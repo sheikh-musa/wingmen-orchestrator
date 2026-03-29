@@ -71,6 +71,42 @@ async def set_job_status(supabase, job_id: int, status: str, **extra):
     await supabase.table("jobs").update(update).eq("id", job_id).execute()
 
 
+async def _git_push(repo_path: str, job_id: int, description: str) -> None:
+    """Stage, commit, and push changes made by Claude CLI."""
+    async def _run(cmd):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+    # Check if there are changes
+    rc, out, _ = await _run(["git", "status", "--porcelain"])
+    if not out.strip():
+        logger.info(f"  No changes to commit for job #{job_id}")
+        return
+
+    # Stage all changes
+    await _run(["git", "add", "-A"])
+
+    # Commit
+    msg = f"feat: {description[:100]} [job_{job_id}]"
+    rc, out, err = await _run(["git", "commit", "-m", msg])
+    if rc != 0:
+        logger.warning(f"  Git commit failed: {err}")
+        return
+
+    # Push
+    rc, out, err = await _run(["git", "push"])
+    if rc != 0:
+        logger.warning(f"  Git push failed: {err}")
+        return
+
+    logger.info(f"  Committed and pushed: {msg}")
+
+
 async def run_job(supabase, job: dict) -> None:
     """Execute the full build pipeline for a single job."""
     job_id = job["id"]
@@ -121,12 +157,20 @@ async def run_job(supabase, job: dict) -> None:
         elapsed = time.monotonic() - start_time
 
         if result["success"]:
-            # 4. Deploy
+            # 4. Git commit + push
+            try:
+                await notify(job_id, repo_name, "deploy", "Committing and pushing changes...")
+                await _git_push(context["repo_path"], job_id, job["description"])
+                logger.info(f"  Pushed to remote")
+            except Exception as e:
+                logger.warning(f"  Git push failed: {e}")
+
+            # 5. Deploy
             deploy_result = {"deployed": False, "url": None}
             try:
-                await notify(job_id, repo_name, "deploy", "Triggering Vercel deploy...")
                 deploy_result = await deploy_manager.deploy(repo_name)
                 if deploy_result["deployed"]:
+                    await notify(job_id, repo_name, "deploy", f"Live at {deploy_result['url']}")
                     logger.info(f"  Deployed → {deploy_result['url']}")
             except Exception as e:
                 logger.error(f"  Deploy failed: {e}")
