@@ -30,6 +30,25 @@ from telegram.ext import (
 
 import context_loader
 
+# ── Whisper (local transcription) ────────────────────────────────
+_whisper_model = None
+
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        import whisper
+        _whisper_model = whisper.load_model("base")
+    return _whisper_model
+
+
+def _whisper_transcribe(audio_path: str) -> str:
+    """Transcribe audio file using local Whisper model. Runs in thread."""
+    model = _get_whisper()
+    result = model.transcribe(audio_path, language=None)  # auto-detect language
+    return result.get("text", "").strip()
+
+
 # ── Setup ────────────────────────────────────────────────────────
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -1094,26 +1113,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tmp_path = tmp.name
             await file.download_to_drive(tmp_path)
 
-        # Transcribe using Claude CLI with audio file
-        claude_bin = os.path.expanduser("~/.local/bin/claude")
-        safe_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "SHELL", "LANG"}}
-        safe_env["HOME"] = os.path.expanduser("~")
-        safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-
-        # Save as temp file and pass to Claude CLI
-        import tempfile as tf
-        prompt = "Transcribe this voice message exactly. If it's in a mix of languages, transcribe as spoken. Return only the transcription, nothing else."
-        proc = await asyncio.create_subprocess_exec(
-            claude_bin, "-p", prompt,
-            "--files", tmp_path,
-            "--output-format", "text",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=safe_env,
-        )
-        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-        transcription = stdout_bytes.decode(errors="replace").strip()
-
+        # Transcribe locally using Whisper (free, fast, offline)
+        transcription = await asyncio.to_thread(_whisper_transcribe, tmp_path)
         os.unlink(tmp_path)
 
         if not transcription:
