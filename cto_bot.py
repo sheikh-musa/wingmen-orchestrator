@@ -700,13 +700,19 @@ async def _build_system_prompt(user: dict, chat_id: str) -> str:
     if is_admin(user):
         # ── ADMIN PROMPT: technical, direct ──
         base = f"""You are Musa's CTO partner at Wingmen. Be direct, technical, and opinionated.
-Keep responses concise (Telegram). When something should be built, suggest /build <repo> <detailed task>.
+Keep responses concise (Telegram).
 
-Example good suggestion:
-/build ihsandms Add public /donate page with PayNow QR for non-onboarded donors - no login required, mobile-first layout, amount input with preset buttons
+When Musa wants something built, you can either:
+1. Suggest a /build command: /build <repo> <detailed task>
+2. Or use an action block to auto-queue it after he confirms.
 
-Example bad suggestion:
-/build ihsandms fix donations
+To auto-queue (preferred for conversational flow):
+- First discuss and confirm with Musa
+- After he says "yes"/"go ahead"/"do it", include:
+[ACTION:BUILD] detailed technical description for the AI dev agent. Include specific files, components, behaviors, acceptance criteria. [/ACTION]
+
+NEVER include action blocks without Musa confirming first.
+For data changes, use [ACTION:DATA] with TABLE/OP/DATA/WHERE format.
 
 Always give detailed, actionable descriptions — an AI agent executes them.
 
@@ -991,9 +997,8 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tokens = response.usage.input_tokens + response.usage.output_tokens
             duration = time.monotonic() - start
 
-            # For clients: parse action blocks and execute them
-            if not is_admin(user):
-                reply = await _parse_and_execute_actions(reply, user, chat_id)
+            # Parse action blocks for all users (admin + clients)
+            reply = await _parse_and_execute_actions(reply, user, chat_id)
 
             # Persist assistant reply
             await save_message(chat_id, "assistant", reply)
@@ -1018,6 +1023,75 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Chat error for {user['name']}: {e}")
             await update.message.reply_text("Sorry, something went wrong. Please try again.")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle voice messages — download, transcribe via Claude, then process as text."""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+
+    if not user:
+        await update.message.reply_text("Not registered. Contact the admin.")
+        return
+
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return
+
+    # Download the voice file
+    try:
+        file = await context.bot.get_file(voice.file_id)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+            await file.download_to_drive(tmp_path)
+
+        # Read and encode as base64
+        import base64
+        with open(tmp_path, "rb") as f:
+            audio_data = base64.standard_b64encode(f.read()).decode()
+
+        os.unlink(tmp_path)
+
+        # Transcribe using Claude's audio input
+        client = anthropic.AsyncAnthropic()
+        response = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "audio/ogg",
+                            "data": audio_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": "Transcribe this voice message exactly. If it's in a mix of languages, transcribe as spoken. Return only the transcription, nothing else.",
+                    },
+                ],
+            }],
+        )
+        transcription = response.content[0].text.strip()
+
+        if not transcription:
+            await update.message.reply_text("I couldn't make out what you said. Could you try again?")
+            return
+
+        # Show what we heard
+        await update.message.reply_text(f"\U0001f3a4 I heard: \"{transcription}\"\n\nProcessing...")
+
+        # Now process as regular text by injecting into handle_chat
+        update.message.text = transcription
+        await handle_chat(update, context)
+
+    except Exception as e:
+        logger.error(f"Voice processing error: {e}")
+        await update.message.reply_text("I had trouble processing that voice message. Could you type it instead?")
 
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1055,8 +1129,9 @@ def main():
     app.add_handler(CommandHandler("clients", cmd_clients))
     app.add_handler(CommandHandler("usage", cmd_usage))
 
-    # Free text → brainstorm
+    # Free text + voice → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
 
     logger.info("Wingmen CTO Bot starting (long-polling mode)...")
