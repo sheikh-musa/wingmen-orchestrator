@@ -1401,18 +1401,20 @@ _chat_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent Claude calls
 
 
 async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle free-text messages — technical brainstorm for admin, conversational for clients."""
+    """Handle free-text messages."""
     chat_id = str(update.effective_user.id)
     user = await resolve_user(chat_id)
-
     if not user:
-        # Start onboarding flow for new users
         await handle_onboarding(update, chat_id)
         return
-
     user_msg = update.message.text
     if not user_msg:
         return
+    await _process_message(update, user, chat_id, user_msg)
+
+
+async def _process_message(update: Update, user: dict, chat_id: str, user_msg: str):
+    """Core chat logic — shared by text, voice, and photo handlers."""
 
     if len(user_msg) > MAX_MSG_LENGTH:
         await update.message.reply_text(f"Message too long (max {MAX_MSG_LENGTH} chars). Please shorten it.")
@@ -1559,14 +1561,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if caption:
             combined += f"\nUser's message: {caption}"
 
-        update.message.text = combined
-        await handle_chat(update, context)
+        await _process_message(update, user, chat_id, combined)
 
     except Exception as e:
         logger.error(f"Photo processing error: {e}")
         if caption:
-            update.message.text = f"[User sent a photo they want to discuss] {caption}"
-            await handle_chat(update, context)
+            await _process_message(update, user, chat_id, f"[User sent a photo they want to discuss] {caption}")
         else:
             await update.message.reply_text("I received your photo. Could you describe what you'd like me to do with it?")
 
@@ -1605,8 +1605,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Step 2: Show transcription and process as chat
     await update.message.reply_text(f"\U0001f3a4 I heard: \"{transcription}\"")
-    update.message.text = transcription
-    await handle_chat(update, context)
+    await _process_message(update, user, chat_id, transcription)
 
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
