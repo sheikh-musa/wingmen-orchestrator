@@ -500,6 +500,248 @@ async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(plans)
 
 
+async def cmd_plan_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show realtime plan usage for admin — percentage of Max subscription used."""
+    user = await resolve_user(str(update.effective_user.id))
+    if not user or not is_admin(user):
+        return
+
+    supabase = await get_supabase()
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    # Today's CLI calls (builds + chats + specs)
+    day_result = await supabase.table("usage_log").select("id, action_type, duration_seconds").gte(
+        "created_at", today_start
+    ).execute()
+
+    day_chats = sum(1 for r in (day_result.data or []) if r["action_type"] == "chat")
+    day_builds = sum(1 for r in (day_result.data or []) if r["action_type"] in ("build_queued", "build_completed"))
+    day_duration = sum(r.get("duration_seconds", 0) for r in (day_result.data or []))
+
+    # This month's builds
+    month_result = await supabase.table("usage_log").select("id, action_type, duration_seconds").gte(
+        "created_at", month_start
+    ).execute()
+
+    month_chats = sum(1 for r in (month_result.data or []) if r["action_type"] == "chat")
+    month_builds = sum(1 for r in (month_result.data or []) if r["action_type"] in ("build_queued", "build_completed"))
+    month_duration = sum(r.get("duration_seconds", 0) for r in (month_result.data or []))
+
+    # Active clients
+    clients_result = await supabase.table("clients").select("id").eq("active", True).execute()
+    active_clients = len(clients_result.data or [])
+
+    # Active jobs
+    jobs_result = await supabase.table("jobs").select("id, status").in_(
+        "status", ["queued", "running"]
+    ).execute()
+    queued = sum(1 for j in (jobs_result.data or []) if j["status"] == "queued")
+    running = sum(1 for j in (jobs_result.data or []) if j["status"] == "running")
+
+    # Estimate plan usage (Pro 5x ~= 500 messages/day equivalent)
+    # Each CLI call ≈ 1 message. Builds use ~10-50 messages each.
+    estimated_daily_messages = day_chats + (day_builds * 30)
+    daily_limit = 500  # rough Pro 5x estimate
+    pct = min(100, int((estimated_daily_messages / daily_limit) * 100))
+
+    bar_filled = pct // 5
+    bar_empty = 20 - bar_filled
+    bar = "\u2588" * bar_filled + "\u2591" * bar_empty
+
+    days_left = (now.replace(month=now.month % 12 + 1, day=1) - now).days
+
+    msg = (
+        f"\U0001f4ca Plan Usage\n\n"
+        f"Daily: [{bar}] {pct}%\n"
+        f"  {day_chats} chats, {day_builds} builds, {day_duration:.0f}s CLI time\n\n"
+        f"Monthly ({days_left} days left):\n"
+        f"  {month_chats} chats, {month_builds} builds\n"
+        f"  {month_duration / 3600:.1f}h total CLI time\n\n"
+        f"System:\n"
+        f"  {active_clients} active clients\n"
+        f"  {running} running / {queued} queued jobs"
+    )
+    await update.message.reply_text(msg)
+
+
+async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Undo the last build — git revert + redeploy."""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user:
+        return
+
+    repo_name = get_active_repo(chat_id, user)
+    if not repo_name:
+        await update.message.reply_text("Select a repo first with /repo <name>")
+        return
+
+    try:
+        config = context_loader.get_repo_config(repo_name)
+        repo_path = os.path.expanduser(config["local_path"])
+
+        # Check last commit
+        proc = await asyncio.create_subprocess_exec(
+            "git", "log", "--oneline", "-1",
+            cwd=repo_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        last_commit = stdout.decode(errors="replace").strip()
+
+        if not last_commit:
+            await update.message.reply_text("No commits to undo.")
+            return
+
+        # Confirm with user
+        if not context.args or context.args[0] != "--confirm":
+            await update.message.reply_text(
+                f"Last commit on {repo_name}:\n{last_commit}\n\n"
+                "This will revert it and redeploy. Send /undo --confirm to proceed."
+            )
+            return
+
+        # Revert
+        proc = await asyncio.create_subprocess_exec(
+            "git", "revert", "HEAD", "--no-edit",
+            cwd=repo_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            await update.message.reply_text(f"Revert failed: {stderr.decode(errors='replace')[:500]}")
+            return
+
+        # Push
+        proc = await asyncio.create_subprocess_exec(
+            "git", "push",
+            cwd=repo_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=60)
+
+        await log_audit(chat_id, user["name"], "undo", repo_name, last_commit)
+        await update.message.reply_text(f"\u21a9\ufe0f Reverted and pushed: {last_commit}\n\nVercel will redeploy automatically.")
+
+    except Exception as e:
+        logger.error(f"Undo failed: {e}")
+        await update.message.reply_text("Undo failed. Check with the team.")
+
+
+async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Take a screenshot of the live site and send it."""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user:
+        return
+
+    repo_name = get_active_repo(chat_id, user)
+    if not repo_name:
+        await update.message.reply_text("Select a repo first with /repo <name>")
+        return
+
+    try:
+        config = context_loader.get_repo_config(repo_name)
+        deploy_url = config.get("deploy_url")
+        if not deploy_url or deploy_url == "FILL_IN":
+            await update.message.reply_text(f"No deploy URL configured for {repo_name}.")
+            return
+
+        await update.message.reply_text(f"\U0001f4f8 Taking screenshot of {deploy_url}...")
+
+        # Use a headless browser screenshot via CLI
+        import tempfile
+        screenshot_path = os.path.join(tempfile.gettempdir(), f"preview_{repo_name}.png")
+
+        # Try playwright first, fall back to message
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "playwright", "screenshot", deploy_url, screenshot_path,
+            "--viewport-size", "375,812",  # iPhone viewport
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+
+        if proc.returncode == 0 and os.path.exists(screenshot_path):
+            from telegram import InputFile
+            with open(screenshot_path, "rb") as f:
+                await update.message.reply_photo(photo=InputFile(f), caption=f"\U0001f4f1 {repo_name} — {deploy_url}")
+            os.unlink(screenshot_path)
+        else:
+            await update.message.reply_text(f"Your site is live at: {deploy_url}")
+
+    except asyncio.TimeoutError:
+        await update.message.reply_text(f"Screenshot timed out. Your site is at: {deploy_url}")
+    except Exception as e:
+        logger.error(f"Preview failed: {e}")
+        config = context_loader.get_repo_config(repo_name)
+        await update.message.reply_text(f"Your site is live at: {config.get('deploy_url', 'N/A')}")
+
+
+async def cmd_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show weekly digest of changes for active repo."""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user:
+        return
+
+    repo_name = get_active_repo(chat_id, user)
+    if not repo_name:
+        await update.message.reply_text("Select a repo first with /repo <name>")
+        return
+
+    try:
+        config = context_loader.get_repo_config(repo_name)
+        repo_path = os.path.expanduser(config["local_path"])
+
+        # Get last 7 days of commits
+        proc = await asyncio.create_subprocess_exec(
+            "git", "log", "--oneline", "--since=7 days ago",
+            cwd=repo_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        commits = stdout.decode(errors="replace").strip()
+
+        # Get completed jobs this week
+        supabase = await get_supabase()
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        jobs_result = await (
+            supabase.table("jobs")
+            .select("id, description, status, created_at")
+            .eq("repo_name", repo_name)
+            .eq("status", "completed")
+            .gte("created_at", week_ago)
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+
+        lines = [f"\U0001f4cb Weekly Digest — {repo_name}\n"]
+
+        if jobs_result.data:
+            lines.append("Completed tasks:")
+            for j in jobs_result.data:
+                desc = j["description"][:100].split("\n")[0]
+                lines.append(f"  \u2705 #{j['id']}: {desc}")
+        else:
+            lines.append("No completed tasks this week.")
+
+        if commits:
+            lines.append(f"\nCommits ({commits.count(chr(10)) + 1}):")
+            for line in commits.splitlines()[:10]:
+                lines.append(f"  {line}")
+        else:
+            lines.append("\nNo commits this week.")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Digest failed: {e}")
+        await update.message.reply_text("Couldn't generate digest. Try again later.")
+
+
 async def cmd_repo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_user.id)
     user = await resolve_user(chat_id)
@@ -1265,6 +1507,70 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Sorry, something went wrong. Please try again.")
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages — save image and describe it in context for Claude."""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user:
+        await handle_onboarding(update, chat_id)
+        return
+
+    photo = update.message.photo[-1] if update.message.photo else None
+    if not photo:
+        return
+
+    caption = update.message.caption or ""
+
+    try:
+        file = await context.bot.get_file(photo.file_id)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+            await file.download_to_drive(tmp_path)
+
+        # Use Claude CLI to describe the image
+        claude_bin = os.path.expanduser("~/.local/bin/claude")
+        safe_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "SHELL", "LANG"}}
+        safe_env["HOME"] = os.path.expanduser("~")
+        safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+        describe_prompt = (
+            "Describe this image concisely. If it's a screenshot of a website or app, "
+            "describe what you see including any bugs, layout issues, or content. "
+            "If there's text, read it. Keep it under 200 words."
+        )
+
+        proc = await asyncio.create_subprocess_exec(
+            claude_bin, "-p", describe_prompt,
+            "--files", tmp_path,
+            "--output-format", "text",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=safe_env,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        description = stdout.decode(errors="replace").strip()
+        os.unlink(tmp_path)
+
+        if not description:
+            description = "(image received but couldn't be analyzed)"
+
+        # Combine with caption and process as chat
+        combined = f"[User sent a photo: {description}]"
+        if caption:
+            combined += f"\nUser's message: {caption}"
+
+        update.message.text = combined
+        await handle_chat(update, context)
+
+    except Exception as e:
+        logger.error(f"Photo processing error: {e}")
+        if caption:
+            update.message.text = f"[User sent a photo they want to discuss] {caption}"
+            await handle_chat(update, context)
+        else:
+            await update.message.reply_text("I received your photo. Could you describe what you'd like me to do with it?")
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle voice messages — download, transcribe via Claude, then process as text."""
     chat_id = str(update.effective_user.id)
@@ -1338,9 +1644,14 @@ def main():
     app.add_handler(CommandHandler("clients", cmd_clients))
     app.add_handler(CommandHandler("usage", cmd_usage))
     app.add_handler(CommandHandler("upgrade", cmd_upgrade))
+    app.add_handler(CommandHandler("mu", cmd_plan_usage))  # admin: plan usage
+    app.add_handler(CommandHandler("undo", cmd_undo))
+    app.add_handler(CommandHandler("preview", cmd_preview))
+    app.add_handler(CommandHandler("digest", cmd_digest))
 
     # Free text + voice → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
 

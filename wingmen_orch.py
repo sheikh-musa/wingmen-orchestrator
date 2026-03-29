@@ -225,8 +225,18 @@ async def run_job(supabase, job: dict) -> None:
         logger.info(f"  Context loaded for {repo_name}")
         await notify(job_id, repo_name, "context", "Loaded project context")
 
-        # 2. Git pull latest
+        # 2. Git pull + tag for rollback safety
         await _git_pull(context["repo_path"])
+        try:
+            tag = f"pre-job-{job_id}"
+            proc = await asyncio.create_subprocess_exec(
+                "git", "tag", "-f", tag,
+                cwd=context["repo_path"],
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+        except Exception:
+            pass
 
         # 3. Generate spec prompt
         prompt_text = await spec_generator.generate_spec(job, context)
