@@ -136,12 +136,20 @@ async def resolve_user(chat_id: str) -> dict | None:
     repos = await context_loader.get_client_repos(client["id"], supabase)
     repo_names = [r["name"] for r in repos]
 
+    # Load plan limits
+    plan_id = client.get("plan", "free")
+    plan_result = await supabase.table("plan_tiers").select("*").eq("id", plan_id).limit(1).execute()
+    plan = plan_result.data[0] if plan_result.data else {
+        "chats_per_day": 10, "builds_per_month": 2, "priority_queue": False
+    }
+
     user = {
         "role": "client",
         "client": client,
         "client_id": client["id"],
         "repos": repo_names,
         "name": client["name"],
+        "plan": plan,
         "ts": now,
     }
     _user_cache[chat_id] = user
@@ -150,6 +158,146 @@ async def resolve_user(chat_id: str) -> dict | None:
 
 def is_admin(user: dict) -> bool:
     return user["role"] == "admin"
+
+
+# ── Onboarding ───────────────────────────────────────────────────
+
+_onboarding_state: dict[str, dict] = {}  # chat_id -> {"step": ..., "data": {...}}
+
+
+async def handle_onboarding(update: Update, chat_id: str) -> bool:
+    """Handle new user onboarding flow. Returns True if handled (caller should return)."""
+    supabase = await get_supabase()
+    text = (update.message.text or "").strip()
+
+    # Check if already has a pending signup
+    existing = await supabase.table("pending_signups").select("*").eq(
+        "telegram_chat_id", chat_id
+    ).limit(1).execute()
+
+    if existing.data and existing.data[0]["status"] == "pending":
+        await update.message.reply_text(
+            "Your account is pending approval. You'll be notified once you're set up! \U0001f44d"
+        )
+        return True
+
+    state = _onboarding_state.get(chat_id, {"step": "start", "data": {}})
+
+    if state["step"] == "start":
+        tg_user = update.effective_user
+        _onboarding_state[chat_id] = {
+            "step": "name",
+            "data": {"telegram_username": tg_user.username or ""},
+        }
+        await update.message.reply_text(
+            "Assalamu alaikum! \U0001f44b Welcome to Wingmen.\n\n"
+            "I'm your AI project assistant. Before we get started, "
+            "I just need a couple of details.\n\n"
+            "What's your name?"
+        )
+        return True
+
+    elif state["step"] == "name":
+        state["data"]["name"] = text
+        state["step"] = "company"
+        _onboarding_state[chat_id] = state
+        await update.message.reply_text(
+            f"Nice to meet you, {text}! \U0001f91d\n\n"
+            "What's your company or project name?"
+        )
+        return True
+
+    elif state["step"] == "company":
+        state["data"]["company"] = text
+        state["step"] = "done"
+
+        # Save to pending_signups
+        await supabase.table("pending_signups").insert({
+            "telegram_chat_id": chat_id,
+            "telegram_username": state["data"].get("telegram_username", ""),
+            "name": state["data"]["name"],
+            "company": text,
+            "status": "pending",
+        }).execute()
+
+        # Notify Musa
+        admin_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        admin_id = os.environ.get("MUSA_TELEGRAM_ID")
+        if admin_token and admin_id:
+            import httpx
+            msg = (
+                f"\U0001f195 New signup request:\n"
+                f"Name: {state['data']['name']}\n"
+                f"Company: {text}\n"
+                f"Telegram: @{state['data'].get('telegram_username', 'N/A')}\n"
+                f"Chat ID: {chat_id}\n\n"
+                f"To approve:\n"
+                f"/addclient {state['data']['name']} {chat_id} free\n"
+                f"/linkrepo {state['data']['name']} <repo_name>"
+            )
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{admin_token}/sendMessage",
+                    json={"chat_id": admin_id, "text": msg},
+                )
+
+        _onboarding_state.pop(chat_id, None)
+
+        await update.message.reply_text(
+            f"Thanks, {state['data']['name']}! \u2705\n\n"
+            "I've sent your details to the team. "
+            "You'll be notified as soon as your account is ready.\n\n"
+            "This usually takes just a few minutes!"
+        )
+        return True
+
+    return False
+
+
+async def check_usage_limit(user: dict, action: str) -> str | None:
+    """Check if user is within their plan limits. Returns error message or None if OK."""
+    if is_admin(user):
+        return None
+
+    plan = user.get("plan", {})
+    client_id = user.get("client_id")
+    if not client_id:
+        return None
+
+    supabase = await get_supabase()
+
+    if action == "chat":
+        # Check daily chat limit
+        from datetime import datetime, timezone, timedelta
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0).isoformat()
+        result = await (
+            supabase.table("usage_log")
+            .select("id", count="exact")
+            .eq("client_id", client_id)
+            .eq("action_type", "chat")
+            .gte("created_at", today_start)
+            .execute()
+        )
+        count = result.count if hasattr(result, 'count') and result.count else len(result.data or [])
+        limit = plan.get("chats_per_day", 10)
+        if count >= limit:
+            return (
+                f"You've reached your daily chat limit ({limit} messages). "
+                "Upgrade your plan for more! Send /upgrade to see options."
+            )
+
+    elif action == "build":
+        # Check monthly build limit
+        client_data = user.get("client", {})
+        monthly_builds = client_data.get("monthly_build_count", 0)
+        limit = plan.get("builds_per_month", 2)
+        if monthly_builds >= limit:
+            return (
+                f"You've used all {limit} builds this month. "
+                "Upgrade your plan for more! Send /upgrade to see options."
+            )
+
+    return None
 
 
 # ── Per-user state ───────────────────────────────────────────────
@@ -276,10 +424,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await resolve_user(chat_id)
 
     if not user:
-        await update.message.reply_text(
-            "Assalamu alaikum! You're not registered yet.\n"
-            "Please contact the admin to get set up."
-        )
+        await handle_onboarding(update, chat_id)
         return
 
     if is_admin(user):
@@ -329,6 +474,30 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Your chat ID: {update.effective_user.id}")
+
+
+async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show plan options."""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+
+    current_plan = "free"
+    if user and user.get("client"):
+        current_plan = user["client"].get("plan", "free")
+
+    plans = (
+        "Your plan: " + current_plan.upper() + "\n\n"
+        "\U0001f7e2 FREE — $0/mo\n"
+        "  10 chats/day, 2 builds/month\n\n"
+        "\U0001f535 STARTER — $49/mo\n"
+        "  50 chats/day, 10 builds/month\n\n"
+        "\U0001f7e1 GROWTH — $149/mo\n"
+        "  Unlimited chats, 30 builds/month, priority\n\n"
+        "\U0001f7e0 SCALE — $399/mo\n"
+        "  Unlimited everything, dedicated support\n\n"
+        "To upgrade, contact the team or send /pay <plan>"
+    )
+    await update.message.reply_text(plans)
 
 
 async def cmd_repo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -995,10 +1164,8 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await resolve_user(chat_id)
 
     if not user:
-        await update.message.reply_text(
-            "Assalamu alaikum! I don't have you in the system yet.\n"
-            "Please ask your project manager to set you up."
-        )
+        # Start onboarding flow for new users
+        await handle_onboarding(update, chat_id)
         return
 
     user_msg = update.message.text
@@ -1007,6 +1174,12 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(user_msg) > MAX_MSG_LENGTH:
         await update.message.reply_text(f"Message too long (max {MAX_MSG_LENGTH} chars). Please shorten it.")
+        return
+
+    # Check usage limits
+    limit_msg = await check_usage_limit(user, "chat")
+    if limit_msg:
+        await update.message.reply_text(limit_msg)
         return
 
     # Auto-detect repo from message or recent history
@@ -1167,6 +1340,7 @@ def main():
     app.add_handler(CommandHandler("linkrepo", cmd_linkrepo))
     app.add_handler(CommandHandler("clients", cmd_clients))
     app.add_handler(CommandHandler("usage", cmd_usage))
+    app.add_handler(CommandHandler("upgrade", cmd_upgrade))
 
     # Free text + voice → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
