@@ -1,6 +1,6 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30
+Last Updated: 2026-03-30 05:09 SGT
 Phase: ready (pending .env secrets)
 Build Status: yellow
 
@@ -8,9 +8,29 @@ Build Status: yellow
 - none
 
 ## Completed (Last 5)
-- none
+- [green] Job #2: ihsandms — Repository: ihsandms
+Task: Add Qurban WhatsApp update timeline
 
-## Failed / Blocked
+ADMIN SIDE — /admin/qurban page:
+- Add "Send Update" button per booking row in the table
+- Opens a modal with:
+  - Booking details at top (donor name, animal type, share count)
+  - Dropdown of milestone steps: "Animal Confirmed" → "Animal Purchased" → "Slaughter In Progress" → "Meat Processing" → "Ready for Collection" → "Delivery Dispatched" → "Completed"
+  - Live WhatsApp message preview below dropdown, interpolating donor name and booking ref. Style it like a WhatsApp chat bubble (green, rounded, timestamp)
+  - "Send Update" confirm button
+- On confirm: log timestamped milestone to that booking's record in mock data, show success toast "Update sent via WhatsApp"
+
+DONOR SIDE — /donor/qurban page:
+- For each booking, show a vertical stepper timeline below the booking card
+- Completed steps: green checkmark + timestamp
+- Current/active step: pulsing green dot
+- Pending steps: gray circle
+- Each step is expandable — shows the WhatsApp message text that was sent
+- Pre-populate 2-3 milestones on existing mock bookings in lib/data.ts so timeline is never empty on demo
+
+DATA: Add `milestones: { step: string, timestamp: string, message: string }[]` to qurban booking type in lib/types.ts and seed 2-3 entries on existing bookings in lib/data.ts (8m 18s, deploy: https://ihsandms-iz2erp406-musaaaaaaas-projects.vercel.app)
+
+##  Failed / Blocked
 - none
 
 ## Session 0 Checklist

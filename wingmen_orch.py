@@ -41,6 +41,7 @@ logger = logging.getLogger("wingmen.orch")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 MAX_FAIL_COUNT = int(os.environ.get("MAX_FAIL_COUNT", "3"))
 STALE_JOB_MINUTES = int(os.environ.get("STALE_JOB_MINUTES", "120"))
+MAX_CONCURRENT_BUILDS = int(os.environ.get("MAX_CONCURRENT_BUILDS", "3"))
 
 
 async def get_supabase():
@@ -49,41 +50,52 @@ async def get_supabase():
     return await acreate_client(url, key)
 
 
-async def pick_next_job(supabase) -> dict | None:
-    """Atomically pick and lock the highest priority queued job.
+async def pick_next_jobs(supabase, running_repos: set[str], max_picks: int) -> list[dict]:
+    """Pick up to max_picks jobs, one per repo, skipping repos with running jobs.
 
-    Uses an UPDATE ... RETURNING pattern to prevent race conditions
-    if multiple orchestrator instances run.
+    Uses CAS pattern to prevent race conditions.
     """
-    # Use RPC or raw SQL for atomic pick — Supabase client doesn't support
-    # SELECT FOR UPDATE, so we use update-where-status-is-queued pattern
+    if max_picks <= 0:
+        return []
+
     result = await (
         supabase.table("jobs")
         .select("*")
         .eq("status", "queued")
         .order("priority", desc=False)
         .order("created_at", desc=False)
-        .limit(1)
+        .limit(20)  # fetch enough candidates
         .execute()
     )
     if not result.data:
-        return None
+        return []
 
-    job = result.data[0]
-    # Atomic claim: only update if still queued (CAS pattern)
-    claim = await (
-        supabase.table("jobs")
-        .update({"status": "running", "updated_at": "now()"})
-        .eq("id", job["id"])
-        .eq("status", "queued")  # CAS: only if still queued
-        .execute()
-    )
-    if not claim.data:
-        # Another instance grabbed it
-        logger.debug(f"Job #{job['id']} already claimed by another instance")
-        return None
+    picked = []
+    claimed_repos = set()
 
-    return claim.data[0]
+    for job in result.data:
+        if len(picked) >= max_picks:
+            break
+
+        repo = job["repo_name"]
+        # Skip if this repo already has a running job (from us or previous poll)
+        if repo in running_repos or repo in claimed_repos:
+            continue
+
+        # Atomic claim
+        claim = await (
+            supabase.table("jobs")
+            .update({"status": "running", "updated_at": "now()"})
+            .eq("id", job["id"])
+            .eq("status", "queued")
+            .execute()
+        )
+        if claim.data:
+            picked.append(claim.data[0])
+            claimed_repos.add(repo)
+            logger.info(f"Claimed job #{job['id']} for {repo}")
+
+    return picked
 
 
 async def recover_stale_jobs(supabase) -> None:
@@ -318,27 +330,53 @@ async def run_job(supabase, job: dict) -> None:
 
 
 async def main_loop():
-    """Main orchestrator loop — poll, pick, run, repeat."""
-    logger.info("🚀 Wingmen Orchestrator starting")
+    """Main orchestrator loop — parallel execution across repos, sequential within.
+
+    Picks up to MAX_CONCURRENT_BUILDS jobs (one per repo) and runs them
+    concurrently. Same-repo jobs run sequentially to avoid git conflicts.
+    """
+    logger.info(f"🚀 Wingmen Orchestrator starting (max {MAX_CONCURRENT_BUILDS} concurrent builds)")
 
     supabase = await get_supabase()
     logger.info("Connected to Supabase")
 
     recovery_counter = 0
+    running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
         try:
+            # Clean up finished tasks
+            done_repos = [repo for repo, task in running_tasks.items() if task.done()]
+            for repo in done_repos:
+                task = running_tasks.pop(repo)
+                # Surface any unhandled exceptions
+                if task.exception():
+                    logger.error(f"Task for {repo} failed: {task.exception()}")
+
             # Recover stale jobs every 10 polls (~5 min)
             recovery_counter += 1
             if recovery_counter >= 10:
                 await recover_stale_jobs(supabase)
                 recovery_counter = 0
 
-            job = await pick_next_job(supabase)
-            if job:
-                await run_job(supabase, job)
-            else:
-                logger.debug("No queued jobs, sleeping...")
+            # How many slots available?
+            available = MAX_CONCURRENT_BUILDS - len(running_tasks)
+            running_repos = set(running_tasks.keys())
+
+            if available > 0:
+                jobs = await pick_next_jobs(supabase, running_repos, available)
+                for job in jobs:
+                    repo = job["repo_name"]
+                    task = asyncio.create_task(
+                        run_job(supabase, job),
+                        name=f"job_{job['id']}_{repo}",
+                    )
+                    running_tasks[repo] = task
+                    logger.info(f"▶ Launched job #{job['id']} for {repo} ({len(running_tasks)}/{MAX_CONCURRENT_BUILDS} slots)")
+
+            if not running_tasks:
+                logger.debug("No active jobs, sleeping...")
+
         except Exception as e:
             logger.exception(f"Loop error: {e}")
 
