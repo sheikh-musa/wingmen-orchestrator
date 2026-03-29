@@ -828,39 +828,45 @@ async def _parse_and_execute_actions(reply: str, user: dict, chat_id: str) -> st
             clean_reply += "\n\nI'll need to get the team to handle this setup. I've flagged it!"
         return clean_reply
 
-    # ── BUILD actions (code changes via Claude CLI) ──
-    build_match = re.search(r'\[ACTION:BUILD\]\s*(.+?)\s*\[/ACTION\]', reply, re.DOTALL)
-    if build_match:
-        technical_desc = build_match.group(1).strip()
-        clean_reply = reply[:build_match.start()].strip()
+    # ── BUILD actions (code changes via Claude CLI) — supports multiple ──
+    build_matches = list(re.finditer(r'\[ACTION:BUILD\]\s*(.+?)\s*\[/ACTION\]', reply, re.DOTALL))
+    if build_matches:
+        # Clean reply = everything before the first action block
+        clean_reply = reply[:build_matches[0].start()].strip()
 
         if not repo_name:
             return clean_reply + "\n\nWhich project is this for? Just let me know!"
 
-        if len(technical_desc) > 2000:
-            technical_desc = technical_desc[:2000]
+        queued_ids = []
+        for match in build_matches:
+            technical_desc = match.group(1).strip()
+            if len(technical_desc) > 2000:
+                technical_desc = technical_desc[:2000]
 
-        try:
-            config = context_loader.get_repo_config(repo_name)
-            supabase = await get_supabase()
-            result = await supabase.table("jobs").insert({
-                "repo_name": repo_name,
-                "description": technical_desc,
-                "status": "queued",
-                "priority": config["priority"],
-                "triggered_by": "telegram",
-                "client_id": user.get("client_id"),
-            }).execute()
+            try:
+                config = context_loader.get_repo_config(repo_name)
+                supabase = await get_supabase()
+                result = await supabase.table("jobs").insert({
+                    "repo_name": repo_name,
+                    "description": technical_desc,
+                    "status": "queued",
+                    "priority": config["priority"],
+                    "triggered_by": "telegram",
+                    "client_id": user.get("client_id"),
+                }).execute()
 
-            if result.data:
-                job = result.data[0]
-                clean_reply += f"\n\nI've submitted this as a task (#{job['id']}). I'll update you on progress!"
-                logger.info(f"Build queued #{job['id']} for {user['name']}: {repo_name} — {technical_desc[:100]}")
-            else:
-                clean_reply += "\n\nI tried to submit that but something went wrong. The team has been notified."
-        except Exception as e:
-            logger.error(f"Failed to queue build: {e}")
-            clean_reply += "\n\nI tried to submit that but hit an issue. Let me flag this to the team."
+                if result.data:
+                    job = result.data[0]
+                    queued_ids.append(str(job["id"]))
+                    logger.info(f"Build queued #{job['id']} for {user['name']}: {repo_name} — {technical_desc[:100]}")
+            except Exception as e:
+                logger.error(f"Failed to queue build: {e}")
+
+        if queued_ids:
+            ids = ", #".join(queued_ids)
+            clean_reply += f"\n\nI've submitted {len(queued_ids)} task{'s' if len(queued_ids) > 1 else ''} (#{ids}). I'll update you on progress!"
+        else:
+            clean_reply += "\n\nI tried to submit those but hit an issue. Let me flag this to the team."
 
         return clean_reply
 
