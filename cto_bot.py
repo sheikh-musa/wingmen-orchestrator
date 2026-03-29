@@ -68,15 +68,19 @@ logger = logging.getLogger("wingmen.cto_bot")
 MUSA_TELEGRAM_ID = os.environ.get("MUSA_TELEGRAM_ID", "")
 
 _supabase = None
+_supabase_lock = asyncio.Lock()
 
 
 async def get_supabase():
     global _supabase
-    if _supabase is None:
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_SERVICE_KEY"]
-        _supabase = await acreate_client(url, key)
-    return _supabase
+    if _supabase is not None:
+        return _supabase
+    async with _supabase_lock:
+        if _supabase is None:
+            url = os.environ["SUPABASE_URL"]
+            key = os.environ["SUPABASE_SERVICE_KEY"]
+            _supabase = await acreate_client(url, key)
+        return _supabase
 
 
 # ── User Resolution ──────────────────────────────────────────────
@@ -188,6 +192,7 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
         _onboarding_state[chat_id] = {
             "step": "name",
             "data": {"telegram_username": tg_user.username or ""},
+            "_ts": time.monotonic(),
         }
         await update.message.reply_text(
             "Assalamu alaikum! \U0001f44b Welcome to Wingmen.\n\n"
@@ -307,6 +312,37 @@ _rate_limits: dict[str, list[float]] = {}    # chat_id -> list of timestamps
 
 MAX_BUILDS_PER_HOUR = 10
 MAX_MSG_LENGTH = 2000
+_message_counter = 0
+
+
+def _cleanup_caches():
+    """Periodic cleanup of unbounded caches. Called every 100 messages."""
+    global _message_counter
+    _message_counter += 1
+    if _message_counter < 100:
+        return
+    _message_counter = 0
+
+    now = time.monotonic()
+
+    # _onboarding_state: remove entries older than 1 hour
+    stale_onboarding = [
+        k for k, v in _onboarding_state.items()
+        if now - v.get("_ts", now) > 3600
+    ]
+    for k in stale_onboarding:
+        del _onboarding_state[k]
+
+    # _rate_limits: remove empty lists
+    empty_rate = [k for k, v in _rate_limits.items() if not v]
+    for k in empty_rate:
+        del _rate_limits[k]
+
+    # _active_repo: cap at 200 entries (drop oldest by insertion order)
+    if len(_active_repo) > 200:
+        keys = list(_active_repo.keys())
+        for k in keys[:len(_active_repo) - 200]:
+            del _active_repo[k]
 
 
 def check_rate_limit(chat_id: str) -> bool:
@@ -482,6 +518,20 @@ async def _recover_unprocessed(app) -> None:
             ).execute()
 
         logger.info(f"Recovered {len(result.data)} unprocessed messages across {len(by_chat)} chats")
+
+        # Clean up processed messages older than 24 hours
+        cleanup_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        try:
+            await (
+                supabase.table("message_queue")
+                .delete()
+                .eq("processed", True)
+                .lt("created_at", cleanup_cutoff)
+                .execute()
+            )
+            logger.info("Cleaned up processed messages older than 24 hours")
+        except Exception as cleanup_err:
+            logger.warning(f"Message queue cleanup failed: {cleanup_err}")
     except Exception as e:
         logger.error(f"Message recovery failed: {e}")
 
@@ -592,7 +642,7 @@ async def cmd_plan_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Today's CLI calls (builds + chats + specs)
     day_result = await supabase.table("usage_log").select("id, action_type, duration_seconds").gte(
         "created_at", today_start
-    ).execute()
+    ).limit(1000).execute()
 
     day_chats = sum(1 for r in (day_result.data or []) if r["action_type"] == "chat")
     day_builds = sum(1 for r in (day_result.data or []) if r["action_type"] in ("build_queued", "build_completed"))
@@ -601,7 +651,7 @@ async def cmd_plan_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # This month's builds
     month_result = await supabase.table("usage_log").select("id, action_type, duration_seconds").gte(
         "created_at", month_start
-    ).execute()
+    ).limit(1000).execute()
 
     month_chats = sum(1 for r in (month_result.data or []) if r["action_type"] == "chat")
     month_builds = sum(1 for r in (month_result.data or []) if r["action_type"] in ("build_queued", "build_completed"))
@@ -904,6 +954,10 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "client_id": user.get("client_id"),
     }).execute()
 
+    if not result.data:
+        await update.message.reply_text("Failed to queue job. Please try again.")
+        return
+
     job = result.data[0]
     await update.message.reply_text(
         f"\u2705 Job #{job['id']} queued\n"
@@ -1076,6 +1130,10 @@ async def cmd_addclient(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "plan": plan,
     }).execute()
 
+    if not result.data:
+        await update.message.reply_text("Failed to add client. Please try again.")
+        return
+
     client = result.data[0]
     # Clear cache so new client is recognized
     _user_cache.pop(chat_id, None)
@@ -1134,12 +1192,18 @@ async def cmd_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No clients registered.")
         return
 
+    # Batch fetch all client_repos in one query instead of N+1
+    client_ids = [c["id"] for c in result.data]
+    all_repos_result = await supabase.table("client_repos").select("client_id, repo_name").in_("client_id", client_ids).execute()
+    from collections import defaultdict
+    repos_by_client: dict[int, list[str]] = defaultdict(list)
+    for r in (all_repos_result.data or []):
+        repos_by_client[r["client_id"]].append(r["repo_name"])
+
     lines = ["Clients:\n"]
     for c in result.data:
         status = "\U0001f7e2" if c["active"] else "\u26d4"
-        # Get their repos
-        repos_result = await supabase.table("client_repos").select("repo_name").eq("client_id", c["id"]).execute()
-        repo_names = [r["repo_name"] for r in (repos_result.data or [])]
+        repo_names = repos_by_client.get(c["id"], [])
         repos_str = ", ".join(repo_names) if repo_names else "none"
         lines.append(f"{status} {c['name']} [{c['plan']}] — repos: {repos_str}")
 
@@ -1161,6 +1225,7 @@ async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         supabase.table("usage_log")
         .select("client_id, action_type, tokens_used, duration_seconds")
         .gte("created_at", week_ago)
+        .limit(1000)
         .execute()
     )
 
@@ -1486,6 +1551,9 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_msg:
         return
 
+    # Periodic cache cleanup
+    _cleanup_caches()
+
     # Queue first — survives crashes
     await _queue_message(chat_id, msg_id, "text", user_msg)
 
@@ -1615,6 +1683,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     caption = update.message.caption or ""
 
+    tmp_path = None
     try:
         file = await context.bot.get_file(photo.file_id)
         import tempfile
@@ -1643,7 +1712,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
         description = stdout.decode(errors="replace").strip()
-        os.unlink(tmp_path)
 
         if not description:
             description = "(image received but couldn't be analyzed)"
@@ -1663,6 +1731,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("I received your photo. Could you describe what you'd like me to do with it?")
         await _mark_processed(chat_id, msg_id)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1683,6 +1754,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Step 1: Download and transcribe
+    tmp_path = None
     try:
         file = await context.bot.get_file(voice.file_id)
         import tempfile
@@ -1691,11 +1763,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await file.download_to_drive(tmp_path)
 
         transcription = await asyncio.to_thread(_whisper_transcribe, tmp_path)
-        os.unlink(tmp_path)
     except Exception as e:
         logger.error(f"Voice transcription error: {e}")
         await update.message.reply_text("I had trouble with the audio. Could you try again or type it instead?")
         return
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
     if not transcription:
         await update.message.reply_text("I couldn't make out what you said. Could you try again?")
@@ -1753,9 +1827,15 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
 
-    # Recover any messages lost during previous crash
+    # Recover any messages lost during previous crash and pre-load Whisper
     async def post_init(application):
         await _recover_unprocessed(application)
+        # Pre-load Whisper model in a background thread to avoid blocking first voice message
+        try:
+            await asyncio.to_thread(_get_whisper)
+            logger.info("Whisper model pre-loaded")
+        except Exception as e:
+            logger.warning(f"Failed to pre-load Whisper model: {e}")
 
     app.post_init = post_init
 

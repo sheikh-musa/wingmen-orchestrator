@@ -96,12 +96,27 @@ async def _poll_deployment(
         await asyncio.sleep(interval)
         elapsed += interval
 
-        resp = await client.get(
-            f"{VERCEL_API}/v13/deployments/{deploy_id}",
-            headers=headers,
-            params=params,
-        )
-        resp.raise_for_status()
+        last_err = None
+        for attempt in range(3):
+            try:
+                resp = await client.get(
+                    f"{VERCEL_API}/v13/deployments/{deploy_id}",
+                    headers=headers,
+                    params=params,
+                )
+                resp.raise_for_status()
+                last_err = None
+                break
+            except httpx.HTTPError as e:
+                last_err = e
+                if attempt < 2:
+                    backoff = 2 ** attempt
+                    logger.warning(f"Vercel API error (attempt {attempt + 1}/3), retrying in {backoff}s: {e}")
+                    await asyncio.sleep(backoff)
+
+        if last_err is not None:
+            raise RuntimeError(f"Vercel API failed after 3 retries: {last_err}")
+
         data = resp.json()
         state = data.get("readyState", data.get("state", ""))
 

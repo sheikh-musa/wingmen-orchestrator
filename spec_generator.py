@@ -56,7 +56,12 @@ End the prompt with exactly:
         stderr=asyncio.subprocess.PIPE,
         env=safe_env,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError("Spec generation timed out after 120s")
     result = stdout.decode(errors="replace").strip()
 
     if not result:

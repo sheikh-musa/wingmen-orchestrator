@@ -44,10 +44,20 @@ STALE_JOB_MINUTES = int(os.environ.get("STALE_JOB_MINUTES", "120"))
 MAX_CONCURRENT_BUILDS = int(os.environ.get("MAX_CONCURRENT_BUILDS", "3"))
 
 
+_supabase = None
+_supabase_lock = asyncio.Lock()
+
+
 async def get_supabase():
-    url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_KEY"]
-    return await acreate_client(url, key)
+    global _supabase
+    if _supabase is not None:
+        return _supabase
+    async with _supabase_lock:
+        if _supabase is None:
+            url = os.environ["SUPABASE_URL"]
+            key = os.environ["SUPABASE_SERVICE_KEY"]
+            _supabase = await acreate_client(url, key)
+        return _supabase
 
 
 async def pick_next_jobs(supabase, running_repos: set[str], max_picks: int) -> list[dict]:
