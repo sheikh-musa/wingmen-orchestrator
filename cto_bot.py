@@ -218,6 +218,30 @@ async def log_usage(client_id: int | None, action_type: str, repo_name: str = ""
         logger.warning(f"Failed to log usage: {e}")
 
 
+async def _load_active_repo(chat_id: str) -> str | None:
+    """Try to infer active repo from recent chat history."""
+    try:
+        supabase = await get_supabase()
+        result = await (
+            supabase.table("chat_history")
+            .select("content")
+            .eq("chat_id", chat_id)
+            .eq("role", "user")
+            .order("created_at", desc=True)
+            .limit(5)
+            .execute()
+        )
+        if result.data:
+            all_repos = context_loader.get_all_repo_names()
+            for msg in result.data:
+                for repo in all_repos:
+                    if repo.lower() in msg["content"].lower():
+                        return repo
+    except Exception:
+        pass
+    return None
+
+
 def get_active_repo(chat_id: str, user: dict) -> str | None:
     if chat_id in _active_repo:
         return _active_repo[chat_id]
@@ -967,7 +991,7 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Message too long (max {MAX_MSG_LENGTH} chars). Please shorten it.")
         return
 
-    # Auto-detect repo from message if no active repo
+    # Auto-detect repo from message or recent history
     if not get_active_repo(chat_id, user):
         for repo in user["repos"]:
             if repo.lower() in user_msg.lower():
@@ -975,6 +999,10 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         if not get_active_repo(chat_id, user) and len(user["repos"]) == 1:
             _active_repo[chat_id] = user["repos"][0]
+        if not get_active_repo(chat_id, user):
+            inferred = await _load_active_repo(chat_id)
+            if inferred and inferred in user["repos"]:
+                _active_repo[chat_id] = inferred
 
     # Load persisted history
     history = await get_history(chat_id)
