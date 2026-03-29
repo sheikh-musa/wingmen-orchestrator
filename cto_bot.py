@@ -63,9 +63,26 @@ async def get_supabase():
 
 # ── User Resolution ──────────────────────────────────────────────
 
-# Cache: chat_id -> {"role": "admin"|"client", "client": dict|None, "repos": [...], "ts": float}
+# ── User Cache (with eviction) ───────────────────────────────────
+
 _user_cache: dict[str, dict] = {}
 CACHE_TTL = 300  # 5 min
+CACHE_MAX_SIZE = 200
+
+
+def _evict_cache():
+    """Remove expired entries from user cache."""
+    if len(_user_cache) <= CACHE_MAX_SIZE:
+        return
+    now = time.monotonic()
+    expired = [k for k, v in _user_cache.items() if now - v["ts"] > CACHE_TTL]
+    for k in expired:
+        del _user_cache[k]
+    # If still over limit, drop oldest
+    if len(_user_cache) > CACHE_MAX_SIZE:
+        oldest = sorted(_user_cache, key=lambda k: _user_cache[k]["ts"])
+        for k in oldest[:len(_user_cache) - CACHE_MAX_SIZE]:
+            del _user_cache[k]
 
 
 async def resolve_user(chat_id: str) -> dict | None:
@@ -74,6 +91,8 @@ async def resolve_user(chat_id: str) -> dict | None:
     cached = _user_cache.get(chat_id)
     if cached and (now - cached["ts"]) < CACHE_TTL:
         return cached
+
+    _evict_cache()
 
     if chat_id == MUSA_TELEGRAM_ID:
         user = {
@@ -87,7 +106,6 @@ async def resolve_user(chat_id: str) -> dict | None:
         _user_cache[chat_id] = user
         return user
 
-    # Look up client
     supabase = await get_supabase()
     result = await supabase.table("clients").select("*").eq(
         "telegram_chat_id", chat_id
@@ -118,7 +136,6 @@ def is_admin(user: dict) -> bool:
 
 # ── Per-user state ───────────────────────────────────────────────
 
-_chat_sessions: dict[str, list[dict]] = {}   # chat_id -> message history
 _active_repo: dict[str, str] = {}            # chat_id -> repo_name
 _rate_limits: dict[str, list[float]] = {}    # chat_id -> list of timestamps
 
@@ -131,21 +148,74 @@ def check_rate_limit(chat_id: str) -> bool:
     now = time.monotonic()
     if chat_id not in _rate_limits:
         _rate_limits[chat_id] = []
-
-    # Clean old entries (>1 hour)
     _rate_limits[chat_id] = [t for t in _rate_limits[chat_id] if now - t < 3600]
-
     if len(_rate_limits[chat_id]) >= MAX_BUILDS_PER_HOUR:
         return False
-
     _rate_limits[chat_id].append(now)
     return True
 
 
-def get_history(chat_id: str) -> list[dict]:
-    if chat_id not in _chat_sessions:
-        _chat_sessions[chat_id] = []
-    return _chat_sessions[chat_id]
+async def get_history(chat_id: str) -> list[dict]:
+    """Load chat history from Supabase, falling back to empty."""
+    try:
+        supabase = await get_supabase()
+        result = await (
+            supabase.table("chat_history")
+            .select("role, content")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=True)
+            .limit(20)
+            .execute()
+        )
+        if result.data:
+            # Reverse to chronological order
+            return list(reversed(result.data))
+    except Exception as e:
+        logger.warning(f"Failed to load chat history: {e}")
+    return []
+
+
+async def save_message(chat_id: str, role: str, content: str) -> None:
+    """Persist a chat message to Supabase."""
+    try:
+        supabase = await get_supabase()
+        await supabase.table("chat_history").insert({
+            "chat_id": chat_id,
+            "role": role,
+            "content": content[:4000],
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Failed to save chat message: {e}")
+
+
+async def log_audit(chat_id: str, user_name: str, action: str, target: str = "", detail: str = "") -> None:
+    """Write to audit log for all significant actions."""
+    try:
+        supabase = await get_supabase()
+        await supabase.table("audit_log").insert({
+            "user_chat_id": chat_id,
+            "user_name": user_name,
+            "action": action,
+            "target": target,
+            "detail": detail[:1000],
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Failed to write audit log: {e}")
+
+
+async def log_usage(client_id: int | None, action_type: str, repo_name: str = "", tokens: int = 0, duration: float = 0) -> None:
+    """Track usage for metering/billing."""
+    try:
+        supabase = await get_supabase()
+        await supabase.table("usage_log").insert({
+            "client_id": client_id,
+            "action_type": action_type,
+            "repo_name": repo_name,
+            "tokens_used": tokens,
+            "duration_seconds": duration,
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Failed to log usage: {e}")
 
 
 def get_active_repo(chat_id: str, user: dict) -> str | None:
@@ -310,6 +380,8 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"\U0001f4dd Task: {description}\n"
         f"\u23f3 Priority: {config['priority']}"
     )
+    await log_audit(chat_id, user["name"], "queue_build", repo_name, description[:200])
+    await log_usage(user.get("client_id"), "build_queued", repo_name)
     logger.info(f"Job #{job['id']} queued by {user['name']}: {repo_name} — {description}")
 
 
@@ -422,6 +494,7 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_id = int(context.args[0])
     supabase = await get_supabase()
     await supabase.table("jobs").update({"status": "paused"}).eq("id", job_id).execute()
+    await log_audit(str(update.effective_user.id), user["name"], "pause_job", f"job_{job_id}")
     await update.message.reply_text(f"\u23f8 Job #{job_id} paused.")
 
 
@@ -435,6 +508,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_id = int(context.args[0])
     supabase = await get_supabase()
     await supabase.table("jobs").update({"status": "failed", "result_summary": "Cancelled by admin"}).eq("id", job_id).execute()
+    await log_audit(str(update.effective_user.id), user["name"], "cancel_job", f"job_{job_id}")
     await update.message.reply_text(f"\u274c Job #{job_id} cancelled.")
 
 
@@ -474,6 +548,7 @@ async def cmd_addclient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = result.data[0]
     # Clear cache so new client is recognized
     _user_cache.pop(chat_id, None)
+    await log_audit(str(update.effective_user.id), user["name"], "add_client", name, f"plan={plan}, chat_id={chat_id}")
     await update.message.reply_text(f"\u2705 Client '{name}' added (id: {client['id']}, plan: {plan})")
     logger.info(f"Client added: {name} (chat_id: {chat_id}, plan: {plan})")
 
@@ -511,6 +586,7 @@ async def cmd_linkrepo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Clear cache
     _user_cache.pop(client.get("telegram_chat_id", ""), None)
+    await log_audit(str(update.effective_user.id), user["name"], "link_repo", f"{client_name}/{repo_name}")
     await update.message.reply_text(f"\u2705 Linked {repo_name} to {client_name}")
     logger.info(f"Repo {repo_name} linked to client {client_name}")
 
@@ -535,6 +611,56 @@ async def cmd_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
         repo_names = [r["repo_name"] for r in (repos_result.data or [])]
         repos_str = ", ".join(repo_names) if repo_names else "none"
         lines.append(f"{status} {c['name']} [{c['plan']}] — repos: {repos_str}")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show usage stats per client (admin only)."""
+    user = await resolve_user(str(update.effective_user.id))
+    if not user or not is_admin(user):
+        return
+
+    supabase = await get_supabase()
+    # Get usage summary for last 7 days
+    from datetime import datetime, timezone, timedelta
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    result = await (
+        supabase.table("usage_log")
+        .select("client_id, action_type, tokens_used, duration_seconds")
+        .gte("created_at", week_ago)
+        .execute()
+    )
+
+    if not result.data:
+        await update.message.reply_text("No usage data in the last 7 days.")
+        return
+
+    # Aggregate by client
+    from collections import defaultdict
+    stats: dict[int | None, dict] = defaultdict(lambda: {"chats": 0, "builds": 0, "tokens": 0, "duration": 0})
+    for r in result.data:
+        cid = r.get("client_id")
+        stats[cid]["tokens"] += r.get("tokens_used", 0)
+        stats[cid]["duration"] += r.get("duration_seconds", 0)
+        if r["action_type"] == "chat":
+            stats[cid]["chats"] += 1
+        elif r["action_type"] in ("build_queued", "build_completed"):
+            stats[cid]["builds"] += 1
+
+    # Resolve client names
+    clients_result = await supabase.table("clients").select("id, name").execute()
+    name_map = {c["id"]: c["name"] for c in (clients_result.data or [])}
+    name_map[None] = "Admin"
+
+    lines = ["Usage (last 7 days):\n"]
+    for cid, s in sorted(stats.items(), key=lambda x: x[1]["tokens"], reverse=True):
+        name = name_map.get(cid, f"client_{cid}")
+        lines.append(
+            f"{name}: {s['chats']} chats, {s['builds']} builds, "
+            f"{s['tokens']:,} tokens, {s['duration']:.0f}s"
+        )
 
     await update.message.reply_text("\n".join(lines))
 
@@ -806,6 +932,9 @@ async def _execute_config_action(operation: str, user: dict) -> str:
     return "I've flagged this for setup. You'll be notified once it's ready!"
 
 
+_chat_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent Claude calls
+
+
 async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle free-text messages — technical brainstorm for admin, conversational for clients."""
     chat_id = str(update.effective_user.id)
@@ -822,48 +951,73 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_msg:
         return
 
+    if len(user_msg) > MAX_MSG_LENGTH:
+        await update.message.reply_text(f"Message too long (max {MAX_MSG_LENGTH} chars). Please shorten it.")
+        return
+
     # Auto-detect repo from message if no active repo
     if not get_active_repo(chat_id, user):
         for repo in user["repos"]:
             if repo.lower() in user_msg.lower():
                 _active_repo[chat_id] = repo
                 break
-        # Single-repo clients auto-select
         if not get_active_repo(chat_id, user) and len(user["repos"]) == 1:
             _active_repo[chat_id] = user["repos"][0]
 
-    history = get_history(chat_id)
+    # Load persisted history
+    history = await get_history(chat_id)
     history.append({"role": "user", "content": user_msg})
 
-    while len(history) > 20:
-        history.pop(0)
+    # Trim to last 20 messages
+    if len(history) > 20:
+        history = history[-20:]
 
-    try:
-        system_prompt = await _build_system_prompt(user, chat_id)
+    # Persist user message
+    await save_message(chat_id, "user", user_msg)
 
-        client = anthropic.AsyncAnthropic()
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            system=system_prompt,
-            messages=history,
-        )
-        reply = response.content[0].text
+    async with _chat_semaphore:
+        start = time.monotonic()
+        try:
+            system_prompt = await _build_system_prompt(user, chat_id)
 
-        # For clients: parse action blocks and execute them
-        if not is_admin(user):
-            reply = await _parse_and_execute_actions(reply, user, chat_id)
+            client = anthropic.AsyncAnthropic()
+            response = await client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=history,
+            )
+            reply = response.content[0].text
+            tokens = response.usage.input_tokens + response.usage.output_tokens
+            duration = time.monotonic() - start
 
-        history.append({"role": "assistant", "content": reply})
+            # For clients: parse action blocks and execute them
+            if not is_admin(user):
+                reply = await _parse_and_execute_actions(reply, user, chat_id)
 
-        if len(reply) > 4000:
-            reply = reply[:4000] + "\n...(truncated)"
+            # Persist assistant reply
+            await save_message(chat_id, "assistant", reply)
 
-        await update.message.reply_text(reply)
+            # Log usage
+            repo = get_active_repo(chat_id, user) or ""
+            await log_usage(user.get("client_id"), "chat", repo, tokens, duration)
 
-    except Exception as e:
-        logger.error(f"Chat error for {user['name']}: {e}")
-        await update.message.reply_text("Sorry, something went wrong. Please try again.")
+            if len(reply) > 4000:
+                reply = reply[:4000] + "\n...(truncated)"
+
+            await update.message.reply_text(reply)
+
+        except anthropic.APIError as e:
+            logger.error(f"Claude API error for {user['name']}: {e}")
+            await update.message.reply_text("I'm having trouble connecting right now. Please try again in a moment.")
+
+        except asyncio.TimeoutError:
+            logger.error(f"Chat timeout for {user['name']}")
+            await update.message.reply_text("That took too long. Please try a shorter message.")
+
+        except Exception as e:
+            logger.error(f"Chat error for {user['name']}: {e}")
+            await update.message.reply_text("Sorry, something went wrong. Please try again.")
 
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -899,6 +1053,7 @@ def main():
     app.add_handler(CommandHandler("addclient", cmd_addclient))
     app.add_handler(CommandHandler("linkrepo", cmd_linkrepo))
     app.add_handler(CommandHandler("clients", cmd_clients))
+    app.add_handler(CommandHandler("usage", cmd_usage))
 
     # Free text → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))

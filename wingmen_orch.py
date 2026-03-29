@@ -266,6 +266,17 @@ async def run_job(supabase, job: dict) -> None:
             )
             logger.info(f"✅ Job #{job_id} completed in {elapsed:.0f}s")
 
+            # Log usage
+            try:
+                await supabase.table("usage_log").insert({
+                    "client_id": job.get("client_id"),
+                    "action_type": "build_completed",
+                    "repo_name": repo_name,
+                    "duration_seconds": elapsed,
+                }).execute()
+            except Exception:
+                pass
+
         else:
             new_fail_count = job.get("fail_count", 0) + 1
             elapsed_str = status_reporter._format_elapsed(elapsed)
