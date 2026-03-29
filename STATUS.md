@@ -1,70 +1,110 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30 05:09 SGT
-Phase: ready (pending .env secrets)
-Build Status: yellow
+Last Updated: 2026-03-30 05:15 SGT
+Phase: production
+Build Status: green
+
+## System Architecture
+
+```
+Telegram (Musa + Clients)
+    ↓
+cto_bot.py (long-polling, multi-client, voice support)
+    ↓ 3-tier action system:
+    ├── DATA: instant Supabase ops (prices, inventory)
+    ├── CONFIG: provisioning (new storefront, DNS)
+    └── BUILD: full code pipeline ↓
+                                    ↓
+Supabase jobs table (with client_id)
+    ↓
+wingmen_orch.py (polls every 30s, parallel per-repo, sequential within)
+    ↓
+context_loader.py → CLAUDE.md + STATUS.md + git log + repo_memory
+spec_generator.py → Claude Sonnet 4.6 generates build spec
+ralph_runner.py   → Claude Code CLI (--dangerously-skip-permissions)
+    ↓ on success:
+git commit + push → deploy_manager.py (Vercel API) → status_reporter.py
+    ↓
+Telegram notification to admin + client
+```
 
 ## Active Jobs
-- none
+- #3 ihsandms [running] — Tabung barcode scan + parent WhatsApp notifications
+- #4 ihsandms [queued after #3] — Donor invite link + public /donate page
 
-## Completed (Last 5)
-- [green] Job #2: ihsandms — Repository: ihsandms
-Task: Add Qurban WhatsApp update timeline
+## Completed
+- #2 ihsandms — Qurban WhatsApp timeline (8m 18s, deployed)
+- #1 dookana — Order form verification (already done)
 
-ADMIN SIDE — /admin/qurban page:
-- Add "Send Update" button per booking row in the table
-- Opens a modal with:
-  - Booking details at top (donor name, animal type, share count)
-  - Dropdown of milestone steps: "Animal Confirmed" → "Animal Purchased" → "Slaughter In Progress" → "Meat Processing" → "Ready for Collection" → "Delivery Dispatched" → "Completed"
-  - Live WhatsApp message preview below dropdown, interpolating donor name and booking ref. Style it like a WhatsApp chat bubble (green, rounded, timestamp)
-  - "Send Update" confirm button
-- On confirm: log timestamped milestone to that booking's record in mock data, show success toast "Update sent via WhatsApp"
+## Core Files (~/wingmen/orchestrator/)
+| File | Purpose |
+|------|---------|
+| wingmen_orch.py | Main async loop — parallel per-repo, CAS job picking, stale recovery |
+| cto_bot.py | Multi-client Telegram bot — admin/client modes, voice, 3-tier actions |
+| context_loader.py | Loads CLAUDE.md, STATUS.md, git log, file tree, repo_memory |
+| spec_generator.py | Claude Sonnet 4.6 → structured build spec from job + context |
+| ralph_runner.py | Shells to `claude` CLI, logs to Supabase, redacts secrets |
+| deploy_manager.py | Vercel API deploy + polling |
+| status_reporter.py | Updates STATUS.md, sends Telegram notifications to admin + client |
 
-DONOR SIDE — /donor/qurban page:
-- For each booking, show a vertical stepper timeline below the booking card
-- Completed steps: green checkmark + timestamp
-- Current/active step: pulsing green dot
-- Pending steps: gray circle
-- Each step is expandable — shows the WhatsApp message text that was sent
-- Pre-populate 2-3 milestones on existing mock bookings in lib/data.ts so timeline is never empty on demo
+## Supabase Tables (project: tscuymavysscrvoberrr)
+| Table | Purpose |
+|-------|---------|
+| jobs | Build queue (id, repo_name, description, status, priority, client_id, fail_count) |
+| build_log | Per-job execution log (phase, message, level) |
+| repo_memory | Persistent key-value context per repo |
+| clients | Registered clients (name, telegram_chat_id, plan, active) |
+| client_repos | Links clients to their repos |
+| chat_history | Persisted conversation history per chat_id |
+| usage_log | Token usage, build duration, action counts per client |
+| audit_log | Admin action audit trail |
 
-DATA: Add `milestones: { step: string, timestamp: string, message: string }[]` to qurban booking type in lib/types.ts and seed 2-3 entries on existing bookings in lib/data.ts (8m 18s, deploy: https://ihsandms-iz2erp406-musaaaaaaas-projects.vercel.app)
+## GitHub Repos (all under sheikh-musa)
+| Repo | Priority | Status | Stack |
+|------|----------|--------|-------|
+| ihsandms | 1 | active | Next.js + Supabase (live: ihsandms.vercel.app) |
+| dookana (was bayt) | 2 | active | Next.js + Python backend + Supabase |
+| hifz-companion (hifz) | 3 | active | PWA + Supabase |
+| cosem-video-pipeline | 4 | specced | Python + WaveSpeedAI + ffmpeg |
+| dawah-pipeline | 5 | specced | Python + Claude + MagiHuman |
 
-##  Failed / Blocked
-- none
+## Bot Features
+- **Admin**: Technical brainstorm, /build, /addclient, /linkrepo, /clients, /usage, /pause, /cancel, /priority
+- **Client**: Conversational AI assistant — no slash commands needed, confirms before acting
+- **Voice**: Send voice notes, bot transcribes via Claude audio input, processes as chat
+- **3 Action Tiers**: DATA (instant DB ops), CONFIG (provisioning), BUILD (code changes)
+- **Multi-action**: Can queue multiple builds from one confirmation
+- **Context-aware**: Loads real codebase (CLAUDE.md, STATUS.md, git log, file tree) into brainstorm
+- **Persistent**: Chat history survives restarts (Supabase-backed)
 
-## Session 0 Checklist
-- [x] Directory structure created
-- [x] Python venv + dependencies installed
-- [x] .env template written
-- [x] REPOS.json written (sheikh-musa)
-- [x] schema.sql written
-- [x] LaunchAgent written (orch + cto_bot)
-- [x] cloudflared installed
+## Orchestrator Features
+- Parallel execution across repos (max 3 concurrent, configurable)
+- Sequential within same repo (prevents git conflicts)
+- Atomic job picking with CAS pattern
+- Stale job recovery (>2hr running → auto-requeue)
+- Git pull before build, git push + Vercel deploy after
+- Secret redaction in all logs
+- Whitelisted env vars for Claude CLI subprocess
+- Progress notifications to admin + client at each pipeline stage
+- Usage metering (tokens, duration per client)
+- Audit logging for all admin actions
 
-## Session 1 Checklist
-- [x] wingmen_orch.py — main async worker loop
-- [x] context_loader.py — per-repo context loader
-- [x] spec_generator.py — Claude-powered prompt builder
-- [x] ralph_runner.py — Claude CLI subprocess runner
-- [x] deploy_manager.py — Vercel deployment trigger
-- [x] status_reporter.py — STATUS.md updater + Telegram notifier
-- [x] cto_bot.py — Telegram bot (long-polling, no tunnel needed)
-- [x] Tests: 13/13 passing
-- [x] Plugins: context7, superpowers installed
-- [x] Supabase schema applied (4 tables: jobs, build_log, repo_memory, clients)
-- [x] Repos cloned: ihsandms, hifz-companion, dookana, cosem-video-pipeline, dawah-pipeline
-- [x] New repos created on GitHub: dookana, cosem-video-pipeline, dawah-pipeline
+## Infrastructure
+- Mac Mini (always-on, Singapore)
+- LaunchAgents: dev.wingmen.orchestrator, dev.wingmen.ctobot
+- GitHub: sheikh-musa (all repos)
+- Supabase: tscuymavysscrvoberrr (shared project)
+- Vercel: team_fgnTFpfA3HElR8jK4vSQ5HYo
+- Domain: wingmen.dev (SiteGround NS, Cloudflare migration pending)
 
-## Pending (5 secrets only Musa can provide)
-- [ ] ANTHROPIC_API_KEY — console.anthropic.com → API Keys
-- [ ] SUPABASE_SERVICE_KEY — Supabase dashboard → Settings → API → service_role
-- [ ] TELEGRAM_BOT_TOKEN — existing CTO bot token
-- [ ] MUSA_TELEGRAM_ID — message @userinfobot on Telegram
-- [ ] VERCEL_TOKEN — vercel.com/account/tokens → Create
-
-## To Go Live
-1. Fill the 5 secrets above in ~/wingmen/orchestrator/.env
-2. launchctl load ~/Library/LaunchAgents/dev.wingmen.orchestrator.plist
-3. launchctl load ~/Library/LaunchAgents/dev.wingmen.ctobot.plist
-4. Send /start to the Telegram bot
+## Hard Constraints
+- async Python only, no blocking calls
+- All secrets via .env, never hardcoded
+- RLS enabled on every Supabase table
+- BIGINT GENERATED ALWAYS AS IDENTITY on all PKs
+- RTL-first CSS with logical properties (for Arabic content)
+- 150KB page weight max ("Yemen/Sumatra Rule")
+- Max 3 consecutive failures before pausing + alerting
+- Never delete repos or Supabase tables without admin confirmation
+- Arabic text must be RTL, diacritics-correct
+- No riba, zakat-transparent, Islamic economic constraints
