@@ -5,12 +5,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 
 from supabase import AsyncClient as SupabaseAsyncClient
 
 logger = logging.getLogger("wingmen.ralph")
+
+# Patterns to redact from logs
+_SECRET_PATTERNS = re.compile(
+    r'(sk-ant-[a-zA-Z0-9_-]+|eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+|'
+    r'ghp_[a-zA-Z0-9]+|gho_[a-zA-Z0-9]+|vcp_[a-zA-Z0-9]+|sb_publishable_[a-zA-Z0-9_-]+)'
+)
+
+
+def _redact(text: str) -> str:
+    return _SECRET_PATTERNS.sub('[REDACTED]', text)
 
 
 async def _log_to_supabase(
@@ -21,13 +32,16 @@ async def _log_to_supabase(
     message: str,
     level: str = "info",
 ):
-    await supabase.table("build_log").insert({
-        "job_id": job_id,
-        "repo_name": repo_name,
-        "phase": phase,
-        "message": message[:4000],  # truncate long messages
-        "level": level,
-    }).execute()
+    try:
+        await supabase.table("build_log").insert({
+            "job_id": job_id,
+            "repo_name": repo_name,
+            "phase": phase,
+            "message": _redact(message[:4000]),
+            "level": level,
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Failed to write build log: {e}")
 
 
 async def run_claude(
@@ -42,11 +56,8 @@ async def run_claude(
 
     Returns {"success": bool, "summary": str}.
     """
-    # Write prompt to temp file
     prompt_file = Path(tempfile.gettempdir()) / f"ralph_job_{job_id}.md"
     prompt_file.write_text(prompt_text)
-
-    completion_promise = f"JOB_{job_id}_DONE"
 
     claude_bin = os.path.expanduser("~/.local/bin/claude")
 
@@ -58,14 +69,18 @@ async def run_claude(
         "--output-format", "text",
     ]
 
-    # Don't pass ANTHROPIC_API_KEY — claude CLI uses Max subscription auth
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    # Whitelist only safe env vars — never pass secrets to subprocess
+    safe_keys = {"PATH", "HOME", "USER", "SHELL", "LANG", "TERM", "LC_ALL", "LC_CTYPE"}
+    env = {k: v for k, v in os.environ.items() if k in safe_keys}
+    env["HOME"] = os.path.expanduser("~")
+    env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
 
     await _log_to_supabase(
         supabase, job_id, repo_name, "claude_start",
         f"Starting Claude CLI with max_turns={max_turns}", "info",
     )
 
+    process = None
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -82,7 +97,6 @@ async def run_claude(
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
 
-        # Log output
         if stdout:
             await _log_to_supabase(
                 supabase, job_id, repo_name, "claude_stdout",
@@ -94,12 +108,9 @@ async def run_claude(
                 stderr[-4000:], "warn",
             )
 
-        # Success if: promise found, OR clean exit (exit_code=0) with output
-        success = process.returncode == 0 and (
-            completion_promise in stdout or len(stdout.strip()) > 0
-        )
+        # Success if: clean exit with output
+        success = process.returncode == 0 and len(stdout.strip()) > 0
 
-        # Extract a summary (last meaningful lines)
         summary_lines = [
             line for line in stdout.strip().splitlines()[-20:]
             if line.strip()
@@ -112,9 +123,15 @@ async def run_claude(
             "info" if success else "error",
         )
 
-        return {"success": success, "summary": summary}
+        return {"success": success, "summary": _redact(summary)}
 
     except asyncio.TimeoutError:
+        if process:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
         await _log_to_supabase(
             supabase, job_id, repo_name, "claude_timeout",
             "Claude CLI timed out after 30 minutes", "error",
@@ -122,6 +139,12 @@ async def run_claude(
         return {"success": False, "summary": "Claude CLI timed out after 30 minutes"}
 
     except Exception as e:
+        if process:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
         await _log_to_supabase(
             supabase, job_id, repo_name, "claude_error",
             str(e), "error",

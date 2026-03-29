@@ -38,8 +38,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("wingmen.orch")
 
-POLL_INTERVAL = 30  # seconds
-MAX_FAIL_COUNT = 3
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
+MAX_FAIL_COUNT = int(os.environ.get("MAX_FAIL_COUNT", "3"))
+STALE_JOB_MINUTES = int(os.environ.get("STALE_JOB_MINUTES", "120"))
 
 
 async def get_supabase():
@@ -49,7 +50,13 @@ async def get_supabase():
 
 
 async def pick_next_job(supabase) -> dict | None:
-    """Pick the highest priority queued job."""
+    """Atomically pick and lock the highest priority queued job.
+
+    Uses an UPDATE ... RETURNING pattern to prevent race conditions
+    if multiple orchestrator instances run.
+    """
+    # Use RPC or raw SQL for atomic pick — Supabase client doesn't support
+    # SELECT FOR UPDATE, so we use update-where-status-is-queued pattern
     result = await (
         supabase.table("jobs")
         .select("*")
@@ -59,52 +66,131 @@ async def pick_next_job(supabase) -> dict | None:
         .limit(1)
         .execute()
     )
-    if result.data:
-        return result.data[0]
-    return None
+    if not result.data:
+        return None
+
+    job = result.data[0]
+    # Atomic claim: only update if still queued (CAS pattern)
+    claim = await (
+        supabase.table("jobs")
+        .update({"status": "running", "updated_at": "now()"})
+        .eq("id", job["id"])
+        .eq("status", "queued")  # CAS: only if still queued
+        .execute()
+    )
+    if not claim.data:
+        # Another instance grabbed it
+        logger.debug(f"Job #{job['id']} already claimed by another instance")
+        return None
+
+    return claim.data[0]
+
+
+async def recover_stale_jobs(supabase) -> None:
+    """Requeue jobs stuck in 'running' state for too long."""
+    try:
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=STALE_JOB_MINUTES)).isoformat()
+        result = await (
+            supabase.table("jobs")
+            .select("id, repo_name")
+            .eq("status", "running")
+            .lt("updated_at", cutoff)
+            .execute()
+        )
+        for job in (result.data or []):
+            await (
+                supabase.table("jobs")
+                .update({"status": "queued", "result_summary": f"Auto-requeued: stuck running for >{STALE_JOB_MINUTES}min"})
+                .eq("id", job["id"])
+                .execute()
+            )
+            logger.warning(f"Recovered stale job #{job['id']} ({job['repo_name']})")
+    except Exception as e:
+        logger.error(f"Stale job recovery failed: {e}")
 
 
 async def set_job_status(supabase, job_id: int, status: str, **extra):
-    """Update job status and any extra fields."""
     update = {"status": status, "updated_at": "now()"}
     update.update(extra)
     await supabase.table("jobs").update(update).eq("id", job_id).execute()
 
 
+async def _git_pull(repo_path: str) -> None:
+    """Pull latest changes before running a build."""
+    git_dir = Path(repo_path) / ".git"
+    if not git_dir.exists():
+        logger.info(f"  No .git in {repo_path}, skipping pull")
+        return
+
+    proc = await asyncio.create_subprocess_exec(
+        "git", "pull", "--ff-only",
+        cwd=repo_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if proc.returncode == 0:
+            logger.info(f"  Git pull OK: {stdout.decode(errors='replace').strip()}")
+        else:
+            logger.warning(f"  Git pull failed: {stderr.decode(errors='replace').strip()}")
+    except asyncio.TimeoutError:
+        proc.kill()
+        logger.warning("  Git pull timed out")
+
+
 async def _git_push(repo_path: str, job_id: int, description: str) -> None:
     """Stage, commit, and push changes made by Claude CLI."""
-    async def _run(cmd):
+    async def _run(cmd, timeout=60):
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=repo_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
-        return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+        except asyncio.TimeoutError:
+            proc.kill()
+            return -1, "", "timeout"
 
-    # Check if there are changes
     rc, out, _ = await _run(["git", "status", "--porcelain"])
     if not out.strip():
         logger.info(f"  No changes to commit for job #{job_id}")
         return
 
-    # Stage all changes
     await _run(["git", "add", "-A"])
 
-    # Commit
-    msg = f"feat: {description[:100]} [job_{job_id}]"
+    # Sanitize description for commit message
+    safe_desc = description[:100].replace('"', "'").replace('\n', ' ')
+    msg = f"feat: {safe_desc} [job_{job_id}]"
     rc, out, err = await _run(["git", "commit", "-m", msg])
     if rc != 0:
         logger.warning(f"  Git commit failed: {err}")
         return
 
-    # Push
-    rc, out, err = await _run(["git", "push"])
+    rc, out, err = await _run(["git", "push"], timeout=120)
     if rc != 0:
         logger.warning(f"  Git push failed: {err}")
         return
 
     logger.info(f"  Committed and pushed: {msg}")
+
+
+async def _resolve_client_chat_id(supabase, job: dict) -> str | None:
+    """Look up the Telegram chat_id for the client who triggered this job."""
+    if not job.get("client_id"):
+        return None
+    try:
+        result = await supabase.table("clients").select("telegram_chat_id").eq(
+            "id", job["client_id"]
+        ).limit(1).execute()
+        if result.data:
+            return result.data[0].get("telegram_chat_id")
+    except Exception as e:
+        logger.warning(f"Failed to resolve client chat_id: {e}")
+    return None
 
 
 async def run_job(supabase, job: dict) -> None:
@@ -114,19 +200,8 @@ async def run_job(supabase, job: dict) -> None:
     start_time = time.monotonic()
 
     logger.info(f"▶ Starting job #{job_id}: {repo_name} — {job['description']}")
-    await set_job_status(supabase, job_id, "running")
 
-    # Resolve client chat_id for notifications
-    client_chat_id = None
-    if job.get("client_id"):
-        try:
-            client_result = await supabase.table("clients").select("telegram_chat_id").eq(
-                "id", job["client_id"]
-            ).limit(1).execute()
-            if client_result.data:
-                client_chat_id = client_result.data[0].get("telegram_chat_id")
-        except Exception:
-            pass
+    client_chat_id = await _resolve_client_chat_id(supabase, job)
 
     async def notify(jid, rname, phase, detail=""):
         await status_reporter.notify_progress(jid, rname, phase, detail, client_chat_id)
@@ -136,15 +211,18 @@ async def run_job(supabase, job: dict) -> None:
         await notify(job_id, repo_name, "picked", job["description"])
         context = await context_loader.load_context(repo_name, supabase)
         logger.info(f"  Context loaded for {repo_name}")
-        await notify(job_id, repo_name, "context", "Loaded CLAUDE.md, STATUS.md, memory")
+        await notify(job_id, repo_name, "context", "Loaded project context")
 
-        # 2. Generate spec prompt
+        # 2. Git pull latest
+        await _git_pull(context["repo_path"])
+
+        # 3. Generate spec prompt
         prompt_text = await spec_generator.generate_spec(job, context)
         logger.info(f"  Spec generated ({len(prompt_text)} chars)")
         await notify(job_id, repo_name, "spec", f"Generated build spec ({len(prompt_text)} chars)")
 
-        # 3. Run Claude CLI
-        await notify(job_id, repo_name, "claude", "Claude Code running...")
+        # 4. Run Claude CLI
+        await notify(job_id, repo_name, "claude", "Building...")
         result = await ralph_runner.run_claude(
             repo_path=context["repo_path"],
             prompt_text=prompt_text,
@@ -157,15 +235,14 @@ async def run_job(supabase, job: dict) -> None:
         elapsed = time.monotonic() - start_time
 
         if result["success"]:
-            # 4. Git commit + push
+            # 5. Git commit + push
             try:
-                await notify(job_id, repo_name, "deploy", "Committing and pushing changes...")
+                await notify(job_id, repo_name, "deploy", "Pushing changes...")
                 await _git_push(context["repo_path"], job_id, job["description"])
-                logger.info(f"  Pushed to remote")
             except Exception as e:
                 logger.warning(f"  Git push failed: {e}")
 
-            # 5. Deploy
+            # 6. Deploy
             deploy_result = {"deployed": False, "url": None}
             try:
                 deploy_result = await deploy_manager.deploy(repo_name)
@@ -175,7 +252,7 @@ async def run_job(supabase, job: dict) -> None:
             except Exception as e:
                 logger.error(f"  Deploy failed: {e}")
 
-            # 5. Report success
+            # 7. Report success
             await status_reporter.report(
                 job=job,
                 result=result,
@@ -190,7 +267,6 @@ async def run_job(supabase, job: dict) -> None:
             logger.info(f"✅ Job #{job_id} completed in {elapsed:.0f}s")
 
         else:
-            # Increment fail count
             new_fail_count = job.get("fail_count", 0) + 1
             elapsed_str = status_reporter._format_elapsed(elapsed)
             if new_fail_count >= MAX_FAIL_COUNT:
@@ -206,6 +282,7 @@ async def run_job(supabase, job: dict) -> None:
                     result=result,
                     deploy_url=None,
                     elapsed_seconds=elapsed,
+                    client_chat_id=client_chat_id,
                 )
             else:
                 await set_job_status(
@@ -213,7 +290,7 @@ async def run_job(supabase, job: dict) -> None:
                     fail_count=new_fail_count,
                     result_summary=result["summary"][:2000],
                 )
-                await notify(job_id, repo_name, "failed", f"Attempt {new_fail_count}/{MAX_FAIL_COUNT} failed ({elapsed_str}). Re-queued.")
+                await notify(job_id, repo_name, "failed", f"Attempt {new_fail_count}/{MAX_FAIL_COUNT} failed ({elapsed_str}). Retrying.")
                 logger.warning(
                     f"⚠️ Job #{job_id} failed (attempt {new_fail_count}/{MAX_FAIL_COUNT}), re-queued"
                 )
@@ -236,8 +313,16 @@ async def main_loop():
     supabase = await get_supabase()
     logger.info("Connected to Supabase")
 
+    recovery_counter = 0
+
     while True:
         try:
+            # Recover stale jobs every 10 polls (~5 min)
+            recovery_counter += 1
+            if recovery_counter >= 10:
+                await recover_stale_jobs(supabase)
+                recovery_counter = 0
+
             job = await pick_next_job(supabase)
             if job:
                 await run_job(supabase, job)

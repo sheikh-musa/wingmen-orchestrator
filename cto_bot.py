@@ -120,6 +120,26 @@ def is_admin(user: dict) -> bool:
 
 _chat_sessions: dict[str, list[dict]] = {}   # chat_id -> message history
 _active_repo: dict[str, str] = {}            # chat_id -> repo_name
+_rate_limits: dict[str, list[float]] = {}    # chat_id -> list of timestamps
+
+MAX_BUILDS_PER_HOUR = 10
+MAX_MSG_LENGTH = 2000
+
+
+def check_rate_limit(chat_id: str) -> bool:
+    """Returns True if within rate limit, False if exceeded."""
+    now = time.monotonic()
+    if chat_id not in _rate_limits:
+        _rate_limits[chat_id] = []
+
+    # Clean old entries (>1 hour)
+    _rate_limits[chat_id] = [t for t in _rate_limits[chat_id] if now - t < 3600]
+
+    if len(_rate_limits[chat_id]) >= MAX_BUILDS_PER_HOUR:
+        return False
+
+    _rate_limits[chat_id].append(now)
+    return True
 
 
 def get_history(chat_id: str) -> list[dict]:
@@ -257,6 +277,15 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Select a repo first with /repo <name>")
             return
         description = " ".join(args)
+
+    # Validate
+    if len(description) > MAX_MSG_LENGTH:
+        await update.message.reply_text(f"Description too long (max {MAX_MSG_LENGTH} chars).")
+        return
+
+    if not check_rate_limit(chat_id):
+        await update.message.reply_text("Too many requests. Please wait a bit before submitting more.")
+        return
 
     try:
         config = context_loader.get_repo_config(repo_name)
@@ -577,15 +606,38 @@ When the user wants something changed, built, or fixed, follow this flow strictl
 STEP 1 — UNDERSTAND: Ask clarifying questions if anything is ambiguous. What exactly? Where? Any preferences?
 STEP 2 — SUMMARIZE: Restate what you'll do in plain, non-technical language. End with "Should I go ahead?"
 STEP 3 — WAIT: Do NOT include an action block until the user explicitly confirms (e.g., "yes", "go ahead", "do it", "yep", "sure", "ok").
-STEP 4 — EXECUTE: Only after confirmation, include the action block.
+STEP 4 — EXECUTE: Only after confirmation, choose the RIGHT action tier and include the block.
 
-ACTION FORMAT (include ONLY after user confirms):
-[ACTION:BUILD] detailed technical description of what needs to be done, written for a developer. Include specific components, pages, behaviors, and acceptance criteria. [/ACTION]
+THREE ACTION TIERS — use the lightest one that works:
+
+TIER 1 — DATA (instant, for content/inventory changes):
+Use for: updating prices, adding products, editing text, changing phone numbers, toggling settings.
+[ACTION:DATA]
+TABLE: products
+OP: insert
+DATA: {{"name": "Nasi Lemak", "price": 5.50, "category": "mains", "available": true}}
+[/ACTION]
+
+[ACTION:DATA]
+TABLE: products
+OP: update
+WHERE: id=42
+DATA: {{"price": 6.00}}
+[/ACTION]
+
+TIER 2 — CONFIG (provisioning, setup tasks):
+Use for: new storefront, domain setup, account configuration.
+[ACTION:CONFIG] Set up new storefront for merchant "Warung Pak Ali" with slug "warung-pak-ali", PayNow UEN 12345678A, phone +6581234567 [/ACTION]
+
+TIER 3 — BUILD (code changes, takes minutes):
+Use for: new features, bug fixes, design changes, new pages.
+[ACTION:BUILD] detailed technical description for a developer. Include specific components, pages, behaviors, and acceptance criteria. [/ACTION]
 
 CRITICAL RULES:
 - NEVER include an action block on the first message about a topic — always clarify and confirm first
 - The text BEFORE the action block is what the user sees — keep it friendly and non-technical
-- The text INSIDE the action block is for the developer AI — make it specific and technical
+- The text INSIDE the action block is for the system — user won't see it
+- Prefer DATA over BUILD — most client requests are data changes, not code changes
 - For questions, status checks, or brainstorming — just respond normally, no action block
 - If the user asks about progress, check the CURRENT STATUS section below
 - If something is a quick question or chat, just respond — not everything needs an action
@@ -603,41 +655,155 @@ CRITICAL RULES:
 
 
 async def _parse_and_execute_actions(reply: str, user: dict, chat_id: str) -> str:
-    """Parse action blocks from Claude's response and execute them. Returns cleaned reply."""
+    """Parse action blocks from Claude's response and execute them.
+
+    Supports 3 tiers:
+    - [ACTION:DATA] — direct Supabase query (instant, e.g. update prices)
+    - [ACTION:CONFIG] — provisioning (new storefront, DNS, etc.)
+    - [ACTION:BUILD] — full code build pipeline
+    """
     import re
-    action_match = re.search(r'\[ACTION:BUILD\]\s*(.+?)\s*\[/ACTION\]', reply, re.DOTALL)
-
-    if not action_match:
-        return reply
-
-    technical_desc = action_match.group(1).strip()
-    clean_reply = reply[:action_match.start()].strip()
 
     repo_name = get_active_repo(chat_id, user)
-    if not repo_name:
-        return clean_reply + "\n\n(I'd need to know which project you mean — just let me know!)"
 
-    # Queue the build job
+    # ── DATA actions (instant Supabase operations) ──
+    data_match = re.search(r'\[ACTION:DATA\]\s*(.+?)\s*\[/ACTION\]', reply, re.DOTALL)
+    if data_match:
+        sql_or_op = data_match.group(1).strip()
+        clean_reply = reply[:data_match.start()].strip()
+        try:
+            supabase = await get_supabase()
+            # Parse structured operations (table, operation, data)
+            result = await _execute_data_action(supabase, sql_or_op, repo_name)
+            clean_reply += f"\n\n{result}"
+            logger.info(f"Data action for {user['name']}: {sql_or_op[:100]}")
+        except Exception as e:
+            logger.error(f"Data action failed: {e}")
+            clean_reply += "\n\nI tried to make that change but hit an issue. Let me flag this to the team."
+        return clean_reply
+
+    # ── CONFIG actions (provisioning) ──
+    config_match = re.search(r'\[ACTION:CONFIG\]\s*(.+?)\s*\[/ACTION\]', reply, re.DOTALL)
+    if config_match:
+        config_op = config_match.group(1).strip()
+        clean_reply = reply[:config_match.start()].strip()
+        try:
+            result = await _execute_config_action(config_op, user)
+            clean_reply += f"\n\n{result}"
+            logger.info(f"Config action for {user['name']}: {config_op[:100]}")
+        except Exception as e:
+            logger.error(f"Config action failed: {e}")
+            clean_reply += "\n\nI'll need to get the team to handle this setup. I've flagged it!"
+        return clean_reply
+
+    # ── BUILD actions (code changes via Claude CLI) ──
+    build_match = re.search(r'\[ACTION:BUILD\]\s*(.+?)\s*\[/ACTION\]', reply, re.DOTALL)
+    if build_match:
+        technical_desc = build_match.group(1).strip()
+        clean_reply = reply[:build_match.start()].strip()
+
+        if not repo_name:
+            return clean_reply + "\n\nWhich project is this for? Just let me know!"
+
+        if len(technical_desc) > 2000:
+            technical_desc = technical_desc[:2000]
+
+        try:
+            config = context_loader.get_repo_config(repo_name)
+            supabase = await get_supabase()
+            result = await supabase.table("jobs").insert({
+                "repo_name": repo_name,
+                "description": technical_desc,
+                "status": "queued",
+                "priority": config["priority"],
+                "triggered_by": "telegram",
+                "client_id": user.get("client_id"),
+            }).execute()
+
+            if result.data:
+                job = result.data[0]
+                clean_reply += f"\n\nI've submitted this as a task (#{job['id']}). I'll update you on progress!"
+                logger.info(f"Build queued #{job['id']} for {user['name']}: {repo_name} — {technical_desc[:100]}")
+            else:
+                clean_reply += "\n\nI tried to submit that but something went wrong. The team has been notified."
+        except Exception as e:
+            logger.error(f"Failed to queue build: {e}")
+            clean_reply += "\n\nI tried to submit that but hit an issue. Let me flag this to the team."
+
+        return clean_reply
+
+    return reply
+
+
+async def _execute_data_action(supabase, operation: str, repo_name: str | None) -> str:
+    """Execute a structured data operation on Supabase.
+
+    Expected format (from Claude):
+    TABLE: <table_name>
+    OP: insert|update|delete
+    WHERE: <column>=<value>  (for update/delete)
+    DATA: {"key": "value", ...}
+    """
+    import json as json_mod
+
+    lines = operation.strip().splitlines()
+    parsed = {}
+    for line in lines:
+        if ":" in line:
+            key, val = line.split(":", 1)
+            parsed[key.strip().upper()] = val.strip()
+
+    table = parsed.get("TABLE", "")
+    op = parsed.get("OP", "").lower()
+    data_str = parsed.get("DATA", "{}")
+    where_str = parsed.get("WHERE", "")
+
+    if not table or not op:
+        return "I couldn't process that change — the format was unclear. Let me try again."
+
     try:
-        config = context_loader.get_repo_config(repo_name)
-        supabase = await get_supabase()
-        result = await supabase.table("jobs").insert({
-            "repo_name": repo_name,
-            "description": technical_desc,
-            "status": "queued",
-            "priority": config["priority"],
-            "triggered_by": "telegram",
-            "client_id": user.get("client_id"),
-        }).execute()
+        data = json_mod.loads(data_str)
+    except json_mod.JSONDecodeError:
+        return "I had trouble understanding the data format. Could you describe what you want changed?"
 
-        job = result.data[0]
-        clean_reply += f"\n\nI've submitted this as a task (#{job['id']}). I'll update you on progress!"
-        logger.info(f"Auto-queued job #{job['id']} for {user['name']}: {repo_name} — {technical_desc[:100]}")
-    except Exception as e:
-        logger.error(f"Failed to auto-queue build: {e}")
-        clean_reply += "\n\nI tried to submit that but hit an issue. Let me flag this to the team."
+    if op == "insert":
+        result = await supabase.table(table).insert(data).execute()
+        if result.data:
+            return "Done! The change is live now."
+        return "I tried but the update didn't go through. Let me check with the team."
 
-    return clean_reply
+    elif op == "update" and where_str:
+        col, val = where_str.split("=", 1)
+        result = await supabase.table(table).update(data).eq(col.strip(), val.strip()).execute()
+        if result.data:
+            return "Done! The change is live now."
+        return "I couldn't find that record to update. Can you double-check the details?"
+
+    elif op == "delete" and where_str:
+        col, val = where_str.split("=", 1)
+        result = await supabase.table(table).delete().eq(col.strip(), val.strip()).execute()
+        return "Done! That's been removed."
+
+    return "I wasn't sure how to process that. Let me flag it to the team."
+
+
+async def _execute_config_action(operation: str, user: dict) -> str:
+    """Execute a configuration/provisioning action.
+
+    Handles: new storefront setup, domain configuration, etc.
+    """
+    # For now, queue as a manual task for Musa
+    supabase = await get_supabase()
+    await supabase.table("jobs").insert({
+        "repo_name": "orchestrator",
+        "description": f"CONFIG: {operation}",
+        "status": "queued",
+        "priority": 2,
+        "triggered_by": "telegram",
+        "client_id": user.get("client_id"),
+    }).execute()
+
+    return "I've flagged this for setup. You'll be notified once it's ready!"
 
 
 async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
