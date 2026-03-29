@@ -1,10 +1,13 @@
 """Turns a job description + context into a Claude-ready build prompt."""
 
-import anthropic
+from __future__ import annotations
+
+import asyncio
+import os
 
 
 async def generate_spec(job: dict, context: dict) -> str:
-    """Use Claude to generate a structured build prompt from job + context."""
+    """Use Claude CLI (Max subscription) to generate a structured build prompt."""
     repo_config = context["repo_config"]
 
     meta_prompt = f"""You are a spec generator for an autonomous build system.
@@ -42,13 +45,24 @@ End the prompt with exactly:
 <promise>JOB_{job['id']}_DONE</promise>
 """
 
-    client = anthropic.AsyncAnthropic()
-    message = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": meta_prompt}],
+    claude_bin = os.path.expanduser("~/.local/bin/claude")
+    safe_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "SHELL", "LANG"}}
+    safe_env["HOME"] = os.path.expanduser("~")
+    safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+    proc = await asyncio.create_subprocess_exec(
+        claude_bin, "-p", meta_prompt, "--output-format", "text",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=safe_env,
     )
-    return message.content[0].text
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    result = stdout.decode(errors="replace").strip()
+
+    if not result:
+        raise RuntimeError(f"Spec generation failed: {stderr.decode(errors='replace')}")
+
+    return result
 
 
 def _format_memory(memory: list[dict]) -> str:

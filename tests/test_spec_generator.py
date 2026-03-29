@@ -43,44 +43,31 @@ def sample_context():
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_returns_prompt_with_promise(sample_job, sample_context):
-    """Spec generator should return a prompt containing the completion promise."""
-    mock_response = MagicMock()
-    mock_response.content = [
-        MagicMock(text="## Role\nihsandms is...\n<promise>JOB_42_DONE</promise>")
-    ]
+async def test_generate_spec_calls_claude_cli(sample_job, sample_context):
+    """Spec generator should shell out to claude CLI."""
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(
+        return_value=(b"## Role\nihsandms is...\n<promise>JOB_42_DONE</promise>", b"")
+    )
+    mock_proc.returncode = 0
 
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-    with patch("spec_generator.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("spec_generator.asyncio.create_subprocess_exec", return_value=mock_proc):
         result = await spec_generator.generate_spec(sample_job, sample_context)
 
     assert "JOB_42_DONE" in result
     assert "<promise>" in result
 
-    # Verify the API was called with correct model
-    call_kwargs = mock_client.messages.create.call_args[1]
-    assert call_kwargs["model"] == "claude-sonnet-4-6"
-    assert "ihsandms" in call_kwargs["messages"][0]["content"]
-    assert "Fix the order form" in call_kwargs["messages"][0]["content"]
-
 
 @pytest.mark.asyncio
-async def test_generate_spec_includes_memory(sample_job, sample_context):
-    """Memory items should appear in the prompt sent to Claude."""
-    mock_response = MagicMock()
-    mock_response.content = [MagicMock(text="prompt text")]
+async def test_generate_spec_raises_on_empty_output(sample_job, sample_context):
+    """Should raise if CLI returns empty."""
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"some error"))
+    mock_proc.returncode = 1
 
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-    with patch("spec_generator.anthropic.AsyncAnthropic", return_value=mock_client):
-        await spec_generator.generate_spec(sample_job, sample_context)
-
-    sent_content = mock_client.messages.create.call_args[1]["messages"][0]["content"]
-    assert "framework: Next.js 14" in sent_content
-    assert "last_issue: checkout form missing" in sent_content
+    with patch("spec_generator.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(RuntimeError, match="Spec generation failed"):
+            await spec_generator.generate_spec(sample_job, sample_context)
 
 
 def test_format_memory_empty():

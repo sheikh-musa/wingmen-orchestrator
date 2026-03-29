@@ -1,6 +1,6 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30 05:15 SGT
+Last Updated: 2026-03-30 05:18 SGT
 Phase: production
 Build Status: green
 
@@ -108,3 +108,22 @@ Telegram notification to admin + client
 - Never delete repos or Supabase tables without admin confirmation
 - Arabic text must be RTL, diacritics-correct
 - No riba, zakat-transparent, Islamic economic constraints
+
+## Completed (Last 5)
+- [green] Job #4: ihsandms — Add donor invite link generator + public /donate/[token] page
+
+INVITE GENERATION — /admin/donors page:
+- Add "Generate Invite Link" button in the donor management section
+- On click: generate a unique token (UUID), create invite record in mock data with donor name, email, token, status (pending/accepted), created_at
+- Show copyable link: ihsandms.vercel.app/donate/[token]
+- List of generated invites with status badges (pending=yellow, accepted=green, expired=gray)
+
+PUBLIC DONATE PAGE — /donate/[token] route:
+- Validate token against mock invite data. Invalid/expired token shows friendly error page
+- Valid token: show org branding at top, welcome message with donor name
+- Donation form: amount input with preset buttons ($10, $25, $50, $100, custom), campaign dropdown, optional message field
+- On submit: show PayNow QR code generated from amount (reuse existing PayNow QR component if available), with org UEN
+- Below QR: "Thank you" message + receipt reference number
+- Mobile-first responsive layout, max 150KB page weight
+
+DATA: Add invites array to lib/data.ts with 2-3 seeded entries (one pending, one accepted). Add Invite type to lib/types.ts (5m 21s, deploy: https://ihsandms-izse9h9bj-musaaaaaaas-projects.vercel.app)

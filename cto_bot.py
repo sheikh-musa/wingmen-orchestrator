@@ -17,7 +17,6 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import anthropic
 from dotenv import load_dotenv
 from supabase import acreate_client
 from telegram import Update
@@ -1020,16 +1019,35 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             system_prompt = await _build_system_prompt(user, chat_id)
 
-            client = anthropic.AsyncAnthropic()
-            response = await client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1024,
-                system=system_prompt,
-                messages=history,
+            # Build conversation as a single prompt for Claude CLI
+            conv_parts = [f"SYSTEM:\n{system_prompt}\n"]
+            for msg in history:
+                role_label = "USER" if msg["role"] == "user" else "ASSISTANT"
+                conv_parts.append(f"{role_label}:\n{msg['content']}\n")
+            full_prompt = "\n---\n".join(conv_parts)
+            full_prompt += "\n---\nRespond as ASSISTANT. Keep it concise (Telegram message)."
+
+            # Use Claude CLI (Max subscription — no API cost)
+            claude_bin = os.path.expanduser("~/.local/bin/claude")
+            safe_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "SHELL", "LANG"}}
+            safe_env["HOME"] = os.path.expanduser("~")
+            safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+            proc = await asyncio.create_subprocess_exec(
+                claude_bin, "-p", full_prompt, "--output-format", "text",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=safe_env,
             )
-            reply = response.content[0].text
-            tokens = response.usage.input_tokens + response.usage.output_tokens
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            reply = stdout.decode(errors="replace").strip()
             duration = time.monotonic() - start
+
+            if not reply:
+                err = stderr.decode(errors="replace")
+                logger.error(f"Claude CLI returned empty: {err}")
+                await update.message.reply_text("I had trouble processing that. Please try again.")
+                return
 
             # Parse action blocks for all users (admin + clients)
             reply = await _parse_and_execute_actions(reply, user, chat_id)
@@ -1037,18 +1055,14 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Persist assistant reply
             await save_message(chat_id, "assistant", reply)
 
-            # Log usage
+            # Log usage (no token count from CLI, track duration)
             repo = get_active_repo(chat_id, user) or ""
-            await log_usage(user.get("client_id"), "chat", repo, tokens, duration)
+            await log_usage(user.get("client_id"), "chat", repo, 0, duration)
 
             if len(reply) > 4000:
                 reply = reply[:4000] + "\n...(truncated)"
 
             await update.message.reply_text(reply)
-
-        except anthropic.APIError as e:
-            logger.error(f"Claude API error for {user['name']}: {e}")
-            await update.message.reply_text("I'm having trouble connecting right now. Please try again in a moment.")
 
         except asyncio.TimeoutError:
             logger.error(f"Chat timeout for {user['name']}")
@@ -1080,37 +1094,27 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tmp_path = tmp.name
             await file.download_to_drive(tmp_path)
 
-        # Read and encode as base64
-        import base64
-        with open(tmp_path, "rb") as f:
-            audio_data = base64.standard_b64encode(f.read()).decode()
+        # Transcribe using Claude CLI with audio file
+        claude_bin = os.path.expanduser("~/.local/bin/claude")
+        safe_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "SHELL", "LANG"}}
+        safe_env["HOME"] = os.path.expanduser("~")
+        safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+        # Save as temp file and pass to Claude CLI
+        import tempfile as tf
+        prompt = "Transcribe this voice message exactly. If it's in a mix of languages, transcribe as spoken. Return only the transcription, nothing else."
+        proc = await asyncio.create_subprocess_exec(
+            claude_bin, "-p", prompt,
+            "--files", tmp_path,
+            "--output-format", "text",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=safe_env,
+        )
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        transcription = stdout_bytes.decode(errors="replace").strip()
 
         os.unlink(tmp_path)
-
-        # Transcribe using Claude's audio input
-        client = anthropic.AsyncAnthropic()
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "audio/ogg",
-                            "data": audio_data,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": "Transcribe this voice message exactly. If it's in a mix of languages, transcribe as spoken. Return only the transcription, nothing else.",
-                    },
-                ],
-            }],
-        )
-        transcription = response.content[0].text.strip()
 
         if not transcription:
             await update.message.reply_text("I couldn't make out what you said. Could you try again?")
