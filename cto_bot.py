@@ -1278,7 +1278,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not voice:
         return
 
-    # Download the voice file
+    # Step 1: Download and transcribe
     try:
         file = await context.bot.get_file(voice.file_id)
         import tempfile
@@ -1286,24 +1286,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tmp_path = tmp.name
             await file.download_to_drive(tmp_path)
 
-        # Transcribe locally using Whisper (free, fast, offline)
         transcription = await asyncio.to_thread(_whisper_transcribe, tmp_path)
         os.unlink(tmp_path)
-
-        if not transcription:
-            await update.message.reply_text("I couldn't make out what you said. Could you try again?")
-            return
-
-        # Show what we heard
-        await update.message.reply_text(f"\U0001f3a4 I heard: \"{transcription}\"\n\nProcessing...")
-
-        # Now process as regular text by injecting into handle_chat
-        update.message.text = transcription
-        await handle_chat(update, context)
-
     except Exception as e:
-        logger.error(f"Voice processing error: {e}")
-        await update.message.reply_text("I had trouble processing that voice message. Could you type it instead?")
+        logger.error(f"Voice transcription error: {e}")
+        await update.message.reply_text("I had trouble with the audio. Could you try again or type it instead?")
+        return
+
+    if not transcription:
+        await update.message.reply_text("I couldn't make out what you said. Could you try again?")
+        return
+
+    # Step 2: Show transcription and process as chat
+    await update.message.reply_text(f"\U0001f3a4 I heard: \"{transcription}\"")
+    update.message.text = transcription
+    await handle_chat(update, context)
 
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
