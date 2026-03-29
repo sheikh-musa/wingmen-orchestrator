@@ -1,0 +1,54 @@
+{
+  "repos": [
+    {
+      "name": "ihsandms",
+      "github": "https://github.com/sheikh-musa/ihsandms",
+      "local_path": "~/wingmen/projects/ihsandms",
+      "vercel_project": "ihsandms",
+      "deploy_url": "https://ihsandms.vercel.app",
+      "supabase_project_ref": "FILL_IN",
+      "status": "active",
+      "priority": 1
+    },
+    {
+      "name": "dookana",
+      "github": "https://github.com/sheikh-musa/dookana",
+      "local_path": "~/wingmen/projects/dookana",
+      "vercel_project": "dookana",
+      "deploy_url": "FILL_IN",
+      "supabase_project_ref": "FILL_IN",
+      "status": "active",
+      "priority": 2
+    },
+    {
+      "name": "hifz-companion",
+      "github": "https://github.com/sheikh-musa/hifz-companion",
+      "local_path": "~/wingmen/projects/hifz-companion",
+      "vercel_project": "hifz-companion",
+      "deploy_url": "https://hifz-companion.vercel.app",
+      "supabase_project_ref": "FILL_IN",
+      "status": "active",
+      "priority": 3
+    },
+    {
+      "name": "cosem-video-pipeline",
+      "github": "https://github.com/sheikh-musa/cosem-video-pipeline",
+      "local_path": "~/wingmen/projects/cosem-video-pipeline",
+      "vercel_project": null,
+      "deploy_url": null,
+      "supabase_project_ref": "FILL_IN",
+      "status": "specced",
+      "priority": 4
+    },
+    {
+      "name": "dawah-pipeline",
+      "github": "https://github.com/sheikh-musa/dawah-pipeline",
+      "local_path": "~/wingmen/projects/dawah-pipeline",
+      "vercel_project": null,
+      "deploy_url": null,
+      "supabase_project_ref": "FILL_IN",
+      "status": "specced",
+      "priority": 5
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+Use the Supabase MCP to list all tables in the orchestrator database, then show the schema for each table (columns, types, constraints). Compare against ~/wingmen/orchestrator/schema.sql to check for drift.
