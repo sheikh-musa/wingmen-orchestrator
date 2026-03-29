@@ -408,6 +408,84 @@ async def _load_active_repo(chat_id: str) -> str | None:
     return None
 
 
+async def _queue_message(chat_id: str, message_id: int, msg_type: str, content: str = "", file_id: str = "") -> None:
+    """Save incoming message to queue before processing. Idempotent via unique constraint."""
+    try:
+        supabase = await get_supabase()
+        await supabase.table("message_queue").upsert({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "message_type": msg_type,
+            "content": content[:4000] if content else "",
+            "file_id": file_id,
+            "processed": False,
+        }, on_conflict="chat_id,message_id").execute()
+    except Exception as e:
+        logger.warning(f"Failed to queue message: {e}")
+
+
+async def _mark_processed(chat_id: str, message_id: int) -> None:
+    """Mark a queued message as processed."""
+    try:
+        supabase = await get_supabase()
+        await supabase.table("message_queue").update({"processed": True}).eq(
+            "chat_id", chat_id
+        ).eq("message_id", message_id).execute()
+    except Exception as e:
+        logger.warning(f"Failed to mark message processed: {e}")
+
+
+async def _recover_unprocessed(app) -> None:
+    """On startup, find unprocessed messages and notify those users."""
+    try:
+        supabase = await get_supabase()
+        # Only recover messages from the last hour (older ones are stale)
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        result = await (
+            supabase.table("message_queue")
+            .select("chat_id, content, message_type")
+            .eq("processed", False)
+            .gte("created_at", cutoff)
+            .order("created_at", desc=False)
+            .limit(50)
+            .execute()
+        )
+
+        if not result.data:
+            return
+
+        # Group by chat_id and send apology + last message summary
+        from collections import defaultdict
+        by_chat: dict[str, list] = defaultdict(list)
+        for msg in result.data:
+            by_chat[msg["chat_id"]].append(msg)
+
+        for chat_id, msgs in by_chat.items():
+            count = len(msgs)
+            last_content = msgs[-1].get("content", "")[:100]
+            try:
+                await app.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(
+                        f"Sorry, I missed {count} message{'s' if count > 1 else ''} "
+                        f"during a brief restart. Could you resend?\n\n"
+                        f"Last message: \"{last_content}...\""
+                    ),
+                )
+            except Exception:
+                pass
+
+        # Mark all as processed
+        for msg in result.data:
+            await supabase.table("message_queue").update({"processed": True}).eq(
+                "chat_id", msg["chat_id"]
+            ).execute()
+
+        logger.info(f"Recovered {len(result.data)} unprocessed messages across {len(by_chat)} chats")
+    except Exception as e:
+        logger.error(f"Message recovery failed: {e}")
+
+
 def get_active_repo(chat_id: str, user: dict) -> str | None:
     if chat_id in _active_repo:
         return _active_repo[chat_id]
@@ -1403,14 +1481,22 @@ _chat_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent Claude calls
 async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle free-text messages."""
     chat_id = str(update.effective_user.id)
-    user = await resolve_user(chat_id)
-    if not user:
-        await handle_onboarding(update, chat_id)
-        return
+    msg_id = update.message.message_id
     user_msg = update.message.text
     if not user_msg:
         return
+
+    # Queue first — survives crashes
+    await _queue_message(chat_id, msg_id, "text", user_msg)
+
+    user = await resolve_user(chat_id)
+    if not user:
+        await handle_onboarding(update, chat_id)
+        await _mark_processed(chat_id, msg_id)
+        return
+
     await _process_message(update, user, chat_id, user_msg)
+    await _mark_processed(chat_id, msg_id)
 
 
 async def _process_message(update: Update, user: dict, chat_id: str, user_msg: str):
@@ -1512,13 +1598,19 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo messages — save image and describe it in context for Claude."""
     chat_id = str(update.effective_user.id)
-    user = await resolve_user(chat_id)
-    if not user:
-        await handle_onboarding(update, chat_id)
-        return
+    msg_id = update.message.message_id
 
     photo = update.message.photo[-1] if update.message.photo else None
     if not photo:
+        return
+
+    caption = update.message.caption or ""
+    await _queue_message(chat_id, msg_id, "photo", caption, photo.file_id)
+
+    user = await resolve_user(chat_id)
+    if not user:
+        await handle_onboarding(update, chat_id)
+        await _mark_processed(chat_id, msg_id)
         return
 
     caption = update.message.caption or ""
@@ -1562,6 +1654,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             combined += f"\nUser's message: {caption}"
 
         await _process_message(update, user, chat_id, combined)
+        await _mark_processed(chat_id, msg_id)
 
     except Exception as e:
         logger.error(f"Photo processing error: {e}")
@@ -1569,19 +1662,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _process_message(update, user, chat_id, f"[User sent a photo they want to discuss] {caption}")
         else:
             await update.message.reply_text("I received your photo. Could you describe what you'd like me to do with it?")
+        await _mark_processed(chat_id, msg_id)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle voice messages — download, transcribe via Claude, then process as text."""
     chat_id = str(update.effective_user.id)
+    msg_id = update.message.message_id
     user = await resolve_user(chat_id)
-
-    if not user:
-        await update.message.reply_text("Not registered. Contact the admin.")
-        return
 
     voice = update.message.voice or update.message.audio
     if not voice:
+        return
+
+    await _queue_message(chat_id, msg_id, "voice", "", voice.file_id)
+
+    if not user:
+        await handle_onboarding(update, chat_id)
+        await _mark_processed(chat_id, msg_id)
         return
 
     # Step 1: Download and transcribe
@@ -1606,6 +1704,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Step 2: Show transcription and process as chat
     await update.message.reply_text(f"\U0001f3a4 I heard: \"{transcription}\"")
     await _process_message(update, user, chat_id, transcription)
+    await _mark_processed(chat_id, msg_id)
 
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1653,6 +1752,12 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
+
+    # Recover any messages lost during previous crash
+    async def post_init(application):
+        await _recover_unprocessed(application)
+
+    app.post_init = post_init
 
     logger.info("Wingmen CTO Bot starting (long-polling mode)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
