@@ -1510,6 +1510,26 @@ DATA: {{"price": 6.00}}
     if repo_name:
         base += await _load_repo_context_block(repo_name)
 
+        # Add completed job history so bot doesn't duplicate work
+        try:
+            supabase = await get_supabase()
+            jobs_result = await (
+                supabase.table("jobs")
+                .select("id, description, status")
+                .eq("repo_name", repo_name)
+                .in_("status", ["completed", "running", "queued"])
+                .order("id", desc=True)
+                .limit(10)
+                .execute()
+            )
+            if jobs_result.data:
+                base += "\n--- ALREADY BUILT/IN PROGRESS (do NOT rebuild these) ---\n"
+                for j in jobs_result.data:
+                    desc = j["description"].split("\n")[0][:100]
+                    base += f"- [{j['status']}] Job #{j['id']}: {desc}\n"
+        except Exception:
+            pass
+
     return base
 
 
