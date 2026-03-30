@@ -1429,11 +1429,12 @@ Large tasks MUST be broken into smaller, focused jobs:
 ## BUILDING
 
 When intent is clear and Musa confirms:
-- Include one or more [ACTION:BUILD] blocks
-- Each block = one focused change (3-5 files max)
+- Include exactly ONE [ACTION:BUILD] block per message — never multiple
+- After queuing it, say "Queued. Ready for the next one?" and wait
+- When Musa says "next" or "go", include the next [ACTION:BUILD]
+- This keeps responses fast and reliable
 - Be specific: name exact files, components, functions
 - Include acceptance criteria the agent can verify
-- Don't add extras — no comments, docs, type annotations, error handling beyond what's needed
 
 [ACTION:BUILD] surgical description — exact files, exact changes, exact acceptance criteria [/ACTION]
 
