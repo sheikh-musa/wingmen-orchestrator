@@ -2407,8 +2407,10 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                         try:
                             config = context_loader.get_repo_config(repo)
                             repo_path = os.path.expanduser(config.get("local_path", ""))
+                            deploy_url = config.get("deploy_url", "")
                         except ValueError:
                             repo_path = ""
+                            deploy_url = ""
                         issue = {
                             "description": route.get("detail", user_msg),
                             "file_path": "",
@@ -2418,6 +2420,28 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                         reply = await _call_claude(prompt, tools="Read,Edit,Write,Bash", timeout=120)
                         if not reply:
                             reply = "I couldn't fix that. Could you give me more details?"
+                        elif "SKIP" not in reply and deploy_url:
+                            # Push changes and take verification screenshot
+                            await _call_claude(
+                                f"Run: cd {repo_path} && git push origin main 2>&1 | tail -3",
+                                tools="Bash", timeout=60,
+                            )
+                            screenshot_path = f"/tmp/fix_verify_{chat_id}.jpg"
+                            await _call_claude(
+                                f"Run: npx playwright screenshot {deploy_url} {screenshot_path} --viewport-size 375,812 --wait-for-timeout 5000 2>&1 | tail -3",
+                                tools="Bash", timeout=30,
+                            )
+                            if os.path.exists(screenshot_path):
+                                try:
+                                    with open(screenshot_path, "rb") as photo:
+                                        await update.message.reply_photo(
+                                            photo=photo,
+                                            caption="Here's how it looks now after the fix."
+                                        )
+                                except Exception as e:
+                                    logger.warning(f"Failed to send fix screenshot: {e}")
+                                finally:
+                                    os.unlink(screenshot_path)
 
                 else:
                     # "chat", "build", "data" all go through brainstorm
