@@ -147,7 +147,7 @@ def test_fixer_prompt_includes_issue_details():
     assert "/Users/sheikhmusa/wingmen/projects/ihsandms" in prompt
     assert "crawl" not in prompt.lower()
     assert "ACTION:BUILD" not in prompt
-    assert "git push" not in prompt
+    assert "Do NOT run git push" in prompt
 
 
 def test_fixer_prompt_minimal_context():
