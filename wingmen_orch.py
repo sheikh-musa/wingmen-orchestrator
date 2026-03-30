@@ -138,6 +138,33 @@ async def set_job_status(supabase, job_id: int, status: str, **extra):
     await supabase.table("jobs").update(update).eq("id", job_id).execute()
 
 
+async def _ensure_repo(repo_path: str, github_url: str) -> None:
+    """Clone the repo if it doesn't exist locally."""
+    if Path(repo_path).exists():
+        return
+
+    logger.info(f"  Repo not found at {repo_path}, cloning from {github_url}")
+    parent = str(Path(repo_path).parent)
+    Path(parent).mkdir(parents=True, exist_ok=True)
+    dir_name = Path(repo_path).name
+
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "repo", "clone", github_url, dir_name,
+        cwd=parent,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        if proc.returncode == 0:
+            logger.info(f"  Cloned {github_url} → {repo_path}")
+        else:
+            raise RuntimeError(f"Clone failed: {stderr.decode(errors='replace')}")
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"Clone timed out for {github_url}")
+
+
 async def _git_pull(repo_path: str) -> None:
     """Pull latest changes before running a build."""
     git_dir = Path(repo_path) / ".git"
@@ -235,7 +262,8 @@ async def run_job(supabase, job: dict) -> None:
         logger.info(f"  Context loaded for {repo_name}")
         await notify(job_id, repo_name, "context", "Loaded project context")
 
-        # 2. Git pull + tag for rollback safety
+        # 2. Ensure repo exists locally, then pull + tag
+        await _ensure_repo(context["repo_path"], context["repo_config"].get("github", ""))
         await _git_pull(context["repo_path"])
         try:
             tag = f"pre-job-{job_id}"
