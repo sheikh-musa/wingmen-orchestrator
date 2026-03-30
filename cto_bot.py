@@ -1771,7 +1771,8 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
             recent = history[-10:]
             for msg in recent:
                 role_label = "USER" if msg["role"] == "user" else "ASSISTANT"
-                content = msg["content"][:500]  # cap each message
+                # Cap assistant messages (can be verbose) but keep user messages full
+                content = msg["content"] if msg["role"] == "user" else msg["content"][:500]
                 conv_parts.append(f"{role_label}:\n{content}\n")
             full_prompt = "\n---\n".join(conv_parts)
             full_prompt += "\n---\nRespond as ASSISTANT. Keep it concise (Telegram message, max 3 paragraphs)."
