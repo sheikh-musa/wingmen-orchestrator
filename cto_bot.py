@@ -2011,6 +2011,11 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
             if inferred and inferred in user["repos"]:
                 _active_repo[chat_id] = inferred
 
+    # If message contains a URL, auto-screenshot and enhance context
+    url_enhanced = await handle_url_in_message(update, user, chat_id, user_msg)
+    if url_enhanced:
+        user_msg = url_enhanced
+
     # Load persisted history
     history = await get_history(chat_id)
     history.append({"role": "user", "content": user_msg})
@@ -2172,6 +2177,161 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.unlink(tmp_path)
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle document uploads — HTML, Excel, CSV, PDF."""
+    chat_id = str(update.effective_user.id)
+    msg_id = update.message.message_id
+    user = await resolve_user(chat_id)
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    caption = update.message.caption or ""
+    file_name = doc.file_name or "file"
+    file_ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+
+    await _queue_message(chat_id, msg_id, "document", f"{file_name}: {caption}", doc.file_id)
+
+    if not user:
+        # For onboarding — save file context for provisioning
+        await handle_onboarding(update, chat_id)
+        await _mark_processed(chat_id, msg_id)
+        return
+
+    await update.message.chat.send_action("typing")
+
+    tmp_path = None
+    try:
+        file = await context.bot.get_file(doc.file_id)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=f".{file_ext}", delete=False) as tmp:
+            tmp_path = tmp.name
+            await file.download_to_drive(tmp_path)
+
+        content_summary = ""
+
+        if file_ext in ("html", "htm"):
+            # Read HTML directly
+            with open(tmp_path, "r", errors="replace") as f:
+                html = f.read()
+            content_summary = f"[User sent an HTML file ({file_name}, {len(html)} chars)]\n\nHTML preview:\n{html[:3000]}"
+
+        elif file_ext in ("xlsx", "xls"):
+            # Parse Excel
+            import openpyxl
+            wb = openpyxl.load_workbook(tmp_path, read_only=True)
+            sheets_data = []
+            for sheet_name in wb.sheetnames[:3]:
+                ws = wb[sheet_name]
+                rows = []
+                for row in ws.iter_rows(max_row=50, values_only=True):
+                    rows.append(" | ".join(str(c) if c is not None else "" for c in row))
+                sheets_data.append(f"Sheet: {sheet_name}\n" + "\n".join(rows[:50]))
+            wb.close()
+            content_summary = f"[User sent Excel file ({file_name})]\n\n" + "\n\n".join(sheets_data)
+
+        elif file_ext == "csv":
+            with open(tmp_path, "r", errors="replace") as f:
+                csv_content = f.read()
+            content_summary = f"[User sent CSV file ({file_name})]\n\n{csv_content[:3000]}"
+
+        elif file_ext == "pdf":
+            import pdfplumber
+            with pdfplumber.open(tmp_path) as pdf:
+                text = "\n".join(page.extract_text() or "" for page in pdf.pages[:5])
+            content_summary = f"[User sent PDF ({file_name})]\n\n{text[:3000]}"
+
+        elif file_ext in ("json",):
+            with open(tmp_path, "r", errors="replace") as f:
+                content = f.read()
+            content_summary = f"[User sent JSON file ({file_name})]\n\n{content[:3000]}"
+
+        else:
+            # Try to read as text
+            try:
+                with open(tmp_path, "r", errors="replace") as f:
+                    content = f.read()
+                content_summary = f"[User sent file ({file_name})]\n\n{content[:2000]}"
+            except Exception:
+                content_summary = f"[User sent file ({file_name}) — binary format, cannot read directly]"
+
+        if caption:
+            content_summary += f"\n\nUser's message: {caption}"
+
+        await _process_message(update, user, chat_id, content_summary)
+        await _mark_processed(chat_id, msg_id)
+
+    except Exception as e:
+        logger.error(f"Document processing error: {e}")
+        fallback = f"I received your file ({file_name})."
+        if caption:
+            fallback += f" {caption}"
+        await _process_message(update, user, chat_id, fallback)
+        await _mark_processed(chat_id, msg_id)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+async def handle_url_in_message(update: Update, user: dict, chat_id: str, user_msg: str) -> str | None:
+    """Detect URLs in messages and auto-screenshot them for context.
+
+    Returns enhanced message with screenshot description, or None if no URL found.
+    """
+    import re
+    url_match = re.search(r'https?://[^\s<>\"]+', user_msg)
+    if not url_match:
+        return None
+
+    url = url_match.group()
+
+    try:
+        await update.message.chat.send_action("typing")
+
+        import tempfile
+        ss_path = os.path.join(tempfile.gettempdir(), f"url_ref_{hash(url)}.png")
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "playwright", "screenshot", url, ss_path,
+            "--viewport-size", "375,812",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=20)
+
+        if proc.returncode == 0 and os.path.exists(ss_path):
+            # Describe with Claude CLI
+            claude_bin = os.path.expanduser("~/.local/bin/claude")
+            safe_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "SHELL", "LANG"}}
+            safe_env["HOME"] = os.path.expanduser("~")
+            safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+            desc_proc = await asyncio.create_subprocess_exec(
+                claude_bin, "-p",
+                "Describe this website screenshot concisely — layout, colors, style, sections, typography. Keep it under 150 words.",
+                "--files", ss_path,
+                "--output-format", "text",
+                "--tools", "",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=safe_env,
+            )
+            stdout, _ = await asyncio.wait_for(desc_proc.communicate(), timeout=30)
+            description = stdout.decode(errors="replace").strip()
+
+            os.unlink(ss_path)
+
+            if description:
+                enhanced = f"{user_msg}\n\n[Auto-captured screenshot of {url}: {description}]"
+                return enhanced
+
+    except Exception as e:
+        logger.debug(f"URL screenshot failed for {url}: {e}")
+
+    return None
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle voice messages — download, transcribe via Claude, then process as text."""
     chat_id = str(update.effective_user.id)
@@ -2261,6 +2421,7 @@ def main():
     # Free text + voice → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
 
