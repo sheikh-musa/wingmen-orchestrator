@@ -2226,6 +2226,49 @@ Group into two sections:
     return result or "I found some things on your site — let me put together a summary for you."
 
 
+_CONFIRM_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "go ahead", "do it", "please", "proceed", "fix it", "go for it", "yea"}
+
+
+async def _execute_pending_fixes(update: Update, user: dict, chat_id: str) -> str:
+    """Execute pending audit fixes for a client and return a friendly summary."""
+    pending = _pending_fixes.pop(chat_id, None)
+    if not pending:
+        return ""
+
+    issues = pending["issues"]
+    repo_name = pending["repo"]
+
+    try:
+        config = context_loader.get_repo_config(repo_name)
+    except ValueError:
+        return "I couldn't find the project to fix. Let me know if you'd like to try again."
+
+    repo_path = os.path.expanduser(config.get("local_path", ""))
+
+    await update.message.reply_text(f"On it! Fixing {len(issues)} thing{'s' if len(issues) != 1 else ''} now...")
+
+    fixed_count = 0
+    for issue in issues:
+        result = await _run_fix(repo_name, issue)
+        if not result.startswith("SKIP"):
+            fixed_count += 1
+
+    # Batch push
+    if fixed_count > 0:
+        await _call_claude(
+            f"Run these commands:\ncd {repo_path} && git push origin main 2>&1 | tail -3",
+            tools="Bash",
+            timeout=60,
+        )
+
+    if fixed_count == len(issues):
+        return f"All done! I've fixed all {fixed_count} issue{'s' if fixed_count != 1 else ''}. Take a look at your site and let me know if it looks better."
+    elif fixed_count > 0:
+        return f"I fixed {fixed_count} out of {len(issues)}. A couple were trickier than expected — I'll flag those for the team. Check your site and let me know!"
+    else:
+        return "I ran into some trouble with the fixes. Let me flag this for the team to look at."
+
+
 async def _send_reply(update: Update, text: str, max_len: int = 4000):
     """Send a reply, splitting into multiple messages if needed."""
     if len(text) <= max_len:
@@ -2290,6 +2333,27 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
     # Persist user message
     await save_message(chat_id, "user", user_msg)
+
+    # Check for pending fix confirmation (client flow)
+    if chat_id in _pending_fixes and not is_admin(user):
+        msg_lower = user_msg.lower().strip().rstrip("!.")
+        if any(word in msg_lower for word in _CONFIRM_WORDS):
+            async with _chat_semaphore:
+                try:
+                    await update.message.chat.send_action("typing")
+                    reply = await _execute_pending_fixes(update, user, chat_id)
+                    await save_message(chat_id, "assistant", reply)
+                    await _send_reply(update, reply)
+                except Exception as e:
+                    logger.error(f"Pending fix error for {user['name']}: {e}")
+                    try:
+                        await update.message.reply_text("Something went wrong with the fixes. Let me try again later.")
+                    except Exception:
+                        pass
+            return
+        else:
+            # Client said something other than confirmation — clear pending and route normally
+            _pending_fixes.pop(chat_id, None)
 
     async with _chat_semaphore:
         start = time.monotonic()
