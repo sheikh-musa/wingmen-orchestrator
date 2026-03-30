@@ -175,7 +175,16 @@ _onboarding_state: dict[str, dict] = {}  # chat_id -> {"step": ..., "data": {...
 
 
 async def handle_onboarding(update: Update, chat_id: str) -> bool:
-    """Handle new user onboarding flow. Returns True if handled (caller should return)."""
+    """Smart onboarding — detects intent, auto-provisions sites.
+
+    Flow:
+    1. start → ask name
+    2. name → ask what they need (or detect from initial message)
+    3. intent → collect details based on type
+    4. provision → create site automatically
+    """
+    import provisioner
+
     supabase = await get_supabase()
     text = (update.message.text or "").strip()
 
@@ -186,7 +195,7 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
 
     if existing.data and existing.data[0]["status"] == "pending":
         await update.message.reply_text(
-            "Your account is pending approval. You'll be notified once you're set up! \U0001f44d"
+            "Your site is being set up! I'll message you as soon as it's ready \U0001f44d"
         )
         return True
 
@@ -196,72 +205,329 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
         tg_user = update.effective_user
         _onboarding_state[chat_id] = {
             "step": "name",
-            "data": {"telegram_username": tg_user.username or ""},
+            "data": {
+                "telegram_username": tg_user.username or "",
+                "initial_message": text,
+            },
             "_ts": time.monotonic(),
         }
         await update.message.reply_text(
             "Assalamu alaikum! \U0001f44b Welcome to Wingmen.\n\n"
-            "I'm your AI project assistant. Before we get started, "
-            "I just need a couple of details.\n\n"
+            "I help people create websites and manage their online presence.\n\n"
             "What's your name?"
         )
         return True
 
     elif state["step"] == "name":
         state["data"]["name"] = text
-        state["step"] = "company"
+        state["step"] = "intent"
         _onboarding_state[chat_id] = state
+
+        # Try to detect intent from initial message
+        initial = state["data"].get("initial_message", "").lower()
+        detected = _detect_intent(initial)
+
+        if detected:
+            state["data"]["template"] = detected
+            state["step"] = "details"
+            _onboarding_state[chat_id] = state
+            return await _ask_details(update, state, detected)
+
         await update.message.reply_text(
-            f"Nice to meet you, {text}! \U0001f91d\n\n"
-            "What's your company or project name?"
+            f"Nice to meet you, {text}! What can I help you with?\n\n"
+            "\U0001f3a8 Create a portfolio or personal site\n"
+            "\U0001f6d2 Set up an online store / ordering page\n"
+            "\U0001f4c4 Build a simple landing page\n"
+            "\U0001f4ac Or just tell me what you need!"
         )
         return True
 
-    elif state["step"] == "company":
-        state["data"]["company"] = text
-        state["step"] = "done"
-
-        # Save to pending_signups
-        await supabase.table("pending_signups").insert({
-            "telegram_chat_id": chat_id,
-            "telegram_username": state["data"].get("telegram_username", ""),
-            "name": state["data"]["name"],
-            "company": text,
-            "status": "pending",
-        }).execute()
-
-        # Notify Musa
-        admin_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        admin_id = os.environ.get("MUSA_TELEGRAM_ID")
-        if admin_token and admin_id:
-            import httpx
-            msg = (
-                f"\U0001f195 New signup request:\n"
-                f"Name: {state['data']['name']}\n"
-                f"Company: {text}\n"
-                f"Telegram: @{state['data'].get('telegram_username', 'N/A')}\n"
-                f"Chat ID: {chat_id}\n\n"
-                f"To approve:\n"
-                f"/addclient {state['data']['name']} {chat_id} free\n"
-                f"/linkrepo {state['data']['name']} <repo_name>"
+    elif state["step"] == "intent":
+        detected = _detect_intent(text)
+        if not detected:
+            await update.message.reply_text(
+                "No worries! Just tell me:\n"
+                "1 = Portfolio/personal site\n"
+                "2 = Store/ordering page\n"
+                "3 = Landing page"
             )
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(
-                    f"https://api.telegram.org/bot{admin_token}/sendMessage",
-                    json={"chat_id": admin_id, "text": msg},
+            return True
+
+        state["data"]["template"] = detected
+        state["step"] = "details"
+        _onboarding_state[chat_id] = state
+        return await _ask_details(update, state, detected)
+
+    elif state["step"] == "details":
+        template = state["data"].get("template", "portfolio")
+        _parse_details(state, text, template)
+
+        # Check if we have enough info to provision
+        if _has_enough_info(state, template):
+            state["step"] = "confirm"
+            _onboarding_state[chat_id] = state
+            return await _show_confirmation(update, state, template)
+        else:
+            return await _ask_missing(update, state, template)
+
+    elif state["step"] == "confirm":
+        if text.lower() in ("yes", "y", "go", "go ahead", "yep", "sure", "ok", "do it", "confirm"):
+            await update.message.reply_text(
+                f"\U0001f680 Setting up your site now! This takes about 2 minutes.\n"
+                "I'll send you a screenshot when it's ready..."
+            )
+            await update.message.chat.send_action("typing")
+
+            # Create client
+            name = state["data"]["name"]
+            company = state["data"].get("company", name)
+            client_result = await supabase.table("clients").insert({
+                "name": name,
+                "telegram_chat_id": chat_id,
+                "telegram_username": state["data"].get("telegram_username", ""),
+                "plan": "free",
+            }).execute()
+
+            if not client_result.data:
+                await update.message.reply_text("Something went wrong. Let me get the team to help.")
+                return True
+
+            client_id = client_result.data[0]["id"]
+
+            # Clear user cache so they're recognized
+            _user_cache.pop(chat_id, None)
+
+            # Provision the site
+            template = state["data"]["template"]
+            config = _build_provision_config(state, template)
+
+            result = await provisioner.provision_site(
+                supabase, client_id, template, company, config,
+            )
+
+            _onboarding_state.pop(chat_id, None)
+
+            if result["success"]:
+                # Notify admin
+                admin_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+                admin_id = os.environ.get("MUSA_TELEGRAM_ID")
+                if admin_token and admin_id:
+                    import httpx as hx
+                    async with hx.AsyncClient(timeout=10) as client:
+                        await client.post(
+                            f"https://api.telegram.org/bot{admin_token}/sendMessage",
+                            json={"chat_id": admin_id, "text": f"\U0001f195 New client auto-provisioned:\nName: {name}\nSite: {result['deploy_url']}\nTemplate: {template}\nRepo: {result['repo_name']}"},
+                        )
+
+                # Take screenshot and send
+                deploy_url = result["deploy_url"]
+                await update.message.reply_text(
+                    f"\u2705 Your site is live!\n\n"
+                    f"\U0001f310 {deploy_url}\n\n"
+                    "You can now tell me anytime you want to:\n"
+                    "\u2022 Update content or products\n"
+                    "\u2022 Change colors or layout\n"
+                    "\u2022 Add new pages or features\n\n"
+                    "Just message me like you would a friend!"
                 )
 
-        _onboarding_state.pop(chat_id, None)
+                # Try to send screenshot
+                try:
+                    import tempfile
+                    ss_path = os.path.join(tempfile.gettempdir(), f"onboard_{client_id}.png")
+                    proc = await asyncio.create_subprocess_exec(
+                        "npx", "playwright", "screenshot", deploy_url, ss_path,
+                        "--viewport-size", "375,812",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    await asyncio.wait_for(proc.communicate(), timeout=30)
+                    if os.path.exists(ss_path):
+                        from telegram import InputFile
+                        with open(ss_path, "rb") as f:
+                            await update.message.reply_photo(
+                                photo=InputFile(f),
+                                caption=f"\U0001f4f1 Here's how your site looks!",
+                            )
+                        os.unlink(ss_path)
+                except Exception:
+                    pass
+            else:
+                await update.message.reply_text(
+                    "I ran into an issue setting up your site. "
+                    "I've flagged it to the team — they'll sort it out and message you shortly!"
+                )
+            return True
 
-        await update.message.reply_text(
-            f"Thanks, {state['data']['name']}! \u2705\n\n"
-            "I've sent your details to the team. "
-            "You'll be notified as soon as your account is ready.\n\n"
-            "This usually takes just a few minutes!"
-        )
-        return True
+        elif text.lower() in ("no", "n", "cancel", "nah"):
+            _onboarding_state.pop(chat_id, None)
+            await update.message.reply_text("No problem! Message me anytime you're ready.")
+            return True
+        else:
+            await update.message.reply_text("Just say 'yes' to confirm or 'no' to cancel.")
+            return True
 
     return False
+
+
+def _detect_intent(text: str) -> str | None:
+    """Detect what type of site the user wants from their message."""
+    text = text.lower()
+    storefront_words = ["store", "shop", "sell", "order", "menu", "food", "bake", "kueh", "business", "product", "inventory", "price"]
+    portfolio_words = ["portfolio", "personal", "designer", "photographer", "freelance", "showcase", "work", "cv", "resume"]
+    landing_words = ["landing", "launch", "coming soon", "waitlist", "startup"]
+
+    store_score = sum(1 for w in storefront_words if w in text)
+    portfolio_score = sum(1 for w in portfolio_words if w in text)
+    landing_score = sum(1 for w in landing_words if w in text)
+
+    if text in ("1", "portfolio"):
+        return "portfolio"
+    if text in ("2", "store", "storefront"):
+        return "storefront"
+    if text in ("3", "landing"):
+        return "landing"
+
+    if store_score > portfolio_score and store_score > landing_score:
+        return "storefront"
+    if portfolio_score > store_score and portfolio_score > landing_score:
+        return "portfolio"
+    if landing_score > 0:
+        return "landing"
+    return None
+
+
+async def _ask_details(update, state, template):
+    name = state["data"]["name"]
+    if template == "portfolio":
+        await update.message.reply_text(
+            f"A portfolio site — great choice, {name}!\n\n"
+            "Tell me about yourself in one message:\n"
+            "\u2022 What do you do? (design, photography, dev, etc.)\n"
+            "\u2022 Your brand/business name\n"
+            "\u2022 Color preference? (or I'll pick something clean)\n"
+            "\u2022 Your email for the contact section"
+        )
+    elif template == "storefront":
+        await update.message.reply_text(
+            f"An online store — love it, {name}!\n\n"
+            "Tell me about your business in one message:\n"
+            "\u2022 Business name\n"
+            "\u2022 What do you sell? (list items with prices)\n"
+            "\u2022 Your WhatsApp/phone number\n"
+            "\u2022 PayNow UEN or phone (for payments)"
+        )
+    else:
+        await update.message.reply_text(
+            f"A landing page — nice, {name}!\n\n"
+            "Tell me:\n"
+            "\u2022 Project/company name\n"
+            "\u2022 One-line description\n"
+            "\u2022 Color preference?"
+        )
+    return True
+
+
+def _parse_details(state, text, template):
+    """Parse user's details message and extract what we can."""
+    state["data"]["details_raw"] = text
+    state["data"]["company"] = state["data"].get("company", state["data"]["name"])
+
+    # Try to extract email
+    import re
+    email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', text)
+    if email_match:
+        state["data"]["email"] = email_match.group()
+
+    # Try to extract phone
+    phone_match = re.search(r'[\+]?[0-9\s\-]{8,15}', text)
+    if phone_match:
+        state["data"]["phone"] = phone_match.group().strip()
+
+    # Try to extract prices/products for storefront
+    if template == "storefront":
+        products = []
+        # Pattern: "item name $price" or "item name price"
+        price_matches = re.findall(r'([a-zA-Z\s]+?)[\s]*[\$S]*(\d+(?:\.\d{2})?)', text)
+        for name, price in price_matches:
+            name = name.strip().strip(',').strip('-').strip()
+            if name and len(name) > 1:
+                products.append({"name": name, "price": float(price)})
+        if products:
+            state["data"]["products"] = products
+
+    # Use the raw text as company name if we don't have one
+    lines = text.strip().splitlines()
+    if lines:
+        first_line = lines[0].strip()
+        if len(first_line) < 50 and not first_line.startswith(("I ", "My ", "We ")):
+            state["data"]["company"] = first_line
+
+
+def _has_enough_info(state, template):
+    """Check if we have enough to provision."""
+    data = state["data"]
+    if template == "storefront":
+        return bool(data.get("company")) and bool(data.get("details_raw"))
+    return bool(data.get("company")) and bool(data.get("details_raw"))
+
+
+async def _ask_missing(update, state, template):
+    """This shouldn't normally be called — we accept whatever they give."""
+    await update.message.reply_text("Got it! Anything else to add? Or say 'done' and I'll set it up.")
+    state["step"] = "confirm"
+    return True
+
+
+async def _show_confirmation(update, state, template):
+    data = state["data"]
+    name = data["name"]
+    company = data.get("company", name)
+
+    if template == "storefront" and data.get("products"):
+        products_list = "\n".join(f"  \u2022 {p['name']} — ${p['price']:.2f}" for p in data["products"])
+        await update.message.reply_text(
+            f"Here's what I'll set up for you:\n\n"
+            f"\U0001f6d2 Online Store: {company}\n"
+            f"Products:\n{products_list}\n"
+            f"Phone: {data.get('phone', 'will add later')}\n\n"
+            "Your store will be live in about 2 minutes.\n\n"
+            "Should I go ahead?"
+        )
+    elif template == "portfolio":
+        await update.message.reply_text(
+            f"Here's what I'll set up:\n\n"
+            f"\U0001f3a8 Portfolio: {company}\n"
+            f"Contact: {data.get('email', 'will add later')}\n\n"
+            "A clean, mobile-friendly portfolio site ready in 2 minutes.\n\n"
+            "Should I go ahead?"
+        )
+    else:
+        await update.message.reply_text(
+            f"Here's what I'll set up:\n\n"
+            f"\U0001f4c4 Landing Page: {company}\n\n"
+            "Ready in about 2 minutes. Should I go ahead?"
+        )
+    return True
+
+
+def _build_provision_config(state, template):
+    """Build the config dict for provisioner from onboarding state."""
+    data = state["data"]
+    config = {
+        "tagline": "",
+        "description": data.get("details_raw", "")[:200],
+        "primary_color": "#111111" if template == "portfolio" else "#2d6a4f",
+    }
+
+    if template == "portfolio":
+        config["email"] = data.get("email", "")
+    elif template == "storefront":
+        config["phone"] = data.get("phone", "")
+        config["paynow_uen"] = data.get("paynow_uen", "")
+        config["paynow_name"] = data.get("company", "").upper()
+        config["products"] = data.get("products", [])
+
+    return config
 
 
 async def check_usage_limit(user: dict, action: str) -> str | None:

@@ -1,6 +1,6 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30 13:18 SGT
+Last Updated: 2026-03-30 14:05 SGT
 Phase: production
 Build Status: green
 
@@ -110,22 +110,37 @@ Telegram notification to admin + client
 - No riba, zakat-transparent, Islamic economic constraints
 
 ## Completed (Last 5)
-- [green] Job #7: ihsandms — Redirect old donor/parent routes to unified /my portal:
+- [green] Job #8: ihsandms — Repository: ihsandms
 
+**New file — `app/invite/[token]/page.tsx`:**
+- Public page (no auth, no layout nesting under /my or /admin)
+- Token param from URL (hardcoded token validation — accept any token for demo)
+- Clean branded form: mosque logo/name at top, "You've been invited to join our donor community" heading
+- Fields: Full Name, Phone (+65 prefix), Email, optional Message
+- On submit: show success state "Welcome! You're now registered as a donor" with CTA button "Make Your First Donation →" linking to `/donate/[token]`
+- Use existing design system (--primary, --accent, Playfair headings, DM Sans body)
+- Mobile-first layout, centered card on desktop
+
+**Modify — `app/admin/donors/page.tsx`:**
+- Add "Invite Donor" button in the header/actions area (next to any existing buttons)
+- Clicking opens a modal/dialog with:
+  - Generated invite URL: `{window.location.origin}/invite/{randomId}` (use crypto.randomUUID or Math.random hex)
+  - Copy button that copies URL to clipboard
+  - WhatsApp share button: opens `https://wa.me/?text=...` with pre-filled invite message
+- Style modal consistent with existing admin UI patterns
+
+**New file — `lib/mock-invites.ts`:**
+- Export a hardcoded array of recent invites (3-4 entries with name, status: pending/accepted, date)
+- Used by admin donors page to show "Recent Invites" section below the donor list
+
+**Acceptance criteria:**
+- `/invite/abc123` renders the onboarding form
+- Form validates required fields (name, phone, email)
+- Submit shows success + "Make First Donation" CTA
+- Admin donors page has "Invite Donor" button that generates + copies a link
+- WhatsApp share opens correctly
+- Fully responsive, matches design system (5m 34s, deploy: https://ihsandms-f6xgz3ek0-musaaaaaaas-projects.vercel.app)
+- [green] Job #7: ihsandms — Redirect old donor/parent routes to unified /my portal:
 - `app/donor/page.tsx` → redirect to `/my/dashboard`
 - `app/donor/donations/page.tsx` → redirect to `/my/donations`
 - `app/donor/qurban/page.tsx` → redirect to `/my/qurban`
-- `app/donor/profile/page.tsx` → redirect to `/my/profile`
-- `app/parent/page.tsx` → redirect to `/my/dashboard`
-- `app/parent/tabung/page.tsx` → redirect to `/my/tabung`
-- `app/parent/profile/page.tsx` → redirect to `/my/profile`
-
-Use Next.js `redirect()` from `next/navigation` in each page.tsx (server-side redirect). Keep the old layout files for now but they should be unused after redirects.
-
-Update any internal links in admin pages that point to `/donor/*` or `/parent/*` to use `/my/*` instead. Update `app/page.tsx` landing page if it links to donor/parent portals — point to `/my/dashboard`.
-
-Test: every old URL should 302 to the new /my equivalent. No dead links. (3m 32s, deploy: https://ihsandms-92ve36t7x-musaaaaaaas-projects.vercel.app)
-- [green] Job #6: ihsandms — Create unified portal at `/my` merging donor + parent portals:
-**Layout — `app/my/layout.tsx`:**
-- Mobile-first bottom tab bar (same pattern as current donor portal)
-- Tabs: Home, Donations, Tabung, Qurban, Profile (Lucide icons)
