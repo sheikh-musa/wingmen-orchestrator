@@ -2135,18 +2135,26 @@ async def _run_audit(update: Update, user: dict, chat_id: str, repo_name: str, d
             )
             logger.info(f"Batch push for {repo_name}: {push_result[:100]}")
 
-    # Compose final message
+    # Compose readable report
     needs_decision = [i for i in issues if i.get("fix_confidence") != "high"]
-    parts = [summary]
+
+    parts = [f"Audit complete for {repo_name} — {len(issues)} issue(s) found.\n"]
 
     if fix_results:
-        parts.append("\n**Auto-fixed:**")
-        parts.extend(fix_results)
+        parts.append(f"Fixed {len(fix_results)} automatically:")
+        for fr in fix_results:
+            parts.append(fr)
 
     if needs_decision:
-        parts.append("\n**Needs your decision:**")
+        parts.append(f"\n{len(needs_decision)} need your call:")
         for i in needs_decision:
-            parts.append(f"- [{i.get('severity', '?')}] {i['description']} ({i.get('suggested_fix', 'no suggestion')})")
+            sev = {"high": "!!!", "medium": "!!", "low": "!"}.get(i.get("severity", ""), "?")
+            parts.append(f"{sev} {i['description']}")
+            if i.get("suggested_fix"):
+                parts.append(f"   Suggestion: {i['suggested_fix']}")
+
+    if not issues:
+        parts = ["All pages look good — no issues found."]
 
     return "\n".join(parts)
 
@@ -2168,6 +2176,31 @@ async def _run_fix(repo_name: str, issue: dict) -> str:
     if result.strip().startswith("SKIP:"):
         return result.strip()
     return result.split("\n")[0][:200]  # First line, capped
+
+
+async def _send_reply(update: Update, text: str, max_len: int = 4000):
+    """Send a reply, splitting into multiple messages if needed."""
+    if len(text) <= max_len:
+        await update.message.reply_text(text)
+        return
+
+    # Split on double newlines (paragraph breaks) first, fall back to single newlines
+    chunks = []
+    current = ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > max_len:
+            if current:
+                chunks.append(current.strip())
+            current = line + "\n"
+        else:
+            current += line + "\n"
+    if current.strip():
+        chunks.append(current.strip())
+
+    for i, chunk in enumerate(chunks):
+        if i > 0:
+            chunk = f"...({i+1}/{len(chunks)})\n\n{chunk}"
+        await update.message.reply_text(chunk)
 
 
 async def _process_message(update: Update, user: dict, chat_id: str, user_msg: str):
@@ -2279,10 +2312,8 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
             repo = get_active_repo(chat_id, user) or ""
             await log_usage(user.get("client_id"), "chat", repo, 0, duration)
 
-            if len(reply) > 4000:
-                reply = reply[:4000] + "\n...(truncated)"
-
-            await update.message.reply_text(reply)
+            # Split long replies into multiple Telegram messages
+            await _send_reply(update, reply)
 
         except asyncio.TimeoutError:
             logger.error(f"Chat timeout for {user['name']}")
