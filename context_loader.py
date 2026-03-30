@@ -81,24 +81,30 @@ async def load_brainstorm_context(repo_name: str, supabase: SupabaseAsyncClient)
     except Exception:
         ctx["recent_commits"] = ""
 
-    # Get directory structure (fast — dirs only, depth 2)
+    # Get routes/pages (the most useful context for brainstorm)
     try:
+        # Find all page files — these define the app's routes
         proc = await asyncio.create_subprocess_exec(
-            "find", ".", "-maxdepth", "2", "-type", "d",
-            "-not", "-path", "./.git*",
-            "-not", "-path", "./node_modules*",
-            "-not", "-path", "./.next*",
-            "-not", "-path", "./__pycache__*",
-            "-not", "-path", "./.venv*",
+            "find", ".", "-name", "page.tsx", "-o", "-name", "page.ts",
+            "-o", "-name", "page.jsx", "-o", "-name", "page.js",
             cwd=repo_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-            ctx["file_tree"] = stdout.decode(errors="replace").strip()
+            pages = stdout.decode(errors="replace").strip()
+            # Also get top-level structure
+            proc2 = await asyncio.create_subprocess_exec(
+                "ls", "-1",
+                cwd=repo_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout2, _ = await asyncio.wait_for(proc2.communicate(), timeout=3)
+            top_level = stdout2.decode(errors="replace").strip()
+            ctx["file_tree"] = f"Top level:\n{top_level}\n\nRoutes/Pages:\n{pages}"
         except asyncio.TimeoutError:
-            proc.kill()
             ctx["file_tree"] = ""
     except Exception:
         ctx["file_tree"] = ""

@@ -1738,6 +1738,9 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
     async with _chat_semaphore:
         start = time.monotonic()
         try:
+            # Show typing indicator
+            await update.message.chat.send_action("typing")
+
             system_prompt = await _build_system_prompt(user, chat_id)
 
             # Build conversation as a single prompt for Claude CLI

@@ -1,6 +1,6 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30 13:12 SGT
+Last Updated: 2026-03-30 13:18 SGT
 Phase: production
 Build Status: green
 
@@ -110,24 +110,22 @@ Telegram notification to admin + client
 - No riba, zakat-transparent, Islamic economic constraints
 
 ## Completed (Last 5)
-- [green] Job #6: ihsandms — Create unified portal at `/my` merging donor + parent portals:
+- [green] Job #7: ihsandms — Redirect old donor/parent routes to unified /my portal:
 
+- `app/donor/page.tsx` → redirect to `/my/dashboard`
+- `app/donor/donations/page.tsx` → redirect to `/my/donations`
+- `app/donor/qurban/page.tsx` → redirect to `/my/qurban`
+- `app/donor/profile/page.tsx` → redirect to `/my/profile`
+- `app/parent/page.tsx` → redirect to `/my/dashboard`
+- `app/parent/tabung/page.tsx` → redirect to `/my/tabung`
+- `app/parent/profile/page.tsx` → redirect to `/my/profile`
+
+Use Next.js `redirect()` from `next/navigation` in each page.tsx (server-side redirect). Keep the old layout files for now but they should be unused after redirects.
+
+Update any internal links in admin pages that point to `/donor/*` or `/parent/*` to use `/my/*` instead. Update `app/page.tsx` landing page if it links to donor/parent portals — point to `/my/dashboard`.
+
+Test: every old URL should 302 to the new /my equivalent. No dead links. (3m 32s, deploy: https://ihsandms-92ve36t7x-musaaaaaaas-projects.vercel.app)
+- [green] Job #6: ihsandms — Create unified portal at `/my` merging donor + parent portals:
 **Layout — `app/my/layout.tsx`:**
 - Mobile-first bottom tab bar (same pattern as current donor portal)
 - Tabs: Home, Donations, Tabung, Qurban, Profile (Lucide icons)
-- Tabung tab conditionally shown — use a `userRole` constant in `lib/data.ts` (e.g. `{ isDonor: true, isParent: true }`)
-- Desktop: keep bottom tabs (it's a personal portal, not admin)
-- Top bar: "My IhsanDMS" centered, notification bell right
-
-**Pages:**
-- `app/my/dashboard/page.tsx` — overview cards: total donated (S$ amount), active campaigns, children tabung balances (if parent). Quick actions: "Donate Now", "View Receipts"
-- `app/my/donations/page.tsx` — pull from existing `/donor/donations` page, donation history list with receipt download buttons, tax cert section
-- `app/my/tabung/page.tsx` — pull from existing `/parent/tabung` page, children's tabung cards with balances + activity log
-- `app/my/qurban/page.tsx` — pull from existing `/donor/qurban` page, bookings list + WhatsApp milestone timeline
-- `app/my/profile/page.tsx` — personal details, notification preferences, role indicator ("Donor & Parent" or "Donor")
-
-Reuse existing components (StatCard, ProgressBar, QurbanTimeline, StatusBadge). Pull hardcoded data from `lib/data.ts`. Match design system (emerald/gold, Playfair headings, DM Sans body). Mobile-first, responsive. (7m 16s, deploy: https://ihsandms-an75lolgw-musaaaaaaas-projects.vercel.app)
-- [green] Job #5: ihsandms — Repository: ihsandms
-Task: Convert entire admin portal to fully responsive mobile-first layout with bottom tab bar navigation (matching donor portal pattern)
-**ADMIN LAYOUT OVERHAUL — `app/admin/layout.tsx`:**
-- Keep desktop sidebar nav as-is for screens ≥1024px
