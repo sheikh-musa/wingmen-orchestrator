@@ -49,6 +49,16 @@
       "supabase_project_ref": "FILL_IN",
       "status": "specced",
       "priority": 5
+    },
+    {
+      "name": "cosem-tdu",
+      "github": "https://github.com/sheikh-musa/cosem-tdu",
+      "local_path": "~/wingmen/projects/cosem-tdu",
+      "vercel_project": null,
+      "deploy_url": "https://tdu-tools-prod.web.app",
+      "supabase_project_ref": null,
+      "status": "active",
+      "priority": 2
     }
   ]
 }
