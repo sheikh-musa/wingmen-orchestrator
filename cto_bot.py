@@ -2371,6 +2371,7 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
             # Step 2: Dispatch to specialist agent with typing indicator
             async def _keep_typing():
                 notified = False
+                progress_msg = "Checking on that for you, one moment..." if not is_admin(user) else "Working on it — using tools to check things. Hang tight..."
                 try:
                     elapsed = 0
                     while True:
@@ -2380,7 +2381,7 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                         if not notified and elapsed >= 30:
                             notified = True
                             try:
-                                await update.message.reply_text("Working on it — using tools to check things. Hang tight...")
+                                await update.message.reply_text(progress_msg)
                             except Exception:
                                 pass
                 except asyncio.CancelledError:
