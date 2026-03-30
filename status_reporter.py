@@ -94,9 +94,11 @@ async def report(
     # Send Telegram notification
     await _send_telegram(job, build_status, status_emoji, deploy_url, elapsed, client_chat_id)
 
-    # Send screenshot of deployed site if successful
-    if result["success"] and deploy_url:
-        await _send_deploy_screenshot(job, deploy_url, client_chat_id)
+    # Send screenshot of live production URL (not preview URL)
+    if result["success"]:
+        prod_url = config.get("deploy_url")
+        if prod_url and prod_url != "FILL_IN":
+            await _send_deploy_screenshot(job, prod_url, client_chat_id)
 
 
 async def _update_status_md(
