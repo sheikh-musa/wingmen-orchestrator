@@ -929,8 +929,8 @@ async def cmd_screenshots(update: Update, context: ContextTypes.DEFAULT_TYPE):
             screenshot_path = os.path.join(tempfile.gettempdir(), f"ss_{repo_name}_{route.replace('/', '_')}.png")
 
             # Desktop for admin routes, mobile for others
-            is_admin_route = "/admin" in route
-            viewport = "1280,800" if is_admin_route else "375,812"
+            # Default to mobile — most users view on phone
+            viewport = "375,812"
 
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -942,7 +942,7 @@ async def cmd_screenshots(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.wait_for(proc.communicate(), timeout=30)
 
                 if proc.returncode == 0 and os.path.exists(screenshot_path):
-                    caption = f"{'🖥' if is_admin_route else '📱'} {repo_name}{route}\n{url}"
+                    caption = f"\U0001f4f1 {repo_name}{route}\n{url}"
                     from telegram import InputFile
                     with open(screenshot_path, "rb") as f:
                         await update.message.reply_photo(
