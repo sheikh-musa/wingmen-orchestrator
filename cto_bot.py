@@ -2503,10 +2503,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Use Claude CLI with Read tool to describe the image
         describe_prompt = (
-            f"Read the image file at {tmp_path} and describe it concisely. "
-            "If it's a screenshot of a website or app, describe what you see "
-            "including any bugs, layout issues, or content. "
-            "If there's text, read it. Keep it under 200 words."
+            f"Read the image file at {tmp_path} and describe it factually. "
+            "Describe ONLY what you see — layout, elements, text, spacing, colors. "
+            "Do NOT judge whether it looks good or bad. Do NOT say 'no issues' or 'looks fine'. "
+            "Just describe the visual facts. Keep it under 200 words."
         )
 
         description = await _call_claude(describe_prompt, tools="Read", timeout=60)
