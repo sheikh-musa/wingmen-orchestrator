@@ -2403,12 +2403,21 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                     if not repo:
                         reply = "Which project? Use /repo to set it."
                     else:
+                        # Direct fix: use fixer prompt but return full response (not truncated)
+                        try:
+                            config = context_loader.get_repo_config(repo)
+                            repo_path = os.path.expanduser(config.get("local_path", ""))
+                        except ValueError:
+                            repo_path = ""
                         issue = {
                             "description": route.get("detail", user_msg),
                             "file_path": "",
                             "suggested_fix": route.get("detail", ""),
                         }
-                        reply = await _run_fix(repo, issue)
+                        prompt = build_fixer_prompt(issue=issue, repo_path=repo_path)
+                        reply = await _call_claude(prompt, tools="Read,Edit,Write,Bash", timeout=120)
+                        if not reply:
+                            reply = "I couldn't fix that. Could you give me more details?"
 
                 else:
                     # "chat", "build", "data" all go through brainstorm
