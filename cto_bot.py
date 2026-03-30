@@ -2740,8 +2740,19 @@ def main():
         read_timeout=30,
         write_timeout=30,
         connect_timeout=15,
+        pool_timeout=10,
+        connection_pool_size=20,
     )
-    app = Application.builder().token(token).request(request).build()
+    app = (
+        Application.builder()
+        .token(token)
+        .request(request)
+        .get_updates_read_timeout(30)
+        .get_updates_write_timeout(30)
+        .get_updates_connect_timeout(15)
+        .get_updates_pool_timeout(10)
+        .build()
+    )
 
     # Universal commands
     app.add_handler(CommandHandler("start", cmd_start))
@@ -2788,12 +2799,23 @@ def main():
     app.post_init = post_init
 
     async def error_handler(update, context):
-        logger.error(f"Unhandled error: {context.error}")
+        import httpx
+        err = context.error
+        # Suppress noisy network errors — these auto-recover via polling retry
+        if isinstance(err, (httpx.ConnectError, httpx.ReadError, httpx.ReadTimeout, httpx.ConnectTimeout)):
+            logger.warning(f"Network blip: {type(err).__name__}")
+            return
+        logger.error(f"Unhandled error: {err}")
 
     app.add_error_handler(error_handler)
 
     logger.info("Wingmen CTO Bot starting (long-polling mode)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+        poll_interval=1.0,
+        timeout=30,
+    )
 
 
 if __name__ == "__main__":
