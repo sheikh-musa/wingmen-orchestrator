@@ -1760,7 +1760,7 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
             proc = await asyncio.create_subprocess_exec(
                 claude_bin, "-p", full_prompt, "--output-format", "text",
-                "--max-turns", "3",
+                "--tools", "",  # no tools — pure text response
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=safe_env,
