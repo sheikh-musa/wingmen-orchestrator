@@ -27,8 +27,13 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 import context_loader
+from agents.router import build_router_prompt, parse_router_response
+from agents.brainstorm import build_brainstorm_prompt
+from agents.auditor import build_auditor_prompt, parse_auditor_response
+from agents.fixer import build_fixer_prompt
 
 # ── Whisper (local transcription) ────────────────────────────────
 _whisper_model = None
@@ -1648,6 +1653,18 @@ async def _load_repo_context_block(repo_name: str) -> str:
                 block += f"- {m['key']}: {m['value']}\n"
         if ctx["repo_config"].get("deploy_url"):
             block += f"\nLive at: {ctx['repo_config']['deploy_url']}\n"
+        local_path = os.path.expanduser(ctx["repo_config"].get("local_path", ""))
+        if local_path:
+            block += f"\nLocal repo path: {local_path}\n"
+        block += f"""
+--- DEPLOY INSTRUCTIONS ---
+When you make direct file edits (not via [ACTION:BUILD]):
+1. cd to the repo's local path
+2. git add the changed files, git commit with a clear message
+3. git push origin main
+4. Run: cd {local_path} && npx vercel --prod --yes 2>&1 | tail -5
+5. Report the deploy URL back to the user
+"""
     except Exception as e:
         logger.warning(f"Failed to load context for {repo_name}: {e}")
     return block
@@ -2021,8 +2038,140 @@ async def _call_claude(prompt: str, *, tools: str = "", timeout: int = 300) -> s
     return result
 
 
+# ── Agent dispatch functions ─────────────────────────────────────
+
+
+async def _route_message(user_msg: str, user: dict, history: list[dict]) -> dict:
+    """Use Router Agent to classify message intent. Falls back to 'chat' on failure."""
+    prompt = build_router_prompt(user_msg, user["repos"], history)
+    raw = await _call_claude(prompt, timeout=30)
+    if not raw:
+        return {"intent": "chat", "repo": None, "detail": user_msg}
+    result = parse_router_response(raw)
+    logger.info(f"Router: {user['name']} -> {result['intent']} (repo={result.get('repo')})")
+    return result
+
+
+async def _run_brainstorm(update: Update, user: dict, chat_id: str, history: list[dict], user_msg: str) -> str:
+    """Run the Brainstorm Agent and return the reply text."""
+    repo_name = get_active_repo(chat_id, user)
+    repo_context = ""
+    if repo_name:
+        repo_context = await _load_repo_context_block(repo_name)
+
+    prompt = build_brainstorm_prompt(
+        user=user,
+        repo_context=repo_context,
+        history=history,
+        user_msg=user_msg,
+    )
+
+    reply = await _call_claude(prompt, tools="Read,Glob,Grep", timeout=300)
+    if not reply:
+        return "I had trouble processing that. Please try again."
+
+    # Parse action blocks (DATA/CONFIG/BUILD)
+    reply = await _parse_and_execute_actions(reply, user, chat_id)
+    return reply
+
+
+async def _run_audit(update: Update, user: dict, chat_id: str, repo_name: str, detail: str) -> str:
+    """Run Auditor Agent, then auto-chain Fixer for high-confidence issues."""
+    try:
+        config = context_loader.get_repo_config(repo_name)
+    except ValueError:
+        return f"I don't have a repo called '{repo_name}' configured."
+
+    deploy_url = config.get("deploy_url", "")
+    repo_path = os.path.expanduser(config.get("local_path", ""))
+
+    if not deploy_url:
+        return f"No deploy URL configured for {repo_name}. Can't crawl pages without it."
+
+    # Get file tree for route list
+    ctx_block = await _load_repo_context_block(repo_name)
+    file_tree = ""
+    if "--- FILES" in ctx_block:
+        start = ctx_block.index("--- FILES")
+        rest = ctx_block[start + 10:]
+        end_offset = rest.find("\n---")
+        if end_offset >= 0:
+            file_tree = ctx_block[start:start + 10 + end_offset].strip()
+        else:
+            file_tree = ctx_block[start:].strip()
+
+    await update.message.reply_text(f"Auditing {repo_name} — crawling all pages. This will take a few minutes...")
+
+    prompt = build_auditor_prompt(
+        deploy_url=deploy_url,
+        repo_path=repo_path,
+        file_tree=file_tree,
+        detail=detail,
+    )
+
+    raw = await _call_claude(prompt, tools="WebFetch,WebSearch,Read,Glob,Grep,Bash", timeout=600)
+    if not raw:
+        return "Audit failed — Claude didn't return results. Try again?"
+
+    issues, summary = parse_auditor_response(raw)
+
+    # Auto-fix high-confidence issues
+    high_conf = [i for i in issues if i.get("fix_confidence") == "high"]
+    fix_results = []
+
+    if high_conf:
+        await update.message.reply_text(f"Found {len(issues)} issue(s). Auto-fixing {len(high_conf)} obvious one(s)...")
+
+        for issue in high_conf:
+            fix_reply = await _run_fix(repo_name, issue)
+            fix_results.append(f"- {issue['description']}: {fix_reply}")
+
+        # Batch push after all fixes
+        if fix_results:
+            push_result = await _call_claude(
+                f"Run these commands:\ncd {repo_path} && git push origin main 2>&1 | tail -3",
+                tools="Bash",
+                timeout=60,
+            )
+            logger.info(f"Batch push for {repo_name}: {push_result[:100]}")
+
+    # Compose final message
+    needs_decision = [i for i in issues if i.get("fix_confidence") != "high"]
+    parts = [summary]
+
+    if fix_results:
+        parts.append("\n**Auto-fixed:**")
+        parts.extend(fix_results)
+
+    if needs_decision:
+        parts.append("\n**Needs your decision:**")
+        for i in needs_decision:
+            parts.append(f"- [{i.get('severity', '?')}] {i['description']} ({i.get('suggested_fix', 'no suggestion')})")
+
+    return "\n".join(parts)
+
+
+async def _run_fix(repo_name: str, issue: dict) -> str:
+    """Run Fixer Agent for a single issue. Returns a one-line result."""
+    try:
+        config = context_loader.get_repo_config(repo_name)
+    except ValueError:
+        return "SKIP: repo not found"
+
+    repo_path = os.path.expanduser(config.get("local_path", ""))
+
+    prompt = build_fixer_prompt(issue=issue, repo_path=repo_path)
+    result = await _call_claude(prompt, tools="Read,Edit,Write,Bash", timeout=120)
+
+    if not result:
+        return "SKIP: fixer returned no output"
+    if result.strip().startswith("SKIP:"):
+        return result.strip()
+    return result.split("\n")[0][:200]  # First line, capped
+
+
 async def _process_message(update: Update, user: dict, chat_id: str, user_msg: str):
-    """Core chat logic — shared by text, voice, and photo handlers."""
+    """Core chat logic — routes to specialized agents via Router."""
 
     if len(user_msg) > MAX_MSG_LENGTH:
         await update.message.reply_text(f"Message too long (max {MAX_MSG_LENGTH} chars). Please shorten it.")
@@ -2055,8 +2204,6 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
     # Load persisted history
     history = await get_history(chat_id)
     history.append({"role": "user", "content": user_msg})
-
-    # Trim to last 20 messages
     if len(history) > 20:
         history = history[-20:]
 
@@ -2066,63 +2213,69 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
     async with _chat_semaphore:
         start = time.monotonic()
         try:
-            # Show typing indicator
             await update.message.chat.send_action("typing")
 
-            system_prompt = await _build_system_prompt(user, chat_id)
+            # Step 1: Route the message
+            route = await _route_message(user_msg, user, history)
+            intent = route["intent"]
 
-            # Build conversation as a single prompt for Claude CLI
-            # Cap total prompt size to ~8KB to avoid timeouts
-            conv_parts = [f"SYSTEM:\n{system_prompt}\n"]
-            # Only use last 10 messages (not 20) and cap each
-            recent = history[-10:]
-            for msg in recent:
-                role_label = "USER" if msg["role"] == "user" else "ASSISTANT"
-                # Cap assistant messages (can be verbose) but keep user messages full
-                content = msg["content"] if msg["role"] == "user" else msg["content"][:500]
-                conv_parts.append(f"{role_label}:\n{content}\n")
-            full_prompt = "\n---\n".join(conv_parts)
-            full_prompt += "\n---\nRespond as ASSISTANT. Keep it concise (Telegram message, max 3 paragraphs)."
+            # Override repo if router detected one
+            if route.get("repo") and route["repo"] in user["repos"]:
+                _active_repo[chat_id] = route["repo"]
 
-            # Use Claude CLI (Max subscription — no API cost)
-            claude_bin = os.path.expanduser("~/.local/bin/claude")
-            safe_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "SHELL", "LANG"}}
-            safe_env["HOME"] = os.path.expanduser("~")
-            safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+            # Step 2: Dispatch to specialist agent with typing indicator
+            async def _keep_typing():
+                notified = False
+                try:
+                    elapsed = 0
+                    while True:
+                        await asyncio.sleep(8)
+                        elapsed += 8
+                        await update.message.chat.send_action("typing")
+                        if not notified and elapsed >= 30:
+                            notified = True
+                            try:
+                                await update.message.reply_text("Working on it — using tools to check things. Hang tight...")
+                            except Exception:
+                                pass
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
 
-            proc = await asyncio.create_subprocess_exec(
-                claude_bin, "-p", full_prompt, "--output-format", "text",
-                "--tools", "",  # no tools — pure text response
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=safe_env,
-            )
+            typing_task = asyncio.create_task(_keep_typing())
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                logger.error(f"Claude CLI timed out for {user['name']}")
-                await update.message.reply_text("That took too long. Could you try a shorter message?")
-                await _mark_processed(chat_id, update.message.message_id)
-                return
+                if intent == "audit":
+                    repo = get_active_repo(chat_id, user) or route.get("repo")
+                    if not repo:
+                        reply = "Which project should I audit? Use /repo to set it."
+                    else:
+                        reply = await _run_audit(update, user, chat_id, repo, route.get("detail", user_msg))
 
-            reply = stdout.decode(errors="replace").strip()
+                elif intent == "fix":
+                    repo = get_active_repo(chat_id, user) or route.get("repo")
+                    if not repo:
+                        reply = "Which project? Use /repo to set it."
+                    else:
+                        issue = {
+                            "description": route.get("detail", user_msg),
+                            "file_path": "",
+                            "suggested_fix": route.get("detail", ""),
+                        }
+                        reply = await _run_fix(repo, issue)
+
+                else:
+                    # "chat", "build", "data" all go through brainstorm
+                    reply = await _run_brainstorm(update, user, chat_id, history, user_msg)
+            finally:
+                typing_task.cancel()
+
             duration = time.monotonic() - start
-
-            if not reply:
-                err = stderr.decode(errors="replace")
-                logger.error(f"Claude CLI returned empty: {err}")
-                await update.message.reply_text("I had trouble processing that. Please try again.")
-                return
-
-            # Parse action blocks for all users (admin + clients)
-            reply = await _parse_and_execute_actions(reply, user, chat_id)
 
             # Persist assistant reply
             await save_message(chat_id, "assistant", reply)
 
-            # Log usage (no token count from CLI, track duration)
+            # Log usage
             repo = get_active_repo(chat_id, user) or ""
             await log_usage(user.get("client_id"), "chat", repo, 0, duration)
 
@@ -2137,7 +2290,10 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
         except Exception as e:
             logger.error(f"Chat error for {user['name']}: {e}")
-            await update.message.reply_text("Sorry, something went wrong. Please try again.")
+            try:
+                await update.message.reply_text("Sorry, something went wrong. Please try again.")
+            except Exception:
+                logger.error(f"Failed to send error reply to {user['name']}")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2427,7 +2583,12 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
 
-    app = Application.builder().token(token).build()
+    request = HTTPXRequest(
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=15,
+    )
+    app = Application.builder().token(token).request(request).build()
 
     # Universal commands
     app.add_handler(CommandHandler("start", cmd_start))
@@ -2472,6 +2633,11 @@ def main():
             logger.warning(f"Failed to pre-load Whisper model: {e}")
 
     app.post_init = post_init
+
+    async def error_handler(update, context):
+        logger.error(f"Unhandled error: {context.error}")
+
+    app.add_error_handler(error_handler)
 
     logger.info("Wingmen CTO Bot starting (long-polling mode)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
