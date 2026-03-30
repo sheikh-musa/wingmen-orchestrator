@@ -65,6 +65,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("wingmen.cto_bot")
 
+# Silence noisy loggers
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+
 MUSA_TELEGRAM_ID = os.environ.get("MUSA_TELEGRAM_ID", "")
 
 _supabase = None
