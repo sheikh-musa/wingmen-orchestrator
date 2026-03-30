@@ -1,6 +1,6 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30 07:22 SGT
+Last Updated: 2026-03-30 12:42 SGT
 Phase: production
 Build Status: green
 
@@ -110,23 +110,41 @@ Telegram notification to admin + client
 - No riba, zakat-transparent, Islamic economic constraints
 
 ## Completed (Last 5)
-- [green] Job #3: ihsandms — Add Tabung barcode scan simulation + parent WhatsApp notification preview
+- [green] Job #5: ihsandms — Repository: ihsandms
+Task: Convert entire admin portal to fully responsive mobile-first layout with bottom tab bar navigation (matching donor portal pattern)
 
+**ADMIN LAYOUT OVERHAUL — `app/admin/layout.tsx`:**
+- Keep desktop sidebar nav as-is for screens ≥1024px
+- Below 1024px: hide sidebar, show bottom tab bar with icons (same pattern as donor/parent portal)
+- Bottom tabs: Dashboard, Donations, Campaigns, Tabung, Qurban, Donors (use Lucide icons)
+- If >5 tabs, use a "More" tab with overflow menu
+- Add hamburger menu icon top-left on mobile that opens a slide-out drawer with full nav + settings
+- Top bar on mobile: org logo/name centered, hamburger left, notifications right
+
+**EVERY ADMIN PAGE — responsive reflow:**
+
+1. `/admin` (Dashboard) — StatCard grid: 2-col on mobile (currently likely 4-col). Charts stack vertically. Recent activity list full-width.
+
+2. `/admin/donations` — Table converts to card list on mobile. Each donation as a card showing donor name, amount, date, status badge. Filter/search bar stacks vertically. Keep sort options in a dropdown.
+
+3. `/admin/campaigns` — Campaign cards: 1-col on mobile, 2-col tablet, 3-col desktop. Progress bars full-width.
+
+4. `/admin/tabung` — "Scan Barcode" button full-width on mobile. Student lookup results as cards not table rows. Modal remains centered overlay.
+
+5. `/admin/qurban` — Booking list as cards on mobile. "Send Update" actions accessible via swipe or kebab menu. Timeline stepper vertical on all sizes.
+
+6. `/admin/donors` — Donor table → card list on mobile. "Invite Donor" button sticky bottom on mobile. Search/filter stacks.
+
+7. Any other admin pages (settings, reports if they exist) — same card-list pattern for tables, stack forms vertically.
+
+**RESPONSIVE BREAKPOINTS (Tailwind):**
+- Mobile: default (< 768px)
+- Tablet: `md:` (768px–1023px) — 2-col grids, sidebar still hidden, bottom tabs
+- Desktop: `lg:` (≥1024px) — full sidebar, multi-col grids
+
+**DESIGN REQUIREMENTS:**
+- Match existing design system: ` (10m 36s, deploy: https://ihsandms-hwjluqlst-musaaaaaaas-projects.vercel.app)
+- [green] Job #3: ihsandms — Add Tabung barcode scan simulation + parent WhatsApp notification preview
 ADMIN SIDE — /admin/tabung page:
 - Add "Scan Barcode" button that opens a modal with a camera viewfinder mockup
 - Input field for manual barcode/QR entry below the viewfinder
-- On scan/enter: look up student by barcode in mock data, show student name + class + tabung status
-- Two action buttons: "Issue Tabung" (sets status to issued) and "Return Tabung" (sets status to returned)
-- On either action: show toast "WhatsApp notification sent to parent" and log the event
-
-PARENT SIDE — /parent/tabung page:
-- Show tabung card per child with current status (issued/returned/not issued)
-- Activity log below each card showing timestamped events: "Tabung issued to Ahmad (3A) — 15 Mar 2026 9:00am"
-- Each event styled like a WhatsApp notification preview (green bubble, checkmarks)
-- Pre-populate 2-3 events on existing students in mock data
-
-DATA: Add tabung_events: { action: string, timestamp: string, scanned_by: string }[] to student type in lib/types.ts and seed entries in lib/data.ts (6m 50s, deploy: https://ihsandms-b70ge5rqh-musaaaaaaas-projects.vercel.app)
-- [green] Job #4: ihsandms — Add donor invite link generator + public /donate/[token] page
-INVITE GENERATION — /admin/donors page:
-- Add "Generate Invite Link" button in the donor management section
-- On click: generate a unique token (UUID), create invite record in mock data with donor name, email, token, status (pending/accepted), created_at
