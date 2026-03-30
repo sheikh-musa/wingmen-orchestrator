@@ -2477,27 +2477,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tmp_path = tmp.name
             await file.download_to_drive(tmp_path)
 
-        # Use Claude CLI to describe the image
-        claude_bin = os.path.expanduser("~/.local/bin/claude")
-        safe_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "USER", "SHELL", "LANG"}}
-        safe_env["HOME"] = os.path.expanduser("~")
-        safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-
+        # Use Claude CLI with Read tool to describe the image
         describe_prompt = (
-            "Describe this image concisely. If it's a screenshot of a website or app, "
-            "describe what you see including any bugs, layout issues, or content. "
+            f"Read the image file at {tmp_path} and describe it concisely. "
+            "If it's a screenshot of a website or app, describe what you see "
+            "including any bugs, layout issues, or content. "
             "If there's text, read it. Keep it under 200 words."
         )
 
-        proc = await asyncio.create_subprocess_exec(
-            claude_bin, "-p", describe_prompt,
-            "--files", tmp_path,
-            "--output-format", "text",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=safe_env,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-        description = stdout.decode(errors="replace").strip()
+        description = await _call_claude(describe_prompt, tools="Read", timeout=60)
 
         if not description:
             description = "(image received but couldn't be analyzed)"
