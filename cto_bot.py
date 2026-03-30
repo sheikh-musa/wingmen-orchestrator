@@ -875,6 +875,96 @@ async def cmd_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Couldn't generate digest. Try again later.")
 
 
+async def cmd_screenshots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Take screenshots of specific routes and send them.
+
+    Usage: /screenshots [route1 route2 ...]
+    Example: /screenshots /admin/qurban /donor/qurban
+    No args = screenshot all known routes for the active repo.
+    """
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user:
+        return
+
+    repo_name = get_active_repo(chat_id, user)
+    if not repo_name:
+        await update.message.reply_text("Select a repo first with /repo <name>")
+        return
+
+    try:
+        config = context_loader.get_repo_config(repo_name)
+        deploy_url = config.get("deploy_url", "")
+        if not deploy_url or deploy_url == "FILL_IN":
+            await update.message.reply_text(f"No deploy URL for {repo_name}.")
+            return
+
+        # Determine which routes to screenshot
+        routes = list(context.args) if context.args else []
+
+        if not routes:
+            # Auto-discover routes from the repo's file structure
+            repo_path = os.path.expanduser(config["local_path"])
+            app_dir = os.path.join(repo_path, "app")
+            if os.path.exists(app_dir):
+                for root, dirs, files in os.walk(app_dir):
+                    # Skip internal Next.js dirs
+                    dirs[:] = [d for d in dirs if not d.startswith("_") and not d.startswith(".")]
+                    if "page.tsx" in files or "page.jsx" in files or "page.ts" in files:
+                        route = root.replace(app_dir, "").replace("\\", "/")
+                        # Skip dynamic routes with brackets for auto-discovery
+                        if "[" not in route and route:
+                            routes.append(route)
+            if not routes:
+                routes = ["/"]
+
+        await update.message.reply_text(f"\U0001f4f8 Taking {len(routes)} screenshot{'s' if len(routes) > 1 else ''}...")
+
+        import tempfile
+        base_url = deploy_url.rstrip("/")
+
+        for route in routes:
+            route = route if route.startswith("/") else f"/{route}"
+            url = f"{base_url}{route}"
+            screenshot_path = os.path.join(tempfile.gettempdir(), f"ss_{repo_name}_{route.replace('/', '_')}.png")
+
+            # Desktop for admin routes, mobile for others
+            is_admin_route = "/admin" in route
+            viewport = "1280,800" if is_admin_route else "375,812"
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "npx", "playwright", "screenshot", url, screenshot_path,
+                    "--viewport-size", viewport,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=30)
+
+                if proc.returncode == 0 and os.path.exists(screenshot_path):
+                    caption = f"{'🖥' if is_admin_route else '📱'} {repo_name}{route}\n{url}"
+                    from telegram import InputFile
+                    with open(screenshot_path, "rb") as f:
+                        await update.message.reply_photo(
+                            photo=InputFile(f),
+                            caption=caption,
+                        )
+                else:
+                    await update.message.reply_text(f"Failed to screenshot {route}")
+
+            except asyncio.TimeoutError:
+                await update.message.reply_text(f"Timeout on {route}")
+            finally:
+                try:
+                    os.unlink(screenshot_path)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logger.error(f"Screenshots failed: {e}")
+        await update.message.reply_text("Screenshot capture failed. Try again.")
+
+
 async def cmd_repo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_user.id)
     user = await resolve_user(chat_id)
@@ -1320,6 +1410,15 @@ NEVER assume intent from vague notes — always clarify first.
 For data changes, use [ACTION:DATA] with TABLE/OP/DATA/WHERE format.
 
 Always give detailed, actionable descriptions — an AI agent executes them.
+
+AVAILABLE COMMANDS you can suggest to Musa:
+- /screenshots [routes] — take screenshots of specific pages (auto-discovers all routes if no args)
+- /preview — screenshot the main deploy URL
+- /undo — revert last change
+- /digest — weekly summary
+- /mu — plan usage dashboard
+- /jobs — active jobs
+- /status — project status
 
 Projects: {', '.join(user['repos'])}
 """
@@ -1834,6 +1933,7 @@ def main():
     app.add_handler(CommandHandler("undo", cmd_undo))
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("digest", cmd_digest))
+    app.add_handler(CommandHandler("screenshots", cmd_screenshots))
 
     # Free text + voice → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
