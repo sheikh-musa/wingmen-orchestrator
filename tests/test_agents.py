@@ -161,3 +161,55 @@ def test_fixer_prompt_minimal_context():
         repo_path="/tmp/test",
     )
     assert len(prompt) < 1500
+
+
+from agents.auditor import build_auditor_prompt, parse_auditor_response
+
+
+def test_auditor_prompt_includes_deploy_url():
+    prompt = build_auditor_prompt(
+        deploy_url="https://ihsandms.vercel.app",
+        repo_path="/Users/sheikhmusa/wingmen/projects/ihsandms",
+        file_tree="app/page.tsx\napp/admin/page.tsx",
+        detail="check all pages work",
+    )
+    assert "https://ihsandms.vercel.app" in prompt
+    assert "app/page.tsx" in prompt
+    assert "fix_confidence" in prompt
+    assert "CTO" not in prompt
+    assert "ACTION:BUILD" not in prompt
+
+
+def test_parse_auditor_response_valid_json():
+    raw = """Here's my audit:
+```json
+[{"page": "/", "severity": "high", "description": "Duplicate cards", "fix_confidence": "high", "file_path": "app/page.tsx", "suggested_fix": "Remove duplicate"}]
+```
+Summary: 1 issue found."""
+    issues, summary = parse_auditor_response(raw)
+    assert len(issues) == 1
+    assert issues[0]["severity"] == "high"
+    assert issues[0]["fix_confidence"] == "high"
+    assert len(summary) > 0
+
+
+def test_parse_auditor_response_no_json():
+    raw = "I couldn't access the site, it seems to be down."
+    issues, summary = parse_auditor_response(raw)
+    assert issues == []
+    assert len(summary) > 0
+
+
+def test_parse_auditor_response_filters_high_confidence():
+    raw = """```json
+[
+  {"page": "/", "severity": "high", "description": "Dup cards", "fix_confidence": "high", "file_path": "app/page.tsx", "suggested_fix": "Remove dup"},
+  {"page": "/admin", "severity": "low", "description": "SSL issue", "fix_confidence": "low", "file_path": null, "suggested_fix": "Check Cloudflare"}
+]
+```
+Found 2 issues."""
+    issues, summary = parse_auditor_response(raw)
+    high = [i for i in issues if i["fix_confidence"] == "high"]
+    low = [i for i in issues if i["fix_confidence"] == "low"]
+    assert len(high) == 1
+    assert len(low) == 1
