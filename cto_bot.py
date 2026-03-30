@@ -1738,11 +1738,21 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
             proc = await asyncio.create_subprocess_exec(
                 claude_bin, "-p", full_prompt, "--output-format", "text",
+                "--max-turns", "3",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=safe_env,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.error(f"Claude CLI timed out for {user['name']}")
+                await update.message.reply_text("That took too long. Could you try a shorter message?")
+                await _mark_processed(chat_id, update.message.message_id)
+                return
+
             reply = stdout.decode(errors="replace").strip()
             duration = time.monotonic() - start
 
