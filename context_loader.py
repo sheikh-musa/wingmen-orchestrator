@@ -67,31 +67,39 @@ async def load_brainstorm_context(repo_name: str, supabase: SupabaseAsyncClient)
     repo_path = ctx["repo_path"]
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "log", "--oneline", "-10",
+            "git", "log", "--oneline", "-5",
             cwd=repo_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
-        ctx["recent_commits"] = stdout.decode(errors="replace").strip()
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            ctx["recent_commits"] = stdout.decode(errors="replace").strip()
+        except asyncio.TimeoutError:
+            proc.kill()
+            ctx["recent_commits"] = ""
     except Exception:
         ctx["recent_commits"] = ""
 
-    # Get file tree (top level + key dirs)
+    # Get directory structure (fast — dirs only, depth 2)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "find", ".", "-maxdepth", "2", "-type", "f",
-            "-not", "-path", "./.git/*",
-            "-not", "-path", "./node_modules/*",
-            "-not", "-path", "./.next/*",
-            "-not", "-path", "./__pycache__/*",
-            "-not", "-path", "./.venv/*",
+            "find", ".", "-maxdepth", "2", "-type", "d",
+            "-not", "-path", "./.git*",
+            "-not", "-path", "./node_modules*",
+            "-not", "-path", "./.next*",
+            "-not", "-path", "./__pycache__*",
+            "-not", "-path", "./.venv*",
             cwd=repo_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
-        ctx["file_tree"] = stdout.decode(errors="replace").strip()
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            ctx["file_tree"] = stdout.decode(errors="replace").strip()
+        except asyncio.TimeoutError:
+            proc.kill()
+            ctx["file_tree"] = ""
     except Exception:
         ctx["file_tree"] = ""
 

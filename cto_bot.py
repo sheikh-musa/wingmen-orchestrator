@@ -1366,16 +1366,19 @@ async def _load_repo_context_block(repo_name: str) -> str:
         ctx = await context_loader.load_brainstorm_context(repo_name, supabase)
 
         if ctx["claude_md"]:
-            block += f"\n--- PROJECT RULES ({repo_name}) ---\n{ctx['claude_md'][:2000]}\n"
+            block += f"\n--- PROJECT RULES ({repo_name}) ---\n{ctx['claude_md'][:1000]}\n"
         if ctx["status_md"]:
-            block += f"\n--- CURRENT STATUS ({repo_name}) ---\n{ctx['status_md'][:1500]}\n"
+            block += f"\n--- CURRENT STATUS ({repo_name}) ---\n{ctx['status_md'][:800]}\n"
         if ctx["recent_commits"]:
-            block += f"\n--- RECENT CHANGES ({repo_name}) ---\n{ctx['recent_commits']}\n"
+            # Only last 5 commits
+            commits = "\n".join(ctx["recent_commits"].splitlines()[:5])
+            block += f"\n--- RECENT CHANGES ({repo_name}) ---\n{commits}\n"
         if ctx["file_tree"]:
-            block += f"\n--- FILES ({repo_name}) ---\n{ctx['file_tree'][:2000]}\n"
+            # Only top-level dirs + key files (cap at 1KB)
+            block += f"\n--- FILES ({repo_name}) ---\n{ctx['file_tree'][:1000]}\n"
         if ctx["memory"]:
             block += f"\n--- MEMORY ({repo_name}) ---\n"
-            for m in ctx["memory"][:10]:
+            for m in ctx["memory"][:5]:
                 block += f"- {m['key']}: {m['value']}\n"
         if ctx["repo_config"].get("deploy_url"):
             block += f"\nLive at: {ctx['repo_config']['deploy_url']}\n"
@@ -1738,12 +1741,16 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
             system_prompt = await _build_system_prompt(user, chat_id)
 
             # Build conversation as a single prompt for Claude CLI
+            # Cap total prompt size to ~8KB to avoid timeouts
             conv_parts = [f"SYSTEM:\n{system_prompt}\n"]
-            for msg in history:
+            # Only use last 10 messages (not 20) and cap each
+            recent = history[-10:]
+            for msg in recent:
                 role_label = "USER" if msg["role"] == "user" else "ASSISTANT"
-                conv_parts.append(f"{role_label}:\n{msg['content']}\n")
+                content = msg["content"][:500]  # cap each message
+                conv_parts.append(f"{role_label}:\n{content}\n")
             full_prompt = "\n---\n".join(conv_parts)
-            full_prompt += "\n---\nRespond as ASSISTANT. Keep it concise (Telegram message)."
+            full_prompt += "\n---\nRespond as ASSISTANT. Keep it concise (Telegram message, max 3 paragraphs)."
 
             # Use Claude CLI (Max subscription — no API cost)
             claude_bin = os.path.expanduser("~/.local/bin/claude")

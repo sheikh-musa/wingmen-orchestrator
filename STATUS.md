@@ -1,6 +1,6 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30 12:42 SGT
+Last Updated: 2026-03-30 13:12 SGT
 Phase: production
 Build Status: green
 
@@ -110,41 +110,24 @@ Telegram notification to admin + client
 - No riba, zakat-transparent, Islamic economic constraints
 
 ## Completed (Last 5)
+- [green] Job #6: ihsandms — Create unified portal at `/my` merging donor + parent portals:
+
+**Layout — `app/my/layout.tsx`:**
+- Mobile-first bottom tab bar (same pattern as current donor portal)
+- Tabs: Home, Donations, Tabung, Qurban, Profile (Lucide icons)
+- Tabung tab conditionally shown — use a `userRole` constant in `lib/data.ts` (e.g. `{ isDonor: true, isParent: true }`)
+- Desktop: keep bottom tabs (it's a personal portal, not admin)
+- Top bar: "My IhsanDMS" centered, notification bell right
+
+**Pages:**
+- `app/my/dashboard/page.tsx` — overview cards: total donated (S$ amount), active campaigns, children tabung balances (if parent). Quick actions: "Donate Now", "View Receipts"
+- `app/my/donations/page.tsx` — pull from existing `/donor/donations` page, donation history list with receipt download buttons, tax cert section
+- `app/my/tabung/page.tsx` — pull from existing `/parent/tabung` page, children's tabung cards with balances + activity log
+- `app/my/qurban/page.tsx` — pull from existing `/donor/qurban` page, bookings list + WhatsApp milestone timeline
+- `app/my/profile/page.tsx` — personal details, notification preferences, role indicator ("Donor & Parent" or "Donor")
+
+Reuse existing components (StatCard, ProgressBar, QurbanTimeline, StatusBadge). Pull hardcoded data from `lib/data.ts`. Match design system (emerald/gold, Playfair headings, DM Sans body). Mobile-first, responsive. (7m 16s, deploy: https://ihsandms-an75lolgw-musaaaaaaas-projects.vercel.app)
 - [green] Job #5: ihsandms — Repository: ihsandms
 Task: Convert entire admin portal to fully responsive mobile-first layout with bottom tab bar navigation (matching donor portal pattern)
-
 **ADMIN LAYOUT OVERHAUL — `app/admin/layout.tsx`:**
 - Keep desktop sidebar nav as-is for screens ≥1024px
-- Below 1024px: hide sidebar, show bottom tab bar with icons (same pattern as donor/parent portal)
-- Bottom tabs: Dashboard, Donations, Campaigns, Tabung, Qurban, Donors (use Lucide icons)
-- If >5 tabs, use a "More" tab with overflow menu
-- Add hamburger menu icon top-left on mobile that opens a slide-out drawer with full nav + settings
-- Top bar on mobile: org logo/name centered, hamburger left, notifications right
-
-**EVERY ADMIN PAGE — responsive reflow:**
-
-1. `/admin` (Dashboard) — StatCard grid: 2-col on mobile (currently likely 4-col). Charts stack vertically. Recent activity list full-width.
-
-2. `/admin/donations` — Table converts to card list on mobile. Each donation as a card showing donor name, amount, date, status badge. Filter/search bar stacks vertically. Keep sort options in a dropdown.
-
-3. `/admin/campaigns` — Campaign cards: 1-col on mobile, 2-col tablet, 3-col desktop. Progress bars full-width.
-
-4. `/admin/tabung` — "Scan Barcode" button full-width on mobile. Student lookup results as cards not table rows. Modal remains centered overlay.
-
-5. `/admin/qurban` — Booking list as cards on mobile. "Send Update" actions accessible via swipe or kebab menu. Timeline stepper vertical on all sizes.
-
-6. `/admin/donors` — Donor table → card list on mobile. "Invite Donor" button sticky bottom on mobile. Search/filter stacks.
-
-7. Any other admin pages (settings, reports if they exist) — same card-list pattern for tables, stack forms vertically.
-
-**RESPONSIVE BREAKPOINTS (Tailwind):**
-- Mobile: default (< 768px)
-- Tablet: `md:` (768px–1023px) — 2-col grids, sidebar still hidden, bottom tabs
-- Desktop: `lg:` (≥1024px) — full sidebar, multi-col grids
-
-**DESIGN REQUIREMENTS:**
-- Match existing design system: ` (10m 36s, deploy: https://ihsandms-hwjluqlst-musaaaaaaas-projects.vercel.app)
-- [green] Job #3: ihsandms — Add Tabung barcode scan simulation + parent WhatsApp notification preview
-ADMIN SIDE — /admin/tabung page:
-- Add "Scan Barcode" button that opens a modal with a camera viewfinder mockup
-- Input field for manual barcode/QR entry below the viewfinder
