@@ -585,6 +585,7 @@ async def check_usage_limit(user: dict, action: str) -> str | None:
 
 _active_repo: dict[str, str] = {}            # chat_id -> repo_name
 _rate_limits: dict[str, list[float]] = {}    # chat_id -> list of timestamps
+_pending_fixes: dict[str, dict] = {}         # chat_id -> {"issues": [...], "repo": str}
 
 MAX_BUILDS_PER_HOUR = 10
 MAX_MSG_LENGTH = 2000
@@ -2077,7 +2078,7 @@ async def _run_brainstorm(update: Update, user: dict, chat_id: str, history: lis
 
 
 async def _run_audit(update: Update, user: dict, chat_id: str, repo_name: str, detail: str) -> str:
-    """Run Auditor Agent, then auto-chain Fixer for high-confidence issues."""
+    """Run Auditor Agent, then handle results based on persona."""
     try:
         config = context_loader.get_repo_config(repo_name)
     except ValueError:
@@ -2087,7 +2088,10 @@ async def _run_audit(update: Update, user: dict, chat_id: str, repo_name: str, d
     repo_path = os.path.expanduser(config.get("local_path", ""))
 
     if not deploy_url:
-        return f"No deploy URL configured for {repo_name}. Can't crawl pages without it."
+        if is_admin(user):
+            return f"No deploy URL configured for {repo_name}. Can't crawl pages without it."
+        else:
+            return "I can't check your site right now — the link isn't set up yet. I'll flag this for the team."
 
     # Get file tree for route list
     ctx_block = await _load_repo_context_block(repo_name)
@@ -2101,7 +2105,11 @@ async def _run_audit(update: Update, user: dict, chat_id: str, repo_name: str, d
         else:
             file_tree = ctx_block[start:].strip()
 
-    await update.message.reply_text(f"Auditing {repo_name} — crawling all pages. This will take a few minutes...")
+    # Persona-aware progress message
+    if is_admin(user):
+        await update.message.reply_text(f"Auditing {repo_name} — crawling all pages. This will take a few minutes...")
+    else:
+        await update.message.reply_text("Checking your site now, one moment...")
 
     prompt = build_auditor_prompt(
         deploy_url=deploy_url,
@@ -2112,52 +2120,52 @@ async def _run_audit(update: Update, user: dict, chat_id: str, repo_name: str, d
 
     raw = await _call_claude(prompt, tools="WebFetch,WebSearch,Read,Glob,Grep,Bash", timeout=600)
     if not raw:
-        return "Audit failed — Claude didn't return results. Try again?"
+        if is_admin(user):
+            return "Audit failed — Claude didn't return results. Try again?"
+        else:
+            return "I had trouble checking your site. Want me to try again?"
 
     issues, summary = parse_auditor_response(raw)
-
-    # Auto-fix high-confidence issues
     high_conf = [i for i in issues if i.get("fix_confidence") == "high"]
-    fix_results = []
-
-    if high_conf:
-        await update.message.reply_text(f"Found {len(issues)} issue(s). Auto-fixing {len(high_conf)} obvious one(s)...")
-
-        for issue in high_conf:
-            fix_reply = await _run_fix(repo_name, issue)
-            fix_results.append(f"- {issue['description']}: {fix_reply}")
-
-        # Batch push after all fixes
-        if fix_results:
-            push_result = await _call_claude(
-                f"Run these commands:\ncd {repo_path} && git push origin main 2>&1 | tail -3",
-                tools="Bash",
-                timeout=60,
-            )
-            logger.info(f"Batch push for {repo_name}: {push_result[:100]}")
-
-    # Compose readable report
     needs_decision = [i for i in issues if i.get("fix_confidence") != "high"]
 
-    parts = [f"Audit complete for {repo_name} — {len(issues)} issue(s) found.\n"]
+    # ── ADMIN FLOW: auto-fix and raw report ──
+    if is_admin(user):
+        fix_results = []
+        if high_conf:
+            await update.message.reply_text(f"Found {len(issues)} issue(s). Auto-fixing {len(high_conf)} obvious one(s)...")
+            for issue in high_conf:
+                fix_reply = await _run_fix(repo_name, issue)
+                fix_results.append(f"- {issue['description']}: {fix_reply}")
+            if fix_results:
+                push_result = await _call_claude(
+                    f"Run these commands:\ncd {repo_path} && git push origin main 2>&1 | tail -3",
+                    tools="Bash",
+                    timeout=60,
+                )
+                logger.info(f"Batch push for {repo_name}: {push_result[:100]}")
 
-    if fix_results:
-        parts.append(f"Fixed {len(fix_results)} automatically:")
-        for fr in fix_results:
-            parts.append(fr)
+        parts = [f"Audit complete for {repo_name} — {len(issues)} issue(s) found.\n"]
+        if fix_results:
+            parts.append(f"Fixed {len(fix_results)} automatically:")
+            parts.extend(fix_results)
+        if needs_decision:
+            parts.append(f"\n{len(needs_decision)} need your call:")
+            for i in needs_decision:
+                sev = {"high": "!!!", "medium": "!!", "low": "!"}.get(i.get("severity", ""), "?")
+                parts.append(f"{sev} {i['description']}")
+                if i.get("suggested_fix"):
+                    parts.append(f"   Suggestion: {i['suggested_fix']}")
+        if not issues:
+            parts = ["All pages look good — no issues found."]
+        return "\n".join(parts)
 
-    if needs_decision:
-        parts.append(f"\n{len(needs_decision)} need your call:")
-        for i in needs_decision:
-            sev = {"high": "!!!", "medium": "!!", "low": "!"}.get(i.get("severity", ""), "?")
-            parts.append(f"{sev} {i['description']}")
-            if i.get("suggested_fix"):
-                parts.append(f"   Suggestion: {i['suggested_fix']}")
+    # ── CLIENT FLOW: translate and ask permission ──
+    if high_conf:
+        _pending_fixes[chat_id] = {"issues": high_conf, "repo": repo_name}
 
-    if not issues:
-        parts = ["All pages look good — no issues found."]
-
-    return "\n".join(parts)
+    translated = await _translate_audit_for_client(issues, repo_name)
+    return translated
 
 
 async def _run_fix(repo_name: str, issue: dict) -> str:
@@ -2177,6 +2185,45 @@ async def _run_fix(repo_name: str, issue: dict) -> str:
     if result.strip().startswith("SKIP:"):
         return result.strip()
     return result.split("\n")[0][:200]  # First line, capped
+
+
+async def _translate_audit_for_client(issues: list[dict], repo_name: str) -> str:
+    """Translate a technical audit report into plain client-friendly language."""
+    high_conf = [i for i in issues if i.get("fix_confidence") == "high"]
+    needs_decision = [i for i in issues if i.get("fix_confidence") != "high"]
+
+    if not high_conf and not needs_decision:
+        return f"I checked your site ({repo_name}) and everything looks good!"
+
+    prompt = f"""You are a friendly project advisor explaining website issues to a non-technical client.
+Translate these findings into plain, warm language. NO file paths, NO code, NO severity ratings, NO technical jargon.
+
+Group into two sections:
+1. "I can fix these right now" — list the easy fixes in simple terms
+2. "I'd like your input on" — list items that need their decision
+"""
+
+    if high_conf:
+        prompt += f"\nEasy fixes ({len(high_conf)}):\n"
+        for i in high_conf:
+            prompt += f"- {i['description']}\n"
+        prompt += '\nEnd with exactly: "Should I go ahead with the easy fixes?"'
+    else:
+        prompt += "\nNo easy fixes found.\n"
+
+    if needs_decision:
+        prompt += f"\nNeeds input ({len(needs_decision)}):\n"
+        for i in needs_decision:
+            prompt += f"- {i['description']}"
+            if i.get("suggested_fix"):
+                prompt += f" (suggestion: {i['suggested_fix']})"
+            prompt += "\n"
+
+    if not high_conf:
+        prompt += '\nEnd with: "Let me know which of these you\'d like me to look into."'
+
+    result = await _call_claude(prompt, timeout=60)
+    return result or "I found some things on your site — let me put together a summary for you."
 
 
 async def _send_reply(update: Update, text: str, max_len: int = 4000):
