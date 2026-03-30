@@ -8,16 +8,24 @@ import re
 VALID_INTENTS = {"chat", "audit", "fix", "build", "data"}
 
 
-def build_router_prompt(user_msg: str, repos: list[str], history: list[dict]) -> str:
+def build_router_prompt(user_msg: str, repos: list[str], history: list[dict], *, role: str = "admin") -> str:
     """Build the Router Agent prompt with minimal context."""
     repo_list = ", ".join(repos)
 
     context_lines = ""
     recent = history[-3:]
     for msg in recent[:-1]:
-        role = "User" if msg["role"] == "user" else "Assistant"
+        role_label = "User" if msg["role"] == "user" else "Assistant"
         content = msg["content"][:200]
-        context_lines += f"{role}: {content}\n"
+        context_lines += f"{role_label}: {content}\n"
+
+    role_rules = ""
+    if role == "client":
+        role_rules = """
+IMPORTANT — this user is a non-technical client:
+- Never classify as "fix" — use "chat" instead (the advisor will confirm intent first)
+- "audit" is allowed
+"""
 
     return f"""You are a message classifier. Given a user message and recent context, return a JSON object.
 
@@ -27,7 +35,7 @@ Intents:
 - "fix": explicit request to fix a specific known issue (e.g. "fix the duplicate card on homepage")
 - "build": request to create a new feature or page (will go through build pipeline)
 - "data": request to update data (prices, text, toggles) in the database
-
+{role_rules}
 Repos: {repo_list}
 
 Recent conversation:

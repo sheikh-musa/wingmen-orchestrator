@@ -2043,12 +2043,13 @@ async def _call_claude(prompt: str, *, tools: str = "", timeout: int = 300) -> s
 
 async def _route_message(user_msg: str, user: dict, history: list[dict]) -> dict:
     """Use Router Agent to classify message intent. Falls back to 'chat' on failure."""
-    prompt = build_router_prompt(user_msg, user["repos"], history)
+    role = "admin" if is_admin(user) else "client"
+    prompt = build_router_prompt(user_msg, user["repos"], history, role=role)
     raw = await _call_claude(prompt, timeout=30)
     if not raw:
         return {"intent": "chat", "repo": None, "detail": user_msg}
     result = parse_router_response(raw)
-    logger.info(f"Router: {user['name']} -> {result['intent']} (repo={result.get('repo')})")
+    logger.info(f"Router: {user['name']} -> {result['intent']} (repo={result.get('repo')}, role={role})")
     return result
 
 

@@ -213,3 +213,22 @@ Found 2 issues."""
     low = [i for i in issues if i["fix_confidence"] == "low"]
     assert len(high) == 1
     assert len(low) == 1
+
+
+def test_router_client_fix_becomes_chat():
+    """Client 'fix' intent should include rule to reclassify as 'chat'."""
+    prompt = build_router_prompt("fix the homepage", ["dookana"], [], role="client")
+    assert "client" in prompt.lower()
+    assert "chat" in prompt  # rule says to use chat instead of fix
+
+
+def test_router_admin_allows_fix():
+    """Admin should have no restriction on fix intent."""
+    prompt = build_router_prompt("fix the homepage", ["dookana"], [], role="admin")
+    assert "never classify as" not in prompt.lower()
+
+
+def test_router_default_role_is_admin():
+    """Omitting role should behave like admin (backward compatible)."""
+    prompt = build_router_prompt("fix the homepage", ["dookana"], [])
+    assert "never classify as" not in prompt.lower()
