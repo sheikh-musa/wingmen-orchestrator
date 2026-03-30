@@ -2743,14 +2743,17 @@ def main():
         pool_timeout=10,
         connection_pool_size=20,
     )
+    get_updates_request = HTTPXRequest(
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=15,
+        pool_timeout=10,
+    )
     app = (
         Application.builder()
         .token(token)
         .request(request)
-        .get_updates_read_timeout(30)
-        .get_updates_write_timeout(30)
-        .get_updates_connect_timeout(15)
-        .get_updates_pool_timeout(10)
+        .get_updates_request(get_updates_request)
         .build()
     )
 
