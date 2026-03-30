@@ -2421,14 +2421,25 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                         if not reply:
                             reply = "I couldn't fix that. Could you give me more details?"
                         elif "SKIP" not in reply and deploy_url:
-                            # Push changes and take verification screenshot
+                            # Push changes
                             await _call_claude(
                                 f"Run: cd {repo_path} && git push origin main 2>&1 | tail -3",
                                 tools="Bash", timeout=60,
                             )
+                            # Figure out which page to screenshot from the fix context
+                            page_route = await _call_claude(
+                                f"Based on this fix description and user message, what is the page route (path) that was fixed? "
+                                f"Return ONLY the route like /donor/donate/1 or /admin/donors — no explanation.\n\n"
+                                f"User message: {user_msg[:500]}\nFix: {reply[:300]}",
+                                timeout=15,
+                            )
+                            page_route = (page_route or "").strip().split("\n")[0].strip()
+                            if not page_route.startswith("/"):
+                                page_route = "/"
+                            screenshot_url = deploy_url.rstrip("/") + page_route
                             screenshot_path = f"/tmp/fix_verify_{chat_id}.jpg"
                             await _call_claude(
-                                f"Run: npx playwright screenshot {deploy_url} {screenshot_path} --viewport-size 375,812 --wait-for-timeout 5000 2>&1 | tail -3",
+                                f"Run: npx playwright screenshot {screenshot_url} {screenshot_path} --viewport-size 375,812 --wait-for-timeout 5000 2>&1 | tail -3",
                                 tools="Bash", timeout=30,
                             )
                             if os.path.exists(screenshot_path):
@@ -2436,7 +2447,7 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                                     with open(screenshot_path, "rb") as photo:
                                         await update.message.reply_photo(
                                             photo=photo,
-                                            caption=f"Here's how it looks now after the fix.\n\nLive: {deploy_url}"
+                                            caption=f"Here's how it looks now after the fix.\n\nLive: {screenshot_url}"
                                         )
                                 except Exception as e:
                                     logger.warning(f"Failed to send fix screenshot: {e}")
