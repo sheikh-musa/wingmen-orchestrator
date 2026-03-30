@@ -2426,16 +2426,15 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                                 f"Run: cd {repo_path} && git push origin main 2>&1 | tail -3",
                                 tools="Bash", timeout=60,
                             )
-                            # Figure out which page to screenshot from the fix context
-                            page_route = await _call_claude(
-                                f"Based on this fix description and user message, what is the page route (path) that was fixed? "
-                                f"Return ONLY the route like /donor/donate/1 or /admin/donors — no explanation.\n\n"
-                                f"User message: {user_msg[:500]}\nFix: {reply[:300]}",
-                                timeout=15,
-                            )
-                            page_route = (page_route or "").strip().split("\n")[0].strip()
-                            if not page_route.startswith("/"):
-                                page_route = "/"
+                            # Extract page route from fixer's PAGE: tag
+                            page_route = "/"
+                            for line in reply.strip().split("\n"):
+                                line = line.strip()
+                                if line.startswith("PAGE:"):
+                                    page_route = line[5:].strip()
+                                    break
+                            # Clean the PAGE: tag from the user-facing reply
+                            reply = "\n".join(l for l in reply.split("\n") if not l.strip().startswith("PAGE:"))
                             screenshot_url = deploy_url.rstrip("/") + page_route
                             screenshot_path = f"/tmp/fix_verify_{chat_id}.jpg"
                             await _call_claude(

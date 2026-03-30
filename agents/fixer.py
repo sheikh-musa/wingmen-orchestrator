@@ -25,6 +25,7 @@ Steps:
 4. Make the minimal edit to fix what the user described
 5. Run: cd {repo_path} && git add -A && git commit -m "fix: {description[:60]}"
 6. Report what you changed and why it fixes the user's issue
+7. On the LAST line of your response, write ONLY the page route that was fixed, like: PAGE:/donor/donate/1 or PAGE:/admin/donors — this is used for verification screenshots
 
 Rules:
 - Fix what the USER asked for, not what you think is wrong. If they say "header spilling into next section", that means add spacing — not change z-index.
