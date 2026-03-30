@@ -2436,7 +2436,7 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                                     with open(screenshot_path, "rb") as photo:
                                         await update.message.reply_photo(
                                             photo=photo,
-                                            caption="Here's how it looks now after the fix."
+                                            caption=f"Here's how it looks now after the fix.\n\nLive: {deploy_url}"
                                         )
                                 except Exception as e:
                                     logger.warning(f"Failed to send fix screenshot: {e}")
@@ -2514,11 +2514,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not description:
             description = "(image received but couldn't be analyzed)"
 
-        # Combine with caption and process as chat
-        combined = f"[User sent a photo: {description}]"
-        if caption:
-            combined += f"\nUser's message: {caption}"
+        # If no caption, ask what they want fixed instead of guessing
+        if not caption:
+            await save_message(chat_id, "user", f"[User sent a photo: {description}]")
+            reply = f"I can see: {description[:300]}\n\nWhat would you like me to do with this?"
+            await save_message(chat_id, "assistant", reply)
+            await update.message.reply_text(reply)
+            await _mark_processed(chat_id, msg_id)
+            return
 
+        # Caption provided — process with context
+        combined = f"[User sent a photo: {description}]\nUser's message: {caption}"
         await _process_message(update, user, chat_id, combined)
         await _mark_processed(chat_id, msg_id)
 
