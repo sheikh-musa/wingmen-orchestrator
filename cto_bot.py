@@ -2412,7 +2412,7 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                             repo_path = ""
                             deploy_url = ""
                         issue = {
-                            "description": route.get("detail", user_msg),
+                            "description": user_msg,  # full message including photo description + caption
                             "file_path": "",
                             "suggested_fix": route.get("detail", ""),
                         }
