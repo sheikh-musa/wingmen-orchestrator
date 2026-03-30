@@ -1985,6 +1985,42 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _mark_processed(chat_id, msg_id)
 
 
+CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
+CLAUDE_ENV = {
+    "HOME": os.path.expanduser("~"),
+    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    "USER": os.environ.get("USER", ""),
+    "SHELL": os.environ.get("SHELL", ""),
+    "LANG": os.environ.get("LANG", ""),
+}
+
+
+async def _call_claude(prompt: str, *, tools: str = "", timeout: int = 300) -> str:
+    """Call Claude CLI and return the text response. Returns empty string on failure."""
+    args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text"]
+    if tools:
+        args += ["--allowedTools", tools, "--permission-mode", "bypassPermissions"]
+
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=CLAUDE_ENV,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.error(f"Claude CLI timed out after {timeout}s")
+        return ""
+
+    result = stdout.decode(errors="replace").strip()
+    if not result:
+        logger.error(f"Claude CLI empty output: {stderr.decode(errors='replace')[:200]}")
+    return result
+
+
 async def _process_message(update: Update, user: dict, chat_id: str, user_msg: str):
     """Core chat logic — shared by text, voice, and photo handlers."""
 
