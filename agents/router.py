@@ -31,10 +31,12 @@ IMPORTANT — this user is a non-technical client:
 
 Intents:
 - "chat": questions, brainstorming, discussion, status checks, planning, follow-ups to conversation
-- "audit": requests to check, crawl, verify, test, or review live pages or code quality
-- "fix": explicit request to fix a specific known issue (e.g. "fix the duplicate card on homepage")
+- "audit": requests to check ALL pages, crawl the entire site, or do a full review. Only use for broad site-wide requests like "check if all pages work" or "audit the whole site"
+- "fix": request to fix a specific issue — a screenshot showing a problem, a single page bug, a UI element that looks wrong. This is for targeted fixes, not full audits
 - "build": request to create a new feature or page (will go through build pipeline)
 - "data": request to update data (prices, text, toggles) in the database
+
+IMPORTANT: If the message contains a photo/screenshot description showing a specific issue, classify as "fix" NOT "audit". Photos are targeted — the user is showing you exactly what to fix.
 {role_rules}
 Repos: {repo_list}
 
