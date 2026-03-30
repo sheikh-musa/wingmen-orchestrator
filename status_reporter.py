@@ -94,6 +94,10 @@ async def report(
     # Send Telegram notification
     await _send_telegram(job, build_status, status_emoji, deploy_url, elapsed, client_chat_id)
 
+    # Send screenshot of deployed site if successful
+    if result["success"] and deploy_url:
+        await _send_deploy_screenshot(job, deploy_url, client_chat_id)
+
 
 async def _update_status_md(
     repo_path: Path,
@@ -241,6 +245,66 @@ async def _send_telegram(
                 logger.info(f"Telegram notification sent for job_{job['id']} to {chat_id}")
             except Exception as e:
                 logger.error(f"Telegram send to {chat_id} failed: {e}")
+
+
+async def _send_deploy_screenshot(
+    job: dict,
+    deploy_url: str,
+    client_chat_id: str | None = None,
+) -> None:
+    """Take a screenshot of the deployed site and send to admin + client."""
+    import tempfile
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    admin_id = os.environ.get("MUSA_TELEGRAM_ID")
+    if not token:
+        return
+
+    screenshot_path = os.path.join(tempfile.gettempdir(), f"deploy_{job['id']}.png")
+
+    try:
+        # Wait a bit for Vercel to finish deploying
+        await asyncio.sleep(10)
+
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "playwright", "screenshot", deploy_url, screenshot_path,
+            "--viewport-size", "375,812",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=30)
+
+        if proc.returncode != 0 or not Path(screenshot_path).exists():
+            logger.warning(f"Screenshot failed for {deploy_url}")
+            return
+
+        recipients = set()
+        if admin_id:
+            recipients.add(admin_id)
+        if client_chat_id:
+            recipients.add(client_chat_id)
+
+        caption = f"\U0001f4f1 {job['repo_name']} — deployed\n{deploy_url}"
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            for chat_id in recipients:
+                try:
+                    with open(screenshot_path, "rb") as f:
+                        await client.post(
+                            f"{TELEGRAM_API}/bot{token}/sendPhoto",
+                            data={"chat_id": chat_id, "caption": caption},
+                            files={"photo": ("screenshot.png", f, "image/png")},
+                        )
+                except Exception as e:
+                    logger.warning(f"Screenshot send to {chat_id} failed: {e}")
+
+    except Exception as e:
+        logger.warning(f"Deploy screenshot failed: {e}")
+    finally:
+        try:
+            os.unlink(screenshot_path)
+        except Exception:
+            pass
 
 
 def _format_elapsed(seconds: float) -> str:

@@ -1,6 +1,6 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30 05:18 SGT
+Last Updated: 2026-03-30 07:22 SGT
 Phase: production
 Build Status: green
 
@@ -110,20 +110,23 @@ Telegram notification to admin + client
 - No riba, zakat-transparent, Islamic economic constraints
 
 ## Completed (Last 5)
-- [green] Job #4: ihsandms — Add donor invite link generator + public /donate/[token] page
+- [green] Job #3: ihsandms — Add Tabung barcode scan simulation + parent WhatsApp notification preview
 
+ADMIN SIDE — /admin/tabung page:
+- Add "Scan Barcode" button that opens a modal with a camera viewfinder mockup
+- Input field for manual barcode/QR entry below the viewfinder
+- On scan/enter: look up student by barcode in mock data, show student name + class + tabung status
+- Two action buttons: "Issue Tabung" (sets status to issued) and "Return Tabung" (sets status to returned)
+- On either action: show toast "WhatsApp notification sent to parent" and log the event
+
+PARENT SIDE — /parent/tabung page:
+- Show tabung card per child with current status (issued/returned/not issued)
+- Activity log below each card showing timestamped events: "Tabung issued to Ahmad (3A) — 15 Mar 2026 9:00am"
+- Each event styled like a WhatsApp notification preview (green bubble, checkmarks)
+- Pre-populate 2-3 events on existing students in mock data
+
+DATA: Add tabung_events: { action: string, timestamp: string, scanned_by: string }[] to student type in lib/types.ts and seed entries in lib/data.ts (6m 50s, deploy: https://ihsandms-b70ge5rqh-musaaaaaaas-projects.vercel.app)
+- [green] Job #4: ihsandms — Add donor invite link generator + public /donate/[token] page
 INVITE GENERATION — /admin/donors page:
 - Add "Generate Invite Link" button in the donor management section
 - On click: generate a unique token (UUID), create invite record in mock data with donor name, email, token, status (pending/accepted), created_at
-- Show copyable link: ihsandms.vercel.app/donate/[token]
-- List of generated invites with status badges (pending=yellow, accepted=green, expired=gray)
-
-PUBLIC DONATE PAGE — /donate/[token] route:
-- Validate token against mock invite data. Invalid/expired token shows friendly error page
-- Valid token: show org branding at top, welcome message with donor name
-- Donation form: amount input with preset buttons ($10, $25, $50, $100, custom), campaign dropdown, optional message field
-- On submit: show PayNow QR code generated from amount (reuse existing PayNow QR component if available), with org UEN
-- Below QR: "Thank you" message + receipt reference number
-- Mobile-first responsive layout, max 150KB page weight
-
-DATA: Add invites array to lib/data.ts with 2-3 seeded entries (one pending, one accepted). Add Invite type to lib/types.ts (5m 21s, deploy: https://ihsandms-izse9h9bj-musaaaaaaas-projects.vercel.app)
