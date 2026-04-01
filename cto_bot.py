@@ -2817,15 +2817,57 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
 
-    # Recover any messages lost during previous crash and pre-load Whisper
+    # Recover messages, pre-load Whisper, and start nervous system
     async def post_init(application):
         await _recover_unprocessed(application)
-        # Pre-load Whisper model in a background thread to avoid blocking first voice message
         try:
             await asyncio.to_thread(_get_whisper)
             logger.info("Whisper model pre-loaded")
         except Exception as e:
             logger.warning(f"Failed to pre-load Whisper model: {e}")
+
+        # Start nervous system scheduler
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from nervous_system.brain_sync import brain_sync
+            from nervous_system.morning_brief import morning_brief
+            from nervous_system.weekly_digest import weekly_digest
+            from nervous_system.memory_sync import memory_sync
+            from nervous_system.session_compress import session_compress
+
+            supabase_client = await get_supabase()
+            admin_chat_id = os.environ.get("MUSA_TELEGRAM_ID", "286619815")
+
+            scheduler = AsyncIOScheduler(timezone="Asia/Singapore")
+
+            scheduler.add_job(
+                brain_sync, "interval", hours=4, args=[supabase_client],
+                id="brain_sync", replace_existing=True,
+            )
+            scheduler.add_job(
+                morning_brief, "cron", hour=6, args=[supabase_client, application.bot, admin_chat_id],
+                id="morning_brief", replace_existing=True,
+            )
+            scheduler.add_job(
+                weekly_digest, "cron", day_of_week="sun", hour=21, args=[supabase_client, application.bot, admin_chat_id],
+                id="weekly_digest", replace_existing=True,
+            )
+            scheduler.add_job(
+                memory_sync, "cron", hour=0, args=[supabase_client],
+                id="memory_sync", replace_existing=True,
+            )
+            scheduler.add_job(
+                session_compress, "cron", hour=2, args=[supabase_client],
+                id="session_compress", replace_existing=True,
+            )
+
+            scheduler.start()
+            logger.info("Nervous system scheduler started — 5 tasks registered")
+
+            # Run brain_sync immediately on startup
+            asyncio.create_task(brain_sync(supabase_client))
+        except Exception as e:
+            logger.error(f"Failed to start nervous system scheduler: {e}")
 
     app.post_init = post_init
 

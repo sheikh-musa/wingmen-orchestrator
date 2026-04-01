@@ -1,6 +1,6 @@
 # Wingmen Orchestrator STATUS
 
-Last Updated: 2026-03-30 14:05 SGT
+Last Updated: 2026-03-30 15:03 SGT
 Phase: production
 Build Status: green
 
@@ -110,37 +110,32 @@ Telegram notification to admin + client
 - No riba, zakat-transparent, Islamic economic constraints
 
 ## Completed (Last 5)
-- [green] Job #8: ihsandms — Repository: ihsandms
+- [green] Job #9: ihsandms — **Repository: ihsandms**
 
+**1. New file — `lib/gamification.ts`:**
+- Define donor tiers: Bronze (< $100), Silver ($100-499), Gold ($500-1999), Platinum ($2000+)
+- Export `getDonorTier(totalDonations: number)` returning `{ tier, icon, color, nextTier, amountToNext }`
+- Tier colors: Bronze `#CD7F32`, Silver `#C0C0C0`, Gold `#C9963A` (existing accent), Platinum `#8B5CF6`
+- Use Lucide icons: `Medal`, `Award`, `Crown`, `Gem`
+
+**2. Update — `app/my/dashboard/page.tsx`:**
+- Import `getDonorTier` and compute tier from hardcoded donor total ($1,250 = Gold)
+- Add tier badge card at top: large icon + "Gold Donor" label + progress bar to next tier
+- Add "Top Donors" leaderboard section below existing content
+- Leaderboard: hardcoded top 8 donors with name, tier badge, total amount
+- Current user highlighted with accent background
+- Responsive — stack on mobile, side-by-side on desktop
+
+**3. Update — `app/my/donations/page.tsx`:**
+- Show small tier badge next to donor name/greeting if one exists
+
+**Acceptance criteria:**
+- `/my/dashboard` shows Gold tier badge with progress bar (75% to Platinum)
+- Leaderboard displays 8 donors sorted by total, each with correct tier badge
+- Current user (Ahmad Ibrahim, $1,250) highlighted in leaderboard
+- Mobile responsive — no horizontal scroll
+- All existing dashboard content preserved (3m 50s, deploy: https://ihsandms-6j2d04o11-musaaaaaaas-projects.vercel.app)
+- [green] Job #8: ihsandms — Repository: ihsandms
 **New file — `app/invite/[token]/page.tsx`:**
 - Public page (no auth, no layout nesting under /my or /admin)
 - Token param from URL (hardcoded token validation — accept any token for demo)
-- Clean branded form: mosque logo/name at top, "You've been invited to join our donor community" heading
-- Fields: Full Name, Phone (+65 prefix), Email, optional Message
-- On submit: show success state "Welcome! You're now registered as a donor" with CTA button "Make Your First Donation →" linking to `/donate/[token]`
-- Use existing design system (--primary, --accent, Playfair headings, DM Sans body)
-- Mobile-first layout, centered card on desktop
-
-**Modify — `app/admin/donors/page.tsx`:**
-- Add "Invite Donor" button in the header/actions area (next to any existing buttons)
-- Clicking opens a modal/dialog with:
-  - Generated invite URL: `{window.location.origin}/invite/{randomId}` (use crypto.randomUUID or Math.random hex)
-  - Copy button that copies URL to clipboard
-  - WhatsApp share button: opens `https://wa.me/?text=...` with pre-filled invite message
-- Style modal consistent with existing admin UI patterns
-
-**New file — `lib/mock-invites.ts`:**
-- Export a hardcoded array of recent invites (3-4 entries with name, status: pending/accepted, date)
-- Used by admin donors page to show "Recent Invites" section below the donor list
-
-**Acceptance criteria:**
-- `/invite/abc123` renders the onboarding form
-- Form validates required fields (name, phone, email)
-- Submit shows success + "Make First Donation" CTA
-- Admin donors page has "Invite Donor" button that generates + copies a link
-- WhatsApp share opens correctly
-- Fully responsive, matches design system (5m 34s, deploy: https://ihsandms-f6xgz3ek0-musaaaaaaas-projects.vercel.app)
-- [green] Job #7: ihsandms — Redirect old donor/parent routes to unified /my portal:
-- `app/donor/page.tsx` → redirect to `/my/dashboard`
-- `app/donor/donations/page.tsx` → redirect to `/my/donations`
-- `app/donor/qurban/page.tsx` → redirect to `/my/qurban`
