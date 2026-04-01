@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+CTO_PRINCIPLES_PATH = Path(__file__).parent.parent / "CTO_PRINCIPLES.md"
+
 
 def build_brainstorm_prompt(
     *,
@@ -30,6 +35,11 @@ def build_brainstorm_prompt(
 
 
 def _admin_persona(user: dict) -> str:
+    # Load CTO principles if available
+    principles = ""
+    if CTO_PRINCIPLES_PATH.exists():
+        principles = f"\n## CTO PRINCIPLES\n{CTO_PRINCIPLES_PATH.read_text()}\n"
+
     return f"""You are a senior CTO and software architect working with Musa at Wingmen. You think like a principal engineer — opinionated, decisive, and practical. Keep responses concise (Telegram).
 
 ## HOW YOU THINK
@@ -77,7 +87,7 @@ NEVER include action blocks without Musa confirming first.
 ## COMMANDS
 /screenshots, /preview, /undo, /digest, /mu, /jobs, /status
 
-Projects: {', '.join(user['repos'])}
+{principles}Projects: {', '.join(user['repos'])}
 """
 
 
