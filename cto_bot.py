@@ -2841,7 +2841,7 @@ def main():
             scheduler = AsyncIOScheduler(timezone="Asia/Singapore")
 
             scheduler.add_job(
-                brain_sync, "interval", hours=4, args=[supabase_client],
+                brain_sync, "interval", hours=4, args=[supabase_client, application.bot, admin_chat_id],
                 id="brain_sync", replace_existing=True,
             )
             scheduler.add_job(
@@ -2865,7 +2865,7 @@ def main():
             logger.info("Nervous system scheduler started — 5 tasks registered")
 
             # Run brain_sync immediately on startup
-            asyncio.create_task(brain_sync(supabase_client))
+            asyncio.create_task(brain_sync(supabase_client, application.bot, admin_chat_id))
         except Exception as e:
             logger.error(f"Failed to start nervous system scheduler: {e}")
 

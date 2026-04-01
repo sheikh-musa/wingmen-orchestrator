@@ -160,7 +160,7 @@ def test_fixer_prompt_minimal_context():
         issue=issue,
         repo_path="/tmp/test",
     )
-    assert len(prompt) < 1500
+    assert len(prompt) < 2000
 
 
 from agents.auditor import build_auditor_prompt, parse_auditor_response

@@ -75,6 +75,18 @@ async def memory_sync(supabase):
             logger.info(f"memory_sync: {len(changes)} changes detected")
             for c in changes:
                 logger.info(f"  → {c}")
+
+            # Write MEMORY_SYNC_LOG.md for claude.ai context
+            import os
+            from pathlib import Path
+            from datetime import datetime, timezone
+            log_path = Path(os.path.expanduser("~/wingmen/MEMORY_SYNC_LOG.md"))
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            existing = log_path.read_text() if log_path.exists() else "# Memory Sync Log\n\n"
+            entry = f"## {now}\n" + "\n".join(f"- {c}" for c in changes) + "\n\n"
+            # Prepend new entry after header
+            header, _, body = existing.partition("\n\n")
+            log_path.write_text(f"{header}\n\n{entry}{body}")
         else:
             logger.info("memory_sync: no significant changes")
 

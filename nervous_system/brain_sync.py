@@ -259,7 +259,7 @@ async def _check_consecutive_failures(supabase, bot=None, admin_chat_id: str = "
         logger.warning(f"Consecutive failure check failed (non-fatal): {e}")
 
 
-async def brain_sync(supabase):
+async def brain_sync(supabase, bot=None, admin_chat_id: str = ""):
     """Main brain_sync task — called by scheduler."""
     start = time.monotonic()
     logger.info("brain_sync starting...")
@@ -357,7 +357,7 @@ async def brain_sync(supabase):
         logger.info(f"brain_sync complete in {duration}ms — {sync_health}")
 
         # 10. Consecutive failure alerting
-        await _check_consecutive_failures(supabase)
+        await _check_consecutive_failures(supabase, bot, admin_chat_id)
 
     except Exception as e:
         logger.error(f"brain_sync failed: {e}")
