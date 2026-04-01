@@ -98,15 +98,54 @@ async def morning_brief(supabase, bot, admin_chat_id: str):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
 
+        # Freshness check
+        freshness_warning = ""
+        sync_time_str = snapshot.get("created_at") or snapshot.get("snapshot_at")
+        if sync_time_str:
+            try:
+                sync_time = datetime.fromisoformat(sync_time_str.replace("Z", "+00:00"))
+                age_minutes = (now - sync_time).total_seconds() / 60
+                if age_minutes > 300:
+                    freshness_warning = f"\n⚠️ STALE DATA: Snapshot is {age_minutes / 60:.0f}h old — treat as hints only\n"
+                elif age_minutes > 60:
+                    freshness_warning = f"\n⏳ Data as of {int(age_minutes)}min ago\n"
+            except (ValueError, TypeError):
+                freshness_warning = "\n⚠️ Cannot determine snapshot freshness\n"
+
+        # Low confidence repos warning
+        low_conf_repos = [r for r in snapshot.get("repos", []) if r.get("confidence") == "low"]
+        conf_warning = ""
+        if low_conf_repos:
+            names = ", ".join(r.get("name", "?") for r in low_conf_repos)
+            conf_warning = f"\n📉 Low confidence repos: {names} — check contradictions\n"
+
+        # Context notes from last sync
+        context_notes = snapshot.get("context_notes", "")
+        notes_section = ""
+        if context_notes:
+            notes_section = f"\n📋 Changes since last sync:\n{context_notes}\n"
+
+        # CTO questions from repos (surfaced for morning decision-making)
+        cto_questions = []
+        for r in snapshot.get("repos", []):
+            for q in r.get("cto_questions", []):
+                cto_questions.append(f"[{r.get('name', '?')}] {q}")
+        questions_section = ""
+        if cto_questions:
+            questions_section = "\n❓ Questions for CTO:\n" + "\n".join(f"- {q}" for q in cto_questions) + "\n"
+
         # Part 1: Status overview
         status = _build_status_summary(snapshot)
 
-        # Part 2: Strategic analysis
-        analysis = await _get_strategic_analysis(status)
+        # Part 2: Strategic analysis (include CTO questions for context)
+        analysis_input = status
+        if cto_questions:
+            analysis_input += "\n\nOpen questions from repos:\n" + "\n".join(f"- {q}" for q in cto_questions)
+        analysis = await _get_strategic_analysis(analysis_input)
 
         # Compose message
         date_str = now.strftime("%d %b %Y")
-        message = f"\u2600\ufe0f Wingmen Morning Brief — {date_str}\n\n{status}\n\n\U0001f4a1 CTO Recommendations:\n{analysis}"
+        message = f"\u2600\ufe0f Wingmen Morning Brief — {date_str}\n{freshness_warning}{conf_warning}{notes_section}{questions_section}\n{status}\n\n\U0001f4a1 CTO Recommendations:\n{analysis}"
 
         # Send via Telegram
         await bot.send_message(chat_id=admin_chat_id, text=message[:4000])

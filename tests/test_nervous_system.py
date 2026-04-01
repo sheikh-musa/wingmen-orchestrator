@@ -9,7 +9,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from nervous_system.brain_sync import _load_active_repos, _scan_repo, _generate_brain_md
+from nervous_system.brain_sync import _load_active_repos, _scan_repo, _generate_brain_md, RepoState
 
 
 def test_load_active_repos(tmp_path):
@@ -28,14 +28,14 @@ def test_load_active_repos(tmp_path):
 async def test_scan_repo_missing_path():
     repo = {"name": "ghost", "local_path": "/nonexistent/path", "status": "active"}
     state = await _scan_repo(repo)
-    assert state["scan_succeeded"] is False
-    assert state["health"] == "red"
-    assert "not found" in state["scan_error"]
+    assert state.scan_succeeded is False
+    assert state.health == "red"
+    assert "not found" in state.scan_error
 
 
 def test_generate_brain_md():
     repos = [
-        {"name": "test-repo", "health": "green", "commits_24h": 3, "blockers": [], "contradictions": []},
+        RepoState(name="test-repo", health="green", commits_24h=3),
     ]
     md = _generate_brain_md(repos, [], [])
     assert "test-repo" in md
@@ -45,7 +45,7 @@ def test_generate_brain_md():
 
 def test_generate_brain_md_with_blockers():
     repos = [
-        {"name": "blocked-repo", "health": "yellow", "commits_24h": 0, "blockers": ["Waiting on API key"], "contradictions": ["Stale STATUS.md"]},
+        RepoState(name="blocked-repo", health="yellow", commits_24h=0, blockers=["Waiting on API key"], contradictions=["Stale STATUS.md"]),
     ]
     md = _generate_brain_md(repos, [], [])
     assert "Blocked: Waiting on API key" in md
