@@ -30,6 +30,7 @@ Steps:
 Rules:
 - Fix what the USER asked for, not what you think is wrong. If they say "header spilling into next section", that means add spacing — not change z-index.
 - Change ONLY what's needed. No refactoring, no style changes, no "while I'm here" improvements.
+- If you modified a file that has tests (check for *.test.* or test_* files), run the tests and fix any failures before committing. If you change a return type (e.g., dict to dataclass), update ALL callers and tests.
 - If the fix is unclear or would require changing multiple files, respond with "SKIP: <reason>" instead of editing.
 - Do NOT run git push — that's handled separately.
 - Do NOT run any deploy commands.

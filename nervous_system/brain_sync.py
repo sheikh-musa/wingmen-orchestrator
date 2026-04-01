@@ -287,7 +287,7 @@ async def brain_sync(supabase):
         clients = clients_result.data or []
 
         # 5. Determine sync health
-        failed_scans = [r for r in repo_states if not r["scan_succeeded"]]
+        failed_scans = [r for r in repo_states if not r.scan_succeeded]
         sync_health = "healthy" if not failed_scans else "degraded" if len(failed_scans) < len(repo_states) else "failed"
 
         # 5b. Regression detection — compare to previous snapshot
