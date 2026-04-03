@@ -5,20 +5,50 @@
       "github": "https://github.com/sheikh-musa/ihsandms",
       "local_path": "~/wingmen/projects/ihsandms",
       "vercel_project": "ihsandms",
-      "deploy_url": "http://irsyad.ihsandms.gazzabyte.sg",
+      "deploy_url": "https://irsyad.ihsandms.gazzabyte.sg",
       "supabase_project_ref": "FILL_IN",
       "status": "active",
       "priority": 1
+    },
+    {
+      "name": "cosem-tdu",
+      "github": "https://github.com/sheikh-musa/cosem-tdu",
+      "local_path": "~/wingmen/projects/cosem-tdu",
+      "vercel_project": null,
+      "deploy_url": "https://tdu-tools-prod.web.app",
+      "supabase_project_ref": null,
+      "status": "active",
+      "priority": 2
     },
     {
       "name": "dookana",
       "github": "https://github.com/sheikh-musa/dookana",
       "local_path": "~/wingmen/projects/dookana",
       "vercel_project": "dookana",
-      "deploy_url": "FILL_IN",
+      "deploy_url": "https://dookana.com",
       "supabase_project_ref": "FILL_IN",
       "status": "active",
       "priority": 2
+    },
+    {
+      "name": "fastrans",
+      "github": "https://github.com/sheikh-musa/fastrans-backend",
+      "local_path": "~/wingmen/projects/fastrans",
+      "vercel_project": null,
+      "deploy_url": null,
+      "supabase_project_ref": null,
+      "status": "active",
+      "priority": 2
+    },
+    {
+      "name": "ai-scholar",
+      "github": "https://github.com/sheikh-musa/ai-scholar",
+      "local_path": "~/wingmen/projects/ai-scholar",
+      "vercel_project": null,
+      "deploy_url": null,
+      "supabase_project_ref": null,
+      "status": "active",
+      "priority": 3
     },
     {
       "name": "hifz-companion",
@@ -49,16 +79,6 @@
       "supabase_project_ref": "FILL_IN",
       "status": "specced",
       "priority": 5
-    },
-    {
-      "name": "cosem-tdu",
-      "github": "https://github.com/sheikh-musa/cosem-tdu",
-      "local_path": "~/wingmen/projects/cosem-tdu",
-      "vercel_project": null,
-      "deploy_url": "https://tdu-tools-prod.web.app",
-      "supabase_project_ref": null,
-      "status": "active",
-      "priority": 2
     }
   ]
 }
