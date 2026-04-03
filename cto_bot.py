@@ -2507,9 +2507,28 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         file = await context.bot.get_file(photo.file_id)
         import tempfile
+        import shutil
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
             await file.download_to_drive(tmp_path)
+
+        # Save persistent copy to ~/wingmen/photos/
+        photos_dir = os.path.expanduser("~/wingmen/photos")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        user_name = user["name"].replace(" ", "_") if user else "unknown"
+        persistent_path = os.path.join(photos_dir, f"{timestamp}_{user_name}_{msg_id}.jpg")
+        shutil.copy2(tmp_path, persistent_path)
+        logger.info(f"Photo saved to {persistent_path}")
+
+        # Cleanup photos older than 3 months
+        from datetime import timedelta
+        cutoff = datetime.now() - timedelta(days=90)
+        for old_file in Path(photos_dir).glob("*.jpg"):
+            try:
+                if datetime.fromtimestamp(old_file.stat().st_mtime) < cutoff:
+                    old_file.unlink()
+            except Exception:
+                pass
 
         # Use Claude CLI with Read tool to describe the image
         describe_prompt = (
@@ -2526,7 +2545,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # If no caption, ask what they want fixed instead of guessing
         if not caption:
-            await save_message(chat_id, "user", f"[User sent a photo: {description}]")
+            await save_message(chat_id, "user", f"[User sent a photo: {description}]\n[Saved to: {persistent_path}]")
             reply = f"I can see: {description[:300]}\n\nWhat would you like me to do with this?"
             await save_message(chat_id, "assistant", reply)
             await update.message.reply_text(reply)
@@ -2534,7 +2553,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Caption provided — process with context
-        combined = f"[User sent a photo: {description}]\nUser's message: {caption}"
+        combined = f"[User sent a photo: {description}]\n[Saved to: {persistent_path}]\nUser's message: {caption}"
         await _process_message(update, user, chat_id, combined)
         await _mark_processed(chat_id, msg_id)
 
