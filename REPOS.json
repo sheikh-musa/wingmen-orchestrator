@@ -1,9 +1,9 @@
 {
   "repos": [
     {
-      "name": "ihsandms",
-      "github": "https://github.com/sheikh-musa/ihsandms",
-      "local_path": "~/wingmen/projects/ihsandms",
+      "name": "ihsanos",
+      "github": "https://github.com/sheikh-musa/ihsanos",
+      "local_path": "~/wingmen/projects/ihsanos",
       "vercel_project": "ihsandms",
       "deploy_url": "https://irsyad.ihsandms.gazzabyte.sg",
       "supabase_project_ref": "FILL_IN",
@@ -16,6 +16,16 @@
       "local_path": "~/wingmen/projects/cosem-tdu",
       "vercel_project": null,
       "deploy_url": "https://tdu-tools-prod.web.app",
+      "supabase_project_ref": null,
+      "status": "active",
+      "priority": 2
+    },
+    {
+      "name": "cosem-adcda",
+      "github": "https://github.com/sheikh-musa/cosem-adcda",
+      "local_path": "~/wingmen/projects/cosem-adcda",
+      "vercel_project": null,
+      "deploy_url": null,
       "supabase_project_ref": null,
       "status": "active",
       "priority": 2
