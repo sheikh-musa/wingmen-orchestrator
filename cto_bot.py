@@ -2049,15 +2049,22 @@ async def _call_claude_session(prompt: str, *, tools: str = "", timeout: int = 6
 
     now = time.monotonic()
 
-    # Start new session if expired or first call
-    if not _admin_session_id or (now - _admin_session_ts > ADMIN_SESSION_TTL):
+    # Check if session expired
+    new_session = not _admin_session_id or (now - _admin_session_ts > ADMIN_SESSION_TTL)
+
+    if new_session:
         _admin_session_id = str(uuid.uuid4())
         logger.info(f"Starting new admin Claude session: {_admin_session_id}")
 
     _admin_session_ts = now
 
-    args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text",
-            "--resume", _admin_session_id]
+    args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text"]
+    if new_session:
+        # First call: create session with --session-id
+        args += ["--session-id", _admin_session_id]
+    else:
+        # Subsequent calls: resume existing session
+        args += ["--resume", _admin_session_id]
     if tools:
         args += ["--allowedTools", tools, "--permission-mode", "bypassPermissions"]
 
