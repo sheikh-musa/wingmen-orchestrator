@@ -2124,8 +2124,14 @@ async def _run_brainstorm(update: Update, user: dict, chat_id: str, history: lis
     )
 
     # Admin gets persistent session (full context across messages)
-    # Clients get one-shot (no session persistence)
+    # Prepend recent chat history so context survives session compression
     if is_admin(user):
+        recent_context = "\n--- RECENT CONVERSATION (last 6 messages — use this if your session context was compressed) ---\n"
+        for msg in history[-6:]:
+            role_label = "MUSA" if msg["role"] == "user" else "YOU"
+            recent_context += f"{role_label}: {msg['content'][:500]}\n"
+        recent_context += "--- END RECENT CONVERSATION ---\n\n"
+        prompt = recent_context + prompt
         reply = await _call_claude_session(prompt, tools="Read,Write,Edit,Glob,Grep,Bash,WebFetch,WebSearch", timeout=600)
     else:
         reply = await _call_claude(prompt, tools="Read,Glob,Grep", timeout=300)
