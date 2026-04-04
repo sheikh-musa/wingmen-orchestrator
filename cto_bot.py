@@ -2518,15 +2518,27 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
             duration = time.monotonic() - start
 
-            # Persist assistant reply
+            # Summarize long admin replies for Telegram
+            if is_admin(user) and len(reply) > 4000:
+                summary = await _call_claude(
+                    f"Summarize this Claude Code output for a Telegram message. "
+                    f"Keep the key information: what was done, what changed, any errors. "
+                    f"Max 3000 chars. Use bullet points.\n\n{reply[:8000]}",
+                    timeout=30,
+                )
+                telegram_reply = summary if summary else reply
+            else:
+                telegram_reply = reply
+
+            # Persist full reply (not summarized)
             await save_message(chat_id, "assistant", reply)
 
             # Log usage
             repo = get_active_repo(chat_id, user) or ""
             await log_usage(user.get("client_id"), "chat", repo, 0, duration)
 
-            # Split long replies into multiple Telegram messages
-            await _send_reply(update, reply)
+            # Send to Telegram (summarized for admin, full for clients)
+            await _send_reply(update, telegram_reply)
 
         except asyncio.TimeoutError:
             logger.error(f"Chat timeout for {user['name']}")
