@@ -586,6 +586,9 @@ async def check_usage_limit(user: dict, action: str) -> str | None:
 _active_repo: dict[str, str] = {}            # chat_id -> repo_name
 _rate_limits: dict[str, list[float]] = {}    # chat_id -> list of timestamps
 _pending_fixes: dict[str, dict] = {}         # chat_id -> {"issues": [...], "repo": str}
+_admin_session_id: str | None = None         # persistent Claude session for admin
+_admin_session_ts: float = 0                 # last activity timestamp
+ADMIN_SESSION_TTL = 3600                     # 1 hour inactivity before new session
 
 MAX_BUILDS_PER_HOUR = 10
 MAX_MSG_LENGTH = 2000
@@ -2014,7 +2017,7 @@ CLAUDE_ENV = {
 
 
 async def _call_claude(prompt: str, *, tools: str = "", timeout: int = 300) -> str:
-    """Call Claude CLI and return the text response. Returns empty string on failure."""
+    """Call Claude CLI (one-shot) and return the text response. Returns empty string on failure."""
     args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text"]
     if tools:
         args += ["--allowedTools", tools, "--permission-mode", "bypassPermissions"]
@@ -2036,6 +2039,51 @@ async def _call_claude(prompt: str, *, tools: str = "", timeout: int = 300) -> s
     result = stdout.decode(errors="replace").strip()
     if not result:
         logger.error(f"Claude CLI empty output: {stderr.decode(errors='replace')[:200]}")
+    return result
+
+
+async def _call_claude_session(prompt: str, *, tools: str = "", timeout: int = 600) -> str:
+    """Call Claude CLI with persistent session (admin only). Resumes existing session for full context."""
+    global _admin_session_id, _admin_session_ts
+    import uuid
+
+    now = time.monotonic()
+
+    # Start new session if expired or first call
+    if not _admin_session_id or (now - _admin_session_ts > ADMIN_SESSION_TTL):
+        _admin_session_id = str(uuid.uuid4())
+        logger.info(f"Starting new admin Claude session: {_admin_session_id}")
+
+    _admin_session_ts = now
+
+    args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text",
+            "--resume", _admin_session_id]
+    if tools:
+        args += ["--allowedTools", tools, "--permission-mode", "bypassPermissions"]
+
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=CLAUDE_ENV,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.error(f"Claude session timed out after {timeout}s")
+        # Reset session on timeout
+        _admin_session_id = None
+        return ""
+
+    result = stdout.decode(errors="replace").strip()
+    if not result:
+        err = stderr.decode(errors="replace")[:200]
+        logger.error(f"Claude session empty output: {err}")
+        # If session is broken, reset for next call
+        if "session" in err.lower() or "resume" in err.lower():
+            _admin_session_id = None
     return result
 
 
@@ -2068,7 +2116,13 @@ async def _run_brainstorm(update: Update, user: dict, chat_id: str, history: lis
         user_msg=user_msg,
     )
 
-    reply = await _call_claude(prompt, tools="Read,Glob,Grep", timeout=300)
+    # Admin gets persistent session (full context across messages)
+    # Clients get one-shot (no session persistence)
+    if is_admin(user):
+        reply = await _call_claude_session(prompt, tools="Read,Write,Edit,Glob,Grep,Bash,WebFetch,WebSearch", timeout=600)
+    else:
+        reply = await _call_claude(prompt, tools="Read,Glob,Grep", timeout=300)
+
     if not reply:
         return "I had trouble processing that. Please try again."
 
@@ -2417,7 +2471,10 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                             "suggested_fix": route.get("detail", ""),
                         }
                         prompt = build_fixer_prompt(issue=issue, repo_path=repo_path)
-                        reply = await _call_claude(prompt, tools="Read,Edit,Write,Bash", timeout=120)
+                        if is_admin(user):
+                            reply = await _call_claude_session(prompt, tools="Read,Write,Edit,Glob,Grep,Bash,WebFetch,WebSearch", timeout=300)
+                        else:
+                            reply = await _call_claude(prompt, tools="Read,Edit,Write,Bash", timeout=120)
                         if not reply:
                             reply = "I couldn't fix that. Could you give me more details?"
                         elif "SKIP" not in reply and deploy_url:
