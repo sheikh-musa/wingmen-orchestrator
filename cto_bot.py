@@ -2679,9 +2679,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         file = await context.bot.get_file(doc.file_id)
         import tempfile
+        import shutil
         with tempfile.NamedTemporaryFile(suffix=f".{file_ext}", delete=False) as tmp:
             tmp_path = tmp.name
             await file.download_to_drive(tmp_path)
+
+        # Save persistent copy to ~/wingmen/files/
+        files_dir = os.path.expanduser("~/wingmen/files")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        user_name = user["name"].replace(" ", "_") if user else "unknown"
+        persistent_file = os.path.join(files_dir, f"{timestamp}_{user_name}_{file_name}")
+        shutil.copy2(tmp_path, persistent_file)
+        logger.info(f"File saved to {persistent_file}")
+
+        # Cleanup files older than 3 months
+        cutoff = datetime.now() - timedelta(days=90)
+        for old_file in Path(files_dir).iterdir():
+            try:
+                if datetime.fromtimestamp(old_file.stat().st_mtime) < cutoff:
+                    old_file.unlink()
+            except Exception:
+                pass
 
         content_summary = ""
 
@@ -2729,6 +2747,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 content_summary = f"[User sent file ({file_name})]\n\n{content[:2000]}"
             except Exception:
                 content_summary = f"[User sent file ({file_name}) — binary format, cannot read directly]"
+
+        content_summary += f"\n[Saved to: {persistent_file}]"
 
         if caption:
             content_summary += f"\n\nUser's message: {caption}"
@@ -2851,6 +2871,125 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _mark_processed(chat_id, msg_id)
 
 
+# ── Todo List ────────────────────────────────────────────────────
+
+TODO_FILE = Path(os.path.expanduser("~/wingmen/todos/todo.md"))
+
+
+def _load_todos() -> list[dict]:
+    """Load todos from markdown file."""
+    if not TODO_FILE.exists():
+        return []
+    todos = []
+    for line in TODO_FILE.read_text().strip().split("\n"):
+        line = line.strip()
+        if line.startswith("- [ ] "):
+            todos.append({"text": line[6:], "done": False})
+        elif line.startswith("- [x] "):
+            todos.append({"text": line[6:], "done": True})
+    return todos
+
+
+def _save_todos(todos: list[dict]):
+    """Save todos to markdown file."""
+    lines = ["# Wingmen Todo List\n"]
+    for t in todos:
+        prefix = "- [x]" if t["done"] else "- [ ]"
+        lines.append(f"{prefix} {t['text']}")
+    TODO_FILE.write_text("\n".join(lines) + "\n")
+
+
+async def cmd_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show todo list."""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user or not is_admin(user):
+        return
+
+    todos = _load_todos()
+    if not todos:
+        await update.message.reply_text("No todos. Add one with /todo add <task>")
+        return
+
+    lines = ["Todo List:\n"]
+    for i, t in enumerate(todos):
+        icon = "✅" if t["done"] else "⬜"
+        lines.append(f"{icon} {i+1}. {t['text']}")
+
+    pending = sum(1 for t in todos if not t["done"])
+    done = sum(1 for t in todos if t["done"])
+    lines.append(f"\n{pending} pending, {done} done")
+    lines.append("\nCommands: /todo add <task> | /todo done <#> | /todo remove <#>")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_todo_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add a todo item. Usage: /todoadd <task>"""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user or not is_admin(user):
+        return
+
+    text = " ".join(context.args) if context.args else ""
+    if not text:
+        await update.message.reply_text("Usage: /todoadd Buy groceries")
+        return
+
+    todos = _load_todos()
+    todos.append({"text": text, "done": False})
+    _save_todos(todos)
+    await update.message.reply_text(f"Added: {text}\n\n{sum(1 for t in todos if not t['done'])} pending items")
+
+
+async def cmd_todo_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mark a todo as done. Usage: /tododone <number>"""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user or not is_admin(user):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /tododone 1")
+        return
+
+    try:
+        idx = int(context.args[0]) - 1
+        todos = _load_todos()
+        if 0 <= idx < len(todos):
+            todos[idx]["done"] = True
+            _save_todos(todos)
+            await update.message.reply_text(f"✅ Done: {todos[idx]['text']}")
+        else:
+            await update.message.reply_text("Invalid number. Use /todo to see the list.")
+    except ValueError:
+        await update.message.reply_text("Usage: /tododone 1")
+
+
+async def cmd_todo_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove a todo item. Usage: /todoremove <number>"""
+    chat_id = str(update.effective_user.id)
+    user = await resolve_user(chat_id)
+    if not user or not is_admin(user):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /todoremove 1")
+        return
+
+    try:
+        idx = int(context.args[0]) - 1
+        todos = _load_todos()
+        if 0 <= idx < len(todos):
+            removed = todos.pop(idx)
+            _save_todos(todos)
+            await update.message.reply_text(f"Removed: {removed['text']}")
+        else:
+            await update.message.reply_text("Invalid number. Use /todo to see the list.")
+    except ValueError:
+        await update.message.reply_text("Usage: /todoremove 1")
+
+
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_user.id)
     user = await resolve_user(chat_id)
@@ -2910,6 +3049,10 @@ def main():
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(CommandHandler("screenshots", cmd_screenshots))
+    app.add_handler(CommandHandler("todo", cmd_todo))
+    app.add_handler(CommandHandler("todoadd", cmd_todo_add))
+    app.add_handler(CommandHandler("tododone", cmd_todo_done))
+    app.add_handler(CommandHandler("todoremove", cmd_todo_remove))
 
     # Free text + voice → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
