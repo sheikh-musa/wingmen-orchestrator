@@ -174,6 +174,38 @@ def is_admin(user: dict) -> bool:
     return user["role"] == "admin"
 
 
+# ── Tier-gated capabilities ─────────────────────────────────────
+
+# What each plan tier can do (cumulative — higher tiers include lower)
+TIER_CAPABILITIES = {
+    "free":    {"chat", "todo"},
+    "starter": {"chat", "todo", "audit"},
+    "growth":  {"chat", "todo", "audit", "fix", "data"},
+    "scale":   {"chat", "todo", "audit", "fix", "data", "build"},
+}
+
+TIER_UPGRADE_MSG = {
+    "audit": "Site auditing is available on the Starter plan ($49/mo). Upgrade to have me check your site for issues.",
+    "fix": "Direct fixes are available on the Growth plan ($149/mo). Upgrade to have me fix issues on your site.",
+    "build": "Custom builds are available on the Scale plan ($399/mo). Upgrade to have me build new features for you.",
+    "data": "Data updates are available on the Growth plan ($149/mo). Upgrade to manage your site data directly.",
+}
+
+
+def can_use_capability(user: dict, capability: str) -> bool:
+    """Check if user's plan tier allows this capability."""
+    if is_admin(user):
+        return True
+    plan_id = user.get("client", {}).get("plan", "free") if user.get("client") else "free"
+    allowed = TIER_CAPABILITIES.get(plan_id, TIER_CAPABILITIES["free"])
+    return capability in allowed
+
+
+def get_upgrade_message(capability: str) -> str:
+    """Get the upgrade prompt for a gated capability."""
+    return TIER_UPGRADE_MSG.get(capability, "This feature requires a plan upgrade. Contact us to learn more.")
+
+
 # ── Onboarding ───────────────────────────────────────────────────
 
 _onboarding_state: dict[str, dict] = {}  # chat_id -> {"step": ..., "data": {...}}
@@ -2472,7 +2504,11 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
             typing_task = asyncio.create_task(_keep_typing())
             try:
-                if intent == "audit":
+                # Tier gate — check if user's plan allows this capability
+                if not can_use_capability(user, intent):
+                    reply = get_upgrade_message(intent)
+
+                elif intent == "audit":
                     repo = get_active_repo(chat_id, user) or route.get("repo")
                     if not repo:
                         reply = "Which project should I audit? Use /repo to set it."
