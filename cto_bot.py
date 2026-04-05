@@ -2124,15 +2124,29 @@ async def _run_brainstorm(update: Update, user: dict, chat_id: str, history: lis
     )
 
     # Admin gets persistent session (full context across messages)
-    # Prepend recent chat history so context survives session compression
+    # Prepend recent chat history + BRAIN.md so context survives compression
     if is_admin(user):
+        brain_context = ""
+        brain_path = Path(os.path.expanduser("~/wingmen/BRAIN.md"))
+        if brain_path.exists():
+            brain_content = brain_path.read_text()[:3000]
+            brain_context = f"\n--- OPERATIONAL STATE (from BRAIN.md) ---\n{brain_content}\n--- END OPERATIONAL STATE ---\n\n"
+
+        todo_context = ""
+        if TODO_FILE.exists():
+            todo_content = TODO_FILE.read_text()[:1000]
+            pending = todo_content.count("- [ ]")
+            if pending > 0:
+                todo_context = f"\n--- TODO LIST ({pending} pending) ---\n{todo_content}\n--- END TODO ---\n\n"
+
         recent_context = "\n--- RECENT CONVERSATION (last 6 messages — use this if your session context was compressed) ---\n"
         for msg in history[-6:]:
             role_label = "MUSA" if msg["role"] == "user" else "YOU"
             recent_context += f"{role_label}: {msg['content'][:500]}\n"
         recent_context += "--- END RECENT CONVERSATION ---\n\n"
-        prompt = recent_context + prompt
-        reply = await _call_claude_session(prompt, tools="Read,Write,Edit,Glob,Grep,Bash,WebFetch,WebSearch", timeout=600)
+
+        prompt = brain_context + todo_context + recent_context + prompt
+        reply = await _call_claude_session(prompt, tools="Read,Write,Edit,Glob,Grep,Bash,WebFetch,WebSearch", timeout=1800)
     else:
         reply = await _call_claude(prompt, tools="Read,Glob,Grep", timeout=300)
 
@@ -2185,7 +2199,7 @@ async def _run_audit(update: Update, user: dict, chat_id: str, repo_name: str, d
         detail=detail,
     )
 
-    raw = await _call_claude(prompt, tools="WebFetch,WebSearch,Read,Glob,Grep,Bash", timeout=600)
+    raw = await _call_claude(prompt, tools="WebFetch,WebSearch,Read,Glob,Grep,Bash", timeout=1800)
     if not raw:
         if is_admin(user):
             return "Audit failed — Claude didn't return results. Try again?"
