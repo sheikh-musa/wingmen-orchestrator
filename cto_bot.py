@@ -363,9 +363,27 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
                     f"\U0001f310 {deploy_url}\n\n"
                     "You can now tell me anytime you want to:\n"
                     "\u2022 Update content or products\n"
-                    "\u2022 Change colors or layout\n"
-                    "\u2022 Add new pages or features\n\n"
+                    "\u2022 Change colors or layout\n\n"
                     "Just message me like you would a friend!"
+                )
+
+                # Show plan tiers
+                await update.message.reply_text(
+                    "You're on the Free plan. Here's what you can unlock:\n\n"
+                    "Starter ($49/mo):\n"
+                    "\u2022 Custom domain (yourbrand.com)\n"
+                    "\u2022 Booking & appointment slots\n"
+                    "\u2022 Site health audits\n\n"
+                    "Growth ($149/mo):\n"
+                    "\u2022 Payment integration\n"
+                    "\u2022 Calendar management\n"
+                    "\u2022 Analytics dashboard\n"
+                    "\u2022 Bug fixes & site improvements\n\n"
+                    "Scale ($399/mo):\n"
+                    "\u2022 Custom feature builds\n"
+                    "\u2022 Dedicated CTO support\n"
+                    "\u2022 Multi-site management\n\n"
+                    "Type /upgrade anytime to level up."
                 )
 
                 # Try to send screenshot
@@ -926,16 +944,26 @@ async def cmd_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_plan = user["client"].get("plan", "free")
 
     plans = (
-        "Your plan: " + current_plan.upper() + "\n\n"
+        f"Your plan: {current_plan.upper()}\n\n"
         "\U0001f7e2 FREE — $0/mo\n"
-        "  10 chats/day, 2 builds/month\n\n"
+        "  Chat support (10/day)\n"
+        "  Template website\n\n"
         "\U0001f535 STARTER — $49/mo\n"
-        "  50 chats/day, 10 builds/month\n\n"
+        "  50 chats/day\n"
+        "  Custom domain\n"
+        "  Site audits (I check your site for issues)\n\n"
         "\U0001f7e1 GROWTH — $149/mo\n"
-        "  Unlimited chats, 30 builds/month, priority\n\n"
+        "  Unlimited chats\n"
+        "  Payment integration\n"
+        "  Booking & calendar\n"
+        "  Bug fixes & data updates\n"
+        "  Analytics dashboard\n\n"
         "\U0001f7e0 SCALE — $399/mo\n"
-        "  Unlimited everything, dedicated support\n\n"
-        "To upgrade, contact the team or send /pay <plan>"
+        "  Everything in Growth\n"
+        "  Custom feature builds\n"
+        "  Dedicated CTO support\n"
+        "  Multi-site management\n\n"
+        "Reply with the plan name to upgrade (e.g. 'starter')"
     )
     await update.message.reply_text(plans)
 
