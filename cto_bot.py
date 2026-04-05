@@ -249,9 +249,13 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
             "_ts": time.monotonic(),
         }
         await update.message.reply_text(
-            "Assalamu alaikum! \U0001f44b Welcome to Wingmen.\n\n"
-            "I help people create websites and manage their online presence.\n\n"
-            "What's your name?"
+            "Welcome to ihsanOS! \U0001f44b\n\n"
+            "I'm your dedicated assistant. I can help you:\n\n"
+            "\u2022 Set up a website or online store\n"
+            "\u2022 Manage donations, sales, and receipts\n"
+            "\u2022 Track your team and operations\n"
+            "\u2022 Fix issues and improve your site\n\n"
+            "Let's get you set up. What's your name?"
         )
         return True
 
@@ -272,9 +276,9 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
 
         await update.message.reply_text(
             f"Nice to meet you, {text}! What can I help you with?\n\n"
-            "\U0001f3a8 Create a portfolio or personal site\n"
-            "\U0001f6d2 Set up an online store / ordering page\n"
-            "\U0001f4c4 Build a simple landing page\n"
+            "\U0001f3e2 Manage my organisation (donations, team, operations)\n"
+            "\U0001f6d2 Set up an online store or ordering page\n"
+            "\U0001f4c4 Create a website or landing page\n"
             "\U0001f4ac Or just tell me what you need!"
         )
         return True
