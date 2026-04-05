@@ -315,14 +315,29 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
             )
             await update.message.chat.send_action("typing")
 
-            # Create client
+            # Create org + client (unified onboarding)
             name = state["data"]["name"]
             company = state["data"].get("company", name)
+
+            # 1. Create organization
+            import re as _re
+            slug = _re.sub(r'[^a-z0-9]+', '-', company.lower()).strip('-')[:60]
+            org_result = await supabase.table("organizations").insert({
+                "name": company,
+                "type": "ngo",
+                "slug": slug,
+                "settings": {"currency": "SGD", "timezone": "Asia/Singapore"},
+            }).execute()
+
+            org_id = org_result.data[0]["id"] if org_result.data else None
+
+            # 2. Create client (linked to org)
             client_result = await supabase.table("clients").insert({
                 "name": name,
                 "telegram_chat_id": chat_id,
                 "telegram_username": state["data"].get("telegram_username", ""),
                 "plan": "free",
+                "org_id": org_id,
             }).execute()
 
             if not client_result.data:
@@ -330,6 +345,21 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
                 return True
 
             client_id = client_result.data[0]["id"]
+
+            # 3. Seed default donation categories
+            if org_id:
+                default_categories = [
+                    {"org_id": org_id, "name": "General Donations", "category_type": "sadaqah", "is_zakat": False, "fund_raised": 0, "sort_order": 1},
+                    {"org_id": org_id, "name": "Zakat", "category_type": "zakat", "is_zakat": True, "fund_raised": 0, "sort_order": 2},
+                    {"org_id": org_id, "name": "Building Fund", "category_type": "tabung", "is_zakat": False, "fund_raised": 0, "fund_target": 100000, "sort_order": 3},
+                    {"org_id": org_id, "name": "Welfare", "category_type": "infaq", "is_zakat": False, "fund_raised": 0, "sort_order": 4},
+                    {"org_id": org_id, "name": "Qurban", "category_type": "qurban", "is_zakat": False, "fund_raised": 0, "sort_order": 5},
+                    {"org_id": org_id, "name": "Other", "category_type": "other", "is_zakat": False, "fund_raised": 0, "sort_order": 6},
+                ]
+                try:
+                    await supabase.table("donation_categories").insert(default_categories).execute()
+                except Exception:
+                    pass  # Non-fatal — categories can be added later
 
             # Clear user cache so they're recognized
             _user_cache.pop(chat_id, None)
