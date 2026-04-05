@@ -1,141 +1,45 @@
-# Wingmen Orchestrator STATUS
+# STATUS — Wingmen Orchestrator (CTO Bot)
 
-Last Updated: 2026-03-30 15:03 SGT
-Phase: production
-Build Status: green
+Last Updated: 2026-04-05
+Phase: Production — unified platform bot
+Status: deployed
+Deploy URL: Telegram @ihsanosbot (Mac Mini always-on)
+Health: green
 
-## System Architecture
+## What This Is
+Wingmen Bot is the single entry point for all clients. One bot, tiered access:
+- Free: template site + chat support (10/day)
+- Starter ($49): + custom domain, site audits
+- Growth ($149): + payments, calendar, bug fixes, data updates
+- Scale ($399): + custom builds, dedicated CTO support
+- Admin (Musa): everything, persistent sessions, nervous system
 
-```
-Telegram (Musa + Clients)
-    ↓
-cto_bot.py (long-polling, multi-client, voice support)
-    ↓ 3-tier action system:
-    ├── DATA: instant Supabase ops (prices, inventory)
-    ├── CONFIG: provisioning (new storefront, DNS)
-    └── BUILD: full code pipeline ↓
-                                    ↓
-Supabase jobs table (with client_id)
-    ↓
-wingmen_orch.py (polls every 30s, parallel per-repo, sequential within)
-    ↓
-context_loader.py → CLAUDE.md + STATUS.md + git log + repo_memory
-spec_generator.py → Claude Sonnet 4.6 generates build spec
-ralph_runner.py   → Claude Code CLI (--dangerously-skip-permissions)
-    ↓ on success:
-git commit + push → deploy_manager.py (Vercel API) → status_reporter.py
-    ↓
-Telegram notification to admin + client
-```
-
-## Active Jobs
-- #3 ihsandms [running] — Tabung barcode scan + parent WhatsApp notifications
-- #4 ihsandms [queued after #3] — Donor invite link + public /donate page
+ihsanOS is the platform. Wingmen Bot is the interface. Dookana is a module within ihsanOS.
 
 ## Completed
-- #2 ihsandms — Qurban WhatsApp timeline (8m 18s, deployed)
-- #1 dookana — Order form verification (already done)
+- Agent split: Router → Brainstorm / Auditor / Fixer
+- Tier-gated capabilities (free/starter/growth/scale)
+- Persona-aware routing (admin=technical, client=warm)
+- Persistent Claude sessions for admin (30min timeout)
+- BRAIN.md + todo list injected into every admin prompt
+- Nervous System: brain_sync (4h), morning_brief (6AM), weekly_digest (Sun 9PM), memory_sync (midnight), session_compress (2AM)
+- CTO Principles loaded into brainstorming
+- Conversational todo list (natural language "remind me")
+- Photo/voice analysis, fix verification screenshots
+- File saving to ~/wingmen/files/
+- Dookana Telegram bot deprecated — all merchants go through Wingmen Bot
+- Morning brief + weekly digest message splitting (no truncation)
+- 8 active repos scanned by nervous system
 
-## Core Files (~/wingmen/orchestrator/)
-| File | Purpose |
-|------|---------|
-| wingmen_orch.py | Main async loop — parallel per-repo, CAS job picking, stale recovery |
-| cto_bot.py | Multi-client Telegram bot — admin/client modes, voice, 3-tier actions |
-| context_loader.py | Loads CLAUDE.md, STATUS.md, git log, file tree, repo_memory |
-| spec_generator.py | Claude Sonnet 4.6 → structured build spec from job + context |
-| ralph_runner.py | Shells to `claude` CLI, logs to Supabase, redacts secrets |
-| deploy_manager.py | Vercel API deploy + polling |
-| status_reporter.py | Updates STATUS.md, sends Telegram notifications to admin + client |
+## Blocked
+- TDU POC hasn't messaged bot — need chat_id (Monday meeting)
 
-## Supabase Tables (project: tscuymavysscrvoberrr)
-| Table | Purpose |
-|-------|---------|
-| jobs | Build queue (id, repo_name, description, status, priority, client_id, fail_count) |
-| build_log | Per-job execution log (phase, message, level) |
-| repo_memory | Persistent key-value context per repo |
-| clients | Registered clients (name, telegram_chat_id, plan, active) |
-| client_repos | Links clients to their repos |
-| chat_history | Persisted conversation history per chat_id |
-| usage_log | Token usage, build duration, action counts per client |
-| audit_log | Admin action audit trail |
+## Next Up
+- Stripe integration for self-serve plan upgrades via Telegram
+- Durable reminders (survive restarts)
+- Client onboarding flow polish
 
-## GitHub Repos (all under sheikh-musa)
-| Repo | Priority | Status | Stack |
-|------|----------|--------|-------|
-| ihsandms | 1 | active | Next.js + Supabase (live: ihsandms.vercel.app) |
-| dookana (was bayt) | 2 | active | Next.js + Python backend + Supabase |
-| hifz-companion (hifz) | 3 | active | PWA + Supabase |
-| cosem-video-pipeline | 4 | specced | Python + WaveSpeedAI + ffmpeg |
-| dawah-pipeline | 5 | specced | Python + Claude + MagiHuman |
-
-## Bot Features
-- **Admin**: Technical brainstorm, /build, /addclient, /linkrepo, /clients, /usage, /pause, /cancel, /priority
-- **Client**: Conversational AI assistant — no slash commands needed, confirms before acting
-- **Voice**: Send voice notes, bot transcribes via Claude audio input, processes as chat
-- **3 Action Tiers**: DATA (instant DB ops), CONFIG (provisioning), BUILD (code changes)
-- **Multi-action**: Can queue multiple builds from one confirmation
-- **Context-aware**: Loads real codebase (CLAUDE.md, STATUS.md, git log, file tree) into brainstorm
-- **Persistent**: Chat history survives restarts (Supabase-backed)
-
-## Orchestrator Features
-- Parallel execution across repos (max 3 concurrent, configurable)
-- Sequential within same repo (prevents git conflicts)
-- Atomic job picking with CAS pattern
-- Stale job recovery (>2hr running → auto-requeue)
-- Git pull before build, git push + Vercel deploy after
-- Secret redaction in all logs
-- Whitelisted env vars for Claude CLI subprocess
-- Progress notifications to admin + client at each pipeline stage
-- Usage metering (tokens, duration per client)
-- Audit logging for all admin actions
-
-## Infrastructure
-- Mac Mini (always-on, Singapore)
-- LaunchAgents: dev.wingmen.orchestrator, dev.wingmen.ctobot
-- GitHub: sheikh-musa (all repos)
-- Supabase: tscuymavysscrvoberrr (shared project)
-- Vercel: team_fgnTFpfA3HElR8jK4vSQ5HYo
-- Domain: wingmen.dev (SiteGround NS, Cloudflare migration pending)
-
-## Hard Constraints
-- async Python only, no blocking calls
-- All secrets via .env, never hardcoded
-- RLS enabled on every Supabase table
-- BIGINT GENERATED ALWAYS AS IDENTITY on all PKs
-- RTL-first CSS with logical properties (for Arabic content)
-- 150KB page weight max ("Yemen/Sumatra Rule")
-- Max 3 consecutive failures before pausing + alerting
-- Never delete repos or Supabase tables without admin confirmation
-- Arabic text must be RTL, diacritics-correct
-- No riba, zakat-transparent, Islamic economic constraints
-
-## Completed (Last 5)
-- [green] Job #9: ihsandms — **Repository: ihsandms**
-
-**1. New file — `lib/gamification.ts`:**
-- Define donor tiers: Bronze (< $100), Silver ($100-499), Gold ($500-1999), Platinum ($2000+)
-- Export `getDonorTier(totalDonations: number)` returning `{ tier, icon, color, nextTier, amountToNext }`
-- Tier colors: Bronze `#CD7F32`, Silver `#C0C0C0`, Gold `#C9963A` (existing accent), Platinum `#8B5CF6`
-- Use Lucide icons: `Medal`, `Award`, `Crown`, `Gem`
-
-**2. Update — `app/my/dashboard/page.tsx`:**
-- Import `getDonorTier` and compute tier from hardcoded donor total ($1,250 = Gold)
-- Add tier badge card at top: large icon + "Gold Donor" label + progress bar to next tier
-- Add "Top Donors" leaderboard section below existing content
-- Leaderboard: hardcoded top 8 donors with name, tier badge, total amount
-- Current user highlighted with accent background
-- Responsive — stack on mobile, side-by-side on desktop
-
-**3. Update — `app/my/donations/page.tsx`:**
-- Show small tier badge next to donor name/greeting if one exists
-
-**Acceptance criteria:**
-- `/my/dashboard` shows Gold tier badge with progress bar (75% to Platinum)
-- Leaderboard displays 8 donors sorted by total, each with correct tier badge
-- Current user (Ahmad Ibrahim, $1,250) highlighted in leaderboard
-- Mobile responsive — no horizontal scroll
-- All existing dashboard content preserved (3m 50s, deploy: https://ihsandms-6j2d04o11-musaaaaaaas-projects.vercel.app)
-- [green] Job #8: ihsandms — Repository: ihsandms
-**New file — `app/invite/[token]/page.tsx`:**
-- Public page (no auth, no layout nesting under /my or /admin)
-- Token param from URL (hardcoded token validation — accept any token for demo)
+## Revenue Signals
+- TDU (Growth plan) — first Tier 1 client
+- ihsanOS deployed with BAPA seed data — demo-ready
+- Single bot model simplifies everything — one product to sell
