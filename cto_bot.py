@@ -2120,8 +2120,19 @@ CLAUDE_ENV = {
 }
 
 
-async def _call_claude(prompt: str, *, tools: str = "", timeout: int = 300) -> str:
-    """Call Claude CLI (one-shot) and return the text response. Returns empty string on failure."""
+async def _call_claude(prompt: str, *, tools: str = "", timeout: int = 300, tier: str = "frontier") -> str:
+    """Call AI model and return text response. Returns empty string on failure.
+
+    Tiers:
+      - "frontier": Claude CLI (Max subscription) — complex reasoning, code generation
+      - "local": Future — route to local Ollama/llama.cpp for client data privacy
+      - "fast": Future — route to smaller/faster model for classification, tagging
+    """
+    if tier in ("local", "fast"):
+        # Future: route to local model endpoint
+        # For now, fall back to frontier
+        logger.debug(f"Tier '{tier}' requested but not configured — falling back to frontier")
+
     args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text"]
     if tools:
         args += ["--allowedTools", tools, "--permission-mode", "bypassPermissions"]
