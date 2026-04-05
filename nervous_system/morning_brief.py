@@ -147,8 +147,23 @@ async def morning_brief(supabase, bot, admin_chat_id: str):
         date_str = now.strftime("%d %b %Y")
         message = f"\u2600\ufe0f Wingmen Morning Brief — {date_str}\n{freshness_warning}{conf_warning}{notes_section}{questions_section}\n{status}\n\n\U0001f4a1 CTO Recommendations:\n{analysis}"
 
-        # Send via Telegram
-        await bot.send_message(chat_id=admin_chat_id, text=message[:4000])
+        # Send via Telegram — split long messages
+        if len(message) <= 4000:
+            await bot.send_message(chat_id=admin_chat_id, text=message)
+        else:
+            chunks = []
+            current = ""
+            for line in message.split("\n"):
+                if len(current) + len(line) + 1 > 4000:
+                    if current:
+                        chunks.append(current.strip())
+                    current = line + "\n"
+                else:
+                    current += line + "\n"
+            if current.strip():
+                chunks.append(current.strip())
+            for chunk in chunks:
+                await bot.send_message(chat_id=admin_chat_id, text=chunk)
 
         # Log
         duration = int((time.monotonic() - start) * 1000)

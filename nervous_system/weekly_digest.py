@@ -96,7 +96,22 @@ Keep it under 300 words. Be direct."""
         now = datetime.now(timezone.utc)
         message = f"\U0001f4ca Wingmen Weekly Digest \u2014 Week of {now.strftime('%d %b %Y')}\n\n{digest}"
 
-        await bot.send_message(chat_id=admin_chat_id, text=message[:4000])
+        if len(message) <= 4000:
+            await bot.send_message(chat_id=admin_chat_id, text=message)
+        else:
+            chunks = []
+            current = ""
+            for line in message.split("\n"):
+                if len(current) + len(line) + 1 > 4000:
+                    if current:
+                        chunks.append(current.strip())
+                    current = line + "\n"
+                else:
+                    current += line + "\n"
+            if current.strip():
+                chunks.append(current.strip())
+            for chunk in chunks:
+                await bot.send_message(chat_id=admin_chat_id, text=chunk)
 
         duration = int((time.monotonic() - start) * 1000)
         await supabase.table("brain_sync_log").insert({
