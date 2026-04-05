@@ -326,10 +326,22 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
             # 1. Create organization
             import re as _re
             slug = _re.sub(r'[^a-z0-9]+', '-', company.lower()).strip('-')[:60]
+
+            # Infer org tags from the template/intent
+            template = state["data"].get("template", "storefront")
+            tag_map = {
+                "storefront": ["business"],
+                "portfolio": ["business", "startup"],
+                "landing": ["business"],
+                "organisation": ["community", "nonprofit"],
+            }
+            org_tags = tag_map.get(template, ["business"])
+
             org_result = await supabase.table("organizations").insert({
                 "name": company,
-                "type": "ngo",
+                "type": org_tags[0],  # backward compat
                 "slug": slug,
+                "org_tags": org_tags,
                 "settings": {"currency": "SGD", "timezone": "Asia/Singapore"},
             }).execute()
 
@@ -459,30 +471,28 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
 
 
 def _detect_intent(text: str) -> str | None:
-    """Detect what type of site the user wants from their message."""
+    """Detect what type of site/org the user wants from their message."""
     text = text.lower()
+    org_words = ["organisation", "organization", "org", "manage", "donation", "charity", "mosque", "church", "ngo", "nonprofit", "community", "club", "team", "volunteer"]
     storefront_words = ["store", "shop", "sell", "order", "menu", "food", "bake", "kueh", "business", "product", "inventory", "price"]
     portfolio_words = ["portfolio", "personal", "designer", "photographer", "freelance", "showcase", "work", "cv", "resume"]
     landing_words = ["landing", "launch", "coming soon", "waitlist", "startup"]
 
+    org_score = sum(1 for w in org_words if w in text)
     store_score = sum(1 for w in storefront_words if w in text)
     portfolio_score = sum(1 for w in portfolio_words if w in text)
     landing_score = sum(1 for w in landing_words if w in text)
 
-    if text in ("1", "portfolio"):
-        return "portfolio"
+    if text in ("1", "organisation", "organization", "manage"):
+        return "organisation"
     if text in ("2", "store", "storefront"):
         return "storefront"
-    if text in ("3", "landing"):
+    if text in ("3", "landing", "website"):
         return "landing"
 
-    if store_score > portfolio_score and store_score > landing_score:
-        return "storefront"
-    if portfolio_score > store_score and portfolio_score > landing_score:
-        return "portfolio"
-    if landing_score > 0:
-        return "landing"
-    return None
+    scores = {"organisation": org_score, "storefront": store_score, "portfolio": portfolio_score, "landing": landing_score}
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else None
 
 
 async def _ask_details(update, state, template):
