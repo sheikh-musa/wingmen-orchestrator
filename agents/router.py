@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 
-VALID_INTENTS = {"chat", "audit", "fix", "build", "data"}
+VALID_INTENTS = {"chat", "audit", "fix", "build", "data", "todo"}
 
 
 def build_router_prompt(user_msg: str, repos: list[str], history: list[dict], *, role: str = "admin") -> str:
@@ -35,6 +35,7 @@ Intents:
 - "fix": request to fix a specific issue — a screenshot showing a problem, a single page bug, a UI element that looks wrong. This is for targeted fixes, not full audits
 - "build": request to create a new feature or page (will go through build pipeline)
 - "data": request to update data (prices, text, toggles) in the database
+- "todo": user wants to remember something, add a task, set a reminder, note something down. Keywords: "remind me", "todo", "add to my list", "note this", "don't forget", "remember to", "I need to"
 
 IMPORTANT: If the message contains a photo/screenshot description showing a specific issue, classify as "fix" NOT "audit". Photos are targeted — the user is showing you exactly what to fix.
 {role_rules}

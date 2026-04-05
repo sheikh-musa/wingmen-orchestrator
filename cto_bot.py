@@ -2523,6 +2523,23 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                                 finally:
                                     os.unlink(screenshot_path)
 
+                elif intent == "todo":
+                    # Extract the task from natural language and add to todo list
+                    task_text = await _call_claude(
+                        f"Extract the actionable task from this message. Return ONLY the task as a short, clear sentence. "
+                        f"No explanation, no quotes, just the task.\n\nMessage: {user_msg}",
+                        timeout=15,
+                    )
+                    if task_text:
+                        task_text = task_text.strip().strip('"').strip("'")
+                        todos = _load_todos()
+                        todos.append({"text": task_text, "done": False})
+                        _save_todos(todos)
+                        pending = sum(1 for t in todos if not t["done"])
+                        reply = f"Added to your todo list:\n\n⬜ {task_text}\n\n{pending} pending item{'s' if pending != 1 else ''}. Use /todo to see all."
+                    else:
+                        reply = "I couldn't figure out the task. Could you rephrase?"
+
                 else:
                     # "chat", "build", "data" all go through brainstorm
                     reply = await _run_brainstorm(update, user, chat_id, history, user_msg)
