@@ -2657,19 +2657,51 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                                     os.unlink(screenshot_path)
 
                 elif intent == "todo":
-                    # Extract the task from natural language and add to todo list
-                    task_text = await _call_claude(
-                        f"Extract the actionable task from this message. Return ONLY the task as a short, clear sentence. "
-                        f"No explanation, no quotes, just the task.\n\nMessage: {user_msg}",
+                    # Extract tasks from natural language — handles multiple items
+                    raw = await _call_claude(
+                        f"Extract ALL actionable tasks from this message. "
+                        f"Return a JSON array of strings, one per task. "
+                        f"If there's only one task, still return an array with one item. "
+                        f"Return ONLY the JSON array, no explanation.\n\n"
+                        f"Examples:\n"
+                        f'Input: "remind me to buy milk and call dentist"\n'
+                        f'Output: ["Buy milk", "Call dentist"]\n\n'
+                        f'Input: "1. Check loading speed 2. Fix deployment"\n'
+                        f'Output: ["Check loading speed", "Fix deployment"]\n\n'
+                        f"Message: {user_msg}",
                         timeout=15,
                     )
-                    if task_text:
-                        task_text = task_text.strip().strip('"').strip("'")
+                    tasks = []
+                    if raw:
+                        raw = raw.strip()
+                        try:
+                            parsed = json.loads(raw)
+                            if isinstance(parsed, list):
+                                tasks = [str(t).strip().strip('"').strip("'") for t in parsed if str(t).strip()]
+                        except json.JSONDecodeError:
+                            import re as _re
+                            match = _re.search(r'\[.*?\]', raw, _re.DOTALL)
+                            if match:
+                                try:
+                                    parsed = json.loads(match.group())
+                                    tasks = [str(t).strip().strip('"').strip("'") for t in parsed if str(t).strip()]
+                                except json.JSONDecodeError:
+                                    pass
+                            if not tasks:
+                                # Fallback: treat as single task
+                                tasks = [raw.strip().strip('"').strip("'")]
+
+                    if tasks:
                         todos = _load_todos()
-                        todos.append({"text": task_text, "done": False})
+                        for t in tasks:
+                            todos.append({"text": t, "done": False})
                         _save_todos(todos)
                         pending = sum(1 for t in todos if not t["done"])
-                        reply = f"Added to your todo list:\n\n⬜ {task_text}\n\n{pending} pending item{'s' if pending != 1 else ''}. Use /todo to see all."
+                        if len(tasks) == 1:
+                            reply = f"Added to your todo list:\n\n⬜ {tasks[0]}\n\n{pending} pending item{'s' if pending != 1 else ''}."
+                        else:
+                            items = "\n".join(f"⬜ {t}" for t in tasks)
+                            reply = f"Added {len(tasks)} items to your todo list:\n\n{items}\n\n{pending} pending total."
                     else:
                         reply = "I couldn't figure out the task. Could you rephrase?"
 
