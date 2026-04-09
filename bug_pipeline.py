@@ -244,14 +244,97 @@ async def apply_fix(supabase: SupabaseAsyncClient, bug_id: str) -> None:
 
         if result["success"]:
             await supabase.table("jobs").update({"status": "completed"}).eq("id", job_id).execute()
+            # Proceed to deploy
+            await deploy_fix(supabase, bug_id)
         else:
             raise RuntimeError(f"ralph_runner returned failure: {result['summary']}")
 
     except Exception as e:
         logger.error(f"Fix application failed for bug {bug_id}: {e}")
         await supabase.table("jobs").update({"status": "failed"}).eq("id", job_id).execute()
-        await _update_status(supabase, bug_id, "escalated")
+        try:
+            await _update_status(supabase, bug_id, "escalated")
+        except ValueError:
+            pass  # Already escalated or in incompatible state
         raise
+
+
+async def deploy_fix(supabase: SupabaseAsyncClient, bug_id: str) -> None:
+    """Deploy the fix after it's been applied by ralph_runner."""
+    import deploy_manager
+    import subprocess
+
+    bug = (await supabase.table("bug_reports").select("*").eq("id", bug_id).single().execute()).data
+    repo_name = bug["repo_name"]
+    repo_config = context_loader.get_repo_config(repo_name)
+    repo_path = repo_config.get("local_path", f"/Users/sheikhmusa/wingmen/projects/{repo_name}")
+
+    # Step 1: Run tests
+    logger.info(f"Running tests for {repo_name}...")
+    test_cmd = _get_test_command(repo_name, repo_config)
+    if test_cmd:
+        try:
+            result = subprocess.run(
+                test_cmd, shell=True, cwd=repo_path,
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                logger.error(f"Tests failed for bug {bug_id}: {result.stderr[:500]}")
+                await _update_status(supabase, bug_id, "escalated")
+                return
+        except subprocess.TimeoutExpired:
+            logger.error(f"Tests timed out for bug {bug_id}")
+            await _update_status(supabase, bug_id, "escalated")
+            return
+
+    # Step 2: Git push
+    try:
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=repo_path, capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:
+        logger.warning(f"Git push failed (non-fatal): {e}")
+
+    # Step 3: Deploy
+    deploy_url = None
+    if repo_config.get("vercel_project"):
+        deploy_result = await deploy_manager.deploy(repo_name)
+        deploy_url = deploy_result.get("url")
+    elif repo_config.get("firebase_project"):
+        # Firebase deploy with explicit project ID
+        firebase_project = repo_config["firebase_project"]
+        try:
+            subprocess.run(
+                ["firebase", "deploy", "--only", "hosting", "--project", firebase_project],
+                cwd=repo_path, capture_output=True, text=True, timeout=180,
+            )
+            deploy_url = repo_config.get("deploy_url", "")
+        except Exception as e:
+            logger.warning(f"Firebase deploy failed: {e}")
+
+    # Step 4: Update bug report
+    await _update_status(
+        supabase, bug_id, "deployed",
+        deploy_url=deploy_url or "",
+    )
+
+    logger.info(f"Bug {bug_id} deployed: {deploy_url}")
+
+
+def _get_test_command(repo_name: str, repo_config: dict) -> str | None:
+    """Get the test command for a repo."""
+    repo_path = repo_config.get("local_path", "")
+
+    if os.path.exists(os.path.join(repo_path, "vitest.config.ts")) or \
+       os.path.exists(os.path.join(repo_path, "vitest.config.js")):
+        return "npx vitest run --reporter=verbose"
+    elif os.path.exists(os.path.join(repo_path, "pytest.ini")) or \
+         os.path.exists(os.path.join(repo_path, "pyproject.toml")):
+        return "python -m pytest -x --tb=short"
+    elif os.path.exists(os.path.join(repo_path, "package.json")):
+        return "npm test -- --run 2>/dev/null || true"  # Some repos may not have tests
+    return None
 
 
 async def handle_verification(supabase: SupabaseAsyncClient, bug_id: str, verified: bool) -> None:

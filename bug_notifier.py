@@ -1,8 +1,16 @@
-"""Bug Notifier — sends notifications to reporters and approvers."""
+"""Bug Notifier — sends notifications to reporters and approvers.
+
+Supports two notification channels:
+- Telegram: for reporters who filed via Telegram bot
+- Email (via Resend): for reporters who filed via the web form
+"""
 
 from __future__ import annotations
 
 import logging
+import os
+from typing import Optional
+
 from telegram import Bot
 
 logger = logging.getLogger("wingmen.bug_notifier")
@@ -69,3 +77,58 @@ async def notify_approvers(
         await supabase.table("bug_reports").update({
             "approval_sent_to": sent_to,
         }).eq("id", bug_id).execute()
+
+
+# ── Email Notifications (Resend) ─────────────────────────────────
+
+
+async def notify_reporter_by_email(email: str, subject: str, body_html: str) -> None:
+    """Send email notification to web-based reporter via Resend."""
+    import httpx
+
+    resend_key = os.environ.get("RESEND_API_KEY")
+    if not resend_key:
+        logger.warning("RESEND_API_KEY not set, skipping email notification")
+        return
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {resend_key}"},
+                json={
+                    "from": "ihsanOS <noreply@ihsanos.com>",
+                    "to": email,
+                    "subject": subject,
+                    "html": body_html,
+                },
+            )
+            resp.raise_for_status()
+            logger.info(f"Email sent to {email}: {subject}")
+    except Exception as e:
+        logger.error(f"Email notification failed: {e}")
+
+
+# ── Smart Routing ─────────────────────────────────────────────────
+
+
+async def notify_reporter_smart(
+    bot: Bot,
+    bug: dict,
+    subject: str,
+    telegram_text: str,
+    email_html: str,
+    verification_keyboard=None,
+) -> None:
+    """Route notification to the right channel based on reporter_source."""
+    source = bug.get("reporter_source", "telegram")
+
+    if source == "web" and bug.get("reporter_email"):
+        await notify_reporter_by_email(bug["reporter_email"], subject, email_html)
+    elif bug.get("reporter_telegram_chat_id"):
+        kwargs: dict = {"chat_id": bug["reporter_telegram_chat_id"], "text": telegram_text}
+        if verification_keyboard:
+            kwargs["reply_markup"] = verification_keyboard
+        await bot.send_message(**kwargs)
+    else:
+        logger.warning(f"No notification channel for bug {bug.get('id')} (source={source})")

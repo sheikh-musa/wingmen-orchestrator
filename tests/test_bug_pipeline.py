@@ -3,9 +3,11 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 import json
+import os
+import tempfile
 
 from agents.diagnostic import build_diagnostic_prompt, parse_diagnostic_response
-from bug_pipeline import VALID_TRANSITIONS
+from bug_pipeline import VALID_TRANSITIONS, _get_test_command
 
 
 class TestDiagnosticAgent:
@@ -85,3 +87,39 @@ class TestStatusTransitions:
 
     def test_escalated_is_terminal(self):
         assert VALID_TRANSITIONS["escalated"] == []
+
+
+class TestGetTestCommand:
+
+    def test_vitest_config_ts(self, tmp_path):
+        (tmp_path / "vitest.config.ts").touch()
+        cmd = _get_test_command("test-repo", {"local_path": str(tmp_path)})
+        assert cmd == "npx vitest run --reporter=verbose"
+
+    def test_vitest_config_js(self, tmp_path):
+        (tmp_path / "vitest.config.js").touch()
+        cmd = _get_test_command("test-repo", {"local_path": str(tmp_path)})
+        assert cmd == "npx vitest run --reporter=verbose"
+
+    def test_pytest_ini(self, tmp_path):
+        (tmp_path / "pytest.ini").touch()
+        cmd = _get_test_command("test-repo", {"local_path": str(tmp_path)})
+        assert cmd == "python -m pytest -x --tb=short"
+
+    def test_pyproject_toml(self, tmp_path):
+        (tmp_path / "pyproject.toml").touch()
+        cmd = _get_test_command("test-repo", {"local_path": str(tmp_path)})
+        assert cmd == "python -m pytest -x --tb=short"
+
+    def test_package_json_fallback(self, tmp_path):
+        (tmp_path / "package.json").touch()
+        cmd = _get_test_command("test-repo", {"local_path": str(tmp_path)})
+        assert "npm test" in cmd
+
+    def test_no_test_setup(self, tmp_path):
+        cmd = _get_test_command("test-repo", {"local_path": str(tmp_path)})
+        assert cmd is None
+
+    def test_empty_path(self):
+        cmd = _get_test_command("test-repo", {"local_path": ""})
+        assert cmd is None

@@ -21,6 +21,7 @@ import spec_generator
 import ralph_runner
 import deploy_manager
 import status_reporter
+from nervous_system.bug_escalation import check_stale_bugs
 
 # ── Setup ────────────────────────────────────────────────────────
 load_dotenv(Path(__file__).parent / ".env")
@@ -389,6 +390,7 @@ async def main_loop():
     logger.info("Connected to Supabase")
 
     recovery_counter = 0
+    escalation_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -406,6 +408,19 @@ async def main_loop():
             if recovery_counter >= 10:
                 await recover_stale_jobs(supabase)
                 recovery_counter = 0
+
+            # Check stale bug reports every 60 polls (~30 min)
+            escalation_counter += 1
+            if escalation_counter >= 60:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    if bot_token:
+                        bot = Bot(token=bot_token)
+                        await check_stale_bugs(supabase, bot)
+                except Exception as e:
+                    logger.error(f"Bug escalation check failed: {e}")
+                escalation_counter = 0
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)
