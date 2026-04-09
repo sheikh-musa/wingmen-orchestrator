@@ -16,12 +16,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 from supabase import acreate_client
 
+from aiohttp import web
+
 import context_loader
 import spec_generator
 import ralph_runner
 import deploy_manager
 import status_reporter
 from nervous_system.bug_escalation import check_stale_bugs
+from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from heartbeat import write_orchestrator_heartbeat
 
 # ── Setup ────────────────────────────────────────────────────────
@@ -379,6 +382,36 @@ async def run_job(supabase, job: dict) -> None:
         )
 
 
+async def start_webhook_server(supabase):
+    """Start the webhook server for client bots."""
+    from bot_manager import BotManager
+    from webhook_server import create_webhook_app
+    from message_dispatcher import dispatch
+
+    bot_manager = BotManager()
+    count = await bot_manager.load_all(supabase)
+
+    if count > 0:
+        await bot_manager.register_all_webhooks()
+        logger.info(f"Registered webhooks for {count} client bots")
+
+    # Create the dispatch function with supabase bound
+    async def handle_message(client_bot, update_data):
+        await dispatch(client_bot, update_data, supabase)
+
+    app = await create_webhook_app(bot_manager, handle_message)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.environ.get("WEBHOOK_PORT", "8443"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Webhook server listening on port {port}")
+
+    return bot_manager
+
+
 async def main_loop():
     """Main orchestrator loop — parallel execution across repos, sequential within.
 
@@ -390,9 +423,23 @@ async def main_loop():
     supabase = await get_supabase()
     logger.info("Connected to Supabase")
 
+    # Start webhook server for client bots
+    try:
+        _bot_manager = await start_webhook_server(supabase)
+        logger.info("Webhook server started")
+        # Share bot_manager with cto_bot for onboarding
+        try:
+            from cto_bot import set_bot_manager
+            set_bot_manager(_bot_manager)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Webhook server failed to start: {e}")
+
     recovery_counter = 0
     escalation_counter = 0
     heartbeat_counter = 0
+    cleanup_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -428,6 +475,15 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"Bug escalation check failed: {e}")
                 escalation_counter = 0
+
+            # Clean up expired bot conversations every 60 polls (~30 min)
+            cleanup_counter += 1
+            if cleanup_counter >= 60:
+                try:
+                    await cleanup_expired_conversations(supabase)
+                except Exception as e:
+                    logger.error(f"Conversation cleanup failed: {e}")
+                cleanup_counter = 0
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)

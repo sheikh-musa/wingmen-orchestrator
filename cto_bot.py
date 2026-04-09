@@ -2506,6 +2506,98 @@ async def _send_reply(update: Update, text: str, max_len: int = 4000):
         await update.message.reply_text(chunk)
 
 
+# ── Bot Onboarding (White-Label) ──────────────────────────────────
+
+_bot_manager = None  # Set by orchestrator when webhook server starts
+
+
+def set_bot_manager(manager):
+    """Called from orchestrator to share the BotManager instance."""
+    global _bot_manager
+    _bot_manager = manager
+
+
+async def _handle_bot_onboarding(update: Update, user: dict, chat_id: str, user_msg: str) -> bool:
+    """Handle bot setup requests from clients.
+
+    Detects "set up bot" / "create bot" requests and bot token pastes.
+    Returns True if the message was handled, False otherwise.
+    """
+    from bot_onboarding import validate_token, onboard_client_bot, get_default_commands
+
+    msg = user_msg.strip()
+
+    # If message looks like a bot token (contains colon, 30+ chars, numeric prefix)
+    if ":" in msg and len(msg) > 30 and msg.split(":")[0].isdigit():
+        client = user.get("client")
+        if not client:
+            await update.message.reply_text(
+                "You need to be a registered client to set up a bot. Contact the admin."
+            )
+            return True
+
+        await update.message.chat.send_action("typing")
+
+        bot_info = await validate_token(msg)
+        if bot_info:
+            supabase = await get_supabase()
+
+            if _bot_manager is None:
+                await update.message.reply_text(
+                    "The webhook server is not running yet. Please try again in a moment."
+                )
+                return True
+
+            result = await onboard_client_bot(
+                supabase,
+                bot_manager=_bot_manager,
+                client_id=client["id"],
+                token=msg,
+                display_name=client.get("name", "Bot"),
+                personality=client.get("personality"),
+                capabilities=client.get("capabilities") or ["support", "bug_report"],
+            )
+            if result:
+                await update.message.reply_text(
+                    f"@{bot_info['username']} is live!\n\n"
+                    f"Share it with your team and customers.\n"
+                    f"Type /help in the new bot to see what it can do."
+                )
+            else:
+                await update.message.reply_text(
+                    "Something went wrong setting up the bot. Please try again."
+                )
+        else:
+            await update.message.reply_text(
+                "That token doesn't seem valid. Please copy it from @BotFather and try again."
+            )
+        return True
+
+    # If message is asking to set up a bot
+    bot_setup_phrases = [
+        "set up bot", "setup bot", "create bot", "new bot",
+        "my own bot", "branded bot", "set up a bot", "make a bot",
+    ]
+    if any(phrase in msg.lower() for phrase in bot_setup_phrases):
+        client = user.get("client")
+        if not client:
+            await update.message.reply_text(
+                "You need to be a registered client first. Send /start to get set up."
+            )
+            return True
+
+        await update.message.reply_text(
+            "Let's set up your branded bot! 3 steps:\n\n"
+            "1. Tap here: https://t.me/BotFather?start\n"
+            "2. Send /newbot, pick a name and username\n"
+            "3. Copy the token and paste it back here\n\n"
+            "I'll handle everything else."
+        )
+        return True
+
+    return False  # Not a bot onboarding message
+
+
 async def _process_message(update: Update, user: dict, chat_id: str, user_msg: str):
     """Core chat logic — routes to specialized agents via Router."""
 
@@ -2517,6 +2609,11 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
     limit_msg = await check_usage_limit(user, "chat")
     if limit_msg:
         await update.message.reply_text(limit_msg)
+        return
+
+    # --- Bot onboarding check (before router) ---
+    handled = await _handle_bot_onboarding(update, user, chat_id, user_msg)
+    if handled:
         return
 
     # Auto-detect repo from message or recent history
