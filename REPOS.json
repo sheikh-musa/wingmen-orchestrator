@@ -15,6 +15,7 @@
       "github": "https://github.com/sheikh-musa/cosem-tdu",
       "local_path": "~/wingmen/projects/cosem-tdu",
       "vercel_project": null,
+      "firebase_project": "tdu-tools-prod",
       "deploy_url": "https://tdu-tools-prod.web.app",
       "supabase_project_ref": null,
       "status": "active",
@@ -25,7 +26,8 @@
       "github": "https://github.com/sheikh-musa/cosem-adcda",
       "local_path": "~/wingmen/projects/cosem-adcda",
       "vercel_project": null,
-      "deploy_url": null,
+      "firebase_project": "cosem-adcda-cb6d9",
+      "deploy_url": "https://cosem-adcda-cb6d9.web.app",
       "supabase_project_ref": null,
       "status": "active",
       "priority": 2
