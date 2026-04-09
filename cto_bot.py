@@ -22,6 +22,7 @@ from supabase import acreate_client
 from telegram import Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -35,6 +36,19 @@ from agents.router import build_router_prompt, parse_router_response
 from agents.brainstorm import build_brainstorm_prompt
 from agents.auditor import build_auditor_prompt, parse_auditor_response
 from agents.fixer import build_fixer_prompt
+from approval_handler import (
+    get_eligible_approvers,
+    build_approval_message,
+    build_full_diagnosis_message,
+    build_verification_keyboard,
+)
+from bug_pipeline import create_bug_report, apply_fix, handle_verification
+from bug_notifier import (
+    notify_reporter_acknowledged,
+    notify_reporter_deployed,
+    notify_reporter_rejected,
+    notify_approvers,
+)
 
 # ── Whisper (local transcription) ────────────────────────────────
 _whisper_model = None
@@ -2708,6 +2722,26 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                     else:
                         reply = "I couldn't figure out the task. Could you rephrase?"
 
+                elif intent == "bug_report":
+                    # Collect bug info and create report
+                    user_obj = await resolve_user(chat_id)
+                    client = user_obj.get("client") if user_obj else None
+
+                    bug = await create_bug_report(
+                        supabase=await get_supabase(),
+                        client_id=client["id"] if client else None,
+                        reporter_name=update.effective_user.first_name or "Unknown",
+                        reporter_email=client.get("email") if client else None,
+                        reporter_source="telegram",
+                        auth_provider="telegram",
+                        repo_name=client.get("repo_name", "unknown") if client else (get_active_repo(chat_id, user) or "unknown"),
+                        description=user_msg,
+                        page_url=None,
+                    )
+
+                    await notify_reporter_acknowledged(context.bot, chat_id, bug["id"])
+                    reply = None  # Already sent acknowledgement
+
                 else:
                     # "chat", "build", "data" all go through brainstorm
                     reply = await _run_brainstorm(update, user, chat_id, history, user_msg)
@@ -2716,28 +2750,30 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
             duration = time.monotonic() - start
 
-            # Summarize long admin replies for Telegram
-            if is_admin(user) and len(reply) > 4000:
-                summary = await call_ai(
-                    f"Summarize this Claude Code output for a Telegram message. "
-                    f"Keep the key information: what was done, what changed, any errors. "
-                    f"Max 3000 chars. Use bullet points.\n\n{reply[:8000]}",
-                    model="fast",
-                    max_tokens=2048,
-                )
-                telegram_reply = summary if summary else reply
-            else:
-                telegram_reply = reply
-
-            # Persist full reply (not summarized)
-            await save_message(chat_id, "assistant", reply)
-
             # Log usage
             repo = get_active_repo(chat_id, user) or ""
             await log_usage(user.get("client_id"), "chat", repo, 0, duration)
 
-            # Send to Telegram (summarized for admin, full for clients)
-            await _send_reply(update, telegram_reply)
+            # bug_report intent already sent its own reply — skip post-processing
+            if reply is not None:
+                # Summarize long admin replies for Telegram
+                if is_admin(user) and len(reply) > 4000:
+                    summary = await call_ai(
+                        f"Summarize this Claude Code output for a Telegram message. "
+                        f"Keep the key information: what was done, what changed, any errors. "
+                        f"Max 3000 chars. Use bullet points.\n\n{reply[:8000]}",
+                        model="fast",
+                        max_tokens=2048,
+                    )
+                    telegram_reply = summary if summary else reply
+                else:
+                    telegram_reply = reply
+
+                # Persist full reply (not summarized)
+                await save_message(chat_id, "assistant", reply)
+
+                # Send to Telegram (summarized for admin, full for clients)
+                await _send_reply(update, telegram_reply)
 
         except asyncio.TimeoutError:
             logger.error(f"Chat timeout for {user['name']}")
@@ -2749,6 +2785,90 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                 await update.message.reply_text("Sorry, something went wrong. Please try again.")
             except Exception:
                 logger.error(f"Failed to send error reply to {user['name']}")
+
+
+async def _handle_bug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline keyboard callbacks for bug approvals and verification."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data  # e.g., "bug_approve:uuid" or "bug_diag:uuid"
+    action, bug_id = data.split(":", 1)
+
+    supabase = await get_supabase()
+    bug = (await supabase.table("bug_reports").select("*").eq("id", bug_id).single().execute()).data
+
+    if not bug:
+        await query.edit_message_text("Bug report not found.")
+        return
+
+    user_name = query.from_user.first_name or "Unknown"
+
+    if action == "bug_diag":
+        # Show full diagnosis
+        diagnosis_text = build_full_diagnosis_message(bug)
+        await query.message.reply_text(diagnosis_text)
+
+    elif action == "bug_approve":
+        if bug["status"] != "proposed":
+            await query.edit_message_text(f"Already handled \u2014 status: {bug['status']}")
+            return
+
+        # Update bug
+        await supabase.table("bug_reports").update({
+            "status": "approved",
+            "approved_by": user_name,
+            "approver_id": str(query.from_user.id),
+        }).eq("id", bug_id).execute()
+
+        # Edit the approval message
+        await query.edit_message_text(
+            query.message.text + f"\n\n\u2705 Approved by {user_name} \u2014 deploying...",
+        )
+
+        # Apply fix and deploy
+        try:
+            await apply_fix(supabase, bug_id)
+
+            # Notify reporter
+            if bug.get("reporter_source") == "telegram" and bug.get("client_id"):
+                client = (await supabase.table("clients").select("telegram_chat_id").eq("id", bug["client_id"]).single().execute()).data
+                if client and client.get("telegram_chat_id"):
+                    keyboard = build_verification_keyboard(bug_id)
+                    await notify_reporter_deployed(
+                        context.bot, client["telegram_chat_id"], bug, keyboard
+                    )
+        except Exception as e:
+            logger.error(f"Fix deployment failed: {e}")
+            await query.message.reply_text(f"\u26a0\ufe0f Fix failed: {e}. Escalating.")
+
+    elif action == "bug_reject":
+        await supabase.table("bug_reports").update({
+            "status": "rejected",
+            "approved_by": user_name,
+        }).eq("id", bug_id).execute()
+
+        await query.edit_message_text(
+            query.message.text + f"\n\n\u274c Rejected by {user_name}",
+        )
+
+    elif action == "bug_escalate":
+        await supabase.table("bug_reports").update({
+            "status": "escalated",
+            "approved_by": user_name,
+        }).eq("id", bug_id).execute()
+
+        await query.edit_message_text(
+            query.message.text + f"\n\n\U0001f527 Escalated \u2014 {user_name} will handle manually",
+        )
+
+    elif action == "bug_verified":
+        await handle_verification(supabase, bug_id, verified=True)
+        await query.edit_message_text("\u2705 Thanks for confirming! Bug marked as fixed.")
+
+    elif action == "bug_still_broken":
+        await handle_verification(supabase, bug_id, verified=False)
+        await query.edit_message_text("\U0001f504 Got it \u2014 re-entering the fix pipeline. We'll try again.")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3239,6 +3359,9 @@ def main():
     app.add_handler(CommandHandler("todoadd", cmd_todo_add))
     app.add_handler(CommandHandler("tododone", cmd_todo_done))
     app.add_handler(CommandHandler("todoremove", cmd_todo_remove))
+
+    # Bug approval/verification inline keyboard callbacks
+    app.add_handler(CallbackQueryHandler(_handle_bug_callback, pattern=r"^bug_"))
 
     # Free text + voice → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
