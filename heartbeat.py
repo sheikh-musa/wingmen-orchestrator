@@ -76,3 +76,20 @@ async def write_bot_heartbeat(supabase, active_sessions: int = 0) -> None:
         service="cto_bot",
         active_sessions=active_sessions,
     )
+
+
+async def write_client_bot_heartbeat(
+    supabase,
+    client_id: int,
+    bot_username: str,
+    messages_count: int = 0,
+    active_conversations: int = 0,
+) -> None:
+    """Write heartbeat for a specific client bot."""
+    await write_heartbeat(
+        supabase,
+        service=f"bot_{bot_username}",
+        messages_count=messages_count,
+        active_conversations=active_conversations,
+        client_id=client_id,
+    )
