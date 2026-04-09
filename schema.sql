@@ -122,3 +122,56 @@ create table if not exists bot_heartbeat (
 alter table bot_heartbeat enable row level security;
 create policy "service role full access" on bot_heartbeat
   using (true) with check (true);
+
+-- ═══════════════════════════════════════════════════════════════
+-- White-Label Bot System
+-- ═══════════════════════════════════════════════════════════════
+
+-- Extend clients table for bot support
+alter table clients add column if not exists telegram_bot_token text;
+alter table clients add column if not exists bot_username text;
+alter table clients add column if not exists bot_display_name text;
+alter table clients add column if not exists personality text;
+alter table clients add column if not exists welcome_message text;
+
+-- Bot users (team members + customers per client bot)
+create table if not exists bot_users (
+  id bigint generated always as identity primary key,
+  client_id bigint not null references clients(id),
+  telegram_chat_id text not null,
+  telegram_username text,
+  name text not null,
+  role text not null default 'customer' check (role in ('owner', 'manager', 'staff', 'customer')),
+  permissions text[] default '{}',
+  invite_code text,
+  invite_expires_at timestamptz,
+  status text not null default 'active' check (status in ('pending', 'active', 'deactivated')),
+  added_by bigint references bot_users(id),
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique(client_id, telegram_chat_id)
+);
+alter table bot_users enable row level security;
+create policy "service role full access" on bot_users
+  using (true) with check (true);
+create index idx_bot_users_client on bot_users(client_id);
+create index idx_bot_users_chat_id on bot_users(telegram_chat_id);
+create index idx_bot_users_invite on bot_users(invite_code) where invite_code is not null;
+
+-- Bot conversations (state machine for multi-turn flows)
+create table if not exists bot_conversations (
+  id bigint generated always as identity primary key,
+  client_id bigint not null references clients(id),
+  telegram_chat_id text not null,
+  flow text not null,  -- 'ordering', 'qurban_booking', 'site_edit', 'bug_report', 'team_manage'
+  step text not null,
+  state_data jsonb not null default '{}',
+  expires_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique(client_id, telegram_chat_id)
+);
+alter table bot_conversations enable row level security;
+create policy "service role full access" on bot_conversations
+  using (true) with check (true);
+create index idx_bot_conversations_lookup on bot_conversations(client_id, telegram_chat_id);
+create index idx_bot_conversations_expires on bot_conversations(expires_at) where expires_at is not null;
