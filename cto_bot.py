@@ -49,6 +49,7 @@ from bug_notifier import (
     notify_reporter_rejected,
     notify_approvers,
 )
+from heartbeat import write_bot_heartbeat
 
 # ── Whisper (local transcription) ────────────────────────────────
 _whisper_model = None
@@ -3413,12 +3414,18 @@ def main():
                 session_compress, "cron", hour=2, args=[supabase_client],
                 id="session_compress", replace_existing=True,
             )
+            scheduler.add_job(
+                write_bot_heartbeat, "interval", minutes=3, args=[supabase_client],
+                id="bot_heartbeat", replace_existing=True,
+            )
 
             scheduler.start()
-            logger.info("Nervous system scheduler started — 5 tasks registered")
+            logger.info("Nervous system scheduler started — 6 tasks registered")
 
             # Run brain_sync immediately on startup
             asyncio.create_task(brain_sync(supabase_client, application.bot, admin_chat_id))
+            # Write initial heartbeat
+            asyncio.create_task(write_bot_heartbeat(supabase_client))
         except Exception as e:
             logger.error(f"Failed to start nervous system scheduler: {e}")
 

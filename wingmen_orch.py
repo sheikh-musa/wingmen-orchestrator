@@ -22,6 +22,7 @@ import ralph_runner
 import deploy_manager
 import status_reporter
 from nervous_system.bug_escalation import check_stale_bugs
+from heartbeat import write_orchestrator_heartbeat
 
 # ── Setup ────────────────────────────────────────────────────────
 load_dotenv(Path(__file__).parent / ".env")
@@ -391,6 +392,7 @@ async def main_loop():
 
     recovery_counter = 0
     escalation_counter = 0
+    heartbeat_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -408,6 +410,11 @@ async def main_loop():
             if recovery_counter >= 10:
                 await recover_stale_jobs(supabase)
                 recovery_counter = 0
+
+            # Write heartbeat every 5 polls (~2.5 min)
+            heartbeat_counter += 1
+            if heartbeat_counter % 5 == 0:
+                await write_orchestrator_heartbeat(supabase)
 
             # Check stale bug reports every 60 polls (~30 min)
             escalation_counter += 1

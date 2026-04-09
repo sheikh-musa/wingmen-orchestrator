@@ -108,3 +108,17 @@ create index idx_bug_reports_status on bug_reports(status);
 create index idx_bug_reports_repo on bug_reports(repo_name);
 create index idx_bug_reports_client on bug_reports(client_id);
 create index idx_bug_reports_created on bug_reports(created_at desc);
+
+-- Bot heartbeat (written every poll cycle, read by ihsanOS super admin)
+create table if not exists bot_heartbeat (
+  id bigint generated always as identity primary key,
+  service text not null,  -- 'orchestrator', 'cto_bot', 'brain_sync'
+  status text not null default 'healthy',  -- healthy, degraded, down
+  last_ping timestamptz not null default now(),
+  metadata jsonb not null default '{}',
+  -- metadata: { uptime_seconds, active_jobs, pending_bugs, last_brain_sync, version }
+  unique(service)
+);
+alter table bot_heartbeat enable row level security;
+create policy "service role full access" on bot_heartbeat
+  using (true) with check (true);
