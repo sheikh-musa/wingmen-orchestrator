@@ -4,19 +4,17 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
+
+# Ensure parent dir is on path for ai_provider import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from ai_provider import call_ai
 
 logger = logging.getLogger("wingmen.nervous_system.morning_brief")
 
 CTO_PRINCIPLES_PATH = os.path.join(os.path.dirname(__file__), "..", "CTO_PRINCIPLES.md")
-CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
-CLAUDE_ENV = {
-    "HOME": os.path.expanduser("~"),
-    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-    "USER": os.environ.get("USER", ""),
-    "SHELL": os.environ.get("SHELL", ""),
-    "LANG": os.environ.get("LANG", ""),
-}
 
 
 def _build_status_summary(snapshot: dict) -> str:
@@ -46,19 +44,17 @@ def _build_status_summary(snapshot: dict) -> str:
 
 
 async def _get_strategic_analysis(status_summary: str) -> str:
-    """Ask Claude for strategic CTO recommendations."""
-    import asyncio
-
+    """Ask AI for strategic CTO recommendations."""
     principles = ""
     if os.path.exists(CTO_PRINCIPLES_PATH):
         with open(CTO_PRINCIPLES_PATH) as f:
             principles = f.read()
 
-    prompt = f"""You are Musa's CTO — a Muslim technologist who thinks strategically about both business growth and community impact.
+    system = "You are Musa's CTO — a Muslim technologist who thinks strategically about both business growth and community impact."
+    if principles:
+        system += f"\n\n{principles}"
 
-{principles}
-
-Current state of all projects:
+    prompt = f"""Current state of all projects:
 {status_summary}
 
 Based on this:
@@ -68,18 +64,11 @@ Based on this:
 
 Keep it to 3-5 bullet points. Be decisive, not diplomatic. Start each with an action verb."""
 
-    proc = await asyncio.create_subprocess_exec(
-        CLAUDE_BIN, "-p", prompt, "--output-format", "text",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env=CLAUDE_ENV,
-    )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-        return stdout.decode(errors="replace").strip()
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return "(Strategic analysis timed out)"
+        return await call_ai(prompt, system=system, model="fast", max_tokens=1024)
+    except Exception as e:
+        logger.error(f"Strategic analysis failed: {e}")
+        return "(Strategic analysis unavailable)"
 
 
 async def morning_brief(supabase, bot, admin_chat_id: str):

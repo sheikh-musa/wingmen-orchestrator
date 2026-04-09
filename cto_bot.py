@@ -30,6 +30,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 import context_loader
+from ai_provider import call_ai, extract_json
 from agents.router import build_router_prompt, parse_router_response
 from agents.brainstorm import build_brainstorm_prompt
 from agents.auditor import build_auditor_prompt, parse_auditor_response
@@ -2216,7 +2217,7 @@ async def _route_message(user_msg: str, user: dict, history: list[dict]) -> dict
     """Use Router Agent to classify message intent. Falls back to 'chat' on failure."""
     role = "admin" if is_admin(user) else "client"
     prompt = build_router_prompt(user_msg, user["repos"], history, role=role)
-    raw = await _call_claude(prompt, timeout=30)
+    raw = await call_ai(prompt, model="fast", max_tokens=256)
     if not raw:
         return {"intent": "chat", "repo": None, "detail": user_msg}
     result = parse_router_response(raw)
@@ -2418,7 +2419,7 @@ Group into two sections:
     if not high_conf:
         prompt += '\nEnd with: "Let me know which of these you\'d like me to look into."'
 
-    result = await _call_claude(prompt, timeout=60)
+    result = await call_ai(prompt, model="fast", max_tokens=1024)
     return result or "I found some things on your site — let me put together a summary for you."
 
 
@@ -2658,7 +2659,7 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
                 elif intent == "todo":
                     # Extract tasks from natural language — handles multiple items
-                    raw = await _call_claude(
+                    raw = await call_ai(
                         f"Extract ALL actionable tasks from this message. "
                         f"Return a JSON array of strings, one per task. "
                         f"If there's only one task, still return an array with one item. "
@@ -2669,7 +2670,9 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                         f'Input: "1. Check loading speed 2. Fix deployment"\n'
                         f'Output: ["Check loading speed", "Fix deployment"]\n\n'
                         f"Message: {user_msg}",
-                        timeout=15,
+                        model="fast",
+                        max_tokens=512,
+                        json_mode=True,
                     )
                     tasks = []
                     if raw:
@@ -2715,11 +2718,12 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
 
             # Summarize long admin replies for Telegram
             if is_admin(user) and len(reply) > 4000:
-                summary = await _call_claude(
+                summary = await call_ai(
                     f"Summarize this Claude Code output for a Telegram message. "
                     f"Keep the key information: what was done, what changed, any errors. "
                     f"Max 3000 chars. Use bullet points.\n\n{reply[:8000]}",
-                    timeout=30,
+                    model="fast",
+                    max_tokens=2048,
                 )
                 telegram_reply = summary if summary else reply
             else:

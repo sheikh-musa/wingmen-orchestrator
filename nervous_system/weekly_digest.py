@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
+import sys
 import time
+
+# Ensure parent dir is on path for ai_provider import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from ai_provider import call_ai
 
 logger = logging.getLogger("wingmen.nervous_system.weekly_digest")
 
-CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 CTO_PRINCIPLES_PATH = os.path.join(os.path.dirname(__file__), "..", "CTO_PRINCIPLES.md")
-CLAUDE_ENV = {
-    "HOME": os.path.expanduser("~"),
-    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-    "USER": os.environ.get("USER", ""),
-    "SHELL": os.environ.get("SHELL", ""),
-    "LANG": os.environ.get("LANG", ""),
-}
 
 
 async def weekly_digest(supabase, bot, admin_chat_id: str):
@@ -80,18 +77,11 @@ Write a concise weekly digest covering:
 
 Keep it under 300 words. Be direct."""
 
-        proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN, "-p", prompt, "--output-format", "text",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=CLAUDE_ENV,
-        )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
-            digest = stdout.decode(errors="replace").strip()
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            digest = "(Weekly analysis timed out)"
+            digest = await call_ai(prompt, model="fast", max_tokens=1024)
+        except Exception as e:
+            logger.error(f"Weekly digest AI call failed: {e}")
+            digest = "(Weekly analysis unavailable)"
 
         now = datetime.now(timezone.utc)
         message = f"\U0001f4ca Wingmen Weekly Digest \u2014 Week of {now.strftime('%d %b %Y')}\n\n{digest}"
