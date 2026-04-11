@@ -24,13 +24,28 @@ from ai_provider import call_ai
 
 logger = logging.getLogger("wingmen.council_summary")
 
-MUSA_TELEGRAM_ID = os.environ.get("MUSA_TELEGRAM_ID", "")
-ORCHESTRATOR_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-
 # Sessions that get summarized (decisions and escalations worth notifying)
 # Skipped: circuit_breaker_tokens, circuit_breaker_usd, timeout — infrastructure
 # alerts that belong in a different channel, not decision summaries.
 SKIP_ENDED_REASONS = {"circuit_breaker_tokens", "circuit_breaker_usd", "timeout"}
+
+
+def _config() -> tuple[str, str]:
+    """Read MUSA_TELEGRAM_ID and TELEGRAM_BOT_TOKEN at CALL TIME, not
+    at module load time.
+
+    Bug history (2026-04-12): the previous version captured these as
+    module-level constants. wingmen_orch.py imports this module BEFORE
+    calling load_dotenv(), so both values were read as empty strings
+    and summarize_pending_sessions() returned silently on every poll.
+    Session 2 stayed pending for minutes with no log output. The fix
+    is to read at call time, after load_dotenv() has populated
+    os.environ in the main module.
+    """
+    return (
+        os.environ.get("MUSA_TELEGRAM_ID", ""),
+        os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+    )
 
 
 async def summarize_pending_sessions(sb) -> None:
@@ -39,7 +54,8 @@ async def summarize_pending_sessions(sb) -> None:
     Fail-soft: logs errors but never raises. The main loop calls this
     every poll and must not be blocked by a telegram or anthropic hiccup.
     """
-    if not MUSA_TELEGRAM_ID or not ORCHESTRATOR_BOT_TOKEN:
+    musa_id, bot_token = _config()
+    if not musa_id or not bot_token:
         return
 
     try:
@@ -85,7 +101,7 @@ async def summarize_pending_sessions(sb) -> None:
 
         try:
             summary_text = await _generate_summary(sb, session)
-            await _send_to_musa(session, summary_text)
+            await _send_to_musa(session, summary_text, musa_id, bot_token)
             await (
                 sb.table("cto_council_sessions")
                 .update({"summary_sent_at": datetime.now(timezone.utc).isoformat()})
@@ -170,8 +186,10 @@ def _html_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-async def _send_to_musa(session: dict, summary_text: str) -> None:
-    bot = Bot(token=ORCHESTRATOR_BOT_TOKEN)
+async def _send_to_musa(
+    session: dict, summary_text: str, musa_id: str, bot_token: str
+) -> None:
+    bot = Bot(token=bot_token)
     session_id = session["id"]
     ended_reason = session.get("ended_reason") or "unknown"
     rounds_str = f"{session.get('current_round', 0)}/{session.get('max_rounds', 0)}"
@@ -210,7 +228,7 @@ async def _send_to_musa(session: dict, summary_text: str) -> None:
     )
 
     await bot.send_message(
-        chat_id=int(MUSA_TELEGRAM_ID),
+        chat_id=int(musa_id),
         text=msg,
         parse_mode=ParseMode.HTML,
     )
