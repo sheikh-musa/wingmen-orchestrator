@@ -424,15 +424,18 @@ async function handleRequest(req: Request): Promise<Response> {
   const responseText = result.content?.[0]?.text ?? "";
   const usage = result.usage ?? {};
 
-  // 10. Parse tags from the response
-  const tags: string[] = [];
-  if (/\[PUSHBACK\]/i.test(responseText)) tags.push("PUSHBACK");
-  if (/\[CONCUR\]/i.test(responseText)) tags.push("CONCUR");
-  if (/\[ESCALATE\]/i.test(responseText)) tags.push("ESCALATE");
-  if (/\[SYNTHESIS\]/i.test(responseText)) tags.push("SYNTHESIS");
-  if (/\[INSUFFICIENT_CONTEXT\]/i.test(responseText)) {
-    tags.push("INSUFFICIENT_CONTEXT");
-  }
+  // 10. Parse tags from the response — scoped to the "## Tag" section.
+  //
+  // Bug history (session 2, 2026-04-12): the previous implementation used
+  // /\[CONCUR\]/i.test(responseText) which matched body mentions like
+  // "I cannot tag [CONCUR] until you address X." That falsely triggered
+  // consensus on a session whose strategist response was pure pushback.
+  // Fix: parse only the content AFTER the "## Tag" header (the canonical
+  // location per the system prompt's Response Format section), and
+  // additionally enforce tag precedence: any blocking tag (PUSHBACK,
+  // ESCALATE, INSUFFICIENT_CONTEXT) wins over CONCUR even if both
+  // somehow appear in the tag section.
+  const tags = parseResponseTags(responseText);
 
   // 11. Compute cost estimate
   const costUsd = computeCostUsd(STRATEGIST_MODEL, usage);
@@ -473,12 +476,22 @@ async function handleRequest(req: Request): Promise<Response> {
   const newHadPushback = session.had_pushback || tags.includes("PUSHBACK");
 
   // Consensus logic: CONCUR tag is only valid if (a) pushback has been
-  // raised in the session, (b) we're past round 0. This prevents the
-  // strategist from rubber-stamping on round 1 — one of the three
-  // refinements we agreed on.
+  // raised in the session, (b) we're past round 0, (c) NO blocking tag
+  // is also present in this response. Blocking tags are PUSHBACK,
+  // ESCALATE, and INSUFFICIENT_CONTEXT — their presence means the
+  // strategist is not concurring even if CONCUR somehow also appears.
+  // This enforces the "PUSHBACK wins over CONCUR" precedence documented
+  // in the system prompt's Canonical Tags table.
   let endedReason: string | null = null;
+  const hasBlockingTag =
+    tags.includes("PUSHBACK") ||
+    tags.includes("ESCALATE") ||
+    tags.includes("INSUFFICIENT_CONTEXT");
   const canConsense =
-    tags.includes("CONCUR") && newHadPushback && newRound >= 2;
+    tags.includes("CONCUR") &&
+    !hasBlockingTag &&
+    newHadPushback &&
+    newRound >= 2;
 
   if (canConsense) {
     endedReason = "consensus";
@@ -539,6 +552,55 @@ async function handleRequest(req: Request): Promise<Response> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+
+/** Parse canonical tags from a strategist response.
+ *
+ *  The system prompt's Response Format section instructs the strategist
+ *  to put exactly one tag in a "## Tag" section at the end. This parser
+ *  scopes tag detection to that section so body mentions of a tag (e.g.,
+ *  "I cannot tag [CONCUR] until you address X") do not match.
+ *
+ *  Fallback: if no "## Tag" header is found, scan the last 400 characters
+ *  of the response. A forgotten section header should not defeat tag
+ *  detection entirely, but we still want to avoid matching tags buried
+ *  in the middle of a long response body.
+ *
+ *  If multiple tags appear in the scanned region, all are returned. The
+ *  consensus logic in handleRequest enforces precedence (blocking tags
+ *  win over CONCUR).
+ *
+ *  Bug history: session 2 on 2026-04-12 was falsely closed on consensus
+ *  because the old parser used /\[CONCUR\]/i.test(responseText) which
+ *  matched a refusal phrase in the response body.
+ */
+function parseResponseTags(text: string): string[] {
+  // Find the last "## Tag" header (case-insensitive, tolerant of
+  // extra whitespace). We take the LAST occurrence because a well-formed
+  // response has it at the end; this also handles responses that mention
+  // "## Tag" earlier as literal text.
+  const headerRegex = /##\s*Tag\s*\n/gi;
+  let headerMatch: RegExpExecArray | null = null;
+  let lastMatch: RegExpExecArray | null = null;
+  while ((headerMatch = headerRegex.exec(text)) !== null) {
+    lastMatch = headerMatch;
+  }
+
+  let scanText: string;
+  if (lastMatch) {
+    scanText = text.slice(lastMatch.index + lastMatch[0].length);
+  } else {
+    // No section header — fall back to the tail of the response.
+    scanText = text.slice(-400);
+  }
+
+  const tags: string[] = [];
+  if (/\[PUSHBACK\]/i.test(scanText)) tags.push("PUSHBACK");
+  if (/\[ESCALATE\]/i.test(scanText)) tags.push("ESCALATE");
+  if (/\[INSUFFICIENT_CONTEXT\]/i.test(scanText)) tags.push("INSUFFICIENT_CONTEXT");
+  if (/\[SYNTHESIS\]/i.test(scanText)) tags.push("SYNTHESIS");
+  if (/\[CONCUR\]/i.test(scanText)) tags.push("CONCUR");
+  return tags;
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
