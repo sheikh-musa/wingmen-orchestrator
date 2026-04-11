@@ -50,6 +50,7 @@ from bug_notifier import (
     notify_approvers,
 )
 from heartbeat import write_bot_heartbeat
+from council_commands import cmd_concur, cmd_rule, cmd_halt
 
 # ── Whisper (local transcription) ────────────────────────────────
 _whisper_model = None
@@ -3457,6 +3458,11 @@ def main():
     app.add_handler(CommandHandler("todoadd", cmd_todo_add))
     app.add_handler(CommandHandler("tododone", cmd_todo_done))
     app.add_handler(CommandHandler("todoremove", cmd_todo_remove))
+
+    # CTO Council reply commands (Musa-only, enforced inside the handlers)
+    app.add_handler(CommandHandler("concur", cmd_concur))
+    app.add_handler(CommandHandler("rule", cmd_rule))
+    app.add_handler(CommandHandler("halt", cmd_halt))
 
     # Bug approval/verification inline keyboard callbacks
     app.add_handler(CallbackQueryHandler(_handle_bug_callback, pattern=r"^bug_"))

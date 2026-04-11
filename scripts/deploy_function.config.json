@@ -1,0 +1,4 @@
+{
+  "_comment": "Opt-out allowlist for deploy_function.sh. Functions listed here get the shallow ?mode=health probe instead of ?mode=full-self-test. Every opt-out must have a reason and a date — future Claude Code instances and Al-Mushtashir will read these and question them. Origin: council session 1 (2026-04-11), consensus.",
+  "opt_out": {}
+}

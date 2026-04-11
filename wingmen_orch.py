@@ -25,6 +25,7 @@ import deploy_manager
 import status_reporter
 from nervous_system.bug_escalation import check_stale_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
+from nervous_system.council_summary import summarize_pending_sessions
 from heartbeat import write_orchestrator_heartbeat
 
 # ── Setup ────────────────────────────────────────────────────────
@@ -484,6 +485,13 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"Conversation cleanup failed: {e}")
                 cleanup_counter = 0
+
+            # Summarize newly-ended council sessions every poll (~30s).
+            # Fail-soft: logs errors but never blocks the main loop.
+            try:
+                await summarize_pending_sessions(supabase)
+            except Exception as e:
+                logger.error(f"Council summary task failed: {e}")
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)

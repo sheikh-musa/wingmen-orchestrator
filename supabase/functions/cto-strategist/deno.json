@@ -1,0 +1,12 @@
+{
+  "imports": {
+    "@supabase/supabase-js": "jsr:@supabase/supabase-js@2"
+  },
+  "tasks": {
+    "dev": "deno run --allow-net --allow-env --allow-read index.ts"
+  },
+  "fmt": {
+    "lineWidth": 100,
+    "indentWidth": 2
+  }
+}
