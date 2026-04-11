@@ -37,19 +37,25 @@ from telegram.ext import ContextTypes
 
 logger = logging.getLogger("wingmen.council_commands")
 
-MUSA_TELEGRAM_ID = os.environ.get("MUSA_TELEGRAM_ID", "")
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+def _env(name: str) -> str:
+    """Read env var at CALL TIME, not module load time. Strips whitespace
+    and any trailing inline "#" comment for belt-and-suspenders parity
+    with python-dotenv's inline-comment handling. Fixes the same
+    import-order bug caught in council_summary.py (2026-04-12)."""
+    raw = os.environ.get(name, "")
+    return raw.split("#", 1)[0].strip()
 
 
 async def _get_sb():
-    return await acreate_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    return await acreate_client(_env("SUPABASE_URL"), _env("SUPABASE_SERVICE_KEY"))
 
 
 def _is_musa(update: Update) -> bool:
-    if not MUSA_TELEGRAM_ID:
+    musa_id = _env("MUSA_TELEGRAM_ID")
+    if not musa_id:
         return False
-    return str(update.effective_user.id) == str(MUSA_TELEGRAM_ID)
+    return str(update.effective_user.id) == musa_id
 
 
 async def _reject(update: Update, reason: str) -> None:

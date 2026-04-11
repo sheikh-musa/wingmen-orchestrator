@@ -32,20 +32,22 @@ SKIP_ENDED_REASONS = {"circuit_breaker_tokens", "circuit_breaker_usd", "timeout"
 
 def _config() -> tuple[str, str]:
     """Read MUSA_TELEGRAM_ID and TELEGRAM_BOT_TOKEN at CALL TIME, not
-    at module load time.
+    at module load time, AND defensively strip any trailing inline
+    "#" comment and whitespace in case python-dotenv leaves them in.
 
-    Bug history (2026-04-12): the previous version captured these as
-    module-level constants. wingmen_orch.py imports this module BEFORE
-    calling load_dotenv(), so both values were read as empty strings
-    and summarize_pending_sessions() returned silently on every poll.
-    Session 2 stayed pending for minutes with no log output. The fix
-    is to read at call time, after load_dotenv() has populated
-    os.environ in the main module.
+    Bug history (2026-04-12): two bugs, one fix.
+    (1) Module-level constants were captured before load_dotenv() had
+    run in wingmen_orch.py, so both values were empty strings and the
+    summary task returned silently on every poll.
+    (2) The .env file had inline "# comment" on these lines; the
+    council_commands._is_musa path tripped on this separately because
+    its permission check compared the user id to the raw value.
+    Fix both: read at call time, strip inline comments defensively.
     """
-    return (
-        os.environ.get("MUSA_TELEGRAM_ID", ""),
-        os.environ.get("TELEGRAM_BOT_TOKEN", ""),
-    )
+    def clean(name: str) -> str:
+        raw = os.environ.get(name, "")
+        return raw.split("#", 1)[0].strip()
+    return (clean("MUSA_TELEGRAM_ID"), clean("TELEGRAM_BOT_TOKEN"))
 
 
 async def summarize_pending_sessions(sb) -> None:
