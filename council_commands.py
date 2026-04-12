@@ -58,6 +58,85 @@ def _is_musa(update: Update) -> bool:
     return str(update.effective_user.id) == musa_id
 
 
+async def cmd_council(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/council <question> — start a new council session from Telegram.
+
+    The autonomous agent + Al-Mushtashir handle the discussion. Musa
+    watches rounds in plain English via the relay. /rule to override,
+    /concur to approve.
+    """
+    if not _is_musa(update):
+        await _reject(update, "not-musa")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /council <your question or topic>\n\n"
+            "Example: /council Should we prioritize TDU chat activation or BAPA qurban beta this week?"
+        )
+        return
+
+    question = " ".join(context.args).strip()
+    if len(question) < 10:
+        await update.message.reply_text("Question is too short. Be specific.")
+        return
+
+    sb = await _get_sb()
+
+    # Create session
+    session_result = await (
+        sb.table("cto_council_sessions")
+        .insert({
+            "opening_prompt": question,
+            "max_rounds": 6,
+            "repo": "orchestrator",
+            "tags": ["telegram-initiated"],
+        })
+        .select("id, public_id")
+        .single()
+        .execute()
+    )
+    session_id = session_result.data["id"]
+
+    # Post the opening as a musa row
+    await sb.table("cto_council").insert({
+        "session_id": session_id,
+        "round": 0,
+        "role": "musa",
+        "message": question,
+        "tags": ["OPENING"],
+        "context": {"source": "telegram_council_command"},
+    }).execute()
+
+    # Post an initial claude_code row to kick off the discussion.
+    # The autonomous agent will see this is a fresh session and the
+    # trigger will fire Al-Mushtashir on this row.
+    await sb.table("cto_council").insert({
+        "session_id": session_id,
+        "round": 1,
+        "role": "claude_code",
+        "message": (
+            f"Musa opened this session from Telegram: {question}\n\n"
+            "I don't have a strong opening position yet. Let me hear "
+            "Al-Mushtashir's framing before I commit. Evaluate this "
+            "against CTO principles, the brain snapshot, and current "
+            "repo state."
+        ),
+        "tags": [],
+        "context": {"source": "telegram_council_command"},
+    }).execute()
+
+    await update.message.reply_text(
+        f"🧠 Council session {session_id} started.\n\n"
+        f"❓ {question}\n\n"
+        f"Al-Mushtashir will respond in ~10s. The autonomous agent "
+        f"drives the discussion. You'll see every round in plain English.\n\n"
+        f"/rule {session_id} <text> — override at any point\n"
+        f"/concur {session_id} — approve when ready\n"
+        f"/halt {session_id} — stop"
+    )
+
+
 async def _reject(update: Update, reason: str) -> None:
     await update.message.reply_text(
         f"Council commands are restricted to Musa. ({reason})"
