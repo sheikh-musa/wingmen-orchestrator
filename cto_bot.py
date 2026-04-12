@@ -51,6 +51,7 @@ from bug_notifier import (
 )
 from heartbeat import write_bot_heartbeat
 from council_commands import cmd_concur, cmd_rule, cmd_halt
+from tools_command import cmd_tools
 
 # ── Whisper (local transcription) ────────────────────────────────
 _whisper_model = None
@@ -3463,6 +3464,9 @@ def main():
     app.add_handler(CommandHandler("concur", cmd_concur))
     app.add_handler(CommandHandler("rule", cmd_rule))
     app.add_handler(CommandHandler("halt", cmd_halt))
+
+    # Wingmen feature inventory summary (Musa-only, see tools_command.py)
+    app.add_handler(CommandHandler("tools", cmd_tools))
 
     # Bug approval/verification inline keyboard callbacks
     app.add_handler(CallbackQueryHandler(_handle_bug_callback, pattern=r"^bug_"))

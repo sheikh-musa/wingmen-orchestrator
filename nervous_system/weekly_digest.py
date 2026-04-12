@@ -17,6 +17,56 @@ logger = logging.getLogger("wingmen.nervous_system.weekly_digest")
 CTO_PRINCIPLES_PATH = os.path.join(os.path.dirname(__file__), "..", "CTO_PRINCIPLES.md")
 
 
+async def _feature_health_section(supabase) -> str:
+    """Build the 4-line wingmen_features health section for the weekly
+    digest. Returns an empty string if wingmen_features is missing or
+    the data shape is unexpected (fail-soft)."""
+    try:
+        result = await supabase.table("wingmen_features").select(
+            "slug, stage, health_signal, needs_backfill"
+        ).execute()
+    except Exception:
+        return ""
+
+    features = result.data or []
+    if not features:
+        return ""
+
+    total = len(features)
+    by_stage: dict[str, int] = {}
+    for f in features:
+        s = f.get("stage") or "unknown"
+        by_stage[s] = by_stage.get(s, 0) + 1
+
+    ga = by_stage.get("ga", 0)
+    dogfood = by_stage.get("dogfood", 0)
+    unknown = by_stage.get("unknown", 0)
+
+    candidates = sum(
+        1 for f in features
+        if f.get("health_signal") == "ok"
+        and f.get("stage") == "unknown"
+        and not f.get("needs_backfill")
+    )
+    alerts = sum(1 for f in features if f.get("health_signal") == "alert")
+
+    lines = [
+        "\U0001f4cb Feature inventory: "
+        f"{total} total \u00b7 {ga} ga \u00b7 {dogfood} dogfood \u00b7 {unknown} unknown",
+    ]
+    if candidates > 0:
+        lines.append(
+            f"\u26a0\ufe0f {candidates} health-green unknowns pending your review"
+        )
+    if alerts > 0:
+        lines.append(f"\U0001f534 Alerts: {alerts}")
+    else:
+        lines.append("\U0001f7e2 Alerts: none")
+    lines.append("\u2192 /tools in the ihsanos bot for details")
+
+    return "\n".join(lines)
+
+
 async def weekly_digest(supabase, bot, admin_chat_id: str):
     """Send Sunday 9PM weekly strategic review."""
     start = time.monotonic()
@@ -85,6 +135,17 @@ Keep it under 300 words. Be direct."""
 
         now = datetime.now(timezone.utc)
         message = f"\U0001f4ca Wingmen Weekly Digest \u2014 Week of {now.strftime('%d %b %Y')}\n\n{digest}"
+
+        # Append feature inventory health section (CTO Council session 2
+        # option 4 — route the dogfood signal to where Musa already looks,
+        # not to a page he has to remember to open). Fail-soft: if the
+        # query fails, skip the section rather than break the digest.
+        try:
+            feature_section = await _feature_health_section(supabase)
+            if feature_section:
+                message += "\n\n" + feature_section
+        except Exception as e:
+            logger.warning(f"weekly_digest feature section failed: {e}")
 
         if len(message) <= 4000:
             await bot.send_message(chat_id=admin_chat_id, text=message)

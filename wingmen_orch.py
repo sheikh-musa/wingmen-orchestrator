@@ -26,6 +26,7 @@ import status_reporter
 from nervous_system.bug_escalation import check_stale_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from nervous_system.council_summary import summarize_pending_sessions
+from nervous_system.feature_health_signal import collect_feature_health
 from heartbeat import write_orchestrator_heartbeat
 
 # ── Setup ────────────────────────────────────────────────────────
@@ -441,6 +442,7 @@ async def main_loop():
     escalation_counter = 0
     heartbeat_counter = 0
     cleanup_counter = 0
+    feature_health_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -492,6 +494,18 @@ async def main_loop():
                 await summarize_pending_sessions(supabase)
             except Exception as e:
                 logger.error(f"Council summary task failed: {e}")
+
+            # Feature health signal — every 60 polls (~30 min).
+            # Scans launchctl + logs + static files, writes advisory
+            # health_signal back to wingmen_features. Stage promotion
+            # remains 100% manual per CTO Council session 2 option 4.
+            feature_health_counter += 1
+            if feature_health_counter >= 60:
+                try:
+                    await collect_feature_health(supabase)
+                except Exception as e:
+                    logger.error(f"Feature health signal task failed: {e}")
+                feature_health_counter = 0
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)
