@@ -17,6 +17,70 @@ logger = logging.getLogger("wingmen.nervous_system.weekly_digest")
 CTO_PRINCIPLES_PATH = os.path.join(os.path.dirname(__file__), "..", "CTO_PRINCIPLES.md")
 
 
+async def _bug_summary_section(supabase) -> str:
+    """Bug pipeline summary for the weekly digest."""
+    try:
+        from datetime import timedelta
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+        # All bugs from the last 7 days
+        result = await supabase.table("bug_reports") \
+            .select("id, status, reporter_source, repo_name, description, confidence, resolved_at, created_at") \
+            .gte("created_at", week_ago) \
+            .execute()
+
+        bugs = result.data or []
+        if not bugs:
+            return ""
+
+        total = len(bugs)
+        by_status: dict[str, int] = {}
+        by_source: dict[str, int] = {}
+        by_repo: dict[str, int] = {}
+        resolved = 0
+
+        for b in bugs:
+            s = b.get("status", "?")
+            by_status[s] = by_status.get(s, 0) + 1
+            src = b.get("reporter_source", "?")
+            by_source[src] = by_source.get(src, 0) + 1
+            repo = b.get("repo_name", "?")
+            by_repo[repo] = by_repo.get(repo, 0) + 1
+            if b.get("resolved_at"):
+                resolved += 1
+
+        # Also count still-open bugs (any status, not resolved)
+        open_result = await supabase.table("bug_reports") \
+            .select("id", count="exact") \
+            .is_("resolved_at", "null") \
+            .not_.in_("status", ["verified", "rejected"]) \
+            .execute()
+        open_count = open_result.count or 0
+
+        lines = [
+            f"\U0001f41e Bug Pipeline (last 7 days)",
+            f"New: {total} \u00b7 Resolved: {resolved} \u00b7 Still open: {open_count}",
+        ]
+
+        if by_source:
+            sources = ", ".join(f"{k}: {v}" for k, v in sorted(by_source.items(), key=lambda x: -x[1]))
+            lines.append(f"Sources: {sources}")
+
+        if by_repo and len(by_repo) > 1:
+            repos = ", ".join(f"{k}: {v}" for k, v in sorted(by_repo.items(), key=lambda x: -x[1]))
+            lines.append(f"Repos: {repos}")
+
+        if open_count > 0:
+            lines.append(f"\u26a0\ufe0f {open_count} bugs still need attention")
+        else:
+            lines.append("\u2705 All bugs resolved")
+
+        return "\n".join(lines)
+
+    except Exception:
+        return ""
+
+
 async def _feature_health_section(supabase) -> str:
     """Build the 4-line wingmen_features health section for the weekly
     digest. Returns an empty string if wingmen_features is missing or
@@ -144,6 +208,14 @@ Keep it under 300 words. Be direct."""
                 message += "\n\n" + ux_section
         except Exception as e:
             logger.warning(f"weekly_digest ux_analysis failed: {e}")
+
+        # Append bug pipeline summary for the week
+        try:
+            bug_section = await _bug_summary_section(supabase)
+            if bug_section:
+                message += "\n\n" + bug_section
+        except Exception as e:
+            logger.warning(f"weekly_digest bug summary failed: {e}")
 
         # Append feature inventory health section (CTO Council session 2
         # option 4 — route the dogfood signal to where Musa already looks,
