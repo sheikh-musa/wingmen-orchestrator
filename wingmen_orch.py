@@ -27,6 +27,7 @@ from nervous_system.bug_escalation import check_stale_bugs
 from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from nervous_system.council_summary import summarize_pending_sessions
+from nervous_system.council_relay import relay_council_messages
 from nervous_system.feature_health_signal import collect_feature_health
 from nervous_system.council_executor import poll_executor
 from heartbeat import write_orchestrator_heartbeat
@@ -489,6 +490,14 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"Conversation cleanup failed: {e}")
                 cleanup_counter = 0
+
+            # Relay live council messages to Musa's Telegram every poll (~30s).
+            # Each new row in cto_council gets sent as it happens — Musa sees
+            # the discussion in real-time and can /rule or /concur mid-stream.
+            try:
+                await relay_council_messages(supabase)
+            except Exception as e:
+                logger.error(f"Council relay task failed: {e}")
 
             # Summarize newly-ended council sessions every poll (~30s).
             # Fail-soft: logs errors but never blocks the main loop.
