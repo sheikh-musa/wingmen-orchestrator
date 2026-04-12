@@ -42,6 +42,45 @@ ROLE_LABELS = {
 }
 
 
+async def _simplify(role: str, message: str, tags: list[str]) -> str:
+    """Distill a technical council message into plain English for Musa.
+
+    Musa is a firefighter trainer, not a developer reading code diffs.
+    He needs: what's being proposed, what the disagreement is, and what
+    action he can take — in 3-5 sentences, no jargon.
+    """
+    try:
+        from ai_provider import call_ai
+
+        role_label = ROLE_LABELS.get(role, role)
+        tags_str = ", ".join(tags) if tags else "none"
+
+        summary = await call_ai(
+            f"""Summarize this council message in plain English for a non-technical founder.
+He needs to understand: what is being said, why it matters, and what (if anything) he should do.
+
+Role: {role_label}
+Tags: {tags_str}
+Message:
+{message[:4000]}
+
+Rules:
+- 3-5 sentences maximum
+- No code, no SQL, no file paths, no technical jargon
+- Use simple analogies if the concept is complex
+- End with what Musa should do (if anything) — e.g., "You don't need to act yet" or "Reply /rule to override"
+- Write like you're explaining to a smart person who doesn't code""",
+            system="You are a translator from technical to plain English. Be concise and clear.",
+            model="fast",
+            max_tokens=200,
+        )
+        return (summary or "").strip()
+    except Exception as e:
+        logger.warning(f"simplify failed: {e}")
+        # Fallback: first 300 chars of original
+        return message[:300] + ("..." if len(message) > 300 else "")
+
+
 async def relay_council_messages(sb) -> None:
     """Send unrelayed council messages to Musa's Telegram. Fail-soft."""
     musa_id = _env("MUSA_TELEGRAM_ID")
@@ -84,15 +123,13 @@ async def relay_council_messages(sb) -> None:
             role_label = ROLE_LABELS.get(role, role)
             tags_str = " ".join(f"[{t}]" for t in tags) if tags else ""
 
-            # Truncate long messages for Telegram (4096 char limit)
-            preview = message
-            if len(preview) > 3000:
-                preview = preview[:3000] + "\n\n... (truncated — full message in council thread)"
+            # Simplify for Musa — plain English, no jargon
+            plain = await _simplify(role, message, tags)
 
             text = (
                 f"<b>Session {session_id} · Round {round_num}</b> {tags_str}\n"
                 f"{role_label}\n\n"
-                f"{_html_escape(preview)}"
+                f"{_html_escape(plain)}"
             )
 
             # Add action hints for Al-Mushtashir responses
