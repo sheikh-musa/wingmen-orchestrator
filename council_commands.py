@@ -71,12 +71,26 @@ async def cmd_council(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "Usage: /council <your question or topic>\n\n"
-            "Example: /council Should we prioritize TDU chat activation or BAPA qurban beta this week?"
+            "Usage: /council <question>\n"
+            "       /council repo:<name> <question>\n\n"
+            "Examples:\n"
+            "  /council Should we prioritize TDU or BAPA this week?\n"
+            "  /council repo:ihsanos How should the qurban booking flow handle partial payments?\n"
+            "  /council repo:dookana What's the MVP onboarding for micro-merchants?\n\n"
+            "Best for decisions with tradeoffs, not bug fixes or status checks.\n"
+            "Available repos: ihsanos, dookana, orchestrator, cosem-tdu"
         )
         return
 
-    question = " ".join(context.args).strip()
+    # Check for repo: prefix
+    args_text = " ".join(context.args).strip()
+    repo_name = "orchestrator"  # default
+    if args_text.startswith("repo:"):
+        parts = args_text.split(" ", 1)
+        repo_name = parts[0].replace("repo:", "").strip()
+        question = parts[1].strip() if len(parts) > 1 else ""
+    else:
+        question = args_text
     if len(question) < 10:
         await update.message.reply_text("Question is too short. Be specific.")
         return
@@ -89,7 +103,7 @@ async def cmd_council(update: Update, context: ContextTypes.DEFAULT_TYPE):
         .insert({
             "opening_prompt": question,
             "max_rounds": 6,
-            "repo": "orchestrator",
+            "repo": repo_name,
             "tags": ["telegram-initiated"],
         })
         .select("id, public_id")
