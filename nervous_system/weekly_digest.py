@@ -136,6 +136,15 @@ Keep it under 300 words. Be direct."""
         now = datetime.now(timezone.utc)
         message = f"\U0001f4ca Wingmen Weekly Digest \u2014 Week of {now.strftime('%d %b %Y')}\n\n{digest}"
 
+        # Append UX analysis if we have enough event data (>= 10 events/week)
+        try:
+            from nervous_system.ux_analysis import generate_ux_report
+            ux_section = await generate_ux_report(supabase)
+            if ux_section:
+                message += "\n\n" + ux_section
+        except Exception as e:
+            logger.warning(f"weekly_digest ux_analysis failed: {e}")
+
         # Append feature inventory health section (CTO Council session 2
         # option 4 — route the dogfood signal to where Musa already looks,
         # not to a page he has to remember to open). Fail-soft: if the
