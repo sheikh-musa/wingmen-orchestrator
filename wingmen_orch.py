@@ -28,6 +28,7 @@ from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from nervous_system.council_summary import summarize_pending_sessions
 from nervous_system.council_relay import relay_council_messages
+from nervous_system.council_agent import run_council_agent
 from nervous_system.feature_health_signal import collect_feature_health
 from nervous_system.council_executor import poll_executor
 from heartbeat import write_orchestrator_heartbeat
@@ -513,6 +514,13 @@ async def main_loop():
                     await poll_undiagnosed_bugs(supabase)
                 except Exception as e:
                     logger.error(f"Bug poll task failed: {e}")
+
+            # Autonomous council agent — responds as Claude Code when it's
+            # our turn (last message was from Al-Mushtashir). Every poll.
+            try:
+                await run_council_agent(supabase)
+            except Exception as e:
+                logger.error(f"Council agent failed: {e}")
 
             # Council executor — every 2 polls (~60s). Needs faster polling
             # than other tasks because dry-run review has a 5-min timeout.
