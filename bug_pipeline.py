@@ -1,6 +1,10 @@
 """Bug Pipeline — orchestrates the full bug report lifecycle.
 
 Flow: create_report -> run_diagnosis -> route_approval -> apply_fix -> deploy -> verify
+
+External sources (CI, E2E tests) can also INSERT bug_reports rows
+directly with status='new'. The poll_undiagnosed_bugs() function
+picks those up from the orchestrator main loop.
 """
 
 from __future__ import annotations
@@ -358,3 +362,45 @@ async def handle_verification(supabase: SupabaseAsyncClient, bug_id: str, verifi
                 "proposed_diff": None,
             }).eq("id", bug_id).execute()
             logger.info(f"Bug {bug_id} re-entered pipeline (retry {retry_count + 1})")
+
+
+async def poll_undiagnosed_bugs(supabase: SupabaseAsyncClient) -> None:
+    """Pick up bug_reports with status='new' that were inserted externally.
+
+    When create_bug_report() is called in-process (e.g., Telegram bot),
+    diagnosis starts immediately via asyncio.create_task. But when rows
+    are inserted externally (e.g., CI GitHub Action on E2E failure), no
+    diagnosis is triggered. This poller bridges the gap.
+
+    Called from wingmen_orch.py main loop every ~30 min. Fail-soft.
+    """
+    try:
+        result = await supabase.table("bug_reports") \
+            .select("*") \
+            .eq("status", "new") \
+            .execute()
+
+        bugs = result.data or []
+        if not bugs:
+            return
+
+        for bug in bugs:
+            age_sec = 0
+            if bug.get("created_at"):
+                from datetime import datetime, timezone
+                created = datetime.fromisoformat(bug["created_at"].replace("Z", "+00:00"))
+                age_sec = (datetime.now(timezone.utc) - created).total_seconds()
+
+            # Only pick up bugs older than 60s to avoid racing with
+            # in-process create_bug_report which already triggers diagnosis
+            if age_sec < 60:
+                continue
+
+            logger.info(
+                f"poll_undiagnosed_bugs: picking up orphaned bug {bug['id']} "
+                f"(reporter={bug.get('reporter_source')}, age={int(age_sec)}s)"
+            )
+            asyncio.create_task(_run_diagnosis(supabase, bug))
+
+    except Exception as e:
+        logger.error(f"poll_undiagnosed_bugs failed: {e}")

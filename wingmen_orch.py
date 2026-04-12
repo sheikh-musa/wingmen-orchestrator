@@ -24,6 +24,7 @@ import ralph_runner
 import deploy_manager
 import status_reporter
 from nervous_system.bug_escalation import check_stale_bugs
+from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from nervous_system.council_summary import summarize_pending_sessions
 from nervous_system.feature_health_signal import collect_feature_health
@@ -494,6 +495,14 @@ async def main_loop():
                 await summarize_pending_sessions(supabase)
             except Exception as e:
                 logger.error(f"Council summary task failed: {e}")
+
+            # Pick up externally-inserted bug reports (from CI, E2E tests).
+            # Every 60 polls (~30 min), same cadence as bug escalation.
+            if escalation_counter == 30:
+                try:
+                    await poll_undiagnosed_bugs(supabase)
+                except Exception as e:
+                    logger.error(f"Bug poll task failed: {e}")
 
             # Feature health signal — every 60 polls (~30 min).
             # Scans launchctl + logs + static files, writes advisory
