@@ -28,6 +28,7 @@ from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from nervous_system.council_summary import summarize_pending_sessions
 from nervous_system.feature_health_signal import collect_feature_health
+from nervous_system.council_executor import poll_executor
 from heartbeat import write_orchestrator_heartbeat
 
 # ── Setup ────────────────────────────────────────────────────────
@@ -503,6 +504,13 @@ async def main_loop():
                     await poll_undiagnosed_bugs(supabase)
                 except Exception as e:
                     logger.error(f"Bug poll task failed: {e}")
+
+            # Council executor — every 2 polls (~60s). Needs faster polling
+            # than other tasks because dry-run review has a 5-min timeout.
+            try:
+                await poll_executor(supabase)
+            except Exception as e:
+                logger.error(f"Council executor poll failed: {e}")
 
             # Feature health signal — every 60 polls (~30 min).
             # Scans launchctl + logs + static files, writes advisory

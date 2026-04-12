@@ -598,6 +598,7 @@ function parseResponseTags(text: string): string[] {
   if (/\[ESCALATE\]/i.test(scanText)) tags.push("ESCALATE");
   if (/\[INSUFFICIENT_CONTEXT\]/i.test(scanText)) tags.push("INSUFFICIENT_CONTEXT");
   if (/\[SYNTHESIS\]/i.test(scanText)) tags.push("SYNTHESIS");
+  if (/\[SPEC_APPROVED\]/i.test(scanText)) tags.push("SPEC_APPROVED");
   if (/\[CONCUR\]/i.test(scanText)) tags.push("CONCUR");
   return tags;
 }

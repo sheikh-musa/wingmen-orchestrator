@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CTO Council Execution Spec",
+  "description": "Structured spec for auto-execution after council consensus. Validated by council_executor.py before dry-run or execution.",
+  "type": "object",
+  "required": ["spec_version", "summary", "risk_level", "operations", "post_conditions"],
+  "properties": {
+    "spec_version": {
+      "type": "string",
+      "const": "v1"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 10
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "pre_conditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "expected"],
+        "properties": {
+          "check": { "type": "string" },
+          "expected": {}
+        }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "description"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": {
+            "type": "string",
+            "enum": ["sql_migration", "file_create", "file_edit", "shell_command"]
+          },
+          "description": { "type": "string" },
+          "path": { "type": "string" },
+          "sql": { "type": "string" },
+          "name": { "type": "string" },
+          "cmd": { "type": "string" },
+          "content_b64": { "type": "string" },
+          "old_sha256": { "type": "string" },
+          "new_content_b64": { "type": "string" },
+          "allowed_exit_codes": {
+            "type": "array",
+            "items": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "post_conditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "expected"],
+        "properties": {
+          "check": { "type": "string" },
+          "expected": {}
+        }
+      }
+    },
+    "rollback": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "enum": ["sql_migration", "shell_command"] },
+          "sql": { "type": "string" },
+          "cmd": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    }
+  }
+}

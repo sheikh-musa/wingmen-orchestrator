@@ -66,7 +66,7 @@ async def summarize_pending_sessions(sb) -> None:
             .select(
                 "id, public_id, opening_prompt, ended_at, ended_reason, "
                 "current_round, max_rounds, token_count, usd_estimated, "
-                "had_pushback, repo"
+                "had_pushback, repo, execution_status, spec_approved_at"
             )
             .not_.is_("ended_at", "null")
             .is_("summary_sent_at", "null")
@@ -210,6 +210,23 @@ async def _send_to_musa(
 
     # For decisions that still need Musa's input, append command hints.
     # For sessions Musa already ruled on, no hints — just the record.
+    exec_status = session.get("execution_status")
+    spec_approved = session.get("spec_approved_at")
+
+    if exec_status:
+        exec_emoji = {
+            "dry_run_complete": "🟡",
+            "dry_run_rejected": "🔴",
+            "complete": "✅",
+            "failed": "❌",
+            "rolled_back": "⏪",
+        }.get(exec_status, "⚙️")
+        exec_line = f"\n\n{exec_emoji} <b>Execution: {_html_escape(exec_status)}</b>"
+        if exec_status == "dry_run_complete":
+            exec_line += f"\n<code>/execute {session_id} &lt;reason&gt;</code> — approve execution"
+    else:
+        exec_line = ""
+
     if ended_reason in ("consensus", "escalated", "max_rounds"):
         hints = (
             f"\n\n<b>Your move</b>\n"
@@ -226,6 +243,7 @@ async def _send_to_musa(
         f"{tokens} tokens · ${usd:.4f}\n\n"
         f"<b>Question</b>\n{_html_escape(opening)}\n\n"
         f"<b>Summary</b>\n{_html_escape(summary_text)}"
+        f"{exec_line}"
         f"{hints}"
     )
 

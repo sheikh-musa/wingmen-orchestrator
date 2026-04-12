@@ -241,3 +241,90 @@ async def cmd_halt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🛑 Halted session {session_id}. No synthesis."
     )
+
+
+async def cmd_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/execute <session_id> <comment> — trigger real execution after dry-run approval."""
+    if not _is_musa(update):
+        await _reject(update, "not-musa")
+        return
+
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /execute <session_id> <reason why you approve execution>"
+        )
+        return
+
+    try:
+        session_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            f"First arg must be a session id. Got: {context.args[0]!r}"
+        )
+        return
+
+    comment = " ".join(context.args[1:]).strip()
+    if not comment:
+        await update.message.reply_text(
+            "Comment is required — explain why you approve this execution."
+        )
+        return
+
+    sb = await _get_sb()
+    session = await _load_session(sb, session_id)
+    if session is None:
+        await update.message.reply_text(f"Session {session_id} not found.")
+        return
+
+    # Verify the session is in dry_run_complete state
+    result = await (
+        sb.table("cto_council_sessions")
+        .select("execution_status, spec_json, spec_approved_at")
+        .eq("id", session_id)
+        .single()
+        .execute()
+    )
+    session_data = result.data if result else None
+
+    if not session_data or not session_data.get("spec_json"):
+        await update.message.reply_text(
+            f"Session {session_id} has no spec. Cannot execute."
+        )
+        return
+
+    if not session_data.get("spec_approved_at"):
+        await update.message.reply_text(
+            f"Session {session_id} spec not yet approved by Al-Mushtashir."
+        )
+        return
+
+    exec_status = session_data.get("execution_status")
+    if exec_status != "dry_run_complete":
+        await update.message.reply_text(
+            f"Session {session_id} is in status '{exec_status}', not 'dry_run_complete'. "
+            f"Cannot execute until dry-run is approved."
+        )
+        return
+
+    # Set status to executing — the executor picks it up on next poll
+    await (
+        sb.table("cto_council_sessions")
+        .update({"execution_status": "executing"})
+        .eq("id", session_id)
+        .execute()
+    )
+
+    # Post Musa's approval as an audit row
+    current_round = session.get("current_round") or 0
+    await _post_musa_row(
+        sb, session_id,
+        f"[EXECUTE] Approved execution. Reason: {comment}",
+        "EXECUTE",
+        current_round + 1,
+    )
+
+    await update.message.reply_text(
+        f"⚡ Execution approved for session {session_id}. "
+        f"The executor will pick it up within ~60s.\n"
+        f"Reason: {comment}"
+    )
