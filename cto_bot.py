@@ -3538,8 +3538,10 @@ def main():
             from nervous_system.memory_sync import memory_sync
             from nervous_system.session_compress import session_compress
 
+            from notification_router import get_chat_id
+
             supabase_client = await get_supabase()
-            admin_chat_id = os.environ.get("MUSA_TELEGRAM_ID", "286619815")
+            admin_chat_id = get_chat_id("cto")
 
             scheduler = AsyncIOScheduler(timezone="Asia/Singapore")
 

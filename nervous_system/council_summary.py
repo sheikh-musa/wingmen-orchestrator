@@ -21,6 +21,7 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from ai_provider import call_ai
+from notification_router import get_chat_id
 
 logger = logging.getLogger("wingmen.council_summary")
 
@@ -47,7 +48,7 @@ def _config() -> tuple[str, str]:
     def clean(name: str) -> str:
         raw = os.environ.get(name, "")
         return raw.split("#", 1)[0].strip()
-    return (clean("MUSA_TELEGRAM_ID"), clean("TELEGRAM_BOT_TOKEN"))
+    return (get_chat_id("cto") or "", clean("TELEGRAM_BOT_TOKEN"))
 
 
 async def summarize_pending_sessions(sb) -> None:

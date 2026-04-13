@@ -8,15 +8,14 @@ Runs every 30 minutes via the main orchestrator scheduler.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone, timedelta
 
 from supabase import AsyncClient as SupabaseAsyncClient
 from telegram import Bot
 
-logger = logging.getLogger("wingmen.bug_escalation")
+from notification_router import get_chat_id
 
-MUSA_TELEGRAM_ID = os.environ.get("MUSA_TELEGRAM_ID", "")
+logger = logging.getLogger("wingmen.bug_escalation")
 
 
 async def check_stale_bugs(supabase: SupabaseAsyncClient, bot: Bot) -> None:
@@ -41,10 +40,11 @@ async def check_stale_bugs(supabase: SupabaseAsyncClient, bot: Bot) -> None:
             # 24h+ — escalate to super admin
             logger.warning(f"Bug {bug['id']} stale for 24h+, escalating to super admin")
 
-            if MUSA_TELEGRAM_ID:
+            cto_id = get_chat_id("cto")
+            if cto_id:
                 try:
                     await bot.send_message(
-                        chat_id=MUSA_TELEGRAM_ID,
+                        chat_id=cto_id,
                         text=(
                             f"Bug waiting 24h+ for approval\n\n"
                             f"Repo: {bug['repo_name']}\n"

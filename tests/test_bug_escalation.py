@@ -71,10 +71,10 @@ async def test_twenty_four_hour_bug_escalates_to_super_admin():
     supabase = _mock_supabase([_make_bug(25.0, approvers=["chat_123"])])
     bot = AsyncMock()
 
-    with patch("nervous_system.bug_escalation.MUSA_TELEGRAM_ID", "musa_chat_id"):
+    with patch("nervous_system.bug_escalation.get_chat_id", return_value="musa_chat_id"):
         await check_stale_bugs(supabase, bot)
 
-    # Should send to Musa only, not to approvers
+    # Should send to CTO group (or Musa fallback) only, not to approvers
     assert bot.send_message.call_count == 1
     call_kwargs = bot.send_message.call_args_list[0].kwargs
     assert call_kwargs["chat_id"] == "musa_chat_id"

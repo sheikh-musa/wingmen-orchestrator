@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from telegram import Bot
 from telegram.constants import ParseMode
 
+from notification_router import get_chat_id
+
 logger = logging.getLogger("wingmen.council_relay")
 
 
@@ -83,7 +85,7 @@ Rules:
 
 async def relay_council_messages(sb) -> None:
     """Send unrelayed council messages to Musa's Telegram. Fail-soft."""
-    musa_id = _env("MUSA_TELEGRAM_ID")
+    musa_id = get_chat_id("cto")
     bot_token = _env("TELEGRAM_BOT_TOKEN")
     if not musa_id or not bot_token:
         return

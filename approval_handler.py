@@ -9,14 +9,13 @@ Determines who can approve based on confidence level and role:
 from __future__ import annotations
 
 import logging
-import os
 from typing import NamedTuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-logger = logging.getLogger("wingmen.approval")
+from notification_router import get_chat_id
 
-MUSA_TELEGRAM_ID = os.environ.get("MUSA_TELEGRAM_ID", "")
+logger = logging.getLogger("wingmen.approval")
 
 
 class Approver(NamedTuple):
@@ -34,9 +33,10 @@ async def get_eligible_approvers(
     approvers = []
 
     # Super admin (Musa) — always eligible
-    if MUSA_TELEGRAM_ID:
+    cto_id = get_chat_id("cto")
+    if cto_id:
         approvers.append(Approver(
-            chat_id=MUSA_TELEGRAM_ID,
+            chat_id=cto_id,
             name="Musa",
             role="super_admin",
         ))

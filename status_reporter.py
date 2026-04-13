@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 
 from context_loader import get_repo_config
+from notification_router import get_chat_id
 
 logger = logging.getLogger("wingmen.status")
 
@@ -32,7 +33,7 @@ async def notify_progress(
     when orchestrator restarts or jobs get re-picked up.
     """
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    admin_id = os.environ.get("MUSA_TELEGRAM_ID")
+    admin_id = get_chat_id("cto")
     if not token:
         return
 
@@ -255,7 +256,7 @@ async def _send_telegram(
     supabase=None,
 ) -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    admin_id = os.environ.get("MUSA_TELEGRAM_ID")
+    admin_id = get_chat_id("cto")
 
     if not token:
         logger.warning("Telegram token not set, skipping notification")
@@ -324,7 +325,7 @@ async def _send_deploy_screenshot(
     import tempfile
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    admin_id = os.environ.get("MUSA_TELEGRAM_ID")
+    admin_id = get_chat_id("cto")
     if not token:
         return
 

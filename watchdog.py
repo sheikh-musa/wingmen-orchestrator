@@ -32,8 +32,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("wingmen.watchdog")
 
+from notification_router import get_chat_id
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ADMIN_CHAT_ID = os.environ.get("MUSA_TELEGRAM_ID", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 CHECK_INTERVAL = 60  # seconds
@@ -97,14 +98,15 @@ async def set_bot_description(online: bool) -> None:
 
 
 async def alert_admin(message: str) -> None:
-    """Send alert to Musa."""
-    if not TELEGRAM_TOKEN or not ADMIN_CHAT_ID:
+    """Send alert to ops group (or Musa DM as fallback)."""
+    chat_id = get_chat_id("ops")
+    if not TELEGRAM_TOKEN or not chat_id:
         return
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(
                 f"{TELEGRAM_API}/sendMessage",
-                json={"chat_id": ADMIN_CHAT_ID, "text": message},
+                json={"chat_id": chat_id, "text": message},
             )
     except Exception:
         pass
