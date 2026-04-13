@@ -165,6 +165,13 @@ async def _run_diagnosis(supabase: SupabaseAsyncClient, bug: dict) -> None:
 
         logger.info(f"Bug {bug_id} diagnosed: confidence={diagnosis['confidence']}")
 
+        # Assign auto-fix tier and auto-approve tier 1 bugs
+        tier = await _assign_auto_fix_tier(supabase, bug_id)
+        if tier == 1:
+            logger.info(f"Bug {bug_id} auto-approved (tier 1: high confidence, QA-sourced)")
+            await _update_status(supabase, bug_id, "approved")
+            await apply_fix(supabase, bug_id)
+
     except Exception as e:
         logger.error(f"Diagnosis failed for bug {bug_id}: {e}")
         # Mark as escalated if diagnosis fails
@@ -207,6 +214,38 @@ def _find_relevant_code(repo_path: str, page_url: str, repo_config: dict) -> str
                 pass
 
     return ""
+
+
+async def _assign_auto_fix_tier(supabase: SupabaseAsyncClient, bug_id: str) -> int:
+    """Assign auto-fix tier based on diagnosis confidence and source.
+
+    Tier 1: auto-approve (high confidence, QA-sourced, ≤2 files, first attempt)
+    Tier 2: fast-track (medium confidence, or high without QA source)
+    Tier 3: full review (low confidence, or retried bugs)
+    """
+    result = await supabase.table("bug_reports") \
+        .select("confidence, qa_finding_id, affected_files, retry_count") \
+        .eq("id", bug_id).single().execute()
+    bug = result.data
+
+    confidence = bug.get("confidence")
+    qa_sourced = bug.get("qa_finding_id") is not None
+    file_count = len(bug.get("affected_files") or [])
+    retry_count = bug.get("retry_count", 0)
+
+    if confidence == "high" and qa_sourced and file_count <= 2 and retry_count == 0:
+        tier = 1
+    elif confidence == "low" or retry_count > 0:
+        tier = 3
+    else:
+        tier = 2
+
+    await supabase.table("bug_reports").update({
+        "auto_fix_tier": tier,
+    }).eq("id", bug_id).execute()
+
+    logger.info(f"Bug {bug_id} assigned auto-fix tier {tier}")
+    return tier
 
 
 async def apply_fix(supabase: SupabaseAsyncClient, bug_id: str) -> None:

@@ -69,6 +69,14 @@ def build_approval_message(bug: dict) -> tuple[str, InlineKeyboardMarkup]:
         f"Issue: {bug['description'][:200]}",
         f"Root cause: {bug.get('root_cause') or 'unknown'}",
         f"Confidence: {confidence_emoji} {(bug.get('confidence') or 'unknown').title()}",
+    ]
+
+    tier = bug.get("auto_fix_tier")
+    if tier is not None:
+        tier_labels = {1: "Auto-approve", 2: "Fast-track", 3: "Full review"}
+        lines.append(f"Auto-fix tier: {tier_labels.get(tier, f'Tier {tier}')}")
+
+    lines += [
         f"Files: {', '.join(bug.get('affected_files') or ['unknown'])}",
     ]
 

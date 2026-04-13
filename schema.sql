@@ -192,3 +192,33 @@ create policy "service role full access" on client_groups
   using (true) with check (true);
 create index idx_client_groups_client on client_groups(client_id);
 create index idx_client_groups_chat on client_groups(group_chat_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- QA Findings Ingestion Pipeline
+-- ═══════════════════════════════════════════════════════════════
+
+create table if not exists qa_findings (
+  id bigint generated always as identity primary key,
+  repo_name text not null,
+  source text not null check (source in ('ci', 'e2e', 'lighthouse', 'manual', 'sentry')),
+  severity text not null default 'medium' check (severity in ('critical', 'high', 'medium', 'low')),
+  title text not null,
+  description text not null,
+  page_url text,
+  screenshot_url text,
+  raw_output text,
+  status text not null default 'new' check (status in ('new', 'bridged', 'ignored', 'duplicate')),
+  bug_report_id uuid references bug_reports(id),
+  created_at timestamptz not null default now()
+);
+alter table qa_findings enable row level security;
+create policy "service role full access" on qa_findings
+  using (true) with check (true);
+create index idx_qa_findings_status on qa_findings(status);
+create index idx_qa_findings_repo on qa_findings(repo_name);
+create index idx_qa_findings_created on qa_findings(created_at desc);
+
+-- Link bug_reports back to qa_findings + auto-fix tier
+alter table bug_reports add column if not exists qa_finding_id bigint references qa_findings(id);
+alter table bug_reports add column if not exists auto_fix_tier int;
+  -- 1 = auto-approve (high confidence), 2 = fast-track (medium), 3 = full review (low/null)

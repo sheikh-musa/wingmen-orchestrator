@@ -33,6 +33,7 @@ from nervous_system.feature_health_signal import collect_feature_health
 from nervous_system.council_executor import poll_executor
 from nervous_system.strategic_decisions_poll import poll_strategic_decisions, notify_decision_complete
 from nervous_system.cai_review_request import poll_cai_review_requests
+from nervous_system.qa_bridge import poll_qa_findings
 from heartbeat import write_orchestrator_heartbeat
 
 # ── Setup ────────────────────────────────────────────────────────
@@ -491,6 +492,7 @@ async def main_loop():
     cleanup_counter = 0
     feature_health_counter = 0
     strategic_decisions_counter = 0
+    qa_bridge_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -591,6 +593,16 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"Strategic decisions poll failed: {e}")
                 strategic_decisions_counter = 0
+
+            # QA bridge — every 10 polls (~5 min).
+            # Picks up qa_findings rows, deduplicates, bridges to bug_reports.
+            qa_bridge_counter += 1
+            if qa_bridge_counter >= 10:
+                try:
+                    await poll_qa_findings(supabase)
+                except Exception as e:
+                    logger.error(f"QA bridge poll failed: {e}")
+                qa_bridge_counter = 0
 
             # Feature health signal — every 60 polls (~30 min).
             # Scans launchctl + logs + static files, writes advisory
