@@ -336,6 +336,54 @@ async def cmd_halt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/reply <session_id> <text> — answer a question or add context without ending the session.
+
+    Unlike /rule (which overrides) or /concur (which approves), /reply
+    just adds Musa's input to the thread. The discussion continues.
+    The autonomous agent sees Musa's reply and factors it into the
+    next round. Al-Mushtashir sees it as a musa row in the thread.
+    """
+    if not _is_musa(update):
+        await _reject(update, "not-musa")
+        return
+
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /reply <session_id> <your answer or context>\n\n"
+            "This adds your input to the discussion without ending it."
+        )
+        return
+
+    try:
+        session_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(f"First arg must be a session id. Got: {context.args[0]!r}")
+        return
+
+    reply_text = " ".join(context.args[1:]).strip()
+    if not reply_text:
+        await update.message.reply_text("Reply text cannot be empty.")
+        return
+
+    sb = await _get_sb()
+    session = await _load_session(sb, session_id)
+    if session is None:
+        await update.message.reply_text(f"Session {session_id} not found.")
+        return
+
+    if session.get("ended_at"):
+        await update.message.reply_text(f"Session {session_id} has already ended. Start a new one.")
+        return
+
+    current_round = session.get("current_round") or 0
+    await _post_musa_row(sb, session_id, reply_text, "REPLY", current_round + 1)
+
+    await update.message.reply_text(
+        f"💬 Reply posted to session {session_id}. Discussion continues."
+    )
+
+
 async def cmd_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/execute <session_id> <comment> — trigger real execution after dry-run approval."""
     if not _is_musa(update):

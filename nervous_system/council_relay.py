@@ -132,11 +132,26 @@ async def relay_council_messages(sb) -> None:
                 f"{_html_escape(plain)}"
             )
 
-            # Add action hints for Al-Mushtashir responses
+            # Add action hints based on what happened
             if role == "claude_ai" and not session_info.get("ended_at"):
-                if "PUSHBACK" in tags:
+                # Detect if questions are directed at Musa
+                has_questions = "question" in message.lower() and ("musa" in message.lower() or "?" in message)
+                question_hint = ""
+                if has_questions or "ESCALATE" in tags or "INSUFFICIENT_CONTEXT" in tags:
+                    question_hint = (
+                        f"\n<code>/reply {session_id} &lt;your answer&gt;</code> to respond"
+                    )
+
+                if "ESCALATE" in tags:
                     text += (
-                        f"\n\n<i>Al-Mushtashir pushed back. Claude Code will respond.</i>\n"
+                        f"\n\n<i>Al-Mushtashir escalated — needs your input.</i>"
+                        f"{question_hint}\n"
+                        f"<code>/rule {session_id} &lt;your decision&gt;</code> to decide"
+                    )
+                elif "PUSHBACK" in tags:
+                    text += (
+                        f"\n\n<i>Al-Mushtashir pushed back. Claude Code will respond.</i>"
+                        f"{question_hint}\n"
                         f"<code>/rule {session_id} &lt;your decision&gt;</code> to override"
                     )
                 elif "CONCUR" in tags:
@@ -145,11 +160,21 @@ async def relay_council_messages(sb) -> None:
                         f"<code>/concur {session_id}</code> to approve"
                     )
                 elif "INSUFFICIENT_CONTEXT" in tags:
-                    text += f"\n\n<i>More context requested. Discussion continues.</i>"
+                    text += (
+                        f"\n\n<i>More context needed. Questions for you above.</i>"
+                        f"{question_hint}"
+                    )
                 elif "SPEC_APPROVED" in tags:
                     text += (
                         f"\n\n<i>Spec approved by Al-Mushtashir.</i>\n"
                         f"<code>/concur {session_id}</code> to trigger dry-run"
+                    )
+            elif role == "claude_code" and not session_info.get("ended_at"):
+                has_questions = "question" in message.lower() and "musa" in message.lower()
+                if has_questions:
+                    text += (
+                        f"\n\n<i>Claude Code has questions for you.</i>\n"
+                        f"<code>/reply {session_id} &lt;your answer&gt;</code>"
                     )
 
             sent = await bot.send_message(
