@@ -24,12 +24,30 @@ async def notify_progress(
     phase: str,
     detail: str = "",
     client_chat_id: str | None = None,
+    supabase=None,
 ) -> None:
-    """Send a lightweight Telegram progress update to admin + client."""
+    """Send a lightweight Telegram progress update to admin + client.
+
+    BUG-002: Dedups via notification_log.dedup_key to prevent duplicate sends
+    when orchestrator restarts or jobs get re-picked up.
+    """
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     admin_id = os.environ.get("MUSA_TELEGRAM_ID")
     if not token:
         return
+
+    # BUG-002 dedup: check if we've already sent this (job_id, phase)
+    dedup_key = f"job:{job_id}:{phase}"
+    if supabase is not None:
+        try:
+            existing = await supabase.table("notification_log").select("id").eq(
+                "dedup_key", dedup_key
+            ).limit(1).execute()
+            if existing.data:
+                logger.info(f"Skipping duplicate notification: {dedup_key}")
+                return
+        except Exception as e:
+            logger.warning(f"Dedup check failed for {dedup_key}: {e}")
 
     icons = {
         "picked": "\u25b6\ufe0f",     # ▶️
@@ -52,12 +70,29 @@ async def notify_progress(
     if client_chat_id:
         recipients.add(client_chat_id)
 
+    sent_any = False
     async with httpx.AsyncClient(timeout=10) as client:
         for chat_id in recipients:
             try:
                 await client.post(url, json={"chat_id": chat_id, "text": msg})
+                sent_any = True
             except Exception as e:
                 logger.warning(f"Progress notify to {chat_id} failed: {e}")
+
+    # Log to notification_log with dedup_key to prevent future duplicates
+    if sent_any and supabase is not None:
+        try:
+            await supabase.table("notification_log").insert({
+                "source": "job_progress",
+                "decision_ref": None,
+                "channel": "telegram",
+                "recipient": admin_id or "unknown",
+                "message_text": msg,
+                "dedup_key": dedup_key,
+            }).execute()
+        except Exception as e:
+            # Unique constraint violation = someone else logged it first, harmless
+            logger.debug(f"Notification log insert skipped (likely dedup race): {e}")
 
 
 async def report(
@@ -66,6 +101,7 @@ async def report(
     deploy_url: str | None,
     elapsed_seconds: float,
     client_chat_id: str | None = None,
+    supabase=None,
 ) -> None:
     """Update STATUS.md in repo and send Telegram notification."""
     config = get_repo_config(job["repo_name"])
@@ -91,8 +127,8 @@ async def report(
     # Update orchestrator STATUS.md
     await _update_orch_status(job, build_status, deploy_url, now, elapsed)
 
-    # Send Telegram notification
-    await _send_telegram(job, build_status, status_emoji, deploy_url, elapsed, client_chat_id)
+    # Send Telegram notification (BUG-002: dedup via supabase)
+    await _send_telegram(job, build_status, status_emoji, deploy_url, elapsed, client_chat_id, supabase)
 
     # Send screenshot of live production URL (not preview URL)
     if result["success"]:
@@ -216,6 +252,7 @@ async def _send_telegram(
     deploy_url: str | None,
     elapsed: str,
     client_chat_id: str | None = None,
+    supabase=None,
 ) -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     admin_id = os.environ.get("MUSA_TELEGRAM_ID")
@@ -223,6 +260,19 @@ async def _send_telegram(
     if not token:
         logger.warning("Telegram token not set, skipping notification")
         return
+
+    # BUG-002 dedup: check if we've already sent the complete notification for this job
+    dedup_key = f"job:{job['id']}:complete"
+    if supabase is not None:
+        try:
+            existing = await supabase.table("notification_log").select("id").eq(
+                "dedup_key", dedup_key
+            ).limit(1).execute()
+            if existing.data:
+                logger.info(f"Skipping duplicate notification: {dedup_key}")
+                return
+        except Exception as e:
+            logger.warning(f"Dedup check failed for {dedup_key}: {e}")
 
     deploy_line = f"\U0001f4e6 Deploy: {deploy_url}\n" if deploy_url else ""
     message = (
@@ -239,14 +289,30 @@ async def _send_telegram(
     if client_chat_id:
         recipients.add(client_chat_id)
 
+    sent_any = False
     async with httpx.AsyncClient(timeout=10) as client:
         for chat_id in recipients:
             try:
                 resp = await client.post(url, json={"chat_id": chat_id, "text": message})
                 resp.raise_for_status()
                 logger.info(f"Telegram notification sent for job_{job['id']} to {chat_id}")
+                sent_any = True
             except Exception as e:
                 logger.error(f"Telegram send to {chat_id} failed: {e}")
+
+    # Log with dedup_key to prevent future duplicates
+    if sent_any and supabase is not None:
+        try:
+            await supabase.table("notification_log").insert({
+                "source": "job_complete",
+                "decision_ref": None,
+                "channel": "telegram",
+                "recipient": admin_id or "unknown",
+                "message_text": message,
+                "dedup_key": dedup_key,
+            }).execute()
+        except Exception as e:
+            logger.debug(f"Notification log insert skipped: {e}")
 
 
 async def _send_deploy_screenshot(

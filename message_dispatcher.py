@@ -14,6 +14,7 @@ from ai_provider import call_ai, extract_json
 from agents.router import build_router_prompt, parse_router_response
 from bot_manager import ClientBot
 from bot_user_resolver import resolve_user, try_claim_invite, BotUser
+from group_setup import link_group
 from conversation import get_conversation, start_conversation, clear_conversation
 from permissions import can_do
 from personality import build_system_prompt
@@ -51,6 +52,12 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
     This is the function passed to webhook_server as the message_handler callback.
     """
     try:
+        # --- Handle my_chat_member updates (bot added/removed from groups) ---
+        chat_member = update_data.get("my_chat_member")
+        if chat_member:
+            await _handle_chat_member(client_bot, chat_member, supabase)
+            return
+
         # Parse the Telegram update
         message = update_data.get("message") or update_data.get("callback_query", {}).get("message")
         callback_query = update_data.get("callback_query")
@@ -59,11 +66,27 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
             return
 
         chat_id = str(message.get("chat", {}).get("id", ""))
+        chat_type = message.get("chat", {}).get("type", "private")
         from_user = message.get("from", {})
         text = message.get("text", "").strip()
 
         if not chat_id or not text:
             return
+
+        # --- Group message filtering ---
+        is_group = chat_type in ("group", "supergroup")
+        if is_group:
+            if not await _should_handle_group_message(supabase, client_bot, chat_id, text, message):
+                return
+
+        # In groups, resolve users by their personal ID, not the group chat ID
+        user_chat_id = str(from_user.get("id", "")) if is_group else chat_id
+        reply_to = message.get("message_id") if is_group else None
+
+        # Strip @bot_username from commands in groups
+        if is_group and text.startswith("/") and "@" in text.split()[0]:
+            text = text.split()[0].split("@")[0] + " " + " ".join(text.split()[1:])
+            text = text.strip()
 
         # Create a Bot instance for sending responses
         bot = Bot(token=client_bot.token)
@@ -77,10 +100,10 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
         # --- Handle /start (welcome message) ---
         if text == "/start":
             welcome = client_bot.welcome_message or f"Welcome to {client_bot.bot_display_name}! How can I help you?"
-            await bot.send_message(chat_id=chat_id, text=welcome)
+            await bot.send_message(chat_id=chat_id, text=welcome, reply_to_message_id=reply_to)
             # Auto-register as customer
             await resolve_user(
-                supabase, client_bot.client_id, chat_id,
+                supabase, client_bot.client_id, user_chat_id,
                 telegram_username=from_user.get("username"),
                 display_name=from_user.get("first_name", "Customer"),
             )
@@ -88,18 +111,18 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
 
         # --- Resolve user ---
         user = await resolve_user(
-            supabase, client_bot.client_id, chat_id,
+            supabase, client_bot.client_id, user_chat_id,
             telegram_username=from_user.get("username"),
             display_name=from_user.get("first_name", "Customer"),
         )
 
         # --- Check for active conversation ---
-        active_conv = await get_conversation(supabase, client_bot.client_id, chat_id)
+        active_conv = await get_conversation(supabase, client_bot.client_id, user_chat_id)
 
         # If user says "cancel" or "stop", clear the conversation
         if active_conv and text.lower() in ("cancel", "stop", "quit", "exit", "/cancel"):
-            await clear_conversation(supabase, client_bot.client_id, chat_id)
-            await bot.send_message(chat_id=chat_id, text="Cancelled. How else can I help?")
+            await clear_conversation(supabase, client_bot.client_id, user_chat_id)
+            await bot.send_message(chat_id=chat_id, text="Cancelled. How else can I help?", reply_to_message_id=reply_to)
             return
 
         # If active conversation exists, resume it
@@ -108,7 +131,7 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
             if intent_for_flow and intent_for_flow in FLOW_HANDLERS:
                 handler = FLOW_HANDLERS[intent_for_flow]
                 response = await handler.handle(supabase, bot, chat_id, text, active_conv, user, client_bot)
-                await bot.send_message(chat_id=chat_id, text=response)
+                await bot.send_message(chat_id=chat_id, text=response, reply_to_message_id=reply_to)
                 await _write_heartbeat(supabase, client_bot)
                 return
 
@@ -135,6 +158,7 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
                 await bot.send_message(
                     chat_id=chat_id,
                     text="Sorry, you don't have permission for that. Type /help to see what you can do.",
+                    reply_to_message_id=reply_to,
                 )
                 return
             intent = "chat"
@@ -152,14 +176,14 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
                 repo_name=client_bot.repo_name or "unknown",
                 description=text,
             )
-            await bot.send_message(chat_id=chat_id, text="Got it -- I'm diagnosing this now. I'll notify you when there's a fix.")
+            await bot.send_message(chat_id=chat_id, text="Got it -- I'm diagnosing this now. I'll notify you when there's a fix.", reply_to_message_id=reply_to)
             await _write_heartbeat(supabase, client_bot)
             return
 
         # --- Handle track_order ---
         if intent == "track_order":
             response = await _handle_track_order(supabase, bot, chat_id, text, user, client_bot)
-            await bot.send_message(chat_id=chat_id, text=response)
+            await bot.send_message(chat_id=chat_id, text=response, reply_to_message_id=reply_to)
             await _write_heartbeat(supabase, client_bot)
             return
 
@@ -167,14 +191,14 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
         if intent in FLOW_HANDLERS:
             handler = FLOW_HANDLERS[intent]
             response = await handler.handle(supabase, bot, chat_id, text, None, user, client_bot)
-            await bot.send_message(chat_id=chat_id, text=response)
+            await bot.send_message(chat_id=chat_id, text=response, reply_to_message_id=reply_to)
             await _write_heartbeat(supabase, client_bot)
             return
 
         # --- Default: chat ---
         system_prompt = build_system_prompt(client_bot, user)
         response = await call_ai(text, system=system_prompt, model="auto")
-        await bot.send_message(chat_id=chat_id, text=response)
+        await bot.send_message(chat_id=chat_id, text=response, reply_to_message_id=reply_to)
         await _write_heartbeat(supabase, client_bot)
 
     except Exception as e:
@@ -244,6 +268,54 @@ def _command_to_intent(text: str) -> str | None:
     }
     cmd = text.split()[0].lower() if text.startswith("/") else None
     return commands.get(cmd)
+
+
+async def _handle_chat_member(client_bot: ClientBot, chat_member: dict, supabase) -> None:
+    """Handle my_chat_member updates — bot added to or removed from a group."""
+    chat = chat_member.get("chat", {})
+    chat_type = chat.get("type", "")
+    if chat_type not in ("group", "supergroup"):
+        return
+
+    new_status = chat_member.get("new_chat_member", {}).get("status", "")
+    group_chat_id = str(chat.get("id", ""))
+    group_name = chat.get("title")
+
+    if new_status in ("member", "administrator", "restricted"):
+        await link_group(supabase, client_bot, group_chat_id, group_name, chat_type)
+    elif new_status in ("left", "kicked"):
+        try:
+            await supabase.table("client_groups").update({"is_active": False}).eq(
+                "client_id", client_bot.client_id
+            ).eq("group_chat_id", group_chat_id).execute()
+            logger.info(f"Deactivated group {group_chat_id} for client {client_bot.client_id}")
+        except Exception as e:
+            logger.error(f"Failed to deactivate group {group_chat_id}: {e}")
+
+
+async def _should_handle_group_message(supabase, client_bot: ClientBot, group_chat_id: str, text: str, message: dict) -> bool:
+    """Return True if the bot should respond to this group message."""
+    # Verify group is linked
+    result = await supabase.table("client_groups").select("id").eq(
+        "client_id", client_bot.client_id
+    ).eq("group_chat_id", group_chat_id).eq("is_active", True).limit(1).execute()
+    if not result.data:
+        return False
+
+    # In linked groups, only respond to commands, @mentions, and replies to the bot
+    if text.startswith("/"):
+        return True
+
+    bot_username = client_bot.bot_username
+    if bot_username and f"@{bot_username}" in text:
+        return True
+
+    reply = message.get("reply_to_message", {})
+    reply_from = reply.get("from", {})
+    if reply_from.get("is_bot") and reply_from.get("username") == bot_username:
+        return True
+
+    return False
 
 
 async def _write_heartbeat(supabase, client_bot: ClientBot) -> None:

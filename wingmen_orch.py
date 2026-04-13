@@ -31,6 +31,8 @@ from nervous_system.council_relay import relay_council_messages
 from nervous_system.council_agent import run_council_agent
 from nervous_system.feature_health_signal import collect_feature_health
 from nervous_system.council_executor import poll_executor
+from nervous_system.strategic_decisions_poll import poll_strategic_decisions, notify_decision_complete
+from nervous_system.cai_review_request import poll_cai_review_requests
 from heartbeat import write_orchestrator_heartbeat
 
 # ── Setup ────────────────────────────────────────────────────────
@@ -264,7 +266,7 @@ async def run_job(supabase, job: dict) -> None:
     client_chat_id = await _resolve_client_chat_id(supabase, job)
 
     async def notify(jid, rname, phase, detail=""):
-        await status_reporter.notify_progress(jid, rname, phase, detail, client_chat_id)
+        await status_reporter.notify_progress(jid, rname, phase, detail, client_chat_id, supabase)
 
     try:
         # 1. Load context
@@ -330,12 +332,32 @@ async def run_job(supabase, job: dict) -> None:
                 deploy_url=deploy_result.get("url"),
                 elapsed_seconds=elapsed,
                 client_chat_id=client_chat_id,
+                supabase=supabase,
             )
             await set_job_status(
                 supabase, job_id, "completed",
                 result_summary=result["summary"][:2000],
             )
             logger.info(f"✅ Job #{job_id} completed in {elapsed:.0f}s")
+
+            # Notify Musa if this was a strategic decision auto-implementation
+            if job.get("triggered_by") == "strategic_decisions_poll":
+                import re as _re
+                _match = _re.match(r"\[([A-Z]+-\d+)\]", job.get("description", ""))
+                if _match:
+                    try:
+                        from telegram import Bot as _Bot
+                        _bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                        _musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                        if _bot_token and _musa_id:
+                            _bot = _Bot(token=_bot_token)
+                            await notify_decision_complete(
+                                supabase, _match.group(1), job_id, True,
+                                result["summary"][:500],
+                                _bot, _musa_id,
+                            )
+                    except Exception as _e:
+                        logger.error(f"Strategic decision completion notify failed: {_e}")
 
             # Log usage
             try:
@@ -359,12 +381,33 @@ async def run_job(supabase, job: dict) -> None:
                 )
                 logger.warning(f"⏸ Job #{job_id} paused after {new_fail_count} failures")
                 await notify(job_id, repo_name, "paused", f"Failed {new_fail_count}x in {elapsed_str}. Paused.")
+
+                # Notify Musa if this was a strategic decision that failed
+                if job.get("triggered_by") == "strategic_decisions_poll":
+                    import re as _re
+                    _match = _re.match(r"\[([A-Z]+-\d+)\]", job.get("description", ""))
+                    if _match:
+                        try:
+                            from telegram import Bot as _Bot
+                            _bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                            _musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                            if _bot_token and _musa_id:
+                                _bot = _Bot(token=_bot_token)
+                                await notify_decision_complete(
+                                    supabase, _match.group(1), job_id, False,
+                                    f"Failed after {new_fail_count} attempts: {result['summary'][:300]}",
+                                    _bot, _musa_id,
+                                )
+                        except Exception as _e:
+                            logger.error(f"Strategic decision failure notify failed: {_e}")
+
                 await status_reporter.report(
                     job=job,
                     result=result,
                     deploy_url=None,
                     elapsed_seconds=elapsed,
                     client_chat_id=client_chat_id,
+                    supabase=supabase,
                 )
             else:
                 await set_job_status(
@@ -447,6 +490,7 @@ async def main_loop():
     heartbeat_counter = 0
     cleanup_counter = 0
     feature_health_counter = 0
+    strategic_decisions_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -528,6 +572,25 @@ async def main_loop():
                 await poll_executor(supabase)
             except Exception as e:
                 logger.error(f"Council executor poll failed: {e}")
+
+            # Strategic decisions poll — every 10 polls (~5 min).
+            # ARCH-004: auto-notify when cai writes new decisions.
+            strategic_decisions_counter += 1
+            if strategic_decisions_counter >= 10:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                    if bot_token and musa_id:
+                        bot = Bot(token=bot_token)
+                        await poll_strategic_decisions(supabase, bot, musa_id)
+                        await poll_cai_review_requests(supabase, bot, musa_id)
+                    else:
+                        await poll_strategic_decisions(supabase)
+                        await poll_cai_review_requests(supabase)
+                except Exception as e:
+                    logger.error(f"Strategic decisions poll failed: {e}")
+                strategic_decisions_counter = 0
 
             # Feature health signal — every 60 polls (~30 min).
             # Scans launchctl + logs + static files, writes advisory

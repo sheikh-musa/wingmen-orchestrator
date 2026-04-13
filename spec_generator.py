@@ -92,11 +92,11 @@ End with: <promise>JOB_{job['id']}_DONE</promise>
         env=safe_env,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        raise RuntimeError("Spec generation timed out after 120s")
+        raise RuntimeError("Spec generation timed out after 300s")
     result = stdout.decode(errors="replace").strip()
 
     if not result:

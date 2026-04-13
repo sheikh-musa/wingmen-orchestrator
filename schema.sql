@@ -175,3 +175,20 @@ create policy "service role full access" on bot_conversations
   using (true) with check (true);
 create index idx_bot_conversations_lookup on bot_conversations(client_id, telegram_chat_id);
 create index idx_bot_conversations_expires on bot_conversations(expires_at) where expires_at is not null;
+
+-- Client groups (per-client Telegram group linkage)
+create table if not exists client_groups (
+  id bigint generated always as identity primary key,
+  client_id bigint not null references clients(id),
+  group_chat_id text not null,
+  group_name text,
+  group_type text default 'group',  -- group | supergroup
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique(client_id, group_chat_id)
+);
+alter table client_groups enable row level security;
+create policy "service role full access" on client_groups
+  using (true) with check (true);
+create index idx_client_groups_client on client_groups(client_id);
+create index idx_client_groups_chat on client_groups(group_chat_id);

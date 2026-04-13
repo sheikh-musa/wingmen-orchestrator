@@ -142,7 +142,7 @@ class BotManager:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"https://api.telegram.org/bot{token}/setWebhook",
-                json={"url": url, "allowed_updates": ["message", "callback_query"]},
+                json={"url": url, "allowed_updates": ["message", "callback_query", "my_chat_member"]},
             )
             data = resp.json()
             if data.get("ok"):

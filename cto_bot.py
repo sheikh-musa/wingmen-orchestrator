@@ -961,6 +961,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/priority <job_id> <1-5> — Set job priority\n"
             "/addclient <name> <chat_id> <plan> — Register client\n"
             "/linkrepo <client_name> <repo_name> — Link repo to client\n"
+            "/setupgroup <client> — Setup client group\n"
             "/clients — List all clients\n"
             "/id — Show your Telegram chat ID\n\n"
             "Or just type normally to brainstorm."
@@ -1670,6 +1671,43 @@ async def cmd_linkrepo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await log_audit(str(update.effective_user.id), user["name"], "link_repo", f"{client_name}/{repo_name}")
     await update.message.reply_text(f"\u2705 Linked {repo_name} to {client_name}")
     logger.info(f"Repo {repo_name} linked to client {client_name}")
+
+
+async def cmd_setupgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = await resolve_user(str(update.effective_user.id))
+    if not user or not is_admin(user):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /setupgroup <client_name>")
+        return
+
+    client_name = context.args[0]
+    supabase = await get_supabase()
+
+    result = await supabase.table("clients").select("id, telegram_bot_token, bot_username").eq("name", client_name).limit(1).execute()
+    if not result.data:
+        await update.message.reply_text(f"Client '{client_name}' not found")
+        return
+
+    client = result.data[0]
+    if not client.get("telegram_bot_token"):
+        await update.message.reply_text(f"Client '{client_name}' has no bot configured")
+        return
+
+    groups = await supabase.table("client_groups").select("*").eq("client_id", client["id"]).execute()
+
+    if groups.data:
+        lines = [f"Groups linked to {client_name}:"]
+        for g in groups.data:
+            status = "\u2705" if g["is_active"] else "\u274c"
+            lines.append(f"  {status} {g.get('group_name') or 'Unnamed'} ({g['group_type']}) — {g['group_chat_id']}")
+        await update.message.reply_text("\n".join(lines))
+    else:
+        bot_username = client.get("bot_username", "the bot")
+        await update.message.reply_text(
+            f"No groups linked to {client_name} yet.\n\n"
+            f"Add @{bot_username} to a Telegram group. The bot will auto-configure when added."
+        )
 
 
 async def cmd_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3447,6 +3485,7 @@ def main():
     app.add_handler(CommandHandler("priority", cmd_priority))
     app.add_handler(CommandHandler("addclient", cmd_addclient))
     app.add_handler(CommandHandler("linkrepo", cmd_linkrepo))
+    app.add_handler(CommandHandler("setupgroup", cmd_setupgroup))
     app.add_handler(CommandHandler("clients", cmd_clients))
     app.add_handler(CommandHandler("usage", cmd_usage))
     app.add_handler(CommandHandler("upgrade", cmd_upgrade))
