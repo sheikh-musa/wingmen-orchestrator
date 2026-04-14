@@ -273,13 +273,10 @@ async def _capture_git_info(repo_path: str) -> dict:
 
 async def _write_work_output(supabase, job_id, repo_name, **fields):
     """Write structured work output to Supabase for CAI visibility."""
-    try:
-        row = {"job_id": job_id, "repo_name": repo_name}
-        row.update(fields)
-        await supabase.table("work_outputs").insert(row).execute()
-        logger.info(f"  Wrote work_output for job #{job_id}")
-    except Exception as e:
-        logger.warning(f"  Failed to write work_output: {e}")
+    row = {"job_id": job_id, "repo_name": repo_name}
+    row.update(fields)
+    await supabase.table("work_outputs").insert(row).execute()
+    logger.info(f"  Wrote work_output for job #{job_id}")
 
 
 async def _resolve_client_chat_id(supabase, job: dict) -> str | None:
@@ -395,7 +392,21 @@ async def run_job(supabase, job: dict) -> None:
             except Exception as e:
                 logger.error(f"  Deploy failed: {e}")
 
-            # 7. Report success
+            # 7. Write work output to Supabase (ARCH-010) — must succeed before marking completed
+            await _write_work_output(
+                supabase, job_id, repo_name,
+                build_spec=prompt_text[:50000],
+                commit_sha=git_info.get("commit_sha"),
+                files_changed=git_info.get("files_changed", []),
+                diff_summary=(git_info.get("diff_summary") or "")[:10000],
+                deploy_url=deploy_result.get("url"),
+                cc_output_summary=result["summary"][:5000],
+                test_passed=True,
+                success=True,
+            )
+            await build_audit.verify_work_output(supabase, job_id, repo_name)
+
+            # 8. Report success
             await status_reporter.report(
                 job=job,
                 result=result,
@@ -409,23 +420,6 @@ async def run_job(supabase, job: dict) -> None:
                 result_summary=result["summary"][:2000],
             )
             logger.info(f"✅ Job #{job_id} completed in {elapsed:.0f}s")
-
-            # 7b. Write work output to Supabase (ARCH-010)
-            await _write_work_output(
-                supabase, job_id, repo_name,
-                build_spec=prompt_text[:50000],
-                commit_sha=git_info.get("commit_sha"),
-                files_changed=git_info.get("files_changed", []),
-                diff_summary=(git_info.get("diff_summary") or "")[:10000],
-                deploy_url=deploy_result.get("url"),
-                cc_output_summary=result["summary"][:5000],
-                test_passed=True,
-                success=True,
-            )
-            try:
-                await build_audit.verify_work_output(supabase, job_id, repo_name)
-            except Exception:
-                pass
 
             # Notify Musa if this was a strategic decision auto-implementation
             if job.get("triggered_by") == "strategic_decisions_poll":
@@ -507,14 +501,17 @@ async def run_job(supabase, job: dict) -> None:
                     f"⚠️ Job #{job_id} failed (attempt {new_fail_count}/{MAX_FAIL_COUNT}), re-queued"
                 )
 
-            # Write partial work output for failed builds (ARCH-010)
-            await _write_work_output(
-                supabase, job_id, repo_name,
-                build_spec=prompt_text[:50000],
-                cc_output_summary=result["summary"][:5000],
-                test_passed=False,
-                success=False,
-            )
+            # Write partial work output for failed builds (ARCH-010, non-blocking)
+            try:
+                await _write_work_output(
+                    supabase, job_id, repo_name,
+                    build_spec=prompt_text[:50000],
+                    cc_output_summary=result["summary"][:5000],
+                    test_passed=False,
+                    success=False,
+                )
+            except Exception:
+                pass
             try:
                 await build_audit.verify_work_output(supabase, job_id, repo_name)
             except Exception:

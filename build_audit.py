@@ -84,27 +84,27 @@ async def maybe_audit(repo_path: str, job_id: int, repo_name: str, supabase) -> 
             pass
 
 
-async def verify_work_output(supabase, job_id: int, repo_name: str) -> None:
-    """Verify that a work_outputs row exists for the given job. Advisory only, never raises."""
+async def verify_work_output(supabase, job_id: int, repo_name: str) -> bool:
+    """Verify that a work_outputs row exists for the given job. Raises RuntimeError if missing."""
+    resp = await supabase.table("work_outputs").select("id").eq("job_id", job_id).execute()
+    if resp.data:
+        msg = f"ARCH-011 OK: work_outputs row confirmed for job #{job_id}"
+        logger.info(f"  {msg}")
+        level = "info"
+    else:
+        msg = f"ARCH-011 violation: no work_outputs row for job #{job_id}"
+        logger.warning(f"  {msg}")
+        level = "warn"
     try:
-        resp = await supabase.table("work_outputs").select("id").eq("job_id", job_id).execute()
-        if resp.data:
-            msg = f"ARCH-011 OK: work_outputs row confirmed for job #{job_id}"
-            logger.info(f"  {msg}")
-            level = "info"
-        else:
-            msg = f"ARCH-011 violation: no work_outputs row for job #{job_id}"
-            logger.warning(f"  {msg}")
-            level = "warn"
-        try:
-            await supabase.table("build_log").insert({
-                "job_id": job_id,
-                "repo_name": repo_name,
-                "phase": "audit_compliance",
-                "message": msg,
-                "level": level,
-            }).execute()
-        except Exception as e:
-            logger.warning(f"Failed to write audit compliance log: {e}")
+        await supabase.table("build_log").insert({
+            "job_id": job_id,
+            "repo_name": repo_name,
+            "phase": "audit_compliance",
+            "message": msg,
+            "level": level,
+        }).execute()
     except Exception as e:
-        logger.warning(f"  Work output verification error (non-blocking): {e}")
+        logger.warning(f"Failed to write audit compliance log: {e}")
+    if not resp.data:
+        raise RuntimeError(msg)
+    return True
