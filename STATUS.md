@@ -15,3 +15,13 @@ strategic_decisions table now auto-updates when implementation jobs complete: ex
 - [green] Job #23: wingmen-orchestrator — repo_context_dump.py: cosem-tdu + cosem-adcda repo_memory populated (11 entries each, 2026-04-14)
 - [green] Job #44: wingmen-orchestrator — [ARCH-004] Clean up dead code from ARCH-013 mutual-review upgrade (deploy: N/A)
 - [green] Job #34: wingmen-orchestrator — [TASK-024] Semantic drift audit — LLM review on N-in-M sampled jobs (6m 16s, deploy: N/A)
+
+---
+
+## Recent Jobs (auto-tracked)
+
+Last Updated: 2026-04-14 14:44 SGT
+
+| Job | Description | Status | Deploy |
+|-----|-------------|--------|--------|
+| #63 | [TASK-026] Decision auto-flip on job completion — close the state-tracking gap | red | N/A |
