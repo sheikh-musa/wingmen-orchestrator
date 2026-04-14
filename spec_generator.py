@@ -13,13 +13,25 @@ import asyncio
 import os
 
 
+CLAUDE_MD_CAP = 8000  # chars; large CLAUDE.md (ihsanos = 26KB) hung the CLI
+
+
+def _truncate_for_prompt(text: str | None, cap: int) -> str:
+    if not text:
+        return "(empty)"
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"\n\n[...truncated {len(text) - cap} chars — agent can read full file at runtime...]"
+
+
 async def generate_spec(job: dict, context: dict) -> str:
     """Use Claude CLI (Max subscription) to generate a structured build prompt."""
     repo_config = context["repo_config"]
+    claude_md = _truncate_for_prompt(context.get('claude_md'), CLAUDE_MD_CAP)
 
-    meta_prompt = f"""You are a senior software architect generating a build specification for an autonomous AI coding agent (Claude Code).
+    meta_prompt = f"""Produce a build specification document. Output ONLY the spec — no preamble, no questions, no requests for additional access. Everything you need is in the context below.
 
-The agent will receive your spec and execute it autonomously with --dangerously-skip-permissions. It can read/write files, run commands, and commit code. Your spec must be precise enough that the agent produces correct, production-ready code on the first attempt.
+If the task seems to need information you don't have, write the spec assuming the executing agent will gather it at runtime (the agent has full filesystem and shell access; you do not need them). DO NOT respond with "I need access to..." — produce the spec.
 
 ## Project Context
 - Repo: {repo_config['name']}
@@ -30,8 +42,8 @@ The agent will receive your spec and execute it autonomously with --dangerously-
 ## Current STATUS.md
 {context['status_md'] or '(no STATUS.md found)'}
 
-## CLAUDE.md (project rules — the agent MUST follow these)
-{context['claude_md'] or '(no CLAUDE.md found)'}
+## CLAUDE.md (project rules — the agent MUST follow these; full file readable at runtime if truncated)
+{claude_md}
 
 ## Repo Memory
 {_format_memory(context['memory'])}
@@ -89,14 +101,38 @@ End with: <promise>JOB_{job['id']}_DONE</promise>
     safe_env["HOME"] = os.path.expanduser("~")
     safe_env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
 
+    # Pipe meta_prompt via stdin, not argv. ihsanos has a 26KB CLAUDE.md
+    # which pushed meta_prompt past whatever argv-length limit the CLI
+    # internally enforces — the model fell back to "I need file access"
+    # prose or hung until timeout. Stdin handles any size cleanly.
+    # Why these flags:
+    # --system-prompt <minimal>  — overrides the default system prompt, which
+    #   triggers CLAUDE.md auto-discovery / plugin sync / hooks loading and
+    #   was hanging ihsanos spec-gen at 300s (per CLI help: "ignored with
+    #   --system-prompt"). Keychain auth still works (unlike --bare).
+    # --dangerously-skip-permissions  — non-interactive mode has no human
+    #   to answer permission prompts; without this the CLI waits forever.
+    # Stdin instead of argv  — handles arbitrary prompt size cleanly.
+    minimal_system_prompt = (
+        "You are a senior software architect. Output exactly what the user "
+        "asks for, formatted as requested. Do not request file access or "
+        "tool permissions — your job is to produce the spec text."
+    )
     proc = await asyncio.create_subprocess_exec(
-        claude_bin, "-p", meta_prompt, "--output-format", "text",
+        claude_bin,
+        "--system-prompt", minimal_system_prompt,
+        "--dangerously-skip-permissions",
+        "-p", "-", "--output-format", "text",
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=safe_env,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=meta_prompt.encode("utf-8")),
+            timeout=300,
+        )
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
