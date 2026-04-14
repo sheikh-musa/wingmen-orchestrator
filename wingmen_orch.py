@@ -487,6 +487,17 @@ async def run_job(supabase, job: dict) -> None:
                 success=True,
             )
             await build_audit.verify_work_output(supabase, job_id, repo_name)
+            await _write_work_session(
+                supabase, job_id, repo_name,
+                triggered_by=job.get("triggered_by"),
+                session_prompt=prompt_text[:50000],
+                narrative=_build_narrative(job, "success", result["summary"], deploy_result.get("url"), elapsed),
+                outcome="success",
+                duration_seconds=int(elapsed),
+                files_changed=git_info.get("files_changed", []),
+                commit_sha=git_info.get("commit_sha"),
+                deploy_url=deploy_result.get("url"),
+            )
 
             # 8. Report success
             await status_reporter.report(
@@ -598,6 +609,17 @@ async def run_job(supabase, job: dict) -> None:
                 await build_audit.verify_work_output(supabase, job_id, repo_name)
             except Exception:
                 pass
+            try:
+                await _write_work_session(
+                    supabase, job_id, repo_name,
+                    triggered_by=job.get("triggered_by"),
+                    session_prompt=prompt_text[:50000],
+                    narrative=_build_narrative(job, "failed", result["summary"], None, elapsed),
+                    outcome="failed",
+                    duration_seconds=int(elapsed),
+                )
+            except Exception:
+                pass
 
     except Exception as e:
         logger.exception(f"💥 Job #{job_id} crashed: {e}")
@@ -621,6 +643,17 @@ async def run_job(supabase, job: dict) -> None:
             pass
         try:
             await build_audit.verify_work_output(supabase, job_id, repo_name)
+        except Exception:
+            pass
+        try:
+            await _write_work_session(
+                supabase, job_id, repo_name,
+                triggered_by=job.get("triggered_by"),
+                session_prompt=prompt_text[:50000] if 'prompt_text' in locals() else None,
+                narrative=_build_narrative(job, "crashed", str(e), None, elapsed if 'elapsed' in locals() else None),
+                outcome="crashed",
+                duration_seconds=int(elapsed) if 'elapsed' in locals() else None,
+            )
         except Exception:
             pass
 
