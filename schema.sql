@@ -341,3 +341,39 @@ create policy "service role full access" on cc_work_sessions
 create index idx_cc_work_sessions_job on cc_work_sessions(job_id);
 create index idx_cc_work_sessions_repo on cc_work_sessions(repo_name);
 create index idx_cc_work_sessions_created on cc_work_sessions(created_at desc);
+
+-- ARCH-016: Bug pipeline readiness tracker (phase gates)
+create table if not exists bug_pipeline_readiness (
+  id bigint generated always as identity primary key,
+  phase text not null default 'phase_0',
+  gate_ref text not null unique,
+  gate_title text not null,
+  status text not null default 'pending'
+    check (status in ('pending', 'green', 'yellow', 'red', 'flagged')),
+  days_clean int not null default 0,
+  last_breach_at timestamptz,
+  last_breach_reason text,
+  required_days_clean int not null default 14,
+  notes text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table bug_pipeline_readiness enable row level security;
+create policy "service role full access" on bug_pipeline_readiness
+  using (true) with check (true);
+create index idx_bug_pipeline_readiness_phase on bug_pipeline_readiness(phase);
+create index idx_bug_pipeline_readiness_status on bug_pipeline_readiness(status);
+
+-- Seed: phase_0 gates (idempotent)
+insert into bug_pipeline_readiness (phase, gate_ref, gate_title, status, notes) values
+  ('phase_0', 'silent_queue_stall',     'Zero silent queue stalls >30min',                           'pending', 'Needs TASK-034 detector'),
+  ('phase_0', 'zombie_running_cleanup', 'Zombie "running" row auto-cleanup on orchestrator startup', 'pending', 'Needs TASK-033; today 4 zombies accumulated from restart'),
+  ('phase_0', 'swallowed_except',       'Swallowed-except blocks have counters + escalation',        'pending', 'Needs TASK-035 harness'),
+  ('phase_0', 'fire_drill_migration',   'Fire drill: broken migration escalates not ships',          'green',   'ARCH-015 schema_gate — verify under TASK-037'),
+  ('phase_0', 'fire_drill_sigkill',     'Fire drill: SIGKILL mid-CLI leaves no zombies on restart', 'pending', 'Depends on TASK-033 + TASK-037'),
+  ('phase_0', 'fire_drill_conflict',    'Fire drill: concurrent conflicting bugs serialize cleanly', 'pending', 'TASK-037'),
+  ('phase_0', 'fire_drill_cli_timeout', 'Fire drill: CLI timeout with partial work → WIP branch + pause', 'pending', 'TASK-037'),
+  ('phase_0', 'fire_drill_missing_tool','Fire drill: test tool absent → pause not crash',           'pending', 'TASK-037'),
+  ('phase_0', 'tests_move_with_code',   'Behavior changes ship with matching test updates',          'green',   'ARCH-014 spec rule; verify no stale-test stalls for 14 days'),
+  ('phase_0', 'paused_job_escalation',  'Paused jobs escalate at 1h/6h',                            'green',   'TASK-028 shipped')
+on conflict (gate_ref) do nothing;
