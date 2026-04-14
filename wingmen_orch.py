@@ -243,6 +243,45 @@ async def _git_push(repo_path: str, job_id: int, description: str) -> None:
     logger.info(f"  Committed and pushed: {msg}")
 
 
+async def _capture_git_info(repo_path: str) -> dict:
+    """Capture commit SHA, files changed, and diff stat from the last commit."""
+    info = {"commit_sha": None, "files_changed": [], "diff_summary": None}
+
+    async def _run(cmd):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            return stdout.decode(errors="replace").strip() if proc.returncode == 0 else None
+        except asyncio.TimeoutError:
+            proc.kill()
+            return None
+
+    info["commit_sha"] = await _run(["git", "rev-parse", "HEAD"])
+
+    names = await _run(["git", "diff", "--name-only", "HEAD~1"])
+    if names:
+        info["files_changed"] = [f for f in names.splitlines() if f.strip()]
+
+    info["diff_summary"] = await _run(["git", "diff", "--stat", "HEAD~1"])
+
+    return info
+
+
+async def _write_work_output(supabase, job_id, repo_name, **fields):
+    """Write structured work output to Supabase for CAI visibility."""
+    try:
+        row = {"job_id": job_id, "repo_name": repo_name}
+        row.update(fields)
+        await supabase.table("work_outputs").insert(row).execute()
+        logger.info(f"  Wrote work_output for job #{job_id}")
+    except Exception as e:
+        logger.warning(f"  Failed to write work_output: {e}")
+
+
 async def _resolve_client_chat_id(supabase, job: dict) -> str | None:
     """Look up the Telegram chat_id for the client who triggered this job."""
     if not job.get("client_id"):
@@ -337,6 +376,9 @@ async def run_job(supabase, job: dict) -> None:
             except Exception as e:
                 logger.warning(f"  Git push failed: {e}")
 
+            # 5c. Capture git info for work_outputs
+            git_info = await _capture_git_info(context["repo_path"])
+
             # 5b. Random audit (advisory, non-blocking)
             try:
                 await build_audit.maybe_audit(context["repo_path"], job_id, repo_name, supabase)
@@ -367,6 +409,19 @@ async def run_job(supabase, job: dict) -> None:
                 result_summary=result["summary"][:2000],
             )
             logger.info(f"✅ Job #{job_id} completed in {elapsed:.0f}s")
+
+            # 7b. Write work output to Supabase (ARCH-010)
+            await _write_work_output(
+                supabase, job_id, repo_name,
+                build_spec=prompt_text[:50000],
+                commit_sha=git_info.get("commit_sha"),
+                files_changed=git_info.get("files_changed", []),
+                diff_summary=(git_info.get("diff_summary") or "")[:10000],
+                deploy_url=deploy_result.get("url"),
+                cc_output_summary=result["summary"][:5000],
+                test_passed=True,
+                success=True,
+            )
 
             # Notify Musa if this was a strategic decision auto-implementation
             if job.get("triggered_by") == "strategic_decisions_poll":
@@ -448,6 +503,15 @@ async def run_job(supabase, job: dict) -> None:
                     f"⚠️ Job #{job_id} failed (attempt {new_fail_count}/{MAX_FAIL_COUNT}), re-queued"
                 )
 
+            # Write partial work output for failed builds (ARCH-010)
+            await _write_work_output(
+                supabase, job_id, repo_name,
+                build_spec=prompt_text[:50000],
+                cc_output_summary=result["summary"][:5000],
+                test_passed=False,
+                success=False,
+            )
+
     except Exception as e:
         logger.exception(f"💥 Job #{job_id} crashed: {e}")
         new_fail_count = job.get("fail_count", 0) + 1
@@ -457,6 +521,17 @@ async def run_job(supabase, job: dict) -> None:
             fail_count=new_fail_count,
             result_summary=str(e)[:2000],
         )
+
+        # Write crash work output (ARCH-010)
+        try:
+            await _write_work_output(
+                supabase, job_id, repo_name,
+                build_spec=prompt_text[:50000] if 'prompt_text' in locals() else None,
+                cc_output_summary=str(e)[:5000],
+                success=False,
+            )
+        except Exception:
+            pass
 
 
 async def start_webhook_server(supabase):

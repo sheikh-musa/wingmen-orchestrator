@@ -227,3 +227,25 @@ alter table bug_reports add column if not exists severity text check (severity i
 create index if not exists idx_bug_reports_severity on bug_reports(severity);
 
 alter table bug_reports add column if not exists prev_diagnosis text;
+
+-- Work outputs (structured CC build results for CAI visibility)
+create table if not exists work_outputs (
+  id bigint generated always as identity primary key,
+  job_id bigint not null references jobs(id),
+  repo_name text not null,
+  build_spec text,
+  commit_sha text,
+  files_changed text[],
+  diff_summary text,
+  deploy_url text,
+  cc_output_summary text,
+  test_passed boolean,
+  success boolean not null default false,
+  created_at timestamptz not null default now()
+);
+alter table work_outputs enable row level security;
+create policy "service role full access" on work_outputs
+  using (true) with check (true);
+create index idx_work_outputs_job on work_outputs(job_id);
+create index idx_work_outputs_repo on work_outputs(repo_name);
+create index idx_work_outputs_created on work_outputs(created_at desc);
