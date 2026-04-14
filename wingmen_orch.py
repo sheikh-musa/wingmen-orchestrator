@@ -38,6 +38,7 @@ from nervous_system.council_executor import poll_executor
 from nervous_system.strategic_decisions_poll import poll_strategic_decisions, notify_decision_complete
 from nervous_system.cai_review_request import poll_cai_review_requests
 from nervous_system.qa_bridge import poll_qa_findings
+from nervous_system.schema_gate import check_and_block as schema_gate_check
 from heartbeat import write_orchestrator_heartbeat
 
 # ── Setup ────────────────────────────────────────────────────────
@@ -431,6 +432,30 @@ async def run_job(supabase, job: dict) -> None:
 
             # 5c. Capture git info for work_outputs
             git_info = await _capture_git_info(context["repo_path"])
+
+            # 5d. Schema gate (ARCH-015) — if the commit touched schema.sql,
+            # pause the job until Musa applies the migration. The orchestrator
+            # has no DB DDL credentials by design.
+            try:
+                from telegram import Bot as _SGBot
+                _sg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                _sg_bot = _SGBot(token=_sg_token) if _sg_token else None
+                blocked = await schema_gate_check(
+                    supabase,
+                    context["repo_path"],
+                    repo_name,
+                    job_id,
+                    job.get("description", ""),
+                    _sg_bot,
+                )
+                if blocked:
+                    await notify(job_id, repo_name, "paused",
+                                 "Schema migration pending — see Telegram for SQL.")
+                    logger.warning(f"\u23f8 Job #{job_id} blocked on schema migration")
+                    return
+            except Exception as e:
+                # Gate is belt-and-braces — don't let a bug in it wedge the pipeline.
+                logger.error(f"Schema gate error (non-blocking): {e}")
 
             # 5b. Random audit (advisory, non-blocking)
             try:
