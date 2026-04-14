@@ -32,9 +32,10 @@ Last Updated: 2026-04-14 15:46 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-14 15:46 SGT
+Last Updated: 2026-04-14 15:50 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
+| #61 | [BUG-006] cc_work_sessions not being written — 1 row from 20+ jobs. Narrative la | green | N/A |
 | #60 | [TASK-025] Add uptime monitoring: ping ihsanOS and cosem-tdu every 5 min, Telegr | green | N/A |
 | #68 | [TASK-032] Add category + parent_ref columns to strategic_decisions — human-read | green | N/A |
