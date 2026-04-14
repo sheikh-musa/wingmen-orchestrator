@@ -42,6 +42,7 @@ from nervous_system.qa_bridge import poll_qa_findings
 from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from heartbeat import write_orchestrator_heartbeat
+from nervous_system.swallowed_except_harness import record_swallowed
 
 # ── Setup ────────────────────────────────────────────────────────
 load_dotenv(Path(__file__).parent / ".env")
@@ -366,6 +367,7 @@ async def _resolve_client_chat_id(supabase, job: dict) -> str | None:
             return result.data[0].get("telegram_chat_id")
     except Exception as e:
         logger.warning(f"Failed to resolve client chat_id: {e}")
+        record_swallowed("client_chat_lookup", e)
     return None
 
 
@@ -400,8 +402,8 @@ async def run_job(supabase, job: dict) -> None:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             await proc.communicate()
-        except Exception:
-            pass
+        except Exception as e:
+            record_swallowed("git_tag_cleanup", e)
 
         # 2b. Pre-flight: reject dirty working tree (TASK-027)
         clean, dirty_files = await _check_clean_tree(context["repo_path"])
@@ -433,6 +435,7 @@ async def run_job(supabase, job: dict) -> None:
                 }).execute()
             except Exception as log_e:
                 logger.warning(f"Could not persist invalid-spec diagnostic: {log_e}")
+                record_swallowed("spec_diagnostic_persist", log_e)
             await notify(job_id, repo_name, "failed", error_msg)
             raise RuntimeError(error_msg)
         await notify(job_id, repo_name, "spec", f"Spec validated OK ({len(prompt_text)} chars)")
@@ -468,6 +471,7 @@ async def run_job(supabase, job: dict) -> None:
                 await _git_push(context["repo_path"], job_id, job["description"])
             except Exception as e:
                 logger.warning(f"  Git push failed: {e}")
+                record_swallowed("git_push", e)
 
             # 5c. Capture git info for work_outputs
             git_info = await _capture_git_info(context["repo_path"])
@@ -495,12 +499,14 @@ async def run_job(supabase, job: dict) -> None:
             except Exception as e:
                 # Gate is belt-and-braces — don't let a bug in it wedge the pipeline.
                 logger.error(f"Schema gate error (non-blocking): {e}")
+                record_swallowed("schema_gate", e)
 
             # 5b. Random audit (advisory, non-blocking)
             try:
                 await build_audit.maybe_audit(context["repo_path"], job_id, repo_name, supabase)
             except Exception as e:
                 logger.warning(f"  Random audit error (non-blocking): {e}")
+                record_swallowed("random_audit", e)
 
             # 6. Deploy
             deploy_result = {"deployed": False, "url": None}
@@ -511,6 +517,7 @@ async def run_job(supabase, job: dict) -> None:
                     logger.info(f"  Deployed → {deploy_result['url']}")
             except Exception as e:
                 logger.error(f"  Deploy failed: {e}")
+                record_swallowed("deploy_failure", e)
 
             # 7. Write work output to Supabase (ARCH-010) — must succeed before marking completed
             await _write_work_output(
@@ -570,6 +577,7 @@ async def run_job(supabase, job: dict) -> None:
                             )
                     except Exception as _e:
                         logger.error(f"Strategic decision completion notify failed: {_e}")
+                        record_swallowed("decision_notify_success", _e)
 
             # Log usage
             try:
@@ -579,8 +587,8 @@ async def run_job(supabase, job: dict) -> None:
                     "repo_name": repo_name,
                     "duration_seconds": elapsed,
                 }).execute()
-            except Exception:
-                pass
+            except Exception as e:
+                record_swallowed("usage_log_insert", e)
 
         else:
             new_fail_count = job.get("fail_count", 0) + 1
@@ -612,6 +620,7 @@ async def run_job(supabase, job: dict) -> None:
                                 )
                         except Exception as _e:
                             logger.error(f"Strategic decision failure notify failed: {_e}")
+                            record_swallowed("decision_notify_fail_max", _e)
 
                 await status_reporter.report(
                     job=job,
@@ -641,12 +650,12 @@ async def run_job(supabase, job: dict) -> None:
                     test_passed=False,
                     success=False,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                record_swallowed("work_output_write_failed", e)
             try:
                 await build_audit.verify_work_output(supabase, job_id, repo_name)
-            except Exception:
-                pass
+            except Exception as e:
+                record_swallowed("work_output_verify_failed", e)
             try:
                 await _write_work_session(
                     supabase, job_id, repo_name,
@@ -656,8 +665,8 @@ async def run_job(supabase, job: dict) -> None:
                     outcome="failed",
                     duration_seconds=int(elapsed),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                record_swallowed("work_session_write_failed", e)
 
     except Exception as e:
         logger.exception(f"💥 Job #{job_id} crashed: {e}")
@@ -677,12 +686,12 @@ async def run_job(supabase, job: dict) -> None:
                 cc_output_summary=str(e)[:5000],
                 success=False,
             )
-        except Exception:
-            pass
+        except Exception as e2:
+            record_swallowed("crash_work_output_write", e2)
         try:
             await build_audit.verify_work_output(supabase, job_id, repo_name)
-        except Exception:
-            pass
+        except Exception as e2:
+            record_swallowed("crash_work_output_verify", e2)
         try:
             await _write_work_session(
                 supabase, job_id, repo_name,
@@ -692,8 +701,8 @@ async def run_job(supabase, job: dict) -> None:
                 outcome="crashed",
                 duration_seconds=int(elapsed) if 'elapsed' in locals() else None,
             )
-        except Exception:
-            pass
+        except Exception as e2:
+            record_swallowed("crash_work_session_write", e2)
 
 
 async def start_webhook_server(supabase):
@@ -745,10 +754,11 @@ async def main_loop():
         try:
             from cto_bot import set_bot_manager
             set_bot_manager(_bot_manager)
-        except Exception:
-            pass
+        except Exception as e:
+            record_swallowed("set_bot_manager_import", e)
     except Exception as e:
         logger.error(f"Webhook server failed to start: {e}")
+        record_swallowed("webhook_server_start", e)
 
     zombie_count = await cleanup_zombie_jobs(supabase)
     if zombie_count:
@@ -764,6 +774,7 @@ async def main_loop():
     drift_audit_counter = 0
     paused_job_counter = 0
     queue_stall_counter = 0
+    swallowed_except_counter = 0
     uptime_monitor_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
@@ -799,6 +810,7 @@ async def main_loop():
                         await check_stale_bugs(supabase, bot)
                 except Exception as e:
                     logger.error(f"Bug escalation check failed: {e}")
+                    record_swallowed("bug_escalation_check", e)
                 escalation_counter = 0
 
             # Check paused jobs every 60 polls (~30 min)
@@ -812,6 +824,7 @@ async def main_loop():
                         await check_paused_jobs(supabase, bot)
                 except Exception as e:
                     logger.error(f"Paused job escalation check failed: {e}")
+                    record_swallowed("paused_job_escalation", e)
                 paused_job_counter = 0
 
             # Check queue stalls every 60 polls (~30 min)
@@ -825,6 +838,7 @@ async def main_loop():
                         await check_queue_stalls(supabase, bot)
                 except Exception as e:
                     logger.error(f"Queue stall check failed: {e}")
+                    record_swallowed("queue_stall_check", e)
                 queue_stall_counter = 0
 
             # Clean up expired bot conversations every 60 polls (~30 min)
@@ -834,6 +848,7 @@ async def main_loop():
                     await cleanup_expired_conversations(supabase)
                 except Exception as e:
                     logger.error(f"Conversation cleanup failed: {e}")
+                    record_swallowed("conversation_cleanup", e)
                 cleanup_counter = 0
 
             # Relay live council messages to Musa's Telegram every poll (~30s).
@@ -843,6 +858,7 @@ async def main_loop():
                 await relay_council_messages(supabase)
             except Exception as e:
                 logger.error(f"Council relay task failed: {e}")
+                record_swallowed("council_relay", e)
 
             # Summarize newly-ended council sessions every poll (~30s).
             # Fail-soft: logs errors but never blocks the main loop.
@@ -850,6 +866,7 @@ async def main_loop():
                 await summarize_pending_sessions(supabase)
             except Exception as e:
                 logger.error(f"Council summary task failed: {e}")
+                record_swallowed("council_summary", e)
 
             # Pick up externally-inserted bug reports (from CI, E2E tests).
             # Every 60 polls (~30 min), same cadence as bug escalation.
@@ -858,6 +875,7 @@ async def main_loop():
                     await poll_undiagnosed_bugs(supabase)
                 except Exception as e:
                     logger.error(f"Bug poll task failed: {e}")
+                    record_swallowed("bug_poll", e)
 
             # Autonomous council agent — responds as Claude Code when it's
             # our turn (last message was from Al-Mushtashir). Every poll.
@@ -865,6 +883,7 @@ async def main_loop():
                 await run_council_agent(supabase)
             except Exception as e:
                 logger.error(f"Council agent failed: {e}")
+                record_swallowed("council_agent", e)
 
             # Council executor — every 2 polls (~60s). Needs faster polling
             # than other tasks because dry-run review has a 5-min timeout.
@@ -872,6 +891,7 @@ async def main_loop():
                 await poll_executor(supabase)
             except Exception as e:
                 logger.error(f"Council executor poll failed: {e}")
+                record_swallowed("council_executor", e)
 
             # Strategic decisions poll — every 10 polls (~5 min).
             # ARCH-004: auto-notify when cai writes new decisions.
@@ -890,6 +910,7 @@ async def main_loop():
                         await poll_cai_review_requests(supabase)
                 except Exception as e:
                     logger.error(f"Strategic decisions poll failed: {e}")
+                    record_swallowed("strategic_decisions_poll", e)
                 strategic_decisions_counter = 0
 
             # QA bridge — every 10 polls (~5 min).
@@ -900,6 +921,7 @@ async def main_loop():
                     await poll_qa_findings(supabase)
                 except Exception as e:
                     logger.error(f"QA bridge poll failed: {e}")
+                    record_swallowed("qa_bridge_poll", e)
                 qa_bridge_counter = 0
 
             # Uptime monitor — every 10 polls (~5 min).
@@ -916,6 +938,7 @@ async def main_loop():
                         await poll_uptime(supabase)
                 except Exception as e:
                     logger.error(f"Uptime monitor poll failed: {e}")
+                    record_swallowed("uptime_monitor", e)
                 uptime_monitor_counter = 0
 
             # Feature health signal — every 60 polls (~30 min).
@@ -928,6 +951,7 @@ async def main_loop():
                     await collect_feature_health(supabase)
                 except Exception as e:
                     logger.error(f"Feature health signal task failed: {e}")
+                    record_swallowed("feature_health", e)
                 feature_health_counter = 0
 
             # Semantic drift audit — every 60 polls (~30 min).
@@ -937,7 +961,22 @@ async def main_loop():
                     await semantic_drift.run_drift_audit(supabase)
                 except Exception as e:
                     logger.error(f"Semantic drift audit failed: {e}")
+                    record_swallowed("drift_audit", e)
                 drift_audit_counter = 0
+
+            # Swallowed-exception escalation — every 60 polls (~30 min).
+            swallowed_except_counter += 1
+            if swallowed_except_counter >= 60:
+                try:
+                    from telegram import Bot
+                    from nervous_system.swallowed_except_harness import check_swallowed_escalation
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    if bot_token:
+                        bot = Bot(token=bot_token)
+                        await check_swallowed_escalation(supabase, bot)
+                except Exception as e:
+                    logger.error(f"Swallowed-except escalation check failed: {e}")
+                swallowed_except_counter = 0
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)
