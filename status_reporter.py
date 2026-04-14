@@ -145,33 +145,39 @@ async def _update_status_md(
     deploy_url: str | None,
     timestamp: str,
 ) -> None:
+    """Update STATUS.md by preserving all existing content and only touching
+    the '## Recent Jobs (auto-tracked)' section at the bottom.
+
+    Never rewrites the file. If the marker section is missing, appends it.
+    This prevents the regression where orchestrator jobs would overwrite
+    hand-written project context with a generic template.
+    """
     status_file = repo_path / "STATUS.md"
 
-    # Build fresh status block
-    deploy_line = f"Deploy: {deploy_url}" if deploy_url else "Deploy: N/A"
-    content = f"""# {job['repo_name']} STATUS
+    marker = "## Recent Jobs (auto-tracked)"
+    deploy_display = deploy_url or "N/A"
+    job_line = f"| #{job['id']} | {job['description'][:80]} | {build_status} | {deploy_display} |"
+    header = "| Job | Description | Status | Deploy |\n|-----|-------------|--------|--------|"
 
-Last Updated: {timestamp}
-Build Status: {build_status}
-{deploy_line}
+    existing = status_file.read_text() if status_file.exists() else f"# {job['repo_name']} STATUS\n\n(no hand-written content)\n"
 
-## Last Completed Job
-- Job #{job['id']}: {job['description']}
+    if marker in existing:
+        # Update the marker section: keep everything before, rebuild the section
+        before, _, tail = existing.partition(marker)
+        # Extract existing job rows from the tail (lines starting with "| #")
+        existing_rows = [
+            line for line in tail.splitlines()
+            if line.startswith("| #") and "Job" not in line.split("|")[1]
+        ][:9]  # keep last 9 + this one = 10 total
+        new_section = f"{marker}\n\nLast Updated: {timestamp}\n\n{header}\n{job_line}\n" + "\n".join(existing_rows) + "\n"
+        new_content = before.rstrip() + "\n\n" + new_section
+    else:
+        # Append the marker section — don't touch existing content
+        new_section = f"\n\n---\n\n{marker}\n\nLast Updated: {timestamp}\n\n{header}\n{job_line}\n"
+        new_content = existing.rstrip() + new_section
 
-## Result Summary
-{job.get('result_summary', 'N/A')}
-"""
-
-    # Preserve existing sections if STATUS.md exists
-    if status_file.exists():
-        existing = status_file.read_text()
-        # Extract "Next Up" section if present
-        if "## Next Up" in existing:
-            next_up = existing.split("## Next Up")[1].split("##")[0].strip()
-            content += f"\n## Previous Next Up\n{next_up}\n"
-
-    status_file.write_text(content)
-    logger.info(f"Updated STATUS.md for {job['repo_name']}")
+    status_file.write_text(new_content)
+    logger.info(f"Updated STATUS.md Recent Jobs for {job['repo_name']}")
 
 
 async def _update_orch_status(
