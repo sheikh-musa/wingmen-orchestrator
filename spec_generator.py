@@ -59,6 +59,8 @@ Follow these rules strictly:
 
 7. **SUPABASE-FIRST AUDIT**: All build outputs and audit deliverables must be written to the Supabase `work_outputs` table. Do not rely on repo files alone for audit trail. The orchestrator handles this automatically — do not duplicate the writes.
 
+8. **TESTS MOVE WITH CODE**: Before declaring done, grep `tests/` for every top-level function, class, or module name you modified. If a test asserts old behavior that no longer holds, update the assertion or delete the test in the same commit. Never ship a behavior change while leaving its test asserting the old behavior — stale tests block the queue via test_gate and stall every downstream job. This is non-negotiable.
+
 Output format:
 
 ### Role
