@@ -38,6 +38,7 @@ from nervous_system.council_executor import poll_executor
 from nervous_system.strategic_decisions_poll import poll_strategic_decisions, notify_decision_complete
 from nervous_system.cai_review_request import poll_cai_review_requests
 from nervous_system.qa_bridge import poll_qa_findings
+from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from heartbeat import write_orchestrator_heartbeat
 
@@ -687,6 +688,7 @@ async def main_loop():
     qa_bridge_counter = 0
     drift_audit_counter = 0
     paused_job_counter = 0
+    uptime_monitor_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -810,6 +812,22 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"QA bridge poll failed: {e}")
                 qa_bridge_counter = 0
+
+            # Uptime monitor — every 10 polls (~5 min).
+            uptime_monitor_counter += 1
+            if uptime_monitor_counter >= 10:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                    if bot_token and musa_id:
+                        bot = Bot(token=bot_token)
+                        await poll_uptime(supabase, bot, musa_id)
+                    else:
+                        await poll_uptime(supabase)
+                except Exception as e:
+                    logger.error(f"Uptime monitor poll failed: {e}")
+                uptime_monitor_counter = 0
 
             # Feature health signal — every 60 polls (~30 min).
             # Scans launchctl + logs + static files, writes advisory

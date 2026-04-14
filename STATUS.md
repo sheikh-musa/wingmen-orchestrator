@@ -1,26 +1,25 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-14 15:30 SGT
+Last Updated: 2026-04-14 SGT
 Build Status: green
 Deploy: N/A
 
 ## Last Completed Job
-- Job #68: Add `category` and `parent_ref` columns to `strategic_decisions` — updated schema.sql with ALTER TABLE + indexes, added columns to select queries in strategic_decisions_poll.py and cai_review_request.py. DB migration blocked by Supabase MCP permissions — must be run manually.
+- Job #60: Uptime monitoring — HTTP-ping ihsanOS and cosem-tdu every ~5 min, Telegram alert on failure with dedup, recovery auto-clears dedup key. Logs to bot_heartbeat. No schema migration needed.
 
 ## Result Summary
-Added `category` (text) and `parent_ref` (text) columns to `strategic_decisions` table in schema.sql with partial indexes. Updated select strings in `strategic_decisions_poll.py` and `cai_review_request.py` to include new columns. 231 tests pass, 0 failures. Supabase MCP permission-blocked — migration SQL must be run manually against the live DB.
+Created `uptime_monitor.py` with `check_target()` and `poll_uptime()`. Integrated into main loop via counter-based scheduling (10 polls = ~5 min). Alerts via Telegram with dedup through `notification_log` table. Recovery clears dedup key so next failure re-alerts. 245 tests pass, 0 failures.
 
 ## Completed (Last 5)
-- [green] Job #68: wingmen-orchestrator — Add category + parent_ref to strategic_decisions (2026-04-14, migration pending manual run)
+- [green] Job #60: wingmen-orchestrator — Uptime monitoring with Telegram alerts, dedup, and recovery (2026-04-14)
+- [green] Job #68: wingmen-orchestrator — [TASK-032] Add category + parent_ref columns to strategic_decisions — human-readable grouping (3m 39s, deploy: N/A)
 - [green] Job #65: wingmen-orchestrator — [TASK-028] Paused job Telegram escalation — no more silent deaths (5m 18s, deploy: N/A)
-- [green] Job #65: wingmen-orchestrator — [TASK-028] Paused job Telegram escalation with tiered alerts and dedup (2026-04-14)
 - [green] Job #64: wingmen-orchestrator — [TASK-027] Pre-flight dirty-tree check before Claude Code runs (2026-04-14)
-- [green] Job #63: wingmen-orchestrator — [TASK-026] Auto-flip strategic_decisions execution_status on job completion (2026-04-14)
-- [green] Job #23: wingmen-orchestrator — repo_context_dump.py: cosem-tdu + cosem-adcda repo_memory populated (11 entries each, 2026-04-14)
+- [green] Job #63: wingmen-orchestrator — [TASK-026] Decision auto-flip on job completion — close the state-tracking gap (2026-04-14)
 
-##  Recent Jobs (auto-tracked)
+##   Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-14 15:05 SGT
+Last Updated: 2026-04-14 15:09 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|

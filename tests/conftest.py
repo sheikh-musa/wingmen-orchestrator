@@ -29,6 +29,7 @@ def mock_supabase_chain(final_data=None, *, count=None):
     mock.limit.return_value = mock
     mock.maybeSingle.return_value = mock
     mock.upsert.return_value = mock
+    mock.delete.return_value = mock
     mock.not_ = mock
 
     result_mock = MagicMock(data=final_data, count=count)
