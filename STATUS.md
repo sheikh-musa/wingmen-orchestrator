@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-14 SGT
+Last Updated: 2026-04-14 19:49 SGT
 Build Status: green
 Deploy: N/A
 
@@ -11,15 +11,15 @@ Deploy: N/A
 Created `nervous_system/queue_stall_detector.py` with `check_queue_stalls()` — queries stalled queued jobs, dedup via notification_log, sends Telegram alert to CTO, recovery sweep clears dedup when jobs leave queued status. Wired into `wingmen_orch.py` main loop (60-poll interval). 5 new tests added, 258 total tests pass, 0 failures.
 
 ## Completed (Last 5)
+- [green] Job #35: ihsanos — [TASK-022] Re-measure BUG-005 hydration with per-stage instrumentation + production build (9m 32s, deploy: https://ihsandms-qk0oxeq1y-musaaaaaaas-projects.vercel.app)
 - [green] Job #71: wingmen-orchestrator — Queue stall detector with dedup and recovery sweep (deploy: N/A)
 - [green] Job #70: wingmen-orchestrator — [TASK-033] Zombie running-row cleanup on orchestrator startup (4m 8s, deploy: N/A)
 - [green] Job #69: wingmen-orchestrator — [TASK-037] Fire drill harness — 5 scenarios exercised and documented (7m 55s, deploy: N/A)
 - [green] Job #61: wingmen-orchestrator — [BUG-006] cc_work_sessions not being written — 1 row from 20+ jobs. Narrative layer is dead. (3m 36s, deploy: N/A)
-- [green] Job #61: wingmen-orchestrator — [BUG-006] Wire _write_work_session into success/failure/crash paths (2026-04-14)
 
-##       Recent Jobs (auto-tracked)
+##        Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-14 16:17 SGT
+Last Updated: 2026-04-14 19:49 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
@@ -32,7 +32,7 @@ Last Updated: 2026-04-14 16:17 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-14 16:17 SGT
+Last Updated: 2026-04-14 19:49 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
