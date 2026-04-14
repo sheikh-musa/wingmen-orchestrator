@@ -249,3 +249,22 @@ create policy "service role full access" on work_outputs
 create index idx_work_outputs_job on work_outputs(job_id);
 create index idx_work_outputs_repo on work_outputs(repo_name);
 create index idx_work_outputs_created on work_outputs(created_at desc);
+
+-- Semantic drift audits (LLM review of spec vs actual output)
+create table if not exists drift_audits (
+  id bigint generated always as identity primary key,
+  job_id bigint not null references jobs(id),
+  repo_name text not null,
+  build_spec text,
+  actual_output text,
+  verdict text not null check (verdict in ('aligned', 'minor_drift', 'major_drift')),
+  reasoning text not null,
+  drift_details text,
+  created_at timestamptz not null default now()
+);
+alter table drift_audits enable row level security;
+create policy "service role full access" on drift_audits
+  using (true) with check (true);
+create index idx_drift_audits_job on drift_audits(job_id);
+create index idx_drift_audits_verdict on drift_audits(verdict);
+create index idx_drift_audits_created on drift_audits(created_at desc);

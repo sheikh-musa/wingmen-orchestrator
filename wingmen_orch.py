@@ -25,6 +25,7 @@ import deploy_manager
 import status_reporter
 import test_gate
 import build_audit
+import semantic_drift
 from nervous_system.bug_escalation import check_stale_bugs
 from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
@@ -604,6 +605,7 @@ async def main_loop():
     feature_health_counter = 0
     strategic_decisions_counter = 0
     qa_bridge_counter = 0
+    drift_audit_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -726,6 +728,15 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"Feature health signal task failed: {e}")
                 feature_health_counter = 0
+
+            # Semantic drift audit — every 60 polls (~30 min).
+            drift_audit_counter += 1
+            if drift_audit_counter >= 60:
+                try:
+                    await semantic_drift.run_drift_audit(supabase)
+                except Exception as e:
+                    logger.error(f"Semantic drift audit failed: {e}")
+                drift_audit_counter = 0
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)
