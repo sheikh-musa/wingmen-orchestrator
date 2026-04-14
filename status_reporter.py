@@ -288,6 +288,30 @@ async def _update_orch_status(
 
         orch_status.write_text(new_content)
         logger.info("Updated orchestrator STATUS.md")
+
+        # Commit the orchestrator's own STATUS.md change. Without this,
+        # every job leaves ~/wingmen/orchestrator with a dirty tree, which
+        # TASK-027's pre-flight clean-tree check then rejects on the NEXT
+        # orchestrator self-job. TASK-033, TASK-034, TASK-037 all got
+        # blocked by this on 2026-04-14 before the fix.
+        orch_dir = Path(__file__).parent
+        if (orch_dir / ".git").exists():
+            proc = await asyncio.create_subprocess_exec(
+                "git", "add", "STATUS.md",
+                cwd=str(orch_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            proc = await asyncio.create_subprocess_exec(
+                "git", "commit", "-m", f"chore: orch STATUS.md [job_{job['id']}]",
+                cwd=str(orch_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            # Non-zero exit is fine (e.g., nothing to commit for self-jobs
+            # where _git_commit_status already captured STATUS.md).
     except Exception as e:
         logger.warning(f"Failed to update orchestrator STATUS.md: {e}")
 
