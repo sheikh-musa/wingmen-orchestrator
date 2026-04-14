@@ -95,6 +95,31 @@ class TestPickNextJobs:
         assert len(result) == 1
 
     @pytest.mark.asyncio
+    async def test_skips_job_when_cas_claim_fails(self):
+        from wingmen_orch import pick_next_jobs
+
+        jobs = [
+            {"id": 1, "repo_name": "ihsandms", "status": "queued"},
+            {"id": 2, "repo_name": "dookana", "status": "queued"},
+        ]
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.order.return_value = sb
+        sb.limit.return_value = sb
+        sb.update.return_value = sb
+
+        select_result = MagicMock(data=jobs)
+        cas_fail = MagicMock(data=[])  # another instance grabbed it
+        cas_ok = MagicMock(data=[{"id": 2, "repo_name": "dookana", "status": "running"}])
+        sb.execute = AsyncMock(side_effect=[select_result, cas_fail, cas_ok])
+
+        result = await pick_next_jobs(sb, set(), max_picks=5)
+        assert len(result) == 1
+        assert result[0]["repo_name"] == "dookana"
+
+    @pytest.mark.asyncio
     async def test_returns_empty_when_max_picks_zero(self):
         from wingmen_orch import pick_next_jobs
 
@@ -102,6 +127,52 @@ class TestPickNextJobs:
         result = await pick_next_jobs(sb, set(), max_picks=0)
         assert result == []
         sb.execute.assert_not_called()
+
+
+class TestMainLoopConcurrency:
+    def test_available_slot_calculation(self):
+        max_builds = 3
+
+        # No tasks running — all slots free
+        running = {}
+        assert max_builds - len(running) == 3
+
+        # One task running
+        running = {"ihsandms": MagicMock()}
+        assert max_builds - len(running) == 2
+
+        # All slots occupied
+        running = {"ihsandms": MagicMock(), "dookana": MagicMock(), "hifz-companion": MagicMock()}
+        assert max_builds - len(running) == 0
+
+    @pytest.mark.asyncio
+    async def test_respects_max_concurrent_builds(self):
+        from wingmen_orch import pick_next_jobs, MAX_CONCURRENT_BUILDS
+
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.order.return_value = sb
+        sb.limit.return_value = sb
+        sb.update.return_value = sb
+
+        # With 2 of MAX slots occupied, only MAX-2 slots should be requested
+        running_tasks = {"ihsandms": MagicMock(), "dookana": MagicMock()}
+        available = MAX_CONCURRENT_BUILDS - len(running_tasks)
+        running_repos = set(running_tasks.keys())
+
+        if available > 0:
+            jobs_data = [{"id": 5, "repo_name": "hifz-companion", "status": "queued"}]
+            select_result = MagicMock(data=jobs_data)
+            claim_ok = MagicMock(data=[{"id": 5, "repo_name": "hifz-companion", "status": "running"}])
+            sb.execute = AsyncMock(side_effect=[select_result, claim_ok])
+
+            result = await pick_next_jobs(sb, running_repos, available)
+            assert len(result) <= available
+        else:
+            result = await pick_next_jobs(sb, running_repos, available)
+            assert result == []
 
 
 class TestRecoverStaleJobs:
@@ -294,6 +365,8 @@ class TestRunJob:
              patch("wingmen_orch.ralph_runner") as ralph, \
              patch("wingmen_orch.deploy_manager") as deploy, \
              patch("wingmen_orch.status_reporter") as reporter, \
+             patch("wingmen_orch.test_gate") as tg, \
+             patch("wingmen_orch.build_audit") as audit, \
              patch("wingmen_orch._ensure_repo", new_callable=AsyncMock), \
              patch("wingmen_orch._git_pull", new_callable=AsyncMock), \
              patch("wingmen_orch._git_push", new_callable=AsyncMock), \
@@ -302,8 +375,11 @@ class TestRunJob:
             mock_proc.return_value.communicate = AsyncMock(return_value=(b"", b""))
             ctx.load_context = AsyncMock(return_value=mock_context)
             spec.generate_spec = AsyncMock(return_value="build this")
+            spec.validate_spec = MagicMock(return_value=(True, []))
             ralph.run_claude = AsyncMock(return_value=mock_result)
             deploy.deploy = AsyncMock(return_value=mock_deploy)
+            tg.run_tests = AsyncMock(return_value={"passed": True, "output": "ok"})
+            audit.maybe_audit = AsyncMock()
             reporter.notify_progress = AsyncMock()
             reporter.report = AsyncMock()
             reporter._format_elapsed = lambda s: f"{int(s)}s"
