@@ -46,7 +46,10 @@ async def run_tests(repo_path: str, repo_name: str, job_id: int, supabase) -> di
         try:
             pkg = json.loads((repo / "package.json").read_text())
             if "test" in pkg.get("scripts", {}):
-                test_cmd = ["npm", "test", "--", "--ci"]
+                # No --ci flag: vitest rejects it with CACError, and Jest
+                # doesn't need it here (repo CI scripts are already non-watch).
+                # Previously blocked job #23 three times on cosem-tdu.
+                test_cmd = ["npm", "test"]
             else:
                 await _log_to_supabase(supabase, job_id, repo_name, "No test script in package.json, skipping")
                 return {"passed": True, "output": "No test script in package.json, skipping", "skipped": True}
