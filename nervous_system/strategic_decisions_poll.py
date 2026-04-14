@@ -21,40 +21,40 @@ logger = logging.getLogger("wingmen.strategic_decisions_poll")
 async def poll_strategic_decisions(supabase, bot=None, musa_chat_id: str | None = None):
     """Find decisions ready for execution under ARCH-013 mutual-review.
 
-    Queue criteria (any ONE of these):
+    ONLY TASK-* and BUG-* prefixes auto-queue as jobs. Everything else
+    (IMPL-* reports, CAI-RESP-* rulings, ARCH-* designs, OPS-*, FEE-*,
+    PROD-*) is state/context — not implementable work. This guard was
+    added after 17 IMPL-* rows spuriously re-queued when the filter was
+    just source+status without a prefix check.
+
+    Queue criteria (must be TASK-* or BUG-* prefix, AND any ONE of):
       - source=claude_ai_session AND challenge_status=accepted
         → cai wrote it, CC reviewed and agreed
       - source=claude_code_proposal AND challenge_status=accepted
         → CC proposed it, cai reviewed and agreed
-      - source=musa_direct
+      - source=musa_direct AND challenge_status=accepted
         → Musa ruled, binding
       - bypass_review=true
         → emergency escape (only musa_direct can set this)
-
-    CAI-RESP-* with challenge_status=challenge_window also auto-queues — these
-    are responses to CC challenges, not new work proposals; adversarial
-    review already happened in the original challenge.
 
     Called every 10 polls (~5 min) from the main orchestrator loop.
     """
     try:
         # ARCH-013: mutual-review-or-musa_direct-or-bypass
-        # Build an OR filter:
-        #   (source=claude_ai_session + status=accepted) OR
-        #   (source=claude_code_proposal + status=accepted) OR
-        #   (source=musa_direct) OR
-        #   (bypass_review=true) OR
-        #   (ref LIKE 'CAI-RESP-%' + status=challenge_window)
+        # PREFIX GUARD: Only TASK-* and BUG-* are implementable work.
         result = await supabase.table("strategic_decisions").select(
             "id, decision_ref, title, decision, reasoning, repos_affected, challenge_status, source, bypass_review, created_at"
         ).or_(
+            "decision_ref.like.TASK-%,decision_ref.like.BUG-%"
+        ).or_(
             "and(source.eq.claude_ai_session,challenge_status.eq.accepted),"
             "and(source.eq.claude_code_proposal,challenge_status.eq.accepted),"
-            "source.eq.musa_direct,"
-            "bypass_review.eq.true,"
-            "and(decision_ref.like.CAI-RESP-%,challenge_status.eq.challenge_window)"
+            "and(source.eq.musa_direct,challenge_status.eq.accepted),"
+            "bypass_review.eq.true"
         ).is_(
             "notified_at", "null"
+        ).is_(
+            "execution_status", "null"
         ).order("created_at", desc=False).execute()
 
         rows = result.data or []
@@ -103,8 +103,8 @@ async def poll_strategic_decisions(supabase, bot=None, musa_chat_id: str | None 
                 f"3. Write deliverables to work_outputs (ARCH-010) and a narrative "
                 f"row to cc_work_sessions (BUG-006 fix).\n"
                 f"4. Update repo_context after completing work.\n"
-                f"5. On success, the orchestrator will auto-flip the source decision "
-                f"to 'implemented' (once TASK-026 lands). Until then, flip it yourself."
+                f"5. On success, the orchestrator auto-flips the source decision "
+                f"to 'implemented'. Do NOT update challenge_status yourself."
             )
 
             # Queue a job for the orchestrator to pick up
@@ -195,6 +195,20 @@ async def notify_decision_complete(
         }).execute()
     except Exception as e:
         logger.error(f"Failed to log completion notification for {decision_ref}: {e}")
+
+    await _mark_decision_executed(supabase, decision_ref, job_id, success)
+
+
+async def _mark_decision_executed(supabase, decision_ref: str, job_id: int, success: bool):
+    """Update strategic_decisions with execution outcome."""
+    try:
+        await supabase.table("strategic_decisions").update({
+            "execution_status": "implemented" if success else "failed",
+            "completed_job_id": job_id,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("decision_ref", decision_ref).execute()
+    except Exception as e:
+        logger.error(f"Failed to mark {decision_ref} as {'implemented' if success else 'failed'}: {e}")
 
 
 async def _mark_notified(supabase, row_id: int, ref: str):

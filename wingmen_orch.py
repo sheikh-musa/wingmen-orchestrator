@@ -280,6 +280,32 @@ async def _write_work_output(supabase, job_id, repo_name, **fields):
     logger.info(f"  Wrote work_output for job #{job_id}")
 
 
+async def _write_work_session(supabase, job_id, repo_name, **fields):
+    """Write a narrative work-session record to Supabase (BUG-006)."""
+    row = {"job_id": job_id, "repo_name": repo_name}
+    row.update(fields)
+    await supabase.table("cc_work_sessions").insert(row).execute()
+    logger.info(f"  Wrote cc_work_session for job #{job_id}")
+
+
+def _build_narrative(job, outcome, result_summary="", deploy_url=None, elapsed=None):
+    """Build a human-readable narrative string for a work session."""
+    desc = job.get("description", "unknown task")
+    triggered = job.get("triggered_by", "unknown")
+    parts = [f"Job #{job['id']} ({desc}), triggered by {triggered}."]
+    if outcome == "success":
+        parts.append(f"Completed successfully in {elapsed:.0f}s." if elapsed else "Completed successfully.")
+        if deploy_url:
+            parts.append(f"Deployed to {deploy_url}.")
+    elif outcome == "failed":
+        parts.append(f"Failed after {elapsed:.0f}s." if elapsed else "Failed.")
+    elif outcome == "crashed":
+        parts.append(f"Crashed after {elapsed:.0f}s." if elapsed else "Crashed.")
+    if result_summary:
+        parts.append(f"Summary: {result_summary[:500]}")
+    return " ".join(parts)
+
+
 async def _resolve_client_chat_id(supabase, job: dict) -> str | None:
     """Look up the Telegram chat_id for the client who triggered this job."""
     if not job.get("client_id"):

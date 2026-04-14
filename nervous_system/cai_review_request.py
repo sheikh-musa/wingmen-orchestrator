@@ -93,7 +93,8 @@ async def poll_cai_review_requests(supabase, bot=None, musa_chat_id: str | None 
                 )
                 try:
                     sent = await bot.send_message(chat_id=musa_chat_id, text=msg)
-                    # Log to notification_log (ARCH-007)
+                    # Log to notification_log with dedup_key so re-sends are idempotent
+                    # (cai flagged this gap: prior rows had dedup_key=null).
                     try:
                         await supabase.table("notification_log").insert({
                             "source": "cai_review_request",
@@ -102,6 +103,7 @@ async def poll_cai_review_requests(supabase, bot=None, musa_chat_id: str | None 
                             "recipient": musa_chat_id or "unknown",
                             "message_text": msg,
                             "telegram_msg_id": sent.message_id,
+                            "dedup_key": f"decision:{ref}:cai_review",
                         }).execute()
                     except Exception as log_e:
                         logger.error(f"Failed to log notification for {ref}: {log_e}")

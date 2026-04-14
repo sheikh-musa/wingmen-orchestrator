@@ -250,6 +250,53 @@ create index idx_work_outputs_job on work_outputs(job_id);
 create index idx_work_outputs_repo on work_outputs(repo_name);
 create index idx_work_outputs_created on work_outputs(created_at desc);
 
+-- ARCH-004: polled by strategic_decisions_poll.py
+create table if not exists strategic_decisions (
+  id bigint generated always as identity primary key,
+  decision_ref text not null,
+  title text not null,
+  decision text,
+  reasoning text,
+  repos_affected text[],
+  source text not null,
+    -- claude_ai_session | claude_code_proposal | musa_direct
+  challenge_status text,
+    -- accepted | cai_review_requested | challenge_window
+  bypass_review boolean default false,
+  notified_at timestamptz,
+  execution_status text,
+    -- NULL (pending) | implemented | failed
+  completed_job_id bigint,
+  completed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+alter table strategic_decisions enable row level security;
+create policy "service role full access" on strategic_decisions
+  using (true) with check (true);
+create index idx_strategic_decisions_ref on strategic_decisions(decision_ref);
+create index idx_strategic_decisions_source on strategic_decisions(source);
+create index idx_strategic_decisions_created on strategic_decisions(created_at desc);
+
+-- ARCH-007: notification dedup + cai visibility
+create table if not exists notification_log (
+  id bigint generated always as identity primary key,
+  source text not null,
+    -- strategic_decisions_poll | strategic_decisions_complete | cai_review_request | job_progress | job_complete
+  decision_ref text,
+  channel text default 'telegram',
+  recipient text,
+  message_text text,
+  telegram_msg_id text,
+  dedup_key text unique,
+  created_at timestamptz not null default now()
+);
+alter table notification_log enable row level security;
+create policy "service role full access" on notification_log
+  using (true) with check (true);
+create index idx_notification_log_dedup on notification_log(dedup_key) where dedup_key is not null;
+create index idx_notification_log_decision on notification_log(decision_ref) where decision_ref is not null;
+create index idx_notification_log_created on notification_log(created_at desc);
+
 -- Semantic drift audits (LLM review of spec vs actual output)
 create table if not exists drift_audits (
   id bigint generated always as identity primary key,
@@ -268,3 +315,25 @@ create policy "service role full access" on drift_audits
 create index idx_drift_audits_job on drift_audits(job_id);
 create index idx_drift_audits_verdict on drift_audits(verdict);
 create index idx_drift_audits_created on drift_audits(created_at desc);
+
+-- Claude Code work session narratives (BUG-006)
+create table if not exists cc_work_sessions (
+  id bigint generated always as identity primary key,
+  job_id bigint not null references jobs(id),
+  repo_name text not null,
+  triggered_by text,
+  session_prompt text,
+  narrative text not null,
+  outcome text not null check (outcome in ('success', 'failed', 'crashed')),
+  duration_seconds int,
+  files_changed text[],
+  commit_sha text,
+  deploy_url text,
+  created_at timestamptz not null default now()
+);
+alter table cc_work_sessions enable row level security;
+create policy "service role full access" on cc_work_sessions
+  using (true) with check (true);
+create index idx_cc_work_sessions_job on cc_work_sessions(job_id);
+create index idx_cc_work_sessions_repo on cc_work_sessions(repo_name);
+create index idx_cc_work_sessions_created on cc_work_sessions(created_at desc);

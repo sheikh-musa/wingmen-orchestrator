@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -19,6 +20,48 @@ SGT = timezone(timedelta(hours=8))
 TELEGRAM_API = "https://api.telegram.org"
 
 
+_DECISION_REF_PATTERN = re.compile(r"\[([A-Z]+-\d+)\]")
+
+
+async def _human_title(supabase, description: str, fallback_repo: str) -> str:
+    """Storytelling mode: turn '[TASK-022] Re-measure BUG-005 hydration...'
+    into 'Hydration re-measurement (ihsanos)'. Falls back to repo + first
+    clause of description if no decision_ref or lookup fails.
+    """
+    if supabase is None:
+        return f"{fallback_repo}: {description[:60]}"
+    match = _DECISION_REF_PATTERN.search(description)
+    if not match:
+        return f"{fallback_repo}: {description[:60]}"
+    ref = match.group(1)
+    try:
+        result = await supabase.table("strategic_decisions").select(
+            "title"
+        ).eq("decision_ref", ref).limit(1).single().execute()
+        title = result.data.get("title", "") if result.data else ""
+        # Strip common prefixes and take first clause
+        for prefix in (f"{ref}: ", f"[{ref}] "):
+            if title.startswith(prefix):
+                title = title[len(prefix):]
+                break
+        # First sentence or clause, capped at 70 chars
+        short = title.split(" — ")[0].split(": ")[0].strip()[:70]
+        return f"{short} ({fallback_repo})" if short else f"{fallback_repo}: {description[:60]}"
+    except Exception:
+        return f"{fallback_repo}: {description[:60]}"
+
+
+_PHASE_VERBS = {
+    "picked": "Starting",
+    "context": "Loading context",
+    "spec": "Planning",
+    "claude": "Building",
+    "deploy": "Deploying",
+    "failed": "Failed",
+    "paused": "Paused",
+}
+
+
 async def notify_progress(
     job_id: int,
     repo_name: str,
@@ -29,8 +72,8 @@ async def notify_progress(
 ) -> None:
     """Send a lightweight Telegram progress update to admin + client.
 
-    BUG-002: Dedups via notification_log.dedup_key to prevent duplicate sends
-    when orchestrator restarts or jobs get re-picked up.
+    Storytelling mode: uses the decision title, not [TASK-XXX] refs.
+    BUG-002: Dedups via notification_log.dedup_key to prevent duplicate sends.
     """
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     admin_id = get_chat_id("cto")
@@ -50,6 +93,22 @@ async def notify_progress(
         except Exception as e:
             logger.warning(f"Dedup check failed for {dedup_key}: {e}")
 
+    # Storytelling mode: look up the decision title from the job description
+    # (which still carries [TASK-XXX] for audit).
+    description = detail if phase == "picked" else ""
+    # notify_progress gets `detail` which varies by phase; fetch job description
+    # from DB for consistent title lookup.
+    try:
+        job_row = await supabase.table("jobs").select("description").eq(
+            "id", job_id
+        ).single().execute() if supabase else None
+        if job_row and job_row.data:
+            description = job_row.data.get("description", description)
+    except Exception:
+        pass
+
+    human = await _human_title(supabase, description, repo_name)
+
     icons = {
         "picked": "\u25b6\ufe0f",     # ▶️
         "context": "\U0001f4c2",       # 📂
@@ -60,8 +119,15 @@ async def notify_progress(
         "paused": "\u23f8\ufe0f",      # ⏸️
     }
     icon = icons.get(phase, "\U0001f504")  # 🔄
+    verb = _PHASE_VERBS.get(phase, phase.capitalize())
 
-    msg = f"{icon} Job #{job_id} [{repo_name}]\n{phase.upper()}: {detail}" if detail else f"{icon} Job #{job_id} [{repo_name}] — {phase}"
+    if phase in ("failed", "paused") and detail:
+        # Errors need the detail visible
+        msg = f"{icon} {verb}: {human}\n\n{detail[:400]}"
+    elif detail and phase != "picked":
+        msg = f"{icon} {verb}: {human}\n{detail[:200]}"
+    else:
+        msg = f"{icon} {verb}: {human}"
 
     url = f"{TELEGRAM_API}/bot{token}/sendMessage"
     # Send to all recipients (admin always, client if set)
@@ -281,12 +347,14 @@ async def _send_telegram(
         except Exception as e:
             logger.warning(f"Dedup check failed for {dedup_key}: {e}")
 
-    deploy_line = f"\U0001f4e6 Deploy: {deploy_url}\n" if deploy_url else ""
+    # Storytelling mode: use decision title, not [TASK-XXX] ref
+    human = await _human_title(supabase, job.get("description", ""), job["repo_name"])
+    landed_verb = "Landed" if build_status == "green" else "Broke"
+    deploy_line = f"\U0001f4e6 Live: {deploy_url}\n" if deploy_url else ""
     message = (
-        f"{status_emoji} {job['repo_name']} — {job['description']}\n"
+        f"{status_emoji} {landed_verb}: {human}\n"
         f"{deploy_line}"
-        f"\U0001f4cb Status: {build_status}\n"
-        f"\u23f1 Duration: {elapsed}"
+        f"\u23f1 {elapsed}"
     ).strip()
 
     url = f"{TELEGRAM_API}/bot{token}/sendMessage"

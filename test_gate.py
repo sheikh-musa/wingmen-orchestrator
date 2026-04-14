@@ -31,9 +31,18 @@ async def run_tests(repo_path: str, repo_name: str, job_id: int, supabase) -> di
     """Auto-detect test infrastructure and run the repo's test suite."""
     repo = Path(repo_path)
 
-    if (repo / "pytest.ini").exists() or (repo / "conftest.py").exists() or (repo / "tests").is_dir():
+    # Detection priority:
+    # 1. pytest.ini / conftest.py (pytest-specific markers) → Python pytest
+    # 2. package.json → Node, use npm test if present else skip
+    # 3. plain tests/ dir → ambiguous (React repos use it for Playwright);
+    #    only treat as pytest if no package.json is present
+    # 4. nothing → skip
+    is_pytest = (repo / "pytest.ini").exists() or (repo / "conftest.py").exists()
+    is_node = (repo / "package.json").exists()
+
+    if is_pytest:
         test_cmd = ["python", "-m", "pytest", "--tb=short", "-q"]
-    elif (repo / "package.json").exists():
+    elif is_node:
         try:
             pkg = json.loads((repo / "package.json").read_text())
             if "test" in pkg.get("scripts", {}):
@@ -44,6 +53,9 @@ async def run_tests(repo_path: str, repo_name: str, job_id: int, supabase) -> di
         except (json.JSONDecodeError, OSError):
             await _log_to_supabase(supabase, job_id, repo_name, "Could not parse package.json, skipping tests")
             return {"passed": True, "output": "Could not parse package.json, skipping", "skipped": True}
+    elif (repo / "tests").is_dir():
+        # Pure Python repo with tests/ but no pytest.ini — try pytest anyway
+        test_cmd = ["python", "-m", "pytest", "--tb=short", "-q"]
     else:
         await _log_to_supabase(supabase, job_id, repo_name, "No test infrastructure detected, skipping")
         return {"passed": True, "output": "No test infrastructure detected, skipping", "skipped": True}
