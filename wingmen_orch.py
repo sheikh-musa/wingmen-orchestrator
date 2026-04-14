@@ -27,6 +27,7 @@ import test_gate
 import build_audit
 import semantic_drift
 from nervous_system.bug_escalation import check_stale_bugs
+from nervous_system.paused_job_escalation import check_paused_jobs
 from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from nervous_system.council_summary import summarize_pending_sessions
@@ -206,6 +207,26 @@ async def _git_pull(repo_path: str) -> None:
         logger.warning("  Git pull timed out")
 
 
+async def _check_clean_tree(repo_path: str) -> tuple:
+    """Check that the working tree has no uncommitted or untracked files."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "status", "--porcelain",
+        cwd=repo_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return False, "git status timed out"
+
+    output = stdout.decode(errors="replace").strip()
+    if not output:
+        return True, ""
+    return False, output
+
+
 async def _git_push(repo_path: str, job_id: int, description: str) -> None:
     """Stage, commit, and push changes made by Claude CLI."""
     async def _run(cmd, timeout=60):
@@ -354,6 +375,14 @@ async def run_job(supabase, job: dict) -> None:
             await proc.communicate()
         except Exception:
             pass
+
+        # 2b. Pre-flight: reject dirty working tree (TASK-027)
+        clean, dirty_files = await _check_clean_tree(context["repo_path"])
+        if not clean:
+            error_msg = f"Dirty working tree — aborting to prevent attribution theft. Files:\n{dirty_files[:500]}"
+            logger.warning(f"  {error_msg}")
+            await notify(job_id, repo_name, "failed", error_msg[:200])
+            raise RuntimeError(error_msg)
 
         # 3. Generate spec prompt
         prompt_text = await spec_generator.generate_spec(job, context)
@@ -632,6 +661,7 @@ async def main_loop():
     strategic_decisions_counter = 0
     qa_bridge_counter = 0
     drift_audit_counter = 0
+    paused_job_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -667,6 +697,19 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"Bug escalation check failed: {e}")
                 escalation_counter = 0
+
+            # Check paused jobs every 60 polls (~30 min)
+            paused_job_counter += 1
+            if paused_job_counter >= 60:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    if bot_token:
+                        bot = Bot(token=bot_token)
+                        await check_paused_jobs(supabase, bot)
+                except Exception as e:
+                    logger.error(f"Paused job escalation check failed: {e}")
+                paused_job_counter = 0
 
             # Clean up expired bot conversations every 60 polls (~30 min)
             cleanup_counter += 1
