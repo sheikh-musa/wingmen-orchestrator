@@ -43,7 +43,7 @@ async def poll_strategic_decisions(supabase, bot=None, musa_chat_id: str | None 
         # ARCH-013: mutual-review-or-musa_direct-or-bypass
         # PREFIX GUARD: Only TASK-* and BUG-* are implementable work.
         result = await supabase.table("strategic_decisions").select(
-            "id, decision_ref, title, decision, reasoning, repos_affected, challenge_status, source, bypass_review, created_at"
+            "id, decision_ref, title, decision, reasoning, repos_affected, challenge_status, source, bypass_review, created_at, category, parent_ref"
         ).or_(
             "decision_ref.like.TASK-%,decision_ref.like.BUG-%"
         ).or_(

@@ -276,6 +276,10 @@ create policy "service role full access" on strategic_decisions
 create index idx_strategic_decisions_ref on strategic_decisions(decision_ref);
 create index idx_strategic_decisions_source on strategic_decisions(source);
 create index idx_strategic_decisions_created on strategic_decisions(created_at desc);
+alter table strategic_decisions add column if not exists category text;
+alter table strategic_decisions add column if not exists parent_ref text;
+create index if not exists idx_strategic_decisions_category on strategic_decisions(category) where category is not null;
+create index if not exists idx_strategic_decisions_parent on strategic_decisions(parent_ref) where parent_ref is not null;
 
 -- ARCH-007: notification dedup + cai visibility
 create table if not exists notification_log (

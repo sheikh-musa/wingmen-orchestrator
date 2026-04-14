@@ -66,7 +66,7 @@ async def poll_cai_review_requests(supabase, bot=None, musa_chat_id: str | None 
     """
     try:
         result = await supabase.table("strategic_decisions").select(
-            "id, decision_ref, title, reasoning"
+            "id, decision_ref, title, reasoning, category, parent_ref"
         ).eq("source", "claude_code_proposal").eq(
             "challenge_status", "cai_review_requested"
         ).is_(
