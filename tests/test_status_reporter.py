@@ -96,10 +96,10 @@ class TestUpdateStatusMd:
         assert "ihsandms STATUS" in content
         assert "green" in content
         assert "https://test.vercel.app" in content
-        assert "Job #42" in content
+        assert "| #42 |" in content
 
     @pytest.mark.asyncio
-    async def test_preserves_next_up_section(self, tmp_path):
+    async def test_preserves_existing_content(self, tmp_path):
         from status_reporter import _update_status_md
 
         status_file = tmp_path / "STATUS.md"
@@ -114,8 +114,14 @@ class TestUpdateStatusMd:
         await _update_status_md(tmp_path, job, "green", None, "2026-04-14 13:00 SGT")
 
         content = status_file.read_text()
-        assert "Previous Next Up" in content
-        assert "Fix bug" in content
+        # Append-only: every line of hand-written content must survive
+        assert "## Next Up" in content
+        assert "- Fix bug" in content
+        assert "- Add tests" in content
+        assert "## Other" in content
+        # And the marker section is appended below
+        assert "## Recent Jobs (auto-tracked)" in content
+        assert "| #43 |" in content
 
 
 class TestStatusMdPreservation:

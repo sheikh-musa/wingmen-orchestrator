@@ -397,6 +397,8 @@ async def deploy_fix(supabase: SupabaseAsyncClient, bug_id: str) -> None:
 def _get_test_command(repo_name: str, repo_config: dict) -> str | None:
     """Get the test command for a repo."""
     repo_path = repo_config.get("local_path", "")
+    if not repo_path:
+        return None
 
     if os.path.exists(os.path.join(repo_path, "vitest.config.ts")) or \
        os.path.exists(os.path.join(repo_path, "vitest.config.js")):

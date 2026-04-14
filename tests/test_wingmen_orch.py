@@ -380,6 +380,7 @@ class TestRunJob:
             deploy.deploy = AsyncMock(return_value=mock_deploy)
             tg.run_tests = AsyncMock(return_value={"passed": True, "output": "ok"})
             audit.maybe_audit = AsyncMock()
+            audit.verify_work_output = AsyncMock()
             reporter.notify_progress = AsyncMock()
             reporter.report = AsyncMock()
             reporter._format_elapsed = lambda s: f"{int(s)}s"
