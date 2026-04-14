@@ -40,3 +40,4 @@ Always-on Python orchestrator running on Mac Mini that manages builds, deploys, 
 - Use Supabase MCP for DB queries when available
 - Use Vercel MCP for deployment operations when available
 - Log all build operations to the `build_log` table
+- All audit deliverables (build specs, diffs, test results, deploy URLs) must be written to Supabase `work_outputs` table — repo files alone are not sufficient

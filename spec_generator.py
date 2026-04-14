@@ -57,6 +57,8 @@ Follow these rules strictly:
 
 6. **MOBILE-FIRST**: If the project uses responsive design, ensure changes work on mobile viewports (375px).
 
+7. **SUPABASE-FIRST AUDIT**: All build outputs and audit deliverables must be written to the Supabase `work_outputs` table. Do not rely on repo files alone for audit trail. The orchestrator handles this automatically — do not duplicate the writes.
+
 Output format:
 
 ### Role

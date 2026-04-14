@@ -422,6 +422,10 @@ async def run_job(supabase, job: dict) -> None:
                 test_passed=True,
                 success=True,
             )
+            try:
+                await build_audit.verify_work_output(supabase, job_id, repo_name)
+            except Exception:
+                pass
 
             # Notify Musa if this was a strategic decision auto-implementation
             if job.get("triggered_by") == "strategic_decisions_poll":
@@ -511,6 +515,10 @@ async def run_job(supabase, job: dict) -> None:
                 test_passed=False,
                 success=False,
             )
+            try:
+                await build_audit.verify_work_output(supabase, job_id, repo_name)
+            except Exception:
+                pass
 
     except Exception as e:
         logger.exception(f"💥 Job #{job_id} crashed: {e}")
@@ -530,6 +538,10 @@ async def run_job(supabase, job: dict) -> None:
                 cc_output_summary=str(e)[:5000],
                 success=False,
             )
+        except Exception:
+            pass
+        try:
+            await build_audit.verify_work_output(supabase, job_id, repo_name)
         except Exception:
             pass
 
