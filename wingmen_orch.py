@@ -28,6 +28,7 @@ import build_audit
 import semantic_drift
 from nervous_system.bug_escalation import check_stale_bugs
 from nervous_system.paused_job_escalation import check_paused_jobs
+from nervous_system.queue_stall_detector import check_queue_stalls
 from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from nervous_system.council_summary import summarize_pending_sessions
@@ -762,6 +763,7 @@ async def main_loop():
     qa_bridge_counter = 0
     drift_audit_counter = 0
     paused_job_counter = 0
+    queue_stall_counter = 0
     uptime_monitor_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
@@ -811,6 +813,19 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"Paused job escalation check failed: {e}")
                 paused_job_counter = 0
+
+            # Check queue stalls every 60 polls (~30 min)
+            queue_stall_counter += 1
+            if queue_stall_counter >= 60:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    if bot_token:
+                        bot = Bot(token=bot_token)
+                        await check_queue_stalls(supabase, bot)
+                except Exception as e:
+                    logger.error(f"Queue stall check failed: {e}")
+                queue_stall_counter = 0
 
             # Clean up expired bot conversations every 60 polls (~30 min)
             cleanup_counter += 1
