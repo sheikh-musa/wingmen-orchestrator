@@ -116,3 +116,82 @@ class TestUpdateStatusMd:
         content = status_file.read_text()
         assert "Previous Next Up" in content
         assert "Fix bug" in content
+
+
+class TestStatusMdPreservation:
+
+    @pytest.mark.asyncio
+    async def test_preserves_content_above_marker(self, tmp_path):
+        from status_reporter import _update_status_md
+
+        status_file = tmp_path / "STATUS.md"
+        hand_written = "# My Project\n\nImportant context here.\n\n## Architecture\nDetails about the system.\n"
+        marker_section = "## Recent Jobs (auto-tracked)\n\nLast Updated: 2026-04-14 10:00 SGT\n\n| Job | Description | Status | Deploy |\n|-----|-------------|--------|--------|\n| #41 | Old job | green | N/A |\n"
+        status_file.write_text(hand_written + "\n" + marker_section)
+
+        job = {"id": 42, "repo_name": "test", "description": "New job", "result_summary": "Done"}
+        await _update_status_md(tmp_path, job, "green", None, "2026-04-14 12:00 SGT")
+
+        content = status_file.read_text()
+        assert "# My Project" in content
+        assert "Important context here." in content
+        assert "## Architecture" in content
+        assert "Details about the system." in content
+
+    @pytest.mark.asyncio
+    async def test_appends_marker_when_missing(self, tmp_path):
+        from status_reporter import _update_status_md
+
+        status_file = tmp_path / "STATUS.md"
+        original = "# My Project\n\nHand-written content only.\n"
+        status_file.write_text(original)
+
+        job = {"id": 42, "repo_name": "test", "description": "New job", "result_summary": "Done"}
+        await _update_status_md(tmp_path, job, "green", None, "2026-04-14 12:00 SGT")
+
+        content = status_file.read_text()
+        assert "# My Project" in content
+        assert "Hand-written content only." in content
+        assert "## Recent Jobs (auto-tracked)" in content
+        assert "| #42 |" in content
+
+    @pytest.mark.asyncio
+    async def test_limits_job_rows_to_10(self, tmp_path):
+        from status_reporter import _update_status_md
+
+        status_file = tmp_path / "STATUS.md"
+        existing_rows = "\n".join([f"| #{i} | Job {i} desc | green | N/A |" for i in range(1, 13)])
+        content = (
+            "# Project\n\n"
+            "## Recent Jobs (auto-tracked)\n\n"
+            "Last Updated: old\n\n"
+            "| Job | Description | Status | Deploy |\n"
+            "|-----|-------------|--------|--------|\n"
+            f"{existing_rows}\n"
+        )
+        status_file.write_text(content)
+
+        job = {"id": 99, "repo_name": "test", "description": "New job", "result_summary": "Done"}
+        await _update_status_md(tmp_path, job, "green", None, "2026-04-14 12:00 SGT")
+
+        result = status_file.read_text()
+        job_rows = [line for line in result.splitlines() if line.startswith("| #")]
+        assert len(job_rows) == 10
+        assert "| #99 |" in result
+
+    @pytest.mark.asyncio
+    async def test_never_overwrites_entire_file(self, tmp_path):
+        from status_reporter import _update_status_md
+
+        status_file = tmp_path / "STATUS.md"
+        lines = [f"Line {i}: important project context" for i in range(50)]
+        original = "\n".join(lines) + "\n"
+        status_file.write_text(original)
+
+        job = {"id": 42, "repo_name": "test", "description": "New job", "result_summary": "Done"}
+        await _update_status_md(tmp_path, job, "green", None, "2026-04-14 12:00 SGT")
+
+        content = status_file.read_text()
+        for i in range(50):
+            assert f"Line {i}: important project context" in content
+        assert "## Recent Jobs (auto-tracked)" in content

@@ -110,3 +110,17 @@ async def test_load_context_missing_files(repos_json, mock_supabase, tmp_path):
         ctx = await context_loader.load_context("empty-repo", mock_supabase)
         assert ctx["claude_md"] == ""
         assert ctx["status_md"] == ""
+
+
+class TestRepoConfigValidation:
+
+    def test_ihsanos_deploy_url_is_correct(self):
+        repos = json.loads((Path(__file__).parent.parent / "REPOS.json").read_text())
+        ihsanos = next(r for r in repos["repos"] if r["name"] == "ihsanos")
+        assert ihsanos["deploy_url"] == "https://ihsanos.com"
+
+    def test_all_active_repos_have_deploy_url(self):
+        repos = json.loads((Path(__file__).parent.parent / "REPOS.json").read_text())
+        for repo in repos["repos"]:
+            if repo["status"] == "active" and (repo.get("vercel_project") or repo.get("firebase_project")):
+                assert repo["deploy_url"], f"{repo['name']} has a deploy target but no deploy_url"
