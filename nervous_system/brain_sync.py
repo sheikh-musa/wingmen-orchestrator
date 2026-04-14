@@ -15,6 +15,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from nervous_system import error_tracker
+
 logger = logging.getLogger("wingmen.nervous_system.brain_sync")
 
 REPOS_JSON = Path(__file__).parent.parent / "REPOS.json"
@@ -257,6 +259,7 @@ async def _check_consecutive_failures(supabase, bot=None, admin_chat_id: str = "
                         pass
     except Exception as e:
         logger.warning(f"Consecutive failure check failed (non-fatal): {e}")
+        error_tracker.track_exception("brain_sync.consecutive_failure_check", e)
 
 
 async def brain_sync(supabase, bot=None, admin_chat_id: str = ""):
@@ -324,6 +327,7 @@ async def brain_sync(supabase, bot=None, admin_chat_id: str = ""):
                     context_notes.append(f"⚠️ Sync health DEGRADED: {prev_sync} → {sync_health}")
         except Exception as e:
             logger.warning(f"Regression detection failed (non-fatal): {e}")
+            error_tracker.track_exception("brain_sync.regression_detection", e)
 
         # 6. Write snapshot to Supabase (serialize dataclasses to dicts)
         snapshot = {
@@ -361,6 +365,7 @@ async def brain_sync(supabase, bot=None, admin_chat_id: str = ""):
 
     except Exception as e:
         logger.error(f"brain_sync failed: {e}")
+        error_tracker.track_exception("brain_sync.main", e)
         duration = int((time.monotonic() - start) * 1000)
         try:
             await supabase.table("brain_sync_log").insert({

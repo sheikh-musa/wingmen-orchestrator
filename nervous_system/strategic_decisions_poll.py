@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from nervous_system import error_tracker
+
 logger = logging.getLogger("wingmen.strategic_decisions_poll")
 
 async def poll_strategic_decisions(supabase, bot=None, musa_chat_id: str | None = None):
@@ -123,6 +125,7 @@ async def poll_strategic_decisions(supabase, bot=None, musa_chat_id: str | None 
 
             except Exception as e:
                 logger.error(f"Failed to queue job for {ref}: {e}")
+                error_tracker.track_exception("strategic_decisions_poll.queue_job", e)
                 continue
 
             # Log to notification_log (ARCH-007) with dedup_key to prevent double-queue
@@ -137,12 +140,14 @@ async def poll_strategic_decisions(supabase, bot=None, musa_chat_id: str | None 
                 }).execute()
             except Exception as e:
                 logger.error(f"Failed to log notification for {ref}: {e}")
+                error_tracker.track_exception("strategic_decisions_poll.log_notification", e)
 
             # Mark as notified — prevents re-queuing on next poll
             await _mark_notified(supabase, row["id"], ref)
 
     except Exception as e:
         logger.error(f"strategic_decisions_poll failed: {e}")
+        error_tracker.track_exception("strategic_decisions_poll.main", e)
 
 
 async def notify_decision_complete(
@@ -170,6 +175,7 @@ async def notify_decision_complete(
             return
     except Exception as e:
         logger.warning(f"Dedup check failed for {dedup_key}: {e}")
+        error_tracker.track_exception("strategic_decisions_poll.dedup_check", e)
 
     status_emoji = "✅" if success else "❌"
     msg = (
@@ -182,6 +188,7 @@ async def notify_decision_complete(
             await bot.send_message(chat_id=musa_chat_id, text=msg)
         except Exception as e:
             logger.error(f"Failed to notify completion for {decision_ref}: {e}")
+            error_tracker.track_exception("strategic_decisions_poll.completion_notify", e)
 
     # Log completion notification with dedup_key
     try:
@@ -195,6 +202,7 @@ async def notify_decision_complete(
         }).execute()
     except Exception as e:
         logger.error(f"Failed to log completion notification for {decision_ref}: {e}")
+        error_tracker.track_exception("strategic_decisions_poll.log_completion", e)
 
     await _mark_decision_executed(supabase, decision_ref, job_id, success)
 
@@ -209,6 +217,7 @@ async def _mark_decision_executed(supabase, decision_ref: str, job_id: int, succ
         }).eq("decision_ref", decision_ref).execute()
     except Exception as e:
         logger.error(f"Failed to mark {decision_ref} as {'implemented' if success else 'failed'}: {e}")
+        error_tracker.track_exception("strategic_decisions_poll.mark_executed", e)
 
 
 async def _mark_notified(supabase, row_id: int, ref: str):
@@ -219,3 +228,4 @@ async def _mark_notified(supabase, row_id: int, ref: str):
         ).eq("id", row_id).execute()
     except Exception as e:
         logger.error(f"Failed to mark {ref} as notified: {e}")
+        error_tracker.track_exception("strategic_decisions_poll.mark_notified", e)

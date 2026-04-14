@@ -15,6 +15,7 @@ from supabase import AsyncClient as SupabaseAsyncClient
 from telegram import Bot
 
 from notification_router import get_chat_id
+from nervous_system import error_tracker
 
 logger = logging.getLogger("wingmen.queue_stall_detector")
 
@@ -52,6 +53,7 @@ async def check_queue_stalls(supabase: SupabaseAsyncClient, bot: Bot) -> None:
                 continue
         except Exception as e:
             logger.warning(f"Dedup check failed for {dedup_key}: {e}")
+            error_tracker.track_exception("queue_stall_detector.dedup_check", e)
 
         try:
             await bot.send_message(
@@ -67,6 +69,7 @@ async def check_queue_stalls(supabase: SupabaseAsyncClient, bot: Bot) -> None:
             )
         except Exception as e:
             logger.error(f"Queue stall alert for job {job['id']} failed: {e}")
+            error_tracker.track_exception("queue_stall_detector.send_alert", e)
             continue
 
         try:
@@ -79,6 +82,7 @@ async def check_queue_stalls(supabase: SupabaseAsyncClient, bot: Bot) -> None:
             }).execute()
         except Exception as e:
             logger.error(f"Failed to log notification for job {job['id']}: {e}")
+            error_tracker.track_exception("queue_stall_detector.log_notification", e)
 
     # Recovery sweep: clear dedup keys for jobs no longer queued
     try:
@@ -100,6 +104,7 @@ async def check_queue_stalls(supabase: SupabaseAsyncClient, bot: Bot) -> None:
                 ).execute()
     except Exception as e:
         logger.warning(f"Recovery sweep failed: {e}")
+        error_tracker.track_exception("queue_stall_detector.recovery_sweep", e)
 
     if stalled_count:
         logger.info(f"Checked {stalled_count} stalled queued jobs")

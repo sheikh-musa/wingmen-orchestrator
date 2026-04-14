@@ -11,6 +11,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ai_provider import call_ai
+from nervous_system import error_tracker
 
 logger = logging.getLogger("wingmen.nervous_system.morning_brief")
 
@@ -68,6 +69,7 @@ Keep it to 3-5 bullet points. Be decisive, not diplomatic. Start each with an ac
         return await call_ai(prompt, system=system, model="fast", max_tokens=1024)
     except Exception as e:
         logger.error(f"Strategic analysis failed: {e}")
+        error_tracker.track_exception("morning_brief.strategic_analysis", e)
         return "(Strategic analysis unavailable)"
 
 
@@ -165,6 +167,7 @@ async def morning_brief(supabase, bot, admin_chat_id: str):
 
     except Exception as e:
         logger.error(f"morning_brief failed: {e}")
+        error_tracker.track_exception("morning_brief.main", e)
         try:
             await supabase.table("brain_sync_log").insert({
                 "task_name": "morning_brief",

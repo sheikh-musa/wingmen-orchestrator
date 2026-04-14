@@ -15,6 +15,7 @@ from supabase import AsyncClient as SupabaseAsyncClient
 from telegram import Bot
 
 from notification_router import get_chat_id
+from nervous_system import error_tracker
 
 logger = logging.getLogger("wingmen.paused_job_escalation")
 
@@ -50,6 +51,7 @@ async def check_paused_jobs(supabase: SupabaseAsyncClient, bot: Bot) -> None:
                     continue
             except Exception as e:
                 logger.warning(f"Dedup check failed for {dedup_key}: {e}")
+                error_tracker.track_exception("paused_job_escalation.dedup_check", e)
 
             try:
                 await bot.send_message(
@@ -65,6 +67,7 @@ async def check_paused_jobs(supabase: SupabaseAsyncClient, bot: Bot) -> None:
                 )
             except Exception as e:
                 logger.error(f"Urgent escalation for job {job['id']} failed: {e}")
+                error_tracker.track_exception("paused_job_escalation.urgent_send", e)
                 continue
 
             try:
@@ -77,6 +80,7 @@ async def check_paused_jobs(supabase: SupabaseAsyncClient, bot: Bot) -> None:
                 }).execute()
             except Exception as e:
                 logger.error(f"Failed to log notification for job {job['id']}: {e}")
+                error_tracker.track_exception("paused_job_escalation.log_notification", e)
 
         elif updated < one_hour_ago:
             dedup_key = f"paused_escalation:{job['id']}:reminder"
@@ -88,6 +92,7 @@ async def check_paused_jobs(supabase: SupabaseAsyncClient, bot: Bot) -> None:
                     continue
             except Exception as e:
                 logger.warning(f"Dedup check failed for {dedup_key}: {e}")
+                error_tracker.track_exception("paused_job_escalation.dedup_check", e)
 
             try:
                 await bot.send_message(
@@ -102,6 +107,7 @@ async def check_paused_jobs(supabase: SupabaseAsyncClient, bot: Bot) -> None:
                 )
             except Exception as e:
                 logger.error(f"Reminder for job {job['id']} failed: {e}")
+                error_tracker.track_exception("paused_job_escalation.reminder_send", e)
                 continue
 
             try:
@@ -114,6 +120,7 @@ async def check_paused_jobs(supabase: SupabaseAsyncClient, bot: Bot) -> None:
                 }).execute()
             except Exception as e:
                 logger.error(f"Failed to log notification for job {job['id']}: {e}")
+                error_tracker.track_exception("paused_job_escalation.log_notification", e)
 
     if paused_jobs:
         logger.info(f"Checked {len(paused_jobs)} paused jobs")
