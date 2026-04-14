@@ -28,3 +28,13 @@ Last Updated: 2026-04-14 15:05 SGT
 | #65 | [TASK-028] Paused job Telegram escalation — tiered alerts with dedup | green | N/A |
 | #64 | [TASK-027] Pre-flight dirty-tree check before Claude Code runs | green | N/A |
 | #63 | [TASK-026] Decision auto-flip on job completion — close the state-tracking gap | green | N/A |
+
+---
+
+## Recent Jobs (auto-tracked)
+
+Last Updated: 2026-04-14 15:09 SGT
+
+| Job | Description | Status | Deploy |
+|-----|-------------|--------|--------|
+| #68 | [TASK-032] Add category + parent_ref columns to strategic_decisions — human-read | green | N/A |
