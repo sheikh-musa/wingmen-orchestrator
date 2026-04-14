@@ -18,10 +18,11 @@ New `check_paused_jobs()` queries jobs table for `status="paused"`, sends remind
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-14 16:00 SGT
+Last Updated: 2026-04-14 15:05 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
+| #65 | [TASK-028] Paused job Telegram escalation — no more silent deaths | green | N/A |
 | #65 | [TASK-028] Paused job Telegram escalation — tiered alerts with dedup | green | N/A |
 | #64 | [TASK-027] Pre-flight dirty-tree check before Claude Code runs | green | N/A |
 | #63 | [TASK-026] Decision auto-flip on job completion — close the state-tracking gap | green | N/A |
