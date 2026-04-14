@@ -395,6 +395,19 @@ async def run_job(supabase, job: dict) -> None:
         if not valid:
             error_msg = f"Spec validation failed: {'; '.join(errors)}"
             logger.warning(f"  {error_msg}")
+            # Persist what the CLI actually returned so spec failures stop being
+            # blind. Job 35 hit this on 2026-04-14 with zero visibility into
+            # what came back from Claude CLI.
+            try:
+                await supabase.table("build_log").insert({
+                    "job_id": job_id,
+                    "repo_name": repo_name,
+                    "phase": "spec_invalid",
+                    "message": f"VALIDATION FAILED: {'; '.join(errors)}\n--- CLI OUTPUT (first 2000 chars) ---\n{(prompt_text or '')[:2000]}",
+                    "level": "error",
+                }).execute()
+            except Exception as log_e:
+                logger.warning(f"Could not persist invalid-spec diagnostic: {log_e}")
             await notify(job_id, repo_name, "failed", error_msg)
             raise RuntimeError(error_msg)
         await notify(job_id, repo_name, "spec", f"Spec validated OK ({len(prompt_text)} chars)")
