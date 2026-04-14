@@ -225,6 +225,57 @@ class TestRecoverStaleJobs:
         await recover_stale_jobs(sb)
 
 
+class TestCleanupZombieJobs:
+    @pytest.mark.asyncio
+    async def test_marks_zombie_jobs_failed(self):
+        from wingmen_orch import cleanup_zombie_jobs
+
+        zombie_jobs = [{"id": 5, "repo_name": "ihsandms"}]
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.update.return_value = sb
+
+        find_result = MagicMock(data=zombie_jobs)
+        update_result = MagicMock(data=[])
+        sb.execute = AsyncMock(side_effect=[find_result, update_result])
+
+        count = await cleanup_zombie_jobs(sb)
+        assert count == 1
+        assert sb.update.called
+        update_arg = sb.update.call_args[0][0]
+        assert update_arg["status"] == "failed"
+        assert update_arg["result_summary"].startswith("Zombie:")
+
+    @pytest.mark.asyncio
+    async def test_no_zombies_no_update(self):
+        from wingmen_orch import cleanup_zombie_jobs
+
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.execute = AsyncMock(return_value=MagicMock(data=[]))
+
+        count = await cleanup_zombie_jobs(sb)
+        assert count == 0
+        sb.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exception_does_not_crash(self):
+        from wingmen_orch import cleanup_zombie_jobs
+
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.execute = AsyncMock(side_effect=RuntimeError("db down"))
+
+        count = await cleanup_zombie_jobs(sb)
+        assert count == 0
+
+
 class TestSetJobStatus:
     @pytest.mark.asyncio
     async def test_sets_status_with_extras(self):

@@ -152,6 +152,30 @@ async def recover_stale_jobs(supabase) -> None:
         logger.error(f"Stale job recovery failed: {e}")
 
 
+async def cleanup_zombie_jobs(supabase) -> int:
+    """Mark all 'running' jobs as failed on startup — they were mid-execution when the process died."""
+    try:
+        result = await (
+            supabase.table("jobs")
+            .select("id, repo_name")
+            .eq("status", "running")
+            .execute()
+        )
+        zombies = result.data or []
+        for job in zombies:
+            await (
+                supabase.table("jobs")
+                .update({"status": "failed", "result_summary": "Zombie: was running when orchestrator restarted"})
+                .eq("id", job["id"])
+                .execute()
+            )
+            logger.warning(f"Zombie cleanup: job #{job['id']} ({job['repo_name']}) marked failed")
+        return len(zombies)
+    except Exception as e:
+        logger.error(f"Zombie job cleanup failed: {e}")
+        return 0
+
+
 async def set_job_status(supabase, job_id: int, status: str, **extra):
     update = {"status": status, "updated_at": "now()"}
     update.update(extra)
@@ -724,6 +748,10 @@ async def main_loop():
             pass
     except Exception as e:
         logger.error(f"Webhook server failed to start: {e}")
+
+    zombie_count = await cleanup_zombie_jobs(supabase)
+    if zombie_count:
+        logger.info(f"Startup: cleaned {zombie_count} zombie running job(s)")
 
     recovery_counter = 0
     escalation_counter = 0
