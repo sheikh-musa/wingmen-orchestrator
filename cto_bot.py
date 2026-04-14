@@ -697,12 +697,14 @@ async def check_usage_limit(user: dict, action: str) -> str | None:
 
 _active_repo: dict[str, str] = {}            # chat_id -> repo_name
 _rate_limits: dict[str, list[float]] = {}    # chat_id -> list of timestamps
+_bug_rate_limits: dict[str, list[float]] = {}  # chat_id -> list of timestamps
 _pending_fixes: dict[str, dict] = {}         # chat_id -> {"issues": [...], "repo": str}
 _admin_session_id: str | None = None         # persistent Claude session for admin
 _admin_session_ts: float = 0                 # last activity timestamp
 ADMIN_SESSION_TTL = 3600                     # 1 hour inactivity before new session
 
 MAX_BUILDS_PER_HOUR = 10
+MAX_BUG_REPORTS_PER_HOUR = 3
 MAX_MSG_LENGTH = 2000
 _message_counter = 0
 
@@ -730,6 +732,11 @@ def _cleanup_caches():
     for k in empty_rate:
         del _rate_limits[k]
 
+    # _bug_rate_limits: remove empty lists
+    empty_bug_rate = [k for k, v in _bug_rate_limits.items() if not v]
+    for k in empty_bug_rate:
+        del _bug_rate_limits[k]
+
     # _active_repo: cap at 200 entries (drop oldest by insertion order)
     if len(_active_repo) > 200:
         keys = list(_active_repo.keys())
@@ -746,6 +753,18 @@ def check_rate_limit(chat_id: str) -> bool:
     if len(_rate_limits[chat_id]) >= MAX_BUILDS_PER_HOUR:
         return False
     _rate_limits[chat_id].append(now)
+    return True
+
+
+def check_bug_rate_limit(chat_id: str) -> bool:
+    """Returns True if within bug report rate limit, False if exceeded."""
+    now = time.monotonic()
+    if chat_id not in _bug_rate_limits:
+        _bug_rate_limits[chat_id] = []
+    _bug_rate_limits[chat_id] = [t for t in _bug_rate_limits[chat_id] if now - t < 3600]
+    if len(_bug_rate_limits[chat_id]) >= MAX_BUG_REPORTS_PER_HOUR:
+        return False
+    _bug_rate_limits[chat_id].append(now)
     return True
 
 
@@ -2861,24 +2880,27 @@ async def _process_message(update: Update, user: dict, chat_id: str, user_msg: s
                         reply = "I couldn't figure out the task. Could you rephrase?"
 
                 elif intent == "bug_report":
-                    # Collect bug info and create report
-                    user_obj = await resolve_user(chat_id)
-                    client = user_obj.get("client") if user_obj else None
+                    if not check_bug_rate_limit(chat_id):
+                        reply = "You've reported several bugs recently \u2014 please wait before reporting more."
+                    else:
+                        # Collect bug info and create report
+                        user_obj = await resolve_user(chat_id)
+                        client = user_obj.get("client") if user_obj else None
 
-                    bug = await create_bug_report(
-                        supabase=await get_supabase(),
-                        client_id=client["id"] if client else None,
-                        reporter_name=update.effective_user.first_name or "Unknown",
-                        reporter_email=client.get("email") if client else None,
-                        reporter_source="telegram",
-                        auth_provider="telegram",
-                        repo_name=client.get("repo_name", "unknown") if client else (get_active_repo(chat_id, user) or "unknown"),
-                        description=user_msg,
-                        page_url=None,
-                    )
+                        bug = await create_bug_report(
+                            supabase=await get_supabase(),
+                            client_id=client["id"] if client else None,
+                            reporter_name=update.effective_user.first_name or "Unknown",
+                            reporter_email=client.get("email") if client else None,
+                            reporter_source="telegram",
+                            auth_provider="telegram",
+                            repo_name=client.get("repo_name", "unknown") if client else (get_active_repo(chat_id, user) or "unknown"),
+                            description=user_msg,
+                            page_url=None,
+                        )
 
-                    await notify_reporter_acknowledged(context.bot, chat_id, bug["id"])
-                    reply = None  # Already sent acknowledgement
+                        await notify_reporter_acknowledged(context.bot, chat_id, bug["id"])
+                        reply = None  # Already sent acknowledgement
 
                 else:
                     # "chat", "build", "data" all go through brainstorm

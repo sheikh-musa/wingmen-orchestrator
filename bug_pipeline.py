@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from supabase import AsyncClient as SupabaseAsyncClient
@@ -49,10 +49,29 @@ async def create_bug_report(
     description: str,
     screenshot_url: str | None = None,
     page_url: str | None = None,
+    severity: str | None = None,
 ) -> dict:
     """Create a new bug report and kick off diagnosis."""
 
-    result = await supabase.table("bug_reports").insert({
+    # Dedup: check for similar open bugs in the last 24h
+    existing = await supabase.table("bug_reports") \
+        .select("id, description, client_id") \
+        .eq("repo_name", repo_name) \
+        .not_.in_("status", ["verified", "rejected", "escalated"]) \
+        .gte("created_at", (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()) \
+        .execute()
+
+    desc_norm = description.lower().strip()
+    for bug in (existing.data or []):
+        existing_desc = (bug.get("description") or "").lower().strip()
+        if desc_norm[:100] in existing_desc or existing_desc[:100] in desc_norm:
+            logger.info(f"Dedup: new report matches existing bug {bug['id']}")
+            return bug
+        if client_id and bug.get("client_id") == client_id and desc_norm[:80] == existing_desc[:80]:
+            logger.info(f"Dedup: same client_id {client_id} has open bug {bug['id']}")
+            return bug
+
+    insert_data = {
         "client_id": client_id,
         "reporter_name": reporter_name,
         "reporter_email": reporter_email,
@@ -63,7 +82,11 @@ async def create_bug_report(
         "screenshot_url": screenshot_url,
         "page_url": page_url,
         "status": "new",
-    }).execute()
+    }
+    if severity:
+        insert_data["severity"] = severity
+
+    result = await supabase.table("bug_reports").insert(insert_data).execute()
 
     bug = result.data[0]
     logger.info(f"Bug report created: {bug['id']} for {repo_name}")
@@ -138,6 +161,7 @@ async def _run_diagnosis(supabase: SupabaseAsyncClient, bug: dict) -> None:
             repo_path=repo_path,
             repo_context=repo_context[:8000],  # Cap context size
             recent_commits=git_log,
+            prev_diagnosis=bug.get("prev_diagnosis"),
         )
 
         # Use vision model if screenshot present
@@ -154,14 +178,16 @@ async def _run_diagnosis(supabase: SupabaseAsyncClient, bug: dict) -> None:
         diagnosis = parse_diagnostic_response(response)
 
         # Update bug report with diagnosis
-        await _update_status(
-            supabase, bug_id, "proposed",
+        update_fields = dict(
             confidence=diagnosis["confidence"],
             root_cause=diagnosis["root_cause"],
             affected_files=diagnosis["affected_files"],
             proposed_diff=diagnosis["proposed_diff"],
             diagnosis_full=diagnosis["diagnosis_full"],
         )
+        if diagnosis.get("severity"):
+            update_fields["severity"] = diagnosis["severity"]
+        await _update_status(supabase, bug_id, "proposed", **update_fields)
 
         logger.info(f"Bug {bug_id} diagnosed: confidence={diagnosis['confidence']}")
 
@@ -224,16 +250,19 @@ async def _assign_auto_fix_tier(supabase: SupabaseAsyncClient, bug_id: str) -> i
     Tier 3: full review (low confidence, or retried bugs)
     """
     result = await supabase.table("bug_reports") \
-        .select("confidence, qa_finding_id, affected_files, retry_count") \
+        .select("confidence, qa_finding_id, affected_files, retry_count, severity") \
         .eq("id", bug_id).single().execute()
     bug = result.data
 
     confidence = bug.get("confidence")
+    severity = bug.get("severity")
     qa_sourced = bug.get("qa_finding_id") is not None
     file_count = len(bug.get("affected_files") or [])
     retry_count = bug.get("retry_count", 0)
 
-    if confidence == "high" and qa_sourced and file_count <= 2 and retry_count == 0:
+    if severity == "critical":
+        tier = 3
+    elif confidence == "high" and qa_sourced and file_count <= 2 and retry_count == 0:
         tier = 1
     elif confidence == "low" or retry_count > 0:
         tier = 3
@@ -386,7 +415,7 @@ async def handle_verification(supabase: SupabaseAsyncClient, bug_id: str, verifi
         await _update_status(supabase, bug_id, "verified")
         logger.info(f"Bug {bug_id} verified as fixed")
     else:
-        bug = (await supabase.table("bug_reports").select("retry_count").eq("id", bug_id).single().execute()).data
+        bug = (await supabase.table("bug_reports").select("retry_count, diagnosis_full").eq("id", bug_id).single().execute()).data
         retry_count = bug["retry_count"]
 
         if retry_count >= 2:
@@ -396,6 +425,7 @@ async def handle_verification(supabase: SupabaseAsyncClient, bug_id: str, verifi
             await supabase.table("bug_reports").update({
                 "status": "new",
                 "retry_count": retry_count + 1,
+                "prev_diagnosis": bug.get("diagnosis_full"),
                 "confidence": None,
                 "root_cause": None,
                 "proposed_diff": None,

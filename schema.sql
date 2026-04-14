@@ -222,3 +222,8 @@ create index idx_qa_findings_created on qa_findings(created_at desc);
 alter table bug_reports add column if not exists qa_finding_id bigint references qa_findings(id);
 alter table bug_reports add column if not exists auto_fix_tier int;
   -- 1 = auto-approve (high confidence), 2 = fast-track (medium), 3 = full review (low/null)
+
+alter table bug_reports add column if not exists severity text check (severity in ('critical', 'high', 'medium', 'low'));
+create index if not exists idx_bug_reports_severity on bug_reports(severity);
+
+alter table bug_reports add column if not exists prev_diagnosis text;

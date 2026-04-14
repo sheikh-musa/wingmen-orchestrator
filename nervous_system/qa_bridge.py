@@ -47,17 +47,22 @@ async def _process_finding(supabase: SupabaseAsyncClient, finding: dict) -> None
     repo_name = finding["repo_name"]
     title = finding["title"]
 
-    # Check for duplicate: same repo, similar title, open bug
+    # Check for duplicate: same repo, similar title/description, open bug
     existing = await supabase.table("bug_reports") \
         .select("id, description") \
         .eq("repo_name", repo_name) \
         .not_.in_("status", ["verified", "rejected"]) \
         .execute()
 
+    title_norm = title.lower().strip()
+    desc_norm = finding.get("description", "").lower().strip()
+
     for bug in (existing.data or []):
+        existing_desc = (bug.get("description") or "").lower().strip()
         if bug.get("id") and (
-            f"qa_finding_id={finding_id}" in (bug.get("description") or "")
-            or title.lower() in (bug.get("description") or "").lower()
+            f"qa_finding_id={finding_id}" in existing_desc
+            or title_norm in existing_desc
+            or (desc_norm[:80] and desc_norm[:80] == existing_desc[:80])
         ):
             await supabase.table("qa_findings").update({
                 "status": "duplicate",
@@ -80,6 +85,7 @@ async def _process_finding(supabase: SupabaseAsyncClient, finding: dict) -> None
         description=f"[{finding['source'].upper()}] {title}\n\n{finding['description']}",
         screenshot_url=finding.get("screenshot_url"),
         page_url=finding.get("page_url"),
+        severity=finding.get("severity"),
     )
 
     # Update finding as bridged
