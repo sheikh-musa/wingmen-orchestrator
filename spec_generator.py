@@ -105,6 +105,25 @@ End with: <promise>JOB_{job['id']}_DONE</promise>
     return result
 
 
+def validate_spec(spec_text: str, job_id: int) -> tuple[bool, list[str]]:
+    """Check that a generated spec has all required sections and promise tag."""
+    errors = []
+    lower = spec_text.lower()
+
+    for heading in ["### role", "### task", "### acceptance criteria", "### files to touch"]:
+        if heading not in lower:
+            errors.append(f"Missing section: {heading.title()}")
+
+    if "### implementation plan" not in lower and "### constraints" not in lower:
+        errors.append("Missing section: ### Implementation Plan or ### Constraints")
+
+    promise = f"<promise>JOB_{job_id}_DONE</promise>"
+    if promise not in spec_text:
+        errors.append(f"Missing promise tag: {promise}")
+
+    return (len(errors) == 0, errors)
+
+
 def _format_memory(memory: list[dict]) -> str:
     if not memory:
         return "(no repo memory)"

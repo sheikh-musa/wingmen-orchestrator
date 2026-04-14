@@ -23,6 +23,8 @@ import spec_generator
 import ralph_runner
 import deploy_manager
 import status_reporter
+import test_gate
+import build_audit
 from nervous_system.bug_escalation import check_stale_bugs
 from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
@@ -293,7 +295,15 @@ async def run_job(supabase, job: dict) -> None:
         # 3. Generate spec prompt
         prompt_text = await spec_generator.generate_spec(job, context)
         logger.info(f"  Spec generated ({len(prompt_text)} chars)")
-        await notify(job_id, repo_name, "spec", f"Generated build spec ({len(prompt_text)} chars)")
+
+        # 3b. Validate spec
+        valid, errors = spec_generator.validate_spec(prompt_text, job_id)
+        if not valid:
+            error_msg = f"Spec validation failed: {'; '.join(errors)}"
+            logger.warning(f"  {error_msg}")
+            await notify(job_id, repo_name, "failed", error_msg)
+            raise RuntimeError(error_msg)
+        await notify(job_id, repo_name, "spec", f"Spec validated OK ({len(prompt_text)} chars)")
 
         # 4. Run Claude CLI
         await notify(job_id, repo_name, "claude", "Building...")
@@ -306,6 +316,17 @@ async def run_job(supabase, job: dict) -> None:
         )
         logger.info(f"  Claude done: success={result['success']}")
 
+        # 4b. Post-build test gate
+        if result["success"]:
+            test_result = await test_gate.run_tests(
+                context["repo_path"], repo_name, job_id, supabase
+            )
+            if not test_result["passed"]:
+                logger.warning(f"  Test gate failed: {test_result['output'][:200]}")
+                await notify(job_id, repo_name, "failed", f"Tests failed: {test_result['output'][:200]}")
+                result["success"] = False
+                result["summary"] = f"Tests failed: {test_result['output'][:500]}"
+
         elapsed = time.monotonic() - start_time
 
         if result["success"]:
@@ -315,6 +336,12 @@ async def run_job(supabase, job: dict) -> None:
                 await _git_push(context["repo_path"], job_id, job["description"])
             except Exception as e:
                 logger.warning(f"  Git push failed: {e}")
+
+            # 5b. Random audit (advisory, non-blocking)
+            try:
+                await build_audit.maybe_audit(context["repo_path"], job_id, repo_name, supabase)
+            except Exception as e:
+                logger.warning(f"  Random audit error (non-blocking): {e}")
 
             # 6. Deploy
             deploy_result = {"deployed": False, "url": None}
