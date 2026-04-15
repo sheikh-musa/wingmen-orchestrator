@@ -555,3 +555,41 @@ class TestRunJob:
             assert last_update["status"] == "queued"
             assert last_update["fail_count"] == 1
             assert "boom" in last_update["result_summary"]
+
+
+class TestAutoccPollGate:
+    def test_default_enabled(self, monkeypatch):
+        from wingmen_orch import _autocc_poll_enabled
+        monkeypatch.delenv("AUTOCC_POLL_ENABLED", raising=False)
+        assert _autocc_poll_enabled() is True
+
+    def test_explicit_true(self, monkeypatch):
+        from wingmen_orch import _autocc_poll_enabled
+        monkeypatch.setenv("AUTOCC_POLL_ENABLED", "true")
+        assert _autocc_poll_enabled() is True
+
+    def test_disabled_via_false(self, monkeypatch):
+        from wingmen_orch import _autocc_poll_enabled
+        monkeypatch.setenv("AUTOCC_POLL_ENABLED", "false")
+        assert _autocc_poll_enabled() is False
+
+    def test_disabled_via_zero(self, monkeypatch):
+        from wingmen_orch import _autocc_poll_enabled
+        monkeypatch.setenv("AUTOCC_POLL_ENABLED", "0")
+        assert _autocc_poll_enabled() is False
+
+    def test_disabled_via_off(self, monkeypatch):
+        from wingmen_orch import _autocc_poll_enabled
+        monkeypatch.setenv("AUTOCC_POLL_ENABLED", "OFF")
+        assert _autocc_poll_enabled() is False
+
+    def test_case_insensitive(self, monkeypatch):
+        from wingmen_orch import _autocc_poll_enabled
+        monkeypatch.setenv("AUTOCC_POLL_ENABLED", "False")
+        assert _autocc_poll_enabled() is False
+
+    def test_unrecognized_value_treats_as_enabled(self, monkeypatch):
+        """Default-safe: unknown values keep the legacy behaviour."""
+        from wingmen_orch import _autocc_poll_enabled
+        monkeypatch.setenv("AUTOCC_POLL_ENABLED", "maybe")
+        assert _autocc_poll_enabled() is True

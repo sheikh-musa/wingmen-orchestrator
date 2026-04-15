@@ -66,6 +66,19 @@ STALE_JOB_MINUTES = int(os.environ.get("STALE_JOB_MINUTES", "120"))
 MAX_CONCURRENT_BUILDS = int(os.environ.get("MAX_CONCURRENT_BUILDS", "3"))
 
 
+def _autocc_poll_enabled() -> bool:
+    """ARCH-016 / MUSA-001 / CAI-RESP-022: gate the autocc job-picking + auto-queue
+    paths so the orchestrator can run for heartbeat / monitoring / bug-pipeline
+    purposes without claiming new strategic_decisions jobs.
+
+    Read at every poll iteration so flipping the env doesn't require restart.
+    Default true to preserve legacy behaviour.
+    """
+    return os.environ.get("AUTOCC_POLL_ENABLED", "true").lower() not in (
+        "false", "0", "no", "off",
+    )
+
+
 _supabase = None
 _supabase_lock = asyncio.Lock()
 
@@ -911,18 +924,24 @@ async def main_loop():
 
             # Strategic decisions poll — every 10 polls (~5 min).
             # ARCH-004: auto-notify when cai writes new decisions.
+            # AUTOCC gate: poll_strategic_decisions auto-queues jobs from accepted
+            # decisions; gated. poll_cai_review_requests only sends Telegram pings
+            # for review-needed decisions; ungated (no job side effect).
             strategic_decisions_counter += 1
             if strategic_decisions_counter >= 10:
                 try:
                     from telegram import Bot
                     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
                     musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
-                    if bot_token and musa_id:
-                        bot = Bot(token=bot_token)
-                        await poll_strategic_decisions(supabase, bot, musa_id)
+                    bot = Bot(token=bot_token) if (bot_token and musa_id) else None
+                    if _autocc_poll_enabled():
+                        if bot:
+                            await poll_strategic_decisions(supabase, bot, musa_id)
+                        else:
+                            await poll_strategic_decisions(supabase)
+                    if bot:
                         await poll_cai_review_requests(supabase, bot, musa_id)
                     else:
-                        await poll_strategic_decisions(supabase)
                         await poll_cai_review_requests(supabase)
                 except Exception as e:
                     logger.error(f"Strategic decisions poll failed: {e}")
@@ -998,7 +1017,11 @@ async def main_loop():
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)
             running_repos = set(running_tasks.keys())
 
-            if available > 0:
+            # AUTOCC gate: skip the job picker entirely when disabled. The
+            # orchestrator continues running heartbeat / monitoring / bug-pipeline
+            # polls but does not claim queued jobs. Existing in-flight jobs
+            # (running_tasks) finish naturally.
+            if available > 0 and _autocc_poll_enabled():
                 jobs = await pick_next_jobs(supabase, running_repos, available)
                 for job in jobs:
                     repo = job["repo_name"]
