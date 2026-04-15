@@ -275,6 +275,28 @@ class TestCleanupZombieJobs:
         count = await cleanup_zombie_jobs(sb)
         assert count == 0
 
+    @pytest.mark.asyncio
+    async def test_bumps_fail_count_on_zombie(self):
+        """TASK-033 spec deviation #3 fix (per CC-UPDATE-015).
+        Without fail_count bumps, a repeatedly-zombied job never hits
+        the 3-fail pause threshold — flaps forever."""
+        from wingmen_orch import cleanup_zombie_jobs
+
+        zombie_jobs = [{"id": 5, "repo_name": "ihsandms", "fail_count": 2}]
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.update.return_value = sb
+        sb.execute = AsyncMock(side_effect=[MagicMock(data=zombie_jobs), MagicMock(data=[])])
+
+        count = await cleanup_zombie_jobs(sb)
+        assert count == 1
+        update_arg = sb.update.call_args[0][0]
+        assert update_arg.get("fail_count") == 3, (
+            "fail_count must increment so zombied jobs eventually pause"
+        )
+
 
 class TestSetJobStatus:
     @pytest.mark.asyncio

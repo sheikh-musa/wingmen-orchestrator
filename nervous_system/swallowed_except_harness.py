@@ -21,7 +21,7 @@ logger = logging.getLogger("wingmen.swallowed_except_harness")
 class SwallowedExceptCounter:
     """In-memory counter mapping label -> list of monotonic timestamps."""
 
-    def __init__(self, window_seconds: int = 3600):
+    def __init__(self, window_seconds: int = 600):
         self._counts: dict[str, list[float]] = {}
         self.window_seconds = window_seconds
 
@@ -58,8 +58,8 @@ def record_swallowed(label: str, exc: Exception) -> None:
 async def check_swallowed_escalation(
     supabase: SupabaseAsyncClient,
     bot: Bot,
-    threshold: int = 5,
-    window_seconds: int = 3600,
+    threshold: int = 3,
+    window_seconds: int = 600,
 ) -> None:
     """Check if any swallowed-exception label has fired repeatedly and escalate."""
 
