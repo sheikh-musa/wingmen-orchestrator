@@ -4,9 +4,10 @@
       "name": "ihsanos",
       "github": "https://github.com/sheikh-musa/ihsanos",
       "local_path": "~/wingmen/projects/ihsanos",
-      "vercel_project": "ihsandms",
+      "vercel_project": "ihsanos",
       "deploy_url": "https://ihsanos.com",
-      "supabase_project_ref": "FILL_IN",
+      "supabase_project_ref": "ceayjeamtmcyzzvqflus",
+      "supabase_region": "ap-southeast-1",
       "status": "active",
       "priority": 1
     },
