@@ -11,19 +11,47 @@ ALERT_FILE="/tmp/ihsanos_health_alert_sent"
 
 ISSUES=""
 
-# 1. Check ihsanOS web
-HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://ihsanos.com" 2>/dev/null || echo "000")
+# Ping a URL, return clean HTTP code (000 = connection failed, no appended junk).
+# Retries once with a short backoff so a single DNS blip doesn't page Musa.
+ping_http() {
+  local url="$1"; shift
+  local http
+  http=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$@" "$url" 2>/dev/null)
+  if [ -z "$http" ] || [ "$http" = "000" ]; then
+    sleep 2
+    http=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$@" "$url" 2>/dev/null)
+    [ -z "$http" ] && http="000"
+  fi
+  echo "$http"
+}
+
+# 1. ihsanOS web
+HTTP=$(ping_http "https://ihsanos.com")
 if [ "$HTTP" != "200" ] && [ "$HTTP" != "307" ]; then
   ISSUES="$ISSUES\n❌ ihsanos.com: HTTP $HTTP"
 fi
 
-# 2. Check Supabase
-HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-  "https://tscuymavysscrvoberrr.supabase.co/rest/v1/organizations?select=id&limit=1" \
+# 2. Orchestrator Supabase (tscuymavysscrvoberrr = wingmen-ops).
+#    Query bot_heartbeat (orchestrator-owned) not organizations (ihsanos-owned
+#    and about to be dropped in Phase C).
+HTTP=$(ping_http \
+  "https://tscuymavysscrvoberrr.supabase.co/rest/v1/bot_heartbeat?select=service&limit=1" \
   -H "apikey: $SUPABASE_SERVICE_KEY" \
-  -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" 2>/dev/null || echo "000")
+  -H "Authorization: Bearer $SUPABASE_SERVICE_KEY")
 if [ "$HTTP" != "200" ]; then
-  ISSUES="$ISSUES\n❌ Supabase: HTTP $HTTP"
+  ISSUES="$ISSUES\n❌ Orchestrator Supabase: HTTP $HTTP"
+fi
+
+# 3. ihsanOS prod Supabase (ceayjeamtmcyzzvqflus = new Singapore project).
+#    Query organizations (the canonical ihsanos table post-migration).
+if [ -n "${IHSANOS_SUPABASE_SERVICE_KEY:-}" ]; then
+  HTTP=$(ping_http \
+    "https://ceayjeamtmcyzzvqflus.supabase.co/rest/v1/organizations?select=id&limit=1" \
+    -H "apikey: $IHSANOS_SUPABASE_SERVICE_KEY" \
+    -H "Authorization: Bearer $IHSANOS_SUPABASE_SERVICE_KEY")
+  if [ "$HTTP" != "200" ]; then
+    ISSUES="$ISSUES\n❌ ihsanOS Supabase: HTTP $HTTP"
+  fi
 fi
 
 # 3. Check bot process
