@@ -78,13 +78,13 @@ async def _check_activity(supabase) -> int:
 
     since = _last_run.isoformat()
 
-    decisions_result = (
+    decisions_result = await (
         supabase.table("strategic_decisions")
         .select("id", count="exact")
         .gt("created_at", since)
         .execute()
     )
-    sessions_result = (
+    sessions_result = await (
         supabase.table("cc_work_sessions")
         .select("id", count="exact")
         .gt("created_at", since)
@@ -208,7 +208,7 @@ async def _run_consolidation(supabase, now: datetime) -> None:
     """Execute the four consolidation phases."""
 
     # ── Phase 1: ORIENT ──────────────────────────────────────────────────────
-    index_result = supabase.table("boot_briefing").select("source,key,context").execute()
+    index_result = await supabase.table("boot_briefing").select("source,key,context").execute()
     index_rows = index_result.data or []
     logger.debug(f"Dream orient: {len(index_rows)} boot_briefing rows")
 
@@ -216,23 +216,21 @@ async def _run_consolidation(supabase, now: datetime) -> None:
     since = (_last_run or (now - timedelta(hours=24))).isoformat()
 
     recent_decisions = (
-        supabase.table("strategic_decisions")
+        await supabase.table("strategic_decisions")
         .select("decision_ref,title,challenge_status,execution_status,decided_at")
         .gt("created_at", since)
         .order("created_at", desc=True)
         .limit(20)
         .execute()
-        .data or []
-    )
+    ).data or []
     recent_sessions = (
-        supabase.table("cc_work_sessions")
+        await supabase.table("cc_work_sessions")
         .select("repo_name,outcome,narrative,created_at")
         .gt("created_at", since)
         .order("created_at", desc=True)
         .limit(10)
         .execute()
-        .data or []
-    )
+    ).data or []
     logger.debug(f"Dream gather: {len(recent_decisions)} new decisions, {len(recent_sessions)} new sessions")
 
     # ── Phase 3: CONSOLIDATE (Haiku API call) ────────────────────────────────
@@ -288,12 +286,11 @@ async def _apply_archival(supabase, refs_to_archive: list[str]) -> int:
         try:
             # Fetch the full row
             rows = (
-                supabase.table("strategic_decisions")
+                await supabase.table("strategic_decisions")
                 .select("*")
                 .eq("decision_ref", ref)
                 .execute()
-                .data
-            )
+            ).data
             if not rows:
                 logger.warning(f"Dream archive: {ref} not found in strategic_decisions")
                 continue
@@ -326,10 +323,10 @@ async def _apply_archival(supabase, refs_to_archive: list[str]) -> int:
                 "created_at": row["created_at"],
                 "archived_at": now,
             }
-            supabase.table("strategic_decisions_archive").upsert(
+            await supabase.table("strategic_decisions_archive").upsert(
                 archive_row, on_conflict="id"
             ).execute()
-            supabase.table("strategic_decisions").delete().eq("id", row["id"]).execute()
+            await supabase.table("strategic_decisions").delete().eq("id", row["id"]).execute()
             archived += 1
             logger.info(f"Dream archive: moved {ref} to strategic_decisions_archive")
         except Exception as e:
@@ -379,5 +376,5 @@ async def _write_session_digest(
         "created_at": now.isoformat(),
     }
 
-    supabase.table("session_digests").insert(digest).execute()
+    await supabase.table("session_digests").insert(digest).execute()
     logger.info(f"Dream: wrote session_digest (archived={archived_count}, contradictions={len(contradictions)})")
