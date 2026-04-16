@@ -45,6 +45,7 @@ from nervous_system.qa_bridge import poll_qa_findings
 from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from nervous_system.archive import run_archive
+from nervous_system.wingmen_dream import run_dream
 from heartbeat import write_orchestrator_heartbeat
 from nervous_system.swallowed_except_harness import record_swallowed
 
@@ -812,6 +813,7 @@ async def main_loop():
     agent_messages_counter = 0
     pipeline_clock_counter = 0
     agent_watchdog_counter = 0
+    dream_counter = 0
     archive_last_run: str | None = None  # "YYYY-MM-DD" — prevents double-runs in the 03:00h window
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
@@ -1087,6 +1089,18 @@ async def main_loop():
                     logger.error(f"Archive task failed: {e}")
                     record_swallowed("archive", e)
                 archive_last_run = _now_sgt.strftime("%Y-%m-%d")
+
+            # Wingmen Dream — memory consolidation every 12 polls (~6 min).
+            # Gates inside run_dream() prevent actual Haiku calls more often
+            # than once every 6 hours and only when activity threshold is met.
+            dream_counter += 1
+            if dream_counter >= 12:
+                try:
+                    await run_dream(supabase)
+                except Exception as e:
+                    logger.error(f"Wingmen Dream failed: {e}")
+                    record_swallowed("wingmen_dream", e)
+                dream_counter = 0
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)
