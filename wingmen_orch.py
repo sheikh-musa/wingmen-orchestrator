@@ -1189,5 +1189,28 @@ async def main_loop():
         await asyncio.sleep(POLL_INTERVAL)
 
 
+async def _shutdown(loop: asyncio.AbstractEventLoop, signal_name: str) -> None:
+    """Cancel in-flight tasks and exit cleanly on SIGTERM/SIGINT."""
+    logger.info(f"Received {signal_name} — starting graceful shutdown")
+    tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    logger.info("Graceful shutdown complete")
+    loop.stop()
+
+
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    import signal as _signal
+    for sig in (_signal.SIGTERM, _signal.SIGINT):
+        loop.add_signal_handler(
+            sig,
+            lambda s=sig: asyncio.ensure_future(_shutdown(loop, s.name), loop=loop),
+        )
+    try:
+        loop.run_until_complete(main_loop())
+    finally:
+        loop.close()
