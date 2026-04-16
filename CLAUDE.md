@@ -34,6 +34,16 @@ Always-on Python orchestrator running on Mac Mini that manages builds, deploys, 
 - `/tunnel` — check tunnel status
 - `/schema` — compare DB schema vs schema.sql
 
+## Boot Sequence (three-tier memory)
+
+Context is scarce. Load the index first; fetch full content only when you need it.
+
+1. **Index (always loaded)**: `SELECT * FROM boot_briefing` — returns repo_context summaries, decision refs + titles (80 chars), open QA failures, latest session snippets. ~10KB total.
+2. **Full decision (on demand)**: `SELECT * FROM get_decision('<ref>')` — returns full decision + reasoning for one row. Call this when actively implementing a specific decision.
+3. **Full repo context (on demand)**: `SELECT * FROM get_repo_context('<repo>')` — returns recent_changes, known_debt, architecture_summary. Call when you need deep context on a repo.
+
+**Rule**: Never SELECT * from `strategic_decisions` directly. Use the boot_briefing index + get_decision() on demand.
+
 ## Rules
 - Never commit `.env`
 - Always update `STATUS.md` after state changes

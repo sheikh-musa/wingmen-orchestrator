@@ -429,3 +429,62 @@ create index idx_sda_ref on strategic_decisions_archive(decision_ref);
 create index idx_sda_challenge_status on strategic_decisions_archive(challenge_status);
 create index idx_sda_archived on strategic_decisions_archive(archived_at desc);
 create index idx_sda_created on strategic_decisions_archive(created_at desc);
+
+-- ── boot_briefing view (ARCH-019: lightweight index) ─────────────────────────
+-- Returns <10KB: decision refs+titles only, no decision/reasoning body.
+-- Full content via get_decision(ref) / get_repo_context(key) RPC functions.
+create or replace view boot_briefing as
+select 'repo_context'::text as source, rc.repo as key,
+    json_build_object('phase', rc.current_phase, 'blockers', rc.blockers,
+        'test_health', rc.test_health, 'updated_at', rc.updated_at) as context
+from repo_context rc
+union all
+select 'active_decision'::text as source, sd.decision_ref as key,
+    json_build_object('title', left(sd.title, 80), 'domain', sd.domain,
+        'category', sd.category, 'repos', sd.repos_affected, 'source', sd.source,
+        'challenge_status', sd.challenge_status, 'execution_status', sd.execution_status,
+        'decided_at', sd.decided_at) as context
+from strategic_decisions sd where sd.status = 'active'
+union all
+select 'open_qa_failure'::text as source,
+    ((((qf.repo || '/') || qf.role) || '/') || qf.flow) as key,
+    json_build_object('role', qf.role, 'flow', qf.flow, 'error', qf.error,
+        'found_at', qf.found_at) as context
+from qa_findings qf where qf.status = 'fail' and qf.resolved_at is null
+union all
+select 'latest_cc_session'::text as source, sub.repo_name as key,
+    json_build_object('narrative', left(sub.narrative, 500), 'outcome', sub.outcome,
+        'commit_sha', sub.commit_sha, 'created_at', sub.created_at) as context
+from (select distinct on (cws.repo_name) cws.repo_name, cws.narrative, cws.outcome,
+        cws.commit_sha, cws.created_at
+    from cc_work_sessions cws order by cws.repo_name, cws.created_at desc) sub
+union all
+select 'latest_digest'::text as source, dig.title as key,
+    json_build_object('topics', dig.topics_covered, 'open_questions', dig.open_questions,
+        'action_items', dig.action_items, 'session_date', dig.session_date) as context
+from (select sd.session_date, sd.title, sd.topics_covered, sd.open_questions, sd.action_items
+    from session_digests sd order by sd.created_at desc limit 1) dig;
+
+-- get_decision(ref): full decision body on demand
+create or replace function get_decision(ref text)
+returns table (decision_ref text, title text, decision text, reasoning text,
+    domain text, category text, repos_affected text[], challenge_status text,
+    execution_status text, source text, decided_at timestamptz, decided_by text,
+    parent_ref text)
+language sql stable security definer as $$
+    select decision_ref, title, decision, reasoning, domain, category,
+        repos_affected, challenge_status, execution_status, source,
+        decided_at, decided_by, parent_ref
+    from strategic_decisions where decision_ref = ref limit 1;
+$$;
+
+-- get_repo_context(key): full repo context on demand (recent_changes, known_debt, etc.)
+create or replace function get_repo_context(key text)
+returns table (repo text, current_phase text, blockers text[], recent_changes text,
+    known_debt text[], test_health text, deploy_url text,
+    architecture_summary text, updated_at timestamptz)
+language sql stable security definer as $$
+    select repo, current_phase, blockers, recent_changes, known_debt,
+        test_health, deploy_url, architecture_summary, updated_at
+    from repo_context where repo = key limit 1;
+$$;
