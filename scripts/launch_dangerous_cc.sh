@@ -73,12 +73,28 @@ echo -e "${BOLD}${TEAL}╚══════════════════
 echo -e "${DIM}Agent: ${AGENT_ID}  |  Repo: ${REPO_NAME}  |  Started: ${SESSION_START}${RESET}"
 echo ""
 
-# ── 2. Run agent_boot ─────────────────────────────────────────────────────────
+# ── 2. Build session context block ───────────────────────────────────────────
+# Queries Supabase for unread messages, agent context, and in-scope governance
+# decisions. Marks messages as read and bumps agent heartbeat.
+# The block is passed as -p to claude so it arrives as the initial user message
+# with Musa's authority (assembled before launch, not at runtime).
+#
+# NOTE: `claude -p "..."` launches a non-interactive session — claude processes
+# the prompt and exits. If you want an interactive session, launch normally
+# and paste the context manually, or use `claude --resume` with a prior session.
 
-echo -e "${BOLD}▶ Running agent boot...${RESET}"
-"$VENV_PY" -m scripts.agent_boot --agent "$AGENT_ID" 2>/dev/null || {
-    echo -e "${AMBER}⚠ agent_boot failed (network issue?). Continuing without DB context.${RESET}"
+echo -e "${BOLD}▶ Building session context...${RESET}"
+# Stdout = context block (captured). Stderr = diagnostics (shown on terminal).
+LAUNCH_CONTEXT="$("$VENV_PY" -m scripts.build_launch_context --agent "$AGENT_ID")" || {
+    echo -e "${AMBER}⚠ build_launch_context failed. Continuing without injected context.${RESET}"
+    LAUNCH_CONTEXT=""
 }
+
+if [ -n "$LAUNCH_CONTEXT" ]; then
+    echo -e "${TEAL}  Context assembled: $(echo "$LAUNCH_CONTEXT" | wc -l | tr -d ' ') lines, $(echo -n "$LAUNCH_CONTEXT" | wc -c | tr -d ' ') chars${RESET}"
+else
+    echo -e "${AMBER}  No context to inject.${RESET}"
+fi
 echo ""
 
 # ── 3. Start background heartbeat loop ────────────────────────────────────────
@@ -359,4 +375,11 @@ for arg in "$@"; do
     fi
 done
 
-claude --dangerously-skip-permissions "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
+if [ -n "$LAUNCH_CONTEXT" ] && [ ${#CLAUDE_ARGS[@]} -eq 0 ]; then
+    # Inject context as initial prompt. Claude processes it then exits (non-interactive).
+    # For an interactive session, remove -p and paste the context manually.
+    claude --dangerously-skip-permissions -p "$LAUNCH_CONTEXT"
+else
+    # Resume / passthrough mode — context already in session, no -p injection.
+    claude --dangerously-skip-permissions "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
+fi
