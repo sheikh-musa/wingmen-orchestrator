@@ -171,14 +171,16 @@ Modelled on the same constitutional pattern as `CLAUDE.md` (IhsanOPS): foundatio
 - `agent_messages` poll fires every orchestrator poll cycle (30s), not every 10 cycles (5 min)
 - cc-ihsanos reads unread `agent_messages` from cai at the start of every session and before every major architectural decision
 - When cc posts a `requires_response=True` message to cai, it explicitly tells Musa in the conversation to watch Telegram for cai's reply
-- cai responses (written by Musa) are pasted directly into the cc session — this human relay is by design, not a gap
+- cai responds by replying to the Telegram notification — bot auto-posts reply to `agent_messages` as `from_agent='cai'`
 
 **Structural enforcement:**
 - `agent_messages_counter` threshold reduced from 10 to 1 in `wingmen_orch.py` main loop
 - CLAUDE.md (ihsanos) read order includes: "Check agent_messages for unread cai responses"
 - Session start protocol: cc queries `agent_messages` where `to_agent='cc-ihsanos'` and `read_at IS NULL`
+- `_maybe_relay_cai_reply()` in `cto_bot.py` — Telegram reply→agent_messages routing (commit 7320159)
+- `notification_log.telegram_msg_id` stores Telegram message ID for reply-to lookup
 
-**Current compliance:** ❌ NON-COMPLIANT — `poll_agent_messages` fires every 10 cycles (~5 min). Remediation: this session (one-line change in `wingmen_orch.py`).
+**Current compliance:** ✅ COMPLIANT — poll frequency fixed (commit 4d179c3); cai→cc relay via Telegram reply-to routing (commit 7320159).
 
 ---
 
@@ -186,16 +188,16 @@ Modelled on the same constitutional pattern as `CLAUDE.md` (IhsanOPS): foundatio
 
 | # | Constraint | Status | Remediation |
 |---|---|---|---|
-| 1 | Amanah — Verifiable Completion | ⚠️ Partial | Fix Vercel cascade this session |
-| 2 | Fail-Fast — Bounded Retries | ⚠️ Partial | Add escalation_count cap next session |
+| 1 | Amanah — Verifiable Completion | ✅ Compliant | Fixed: deploy failure re-queues, blocks completed (4d179c3) |
+| 2 | Fail-Fast — Bounded Retries | ⚠️ Partial | Add escalation_count cap via agent_messages (next session) |
 | 3 | Bounded Autonomy | ✅ Mostly | Scope ARCH-030 to not read .env directly |
 | 4 | Observable Healing | ✅ Compliant | — |
 | 5 | Resource Bounds | ⚠️ Partial | API rate limit awareness (Phase 2) |
 | 6 | Data Integrity | ✅ Compliant | — |
 | 7 | Security Boundary | ✅ Compliant | Minor: ARCH-030 .env advisory |
-| 8 | Communication Latency | ❌ Non-compliant | Fix poll frequency this session |
+| 8 | Communication Latency | ✅ Compliant | Fixed: poll 30s (4d179c3) + cai relay (7320159) |
 
-**Blocking scale-up:** Constraints 1 and 8 must be compliant before adding more repos or concurrent jobs.
+**Blocking scale-up:** ✅ Constraints 1 and 8 now compliant. Ready to add repos/concurrent jobs once Constraint 2 cap is implemented.
 
 ---
 
