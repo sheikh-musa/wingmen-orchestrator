@@ -125,7 +125,140 @@ _reminder_loop() {
 _reminder_loop &
 REMINDER_PID=$!
 
-# ── 5. EXIT trap ──────────────────────────────────────────────────────────────
+# ── 5. Vercel deployment verification ─────────────────────────────────────────
+# Call after every git push to confirm Vercel reaches READY or ERROR state.
+# Requires VERCEL_TOKEN + VERCEL_TEAM_ID in orchestrator .env (already present).
+# Falls back gracefully if token is missing.
+
+_verify_vercel_deploy() {
+    local repo_dir="${1:-$CALLER_DIR}"
+    local commit_sha
+    commit_sha="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null)"
+
+    # Load Vercel creds from orchestrator .env
+    local token team_id project_id
+    token="$(grep -E '^VERCEL_TOKEN=' "$ORCH_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' | sed 's/#.*//')"
+    team_id="$(grep -E '^VERCEL_TEAM_ID=' "$ORCH_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' | sed 's/#.*//')"
+
+    # Try to get project ID from caller repo's .vercel/project.json
+    local project_json="$repo_dir/.vercel/project.json"
+    if [ -f "$project_json" ]; then
+        project_id="$(python3 -c "import json,sys; d=json.load(open('$project_json')); print(d.get('projectId',''))" 2>/dev/null)"
+    fi
+
+    if [ -z "$token" ] || [ -z "$project_id" ]; then
+        echo -e "${AMBER}⚠ Vercel token or project ID not available — skipping deploy check${RESET}"
+        return 0
+    fi
+
+    echo -e "${BOLD}▶ Vercel deploy check for commit ${commit_sha:0:8}...${RESET}"
+
+    local deadline=$(( $(date -u +%s) + 300 ))  # 5-minute timeout
+    local state="" deploy_url="" build_log_url=""
+    local poll_count=0
+
+    # Brief initial wait for Vercel to pick up the push
+    sleep 20
+
+    while [ "$(date -u +%s)" -lt "$deadline" ]; do
+        poll_count=$(( poll_count + 1 ))
+
+        local api_url="https://api.vercel.com/v6/deployments?projectId=${project_id}&limit=5&target=production"
+        [ -n "$team_id" ] && api_url="${api_url}&teamId=${team_id}"
+
+        local response
+        response="$(curl -sf -H "Authorization: Bearer ${token}" "$api_url" 2>/dev/null)"
+
+        if [ -z "$response" ]; then
+            echo -e "${DIM}  poll ${poll_count}: API unreachable, retrying in 15s...${RESET}"
+            sleep 15
+            continue
+        fi
+
+        # Find deployment matching current commit SHA
+        state="$(python3 -c "
+import json, sys
+data = json.loads('''$response''')
+deployments = data.get('deployments', [])
+for d in deployments:
+    meta = d.get('meta', {})
+    if meta.get('githubCommitSha', '').startswith('${commit_sha:0:8}') or d.get('meta', {}).get('githubCommitSha') == '${commit_sha}':
+        print(d.get('state', 'UNKNOWN'))
+        print(d.get('url', ''))
+        sys.exit(0)
+# If not found by SHA, use the most recent deployment
+if deployments:
+    d = deployments[0]
+    print(d.get('state', 'UNKNOWN'))
+    print(d.get('url', ''))
+" 2>/dev/null | head -2)"
+
+        local deploy_state
+        deploy_state="$(echo "$state" | head -1)"
+        deploy_url="$(echo "$state" | tail -1)"
+        build_log_url="https://vercel.com/dashboard"
+        [ -n "$deploy_url" ] && build_log_url="https://${deploy_url}/_logs"
+
+        case "$deploy_state" in
+            READY)
+                echo -e "${TEAL}${BOLD}  ✓ DEPLOY OK — https://${deploy_url}${RESET}"
+                return 0
+                ;;
+            ERROR)
+                echo -e "${RED}${BOLD}  ✗ DEPLOY FAILED — build log: ${build_log_url}${RESET}"
+                # Post blocker to agent_messages
+                "$VENV_PY" -c "
+import os, sys
+sys.path.insert(0, '$ORCH_DIR')
+from dotenv import load_dotenv
+load_dotenv('$ORCH_DIR/.env')
+from supabase import create_client
+sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
+sb.table('agent_messages').insert({
+    'from_agent': '$AGENT_ID',
+    'to_agent': 'cai',
+    'message_type': 'blocker',
+    'subject': 'DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8}',
+    'body': 'Vercel deployment reached ERROR state.\nCommit: ${commit_sha}\nBuild log: ${build_log_url}\nAction required: read build log, fix, push again.',
+    'requires_response': True,
+}).execute()
+" 2>/dev/null || true
+                return 1
+                ;;
+            BUILDING|INITIALIZING|QUEUED)
+                echo -e "${DIM}  poll ${poll_count}: state=${deploy_state}, waiting 20s...${RESET}"
+                sleep 20
+                ;;
+            *)
+                echo -e "${DIM}  poll ${poll_count}: state=${deploy_state:-unknown}, waiting 15s...${RESET}"
+                sleep 15
+                ;;
+        esac
+    done
+
+    # Timeout — flag as blocker
+    echo -e "${AMBER}${BOLD}  ⚠ DEPLOY TIMEOUT — still not READY after 5 minutes${RESET}"
+    echo -e "${AMBER}  Check: https://vercel.com/dashboard${RESET}"
+    "$VENV_PY" -c "
+import os, sys
+sys.path.insert(0, '$ORCH_DIR')
+from dotenv import load_dotenv
+load_dotenv('$ORCH_DIR/.env')
+from supabase import create_client
+sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
+sb.table('agent_messages').insert({
+    'from_agent': '$AGENT_ID',
+    'to_agent': 'cai',
+    'message_type': 'blocker',
+    'subject': 'DEPLOY TIMEOUT — ${REPO_NAME} commit ${commit_sha:0:8}',
+    'body': 'Vercel deployment did not reach READY within 5 minutes.\nCommit: ${commit_sha}\nCheck Vercel dashboard for build status.',
+    'requires_response': True,
+}).execute()
+" 2>/dev/null || true
+    return 1
+}
+
+# ── 6. EXIT trap ──────────────────────────────────────────────────────────────
 
 _handle_exit() {
     local exit_code=$?
@@ -145,13 +278,16 @@ _handle_exit() {
     echo ""
     echo -e "${DIM}Session ended: ${outcome} | exit_code=${exit_code} | duration=${duration_seconds}s${RESET}"
 
-    # Auto-push any unpushed commits before closing out
+    # Auto-push any unpushed commits before closing out, then verify Vercel deploy
     local ahead
     ahead="$(git -C "$CALLER_DIR" log --oneline origin/main..HEAD 2>/dev/null | wc -l | tr -d ' ')"
     if [ "${ahead:-0}" -gt 0 ]; then
         echo -e "${AMBER}▶ Pushing ${ahead} unpushed commit(s) before exit...${RESET}"
-        git -C "$CALLER_DIR" push origin main 2>&1 || \
+        if git -C "$CALLER_DIR" push origin main 2>&1; then
+            _verify_vercel_deploy "$CALLER_DIR"
+        else
             echo -e "${RED}⚠ git push failed — commits remain local${RESET}"
+        fi
     fi
 
     # Write cc_work_sessions row
