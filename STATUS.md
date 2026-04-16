@@ -32,10 +32,11 @@ Last Updated: 2026-04-16 18:48 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-16 19:24 SGT
+Last Updated: 2026-04-16 19:05 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
+| #85 | [BUG-018] strategic_decisions_poll queues jobs for already-shipped decisions — a | red | N/A |
 | #85 | [BUG-018] strategic_decisions_poll shipped-decision filter — evidence_commit_sha IS NULL + challenge_status != 'implemented' | green | N/A |
 | #90 | [SMOKE-001] BUG-019 worktree isolation smoke test — append a comment to STATUS.m | red | N/A |
 | #84 | [BUG-013] qa_findings.created_at migration — column + index added, bridge unblocked | green | N/A |
@@ -45,4 +46,3 @@ Last Updated: 2026-04-16 19:24 SGT
 | #71 | Queue stall detector — alert CTO on 30min+ queued jobs with dedup | green | N/A |
 | #70 | [TASK-033] Zombie running-row cleanup on orchestrator startup | green | N/A |
 | #69 | [TASK-037] Fire drill harness — 5 scenarios exercised and documented | green | N/A |
-| #61 | [BUG-006] cc_work_sessions not being written — 1 row from 20+ jobs. Narrative la | green | N/A |
