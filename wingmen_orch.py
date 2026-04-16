@@ -46,6 +46,13 @@ from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from nervous_system.archive import run_archive
 from nervous_system.wingmen_dream import run_dream
+from nervous_system.ecosystem_auditor import (
+    run_frequent_gates,
+    run_half_hour_gates,
+    run_hourly_gates,
+    run_six_hour_gates,
+    run_daily_gates,
+)
 from heartbeat import write_orchestrator_heartbeat
 from nervous_system.swallowed_except_harness import record_swallowed
 
@@ -814,6 +821,9 @@ async def main_loop():
     pipeline_clock_counter = 0
     agent_watchdog_counter = 0
     dream_counter = 0
+    ecosystem_frequent_counter = 0   # GATE 4 every 10 polls (~5 min)
+    ecosystem_half_hour_counter = 0  # GATE 2 every 60 polls (~30 min)
+    ecosystem_hourly_counter = 0     # GATE 1 every 120 polls (~60 min)
     archive_last_run: str | None = None  # "YYYY-MM-DD" — prevents double-runs in the 03:00h window
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
@@ -1101,6 +1111,54 @@ async def main_loop():
                     logger.error(f"Wingmen Dream failed: {e}")
                     record_swallowed("wingmen_dream", e)
                 dream_counter = 0
+
+            # Ecosystem Auditor — ARCH-023 self-maintaining governance gates.
+            # GATE 4 (CC-UPDATE classification) every 10 polls (~5 min).
+            ecosystem_frequent_counter += 1
+            if ecosystem_frequent_counter >= 10:
+                try:
+                    await run_frequent_gates(supabase)
+                except Exception as e:
+                    logger.error(f"Ecosystem frequent gates failed: {e}")
+                    record_swallowed("ecosystem_gate4", e)
+                ecosystem_frequent_counter = 0
+
+            # GATE 2 (ship verify) every 60 polls (~30 min).
+            ecosystem_half_hour_counter += 1
+            if ecosystem_half_hour_counter >= 60:
+                try:
+                    await run_half_hour_gates(supabase)
+                except Exception as e:
+                    logger.error(f"Ecosystem half-hour gates failed: {e}")
+                    record_swallowed("ecosystem_gate2", e)
+                ecosystem_half_hour_counter = 0
+
+            # GATE 1 (challenge flip) every 120 polls (~60 min).
+            ecosystem_hourly_counter += 1
+            if ecosystem_hourly_counter >= 120:
+                try:
+                    await run_hourly_gates(supabase)
+                except Exception as e:
+                    logger.error(f"Ecosystem hourly gates failed: {e}")
+                    record_swallowed("ecosystem_gate1", e)
+                ecosystem_hourly_counter = 0
+
+            # GATES 3 + 7 (daily at 06:00 / 04:00 SGT) — every poll, time-gated inside.
+            # GATE 6 (contradiction, every 6h) — every poll, time-gated inside.
+            try:
+                _bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                _musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                if _bot_token and _musa_id:
+                    from telegram import Bot as _TGBot
+                    _bot = _TGBot(token=_bot_token)
+                    await run_daily_gates(supabase, _bot, _musa_id)
+                    await run_six_hour_gates(supabase, _bot, _musa_id)
+                else:
+                    await run_daily_gates(supabase)
+                    await run_six_hour_gates(supabase)
+            except Exception as e:
+                logger.error(f"Ecosystem daily/6h gates failed: {e}")
+                record_swallowed("ecosystem_daily_gates", e)
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)

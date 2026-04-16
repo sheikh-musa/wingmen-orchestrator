@@ -479,6 +479,23 @@ language sql stable security definer as $$
     from strategic_decisions where decision_ref = ref limit 1;
 $$;
 
+-- ── ecosystem_audit_log (ARCH-023) ───────────────────────────────────────────
+create table if not exists ecosystem_audit_log (
+  id            bigserial primary key,
+  gate_name     text not null,
+  ran_at        timestamptz not null default now(),
+  dry_run       boolean not null default true,
+  rows_affected int not null default 0,
+  actions_taken jsonb not null default '[]',
+  notes         text,
+  created_at    timestamptz not null default now()
+);
+alter table ecosystem_audit_log enable row level security;
+create policy "service role full access" on ecosystem_audit_log
+  using (true) with check (true);
+create index if not exists idx_eal_gate_name on ecosystem_audit_log(gate_name);
+create index if not exists idx_eal_ran_at on ecosystem_audit_log(ran_at desc);
+
 -- get_repo_context(key): full repo context on demand (recent_changes, known_debt, etc.)
 create or replace function get_repo_context(key text)
 returns table (repo text, current_phase text, blockers text[], recent_changes text,
