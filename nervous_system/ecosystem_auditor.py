@@ -351,6 +351,15 @@ async def run_gate6_contradiction(supabase, bot=None, musa_id: str = "") -> None
     dry = _dry_run("G6")
     logger.debug(f"GATE 6 running (dry_run={dry})")
 
+    # BUG-012: fail loud if the key is missing. Previously os.environ[...] raised
+    # KeyError inside the blanket try/except below, which silently returned and
+    # produced an empty Gate 6 result with no visible failure.
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY missing from orchestrator env — Gate 6 cannot run"
+        )
+
     # Fetch active accepted + implemented decisions (index only)
     rows = (
         await supabase.table("strategic_decisions")
@@ -381,7 +390,7 @@ async def run_gate6_contradiction(supabase, bot=None, musa_id: str = "") -> None
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
@@ -391,8 +400,16 @@ async def run_gate6_contradiction(supabase, bot=None, musa_id: str = "") -> None
         result = json.loads(raw)
         contradictions = result.get("contradictions", [])
     except Exception as e:
+        # BUG-012: log the failure to ecosystem_audit_log (matching the other
+        # gates' logging path) and re-raise so the caller/loop sees a loud
+        # failure instead of an empty Gate 6 pass.
         logger.error(f"GATE 6 Haiku call failed: {e}")
-        return
+        await _log_gate_run(
+            supabase, "G6_contradiction", dry, 0,
+            [{"type": "error", "error": str(e)}],
+            notes=f"gate 6 haiku call failed: {e}",
+        )
+        raise
 
     actions: list[dict] = []
     for c in contradictions:
