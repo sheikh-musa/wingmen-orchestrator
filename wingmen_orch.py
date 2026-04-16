@@ -39,6 +39,7 @@ from nervous_system.council_executor import poll_executor
 from nervous_system.strategic_decisions_poll import poll_strategic_decisions, notify_decision_complete
 from nervous_system.cai_review_request import poll_cai_review_requests
 from nervous_system.agent_messages_poll import poll_agent_messages
+from nervous_system.pipeline_clock import tick_pipeline_clock
 from nervous_system.qa_bridge import poll_qa_findings
 from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
@@ -807,6 +808,7 @@ async def main_loop():
     swallowed_except_counter = 0
     uptime_monitor_counter = 0
     agent_messages_counter = 0
+    pipeline_clock_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -967,6 +969,25 @@ async def main_loop():
                     logger.error(f"Agent messages poll failed: {e}")
                     record_swallowed("agent_messages_poll", e)
                 agent_messages_counter = 0
+
+            # Pipeline clock — every 10 polls (~5 min), but self-throttles to 24h.
+            # TASK-042: increments days_clean for green bug_pipeline_readiness gates.
+            # Cheap to call — does DB work only when 24h have elapsed since last tick.
+            pipeline_clock_counter += 1
+            if pipeline_clock_counter >= 10:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                    if bot_token and musa_id:
+                        bot = Bot(token=bot_token)
+                        await tick_pipeline_clock(supabase, bot, musa_id)
+                    else:
+                        await tick_pipeline_clock(supabase)
+                except Exception as e:
+                    logger.error(f"Pipeline clock tick failed: {e}")
+                    record_swallowed("pipeline_clock", e)
+                pipeline_clock_counter = 0
 
             # QA bridge — every 10 polls (~5 min).
             # Picks up qa_findings rows, deduplicates, bridges to bug_reports.
