@@ -769,7 +769,12 @@ async def run_job(supabase, job: dict) -> None:
                 record_swallowed("random_audit", e)
 
             # 6. Deploy
+            # CONSTRAINT-1 (Amanah): a deploy failure means the job is NOT complete.
+            # The code committed correctly but production is broken — that is not success.
+            # On deploy failure: re-queue with incremented fail_count rather than
+            # swallowing the error and marking completed with a broken production URL.
             deploy_result = {"deployed": False, "url": None}
+            _deploy_failed = False
             try:
                 deploy_result = await deploy_manager.deploy(repo_name)
                 if deploy_result["deployed"]:
@@ -777,7 +782,37 @@ async def run_job(supabase, job: dict) -> None:
                     logger.info(f"  Deployed → {deploy_result['url']}")
             except Exception as e:
                 logger.error(f"  Deploy failed: {e}")
-                record_swallowed("deploy_failure", e)
+                _deploy_failed = True
+                _deploy_fail_reason = str(e)[:500]
+                new_fail_count = job.get("fail_count", 0) + 1
+                _new_status = "paused" if new_fail_count >= MAX_FAIL_COUNT else "queued"
+                await set_job_status(
+                    supabase, job_id, _new_status,
+                    fail_count=new_fail_count,
+                    result_summary=f"Deploy failed (code committed OK): {_deploy_fail_reason}",
+                )
+                await notify(
+                    job_id, repo_name, "deploy_failed",
+                    f"Deploy failed (attempt {new_fail_count}/{MAX_FAIL_COUNT}): {_deploy_fail_reason[:150]}",
+                )
+                try:
+                    await supabase.table("agent_messages").insert({
+                        "from_agent": "ralph_runner",
+                        "to_agent": "cc-ihsanos",
+                        "message_type": "blocker",
+                        "subject": f"Job #{job_id} deploy failed ({new_fail_count}/{MAX_FAIL_COUNT}): {job.get('description','')[:60]}",
+                        "body": f"Code committed successfully but Vercel deploy failed.\n\nError: {_deploy_fail_reason}\n\nJob re-queued. Code is on main — deploy failure only.",
+                        "requires_response": _new_status == "paused",
+                    }).execute()
+                except Exception as _me:
+                    record_swallowed("deploy_fail_msg", _me)
+                logger.warning(
+                    f"  Job #{job_id} {_new_status} after deploy failure "
+                    f"(fail_count={new_fail_count})"
+                )
+
+            if _deploy_failed:
+                return  # Do not mark job completed — Amanah constraint
 
             # 7. Write work output to Supabase (ARCH-010) — must succeed before marking completed
             await _write_work_output(
@@ -1260,10 +1295,12 @@ async def main_loop():
                     record_swallowed("strategic_decisions_poll", e)
                 strategic_decisions_counter = 0
 
-            # Agent messages poll — every 10 polls (~5 min).
-            # TASK-041: routes CC→cai/musa messages to Telegram. Skips CC-to-CC.
+            # Agent messages poll — every poll (~30s).
+            # CONSTRAINT-8: cc↔cai communication latency ≤60s.
+            # Reduced from every 10 polls (5 min) to every poll (30s) so
+            # cai/musa receive cc messages within one poll cycle, not five.
             agent_messages_counter += 1
-            if agent_messages_counter >= 10:
+            if agent_messages_counter >= 1:
                 try:
                     from telegram import Bot
                     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
