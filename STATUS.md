@@ -5,7 +5,7 @@ Build Status: green
 Deploy: N/A
 
 ## Last Completed Job
-- Job #82: [BUG-015] Graceful shutdown asyncio cleanup — cancel pending tasks before loop close.
+- Job #83: [BUG-016] Safe-restart procedure — `scripts/restart_orch.sh` via `launchctl kickstart -k`, runbook, `nohup` forbidden.
 
 ## Result Summary
 Added module-level `_cancel_pending_tasks(loop)` helper in `wingmen_orch.py` and wired it into the existing `finally:` block before `loop.close()` so any tasks still pending after `run_until_complete` returns (e.g. the `_shutdown` task itself, or tasks spawned inside cancellation cleanup) are cancelled and awaited via `asyncio.gather(..., return_exceptions=True)`. Eliminates the "Task was destroyed but it is pending" warnings previously emitted at SIGINT/SIGTERM. Added `tests/test_graceful_shutdown.py` with 3 tests (cancel background task, swallow exceptions, no-op when empty). Full suite: 350 pass (347 prior + 3 new). Synthetic SIGINT smoke exercised a late-spawned cleanup task and reported 0 leak warnings.
@@ -37,6 +37,7 @@ Last Updated: 2026-04-16 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
+| #83 | [BUG-016] Safe-restart procedure — launchctl kickstart helper + runbook; nohup forbidden | green | N/A |
 | #82 | [BUG-015] Graceful shutdown asyncio cleanup — cancel pending tasks before loop close | green | N/A |
 | #79 | [BUG-012] Gate 6 Haiku empty-JSON fix — ANTHROPIC_API_KEY guard + fail-loud | green | N/A |
 | #71 | Queue stall detector — alert CTO on 30min+ queued jobs with dedup | green | N/A |

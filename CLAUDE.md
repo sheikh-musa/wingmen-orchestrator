@@ -51,3 +51,4 @@ Context is scarce. Load the index first; fetch full content only when you need i
 - Use Vercel MCP for deployment operations when available
 - Log all build operations to the `build_log` table
 - All audit deliverables (build specs, diffs, test results, deploy URLs) must be written to Supabase `work_outputs` table — repo files alone are not sufficient
+- Restart orchestrator only via `scripts/restart_orch.sh` (launchctl). Never `nohup`.
