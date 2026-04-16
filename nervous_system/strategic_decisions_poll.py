@@ -57,6 +57,10 @@ async def poll_strategic_decisions(supabase, bot=None, musa_chat_id: str | None 
             "notified_at", "null"
         ).is_(
             "execution_status", "null"
+        ).is_(
+            "evidence_commit_sha", "null"
+        ).neq(
+            "challenge_status", "implemented"
         ).order("created_at", desc=False).execute()
 
         rows = result.data or []

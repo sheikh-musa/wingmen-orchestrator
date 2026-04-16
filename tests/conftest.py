@@ -19,8 +19,10 @@ def mock_supabase_chain(final_data=None, *, count=None):
     mock.table.return_value = mock
     mock.select.return_value = mock
     mock.eq.return_value = mock
+    mock.neq.return_value = mock
     mock.is_.return_value = mock
     mock.in_.return_value = mock
+    mock.or_.return_value = mock
     mock.insert.return_value = mock
     mock.update.return_value = mock
     mock.gte.return_value = mock
