@@ -301,6 +301,9 @@ _handle_exit() {
         echo -e "${AMBER}▶ Pushing ${ahead} unpushed commit(s) before exit...${RESET}"
         if git -C "$CALLER_DIR" push origin main 2>&1; then
             _verify_vercel_deploy "$CALLER_DIR"
+            # ARCH-024: write repo_snapshot after successful push (best-effort)
+            "$VENV_PY" -m scripts.write_repo_snapshot \
+                --repo "$REPO_NAME" --dir "$CALLER_DIR" 2>/dev/null || true
         else
             echo -e "${RED}⚠ git push failed — commits remain local${RESET}"
         fi

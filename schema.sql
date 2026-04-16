@@ -431,7 +431,37 @@ create index idx_sda_challenge_status on strategic_decisions_archive(challenge_s
 create index idx_sda_archived on strategic_decisions_archive(archived_at desc);
 create index idx_sda_created on strategic_decisions_archive(created_at desc);
 
--- ── boot_briefing view (ARCH-019: lightweight index) ─────────────────────────
+-- ── repo_snapshot (ARCH-024: evidence layer) ─────────────────────────────────
+create table if not exists repo_snapshot (
+  id               bigint generated always as identity primary key,
+  repo_name        text not null,
+  commit_sha       text not null,
+  commit_timestamp timestamptz not null,
+  branch           text not null default 'main',
+  total_loc        int,
+  file_count       int,
+  test_count       int,
+  migration_count  int,
+  route_count      int,
+  top_level_dirs   jsonb,
+  recent_churn     jsonb,
+  dependencies     jsonb,
+  schema_tables    text[],
+  schema_rls_policies int,
+  created_at       timestamptz not null default now()
+);
+alter table repo_snapshot enable row level security;
+create policy "service role full access" on repo_snapshot using (true) with check (true);
+create index if not exists idx_repo_snapshot_repo_commit on repo_snapshot(repo_name, commit_timestamp desc);
+create index if not exists idx_repo_snapshot_sha on repo_snapshot(commit_sha);
+
+-- ARCH-024: evidence columns on strategic_decisions
+alter table strategic_decisions add column if not exists evidence_commit_sha text;
+alter table strategic_decisions add column if not exists evidence_deploy_id text;
+alter table strategic_decisions add column if not exists evidence_test_run_id text;
+create index if not exists idx_sd_evidence_commit on strategic_decisions(evidence_commit_sha) where evidence_commit_sha is not null;
+
+-- ── boot_briefing view (ARCH-019: lightweight index, ARCH-024: +repo_snapshot) ─
 -- Returns <10KB: decision refs+titles only, no decision/reasoning body.
 -- Full content via get_decision(ref) / get_repo_context(key) RPC functions.
 create or replace view boot_briefing as
@@ -439,6 +469,15 @@ select 'repo_context'::text as source, rc.repo as key,
     json_build_object('phase', rc.current_phase, 'blockers', rc.blockers,
         'test_health', rc.test_health, 'updated_at', rc.updated_at) as context
 from repo_context rc
+union all
+select 'repo_snapshot'::text as source, rs.repo_name as key,
+    json_build_object('commit_sha', left(rs.commit_sha, 8), 'commit_timestamp', rs.commit_timestamp,
+        'branch', rs.branch, 'file_count', rs.file_count, 'total_loc', rs.total_loc,
+        'test_count', rs.test_count, 'migration_count', rs.migration_count,
+        'route_count', rs.route_count, 'schema_tables', rs.schema_tables) as context
+from (select distinct on (repo_name) repo_name, commit_sha, commit_timestamp, branch,
+        file_count, total_loc, test_count, migration_count, route_count, schema_tables
+    from repo_snapshot order by repo_name, commit_timestamp desc) rs
 union all
 select 'active_decision'::text as source, sd.decision_ref as key,
     json_build_object('title', left(sd.title, 80), 'domain', sd.domain,

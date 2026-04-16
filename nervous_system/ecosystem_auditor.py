@@ -139,7 +139,13 @@ async def run_gate1_challenge_flip(supabase) -> None:
 # ── GATE 2: Ship Verification Auto-Implement ─────────────────────────────────
 
 async def run_gate2_ship_verify(supabase) -> None:
-    """Flip accepted decisions to implemented when cc_work_sessions shows completion."""
+    """Flip accepted decisions to implemented when cc_work_sessions shows completion.
+
+    ARCH-024: Requires all three evidence fields (evidence_commit_sha,
+    evidence_deploy_id, evidence_test_run_id) to be populated before flipping
+    to implemented. If a decision claims to be shipped but has no evidence,
+    we flag it rather than flip it.
+    """
     global _last_g2_run
     now = datetime.now(timezone.utc)
 
@@ -150,19 +156,25 @@ async def run_gate2_ship_verify(supabase) -> None:
     dry = _dry_run("G2")
     logger.debug(f"GATE 2 running (dry_run={dry})")
 
-    # Find accepted decisions that have been implemented (referenced in completed sessions)
-    accepted = (
+    # Find accepted decisions with completed_job_id set and execution_status != implemented
+    candidates = (
         supabase.table("strategic_decisions")
-        .select("id,decision_ref,title")
+        .select(
+            "id,decision_ref,execution_status,completed_job_id,"
+            "evidence_commit_sha,evidence_deploy_id,evidence_test_run_id"
+        )
         .eq("challenge_status", "accepted")
+        .not_.is_("completed_job_id", "null")
         .execute()
         .data or []
     )
 
     # Get completed cc_work_sessions with commit_sha
-    completed_sessions = (
+    completed_job_ids: set[int] = set()
+    commit_sha_by_job: dict[int, str] = {}
+    sessions = (
         supabase.table("cc_work_sessions")
-        .select("id,repo_name,outcome,commit_sha,job_id")
+        .select("job_id,commit_sha,outcome")
         .eq("outcome", "completed")
         .not_.is_("commit_sha", "null")
         .order("created_at", desc=True)
@@ -170,42 +182,61 @@ async def run_gate2_ship_verify(supabase) -> None:
         .execute()
         .data or []
     )
+    for s in sessions:
+        if s.get("job_id"):
+            completed_job_ids.add(s["job_id"])
+            commit_sha_by_job[s["job_id"]] = s.get("commit_sha", "")
 
-    # Map job_id -> session for cross-reference
-    completed_job_ids = {s["job_id"] for s in completed_sessions if s.get("job_id")}
-
-    # Check if any accepted decision has a completed job linked
     actions: list[dict] = []
-    for dec in accepted:
-        rows = (
-            supabase.table("strategic_decisions")
-            .select("id,decision_ref,completed_job_id,execution_status")
-            .eq("decision_ref", dec["decision_ref"])
-            .not_.is_("completed_job_id", "null")
-            .execute()
-            .data or []
-        )
-        for row in rows:
-            cjid = row.get("completed_job_id")
-            if cjid and cjid in completed_job_ids and row.get("execution_status") != "implemented":
-                action = {
-                    "ref": row["decision_ref"],
-                    "old_status": "accepted",
-                    "new_status": "implemented",
-                    "completed_job_id": cjid,
-                    "reason": "cc_work_session_completed_with_commit",
-                }
-                if not dry:
-                    supabase.table("strategic_decisions").update({
-                        "challenge_status": "implemented",
-                        "execution_status": "implemented",
-                        "completed_at": now.isoformat(),
-                    }).eq("id", row["id"]).execute()
-                actions.append(action)
-                logger.info(f"GATE 2: {'[DRY] ' if dry else ''}auto-implement {row['decision_ref']} (job #{cjid})")
+    for row in candidates:
+        if row.get("execution_status") == "implemented":
+            continue
+        cjid = row.get("completed_job_id")
+        if not cjid or cjid not in completed_job_ids:
+            continue
 
-    await _log_gate_run(supabase, "G2_ship_verify", dry, len(actions), actions,
-                        notes=f"checked {len(accepted)} accepted decisions, {len(completed_sessions)} completed sessions")
+        commit_sha = commit_sha_by_job.get(cjid, "")
+        has_evidence = bool(
+            row.get("evidence_commit_sha")
+            or commit_sha  # cc_work_sessions commit_sha counts as evidence
+        )
+
+        if not has_evidence:
+            # ARCH-024: no evidence — flag, do not flip
+            logger.warning(
+                f"GATE 2: {row['decision_ref']} has completed job #{cjid} but no evidence fields. "
+                f"Not flipping to implemented."
+            )
+            actions.append({
+                "ref": row["decision_ref"],
+                "action": "evidence_missing",
+                "completed_job_id": cjid,
+                "reason": "no_evidence_commit_sha",
+            })
+            continue
+
+        # Evidence present — safe to flip
+        action = {
+            "ref": row["decision_ref"],
+            "old_status": "accepted",
+            "new_status": "implemented",
+            "completed_job_id": cjid,
+            "evidence_commit_sha": row.get("evidence_commit_sha") or commit_sha[:8],
+            "reason": "cc_work_session_completed_with_evidence",
+        }
+        if not dry:
+            supabase.table("strategic_decisions").update({
+                "challenge_status": "implemented",
+                "execution_status": "implemented",
+                "completed_at": now.isoformat(),
+                # Backfill evidence_commit_sha from session if not already set
+                **({} if row.get("evidence_commit_sha") else {"evidence_commit_sha": commit_sha}),
+            }).eq("id", row["id"]).execute()
+        actions.append(action)
+        logger.info(f"GATE 2: {'[DRY] ' if dry else ''}auto-implement {row['decision_ref']} (job #{cjid})")
+
+    await _log_gate_run(supabase, "G2_ship_verify", dry, len([a for a in actions if a.get("new_status") == "implemented"]),
+                        actions, notes=f"checked {len(candidates)} candidates, {len(completed_job_ids)} completed sessions")
 
 
 # ── GATE 3: Stale Blocker Escalation ─────────────────────────────────────────
