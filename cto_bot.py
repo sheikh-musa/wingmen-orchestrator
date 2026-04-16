@@ -2416,6 +2416,98 @@ async def _execute_config_action(operation: str, user: dict) -> str:
 _chat_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent Claude calls
 
 
+async def _maybe_relay_cai_reply(update: Update, user: dict, user_msg: str) -> bool:
+    """If Musa replies to a bot notification for a requires_response agent_message,
+    auto-post the reply to agent_messages as cai's response to cc-ihsanos.
+
+    Returns True if the message was consumed as a cai relay (caller should skip
+    normal processing). Returns False if this is a regular message.
+
+    Flow:
+      1. Message must be a Telegram reply (reply_to_message present)
+      2. Sender must be admin (Musa)
+      3. Look up notification_log by telegram_msg_id
+      4. Parse agent_message_id from dedup_key
+      5. Post reply to agent_messages as from_agent='cai'
+      6. Confirm to Musa
+    """
+    if not is_admin(user):
+        return False
+
+    reply_to = update.message.reply_to_message
+    if reply_to is None:
+        return False
+
+    replied_msg_id: int = reply_to.message_id
+
+    try:
+        supabase = await get_supabase()
+
+        # Look up which agent_message this notification corresponds to
+        notif_result = (
+            await supabase.table("notification_log")
+            .select("id, dedup_key")
+            .eq("telegram_msg_id", replied_msg_id)
+            .eq("channel", "telegram")
+            .limit(1)
+            .execute()
+        )
+
+        if not notif_result.data:
+            # Not a notification reply — normal chat
+            return False
+
+        dedup_key: str = notif_result.data[0]["dedup_key"]
+
+        # dedup_key format: "agent_message:{id}:telegram"
+        parts = dedup_key.split(":")
+        if len(parts) != 3 or parts[0] != "agent_message" or parts[2] != "telegram":
+            logger.warning(f"Unexpected dedup_key format: {dedup_key!r} — skipping relay")
+            return False
+
+        agent_message_id = int(parts[1])
+
+        # Fetch original message for context (subject)
+        orig_result = (
+            await supabase.table("agent_messages")
+            .select("id, subject, from_agent, requires_response")
+            .eq("id", agent_message_id)
+            .limit(1)
+            .execute()
+        )
+
+        orig_subject = ""
+        orig_from = "cc-ihsanos"
+        if orig_result.data:
+            orig_subject = orig_result.data[0].get("subject") or ""
+            orig_from = orig_result.data[0].get("from_agent") or "cc-ihsanos"
+
+        # Post Musa's reply as cai's response
+        reply_subject = f"Re: {orig_subject}" if orig_subject else "cai reply"
+        await supabase.table("agent_messages").insert({
+            "from_agent": "cai",
+            "to_agent": orig_from,  # reply back to whoever asked (usually cc-ihsanos)
+            "message_type": "update",
+            "subject": reply_subject[:200],
+            "body": user_msg,
+            "requires_response": False,
+        }).execute()
+
+        logger.info(
+            f"cai relay: Musa reply → agent_messages "
+            f"(original msg_id={agent_message_id}, to={orig_from!r})"
+        )
+        await update.message.reply_text(
+            f"\u2705 Posted to cc-ihsanos as cai reply\n\nRe: {orig_subject[:80]}"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"_maybe_relay_cai_reply failed: {e}")
+        # Fail open — treat as a normal message
+        return False
+
+
 async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle free-text messages."""
     chat_id = str(update.effective_user.id)
@@ -2433,6 +2525,11 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await resolve_user(chat_id)
     if not user:
         await handle_onboarding(update, chat_id)
+        await _mark_processed(chat_id, msg_id)
+        return
+
+    # Check if this is Musa replying to a CC notification — if so, relay as cai
+    if await _maybe_relay_cai_reply(update, user, user_msg):
         await _mark_processed(chat_id, msg_id)
         return
 

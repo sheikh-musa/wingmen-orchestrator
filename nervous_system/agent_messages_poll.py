@@ -69,7 +69,7 @@ def _format_telegram(msg: dict) -> str | None:
             f"\U0001f514 CC needs your input\n\n"
             f"From: {from_agent}\n"
             f"{subject}\n\n"
-            f"Open claude.ai to respond."
+            f"Reply to this message to respond as cai."
         )
 
     if message_type == "blocker":
