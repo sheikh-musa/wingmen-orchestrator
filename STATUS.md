@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-16 SGT
+Last Updated: 2026-04-16 18:48 SGT
 Build Status: green
 Deploy: N/A
 
@@ -11,17 +11,15 @@ Deploy: N/A
 Applied migration `bug013_qa_findings_created_at` via Supabase MCP: `ALTER TABLE qa_findings ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()` plus `CREATE INDEX IF NOT EXISTS qa_findings_created_at_idx ON qa_findings (created_at DESC)`. The `DEFAULT now()` backfilled all 500 pre-existing rows in a single statement (verified: 0 null rows). Updated `schema.sql` to rename the existing index declaration to `qa_findings_created_at_idx` so it mirrors the live DB. QA bridge (`nervous_system/qa_bridge.py`) required no code change — its `.order("created_at", desc=False)` FIFO SELECT now succeeds; the bridge doesn't INSERT into `qa_findings` (external QA producers do). Added regression test `test_select_orders_by_created_at` in `tests/test_qa_bridge.py` asserting `.order("created_at", ...)` is called. Full suite: 355 pass (350 prior + 5 new). Smoke test via MCP: insert legacy-schema row → `SELECT ... ORDER BY created_at DESC LIMIT 1` returns the inserted row with populated `created_at` — no error. Note: broader qa_findings schema drift (legacy `repo`/`role`/`flow` columns vs schema.sql's `repo_name`/`source`/`title`) is pre-existing and out of BUG-013 scope — tracked in build_log id=66.
 
 ## Completed (Last 5)
+- [red] Job #90: wingmen-orchestrator — [SMOKE-001] BUG-019 worktree isolation smoke test — append a comment to STATUS.md (3m 0s, deploy: N/A)
 - [green] Job #83: wingmen-orchestrator — [BUG-016] Safe-restart procedure — launchctl kickstart helper + runbook; nohup forbidden (deploy: N/A)
 - [green] Job #82: wingmen-orchestrator — [BUG-015] Graceful shutdown asyncio cleanup — cancel pending tasks before loop close (deploy: N/A)
 - [green] Job #79: wingmen-orchestrator — [BUG-012] Gate 6 Haiku empty-JSON fix — ANTHROPIC_API_KEY guard + fail-loud (deploy: N/A)
 - [green] Job #35: ihsanos — [TASK-022] Re-measure BUG-005 hydration with per-stage instrumentation + production build (9m 32s, deploy: https://ihsandms-qk0oxeq1y-musaaaaaaas-projects.vercel.app)
-- [green] Job #71: wingmen-orchestrator — Queue stall detector with dedup and recovery sweep (deploy: N/A)
-- [green] Job #70: wingmen-orchestrator — [TASK-033] Zombie running-row cleanup on orchestrator startup (4m 8s, deploy: N/A)
-- [green] Job #69: wingmen-orchestrator — [TASK-037] Fire drill harness — 5 scenarios exercised and documented (7m 55s, deploy: N/A)
 
-##        Recent Jobs (auto-tracked)
+##         Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-14 19:49 SGT
+Last Updated: 2026-04-16 18:48 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
