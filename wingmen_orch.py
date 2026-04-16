@@ -1240,6 +1240,27 @@ async def _shutdown(loop: asyncio.AbstractEventLoop, signal_name: str) -> None:
     loop.stop()
 
 
+def _cancel_pending_tasks(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel and await any tasks still pending before ``loop.close()``.
+
+    Called from the ``finally`` block after ``run_until_complete`` returns so
+    leftover tasks (e.g. the ``_shutdown`` task itself, or tasks spawned during
+    cancellation cleanup) don't emit "Task was destroyed but it is pending".
+    """
+    try:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+    except RuntimeError:
+        return
+    if not pending:
+        return
+    for task in pending:
+        task.cancel()
+    try:
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    except Exception as e:
+        logger.debug(f"_cancel_pending_tasks swallowed: {e}")
+
+
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1252,4 +1273,5 @@ if __name__ == "__main__":
     try:
         loop.run_until_complete(main_loop())
     finally:
+        _cancel_pending_tasks(loop)
         loop.close()
