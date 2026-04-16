@@ -112,6 +112,12 @@ _reminder_loop() {
         echo -e "${AMBER}${BOLD}║  CHECK-IN DUE (ARCH-022) — post agent_message to cai:              ║${RESET}"
         echo -e "${AMBER}${BOLD}║    message_type=update, what shipped, what's in progress, blockers  ║${RESET}"
         echo -e "${AMBER}${BOLD}╚══════════════════════════════════════════════════════════════════════╝${RESET}"
+        # Check for unpushed commits in caller's repo
+        local ahead
+        ahead="$(git -C "$CALLER_DIR" log --oneline origin/main..HEAD 2>/dev/null | wc -l | tr -d ' ')"
+        if [ "${ahead:-0}" -gt 0 ]; then
+            echo -e "${RED}${BOLD}  ⚠ UNPUSHED COMMITS ($ahead ahead of origin) — run: git push origin main${RESET}"
+        fi
         echo ""
     done
 }
@@ -138,6 +144,15 @@ _handle_exit() {
 
     echo ""
     echo -e "${DIM}Session ended: ${outcome} | exit_code=${exit_code} | duration=${duration_seconds}s${RESET}"
+
+    # Auto-push any unpushed commits before closing out
+    local ahead
+    ahead="$(git -C "$CALLER_DIR" log --oneline origin/main..HEAD 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${ahead:-0}" -gt 0 ]; then
+        echo -e "${AMBER}▶ Pushing ${ahead} unpushed commit(s) before exit...${RESET}"
+        git -C "$CALLER_DIR" push origin main 2>&1 || \
+            echo -e "${RED}⚠ git push failed — commits remain local${RESET}"
+    fi
 
     # Write cc_work_sessions row
     "$VENV_PY" -c "
