@@ -377,3 +377,55 @@ insert into bug_pipeline_readiness (phase, gate_ref, gate_title, status, notes) 
   ('phase_0', 'tests_move_with_code',   'Behavior changes ship with matching test updates',          'green',   'ARCH-014 spec rule; verify no stale-test stalls for 14 days'),
   ('phase_0', 'paused_job_escalation',  'Paused jobs escalate at 1h/6h',                            'green',   'TASK-028 shipped')
 on conflict (gate_ref) do nothing;
+-- TASK-031: Archive tables for completed jobs and terminal decisions
+-- jobs_archive: 90-day retention (execution history, not durable record)
+-- strategic_decisions_archive: 365-day minimum retention (institutional memory)
+
+create table if not exists jobs_archive (
+  id bigint primary key,                          -- original job id (not auto-generated)
+  repo_name text not null,
+  description text not null,
+  status text not null,
+  priority int not null default 5,
+  fail_count int not null default 0,
+  session_prompt text,
+  result_summary text,
+  triggered_by text,
+  created_at timestamptz not null,
+  updated_at timestamptz not null,
+  archived_at timestamptz not null default now()
+);
+alter table jobs_archive enable row level security;
+create policy "service role full access" on jobs_archive
+  using (true) with check (true);
+create index idx_jobs_archive_repo on jobs_archive(repo_name);
+create index idx_jobs_archive_status on jobs_archive(status);
+create index idx_jobs_archive_archived on jobs_archive(archived_at desc);
+create index idx_jobs_archive_created on jobs_archive(created_at desc);
+
+create table if not exists strategic_decisions_archive (
+  id bigint primary key,                          -- original decision id (not auto-generated)
+  decision_ref text not null,
+  title text not null,
+  decision text,
+  reasoning text,
+  repos_affected text[],
+  source text,
+  challenge_status text,
+  bypass_review boolean,
+  notified_at timestamptz,
+  execution_status text,
+  completed_job_id bigint,
+  completed_at timestamptz,
+  category text,
+  parent_ref text,
+  created_at timestamptz not null,
+  archived_at timestamptz not null default now()
+);
+alter table strategic_decisions_archive enable row level security;
+create policy "service role full access" on strategic_decisions_archive
+  using (true) with check (true);
+create index idx_sda_ref on strategic_decisions_archive(decision_ref);
+create index idx_sda_challenge_status on strategic_decisions_archive(challenge_status);
+create index idx_sda_archived on strategic_decisions_archive(archived_at desc);
+create index idx_sda_created on strategic_decisions_archive(created_at desc);

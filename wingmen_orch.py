@@ -44,6 +44,7 @@ from nervous_system.agent_watchdog import check_agent_health
 from nervous_system.qa_bridge import poll_qa_findings
 from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
+from nervous_system.archive import run_archive
 from heartbeat import write_orchestrator_heartbeat
 from nervous_system.swallowed_except_harness import record_swallowed
 
@@ -811,6 +812,7 @@ async def main_loop():
     agent_messages_counter = 0
     pipeline_clock_counter = 0
     agent_watchdog_counter = 0
+    archive_last_run: str | None = None  # "YYYY-MM-DD" — prevents double-runs in the 03:00h window
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -1073,6 +1075,18 @@ async def main_loop():
                 except Exception as e:
                     logger.error(f"Swallowed-except escalation check failed: {e}")
                 swallowed_except_counter = 0
+
+            # Archive completed jobs + terminal decisions once daily at 03:00 SGT.
+            # Counter-based time check: runs once per 03:xx hour, never twice.
+            _sgt = timezone(timedelta(hours=8))
+            _now_sgt = datetime.now(_sgt)
+            if _now_sgt.hour == 3 and _now_sgt.strftime("%Y-%m-%d") != archive_last_run:
+                try:
+                    await run_archive(supabase)
+                except Exception as e:
+                    logger.error(f"Archive task failed: {e}")
+                    record_swallowed("archive", e)
+                archive_last_run = _now_sgt.strftime("%Y-%m-%d")
 
             # How many slots available?
             available = MAX_CONCURRENT_BUILDS - len(running_tasks)

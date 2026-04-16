@@ -1482,41 +1482,296 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Job #{job['id']} queued by {user['name']}: {repo_name} — {description}")
 
 
+# ── /status subcommand helpers ───────────────────────────────────
+
+
+def _extract_ref(description: str) -> str:
+    """Extract [TASK-XXX] / [BUG-XXX] ref from a job description."""
+    if description.startswith("[") and "]" in description:
+        return description[1:description.index("]")]
+    return "—"
+
+
+def _fmt_age(ts_str: str) -> str:
+    """Return human-readable age since a UTC ISO timestamp."""
+    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    return f"{secs // 3600}h{(secs % 3600) // 60}m"
+
+
+def _secs_since(ts_str: str) -> int:
+    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    return int((datetime.now(timezone.utc) - dt).total_seconds())
+
+
+async def _status_jobs(update, user) -> None:
+    supabase = await get_supabase()
+    query = (
+        supabase.table("jobs")
+        .select("id, description, repo_name, status, fail_count, updated_at")
+        .in_("status", ["queued", "running", "paused"])
+        .order("priority", desc=False)
+    )
+    if not is_admin(user) and user.get("client_id"):
+        query = query.eq("client_id", user["client_id"])
+    result = await query.execute()
+
+    if not result.data:
+        await update.message.reply_text("No active jobs.")
+        return
+
+    lines = []
+    for j in result.data:
+        ref = _extract_ref(j["description"])
+        age = _fmt_age(j["updated_at"])
+        icon = {"queued": "\u23f3", "running": "\u25b6", "paused": "\u23f8"}.get(j["status"], "?")
+        fail_str = f" \u26a0{j['fail_count']}" if j["fail_count"] > 0 else ""
+        lines.append(f"{icon} #{j['id']} {ref} {j['repo_name']} [{j['status']}]{fail_str} ({age})")
+
+    body = "\n".join(lines)
+    text = f"<b>Active Jobs ({len(result.data)})</b>\n<pre>{body}</pre>"
+    if len(text) > 4000:
+        text = text[:3990] + "\n\u2026</pre>"
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def _status_decisions(update, user) -> None:
+    if not is_admin(user):
+        await update.message.reply_text("Admin only.")
+        return
+
+    supabase = await get_supabase()
+    result = await (
+        supabase.table("strategic_decisions")
+        .select("decision_ref, title, challenge_status, execution_status")
+        .order("created_at", desc=True)
+        .limit(200)
+        .execute()
+    )
+
+    if not result.data:
+        await update.message.reply_text("No decisions found.")
+        return
+
+    show_detail = {"challenge_window", "cai_review_requested", "challenged"}
+    buckets: dict[str, list] = {
+        "challenge_window": [],
+        "cai_review_requested": [],
+        "challenged": [],
+    }
+    counts: dict[str, int] = {}
+
+    for d in result.data:
+        cs = d.get("challenge_status") or "unknown"
+        es = d.get("execution_status") or ""
+        if cs in show_detail:
+            buckets[cs].append(d)
+        else:
+            key = "implemented" if es == "implemented" else (cs or "unknown")
+            counts[key] = counts.get(key, 0) + 1
+
+    lines = []
+    label_map = {
+        "challenge_window": "\U0001f514 Challenge window",
+        "cai_review_requested": "\U0001f50d Needs CAI review",
+        "challenged": "\u2694\ufe0f Challenged",
+    }
+    for key, label in label_map.items():
+        rows = buckets[key]
+        if rows:
+            lines.append(f"\n<b>{label} ({len(rows)})</b>")
+            for d in rows:
+                title = (d.get("title") or "")[:60]
+                lines.append(f"  {d['decision_ref']} \u2014 {title}")
+        else:
+            lines.append(f"<b>{label}:</b> none")
+
+    if counts:
+        lines.append("\n<b>Collapsed</b>")
+        for k, v in sorted(counts.items()):
+            lines.append(f"  {k}: {v}")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "\n\u2026"
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def _status_stuck(update, user) -> None:
+    if not is_admin(user):
+        await update.message.reply_text("Admin only.")
+        return
+
+    supabase = await get_supabase()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+    decisions_res, jobs_res = await asyncio.gather(
+        supabase.table("strategic_decisions")
+        .select("decision_ref, title, updated_at")
+        .eq("challenge_status", "cai_review_requested")
+        .lt("updated_at", cutoff)
+        .order("updated_at")
+        .execute(),
+        supabase.table("jobs")
+        .select("id, description, repo_name, updated_at")
+        .eq("status", "paused")
+        .order("updated_at")
+        .execute(),
+    )
+
+    lines = []
+    if decisions_res.data:
+        lines.append("<b>\U0001f50d Decisions stuck in CAI review (&gt;2h)</b>")
+        for d in decisions_res.data:
+            age = _fmt_age(d["updated_at"])
+            title = (d.get("title") or "")[:55]
+            lines.append(f"  {d['decision_ref']} \u2014 {title} ({age})")
+    else:
+        lines.append("<b>Decisions:</b> none stuck in CAI review")
+
+    lines.append("")
+    if jobs_res.data:
+        lines.append("<b>\u23f8 Paused jobs</b>")
+        for j in jobs_res.data:
+            ref = _extract_ref(j["description"])
+            age = _fmt_age(j["updated_at"])
+            lines.append(f"  #{j['id']} {ref} {j['repo_name']} ({age})")
+    else:
+        lines.append("<b>Jobs:</b> none paused")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "\n\u2026"
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def _status_perf(update, user) -> None:
+    if not is_admin(user):
+        await update.message.reply_text("Admin only.")
+        return
+
+    supabase = await get_supabase()
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+    heartbeat_res, dedup_res, last_paused_res = await asyncio.gather(
+        supabase.table("bot_heartbeat")
+        .select("service, last_ping")
+        .eq("service", "orchestrator")
+        .limit(1)
+        .execute(),
+        supabase.table("notification_log")
+        .select("id", count="exact")
+        .gte("created_at", cutoff_24h)
+        .not_.is_("dedup_key", "null")
+        .execute(),
+        supabase.table("jobs")
+        .select("id, description, repo_name, result_summary, updated_at")
+        .eq("status", "paused")
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute(),
+    )
+
+    lines = ["<b>\U0001f4ca Orchestrator Perf</b>"]
+
+    if heartbeat_res.data:
+        hb = heartbeat_res.data[0]
+        age = _fmt_age(hb["last_ping"])
+        healthy = _secs_since(hb["last_ping"]) < 300
+        icon = "\U0001f7e2" if healthy else "\U0001f534"
+        lines.append(f"Heartbeat: {icon} last ping {age}")
+    else:
+        lines.append("Heartbeat: no data")
+
+    dedup_count = (
+        dedup_res.count
+        if hasattr(dedup_res, "count") and dedup_res.count is not None
+        else len(dedup_res.data or [])
+    )
+    lines.append(f"Dedup notifications (24h): {dedup_count}")
+
+    if last_paused_res.data:
+        j = last_paused_res.data[0]
+        ref = _extract_ref(j["description"])
+        age = _fmt_age(j["updated_at"])
+        lines.append(f"\nLast paused: #{j['id']} {ref} {j['repo_name']} ({age})")
+        summary = j.get("result_summary") or "(no summary)"
+        lines.append(f"<pre>{summary[:600]}</pre>")
+    else:
+        lines.append("\nNo paused jobs.")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_user.id)
     user = await resolve_user(chat_id)
     if not user:
         return
 
-    # Determine which repo to show
-    if context.args and is_admin(user):
-        repo_name = context.args[0]
+    sub = context.args[0].lower() if context.args else None
+
+    if sub == "jobs":
+        await _status_jobs(update, user)
+    elif sub == "decisions":
+        await _status_decisions(update, user)
+    elif sub == "stuck":
+        await _status_stuck(update, user)
+    elif sub == "perf":
+        await _status_perf(update, user)
+    elif sub is not None:
+        # Check if it's a repo name shortcut (admin only), otherwise show help
+        known_subs = ("jobs", "decisions", "stuck", "perf")
+        if is_admin(user):
+            try:
+                config = context_loader.get_repo_config(context.args[0])
+                repo_path = Path(os.path.expanduser(config["local_path"]))
+                status_file = repo_path / "STATUS.md"
+                if status_file.exists():
+                    content = status_file.read_text()
+                    if len(content) > 4000:
+                        content = content[:4000] + "\n...(truncated)"
+                    await update.message.reply_text(content)
+                    return
+            except ValueError:
+                pass
+        valid = ", ".join(f"<code>{s}</code>" for s in known_subs)
+        await update.message.reply_text(
+            f"Unknown subcommand: <code>{sub}</code>\n"
+            f"Valid subcommands: {valid}\n"
+            f"Usage: <code>/status [jobs|decisions|stuck|perf]</code>",
+            parse_mode="HTML",
+        )
     else:
+        # Default: active repo STATUS.md or orchestrator fallback
         repo_name = get_active_repo(chat_id, user)
 
-    if repo_name:
-        try:
-            config = context_loader.get_repo_config(repo_name)
-            repo_path = Path(os.path.expanduser(config["local_path"]))
-            status_file = repo_path / "STATUS.md"
-            if status_file.exists():
-                content = status_file.read_text()
-                if len(content) > 4000:
-                    content = content[:4000] + "\n...(truncated)"
-                await update.message.reply_text(content)
-                return
-        except ValueError:
-            pass
+        if repo_name:
+            try:
+                config = context_loader.get_repo_config(repo_name)
+                repo_path = Path(os.path.expanduser(config["local_path"]))
+                status_file = repo_path / "STATUS.md"
+                if status_file.exists():
+                    content = status_file.read_text()
+                    if len(content) > 4000:
+                        content = content[:4000] + "\n...(truncated)"
+                    await update.message.reply_text(content)
+                    return
+            except ValueError:
+                pass
 
-    # Fallback: orchestrator status
-    orch_status = Path(__file__).parent / "STATUS.md"
-    if orch_status.exists():
-        content = orch_status.read_text()
-        if len(content) > 4000:
-            content = content[:4000] + "\n...(truncated)"
-        await update.message.reply_text(content)
-    else:
-        await update.message.reply_text("No status available.")
+        orch_status = Path(__file__).parent / "STATUS.md"
+        if orch_status.exists():
+            content = orch_status.read_text()
+            if len(content) > 4000:
+                content = content[:4000] + "\n...(truncated)"
+            await update.message.reply_text(content)
+        else:
+            await update.message.reply_text("No status available.")
 
 
 async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
