@@ -606,6 +606,27 @@ async def run_job(supabase, job: dict) -> None:
             )
             logger.info(f"✅ Job #{job_id} completed in {elapsed:.0f}s")
 
+            # BUG-017: push completion event to cc-ihsanos inbox (ARCH-018/ARCH-028)
+            try:
+                _g1 = (result.get("gate1") or {})
+                _g2 = (result.get("gate2") or {})
+                _sha = _g1.get("commit_sha", "")
+                _body = (
+                    f"{result['summary'][:800]}\n\n"
+                    f"Gate1 (commit): {'pass' if _g1.get('passed') else 'n/a'}{' sha=' + _sha if _sha else ''}\n"
+                    f"Gate2 (intent): {'pass conf=' + str(_g2.get('confidence')) if _g2.get('passed') else 'n/a'}"
+                )
+                await supabase.table("agent_messages").insert({
+                    "from_agent": "ralph_runner",
+                    "to_agent": "cc-ihsanos",
+                    "message_type": "update",
+                    "subject": f"Job #{job_id} completed: {job.get('description', '')[:80]}",
+                    "body": _body,
+                    "requires_response": False,
+                }).execute()
+            except Exception as _e:
+                record_swallowed("bug017_completion_msg", _e)
+
             # Notify Musa if this was a strategic decision auto-implementation
             if job.get("triggered_by") == "strategic_decisions_poll":
                 import re as _re
@@ -648,6 +669,19 @@ async def run_job(supabase, job: dict) -> None:
                 )
                 logger.warning(f"⏸ Job #{job_id} paused after {new_fail_count} failures")
                 await notify(job_id, repo_name, "paused", f"Failed {new_fail_count}x in {elapsed_str}. Paused.")
+
+                # BUG-017: push blocker event to cc-ihsanos inbox (ARCH-018/ARCH-028)
+                try:
+                    await supabase.table("agent_messages").insert({
+                        "from_agent": "ralph_runner",
+                        "to_agent": "cc-ihsanos",
+                        "message_type": "blocker",
+                        "subject": f"Job #{job_id} paused after {new_fail_count} failures: {job.get('description', '')[:80]}",
+                        "body": f"{result['summary'][:800]}\n\nFailed {new_fail_count}/{MAX_FAIL_COUNT} attempts. Manual review required.",
+                        "requires_response": True,
+                    }).execute()
+                except Exception as _e:
+                    record_swallowed("bug017_paused_msg", _e)
 
                 # Notify Musa if this was a strategic decision that failed
                 if job.get("triggered_by") == "strategic_decisions_poll":
