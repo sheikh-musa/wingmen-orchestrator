@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-17 14:30 SGT
+Last Updated: 2026-04-17 03:02 SGT
 Build Status: green
 Deploy: N/A
 
@@ -11,16 +11,15 @@ Deploy: N/A
 Docs-only change: created `README.md` with H1 + appended `<!-- PIPELINE-TEST-001: pipeline marker 2026-04-17 -->` marker. No code paths touched, no restart required. Audit row written to `work_outputs` by orchestrator.
 
 ## Completed (Last 5)
+- [red] Job #93: wingmen-orchestrator — PIPELINE-TEST-001: Add test marker comment to README.md (1m 1s, deploy: N/A)
 - [green] Job #93: wingmen-orchestrator — [PIPELINE-TEST-001] README pipeline marker (deploy: N/A)
 - [red] Job #91: ihsanos — QURBAN-GAP-004 (concrete): age_months column + Islamic fiqh validation (5m 45s, deploy: N/A)
 - [red] Job #87: ihsanos — [QURBAN-GAP-004] Animal minimum age enforcement — add age_months to qbn_animals with fiqh CHECK (Islamic §9) (2m 7s, deploy: N/A)
 - [red] Job #88: ihsanos — [QURBAN-GAP-008] Physical animal tag ID — add animal_tag_id to qbn_milestones (Islamic §11) (8m 40s, deploy: N/A)
-- [red] Job #85: wingmen-orchestrator — [BUG-018] strategic_decisions_poll queues jobs for already-shipped decisions — add WHERE evidence_commit_sha IS NULL AND challenge_status != 'implemented' (2m 10s, deploy: N/A)
-- [green] Job #85: wingmen-orchestrator — [BUG-018] strategic_decisions_poll shipped-decision filter — evidence_commit_sha IS NULL + challenge_status != 'implemented' (deploy: N/A)
 
-##             Recent Jobs (auto-tracked)
+##              Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-17 14:30 SGT
+Last Updated: 2026-04-17 03:02 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
