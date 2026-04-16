@@ -46,3 +46,4 @@ Last Updated: 2026-04-16 SGT
 | #70 | [TASK-033] Zombie running-row cleanup on orchestrator startup | green | N/A |
 | #69 | [TASK-037] Fire drill harness — 5 scenarios exercised and documented | green | N/A |
 | #61 | [BUG-006] cc_work_sessions not being written — 1 row from 20+ jobs. Narrative la | green | N/A |
+<!-- SMOKE-001 BUG-019 worktree isolation verified 2026-04-16 SGT -->
