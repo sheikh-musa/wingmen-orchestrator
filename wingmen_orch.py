@@ -77,6 +77,10 @@ MAX_FAIL_COUNT = int(os.environ.get("MAX_FAIL_COUNT", "3"))
 STALE_JOB_MINUTES = int(os.environ.get("STALE_JOB_MINUTES", "120"))
 MAX_CONCURRENT_BUILDS = int(os.environ.get("MAX_CONCURRENT_BUILDS", "3"))
 
+# ARCH-030: tracks job IDs with an in-flight escalation session so a single
+# paused job cannot spawn multiple simultaneous CC processes.
+_arch030_active: set[int] = set()
+
 
 def _autocc_poll_enabled() -> bool:
     """ARCH-016 / MUSA-001 / CAI-RESP-022: gate the autocc job-picking + auto-queue
@@ -87,6 +91,15 @@ def _autocc_poll_enabled() -> bool:
     Default true to preserve legacy behaviour.
     """
     return os.environ.get("AUTOCC_POLL_ENABLED", "true").lower() not in (
+        "false", "0", "no", "off",
+    )
+
+
+def _arch030_escalation_enabled() -> bool:
+    """ARCH-030: gate the auto-escalation CC spawn.
+    Default true. Set ARCH030_ESCALATION_ENABLED=false to disable without restart.
+    """
+    return os.environ.get("ARCH030_ESCALATION_ENABLED", "true").lower() not in (
         "false", "0", "no", "off",
     )
 
@@ -412,6 +425,188 @@ async def _resolve_client_chat_id(supabase, job: dict) -> str | None:
     return None
 
 
+async def _spawn_escalation_session(
+    supabase,
+    job: dict,
+    result_summary: str,
+    session_prompt: str,
+    repo_path: str,
+) -> None:
+    """ARCH-030: spawn a dangerous-mode CC session to self-diagnose a paused job.
+
+    Fire-and-forget from run_job's failure handler. Collects git state and
+    build_log context, builds a rich prompt, runs `claude --dangerously-skip-permissions -p`,
+    then posts the diagnosis back to agent_messages. Does NOT re-enter the
+    ralph_runner pipeline — CC acts directly on the repo and jobs table.
+    """
+    global _arch030_active
+    job_id = job["id"]
+    repo_name = job.get("repo_name", "unknown")
+
+    if job_id in _arch030_active:
+        logger.info(f"ARCH-030: escalation already in-flight for job #{job_id}, skipping duplicate")
+        return
+    _arch030_active.add(job_id)
+
+    try:
+        # ── Gather diagnostics ──────────────────────────────────────────────
+        async def _git(cmd: list[str]) -> str:
+            if not repo_path or not Path(repo_path).exists():
+                return ""
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=repo_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+                return stdout.decode(errors="replace").strip()
+            except Exception:
+                return ""
+
+        git_status = await _git(["git", "status", "--short"])
+        git_log = await _git(["git", "log", "--oneline", "-10"])
+
+        build_log_tail = ""
+        try:
+            bl = await (
+                supabase.table("build_log")
+                .select("phase,message,level")
+                .eq("job_id", job_id)
+                .order("created_at", desc=True)
+                .limit(10)
+                .execute()
+            )
+            if bl.data:
+                lines = [
+                    f"[{r['level']}] {r['phase']}: {r['message'][:200]}"
+                    for r in reversed(bl.data)
+                ]
+                build_log_tail = "\n".join(lines)
+        except Exception:
+            pass
+
+        fail_count_display = f"{job.get('fail_count', 0) + 1}/{MAX_FAIL_COUNT}"
+
+        escalation_prompt = f"""ARCH-030 AUTO-ESCALATION: Job #{job_id} paused after {fail_count_display} failures.
+
+You are an emergency diagnostic session for the Wingmen orchestrator. Act immediately — do not acknowledge this preamble.
+
+## Job
+- ID: {job_id}
+- Repo: {repo_name}
+- Description: {job.get('description', 'unknown')}
+- Fail count: {fail_count_display}
+
+## Original Session Prompt (what was attempted)
+{session_prompt[:3000]}
+
+## Failure Summary
+{result_summary[:1000]}
+
+## Build Log (recent)
+{build_log_tail[:800] or '(none)'}
+
+## Git State ({repo_path})
+Status:
+{git_status[:500] or '(clean)'}
+
+Recent commits:
+{git_log[:500] or '(none)'}
+
+## Instructions
+1. Read the relevant source files. Understand WHY the job failed.
+2. If the root cause is fixable within ~20 minutes:
+   a. Fix it (edit files, run tests).
+   b. Commit: `fix(arch030): auto-diagnosis job #{job_id} — <cause>`
+   c. Update the jobs row: SET status='queued', fail_count=0, result_summary='ARCH-030: fixed — <what you fixed>' WHERE id={job_id}. Use the Supabase service key from .env.
+3. If NOT fixable autonomously (schema migration required, ambiguous requirements, needs Musa):
+   a. Write a concrete, explicit rewrite of the spec and update: SET session_prompt=<new prompt>, description=<clearer title>, status='queued', fail_count=0 WHERE id={job_id}.
+   b. If you need Musa's input: leave status='paused', set requires_response=True below.
+4. Post your diagnosis to Supabase agent_messages:
+   INSERT (from_agent='arch-030-escalation', to_agent='cc-ihsanos', message_type='update',
+           subject='ARCH-030 Job #{job_id}: <outcome in 60 chars>',
+           body=<your diagnosis + what you did, under 2000 chars>,
+           requires_response=<True only if human input genuinely required>)
+5. Do not create new jobs. Do not modify other jobs. Scope = job #{job_id} in {repo_path}.
+"""
+
+        logger.info(f"ARCH-030: spawning escalation CC for job #{job_id} ({len(escalation_prompt)} chars)")
+
+        # Announce escalation start
+        try:
+            await supabase.table("agent_messages").insert({
+                "from_agent": "arch-030-escalation",
+                "to_agent": "cc-ihsanos",
+                "message_type": "update",
+                "subject": f"ARCH-030: starting auto-diagnosis for job #{job_id}",
+                "body": (
+                    f"Job #{job_id} ({job.get('description','')[:80]}) paused after "
+                    f"{fail_count_display} failures. Launching dangerous-mode CC.\n\n"
+                    f"Failure: {result_summary[:400]}"
+                ),
+                "requires_response": False,
+            }).execute()
+        except Exception as _e:
+            record_swallowed("arch030_start_msg", _e)
+
+        # ── Spawn dangerous-mode CC ─────────────────────────────────────────
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "--dangerously-skip-permissions", "-p", escalation_prompt,
+            cwd=repo_path or str(Path(__file__).parent),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "AUTOCC_POLL_ENABLED": "false"},  # prevent nested orchestrator re-entry
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)  # 15 min cap
+            cc_output = stdout.decode(errors="replace").strip()
+            cc_err = stderr.decode(errors="replace").strip()
+            rc = proc.returncode
+
+            logger.info(f"ARCH-030: escalation session done for job #{job_id}, rc={rc}")
+
+            body_parts = [f"Escalation session exit code: {rc}"]
+            if cc_output:
+                body_parts.append(f"\nCC output (tail):\n{cc_output[-2000:]}")
+            if cc_err and rc != 0:
+                body_parts.append(f"\nStderr:\n{cc_err[-400:]}")
+
+            await supabase.table("agent_messages").insert({
+                "from_agent": "arch-030-escalation",
+                "to_agent": "cc-ihsanos",
+                "message_type": "update",
+                "subject": f"ARCH-030 Job #{job_id}: escalation {'done' if rc == 0 else 'errored (rc=' + str(rc) + ')'}",
+                "body": "\n".join(body_parts)[:5000],
+                "requires_response": rc != 0,
+            }).execute()
+
+        except asyncio.TimeoutError:
+            proc.kill()
+            logger.warning(f"ARCH-030: escalation timed out for job #{job_id} (15 min)")
+            try:
+                await supabase.table("agent_messages").insert({
+                    "from_agent": "arch-030-escalation",
+                    "to_agent": "cc-ihsanos",
+                    "message_type": "blocker",
+                    "subject": f"ARCH-030 Job #{job_id}: escalation timed out (15 min cap)",
+                    "body": (
+                        f"Auto-escalation session for job #{job_id} ({job.get('description','')[:80]}) "
+                        f"exceeded the 15-minute cap and was killed. Manual review required."
+                    ),
+                    "requires_response": True,
+                }).execute()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"ARCH-030: escalation session failed for job #{job_id}: {e}")
+        record_swallowed("arch030_escalation", e)
+
+    finally:
+        _arch030_active.discard(job_id)
+
+
 async def run_job(supabase, job: dict) -> None:
     """Execute the full build pipeline for a single job."""
     job_id = job["id"]
@@ -703,6 +898,24 @@ async def run_job(supabase, job: dict) -> None:
                 except Exception as _e:
                     record_swallowed("bug017_paused_msg", _e)
 
+                # ARCH-030: spawn dangerous-mode CC to self-diagnose this paused job.
+                # Fire-and-forget — does not block the main loop.
+                if _arch030_escalation_enabled():
+                    try:
+                        asyncio.create_task(
+                            _spawn_escalation_session(
+                                supabase=supabase,
+                                job=job,
+                                result_summary=result["summary"],
+                                session_prompt=prompt_text,
+                                repo_path=context["repo_path"],
+                            ),
+                            name=f"arch030_{job_id}",
+                        )
+                        logger.info(f"ARCH-030: escalation task spawned for job #{job_id}")
+                    except Exception as _e:
+                        record_swallowed("arch030_task_create", _e)
+
                 # Notify Musa if this was a strategic decision that failed
                 if job.get("triggered_by") == "strategic_decisions_poll":
                     import re as _re
@@ -804,6 +1017,25 @@ async def run_job(supabase, job: dict) -> None:
             )
         except Exception as e2:
             record_swallowed("crash_work_session_write", e2)
+
+        # ARCH-030: escalation for crashes too (only when job is now paused).
+        if _arch030_escalation_enabled() and new_fail_count >= MAX_FAIL_COUNT:
+            _rp = context["repo_path"] if "context" in locals() else ""  # type: ignore[name-defined]
+            if _rp:
+                try:
+                    asyncio.create_task(
+                        _spawn_escalation_session(
+                            supabase=supabase,
+                            job=job,
+                            result_summary=str(e)[:1000],
+                            session_prompt=prompt_text[:50000] if "prompt_text" in locals() else "",  # type: ignore[name-defined]
+                            repo_path=_rp,
+                        ),
+                        name=f"arch030_crash_{job_id}",
+                    )
+                    logger.info(f"ARCH-030: escalation task spawned for crashed job #{job_id}")
+                except Exception as _e2:
+                    record_swallowed("arch030_crash_task", _e2)
 
 
 async def start_webhook_server(supabase):
