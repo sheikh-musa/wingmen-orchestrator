@@ -446,13 +446,33 @@ async def run_job(supabase, job: dict) -> None:
         except Exception as e:
             record_swallowed("git_tag_cleanup", e)
 
-        # 2b. Pre-flight: reject dirty working tree (TASK-027)
+        # 2b. Pre-flight: stash dirty working tree (BUG-019 replaces abort).
+        # CC now runs in an isolated git worktree, so pre-existing dirt in the
+        # main tree can't contaminate the build. Auto-stash clears the path
+        # and preserves the files for later inspection via `git stash list`.
         clean, dirty_files = await _check_clean_tree(context["repo_path"])
         if not clean:
-            error_msg = f"Dirty working tree — aborting to prevent attribution theft. Files:\n{dirty_files[:500]}"
-            logger.warning(f"  {error_msg}")
-            await notify(job_id, repo_name, "failed", error_msg[:200])
-            raise RuntimeError(error_msg)
+            warn_msg = (
+                f"BUG-019: main tree is dirty before job #{job_id} — "
+                f"auto-stashing. Files:\n{dirty_files[:300]}"
+            )
+            logger.warning(f"  {warn_msg}")
+            await notify(job_id, repo_name, "warn", warn_msg[:200])
+            stash_proc = await asyncio.create_subprocess_exec(
+                "git", "stash", "push", "-u",
+                "-m", f"BUG-019 auto-stash before job #{job_id}",
+                cwd=context["repo_path"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stash_err = await asyncio.wait_for(stash_proc.communicate(), timeout=30)
+                if stash_proc.returncode != 0:
+                    logger.warning(
+                        f"  BUG-019: git stash failed: {stash_err.decode().strip()}"
+                    )
+            except Exception as stash_exc:
+                logger.warning(f"  BUG-019: git stash error: {stash_exc}")
 
         # 3. Generate spec prompt
         prompt_text = await spec_generator.generate_spec(job, context)

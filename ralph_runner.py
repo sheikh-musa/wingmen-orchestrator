@@ -13,6 +13,77 @@ from pathlib import Path
 
 from supabase import AsyncClient as SupabaseAsyncClient
 
+# ── BUG-019 worktree isolation ────────────────────────────────────────────────
+
+async def _create_worktree(repo_path: str, job_id: int) -> tuple[str, str]:
+    """Create an isolated git worktree for job_id.
+
+    Returns (worktree_path, branch_name). Cleans up any stale worktree
+    left by a previous interrupted attempt with the same job_id.
+
+    BUG-019: CC runs in the worktree so the main tree stays clean even
+    if the orchestrator is killed mid-session. The main tree is untouched
+    until _merge_and_remove_worktree merges the branch back.
+    """
+    branch = f"ralph-job-{job_id}"
+    wt_path = f"/tmp/wingmen-wt-{job_id}"
+
+    # Remove any stale worktree/branch from a previous failed attempt
+    for cmd in (
+        ["git", "worktree", "remove", "--force", wt_path],
+        ["git", "branch", "-D", branch],
+    ):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=repo_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()  # ignore exit code — cleanup is best-effort
+
+    # Create worktree on a fresh branch from current HEAD
+    proc = await asyncio.create_subprocess_exec(
+        "git", "worktree", "add", wt_path, "-b", branch,
+        cwd=repo_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git worktree add failed (job #{job_id}): {stderr.decode().strip()}"
+        )
+
+    return wt_path, branch
+
+
+async def _merge_and_remove_worktree(
+    repo_path: str, job_id: int, wt_path: str, branch: str
+) -> None:
+    """Merge worktree branch into main and clean up.
+
+    Fast-forward only: safe because pick_next_jobs enforces one-job-per-repo.
+    If CC made no commit the merge is a no-op ("Already up to date.").
+    --force on worktree remove handles dirty/partially-written files.
+    """
+    async def _run_silent(cmd: list[str]) -> int:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode != 0:
+            msg = stderr.decode().strip()
+            if "Already up to date" not in msg:
+                logger.warning(
+                    f"BUG-019 worktree cleanup cmd {cmd[1]} failed for job #{job_id}: {msg}"
+                )
+        return proc.returncode
+
+    await _run_silent(["git", "merge", "--ff-only", branch])
+    await _run_silent(["git", "worktree", "remove", "--force", wt_path])
+    await _run_silent(["git", "branch", "-D", branch])
+
 logger = logging.getLogger("wingmen.ralph")
 
 # Patterns to redact from logs
@@ -173,11 +244,29 @@ async def run_claude(
     # Use job_started_at for Gate 1 precision; fall back to now if caller didn't supply it.
     launch_time = job_started_at or datetime.now(timezone.utc)
 
+    # BUG-019: Create isolated worktree so CC never touches the main working tree.
+    # Falls back to repo_path if git worktree add fails (non-git dir, permission, etc.)
+    wt_path: str | None = None
+    wt_branch: str | None = None
+    try:
+        wt_path, wt_branch = await _create_worktree(repo_path, job_id)
+        active_path = wt_path
+        await _log_to_supabase(
+            supabase, job_id, repo_name, "worktree_created",
+            f"BUG-019: worktree {wt_path} on branch {wt_branch}", "info",
+        )
+    except Exception as wt_err:
+        logger.warning(
+            f"BUG-019: worktree creation failed for job #{job_id} ({wt_err}) "
+            f"— falling back to direct repo_path"
+        )
+        active_path = repo_path
+
     process = None
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
-            cwd=repo_path,
+            cwd=active_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -217,6 +306,22 @@ async def run_claude(
 
         gate1: dict | None = None
         gate2: dict | None = None
+
+        # BUG-019: Merge worktree back to repo_path BEFORE Gate 1/Gate 2 so
+        # that _check_commit_since and _check_intent_alignment see the commit.
+        if wt_path and wt_branch:
+            try:
+                await _merge_and_remove_worktree(repo_path, job_id, wt_path, wt_branch)
+                await _log_to_supabase(
+                    supabase, job_id, repo_name, "worktree_merged",
+                    f"BUG-019: worktree branch {wt_branch} merged into main", "info",
+                )
+            except Exception as merge_err:
+                logger.warning(
+                    f"BUG-019: worktree merge failed for job #{job_id}: {merge_err}"
+                )
+            finally:
+                wt_path = None  # prevent double-cleanup in outer finally
 
         # ── ARCH-021 Gate 1: Commit existence ─────────────────────────────────
         if success and commit_expected:
@@ -326,3 +431,13 @@ async def run_claude(
 
     finally:
         prompt_file.unlink(missing_ok=True)
+        # BUG-019: Cleanup worktree on failure/exception paths.
+        # wt_path is set to None after a successful merge in the try block,
+        # so this only runs when the merge hasn't happened yet (timeout/error).
+        if wt_path and wt_branch:
+            try:
+                await _merge_and_remove_worktree(repo_path, job_id, wt_path, wt_branch)
+            except Exception as wt_e:
+                logger.warning(
+                    f"BUG-019: worktree cleanup (failure path) failed for job #{job_id}: {wt_e}"
+                )
