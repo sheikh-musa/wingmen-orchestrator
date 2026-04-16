@@ -241,6 +241,8 @@ create table if not exists work_outputs (
   cc_output_summary text,
   test_passed boolean,
   success boolean not null default false,
+  gate1_result jsonb,   -- ARCH-021: commit existence check result
+  gate2_result jsonb,   -- ARCH-021: intent alignment (Haiku) result
   created_at timestamptz not null default now()
 );
 alter table work_outputs enable row level security;

@@ -484,12 +484,16 @@ async def run_job(supabase, job: dict) -> None:
 
         # 4. Run Claude CLI
         await notify(job_id, repo_name, "claude", "Building...")
+        job_started_at = datetime.now(timezone.utc)  # ARCH-021 Gate 1 anchor
         result = await ralph_runner.run_claude(
             repo_path=context["repo_path"],
             prompt_text=prompt_text,
             job_id=job_id,
             repo_name=repo_name,
             supabase=supabase,
+            job_started_at=job_started_at,
+            decision_text=prompt_text,
+            commit_expected=job.get("commit_expected", True),
         )
         logger.info(f"  Claude done: success={result['success']}")
 
@@ -572,6 +576,8 @@ async def run_job(supabase, job: dict) -> None:
                 cc_output_summary=result["summary"][:5000],
                 test_passed=True,
                 success=True,
+                gate1_result=result.get("gate1"),
+                gate2_result=result.get("gate2"),
             )
             await build_audit.verify_work_output(supabase, job_id, repo_name)
             await _write_work_session(

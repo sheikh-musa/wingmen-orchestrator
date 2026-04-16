@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from supabase import AsyncClient as SupabaseAsyncClient
@@ -44,6 +46,81 @@ async def _log_to_supabase(
         logger.warning(f"Failed to write build log: {e}")
 
 
+async def _check_commit_since(repo_path: str, since: datetime) -> bool:
+    """Return True if at least one commit was made in repo_path since `since`.
+
+    ARCH-021 Gate 1: prevents ghost successes where CC exited 0 but produced
+    no commit (e.g., responded with a clarifying question instead of code).
+    """
+    since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    proc = await asyncio.create_subprocess_exec(
+        "git", "log", "--oneline", f"--since={since_iso}", "-1",
+        cwd=repo_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    return bool(stdout.strip())
+
+
+async def _check_intent_alignment(
+    repo_path: str,
+    decision_text: str,
+    result_summary: str,
+) -> dict:
+    """Call Haiku to verify the diff matches the stated task.
+
+    ARCH-021 Gate 2: semantic drift check. Fails open if API is unavailable —
+    never blocks a job on API outage.
+
+    Returns {"aligned": bool, "confidence": int, "mismatches": list[str]}.
+    """
+    try:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            logger.warning("ARCH-021 Gate 2: ANTHROPIC_API_KEY not set — skipping intent check")
+            return {"aligned": True, "confidence": -1, "mismatches": [], "note": "api_key_missing"}
+
+        # Get the diff for Gate 2 verification
+        diff_proc = await asyncio.create_subprocess_exec(
+            "git", "diff", "HEAD~1", "HEAD",
+            cwd=repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        diff_bytes, _ = await asyncio.wait_for(diff_proc.communicate(), timeout=15)
+        diff_text = diff_bytes.decode(errors="replace")[:8000]
+
+        if not diff_text.strip():
+            return {"aligned": True, "confidence": 10, "mismatches": [], "note": "no_diff_empty_commit"}
+
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = (
+            "You are verifying whether a git diff implements a stated task.\n"
+            "Return JSON only — no preamble:\n"
+            "{\"aligned\": bool, \"confidence\": 0-10, \"mismatches\": [\"...\"]}\n\n"
+            f"TASK:\n{decision_text[:3000]}\n\n"
+            f"GIT DIFF:\n{diff_text}\n\n"
+            f"CC RESULT SUMMARY:\n{result_summary[:500]}"
+        )
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        result = json.loads(raw)
+        return {
+            "aligned": bool(result.get("aligned", True)),
+            "confidence": int(result.get("confidence", 0)),
+            "mismatches": result.get("mismatches", []),
+        }
+    except Exception as e:
+        logger.warning(f"ARCH-021 Gate 2: intent check failed ({e}) — failing open")
+        return {"aligned": True, "confidence": -1, "mismatches": [], "note": f"check_failed: {e}"}
+
+
 async def run_claude(
     repo_path: str,
     prompt_text: str,
@@ -51,10 +128,23 @@ async def run_claude(
     repo_name: str,
     supabase: SupabaseAsyncClient,
     max_turns: int = 50,
+    job_started_at: datetime | None = None,
+    decision_text: str = "",
+    commit_expected: bool = True,
 ) -> dict:
     """Run Claude Code CLI on a repo with a build prompt.
 
-    Returns {"success": bool, "summary": str}.
+    Returns:
+        {
+            "success": bool,
+            "summary": str,
+            "gate1": dict | None,  # ARCH-021 commit existence result
+            "gate2": dict | None,  # ARCH-021 intent alignment result
+        }
+
+    ARCH-021: Two verification gates run before marking success:
+    Gate 1 — Commit existence: if no commit produced since job_started_at, ghost success.
+    Gate 2 — Intent alignment: Haiku checks if diff matches the stated decision.
     """
     prompt_file = Path(tempfile.gettempdir()) / f"ralph_job_{job_id}.md"
     prompt_file.write_text(prompt_text)
@@ -79,6 +169,9 @@ async def run_claude(
         supabase, job_id, repo_name, "claude_start",
         f"Starting Claude CLI with max_turns={max_turns}", "info",
     )
+
+    # Use job_started_at for Gate 1 precision; fall back to now if caller didn't supply it.
+    launch_time = job_started_at or datetime.now(timezone.utc)
 
     process = None
     try:
@@ -108,7 +201,6 @@ async def run_claude(
                 stderr[-4000:], "warn",
             )
 
-        # Success if: clean exit with output
         success = process.returncode == 0 and len(stdout.strip()) > 0
 
         summary_lines = [
@@ -123,7 +215,88 @@ async def run_claude(
             "info" if success else "error",
         )
 
-        return {"success": success, "summary": _redact(summary)}
+        gate1: dict | None = None
+        gate2: dict | None = None
+
+        # ── ARCH-021 Gate 1: Commit existence ─────────────────────────────────
+        if success and commit_expected:
+            try:
+                has_commit = await _check_commit_since(repo_path, launch_time)
+                gate1 = {
+                    "gate": "commit_check",
+                    "passed": has_commit,
+                    "launch_time": launch_time.isoformat(),
+                }
+                if not has_commit:
+                    success = False
+                    summary = (
+                        "No commit produced — ghost success prevented "
+                        "(clarifying question or no-op response)"
+                    )
+                    logger.warning(
+                        f"ARCH-021 Gate 1 FAIL: job #{job_id} produced no commit"
+                    )
+                    await _log_to_supabase(
+                        supabase, job_id, repo_name, "arch021_gate1_fail",
+                        "Gate 1 FAIL: no commit since launch — ghost success prevented",
+                        "error",
+                    )
+                else:
+                    logger.debug(f"ARCH-021 Gate 1 OK: commit present for job #{job_id}")
+            except Exception as e:
+                logger.warning(f"ARCH-021 Gate 1 check error ({e}) — failing open")
+                gate1 = {"gate": "commit_check", "passed": True, "note": f"check_error: {e}"}
+
+        # ── ARCH-021 Gate 2: Intent alignment ─────────────────────────────────
+        if success and decision_text:
+            try:
+                alignment = await _check_intent_alignment(repo_path, decision_text, summary)
+                gate2 = {
+                    "gate": "intent_alignment",
+                    **alignment,
+                    "passed": alignment["aligned"] and alignment.get("confidence", 0) >= 5,
+                }
+                if not gate2["passed"]:
+                    # confidence < 0 means the API was unavailable — fail open
+                    if gate2.get("confidence", 0) < 0:
+                        logger.warning(
+                            f"ARCH-021 Gate 2: API unavailable for job #{job_id} — skipping"
+                        )
+                        gate2["passed"] = True
+                    else:
+                        success = False
+                        mismatches = gate2.get("mismatches", [])
+                        summary = (
+                            f"Semantic drift (confidence={gate2.get('confidence','?')}): "
+                            f"{'; '.join(mismatches[:3])}"
+                        )
+                        logger.warning(
+                            f"ARCH-021 Gate 2 FAIL: job #{job_id} semantic drift — {mismatches[:2]}"
+                        )
+                        await _log_to_supabase(
+                            supabase, job_id, repo_name, "arch021_gate2_fail",
+                            f"Gate 2 FAIL: confidence={gate2.get('confidence')} mismatches={mismatches}",
+                            "error",
+                        )
+                else:
+                    logger.debug(
+                        f"ARCH-021 Gate 2 OK: aligned (confidence={gate2.get('confidence')}) "
+                        f"for job #{job_id}"
+                    )
+            except Exception as e:
+                logger.warning(f"ARCH-021 Gate 2 check error ({e}) — failing open")
+                gate2 = {
+                    "gate": "intent_alignment",
+                    "passed": True,
+                    "note": f"check_error: {e}",
+                }
+
+        return {
+            "success": success,
+            "summary": _redact(summary),
+            "gate1": gate1,
+            "gate2": gate2,
+        }
 
     except asyncio.TimeoutError:
         if process:
@@ -136,7 +309,7 @@ async def run_claude(
             supabase, job_id, repo_name, "claude_timeout",
             "Claude CLI timed out after 30 minutes", "error",
         )
-        return {"success": False, "summary": "Claude CLI timed out after 30 minutes"}
+        return {"success": False, "summary": "Claude CLI timed out after 30 minutes", "gate1": None, "gate2": None}
 
     except Exception as e:
         if process:
@@ -149,7 +322,7 @@ async def run_claude(
             supabase, job_id, repo_name, "claude_error",
             str(e), "error",
         )
-        return {"success": False, "summary": f"Error: {e}"}
+        return {"success": False, "summary": f"Error: {e}", "gate1": None, "gate2": None}
 
     finally:
         prompt_file.unlink(missing_ok=True)
