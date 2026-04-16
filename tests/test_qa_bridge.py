@@ -29,6 +29,26 @@ class TestPollQaFindings:
         sb.limit.assert_called_with(10)
 
     @pytest.mark.asyncio
+    async def test_select_orders_by_created_at(self):
+        # BUG-013 regression: poll_qa_findings must call .order("created_at", ...).
+        # The live DB was missing that column, so this call path raised
+        # `column "created_at" does not exist` on every poll tick.
+        finding = {
+            "id": 1,
+            "repo_name": "ihsanos",
+            "title": "t",
+            "source": "ci",
+            "description": "",
+            "created_at": "2026-04-16T10:00:00Z",
+        }
+        sb = mock_supabase_chain([finding])
+        with patch("nervous_system.qa_bridge._process_finding", new_callable=AsyncMock):
+            await poll_qa_findings(sb)
+
+        sb.order.assert_called_with("created_at", desc=False)
+        assert finding["created_at"] is not None
+
+    @pytest.mark.asyncio
     async def test_individual_finding_failure_does_not_block_others(self):
         findings = [
             {"id": 1, "repo_name": "test", "title": "Bug 1", "source": "ci", "description": ""},

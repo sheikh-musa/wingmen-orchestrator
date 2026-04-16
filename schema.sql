@@ -216,7 +216,7 @@ create policy "service role full access" on qa_findings
   using (true) with check (true);
 create index idx_qa_findings_status on qa_findings(status);
 create index idx_qa_findings_repo on qa_findings(repo_name);
-create index idx_qa_findings_created on qa_findings(created_at desc);
+create index if not exists qa_findings_created_at_idx on qa_findings(created_at desc);
 
 -- Link bug_reports back to qa_findings + auto-fix tier
 alter table bug_reports add column if not exists qa_finding_id bigint references qa_findings(id);

@@ -5,12 +5,13 @@ Build Status: green
 Deploy: N/A
 
 ## Last Completed Job
-- Job #83: [BUG-016] Safe-restart procedure — `scripts/restart_orch.sh` via `launchctl kickstart -k`, runbook, `nohup` forbidden.
+- Job #84: [BUG-013] qa_findings.created_at missing — migration adds column (NOT NULL DEFAULT now()) + index; QA bridge poll no longer errors.
 
 ## Result Summary
-Added module-level `_cancel_pending_tasks(loop)` helper in `wingmen_orch.py` and wired it into the existing `finally:` block before `loop.close()` so any tasks still pending after `run_until_complete` returns (e.g. the `_shutdown` task itself, or tasks spawned inside cancellation cleanup) are cancelled and awaited via `asyncio.gather(..., return_exceptions=True)`. Eliminates the "Task was destroyed but it is pending" warnings previously emitted at SIGINT/SIGTERM. Added `tests/test_graceful_shutdown.py` with 3 tests (cancel background task, swallow exceptions, no-op when empty). Full suite: 350 pass (347 prior + 3 new). Synthetic SIGINT smoke exercised a late-spawned cleanup task and reported 0 leak warnings.
+Applied migration `bug013_qa_findings_created_at` via Supabase MCP: `ALTER TABLE qa_findings ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()` plus `CREATE INDEX IF NOT EXISTS qa_findings_created_at_idx ON qa_findings (created_at DESC)`. The `DEFAULT now()` backfilled all 500 pre-existing rows in a single statement (verified: 0 null rows). Updated `schema.sql` to rename the existing index declaration to `qa_findings_created_at_idx` so it mirrors the live DB. QA bridge (`nervous_system/qa_bridge.py`) required no code change — its `.order("created_at", desc=False)` FIFO SELECT now succeeds; the bridge doesn't INSERT into `qa_findings` (external QA producers do). Added regression test `test_select_orders_by_created_at` in `tests/test_qa_bridge.py` asserting `.order("created_at", ...)` is called. Full suite: 355 pass (350 prior + 5 new). Smoke test via MCP: insert legacy-schema row → `SELECT ... ORDER BY created_at DESC LIMIT 1` returns the inserted row with populated `created_at` — no error. Note: broader qa_findings schema drift (legacy `repo`/`role`/`flow` columns vs schema.sql's `repo_name`/`source`/`title`) is pre-existing and out of BUG-013 scope — tracked in build_log id=66.
 
 ## Completed (Last 5)
+- [green] Job #83: wingmen-orchestrator — [BUG-016] Safe-restart procedure — launchctl kickstart helper + runbook; nohup forbidden (deploy: N/A)
 - [green] Job #82: wingmen-orchestrator — [BUG-015] Graceful shutdown asyncio cleanup — cancel pending tasks before loop close (deploy: N/A)
 - [green] Job #79: wingmen-orchestrator — [BUG-012] Gate 6 Haiku empty-JSON fix — ANTHROPIC_API_KEY guard + fail-loud (deploy: N/A)
 - [green] Job #35: ihsanos — [TASK-022] Re-measure BUG-005 hydration with per-stage instrumentation + production build (9m 32s, deploy: https://ihsandms-qk0oxeq1y-musaaaaaaas-projects.vercel.app)
@@ -37,6 +38,7 @@ Last Updated: 2026-04-16 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
+| #84 | [BUG-013] qa_findings.created_at migration — column + index added, bridge unblocked | green | N/A |
 | #83 | [BUG-016] Safe-restart procedure — launchctl kickstart helper + runbook; nohup forbidden | green | N/A |
 | #82 | [BUG-015] Graceful shutdown asyncio cleanup — cancel pending tasks before loop close | green | N/A |
 | #79 | [BUG-012] Gate 6 Haiku empty-JSON fix — ANTHROPIC_API_KEY guard + fail-loud | green | N/A |
