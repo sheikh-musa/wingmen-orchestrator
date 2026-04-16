@@ -62,7 +62,7 @@ async def _log_gate_run(
 ) -> None:
     """Write a row to ecosystem_audit_log."""
     try:
-        supabase.table("ecosystem_audit_log").insert({
+        await supabase.table("ecosystem_audit_log").insert({
             "gate_name": gate_name,
             "ran_at": datetime.now(timezone.utc).isoformat(),
             "dry_run": dry_run,
@@ -90,14 +90,13 @@ async def run_gate1_challenge_flip(supabase) -> None:
 
     # Find expired challenge windows from CC or orchestrator proposals
     expired = (
-        supabase.table("strategic_decisions")
+        await supabase.table("strategic_decisions")
         .select("id,decision_ref,challenge_status,source,challengeable_until")
         .eq("challenge_status", "challenge_window")
         .lt("challengeable_until", now.isoformat())
         .in_("source", ["claude_ai_session", "claude_code_proposal", "claude_code"])
         .execute()
-        .data or []
-    )
+    ).data or []
 
     actions: list[dict] = []
     for row in expired:
@@ -109,7 +108,7 @@ async def run_gate1_challenge_flip(supabase) -> None:
             "reason": "challenge_window_expired",
         }
         if not dry:
-            supabase.table("strategic_decisions").update({
+            await supabase.table("strategic_decisions").update({
                 "challenge_status": "accepted"
             }).eq("id", row["id"]).execute()
         actions.append(action)
@@ -117,13 +116,12 @@ async def run_gate1_challenge_flip(supabase) -> None:
 
     # Also: decisions stuck in cai_review_requested for > 48h — escalate but don't flip
     stale_reviews = (
-        supabase.table("strategic_decisions")
+        await supabase.table("strategic_decisions")
         .select("id,decision_ref,updated_at")
         .eq("challenge_status", "cai_review_requested")
         .lt("updated_at", (now - timedelta(hours=48)).isoformat())
         .execute()
-        .data or []
-    )
+    ).data or []
     for row in stale_reviews:
         logger.warning(f"GATE 1: {row['decision_ref']} has been cai_review_requested for >48h")
         actions.append({
@@ -158,7 +156,7 @@ async def run_gate2_ship_verify(supabase) -> None:
 
     # Find accepted decisions with completed_job_id set and execution_status != implemented
     candidates = (
-        supabase.table("strategic_decisions")
+        await supabase.table("strategic_decisions")
         .select(
             "id,decision_ref,execution_status,completed_job_id,"
             "evidence_commit_sha,evidence_deploy_id,evidence_test_run_id"
@@ -166,22 +164,20 @@ async def run_gate2_ship_verify(supabase) -> None:
         .eq("challenge_status", "accepted")
         .not_.is_("completed_job_id", "null")
         .execute()
-        .data or []
-    )
+    ).data or []
 
     # Get completed cc_work_sessions with commit_sha
     completed_job_ids: set[int] = set()
     commit_sha_by_job: dict[int, str] = {}
     sessions = (
-        supabase.table("cc_work_sessions")
+        await supabase.table("cc_work_sessions")
         .select("job_id,commit_sha,outcome")
         .eq("outcome", "completed")
         .not_.is_("commit_sha", "null")
         .order("created_at", desc=True)
         .limit(100)
         .execute()
-        .data or []
-    )
+    ).data or []
     for s in sessions:
         if s.get("job_id"):
             completed_job_ids.add(s["job_id"])
@@ -225,7 +221,7 @@ async def run_gate2_ship_verify(supabase) -> None:
             "reason": "cc_work_session_completed_with_evidence",
         }
         if not dry:
-            supabase.table("strategic_decisions").update({
+            await supabase.table("strategic_decisions").update({
                 "challenge_status": "implemented",
                 "execution_status": "implemented",
                 "completed_at": now.isoformat(),
@@ -259,22 +255,20 @@ async def run_gate3_stale_blocker(supabase, bot=None, musa_id: str = "") -> None
 
     # Challenged decisions with no update in 72h
     stale_challenged = (
-        supabase.table("strategic_decisions")
+        await supabase.table("strategic_decisions")
         .select("decision_ref,title,challenge_reason,updated_at")
         .eq("challenge_status", "challenged")
         .lt("updated_at", cutoff_72h)
         .execute()
-        .data or []
-    )
+    ).data or []
 
     # Stale repo_context blockers
     stale_blockers = (
-        supabase.table("repo_context")
+        await supabase.table("repo_context")
         .select("repo,blockers,updated_at")
         .lt("updated_at", cutoff_7d)
         .execute()
-        .data or []
-    )
+    ).data or []
     stale_blockers = [r for r in stale_blockers if r.get("blockers")]
 
     actions: list[dict] = []
@@ -309,12 +303,11 @@ async def run_gate4_cc_classification(supabase) -> None:
 
     # Find status/update rows that are still in challenge_window or unchallenged
     candidates = (
-        supabase.table("strategic_decisions")
+        await supabase.table("strategic_decisions")
         .select("id,decision_ref,challenge_status")
         .in_("challenge_status", ["challenge_window", "unchallenged"])
         .execute()
-        .data or []
-    )
+    ).data or []
 
     # Filter to CC-UPDATE-* and similar operational report patterns
     _INFO_PREFIXES = ("CC-UPDATE-", "IMPL-UPDATE-", "CAI-STATUS-", "DIGEST-")
@@ -335,7 +328,7 @@ async def run_gate4_cc_classification(supabase) -> None:
             "reason": "cc_update_auto_classification",
         }
         if not dry:
-            supabase.table("strategic_decisions").update({
+            await supabase.table("strategic_decisions").update({
                 "challenge_status": "informational"
             }).eq("id", row["id"]).execute()
         actions.append(action)
@@ -360,15 +353,14 @@ async def run_gate6_contradiction(supabase, bot=None, musa_id: str = "") -> None
 
     # Fetch active accepted + implemented decisions (index only)
     rows = (
-        supabase.table("strategic_decisions")
+        await supabase.table("strategic_decisions")
         .select("decision_ref,title,domain,category")
         .in_("challenge_status", ["accepted", "challenge_window"])
         .eq("status", "active")
         .order("decided_at", desc=True)
         .limit(60)
         .execute()
-        .data or []
-    )
+    ).data or []
 
     if len(rows) < 4:
         logger.debug("GATE 6: not enough decisions to check for contradictions")
@@ -453,13 +445,12 @@ async def run_gate7_orphan_detection(supabase, bot=None, musa_id: str = "") -> N
     # Orphaned sessions: cc_work_sessions with no matching strategic_decisions
     if known_repos:
         unknown_repo_sessions = (
-            supabase.table("cc_work_sessions")
+            await supabase.table("cc_work_sessions")
             .select("id,repo_name,outcome,created_at")
             .order("created_at", desc=True)
             .limit(200)
             .execute()
-            .data or []
-        )
+        ).data or []
         unknown_repo_sessions = [
             s for s in unknown_repo_sessions
             if s.get("repo_name") and s["repo_name"] not in known_repos
@@ -475,15 +466,14 @@ async def run_gate7_orphan_detection(supabase, bot=None, musa_id: str = "") -> N
     # qa_findings with no status change in 14 days
     cutoff_14d = (now - timedelta(days=14)).isoformat()
     stale_qa = (
-        supabase.table("qa_findings")
+        await supabase.table("qa_findings")
         .select("id,repo,role,flow,status,found_at")
         .eq("status", "fail")
         .is_("resolved_at", "null")
         .lt("found_at", cutoff_14d)
         .limit(20)
         .execute()
-        .data or []
-    )
+    ).data or []
     for f in stale_qa:
         key = f"{f['repo']}/{f['role']}/{f['flow']}"
         logger.warning(f"GATE 7: qa_finding {key} has been failing for >14 days")

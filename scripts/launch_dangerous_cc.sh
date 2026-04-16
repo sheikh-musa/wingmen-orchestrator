@@ -85,7 +85,7 @@ echo ""
 
 echo -e "${BOLD}▶ Building session context...${RESET}"
 # Stdout = context block (captured). Stderr = diagnostics (shown on terminal).
-LAUNCH_CONTEXT="$("$VENV_PY" -m scripts.build_launch_context --agent "$AGENT_ID")" || {
+LAUNCH_CONTEXT="$(cd ~/wingmen/orchestrator && "$VENV_PY" -m scripts.build_launch_context --agent "$AGENT_ID")" || {
     echo -e "${AMBER}⚠ build_launch_context failed. Continuing without injected context.${RESET}"
     LAUNCH_CONTEXT=""
 }
@@ -379,10 +379,14 @@ for arg in "$@"; do
 done
 
 if [ -n "$LAUNCH_CONTEXT" ] && [ ${#CLAUDE_ARGS[@]} -eq 0 ]; then
-    # Inject context as initial prompt. Claude processes it then exits (non-interactive).
-    # For an interactive session, remove -p and paste the context manually.
-    claude --dangerously-skip-permissions -p "$LAUNCH_CONTEXT"
-else
-    # Resume / passthrough mode — context already in session, no -p injection.
-    claude --dangerously-skip-permissions "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
+    # BUG-011 fix: write context to temp file. The SessionStart hook in
+    # ~/.claude/settings.local.json reads and deletes the file, injecting it
+    # as a system-reminder on startup. Piping via stdin (or -p) makes claude
+    # exit after processing the input — the session would not be interactive.
+    echo "$LAUNCH_CONTEXT" > /tmp/cc_launch_ctx.txt
+    echo -e "${TEAL}  Context staged → /tmp/cc_launch_ctx.txt (SessionStart hook will inject)${RESET}"
 fi
+
+# Always launch interactively. Context (if staged above) arrives via the
+# SessionStart hook as a system-reminder, not via stdin.
+claude --dangerously-skip-permissions "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
