@@ -33,10 +33,11 @@ Last Updated: 2026-04-17 14:30 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-17 14:30 SGT
+Last Updated: 2026-04-17 03:02 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
+| #93 | PIPELINE-TEST-001: Add test marker comment to README.md | red | N/A |
 | #85 | [BUG-018] strategic_decisions_poll queues jobs for already-shipped decisions — a | red | N/A |
 | #85 | [BUG-018] strategic_decisions_poll shipped-decision filter — evidence_commit_sha IS NULL + challenge_status != 'implemented' | green | N/A |
 | #90 | [SMOKE-001] BUG-019 worktree isolation smoke test — append a comment to STATUS.m | red | N/A |
@@ -46,5 +47,3 @@ Last Updated: 2026-04-17 14:30 SGT
 | #79 | [BUG-012] Gate 6 Haiku empty-JSON fix — ANTHROPIC_API_KEY guard + fail-loud | green | N/A |
 | #71 | Queue stall detector — alert CTO on 30min+ queued jobs with dedup | green | N/A |
 | #70 | [TASK-033] Zombie running-row cleanup on orchestrator startup | green | N/A |
-| #69 | [TASK-037] Fire drill harness — 5 scenarios exercised and documented | green | N/A |
-| #93 | [PIPELINE-TEST-001] README pipeline marker | green | N/A |
