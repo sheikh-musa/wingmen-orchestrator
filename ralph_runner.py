@@ -198,7 +198,7 @@ async def run_claude(
     job_id: int,
     repo_name: str,
     supabase: SupabaseAsyncClient,
-    max_turns: int = 50,
+    max_turns: int = 80,
     job_started_at: datetime | None = None,
     decision_text: str = "",
     commit_expected: bool = True,
