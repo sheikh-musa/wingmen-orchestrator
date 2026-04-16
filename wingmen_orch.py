@@ -40,6 +40,7 @@ from nervous_system.strategic_decisions_poll import poll_strategic_decisions, no
 from nervous_system.cai_review_request import poll_cai_review_requests
 from nervous_system.agent_messages_poll import poll_agent_messages
 from nervous_system.pipeline_clock import tick_pipeline_clock
+from nervous_system.agent_watchdog import check_agent_health
 from nervous_system.qa_bridge import poll_qa_findings
 from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
@@ -809,6 +810,7 @@ async def main_loop():
     uptime_monitor_counter = 0
     agent_messages_counter = 0
     pipeline_clock_counter = 0
+    agent_watchdog_counter = 0
     running_tasks: dict[str, asyncio.Task] = {}  # repo_name -> Task
 
     while True:
@@ -988,6 +990,24 @@ async def main_loop():
                     logger.error(f"Pipeline clock tick failed: {e}")
                     record_swallowed("pipeline_clock", e)
                 pipeline_clock_counter = 0
+
+            # Agent watchdog — every 20 polls (~10 min).
+            # ARCH-022 Layer 3: heartbeat staleness + check-in silence alerts.
+            agent_watchdog_counter += 1
+            if agent_watchdog_counter >= 20:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                    if bot_token and musa_id:
+                        bot = Bot(token=bot_token)
+                        await check_agent_health(supabase, bot, musa_id)
+                    else:
+                        await check_agent_health(supabase)
+                except Exception as e:
+                    logger.error(f"Agent watchdog failed: {e}")
+                    record_swallowed("agent_watchdog", e)
+                agent_watchdog_counter = 0
 
             # QA bridge — every 10 polls (~5 min).
             # Picks up qa_findings rows, deduplicates, bridges to bug_reports.

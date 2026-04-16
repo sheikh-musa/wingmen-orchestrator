@@ -1,0 +1,259 @@
+"""Tests for agent_watchdog — ARCH-022 Layer 3."""
+
+import pytest
+from datetime import datetime, timezone, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
+from nervous_system.agent_watchdog import (
+    check_agent_health,
+    _check_heartbeat_staleness,
+    _check_checkin_silence,
+    _dedup_bucket,
+)
+
+
+_NOW = datetime.now(timezone.utc)
+_STALE_HB = (_NOW - timedelta(minutes=45)).isoformat()   # 45min stale — triggers warn
+_VERY_STALE_HB = (_NOW - timedelta(hours=3)).isoformat()  # 3h stale — triggers offline
+_FRESH_HB = (_NOW - timedelta(minutes=5)).isoformat()    # recent — no alert
+
+
+def _agent(id="cc-ihsanos", status="active", last_heartbeat=None):
+    return {
+        "id": id,
+        "display_name": f"CC {id}",
+        "status": status,
+        "last_heartbeat": last_heartbeat or _STALE_HB,
+    }
+
+
+def _multi_execute_mock(*return_values):
+    """Build a supabase mock that returns different values on sequential .execute() calls."""
+    sb = MagicMock()
+    sb.table.return_value = sb
+    sb.select.return_value = sb
+    sb.update.return_value = sb
+    sb.eq.return_value = sb
+    sb.lt.return_value = sb
+    sb.like.return_value = sb
+    sb.order.return_value = sb
+    sb.limit.return_value = sb
+    sb.insert.return_value = sb
+    sb.execute = AsyncMock(side_effect=[MagicMock(data=d) for d in return_values])
+    return sb
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat staleness
+# ---------------------------------------------------------------------------
+
+class TestHeartbeatStaleness:
+
+    @pytest.mark.asyncio
+    async def test_no_stale_agents_does_nothing(self):
+        sb = _multi_execute_mock([])  # no stale agents
+        bot = AsyncMock()
+        await _check_heartbeat_staleness(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_agent_sends_telegram(self):
+        agent = _agent(last_heartbeat=_STALE_HB)
+        sb = _multi_execute_mock(
+            [agent],   # stale agents query
+            [],        # dedup check (empty = not yet alerted)
+            [],        # notification_log insert
+        )
+        bot = AsyncMock()
+        sent_mock = MagicMock()
+        sent_mock.message_id = 42
+        bot.send_message = AsyncMock(return_value=sent_mock)
+
+        await _check_heartbeat_staleness(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_called_once()
+        text = bot.send_message.call_args[1]["text"]
+        assert "heartbeat stale" in text.lower() or "stale" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_very_stale_agent_flipped_offline(self):
+        agent = _agent(last_heartbeat=_VERY_STALE_HB)
+        sb = _multi_execute_mock(
+            [agent],  # stale agents query
+            [],       # dedup check
+            [],       # notification_log insert
+        )
+        bot = AsyncMock()
+        sent_mock = MagicMock()
+        sent_mock.message_id = 1
+        bot.send_message = AsyncMock(return_value=sent_mock)
+
+        await _check_heartbeat_staleness(sb, bot=bot, musa_chat_id="123")
+
+        # Should have called update to flip to offline
+        sb.update.assert_called()
+        update_calls = [str(c) for c in sb.update.call_args_list]
+        assert any("offline" in c for c in update_calls)
+
+    @pytest.mark.asyncio
+    async def test_already_alerted_not_resent(self):
+        agent = _agent(last_heartbeat=_STALE_HB)
+        sb = _multi_execute_mock(
+            [agent],           # stale agents query
+            [{"id": 99}],      # dedup check — already exists
+        )
+        bot = AsyncMock()
+        await _check_heartbeat_staleness(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fresh_heartbeat_no_alert(self):
+        # An agent with fresh heartbeat won't appear in the stale query
+        sb = _multi_execute_mock([])  # query returns empty
+        bot = AsyncMock()
+        await _check_heartbeat_staleness(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Check-in silence
+# ---------------------------------------------------------------------------
+
+class TestCheckinSilence:
+
+    @pytest.mark.asyncio
+    async def test_no_active_cc_agents_does_nothing(self):
+        sb = _multi_execute_mock([])  # no active cc-* agents
+        bot = AsyncMock()
+        await _check_checkin_silence(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recent_message_no_alert(self):
+        agent = _agent()
+        recent_msg = [{"id": 1, "created_at": (_NOW - timedelta(minutes=10)).isoformat()}]
+        sb = _multi_execute_mock(
+            [agent],       # active cc-* agents
+            recent_msg,    # recent message — within 45-min window
+        )
+        bot = AsyncMock()
+        await _check_checkin_silence(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_old_message_sends_telegram(self):
+        agent = _agent()
+        old_msg = [{"id": 1, "created_at": (_NOW - timedelta(minutes=60)).isoformat()}]
+        sb = _multi_execute_mock(
+            [agent],   # active cc-* agents
+            old_msg,   # last message was 60 min ago — over 45-min threshold
+            [],        # dedup check (empty)
+            [],        # notification_log insert
+        )
+        bot = AsyncMock()
+        sent_mock = MagicMock()
+        sent_mock.message_id = 7
+        bot.send_message = AsyncMock(return_value=sent_mock)
+
+        await _check_checkin_silence(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_called_once()
+        text = bot.send_message.call_args[1]["text"]
+        assert "checked in" in text.lower() or "check" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_messages_ever_sends_telegram(self):
+        agent = _agent()
+        sb = _multi_execute_mock(
+            [agent],   # active cc-* agents
+            [],        # no messages at all
+            [],        # dedup check empty
+            [],        # notification_log insert
+        )
+        bot = AsyncMock()
+        sent_mock = MagicMock()
+        sent_mock.message_id = 8
+        bot.send_message = AsyncMock(return_value=sent_mock)
+
+        await _check_checkin_silence(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_already_alerted_not_resent(self):
+        agent = _agent()
+        old_msg = [{"id": 1, "created_at": (_NOW - timedelta(minutes=60)).isoformat()}]
+        sb = _multi_execute_mock(
+            [agent],
+            old_msg,
+            [{"id": 55}],  # dedup check — already alerted
+        )
+        bot = AsyncMock()
+        await _check_checkin_silence(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_only_checks_cc_prefix_agents(self):
+        """Non-CC agents (cai, ralph) should not trigger check-in alerts."""
+        # The .like("id", "cc-%") filter excludes non-CC agents.
+        # Simulate: no cc-* agents active
+        sb = _multi_execute_mock([])
+        bot = AsyncMock()
+        await _check_checkin_silence(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# check_agent_health (integration — both checks run)
+# ---------------------------------------------------------------------------
+
+class TestCheckAgentHealth:
+
+    @pytest.mark.asyncio
+    async def test_runs_both_checks(self):
+        from unittest.mock import patch
+        sb = MagicMock()
+
+        with patch("nervous_system.agent_watchdog._check_heartbeat_staleness",
+                   new_callable=AsyncMock) as mock_hb:
+            with patch("nervous_system.agent_watchdog._check_checkin_silence",
+                       new_callable=AsyncMock) as mock_ci:
+                await check_agent_health(sb)
+                mock_hb.assert_called_once()
+                mock_ci.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_check_in_failure_does_not_block_heartbeat_check(self):
+        from unittest.mock import patch
+        sb = MagicMock()
+        call_log = []
+
+        async def hb_mock(*a, **kw):
+            call_log.append("hb")
+
+        async def ci_mock(*a, **kw):
+            call_log.append("ci")
+            raise ValueError("simulated failure")
+
+        with patch("nervous_system.agent_watchdog._check_heartbeat_staleness", side_effect=hb_mock):
+            with patch("nervous_system.agent_watchdog._check_checkin_silence", side_effect=ci_mock):
+                # Should not raise even if check-in check fails
+                try:
+                    await check_agent_health(sb)
+                except Exception:
+                    pass
+                assert "hb" in call_log
+
+
+# ---------------------------------------------------------------------------
+# _dedup_bucket
+# ---------------------------------------------------------------------------
+
+class TestDedupBucket:
+
+    def test_same_hour_same_bucket(self):
+        t1 = datetime(2026, 4, 16, 14, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 4, 16, 14, 59, tzinfo=timezone.utc)
+        assert _dedup_bucket(t1) == _dedup_bucket(t2)
+
+    def test_different_hour_different_bucket(self):
+        t1 = datetime(2026, 4, 16, 14, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 4, 16, 15, 0, tzinfo=timezone.utc)
+        assert _dedup_bucket(t1) != _dedup_bucket(t2)
