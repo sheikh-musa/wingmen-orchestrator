@@ -60,21 +60,18 @@ def _format_telegram(msg: dict) -> str | None:
     if _is_cc_to_cc(from_agent, to_agent):
         return None
 
-    # cai → cc-* messages: route to Musa as relay — he pastes into active session
+    # cai → cc-* messages: short trigger — both agents read Supabase directly
     cai_to_cc = (
         from_agent == "cai"
         and bool(to_agent)
         and to_agent.startswith(_CC_PREFIX)
     )
     if cai_to_cc:
-        snippet = (body[:600] + "\n...") if len(body) > 600 else body
-        urgency = "🔔 cai → relay to active session" if requires_response else "📨 cai message"
+        flag = "🔔" if requires_response else "📨"
         return (
-            f"{urgency}\n\n"
-            f"To: {to_agent}\n"
+            f"{flag} cai → {to_agent}\n"
             f"{subject}\n\n"
-            f"{snippet}\n\n"
-            f"Paste this into the active {to_agent} session."
+            f"Tell {to_agent} to check agent_messages."
         )
 
     # Only route to known Telegram targets
@@ -90,12 +87,11 @@ def _format_telegram(msg: dict) -> str | None:
         )
 
     if message_type == "challenge":
-        snippet = (body[:400] + "\n...") if len(body) > 400 else body
+        # Short trigger — cai reads Supabase directly, no body paste needed
         return (
-            f"\u2694\ufe0f CC challenge — take to cai\n\n"
+            f"\u2694\ufe0f {from_agent} → {to_agent}\n"
             f"{subject}\n\n"
-            f"{snippet}\n\n"
-            f"Reply to this message with cai\u2019s response."
+            f"Tell {to_agent} to check agent_messages."
         )
 
     if message_type == "agreed":
