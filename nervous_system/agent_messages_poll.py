@@ -205,8 +205,12 @@ async def poll_agent_messages(
                 dedup_key=dedup_key,
             )
 
-            # Mark the message as read — prevents re-notification on next poll
-            await _mark_read(supabase, msg_id)
+            # Only mark read for musa/broadcast — direct targets that don't
+            # need to poll themselves. For cc-* relay targets, leave read_at
+            # null so the agent can detect and process the message itself.
+            to_agent = msg.get("to_agent", "")
+            if not to_agent.startswith(_CC_PREFIX):
+                await _mark_read(supabase, msg_id)
 
     except Exception as e:
         logger.error(f"agent_messages_poll failed: {e}")
