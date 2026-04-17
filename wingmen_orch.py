@@ -919,8 +919,9 @@ Recent commits:
             record_swallowed("arch030_start_msg", _e)
 
         # ── Spawn dangerous-mode CC ─────────────────────────────────────────
+        _claude_bin = os.path.expanduser("~/.local/bin/claude")
         proc = await asyncio.create_subprocess_exec(
-            "claude", "--dangerously-skip-permissions", "-p", escalation_prompt,
+            _claude_bin, "--dangerously-skip-permissions", "-p", escalation_prompt,
             cwd=repo_path or str(Path(__file__).parent),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
