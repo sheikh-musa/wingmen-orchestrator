@@ -72,6 +72,18 @@ def _format_telegram(msg: dict) -> str | None:
             f"Reply to this message to respond as cai."
         )
 
+    if message_type == "challenge":
+        snippet = (body[:400] + "\n...") if len(body) > 400 else body
+        return (
+            f"\u2694\ufe0f CC challenge — take to cai\n\n"
+            f"{subject}\n\n"
+            f"{snippet}\n\n"
+            f"Reply to this message with cai\u2019s response."
+        )
+
+    if message_type == "agreed":
+        return f"\u2705 CC agreed\n\n{subject}"
+
     if message_type == "blocker":
         snippet = (body[:200] + "...") if len(body) > 200 else body
         return f"\U0001f6a8 BLOCKER from {from_agent}\n\n{subject}\n\n{snippet}"

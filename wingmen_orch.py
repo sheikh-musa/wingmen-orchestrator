@@ -76,10 +76,14 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 MAX_FAIL_COUNT = int(os.environ.get("MAX_FAIL_COUNT", "3"))
 STALE_JOB_MINUTES = int(os.environ.get("STALE_JOB_MINUTES", "120"))
 MAX_CONCURRENT_BUILDS = int(os.environ.get("MAX_CONCURRENT_BUILDS", "3"))
+MAX_REVIEW_ROUNDS = int(os.environ.get("MAX_REVIEW_ROUNDS", "3"))
 
 # ARCH-030: tracks job IDs with an in-flight escalation session so a single
 # paused job cannot spawn multiple simultaneous CC processes.
 _arch030_active: set[int] = set()
+
+# Adversarial review: tracks job IDs with an in-flight CC review session.
+_review_active: set[int] = set()
 
 
 def _autocc_poll_enabled() -> bool:
@@ -118,6 +122,357 @@ async def get_supabase():
             key = os.environ["SUPABASE_SERVICE_KEY"]
             _supabase = await acreate_client(url, key)
         return _supabase
+
+
+import uuid as _uuid_module
+
+
+def _review_thread_id(job_id: int) -> str:
+    """Deterministic UUID linking all agent_messages in a job's review thread."""
+    return str(_uuid_module.uuid5(_uuid_module.NAMESPACE_OID, f"job-review-{job_id}"))
+
+
+async def pick_pending_review_jobs(supabase) -> list[dict]:
+    """Return pending_review jobs that need a new CC review session.
+
+    A job needs a session when:
+    - No CC challenge posted yet (first review), OR
+    - cai has responded since the last CC challenge (next round).
+
+    Excludes jobs already in _review_active or past MAX_REVIEW_ROUNDS.
+    """
+    try:
+        result = await (
+            supabase.table("jobs")
+            .select("*")
+            .eq("status", "pending_review")
+            .order("created_at", desc=False)
+            .execute()
+        )
+        jobs = result.data or []
+        if not jobs:
+            return []
+
+        ready = []
+        for job in jobs:
+            job_id = job["id"]
+            if job_id in _review_active:
+                continue
+
+            thread_id = _review_thread_id(job_id)
+            msgs_result = await (
+                supabase.table("agent_messages")
+                .select("from_agent, message_type, created_at")
+                .eq("thread_id", thread_id)
+                .order("created_at", desc=False)
+                .execute()
+            )
+            msgs = msgs_result.data or []
+            cc_challenges = [m for m in msgs if m["from_agent"] == "cc-ihsanos" and m["message_type"] == "challenge"]
+            cai_responses  = [m for m in msgs if m["from_agent"] == "cai"]
+
+            # Deadlock cap: escalate to Musa once, then stop spawning
+            if len(cc_challenges) >= MAX_REVIEW_ROUNDS:
+                already_escalated = any(
+                    m["message_type"] == "blocker" for m in msgs
+                    if m["from_agent"] == "cc-ihsanos"
+                )
+                if not already_escalated:
+                    try:
+                        await supabase.table("agent_messages").insert({
+                            "thread_id": thread_id,
+                            "from_agent": "cc-ihsanos",
+                            "to_agent": "musa",
+                            "message_type": "blocker",
+                            "subject": (
+                                f"[JOB:{job_id}] Review deadlock — "
+                                f"{MAX_REVIEW_ROUNDS} rounds, no agreement"
+                            ),
+                            "body": (
+                                f"Job #{job_id} ({job.get('description','')[:80]}) has gone through "
+                                f"{MAX_REVIEW_ROUNDS} review rounds without cc and cai reaching agreement.\n\n"
+                                f"Manual decision required: set status='queued' to approve, "
+                                f"or status='cancelled' to discard."
+                            ),
+                            "requires_response": True,
+                        }).execute()
+                        logger.warning(
+                            f"Review: job #{job_id} deadlock after {MAX_REVIEW_ROUNDS} rounds — "
+                            f"escalated to Musa"
+                        )
+                    except Exception as _e:
+                        record_swallowed("review_deadlock_escalation", _e)
+                continue
+
+            if len(cc_challenges) == 0:
+                ready.append(job)                    # First review
+            elif len(cai_responses) > len(cc_challenges):
+                ready.append(job)                    # cai responded — CC's turn
+
+        return ready
+
+    except Exception as e:
+        logger.error(f"pick_pending_review_jobs failed: {e}")
+        record_swallowed("pick_pending_review_jobs", e)
+        return []
+
+
+async def _spawn_review_session(supabase, job: dict) -> None:
+    """Spawn an automated CC adversarial review session for a pending_review job.
+
+    CC reads the spec + prior exchange, outputs DECISION: AGREED or DECISION: CHALLENGE.
+    - CHALLENGE  → posted to agent_messages → Telegram notifies Musa → Musa relays to cai
+    - AGREED     → job promoted to 'queued' → ralph picks it up
+    """
+    global _review_active
+    job_id = job["id"]
+    repo_name = job.get("repo_name", "unknown")
+
+    if job_id in _review_active:
+        logger.info(f"Review: session already in-flight for job #{job_id}, skipping")
+        return
+    _review_active.add(job_id)
+
+    try:
+        thread_id = _review_thread_id(job_id)
+
+        # ── Prior exchange ───────────────────────────────────────────────────
+        prior_result = await (
+            supabase.table("agent_messages")
+            .select("from_agent, message_type, body, created_at")
+            .eq("thread_id", thread_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        prior_msgs = prior_result.data or []
+        round_num = sum(
+            1 for m in prior_msgs
+            if m["from_agent"] == "cc-ihsanos" and m["message_type"] == "challenge"
+        ) + 1
+
+        prior_exchange = ""
+        if prior_msgs:
+            lines = []
+            for m in prior_msgs:
+                if m["message_type"] in ("challenge", "agreed", "update"):
+                    continue   # skip internal bookkeeping rows
+                label = m["from_agent"].upper()
+                lines.append(f"--- {label} ---\n{(m.get('body') or '')[:600]}")
+            if lines:
+                prior_exchange = "\n\n".join(lines)
+
+        # ── Repo context ─────────────────────────────────────────────────────
+        repo_path = ""
+        try:
+            import context_loader as _cl
+            cfg = _cl.get_repo_config(repo_name)
+            repo_path = os.path.expanduser(cfg.get("local_path", ""))
+        except Exception:
+            pass
+
+        git_log = ""
+        claude_md = ""
+        if repo_path and Path(repo_path).exists():
+            try:
+                _proc = await asyncio.create_subprocess_exec(
+                    "git", "log", "--oneline", "-15",
+                    cwd=repo_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _stdout, _ = await asyncio.wait_for(_proc.communicate(), timeout=15)
+                git_log = _stdout.decode(errors="replace").strip()
+            except Exception:
+                pass
+
+            _claude_md_path = Path(repo_path) / "CLAUDE.md"
+            if _claude_md_path.exists():
+                claude_md = _claude_md_path.read_text()[:3000]
+
+        # ── cai persona ──────────────────────────────────────────────────────
+        _persona_path = Path(__file__).parent / "cai_persona.md"
+        cai_persona = _persona_path.read_text()[:2500] if _persona_path.exists() else ""
+
+        # ── Build review prompt ──────────────────────────────────────────────
+        review_prompt = f"""You are cc-ihsanos performing adversarial pre-execution review.
+
+ROLE: Find implementation gaps in this spec BEFORE ralph builds it. You are NOT building anything here.
+OUTPUT FORMAT IS MANDATORY — your first line must be exactly "DECISION: AGREED" or "DECISION: CHALLENGE".
+
+---
+
+## WHO WROTE THIS SPEC (cai's context)
+{cai_persona or "(cai_persona.md not found)"}
+
+---
+
+## JOB SPEC — Job #{job_id} ({repo_name})
+Description: {job.get('description', 'unknown')}
+
+{(job.get('session_prompt') or '')[:5000]}
+
+---
+
+## REPO CONTEXT
+Recent commits:
+{git_log or "(unavailable)"}
+
+CLAUDE.md excerpt:
+{claude_md or "(unavailable)"}
+
+---
+
+## PRIOR EXCHANGE (this is round {round_num})
+{prior_exchange or "(first review — no prior exchange)"}
+
+---
+
+## YOUR REVIEW — check these four failure categories we have actually seen:
+
+1. [domain] Knowledge this requires that is NOT derivable from the codebase alone
+   Example: QURBAN fiqh minimum age rules, IRAS receipt numbering constraints
+
+2. [dependencies] Tables, columns, APIs, or schemas touched beyond the obvious
+   Example: gate1_result column that didn't exist, RLS policies that block an action
+
+3. [implementation] What ralph will misunderstand if the spec is ambiguous
+   Example: wrong table targeted, constraint applied at wrong layer, scope unclear
+
+4. [verification] How we know the feature works beyond "tests pass and it deployed"
+   Example: ghost success — job completes but the feature behaves incorrectly in production
+
+---
+
+## OUTPUT (first line must be exactly one of these):
+
+If you have a real, specific concern:
+DECISION: CHALLENGE
+CHALLENGES:
+1. [domain|dependencies|implementation|verification] Specific gap — what's missing, what to add
+
+If the spec is genuinely sound and (in round 2+) cai has addressed your prior concerns:
+DECISION: AGREED
+SUMMARY: What you verified. Reference specific parts of the spec.
+"""
+
+        logger.info(
+            f"Review: spawning CC review for job #{job_id} round {round_num} "
+            f"({len(review_prompt)} chars, repo={repo_path or 'N/A'})"
+        )
+
+        # ── Announce start ───────────────────────────────────────────────────
+        try:
+            await supabase.table("agent_messages").insert({
+                "thread_id": thread_id,
+                "from_agent": "cc-ihsanos",
+                "to_agent": "cc-ihsanos",
+                "message_type": "update",
+                "subject": f"[JOB:{job_id}] Review round {round_num} starting — {repo_name}",
+                "body": f"Spawning CC adversarial review for job #{job_id}: {job.get('description','')[:80]}",
+                "requires_response": False,
+            }).execute()
+        except Exception as _e:
+            record_swallowed("review_start_msg", _e)
+
+        # ── Spawn CC (read-only tools only — not dangerous-mode) ─────────────
+        _claude_bin = os.path.expanduser("~/.local/bin/claude")
+        proc = await asyncio.create_subprocess_exec(
+            _claude_bin, "-p", review_prompt,
+            "--allowedTools", "Read,Glob,Grep",
+            cwd=repo_path or str(Path(__file__).parent),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "AUTOCC_POLL_ENABLED": "false"},
+        )
+
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.error(f"Review: CC session timed out for job #{job_id}")
+            try:
+                await supabase.table("agent_messages").insert({
+                    "thread_id": thread_id,
+                    "from_agent": "cc-ihsanos",
+                    "to_agent": "cai",
+                    "message_type": "challenge",
+                    "subject": f"[JOB:{job_id}] Review timed out — manual review required",
+                    "body": "CC review session timed out (10 min). Job requires manual review before execution.",
+                    "requires_response": True,
+                }).execute()
+            except Exception as _e:
+                record_swallowed("review_timeout_msg", _e)
+            return
+
+        output = stdout.decode(errors="replace").strip()
+        if not output:
+            logger.warning(f"Review: empty CC output for job #{job_id} — posting challenge as fallback")
+            output = (
+                "DECISION: CHALLENGE\n"
+                "CHALLENGES:\n"
+                "1. [implementation] CC review produced empty output — spec needs manual review before execution"
+            )
+
+        # ── Parse and post decision ──────────────────────────────────────────
+        if output.startswith("DECISION: AGREED"):
+            try:
+                await supabase.table("agent_messages").insert({
+                    "thread_id": thread_id,
+                    "from_agent": "cc-ihsanos",
+                    "to_agent": "cai",
+                    "message_type": "agreed",
+                    "subject": f"[JOB:{job_id}] CC agreed — approving for execution (round {round_num})",
+                    "body": output[:2000],
+                    "requires_response": False,
+                }).execute()
+            except Exception as _e:
+                record_swallowed("review_agreed_msg", _e)
+
+            # Promote job — CAS on status='pending_review' prevents double-promote
+            promote = await (
+                supabase.table("jobs")
+                .update({"status": "queued", "updated_at": "now()"})
+                .eq("id", job_id)
+                .eq("status", "pending_review")
+                .execute()
+            )
+            if promote.data:
+                logger.info(
+                    f"Review: job #{job_id} APPROVED after round {round_num} — promoted to queued"
+                )
+            else:
+                logger.warning(
+                    f"Review: job #{job_id} promote CAS missed — already moved (status changed externally)"
+                )
+
+        else:
+            # Post challenge → Telegram → Musa → cai relay
+            try:
+                await supabase.table("agent_messages").insert({
+                    "thread_id": thread_id,
+                    "from_agent": "cc-ihsanos",
+                    "to_agent": "cai",
+                    "message_type": "challenge",
+                    "subject": (
+                        f"[JOB:{job_id}] CC challenge round {round_num}: "
+                        f"{repo_name} — {job.get('description','')[:40]}"
+                    ),
+                    "body": output[:2000],
+                    "requires_response": True,
+                }).execute()
+                logger.info(
+                    f"Review: job #{job_id} round {round_num} — CC posted challenges to cai"
+                )
+            except Exception as _e:
+                record_swallowed("review_challenge_msg", _e)
+
+    except Exception as e:
+        logger.error(f"Review: _spawn_review_session failed for job #{job_id}: {e}")
+        record_swallowed("spawn_review_session", e)
+
+    finally:
+        _review_active.discard(job_id)
 
 
 async def pick_next_jobs(supabase, running_repos: set[str], max_picks: int) -> list[dict]:
@@ -1507,6 +1862,24 @@ async def main_loop():
                     )
                     running_tasks[repo] = task
                     logger.info(f"▶ Launched job #{job['id']} for {repo} ({len(running_tasks)}/{MAX_CONCURRENT_BUILDS} slots)")
+
+            # Adversarial review gate — spawn CC review sessions for pending_review jobs.
+            # Runs regardless of available ralph slots (review is separate from execution).
+            if _autocc_poll_enabled():
+                try:
+                    review_jobs = await pick_pending_review_jobs(supabase)
+                    for rjob in review_jobs:
+                        asyncio.create_task(
+                            _spawn_review_session(supabase, rjob),
+                            name=f"review_{rjob['id']}",
+                        )
+                        logger.info(
+                            f"Review: spawning review session for job #{rjob['id']} "
+                            f"({rjob.get('repo_name','?')} — {rjob.get('description','')[:50]})"
+                        )
+                except Exception as _re:
+                    logger.error(f"Review session dispatch failed: {_re}")
+                    record_swallowed("review_dispatch", _re)
 
             if not running_tasks:
                 logger.debug("No active jobs, sleeping...")

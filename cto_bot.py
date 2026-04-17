@@ -1460,7 +1460,7 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await supabase.table("jobs").insert({
         "repo_name": repo_name,
         "description": description,
-        "status": "queued",
+        "status": "pending_review",
         "priority": config["priority"],
         "triggered_by": "telegram",
         "client_id": user.get("client_id"),
@@ -2318,7 +2318,7 @@ async def _parse_and_execute_actions(reply: str, user: dict, chat_id: str) -> st
                 result = await supabase.table("jobs").insert({
                     "repo_name": repo_name,
                     "description": technical_desc,
-                    "status": "queued",
+                    "status": "pending_review",
                     "priority": config["priority"],
                     "triggered_by": "telegram",
                     "client_id": user.get("client_id"),
@@ -2404,7 +2404,7 @@ async def _execute_config_action(operation: str, user: dict) -> str:
     await supabase.table("jobs").insert({
         "repo_name": "orchestrator",
         "description": f"CONFIG: {operation}",
-        "status": "queued",
+        "status": "pending_review",
         "priority": 2,
         "triggered_by": "telegram",
         "client_id": user.get("client_id"),
