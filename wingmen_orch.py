@@ -414,8 +414,21 @@ SUMMARY: What you verified. Reference specific parts of the spec.
                 "1. [implementation] CC review produced empty output — spec needs manual review before execution"
             )
 
-        # ── Parse and post decision ──────────────────────────────────────────
-        if output.startswith("DECISION: AGREED"):
+        # ── Parse decision — search anywhere in output, not just first line ──
+        # CC sometimes prefixes reasoning before the DECISION line.
+        import re as _re_review
+        _decision_match = _re_review.search(
+            r'^DECISION:\s*(AGREED|CHALLENGE)', output, _re_review.MULTILINE
+        )
+        _is_agreed = bool(_decision_match and _decision_match.group(1) == "AGREED")
+
+        if not _decision_match:
+            logger.warning(
+                f"Review: CC output for job #{job_id} has no DECISION line — "
+                f"defaulting to CHALLENGE (output[:100]={output[:100]!r})"
+            )
+
+        if _is_agreed:
             try:
                 await supabase.table("agent_messages").insert({
                     "thread_id": thread_id,
