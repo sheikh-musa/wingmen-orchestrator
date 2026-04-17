@@ -40,6 +40,7 @@ from nervous_system.council_executor import poll_executor
 from nervous_system.strategic_decisions_poll import poll_strategic_decisions, notify_decision_complete
 from nervous_system.cai_review_request import poll_cai_review_requests
 from nervous_system.agent_messages_poll import poll_agent_messages
+from nervous_system.bug_reports_poll import poll_bug_reports
 from nervous_system.pipeline_clock import tick_pipeline_clock
 from nervous_system.agent_watchdog import check_agent_health
 from nervous_system.qa_bridge import poll_qa_findings
@@ -1513,6 +1514,7 @@ async def main_loop():
     swallowed_except_counter = 0
     uptime_monitor_counter = 0
     agent_messages_counter = 0
+    bug_reports_counter = 0
     pipeline_clock_counter = 0
     agent_watchdog_counter = 0
     dream_counter = 0
@@ -1682,6 +1684,18 @@ async def main_loop():
                     logger.error(f"Agent messages poll failed: {e}")
                     record_swallowed("agent_messages_poll", e)
                 agent_messages_counter = 0
+
+            # Bug reports poll — every poll (~30s).
+            # Reads new bug_reports from ihsanos Supabase, creates pending_review jobs.
+            # CC's adversarial review gate validates the auto-spec before ralph executes.
+            bug_reports_counter += 1
+            if bug_reports_counter >= 1:
+                try:
+                    await poll_bug_reports(supabase)
+                except Exception as e:
+                    logger.error(f"Bug reports poll failed: {e}")
+                    record_swallowed("bug_reports_poll", e)
+                bug_reports_counter = 0
 
             # Pipeline clock — every 10 polls (~5 min), but self-throttles to 24h.
             # TASK-042: increments days_clean for green bug_pipeline_readiness gates.
