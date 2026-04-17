@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import subprocess
 
 
 CLAUDE_MD_CAP = 8000  # chars; large CLAUDE.md (ihsanos = 26KB) hung the CLI
@@ -24,20 +26,142 @@ def _truncate_for_prompt(text: str | None, cap: int) -> str:
     return text[:cap] + f"\n\n[...truncated {len(text) - cap} chars — agent can read full file at runtime...]"
 
 
+def _grep_codebase(repo_path: str, pattern: str, max_results: int = 15) -> str:
+    """Run ripgrep in the repo and return formatted results, or empty string on failure."""
+    if not repo_path or not os.path.isdir(repo_path):
+        return ""
+    try:
+        result = subprocess.run(
+            ["rg", "-n", "--max-count=3", "--glob=*.ts", "--glob=*.tsx",
+             "--glob=*.py", "--glob=*.js", "-l", pattern, repo_path],
+            capture_output=True, text=True, timeout=10
+        )
+        files = result.stdout.strip().splitlines()[:max_results]
+        if not files:
+            return ""
+        # For each file, get matching lines (up to 3 per file)
+        lines = []
+        for f in files:
+            r2 = subprocess.run(
+                ["rg", "-n", "--max-count=3", pattern, f],
+                capture_output=True, text=True, timeout=5
+            )
+            rel = f.replace(repo_path + "/", "")
+            for line in r2.stdout.strip().splitlines():
+                lines.append(f"  {rel}: {line.strip()}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _extract_quoted_strings(text: str) -> list[str]:
+    """Extract strings likely to be error messages or identifiers from description."""
+    # Match content in quotes, backticks, or after "error:" / "message:"
+    patterns = [
+        r'["`\'](Failed[^"`\']{3,80})["`\']',
+        r'["`\'](Error[^"`\']{3,80})["`\']',
+        r'["`\'](Cannot[^"`\']{3,80})["`\']',
+        r'["`\'](Unable[^"`\']{3,80})["`\']',
+    ]
+    found = []
+    for p in patterns:
+        found.extend(re.findall(p, text, re.IGNORECASE))
+    return list(dict.fromkeys(found))[:5]  # dedupe, cap at 5
+
+
+def _build_grounding_section(job: dict, context: dict) -> str:
+    """Pre-flight grep the repo to inject real file paths into the prompt.
+
+    This prevents the spec generator from hallucinating file names it
+    cannot verify (it has no filesystem access). We grep for:
+    - The exact error strings mentioned in the description
+    - Route/page paths from the session_prompt
+    - The job description keywords
+    """
+    repo_path = context.get("repo_path") or context.get("repo_config", {}).get("path", "")
+    if not repo_path:
+        return "(pre-flight grep skipped — no repo_path in context)"
+
+    description = job.get("description", "")
+    session_prompt = job.get("session_prompt", "") or ""
+
+    results = []
+
+    # 1. Grep for exact error strings in the description
+    for err_str in _extract_quoted_strings(description + " " + session_prompt):
+        hits = _grep_codebase(repo_path, re.escape(err_str[:60]))
+        if hits:
+            results.append(f"Error string `{err_str[:60]}` found at:\n{hits}")
+
+    # 2. Grep for page paths mentioned in session_prompt (e.g. /dashboard/settings)
+    page_paths = re.findall(r'/(?:dashboard|super-admin|app|api)[/\w\-\[\]]+', session_prompt)
+    for path in list(dict.fromkeys(page_paths))[:3]:
+        # Convert URL path to likely filename fragment
+        slug = path.strip("/").replace("/", "/").split("?")[0]
+        hits = _grep_codebase(repo_path, re.escape(slug.split("/")[-1]))
+        if hits:
+            results.append(f"Page `{path}` — related files:\n{hits}")
+
+    # 3. Grep for the core action verb from description (e.g. "save", "update", "delete")
+    words = re.findall(r'\b(save|update|delete|create|submit|upload|import|export|login|sign|fetch|load)\b',
+                       description, re.IGNORECASE)
+    if words:
+        verb = words[0].lower()
+        hits = _grep_codebase(repo_path, f"action.*{verb}|{verb}.*action|{verb}.*Action")
+        if hits:
+            results.append(f"Actions matching `{verb}`:\n{hits}")
+
+    if not results:
+        return "(pre-flight grep found no matches — agent must grep at runtime)"
+
+    return "\n\n".join(results)
+
+
 async def generate_spec(job: dict, context: dict) -> str:
     """Use Claude CLI (Max subscription) to generate a structured build prompt."""
     repo_config = context["repo_config"]
     claude_md = _truncate_for_prompt(context.get('claude_md'), CLAUDE_MD_CAP)
 
+    # Pre-flight grep: ground the spec in real file paths before asking Claude to write it.
+    # The spec generator has NO filesystem access, so without this it hallucinates paths.
+    grounding = _build_grounding_section(job, context)
+
+    # For bug reports, include the original session_prompt as the primary task anchor.
+    # The spec generator must not replace it with a hallucinated implementation plan.
+    original_prompt = job.get("session_prompt", "") or ""
+    triggered_by = job.get("triggered_by", "")
+    original_prompt_section = ""
+    if triggered_by == "bug_report" and original_prompt.strip():
+        original_prompt_section = f"""
+## Original Bug Report Prompt (anchor — do not contradict)
+The following was written by the bug reporter's pipeline with knowledge of the actual page.
+Your spec MUST build on this, not replace it:
+
+{_truncate_for_prompt(original_prompt, 2000)}
+"""
+
     meta_prompt = f"""Produce a build specification document. Output ONLY the spec — no preamble, no questions, no requests for additional access. Everything you need is in the context below.
 
-If the task seems to need information you don't have, write the spec assuming the executing agent will gather it at runtime (the agent has full filesystem and shell access; you do not need them). DO NOT respond with "I need access to..." — produce the spec.
+## CRITICAL: You have NO filesystem access.
+
+You cannot read files, run commands, or verify paths. Therefore:
+- **NEVER invent file paths** based on naming conventions or assumptions.
+- Every file path in your spec MUST come from one of three sources:
+  1. The "Pre-flight grep results" section below (real paths found by searching the repo)
+  2. The "Original Bug Report Prompt" section below (written with real page knowledge)
+  3. Explicit paths named in CLAUDE.md or STATUS.md
+- If you cannot find the file via the grep results, write in the Implementation Plan:
+  `Run: rg -n "<search term>" src/ to locate the file`
+  Do NOT guess a path like `src/actions/some-name.ts` if it's not in the grep results.
 
 ## Project Context
 - Repo: {repo_config['name']}
 - GitHub: {repo_config['github']}
 - Deploy URL: {repo_config.get('deploy_url', 'N/A')}
 - Status: {repo_config['status']}
+
+## Pre-flight grep results (VERIFIED real file paths from the actual codebase)
+{grounding}
 
 ## Current STATUS.md
 {context['status_md'] or '(no STATUS.md found)'}
@@ -47,7 +171,7 @@ If the task seems to need information you don't have, write the spec assuming th
 
 ## Repo Memory
 {_format_memory(context['memory'])}
-
+{original_prompt_section}
 ## Task from User
 {job['description']}
 
@@ -59,19 +183,19 @@ Follow these rules strictly:
 
 1. **SCOPE**: Keep changes minimal and surgical. Only modify files directly related to the task. Never refactor unrelated code, add unnecessary abstractions, or "improve" things that weren't asked for.
 
-2. **EXISTING PATTERNS**: Study the codebase's existing patterns before proposing changes. Match the project's naming conventions, file structure, component patterns, and styling approach. Don't introduce new patterns.
+2. **GROUNDED FILE PATHS ONLY**: Use ONLY file paths from the "Pre-flight grep results" above. If a path is not there, tell the executing agent to grep for it — do not invent it.
 
-3. **ACCEPTANCE CRITERIA**: List 3-5 specific, testable criteria. Each should be verifiable by looking at the UI or running a command. No vague criteria like "works correctly."
+3. **INVESTIGATE-FIRST for bugs**: For bug reports, the Implementation Plan step 1 must always be: grep for the exact error string, read the matched file, understand the data flow. Do NOT prescribe a fix before the agent has read the code.
 
-4. **FILE PLAN**: List exact files to create or modify. For modifications, describe what changes — not "update file" but "add X component/function/route."
+4. **NO CLARIFYING QUESTIONS in the spec**: The executing agent must NEVER ask for more information. The spec must be self-contained. If information is missing, tell the agent how to find it at runtime (grep, read file, check DB schema).
 
-5. **NO EXTRAS**: Don't add error handling, comments, type annotations, or features beyond what was asked. Don't create utility files for one-time operations. Three similar lines of code is better than a premature abstraction.
+5. **ACCEPTANCE CRITERIA**: List 3-5 specific, testable criteria. Each should be verifiable by looking at the UI or running a command. No vague criteria like "works correctly."
 
-6. **MOBILE-FIRST**: If the project uses responsive design, ensure changes work on mobile viewports (375px).
+6. **NO EXTRAS**: Don't add error handling, comments, type annotations, or features beyond what was asked.
 
-7. **SUPABASE-FIRST AUDIT**: All build outputs and audit deliverables must be written to the Supabase `work_outputs` table. Do not rely on repo files alone for audit trail. The orchestrator handles this automatically — do not duplicate the writes.
+7. **MOBILE-FIRST**: If the project uses responsive design, ensure changes work on mobile viewports (375px).
 
-8. **TESTS MOVE WITH CODE**: Before declaring done, grep `tests/` for every top-level function, class, or module name you modified. If a test asserts old behavior that no longer holds, update the assertion or delete the test in the same commit. Never ship a behavior change while leaving its test asserting the old behavior — stale tests block the queue via test_gate and stall every downstream job. This is non-negotiable.
+8. **TESTS MOVE WITH CODE**: Before declaring done, grep `tests/` for every function you modified. Update stale test assertions in the same commit.
 
 Output format:
 
@@ -85,13 +209,14 @@ The exact task, rephrased clearly.
 Hard rules from CLAUDE.md that apply to this task.
 
 ### Implementation Plan
-Step-by-step what the agent should do. Be specific about which files, which functions, which components.
+Step-by-step what the agent should do. Step 1 for bugs: grep for the error string, read the file, understand root cause BEFORE proposing a fix.
 
 ### Acceptance Criteria
 Numbered list. Each criterion is testable.
 
 ### Files to Touch
 Table: | File | Action | What changes |
+Note: every file path here MUST be from the pre-flight grep results or original prompt. If unknown, write "TBD — agent must grep for: <pattern>"
 
 End with: <promise>JOB_{job['id']}_DONE</promise>
 """
@@ -116,7 +241,8 @@ End with: <promise>JOB_{job['id']}_DONE</promise>
     minimal_system_prompt = (
         "You are a senior software architect. Output exactly what the user "
         "asks for, formatted as requested. Do not request file access or "
-        "tool permissions — your job is to produce the spec text."
+        "tool permissions — your job is to produce the spec text. "
+        "NEVER invent file paths — only use paths provided in the prompt."
     )
     proc = await asyncio.create_subprocess_exec(
         claude_bin,
