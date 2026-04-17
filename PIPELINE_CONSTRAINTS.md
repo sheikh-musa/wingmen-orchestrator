@@ -49,7 +49,7 @@ Modelled on the same constitutional pattern as `CLAUDE.md` (IhsanOPS): foundatio
 - `escalation_count` tracked per job via `agent_messages` row count (`from_agent='arch-030-escalation'`, `job_id` in subject) — no schema migration required
 - ARCH-030 reads escalation count before spawning; aborts with `requires_response=True` if cap reached
 
-**Current compliance:** ⚠️ PARTIAL — escalation cap logic exists in `_arch030_active` (process-local only; does not survive restart). `escalation_count` check via agent_messages not yet implemented. Remediation: next session.
+**Current compliance:** ✅ COMPLIANT — persistent escalation count via `agent_messages` row count (survives restart). `_arch030_active` guards in-process duplicates; agent_messages query guards cross-restart cap. Implemented 2026-04-17.
 
 ---
 
@@ -118,7 +118,7 @@ Modelled on the same constitutional pattern as `CLAUDE.md` (IhsanOPS): foundatio
 - `asyncio.wait_for(proc.communicate(), timeout=900)` in `_spawn_escalation_session()`
 - `pick_next_jobs` enforces one-per-repo via `claimed_repos` set
 
-**Current compliance:** ⚠️ PARTIAL — compute time bounded, concurrency bounded. Gap: no API rate limit awareness. If Claude 5-hour window exhausts, pipeline stalls silently. Remediation: monitor `claude` exit codes for rate limit errors; re-queue with backoff.
+**Current compliance:** ✅ COMPLIANT — compute time bounded, concurrency bounded. Rate limit awareness implemented 2026-04-17: `ralph_runner.py` detects rate-limit patterns in claude output, returns `rate_limited=True`; `wingmen_orch.py` re-queues with `retry_after=NOW()+30min`, `fail_count` unchanged; `pick_next_jobs` filters on `retry_after`. `jobs.retry_after TIMESTAMPTZ` column added via migration.
 
 ---
 
@@ -189,10 +189,10 @@ Modelled on the same constitutional pattern as `CLAUDE.md` (IhsanOPS): foundatio
 | # | Constraint | Status | Remediation |
 |---|---|---|---|
 | 1 | Amanah — Verifiable Completion | ✅ Compliant | Fixed: deploy failure re-queues, blocks completed (4d179c3) |
-| 2 | Fail-Fast — Bounded Retries | ⚠️ Partial | Add escalation_count cap via agent_messages (next session) |
+| 2 | Fail-Fast — Bounded Retries | ✅ Compliant | Persistent cap via agent_messages count (2026-04-17) |
 | 3 | Bounded Autonomy | ✅ Mostly | Scope ARCH-030 to not read .env directly |
 | 4 | Observable Healing | ✅ Compliant | — |
-| 5 | Resource Bounds | ⚠️ Partial | API rate limit awareness (Phase 2) |
+| 5 | Resource Bounds | ✅ Compliant | Rate limit re-queue with retry_after backoff (2026-04-17) |
 | 6 | Data Integrity | ✅ Compliant | — |
 | 7 | Security Boundary | ✅ Compliant | Minor: ARCH-030 .env advisory |
 | 8 | Communication Latency | ✅ Compliant | Fixed: poll 30s (4d179c3) + cai relay (7320159) |

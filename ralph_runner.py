@@ -298,9 +298,27 @@ async def run_claude(
         ]
         summary = "\n".join(summary_lines) or "(no output)"
 
+        # Constraint 5: detect Claude API rate limit so the orchestrator can
+        # re-queue without burning fail_count. Match against known Claude CLI
+        # messages in stdout+stderr — exit code alone is too broad.
+        _RATE_LIMIT_RE = re.compile(
+            r"usage.limit|rate.limit|too.many.requests|claude\.ai/settings|overloaded|529",
+            re.IGNORECASE,
+        )
+        rate_limited = (
+            not success
+            and _RATE_LIMIT_RE.search(stdout + stderr) is not None
+        )
+        if rate_limited:
+            summary = f"Rate limited (rc={process.returncode}) — will re-queue without burning fail_count"
+            await _log_to_supabase(
+                supabase, job_id, repo_name, "rate_limited",
+                f"Rate limit detected in output: {(stdout + stderr)[:300]}", "warn",
+            )
+
         await _log_to_supabase(
             supabase, job_id, repo_name, "claude_done",
-            f"exit_code={process.returncode} success={success}",
+            f"exit_code={process.returncode} success={success} rate_limited={rate_limited}",
             "info" if success else "error",
         )
 
@@ -398,6 +416,7 @@ async def run_claude(
 
         return {
             "success": success,
+            "rate_limited": rate_limited,
             "summary": _redact(summary),
             "gate1": gate1,
             "gate2": gate2,

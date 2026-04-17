@@ -501,6 +501,7 @@ async def pick_next_jobs(supabase, running_repos: set[str], max_picks: int) -> l
         supabase.table("jobs")
         .select("*")
         .eq("status", "queued")
+        .or_("retry_after.is.null,retry_after.lte." + datetime.now(timezone.utc).isoformat())
         .order("priority", desc=False)
         .order("created_at", desc=False)
         .limit(20)  # fetch enough candidates
@@ -816,6 +817,50 @@ async def _spawn_escalation_session(
         logger.info(f"ARCH-030: escalation already in-flight for job #{job_id}, skipping duplicate")
         return
     _arch030_active.add(job_id)
+
+    # Constraint 2: cap at 2 escalations per job via persistent agent_messages count.
+    # Survives orchestrator restarts; _arch030_active only guards in-process duplicates.
+    try:
+        cap_check = await (
+            supabase.table("agent_messages")
+            .select("id", count="exact")
+            .eq("from_agent", "arch-030-escalation")
+            .like("subject", f"ARCH-030: starting auto-diagnosis for job #{job_id}%")
+            .execute()
+        )
+        prior_escalations = cap_check.count or 0
+    except Exception as _ce:
+        prior_escalations = 0
+        record_swallowed("arch030_cap_count", _ce)
+
+    if prior_escalations >= 2:
+        logger.warning(
+            f"ARCH-030: escalation cap reached for job #{job_id} "
+            f"({prior_escalations} prior) — posting blocker, no further auto-escalation"
+        )
+        try:
+            await supabase.table("agent_messages").insert({
+                "from_agent": "arch-030-escalation",
+                "to_agent": "cc-ihsanos",
+                "message_type": "blocker",
+                "subject": (
+                    f"ARCH-030 Job #{job_id}: cap hit ({prior_escalations} attempts) "
+                    f"— manual fix required"
+                ),
+                "body": (
+                    f"Job #{job_id} ({job.get('description','')[:80]}) triggered "
+                    f"{prior_escalations} auto-escalation sessions without resolution. "
+                    f"No further autonomous escalations will run.\n\n"
+                    f"Last failure: {result_summary[:500]}\n\n"
+                    f"Action required: diagnose manually, then set status='queued' "
+                    f"and fail_count=0."
+                ),
+                "requires_response": True,
+            }).execute()
+        except Exception as _ce:
+            record_swallowed("arch030_cap_msg", _ce)
+        _arch030_active.discard(job_id)
+        return
 
     try:
         # ── Gather diagnostics ──────────────────────────────────────────────
@@ -1277,6 +1322,34 @@ async def run_job(supabase, job: dict) -> None:
                 }).execute()
             except Exception as e:
                 record_swallowed("usage_log_insert", e)
+
+        elif result.get("rate_limited"):
+            # Constraint 5: Claude API rate limit — re-queue without burning fail_count.
+            # Set retry_after so the job isn't re-attempted for 30 minutes.
+            retry_after = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+            await set_job_status(
+                supabase, job_id, "queued",
+                fail_count=job.get("fail_count", 0),
+                result_summary=result["summary"][:2000],
+                retry_after=retry_after,
+            )
+            logger.warning(f"⏳ Job #{job_id} rate-limited — re-queued with 30 min backoff")
+            await notify(job_id, repo_name, "queued", "Rate limited — re-queued, retry in ~30 min")
+            try:
+                await supabase.table("agent_messages").insert({
+                    "from_agent": "ralph_runner",
+                    "to_agent": "cc-ihsanos",
+                    "message_type": "update",
+                    "subject": f"Job #{job_id} rate-limited — re-queued with 30 min backoff",
+                    "body": (
+                        f"Claude API rate limit hit for job #{job_id} "
+                        f"({job.get('description','')[:80]}). Re-queued for retry in ~30 min. "
+                        f"fail_count unchanged ({job.get('fail_count', 0)})."
+                    ),
+                    "requires_response": False,
+                }).execute()
+            except Exception as _e:
+                record_swallowed("rate_limit_msg", _e)
 
         else:
             new_fail_count = job.get("fail_count", 0) + 1

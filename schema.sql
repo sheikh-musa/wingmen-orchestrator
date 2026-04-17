@@ -12,6 +12,7 @@ create table jobs (
   session_prompt text,
   result_summary text,
   triggered_by text default 'telegram',
+  retry_after timestamptz,                          -- Constraint 5: rate-limit backoff, null = no backoff
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
