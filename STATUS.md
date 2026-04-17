@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-18 03:39 SGT
+Last Updated: 2026-04-18 04:00 SGT
 Build Status: green
 Deploy: N/A
 
@@ -11,15 +11,15 @@ Deploy: N/A
 Docs-only change: created `README.md` with H1 + appended `<!-- PIPELINE-TEST-001: pipeline marker 2026-04-17 -->` marker. No code paths touched, no restart required. Audit row written to `work_outputs` by orchestrator.
 
 ## Completed (Last 5)
+- [green] Job #106: ihsanos — [BUG] still see an empty dashboard for qurban supplier (18m 0s, deploy: https://ihsanos-a1ok6x0o6-musaaaaaaas-projects.vercel.app)
 - [green] Job #105: ihsanos — [BUG] where does the qurban supplier add the slaughterman information? (5m 52s, deploy: https://ihsanos-fpshtw62t-musaaaaaaas-projects.vercel.app)
 - [red] Job #93: wingmen-orchestrator — PIPELINE-TEST-001: Add test marker comment to README.md (1m 1s, deploy: N/A)
 - [green] Job #93: wingmen-orchestrator — [PIPELINE-TEST-001] README pipeline marker (deploy: N/A)
 - [red] Job #91: ihsanos — QURBAN-GAP-004 (concrete): age_months column + Islamic fiqh validation (5m 45s, deploy: N/A)
-- [red] Job #87: ihsanos — [QURBAN-GAP-004] Animal minimum age enforcement — add age_months to qbn_animals with fiqh CHECK (Islamic §9) (2m 7s, deploy: N/A)
 
-##               Recent Jobs (auto-tracked)
+##                Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-18 03:39 SGT
+Last Updated: 2026-04-18 04:00 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
@@ -32,7 +32,7 @@ Last Updated: 2026-04-18 03:39 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-18 03:39 SGT
+Last Updated: 2026-04-18 04:00 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
