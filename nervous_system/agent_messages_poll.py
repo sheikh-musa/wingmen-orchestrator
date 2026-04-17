@@ -60,6 +60,23 @@ def _format_telegram(msg: dict) -> str | None:
     if _is_cc_to_cc(from_agent, to_agent):
         return None
 
+    # cai → cc-* messages: route to Musa as relay — he pastes into active session
+    cai_to_cc = (
+        from_agent == "cai"
+        and bool(to_agent)
+        and to_agent.startswith(_CC_PREFIX)
+    )
+    if cai_to_cc:
+        snippet = (body[:600] + "\n...") if len(body) > 600 else body
+        urgency = "🔔 cai → relay to active session" if requires_response else "📨 cai message"
+        return (
+            f"{urgency}\n\n"
+            f"To: {to_agent}\n"
+            f"{subject}\n\n"
+            f"{snippet}\n\n"
+            f"Paste this into the active {to_agent} session."
+        )
+
     # Only route to known Telegram targets
     if to_agent not in TELEGRAM_ROUTED_TARGETS:
         return None
@@ -120,11 +137,17 @@ async def poll_agent_messages(
         if not rows:
             return
 
-        routable = [
-            r for r in rows
-            if not _is_cc_to_cc(r.get("from_agent", ""), r.get("to_agent"))
-            and r.get("to_agent") in TELEGRAM_ROUTED_TARGETS
-        ]
+        def _is_routable(r: dict) -> bool:
+            from_a = r.get("from_agent", "")
+            to_a = r.get("to_agent")
+            if _is_cc_to_cc(from_a, to_a):
+                return False
+            # cai messages addressed to any cc-* agent relay through Musa
+            if from_a == "cai" and bool(to_a) and to_a.startswith(_CC_PREFIX):
+                return True
+            return to_a in TELEGRAM_ROUTED_TARGETS
+
+        routable = [r for r in rows if _is_routable(r)]
 
         if not routable:
             logger.debug(
