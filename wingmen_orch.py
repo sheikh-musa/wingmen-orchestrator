@@ -1312,6 +1312,44 @@ async def run_job(supabase, job: dict) -> None:
                         logger.error(f"Strategic decision completion notify failed: {_e}")
                         record_swallowed("decision_notify_success", _e)
 
+            # Advance bug_report to 'deployed' and send Telegram verification prompt
+            if job.get("triggered_by") == "bug_report":
+                try:
+                    _deploy_url = deploy_result.get("url") or ""
+                    _bug_update: dict = {"status": "deployed"}
+                    if _deploy_url:
+                        _bug_update["deploy_url"] = _deploy_url
+
+                    _bug_res = await (
+                        supabase.table("bug_reports")
+                        .update(_bug_update)
+                        .eq("job_id", job_id)
+                        .execute()
+                    )
+                    _bug_rows = _bug_res.data or []
+                    _bug_id = _bug_rows[0].get("id", "?") if _bug_rows else "?"
+                    _bug_desc = _bug_rows[0].get("description", job.get("description", ""))[:80] if _bug_rows else job.get("description", "")[:80]
+
+                    # Telegram verification prompt to Musa
+                    _bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    _musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                    if _bot_token and _musa_id:
+                        from telegram import Bot as _Bot
+                        _bot = _Bot(token=_bot_token)
+                        _url_line = f"\n🔗 {_deploy_url}" if _deploy_url else ""
+                        await _bot.send_message(
+                            chat_id=_musa_id,
+                            text=(
+                                f"✅ Bug fix deployed — please verify\n\n"
+                                f"Bug: {_bug_desc}{_url_line}\n\n"
+                                f"Reply ✅ to mark verified or ❌ to reject."
+                            ),
+                        )
+                    logger.info(f"bug_report post-completion: bug {_bug_id} → deployed (job #{job_id})")
+                except Exception as _e:
+                    logger.error(f"bug_report post-completion hook failed: {_e}")
+                    record_swallowed("bug_report_deployed_hook", _e)
+
             # Log usage
             try:
                 await supabase.table("usage_log").insert({
