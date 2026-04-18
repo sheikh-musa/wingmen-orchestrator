@@ -1,8 +1,10 @@
 """Build the initial context block for a CC launch session.
 
 Queries Supabase for the agent's current state, formats a structured
-context block for `claude -p "$CONTEXT_BLOCK"`, marks unread messages
-as read, and bumps the agent heartbeat to 'active'.
+context block for `claude -p "$CONTEXT_BLOCK"`, stamps
+`forwarded_to_telegram_at` on the surfaced inbox rows (BUG-021 — boot
+briefing is middleware, not an agent), and bumps the agent heartbeat to
+'active'.
 
 Writes the context block to stdout (captured by the shell script).
 Writes diagnostic lines to stderr only.
@@ -133,13 +135,19 @@ def build(agent_id: str, dry_run: bool = False) -> str:
                 f"  • {g['decision_ref']} [{status}{exec_str}] ({domain}): {g['title']}"
             )
 
-    # ── 4. Mark messages as read + bump heartbeat ────────────────────────────
+    # ── 4. Mark messages forwarded + bump heartbeat (BUG-021) ───────────────
+    # Boot briefing forwards the inbox summary to Musa via Telegram — it is
+    # middleware, not an agent. Stamp forwarded_to_telegram_at, never read_at.
     if not dry_run and inbox:
         ids_to_mark = [m["id"] for m in inbox]
         client.table("agent_messages").update(
-            {"read_at": now_ts}
+            {"forwarded_to_telegram_at": now_ts}
         ).in_("id", ids_to_mark).execute()
-        print(f"build_launch_context: marked {len(ids_to_mark)} message(s) as read", file=sys.stderr)
+        print(
+            f"build_launch_context: stamped forwarded_to_telegram_at on "
+            f"{len(ids_to_mark)} message(s)",
+            file=sys.stderr,
+        )
 
     if not dry_run:
         client.table("agents").update(
