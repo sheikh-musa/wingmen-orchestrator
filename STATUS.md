@@ -1,16 +1,48 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-18 SGT (session end)
+Last Updated: 2026-04-19 SGT (BUG-020/021 shipped)
 Build Status: green
-Deploy: N/A — commit aea4ce2 pushed
+Deploy: d61e8ff pushed, launchd restarted
 
-## Last Completed (evening session 2026-04-18)
+## Last Completed (2026-04-19 — governance comms v1 hardening)
+
+### BUG-020 + BUG-021 — shipped
+Plan: `docs/superpowers/plans/2026-04-19-governance-comms-pipeline-hardening.md`
+Spec: `docs/superpowers/specs/2026-04-18-governance-comms-pipeline-hardening-design.md`
+
+**Schema migration** (`supabase/migrations/20260419_bug020_bug021_governance_comms_hardening.sql`, applied live):
+- `agent_messages.forwarded_to_telegram_at TIMESTAMPTZ` (BUG-021 — middleware's own stamp column)
+- `strategic_decisions.announced_by_msg_id BIGINT REFERENCES agent_messages(id) ON DELETE SET NULL` (BUG-020 — FK dedup guard)
+- Partial indexes on NULL subsets of both columns (hot-set optimisation)
+- `trigger_cai_decision_announce()` + BEFORE INSERT/UPDATE triggers: fires only for `source='claude_ai_session' AND challenge_status='challenge_window' AND bypass_review=false AND announced_by_msg_id IS NULL`; UPDATE variant guards against state-noise by checking `OLD.challenge_status != 'challenge_window'`
+- Per-orphan atomic backfill DO block (notified_at IS NULL filter — preserves historical manual announcements)
+
+**Code changes:**
+- `nervous_system/agent_messages_poll.py` (commit `3472771`): `.is_("forwarded_to_telegram_at","null")` added to polling query; `_mark_read` replaced with `_mark_forwarded` on both live + dedup paths; cc-* guard removed (middleware no longer clobbers `read_at`); docstring updated
+- `scripts/build_launch_context.py` (commit `d61e8ff`): stamps `forwarded_to_telegram_at` on surfaced inbox rows instead of `read_at`; classified as middleware per plan (forwards inbox digest to Musa via Telegram)
+
+**Live verification:**
+- Test msg id=242 (smoke): forwarder stamped `forwarded_to_telegram_at`, left `read_at IS NULL` ✓
+- `strategic_decisions` id=263 BUG-020-VERIFY → trigger created `agent_messages` id=247 + set `announced_by_msg_id` ✓
+- FK `ON DELETE SET NULL` verified on cleanup
+- Orphan sweep: 0 (14 historical rows correctly excluded by `notified_at IS NULL` filter — manually notified 2026-04-18T11:33:57Z)
+- pytest full-suite: 355 pass, 7 pre-existing failures (not regressions — verified by git-stash rollback)
+
+**Outcome:** Governance pipeline now end-to-end: CAI writes strategic_decisions → trigger queues review_request → notifier forwards to Musa → cc-ihsanos detects unprocessed mail via `read_at IS NULL` regardless of forwarder state. No more governance blackouts from the 2026-04-18 pattern.
+
+## Previous session (2026-04-18 evening)
+
+### TASK-043 Phase 3 — Baseline verdict: MARGINAL (cc-ihsanos-3, 22:30 SGT)
+- 2h baseline complete (PID 55042, 24 samples @ 5min): avg idle 62.6%, avg user 21.4%, avg sys 16.1%, min idle 3.8%, max idle 82.9%
+- Verdict **MARGINAL** (62.6% between 40–70% band) — revisit after ARCH-030 cutover reduces load
+- Full report: `reports/mac-mini-baseline-2026-04-18-2230.md`
+- Posted as agent_messages #235
+- REVIEW bucket follow-up (msg #234): 5/6 flagged processes died naturally between Phase 2 and Phase 3; PID 47922 remaining is ChromeRemoteDesktopHost (launchd-managed, legit) — no action required
 
 ### TASK-043 Phase 2 — Mac Mini process audit script shipped
 - `scripts/audit_mac_mini.py` fully operational: Phase 1 dry-run, Phase 2 SIGTERM kills, Phase 3 CPU baseline
 - Fixed `SUPABASE_SERVICE_KEY` env var name (was `SUPABASE_SERVICE_ROLE_KEY`); added `dotenv` auto-load for standalone use
 - Phase 2 cleared 5 orphaned pytest workers (test_queue_stall_detector, 4+ days stale, ~180% CPU freed)
-- Phase 3 baseline running in background (PID 55042, verdict auto-posts to agent_messages ~22:15 SGT)
 - Commit: `b33db53`
 
 ### BUG-022 — agent_messages claim/lock pattern (CC-2 prerequisite)
