@@ -118,6 +118,7 @@ async def test_no_cto_chat_id_returns_silently():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(10)
 async def test_recovery_clears_dedup():
     """Dedup key exists for job no longer queued -> dedup record deleted."""
     deleted_ids = []
