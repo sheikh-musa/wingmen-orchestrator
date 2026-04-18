@@ -265,8 +265,8 @@ class TestPollAgentMessages:
         bot.send_message.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_telegram_failure_does_not_mark_read(self):
-        """If Telegram send fails, the message stays unread for retry."""
+    async def test_telegram_failure_does_not_mark_forwarded(self):
+        """If Telegram send fails, forwarded_to_telegram_at stays NULL for retry."""
         msg = _make_msg(6, subject="CC-UPDATE-031: failed send")
         sb = MagicMock()
         sb.table.return_value = sb
@@ -348,3 +348,71 @@ class TestPollAgentMessages:
 
         # Should complete without error even with no bot
         await poll_agent_messages(sb, bot=None, musa_chat_id=None)
+
+    @pytest.mark.asyncio
+    async def test_successful_forward_stamps_forwarded_to_telegram_at(self):
+        """After a successful Telegram send, forwarded_to_telegram_at is set."""
+        msg = _make_msg(100, to_agent="musa", subject="BUG-021: positive case")
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.is_.return_value = sb
+        sb.order.return_value = sb
+        sb.eq.return_value = sb
+        sb.limit.return_value = sb
+        sb.insert.return_value = sb
+        sb.update.return_value = sb
+        sb.execute = AsyncMock(side_effect=[
+            MagicMock(data=[msg]),       # agent_messages select
+            MagicMock(data=[]),          # dedup empty
+            MagicMock(data=[]),          # log insert
+            MagicMock(data=[]),          # mark forwarded
+        ])
+
+        bot = AsyncMock()
+        sent_mock = MagicMock()
+        sent_mock.message_id = 100
+        bot.send_message = AsyncMock(return_value=sent_mock)
+
+        await poll_agent_messages(sb, bot=bot, musa_chat_id="123456")
+
+        update_calls = list(sb.update.call_args_list)
+        assert any(
+            "forwarded_to_telegram_at" in str(call)
+            for call in update_calls
+        ), f"Expected update with forwarded_to_telegram_at, got: {update_calls}"
+
+    @pytest.mark.asyncio
+    async def test_forwarding_does_not_modify_read_at(self):
+        """BUG-021 regression guard: middleware must never write read_at."""
+        msg = _make_msg(101, to_agent="musa", subject="BUG-021: regression guard")
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.is_.return_value = sb
+        sb.order.return_value = sb
+        sb.eq.return_value = sb
+        sb.limit.return_value = sb
+        sb.insert.return_value = sb
+        sb.update.return_value = sb
+        sb.execute = AsyncMock(side_effect=[
+            MagicMock(data=[msg]),
+            MagicMock(data=[]),
+            MagicMock(data=[]),
+            MagicMock(data=[]),
+        ])
+
+        bot = AsyncMock()
+        sent_mock = MagicMock()
+        sent_mock.message_id = 101
+        bot.send_message = AsyncMock(return_value=sent_mock)
+
+        await poll_agent_messages(sb, bot=bot, musa_chat_id="123456")
+
+        for call in sb.update.call_args_list:
+            args, _kwargs = call
+            if args:
+                payload = args[0]
+                assert "read_at" not in payload, (
+                    f"BUG-021 regression: middleware wrote read_at: {payload}"
+                )
