@@ -2,7 +2,7 @@
 
 **Bugs:** BUG-020, BUG-021
 **Date:** 2026-04-18
-**Status:** Design approved by Musa + CAI (CAI-RESP-027 tightenings folded in). Pending implementation plan.
+**Status:** Design approved by Musa + CAI (CAI-RESP-027 + msg 239 tightenings folded in). Cleared for implementation.
 
 ## Problem
 
@@ -170,6 +170,18 @@ CREATE TRIGGER cai_decision_announce_update
 
 `BEFORE` (not `AFTER`) so the function can set `NEW.announced_by_msg_id` and `NEW.notified_at` on the same row without a recursive UPDATE. The FK is satisfied because the `INSERT … RETURNING id` runs inside the same transaction and returns a committed agent_messages row id.
 
+**PG version check before shipping:** `BEFORE UPDATE OF <col>` requires PG 9.0+. Run `SELECT version();` against the target Supabase DB first. If the column-level syntax is rejected for any reason, use this equivalent form:
+
+```sql
+CREATE TRIGGER cai_decision_announce_update
+  BEFORE UPDATE ON strategic_decisions
+  FOR EACH ROW
+  WHEN (NEW.challenge_status IS DISTINCT FROM OLD.challenge_status)
+  EXECUTE FUNCTION trigger_cai_decision_announce();
+```
+
+The `WHEN` clause scopes trigger firing to challenge_status changes at fire-time instead of declaration-time — same semantics, broader compatibility.
+
 ### 3. Backfill sweep (atomic per orphan — CC msg 197 answer #5)
 
 **NOT a bulk UPDATE at the end.** Per-orphan: INSERT agent_message, capture id, UPDATE the single strategic_decision with that id + notified_at. If the loop is interrupted, partial progress is consistent — every processed orphan is fully linked, no "inserted but not marked" state.
@@ -258,7 +270,24 @@ Dead security policies are worse than no policy. They give false confidence, and
 
 ### Step 1: Migration
 
-Apply `20260418_bug020_bug021_governance_comms_hardening.sql` against orchestrator Supabase.
+**Pre-flight preview — run BEFORE applying the migration:**
+
+```sql
+SELECT decision_ref, title, notified_at, bypass_review, created_at
+FROM strategic_decisions
+WHERE source = 'claude_ai_session'
+  AND challenge_status = 'challenge_window'
+  AND COALESCE(bypass_review, false) = false
+  AND announced_by_msg_id IS NULL
+  AND notified_at IS NULL
+ORDER BY created_at ASC;
+```
+
+This is the exact set the DO block will backfill. CAI manually backfilled 21 rows at 2026-04-18 11:33 UTC with `notified_at = now()`, so this query is expected to return **0 rows**. If it returns anything, eyeball the list against the `decision_ref`s you know about from today's session before running the migration — a surprise flood of backfilled announcements is worse than the blackout the migration is fixing.
+
+If the preview returns >0 and any of the rows look wrong (e.g., a decision you intended to bypass_review): abort, fix the row (`UPDATE strategic_decisions SET bypass_review=true WHERE decision_ref=…`), re-run preview, proceed only when the list is what you expect.
+
+Once preview is confirmed, apply `20260418_bug020_bug021_governance_comms_hardening.sql` against orchestrator Supabase.
 
 **Verify — migration smoke test:**
 ```sql
@@ -315,7 +344,16 @@ SELECT COUNT(*) FROM agent_messages
 -- Expect: 1
 ```
 
-Then delete the test decision and its announcement message.
+Then clean up. Delete the announcement message first, then the test decision — wrap both in one transaction so a concurrent read can't observe the decision without its announcement:
+
+```sql
+BEGIN;
+DELETE FROM agent_messages WHERE subject LIKE 'BUG-021-VERIFY:%';
+DELETE FROM strategic_decisions WHERE decision_ref = 'BUG-021-VERIFY';
+COMMIT;
+```
+
+The FK's `ON DELETE SET NULL` clears `announced_by_msg_id` on the decision row when the agent_message is removed, so the second delete proceeds cleanly.
 
 ### Step 4: ihsanos cleanup
 
@@ -365,20 +403,30 @@ Backfill-created agent_messages rows remain — they are real review_requests CC
 
 ### Rollback D: backfill created unwanted announcements
 
-If backfill fires for decisions that shouldn't have been announced (e.g., a CAI session was filed as `claude_ai_session` but was meant to be `bypass_review`), manually unwind:
+If backfill fires for decisions that shouldn't have been announced (e.g., a CAI session was filed as `claude_ai_session` but was meant to be `bypass_review`), prefer unlinking over deletion — CC may have already posted a response referencing the announcement, and deleting the announcement leaves a dangling reply. Forensic state is usually worth preserving.
+
+**Preferred — unlink without destroying context:**
 ```sql
--- Identify the erroneous announcements
+-- Identify
 SELECT sd.decision_ref, sd.announced_by_msg_id
 FROM strategic_decisions sd
 WHERE sd.decision_ref IN ('DEC-REF-1', 'DEC-REF-2');
 
--- Delete the corresponding agent_messages (cascades SET NULL on strategic_decisions.announced_by_msg_id via FK)
-DELETE FROM agent_messages WHERE id IN (…);
+-- Unlink: clear the FK, keep both rows for audit trail
+UPDATE strategic_decisions SET announced_by_msg_id = NULL, bypass_review = true
+ WHERE decision_ref IN ('DEC-REF-1', 'DEC-REF-2');
 
--- Optionally re-mark as notified to prevent re-backfill
+-- If an `archived_at` column exists on agent_messages, archive there instead of delete
+-- UPDATE agent_messages SET archived_at = now() WHERE id IN (…);
+```
+
+**Only if forensic state is truly unneeded — hard delete:**
+```sql
+DELETE FROM agent_messages WHERE id IN (…);  -- FK ON DELETE SET NULL clears announced_by_msg_id
 UPDATE strategic_decisions SET notified_at = now(), bypass_review = true
  WHERE decision_ref IN ('DEC-REF-1', 'DEC-REF-2');
 ```
+Do this only when you're certain no response rows reference the announcement message.
 
 ## Out of scope
 
