@@ -14,8 +14,11 @@ Telegram based on message_type and routing rules:
   - message_type=update     → 📦 brief subject line only
   - CC-to-CC traffic        → skipped entirely (internal peer traffic)
 
-After notifying, messages are marked read_at=NOW() and logged to
-notification_log with a dedup_key to prevent double-sends on restart.
+After notifying, messages are stamped forwarded_to_telegram_at=NOW()
+and logged to notification_log with a dedup_key to prevent double-sends
+on restart. BUG-021: the addressed agent's own read_at column is never
+touched by the notifier — that's reserved for the agent's processing
+stamp, so agents can still detect unhandled mail after forwarding.
 """
 
 from __future__ import annotations
@@ -127,7 +130,9 @@ async def poll_agent_messages(
         result = await supabase.table("agent_messages").select(
             "id, from_agent, to_agent, message_type, subject, body, "
             "requires_response, created_at"
-        ).is_("read_at", "null").order("created_at", desc=False).execute()
+        ).is_("read_at", "null").is_(
+            "forwarded_to_telegram_at", "null"
+        ).order("created_at", desc=False).execute()
 
         rows: list[dict] = result.data or []
         if not rows:
@@ -205,12 +210,12 @@ async def poll_agent_messages(
                 dedup_key=dedup_key,
             )
 
-            # Only mark read for musa/broadcast — direct targets that don't
-            # need to poll themselves. For cc-* relay targets, leave read_at
-            # null so the agent can detect and process the message itself.
-            to_agent = msg.get("to_agent", "")
-            if not to_agent.startswith(_CC_PREFIX):
-                await _mark_read(supabase, msg_id)
+            # BUG-021: stamp forwarded_to_telegram_at (notifier's column),
+            # never read_at. read_at is reserved for the addressed agent's
+            # own processing stamp — cc-* agents set it when they handle
+            # the message. Keeping semantics honest lets agents detect
+            # unprocessed mail via read_at IS NULL regardless of forwarding.
+            await _mark_forwarded(supabase, msg_id)
 
     except Exception as e:
         logger.error(f"agent_messages_poll failed: {e}")
@@ -232,8 +237,9 @@ async def _already_notified(supabase, dedup_key: str, msg_id: int) -> bool:
                 f"Skipping agent_message {msg_id} — already notified "
                 f"(dedup_key={dedup_key})"
             )
-            # Ensure read_at is set even if a previous run notified but didn't mark read
-            await _mark_read(supabase, msg_id)
+            # Ensure forwarded_to_telegram_at is set even if a previous run
+            # notified but didn't stamp it (crash between log + stamp)
+            await _mark_forwarded(supabase, msg_id)
             return True
         return False
     except Exception as e:
@@ -274,12 +280,17 @@ async def _log_notification(
         )
 
 
-async def _mark_read(supabase, msg_id: int) -> None:
-    """Set read_at on an agent_messages row."""
+async def _mark_forwarded(supabase, msg_id: int) -> None:
+    """Set forwarded_to_telegram_at on an agent_messages row.
+
+    BUG-021: middleware must NEVER write read_at — that column is reserved
+    for the addressed agent's own processing stamp. Forwarding state lives
+    on its own column so semantics stay honest.
+    """
     try:
         await supabase.table("agent_messages").update(
-            {"read_at": datetime.now(timezone.utc).isoformat()}
+            {"forwarded_to_telegram_at": datetime.now(timezone.utc).isoformat()}
         ).eq("id", msg_id).execute()
     except Exception as e:
-        logger.error(f"Failed to mark agent_message {msg_id} as read: {e}")
-        error_tracker.track_exception("agent_messages_poll.mark_read", e)
+        logger.error(f"Failed to mark agent_message {msg_id} as forwarded: {e}")
+        error_tracker.track_exception("agent_messages_poll.mark_forwarded", e)
