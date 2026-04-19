@@ -2,7 +2,7 @@
 
 **Spec date:** 2026-04-19
 **Status:** Approved (Musa scope A; CAI-RESP-036 + CAI-RESP-042 + CAI-RESP-043 binding)
-**Parent decisions:** ARCH-035 (decision_ref), CAI-RESP-036 (8-item amendment), CAI-RESP-042 (3-item pre-write clarification), CAI-RESP-043 (spec review: B1 blocker + B2 add + C2/C3/C4 polish)
+**Parent decisions:** ARCH-035 (decision_ref), CAI-RESP-036 (8-item amendment), CAI-RESP-042 (3-item pre-write clarification), CAI-RESP-043 (spec review: B1 blocker + B2 add + C2/C3/C4 polish), CAI-RESP-044 (dblink+pg_cron confirmed enabled; proceed to writing-plans)
 **Implementation owner:** cc-ihsanos
 **Estimated time:** ~1.5 days, single session, full vertical slice
 
@@ -122,10 +122,9 @@ CREATE INDEX idx_violations_recent ON agent_status_identity_violations (attempte
 
 -- 4b. Autonomous-transaction helper (dblink) — logs violations durably even when the
 --     outer transaction aborts. Standard Postgres pattern for trigger-side audit.
---     Open item flagged back to CAI in Q1 of agreed response — if dblink isn't
---     available on this Supabase project, fallback is RAISE NOTICE + external tailer
---     of postgres logs. See Risks #6.
+--     CAI-RESP-044 Q1 confirmed dblink + pg_cron are allowlisted on this Supabase project.
 CREATE EXTENSION IF NOT EXISTS dblink;
+CREATE EXTENSION IF NOT EXISTS pg_cron;  -- readiness for follow-up TTL + purge crons (CAI-RESP-044)
 
 CREATE OR REPLACE FUNCTION log_agent_status_identity_violation(
   p_claimed TEXT, p_guc TEXT, p_type TEXT, p_op TEXT
@@ -378,12 +377,12 @@ SELECT * FROM agent_status; -- expect: empty
 3. **Banned-prefix rows accumulate until purge cron lands** — intentional for the short term (A1 — discipline visible). Nightly cron (filed as follow-up) will cap retention at 24h per CAI-RESP-043 C2.
 4. **THIS-session bootstrap** — cc-ihsanos's current session was launched without the GUC set. Per CAI-RESP-042 Q2, we skip self-UPSERT this session; agent_status sits empty for cc-ihsanos until the next launch. Acceptable forensic gap of a few hours.
 5. **`stale_agents` noisy until tool-call hook lands** — v0 only stamps `last_heartbeat` at session-launch and session-end, so long sessions (>15 min) flag as stale. Documented as known limitation; operator should read `agent_status` directly until the follow-up TASK lands.
-6. **dblink availability on Supabase** (CAI-RESP-043 B2 dependency) — the violations-table log uses dblink for autonomous transaction (needed because RAISE EXCEPTION rolls back the INSERT we just did). Supabase typically has dblink enabled, but Q1 in the agreed response to CAI-RESP-043 confirms availability. If dblink is disabled: fallback is `RAISE NOTICE` with structured payload + external postgres-log tailer persisting to the violations table. Decision before migration applies.
+6. **dblink availability** — resolved. CAI-RESP-044 Q1 confirmed `dblink 1.2` + `pg_cron 1.6.4` are both allowlisted on project `tscuymavysscrvoberrr`. `CREATE EXTENSION IF NOT EXISTS dblink` + `pg_cron` included in the migration directly.
 
 ## Follow-ups (deferred TASKs, not blocking ship)
 
 - `TASK-NNN` (file post-ship): **90-day TTL cron for `agent_status_history`** (per CAI-RESP-036 B3, implementation named per CAI-RESP-043 C4). Use Supabase `pg_cron`: nightly at 03:00 UTC, `DELETE FROM agent_status_history WHERE recorded_at < now() - interval '90 days'`. If history grows hot, add partial index `WHERE recorded_at > now() - interval '30 days'` for common queries. Cron registration: `SELECT cron.schedule('agent_status_history_ttl', '0 3 * * *', $$DELETE FROM agent_status_history WHERE recorded_at < now() - interval '90 days'$$);`
-- `TASK-NNN` (file post-ship): **Banned-prefix unread purge cron** (per CAI-RESP-043 C2, option a). `pg_cron` nightly at 03:15 UTC: `DELETE FROM agent_messages WHERE subject ~ '^(CLAIM|STATUS|HEARTBEAT|DIGEST|COMPLETE):' AND read_at IS NULL AND forwarded_to_telegram_at IS NULL AND created_at < now() - interval '24 hours'`.
+- `TASK-NNN` (file post-ship): **Banned-prefix unread purge cron** (per CAI-RESP-043 C2, option a). `pg_cron` nightly at 03:15 UTC: `DELETE FROM agent_messages WHERE subject ~ '^(CLAIM|STATUS|HEARTBEAT|DIGEST|COMPLETE):' AND read_at IS NULL AND forwarded_to_telegram_at IS NULL AND created_at < now() - interval '24 hours'`. **Interim mechanism only** — CAI-RESP-044 C2 acknowledgment confirms option (b) counter-message is the preferred long-term approach once BUG-024 Phase 1 lands per-agent identity; purge is a bridge, not the end-state.
 - `TASK-NNN` (file post-ship): Telegram digest of `stale_agents` view rows (15-min staleness alert) — currently silent, only visible if queried.
 - `TASK-NNN` (file post-ship): Tool-call-boundary heartbeat hook — bump `last_heartbeat` once per minute during active work, so `stale_agents` becomes useful for long-session detection.
 - `BUG-024 Phase 1`: replaces GUC tripwire with proper per-agent JWT identity; `agent_status` RLS becomes real then.
