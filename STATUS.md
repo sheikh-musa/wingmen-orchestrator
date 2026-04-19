@@ -1,10 +1,39 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-19 SGT (BUG-020/021 shipped)
+Last Updated: 2026-04-19 SGT (BUG-025 shipped)
 Build Status: green
-Deploy: d61e8ff pushed, launchd restarted
+Deploy: 0893d7a pushed (migration applied via dashboard SQL editor)
 
-## Last Completed (2026-04-19 — governance comms v1 hardening)
+## Last Completed (2026-04-19 — BUG-025 acceptance-path announce trigger)
+
+### BUG-025 — shipped
+Plan: `docs/superpowers/plans/2026-04-19-bug-025-acceptance-path-trigger.md`
+Spec: CAI-RESP-040 (B1 + A1 + A2 + concession on simpler announce-all-CAI variant)
+Migration: `supabase/migrations/20260419_bug025_acceptance_path_announce.sql` (commit `0893d7a`, applied live via dashboard)
+
+**Behaviour change vs BUG-020 (357a135):**
+- Announceable status set widened: `'challenge_window'` → `('challenge_window', 'accepted')`
+- Message shape branches on `challenge_status`:
+  - `challenge_window` → `message_type='review_request'`, subject `"<ref>: <title> — for review + challenge"`, `requires_response=true` (BUG-020 preserved)
+  - `accepted` → `message_type='decision'`, subject `"<ref>: <title>"`, `requires_response=false` (BUG-025 new)
+- `OLD.challenge_status='challenge_window'` state-transition guard dropped — `announced_by_msg_id IS NOT NULL` is the universal dedup
+- No SIMILAR TO regex on `decision_ref` — `source='claude_ai_session'` is the canonical "from CAI" signal (A1)
+
+**Live verification (4-case matrix per CAI-RESP-040 A2):**
+- CAI-TEST-001 (accepted path): announced as `decision` + `requires_response=false`, no challenge suffix → PASS
+- CAI-TEST-002 (challenge_window regression): announced as `review_request` + challenge suffix preserved → PASS
+- CAI-TEST-003 (bypass_review escape hatch): no announce, no notified_at → PASS
+- CAI-TEST-004 (state-transition dedup): insert as challenge_window then UPDATE to accepted yielded exactly 1 announce, `announced_by_msg_id` unchanged → PASS
+- All 4 synthetic `BUG-025-VERIFY-NNN` rows hard-deleted from `strategic_decisions` and `agent_messages` post-verify
+
+**Schema NOT NULL discoveries (live testing, not in plan):**
+- `strategic_decisions` requires `decision`, `reasoning`, `domain` (no `body` column). Plan's verification scripts assumed a `body` column and used Node `@supabase/supabase-js` which isn't installed in the Python orchestrator — used Python `.venv` + correct field set instead.
+
+**Outcome:** CAI-RESP-* and CAI-* acceptance-path rulings now appear in cc-ihsanos's inbox automatically. No more manual paste-by-Musa for accepted decisions. Closes the third bug in the BUG-019/020/025 governance-comms family.
+
+Next P0: ARCH-035 (agent_status table + channel split per CAI-RESP-036).
+
+## Previous Completed (2026-04-19 — governance comms v1 hardening)
 
 ### BUG-020 + BUG-021 — shipped
 Plan: `docs/superpowers/plans/2026-04-19-governance-comms-pipeline-hardening.md`
