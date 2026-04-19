@@ -75,7 +75,36 @@ def build(agent_id: str, dry_run: bool = False) -> str:
     else:
         parts.append("(no context row — first boot)")
 
-    # ── 2. Unread inbox (requires_response first) ─────────────────────────────
+    # ── 2. World state (agent_status snapshot) ────────────────────────────────
+    # ARCH-035: every CC's boot briefing shows what every other agent is
+    # doing. Replaces the discipline-based "scroll through agent_messages
+    # CLAIMs" pattern.
+    status_rows = (
+        client.table("agent_status")
+        .select(
+            "agent_id,status,current_task,scope_repos,blocked_on_msg_id,"
+            "blocked_on_decision_ref,last_heartbeat"
+        )
+        .order("updated_at", desc=True)
+        .execute()
+        .data
+    )
+    parts.append(f"\n## World State ({len(status_rows)} agents)")
+    if not status_rows:
+        parts.append("(no agents currently registered)")
+    else:
+        for s in status_rows:
+            line = f"  - {s['agent_id']}: {s['status']}"
+            if s.get("current_task"):
+                line += f" | {s['current_task']}"
+            if s.get("blocked_on_msg_id"):
+                line += f" | blocked_on_msg={s['blocked_on_msg_id']}"
+            if s.get("blocked_on_decision_ref"):
+                line += f" | blocked_on={s['blocked_on_decision_ref']}"
+            line += f" | hb={s['last_heartbeat']}"
+            parts.append(line)
+
+    # ── 3. Unread inbox (requires_response first) ─────────────────────────────
     inbox = (
         client.table("agent_messages")
         .select("id,from_agent,to_agent,message_type,subject,body,requires_response,created_at")
@@ -103,7 +132,7 @@ def build(agent_id: str, dry_run: bool = False) -> str:
                 for line in body.splitlines():
                     parts.append(f"    {line}")
 
-    # ── 3. Strategic decisions (accepted + challenge_window, scoped repos) ────
+    # ── 4. Strategic decisions (accepted + challenge_window, scoped repos) ────
     gov = (
         client.table("strategic_decisions")
         .select(
@@ -135,7 +164,7 @@ def build(agent_id: str, dry_run: bool = False) -> str:
                 f"  • {g['decision_ref']} [{status}{exec_str}] ({domain}): {g['title']}"
             )
 
-    # ── 4. Mark messages forwarded + bump heartbeat (BUG-021) ───────────────
+    # ── 5. Mark messages forwarded + bump heartbeat (BUG-021) ───────────────
     # Boot briefing forwards the inbox summary to Musa via Telegram — it is
     # middleware, not an agent. Stamp forwarded_to_telegram_at, never read_at.
     if not dry_run and inbox:

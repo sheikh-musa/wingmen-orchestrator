@@ -24,6 +24,7 @@ stamp, so agents can still detect unhandled mail after forwarding.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from nervous_system import error_tracker
@@ -36,6 +37,38 @@ TELEGRAM_ROUTED_TARGETS = {"cai", "musa", "broadcast"}
 
 # CC agent prefix — both-sided prefix = internal peer traffic, no Telegram
 _CC_PREFIX = "cc-"
+
+# ARCH-035: subjects on agent_messages starting with any of these prefixes
+# belong in agent_status, not agent_messages. The poller drops them so the
+# row stays UNREAD as a tripwire for the sending agent. Interim: nightly
+# pg_cron purges after 24h (task #97).
+_BANNED_PREFIX_RE = re.compile(r'^(CLAIM|STATUS|HEARTBEAT|DIGEST|COMPLETE):')
+
+
+def _is_routable(r: dict) -> bool:
+    """Return True if this row should reach Musa's Telegram.
+
+    Filters:
+    1. Banned-prefix rows dropped (ARCH-035) — left UNREAD as tripwire.
+    2. CC-to-CC peer traffic dropped.
+    3. cai → cc-* relayed.
+    4. Everything else: only TELEGRAM_ROUTED_TARGETS addressees.
+    """
+    subject = r.get("subject") or ""
+    if _BANNED_PREFIX_RE.match(subject):
+        logger.info(
+            f"poll: dropping banned-prefix msg id={r.get('id')} "
+            f"subject={subject[:60]}"
+        )
+        return False
+
+    from_a = r.get("from_agent", "")
+    to_a = r.get("to_agent")
+    if _is_cc_to_cc(from_a, to_a):
+        return False
+    if from_a == "cai" and bool(to_a) and to_a.startswith(_CC_PREFIX):
+        return True
+    return to_a in TELEGRAM_ROUTED_TARGETS
 
 
 def _is_cc_to_cc(from_agent: str, to_agent: str | None) -> bool:
@@ -137,16 +170,6 @@ async def poll_agent_messages(
         rows: list[dict] = result.data or []
         if not rows:
             return
-
-        def _is_routable(r: dict) -> bool:
-            from_a = r.get("from_agent", "")
-            to_a = r.get("to_agent")
-            if _is_cc_to_cc(from_a, to_a):
-                return False
-            # cai messages addressed to any cc-* agent relay through Musa
-            if from_a == "cai" and bool(to_a) and to_a.startswith(_CC_PREFIX):
-                return True
-            return to_a in TELEGRAM_ROUTED_TARGETS
 
         routable = [r for r in rows if _is_routable(r)]
 

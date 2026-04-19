@@ -7,6 +7,7 @@ from nervous_system.agent_messages_poll import (
     poll_agent_messages,
     _format_telegram,
     _is_cc_to_cc,
+    _is_routable,
 )
 from tests.conftest import mock_supabase_chain
 
@@ -416,3 +417,56 @@ class TestPollAgentMessages:
                 assert "read_at" not in payload, (
                     f"BUG-021 regression: middleware wrote read_at: {payload}"
                 )
+
+
+# ARCH-035: banned-prefix rejection in _is_routable
+class TestBannedPrefixRejection:
+    """Per ARCH-035: CLAIM/STATUS/HEARTBEAT/DIGEST/COMPLETE prefixes on
+    agent_messages subjects belong in agent_status, not agent_messages.
+    The poller drops them (no Telegram, no forwarded_to_telegram_at stamp).
+    The row stays UNREAD as a tripwire so the sending agent can be coached."""
+
+    def _row(self, subject: str, from_agent: str = "cc-ihsanos", to_agent: str = "cai"):
+        return {
+            "id": 1,
+            "from_agent": from_agent,
+            "to_agent": to_agent,
+            "message_type": "update",
+            "subject": subject,
+            "body": "x",
+            "requires_response": False,
+        }
+
+    def test_claim_prefix_rejected(self):
+        assert _is_routable(self._row("CLAIM: working on BUG-042")) is False
+
+    def test_status_prefix_rejected(self):
+        assert _is_routable(self._row("STATUS: idle")) is False
+
+    def test_heartbeat_prefix_rejected(self):
+        assert _is_routable(self._row("HEARTBEAT: 2026-04-19T12:00Z")) is False
+
+    def test_digest_prefix_rejected(self):
+        assert _is_routable(self._row("DIGEST: session-end summary")) is False
+
+    def test_complete_prefix_rejected(self):
+        assert _is_routable(self._row("COMPLETE: TASK-042 shipped")) is False
+
+    def test_normal_subject_still_routed(self):
+        assert _is_routable(self._row("BUG-042: trigger rewrite for review")) is True
+
+    def test_lowercase_prefix_not_rejected(self):
+        # Intentional — only uppercase convention is banned.
+        assert _is_routable(self._row("claim: normal message")) is True
+
+    def test_prefix_mid_subject_not_rejected(self):
+        # Only leading prefix is banned.
+        assert _is_routable(self._row("re: CLAIM: normal message")) is True
+
+    def test_missing_subject_not_rejected(self):
+        # Row with null subject — don't crash on .match(None)
+        r = self._row("")
+        r["subject"] = None
+        # Row has to_agent='cai' so it IS normally routable — banned-prefix
+        # check should not false-positive on None.
+        assert _is_routable(r) is True

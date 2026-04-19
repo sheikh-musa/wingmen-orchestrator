@@ -97,6 +97,54 @@ else
 fi
 echo ""
 
+# ── 2.5 ARCH-035 — register agent_status with GUC identity tripwire ─────────
+# Opens a dedicated psycopg connection (NOT supabase-py — PostgREST pooling
+# breaks GUC semantics). SET LOCAL + UPSERT in one transaction; trigger
+# compares NEW.agent_id to app.current_agent_id and raises 42501 on mismatch.
+# Launch script is the only place GUC is set; no RPC wrapper (CAI-RESP-043 B1).
+
+echo -e "${BOLD}▶ Registering agent_status for ${AGENT_ID}...${RESET}"
+"$VENV_PY" -c "
+import os, sys
+sys.path.insert(0, '$ORCH_DIR')
+from dotenv import load_dotenv
+load_dotenv('$ORCH_DIR/.env')
+try:
+    import psycopg
+except ImportError:
+    sys.stderr.write('psycopg not installed — skipping agent_status UPSERT\n')
+    sys.exit(0)
+
+dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
+if not dsn:
+    sys.stderr.write('DATABASE_URL not set — skipping agent_status UPSERT\n')
+    sys.exit(0)
+
+agent_id = '$AGENT_ID'
+try:
+    with psycopg.connect(dsn, autocommit=False) as conn:
+        with conn.cursor() as cur:
+            cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", (agent_id,))
+            cur.execute(
+                '''
+                INSERT INTO agent_status (agent_id, status, current_task, last_heartbeat, updated_at)
+                VALUES (%s, 'working', 'session-launch', now(), now())
+                ON CONFLICT (agent_id) DO UPDATE SET
+                  status = EXCLUDED.status,
+                  current_task = EXCLUDED.current_task,
+                  last_heartbeat = EXCLUDED.last_heartbeat,
+                  updated_at = EXCLUDED.updated_at
+                ''',
+                (agent_id,)
+            )
+        conn.commit()
+    sys.stderr.write(f'launch: agent_status registered for {agent_id} (status=working)\n')
+except Exception as e:
+    sys.stderr.write(f'launch: agent_status UPSERT failed: {e}\n')
+    sys.stderr.write('launch: continuing without agent_status registration — will show in stale_agents\n')
+" 2>&1 | grep -E '^launch:' || true
+echo ""
+
 # ── 3. Start background heartbeat loop ────────────────────────────────────────
 
 _heartbeat_loop() {
@@ -325,6 +373,43 @@ sb.table('cc_work_sessions').insert({
     'duration_seconds': $duration_seconds,
 }).execute()
 " 2>/dev/null || true
+
+    # ARCH-035: flip agent_status to offline (psycopg direct for GUC).
+    # Survives clean exit + SIGTERM (trap fires). Does NOT survive kill -9 —
+    # stale_agents view catches that via 15-min heartbeat threshold.
+    "$VENV_PY" -c "
+import os, sys
+sys.path.insert(0, '$ORCH_DIR')
+from dotenv import load_dotenv
+load_dotenv('$ORCH_DIR/.env')
+try:
+    import psycopg
+except ImportError:
+    sys.exit(0)
+
+dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
+if not dsn:
+    sys.exit(0)
+
+try:
+    with psycopg.connect(dsn, autocommit=False) as conn:
+        with conn.cursor() as cur:
+            cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$AGENT_ID',))
+            cur.execute(
+                '''
+                UPDATE agent_status
+                   SET status = 'offline',
+                       current_task = NULL,
+                       last_heartbeat = now(),
+                       updated_at = now()
+                 WHERE agent_id = %s
+                ''',
+                ('$AGENT_ID',)
+            )
+        conn.commit()
+except Exception as e:
+    sys.stderr.write(f'exit: agent_status offline UPSERT failed: {e}\n')
+" 2>&1 | grep -E '^exit:' || true
 
     # Post session-end agent_message
     local subject
