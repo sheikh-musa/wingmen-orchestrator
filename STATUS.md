@@ -1,10 +1,47 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-19 SGT (BUG-025 shipped)
+Last Updated: 2026-04-19 SGT (ARCH-035 shipped)
 Build Status: green
-Deploy: 0893d7a pushed (migration applied via dashboard SQL editor)
+Deploy: ccb136a pushed (migration applied via Supabase MCP under Musa's delegation)
 
-## Last Completed (2026-04-19 — BUG-025 acceptance-path announce trigger)
+## Last Completed (2026-04-19 — ARCH-035 three-channel governance taxonomy)
+
+### ARCH-035 — shipped
+Plan: `docs/superpowers/plans/2026-04-19-arch-035-three-channel-taxonomy.md` (commit `6a1da85`)
+Spec: `docs/superpowers/specs/2026-04-19-arch-035-three-channel-governance-taxonomy-design.md` (commit `f6b5483`, CAI-approved via CAI-RESP-036 + 042 + 043 + 044)
+Docs (WINGMEN_CONSTRAINTS): commit `8a96c6c` + nit fix `58c535b` (ihsanos repo — file lives there)
+Code commit: `ccb136a` 7-file atomic (base migration + CAI-RESP-046 hotfix migration + build_launch_context.py + launch_dangerous_cc.sh + agent_messages_poll.py + tests + requirements.txt)
+Migrations: `supabase/migrations/20260419_arch035_three_channel_taxonomy.sql` + `20260419_arch035_cai_resp_046_hotfix.sql` (both applied live via Supabase MCP under Musa's delegation default — CAI-RESP-046)
+
+**Shape delivered:**
+- `agent_status` table: 1 row/agent, 4-value status CHECK (`idle`/`working`/`blocked`/`offline`), GUC-guarded writes
+- `agent_status_history` table: AFTER-trigger append-only snapshot on every INSERT/UPDATE
+- `agent_status_identity_violations` table: retained but empty under hotfix (CAI-RESP-046 Deviation 2 — dblink→RAISE NOTICE; violations land in Postgres server logs until BUG-024 Phase 1)
+- `stale_agents` view: 15-min heartbeat drift surface
+- `agent_messages` CHECK: 8 legal message_type values (`review_request`, `question`, `decision`, `agreed`, `challenge`, `update`, `blocker`, `counter`). CAI-RESP-046 Deviation 1 preserved `counter` (pre-existing in pg_constraint, 0 rows, may represent counter-proposal semantics distinct from `challenge`)
+- Banned prefixes rejected by notifier: `^(CLAIM|STATUS|HEARTBEAT|DIGEST|COMPLETE):` — row left UNREAD as tripwire, 24h purge cron filed as task #97
+- Boot briefing: new "World State (N agents)" section between Agent-context and Unread-inbox in `build_launch_context.py`
+- Launch protocol: psycopg direct `SELECT set_config('app.current_agent_id', …, true)` + UPSERT at launch; offline UPDATE in EXIT trap. No RPC wrapper (CAI-RESP-043 B1 — RPC structurally defeats the tripwire)
+
+**Live verification (8/8 smoke cases passed, cc-smoketest-live fixture):**
+- Launch SQL UPSERT → agent_status row created with status=working, current_task=session-launch ✓
+- Identity tripwire → GUC mismatch raises 42501 with "identity mismatch" message ✓
+- Boot briefing dry-run → "## World State (1 agents)" section renders correctly ✓
+- Banned-prefix `_is_routable` → returns False on `CLAIM:` subject (simulated via direct module invocation against live DB; unit tests cover deployment path — orchestrator restart picks up new code post-push) ✓
+- Row left UNREAD + forwarded_to_telegram_at NULL after drop ✓
+- Exit SQL UPDATE → status=offline, current_task=NULL ✓
+- History table → 2 rows in correct order (working/session-launch → offline/NULL) ✓
+- Cleanup → all cc-smoketest-live rows deleted from agent_status + agent_status_history ✓
+
+**Known-degraded until BUG-024 Phase 1:** (1) GUC tripwire relies on launch-script trust — spoofing requires editing `scripts/launch_dangerous_cc.sh` (auditable); (2) `agent_status_identity_violations` table empty until dblink auth or per-agent JWT lands (CAI-RESP-046 Deviation 2). Proper per-agent identity replaces both when BUG-024 ships.
+
+**Follow-ups filed:** task #97 (pg_cron purge banned-prefix rows after 24h). ARCH-036 priority column on narrowed agent_messages (task #76) now unblocked.
+
+**Test baseline:** pytest full suite unchanged — 9 new banned-prefix cases in `test_agent_messages_poll.py` all PASS, no regressions.
+
+Next P0: ARCH-036 (priority column on narrowed agent_messages, unblocked now that ARCH-035 has shipped).
+
+## Previous Completed (2026-04-19 — BUG-025 acceptance-path announce trigger)
 
 ### BUG-025 — shipped
 Plan: `docs/superpowers/plans/2026-04-19-bug-025-acceptance-path-trigger.md`
