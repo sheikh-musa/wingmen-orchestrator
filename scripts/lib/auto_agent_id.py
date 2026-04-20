@@ -43,3 +43,76 @@ def load_family_map(dsn: str) -> dict[str, str]:
                 )
             out[canon] = agent_id
     return out
+
+
+import re
+import subprocess
+from pathlib import Path
+
+# Matches trailing worktree-style suffix: -UPPERCASE... or .UPPERCASE... or
+# .wt-anything. Lowercase inner hyphens (hifz-companion) do NOT match since
+# the second group requires an uppercase start or the literal 'wt'.
+_WORKTREE_SUFFIX_RE = re.compile(r"[-.](?:[A-Z][\w-]*|wt[\w-]*)$")
+
+
+def strip_worktree_suffix(segment: str) -> str:
+    """Strip trailing worktree-style suffix from a path segment.
+
+    'orchestrator-LEDGER' → 'orchestrator'
+    'orchestrator.wt-qurban' → 'orchestrator'
+    'hifz-companion' → 'hifz-companion' (lowercase hyphen, no match)
+
+    CONVENTION (delta-v2 + CAI msg 407): worktree suffixes MUST use either:
+        (a) uppercase-initial token:  `-FEATURE`, `-LEDGER`, `-HOTFIX`
+        (b) dot-wt prefix form:       `.wt-qurban`, `.wt-abc123`
+    Lowercase suffixes (e.g. `orchestrator-hotfix`) are treated as CANONICAL
+    repo names, NOT worktrees — they will UnknownRepoError on pwd resolution.
+    This trades one convention rule for zero ambiguity between `hifz-companion`
+    (canonical, no strip) and `orchestrator-LEDGER` (worktree, stripped).
+    """
+    return _WORKTREE_SUFFIX_RE.sub("", segment)
+
+
+def _git_toplevel(pwd: str) -> str | None:
+    """Return `git rev-parse --show-toplevel` for pwd, or None if not in a repo."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", pwd, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip() or None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def resolve_base_agent_id(pwd: str, family_map: dict[str, str]) -> str:
+    """Map an absolute pwd to a registered agents.id base family.
+
+    Algorithm:
+      1. Try `git rev-parse --show-toplevel` — get worktree/repo root path.
+      2. Take basename, apply strip_worktree_suffix, look up in family_map.
+      3. If miss OR no git toplevel: walk pwd components bottom-up, apply
+         strip_worktree_suffix at each, first hit wins.
+      4. Fail-fast UnknownRepoError if nothing matches.
+    """
+    # Step 1+2: git toplevel
+    toplevel = _git_toplevel(pwd)
+    if toplevel:
+        basename = strip_worktree_suffix(Path(toplevel).name)
+        if basename in family_map:
+            return family_map[basename]
+
+    # Step 3: fallback — walk pwd components bottom-up
+    for part in reversed(Path(pwd).parts):
+        if not part or part == "/":
+            continue
+        canon = strip_worktree_suffix(part)
+        if canon in family_map:
+            return family_map[canon]
+
+    raise UnknownRepoError(
+        f"pwd {pwd!r} (toplevel={toplevel!r}) is not a registered agent family. "
+        f"Known: {sorted(family_map.keys())}"
+    )

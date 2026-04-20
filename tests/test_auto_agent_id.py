@@ -52,3 +52,103 @@ class TestLoadFamilyMap:
                 auto_agent_id.load_family_map("dummy-dsn")
         finally:
             psycopg.connect = orig
+
+
+import os
+
+# Fixture-style map matching live agents table at delta-v2 time.
+FAKE_MAP = {
+    "ihsanos": "cc-ihsanos",
+    "orchestrator": "cc-ihsanos",
+    "ai-scholar": "cc-scholar",
+    "hifz-companion": "cc-scholar",
+    "dookana": "cc-web",
+    "wordpress-sites": "cc-web",
+    "cosem-tdu": "cc-cosem",
+    "cosem-adcda": "cc-cosem",
+}
+
+
+class TestStripWorktreeSuffix:
+    def test_dash_uppercase_stripped(self):
+        assert auto_agent_id.strip_worktree_suffix("orchestrator-LEDGER") == "orchestrator"
+
+    def test_dot_wt_stripped(self):
+        assert auto_agent_id.strip_worktree_suffix("orchestrator.wt-qurban") == "orchestrator"
+
+    def test_dash_lowercase_preserved(self):
+        # This is a legit repo name, not a worktree suffix.
+        assert auto_agent_id.strip_worktree_suffix("hifz-companion") == "hifz-companion"
+
+    def test_dash_lowercase_multi_preserved(self):
+        assert auto_agent_id.strip_worktree_suffix("cosem-tdu") == "cosem-tdu"
+
+    def test_no_suffix_unchanged(self):
+        assert auto_agent_id.strip_worktree_suffix("orchestrator") == "orchestrator"
+
+
+class TestResolveBaseAgentId:
+    def test_orchestrator_maps_to_cc_ihsanos(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator")
+        assert auto_agent_id.resolve_base_agent_id(
+            "/Users/sheikhmusa/wingmen/orchestrator", FAKE_MAP
+        ) == "cc-ihsanos"
+
+    def test_orchestrator_worktree_LEDGER_maps(self, monkeypatch):
+        # Worktree: git rev-parse --show-toplevel returns the worktree path.
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator-LEDGER")
+        assert auto_agent_id.resolve_base_agent_id(
+            "/Users/sheikhmusa/wingmen/orchestrator-LEDGER", FAKE_MAP
+        ) == "cc-ihsanos"
+
+    def test_orchestrator_worktree_dot_wt_maps(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator.wt-qurban")
+        assert auto_agent_id.resolve_base_agent_id(
+            "/Users/sheikhmusa/wingmen/orchestrator.wt-qurban", FAKE_MAP
+        ) == "cc-ihsanos"
+
+    def test_hifz_companion_hyphen_preserved(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/projects/hifz-companion")
+        assert auto_agent_id.resolve_base_agent_id(
+            "/Users/sheikhmusa/wingmen/projects/hifz-companion", FAKE_MAP
+        ) == "cc-scholar"
+
+    def test_cosem_tdu_maps_to_cc_cosem(self, monkeypatch):
+        # New family post-CAI-AGENTS-001.
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/projects/cosem-tdu")
+        assert auto_agent_id.resolve_base_agent_id(
+            "/Users/sheikhmusa/wingmen/projects/cosem-tdu", FAKE_MAP
+        ) == "cc-cosem"
+
+    def test_subdirectory_falls_back_to_walk(self, monkeypatch):
+        # User in dookana/src/components — git-toplevel resolves, basename dookana.
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/projects/dookana")
+        assert auto_agent_id.resolve_base_agent_id(
+            "/Users/sheikhmusa/wingmen/projects/dookana/src/components", FAKE_MAP
+        ) == "cc-web"
+
+    def test_no_git_walks_pwd_components(self, monkeypatch):
+        # Fallback when outside a git repo.
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel", lambda pwd: None)
+        assert auto_agent_id.resolve_base_agent_id(
+            "/Users/sheikhmusa/wingmen/projects/dookana/src", FAKE_MAP
+        ) == "cc-web"
+
+    def test_unrecognized_raises(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/projects/unregistered-repo")
+        with pytest.raises(auto_agent_id.UnknownRepoError):
+            auto_agent_id.resolve_base_agent_id(
+                "/Users/sheikhmusa/wingmen/projects/unregistered-repo", FAKE_MAP
+            )
+
+    def test_outside_wingmen_raises(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel", lambda pwd: None)
+        with pytest.raises(auto_agent_id.UnknownRepoError):
+            auto_agent_id.resolve_base_agent_id("/tmp/foo", FAKE_MAP)
