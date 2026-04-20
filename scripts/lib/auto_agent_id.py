@@ -3,6 +3,9 @@
 Composes msgs 315/317/324 per GOVERNANCE-CLEANUP-001 Step 3.
 Dual-identity convention: sub-tag (per-instance, agent_status + GUC) +
 base (family, agent_messages.from_agent FK-enforced).
+
+INVARIANT: this module uses psycopg exclusively for DB I/O. No supabase-py
+imports. See test_auto_agent_id_does_not_import_supabase_py for enforcement.
 """
 from __future__ import annotations
 
@@ -273,10 +276,13 @@ def allocate_sub_tag_and_register(
                 except OSError:
                     pass  # disk full / permission — swallow; primary signal is the raise
 
-                # Retention: keep newest 20 diagnostic files, unlink the rest.
+                # SA1 (CAI-RESP-054): keep newest-40, treat oldest-20 of those
+                # as overflow generation. Bursty lock-timeout storms no longer
+                # evict their own evidence before the operator sees it.
+                # Per-file is small (~KB of stack+header), so 40 files ≪ 20MB cap.
                 try:
                     _existing = sorted(_glob.glob("/tmp/cc_lock_timeout_*.log"))
-                    for _old in _existing[:-20]:
+                    for _old in _existing[:-40]:
                         try:
                             _os.unlink(_old)
                         except OSError:

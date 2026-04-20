@@ -5,6 +5,10 @@ CAI-RESP-053:
   a size-capped /tmp/cc_heartbeat_err.log.
 - A4: allocate_sub_tag_and_register flushes a full diagnostic file with
   fsync before raising LockTimeoutError, with newest-20 retention.
+
+CAI-RESP-054 SA1:
+- Heartbeat log rotates to .1 before truncate (evidence survives error-storm).
+- Lock-timeout retention raised to newest-40 (overflow generation).
 """
 import re
 from pathlib import Path
@@ -68,4 +72,38 @@ def test_lock_timeout_flush_path_present():
     assert "/tmp/cc_lock_timeout_" in src
     assert re.search(r"glob.*cc_lock_timeout", src), (
         "expected glob for retention pruning"
+    )
+
+
+def test_heartbeat_log_rotates_before_truncate():
+    """SA1 (CAI-RESP-054): evidence at error-storm time survives the cap.
+
+    Old behavior was `: > "$HB_ERR_LOG"` — an error-storm faster than the
+    5-min cadence loses its own evidence. New behavior renames the full log
+    to .1 before opening a fresh one, keeping one generation.
+    """
+    src = LAUNCHER.read_text()
+    # The old truncate form must be gone — if it reappears, the rotation is lost.
+    assert ': > "$HB_ERR_LOG"' not in src, (
+        "heartbeat log must rotate (mv to .1), not truncate in place"
+    )
+    # The rotation target must be .1 suffix.
+    assert '${HB_ERR_LOG}.1' in src or '"$HB_ERR_LOG".1' in src, (
+        "expected rotation target ${HB_ERR_LOG}.1"
+    )
+    # Rotation must use mv (not cp — cp+truncate loses the atomicity window).
+    assert re.search(r'mv\s+-f\s+"\$HB_ERR_LOG"', src), (
+        "expected mv -f rotation of heartbeat err log"
+    )
+
+
+def test_lock_timeout_retention_is_forty():
+    """SA1 (CAI-RESP-054): keep newest-40 (up from 20) so the oldest-20
+    function as an overflow generation — evidence survives bursty storms."""
+    src = HELPER.read_text()
+    assert re.search(r"_existing\[:\-40\]", src), (
+        "expected retention slice _existing[:-40] (newest-40 kept)"
+    )
+    assert "_existing[:-20]" not in src, (
+        "old newest-20 retention must be gone — bump to newest-40"
     )

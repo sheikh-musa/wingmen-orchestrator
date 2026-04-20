@@ -33,7 +33,32 @@ codebase MUST be registered here before use.
    _ALLOC_LOCK_ID = 1001
    ```
 
+## Identity invariants
+
+The advisory lock at key `1001` (`AGENT_ID_ALLOC`) serializes allocation of
+*agent sub-tags* (e.g. `cc-ihsanos` → `cc-ihsanos-42`). The allocator uses
+string-prefix matching to find the next free suffix under a base tag.
+
+**Invariant (CAI-RESP-054):** No two registered base agent ids may stand in a
+prefix+hyphen relationship. That is, if `cc-foo` is a registered base tag,
+then `cc-foo-bar` MUST NOT also be a registered base tag — only an allocated
+sub-tag under `cc-foo`.
+
+**Why:** if both `cc-foo` and `cc-foo-bar` existed as independent base tags,
+a `LIKE 'cc-foo-%'` scan under the `1001` lock would conflate sub-tags of
+`cc-foo` with base tags of `cc-foo-bar`, producing either double-allocation
+or false collisions. The allocator cannot distinguish the two cases from the
+stored string alone.
+
+**How enforced:** today, socially — by convention and code review. Agent
+base tags are declared in a short list (orchestrator config). A mechanical
+check is tracked as a future hardening; until then, reviewers must reject
+a new base tag that prefixes an existing one.
+
 ## History
 
 - **2026-04-20** — Registry created (CAI-RESP-053 A1). Migrated
   `auto_agent_id.py` from `hashtext('cc-agent-id-alloc')` to `1001`.
+- **2026-04-20** — Identity invariants section added (CAI-RESP-054
+  documented-limitation). Prefix-collision rule made explicit pending
+  mechanical enforcement.

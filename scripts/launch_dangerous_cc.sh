@@ -234,11 +234,13 @@ _heartbeat_loop() {
     local HB_ERR_CAP=10485760  # 10 MB cap (CAI-RESP-053 sub-amendment)
     while true; do
         sleep 300
-        # A2 (CAI-RESP-053): truncate the heartbeat err log BEFORE the write
-        # if it has exceeded its cap; leave a timestamped marker line.
+        # SA1 (CAI-RESP-054): rotate the heartbeat err log BEFORE truncating on
+        # cap breach — error-storm is the failure mode the log exists for, and
+        # truncate-in-place loses the last 10MB of evidence at that moment.
+        # One rotation generation (.1) bounds total footprint to ~20MB.
         if [ -f "$HB_ERR_LOG" ] && [ "$(wc -c < "$HB_ERR_LOG" 2>/dev/null || echo 0)" -gt "$HB_ERR_CAP" ]; then
-            : > "$HB_ERR_LOG"   # truncate once cap exceeded
-            echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [heartbeat-log] truncated (cap=$HB_ERR_CAP B)" >> "$HB_ERR_LOG"
+            mv -f "$HB_ERR_LOG" "${HB_ERR_LOG}.1" 2>/dev/null || true
+            echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [heartbeat-log] rotated (prev → ${HB_ERR_LOG}.1, cap=$HB_ERR_CAP B)" > "$HB_ERR_LOG"
         fi
         "$VENV_PY" -c "
 import os, sys
