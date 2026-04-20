@@ -192,7 +192,7 @@ async def poll_agent_messages(
             "requires_response, priority, created_at"
         ).is_("read_at", "null").is_(
             "forwarded_to_telegram_at", "null"
-        ).order("priority", desc=False).order(
+        ).is_("skipped_at", "null").order("priority", desc=False).order(
             "requires_response", desc=True
         ).order("created_at", desc=False).execute()
 
@@ -224,7 +224,10 @@ async def poll_agent_messages(
 
             text = _format_telegram(msg)
             if text is None:
-                # Should not happen here (pre-filtered above), but guard anyway
+                # P3 suppression or non-routable shape — stamp skipped_at
+                # (GOVERNANCE-CLEANUP-001 Step 2) so the poll hot-set doesn't
+                # loop over it every 5-min cycle.
+                await _mark_skipped(supabase, msg_id)
                 continue
 
             sent_telegram_id: int | None = None
@@ -346,3 +349,18 @@ async def _mark_forwarded(supabase, msg_id: int) -> None:
     except Exception as e:
         logger.error(f"Failed to mark agent_message {msg_id} as forwarded: {e}")
         error_tracker.track_exception("agent_messages_poll.mark_forwarded", e)
+
+
+async def _mark_skipped(supabase, msg_id: int) -> None:
+    """Stamp agent_messages.skipped_at=now() on a row the notifier decided
+    not to route. Mutually exclusive with forwarded_to_telegram_at by
+    convention — a row is either forwarded or skipped, never both.
+    GOVERNANCE-CLEANUP-001 Step 2.
+    """
+    try:
+        await supabase.table("agent_messages").update(
+            {"skipped_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", msg_id).execute()
+    except Exception as e:
+        logger.warning(f"Failed to stamp skipped_at for message {msg_id}: {e}")
+        error_tracker.track_exception("agent_messages_poll.mark_skipped", e)

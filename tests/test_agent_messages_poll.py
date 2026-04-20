@@ -558,3 +558,71 @@ class TestPriorityFormat:
         assert out is not None
         assert out.startswith("\U0001f534 ")
         assert "CC needs your input" in out
+
+
+# ---------------------------------------------------------------------------
+# GOVERNANCE-CLEANUP-001 Step 2 — skipped_at stamping on None-skip path
+# ---------------------------------------------------------------------------
+
+class TestSkippedAtStamping:
+    """Verify _mark_skipped fires when _format_telegram returns None."""
+
+    @pytest.mark.asyncio
+    async def test_p3_suppressed_row_stamps_skipped_at(self, monkeypatch):
+        """A P3 row that _format_telegram drops must get skipped_at stamped
+        so the poll hot-set doesn't loop over it every 5-min cycle.
+        """
+        from nervous_system import agent_messages_poll as mod
+
+        fixture = {
+            "id": 9001,
+            "from_agent": "cai",
+            "to_agent": "musa",
+            "message_type": "update",
+            "subject": "fyi",
+            "body": "something",
+            "requires_response": False,
+            "priority": "P3",
+            "created_at": "2026-04-20T00:00:00Z",
+        }
+
+        stamped: list[int] = []
+
+        async def fake_mark_skipped(sb, msg_id):
+            stamped.append(msg_id)
+
+        async def fake_mark_forwarded(sb, msg_id):
+            raise AssertionError("forwarded should not be called on P3 skip")
+
+        async def fake_already_notified(sb, dedup_key, msg_id):
+            return False
+
+        async def fake_log_notification(sb, **kwargs):
+            raise AssertionError("log_notification should not be called on skip")
+
+        monkeypatch.setattr(mod, "_mark_skipped", fake_mark_skipped)
+        monkeypatch.setattr(mod, "_mark_forwarded", fake_mark_forwarded)
+        monkeypatch.setattr(mod, "_already_notified", fake_already_notified)
+        monkeypatch.setattr(mod, "_log_notification", fake_log_notification)
+
+        sb = mock_supabase_chain([fixture])
+        await mod.poll_agent_messages(sb, bot=None, musa_chat_id=None)
+
+        assert stamped == [9001], (
+            f"expected skipped_at stamp on id=9001, got {stamped}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_poll_query_filters_out_already_skipped(self):
+        """The poll query must chain .is_('skipped_at', 'null') so
+        previously-skipped rows don't re-enter the hot set each cycle.
+        """
+        from nervous_system import agent_messages_poll as mod
+
+        sb = mock_supabase_chain([])
+        await mod.poll_agent_messages(sb, bot=None, musa_chat_id=None)
+
+        is_calls = [call.args for call in sb.is_.call_args_list]
+        assert ("skipped_at", "null") in is_calls, (
+            f"expected .is_('skipped_at', 'null') in poll query; got {is_calls}"
+        )
