@@ -1,14 +1,31 @@
 # G2: Pre-existing test regression check
 # Generated for CAI-RESP-053 G2 audit trail.
-# Command:
-#   git log --oneline e0e26d6^..HEAD -- tests/test_agent_messages_poll.py scripts/agent_messages_poll.py
 # Context:
 #   e0e26d6 is the first commit of Step 3 (Task 1).
 #   The 2 failing tests in the Step 3 review were TestFormatTelegram and
 #   TestPollAgentMessages — both assert 'claude.ai' in text. Empty output
-#   below confirms Step 3 did NOT touch either file; failures are pre-existing.
+#   below confirms Step 3 did NOT touch the test file or the module under
+#   test; failures are pre-existing.
+#
+# Note: the plan's spec command referenced scripts/agent_messages_poll.py,
+# but the actual module lives at nervous_system/agent_messages_poll.py.
+# Artifact covers BOTH the attempted and the correct path for auditability.
 
-## git log output:
+## git log output (plan-spec path — scripts/agent_messages_poll.py is not a real path; serves as spec-fidelity record):
+#   git log --oneline e0e26d6^..HEAD -- tests/test_agent_messages_poll.py scripts/agent_messages_poll.py
 
-## test file HEAD SHAs at the time of Step 3 review:
+
+## git log output (correct path — nervous_system/agent_messages_poll.py):
+#   git log --oneline e0e26d6^..HEAD -- tests/test_agent_messages_poll.py nervous_system/agent_messages_poll.py
+
+
+## test file HEAD SHA at the time of Step 3 review:
+#   git log -1 --format='%H %ad %s' -- tests/test_agent_messages_poll.py
 469a79da29c86f9e3c92680af21ca24f47e3b4d4 Mon Apr 20 12:35:35 2026 +0800 feat(governance): stamp skipped_at on notifier None-skip path
+
+## module-under-test HEAD SHA at the time of Step 3 review:
+#   git log -1 --format='%H %ad %s' -- nervous_system/agent_messages_poll.py
+469a79da29c86f9e3c92680af21ca24f47e3b4d4 Mon Apr 20 12:35:35 2026 +0800 feat(governance): stamp skipped_at on notifier None-skip path
+
+# Both files' HEAD SHA (469a79d) is older than e0e26d6 (the first Step 3 commit).
+# Step 3 did not touch either; the two test failures are pre-existing.
