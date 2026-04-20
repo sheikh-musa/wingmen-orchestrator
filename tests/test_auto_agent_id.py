@@ -322,3 +322,68 @@ class TestAllocateSubTagAndRegister:
         )
         assert result.sub_tag == "cc-test-family-2"
         assert "cc-test-family-1" in result.siblings
+
+
+@pytestmark_integration
+class TestScanOverlapSiblings:
+  def _fresh_conn(self):
+      import psycopg
+      return psycopg.connect(DSN, autocommit=False)
+
+  def test_returns_overlapping_active_sibling(self):
+      # Seed two rows in cc-test-family: -1 scopes orchestrator, -2 scopes orchestrator too.
+      with self._fresh_conn() as setup_conn:
+          with setup_conn.cursor() as cur:
+              for n, scope in [(1, "orchestrator"), (2, "orchestrator")]:
+                  cur.execute("SELECT set_config('app.current_agent_id', %s, true)",
+                              (f"cc-test-family-{n}",))
+                  cur.execute(
+                      "INSERT INTO agent_status "
+                      "(agent_id, status, scope_repos, last_heartbeat, updated_at) "
+                      "VALUES (%s, 'working', ARRAY[%s]::text[], now(), now()) "
+                      "ON CONFLICT (agent_id) DO UPDATE SET "
+                      "scope_repos = EXCLUDED.scope_repos, "
+                      "last_heartbeat = now()",
+                      (f"cc-test-family-{n}", scope),
+                  )
+          setup_conn.commit()
+
+      overlaps = auto_agent_id.scan_overlap_siblings(
+          base="cc-test-family",
+          scope_repo="orchestrator",
+          dsn=DSN,
+          exclude_sub_tag="cc-test-family-2",
+      )
+      # delta-v2: return type is list[tuple[str, int]] — (agent_id, heartbeat_age_s).
+      # Shape check + membership check by first element.
+      assert all(isinstance(t, tuple) and len(t) == 2 for t in overlaps)
+      assert all(isinstance(t[0], str) and isinstance(t[1], int) for t in overlaps)
+      agent_ids = [t[0] for t in overlaps]
+      assert "cc-test-family-1" in agent_ids
+      assert "cc-test-family-2" not in agent_ids  # excluded self
+      # heartbeat just-inserted → age should be tiny (< 60s).
+      age_1 = next(age for (aid, age) in overlaps if aid == "cc-test-family-1")
+      assert 0 <= age_1 < 60
+
+  def test_non_overlapping_scope_excluded(self):
+      with self._fresh_conn() as setup_conn:
+          with setup_conn.cursor() as cur:
+              cur.execute("SELECT set_config('app.current_agent_id', %s, true)",
+                          ("cc-test-family-1",))
+              cur.execute(
+                  "INSERT INTO agent_status "
+                  "(agent_id, status, scope_repos, last_heartbeat, updated_at) "
+                  "VALUES (%s, 'working', ARRAY['dookana']::text[], now(), now()) "
+                  "ON CONFLICT (agent_id) DO UPDATE SET "
+                  "scope_repos = EXCLUDED.scope_repos, last_heartbeat = now()",
+                  ("cc-test-family-1",),
+              )
+          setup_conn.commit()
+
+      overlaps = auto_agent_id.scan_overlap_siblings(
+          base="cc-test-family",
+          scope_repo="orchestrator",  # different
+          dsn=DSN,
+          exclude_sub_tag="cc-test-family-2",
+      )
+      assert overlaps == []

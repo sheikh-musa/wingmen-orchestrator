@@ -265,3 +265,42 @@ def allocate_sub_tag_and_register(
         conn.commit()  # releases advisory lock
 
     return AllocResult(sub_tag=sub_tag, siblings=siblings)
+
+
+def scan_overlap_siblings(
+    base: str,
+    scope_repo: str,
+    dsn: str,
+    exclude_sub_tag: str,
+    stale_cutoff_minutes: int = 30,
+) -> list[tuple[str, int]]:
+    """Return `(agent_id, heartbeat_age_seconds)` for active sub-tags in
+    `base` family whose scope_repos contains `scope_repo`, excluding
+    `exclude_sub_tag` (the caller itself).
+
+    Soft-warning helper per CAI msg 395 Q3-C — prints a pre-launch overlap
+    notice if 2+ CCs in the same family are about to edit the same repo.
+    Read-only, no lock, no UPSERT.
+
+    Delta-v2 non-load-bearing #4: include heartbeat age so operator sees
+    actionable recency at a glance (e.g. `cc-ihsanos-2 (3s ago)` vs
+    `cc-ihsanos-5 (847s ago)`).
+    """
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT agent_id,
+                       EXTRACT(EPOCH FROM (now() - last_heartbeat))::int AS age_s
+                  FROM agent_status
+                 WHERE agent_id LIKE %s
+                   AND agent_id != %s
+                   AND last_heartbeat > now() - (%s * interval '1 minute')
+                   AND status != 'offline'
+                   AND %s = ANY(scope_repos)
+                """,
+                (f"{base}-%", exclude_sub_tag, stale_cutoff_minutes, scope_repo),
+            )
+            return [(r[0], int(r[1])) for r in cur.fetchall()]
