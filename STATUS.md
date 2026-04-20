@@ -1,10 +1,47 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-20 SGT (GOVERNANCE-CLEANUP-001 Step 2 shipped)
+Last Updated: 2026-04-20 SGT (GOVERNANCE-CLEANUP-001 Step 3 shipped — pending CAI adversarial review)
 Build Status: green
-Deploy: 469a79d (app-code) on top of eb1746a (migration applied via CAI Supabase MCP per msg 387 — 12/12 structural + 4/4 behavioral smoke PASS)
+Deploy: 0a85ba5 (launcher — dual-identity + Opus 4.7 default) on top of 469a79d (Step 2 app-code)
 
-## Last Completed (2026-04-20 — GOVERNANCE-CLEANUP-001 Step 2 governance hygiene batch)
+## Last Completed (2026-04-20 — GOVERNANCE-CLEANUP-001 Step 3 launcher multi-repo + dual-identity + Opus 4.7)
+
+### GOVERNANCE-CLEANUP-001 Step 3 — shipped
+
+Plan: `docs/superpowers/plans/2026-04-20-step-3-launcher-multi-repo-identity.md` (commits `797565e` base + `77b6111` delta-v2 + `7be7519` worktree amendment)
+Thread: GOVERNANCE-CLEANUP-001 (composes msgs 315 multi-repo scope / 317 auto-identity / 324 Opus 4.7 default; integrates CAI msgs 395+397 deltas)
+Commits (Step 3 span, oldest → newest):
+- Helper module (Tasks 1–6): `e0e26d6` scaffold → `9a3d6ba` load_family_map → `319b1ac` resolve_base_agent_id → `37c5ae1` import hoist → `60899ec` pick_sub_tag → `cdd8a17` allocate + `fd86540` code-review fixes → `882aab4` scan_overlap_siblings → `eaa086f` CLI + `9b7eaf3` fail-loud fix
+- Launcher (Tasks 7–10): `8451603` --repo arg + helper invocation + `bc59dde` empty-agent guard → `73e0b05` header/context/heartbeat dual identity → `942d84d` vercel blockers + exit trap split → `0a85ba5` --model claude-opus-4-7 default with MODEL env override
+
+**Goal:** Replace the hardcoded single-identity launcher with a dual-identity, multi-repo, structurally-drift-resistant one. `CC_AGENT_ID` (sub-tag, e.g. `cc-ihsanos-3`) carries per-session identity for `agent_status` + GUC; `CC_BASE_AGENT_ID` (family, e.g. `cc-ihsanos`) stays on the FK-registered `agents.id` row for `agent_messages.from_agent`. Unrecognized pwd = fail-fast ABORT before claude starts.
+
+**Shape delivered:**
+- New helper `scripts/lib/auto_agent_id.py` — pwd → family map loaded at launch from `agents.repo_scope` (data-driven, no hardcoded constant; wingmen- prefix stripped; duplicate-claim raises ValueError). Worktree suffixes stripped via `git rev-parse --show-toplevel` + regex (`orchestrator-LEDGER` / `orchestrator.wt-qurban` both → `orchestrator`).
+- `resolve_base_agent_id(pwd, family_map)` — pure, unit-testable; pwd outside `~/wingmen/` raises `UnknownRepoError`.
+- `pick_sub_tag` + `allocate_sub_tag_and_register` — scan + pick smallest-free N + UPSERT `agent_status` all in one TX under `pg_try_advisory_xact_lock('cc-agent-id-alloc')` with 10×500ms retry (5s ceiling) and `pg_locks` diagnostic on timeout. Stale/offline rows reclaimable (30-min cutoff).
+- `scan_overlap_siblings` — soft-warn when another family instance holds overlapping `scope_repos`; returns `list[tuple[str, int]]` (agent_id, heartbeat_age_s) so the launcher header prints `cc-ihsanos-2 (3s ago)` at a glance.
+- CLI `python -m scripts.lib.auto_agent_id --pwd X --repo Y --dsn Z` emits `{"sub_tag", "base", "siblings", "overlap_warnings"}`; fail-loud on bad DSN (`DatabaseError: <type>: <msg>` exit 1) and unknown pwd (`UnknownRepoError` exit 1).
+- Launcher `scripts/launch_dangerous_cc.sh` — single-pass argv parser respects `--` boundary (CLAUDE_PASSTHROUGH array); `--repo` flag (space or equals form); .env sourced with `set -a` so DATABASE_URL wins over shell env; dual exports `CC_AGENT_ID` + `CC_BASE_AGENT_ID`; header shows both identities + pwd + overlap warnings.
+- `build_launch_context --agent "$CC_BASE_AGENT_ID"` (not sub-tag — per-FAMILY context builder; delta-v2 L3-A1 fix catches silent-empty-inbox regression).
+- Exit trap split along identity axis: `agent_status` flip to offline uses sub-tag (psycopg + GUC); `agent_messages` session-digest + `agents.status` update use base; sub-tag carried in subject `[cc-ihsanos-N]` + body `Sub-tag: ...`.
+- Heartbeat loop dual-writes: `agents.last_heartbeat` (base, supabase-py) + `agent_status.last_heartbeat` (sub-tag, psycopg with GUC) every 5 min.
+- Model default: `--model claude-opus-4-7` hardcoded with `MODEL` env override; `--model "$RESOLVED_MODEL"` appended FIRST so operator `-- --model X` wins via claude's last-wins flag parsing. Current_task stamped with `session-launch model=X repo=Y` for CAI drift observability.
+- Self-surgery safe: Task 11 smoke verified the edits don't regress the base-case re-launch (cc-ihsanos-3 itself re-launches cleanly into the new launcher).
+
+**Live verification:**
+- 75/77 pytest (`tests/test_auto_agent_id.py` + `tests/test_agent_messages_poll.py`) PASS; 2 failures are the pre-existing `"claude.ai" in text` checks (out-of-scope, pre-date Step 3).
+- Smoke from `~/wingmen/orchestrator`: allocator returned `cc-ihsanos-1` with shape `('cc-ihsanos-1', 'working', 'session-launch', ['orchestrator'])` — matches spec exactly.
+- Both `--repo foo` and `--repo=foo` forms parse natively via argparse — launcher regression covered.
+- `bash -n scripts/launch_dangerous_cc.sh` clean at every task commit.
+
+**Deferred to Step 4 (BUG-024 Phase 1):** sub-identity promotion to first-class FK (`agents.id` rows per sub-tag); current dual-write (`agents.last_heartbeat` via base + `agent_status.last_heartbeat` via sub-tag) bridges the gap until the structural identity capstone lands.
+
+**CAI adversarial review:** pending — review request to be filed at task close.
+
+---
+
+## Previously Completed (2026-04-20 — GOVERNANCE-CLEANUP-001 Step 2 governance hygiene batch)
 
 ### GOVERNANCE-CLEANUP-001 Step 2 — shipped
 Plan: `docs/superpowers/plans/2026-04-20-governance-hygiene-batch.md`
