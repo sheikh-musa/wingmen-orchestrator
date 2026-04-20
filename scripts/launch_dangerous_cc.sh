@@ -161,9 +161,14 @@ $1
 
 echo ""
 echo -e "${BOLD}${TEAL}╔══════════════════════════════════════════════════════════════════════╗${RESET}"
-echo -e "${BOLD}${TEAL}║   WINGMEN AGENT BOOT — ARCH-022 Layer 2                             ║${RESET}"
+echo -e "${BOLD}${TEAL}║   WINGMEN AGENT BOOT — ARCH-022 Layer 2 + Step 3 multi-repo         ║${RESET}"
 echo -e "${BOLD}${TEAL}╚══════════════════════════════════════════════════════════════════════╝${RESET}"
-echo -e "${DIM}Agent: ${AGENT_ID}  |  Repo: ${REPO_NAME}  |  Started: ${SESSION_START}${RESET}"
+echo -e "${DIM}Sub-tag: ${CC_AGENT_ID}  |  Base: ${CC_BASE_AGENT_ID}  |  Repo: ${REPO_NAME}${RESET}"
+echo -e "${DIM}Started: ${SESSION_START}  |  pwd: ${CALLER_DIR}${RESET}"
+if [ -n "$OVERLAP_WARNINGS" ]; then
+    echo -e "${AMBER}${BOLD}⚠ OVERLAP: family siblings in ${REPO_NAME}: ${OVERLAP_WARNINGS}${RESET}"
+    echo -e "${AMBER}  Coordinate scope or split work before editing shared paths.${RESET}"
+fi
 echo ""
 
 # ── 2. Build session context block ───────────────────────────────────────────
@@ -176,9 +181,18 @@ echo ""
 # the prompt and exits. If you want an interactive session, launch normally
 # and paste the context manually, or use `claude --resume` with a prior session.
 
-echo -e "${BOLD}▶ Building session context...${RESET}"
+echo -e "${BOLD}▶ Building session context for ${CC_BASE_AGENT_ID}...${RESET}"
 # Stdout = context block (captured). Stderr = diagnostics (shown on terminal).
-LAUNCH_CONTEXT="$(cd ~/wingmen/orchestrator && "$VENV_PY" -m scripts.build_launch_context --agent "$AGENT_ID")" || {
+#
+# Delta-v2 L3-A1 fix: pass CC_BASE_AGENT_ID, NOT CC_AGENT_ID. The context
+# builder is per-FAMILY, not per-instance:
+#   - scripts/build_launch_context.py L57 — agent_context.eq('agent_id', base)
+#   - scripts/build_launch_context.py L111 — inbox filter to_agent.eq.{base}
+#   - scripts/build_launch_context.py L187-189 — agents.update(...).eq('id', base)
+# Passing the sub-tag would land an empty agent_context row + hidden inbox
+# (sibling filter would match literal 'cc-ihsanos-3' while all inbox rows are
+# addressed to base 'cc-ihsanos' with '[cc-ihsanos-3]' tagged in body).
+LAUNCH_CONTEXT="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.build_launch_context --agent "$CC_BASE_AGENT_ID")" || {
     echo -e "${AMBER}⚠ build_launch_context failed. Continuing without injected context.${RESET}"
     LAUNCH_CONTEXT=""
 }
@@ -190,59 +204,24 @@ else
 fi
 echo ""
 
-# ── 2.5 ARCH-035 — register agent_status with GUC identity tripwire ─────────
-# Opens a dedicated psycopg connection (NOT supabase-py — PostgREST pooling
-# breaks GUC semantics). SET LOCAL + UPSERT in one transaction; trigger
-# compares NEW.agent_id to app.current_agent_id and raises 42501 on mismatch.
-# Launch script is the only place GUC is set; no RPC wrapper (CAI-RESP-043 B1).
+# ── 2.5 ARCH-035 — agent_status already UPSERTed by auto_agent_id helper ─────
+# The helper acquired the advisory lock, scanned siblings, picked sub_tag,
+# and UPSERTed agent_status(sub_tag, status=working, current_task=session-launch,
+# scope_repos=[REPO_NAME]) all in one TX with GUC=sub_tag. Nothing to do here.
 
-echo -e "${BOLD}▶ Registering agent_status for ${AGENT_ID}...${RESET}"
-"$VENV_PY" -c "
-import os, sys
-sys.path.insert(0, '$ORCH_DIR')
-from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
-try:
-    import psycopg
-except ImportError:
-    sys.stderr.write('psycopg not installed — skipping agent_status UPSERT\n')
-    sys.exit(0)
-
-dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
-if not dsn:
-    sys.stderr.write('DATABASE_URL not set — skipping agent_status UPSERT\n')
-    sys.exit(0)
-
-agent_id = '$AGENT_ID'
-try:
-    with psycopg.connect(dsn, autocommit=False) as conn:
-        with conn.cursor() as cur:
-            cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", (agent_id,))
-            cur.execute(
-                '''
-                INSERT INTO agent_status (agent_id, status, current_task, last_heartbeat, updated_at)
-                VALUES (%s, 'working', 'session-launch', now(), now())
-                ON CONFLICT (agent_id) DO UPDATE SET
-                  status = EXCLUDED.status,
-                  current_task = EXCLUDED.current_task,
-                  last_heartbeat = EXCLUDED.last_heartbeat,
-                  updated_at = EXCLUDED.updated_at
-                ''',
-                (agent_id,)
-            )
-        conn.commit()
-    sys.stderr.write(f'launch: agent_status registered for {agent_id} (status=working)\n')
-except Exception as e:
-    sys.stderr.write(f'launch: agent_status UPSERT failed: {e}\n')
-    sys.stderr.write('launch: continuing without agent_status registration — will show in stale_agents\n')
-" 2>&1 | grep -E '^launch:' || true
+echo -e "${BOLD}▶ agent_status registered: ${CC_AGENT_ID} (scope_repos=[${REPO_NAME}])${RESET}"
 echo ""
 
 # ── 3. Start background heartbeat loop ────────────────────────────────────────
 
 _heartbeat_loop() {
+    # Two heartbeats on a 5-minute cadence:
+    #   1. agents.last_heartbeat (base id, legacy agents table)
+    #   2. agent_status.last_heartbeat (sub-tag, ARCH-035 with GUC)
+    # Both are best-effort; if the worker misses a beat, stale_agents view
+    # (15-min threshold) catches it.
     while true; do
-        sleep 300  # every 5 minutes
+        sleep 300
         "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
@@ -251,7 +230,31 @@ load_dotenv('$ORCH_DIR/.env')
 from supabase import create_client
 from datetime import datetime, timezone
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
-sb.table('agents').update({'last_heartbeat': datetime.now(timezone.utc).isoformat()}).eq('id', '$AGENT_ID').execute()
+now_iso = datetime.now(timezone.utc).isoformat()
+# agents table — base id (FK-enforced)
+sb.table('agents').update({'last_heartbeat': now_iso}).eq('id', '$BASE_AGENT_ID').execute()
+" 2>/dev/null || true
+        # agent_status heartbeat needs psycopg (GUC).
+        "$VENV_PY" -c "
+import os, sys
+sys.path.insert(0, '$ORCH_DIR')
+from dotenv import load_dotenv
+load_dotenv('$ORCH_DIR/.env')
+try:
+    import psycopg
+except ImportError:
+    sys.exit(0)
+dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
+if not dsn:
+    sys.exit(0)
+try:
+    with psycopg.connect(dsn, autocommit=False) as conn:
+        with conn.cursor() as cur:
+            cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$AGENT_ID',))
+            cur.execute(\"UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id=%s\", ('$AGENT_ID',))
+        conn.commit()
+except Exception:
+    pass
 " 2>/dev/null || true
     done
 }
