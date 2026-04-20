@@ -1,0 +1,14 @@
+# G2: Pre-existing test regression check
+# Generated for CAI-RESP-053 G2 audit trail.
+# Command:
+#   git log --oneline e0e26d6^..HEAD -- tests/test_agent_messages_poll.py scripts/agent_messages_poll.py
+# Context:
+#   e0e26d6 is the first commit of Step 3 (Task 1).
+#   The 2 failing tests in the Step 3 review were TestFormatTelegram and
+#   TestPollAgentMessages — both assert 'claude.ai' in text. Empty output
+#   below confirms Step 3 did NOT touch either file; failures are pre-existing.
+
+## git log output:
+
+## test file HEAD SHAs at the time of Step 3 review:
+469a79da29c86f9e3c92680af21ca24f47e3b4d4 Mon Apr 20 12:35:35 2026 +0800 feat(governance): stamp skipped_at on notifier None-skip path

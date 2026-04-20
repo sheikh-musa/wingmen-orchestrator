@@ -41,6 +41,24 @@ Commits (Step 3 span, oldest → newest):
 
 ---
 
+## Next Steps
+
+### Deferred from Step 3.5 (CAI-RESP-053)
+
+- **Step 4 (D1)**: BUG-024 Phase 1 — promote sub-identity (`cc-ihsanos-N`)
+  to first-class `agents.id` FK. Collapses the current dual-identity split
+  (base in `agents`, sub-tag in `agent_status` under GUC) into a single
+  FK-coherent surface. Every new write site between now and Phase 1 is a
+  BUG-024 re-introduction risk. Committed-date: TBD after Step 3.5 ships.
+
+- **Step 5 (D2)**: BUG-027 — exit-trap janitor cron. Exit trap doesn't
+  survive `kill -9`, so stale `agent_status` rows can linger past the
+  `stale_agents` view's 15-min threshold. Cron-based janitor flips rows
+  with `last_heartbeat < now() - interval '30 minutes'` to `offline`.
+  Committed-date: TBD after Step 4.
+
+---
+
 ## Previously Completed (2026-04-20 — GOVERNANCE-CLEANUP-001 Step 2 governance hygiene batch)
 
 ### GOVERNANCE-CLEANUP-001 Step 2 — shipped
