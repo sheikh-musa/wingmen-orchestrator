@@ -248,6 +248,42 @@ def allocate_sub_tag_and_register(
                     (_ALLOC_LOCK_ID,),
                 )
                 holders = cur.fetchall()
+
+                # A4 (CAI-RESP-053): flush diagnostic to disk before raising.
+                # Launcher stderr may be redirected by launchd; a dedicated
+                # file gives the operator a forensic trail.
+                import datetime as _dt
+                import glob as _glob
+                import os as _os
+                import traceback as _traceback
+                _iso = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                _diag_path = f"/tmp/cc_lock_timeout_{_iso}.log"
+                try:
+                    with open(_diag_path, "a") as _fh:
+                        _fh.write(f"timestamp: {_iso}\n")
+                        _fh.write(f"base: {base}\n")
+                        _fh.write(f"repo: {repo}\n")
+                        _fh.write(f"lock_id: {_ALLOC_LOCK_ID}\n")
+                        _fh.write(f"timeout_seconds: {_LOCK_TIMEOUT_SECONDS}\n")
+                        _fh.write(f"holders: {holders}\n")
+                        _fh.write("stack:\n")
+                        _fh.write("".join(_traceback.format_stack()))
+                        _fh.flush()
+                        _os.fsync(_fh.fileno())
+                except OSError:
+                    pass  # disk full / permission — swallow; primary signal is the raise
+
+                # Retention: keep newest 20 diagnostic files, unlink the rest.
+                try:
+                    _existing = sorted(_glob.glob("/tmp/cc_lock_timeout_*.log"))
+                    for _old in _existing[:-20]:
+                        try:
+                            _os.unlink(_old)
+                        except OSError:
+                            pass
+                except OSError:
+                    pass
+
                 raise LockTimeoutError(
                     f"advisory lock AGENT_ID_ALLOC (id={_ALLOC_LOCK_ID}) "
                     f"held >{_LOCK_TIMEOUT_SECONDS}s. Holders: {holders}"

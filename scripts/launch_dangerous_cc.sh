@@ -107,6 +107,14 @@ ALLOC_JSON="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.auto_agent_id \
     --dsn "$DSN" 2>/tmp/cc_alloc_err.log)" || {
     echo -e "\033[31mERROR: identity allocation failed\033[0m" >&2
     cat /tmp/cc_alloc_err.log >&2
+    # A4 (CAI-RESP-053): surface the most-recent LockTimeout diagnostic.
+    # allocate_sub_tag_and_register flushes a fsync'd forensic file before
+    # raising — co-locate its tail with the alloc-err tail for consistency.
+    RECENT_LOCK_DIAG=$(ls -t /tmp/cc_lock_timeout_*.log 2>/dev/null | head -n 1 || true)
+    if [ -n "$RECENT_LOCK_DIAG" ] && [ -f "$RECENT_LOCK_DIAG" ]; then
+        echo -e "\033[33m  Most recent lock-timeout diagnostic: ${RECENT_LOCK_DIAG}\033[0m" >&2
+        tail -n 20 "$RECENT_LOCK_DIAG" | sed 's/^/    /' >&2
+    fi
     exit 1
 }
 
@@ -216,12 +224,22 @@ echo ""
 
 _heartbeat_loop() {
     # Two heartbeats on a 5-minute cadence:
-    #   1. agents.last_heartbeat (base id, legacy agents table)
-    #   2. agent_status.last_heartbeat (sub-tag, ARCH-035 with GUC)
-    # Both are best-effort; if the worker misses a beat, stale_agents view
-    # (15-min threshold) catches it.
+    #   1. agents.last_heartbeat (base id, legacy agents table) — FAIL LOUD (A2).
+    #      Feeds stale_agents view + telegram /status + operator dashboards;
+    #      silent failure = operator blindness. Stderr appends to a tailable
+    #      size-capped log.
+    #   2. agent_status.last_heartbeat (sub-tag, ARCH-035 with GUC) — best-effort.
+    #      The stale_agents 15-min view-based backstop covers silent failure here.
+    local HB_ERR_LOG="/tmp/cc_heartbeat_err.log"
+    local HB_ERR_CAP=10485760  # 10 MB cap (CAI-RESP-053 sub-amendment)
     while true; do
         sleep 300
+        # A2 (CAI-RESP-053): truncate the heartbeat err log BEFORE the write
+        # if it has exceeded its cap; leave a timestamped marker line.
+        if [ -f "$HB_ERR_LOG" ] && [ "$(wc -c < "$HB_ERR_LOG" 2>/dev/null || echo 0)" -gt "$HB_ERR_CAP" ]; then
+            : > "$HB_ERR_LOG"   # truncate once cap exceeded
+            echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [heartbeat-log] truncated (cap=$HB_ERR_CAP B)" >> "$HB_ERR_LOG"
+        fi
         "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
@@ -233,7 +251,7 @@ sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'
 now_iso = datetime.now(timezone.utc).isoformat()
 # agents table — base id (FK-enforced)
 sb.table('agents').update({'last_heartbeat': now_iso}).eq('id', '$BASE_AGENT_ID').execute()
-" 2>/dev/null || true
+" 2>>"$HB_ERR_LOG"
         # agent_status heartbeat needs psycopg (GUC).
         "$VENV_PY" -c "
 import os, sys
