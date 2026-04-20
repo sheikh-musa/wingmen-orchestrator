@@ -375,11 +375,11 @@ load_dotenv('$ORCH_DIR/.env')
 from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 sb.table('agent_messages').insert({
-    'from_agent': '$AGENT_ID',
+    'from_agent': '$BASE_AGENT_ID',
     'to_agent': 'cai',
     'message_type': 'blocker',
-    'subject': 'DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8}',
-    'body': 'Vercel deployment reached ERROR state.\nCommit: ${commit_sha}\nBuild log: ${build_log_url}\nAction required: read build log, fix, push again.',
+    'subject': 'DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8} [${CC_AGENT_ID}]',
+    'body': 'Vercel deployment reached ERROR state.\nCommit: ${commit_sha}\nBuild log: ${build_log_url}\nAction required: read build log, fix, push again.\n\nPosted by sub-tag: ${CC_AGENT_ID}',
     'requires_response': True,
 }).execute()
 " 2>/dev/null || true
@@ -407,11 +407,11 @@ load_dotenv('$ORCH_DIR/.env')
 from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 sb.table('agent_messages').insert({
-    'from_agent': '$AGENT_ID',
+    'from_agent': '$BASE_AGENT_ID',
     'to_agent': 'cai',
     'message_type': 'blocker',
-    'subject': 'DEPLOY TIMEOUT — ${REPO_NAME} commit ${commit_sha:0:8}',
-    'body': 'Vercel deployment did not reach READY within 5 minutes.\nCommit: ${commit_sha}\nCheck Vercel dashboard for build status.',
+    'subject': 'DEPLOY TIMEOUT — ${REPO_NAME} commit ${commit_sha:0:8} [${CC_AGENT_ID}]',
+    'body': 'Vercel deployment did not reach READY within 5 minutes.\nCommit: ${commit_sha}\nCheck Vercel dashboard for build status.\n\nPosted by sub-tag: ${CC_AGENT_ID}',
     'requires_response': True,
 }).execute()
 " 2>/dev/null || true
@@ -470,9 +470,12 @@ sb.table('cc_work_sessions').insert({
 }).execute()
 " 2>/dev/null || true
 
-    # ARCH-035: flip agent_status to offline (psycopg direct for GUC).
-    # Survives clean exit + SIGTERM (trap fires). Does NOT survive kill -9 —
-    # stale_agents view catches that via 15-min heartbeat threshold.
+    # ARCH-035: flip agent_status to offline for THIS sub-tag ($CC_AGENT_ID,
+    # aliased as $AGENT_ID above). psycopg direct is mandatory for GUC
+    # semantics (SET LOCAL + UPDATE must be one transaction for the trigger
+    # to see the GUC match). Survives clean exit + SIGTERM (trap fires).
+    # Does NOT survive kill -9 — stale_agents view catches that via 15-min
+    # heartbeat threshold.
     "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
@@ -521,16 +524,18 @@ from dotenv import load_dotenv
 load_dotenv('$ORCH_DIR/.env')
 from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
+# agent_messages.from_agent uses BASE (FK-enforced). Sub-tag goes in subject.
 sb.table('agent_messages').insert({
-    'from_agent': '$AGENT_ID',
+    'from_agent': '$BASE_AGENT_ID',
     'to_agent': 'cai',
     'message_type': 'update',
-    'subject': '$subject',
-    'body': 'Session ended. Outcome: $outcome. Duration: ${duration_seconds}s. Repo: $REPO_NAME. Exit code: $exit_code.',
+    'subject': '$subject [$CC_AGENT_ID]',
+    'body': 'Session ended. Sub-tag: $CC_AGENT_ID. Outcome: $outcome. Duration: ${duration_seconds}s. Repo: $REPO_NAME. Exit code: $exit_code.',
     'requires_response': False,
 }).execute()
-# Flip agent status to idle
-sb.table('agents').update({'status': 'idle', 'current_task': None}).eq('id', '$AGENT_ID').execute()
+# Flip BASE family status to idle (legacy agents table). Sub-tag agent_status
+# was flipped to offline in the psycopg block above.
+sb.table('agents').update({'status': 'idle', 'current_task': None}).eq('id', '$BASE_AGENT_ID').execute()
 " 2>/dev/null || true
 }
 
