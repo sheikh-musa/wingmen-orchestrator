@@ -164,7 +164,7 @@ def pick_sub_tag(base: str, active: list[str]) -> str:
     while n in taken:
         n += 1
     if n > _MAX_SUB_TAGS_PER_BASE:
-        siblings = sorted(f"{base}-{k}" for k in taken)
+        siblings = [f"{base}-{k}" for k in sorted(taken)]
         raise NamespaceExhaustedError(
             f"{base} exhausted ({_MAX_SUB_TAGS_PER_BASE} concurrent sub-tags). "
             f"Likely runaway launchd/watchdog. "
