@@ -394,13 +394,26 @@ class TestScanOverlapSiblings:
 
 
 class TestCliEntrypoint:
-    def test_unrecognized_repo_exits_1_with_clear_error(self):
-        # Invoke the module as a subprocess — verify exit code + stderr.
+    def test_bad_dsn_exits_1_with_clear_error(self):
+        # Bad DSN → DatabaseError path (fail-loud, not silent-swallow).
         result = subprocess.run(
             [sys.executable, "-m", "scripts.lib.auto_agent_id",
              "--pwd", "/tmp/foo",
              "--repo", "unknown",
              "--dsn", "postgres://invalid"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "DatabaseError" in result.stderr, result.stderr
+
+    @pytestmark_integration
+    def test_unrecognized_repo_exits_1_with_clear_error(self):
+        # Good DSN, unregistered pwd → UnknownRepoError path.
+        result = subprocess.run(
+            [sys.executable, "-m", "scripts.lib.auto_agent_id",
+             "--pwd", "/tmp/foo",
+             "--repo", "unknown",
+             "--dsn", DSN],
             capture_output=True, text=True,
         )
         assert result.returncode == 1, result.stdout + result.stderr

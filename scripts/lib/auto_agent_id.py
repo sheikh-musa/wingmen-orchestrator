@@ -337,16 +337,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Data-driven map (delta-v2 L1-B2): load from agents.repo_scope each boot.
         # Drift from hardcoded constants is structurally impossible.
-        # On DB connection failure fall back to empty map so that pwd-resolution
-        # still runs and raises UnknownRepoError for unregistered paths (rather
-        # than surfacing a raw psycopg traceback).
-        try:
+        if args.base_override:
+            base = args.base_override
+        else:
             family_map = load_family_map(args.dsn)
-        except Exception:
-            family_map = {}
-        base = args.base_override or resolve_base_agent_id(args.pwd, family_map)
+            base = resolve_base_agent_id(args.pwd, family_map)
     except UnknownRepoError as e:
         sys.stderr.write(f"UnknownRepoError: {e}\n")
+        return 1
+    except Exception as e:
+        # Bad DSN / DB unreachable / etc. Fail loud — operator needs to see
+        # the real cause, not a misleading 'not registered' message.
+        sys.stderr.write(f"DatabaseError: {type(e).__name__}: {e}\n")
         return 1
 
     try:
