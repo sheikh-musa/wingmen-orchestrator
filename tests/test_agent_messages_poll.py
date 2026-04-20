@@ -470,3 +470,91 @@ class TestBannedPrefixRejection:
         # Row has to_agent='cai' so it IS normally routable — banned-prefix
         # check should not false-positive on None.
         assert _is_routable(r) is True
+
+
+# ARCH-036: priority glyph prefix + P3 suppression
+class TestPriorityFormat:
+    """Per ARCH-036: _format_telegram prepends priority glyph (🔴 P0, 🟠 P1,
+    🟡 P2) to every Telegram message, and returns None for P3 so the caller
+    skips Telegram send entirely. P3 still appears in boot-briefing inbox
+    and table scans; it just doesn't interrupt Musa's phone."""
+
+    def _msg(self, priority="P2", requires_response=False, message_type="update",
+             subject="X", from_agent="cai", to_agent="musa"):
+        return {
+            "id": 1,
+            "from_agent": from_agent,
+            "to_agent": to_agent,
+            "message_type": message_type,
+            "subject": subject,
+            "body": "body-text",
+            "requires_response": requires_response,
+            "priority": priority,
+        }
+
+    def test_p0_prepends_red_glyph(self):
+        from nervous_system.agent_messages_poll import _format_telegram
+        out = _format_telegram(self._msg(priority="P0", requires_response=True))
+        assert out is not None
+        assert out.startswith("\U0001f534 ")  # 🔴
+
+    def test_p1_prepends_orange_glyph(self):
+        from nervous_system.agent_messages_poll import _format_telegram
+        out = _format_telegram(self._msg(priority="P1", requires_response=True))
+        assert out is not None
+        assert out.startswith("\U0001f7e0 ")  # 🟠
+
+    def test_p2_prepends_yellow_glyph(self):
+        from nervous_system.agent_messages_poll import _format_telegram
+        out = _format_telegram(self._msg(priority="P2"))
+        assert out is not None
+        assert out.startswith("\U0001f7e1 ")  # 🟡
+
+    def test_p3_returns_none(self):
+        from nervous_system.agent_messages_poll import _format_telegram
+        out = _format_telegram(self._msg(priority="P3"))
+        assert out is None, "P3 must be suppressed from Telegram entirely"
+
+    def test_missing_priority_defaults_to_p2(self):
+        # Defensive — if the row is malformed / pre-migration / test fixture
+        # missing priority, default to P2 (yellow) rather than crashing.
+        from nervous_system.agent_messages_poll import _format_telegram
+        m = self._msg()
+        del m["priority"]
+        out = _format_telegram(m)
+        assert out is not None
+        assert out.startswith("\U0001f7e1 ")  # 🟡
+
+    def test_null_priority_defaults_to_p2(self):
+        from nervous_system.agent_messages_poll import _format_telegram
+        out = _format_telegram(self._msg(priority=None))
+        assert out is not None
+        assert out.startswith("\U0001f7e1 ")  # 🟡
+
+    def test_p0_blocker_glyph_before_existing_blocker_format(self):
+        # Composition check — priority glyph wraps the existing per-type
+        # formatter output, it does not replace it.
+        # Note: requires_response=False so the body formatter takes the
+        # BLOCKER branch (requires_response=True short-circuits to the
+        # "CC needs your input" branch first — see _format_telegram_body).
+        from nervous_system.agent_messages_poll import _format_telegram
+        out = _format_telegram(self._msg(
+            priority="P0", requires_response=False,
+            message_type="blocker", subject="payment down",
+        ))
+        assert out is not None
+        assert out.startswith("\U0001f534 ")           # 🔴 first
+        assert "\U0001f6a8" in out                     # 🚨 BLOCKER still appears
+        assert "payment down" in out
+
+    def test_p0_requires_response_uses_needs_input_format(self):
+        # When requires_response=true the existing formatter returns the
+        # "CC needs your input" format; glyph still prepends.
+        from nervous_system.agent_messages_poll import _format_telegram
+        out = _format_telegram(self._msg(
+            priority="P0", requires_response=True,
+            message_type="question", subject="scope check",
+        ))
+        assert out is not None
+        assert out.startswith("\U0001f534 ")
+        assert "CC needs your input" in out

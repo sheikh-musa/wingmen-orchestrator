@@ -80,8 +80,31 @@ def _is_cc_to_cc(from_agent: str, to_agent: str | None) -> bool:
     )
 
 
+# ARCH-036: priority glyph prefix + P3 suppression.
+# P0/P1/P2 prepend a colored circle. P3 is suppressed from Telegram entirely
+# (Telegram is interrupt-capable, P3 is passive FYI). See CAI-RESP-047 for why
+# P3 suppression is load-bearing alongside the ARCH-035 banned-prefix filter.
+_PRIORITY_GLYPH = {"P0": "\U0001f534", "P1": "\U0001f7e0", "P2": "\U0001f7e1"}
+
+
 def _format_telegram(msg: dict) -> str | None:
-    """Format an agent_messages row into a Telegram string.
+    """Format an agent_messages row into a Telegram string with priority glyph.
+
+    Returns None if this message should not be routed to Telegram (P3, or the
+    body formatter filtered it out e.g. CC-to-CC peer traffic).
+    """
+    priority = msg.get("priority") or "P2"
+    if priority == "P3":
+        return None
+    base = _format_telegram_body(msg)
+    if base is None:
+        return None
+    glyph = _PRIORITY_GLYPH.get(priority, _PRIORITY_GLYPH["P2"])
+    return f"{glyph} {base}"
+
+
+def _format_telegram_body(msg: dict) -> str | None:
+    """Format an agent_messages row into a Telegram string (no priority glyph).
 
     Returns None if this message should not be routed to Telegram.
     """
@@ -160,11 +183,14 @@ async def poll_agent_messages(
     Deduplicates via notification_log.dedup_key so restarts are safe.
     """
     try:
+        # ARCH-036: sort priority-first so urgent traffic drains before backlog.
         result = await supabase.table("agent_messages").select(
             "id, from_agent, to_agent, message_type, subject, body, "
-            "requires_response, created_at"
+            "requires_response, priority, created_at"
         ).is_("read_at", "null").is_(
             "forwarded_to_telegram_at", "null"
+        ).order("priority", desc=False).order(
+            "requires_response", desc=True
         ).order("created_at", desc=False).execute()
 
         rows: list[dict] = result.data or []

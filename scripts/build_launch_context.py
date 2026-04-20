@@ -104,12 +104,13 @@ def build(agent_id: str, dry_run: bool = False) -> str:
             line += f" | hb={s['last_heartbeat']}"
             parts.append(line)
 
-    # ── 3. Unread inbox (requires_response first) ─────────────────────────────
+    # ── 3. Unread inbox (ARCH-036 priority ASC, requires_response DESC, created_at ASC) ─
     inbox = (
         client.table("agent_messages")
-        .select("id,from_agent,to_agent,message_type,subject,body,requires_response,created_at")
+        .select("id,from_agent,to_agent,message_type,subject,body,requires_response,priority,created_at")
         .or_(f"to_agent.eq.{agent_id},to_agent.is.null")
         .is_("read_at", "null")
+        .order("priority", desc=False)
         .order("requires_response", desc=True)
         .order("created_at", desc=False)
         .execute()
@@ -119,11 +120,15 @@ def build(agent_id: str, dry_run: bool = False) -> str:
     if not inbox:
         parts.append("(empty)")
     else:
+        # ARCH-036: [Pn] tag shows priority; glyph reserved for Telegram (P3
+        # suppressed there). Boot briefing SHOWS all priorities including P3.
+        _PRIO_TAG = {"P0": "[P0]", "P1": "[P1]", "P2": "[P2]", "P3": "[P3]"}
         for m in inbox:
             flag = "[NEEDS RESPONSE] " if m.get("requires_response") and not m.get("responded_at") else ""
+            prio = _PRIO_TAG.get(m.get("priority") or "P2", "[P2]")
             to = m.get("to_agent") or "broadcast"
             parts.append(
-                f"  #{m['id']} {flag}[{m['message_type']}] "
+                f"  #{m['id']} {prio} {flag}[{m['message_type']}] "
                 f"{m['from_agent']}→{to}: {m.get('subject','')}"
             )
             if m.get("body"):
