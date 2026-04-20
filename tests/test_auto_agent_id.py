@@ -150,3 +150,41 @@ class TestResolveBaseAgentId:
         monkeypatch.setattr(auto_agent_id, "_git_toplevel", lambda pwd: None)
         with pytest.raises(auto_agent_id.UnknownRepoError):
             auto_agent_id.resolve_base_agent_id("/tmp/foo", FAKE_MAP)
+
+
+class TestPickSubTag:
+    def test_empty_active_picks_one(self):
+        assert auto_agent_id.pick_sub_tag("cc-ihsanos", []) == "cc-ihsanos-1"
+
+    def test_contiguous_picks_next(self):
+        assert auto_agent_id.pick_sub_tag(
+            "cc-ihsanos", ["cc-ihsanos-1", "cc-ihsanos-2"]
+        ) == "cc-ihsanos-3"
+
+    def test_gap_fills_first_gap(self):
+        assert auto_agent_id.pick_sub_tag(
+            "cc-ihsanos", ["cc-ihsanos-1", "cc-ihsanos-3"]
+        ) == "cc-ihsanos-2"
+
+    def test_foreign_family_ignored(self):
+        assert auto_agent_id.pick_sub_tag(
+            "cc-ihsanos",
+            ["cc-web-1", "cc-scholar-5", "cc-ihsanos-1"],
+        ) == "cc-ihsanos-2"
+
+    def test_duplicate_active_deduped(self):
+        assert auto_agent_id.pick_sub_tag(
+            "cc-ihsanos", ["cc-ihsanos-1", "cc-ihsanos-1"]
+        ) == "cc-ihsanos-2"
+
+    def test_base_matching_entry_ignored(self):
+        # "cc-ihsanos" (no -N suffix) is the legacy base row, not a sub-tag
+        assert auto_agent_id.pick_sub_tag(
+            "cc-ihsanos", ["cc-ihsanos", "cc-ihsanos-1"]
+        ) == "cc-ihsanos-2"
+
+    def test_non_integer_suffix_ignored(self):
+        # Robust to unexpected suffixes like "cc-ihsanos-test"
+        assert auto_agent_id.pick_sub_tag(
+            "cc-ihsanos", ["cc-ihsanos-test", "cc-ihsanos-1"]
+        ) == "cc-ihsanos-2"

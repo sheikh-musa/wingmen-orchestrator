@@ -118,3 +118,26 @@ def resolve_base_agent_id(pwd: str, family_map: dict[str, str]) -> str:
         f"pwd {pwd!r} (toplevel={toplevel!r}) is not a registered agent family. "
         f"Known: {sorted(family_map.keys())}"
     )
+
+
+def pick_sub_tag(base: str, active: list[str]) -> str:
+    """Pick the smallest positive integer N such that f'{base}-{N}' is not in active.
+
+    Pure function — no DB. Callers feed it a scanned active list. Ignores
+    entries that don't parse as '{base}-<int>' (e.g. legacy bare base, or
+    experimental suffixes).
+    """
+    taken: set[int] = set()
+    prefix = f"{base}-"
+    for entry in active:
+        if not entry.startswith(prefix):
+            continue
+        suffix = entry[len(prefix):]
+        if not suffix.isdigit():
+            continue
+        taken.add(int(suffix))
+
+    n = 1
+    while n in taken:
+        n += 1
+    return f"{base}-{n}"
