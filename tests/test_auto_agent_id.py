@@ -437,3 +437,59 @@ class TestCliEntrypoint:
         assert payload["sub_tag"] == "cc-test-family-1"
         assert isinstance(payload["siblings"], list)
         assert isinstance(payload["overlap_warnings"], list)
+
+
+# ---------------------------------------------------------------------------
+# Step 3.5 additions — Task 15: G3 MAX_SUB_TAGS + A1 lock-namespace + A3 guard
+# ---------------------------------------------------------------------------
+
+import ast
+from pathlib import Path
+
+from scripts.lib.auto_agent_id import (
+    pick_sub_tag,
+    NamespaceExhaustedError,
+    _MAX_SUB_TAGS_PER_BASE,
+    _ALLOC_LOCK_ID,
+)
+
+
+def test_max_sub_tags_ceiling_is_20():
+    assert _MAX_SUB_TAGS_PER_BASE == 20
+
+
+def test_alloc_lock_id_is_registered_int():
+    assert isinstance(_ALLOC_LOCK_ID, int)
+    assert _ALLOC_LOCK_ID == 1001
+
+
+def test_pick_sub_tag_raises_when_all_slots_taken():
+    base = "cc-test-family"
+    active = [f"{base}-{n}" for n in range(1, _MAX_SUB_TAGS_PER_BASE + 1)]
+    with pytest.raises(NamespaceExhaustedError) as exc:
+        pick_sub_tag(base, active)
+    msg = str(exc.value)
+    assert base in msg
+    assert str(_MAX_SUB_TAGS_PER_BASE) in msg
+    # The message must include the siblings list so the operator can spot the culprit.
+    assert "cc-test-family-20" in msg
+
+
+def test_pick_sub_tag_returns_first_free_below_ceiling():
+    base = "cc-test-family"
+    active = [f"{base}-{n}" for n in range(1, _MAX_SUB_TAGS_PER_BASE)]  # 1..19 taken
+    assert pick_sub_tag(base, active) == f"{base}-{_MAX_SUB_TAGS_PER_BASE}"
+
+
+def test_auto_agent_id_does_not_import_supabase_py():
+    """A3 guard: allocate_sub_tag_and_register must stay on psycopg.
+    supabase-py is PostgREST + pooled — incompatible with GUC."""
+    module_src = Path("scripts/lib/auto_agent_id.py").read_text()
+    tree = ast.parse(module_src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert "supabase" not in alias.name.lower(), f"found import {alias.name}"
+        elif isinstance(node, ast.ImportFrom):
+            mod = (node.module or "").lower()
+            assert "supabase" not in mod, f"found from-import {node.module}"

@@ -16,10 +16,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_ALLOC_LOCK_KEY = "cc-agent-id-alloc"
+# Advisory-lock registry (see docs/lock-namespace.md).
+# Identity/scheduling range: 1000–1099. Reserve new keys there.
+_ALLOC_LOCK_ID = 1001  # "cc-agent-id-alloc" — allocator critical section
 _LOCK_TIMEOUT_SECONDS = 5.0
 _LOCK_POLL_INTERVAL_SECONDS = 0.5
 _LOCK_RETRY_COUNT = 10  # 10 × 0.5s = 5s ceiling
+
+# G3 (CAI-RESP-053): 20 concurrent sub-tags per base is pathology threshold.
+# 4 families × 20 = 80 concurrent identities — anything approaching this is
+# runaway launchd/watchdog, not legitimate concurrency. Fail loud.
+_MAX_SUB_TAGS_PER_BASE = 20
+
+
+class NamespaceExhaustedError(RuntimeError):
+    """Raised when pick_sub_tag is asked to allocate past _MAX_SUB_TAGS_PER_BASE.
+    Operator should investigate rogue launchd/watchdog rather than raising the cap."""
 
 
 class UnknownRepoError(ValueError):
@@ -151,6 +163,14 @@ def pick_sub_tag(base: str, active: list[str]) -> str:
     n = 1
     while n in taken:
         n += 1
+    if n > _MAX_SUB_TAGS_PER_BASE:
+        siblings = sorted(f"{base}-{k}" for k in taken)
+        raise NamespaceExhaustedError(
+            f"{base} exhausted ({_MAX_SUB_TAGS_PER_BASE} concurrent sub-tags). "
+            f"Likely runaway launchd/watchdog. "
+            f"Run `ps aux | grep launch_dangerous_cc` and cull. "
+            f"Siblings: {siblings}"
+        )
     return f"{base}-{n}"
 
 
@@ -207,8 +227,8 @@ def allocate_sub_tag_and_register(
             acquired = False
             for attempt in range(_LOCK_RETRY_COUNT):
                 cur.execute(
-                    "SELECT pg_try_advisory_xact_lock(hashtext(%s))",
-                    (_ALLOC_LOCK_KEY,),
+                    "SELECT pg_try_advisory_xact_lock(%s)",
+                    (_ALLOC_LOCK_ID,),
                 )
                 if cur.fetchone()[0]:
                     acquired = True
@@ -223,14 +243,14 @@ def allocate_sub_tag_and_register(
                       FROM pg_locks l
                       JOIN pg_stat_activity a ON a.pid = l.pid
                      WHERE locktype = 'advisory'
-                       AND objid = hashtext(%s)::bigint
+                       AND objid = %s
                     """,
-                    (_ALLOC_LOCK_KEY,),
+                    (_ALLOC_LOCK_ID,),
                 )
                 holders = cur.fetchall()
                 raise LockTimeoutError(
-                    f"advisory lock {_ALLOC_LOCK_KEY!r} held >{_LOCK_TIMEOUT_SECONDS}s. "
-                    f"Holders: {holders}"
+                    f"advisory lock AGENT_ID_ALLOC (id={_ALLOC_LOCK_ID}) "
+                    f"held >{_LOCK_TIMEOUT_SECONDS}s. Holders: {holders}"
                 )
 
             cur.execute(
