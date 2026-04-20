@@ -6,6 +6,10 @@ base (family, agent_messages.from_agent FK-enforced).
 """
 from __future__ import annotations
 
+import re
+import subprocess
+from pathlib import Path
+
 
 class UnknownRepoError(ValueError):
     """Raised when pwd does not map to a registered agent family.
@@ -45,10 +49,6 @@ def load_family_map(dsn: str) -> dict[str, str]:
     return out
 
 
-import re
-import subprocess
-from pathlib import Path
-
 # Matches trailing worktree-style suffix: -UPPERCASE... or .UPPERCASE... or
 # .wt-anything. Lowercase inner hyphens (hifz-companion) do NOT match since
 # the second group requires an uppercase start or the literal 'wt'.
@@ -82,7 +82,9 @@ def _git_toplevel(pwd: str) -> str | None:
         )
         if r.returncode == 0:
             return r.stdout.strip() or None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        # OSError covers FileNotFoundError (git missing), PermissionError,
+        # and non-existent pwd. Never kill the launcher — degrade to walk.
         pass
     return None
 

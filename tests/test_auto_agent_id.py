@@ -54,8 +54,6 @@ class TestLoadFamilyMap:
             psycopg.connect = orig
 
 
-import os
-
 # Fixture-style map matching live agents table at delta-v2 time.
 FAKE_MAP = {
     "ihsanos": "cc-ihsanos",
