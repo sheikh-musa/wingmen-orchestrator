@@ -376,10 +376,11 @@ from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 sb.table('agent_messages').insert({
     'from_agent': '$BASE_AGENT_ID',
+    'sub_tag': '$CC_AGENT_ID',
     'to_agent': 'cai',
     'message_type': 'blocker',
-    'subject': 'DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8} [${CC_AGENT_ID}]',
-    'body': 'Vercel deployment reached ERROR state.\nCommit: ${commit_sha}\nBuild log: ${build_log_url}\nAction required: read build log, fix, push again.\n\nPosted by sub-tag: ${CC_AGENT_ID}',
+    'subject': 'DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8}',
+    'body': 'Vercel deployment reached ERROR state.\nCommit: ${commit_sha}\nBuild log: ${build_log_url}\nAction required: read build log, fix, push again.',
     'requires_response': True,
 }).execute()
 " 2>/dev/null || true
@@ -408,10 +409,11 @@ from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
 sb.table('agent_messages').insert({
     'from_agent': '$BASE_AGENT_ID',
+    'sub_tag': '$CC_AGENT_ID',
     'to_agent': 'cai',
     'message_type': 'blocker',
-    'subject': 'DEPLOY TIMEOUT — ${REPO_NAME} commit ${commit_sha:0:8} [${CC_AGENT_ID}]',
-    'body': 'Vercel deployment did not reach READY within 5 minutes.\nCommit: ${commit_sha}\nCheck Vercel dashboard for build status.\n\nPosted by sub-tag: ${CC_AGENT_ID}',
+    'subject': 'DEPLOY TIMEOUT — ${REPO_NAME} commit ${commit_sha:0:8}',
+    'body': 'Vercel deployment did not reach READY within 5 minutes.\nCommit: ${commit_sha}\nCheck Vercel dashboard for build status.',
     'requires_response': True,
 }).execute()
 " 2>/dev/null || true
@@ -524,13 +526,14 @@ from dotenv import load_dotenv
 load_dotenv('$ORCH_DIR/.env')
 from supabase import create_client
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
-# agent_messages.from_agent uses BASE (FK-enforced). Sub-tag goes in subject.
+# agent_messages.from_agent uses BASE (FK-enforced). Sub-tag goes in sub_tag column.
 sb.table('agent_messages').insert({
     'from_agent': '$BASE_AGENT_ID',
+    'sub_tag': '$CC_AGENT_ID',
     'to_agent': 'cai',
     'message_type': 'update',
-    'subject': '$subject [$CC_AGENT_ID]',
-    'body': 'Session ended. Sub-tag: $CC_AGENT_ID. Outcome: $outcome. Duration: ${duration_seconds}s. Repo: $REPO_NAME. Exit code: $exit_code.',
+    'subject': '$subject',
+    'body': 'Session ended. Outcome: $outcome. Duration: ${duration_seconds}s. Repo: $REPO_NAME. Exit code: $exit_code.',
     'requires_response': False,
 }).execute()
 # Flip BASE family status to idle (legacy agents table). Sub-tag agent_status
