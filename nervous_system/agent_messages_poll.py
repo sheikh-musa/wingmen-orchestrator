@@ -40,8 +40,11 @@ _CC_PREFIX = "cc-"
 
 # ARCH-035: subjects on agent_messages starting with any of these prefixes
 # belong in agent_status, not agent_messages. The poller drops them so the
-# row stays UNREAD as a tripwire for the sending agent. Interim: nightly
-# pg_cron purges after 24h (task #97).
+# row stays UNREAD as a tripwire for the sending agent. Nightly pg_cron purges
+# after 24h — see supabase/migrations/20260420_governance_hygiene_batch.sql
+# Section D.1. The regex below MUST stay in sync with the cron DELETE's
+# `subject ~` pattern — if you change one, change the other. Follow-up to
+# extract into a shared source: GOVERNANCE-CLEANUP-001 H6.
 _BANNED_PREFIX_RE = re.compile(r'^(CLAIM|STATUS|HEARTBEAT|DIGEST|COMPLETE):')
 
 
