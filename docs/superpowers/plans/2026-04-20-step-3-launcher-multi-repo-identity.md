@@ -2063,3 +2063,876 @@ Do NOT push until CAI acks the review.
 No issues found — plan is internally consistent across delta-v2 surfaces.
 
 ---
+
+## Step 3.5 — CAI-RESP-053 Integration (Tasks 13–17)
+
+**Source:** CAI review of Step 3 (msg 408 → our delta msg 413 → CAI ack msg 416).
+
+**Scope:** 1 blocker (B1), 3 ship-gates (G1–G3), 4 amendments (A1–A4), consolidated into 5 sequenced tasks. 2 items (D1/D2) are scheduled — not implemented here — but documented below.
+
+**CAI-confirmed defaults (msg 416):**
+1. A2 framing → **asymmetric fail-loud**: `agents.last_heartbeat` write fails loud to tailable log; `agent_status.last_heartbeat` (psycopg+GUC) stays best-effort (stale_agents 15-min backstop covers it).
+2. G3 ceiling → **20 sub-tags per base**.
+3. B1 CHECK → `sub_tag IS NULL OR sub_tag LIKE from_agent || '-%'` (LIKE form, not numeric-N regex — numeric enforcement stays in `pick_sub_tag`).
+4. G1 → **overwrite** existing plan file, append new Step 3.5 section inline (git preserves the three source commits 797565e + 77b6111 + 7be7519).
+
+**CAI sub-amendment (msg 416):** Log files introduced in A2/A4 must be size-bounded. `/tmp/cc_heartbeat_err.log` → 10MB cap (check-and-truncate on each write). `/tmp/cc_lock_timeout_<UTC-iso>.log` → keep newest 20, unlink older via glob+sort.
+
+**Deferred (scheduled, NOT in Step 3.5):**
+- **D1 = Step 4 = BUG-024 Phase 1** — sub-identity (`cc-ihsanos-N`) promoted to first-class `agents.id` FK. Collapses the dual write pattern into a single identity surface. Committed-date: TBD after Step 3.5 ships.
+- **D2 = Step 5 = BUG-027** — exit-trap janitor cron (exit trap doesn't survive `kill -9`). Committed-date: TBD after Step 4.
+
+### Task 13: B1 — agent_messages.sub_tag column + CHECK + partial index
+
+**Files:**
+- Create: `supabase/migrations/20260420_agent_messages_sub_tag.sql`
+- Create: `tests/test_agent_messages_sub_tag_migration.py`
+
+**Why:** Sub-tag is currently string-encoded into `subject`/`body` (introduced in Task 9 of Step 3). String-encoding is opaque to queries, un-indexable, and has no schema-level impersonation protection. Structural column is cheaper to query and the CHECK constraint structurally blocks cross-family impersonation (a row claiming `from_agent='cc-ihsanos'` with `sub_tag='cc-scholar-1'` gets rejected by the DB, not a downstream parser).
+
+**Schema:**
+- `sub_tag TEXT NULL` (nullable: CAI writes, orchestrator background jobs, legacy rows all leave NULL).
+- `CHECK (sub_tag IS NULL OR sub_tag LIKE from_agent || '-%')` — named `agent_messages_sub_tag_family_prefix_chk`.
+- Partial index `idx_agent_messages_sub_tag ON agent_messages (from_agent, sub_tag) WHERE sub_tag IS NOT NULL`.
+
+- [ ] **Step 1: Write the failing test file first**
+
+```python
+# tests/test_agent_messages_sub_tag_migration.py
+"""B1 migration: agent_messages.sub_tag column, CHECK constraint, partial index."""
+import os
+import pytest
+import psycopg
+from pathlib import Path
+
+MIGRATION_PATH = Path(__file__).parent.parent / "supabase/migrations/20260420_agent_messages_sub_tag.sql"
+
+
+def _dsn():
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    if not dsn:
+        pytest.skip("DATABASE_URL not set — integration test")
+    return dsn
+
+
+def test_migration_file_exists():
+    assert MIGRATION_PATH.exists(), f"migration file missing: {MIGRATION_PATH}"
+
+
+def test_sub_tag_column_present():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT data_type, is_nullable FROM information_schema.columns
+             WHERE table_name = 'agent_messages' AND column_name = 'sub_tag'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None, "sub_tag column not found"
+        assert row[0] == "text"
+        assert row[1] == "YES"  # nullable
+
+
+def test_check_rejects_cross_family_impersonation():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute(
+                """
+                INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, sub_tag)
+                VALUES ('cc-ihsanos', 'cai', 'update', 't', 'b', 'cc-scholar-1')
+                """
+            )
+
+
+def test_check_accepts_matching_family():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, sub_tag)
+            VALUES ('cc-ihsanos', 'cai', 'update', 'b1-test-accept', 'b', 'cc-ihsanos-99')
+            RETURNING id
+            """
+        )
+        mid = cur.fetchone()[0]
+        cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
+
+
+def test_check_accepts_null():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body)
+            VALUES ('cai', 'cc-ihsanos', 'update', 'b1-test-null', 'b')
+            RETURNING id, sub_tag
+            """
+        )
+        mid, sub_tag = cur.fetchone()
+        assert sub_tag is None
+        cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
+
+
+def test_partial_index_exists():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT indexdef FROM pg_indexes
+             WHERE tablename = 'agent_messages' AND indexname = 'idx_agent_messages_sub_tag'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None, "partial index missing"
+        assert "sub_tag IS NOT NULL" in row[0]
+
+
+def test_migration_idempotent():
+    sql = MIGRATION_PATH.read_text()
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(sql)  # should succeed even if already applied
+        cur.execute(sql)  # running twice = no-op
+```
+
+- [ ] **Step 2: Run the failing test**
+
+Run: `pytest tests/test_agent_messages_sub_tag_migration.py -v`
+Expected: all tests FAIL (migration file does not yet exist / column not present).
+
+- [ ] **Step 3: Write the migration**
+
+```sql
+-- supabase/migrations/20260420_agent_messages_sub_tag.sql
+-- B1 (CAI-RESP-053): replace string-encoded sub-tag with structural column.
+-- Idempotent — safe to re-run.
+
+ALTER TABLE agent_messages
+    ADD COLUMN IF NOT EXISTS sub_tag TEXT NULL;
+
+-- Structural impersonation guard: sub_tag must be an N-suffix of from_agent.
+-- NULL is permitted (CAI writes, background jobs, legacy rows).
+ALTER TABLE agent_messages
+    DROP CONSTRAINT IF EXISTS agent_messages_sub_tag_family_prefix_chk;
+ALTER TABLE agent_messages
+    ADD CONSTRAINT agent_messages_sub_tag_family_prefix_chk
+    CHECK (sub_tag IS NULL OR sub_tag LIKE from_agent || '-%');
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_sub_tag
+    ON agent_messages (from_agent, sub_tag)
+    WHERE sub_tag IS NOT NULL;
+
+COMMENT ON COLUMN agent_messages.sub_tag IS
+  'Sub-identity (e.g. cc-ihsanos-3) of the CC session that wrote this row. '
+  'NULL for CAI, orchestrator background jobs, and legacy rows. '
+  'CHECK constraint enforces structural family match with from_agent.';
+```
+
+- [ ] **Step 4: Apply the migration and run tests**
+
+Run:
+```bash
+psql "$DATABASE_URL" -f supabase/migrations/20260420_agent_messages_sub_tag.sql
+pytest tests/test_agent_messages_sub_tag_migration.py -v
+```
+Expected: PASS (6 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add supabase/migrations/20260420_agent_messages_sub_tag.sql \
+        tests/test_agent_messages_sub_tag_migration.py
+git commit -m "$(cat <<'EOF'
+feat(db): B1 agent_messages.sub_tag column + CHECK + partial index
+
+CAI-RESP-053 blocker B1. Replaces string-encoded sub-tag (Task 9 of
+Step 3) with a structural column. CHECK `sub_tag LIKE from_agent || '-%'`
+rejects cross-family impersonation at the DB, not a downstream parser.
+
+Thread: GOVERNANCE-CLEANUP-001 Step 3.5.
+EOF
+)"
+```
+
+### Task 14: Update launcher insert sites — drop string encoding, populate sub_tag
+
+**Files:**
+- Modify: `scripts/launch_dangerous_cc.sh` — three inserts at L377, L409, L528.
+
+**Why:** Task 13 adds the column; Task 14 switches the writers to populate it. String encoding (`[${CC_AGENT_ID}]` suffix on subject; `Sub-tag: ${CC_AGENT_ID}` in body) is deleted — it has no consumers (the string convention was introduced in Task 9 of this same Step 3 and never read downstream).
+
+**Reconnaissance (already done in CAI-RESP-052 delta):**
+- L377 — DEPLOY FAILED blocker.
+- L409 — DEPLOY TIMEOUT blocker.
+- L528 — session-end digest.
+- `scripts/audit_mac_mini.py:374` is a background job not in the launcher chain (leaves `sub_tag=NULL`, correct). Out of scope.
+- No other writers found via `grep -rn "agent_messages.*insert" scripts/`.
+
+- [ ] **Step 1: Edit L377 block (DEPLOY FAILED)**
+
+Old:
+```python
+sb.table('agent_messages').insert({
+    'from_agent': '$BASE_AGENT_ID',
+    'to_agent': 'cai',
+    'message_type': 'blocker',
+    'subject': 'DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8} [${CC_AGENT_ID}]',
+    'body': 'Vercel deployment reached ERROR state.\nCommit: ${commit_sha}\nBuild log: ${build_log_url}\nAction required: read build log, fix, push again.\n\nPosted by sub-tag: ${CC_AGENT_ID}',
+    'requires_response': True,
+}).execute()
+```
+
+New:
+```python
+sb.table('agent_messages').insert({
+    'from_agent': '$BASE_AGENT_ID',
+    'sub_tag': '$CC_AGENT_ID',
+    'to_agent': 'cai',
+    'message_type': 'blocker',
+    'subject': 'DEPLOY FAILED — ${REPO_NAME} commit ${commit_sha:0:8}',
+    'body': 'Vercel deployment reached ERROR state.\nCommit: ${commit_sha}\nBuild log: ${build_log_url}\nAction required: read build log, fix, push again.',
+    'requires_response': True,
+}).execute()
+```
+
+- [ ] **Step 2: Edit L409 block (DEPLOY TIMEOUT)**
+
+Old subject `... [${CC_AGENT_ID}]` → drop suffix.
+Old body `... \n\nPosted by sub-tag: ${CC_AGENT_ID}` → drop trailing line.
+Add `'sub_tag': '$CC_AGENT_ID',` immediately after `'from_agent'` line.
+
+- [ ] **Step 3: Edit L528 block (session-end digest)**
+
+Old subject `'$subject [$CC_AGENT_ID]'` → `'$subject'`.
+Old body `'Session ended. Sub-tag: $CC_AGENT_ID. Outcome: ...'` → `'Session ended. Outcome: ...'`.
+Add `'sub_tag': '$CC_AGENT_ID',`.
+
+- [ ] **Step 4: Verify no stale `[${CC_AGENT_ID}]` or `Sub-tag:` strings remain**
+
+Run:
+```bash
+grep -nE '\[\$\{CC_AGENT_ID\}\]|Sub-tag:|Posted by sub-tag' scripts/launch_dangerous_cc.sh
+```
+Expected: no output. (Comments documenting the convention are allowed to stay; only the payload strings must go.)
+
+- [ ] **Step 5: Smoke test — insert a blocker and confirm column populated**
+
+Run (with DATABASE_URL set):
+```bash
+CC_AGENT_ID=cc-ihsanos-99 BASE_AGENT_ID=cc-ihsanos REPO_NAME=orchestrator \
+  python -c "
+import os
+from dotenv import load_dotenv
+load_dotenv('.env')
+from supabase import create_client
+sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
+r = sb.table('agent_messages').insert({
+    'from_agent': 'cc-ihsanos', 'sub_tag': 'cc-ihsanos-99', 'to_agent': 'cai',
+    'message_type': 'update', 'subject': 'b1 smoke', 'body': 'x',
+    'requires_response': False,
+}).execute()
+print(r.data[0]['id'], r.data[0]['sub_tag'])
+sb.table('agent_messages').delete().eq('id', r.data[0]['id']).execute()
+"
+```
+Expected: output has `cc-ihsanos-99` as the second token.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/launch_dangerous_cc.sh
+git commit -m "$(cat <<'EOF'
+feat(launcher): drop sub-tag string encoding, populate sub_tag column
+
+CAI-RESP-053 B1 call-site updates. Three agent_messages inserts
+(DEPLOY FAILED, DEPLOY TIMEOUT, session-end) now write sub_tag via
+the new column. Subject/body string artefacts removed — no consumers.
+
+Thread: GOVERNANCE-CLEANUP-001 Step 3.5.
+EOF
+)"
+```
+
+### Task 15: G3 MAX_SUB_TAGS + A1 lock-namespace registry
+
+**Files:**
+- Modify: `scripts/lib/auto_agent_id.py` — L19 (`_ALLOC_LOCK_KEY`), L210 (`pg_try_advisory_xact_lock`), L226 (`pg_locks` lookup), add module constants, add `NamespaceExhaustedError`, add guard at bottom of `pick_sub_tag`.
+- Create: `docs/lock-namespace.md`
+- Create/Modify: `tests/test_auto_agent_id.py` — add tests for exhaustion + no-supabase-py import guard.
+
+**Why:**
+- **G3**: `pick_sub_tag` as written will return `cc-ihsanos-21`, `cc-ihsanos-22`… forever. 20 concurrent sub-tags per base = 80 across 4 families. Anything at that level is runaway launchd/watchdog, not legitimate concurrency. Fail loud.
+- **A1**: `hashtext('cc-agent-id-alloc')` collapses a string to one 32-bit int. Today only one call site uses advisory locks, so collision is theoretical; registering the integer now locks the namespace down before future use sites introduce a real collision. Switch to `pg_try_advisory_xact_lock(1001)` (bigint).
+- **A3 guard**: `allocate_sub_tag_and_register` already uses psycopg end-to-end (verified in delta recon — L202–245). A regression-guard test keeps it that way.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_auto_agent_id.py` (create if missing):
+
+```python
+# tests/test_auto_agent_id.py — Step 3.5 additions
+"""G3 + A1 + A3 guards for auto_agent_id module."""
+import ast
+from pathlib import Path
+import pytest
+
+from scripts.lib.auto_agent_id import (
+    pick_sub_tag,
+    NamespaceExhaustedError,
+    _MAX_SUB_TAGS_PER_BASE,
+    _ALLOC_LOCK_ID,
+)
+
+
+def test_max_sub_tags_ceiling_is_20():
+    assert _MAX_SUB_TAGS_PER_BASE == 20
+
+
+def test_alloc_lock_id_is_registered_int():
+    assert isinstance(_ALLOC_LOCK_ID, int)
+    assert _ALLOC_LOCK_ID == 1001
+
+
+def test_pick_sub_tag_raises_when_all_slots_taken():
+    base = "cc-test-family"
+    active = [f"{base}-{n}" for n in range(1, _MAX_SUB_TAGS_PER_BASE + 1)]
+    with pytest.raises(NamespaceExhaustedError) as exc:
+        pick_sub_tag(base, active)
+    msg = str(exc.value)
+    assert base in msg
+    assert str(_MAX_SUB_TAGS_PER_BASE) in msg
+    # The message must include the siblings list so the operator can spot the culprit.
+    assert "cc-test-family-20" in msg
+
+
+def test_pick_sub_tag_returns_first_free_below_ceiling():
+    base = "cc-test-family"
+    active = [f"{base}-{n}" for n in range(1, _MAX_SUB_TAGS_PER_BASE)]  # 1..19 taken
+    assert pick_sub_tag(base, active) == f"{base}-{_MAX_SUB_TAGS_PER_BASE}"
+
+
+def test_auto_agent_id_does_not_import_supabase_py():
+    """A3 guard: allocate_sub_tag_and_register must stay on psycopg.
+    supabase-py is PostgREST + pooled — incompatible with GUC."""
+    module_src = Path("scripts/lib/auto_agent_id.py").read_text()
+    tree = ast.parse(module_src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert "supabase" not in alias.name.lower(), f"found import {alias.name}"
+        elif isinstance(node, ast.ImportFrom):
+            mod = (node.module or "").lower()
+            assert "supabase" not in mod, f"found from-import {node.module}"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pytest tests/test_auto_agent_id.py -v -k "max_sub_tags or alloc_lock_id or exhausted or first_free or supabase"`
+Expected: ImportError or AssertionError — `_MAX_SUB_TAGS_PER_BASE`, `NamespaceExhaustedError`, `_ALLOC_LOCK_ID` not yet defined.
+
+- [ ] **Step 3: Edit `scripts/lib/auto_agent_id.py` — top-of-module constants + exception**
+
+Replace the block around line 19:
+
+Old:
+```python
+_ALLOC_LOCK_KEY = "cc-agent-id-alloc"
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_INTERVAL_SECONDS = 0.5
+_LOCK_RETRY_COUNT = 10  # 10 × 0.5s = 5s ceiling
+```
+
+New:
+```python
+# Advisory-lock registry (see docs/lock-namespace.md).
+# Identity/scheduling range: 1000–1099. Reserve new keys there.
+_ALLOC_LOCK_ID = 1001  # "cc-agent-id-alloc" — allocator critical section
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_INTERVAL_SECONDS = 0.5
+_LOCK_RETRY_COUNT = 10  # 10 × 0.5s = 5s ceiling
+
+# G3 (CAI-RESP-053): 20 concurrent sub-tags per base is pathology threshold.
+# 4 families × 20 = 80 concurrent identities — anything approaching this is
+# runaway launchd/watchdog, not legitimate concurrency. Fail loud.
+_MAX_SUB_TAGS_PER_BASE = 20
+
+
+class NamespaceExhaustedError(RuntimeError):
+    """Raised when pick_sub_tag is asked to allocate past _MAX_SUB_TAGS_PER_BASE.
+    Operator should investigate rogue launchd/watchdog rather than raising the cap."""
+```
+
+- [ ] **Step 4: Edit `pick_sub_tag` to enforce the ceiling**
+
+Replace the final `n = 1 … return …` block:
+
+Old:
+```python
+    n = 1
+    while n in taken:
+        n += 1
+    return f"{base}-{n}"
+```
+
+New:
+```python
+    n = 1
+    while n in taken:
+        n += 1
+    if n > _MAX_SUB_TAGS_PER_BASE:
+        siblings = sorted(f"{base}-{k}" for k in taken)
+        raise NamespaceExhaustedError(
+            f"{base} exhausted ({_MAX_SUB_TAGS_PER_BASE} concurrent sub-tags). "
+            f"Likely runaway launchd/watchdog. "
+            f"Run `ps aux | grep launch_dangerous_cc` and cull. "
+            f"Siblings: {siblings}"
+        )
+    return f"{base}-{n}"
+```
+
+- [ ] **Step 5: Swap hashtext(string) → bigint literal in the two advisory-lock call sites**
+
+Replace L210 block:
+
+Old:
+```python
+                cur.execute(
+                    "SELECT pg_try_advisory_xact_lock(hashtext(%s))",
+                    (_ALLOC_LOCK_KEY,),
+                )
+```
+
+New:
+```python
+                cur.execute(
+                    "SELECT pg_try_advisory_xact_lock(%s)",
+                    (_ALLOC_LOCK_ID,),
+                )
+```
+
+Replace L220–L228 diagnostic block (pg_locks lookup):
+
+Old:
+```python
+                cur.execute(
+                    """
+                    SELECT pid, granted, query_start, state
+                      FROM pg_locks l
+                      JOIN pg_stat_activity a ON a.pid = l.pid
+                     WHERE locktype = 'advisory'
+                       AND objid = hashtext(%s)::bigint
+                    """,
+                    (_ALLOC_LOCK_KEY,),
+                )
+```
+
+New:
+```python
+                cur.execute(
+                    """
+                    SELECT pid, granted, query_start, state
+                      FROM pg_locks l
+                      JOIN pg_stat_activity a ON a.pid = l.pid
+                     WHERE locktype = 'advisory'
+                       AND objid = %s
+                    """,
+                    (_ALLOC_LOCK_ID,),
+                )
+```
+
+Replace the `raise LockTimeoutError(...)` message:
+
+Old:
+```python
+                raise LockTimeoutError(
+                    f"advisory lock {_ALLOC_LOCK_KEY!r} held >{_LOCK_TIMEOUT_SECONDS}s. "
+                    f"Holders: {holders}"
+                )
+```
+
+New:
+```python
+                raise LockTimeoutError(
+                    f"advisory lock AGENT_ID_ALLOC (id={_ALLOC_LOCK_ID}) "
+                    f"held >{_LOCK_TIMEOUT_SECONDS}s. Holders: {holders}"
+                )
+```
+
+- [ ] **Step 6: Create `docs/lock-namespace.md`**
+
+```markdown
+# Advisory Lock Namespace Registry
+
+Postgres advisory locks use a shared 64-bit integer key space across the
+database. To prevent collisions, every advisory-lock key used in this
+codebase MUST be registered here before use.
+
+## Reserved ranges
+
+| Range      | Purpose                       | Status  |
+|------------|-------------------------------|---------|
+| 1000–1099  | Identity & scheduling         | active  |
+| 1100–1199  | Migrations & schema evolution | reserved|
+| 1200–1299  | Build/deploy coordination     | reserved|
+| 1300+      | Future use                    | reserved|
+
+## Active registrations
+
+| Key ID | Constant name     | Owner                                    | Purpose                                  |
+|--------|-------------------|------------------------------------------|------------------------------------------|
+| 1001   | AGENT_ID_ALLOC    | `scripts/lib/auto_agent_id.py`           | Sub-tag allocator critical section.      |
+
+## Rules
+
+1. Pick the next available integer in the appropriate range.
+2. Add a row to the "Active registrations" table in the same commit
+   that introduces the lock. A PR that adds a `pg_*_advisory_*_lock`
+   call without a registry entry must be rejected in review.
+3. Never use `hashtext('some-string')` — it's a 32-bit hash and the
+   registry loses meaning. Always use an explicit bigint literal.
+4. Document in the owner file:
+   ```python
+   # See docs/lock-namespace.md — registered as AGENT_ID_ALLOC.
+   _ALLOC_LOCK_ID = 1001
+   ```
+
+## History
+
+- **2026-04-20** — Registry created (CAI-RESP-053 A1). Migrated
+  `auto_agent_id.py` from `hashtext('cc-agent-id-alloc')` to `1001`.
+```
+
+- [ ] **Step 7: Run tests**
+
+Run: `pytest tests/test_auto_agent_id.py -v`
+Expected: PASS (including new G3/A1/A3 tests + pre-existing pick_sub_tag tests still green).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add scripts/lib/auto_agent_id.py docs/lock-namespace.md tests/test_auto_agent_id.py
+git commit -m "$(cat <<'EOF'
+feat(identity): G3 MAX_SUB_TAGS ceiling + A1 lock-namespace registry
+
+CAI-RESP-053:
+- G3: pick_sub_tag raises NamespaceExhaustedError past 20 concurrent
+  sub-tags per base. Prevents silent sprawl of runaway launchd.
+- A1: advisory lock key is now a registered bigint (1001 = AGENT_ID_ALLOC)
+  instead of hashtext('cc-agent-id-alloc'). docs/lock-namespace.md locks
+  the integer namespace down before future use sites introduce collisions.
+- A3 guard: regression test asserts auto_agent_id.py never imports
+  supabase-py (PostgREST is GUC-incompatible).
+
+Thread: GOVERNANCE-CLEANUP-001 Step 3.5.
+EOF
+)"
+```
+
+### Task 16: A2 asymmetric heartbeat fail-loud + A4 LockTimeout diagnostic flush
+
+**Files:**
+- Modify: `scripts/launch_dangerous_cc.sh` — heartbeat loop at L217–L260.
+- Modify: `scripts/lib/auto_agent_id.py` — `allocate_sub_tag_and_register` LockTimeoutError path (inside the `if not acquired:` block).
+
+**Why:**
+- **A2 asymmetric (CAI-confirmed)**: `agents.last_heartbeat` feeds `stale_agents` view + telegram `/status` + operator dashboards. If it silently stops, operator goes blind. `agent_status.last_heartbeat` (psycopg+GUC) has its own 15-min view-based backstop → stays best-effort. Drop `|| true` on the supabase-py path; redirect stderr to a dedicated log.
+- **A4**: `LockTimeoutError` today prints holders to stderr only; if the launcher is run under launchd, stderr may already be redirected or swallowed. A dedicated diagnostic file (`/tmp/cc_lock_timeout_<UTC-iso>.log`) + fsync before raise gives the operator a forensic trail even after the shell exits.
+- **Size caps (CAI sub-amendment)**: unbounded `/tmp/` growth is a known launcher pathology. Both logs get caps.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_launcher_logs.py`:
+
+```python
+"""Tests for launcher heartbeat error log and LockTimeout diagnostic flush."""
+import os
+import re
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+import pytest
+
+
+LAUNCHER = Path("scripts/launch_dangerous_cc.sh")
+HELPER = Path("scripts/lib/auto_agent_id.py")
+
+
+def test_launcher_heartbeat_agents_path_does_not_swallow_stderr():
+    """The supabase-py heartbeat (agents table) must fail loud, not `|| true`."""
+    src = LAUNCHER.read_text()
+    # Find the `sb.table('agents').update(...).execute()` heartbeat block
+    # and assert the surrounding shell wrapper does NOT have `|| true`.
+    # Crude but effective: the agents-table heartbeat should be followed by
+    # `2>>/tmp/cc_heartbeat_err.log` (append redirect), not `2>/dev/null || true`.
+    m = re.search(
+        r"sb\.table\('agents'\)\.update\(\{'last_heartbeat'[\s\S]*?execute\(\)\n\"\n(\s*)([^\n]+)",
+        src,
+    )
+    assert m, "could not locate agents heartbeat block"
+    tail = m.group(2)
+    assert "/tmp/cc_heartbeat_err.log" in tail, f"expected redirect to heartbeat err log, got {tail!r}"
+    assert "|| true" not in tail, f"agents heartbeat must fail loud, got {tail!r}"
+
+
+def test_launcher_heartbeat_cap_check_present():
+    """Heartbeat log must be size-capped (10MB) to prevent /tmp sprawl."""
+    src = LAUNCHER.read_text()
+    assert "10485760" in src or "10*1024*1024" in src or "10 * 1024 * 1024" in src, \
+        "expected 10MB cap constant in launcher"
+    assert "cc_heartbeat_err.log" in src
+
+
+def test_lock_timeout_flush_path_present():
+    """allocate_sub_tag_and_register writes a diagnostic file before raising."""
+    src = HELPER.read_text()
+    assert "cc_lock_timeout_" in src, "expected LockTimeout diagnostic filename pattern"
+    assert "fsync" in src, "expected fsync on the diagnostic file handle"
+    # Newest-20 retention via glob + sort + unlink
+    assert "/tmp/cc_lock_timeout_" in src
+    assert re.search(r"glob.*cc_lock_timeout", src), "expected glob for retention pruning"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pytest tests/test_launcher_logs.py -v`
+Expected: all 3 tests FAIL (current code has `|| true` and no diagnostic file).
+
+- [ ] **Step 3: Edit heartbeat loop in `scripts/launch_dangerous_cc.sh` (A2)**
+
+Replace L223–L236 (the `while true` body, agents-table write):
+
+Old:
+```bash
+    while true; do
+        sleep 300
+        "$VENV_PY" -c "
+import os, sys
+sys.path.insert(0, '$ORCH_DIR')
+from dotenv import load_dotenv
+load_dotenv('$ORCH_DIR/.env')
+from supabase import create_client
+from datetime import datetime, timezone
+sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
+now_iso = datetime.now(timezone.utc).isoformat()
+# agents table — base id (FK-enforced)
+sb.table('agents').update({'last_heartbeat': now_iso}).eq('id', '$BASE_AGENT_ID').execute()
+" 2>/dev/null || true
+```
+
+New:
+```bash
+    local HB_ERR_LOG="/tmp/cc_heartbeat_err.log"
+    local HB_ERR_CAP=10485760  # 10 MB cap (CAI-RESP-053 sub-amendment)
+    while true; do
+        sleep 300
+        # A2 (CAI-RESP-053): agents.last_heartbeat feeds stale_agents view +
+        # telegram /status + operator dashboards. FAIL LOUD — no `|| true`.
+        # Errors append to a tailable log; size-capped to HB_ERR_CAP bytes.
+        if [ -f "$HB_ERR_LOG" ] && [ "$(wc -c < "$HB_ERR_LOG")" -gt "$HB_ERR_CAP" ]; then
+            : > "$HB_ERR_LOG"   # truncate once cap exceeded
+            echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [heartbeat-log] truncated (cap=$HB_ERR_CAP B)" >> "$HB_ERR_LOG"
+        fi
+        "$VENV_PY" -c "
+import os, sys
+sys.path.insert(0, '$ORCH_DIR')
+from dotenv import load_dotenv
+load_dotenv('$ORCH_DIR/.env')
+from supabase import create_client
+from datetime import datetime, timezone
+sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
+now_iso = datetime.now(timezone.utc).isoformat()
+# agents table — base id (FK-enforced)
+sb.table('agents').update({'last_heartbeat': now_iso}).eq('id', '$BASE_AGENT_ID').execute()
+" 2>>"$HB_ERR_LOG"
+```
+
+(The `agent_status` psycopg block below stays best-effort — no change to its `2>/dev/null || true`. The `stale_agents` 15-min backstop covers silent failure there.)
+
+- [ ] **Step 4: Edit `allocate_sub_tag_and_register` LockTimeout flush (A4)**
+
+In `scripts/lib/auto_agent_id.py`, inside the `if not acquired:` block, BEFORE `raise LockTimeoutError(...)`, insert:
+
+```python
+                # A4 (CAI-RESP-053): flush diagnostic to disk before raising.
+                # Launcher stderr may be redirected by launchd; a dedicated
+                # file gives the operator a forensic trail.
+                import datetime as _dt
+                import glob as _glob
+                import os as _os
+                import traceback as _traceback
+                _iso = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                _diag_path = f"/tmp/cc_lock_timeout_{_iso}.log"
+                try:
+                    with open(_diag_path, "a") as _fh:
+                        _fh.write(f"timestamp: {_iso}\n")
+                        _fh.write(f"base: {base}\n")
+                        _fh.write(f"repo: {repo}\n")
+                        _fh.write(f"lock_id: {_ALLOC_LOCK_ID}\n")
+                        _fh.write(f"timeout_seconds: {_LOCK_TIMEOUT_SECONDS}\n")
+                        _fh.write(f"holders: {holders}\n")
+                        _fh.write("stack:\n")
+                        _fh.write("".join(_traceback.format_stack()))
+                        _fh.flush()
+                        _os.fsync(_fh.fileno())
+                except OSError:
+                    pass  # disk full / permission — swallow; primary signal is the raise
+
+                # Retention: keep newest 20 diagnostic files, unlink the rest.
+                try:
+                    _existing = sorted(_glob.glob("/tmp/cc_lock_timeout_*.log"))
+                    for _old in _existing[:-20]:
+                        try:
+                            _os.unlink(_old)
+                        except OSError:
+                            pass
+                except OSError:
+                    pass
+```
+
+- [ ] **Step 5: Launcher also tails the most-recent diagnostic on allocator failure**
+
+In `scripts/launch_dangerous_cc.sh`, find the existing `cc_alloc_err.log` tail (from Task 7). Immediately after it, append:
+
+```bash
+    # A4 (CAI-RESP-053): surface the most-recent LockTimeout diagnostic.
+    RECENT_LOCK_DIAG=$(ls -t /tmp/cc_lock_timeout_*.log 2>/dev/null | head -n 1 || true)
+    if [ -n "$RECENT_LOCK_DIAG" ] && [ -f "$RECENT_LOCK_DIAG" ]; then
+        echo -e "${AMBER}  Most recent lock-timeout diagnostic: ${RECENT_LOCK_DIAG}${RESET}"
+        tail -n 20 "$RECENT_LOCK_DIAG" | sed 's/^/    /'
+    fi
+```
+
+(Exact location: inside the failure branch that already cats `/tmp/cc_alloc_err.log` — co-locate for consistency.)
+
+- [ ] **Step 6: Run tests**
+
+Run: `pytest tests/test_launcher_logs.py tests/test_auto_agent_id.py -v`
+Expected: PASS.
+
+- [ ] **Step 7: Smoke — simulate a failed agents heartbeat and confirm the log grows**
+
+Run:
+```bash
+# Simulate by writing a deliberately-invalid payload via the same redirect pattern.
+: > /tmp/cc_heartbeat_err.log
+python -c "
+import os
+from dotenv import load_dotenv
+load_dotenv('.env')
+from supabase import create_client
+sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_KEY'])
+# Invalid id → FK violation → stderr
+try:
+    sb.table('agents').update({'last_heartbeat': 'not-a-timestamp'}).eq('id', 'does-not-exist').execute()
+except Exception as e:
+    import sys; print(e, file=sys.stderr)
+" 2>>/tmp/cc_heartbeat_err.log
+wc -c /tmp/cc_heartbeat_err.log   # expect > 0
+```
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add scripts/launch_dangerous_cc.sh scripts/lib/auto_agent_id.py tests/test_launcher_logs.py
+git commit -m "$(cat <<'EOF'
+feat(launcher): A2 asymmetric heartbeat fail-loud + A4 lock-timeout diagnostic flush
+
+CAI-RESP-053:
+- A2: agents.last_heartbeat feeds dashboards + stale_agents view +
+  telegram /status. Drop `|| true`, redirect stderr to /tmp/cc_heartbeat_err.log
+  (10 MB cap). agent_status heartbeat stays best-effort per stale_agents backstop.
+- A4: on LockTimeoutError, fsync full diagnostic (base, repo, lock id,
+  holders, stack) to /tmp/cc_lock_timeout_<UTC-iso>.log BEFORE raising.
+  Retention: newest 20 files; older pruned.
+- Launcher also tails the most-recent diagnostic on allocator failure.
+
+Thread: GOVERNANCE-CLEANUP-001 Step 3.5.
+EOF
+)"
+```
+
+### Task 17: G2 regression-check artifact + D1/D2 in STATUS.md
+
+**Files:**
+- Modify: `STATUS.md` — Next Steps block.
+- Create: `reports/step-3.5/g2-regression-check.txt` — git-log artifact.
+
+**Why:**
+- **G1**: the plan file is *this* file. Appending Step 3.5 inline (which you're reading now) IS the consolidation. No further action needed in Task 17 for G1.
+- **G2**: CAI wants the pre-existing test attribution (`TestFormatTelegram` + `TestPollAgentMessages` — the 2 failing tests) reproducible from the record alone. A frozen git-log artifact in-repo satisfies this without relying on run-time git state.
+- **D1/D2**: STATUS.md "Next Steps" block needs explicit pointers so the next session knows Step 4 = BUG-024 Phase 1, Step 5 = BUG-027 janitor. Committed-date placeholders only; actual dates set when those steps start.
+
+- [ ] **Step 1: Generate the G2 artifact**
+
+Run:
+```bash
+mkdir -p reports/step-3.5
+{
+  echo "# G2: Pre-existing test regression check"
+  echo "# Generated for CAI-RESP-053 G2 audit trail."
+  echo "# Command:"
+  echo "#   git log --oneline e0e26d6^..HEAD -- tests/test_agent_messages_poll.py scripts/agent_messages_poll.py"
+  echo "# Context:"
+  echo "#   e0e26d6 is the first commit of Step 3 (Task 1)."
+  echo "#   The 2 failing tests in the Step 3 review were TestFormatTelegram and"
+  echo "#   TestPollAgentMessages — both assert 'claude.ai' in text. Empty output"
+  echo "#   below confirms Step 3 did NOT touch either file; failures are pre-existing."
+  echo ""
+  echo "## git log output:"
+  git log --oneline e0e26d6^..HEAD -- tests/test_agent_messages_poll.py scripts/agent_messages_poll.py || true
+  echo ""
+  echo "## test file HEAD SHAs at the time of Step 3 review:"
+  git log -1 --format='%H %ad %s' -- tests/test_agent_messages_poll.py || true
+  git log -1 --format='%H %ad %s' -- scripts/agent_messages_poll.py || true
+} > reports/step-3.5/g2-regression-check.txt
+cat reports/step-3.5/g2-regression-check.txt
+```
+
+Expected: the "git log output" section is empty (no Step 3 commits touched those files); the file SHAs are older than `e0e26d6`.
+
+- [ ] **Step 2: Edit `STATUS.md` Next Steps block**
+
+Locate the "Next steps" block (top of file, under the Step 3 shipped entry). Append:
+
+```markdown
+### Deferred from Step 3.5 (CAI-RESP-053)
+
+- **Step 4 (D1)**: BUG-024 Phase 1 — promote sub-identity (`cc-ihsanos-N`)
+  to first-class `agents.id` FK. Collapses the current dual-identity split
+  (base in `agents`, sub-tag in `agent_status` under GUC) into a single
+  FK-coherent surface. Every new write site between now and Phase 1 is a
+  BUG-024 re-introduction risk. Committed-date: TBD after Step 3.5 ships.
+
+- **Step 5 (D2)**: BUG-027 — exit-trap janitor cron. Exit trap doesn't
+  survive `kill -9`, so stale `agent_status` rows can linger past the
+  `stale_agents` view's 15-min threshold. Cron-based janitor flips rows
+  with `last_heartbeat < now() - interval '30 minutes'` to `offline`.
+  Committed-date: TBD after Step 4.
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add STATUS.md reports/step-3.5/g2-regression-check.txt
+git commit -m "$(cat <<'EOF'
+chore: Step 3.5 — G2 regression-check artifact + D1/D2 in STATUS.md
+
+CAI-RESP-053 close-out:
+- G2: frozen git-log artifact confirms the 2 pre-existing test failures
+  (TestFormatTelegram, TestPollAgentMessages) are not Step 3 regressions.
+- D1: STATUS.md Next Steps pointer to Step 4 = BUG-024 Phase 1.
+- D2: STATUS.md Next Steps pointer to Step 5 = BUG-027 janitor cron.
+
+Thread: GOVERNANCE-CLEANUP-001 Step 3.5.
+EOF
+)"
+```
+
+### Step 3.5 Close-Out
+
+After Task 17 commits:
+
+1. **File review_request to CAI** — same shape as msg 408; subject `Step 3.5 shipped — CAI-RESP-053 integration ready for adversarial review [cc-ihsanos-3]`; body covers B1/G1/G2/G3/A1/A2/A3/A4 status + D1/D2 deferred.
+2. **On CAI ack** → push `origin/main`, close job #111, close GOVERNANCE-CLEANUP-001 thread.
+3. **On CAI counter** → draft delta, cycle (same pattern as this Step 3.5 itself).
+
+**Estimate:** 2–2.5h end-to-end.
+
+---
