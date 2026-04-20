@@ -88,6 +88,10 @@ REMINDER_PID=""
 # ── Step 3: dual-identity resolution via scripts/lib/auto_agent_id ───────────
 
 # Load DATABASE_URL from .env for the helper call.
+# Note: sourcing with `set -a` marks NEW assignments for export and OVERWRITES
+# same-named shell vars — so .env wins over pre-set shell env. This is
+# intentional for the orchestrator-managed launcher (canonical config lives
+# in .env, not the operator's shell).
 # shellcheck disable=SC1091
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
 DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
@@ -111,6 +115,16 @@ CC_BASE_AGENT_ID="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(js
 # Delta-v2 non-load-bearing #4: overlap_warnings is list of [aid, age_s]
 # pairs. Format each as "aid (Ns ago)" for operator-readable output.
 OVERLAP_WARNINGS="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(", ".join(f"{a} ({s}s ago)" for a,s in json.load(sys.stdin)["overlap_warnings"]))')"
+
+# Guard: if the helper returned exit-0 but produced unparseable stdout, the
+# json.load calls above still `print("")` via silent failure and we'd proceed
+# with empty agent_id — which would then land malformed agent_status rows.
+# Fail-loud here so the operator sees the real problem before claude starts.
+if [ -z "$CC_AGENT_ID" ] || [ -z "$CC_BASE_AGENT_ID" ]; then
+    echo -e "\033[31mERROR: auto_agent_id returned empty sub_tag or base_agent_id\033[0m" >&2
+    echo "       Raw JSON: $ALLOC_JSON" >&2
+    exit 1
+fi
 
 export CC_AGENT_ID
 export CC_BASE_AGENT_ID
