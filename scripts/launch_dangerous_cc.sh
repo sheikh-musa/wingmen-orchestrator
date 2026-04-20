@@ -541,7 +541,52 @@ sb.table('agents').update({'status': 'idle', 'current_task': None}).eq('id', '$B
 
 trap '_handle_exit' EXIT
 
-# ── 6. Launch claude ──────────────────────────────────────────────────────────
+# ── 6. Launch claude (Step 3: Opus 4.7 default + MODEL env override) ─────────
+#
+# Delta-v2 non-load-bearing #3 — model precedence order (LAST argv --model
+# wins, because `claude` uses last-wins flag parsing):
+#   1. CLAUDE_PASSTHROUGH --model foo   — highest priority (operator escape
+#                                         hatch via `-- --model foo` on the
+#                                         launcher command line).
+#   2. MODEL env var                    — resolves RESOLVED_MODEL, applied as
+#                                         the first --model flag on argv.
+#   3. hardcoded default claude-opus-4-7 — falls through when MODEL unset.
+# Sequencing: resolve RESOLVED_MODEL from (MODEL env || default) → append
+# `--model $RESOLVED_MODEL` to the claude call → append "${CLAUDE_PASSTHROUGH[@]}"
+# AFTER it, so a passthrough --model overrides by coming later on argv.
+
+RESOLVED_MODEL="${MODEL:-claude-opus-4-7}"
+echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}"
+if [ "$RESOLVED_MODEL" != "claude-opus-4-7" ]; then
+    echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-7)${RESET}"
+fi
+
+# Also stamp resolved model into current_task so CAI can observe model drift
+# across sessions via agent_status.current_task sampling.
+"$VENV_PY" -c "
+import os, sys
+sys.path.insert(0, '$ORCH_DIR')
+from dotenv import load_dotenv
+load_dotenv('$ORCH_DIR/.env')
+try:
+    import psycopg
+except ImportError:
+    sys.exit(0)
+dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
+if not dsn:
+    sys.exit(0)
+try:
+    with psycopg.connect(dsn, autocommit=False) as conn:
+        with conn.cursor() as cur:
+            cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$CC_AGENT_ID',))
+            cur.execute(
+                \"UPDATE agent_status SET current_task = %s, updated_at=now() WHERE agent_id = %s\",
+                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_AGENT_ID'),
+            )
+        conn.commit()
+except Exception:
+    pass
+" 2>/dev/null || true
 
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
@@ -552,10 +597,9 @@ echo ""
 cd "$CALLER_DIR"
 
 # CLAUDE_PASSTHROUGH was populated by the single-pass arg parser at the top of
-# this script. Use it directly (CLAUDE_ARGS alias for readability).
-CLAUDE_ARGS=("${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}")
+# this script; use it directly.
 
-if [ -n "$LAUNCH_CONTEXT" ] && [ ${#CLAUDE_ARGS[@]} -eq 0 ]; then
+if [ -n "$LAUNCH_CONTEXT" ] && [ ${#CLAUDE_PASSTHROUGH[@]} -eq 0 ]; then
     # BUG-011 fix: write context to temp file. The SessionStart hook in
     # ~/.claude/settings.local.json reads and deletes the file, injecting it
     # as a system-reminder on startup. Piping via stdin (or -p) makes claude
@@ -566,4 +610,6 @@ fi
 
 # Always launch interactively. Context (if staged above) arrives via the
 # SessionStart hook as a system-reminder, not via stdin.
-claude --dangerously-skip-permissions "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
+# --model $RESOLVED_MODEL first; CLAUDE_PASSTHROUGH appended AFTER so an
+# operator `-- --model X` wins via last-wins flag parsing.
+claude --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
