@@ -14,6 +14,23 @@ pytestmark_integration = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _clean_test_family_rows():
+    """Unconditional DELETE of cc-test-family-% rows before AND after each integration test.
+    Makes teardown crash-safe — prior aborted runs don't leak state."""
+    if not DSN:
+        yield
+        return
+    import psycopg
+    def _purge():
+        with psycopg.connect(DSN, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("DELETE FROM agent_status WHERE agent_id LIKE 'cc-test-family-%%'")
+    _purge()
+    yield
+    _purge()
+
+
 @pytestmark_integration
 class TestLoadFamilyMap:
     def test_returns_all_four_cc_families_canonicalized(self):
@@ -298,18 +315,10 @@ class TestAllocateSubTagAndRegister:
                 )
             setup_conn.commit()
 
-        try:
-            result = auto_agent_id.allocate_sub_tag_and_register(
-                base="cc-test-family",
-                dsn=DSN,
-                repo="orchestrator",
-            )
-            assert result.sub_tag == "cc-test-family-2"
-            assert "cc-test-family-1" in result.siblings
-        finally:
-            with self._fresh_conn() as clean_conn:
-                with clean_conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM agent_status WHERE agent_id LIKE 'cc-test-family-%'"
-                    )
-                clean_conn.commit()
+        result = auto_agent_id.allocate_sub_tag_and_register(
+            base="cc-test-family",
+            dsn=DSN,
+            repo="orchestrator",
+        )
+        assert result.sub_tag == "cc-test-family-2"
+        assert "cc-test-family-1" in result.siblings

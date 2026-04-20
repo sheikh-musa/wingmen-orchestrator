@@ -13,6 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+_ALLOC_LOCK_KEY = "cc-agent-id-alloc"
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_INTERVAL_SECONDS = 0.5
+_LOCK_RETRY_COUNT = 10  # 10 × 0.5s = 5s ceiling
+
+
 class UnknownRepoError(ValueError):
     """Raised when pwd does not map to a registered agent family.
     Fail-fast per CAI msg 395 Q2 constraint — never silent-fallback."""
@@ -156,6 +162,7 @@ class LockTimeoutError(RuntimeError):
 
 @dataclass(frozen=True)
 class AllocResult:
+    """Result of allocate_sub_tag_and_register: chosen sub-tag + siblings seen pre-allocation."""
     sub_tag: str
     siblings: list[str]  # active siblings *before* this allocation
 
@@ -193,17 +200,18 @@ def allocate_sub_tag_and_register(
 
     with psycopg.connect(dsn, autocommit=False) as conn:
         with conn.cursor() as cur:
-            # Bounded lock acquisition: 10 × 500ms = 5s ceiling.
+            # Bounded lock acquisition: _LOCK_RETRY_COUNT × _LOCK_POLL_INTERVAL_SECONDS ceiling.
             acquired = False
-            for _ in range(10):
+            for attempt in range(_LOCK_RETRY_COUNT):
                 cur.execute(
                     "SELECT pg_try_advisory_xact_lock(hashtext(%s))",
-                    ("cc-agent-id-alloc",),
+                    (_ALLOC_LOCK_KEY,),
                 )
                 if cur.fetchone()[0]:
                     acquired = True
                     break
-                time.sleep(0.5)
+                if attempt < _LOCK_RETRY_COUNT - 1:
+                    time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
             if not acquired:
                 # Diagnostic: who holds our key?
                 cur.execute(
@@ -212,12 +220,13 @@ def allocate_sub_tag_and_register(
                       FROM pg_locks l
                       JOIN pg_stat_activity a ON a.pid = l.pid
                      WHERE locktype = 'advisory'
-                       AND objid = hashtext('cc-agent-id-alloc')::bigint
-                    """
+                       AND objid = hashtext(%s)::bigint
+                    """,
+                    (_ALLOC_LOCK_KEY,),
                 )
                 holders = cur.fetchall()
                 raise LockTimeoutError(
-                    f"advisory lock 'cc-agent-id-alloc' held >5s. "
+                    f"advisory lock {_ALLOC_LOCK_KEY!r} held >{_LOCK_TIMEOUT_SECONDS}s. "
                     f"Holders: {holders}"
                 )
 
