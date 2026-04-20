@@ -11,7 +11,13 @@ ALTER TABLE agent_messages
     DROP CONSTRAINT IF EXISTS agent_messages_sub_tag_family_prefix_chk;
 ALTER TABLE agent_messages
     ADD CONSTRAINT agent_messages_sub_tag_family_prefix_chk
-    CHECK (sub_tag IS NULL OR sub_tag LIKE from_agent || '-%');
+    CHECK (
+        sub_tag IS NULL
+        OR (
+            length(from_agent) > 0
+            AND left(sub_tag, length(from_agent) + 1) = from_agent || '-'
+        )
+    );
 
 CREATE INDEX IF NOT EXISTS idx_agent_messages_sub_tag
     ON agent_messages (from_agent, sub_tag)

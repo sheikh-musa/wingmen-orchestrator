@@ -53,7 +53,10 @@ def test_check_accepts_matching_family():
             """
         )
         mid = cur.fetchone()[0]
-        cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
+        try:
+            pass
+        finally:
+            cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
 
 
 def test_check_accepts_null():
@@ -66,8 +69,88 @@ def test_check_accepts_null():
             """
         )
         mid, sub_tag = cur.fetchone()
-        assert sub_tag is None
-        cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
+        try:
+            assert sub_tag is None
+        finally:
+            cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
+
+
+def test_check_rejects_like_metacharacter_bypass():
+    """Guard against LIKE-wildcard bypass.
+
+    If from_agent ever contains `_` (a LIKE single-char wildcard), the old
+    `sub_tag LIKE from_agent || '-%'` constraint would match across
+    families. Example: from_agent='cc-ihsanos' contains a literal `-`, but
+    if a future agent id were 'cc_ihsanos', then an impostor row with
+    from_agent='cc-ihsanos' and sub_tag='cc-ihsanos-1' would also pass a
+    constraint built from a different agent id 'cc_ihsanos' — because
+    'cc-ihsanos-1' LIKE 'cc_ihsanos-%' is True under LIKE.
+
+    More directly: from_agent='cc-ihsanos', sub_tag='cc_ihsanos-1' — the
+    old LIKE form would be 'cc_ihsanos-1' LIKE 'cc-ihsanos-%'. That's
+    False. The real bypass direction is from_agent containing wildcards.
+    We simulate by probing the LIKE expression with a wildcard-bearing
+    from_agent, then asserting the literal form rejects the equivalent
+    CHECK via an insert.
+    """
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        # 1. Sanity: demonstrate the old LIKE form would have allowed a
+        #    cross-family match when from_agent contains `_`.
+        cur.execute(
+            "SELECT ('cc-ihsanos-1' LIKE %s || '-%%')", ('cc_ihsanos',)
+        )
+        assert cur.fetchone()[0] is True, (
+            "LIKE wildcard assumption broken — `_` should match any char under LIKE"
+        )
+
+        # 2. The new literal form rejects the equivalent shape. We insert
+        #    (from_agent='cc-ihsanos', sub_tag='cc_ihsanos-1'): the literal
+        #    left()/length() check compares sub_tag[:11] ('cc_ihsanos-') vs
+        #    from_agent || '-' ('cc-ihsanos-') — not equal, so CheckViolation.
+        #    Under the OLD LIKE form this would have passed, because
+        #    'cc_ihsanos-1' LIKE 'cc-ihsanos-%' is... actually False in this
+        #    direction. Use a direct SELECT probe to confirm the literal
+        #    form rejects a wildcard-bearing from_agent.
+        cur.execute(
+            """
+            SELECT
+                (sub_tag IS NULL
+                 OR (length(from_agent) > 0
+                     AND left(sub_tag, length(from_agent) + 1) = from_agent || '-'))
+            FROM (VALUES ('cc_ihsanos', 'cc-ihsanos-1')) AS v(from_agent, sub_tag)
+            """
+        )
+        assert cur.fetchone()[0] is False, (
+            "literal form must reject cross-family match that LIKE would accept"
+        )
+
+        # 3. And confirm via an actual insert that a mismatched prefix is
+        #    rejected by the CHECK constraint itself.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute(
+                """
+                INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, sub_tag)
+                VALUES ('cc-ihsanos', 'cai', 'update', 'b1-test-likebypass', 'b', 'cc_ihsanos-1')
+                """
+            )
+
+
+def test_check_rejects_empty_from_agent_in_principle():
+    """from_agent is FK-enforced so we can't insert with empty from_agent,
+    but we assert the CHECK expression itself rejects (from_agent='',
+    sub_tag='anything-1') via a SELECT probe.
+    """
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                (sub_tag IS NULL
+                 OR (length(from_agent) > 0
+                     AND left(sub_tag, length(from_agent) + 1) = from_agent || '-'))
+            FROM (VALUES ('', 'anything-1')) AS v(from_agent, sub_tag)
+            """
+        )
+        assert cur.fetchone()[0] is False
 
 
 def test_partial_index_exists():
