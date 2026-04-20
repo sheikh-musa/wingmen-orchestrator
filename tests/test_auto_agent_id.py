@@ -1,9 +1,13 @@
 """Tests for scripts.lib.auto_agent_id — GOVERNANCE-CLEANUP-001 Step 3."""
-import pytest
-from scripts.lib import auto_agent_id
-
+import json
 import os
+import subprocess
+import sys
+
+import pytest
 from dotenv import load_dotenv
+
+from scripts.lib import auto_agent_id
 
 load_dotenv()
 DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -387,3 +391,36 @@ class TestScanOverlapSiblings:
           exclude_sub_tag="cc-test-family-2",
       )
       assert overlaps == []
+
+
+class TestCliEntrypoint:
+    def test_unrecognized_repo_exits_1_with_clear_error(self):
+        # Invoke the module as a subprocess — verify exit code + stderr.
+        result = subprocess.run(
+            [sys.executable, "-m", "scripts.lib.auto_agent_id",
+             "--pwd", "/tmp/foo",
+             "--repo", "unknown",
+             "--dsn", "postgres://invalid"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "UnknownRepoError" in result.stderr or "not a registered" in result.stderr
+
+    @pytestmark_integration
+    def test_recognized_repo_emits_json(self):
+        # Autouse fixture handles before/after cleanup.
+        env = {**os.environ, "DATABASE_URL": DSN}
+        result = subprocess.run(
+            [sys.executable, "-m", "scripts.lib.auto_agent_id",
+             "--pwd", str(os.path.expanduser("~/wingmen/orchestrator")),
+             "--repo", "orchestrator",
+             "--dsn", DSN,
+             "--base-override", "cc-test-family"],
+            capture_output=True, text=True, env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["base"] == "cc-test-family"
+        assert payload["sub_tag"] == "cc-test-family-1"
+        assert isinstance(payload["siblings"], list)
+        assert isinstance(payload["overlap_warnings"], list)

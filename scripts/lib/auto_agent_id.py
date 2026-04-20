@@ -6,8 +6,11 @@ base (family, agent_messages.from_agent FK-enforced).
 """
 from __future__ import annotations
 
+import argparse
+import json
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -304,3 +307,80 @@ def scan_overlap_siblings(
                 (f"{base}-%", exclude_sub_tag, stale_cutoff_minutes, scope_repo),
             )
             return [(r[0], int(r[1])) for r in cur.fetchall()]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint: emit JSON {sub_tag, base, siblings, overlap_warnings}.
+
+    Invoked by scripts/launch_dangerous_cc.sh. Exits 1 on UnknownRepoError
+    or LockTimeoutError with human-readable stderr.
+
+    Delta-v2 checkpoint: CLI loads the family map itself (not launcher-side).
+    Keeps bash pure — shell ships only --pwd/--repo/--dsn and the CLI owns
+    the map-shape surface.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m scripts.lib.auto_agent_id",
+        description="Allocate a sub-tag agent identity within a registered family.",
+    )
+    parser.add_argument("--pwd", required=True, help="caller working directory")
+    parser.add_argument("--repo", required=True, help="repo name for scope_repos")
+    parser.add_argument("--dsn", required=True, help="Postgres DSN")
+    parser.add_argument("--stale-minutes", type=int, default=30)
+    parser.add_argument(
+        "--base-override",
+        default=None,
+        help="skip pwd→family resolution, use this base (test hook only)",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        # Data-driven map (delta-v2 L1-B2): load from agents.repo_scope each boot.
+        # Drift from hardcoded constants is structurally impossible.
+        # On DB connection failure fall back to empty map so that pwd-resolution
+        # still runs and raises UnknownRepoError for unregistered paths (rather
+        # than surfacing a raw psycopg traceback).
+        try:
+            family_map = load_family_map(args.dsn)
+        except Exception:
+            family_map = {}
+        base = args.base_override or resolve_base_agent_id(args.pwd, family_map)
+    except UnknownRepoError as e:
+        sys.stderr.write(f"UnknownRepoError: {e}\n")
+        return 1
+
+    try:
+        result = allocate_sub_tag_and_register(
+            base=base,
+            dsn=args.dsn,
+            repo=args.repo,
+            stale_cutoff_minutes=args.stale_minutes,
+        )
+    except LockTimeoutError as e:
+        sys.stderr.write(f"LockTimeoutError: {e}\n")
+        return 1
+
+    overlaps = scan_overlap_siblings(
+        base=base,
+        scope_repo=args.repo,
+        dsn=args.dsn,
+        exclude_sub_tag=result.sub_tag,
+        stale_cutoff_minutes=args.stale_minutes,
+    )
+
+    json.dump(
+        {
+            "sub_tag": result.sub_tag,
+            "base": base,
+            "siblings": list(result.siblings),
+            # list of [agent_id, heartbeat_age_s] pairs (JSON-serialised tuples).
+            "overlap_warnings": [[aid, age] for (aid, age) in overlaps],
+        },
+        sys.stdout,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
