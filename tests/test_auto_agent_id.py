@@ -188,3 +188,128 @@ class TestPickSubTag:
         assert auto_agent_id.pick_sub_tag(
             "cc-ihsanos", ["cc-ihsanos-test", "cc-ihsanos-1"]
         ) == "cc-ihsanos-2"
+
+
+@pytestmark_integration
+class TestAllocateSubTagAndRegister:
+    """SAVEPOINT-rolled integration tests against the real Supabase project.
+    Mirrors verify_governance_hygiene_batch.py SAVEPOINT/ROLLBACK harness."""
+
+    def _fresh_conn(self):
+        import psycopg
+        return psycopg.connect(DSN, autocommit=False)
+
+    def test_empty_family_allocates_one(self):
+        # Roll in SAVEPOINT so we don't pollute real agent_status.
+        import psycopg
+        with self._fresh_conn() as setup_conn:
+            with setup_conn.cursor() as cur:
+                cur.execute("SAVEPOINT test_alloc")
+                # Delete any sub-tagged rows in test family so we start clean.
+                cur.execute("SELECT set_config('app.current_agent_id', %s, true)",
+                            ("cc-test-family",))
+                cur.execute(
+                    "DELETE FROM agent_status WHERE agent_id LIKE 'cc-test-family-%'"
+                )
+            setup_conn.commit()
+
+        try:
+            result = auto_agent_id.allocate_sub_tag_and_register(
+                base="cc-test-family",
+                dsn=DSN,
+                repo="orchestrator",
+            )
+            assert result.sub_tag == "cc-test-family-1"
+            assert result.siblings == []
+
+            # Verify row landed
+            with self._fresh_conn() as verify_conn:
+                with verify_conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status, current_task, scope_repos "
+                        "FROM agent_status WHERE agent_id = %s",
+                        (result.sub_tag,),
+                    )
+                    row = cur.fetchone()
+                    assert row is not None
+                    assert row[0] == "working"
+                    assert row[1] == "session-launch"
+                    assert row[2] == ["orchestrator"]
+        finally:
+            # Cleanup
+            with self._fresh_conn() as clean_conn:
+                with clean_conn.cursor() as cur:
+                    cur.execute("SELECT set_config('app.current_agent_id', %s, true)",
+                                ("cc-test-family-1",))
+                    cur.execute(
+                        "DELETE FROM agent_status WHERE agent_id LIKE 'cc-test-family-%'"
+                    )
+                clean_conn.commit()
+
+    def test_stale_row_is_reclaimed(self):
+        # Insert a row with heartbeat 2 hours old — allocator should skip it
+        # (and its N becomes available).
+        with self._fresh_conn() as setup_conn:
+            with setup_conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.current_agent_id', %s, true)",
+                            ("cc-test-family-1",))
+                cur.execute(
+                    "INSERT INTO agent_status "
+                    "(agent_id, status, last_heartbeat, updated_at) "
+                    "VALUES (%s, 'working', now() - interval '2 hours', now() - interval '2 hours') "
+                    "ON CONFLICT (agent_id) DO UPDATE SET "
+                    "last_heartbeat = EXCLUDED.last_heartbeat",
+                    ("cc-test-family-1",),
+                )
+            setup_conn.commit()
+
+        try:
+            # N=1 is stale, so allocator should reclaim it (pick N=1 again).
+            result = auto_agent_id.allocate_sub_tag_and_register(
+                base="cc-test-family",
+                dsn=DSN,
+                repo="orchestrator",
+            )
+            assert result.sub_tag == "cc-test-family-1"
+            # The previously-stale row should now have fresh heartbeat (UPSERT overwrote).
+        finally:
+            with self._fresh_conn() as clean_conn:
+                with clean_conn.cursor() as cur:
+                    cur.execute("SELECT set_config('app.current_agent_id', %s, true)",
+                                ("cc-test-family-1",))
+                    cur.execute(
+                        "DELETE FROM agent_status WHERE agent_id LIKE 'cc-test-family-%'"
+                    )
+                clean_conn.commit()
+
+    def test_active_sibling_bumps_n(self):
+        # Pre-populate with a fresh sibling; new allocation should pick N=2.
+        with self._fresh_conn() as setup_conn:
+            with setup_conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.current_agent_id', %s, true)",
+                            ("cc-test-family-1",))
+                cur.execute(
+                    "INSERT INTO agent_status "
+                    "(agent_id, status, last_heartbeat, updated_at) "
+                    "VALUES (%s, 'working', now(), now()) "
+                    "ON CONFLICT (agent_id) DO UPDATE SET "
+                    "last_heartbeat = now()",
+                    ("cc-test-family-1",),
+                )
+            setup_conn.commit()
+
+        try:
+            result = auto_agent_id.allocate_sub_tag_and_register(
+                base="cc-test-family",
+                dsn=DSN,
+                repo="orchestrator",
+            )
+            assert result.sub_tag == "cc-test-family-2"
+            assert "cc-test-family-1" in result.siblings
+        finally:
+            with self._fresh_conn() as clean_conn:
+                with clean_conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM agent_status WHERE agent_id LIKE 'cc-test-family-%'"
+                    )
+                clean_conn.commit()
