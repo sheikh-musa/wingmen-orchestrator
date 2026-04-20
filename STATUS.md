@@ -1,10 +1,45 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-19 SGT (ARCH-035 shipped)
+Last Updated: 2026-04-20 SGT (ARCH-036 shipped)
 Build Status: green
-Deploy: ccb136a pushed (migration applied via Supabase MCP under Musa's delegation)
+Deploy: b77a58c pushed (migration applied via Supabase MCP under Musa's delegation per CAI msg #311)
 
-## Last Completed (2026-04-19 — ARCH-035 three-channel governance taxonomy)
+## Last Completed (2026-04-20 — ARCH-036 priority column on narrowed agent_messages)
+
+### ARCH-036 — shipped
+Plan: `docs/superpowers/plans/2026-04-20-arch-036-priority-column.md`
+Spec: `docs/superpowers/specs/2026-04-19-arch-036-priority-column-design.md` (CAI-approved)
+Docs (WINGMEN_CONSTRAINTS): commit `971b759` (ihsanos repo — file lives there) — priority rubric P0/P1/P2/P3 added under ARCH-035 Part 8
+Code commit: `b77a58c` 4-file atomic (migration + agent_messages_poll.py + build_launch_context.py + tests)
+Migration: `supabase/migrations/20260420_arch036_priority_column.sql` applied live via Supabase MCP under Musa's delegation (CAI msg #311) — 246 rows backfilled to P2, 5/5 smoke PASS
+
+**Goal:** Add P0/P1/P2/P3 priority taxonomy to agent_messages so urgent traffic surfaces first and passive FYI doesn't interrupt.
+
+**Shape delivered:**
+- `agent_messages.priority TEXT NOT NULL DEFAULT 'P2'` with 4-value CHECK (`P0`/`P1`/`P2`/`P3`)
+- Anti-inflation CHECK: `P0` and `P1` priorities require `requires_response=true` (cannot mass-mark FYI as urgent)
+- Partial index `idx_agent_messages_priority_unread` on `(priority, created_at)` WHERE `read_at IS NULL` (hot-set sort)
+- Backfill: all 246 pre-existing rows defaulted to `P2`
+- `agent_messages_poll.py` — sort priority-first, prepend 🔴/🟠/🟡 glyph for P0/P1/P2, suppress P3 from Telegram entirely (two-layer defense alongside ARCH-035 banned-prefix filter)
+- `build_launch_context.py` — boot-briefing SELECT + ORDER BY priority; `[P0]`/`[P1]`/`[P2]`/`[P3]` tags rendered for all priorities (briefings show everything; only Telegram suppresses P3)
+- 8 new tests in `TestPriorityFormat` class; all green (372 pass / 9 pre-existing fail unchanged)
+
+**Live verification:** Option B simulated harness (Task 6) — direct module invocation against live DB:
+- P0 row → `_format_telegram` returns 🔴 prefix ✓
+- P1 row → `_format_telegram` returns 🟠 prefix ✓
+- P2 row → `_format_telegram` returns 🟡 prefix ✓
+- P3 row → `_format_telegram` returns None (suppressed) ✓
+- Boot-briefing renders [Pn] tag for all priorities including P3 ✓
+
+Direct dogfood follow-up (Task 8): this session's digest posted as `priority='P3'` to `agent_messages` to verify suppression once Musa cycles launchd. If row lands silently in agent_messages and Musa never gets a Telegram for it, the ARCH-036 P3 suppression rule works as designed.
+
+**Action required:** Musa cycles launchd (`launchctl kickstart -k gui/$(id -u)/dev.wingmen.orchestrator`) to load new poller. Task #76 (parent ARCH-036) ready to close after cycle confirms dogfood suppression.
+
+**Follow-ups still open:** task #97 (ARCH-035 pg_cron purge banned-prefix rows after 24h), #73 (BUG-024 Phase 1 per-agent identity), #77 (ARCH-034 tiered CC Supabase access — gated on BUG-024), #55 (LEDGER spec review).
+
+Next P0: TBD after launchd cycle confirms ARCH-036 dogfood passes.
+
+## Previously Completed (2026-04-19 — ARCH-035 three-channel governance taxonomy)
 
 ### ARCH-035 — shipped
 Plan: `docs/superpowers/plans/2026-04-19-arch-035-three-channel-taxonomy.md` (commit `6a1da85`)
