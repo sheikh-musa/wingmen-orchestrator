@@ -1,10 +1,43 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-20 SGT (ARCH-036 shipped)
+Last Updated: 2026-04-20 SGT (GOVERNANCE-CLEANUP-001 Step 2 shipped)
 Build Status: green
-Deploy: b77a58c pushed (migration applied via Supabase MCP under Musa's delegation per CAI msg #311)
+Deploy: 469a79d (app-code) on top of eb1746a (migration applied via CAI Supabase MCP per msg 387 — 12/12 structural + 4/4 behavioral smoke PASS)
 
-## Last Completed (2026-04-20 — ARCH-036 priority column on narrowed agent_messages)
+## Last Completed (2026-04-20 — GOVERNANCE-CLEANUP-001 Step 2 governance hygiene batch)
+
+### GOVERNANCE-CLEANUP-001 Step 2 — shipped
+Plan: `docs/superpowers/plans/2026-04-20-governance-hygiene-batch.md`
+Thread: agent_messages `4af8f733-4ba4-48fd-91f0-ce0616b1a70b` (msgs 339 → 380 → 387)
+Commits: `eb1746a` (migration + verify + plan + poll.py H6 comment) → `469a79d` (app-code + tests)
+Migration: `supabase/migrations/20260420_governance_hygiene_batch.sql` applied via CAI MCP — 7/7 Python verify matrix PASS
+
+**Goal:** Compose six structural fixes so the governance substrate stops depending on discipline to stay clean.
+
+**Shape delivered:**
+- `strategic_decisions.challenge_status` gains `'superseded'` enum value
+- `strategic_decisions.superseded_by_decision_ref TEXT REFERENCES strategic_decisions(decision_ref) ON DELETE RESTRICT` + partial index
+- `strategic_decisions_no_self_supersede_check` CHECK prevents circular lineage (CAI msg 380 A3)
+- `agent_messages.skipped_at TIMESTAMPTZ` + partial index — dedicated column for notifier-skipped rows (P3/non-routable)
+- CAI-LEDGER-004 re-flipped `overridden → superseded` with lineage FK to `CAI-LEDGER-004-REV01`
+- 13 Step 1 announce-noise rows (msgs 360-372) bulk-closed, strict-scoped `from_agent='cai' AND to_agent='cc-ihsanos'`
+- `trigger_cai_decision_announce` gains OLD-side guard — suppresses hygiene-flip announce storms when `OLD.announced_by_msg_id IS NOT NULL OR OLD.execution_status = 'implemented'`
+- New AFTER UPDATE trigger `trigger_cai_decision_autoclose_announce` — auto-closes linked announce row on `execution_status → 'implemented'`
+- Both trigger functions pinned with `SET search_path = public, pg_temp` (CVE-2018-1058 class)
+- pg_cron `governance_banned_prefix_purge_24h` (03:15 UTC, 4-NULL criterion) + `agent_status_history_90d_ttl` (04:00 UTC); both wrapped in `DO $$ IF NOT EXISTS` idempotency guards
+- `agent_messages_poll.py` — new `_mark_skipped` helper, stamped on None-skip path, `.is_('skipped_at', 'null')` added to poll query so skipped rows exit the hot set
+- Banned-prefix regex kept in sync by convention between Python L45 and SQL D.1 (cross-ref comments on both sides); extraction filed as jobs #109 follow-up
+
+**Live verification:** `scripts/verify_governance_hygiene_batch.py` — 7/7 PASS live against applied migration:
+- Case 1 superseded enum ✓ · Case 2 FK RESTRICT ✓ · Case 3 skipped_at column ✓ · Case 4 fresh announce fires ✓ · Case 5 hygiene flip suppressed (13-row storm regression) ✓ · Case 6 auto-close on implementation ✓ · Case 7 re-announce prevented ✓
+
+**Semantic note:** the OLD-side guard on `OLD.announced_by_msg_id IS NOT NULL` is a semantic improvement over BUG-025 — a decision filed as `challenge_window` that later flips to `accepted` now fires ONE announce, not two. Strictly better; named here so future archaeologists trace the change intentionally.
+
+**CAI adversarial review:** msg 379 → 380 (0 blockers, H1-H7 self-flagged + A1-A3 adds) → 381 (hardening delta) → 387 (APPLIED via MCP, 12/12 structural + 4/4 behavioral smoke PASS).
+
+---
+
+## Previously Completed (2026-04-20 — ARCH-036 priority column on narrowed agent_messages)
 
 ### ARCH-036 — shipped
 Plan: `docs/superpowers/plans/2026-04-20-arch-036-priority-column.md`
