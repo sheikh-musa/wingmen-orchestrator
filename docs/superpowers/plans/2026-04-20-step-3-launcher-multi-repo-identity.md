@@ -13,6 +13,12 @@
 
 **Self-surgery meta:** this session (cc-ihsanos-3) edits the launcher code that spawns cc-ihsanos-N. Edits take effect on NEXT launch, not this session. Task 11 smoke verifies the first next-launch reads the revised launcher correctly. If cc-ihsanos-3 itself exits before Task 12 closes, verify the next cc-ihsanos boot picks up the delta cleanly.
 
+**Worktree-naming convention (delta-v2 L1-B1 + CAI msg 407):** directories created as git worktrees MUST use one of two naming forms so `strip_worktree_suffix` can distinguish them from canonical repo names:
+- uppercase-initial token after `-` or `.`: e.g. `orchestrator-LEDGER`, `orchestrator-HOTFIX`, `orchestrator.QURBAN`
+- lowercase `wt` prefix after `-` or `.`: e.g. `orchestrator.wt-qurban`, `ihsanos.wt-abc123`
+
+Lowercase suffixes (`orchestrator-hotfix`) are treated as canonical repo names, not worktrees — they will `UnknownRepoError` on pwd resolution. Canonical hyphenated repo names (`hifz-companion`, `ai-scholar`, `cosem-tdu`) are preserved by this convention since they start with lowercase.
+
 **Deferred to Step 4 (BUG-024 Phase 1) — NOT in scope here:**
 - Promoting sub-tags to first-class `agents.id` rows (currently FK blocks this).
 - `agents.last_heartbeat` semantics redesign — today all cc-ihsanos-N stomp the same `agents.cc-ihsanos` heartbeat row. Acceptable noise for Step 3; cleaner split lands in Phase 1 where `agent_status.last_heartbeat` becomes per-instance truth.
@@ -415,6 +421,14 @@ def strip_worktree_suffix(segment: str) -> str:
     'orchestrator-LEDGER' → 'orchestrator'
     'orchestrator.wt-qurban' → 'orchestrator'
     'hifz-companion' → 'hifz-companion' (lowercase hyphen, no match)
+
+    CONVENTION (delta-v2 + CAI msg 407): worktree suffixes MUST use either:
+        (a) uppercase-initial token:  `-FEATURE`, `-LEDGER`, `-HOTFIX`
+        (b) dot-wt prefix form:       `.wt-qurban`, `.wt-abc123`
+    Lowercase suffixes (e.g. `orchestrator-hotfix`) are treated as CANONICAL
+    repo names, NOT worktrees — they will UnknownRepoError on pwd resolution.
+    This trades one convention rule for zero ambiguity between `hifz-companion`
+    (canonical, no strip) and `orchestrator-LEDGER` (worktree, stripped).
     """
     return _WORKTREE_SUFFIX_RE.sub("", segment)
 
