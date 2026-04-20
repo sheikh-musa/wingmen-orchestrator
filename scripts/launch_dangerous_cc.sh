@@ -13,12 +13,22 @@
 #
 # Usage:
 #   ./scripts/launch_dangerous_cc.sh
-#   CC_AGENT_ID=cc-web ./scripts/launch_dangerous_cc.sh
+#   ./scripts/launch_dangerous_cc.sh --repo orchestrator
 #   ./scripts/launch_dangerous_cc.sh -- --resume <session-id>
 #
 # Environment:
-#   CC_AGENT_ID  — agent id to boot as (default: cc-ihsanos)
-#   CC_REPO      — repo name for cc_work_sessions row (default: autodetect from git)
+#   CC_REPO      — repo name override (default: caller pwd's git toplevel basename)
+#   MODEL        — claude model override (default: claude-opus-4-7)
+#
+# Identity (GOVERNANCE-CLEANUP-001 Step 3, composes msgs 315/317/324):
+#   Base family (CC_BASE_AGENT_ID) resolved from pwd → data-driven family map
+#   built from agents.repo_scope at launch time (delta-v2: no hardcoded
+#   constant; worktrees handled via git-toplevel + suffix-strip). Unrecognized
+#   pwd = fail-fast ABORT. Sub-tag (CC_AGENT_ID) allocated via bounded
+#   pg_try_advisory_xact_lock (5s retry) + scan of agent_status, picks the
+#   smallest free N in the family. GUC + agent_status = sub-tag.
+#   agent_messages.from_agent = base (FK requires a registered agents.id row).
+#   Sub-identity promotion to first-class FK is Step 4 (BUG-024 Phase 1).
 
 set -uo pipefail
 
@@ -29,10 +39,43 @@ ORCH_DIR="$(dirname "$SCRIPT_DIR")"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
 CALLER_DIR="$(pwd)"
 
-AGENT_ID="${CC_AGENT_ID:-cc-ihsanos}"
+# ── CLI arg parse (Step 3: --repo override, -- passthrough to claude) ────────
+# Single-pass parser — respects `--` boundary (plan's two-pass parser had a
+# bug where `./launch.sh -- --repo X` would let the second pass steal the
+# `--repo X` from claude's passthrough).
 
-# Auto-detect repo name from caller's git directory, or use fallback
-REPO_NAME="${CC_REPO:-}"
+REPO_OVERRIDE=""
+CLAUDE_PASSTHROUGH=()
+PASS_THROUGH=false
+while [ $# -gt 0 ]; do
+    if $PASS_THROUGH; then
+        CLAUDE_PASSTHROUGH+=("$1")
+        shift
+        continue
+    fi
+    case "$1" in
+        --repo=*)
+            REPO_OVERRIDE="${1#--repo=}"
+            shift
+            ;;
+        --repo)
+            shift
+            REPO_OVERRIDE="${1:-}"
+            [ $# -gt 0 ] && shift
+            ;;
+        --)
+            PASS_THROUGH=true
+            shift
+            ;;
+        *)
+            # Anything else before `--` is ignored (no bare positional args).
+            shift
+            ;;
+    esac
+done
+
+# Repo name: --repo flag > CC_REPO env > pwd git basename
+REPO_NAME="${REPO_OVERRIDE:-${CC_REPO:-}}"
 if [ -z "$REPO_NAME" ]; then
     REPO_NAME="$(git -C "$CALLER_DIR" rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null || echo "unknown")"
 fi
@@ -41,6 +84,42 @@ SESSION_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SESSION_START_EPOCH="$(date -u +%s)"
 HEARTBEAT_PID=""
 REMINDER_PID=""
+
+# ── Step 3: dual-identity resolution via scripts/lib/auto_agent_id ───────────
+
+# Load DATABASE_URL from .env for the helper call.
+# shellcheck disable=SC1091
+set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
+if [ -z "$DSN" ]; then
+    echo -e "\033[31mERROR: DATABASE_URL not set — cannot allocate agent identity\033[0m" >&2
+    echo "       Add DATABASE_URL=postgres://... to $ORCH_DIR/.env" >&2
+    exit 1
+fi
+
+ALLOC_JSON="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.auto_agent_id \
+    --pwd "$CALLER_DIR" \
+    --repo "$REPO_NAME" \
+    --dsn "$DSN" 2>/tmp/cc_alloc_err.log)" || {
+    echo -e "\033[31mERROR: identity allocation failed\033[0m" >&2
+    cat /tmp/cc_alloc_err.log >&2
+    exit 1
+}
+
+CC_AGENT_ID="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(json.load(sys.stdin)["sub_tag"])')"
+CC_BASE_AGENT_ID="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(json.load(sys.stdin)["base"])')"
+# Delta-v2 non-load-bearing #4: overlap_warnings is list of [aid, age_s]
+# pairs. Format each as "aid (Ns ago)" for operator-readable output.
+OVERLAP_WARNINGS="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(", ".join(f"{a} ({s}s ago)" for a,s in json.load(sys.stdin)["overlap_warnings"]))')"
+
+export CC_AGENT_ID
+export CC_BASE_AGENT_ID
+export SCOPE_REPO="$REPO_NAME"
+
+# Legacy alias: some blocks below still reference $AGENT_ID. Retain a local
+# only for readability; every write site specifies sub-tag vs base explicitly.
+AGENT_ID="$CC_AGENT_ID"
+BASE_AGENT_ID="$CC_BASE_AGENT_ID"
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 
@@ -450,18 +529,9 @@ echo ""
 # Restore caller's directory for the actual claude session
 cd "$CALLER_DIR"
 
-# Pass any extra args after -- to claude
-CLAUDE_ARGS=()
-PASS_THROUGH=false
-for arg in "$@"; do
-    if [ "$arg" = "--" ]; then
-        PASS_THROUGH=true
-        continue
-    fi
-    if $PASS_THROUGH; then
-        CLAUDE_ARGS+=("$arg")
-    fi
-done
+# CLAUDE_PASSTHROUGH was populated by the single-pass arg parser at the top of
+# this script. Use it directly (CLAUDE_ARGS alias for readability).
+CLAUDE_ARGS=("${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}")
 
 if [ -n "$LAUNCH_CONTEXT" ] && [ ${#CLAUDE_ARGS[@]} -eq 0 ]; then
     # BUG-011 fix: write context to temp file. The SessionStart hook in
