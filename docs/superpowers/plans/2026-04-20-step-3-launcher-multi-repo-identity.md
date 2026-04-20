@@ -11,6 +11,13 @@
 
 **Tech Stack:** Python 3.9 (orchestrator venv), psycopg (direct PG for GUC semantics), pytest + unittest.mock, bash 5, Supabase, Claude Code CLI.
 
+**Self-surgery meta:** this session (cc-ihsanos-3) edits the launcher code that spawns cc-ihsanos-N. Edits take effect on NEXT launch, not this session. Task 11 smoke verifies the first next-launch reads the revised launcher correctly. If cc-ihsanos-3 itself exits before Task 12 closes, verify the next cc-ihsanos boot picks up the delta cleanly.
+
+**Deferred to Step 4 (BUG-024 Phase 1) — NOT in scope here:**
+- Promoting sub-tags to first-class `agents.id` rows (currently FK blocks this).
+- `agents.last_heartbeat` semantics redesign — today all cc-ihsanos-N stomp the same `agents.cc-ihsanos` heartbeat row. Acceptable noise for Step 3; cleaner split lands in Phase 1 where `agent_status.last_heartbeat` becomes per-instance truth.
+- RLS on `agent_status` writes (ARCH-034 activation).
+
 ---
 
 ## Scope & Context
@@ -40,13 +47,15 @@
 
 **New files:**
 - `scripts/lib/__init__.py` — empty, enables `scripts.lib.*` package import.
-- `scripts/lib/auto_agent_id.py` — helper module. Public surface:
-  - `RepoFamilyMap: dict[str, str]` — constant pwd-prefix → base agent id.
-  - `resolve_base_agent_id(pwd: str) -> str` — raises `UnknownRepoError` on no match.
+- `scripts/lib/auto_agent_id.py` — helper module. Public surface (delta-v2):
+  - `UnknownRepoError`, `LockTimeoutError` — exception classes.
+  - `load_family_map(dsn: str) -> dict[str, str]` — reads `agents.repo_scope` (NOT `scope_repos`), strips `wingmen-` prefix for canonical keys, returns `{repo_canonical: base_agent_id}`. Raises on duplicate claim. Called at launcher startup; 4-family live state (cc-ihsanos / cc-scholar / cc-web / cc-cosem per CAI-AGENTS-001).
+  - `strip_worktree_suffix(segment: str) -> str` — strips uppercase-initial post-dash/post-dot suffixes (e.g. `orchestrator-LEDGER` → `orchestrator`, `orchestrator.wt-qurban` → `orchestrator`). Preserves lowercase inner hyphens (`hifz-companion` unchanged). Regex: uppercase-start token after `-` or `.`.
+  - `resolve_base_agent_id(pwd: str, family_map: dict[str, str]) -> str` — impure (calls git), pure given fixed map. Uses `git rev-parse --show-toplevel` first, falls back to pwd walk. Applies `strip_worktree_suffix` at each step. Raises `UnknownRepoError` on no match.
   - `pick_sub_tag(base: str, active: list[str]) -> str` — pure; scans a given active list for next free N.
-  - `allocate_sub_tag_and_register(base: str, dsn: str, repo: str, stale_cutoff_minutes: int = 30) -> AllocResult` — acquires global advisory lock, scans `agent_status` for active siblings, picks next N, UPSERTs `agent_status` with GUC set correctly, all in one transaction. Returns `AllocResult(sub_tag, siblings)`.
-  - `scan_overlap_siblings(base: str, scope_repo: str, dsn: str, exclude_sub_tag: str) -> list[str]` — returns active sub-tags (sub-tag != self, in same family, with scope_repos overlapping `scope_repo`).
-  - `main()` — CLI entrypoint that reads args `--pwd/--repo/--dsn/--stale-minutes`, emits JSON `{"sub_tag": ..., "base": ..., "siblings": [...], "overlap_warnings": [...]}` on stdout, exits 1 + human-readable error on stderr for `UnknownRepoError`.
+  - `allocate_sub_tag_and_register(base, dsn, repo, stale_cutoff_minutes=30) -> AllocResult` — acquires advisory lock via `pg_try_advisory_xact_lock` with 5s retry loop, scans `agent_status` for active siblings, picks next N, UPSERTs with GUC, all one TX. Raises `LockTimeoutError` with `pg_locks` diagnostic on timeout.
+  - `scan_overlap_siblings(base, scope_repo, dsn, exclude_sub_tag, stale_cutoff_minutes=30) -> list[tuple[str, int]]` — returns `(agent_id, heartbeat_age_seconds)` tuples, excluding self.
+  - `main()` — CLI entrypoint: `--pwd/--repo/--dsn/--stale-minutes`. Loads family map itself (checkpoint lean per delta msg 398 — CLI owns map, bash-side stays pure). Emits JSON `{"sub_tag", "base", "siblings", "overlap_warnings": [[agent, age_s], ...]}` on stdout. Exits 1 on `UnknownRepoError` or `LockTimeoutError` with human-readable stderr.
 - `tests/test_auto_agent_id.py` — pytest covering:
   - `resolve_base_agent_id` — all 6 mapped prefixes, absolute vs home-expanded paths, unrecognized path raises, case preservation.
   - `pick_sub_tag` — empty active list → `-1`, contiguous `-1/-2` → `-3`, gap `-1/-3` → `-2`, foreign-family entries in list are ignored, duplicate entries are deduped.
@@ -137,11 +146,143 @@ git commit -m "chore(step-3): scaffold scripts/lib/auto_agent_id module"
 
 ---
 
-### Task 2: `resolve_base_agent_id` — pwd→family mapping table (CAI Q2 constraint)
+### Task 1.5: `load_family_map` — data-driven map from `agents.repo_scope` (delta-v2 L1-B2)
 
 **Files:**
 - Modify: `scripts/lib/auto_agent_id.py`
 - Modify: `tests/test_auto_agent_id.py`
+
+CAI msg 397 flagged hardcoded-map drift; msg 403 applied a live agents-table split (cc-cosem family created). Both issues collapse if the map is loaded from `agents.repo_scope` at each launcher boot. Column name is `repo_scope` (verified live, NOT `scope_repos`).
+
+Live state at delta-v2 time:
+  - cc-ihsanos: [ihsanos, wingmen-orchestrator]
+  - cc-scholar: [ai-scholar, hifz-companion]
+  - cc-web:     [wordpress-sites, dookana]
+  - cc-cosem:   [cosem-tdu, cosem-adcda]
+
+Canonicalization rule: strip `wingmen-` prefix so `wingmen-orchestrator` keys as `orchestrator` — matches the filesystem basename.
+
+- [ ] **Step 1: Write the failing integration test**
+
+Append to `tests/test_auto_agent_id.py`:
+
+```python
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+
+pytestmark_integration = pytest.mark.skipif(
+    not DSN,
+    reason="DATABASE_URL not set — skipping Supabase integration tests",
+)
+
+
+@pytestmark_integration
+class TestLoadFamilyMap:
+    def test_returns_all_four_cc_families_canonicalized(self):
+        m = auto_agent_id.load_family_map(DSN)
+        # 4 families live (post CAI-AGENTS-001 split).
+        assert m["ihsanos"] == "cc-ihsanos"
+        assert m["orchestrator"] == "cc-ihsanos"  # 'wingmen-' stripped
+        assert m["ai-scholar"] == "cc-scholar"
+        assert m["hifz-companion"] == "cc-scholar"
+        assert m["dookana"] == "cc-web"
+        assert m["wordpress-sites"] == "cc-web"
+        assert m["cosem-tdu"] == "cc-cosem"
+        assert m["cosem-adcda"] == "cc-cosem"
+
+    def test_duplicate_claim_raises(self):
+        # Can't easily test in integration without mutating agents table.
+        # Unit-style test with monkeypatched psycopg instead.
+        import types
+        fake_rows = [("cc-a", ["x"]), ("cc-b", ["x"])]
+
+        class _FakeCur:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): pass
+            def execute(self_, *a, **k): pass
+            def fetchall(self_): return fake_rows
+        class _FakeConn:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): pass
+            def cursor(self_): return _FakeCur()
+
+        import psycopg
+        orig = psycopg.connect
+        psycopg.connect = lambda *a, **k: _FakeConn()
+        try:
+            with pytest.raises(ValueError, match="claimed by both"):
+                auto_agent_id.load_family_map("dummy-dsn")
+        finally:
+            psycopg.connect = orig
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/pytest tests/test_auto_agent_id.py::TestLoadFamilyMap -v`
+Expected: FAIL with `AttributeError: module 'scripts.lib.auto_agent_id' has no attribute 'load_family_map'`.
+
+- [ ] **Step 3: Implement `load_family_map`**
+
+Append to `scripts/lib/auto_agent_id.py`:
+
+```python
+def load_family_map(dsn: str) -> dict[str, str]:
+    """Build canonical repo-name → base-agent-id map from agents.repo_scope.
+
+    Canonicalization: strip 'wingmen-' prefix so 'wingmen-orchestrator'
+    matches filesystem basename 'orchestrator'. Replaces any hardcoded map.
+    Raises ValueError if two agent rows claim the same canonical repo
+    (indicates agents table corruption — fail loud, not silent-last-wins).
+
+    Called once per launcher boot. Zero drift risk — if agents table changes,
+    next launcher picks up the new map automatically.
+    """
+    import psycopg
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, repo_scope FROM agents WHERE id LIKE 'cc-%'"
+            )
+            rows = cur.fetchall()
+
+    out: dict[str, str] = {}
+    for agent_id, repo_list in rows:
+        for raw in (repo_list or []):
+            canon = raw[len("wingmen-"):] if raw.startswith("wingmen-") else raw
+            existing = out.get(canon)
+            if existing is not None and existing != agent_id:
+                raise ValueError(
+                    f"repo {canon!r} claimed by both {existing} and {agent_id} "
+                    f"in agents.repo_scope — fix the agents table before launching"
+                )
+            out[canon] = agent_id
+    return out
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/bin/pytest tests/test_auto_agent_id.py::TestLoadFamilyMap -v`
+Expected: 2 PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/lib/auto_agent_id.py tests/test_auto_agent_id.py
+git commit -m "feat(step-3): load_family_map — data-driven from agents.repo_scope with wingmen- strip"
+```
+
+---
+
+### Task 2: `resolve_base_agent_id` + `strip_worktree_suffix` — pwd→family with worktree handling (delta-v2 L1-B1)
+
+**Files:**
+- Modify: `scripts/lib/auto_agent_id.py`
+- Modify: `tests/test_auto_agent_id.py`
+
+Delta-v2 rewrite: `resolve_base_agent_id` takes the family_map produced by Task 1.5 as a parameter (no hardcoded constant). First tries `git rev-parse --show-toplevel` for clean worktree handling, falls back to pwd-component walk. At each candidate basename applies `strip_worktree_suffix` which strips uppercase-initial post-dash/post-dot tokens like `-LEDGER` or `.wt-qurban` without touching lowercase-hyphen names like `hifz-companion`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -150,139 +291,189 @@ Append to `tests/test_auto_agent_id.py`:
 ```python
 import os
 
+# Fixture-style map matching live agents table at delta-v2 time.
+FAKE_MAP = {
+    "ihsanos": "cc-ihsanos",
+    "orchestrator": "cc-ihsanos",
+    "ai-scholar": "cc-scholar",
+    "hifz-companion": "cc-scholar",
+    "dookana": "cc-web",
+    "wordpress-sites": "cc-web",
+    "cosem-tdu": "cc-cosem",
+    "cosem-adcda": "cc-cosem",
+}
+
+
+class TestStripWorktreeSuffix:
+    def test_dash_uppercase_stripped(self):
+        assert auto_agent_id.strip_worktree_suffix("orchestrator-LEDGER") == "orchestrator"
+
+    def test_dot_wt_stripped(self):
+        assert auto_agent_id.strip_worktree_suffix("orchestrator.wt-qurban") == "orchestrator"
+
+    def test_dash_lowercase_preserved(self):
+        # This is a legit repo name, not a worktree suffix.
+        assert auto_agent_id.strip_worktree_suffix("hifz-companion") == "hifz-companion"
+
+    def test_dash_lowercase_multi_preserved(self):
+        assert auto_agent_id.strip_worktree_suffix("cosem-tdu") == "cosem-tdu"
+
+    def test_no_suffix_unchanged(self):
+        assert auto_agent_id.strip_worktree_suffix("orchestrator") == "orchestrator"
+
 
 class TestResolveBaseAgentId:
-    def test_orchestrator_maps_to_cc_ihsanos(self):
+    def test_orchestrator_maps_to_cc_ihsanos(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator")
         assert auto_agent_id.resolve_base_agent_id(
-            "/Users/sheikhmusa/wingmen/orchestrator"
+            "/Users/sheikhmusa/wingmen/orchestrator", FAKE_MAP
         ) == "cc-ihsanos"
 
-    def test_ihsanos_maps_to_cc_ihsanos(self):
+    def test_orchestrator_worktree_LEDGER_maps(self, monkeypatch):
+        # Worktree: git rev-parse --show-toplevel returns the worktree path.
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator-LEDGER")
         assert auto_agent_id.resolve_base_agent_id(
-            "/Users/sheikhmusa/wingmen/projects/ihsanos"
+            "/Users/sheikhmusa/wingmen/orchestrator-LEDGER", FAKE_MAP
         ) == "cc-ihsanos"
 
-    def test_ihsandms_maps_to_cc_ihsanos(self):
+    def test_orchestrator_worktree_dot_wt_maps(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator.wt-qurban")
         assert auto_agent_id.resolve_base_agent_id(
-            "/Users/sheikhmusa/wingmen/projects/ihsandms"
+            "/Users/sheikhmusa/wingmen/orchestrator.wt-qurban", FAKE_MAP
         ) == "cc-ihsanos"
 
-    def test_hifz_companion_maps_to_cc_scholar(self):
+    def test_hifz_companion_hyphen_preserved(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/projects/hifz-companion")
         assert auto_agent_id.resolve_base_agent_id(
-            "/Users/sheikhmusa/wingmen/projects/hifz-companion"
+            "/Users/sheikhmusa/wingmen/projects/hifz-companion", FAKE_MAP
         ) == "cc-scholar"
 
-    def test_ai_scholar_maps_to_cc_scholar(self):
+    def test_cosem_tdu_maps_to_cc_cosem(self, monkeypatch):
+        # New family post-CAI-AGENTS-001.
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/projects/cosem-tdu")
         assert auto_agent_id.resolve_base_agent_id(
-            "/Users/sheikhmusa/wingmen/projects/ai-scholar"
-        ) == "cc-scholar"
+            "/Users/sheikhmusa/wingmen/projects/cosem-tdu", FAKE_MAP
+        ) == "cc-cosem"
 
-    def test_dookana_maps_to_cc_web(self):
+    def test_subdirectory_falls_back_to_walk(self, monkeypatch):
+        # User in dookana/src/components — git-toplevel resolves, basename dookana.
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/projects/dookana")
         assert auto_agent_id.resolve_base_agent_id(
-            "/Users/sheikhmusa/wingmen/projects/dookana"
+            "/Users/sheikhmusa/wingmen/projects/dookana/src/components", FAKE_MAP
         ) == "cc-web"
 
-    def test_subdirectory_still_resolves(self):
-        # User is deep in a tree like projects/dookana/src/components
+    def test_no_git_walks_pwd_components(self, monkeypatch):
+        # Fallback when outside a git repo.
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel", lambda pwd: None)
         assert auto_agent_id.resolve_base_agent_id(
-            "/Users/sheikhmusa/wingmen/projects/dookana/src/components"
+            "/Users/sheikhmusa/wingmen/projects/dookana/src", FAKE_MAP
         ) == "cc-web"
 
-    def test_unrecognized_raises(self):
-        with pytest.raises(auto_agent_id.UnknownRepoError) as exc:
-            auto_agent_id.resolve_base_agent_id("/Users/sheikhmusa/wingmen/projects/razposv2")
-        assert "razposv2" in str(exc.value) or "not registered" in str(exc.value)
-
-    def test_outside_wingmen_raises(self):
+    def test_unrecognized_raises(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel",
+                            lambda pwd: "/Users/sheikhmusa/wingmen/projects/unregistered-repo")
         with pytest.raises(auto_agent_id.UnknownRepoError):
-            auto_agent_id.resolve_base_agent_id("/tmp/foo")
+            auto_agent_id.resolve_base_agent_id(
+                "/Users/sheikhmusa/wingmen/projects/unregistered-repo", FAKE_MAP
+            )
+
+    def test_outside_wingmen_raises(self, monkeypatch):
+        monkeypatch.setattr(auto_agent_id, "_git_toplevel", lambda pwd: None)
+        with pytest.raises(auto_agent_id.UnknownRepoError):
+            auto_agent_id.resolve_base_agent_id("/tmp/foo", FAKE_MAP)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `.venv/bin/pytest tests/test_auto_agent_id.py::TestResolveBaseAgentId -v`
-Expected: All 9 FAIL with `AttributeError: module 'scripts.lib.auto_agent_id' has no attribute 'resolve_base_agent_id'`.
+Run: `.venv/bin/pytest tests/test_auto_agent_id.py::TestStripWorktreeSuffix tests/test_auto_agent_id.py::TestResolveBaseAgentId -v`
+Expected: All FAIL with `AttributeError` on `strip_worktree_suffix`, `_git_toplevel`, or `resolve_base_agent_id`.
 
-- [ ] **Step 3: Implement `resolve_base_agent_id`**
+- [ ] **Step 3: Implement `strip_worktree_suffix`, `_git_toplevel`, and `resolve_base_agent_id`**
 
 Append to `scripts/lib/auto_agent_id.py`:
 
 ```python
+import re
+import subprocess
 from pathlib import Path
 
-# pwd-prefix (relative to $HOME/wingmen or absolute-rooted) → base agent id.
-# MUST stay in sync with agents.id rows in Supabase. Unknown repos fail-fast
-# per CAI msg 395 Q2 — never silent-fallback to a wrong family.
-RepoFamilyMap: dict[str, str] = {
-    "orchestrator":            "cc-ihsanos",
-    "projects/ihsanos":        "cc-ihsanos",
-    "projects/ihsanos-layer1": "cc-ihsanos",
-    "projects/ihsandms":       "cc-ihsanos",
-    "projects/hifz-companion": "cc-scholar",
-    "projects/ai-scholar":     "cc-scholar",
-    "projects/dawah-pipeline": "cc-scholar",
-    "projects/dookana":        "cc-web",
-    "projects/razpos":         "cc-web",
-    "projects/razposv2":       "cc-web",  # example: register later if needed
-}
+# Matches trailing worktree-style suffix: -UPPERCASE... or .UPPERCASE... or
+# .wt-anything. Lowercase inner hyphens (hifz-companion) do NOT match since
+# the second group requires an uppercase start or the literal 'wt'.
+_WORKTREE_SUFFIX_RE = re.compile(r"[-.](?:[A-Z][\w-]*|wt[\w-]*)$")
 
 
-def resolve_base_agent_id(pwd: str) -> str:
+def strip_worktree_suffix(segment: str) -> str:
+    """Strip trailing worktree-style suffix from a path segment.
+
+    'orchestrator-LEDGER' → 'orchestrator'
+    'orchestrator.wt-qurban' → 'orchestrator'
+    'hifz-companion' → 'hifz-companion' (lowercase hyphen, no match)
+    """
+    return _WORKTREE_SUFFIX_RE.sub("", segment)
+
+
+def _git_toplevel(pwd: str) -> str | None:
+    """Return `git rev-parse --show-toplevel` for pwd, or None if not in a repo."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", pwd, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip() or None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def resolve_base_agent_id(pwd: str, family_map: dict[str, str]) -> str:
     """Map an absolute pwd to a registered agents.id base family.
 
-    Looks for the longest matching suffix-of-wingmen-prefix in RepoFamilyMap.
-    Raises UnknownRepoError if no mapping exists — fail-fast (CAI msg 395 Q2).
+    Algorithm:
+      1. Try `git rev-parse --show-toplevel` — get worktree/repo root path.
+      2. Take basename, apply strip_worktree_suffix, look up in family_map.
+      3. If miss OR no git toplevel: walk pwd components bottom-up, apply
+         strip_worktree_suffix at each, first hit wins.
+      4. Fail-fast UnknownRepoError if nothing matches.
     """
-    p = Path(pwd).resolve()
-    wingmen_root = (Path.home() / "wingmen").resolve()
+    # Step 1+2: git toplevel
+    toplevel = _git_toplevel(pwd)
+    if toplevel:
+        basename = strip_worktree_suffix(Path(toplevel).name)
+        if basename in family_map:
+            return family_map[basename]
 
-    try:
-        rel = p.relative_to(wingmen_root)
-    except ValueError:
-        raise UnknownRepoError(
-            f"pwd {pwd!r} is not under {wingmen_root} — cannot resolve agent family"
-        )
-
-    # Walk relative path from deepest-prefix to shallowest, longest-match wins.
-    parts = list(rel.parts)
-    for depth in range(len(parts), 0, -1):
-        candidate = "/".join(parts[:depth])
-        if candidate in RepoFamilyMap:
-            return RepoFamilyMap[candidate]
+    # Step 3: fallback — walk pwd components bottom-up
+    for part in reversed(Path(pwd).parts):
+        if not part or part == "/":
+            continue
+        canon = strip_worktree_suffix(part)
+        if canon in family_map:
+            return family_map[canon]
 
     raise UnknownRepoError(
-        f"pwd {pwd!r} (relative: {rel}) is not a registered agent family — "
-        f"add an entry to RepoFamilyMap in scripts/lib/auto_agent_id.py "
-        f"or launch from a registered repo"
+        f"pwd {pwd!r} (toplevel={toplevel!r}) is not a registered agent family. "
+        f"Known: {sorted(family_map.keys())}"
     )
-```
-
-Remove `razposv2` from `RepoFamilyMap` (it was a deliberate placeholder to keep the test `test_unrecognized_raises` honest — `razposv2` must stay unregistered). Final map:
-
-```python
-RepoFamilyMap: dict[str, str] = {
-    "orchestrator":            "cc-ihsanos",
-    "projects/ihsanos":        "cc-ihsanos",
-    "projects/ihsanos-layer1": "cc-ihsanos",
-    "projects/ihsandms":       "cc-ihsanos",
-    "projects/hifz-companion": "cc-scholar",
-    "projects/ai-scholar":     "cc-scholar",
-    "projects/dawah-pipeline": "cc-scholar",
-    "projects/dookana":        "cc-web",
-    "projects/razpos":         "cc-web",
-}
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `.venv/bin/pytest tests/test_auto_agent_id.py::TestResolveBaseAgentId -v`
-Expected: 9 PASS.
+Run: `.venv/bin/pytest tests/test_auto_agent_id.py::TestStripWorktreeSuffix tests/test_auto_agent_id.py::TestResolveBaseAgentId -v`
+Expected: 14 PASS (5 strip + 9 resolve).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add scripts/lib/auto_agent_id.py tests/test_auto_agent_id.py
-git commit -m "feat(step-3): resolve_base_agent_id with pwd→family mapping + fail-fast ABORT"
+git commit -m "feat(step-3): resolve_base_agent_id with worktree-strip + data-driven map"
 ```
 
 ---
@@ -538,12 +729,22 @@ class TestAllocateSubTagAndRegister:
 Run: `.venv/bin/pytest tests/test_auto_agent_id.py::TestAllocateSubTagAndRegister -v`
 Expected: 3 FAIL with `AttributeError: ... no attribute 'allocate_sub_tag_and_register'`.
 
-- [ ] **Step 3: Implement `allocate_sub_tag_and_register` + `AllocResult`**
+- [ ] **Step 3: Implement `allocate_sub_tag_and_register` + `AllocResult` + `LockTimeoutError` (delta-v2 L2)**
 
 Append to `scripts/lib/auto_agent_id.py`:
 
 ```python
+import time
 from dataclasses import dataclass
+
+
+class LockTimeoutError(RuntimeError):
+    """Raised when pg_try_advisory_xact_lock fails to acquire within retry budget.
+
+    Delta-v2 L2: `pg_advisory_xact_lock` blocks indefinitely if another
+    launcher's TX wedges. We prefer a bounded wait + pg_locks diagnostic so
+    the operator sees who holds the key rather than hanging forever.
+    """
 
 
 @dataclass(frozen=True)
@@ -564,6 +765,10 @@ def allocate_sub_tag_and_register(
     The lock is held across scan + UPSERT so two concurrent launchers cannot
     pick the same N — one commits, the other sees the fresh row on rescan.
 
+    Lock strategy (delta-v2 L2): `pg_try_advisory_xact_lock` with 500ms poll
+    for up to 5s. On timeout, query pg_locks for the holder and raise
+    LockTimeoutError with the diagnostic attached.
+
     Args:
         base: registered agents.id family (e.g. 'cc-ihsanos').
         dsn: Postgres connection string with the GUC-capable user.
@@ -573,16 +778,42 @@ def allocate_sub_tag_and_register(
 
     Returns:
         AllocResult(sub_tag, siblings_seen_before_alloc).
+
+    Raises:
+        LockTimeoutError: advisory lock not acquired within 5s.
     """
     import psycopg
 
     with psycopg.connect(dsn, autocommit=False) as conn:
         with conn.cursor() as cur:
-            # Global lock namespace: one pick at a time, DB-wide.
-            cur.execute(
-                "SELECT pg_advisory_xact_lock(hashtext(%s))",
-                ("cc-agent-id-alloc",),
-            )
+            # Bounded lock acquisition: 10 × 500ms = 5s ceiling.
+            acquired = False
+            for _ in range(10):
+                cur.execute(
+                    "SELECT pg_try_advisory_xact_lock(hashtext(%s))",
+                    ("cc-agent-id-alloc",),
+                )
+                if cur.fetchone()[0]:
+                    acquired = True
+                    break
+                time.sleep(0.5)
+            if not acquired:
+                # Diagnostic: who holds our key?
+                cur.execute(
+                    """
+                    SELECT pid, granted, query_start, state
+                      FROM pg_locks l
+                      JOIN pg_stat_activity a ON a.pid = l.pid
+                     WHERE locktype = 'advisory'
+                       AND objid = hashtext('cc-agent-id-alloc')::bigint
+                    """
+                )
+                holders = cur.fetchall()
+                raise LockTimeoutError(
+                    f"advisory lock 'cc-agent-id-alloc' held >5s. "
+                    f"Holders: {holders}"
+                )
+
             cur.execute(
                 """
                 SELECT agent_id FROM agent_status
@@ -676,8 +907,16 @@ class TestScanOverlapSiblings:
                 dsn=DSN,
                 exclude_sub_tag="cc-test-family-2",
             )
-            assert "cc-test-family-1" in overlaps
-            assert "cc-test-family-2" not in overlaps  # excluded self
+            # delta-v2: return type is list[tuple[str, int]] — (agent_id, heartbeat_age_s).
+            # Shape check + membership check by first element.
+            assert all(isinstance(t, tuple) and len(t) == 2 for t in overlaps)
+            assert all(isinstance(t[0], str) and isinstance(t[1], int) for t in overlaps)
+            agent_ids = [t[0] for t in overlaps]
+            assert "cc-test-family-1" in agent_ids
+            assert "cc-test-family-2" not in agent_ids  # excluded self
+            # heartbeat just-inserted → age should be tiny (< 60s).
+            age_1 = next(age for (aid, age) in overlaps if aid == "cc-test-family-1")
+            assert 0 <= age_1 < 60
         finally:
             with self._fresh_conn() as clean_conn:
                 with clean_conn.cursor() as cur:
@@ -734,13 +973,18 @@ def scan_overlap_siblings(
     dsn: str,
     exclude_sub_tag: str,
     stale_cutoff_minutes: int = 30,
-) -> list[str]:
-    """Return active sub-tags in `base` family whose scope_repos contains
-    `scope_repo`, excluding `exclude_sub_tag` (the caller itself).
+) -> list[tuple[str, int]]:
+    """Return `(agent_id, heartbeat_age_seconds)` for active sub-tags in
+    `base` family whose scope_repos contains `scope_repo`, excluding
+    `exclude_sub_tag` (the caller itself).
 
     Soft-warning helper per CAI msg 395 Q3-C — prints a pre-launch overlap
     notice if 2+ CCs in the same family are about to edit the same repo.
     Read-only, no lock, no UPSERT.
+
+    Delta-v2 non-load-bearing #4: include heartbeat age so operator sees
+    actionable recency at a glance (e.g. `cc-ihsanos-2 (3s ago)` vs
+    `cc-ihsanos-5 (847s ago)`).
     """
     import psycopg
 
@@ -748,7 +992,9 @@ def scan_overlap_siblings(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT agent_id FROM agent_status
+                SELECT agent_id,
+                       EXTRACT(EPOCH FROM (now() - last_heartbeat))::int AS age_s
+                  FROM agent_status
                  WHERE agent_id LIKE %s
                    AND agent_id != %s
                    AND last_heartbeat > now() - (%s * interval '1 minute')
@@ -757,7 +1003,7 @@ def scan_overlap_siblings(
                 """,
                 (f"{base}-%", exclude_sub_tag, stale_cutoff_minutes, scope_repo),
             )
-            return [r[0] for r in cur.fetchall()]
+            return [(r[0], int(r[1])) for r in cur.fetchall()]
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -847,7 +1093,12 @@ Append to `scripts/lib/auto_agent_id.py`:
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint: emit JSON {sub_tag, base, siblings, overlap_warnings}.
 
-    Invoked by scripts/launch_dangerous_cc.sh. Exits 1 on UnknownRepoError.
+    Invoked by scripts/launch_dangerous_cc.sh. Exits 1 on UnknownRepoError
+    or LockTimeoutError with human-readable stderr.
+
+    Delta-v2 checkpoint: CLI loads the family map itself (not launcher-side).
+    Keeps bash pure — shell ships only --pwd/--repo/--dsn and the CLI owns
+    the map-shape surface.
     """
     import argparse
     import json
@@ -869,17 +1120,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        base = args.base_override or resolve_base_agent_id(args.pwd)
+        # Data-driven map (delta-v2 L1-B2): load from agents.repo_scope each boot.
+        # Drift from hardcoded constants is structurally impossible.
+        family_map = load_family_map(args.dsn)
+        base = args.base_override or resolve_base_agent_id(args.pwd, family_map)
     except UnknownRepoError as e:
         sys.stderr.write(f"UnknownRepoError: {e}\n")
         return 1
 
-    result = allocate_sub_tag_and_register(
-        base=base,
-        dsn=args.dsn,
-        repo=args.repo,
-        stale_cutoff_minutes=args.stale_minutes,
-    )
+    try:
+        result = allocate_sub_tag_and_register(
+            base=base,
+            dsn=args.dsn,
+            repo=args.repo,
+            stale_cutoff_minutes=args.stale_minutes,
+        )
+    except LockTimeoutError as e:
+        sys.stderr.write(f"LockTimeoutError: {e}\n")
+        return 1
 
     overlaps = scan_overlap_siblings(
         base=base,
@@ -894,7 +1152,8 @@ def main(argv: list[str] | None = None) -> int:
             "sub_tag": result.sub_tag,
             "base": base,
             "siblings": list(result.siblings),
-            "overlap_warnings": overlaps,
+            # list of [agent_id, heartbeat_age_s] pairs (JSON-serialised tuples).
+            "overlap_warnings": [[aid, age] for (aid, age) in overlaps],
         },
         sys.stdout,
     )
@@ -954,10 +1213,12 @@ With:
 #   MODEL        — claude model override (default: claude-opus-4-7)
 #
 # Identity (GOVERNANCE-CLEANUP-001 Step 3, composes msgs 315/317/324):
-#   Base family (CC_BASE_AGENT_ID) resolved from pwd → RepoFamilyMap in
-#   scripts/lib/auto_agent_id.py. Unrecognized pwd = fail-fast ABORT.
-#   Sub-tag (CC_AGENT_ID) allocated via advisory-lock scan of agent_status,
-#   picks the smallest free N in the family. GUC + agent_status = sub-tag.
+#   Base family (CC_BASE_AGENT_ID) resolved from pwd → data-driven family map
+#   built from agents.repo_scope at launch time (delta-v2: no hardcoded
+#   constant; worktrees handled via git-toplevel + suffix-strip). Unrecognized
+#   pwd = fail-fast ABORT. Sub-tag (CC_AGENT_ID) allocated via bounded
+#   pg_try_advisory_xact_lock (5s retry) + scan of agent_status, picks the
+#   smallest free N in the family. GUC + agent_status = sub-tag.
 #   agent_messages.from_agent = base (FK requires a registered agents.id row).
 #   Sub-identity promotion to first-class FK is Step 4 (BUG-024 Phase 1).
 ```
@@ -1072,7 +1333,9 @@ ALLOC_JSON="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.auto_agent_id \
 
 CC_AGENT_ID="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(json.load(sys.stdin)["sub_tag"])')"
 CC_BASE_AGENT_ID="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(json.load(sys.stdin)["base"])')"
-OVERLAP_WARNINGS="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(",".join(json.load(sys.stdin)["overlap_warnings"]))')"
+# Delta-v2 non-load-bearing #4: overlap_warnings is list of [aid, age_s]
+# pairs. Format each as "aid (Ns ago)" for operator-readable output.
+OVERLAP_WARNINGS="$(echo "$ALLOC_JSON" | "$VENV_PY" -c 'import sys,json;print(", ".join(f"{a} ({s}s ago)" for a,s in json.load(sys.stdin)["overlap_warnings"]))')"
 
 export CC_AGENT_ID
 export CC_BASE_AGENT_ID
@@ -1128,7 +1391,7 @@ if [ -n "$OVERLAP_WARNINGS" ]; then
 fi
 ```
 
-- [ ] **Step 2: `build_launch_context` — keep the cd-to-orchestrator but pass sub-tag (lines 86-98)**
+- [ ] **Step 2: `build_launch_context` — keep the cd-to-orchestrator, pass BASE (lines 86-98)**
 
 Replace:
 
@@ -1144,11 +1407,18 @@ LAUNCH_CONTEXT="$(cd ~/wingmen/orchestrator && "$VENV_PY" -m scripts.build_launc
 With:
 
 ```bash
-echo -e "${BOLD}▶ Building session context for ${CC_AGENT_ID}...${RESET}"
+echo -e "${BOLD}▶ Building session context for ${CC_BASE_AGENT_ID}...${RESET}"
 # Stdout = context block (captured). Stderr = diagnostics (shown on terminal).
-# build_launch_context receives the SUB-TAG so the context includes messages
-# addressed specifically to this instance (subject tag in body).
-LAUNCH_CONTEXT="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.build_launch_context --agent "$CC_AGENT_ID")" || {
+#
+# Delta-v2 L3-A1 fix: pass CC_BASE_AGENT_ID, NOT CC_AGENT_ID. The context
+# builder is per-FAMILY, not per-instance:
+#   - scripts/build_launch_context.py L57 — agent_context.eq('agent_id', base)
+#   - scripts/build_launch_context.py L111 — inbox filter to_agent.eq.{base}
+#   - scripts/build_launch_context.py L187-189 — agents.update(...).eq('id', base)
+# Passing the sub-tag would land an empty agent_context row + hidden inbox
+# (sibling filter would match literal 'cc-ihsanos-3' while all inbox rows are
+# addressed to base 'cc-ihsanos' with '[cc-ihsanos-3]' tagged in body).
+LAUNCH_CONTEXT="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.build_launch_context --agent "$CC_BASE_AGENT_ID")" || {
     echo -e "${AMBER}⚠ build_launch_context failed. Continuing without injected context.${RESET}"
     LAUNCH_CONTEXT=""
 }
@@ -1392,6 +1662,18 @@ Add (directly after the `# ── 6. Launch claude` comment, before the existing
 
 ```bash
 # ── 6. Launch claude (Step 3: Opus 4.7 default + MODEL env override) ─────────
+#
+# Delta-v2 non-load-bearing #3 — model precedence order (LAST argv --model
+# wins, because `claude` uses last-wins flag parsing):
+#   1. CLAUDE_PASSTHROUGH --model foo   — highest priority (operator escape
+#                                         hatch via `-- --model foo` on the
+#                                         launcher command line).
+#   2. MODEL env var                    — resolves RESOLVED_MODEL, applied as
+#                                         the first --model flag on argv.
+#   3. hardcoded default claude-opus-4-7 — falls through when MODEL unset.
+# Sequencing: resolve RESOLVED_MODEL from (MODEL env || default) → append
+# `--model $RESOLVED_MODEL` to the claude call → append "${CLAUDE_PASSTHROUGH[@]}"
+# AFTER it, so a passthrough --model overrides by coming later on argv.
 
 RESOLVED_MODEL="${MODEL:-claude-opus-4-7}"
 echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}"
@@ -1541,6 +1823,36 @@ Expected: `('cc-ihsanos-N', 'working', 'session-launch', ['orchestrator'])` wher
 Run: `bash -n scripts/launch_dangerous_cc.sh`
 Expected: no output, exit 0.
 
+- [ ] **Step 4.5: Verify both `--repo` argument forms parse (delta-v2 non-load-bearing #2)**
+
+Run (space-separated form):
+
+```bash
+cd ~/wingmen/orchestrator
+.venv/bin/python -m scripts.lib.auto_agent_id \
+    --pwd "$(pwd)" \
+    --repo orchestrator \
+    --dsn "$(grep -E '^DATABASE_URL=|^SUPABASE_DB_URL=' .env | head -1 | cut -d= -f2-)" | "$VENV_PY" -c 'import sys,json;d=json.load(sys.stdin);print(d["sub_tag"], d["base"])'
+```
+
+Expected: `cc-ihsanos-<N1> cc-ihsanos` on stdout, exit 0.
+
+Run (equals-separated form):
+
+```bash
+cd ~/wingmen/orchestrator
+.venv/bin/python -m scripts.lib.auto_agent_id \
+    --pwd="$(pwd)" \
+    --repo=orchestrator \
+    --dsn="$(grep -E '^DATABASE_URL=|^SUPABASE_DB_URL=' .env | head -1 | cut -d= -f2-)" | "$VENV_PY" -c 'import sys,json;d=json.load(sys.stdin);print(d["sub_tag"], d["base"])'
+```
+
+Expected: `cc-ihsanos-<N2> cc-ihsanos` on stdout, exit 0. `argparse` accepts
+both forms natively; this only asserts we don't regress launcher parse logic
+across the two conventions.
+
+Both N1 and N2 are additional test rows to clean up in Step 5.
+
 - [ ] **Step 5: Clean up the smoke-test row**
 
 Run:
@@ -1551,12 +1863,13 @@ import os, psycopg
 from dotenv import load_dotenv
 load_dotenv()
 dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
-sub_tag = 'cc-ihsanos-N'  # <-- REPLACE with the N from Step 2
+sub_tags = ['cc-ihsanos-N']  # <-- REPLACE with N from Step 2, plus N1+N2 from Step 4.5
 with psycopg.connect(dsn, autocommit=True) as c:
     with c.cursor() as cur:
-        cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", (sub_tag,))
-        cur.execute(\"UPDATE agent_status SET status='offline', updated_at=now() WHERE agent_id=%s\", (sub_tag,))
-print(f'Flipped {sub_tag} → offline')
+        for sub_tag in sub_tags:
+            cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", (sub_tag,))
+            cur.execute(\"UPDATE agent_status SET status='offline', updated_at=now() WHERE agent_id=%s\", (sub_tag,))
+            print(f'Flipped {sub_tag} → offline')
 "
 ```
 
@@ -1666,10 +1979,10 @@ sb.table('agent_messages').insert({
         'Step 3 ready for your adversarial review before I flip the jobs row to implemented.\n\n'
         'Commits: <c1>/<c2>/<c3>/<c4>. 21/21 unit+integration PASS. Smoke from orchestrator PASS.\n\n'
         'Load-bearing surfaces for your attack:\n'
-        '  L1. pwd→family mapping fail-fast: any pwd not in RepoFamilyMap aborts before claude starts.\n'
-        '      Attack: can a symlink or race between git-toplevel + resolve_base_agent_id bypass this?\n'
-        '  L2. advisory-lock + UPSERT atomicity: scan + pick + UPSERT are one TX with pg_advisory_xact_lock.\n'
-        '      Attack: can two launchers starting within <1s double-allocate the same N?\n'
+        '  L1. pwd→family mapping fail-fast: any pwd not in the data-driven family map (loaded from agents.repo_scope) aborts before claude starts; worktree suffixes are stripped via git-toplevel + regex.\n'
+        '      Attack: can a symlink, worktree-rename, or race between git-toplevel + resolve_base_agent_id bypass this? Can a repo_scope write between load_family_map and allocate_sub_tag_and_register mis-route the allocation?\n'
+        '  L2. advisory-lock + UPSERT atomicity: scan + pick + UPSERT are one TX with pg_try_advisory_xact_lock (5s retry + pg_locks diagnostic on timeout).\n'
+        '      Attack: can two launchers starting within <1s double-allocate the same N? Can a stuck holder bypass the timeout?\n'
         '  L3. exit trap identity split: agent_status flip uses sub-tag ($AGENT_ID, now = sub-tag); \n'
         '      agent_messages inserts + agents.status update use $BASE_AGENT_ID.\n'
         '      Attack: any write site I missed? Any path where $AGENT_ID is still used for a BASE-expecting write?\n\n'
@@ -1696,13 +2009,26 @@ Do NOT push until CAI acks the review.
 ## Self-Review
 
 **1. Spec coverage:**
-- msg 315 (multi-repo scope) → Tasks 7 (`--repo` arg + pwd resolution), 8 (scope_repos in agent_status), 11 (smoke verifies scope_repos lands).
-- msg 317 (auto-identity) → Tasks 2 (mapping), 3 (pick_sub_tag), 4 (allocate), 6 (CLI), 7 (launcher calls CLI).
-- msg 324 (Opus 4.7 default) → Task 10 (hardcoded `--model claude-opus-4-7` + `MODEL` env override + current_task stamp).
-- CAI msg 395 Q2 mapping-table constraint → Task 2 (`resolve_base_agent_id` with fail-fast `UnknownRepoError`).
+- msg 315 (multi-repo scope) → Tasks 7 (`--repo` arg + pwd resolution), 8 (scope_repos in agent_status), 11 (smoke verifies scope_repos lands + both `--repo` forms).
+- msg 317 (auto-identity) → Tasks 1.5 (`load_family_map` data-driven), 2 (mapping + worktree strip), 3 (pick_sub_tag), 4 (allocate), 6 (CLI), 7 (launcher calls CLI).
+- msg 324 (Opus 4.7 default) → Task 10 (hardcoded `--model claude-opus-4-7` + `MODEL` env override + current_task stamp + precedence order comment).
+- CAI msg 395 Q2 mapping-table constraint → Task 1.5 (data-driven from `agents.repo_scope`) + Task 2 (`resolve_base_agent_id` with fail-fast `UnknownRepoError`).
 - CAI msg 395 exit-trap preservation → Task 9 Steps 3-4 (comment-clarifies agent_status uses sub-tag; agent_messages uses base).
-- CAI msg 395 Q3-C overlap warning → Task 5 (`scan_overlap_siblings`) + Task 8 Step 1 (header print).
+- CAI msg 395 Q3-C overlap warning → Task 5 (`scan_overlap_siblings`, now returns `list[tuple[str, int]]` with heartbeat age) + Task 8 Step 1 (header print formatted "aid (Ns ago)").
 - Non-load-bearing confirmations (advisory lock namespace, 30min stale-cutoff, --repo + pwd both supported) → Tasks 4 + 7.
+
+**Delta-v2 (CAI msg 397) coverage:**
+- L1-B1 (worktree-suffix) → Task 2 (`strip_worktree_suffix` + `_git_toplevel` + `resolve_base_agent_id(pwd, family_map)`).
+- L1-B2 (map drift) → Task 1.5 (`load_family_map` from `agents.repo_scope`, wingmen- prefix stripped; raises `ValueError` on duplicate claim).
+- L2 (advisory-lock hang) → Task 4 (`pg_try_advisory_xact_lock` + 5s retry + `LockTimeoutError` + `pg_locks` diagnostic).
+- L3-A1 (build_launch_context write-site) → Task 8 Step 2 (passes `$CC_BASE_AGENT_ID`, not `$CC_AGENT_ID`).
+- L3-A2 (agents.last_heartbeat double-write) → deferred to Step 4 (BUG-024 Phase 1) — documented in header "Deferred to Step 4" block.
+- Non-load-bearing #2 (both `--repo` forms) → Task 11 Step 4.5.
+- Non-load-bearing #3 (MODEL order) → Task 10 Step 1 comment.
+- Non-load-bearing #4 (heartbeat-age in overlap warning) → Task 5 return type + Task 7 bash formatter.
+- Non-load-bearing #5 (self-surgery preamble) → plan header.
+- Checkpoint "CLI owns map" → Task 6 `main()` calls `load_family_map(args.dsn)` itself.
+- CAI-AGENTS-001 (4-family split) → Task 1.5 tests cover cc-cosem family; data-driven map handles structurally.
 
 **2. Placeholder scan:**
 - Task 12 uses `<c1>/<c2>/<c3>/<c4>` and `<JOB_ID>` — these are explicit "fill at commit time" markers, not plan placeholders. Acceptable because the hashes don't exist until Tasks 7-10 land.
@@ -1710,12 +2036,16 @@ Do NOT push until CAI acks the review.
 - No other TBDs.
 
 **3. Type consistency:**
-- `resolve_base_agent_id(pwd: str) -> str` — used in Task 2 and invoked by `main()` in Task 6. Consistent.
+- `load_family_map(dsn: str) -> dict[str, str]` — defined in Task 1.5, called by `main()` in Task 6. Consistent.
+- `resolve_base_agent_id(pwd: str, family_map: dict[str, str]) -> str` — delta-v2 signature with map param. Used in Task 2, called by `main()` in Task 6 with `family_map=load_family_map(args.dsn)`. Consistent.
+- `strip_worktree_suffix(segment: str) -> str` — defined in Task 2, used inside `resolve_base_agent_id`. Consistent.
+- `_git_toplevel(pwd: str) -> str | None` — defined in Task 2, used inside `resolve_base_agent_id`. Consistent.
 - `pick_sub_tag(base: str, active: list[str]) -> str` — used in Task 3, called by `allocate_sub_tag_and_register` in Task 4. Consistent.
 - `AllocResult(sub_tag, siblings)` — defined in Task 4, returned by `allocate_sub_tag_and_register`, consumed by `main()` in Task 6. Consistent.
-- `scan_overlap_siblings(base, scope_repo, dsn, exclude_sub_tag, stale_cutoff_minutes=30) -> list[str]` — Task 5 signature, called by `main()` in Task 6 with the same kwargs. Consistent.
-- Bash variable names `CC_AGENT_ID` (sub-tag) and `CC_BASE_AGENT_ID` (base) — introduced in Task 7, referenced in Tasks 8/9/10 consistently. Local aliases `AGENT_ID`/`BASE_AGENT_ID` mirror them 1:1.
+- `LockTimeoutError(RuntimeError)` — defined in Task 4, caught by `main()` in Task 6 (returns exit 1 with stderr message). Consistent.
+- `scan_overlap_siblings(base, scope_repo, dsn, exclude_sub_tag, stale_cutoff_minutes=30) -> list[tuple[str, int]]` — delta-v2 return type. Task 5 signature matches Task 6 call site; Task 7 bash unpacker formats `(aid, age)` tuples. Consistent.
+- Bash variable names `CC_AGENT_ID` (sub-tag), `CC_BASE_AGENT_ID` (base), `OVERLAP_WARNINGS` — introduced in Task 7, referenced in Tasks 8/9/10 consistently. Task 8 Step 2 passes `$CC_BASE_AGENT_ID` to `build_launch_context` (delta-v2 L3-A1 fix). Local aliases `AGENT_ID`/`BASE_AGENT_ID` mirror sub-tag/base 1:1.
 
-No issues found — plan is internally consistent.
+No issues found — plan is internally consistent across delta-v2 surfaces.
 
 ---
