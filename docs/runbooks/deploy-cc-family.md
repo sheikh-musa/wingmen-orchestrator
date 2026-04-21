@@ -94,7 +94,7 @@ with psycopg.connect(os.environ['DATABASE_URL']) as c:
 "
 ```
 
-Expected: at least one row like `('cc-scholar_1', 'working', ['ai-scholar'], <recent>)`. The `_1` suffix is the sub-tag from the allocator (`scripts/lib/auto_agent_id.py::allocate_sub_tag_and_register`). Family identity is encoded in `agent_id` via the `<base>_<N>` convention — `agent_status` has no separate `base_agent_id` column.
+Expected: at least one row like `('cc-scholar-1', 'working', ['ai-scholar'], <recent>)`. The `-1` suffix is the sub-tag from the allocator (`scripts/lib/auto_agent_id.py::allocate_sub_tag_and_register`). Family identity is encoded in `agent_id` via the `<base>-<N>` convention — `agent_status` has no separate `base_agent_id` column. Note: SQL `LIKE 'cc-scholar\_%'` still matches `cc-scholar-1` because `_` is a single-char wildcard in LIKE patterns.
 
 **Fail mode:** No row → advisory-lock contention or misconfigured DSN. Check that `DATABASE_URL` in `.env` points at the same Postgres as `SUPABASE_URL` (same project).
 
@@ -135,7 +135,7 @@ with psycopg.connect(os.environ['DATABASE_URL']) as c:
 " <JOB_ID_FROM_PREVIOUS_STEP>
 ```
 
-Expected: `claimed_by` is a cc-scholar sub-tag (e.g., `cc-scholar_1`), not `cc-ihsanos` or any variant.
+Expected: `claimed_by` is a cc-scholar sub-tag (e.g., `cc-scholar-1`), not `cc-ihsanos` or any variant.
 
 **Fail mode:** `claimed_by = 'cc-ihsanos_N'` → scope split not honoured; check the `agents.repo_scope` for both families and the claim logic in `wingmen_orch.py`. This would be a **scope-split regression**, escalate to CAI via `agent_messages`.
 
@@ -216,7 +216,7 @@ CREATE TABLE agents (
 
 -- agent_status: one row per live session (sub-tag granularity)
 CREATE TABLE agent_status (
-  agent_id        TEXT PRIMARY KEY,           -- 'cc-scholar_1', 'cc-ihsanos_3', ...
+  agent_id        TEXT PRIMARY KEY,           -- 'cc-scholar-1', 'cc-ihsanos-3', ...
   base_agent_id   TEXT REFERENCES agents(id), -- 'cc-scholar'
   sub_tag         INT NOT NULL,               -- 1..20, allocated by auto_agent_id.py
   repo_scope      TEXT,                       -- single repo for this session (worktree)

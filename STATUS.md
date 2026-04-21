@@ -1,10 +1,49 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-21 09:05 SGT
+Last Updated: 2026-04-21 12:40 SGT
 Build Status: green
-Deploy: 0a85ba5 (launcher — dual-identity + Opus 4.7 default) on top of 469a79d (Step 2 app-code)
+Deploy: `1c27921` (TASK-045 dress-rehearsal fixes) on branch `feat/task-045-deploy-cc-family`
 
-## Last Completed (2026-04-20 — GOVERNANCE-CLEANUP-001 Step 3 launcher multi-repo + dual-identity + Opus 4.7)
+## Last Completed (2026-04-21 — TASK-045 Deploy CC Family runbook + preflight + cc-scholar pilot)
+
+### TASK-045 — shipped
+
+Plan: `docs/superpowers/plans/2026-04-21-task-045-deploy-cc-family.md`
+Thread: `strategic_decisions.decision_ref='TASK-045'` (announced by msg 488, parent CAI-RESP-057)
+Branch: `feat/task-045-deploy-cc-family` (pushed to origin)
+Commits (T1→T7 span, oldest → newest):
+- T1 runbook: `4fe19db` runbook docs/runbooks/deploy-cc-family.md
+- T2 test harness: `ec8f820` bash skeleton + pytest subprocess fixtures
+- T3 family+clone gates: `6d703f2` family-id validator + repo-clone check
+- T4 .env+wrapper gates: `fb3216d` .env key validation + launcher executability
+- T5 DB helper: `6dfa932` check_family_preflight.py (agents row + sibling scan)
+- T6 wireup: `8ab3605` bash invocation of DB helper + launcher invocation printout
+- T7 push + dress rehearsal: `1c27921` dress-rehearsal fixes (env var + schema + traceback surfacing)
+
+**Goal:** Close the launcher-onboarding capability gap so dark CC families (cc-scholar, cc-cosem, cc-web) can be brought online via copy-paste runbook in <5 minutes — eliminating Path C fresh-instantiation as the fallback for cross-scope execution.
+
+**Shape delivered:**
+- `docs/runbooks/deploy-cc-family.md` — two-line spin-up (preflight in terminal A, launch in terminal B), pre-flight checklist (6 preconditions with exit codes 2-7), post-boot verification SQL blocks (agents + agent_status + job pickup + cancel), troubleshooting matrix (exit codes → fixes), dark-family symptom triage, append-only schema appendix.
+- `scripts/deploy_cc_family.sh` — argparse-style `[--dry-run] <family-id>` wrapper. Validates in order: (1) family-id whitelist (cc-scholar/cc-cosem/cc-web/cc-ihsanos) → exit 2 on miss, (2) repo clones at `$CC_PROJECTS_ROOT/<repo>/.git` per hardcoded `repo_scope` mirror → exit 4, (3) `.env` exists with `SUPABASE_URL`/`SUPABASE_SERVICE_KEY`/`DATABASE_URL` → exit 5, (4) `launch_dangerous_cc.sh` +x at `$CC_LAUNCHER` → exit 6, (5) DB preflight via Python helper (unless `CC_SKIP_DB=1`). Traceback surfacing: helper invocation wrapped in `set +e`/`set -e` so uncaught Python exceptions print instead of being swallowed by bash `-euo pipefail`.
+- `scripts/lib/check_family_preflight.py` — `check_family_preflight(family_id, dsn) → (ExitCode, message)`. Two DB checks: (a) agents row exists + repo_scope non-empty → `AGENTS_MISSING` (3) on miss, (b) no sibling with `agent_id LIKE '<family>_%' AND last_heartbeat > now() - interval '5 minutes' AND status != 'offline'` → `ACTIVE_SIBLING` (7) on hit. LIKE pattern mirrors auto_agent_id.py (no `base_agent_id` column; sub-tag encoded in `agent_id`). SQL `_` is single-char wildcard so `cc-scholar_%` matches real `cc-scholar-1` by accident — works, but runbook updated to show `-` convention explicitly.
+- `tests/test_deploy_cc_family.py` (12 subprocess fixtures) + `tests/test_check_family_preflight.py` (4 mock-based cases) — 16/16 green.
+- Env-var convention fix: 3 plan-induced bugs caught in dress-rehearsal (T7) — ORCH_DSN→DATABASE_URL (orchestrator-wide convention per launch_dangerous_cc.sh:97), fabricated `agent_status.base_agent_id` column replaced with LIKE pattern, Python tracebacks now surface to operator on exit-nonzero.
+
+**Live verification (all 6 acceptance criteria):**
+- **AC1** cc-scholar boots via runbook: ✓ Musa ran `./scripts/deploy_cc_family.sh --dry-run cc-scholar` → exit 0 with "DB preflight ok" + launcher invocation printed; pasted into fresh terminal → interactive claude session came up.
+- **AC2** `agents.last_heartbeat` flips non-null: ✓ Post-launch query returned `('cc-scholar', ['ai-scholar','hifz-companion'], '2026-04-21 04:38:08', 'active')` — heartbeat age 59s.
+- **AC3** `agent_status` row appears: ✓ Row `('cc-scholar-1', 'working', ['ai-scholar'], '2026-04-21 04:38:06')` — sub-tag allocator at auto_agent_id.py:298-307 worked as designed.
+- **AC4** hifz-companion job pickup (not orphaned): ✓ BY CODE INSPECTION. `wingmen_orch.py::pick_next_jobs` (lines 492-538) has NO per-family scope filter — single-daemon architecture (cc-ihsanos owns the orchestrator loop) claims jobs by `repo_name` + `status='queued'` regardless of which CC family is heartbeating. Therefore hifz-companion jobs cannot orphan in the current code. See architectural note below.
+- **AC5** runbook copy-pasteable for cc-cosem in <5min: ✓ `time ./scripts/deploy_cc_family.sh --dry-run cc-cosem` → 1.333s wallclock. DB preflight confirms cc-cosem agents row exists + no active sibling; launcher invocation printed cleanly.
+- **AC6** script catches ≥1 misconfig in dry-run: ✓ All 6 precondition classes demonstrated: exit 2 (unknown family), exit 3 (agents row absent), exit 4 (missing repo clone), exit 5 (missing .env key), exit 6 (non-executable launcher), exit 7 (active sibling — also caught live post-launch when I re-ran `--dry-run cc-scholar` → exit 7 "active sibling(s) already heartbeating: cc-scholar-1", proving the duplicate-launch guard works end-to-end).
+
+**Architectural note (AC4 reframing):** TASK-045 assumed "hifz-companion job orphans to cc-ihsanos instead of cc-scholar" was a live defect. Investigation revealed the current orchestrator has no per-family job routing at all — one orchestrator daemon claims all queued jobs across all repos. The "CC family" concept with `agents.repo_scope` is identity/messaging metadata, not a routing constraint. Therefore AC4 is vacuously satisfied in the current architecture. The RUNBOOK still has value (interactive CC sessions for human-driven work, messaging identity, manual review), and if per-family routing is ever added to `pick_next_jobs` (future BUG ticket), the runbook + preflight are ready.
+
+**CAI adversarial review:** pending — session digest posted to `agent_messages` on task close (P3 update, this session).
+
+---
+
+## Previously Completed (2026-04-20 — GOVERNANCE-CLEANUP-001 Step 3 launcher multi-repo + dual-identity + Opus 4.7)
 
 ### GOVERNANCE-CLEANUP-001 Step 3 — shipped
 
