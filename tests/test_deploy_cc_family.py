@@ -84,3 +84,81 @@ def test_present_repo_clone_passes_clone_check(tmp_path):
         env_overrides={"CC_PROJECTS_ROOT": str(tmp_path)},
     )
     assert r.returncode != 4, f"clone check rejected despite repos present. stderr:{r.stderr}"
+
+
+def _fixture_repos(tmp_path: Path) -> Path:
+    """Create fake cc-scholar repos under tmp_path."""
+    (tmp_path / "ai-scholar" / ".git").mkdir(parents=True)
+    (tmp_path / "hifz-companion" / ".git").mkdir(parents=True)
+    return tmp_path
+
+
+def test_missing_env_exits_5(tmp_path):
+    """CC_ENV_FILE pointing at nonexistent file → exit 5."""
+    _fixture_repos(tmp_path)
+    r = _run(
+        ["cc-scholar"],
+        env_overrides={
+            "CC_PROJECTS_ROOT": str(tmp_path),
+            "CC_ENV_FILE": str(tmp_path / "nonexistent.env"),
+        },
+    )
+    assert r.returncode == 5, f"expected 5, got {r.returncode}. stderr:{r.stderr}"
+    assert ".env" in r.stderr or "env" in r.stderr.lower()
+
+
+def test_incomplete_env_exits_5(tmp_path):
+    """.env missing required keys → exit 5."""
+    _fixture_repos(tmp_path)
+    env_file = tmp_path / "test.env"
+    env_file.write_text("SUPABASE_URL=https://example.supabase.co\n")  # missing SERVICE_KEY and DSN
+    r = _run(
+        ["cc-scholar"],
+        env_overrides={
+            "CC_PROJECTS_ROOT": str(tmp_path),
+            "CC_ENV_FILE": str(env_file),
+        },
+    )
+    assert r.returncode == 5, f"expected 5, got {r.returncode}. stderr:{r.stderr}"
+    assert "SUPABASE_SERVICE_KEY" in r.stderr or "ORCH_DSN" in r.stderr
+
+
+def test_complete_env_passes_env_check(tmp_path):
+    """.env with all required keys → passes env check (may fail downstream)."""
+    _fixture_repos(tmp_path)
+    env_file = tmp_path / "test.env"
+    env_file.write_text(
+        "SUPABASE_URL=https://example.supabase.co\n"
+        "SUPABASE_SERVICE_KEY=eyJfake\n"
+        "ORCH_DSN=postgresql://fake\n"
+    )
+    r = _run(
+        ["cc-scholar"],
+        env_overrides={
+            "CC_PROJECTS_ROOT": str(tmp_path),
+            "CC_ENV_FILE": str(env_file),
+        },
+    )
+    assert r.returncode != 5, f"env check rejected despite all keys present. stderr:{r.stderr}"
+
+
+def test_missing_wrapper_exits_6(tmp_path):
+    """launch_dangerous_cc.sh missing or non-executable → exit 6."""
+    _fixture_repos(tmp_path)
+    env_file = tmp_path / "test.env"
+    env_file.write_text(
+        "SUPABASE_URL=https://example.supabase.co\n"
+        "SUPABASE_SERVICE_KEY=eyJfake\n"
+        "ORCH_DSN=postgresql://fake\n"
+    )
+    # Point CC_LAUNCHER at a path that doesn't exist
+    r = _run(
+        ["cc-scholar"],
+        env_overrides={
+            "CC_PROJECTS_ROOT": str(tmp_path),
+            "CC_ENV_FILE": str(env_file),
+            "CC_LAUNCHER": str(tmp_path / "does_not_exist.sh"),
+        },
+    )
+    assert r.returncode == 6, f"expected 6, got {r.returncode}. stderr:{r.stderr}"
+    assert "launch" in r.stderr.lower() or "wrapper" in r.stderr.lower()

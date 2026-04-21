@@ -88,6 +88,35 @@ for repo in "${REPOS[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# Precondition 3: .env exists and has required keys
+# ---------------------------------------------------------------------------
+ENV_FILE="${CC_ENV_FILE:-/Users/sheikhmusa/wingmen/orchestrator/.env}"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "error: .env not found at $ENV_FILE" >&2
+  echo "       copy from .env.example and fill in SUPABASE_URL / SUPABASE_SERVICE_KEY / ORCH_DSN" >&2
+  exit 5
+fi
+
+for key in SUPABASE_URL SUPABASE_SERVICE_KEY ORCH_DSN; do
+  if ! grep -qE "^${key}=" "$ENV_FILE"; then
+    echo "error: .env missing required key: $key (in $ENV_FILE)" >&2
+    exit 5
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Precondition 4: launch_dangerous_cc.sh exists and is executable
+# ---------------------------------------------------------------------------
+LAUNCHER="${CC_LAUNCHER:-/Users/sheikhmusa/wingmen/orchestrator/scripts/launch_dangerous_cc.sh}"
+
+if [[ ! -x "$LAUNCHER" ]]; then
+  echo "error: wrapper script missing or non-executable: $LAUNCHER" >&2
+  echo "       chmod +x $LAUNCHER" >&2
+  exit 6
+fi
+
 echo "deploy_cc_family.sh: family-id=$FAMILY_ID dry-run=$DRY_RUN"
-echo "  family + repo-clone checks: ok"
-echo "  (.env + wrapper + DB + sibling checks not yet implemented)"
+echo "  family + repo-clone + env + wrapper checks: ok"
+echo "  (DB + sibling checks not yet implemented)"
