@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-20 SGT (GOVERNANCE-CLEANUP-001 Step 3 shipped — pending CAI adversarial review)
+Last Updated: 2026-04-21 09:05 SGT
 Build Status: green
 Deploy: 0a85ba5 (launcher — dual-identity + Opus 4.7 default) on top of 469a79d (Step 2 app-code)
 
@@ -257,15 +257,15 @@ Spec: `docs/superpowers/specs/2026-04-18-governance-comms-pipeline-hardening-des
 Docs-only change: created `README.md` with H1 + appended `<!-- PIPELINE-TEST-001: pipeline marker 2026-04-17 -->` marker. No code paths touched, no restart required. Audit row written to `work_outputs` by orchestrator.
 
 ## Completed (Last 5)
+- [red] Job #113: cosem-tdu — [BUG] tdu button target smoke test (1m 26s, deploy: N/A)
 - [green] Job #106: ihsanos — [BUG] still see an empty dashboard for qurban supplier (18m 0s, deploy: https://ihsanos-a1ok6x0o6-musaaaaaaas-projects.vercel.app)
 - [green] Job #105: ihsanos — [BUG] where does the qurban supplier add the slaughterman information? (5m 52s, deploy: https://ihsanos-fpshtw62t-musaaaaaaas-projects.vercel.app)
 - [red] Job #93: wingmen-orchestrator — PIPELINE-TEST-001: Add test marker comment to README.md (1m 1s, deploy: N/A)
 - [green] Job #93: wingmen-orchestrator — [PIPELINE-TEST-001] README pipeline marker (deploy: N/A)
-- [red] Job #91: ihsanos — QURBAN-GAP-004 (concrete): age_months column + Islamic fiqh validation (5m 45s, deploy: N/A)
 
-##                Recent Jobs (auto-tracked)
+##                 Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-18 04:00 SGT
+Last Updated: 2026-04-21 09:05 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
@@ -278,7 +278,7 @@ Last Updated: 2026-04-18 04:00 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-18 04:00 SGT
+Last Updated: 2026-04-21 09:05 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
