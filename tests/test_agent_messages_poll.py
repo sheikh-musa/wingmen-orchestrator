@@ -59,7 +59,7 @@ class TestFormatTelegram:
         assert text is not None
         assert "CC needs your input" in text
         assert "cc-ihsanos" in text
-        assert "claude.ai" in text
+        assert "Reply to this message" in text
 
     def test_blocker_includes_body_snippet(self):
         text = _format_telegram(self._msg(message_type="blocker", body="x" * 300))
@@ -202,7 +202,7 @@ class TestPollAgentMessages:
         bot.send_message.assert_called_once()
         text = bot.send_message.call_args[1]["text"]
         assert "CC needs your input" in text
-        assert "claude.ai" in text
+        assert "Reply to this message" in text
 
     @pytest.mark.asyncio
     async def test_blocker_sends_urgent_format(self):

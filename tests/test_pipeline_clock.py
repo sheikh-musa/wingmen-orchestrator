@@ -43,8 +43,10 @@ class TestTickInterval:
 
     @pytest.mark.asyncio
     async def test_does_nothing_if_less_than_24h_elapsed(self):
-        # last_run was 1 hour ago
-        recent = (_NOW - timedelta(hours=1)).isoformat()
+        # last_run was 1 hour ago — must be relative to real now() since
+        # tick_pipeline_clock uses datetime.now(tz), not _NOW. Hardcoding
+        # drifts past the 24h guard once the suite is run on any later day.
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         config_row = [{"value": recent}]
         sb = mock_supabase_chain(config_row)
 
