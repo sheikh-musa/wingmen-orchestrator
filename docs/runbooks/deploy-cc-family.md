@@ -33,7 +33,7 @@ The script validates:
 1. **Family ID** is one of: `cc-scholar`, `cc-cosem`, `cc-web`, `cc-ihsanos`.
 2. **`agents` row** exists for the family with non-empty `repo_scope`.
 3. **Repo clones** exist at `~/wingmen/projects/<repo>` for every repo in `repo_scope`.
-4. **`.env`** at `/Users/sheikhmusa/wingmen/orchestrator/.env` exists and contains `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` + `ORCH_DSN`.
+4. **`.env`** at `/Users/sheikhmusa/wingmen/orchestrator/.env` exists and contains `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` + `DATABASE_URL`.
 5. **`scripts/launch_dangerous_cc.sh`** exists and is executable.
 6. **No active sibling** — no `agent_status` row for a family sibling with `last_heartbeat > now() - interval '5 min'`.
 
@@ -68,7 +68,7 @@ cd /Users/sheikhmusa/wingmen/orchestrator
 import os, psycopg
 from dotenv import load_dotenv
 load_dotenv('/Users/sheikhmusa/wingmen/orchestrator/.env')
-with psycopg.connect(os.environ['ORCH_DSN']) as c:
+with psycopg.connect(os.environ['DATABASE_URL']) as c:
     with c.cursor() as cur:
         cur.execute(\"SELECT id, repo_scope, last_heartbeat, status FROM agents WHERE id = 'cc-scholar'\")
         print(cur.fetchone())
@@ -86,17 +86,17 @@ Expected: `('cc-scholar', ['ai-scholar', 'hifz-companion'], <recent timestamp>, 
 import os, psycopg
 from dotenv import load_dotenv
 load_dotenv('/Users/sheikhmusa/wingmen/orchestrator/.env')
-with psycopg.connect(os.environ['ORCH_DSN']) as c:
+with psycopg.connect(os.environ['DATABASE_URL']) as c:
     with c.cursor() as cur:
-        cur.execute(\"SELECT agent_id, base_agent_id, sub_tag, repo_scope, last_heartbeat FROM agent_status WHERE base_agent_id = 'cc-scholar' ORDER BY last_heartbeat DESC LIMIT 3\")
+        cur.execute(\"SELECT agent_id, status, scope_repos, last_heartbeat FROM agent_status WHERE agent_id LIKE 'cc-scholar\\_%' ORDER BY last_heartbeat DESC LIMIT 3\")
         for r in cur.fetchall():
             print(r)
 "
 ```
 
-Expected: at least one row like `('cc-scholar_1', 'cc-scholar', 1, 'ai-scholar', <recent>)`. The `_1` suffix is the sub-tag from the allocator (`scripts/lib/auto_agent_id.py::allocate_sub_tag_and_register`).
+Expected: at least one row like `('cc-scholar_1', 'working', ['ai-scholar'], <recent>)`. The `_1` suffix is the sub-tag from the allocator (`scripts/lib/auto_agent_id.py::allocate_sub_tag_and_register`). Family identity is encoded in `agent_id` via the `<base>_<N>` convention — `agent_status` has no separate `base_agent_id` column.
 
-**Fail mode:** No row → advisory-lock contention or misconfigured DSN. Check that `ORCH_DSN` in `.env` points at the same Postgres as `SUPABASE_URL` (same project).
+**Fail mode:** No row → advisory-lock contention or misconfigured DSN. Check that `DATABASE_URL` in `.env` points at the same Postgres as `SUPABASE_URL` (same project).
 
 ### 3. Test job pickup (acceptance criterion 4)
 
@@ -107,7 +107,7 @@ Queue a dummy hifz-companion job and confirm cc-scholar claims it:
 import os, psycopg
 from dotenv import load_dotenv
 load_dotenv('/Users/sheikhmusa/wingmen/orchestrator/.env')
-with psycopg.connect(os.environ['ORCH_DSN']) as c:
+with psycopg.connect(os.environ['DATABASE_URL']) as c:
     with c.cursor() as cur:
         cur.execute(\"\"\"
             INSERT INTO jobs (repo, description, status, priority, spec)
@@ -128,7 +128,7 @@ import os, psycopg, sys
 from dotenv import load_dotenv
 load_dotenv('/Users/sheikhmusa/wingmen/orchestrator/.env')
 job_id = int(sys.argv[1])
-with psycopg.connect(os.environ['ORCH_DSN']) as c:
+with psycopg.connect(os.environ['DATABASE_URL']) as c:
     with c.cursor() as cur:
         cur.execute(\"SELECT id, repo, status, claimed_by FROM jobs WHERE id = %s\", (job_id,))
         print(cur.fetchone())
@@ -147,7 +147,7 @@ import os, psycopg, sys
 from dotenv import load_dotenv
 load_dotenv('/Users/sheikhmusa/wingmen/orchestrator/.env')
 job_id = int(sys.argv[1])
-with psycopg.connect(os.environ['ORCH_DSN']) as c:
+with psycopg.connect(os.environ['DATABASE_URL']) as c:
     with c.cursor() as cur:
         cur.execute(\"UPDATE jobs SET status='cancelled', result_summary='TASK-045 smoke test — verified pickup' WHERE id = %s\", (job_id,))
         c.commit()
@@ -164,7 +164,7 @@ with psycopg.connect(os.environ['ORCH_DSN']) as c:
 | 2 | Unknown family-id | Use one of `cc-scholar`, `cc-cosem`, `cc-web`, `cc-ihsanos` |
 | 3 | `agents` row missing or `repo_scope` empty | Insert row with scope via CAI (`INSERT INTO agents (id, repo_scope, status) VALUES ('cc-<name>', ARRAY['repo1','repo2'], 'idle')`) |
 | 4 | Repo clone missing | `git clone git@github.com:<org>/<repo>.git ~/wingmen/projects/<repo>` |
-| 5 | `.env` missing or incomplete | Copy from `.env.example`, fill `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` / `ORCH_DSN` |
+| 5 | `.env` missing or incomplete | Copy from `.env.example`, fill `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` / `DATABASE_URL` |
 | 6 | `launch_dangerous_cc.sh` missing or non-executable | `chmod +x scripts/launch_dangerous_cc.sh` |
 | 7 | Active sibling already heartbeating | Either the family is already deployed (run `scripts/launch_dangerous_cc.sh --repo <repo>` directly) or a stale session is holding the slot — check `agent_status` for rows with stale `last_heartbeat` and coordinate cleanup with CAI |
 
@@ -191,7 +191,7 @@ The runbook is additive — there's nothing to roll back in the database. To sto
 import os, psycopg
 from dotenv import load_dotenv
 load_dotenv('/Users/sheikhmusa/wingmen/orchestrator/.env')
-with psycopg.connect(os.environ['ORCH_DSN']) as c:
+with psycopg.connect(os.environ['DATABASE_URL']) as c:
     with c.cursor() as cur:
         cur.execute(\"UPDATE agent_status SET status='offline' WHERE base_agent_id = 'cc-scholar' AND last_heartbeat < now() - interval '5 min'\")
         cur.execute(\"UPDATE agents SET status='idle' WHERE id = 'cc-scholar' AND last_heartbeat < now() - interval '5 min'\")

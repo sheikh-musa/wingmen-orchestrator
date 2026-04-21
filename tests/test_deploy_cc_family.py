@@ -122,7 +122,7 @@ def test_incomplete_env_exits_5(tmp_path):
         },
     )
     assert r.returncode == 5, f"expected 5, got {r.returncode}. stderr:{r.stderr}"
-    assert "SUPABASE_SERVICE_KEY" in r.stderr or "ORCH_DSN" in r.stderr
+    assert "SUPABASE_SERVICE_KEY" in r.stderr or "DATABASE_URL" in r.stderr
 
 
 def test_complete_env_passes_env_check(tmp_path):
@@ -132,7 +132,7 @@ def test_complete_env_passes_env_check(tmp_path):
     env_file.write_text(
         "SUPABASE_URL=https://example.supabase.co\n"
         "SUPABASE_SERVICE_KEY=eyJfake\n"
-        "ORCH_DSN=postgresql://fake\n"
+        "DATABASE_URL=postgresql://fake\n"
     )
     r = _run(
         ["cc-scholar"],
@@ -151,7 +151,7 @@ def test_missing_wrapper_exits_6(tmp_path):
     env_file.write_text(
         "SUPABASE_URL=https://example.supabase.co\n"
         "SUPABASE_SERVICE_KEY=eyJfake\n"
-        "ORCH_DSN=postgresql://fake\n"
+        "DATABASE_URL=postgresql://fake\n"
     )
     # Point CC_LAUNCHER at a path that doesn't exist
     r = _run(
@@ -173,7 +173,7 @@ def _fixture_full_env(tmp_path: Path) -> dict[str, str]:
     env_file.write_text(
         "SUPABASE_URL=https://example.supabase.co\n"
         "SUPABASE_SERVICE_KEY=eyJfake\n"
-        "ORCH_DSN=postgresql://fake\n"
+        "DATABASE_URL=postgresql://fake\n"
     )
     launcher = tmp_path / "launch_dangerous_cc.sh"
     launcher.write_text("#!/bin/bash\necho dummy launcher\n")

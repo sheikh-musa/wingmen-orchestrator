@@ -50,15 +50,20 @@ def check_family_preflight(family_id: str, dsn: str) -> tuple[ExitCode, str]:
                     f"agents.repo_scope empty for '{family_id}' — set scope via CAI before deploying",
                 )
 
+            # Sibling detection mirrors scripts/lib/auto_agent_id.py: agent_status has
+            # no base_agent_id column; identity is encoded in agent_id via the
+            # sub-tag convention (`<base>_<N>`). LIKE '<base>_%' matches all live
+            # sub-tags of this family.
             cur.execute(
                 """
                 SELECT agent_id, last_heartbeat
                 FROM agent_status
-                WHERE base_agent_id = %s
+                WHERE agent_id LIKE %s
                   AND last_heartbeat > now() - interval '5 minutes'
+                  AND status != 'offline'
                 ORDER BY last_heartbeat DESC
                 """,
-                (family_id,),
+                (f"{family_id}_%",),
             )
             siblings = cur.fetchall()
             if siblings:
@@ -75,11 +80,11 @@ def check_family_preflight(family_id: str, dsn: str) -> tuple[ExitCode, str]:
 def main() -> int:
     p = argparse.ArgumentParser(description="DB preflight for deploy_cc_family.sh")
     p.add_argument("family_id")
-    p.add_argument("--dsn", default=os.environ.get("ORCH_DSN"))
+    p.add_argument("--dsn", default=os.environ.get("DATABASE_URL"))
     args = p.parse_args()
 
     if not args.dsn:
-        print("error: ORCH_DSN not set and --dsn not passed", file=sys.stderr)
+        print("error: DATABASE_URL not set and --dsn not passed", file=sys.stderr)
         return 1
 
     code, msg = check_family_preflight(args.family_id, args.dsn)

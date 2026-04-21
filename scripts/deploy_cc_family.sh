@@ -95,11 +95,11 @@ ENV_FILE="${CC_ENV_FILE:-/Users/sheikhmusa/wingmen/orchestrator/.env}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "error: .env not found at $ENV_FILE" >&2
-  echo "       copy from .env.example and fill in SUPABASE_URL / SUPABASE_SERVICE_KEY / ORCH_DSN" >&2
+  echo "       copy from .env.example and fill in SUPABASE_URL / SUPABASE_SERVICE_KEY / DATABASE_URL" >&2
   exit 5
 fi
 
-for key in SUPABASE_URL SUPABASE_SERVICE_KEY ORCH_DSN; do
+for key in SUPABASE_URL SUPABASE_SERVICE_KEY DATABASE_URL; do
   if ! grep -qE "^${key}=" "$ENV_FILE"; then
     echo "error: .env missing required key: $key (in $ENV_FILE)" >&2
     exit 5
@@ -128,14 +128,19 @@ if [[ "${CC_SKIP_DB:-0}" != "1" ]]; then
     echo "error: orchestrator venv Python not found at $PY" >&2
     exit 5
   fi
-  # Source .env so ORCH_DSN is in the environment for the helper.
+  # Source .env so DATABASE_URL is in the environment for the helper.
   set -a
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
+  # Capture stdout+stderr so a Python traceback (uncaught exception) surfaces
+  # to the operator instead of being swallowed by set -e / bash pipefail.
+  set +e
   DB_OUT="$("$PY" -m scripts.lib.check_family_preflight "$FAMILY_ID" 2>&1)"
   DB_CODE=$?
+  set -e
   if [[ $DB_CODE -ne 0 ]]; then
+    echo "DB preflight failed (exit $DB_CODE):" >&2
     echo "$DB_OUT" >&2
     exit $DB_CODE
   fi
