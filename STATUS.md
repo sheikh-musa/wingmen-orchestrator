@@ -1,10 +1,53 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-21 12:40 SGT
+Last Updated: 2026-04-21 21:10 SGT
 Build Status: green
-Deploy: `1c27921` (TASK-045 dress-rehearsal fixes) on branch `feat/task-045-deploy-cc-family`
+Deploy: `1c27921` (TASK-045 dress-rehearsal fixes) on branch `feat/task-045-deploy-cc-family` (orchestrator code untouched this session — cosem-vision-port is a cross-repo port landing in cosem-tdu via PR #4)
 
-## Last Completed (2026-04-21 — TASK-045 Deploy CC Family runbook + preflight + cc-scholar pilot)
+## Last Completed (2026-04-21 — cosem-vision-port plan executed, PR open on cosem-tdu)
+
+### cosem-vision-port — Path C handoff in flight
+
+Plan: `docs/superpowers/plans/2026-04-21-cosem-vision-port.md` (10 tasks, TDD throughout; authored in this session)
+Thread: CAI-RESP-057 + CAI-RESP-058 (`agent_messages` 478, 492, 501, 502) — Queue #3 item
+Branch (cosem-tdu): `feat/cosem-vision-port` (pushed to `origin`, 7 commits, all `[propagation]` prefix + `Co-authored-by: cc-cosem <cosem@wingmen>` trailer)
+PR: https://github.com/sheikh-musa/cosem-tdu/pull/4 — awaiting cc-cosem Path C review and merge
+Review request: `agent_messages` id 506 (P2 review_request, `cc-ihsanos → cc-cosem`, requires_response=true)
+
+**Goal:** Port `ihsanos/e2e/helpers/claude-vision.ts` to `cosem-tdu` with Sonnet 4.6 + a new bug-pipeline reporter that POSTs visual-review failures into the orchestrator bug-report endpoint, and wire one vision probe into each of three Playwright specs. Done under Path C cross-scope propagation: cc-ihsanos (me) authors the PR, cc-cosem reviews + merges.
+
+**Shape delivered (in cosem-tdu, commits oldest → newest on `feat/cosem-vision-port`):**
+- `a381411` — `@anthropic-ai/sdk ^0.82.0` added to devDependencies (matches ihsanos pin).
+- `c734223` — `tests/e2e/helpers/claude-vision.js` — ESM port of ihsanos source. Exports `VIEWPORTS` (`mobile {375,812}` / `tablet {768,1024}` / `desktop {1280,800}`), `captureAllViewports`, `visualReview`. Retry ladder `[1_000, 2_500, 6_000, 15_000]` ms. `TRANSIENT_STATUSES = {429, 503, 529}`. Sentinel-skip on exhausted retries returns `{pass: true, reasoning: 'skipped — Anthropic vision API overloaded after retries', anomalies: [], viewport}`. Missing-key path returns `{pass: true, reasoning: 'skipped — no ANTHROPIC_API_KEY', anomalies: []}`. Model upgraded to `claude-sonnet-4-6`. Unit test `tests/unit/helpers/claude-vision.test.js` (3 cases) pins model string, VIEWPORTS export shape, and missing-key skip behaviour. Co-scope fix: added `tests/unit/**/*.test.*` to vite.config.js `include` array (separate from Playwright discovery); added `globals.node` override block in eslint.config.js for helper + unit folders (ESLint 9 flat config doesn't honour `/* eslint-env */` directives).
+- `98b88eb` — `tests/e2e/helpers/bug-pipeline-reporter.js` — exports `postBugReport({description, pageUrl, repoName='cosem-tdu', reporterName='cc-cosem-e2e', screenshotUrl})`. `DEFAULT_URL = 'https://ihsanos.com/api/bug-report'` + `BUG_REPORT_URL` env override. Fire-and-forget (try/catch → null). Two short-circuits: CI gate (returns null unless `process.env.CI === 'true'`) and weak-spec gate (returns null if trimmed description < 20 chars — couples to `GOOD_SPEC_MIN_DESC_LENGTH` in `ihsanos/src/app/api/bug-report/route.ts`). Unit test `tests/unit/helpers/bug-pipeline-reporter.test.js` (6 cases) covers CI gate, weak-spec gate, body shape, URL override, non-OK response handling, fetch-throws handling.
+- `884d70a` / `ec21db4` / `b8bb041` — one `visualReview` probe test appended to each of `attendance-home.spec.js` (`seedContext` + `role:'regular'`), `role-matrix.spec.js` (`seedRoleContext(page, 'regular')` — plan-specified helper name `setMockRole` didn't exist; actual helper is `seedRoleContext`, implementer adapted correctly), and `critical-happy-paths.spec.js` (inherits `beforeEach` seeding `tdu.e2e.mockRole='regular'`, visits `/observations`).
+- `51c0fd8` — `.github/workflows/firebase-hosting-pull-request.yml` — `ANTHROPIC_API_KEY: '${{ secrets.ANTHROPIC_API_KEY }}'` injected into the "Run E2E tests" step env block. Pre-merge note in commit message flags that Musa must add the repo secret before merge.
+
+**Verification (cosem-tdu local):**
+- `npm test -- --run`: **161/161 tests pass** across 31 test files (9 new tests land inside this count).
+- `npm run lint`: clean exit, 0 errors. 1 pre-existing warning in `src/pages/TrainerAttendance.jsx` (react-hooks/exhaustive-deps) — not in any file from this PR.
+- `git diff --stat origin/main..HEAD`: 14 files, 589 insertions, 72 deletions. Version-bump files (`public/version.json`, `src/version.js`) absorbed by pre-commit hook across all commits — expected and consistent.
+- Branch pushed to origin as a new branch: `* [new branch]  feat/cosem-vision-port -> feat/cosem-vision-port`.
+
+**Subagent-driven execution notes:**
+- Tasks 2 and 3 (substantive code — port helper + reporter) went through full two-stage review (spec compliance → code quality); each required a `--amend` loop for reviewer findings (directive removal, missing `vi.resetModules`, duplicate constant, missing `screenshot_url` assertion). Branch was unpushed when amending, so no history rewrite exposed to anyone.
+- Tasks 4-6 (spec wirings — 1 new test each, no logic) used inline verification instead of full 2-stage review. Justification: each is an append-only change to an existing file, tests can't run pre-Task-8, spec compliance is verifiable via tail+grep inspection.
+- Task 5 plan deviation: plan specified `setMockRole(page, 'regular')` but the actual helper in `role-matrix.spec.js` (line 146, used at lines 186/202/220/241/250/259/280/289/302) is `seedRoleContext(page, 'regular')`. Implementer read the file, adapted, reported. Accepted.
+
+**Pre-merge block:** Musa must add the `ANTHROPIC_API_KEY` repository secret to `cosem-tdu` before PR merge. The code itself is merge-safe without it (`visualReview` short-circuits to `pass: true` with reasoning "skipped — no ANTHROPIC_API_KEY"), but all probes will be inert until the secret lands.
+
+**Known follow-up (non-blocking, flagged in PR body):**
+- `claude-vision.js` constructs a fresh `Anthropic` client per `callClaudeVision` invocation (line ~103). Matches ihsanos source verbatim; port-fidelity choice. Hoisting to a module-level singleton is a reasonable cosem-tdu-local cleanup if cc-cosem wants it before merge.
+
+**Deferred / tracked separately:**
+- ARCH-037: move bug-report endpoint from ihsanos app to orchestrator — long-term; not blocking this PR.
+- Retry ladder recalibration for Sonnet 4.6 — current `[1s, 2.5s, 6s, 15s]` calibrated against Haiku 429 clustering; defer until we observe real Sonnet 429 patterns.
+
+**CAI digest:** P3 `update` posted this session — see `agent_messages` (Task 10 Step 2).
+
+---
+
+## Previously Completed (2026-04-21 — TASK-045 Deploy CC Family runbook + preflight + cc-scholar pilot)
 
 ### TASK-045 — shipped
 
