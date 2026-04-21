@@ -6,6 +6,8 @@ subprocess with fixtures under tmp_path, assert on exit code + stderr.
 Fixtures override the repo-root and projects-root via env vars so the
 script can be tested in isolation without touching ~/wingmen/projects.
 """
+from __future__ import annotations
+
 import os
 import stat
 import subprocess
@@ -162,3 +164,47 @@ def test_missing_wrapper_exits_6(tmp_path):
     )
     assert r.returncode == 6, f"expected 6, got {r.returncode}. stderr:{r.stderr}"
     assert "launch" in r.stderr.lower() or "wrapper" in r.stderr.lower()
+
+
+def _fixture_full_env(tmp_path: Path) -> dict[str, str]:
+    """Full environment fixture: repos + .env + launcher (dummy +x file)."""
+    _fixture_repos(tmp_path)
+    env_file = tmp_path / "test.env"
+    env_file.write_text(
+        "SUPABASE_URL=https://example.supabase.co\n"
+        "SUPABASE_SERVICE_KEY=eyJfake\n"
+        "ORCH_DSN=postgresql://fake\n"
+    )
+    launcher = tmp_path / "launch_dangerous_cc.sh"
+    launcher.write_text("#!/bin/bash\necho dummy launcher\n")
+    launcher.chmod(0o755)
+    return {
+        "CC_PROJECTS_ROOT": str(tmp_path),
+        "CC_ENV_FILE": str(env_file),
+        "CC_LAUNCHER": str(launcher),
+    }
+
+
+def test_dry_run_skip_db_prints_invocation(tmp_path):
+    """--dry-run with CC_SKIP_DB=1 → exit 0 + prints launcher command."""
+    env = _fixture_full_env(tmp_path)
+    env["CC_SKIP_DB"] = "1"
+    r = _run(["--dry-run", "cc-scholar"], env_overrides=env)
+    assert r.returncode == 0, f"dry-run failed: {r.returncode}. stderr:{r.stderr}"
+    # Output should contain the launcher command with one of the cc-scholar repos
+    combined = r.stdout + r.stderr
+    assert "launch_dangerous_cc.sh" in combined or "launcher" in combined.lower()
+    assert "--repo" in combined
+    assert "ai-scholar" in combined or "hifz-companion" in combined
+
+
+def test_non_dry_run_skip_db_prints_operator_instructions(tmp_path):
+    """No --dry-run with CC_SKIP_DB=1 → exit 0 + prints "paste this into a new terminal" guidance."""
+    env = _fixture_full_env(tmp_path)
+    env["CC_SKIP_DB"] = "1"
+    r = _run(["cc-scholar"], env_overrides=env)
+    assert r.returncode == 0, f"non-dry-run failed: {r.returncode}. stderr:{r.stderr}"
+    combined = r.stdout + r.stderr
+    assert "launch_dangerous_cc.sh" in combined
+    # Operator guidance wording — adjust assertion to match implementation
+    assert "terminal" in combined.lower() or "paste" in combined.lower()

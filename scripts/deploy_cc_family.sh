@@ -117,6 +117,53 @@ if [[ ! -x "$LAUNCHER" ]]; then
   exit 6
 fi
 
-echo "deploy_cc_family.sh: family-id=$FAMILY_ID dry-run=$DRY_RUN"
-echo "  family + repo-clone + env + wrapper checks: ok"
-echo "  (DB + sibling checks not yet implemented)"
+# ---------------------------------------------------------------------------
+# Precondition 5: DB preflight (agents row + no active sibling)
+# ---------------------------------------------------------------------------
+# CC_SKIP_DB=1 bypasses for unit tests that don't need a live DSN.
+if [[ "${CC_SKIP_DB:-0}" != "1" ]]; then
+  ORCH_DIR="$(cd "$(dirname "$LAUNCHER")/.." && pwd)"
+  PY="${ORCH_DIR}/.venv/bin/python"
+  if [[ ! -x "$PY" ]]; then
+    echo "error: orchestrator venv Python not found at $PY" >&2
+    exit 5
+  fi
+  # Source .env so ORCH_DSN is in the environment for the helper.
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  DB_OUT="$("$PY" -m scripts.lib.check_family_preflight "$FAMILY_ID" 2>&1)"
+  DB_CODE=$?
+  if [[ $DB_CODE -ne 0 ]]; then
+    echo "$DB_OUT" >&2
+    exit $DB_CODE
+  fi
+  echo "  DB preflight: $DB_OUT"
+fi
+
+# ---------------------------------------------------------------------------
+# All preconditions pass — emit the launcher invocation
+# ---------------------------------------------------------------------------
+# Pick the FIRST repo in the family's scope as the default worktree.
+PRIMARY_REPO="${REPOS[0]}"
+
+LAUNCH_CMD="cd $PROJECTS_ROOT/$PRIMARY_REPO && $LAUNCHER --repo $PRIMARY_REPO"
+
+echo ""
+echo "=== Preflight complete for $FAMILY_ID ==="
+echo ""
+echo "Launcher invocation (paste into a fresh terminal):"
+echo ""
+echo "  $LAUNCH_CMD"
+echo ""
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  echo "(dry-run — no action taken)"
+else
+  echo "Open a new terminal window, paste the command above, and run it."
+  echo "The launcher will resolve identity, register the session, and start claude."
+  echo "See docs/runbooks/deploy-cc-family.md for post-boot verification."
+fi
+
+exit 0
