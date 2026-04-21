@@ -27,18 +27,10 @@ class TestPickNextJobs:
             {"id": 2, "repo_name": "ihsandms", "status": "queued"},
             {"id": 3, "repo_name": "dookana", "status": "queued"},
         ]
-        sb = MagicMock()
-        sb.table.return_value = sb
-        sb.select.return_value = sb
-        sb.eq.return_value = sb
-        sb.order.return_value = sb
-        sb.limit.return_value = sb
-        sb.update.return_value = sb
-
+        sb = mock_supabase_chain()
         select_result = MagicMock(data=jobs)
         claim_ihsandms = MagicMock(data=[{"id": 1, "repo_name": "ihsandms", "status": "running"}])
         claim_dookana = MagicMock(data=[{"id": 3, "repo_name": "dookana", "status": "running"}])
-
         sb.execute = AsyncMock(side_effect=[select_result, claim_ihsandms, claim_dookana])
 
         result = await pick_next_jobs(sb, set(), max_picks=5)
@@ -54,14 +46,7 @@ class TestPickNextJobs:
             {"id": 1, "repo_name": "ihsandms", "status": "queued"},
             {"id": 2, "repo_name": "dookana", "status": "queued"},
         ]
-        sb = MagicMock()
-        sb.table.return_value = sb
-        sb.select.return_value = sb
-        sb.eq.return_value = sb
-        sb.order.return_value = sb
-        sb.limit.return_value = sb
-        sb.update.return_value = sb
-
+        sb = mock_supabase_chain()
         select_result = MagicMock(data=jobs)
         claim_dookana = MagicMock(data=[{"id": 2, "repo_name": "dookana", "status": "running"}])
         sb.execute = AsyncMock(side_effect=[select_result, claim_dookana])
@@ -79,14 +64,7 @@ class TestPickNextJobs:
             {"id": 2, "repo_name": "dookana", "status": "queued"},
             {"id": 3, "repo_name": "hifz-companion", "status": "queued"},
         ]
-        sb = MagicMock()
-        sb.table.return_value = sb
-        sb.select.return_value = sb
-        sb.eq.return_value = sb
-        sb.order.return_value = sb
-        sb.limit.return_value = sb
-        sb.update.return_value = sb
-
+        sb = mock_supabase_chain()
         select_result = MagicMock(data=jobs)
         claim = MagicMock(data=[{"id": 1, "repo_name": "ihsandms", "status": "running"}])
         sb.execute = AsyncMock(side_effect=[select_result, claim])
@@ -102,14 +80,7 @@ class TestPickNextJobs:
             {"id": 1, "repo_name": "ihsandms", "status": "queued"},
             {"id": 2, "repo_name": "dookana", "status": "queued"},
         ]
-        sb = MagicMock()
-        sb.table.return_value = sb
-        sb.select.return_value = sb
-        sb.eq.return_value = sb
-        sb.order.return_value = sb
-        sb.limit.return_value = sb
-        sb.update.return_value = sb
-
+        sb = mock_supabase_chain()
         select_result = MagicMock(data=jobs)
         cas_fail = MagicMock(data=[])  # another instance grabbed it
         cas_ok = MagicMock(data=[{"id": 2, "repo_name": "dookana", "status": "running"}])
@@ -149,13 +120,7 @@ class TestMainLoopConcurrency:
     async def test_respects_max_concurrent_builds(self):
         from wingmen_orch import pick_next_jobs, MAX_CONCURRENT_BUILDS
 
-        sb = MagicMock()
-        sb.table.return_value = sb
-        sb.select.return_value = sb
-        sb.eq.return_value = sb
-        sb.order.return_value = sb
-        sb.limit.return_value = sb
-        sb.update.return_value = sb
+        sb = mock_supabase_chain()
 
         # With 2 of MAX slots occupied, only MAX-2 slots should be requested
         running_tasks = {"ihsandms": MagicMock(), "dookana": MagicMock()}
