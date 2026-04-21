@@ -170,7 +170,19 @@ class TestFireDrill:
             ns["deploy"].deploy.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_drill_dirty_tree_rejection(self, tmp_path):
+    async def test_drill_dirty_tree_auto_stashes_and_proceeds(self, tmp_path):
+        """BUG-019: dirty tree must be auto-stashed, NOT rejected.
+
+        The old rejection-on-dirty-tree behavior was deliberately replaced
+        (see wingmen_orch.py:1059-1086). The build continues in an isolated
+        worktree (ralph_runner._create_worktree) so pre-existing dirt can't
+        contaminate the build, and the stash preserves the files for
+        recovery via `git stash list`.
+
+        This test verifies the drill reaches the new code path. For a
+        recoverability check against a real repo (stash actually preserves
+        the file), see tests/test_auto_stash_recovery.py (STRONG).
+        """
         from wingmen_orch import run_job
 
         ns = _drill_mocks(tmp_path)
@@ -182,17 +194,25 @@ class TestFireDrill:
 
             await run_job(sb, job)
 
-            # Crashes → re-queued (fail_count 0 → 1)
-            ns["set_status"].assert_called_once()
-            call_args = ns["set_status"].call_args
-            assert call_args.args[2] == "queued"
-            assert call_args.kwargs["fail_count"] == 1
-            assert "Dirty working tree" in call_args.kwargs["result_summary"]
-            # Claude never ran
-            ns["ralph"].run_claude.assert_not_called()
-            # Work session with outcome=crashed
-            ns["write_ws"].assert_called_once()
-            assert _kw_from_call(ns["write_ws"].call_args, "outcome") == "crashed"
+            # Stash subprocess was invoked with the BUG-019 marker.
+            stash_calls = [
+                c for c in ns["subprocess"].call_args_list
+                if len(c.args) >= 4 and c.args[:4] == ("git", "stash", "push", "-u")
+            ]
+            assert len(stash_calls) == 1, (
+                f"expected exactly one auto-stash subprocess call, "
+                f"got {len(stash_calls)}: {ns['subprocess'].call_args_list}"
+            )
+            stash_msg = stash_calls[0].args[5]  # position of -m argument
+            assert "BUG-019 auto-stash before job #42" in stash_msg
+
+            # Claude DID run — dirty tree no longer blocks the build.
+            ns["ralph"].run_claude.assert_called_once()
+
+            # Job progressed normally (completed, not early-returned to queued).
+            ns["set_status"].assert_any_call(
+                sb, 42, "completed", result_summary="Built widget",
+            )
 
     @pytest.mark.asyncio
     async def test_drill_build_crash_pauses(self, tmp_path):
