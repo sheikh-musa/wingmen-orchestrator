@@ -53,5 +53,41 @@ if [[ -z "$FAMILY_ID" ]]; then
   usage
 fi
 
+# ---------------------------------------------------------------------------
+# Precondition 1: family-id is a known CC family
+# ---------------------------------------------------------------------------
+case "$FAMILY_ID" in
+  cc-scholar|cc-cosem|cc-web|cc-ihsanos) ;;
+  *)
+    echo "error: unknown family '$FAMILY_ID'" >&2
+    echo "       valid: cc-scholar, cc-cosem, cc-web, cc-ihsanos" >&2
+    exit 2
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Precondition 2: repo clones exist at CC_PROJECTS_ROOT/<repo>
+# ---------------------------------------------------------------------------
+# repo_scope per family (hardcoded mirror of agents.repo_scope — updated when
+# CAI-AGENTS-001 changes. Kept in sync manually; DB preflight in the Python
+# helper catches drift.)
+case "$FAMILY_ID" in
+  cc-ihsanos) REPOS=("ihsanos" "wingmen-orchestrator") ;;
+  cc-cosem)   REPOS=("cosem-tdu" "cosem-adcda") ;;
+  cc-scholar) REPOS=("ai-scholar" "hifz-companion") ;;
+  cc-web)     REPOS=("wordpress-sites" "dookana") ;;
+esac
+
+PROJECTS_ROOT="${CC_PROJECTS_ROOT:-$HOME/wingmen/projects}"
+
+for repo in "${REPOS[@]}"; do
+  if [[ ! -d "$PROJECTS_ROOT/$repo/.git" ]]; then
+    echo "error: repo clone missing: $PROJECTS_ROOT/$repo/.git" >&2
+    echo "       clone it: git clone git@github.com:<org>/$repo.git $PROJECTS_ROOT/$repo" >&2
+    exit 4
+  fi
+done
+
 echo "deploy_cc_family.sh: family-id=$FAMILY_ID dry-run=$DRY_RUN"
-echo "  (skeleton — preconditions not yet implemented)"
+echo "  family + repo-clone checks: ok"
+echo "  (.env + wrapper + DB + sibling checks not yet implemented)"
