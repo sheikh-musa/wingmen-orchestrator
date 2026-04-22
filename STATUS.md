@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-21 21:10 SGT
+Last Updated: 2026-04-22 08:48 SGT
 Build Status: green
 Deploy: `1c27921` (TASK-045 dress-rehearsal fixes) on branch `feat/task-045-deploy-cc-family` (orchestrator code untouched this session — cosem-vision-port is a cross-repo port landing in cosem-tdu via PR #4)
 
@@ -339,15 +339,15 @@ Spec: `docs/superpowers/specs/2026-04-18-governance-comms-pipeline-hardening-des
 Docs-only change: created `README.md` with H1 + appended `<!-- PIPELINE-TEST-001: pipeline marker 2026-04-17 -->` marker. No code paths touched, no restart required. Audit row written to `work_outputs` by orchestrator.
 
 ## Completed (Last 5)
+- [green] Job #114: cosem-tdu — [BUG] when clicking report bug button the first time, menu disappears and i need to pr (5m 34s, deploy: N/A)
 - [red] Job #113: cosem-tdu — [BUG] tdu button target smoke test (1m 26s, deploy: N/A)
 - [green] Job #106: ihsanos — [BUG] still see an empty dashboard for qurban supplier (18m 0s, deploy: https://ihsanos-a1ok6x0o6-musaaaaaaas-projects.vercel.app)
 - [green] Job #105: ihsanos — [BUG] where does the qurban supplier add the slaughterman information? (5m 52s, deploy: https://ihsanos-fpshtw62t-musaaaaaaas-projects.vercel.app)
 - [red] Job #93: wingmen-orchestrator — PIPELINE-TEST-001: Add test marker comment to README.md (1m 1s, deploy: N/A)
-- [green] Job #93: wingmen-orchestrator — [PIPELINE-TEST-001] README pipeline marker (deploy: N/A)
 
-##                 Recent Jobs (auto-tracked)
+##                  Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-21 09:05 SGT
+Last Updated: 2026-04-22 08:48 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
@@ -360,7 +360,7 @@ Last Updated: 2026-04-21 09:05 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-21 09:05 SGT
+Last Updated: 2026-04-22 08:48 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
