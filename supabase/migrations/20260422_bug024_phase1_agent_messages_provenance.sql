@@ -43,7 +43,9 @@ ALTER TABLE agent_messages
 -- SECTION 2: strategic_decisions cai_session_id
 -- ============================================================
 
--- (Task 5 will fill this in)
+-- Reverse: ALTER TABLE strategic_decisions DROP COLUMN cai_session_id;
+ALTER TABLE strategic_decisions
+  ADD COLUMN cai_session_id TEXT;
 
 -- ============================================================
 -- SECTION 3: identity_allowlist table
@@ -123,7 +125,15 @@ CREATE TRIGGER trg_agent_messages_provenance
 -- SECTION 5: indexes
 -- ============================================================
 
--- (Task 5 will fill this in)
+-- Reverse: DROP INDEX IF EXISTS idx_agent_messages_cai_session;
+CREATE INDEX idx_agent_messages_cai_session
+  ON agent_messages (cai_session_id, created_at DESC)
+  WHERE from_agent = 'cai';
+
+-- Reverse: DROP INDEX IF EXISTS idx_strategic_decisions_cai_session;
+CREATE INDEX idx_strategic_decisions_cai_session
+  ON strategic_decisions (cai_session_id, decided_at DESC)
+  WHERE source = 'claude_ai_session';
 
 -- ============================================================
 -- SECTION 6: boot_briefing view extension

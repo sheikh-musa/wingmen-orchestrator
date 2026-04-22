@@ -163,3 +163,49 @@ def test_trigger_sets_verified_null_on_no_match():
             assert verified is None, f"expected NULL, got {verified}"
         finally:
             cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
+
+
+def test_strategic_decisions_cai_session_id_column():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT data_type, is_nullable FROM information_schema.columns
+             WHERE table_name = 'strategic_decisions' AND column_name = 'cai_session_id'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "text"
+        assert row[1] == "YES"
+
+
+def test_partial_index_agent_messages_cai_session():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT indexdef FROM pg_indexes
+             WHERE tablename = 'agent_messages'
+               AND indexname = 'idx_agent_messages_cai_session'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None, "partial index idx_agent_messages_cai_session missing"
+        idx_def = row[0]
+        assert "cai_session_id" in idx_def
+        assert "from_agent" in idx_def  # partial predicate
+
+
+def test_partial_index_strategic_decisions_cai_session():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT indexdef FROM pg_indexes
+             WHERE tablename = 'strategic_decisions'
+               AND indexname = 'idx_strategic_decisions_cai_session'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None, "partial index idx_strategic_decisions_cai_session missing"
+        idx_def = row[0]
+        assert "cai_session_id" in idx_def
+        assert "claude_ai_session" in idx_def  # partial predicate on source
