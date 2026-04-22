@@ -300,3 +300,25 @@ def test_existing_rows_cai_session_id_null():
         )
         count = cur.fetchone()[0]
         assert count == 0, f"{count} pre-migration rows have non-NULL cai_session_id (should all be NULL)"
+
+
+def test_full_migration_smoke():
+    """End-to-end: insert a cai message with session_id, verify all columns populate correctly."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agent_messages
+              (from_agent, to_agent, message_type, subject, body, cai_session_id)
+            VALUES
+              ('cai', 'cc-ihsanos', 'update', 'bug024-e2e-smoke',
+               'end to end smoke', 'cai-20260422-smoke-test')
+            RETURNING id, posted_by_identity, from_agent_verified, cai_session_id
+            """
+        )
+        mid, pbi, verified, session_id = cur.fetchone()
+        try:
+            assert pbi is not None  # trigger populated
+            assert verified is None  # no allowlist row for test context
+            assert session_id == 'cai-20260422-smoke-test'
+        finally:
+            cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
