@@ -23,7 +23,21 @@
 -- SECTION 1: agent_messages provenance columns
 -- ============================================================
 
--- (Task 3 will fill this in)
+-- Reverse: ALTER TABLE agent_messages DROP COLUMN posted_by_identity;
+ALTER TABLE agent_messages
+  ADD COLUMN posted_by_identity TEXT;
+
+-- Reverse: ALTER TABLE agent_messages DROP COLUMN from_agent_verified;
+-- Nullable: NULL = unverified (Phase 1 default), true = allowlist-matched,
+-- false = explicit admin mark (e.g. msg 252 known impersonation).
+ALTER TABLE agent_messages
+  ADD COLUMN from_agent_verified BOOLEAN;
+
+-- Reverse: ALTER TABLE agent_messages DROP COLUMN cai_session_id;
+-- Nullable: NULL on pre-tracking rows, populated via app convention
+-- (cai opens every chat with 'cai-YYYYMMDD-topic' identifier).
+ALTER TABLE agent_messages
+  ADD COLUMN cai_session_id TEXT;
 
 -- ============================================================
 -- SECTION 2: strategic_decisions cai_session_id
