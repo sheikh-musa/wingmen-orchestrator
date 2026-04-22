@@ -268,3 +268,35 @@ def test_boot_briefing_last_cai_session_row():
         payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         assert "cai_session_id" in payload
         assert "gap_days" in payload
+
+
+def test_msg_252_marked_unverified():
+    """BUG-024 incident message: msg 252 should have from_agent_verified=false."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT from_agent_verified FROM agent_messages WHERE id = 252
+            """
+        )
+        row = cur.fetchone()
+        if row is None:
+            pytest.skip("msg 252 not present in this DB (may be local dev)")
+        verified = row[0]
+        assert verified is False, (
+            f"msg 252 (BUG-024 incident) should be from_agent_verified=false, "
+            f"got {verified}"
+        )
+
+
+def test_existing_rows_cai_session_id_null():
+    """Pre-migration rows should have cai_session_id = NULL (honest pre-tracking marker)."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM agent_messages
+             WHERE id < (SELECT coalesce(max(id), 0) FROM agent_messages WHERE created_at > '2026-04-22 00:00:00+00')
+               AND cai_session_id IS NOT NULL
+            """
+        )
+        count = cur.fetchone()[0]
+        assert count == 0, f"{count} pre-migration rows have non-NULL cai_session_id (should all be NULL)"

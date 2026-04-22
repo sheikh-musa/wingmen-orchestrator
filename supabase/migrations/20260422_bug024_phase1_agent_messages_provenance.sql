@@ -315,4 +315,14 @@ FROM (
 -- SECTION 7: backfills
 -- ============================================================
 
--- (Task 7 will fill this in)
+-- Backfill msg 252: confirmed CAI impersonation incident (BUG-024).
+-- No-op if msg 252 does not exist (e.g. fresh local dev DB).
+UPDATE agent_messages
+   SET from_agent_verified = false,
+       posted_by_identity   = 'unknown_impersonator'
+ WHERE id = 252
+   AND from_agent_verified IS DISTINCT FROM false;
+
+-- cai_session_id NULL backfill is implicit via column default (NULL).
+-- No UPDATE needed — new column on existing rows starts NULL.
+-- This comment is the explicit documentation for future readers.
