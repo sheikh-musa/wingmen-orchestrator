@@ -209,3 +209,62 @@ def test_partial_index_strategic_decisions_cai_session():
         idx_def = row[0]
         assert "cai_session_id" in idx_def
         assert "claude_ai_session" in idx_def  # partial predicate on source
+
+
+def test_boot_briefing_includes_recent_decision_text():
+    """Recent (< 14d) cai-authored decisions surface decision + reasoning + cai_session_id."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT context
+              FROM boot_briefing
+             WHERE source = 'active_decision'
+               AND (context->>'decided_at')::timestamptz >= now() - interval '14 days'
+             LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        if row is None:
+            pytest.skip("no recent cai-authored decisions in DB to verify shape")
+        payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        assert "decision" in payload, "decision text field missing in recent-window row"
+        assert "reasoning" in payload, "reasoning text field missing in recent-window row"
+        assert "cai_session_id" in payload, "cai_session_id field missing"
+
+
+def test_boot_briefing_stubs_old_decision_text():
+    """Decisions > 14d old retain existing fields but do NOT have decision/reasoning text."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT context
+              FROM boot_briefing
+             WHERE source = 'active_decision'
+               AND (context->>'decided_at')::timestamptz < now() - interval '14 days'
+             LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        if row is None:
+            pytest.skip("no > 14d cai decisions in DB to verify stub shape")
+        payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        assert "title" in payload, "title field should still be present on old rows"
+        assert "cai_session_id" in payload, "cai_session_id should be present on all active_decision rows"
+        assert "decision" not in payload, "full decision text should NOT be in >14d row"
+        assert "reasoning" not in payload, "full reasoning should NOT be in >14d row"
+
+
+def test_boot_briefing_last_cai_session_row():
+    """boot_briefing surfaces last_cai_session section with gap-in-days."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT context FROM boot_briefing
+             WHERE source = 'last_cai_session'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None, "boot_briefing missing last_cai_session section"
+        payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        assert "cai_session_id" in payload
+        assert "gap_days" in payload
