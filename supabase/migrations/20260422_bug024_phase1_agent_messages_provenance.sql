@@ -95,6 +95,11 @@ SET search_path = public, pg_temp
 AS $$
 BEGIN
   -- Only populate if caller did not explicitly set it (allows admin backfills).
+  -- PHASE 2 REWRITE: when per-agent API keys land, replace `current_user` with
+  --   current_setting('request.jwt.claims', true)::json ->> 'agent_id'
+  -- so posted_by_identity reflects the authenticated agent per JWT claim
+  -- rather than the shared Postgres session role. Trigger signature stays the
+  -- same; only this one line changes. See CAI-RESP-072 Q2 ruling for rationale.
   IF NEW.posted_by_identity IS NULL THEN
     NEW.posted_by_identity := current_user;
   END IF;
