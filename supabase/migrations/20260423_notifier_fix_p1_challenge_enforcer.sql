@@ -127,10 +127,65 @@ CREATE TRIGGER trg_challenge_window_requires_expiry
 -- SECTION 5: enforce_challenge_window_timeouts function
 -- ============================================================
 
--- (Task B5 will fill this in)
+-- Reverse: DROP FUNCTION IF EXISTS enforce_challenge_window_timeouts();
+--
+-- CAI-RESP-074 C1: ships with DRY_RUN default. Reads orchestrator_runtime_config
+-- flag 'challenge_enforcer_mode'. In dry_run: logs proposals to dryrun_log.
+-- In write_mode: flips strategic_decisions.challenge_status to accepted_by_timeout.
+-- Race guard: skips rows decided_at within last 1 hour (not-yet-notified rows).
+-- Returns a table of (decision_ref, action) for each row processed.
+
+CREATE OR REPLACE FUNCTION enforce_challenge_window_timeouts()
+RETURNS TABLE(decision_ref TEXT, action TEXT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  mode TEXT;
+  rec RECORD;
+BEGIN
+  SELECT value INTO mode
+    FROM orchestrator_runtime_config
+   WHERE key = 'challenge_enforcer_mode';
+  IF mode IS NULL THEN
+    mode := 'dry_run';
+  END IF;
+
+  FOR rec IN
+    SELECT sd.decision_ref, sd.challenge_status, sd.challengeable_until
+      FROM strategic_decisions sd
+     WHERE sd.challenge_status = 'challenge_window'
+       AND sd.challengeable_until IS NOT NULL
+       AND sd.challengeable_until < now()
+       AND sd.decided_at < now() - interval '1 hour'
+  LOOP
+    IF mode = 'dry_run' THEN
+      INSERT INTO challenge_enforcer_dryrun_log
+        (decision_ref, current_challenge_status, challengeable_until, proposed_new_status)
+      VALUES
+        (rec.decision_ref, rec.challenge_status, rec.challengeable_until, 'accepted_by_timeout')
+      ON CONFLICT (decision_ref) DO NOTHING;
+      RETURN QUERY SELECT rec.decision_ref, 'logged'::TEXT;
+    ELSE
+      UPDATE strategic_decisions
+         SET challenge_status = 'accepted_by_timeout',
+             updated_at = now()
+       WHERE strategic_decisions.decision_ref = rec.decision_ref;
+      RETURN QUERY SELECT rec.decision_ref, 'flipped'::TEXT;
+    END IF;
+  END LOOP;
+END;
+$$;
 
 -- ============================================================
 -- SECTION 6: pg_cron schedule
 -- ============================================================
 
--- (Task B5 will fill this in)
+-- Reverse: SELECT cron.unschedule('notifier-fix-enforcer');
+-- Runs every 5 minutes. Calls enforcer function which self-branches on config flag.
+SELECT cron.schedule(
+  'notifier-fix-enforcer',
+  '*/5 * * * *',
+  $cron$SELECT enforce_challenge_window_timeouts();$cron$
+);

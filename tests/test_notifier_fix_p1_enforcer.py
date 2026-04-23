@@ -159,3 +159,129 @@ def test_trigger_accepts_challenge_window_with_expiry():
             assert cur.fetchone()[0] == 'TEST-TRIG-OK'
         finally:
             cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-TRIG-OK'")
+
+
+def test_enforcer_function_exists():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_get_function_result(oid) FROM pg_proc
+             WHERE proname = 'enforce_challenge_window_timeouts'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None, "enforce_challenge_window_timeouts function not found"
+        assert 'text' in row[0].lower()
+
+
+def test_enforcer_dry_run_logs_not_flips():
+    """In dry_run mode, expired rows go to log, strategic_decisions unchanged."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM orchestrator_runtime_config WHERE key = 'challenge_enforcer_mode'"
+        )
+        mode = cur.fetchone()[0]
+        assert mode == 'dry_run', f"test precondition violated: mode={mode}"
+
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, status, challenge_status,
+               decided_by, decided_at, challengeable_until)
+            VALUES
+              ('TEST-ENFORCER-DRY', 't', 'd', 'r', 'active', 'challenge_window',
+               'cc-ihsanos', now() - interval '2 hours', now() - interval '30 minutes')
+            """
+        )
+        try:
+            cur.execute("SELECT decision_ref, action FROM enforce_challenge_window_timeouts()")
+            rows = cur.fetchall()
+            logged = [r for r in rows if r[0] == 'TEST-ENFORCER-DRY']
+            assert len(logged) == 1, f"expected test row logged, got {rows}"
+            assert logged[0][1] == 'logged'
+
+            cur.execute(
+                "SELECT challenge_status FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCER-DRY'"
+            )
+            assert cur.fetchone()[0] == 'challenge_window'
+
+            cur.execute(
+                "SELECT proposed_new_status FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCER-DRY'"
+            )
+            log_row = cur.fetchone()
+            assert log_row is not None
+            assert log_row[0] == 'accepted_by_timeout'
+        finally:
+            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCER-DRY'")
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCER-DRY'")
+
+
+def test_enforcer_write_mode_flips_not_logs():
+    """In write_mode, expired rows flip directly, dryrun_log not touched."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE orchestrator_runtime_config SET value = 'write_mode' WHERE key = 'challenge_enforcer_mode'")
+        try:
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, status, challenge_status,
+                   decided_by, decided_at, challengeable_until)
+                VALUES
+                  ('TEST-ENFORCER-WRITE', 't', 'd', 'r', 'active', 'challenge_window',
+                   'cc-ihsanos', now() - interval '2 hours', now() - interval '30 minutes')
+                """
+            )
+            try:
+                cur.execute("SELECT decision_ref, action FROM enforce_challenge_window_timeouts()")
+                rows = cur.fetchall()
+                flipped = [r for r in rows if r[0] == 'TEST-ENFORCER-WRITE']
+                assert len(flipped) == 1
+                assert flipped[0][1] == 'flipped'
+
+                cur.execute(
+                    "SELECT challenge_status FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCER-WRITE'"
+                )
+                assert cur.fetchone()[0] == 'accepted_by_timeout'
+
+                cur.execute(
+                    "SELECT count(*) FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCER-WRITE'"
+                )
+                assert cur.fetchone()[0] == 0
+            finally:
+                cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCER-WRITE'")
+        finally:
+            cur.execute("UPDATE orchestrator_runtime_config SET value = 'dry_run' WHERE key = 'challenge_enforcer_mode'")
+
+
+def test_enforcer_race_guard_skips_recent_rows():
+    """Rows with decided_at within last hour must NOT be flipped even if expired."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, status, challenge_status,
+               decided_by, decided_at, challengeable_until)
+            VALUES
+              ('TEST-ENFORCER-RACE', 't', 'd', 'r', 'active', 'challenge_window',
+               'cc-ihsanos', now() - interval '15 minutes', now() - interval '5 minutes')
+            """
+        )
+        try:
+            cur.execute("SELECT decision_ref FROM enforce_challenge_window_timeouts()")
+            rows = cur.fetchall()
+            race_rows = [r for r in rows if r[0] == 'TEST-ENFORCER-RACE']
+            assert len(race_rows) == 0, f"race guard failed: test row was processed"
+        finally:
+            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCER-RACE'")
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCER-RACE'")
+
+
+def test_pg_cron_job_registered():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT jobname, schedule, command FROM cron.job WHERE jobname = 'notifier-fix-enforcer'"
+        )
+        row = cur.fetchone()
+        assert row is not None, "pg_cron job 'notifier-fix-enforcer' not registered"
+        assert row[1] == '*/5 * * * *', f"expected 5-min schedule, got {row[1]}"
+        assert 'enforce_challenge_window_timeouts' in row[2]
