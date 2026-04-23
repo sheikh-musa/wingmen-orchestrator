@@ -250,3 +250,88 @@ def test_agent_messages_is_test_defaults_false_on_insert():
             assert is_test is False
         finally:
             cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
+
+
+def test_enforcer_accepts_test_mode_parameter():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_get_function_arguments(oid) FROM pg_proc
+             WHERE proname = 'enforce_challenge_window_timeouts'
+            """
+        )
+        args = cur.fetchone()[0]
+        assert 'test_mode' in args, f"function signature missing test_mode parameter: {args}"
+        assert 'boolean' in args.lower()
+
+
+def test_enforcer_default_call_excludes_is_test_rows():
+    """enforce_challenge_window_timeouts() with no args defaults test_mode=FALSE,
+    so is_test=TRUE fixtures are ignored."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by,
+               decided_at, challengeable_until, is_test)
+            VALUES
+              ('TEST-ENFORCE-DEFAULT', 't', 'd', 'r', 'architecture', 'active', 'challenge_window', 'cc-ihsanos',
+               now() - interval '2 hours', now() - interval '30 minutes', TRUE)
+            """
+        )
+        try:
+            cur.execute("SELECT decision_ref FROM enforce_challenge_window_timeouts()")
+            refs = [r[0] for r in cur.fetchall()]
+            assert 'TEST-ENFORCE-DEFAULT' not in refs, \
+                "default call (test_mode=FALSE) must exclude is_test=TRUE rows"
+        finally:
+            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCE-DEFAULT'")
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCE-DEFAULT'")
+
+
+def test_enforcer_test_mode_true_includes_is_test_rows():
+    """enforce_challenge_window_timeouts(test_mode => TRUE) processes only is_test=TRUE rows."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by,
+               decided_at, challengeable_until, is_test)
+            VALUES
+              ('TEST-ENFORCE-TESTMODE', 't', 'd', 'r', 'architecture', 'active', 'challenge_window', 'cc-ihsanos',
+               now() - interval '2 hours', now() - interval '30 minutes', TRUE)
+            """
+        )
+        try:
+            cur.execute("SELECT decision_ref, action FROM enforce_challenge_window_timeouts(test_mode => TRUE)")
+            rows = cur.fetchall()
+            refs = [r[0] for r in rows]
+            assert 'TEST-ENFORCE-TESTMODE' in refs, \
+                "test_mode=TRUE should process is_test=TRUE rows"
+        finally:
+            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCE-TESTMODE'")
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCE-TESTMODE'")
+
+
+def test_enforcer_test_mode_true_excludes_production_rows():
+    """CRITICAL — test_mode=TRUE must NOT touch is_test=FALSE rows. Prevents the exact
+    test-mutates-prod bug that caused CAI-RESP-077 incident. This is the structural fix."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by,
+               decided_at, challengeable_until)
+            VALUES
+              ('TEST-ENFORCE-PROD-SAFE', 't', 'd', 'r', 'architecture', 'active', 'challenge_window', 'cc-ihsanos',
+               now() - interval '2 hours', now() - interval '30 minutes')
+            """
+        )
+        try:
+            cur.execute("SELECT decision_ref FROM enforce_challenge_window_timeouts(test_mode => TRUE)")
+            refs = [r[0] for r in cur.fetchall()]
+            assert 'TEST-ENFORCE-PROD-SAFE' not in refs, \
+                "test_mode=TRUE must NOT touch is_test=FALSE production rows"
+        finally:
+            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCE-PROD-SAFE'")
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCE-PROD-SAFE'")

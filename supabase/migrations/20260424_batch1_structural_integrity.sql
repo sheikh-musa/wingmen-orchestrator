@@ -153,7 +153,82 @@ ALTER TABLE agent_messages
 -- SECTION 7: enforce_challenge_window_timeouts REPLACE with test_mode parameter
 -- ============================================================
 
--- (Task 7 will fill this in)
+-- BUG-031 per CAI-RESP-077: eliminate test-mutates-prod by gating iteration on
+-- is_test flag. Single function, two modes:
+--   test_mode=FALSE (default, production): predicate requires is_test = FALSE
+--   test_mode=TRUE  (test harness only):    predicate requires is_test = TRUE
+-- Production callers (pg_cron, manual admin) do NOT pass test_mode → defaults
+-- FALSE. Test suites explicitly pass test_mode=TRUE.
+-- Race guard + dry_run/write_mode branching from Fix 2 preserved verbatim.
+-- Reverse: DROP FUNCTION IF EXISTS enforce_challenge_window_timeouts(BOOLEAN);
+-- Note: Postgres allows overloaded functions; the OR REPLACE here replaces by
+-- signature. The prior 0-arg version must be dropped first if it still exists.
+
+DROP FUNCTION IF EXISTS enforce_challenge_window_timeouts();
+
+CREATE OR REPLACE FUNCTION enforce_challenge_window_timeouts(test_mode BOOLEAN DEFAULT FALSE)
+RETURNS TABLE(decision_ref TEXT, action TEXT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+#variable_conflict use_column
+-- #variable_conflict directive from Fix 2: plpgsql OUT variable `decision_ref`
+-- shadows table column in INSERT ... ON CONFLICT. Prefer column when names clash.
+DECLARE
+  mode TEXT;
+  rec RECORD;
+BEGIN
+  SELECT value INTO mode
+    FROM orchestrator_runtime_config
+   WHERE key = 'challenge_enforcer_mode';
+  IF mode IS NULL THEN
+    mode := 'dry_run';
+  END IF;
+
+  FOR rec IN
+    SELECT sd.decision_ref, sd.challenge_status, sd.challengeable_until
+      FROM strategic_decisions sd
+     WHERE sd.challenge_status = 'challenge_window'
+       AND sd.challengeable_until IS NOT NULL
+       AND sd.challengeable_until < now()
+       AND sd.decided_at < now() - interval '1 hour'
+       -- BUG-031: is_test predicate inverts based on test_mode parameter.
+       -- test_mode=FALSE (prod) → matches is_test=FALSE rows only.
+       -- test_mode=TRUE  (test) → matches is_test=TRUE rows only.
+       AND sd.is_test = test_mode
+  LOOP
+    IF mode = 'dry_run' THEN
+      INSERT INTO challenge_enforcer_dryrun_log
+        (decision_ref, current_challenge_status, challengeable_until, proposed_new_status)
+      VALUES
+        (rec.decision_ref, rec.challenge_status, rec.challengeable_until, 'accepted_by_timeout')
+      ON CONFLICT (decision_ref) DO NOTHING;
+      RETURN QUERY SELECT rec.decision_ref, 'logged'::TEXT;
+    ELSE
+      -- Race guard (from Fix 2 B5 amendment): concurrent challenge flip protection
+      UPDATE strategic_decisions
+         SET challenge_status = 'accepted_by_timeout',
+             updated_at = now()
+       WHERE strategic_decisions.decision_ref = rec.decision_ref
+         AND strategic_decisions.challenge_status = 'challenge_window';
+      IF FOUND THEN
+        RETURN QUERY SELECT rec.decision_ref, 'flipped'::TEXT;
+      ELSE
+        RETURN QUERY SELECT rec.decision_ref, 'skipped_raced'::TEXT;
+      END IF;
+    END IF;
+  END LOOP;
+END;
+$$;
+
+-- Permissions: same as Fix 2 — only postgres (pg_cron invoker) should execute.
+REVOKE EXECUTE ON FUNCTION enforce_challenge_window_timeouts(BOOLEAN) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION enforce_challenge_window_timeouts(BOOLEAN) TO postgres;
+
+-- pg_cron continues to call the zero-arg form (defaults test_mode=FALSE).
+-- No schedule change required — existing schedule command 'SELECT enforce_challenge_window_timeouts();'
+-- resolves via DEFAULT to the 1-arg form with test_mode=FALSE.
 
 -- ============================================================
 -- SECTION 8: boot_briefing view extension
