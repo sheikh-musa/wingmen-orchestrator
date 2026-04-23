@@ -205,3 +205,31 @@ def test_tier1_explicit_announce_thread_id_overrides_inheritance():
             cur.execute("SELECT thread_id FROM agent_messages WHERE id = %s", (msg_id,))
             assert str(cur.fetchone()[0]) == override_thread, "thread_id override ignored"
         c.rollback()
+
+
+def test_tier3_legacy_fallback_when_parent_msg_id_null():
+    """AC-BUG030-4 Tier 3: parent_msg_id NULL + announce_* NULL → cc-ihsanos default +
+    fresh thread_id. Backward-compatible behavior for all 300+ pre-migration rows."""
+    with _conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, domain, status,
+                   source, challenge_status, decided_by, challengeable_until)
+                VALUES ('TEST-BUG030-T3', 't', 'd', 'r', 'operations', 'active',
+                        'claude_ai_session', 'challenge_window', 'cai',
+                        now() + interval '1 day')
+                RETURNING announced_by_msg_id
+                """
+            )
+            msg_id = cur.fetchone()[0]
+            cur.execute(
+                "SELECT to_agent, thread_id FROM agent_messages WHERE id = %s",
+                (msg_id,),
+            )
+            to_agent, thread_id = cur.fetchone()
+            assert to_agent == "cc-ihsanos"
+            assert thread_id is not None
+        c.rollback()
