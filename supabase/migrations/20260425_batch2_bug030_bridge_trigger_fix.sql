@@ -19,3 +19,30 @@
 --   * agent_messages.id is BIGINT PK. agent_messages.thread_id is UUID (no self-FK).
 
 BEGIN;
+
+-- ============================================================
+-- SECTION 1: strategic_decisions new routing columns (all nullable)
+-- ============================================================
+-- Reverse:
+--   ALTER TABLE strategic_decisions DROP COLUMN parent_msg_id;
+--   ALTER TABLE strategic_decisions DROP COLUMN announce_to_agent;
+--   ALTER TABLE strategic_decisions DROP COLUMN announce_thread_id;
+
+ALTER TABLE strategic_decisions
+  ADD COLUMN parent_msg_id BIGINT,
+  ADD COLUMN announce_to_agent TEXT,
+  ADD COLUMN announce_thread_id UUID;
+
+COMMENT ON COLUMN strategic_decisions.parent_msg_id IS
+  'BUG-030: BIGINT FK to agent_messages(id). If populated, bridge trigger '
+  'inherits parent thread_id and reply-to-sender for to_agent routing '
+  '(see trigger_cai_decision_announce). Nullable — legacy rows + decisions '
+  'not responding to a specific message leave this NULL and hit Tier-3 fallback.';
+
+COMMENT ON COLUMN strategic_decisions.announce_to_agent IS
+  'BUG-030: explicit override for bridge trigger recipient. Highest precedence '
+  'in the 3-tier COALESCE (explicit > inferred-from-parent > cc-ihsanos default).';
+
+COMMENT ON COLUMN strategic_decisions.announce_thread_id IS
+  'BUG-030: explicit override for bridge trigger thread_id. Highest precedence '
+  'in the 3-tier COALESCE (explicit > inherit-from-parent > fresh uuid).';

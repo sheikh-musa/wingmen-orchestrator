@@ -47,3 +47,25 @@ def _clean_test_bug030_rows():
     _cleanup("TEST-BUG030-")
     yield
     _cleanup("TEST-BUG030-")
+
+
+def test_strategic_decisions_has_bug030_columns():
+    """AC-BUG030-1/2/3: parent_msg_id + announce_to_agent + announce_thread_id."""
+    expected = {
+        "parent_msg_id": ("bigint", "YES"),
+        "announce_to_agent": ("text", "YES"),
+        "announce_thread_id": ("uuid", "YES"),
+    }
+    with _conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name, data_type, is_nullable
+                  FROM information_schema.columns
+                 WHERE table_name = 'strategic_decisions'
+                   AND column_name = ANY(%s)
+                """,
+                (list(expected.keys()),),
+            )
+            actual = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    assert actual == expected, f"columns mismatch: expected {expected}, got {actual}"
