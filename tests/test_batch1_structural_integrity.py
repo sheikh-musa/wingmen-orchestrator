@@ -51,8 +51,14 @@ def test_agent_status_base_agent_id_backfilled():
 
 
 def test_agent_status_base_agent_id_fk_enforced():
-    """FK to agents(id) rejects non-existent family."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    """FK to agents(id) rejects non-existent family.
+
+    Note: trg_agent_status_identity requires SET LOCAL app.current_agent_id = <agent_id>
+    matching NEW.agent_id. Wrap in explicit transaction + SET LOCAL.
+    """
+    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        cur.execute("BEGIN")
+        cur.execute("SET LOCAL app.current_agent_id = 'test-bogus-9'")
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             cur.execute(
                 """
@@ -60,11 +66,18 @@ def test_agent_status_base_agent_id_fk_enforced():
                 VALUES ('test-bogus-9', 'cc-nonexistent', 'offline')
                 """
             )
+        cur.execute("ROLLBACK")
 
 
 def test_agent_status_check_constraint_rejects_prefix_mismatch():
-    """CAI-RESP-080 Open Q2: FK alone allows cross-family; CHECK enforces prefix match."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    """CAI-RESP-080 Open Q2: FK alone allows cross-family; CHECK enforces prefix match.
+
+    trg_agent_status_identity GUC wrap required per note above.
+    """
+    # Negative case: CHECK rejects mismatched base
+    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        cur.execute("BEGIN")
+        cur.execute("SET LOCAL app.current_agent_id = 'cc-ihsanos-999'")
         with pytest.raises(psycopg.errors.CheckViolation):
             cur.execute(
                 """
@@ -72,7 +85,11 @@ def test_agent_status_check_constraint_rejects_prefix_mismatch():
                 VALUES ('cc-ihsanos-999', 'cc-scholar', 'offline')
                 """
             )
-        # Accept case: matching prefix — verify INSERT then cleanup
+        cur.execute("ROLLBACK")
+    # Positive case: matching prefix accepted, then cleanup
+    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        cur.execute("BEGIN")
+        cur.execute("SET LOCAL app.current_agent_id = 'cc-ihsanos-999'")
         cur.execute(
             """
             INSERT INTO agent_status (agent_id, base_agent_id, status)
@@ -80,11 +97,14 @@ def test_agent_status_check_constraint_rejects_prefix_mismatch():
             """
         )
         cur.execute("DELETE FROM agent_status WHERE agent_id = 'cc-ihsanos-999'")
+        cur.execute("COMMIT")
 
 
 def test_agent_status_insert_with_base_agent_id_succeeds():
-    """Positive path: matching family inserts cleanly."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    """Positive path: matching family inserts cleanly. GUC wrap required."""
+    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        cur.execute("BEGIN")
+        cur.execute("SET LOCAL app.current_agent_id = 'cc-scholar-99'")
         cur.execute(
             """
             INSERT INTO agent_status (agent_id, base_agent_id, status)
@@ -97,6 +117,7 @@ def test_agent_status_insert_with_base_agent_id_succeeds():
             assert ret == 'cc-scholar'
         finally:
             cur.execute("DELETE FROM agent_status WHERE agent_id = 'cc-scholar-99'")
+            cur.execute("COMMIT")
 
 
 def test_strategic_decisions_posted_by_identity_column():
