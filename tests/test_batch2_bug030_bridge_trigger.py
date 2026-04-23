@@ -233,3 +233,37 @@ def test_tier3_legacy_fallback_when_parent_msg_id_null():
             assert to_agent == "cc-ihsanos"
             assert thread_id is not None
         c.rollback()
+
+
+def test_update_path_fires_trigger_on_challenge_status_change():
+    """AC-BUG030-5: UPDATE of challenge_status from accepted_by_timeout →
+    challenge_window must fire the bridge trigger (BUG-020 precedent preserved)."""
+    with _conn() as c:
+        with c.cursor() as cur:
+            # Seed a decision in challenge_window with bypass_review=true
+            # — simulates the bypass-then-untbypass flow that triggers the UPDATE path.
+            cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, domain, status,
+                   source, challenge_status, decided_by, bypass_review,
+                   challengeable_until)
+                VALUES ('TEST-BUG030-UPD', 't', 'd', 'r', 'operations', 'active',
+                        'claude_ai_session', 'challenge_window', 'cai', true,
+                        now() + interval '1 day')
+                """
+            )
+            # Flip bypass_review → false then flip challenge_status to trigger.
+            cur.execute(
+                "UPDATE strategic_decisions SET bypass_review = false "
+                "WHERE decision_ref = 'TEST-BUG030-UPD'"
+            )
+            cur.execute(
+                "UPDATE strategic_decisions SET challenge_status = 'accepted' "
+                "WHERE decision_ref = 'TEST-BUG030-UPD' "
+                "RETURNING announced_by_msg_id"
+            )
+            msg_id = cur.fetchone()[0]
+            assert msg_id is not None, "UPDATE path did not fire trigger"
+        c.rollback()
