@@ -32,19 +32,43 @@
 -- SECTION 1: agent_status + base_agent_id FK column (nullable initial)
 -- ============================================================
 
--- (Task 3 will fill this in)
+-- Reverse: ALTER TABLE agent_status DROP COLUMN base_agent_id;
+-- Add nullable first so existing rows don't violate NOT NULL during CREATE.
+-- Section 2 backfills; Section 3 enforces NOT NULL + prefix CHECK.
+ALTER TABLE agent_status
+  ADD COLUMN base_agent_id TEXT REFERENCES agents(id);
 
 -- ============================================================
 -- SECTION 2: agent_status backfill base_agent_id from agent_id pattern
 -- ============================================================
 
--- (Task 3 will fill this in)
+-- Parse sub-identity suffix `-N` where N is numeric. E.g., cc-ihsanos-3 → cc-ihsanos.
+-- Current 5 rows: cc-cosem-1, cc-ihsanos-1, cc-ihsanos-2, cc-ihsanos-3, cc-scholar-1.
+-- All parse cleanly to known agent IDs (cc-cosem, cc-ihsanos, cc-scholar) which
+-- exist in agents table.
+UPDATE agent_status
+   SET base_agent_id = regexp_replace(agent_id, '-[0-9]+$', '')
+ WHERE base_agent_id IS NULL;
 
 -- ============================================================
 -- SECTION 3: agent_status base_agent_id NOT NULL + prefix CHECK
 -- ============================================================
 
--- (Task 3 will fill this in)
+-- After Section 2 backfill, enforce NOT NULL. Any future INSERT must supply
+-- base_agent_id (auto_agent_id.py populates explicitly — see Task 12).
+-- Reverse: ALTER TABLE agent_status ALTER COLUMN base_agent_id DROP NOT NULL;
+ALTER TABLE agent_status
+  ALTER COLUMN base_agent_id SET NOT NULL;
+
+-- CAI-RESP-080 Open Q2 ruling: FK alone allows cross-family prefix mismatch
+-- (e.g., agent_id='cc-ihsanos-99' with base_agent_id='cc-scholar' — both exist
+-- in agents table, so FK accepts; CHECK catches). Structural enforcement
+-- preserves the family-identity invariant at INSERT time rather than relying on
+-- auto_agent_id.py app-layer discipline.
+-- Reverse: ALTER TABLE agent_status DROP CONSTRAINT agent_status_base_agent_id_prefix_chk;
+ALTER TABLE agent_status
+  ADD CONSTRAINT agent_status_base_agent_id_prefix_chk
+  CHECK (base_agent_id = regexp_replace(agent_id, '-[0-9]+$', ''));
 
 -- ============================================================
 -- SECTION 4: strategic_decisions provenance columns
