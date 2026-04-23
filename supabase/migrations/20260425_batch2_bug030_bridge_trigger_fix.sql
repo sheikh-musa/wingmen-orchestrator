@@ -140,6 +140,11 @@ BEGIN
   -- Tier 2 (inferred): if parent_msg_id populated, inherit parent's from_agent
   --                    (reply-to-sender) and parent's thread_id (stay in thread).
   -- Tier 3 (legacy):   cc-ihsanos + fresh uuid (historical default).
+  -- Concurrent-delete race is tolerated: ON DELETE RESTRICT on parent_msg_id_fkey
+  -- means a committed parent delete is impossible while this decision row exists,
+  -- but an uncommitted concurrent delete visible under READ COMMITTED would leave
+  -- v_parent_* NULL and silently fall through to Tier 3. Audit loss is negligible
+  -- (legacy default still routes to cc-ihsanos); not worth FOR SHARE overhead.
   IF NEW.parent_msg_id IS NOT NULL THEN
     SELECT from_agent, thread_id
       INTO v_parent_from_agent, v_parent_thread_id

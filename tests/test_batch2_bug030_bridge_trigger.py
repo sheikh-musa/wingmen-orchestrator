@@ -49,6 +49,11 @@ def _clean_test_bug030_rows():
     _cleanup("TEST-BUG030-")
 
 
+# NOTE: strategic_decisions.domain has a CHECK constraint restricting values to
+# {pricing, architecture, islamic, sales, product, operations, renovation}.
+# Tests use 'operations' as the closest fit for process/governance test rows.
+
+
 def test_strategic_decisions_has_bug030_columns():
     """AC-BUG030-1/2/3: parent_msg_id + announce_to_agent + announce_thread_id."""
     expected = {
