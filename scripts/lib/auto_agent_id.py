@@ -299,10 +299,11 @@ def allocate_sub_tag_and_register(
                 """
                 SELECT agent_id FROM agent_status
                  WHERE agent_id LIKE %s
+                   AND base_agent_id = %s
                    AND last_heartbeat > now() - (%s * interval '1 minute')
                    AND status != 'offline'
                 """,
-                (f"{base}-%", stale_cutoff_minutes),
+                (f"{base}-%", base, stale_cutoff_minutes),
             )
             siblings = [r[0] for r in cur.fetchall()]
             sub_tag = pick_sub_tag(base, siblings)
@@ -316,16 +317,17 @@ def allocate_sub_tag_and_register(
             cur.execute(
                 """
                 INSERT INTO agent_status
-                  (agent_id, status, current_task, scope_repos, last_heartbeat, updated_at)
-                VALUES (%s, 'working', 'session-launch', ARRAY[%s]::text[], now(), now())
+                  (agent_id, base_agent_id, status, current_task, scope_repos, last_heartbeat, updated_at)
+                VALUES (%s, %s, 'working', 'session-launch', ARRAY[%s]::text[], now(), now())
                 ON CONFLICT (agent_id) DO UPDATE SET
+                  base_agent_id = EXCLUDED.base_agent_id,
                   status = 'working',
                   current_task = 'session-launch',
                   scope_repos = ARRAY[%s]::text[],
                   last_heartbeat = now(),
                   updated_at = now()
                 """,
-                (sub_tag, repo, repo),
+                (sub_tag, base, repo, repo),
             )
         conn.commit()  # releases advisory lock
 
