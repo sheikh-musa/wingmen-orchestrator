@@ -234,4 +234,98 @@ GRANT  EXECUTE ON FUNCTION enforce_challenge_window_timeouts(BOOLEAN) TO postgre
 -- SECTION 8: boot_briefing view extension
 -- ============================================================
 
--- (Task 8 will fill this in)
+-- BUG-032 AC-6: add 'unverified_decisions' section to boot_briefing for
+-- per-decided_by count of unverified rows (decided_by_verified IS NULL).
+-- In Phase 1 zero-allowlist era, this is effectively every cai-authored
+-- decision — the view is observability, not alerting. Phase 2 per-key
+-- auth populates allowlist → values fall.
+--
+-- CRITICAL: CREATE OR REPLACE VIEW drops any section not re-included.
+-- The 7 pre-existing sections from Fix 2 (20260422) must be copied
+-- byte-for-byte from the current view definition.
+-- Reverse: restore the 7-section view from prior migration.
+
+CREATE OR REPLACE VIEW boot_briefing AS
+ SELECT 'repo_context'::text AS source,
+    rc.repo AS key,
+    json_build_object('phase', rc.current_phase, 'blockers', rc.blockers, 'test_health', rc.test_health, 'updated_at', rc.updated_at) AS context
+   FROM repo_context rc
+UNION ALL
+ SELECT 'repo_snapshot'::text AS source,
+    rs.repo_name AS key,
+    json_build_object('commit_sha', "left"(rs.commit_sha, 8), 'commit_timestamp', rs.commit_timestamp, 'branch', rs.branch, 'file_count', rs.file_count, 'total_loc', rs.total_loc, 'test_count', rs.test_count, 'migration_count', rs.migration_count, 'route_count', rs.route_count, 'schema_tables', rs.schema_tables) AS context
+   FROM ( SELECT DISTINCT ON (repo_snapshot.repo_name) repo_snapshot.repo_name,
+            repo_snapshot.commit_sha,
+            repo_snapshot.commit_timestamp,
+            repo_snapshot.branch,
+            repo_snapshot.file_count,
+            repo_snapshot.total_loc,
+            repo_snapshot.test_count,
+            repo_snapshot.migration_count,
+            repo_snapshot.route_count,
+            repo_snapshot.schema_tables
+           FROM repo_snapshot
+          ORDER BY repo_snapshot.repo_name, repo_snapshot.commit_timestamp DESC) rs
+UNION ALL
+ SELECT 'active_decision'::text AS source,
+    sd.decision_ref AS key,
+        CASE
+            WHEN sd.decided_at >= (now() - '14 days'::interval) THEN json_build_object('title', "left"(sd.title, 80), 'domain', sd.domain, 'category', sd.category, 'repos', sd.repos_affected, 'source', sd.source, 'challenge_status', sd.challenge_status, 'execution_status', sd.execution_status, 'decided_at', sd.decided_at, 'cai_session_id', sd.cai_session_id, 'decision', sd.decision, 'reasoning', sd.reasoning)
+            ELSE json_build_object('title', "left"(sd.title, 80), 'domain', sd.domain, 'category', sd.category, 'repos', sd.repos_affected, 'source', sd.source, 'challenge_status', sd.challenge_status, 'execution_status', sd.execution_status, 'decided_at', sd.decided_at, 'cai_session_id', sd.cai_session_id, 'stub_reason', 'older_than_14_days_fetch_full_via_decision_ref')
+        END AS context
+   FROM strategic_decisions sd
+  WHERE sd.status = 'active'::text
+UNION ALL
+ SELECT 'open_qa_failure'::text AS source,
+    (((qf.repo || '/'::text) || qf.role) || '/'::text) || qf.flow AS key,
+    json_build_object('role', qf.role, 'flow', qf.flow, 'error', qf.error, 'found_at', qf.found_at) AS context
+   FROM qa_findings qf
+  WHERE qf.status = 'fail'::text AND qf.resolved_at IS NULL
+UNION ALL
+ SELECT 'latest_cc_session'::text AS source,
+    sub.repo_name AS key,
+    json_build_object('narrative', "left"(sub.narrative, 500), 'outcome', sub.outcome, 'commit_sha', sub.commit_sha, 'created_at', sub.created_at) AS context
+   FROM ( SELECT DISTINCT ON (cws.repo_name) cws.repo_name,
+            cws.narrative,
+            cws.outcome,
+            cws.commit_sha,
+            cws.created_at
+           FROM cc_work_sessions cws
+          ORDER BY cws.repo_name, cws.created_at DESC) sub
+UNION ALL
+ SELECT 'latest_digest'::text AS source,
+    dig.title AS key,
+    json_build_object('topics', dig.topics_covered, 'open_questions', dig.open_questions, 'action_items', dig.action_items, 'session_date', dig.session_date) AS context
+   FROM ( SELECT sd.session_date,
+            sd.title,
+            sd.topics_covered,
+            sd.open_questions,
+            sd.action_items
+           FROM session_digests sd
+          ORDER BY sd.created_at DESC
+         LIMIT 1) dig
+UNION ALL
+ SELECT 'last_cai_session'::text AS source,
+    lc.cai_session_id AS key,
+    json_build_object('cai_session_id', lc.cai_session_id, 'last_decided_at', lc.last_decided_at, 'gap_days', EXTRACT(day FROM now() - lc.last_decided_at)::integer) AS context
+   FROM ( SELECT strategic_decisions.cai_session_id,
+            max(strategic_decisions.decided_at) AS last_decided_at
+           FROM strategic_decisions
+          WHERE strategic_decisions.decided_by = 'cai'::text AND strategic_decisions.cai_session_id IS NOT NULL
+          GROUP BY strategic_decisions.cai_session_id
+          ORDER BY (max(strategic_decisions.decided_at)) DESC
+         LIMIT 1) lc
+UNION ALL
+-- NEW 8th section: unverified_decisions (BUG-032 AC-6)
+SELECT
+    'unverified_decisions'::text  AS source,
+    COALESCE(sd.decided_by, 'unknown') AS key,
+    json_build_object(
+        'count',           count(*),
+        'oldest_decided',  min(sd.decided_at),
+        'newest_decided',  max(sd.decided_at)
+    ) AS context
+FROM strategic_decisions sd
+WHERE sd.decided_by_verified IS NULL
+  AND sd.status = 'active'
+GROUP BY sd.decided_by;

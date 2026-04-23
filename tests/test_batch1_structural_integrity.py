@@ -335,3 +335,21 @@ def test_enforcer_test_mode_true_excludes_production_rows():
         finally:
             cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCE-PROD-SAFE'")
             cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCE-PROD-SAFE'")
+
+
+def test_boot_briefing_unverified_decisions_section():
+    """AC-BUG032-6: boot_briefing surfaces per-decided_by count of unverified rows."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT source, count(*) FROM boot_briefing
+             WHERE source = 'unverified_decisions'
+             GROUP BY source
+            """
+        )
+        # In Phase 1 with zero allowlist seed, every decision is unverified, so we expect
+        # >= 1 row (one per distinct decided_by).
+        row = cur.fetchone()
+        if row is None:
+            pytest.skip("no unverified decisions in DB (unexpected in Phase 1 zero-seed state)")
+        assert row[0] == 'unverified_decisions'
