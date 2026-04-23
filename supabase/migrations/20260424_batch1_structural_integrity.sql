@@ -46,9 +46,18 @@ ALTER TABLE agent_status
 -- Current 5 rows: cc-cosem-1, cc-ihsanos-1, cc-ihsanos-2, cc-ihsanos-3, cc-scholar-1.
 -- All parse cleanly to known agent IDs (cc-cosem, cc-ihsanos, cc-scholar) which
 -- exist in agents table.
+--
+-- NOTE: trg_agent_status_identity enforces NEW.agent_id = current_setting('app.current_agent_id')
+-- which is impossible for a multi-row UPDATE in a single session. Disable for the
+-- backfill, then re-enable. Wrapped in atomic transaction — external observers
+-- never see a window where the trigger is disabled.
+ALTER TABLE agent_status DISABLE TRIGGER trg_agent_status_identity;
+
 UPDATE agent_status
    SET base_agent_id = regexp_replace(agent_id, '-[0-9]+$', '')
  WHERE base_agent_id IS NULL;
+
+ALTER TABLE agent_status ENABLE TRIGGER trg_agent_status_identity;
 
 -- CAI-RESP-081 CHECK 2: explicit assertion before SET NOT NULL.
 -- Belt-and-suspenders over transaction atomicity — Postgres would raise
