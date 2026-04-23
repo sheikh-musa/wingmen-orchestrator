@@ -64,3 +64,103 @@ ALTER TABLE strategic_decisions
 CREATE INDEX IF NOT EXISTS strategic_decisions_parent_msg_id_idx
   ON strategic_decisions (parent_msg_id)
   WHERE parent_msg_id IS NOT NULL;
+
+-- ============================================================
+-- SECTION 3: trigger_cai_decision_announce — 3-tier routing rewrite
+-- ============================================================
+-- Preserves all existing guards: source filter, challenge_status whitelist,
+-- bypass_review escape hatch, announced_by_msg_id idempotency, OLD-side
+-- UPDATE-path suppression (already-announced or already-implemented).
+--
+-- Change surface:
+--   * New DECLAREs: v_to_agent, v_thread_id, v_parent_from_agent, v_parent_thread_id.
+--   * Parent lookup when NEW.parent_msg_id IS NOT NULL (one-row SELECT).
+--   * COALESCE 3-tier routing:
+--       to_agent  := NEW.announce_to_agent    ?> parent.from_agent ?> 'cc-ihsanos'
+--       thread_id := NEW.announce_thread_id   ?> parent.thread_id  ?> gen_random_uuid()
+--   * INSERT uses v_thread_id and v_to_agent (was gen_random_uuid() + 'cc-ihsanos').
+--
+-- Sibling trigger_cai_decision_autoclose_announce (AFTER UPDATE OF execution_status)
+-- is untouched — it handles the later lifecycle edge, not review-time routing.
+--
+-- Reverse: restore the pre-BUG-030 body (see repo history, pre-commit 53ab4237).
+
+CREATE OR REPLACE FUNCTION public.trigger_cai_decision_announce()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE
+  v_msg_id BIGINT;
+  v_subject TEXT;
+  v_body TEXT;
+  v_message_type TEXT;
+  v_requires_response BOOLEAN;
+  v_to_agent TEXT;
+  v_thread_id UUID;
+  v_parent_from_agent TEXT;
+  v_parent_thread_id UUID;
+BEGIN
+  IF NEW.source IS DISTINCT FROM 'claude_ai_session'
+     OR NEW.challenge_status NOT IN ('challenge_window', 'accepted')
+     OR COALESCE(NEW.bypass_review, false) = true
+     OR NEW.announced_by_msg_id IS NOT NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF OLD.announced_by_msg_id IS NOT NULL
+       OR OLD.execution_status = 'implemented' THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+
+  IF NEW.challenge_status = 'challenge_window' THEN
+    v_message_type := 'review_request';
+    v_subject := NEW.decision_ref || ': ' || NEW.title || ' — for review + challenge';
+    v_requires_response := true;
+  ELSE
+    v_message_type := 'decision';
+    v_subject := NEW.decision_ref || ': ' || NEW.title;
+    v_requires_response := false;
+  END IF;
+
+  v_body := format(
+    E'Decision %s filed by CAI (status: %s).\nFull spec: see strategic_decisions.decision_ref=%s%s\n',
+    NEW.decision_ref,
+    NEW.challenge_status,
+    NEW.decision_ref,
+    CASE WHEN NEW.parent_ref IS NOT NULL
+         THEN E'\nParent: ' || NEW.parent_ref
+         ELSE '' END
+  );
+
+  -- BUG-030: 3-tier recipient + thread_id routing.
+  -- Tier 1 (explicit): NEW.announce_to_agent / NEW.announce_thread_id if set.
+  -- Tier 2 (inferred): if parent_msg_id populated, inherit parent's from_agent
+  --                    (reply-to-sender) and parent's thread_id (stay in thread).
+  -- Tier 3 (legacy):   cc-ihsanos + fresh uuid (historical default).
+  IF NEW.parent_msg_id IS NOT NULL THEN
+    SELECT from_agent, thread_id
+      INTO v_parent_from_agent, v_parent_thread_id
+      FROM agent_messages
+     WHERE id = NEW.parent_msg_id;
+  END IF;
+
+  v_to_agent := COALESCE(NEW.announce_to_agent, v_parent_from_agent, 'cc-ihsanos');
+  v_thread_id := COALESCE(NEW.announce_thread_id, v_parent_thread_id, gen_random_uuid());
+
+  INSERT INTO agent_messages (
+    thread_id, from_agent, to_agent, message_type,
+    subject, body, requires_response
+  ) VALUES (
+    v_thread_id, 'cai', v_to_agent, v_message_type,
+    v_subject, v_body, v_requires_response
+  )
+  RETURNING id INTO v_msg_id;
+
+  NEW.announced_by_msg_id := v_msg_id;
+  NEW.notified_at := now();
+  RETURN NEW;
+END;
+$function$;

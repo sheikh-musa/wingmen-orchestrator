@@ -86,3 +86,47 @@ def test_parent_msg_id_fk_rejects_nonexistent_id():
                     """
                 )
             c.rollback()
+
+
+def test_tier2_recipient_inferred_from_parent_msg_sender():
+    """AC-BUG030-4 Tier 2: parent_msg_id populated, announce_to_agent NULL →
+    bridge infers to_agent = parent.from_agent."""
+    with _conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_messages
+                  (thread_id, from_agent, to_agent, message_type, subject, body)
+                VALUES (gen_random_uuid(), 'cc-cosem', 'cai', 'question', 'p', 'p')
+                RETURNING id, thread_id
+                """
+            )
+            parent_id, parent_thread = cur.fetchone()
+
+            cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, domain, status,
+                   source, challenge_status, decided_by, parent_msg_id,
+                   challengeable_until)
+                VALUES ('TEST-BUG030-T2', 't', 'd', 'r', 'operations', 'active',
+                        'claude_ai_session', 'challenge_window', 'cai', %s,
+                        now() + interval '1 day')
+                RETURNING announced_by_msg_id
+                """,
+                (parent_id,),
+            )
+            announced_msg_id = cur.fetchone()[0]
+            assert announced_msg_id is not None, "trigger did not populate announced_by_msg_id"
+
+            cur.execute(
+                "SELECT to_agent, thread_id FROM agent_messages WHERE id = %s",
+                (announced_msg_id,),
+            )
+            to_agent, thread_id = cur.fetchone()
+            assert to_agent == "cc-cosem", f"expected cc-cosem (parent.from_agent), got {to_agent}"
+            assert thread_id == parent_thread, \
+                f"expected inherited thread {parent_thread}, got {thread_id}"
+
+        c.rollback()
