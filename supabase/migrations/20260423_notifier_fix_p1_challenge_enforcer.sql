@@ -21,13 +21,49 @@
 -- SECTION 1: challenge_status CHECK expansion
 -- ============================================================
 
--- (Task B2 will fill this in)
+-- Reverse: ALTER TABLE strategic_decisions DROP CONSTRAINT strategic_decisions_challenge_status_check;
+--          (re-add original constraint if rolling back)
+-- Adds 'accepted_by_timeout' to the enumeration. Per CAI-RESP-074 C6: distinct
+-- from 'accepted' to preserve epistemic distinction between silent-consent and
+-- explicit agreement.
+ALTER TABLE strategic_decisions
+  DROP CONSTRAINT IF EXISTS strategic_decisions_challenge_status_check;
+
+ALTER TABLE strategic_decisions
+  ADD CONSTRAINT strategic_decisions_challenge_status_check
+  CHECK (challenge_status IN (
+    'challenge_window',
+    'accepted',
+    'accepted_by_timeout',
+    'challenged',
+    'unchallenged',
+    'overridden',
+    'implemented',
+    'rejected',
+    'informational'
+  ));
 
 -- ============================================================
 -- SECTION 2: orchestrator_runtime_config + dry_run flag
 -- ============================================================
 
--- (Task B2 will fill this in)
+-- Reverse: DROP TABLE orchestrator_runtime_config;
+-- Flag table for toggleable enforcer behavior. Phase 1 ships 'dry_run' default.
+-- Musa UPDATEs to 'write_mode' after manual backlog review cycle per CAI-RESP-074 C1.
+CREATE TABLE orchestrator_runtime_config (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- CHECK constraint catches typos; extend when new flags added.
+  CONSTRAINT orchestrator_runtime_config_value_check
+  CHECK (
+    (key = 'challenge_enforcer_mode' AND value IN ('dry_run', 'write_mode'))
+    OR key != 'challenge_enforcer_mode'
+  )
+);
+
+INSERT INTO orchestrator_runtime_config (key, value)
+VALUES ('challenge_enforcer_mode', 'dry_run');
 
 -- ============================================================
 -- SECTION 3: challenge_enforcer_dryrun_log staging table
