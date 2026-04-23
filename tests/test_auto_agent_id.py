@@ -37,11 +37,12 @@ def _clean_test_family_rows():
 
 @pytestmark_integration
 class TestLoadFamilyMap:
-    def test_returns_all_four_cc_families_canonicalized(self):
+    def test_returns_all_cc_families_canonicalized(self):
         m = auto_agent_id.load_family_map(DSN)
-        # 4 families live (post CAI-AGENTS-001 split).
+        # Post CAI-AGENTS-002: cc-ihsanos narrowed to ['ihsanos'];
+        # cc-orchestrator owns ['wingmen-orchestrator'] (→ 'orchestrator').
         assert m["ihsanos"] == "cc-ihsanos"
-        assert m["orchestrator"] == "cc-ihsanos"  # 'wingmen-' stripped
+        assert m["orchestrator"] == "cc-orchestrator"  # post-AGENTS-002
         assert m["ai-scholar"] == "cc-scholar"
         assert m["hifz-companion"] == "cc-scholar"
         assert m["dookana"] == "cc-web"
@@ -75,10 +76,11 @@ class TestLoadFamilyMap:
             psycopg.connect = orig
 
 
-# Fixture-style map matching live agents table at delta-v2 time.
+# Fixture-style map matching live agents table post-CAI-AGENTS-002.
+# cc-ihsanos narrowed to ['ihsanos']; cc-orchestrator owns 'orchestrator'.
 FAKE_MAP = {
     "ihsanos": "cc-ihsanos",
-    "orchestrator": "cc-ihsanos",
+    "orchestrator": "cc-orchestrator",
     "ai-scholar": "cc-scholar",
     "hifz-companion": "cc-scholar",
     "dookana": "cc-web",
@@ -107,12 +109,13 @@ class TestStripWorktreeSuffix:
 
 
 class TestResolveBaseAgentId:
-    def test_orchestrator_maps_to_cc_ihsanos(self, monkeypatch):
+    def test_orchestrator_maps_to_cc_orchestrator(self, monkeypatch):
+        # Post-AGENTS-002: orchestrator repo belongs to cc-orchestrator family.
         monkeypatch.setattr(auto_agent_id, "_git_toplevel",
                             lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator")
         assert auto_agent_id.resolve_base_agent_id(
             "/Users/sheikhmusa/wingmen/orchestrator", FAKE_MAP
-        ) == "cc-ihsanos"
+        ) == "cc-orchestrator"
 
     def test_orchestrator_worktree_LEDGER_maps(self, monkeypatch):
         # Worktree: git rev-parse --show-toplevel returns the worktree path.
@@ -120,14 +123,14 @@ class TestResolveBaseAgentId:
                             lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator-LEDGER")
         assert auto_agent_id.resolve_base_agent_id(
             "/Users/sheikhmusa/wingmen/orchestrator-LEDGER", FAKE_MAP
-        ) == "cc-ihsanos"
+        ) == "cc-orchestrator"
 
     def test_orchestrator_worktree_dot_wt_maps(self, monkeypatch):
         monkeypatch.setattr(auto_agent_id, "_git_toplevel",
                             lambda pwd: "/Users/sheikhmusa/wingmen/orchestrator.wt-qurban")
         assert auto_agent_id.resolve_base_agent_id(
             "/Users/sheikhmusa/wingmen/orchestrator.wt-qurban", FAKE_MAP
-        ) == "cc-ihsanos"
+        ) == "cc-orchestrator"
 
     def test_hifz_companion_hyphen_preserved(self, monkeypatch):
         monkeypatch.setattr(auto_agent_id, "_git_toplevel",
@@ -276,11 +279,11 @@ class TestAllocateSubTagAndRegister:
                             ("cc-test-family-1",))
                 cur.execute(
                     "INSERT INTO agent_status "
-                    "(agent_id, status, last_heartbeat, updated_at) "
-                    "VALUES (%s, 'working', now() - interval '2 hours', now() - interval '2 hours') "
+                    "(agent_id, base_agent_id, status, last_heartbeat, updated_at) "
+                    "VALUES (%s, %s, 'working', now() - interval '2 hours', now() - interval '2 hours') "
                     "ON CONFLICT (agent_id) DO UPDATE SET "
                     "last_heartbeat = EXCLUDED.last_heartbeat",
-                    ("cc-test-family-1",),
+                    ("cc-test-family-1", "cc-test-family"),
                 )
             setup_conn.commit()
 
@@ -311,11 +314,11 @@ class TestAllocateSubTagAndRegister:
                             ("cc-test-family-1",))
                 cur.execute(
                     "INSERT INTO agent_status "
-                    "(agent_id, status, last_heartbeat, updated_at) "
-                    "VALUES (%s, 'working', now(), now()) "
+                    "(agent_id, base_agent_id, status, last_heartbeat, updated_at) "
+                    "VALUES (%s, %s, 'working', now(), now()) "
                     "ON CONFLICT (agent_id) DO UPDATE SET "
                     "last_heartbeat = now()",
-                    ("cc-test-family-1",),
+                    ("cc-test-family-1", "cc-test-family"),
                 )
             setup_conn.commit()
 
@@ -326,6 +329,71 @@ class TestAllocateSubTagAndRegister:
         )
         assert result.sub_tag == "cc-test-family-2"
         assert "cc-test-family-1" in result.siblings
+
+    def test_allocate_sub_tag_registers_fresh_base_agent_without_existing_rows(self):
+        """BUG-033 AC-BUG033-2: fresh-family INSERT codepath populates base_agent_id.
+
+        Regression: prior to BUG-033 fix, INSERT column list omitted base_agent_id.
+        Existing families (ihsanos/scholar/cosem) had pre-backfilled rows so UPSERT
+        branch fired and succeeded. First-spawn of a never-seen family hit the
+        INSERT branch with base_agent_id=NULL — violated NOT NULL pre-degradation,
+        silently inserted NULL post-degradation.
+        """
+        # Teardown via autouse fixture already DELETEd cc-test-family-% rows.
+        # Double-check: fresh-family state means zero sibling rows.
+        with self._fresh_conn() as verify_conn:
+            with verify_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM agent_status WHERE agent_id LIKE 'cc-test-family-%'"
+                )
+                assert cur.fetchone()[0] == 0, "precondition: fresh family has zero rows"
+
+        result = auto_agent_id.allocate_sub_tag_and_register(
+            base="cc-test-family",
+            dsn=DSN,
+            repo="orchestrator",
+        )
+        assert result.sub_tag == "cc-test-family-1"
+
+        with self._fresh_conn() as verify_conn:
+            with verify_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT agent_id, base_agent_id, scope_repos "
+                    "FROM agent_status WHERE agent_id = %s",
+                    (result.sub_tag,),
+                )
+                row = cur.fetchone()
+                assert row is not None, "new agent_status row must exist"
+                assert row[0] == "cc-test-family-1"
+                assert row[1] == "cc-test-family", (
+                    f"base_agent_id must be populated on fresh INSERT; got {row[1]!r}"
+                )
+                assert row[2] == ["orchestrator"]
+
+    def test_allocate_respects_base_agent_id_prefix_check_constraint(self):
+        """BUG-033 AC-BUG033-3: CHECK fires on base_agent_id prefix mismatch.
+
+        Direct INSERT with agent_id='cc-test-family-1' but base_agent_id='cc-ihsanos'
+        must be rejected by agent_status_base_agent_id_prefix_chk CHECK constraint.
+        This is defense-in-depth for the fix: a future regression that writes a
+        garbage base_agent_id gets caught at the DB layer, not just the Python layer.
+        """
+        import psycopg
+        with self._fresh_conn() as setup_conn:
+            with setup_conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.current_agent_id', %s, true)",
+                            ("cc-test-family-1",))
+                with pytest.raises(psycopg.errors.CheckViolation) as exc:
+                    cur.execute(
+                        "INSERT INTO agent_status "
+                        "(agent_id, base_agent_id, status, scope_repos, "
+                        " last_heartbeat, updated_at) "
+                        "VALUES (%s, %s, 'working', ARRAY['orchestrator']::text[], "
+                        "        now(), now())",
+                        ("cc-test-family-1", "cc-ihsanos"),  # prefix mismatch
+                    )
+                assert "prefix" in str(exc.value).lower() or "check" in str(exc.value).lower()
+            setup_conn.rollback()
 
 
 @pytestmark_integration
@@ -343,12 +411,12 @@ class TestScanOverlapSiblings:
                               (f"cc-test-family-{n}",))
                   cur.execute(
                       "INSERT INTO agent_status "
-                      "(agent_id, status, scope_repos, last_heartbeat, updated_at) "
-                      "VALUES (%s, 'working', ARRAY[%s]::text[], now(), now()) "
+                      "(agent_id, base_agent_id, status, scope_repos, last_heartbeat, updated_at) "
+                      "VALUES (%s, %s, 'working', ARRAY[%s]::text[], now(), now()) "
                       "ON CONFLICT (agent_id) DO UPDATE SET "
                       "scope_repos = EXCLUDED.scope_repos, "
                       "last_heartbeat = now()",
-                      (f"cc-test-family-{n}", scope),
+                      (f"cc-test-family-{n}", "cc-test-family", scope),
                   )
           setup_conn.commit()
 
@@ -376,11 +444,11 @@ class TestScanOverlapSiblings:
                           ("cc-test-family-1",))
               cur.execute(
                   "INSERT INTO agent_status "
-                  "(agent_id, status, scope_repos, last_heartbeat, updated_at) "
-                  "VALUES (%s, 'working', ARRAY['dookana']::text[], now(), now()) "
+                  "(agent_id, base_agent_id, status, scope_repos, last_heartbeat, updated_at) "
+                  "VALUES (%s, %s, 'working', ARRAY['dookana']::text[], now(), now()) "
                   "ON CONFLICT (agent_id) DO UPDATE SET "
                   "scope_repos = EXCLUDED.scope_repos, last_heartbeat = now()",
-                  ("cc-test-family-1",),
+                  ("cc-test-family-1", "cc-test-family"),
               )
           setup_conn.commit()
 
