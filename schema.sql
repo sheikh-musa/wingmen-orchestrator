@@ -7,6 +7,10 @@ create table jobs (
   description text not null,
   status text not null default 'queued',
     -- queued | running | completed | failed | paused
+    -- + (ORCHESTRATOR-STATUS-001): pushed | pr_open | push_failed | pr_failed
+    -- + (ORCHESTRATOR-STATUS-001 Option B, cc-ihsanos): deploy_verification_pending
+    -- NOTE: no CHECK constraint on jobs.status today; cc-ihsanos's Batch 1
+    -- migration is expected to add one covering the combined enum above.
   priority int not null default 5,
   fail_count int not null default 0,
   session_prompt text,
@@ -84,6 +88,11 @@ create table bug_reports (
   status text not null default 'new' check (status in (
     'new', 'diagnosing', 'proposed', 'approved', 'deploying',
     'deployed', 'verified', 'rejected', 'escalated', 'still_broken'
+    -- cc-ihsanos Batch 1 migration (ORCHESTRATOR-STATUS-001 coordination):
+    -- must expand this list to include 'pushed', 'pr_open',
+    -- 'push_failed', 'pr_failed'. Agent-side writes from
+    -- wingmen_orch._apply_publisher_result depend on it. Until then,
+    -- 'deployed' retains its (known-incorrect) meaning of "agent done".
   )),
   confidence text check (confidence in ('high', 'medium', 'low')),
   root_cause text,

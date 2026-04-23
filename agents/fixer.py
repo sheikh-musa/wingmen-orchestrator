@@ -32,6 +32,11 @@ Rules:
 - Change ONLY what's needed. No refactoring, no style changes, no "while I'm here" improvements.
 - If you modified a file that has tests (check for *.test.* or test_* files), run the tests and fix any failures before committing. If you change a return type (e.g., dict to dataclass), update ALL callers and tests.
 - If the fix is unclear or would require changing multiple files, respond with "SKIP: <reason>" instead of editing.
-- Do NOT run git push — that's handled separately.
+- Do NOT run git push. The post-work step in wingmen_orch (after
+  ARCH-021 gates pass) calls ralph_runner.publish_job_commit, which
+  invokes agents/git_publisher.py to push a canonical
+  autofix/job-<id>-<sha> branch and open a PR. If you push yourself,
+  the PR may already exist on a different branch name and your push
+  may fail spuriously.
 - Do NOT run any deploy commands.
 """
