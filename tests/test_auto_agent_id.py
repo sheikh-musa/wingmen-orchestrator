@@ -21,7 +21,11 @@ pytestmark_integration = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def _clean_test_family_rows():
     """Unconditional DELETE of cc-test-family-% rows before AND after each integration test.
-    Makes teardown crash-safe — prior aborted runs don't leak state."""
+    Makes teardown crash-safe — prior aborted runs don't leak state.
+
+    BUG-024 Phase 1B: also ensures 'cc-test-family' exists in agents — required
+    because agent_status.base_agent_id is an FK to agents(id) post-migration.
+    Idempotent INSERT — leaves other agent rows untouched."""
     if not DSN:
         yield
         return
@@ -30,6 +34,14 @@ def _clean_test_family_rows():
         with psycopg.connect(DSN, autocommit=True) as c:
             with c.cursor() as cur:
                 cur.execute("DELETE FROM agent_status WHERE agent_id LIKE 'cc-test-family-%%'")
+    def _ensure_family():
+        with psycopg.connect(DSN, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO agents (id, display_name) VALUES ('cc-test-family', 'cc-test-family') "
+                    "ON CONFLICT (id) DO NOTHING"
+                )
+    _ensure_family()
     _purge()
     yield
     _purge()
@@ -250,7 +262,7 @@ class TestAllocateSubTagAndRegister:
             with self._fresh_conn() as verify_conn:
                 with verify_conn.cursor() as cur:
                     cur.execute(
-                        "SELECT status, current_task, scope_repos "
+                        "SELECT status, current_task, scope_repos, base_agent_id "
                         "FROM agent_status WHERE agent_id = %s",
                         (result.sub_tag,),
                     )
@@ -259,6 +271,8 @@ class TestAllocateSubTagAndRegister:
                     assert row[0] == "working"
                     assert row[1] == "session-launch"
                     assert row[2] == ["orchestrator"]
+                    # BUG-024 Phase 1B: base_agent_id FK populated from `base` arg.
+                    assert row[3] == "cc-test-family"
         finally:
             # Cleanup
             with self._fresh_conn() as clean_conn:
@@ -561,3 +575,35 @@ def test_auto_agent_id_does_not_import_supabase_py():
         elif isinstance(node, ast.ImportFrom):
             mod = (node.module or "").lower()
             assert "supabase" not in mod, f"found from-import {node.module}"
+
+
+@pytestmark_integration
+def test_allocate_sub_tag_populates_base_agent_id():
+    """BUG-024 Phase 1B: allocate_sub_tag_and_register writes base_agent_id = family on agent_status.
+
+    Regression test: verifies the Phase 1B UPSERT change in auto_agent_id.py
+    populates the base_agent_id FK column. Uses cc-test-family (registered in
+    agents + cleaned by autouse fixture) for safe isolation — the plan-verbatim
+    cc-scholar would mutate a real family.
+    """
+    import psycopg
+
+    # Autouse fixture already DELETEd cc-test-family-% rows + ensured agents row.
+    result = auto_agent_id.allocate_sub_tag_and_register(
+        base="cc-test-family",
+        dsn=DSN,
+        repo="orchestrator",
+    )
+    assert result.sub_tag == "cc-test-family-1"
+
+    with psycopg.connect(DSN, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT agent_id, base_agent_id FROM agent_status WHERE agent_id = %s",
+            (result.sub_tag,),
+        )
+        row = cur.fetchone()
+        assert row is not None, f"agent_status row not found for {result.sub_tag}"
+        assert row[1] == "cc-test-family", (
+            f"base_agent_id should be cc-test-family, got {row[1]}"
+        )
+    # Autouse fixture handles teardown.
