@@ -53,17 +53,21 @@ def test_agent_status_base_agent_id_backfilled():
 def test_agent_status_base_agent_id_fk_enforced():
     """FK to agents(id) rejects non-existent family.
 
+    To exercise FK specifically (not CHECK which fires first), use an agent_id
+    whose regexp_replace prefix equals base_agent_id BUT that prefix is not a
+    known agents.id row. E.g., 'cc-bogus-9' → 'cc-bogus' (CHECK passes, FK fails).
+
     Note: trg_agent_status_identity requires SET LOCAL app.current_agent_id = <agent_id>
     matching NEW.agent_id. Wrap in explicit transaction + SET LOCAL.
     """
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute("BEGIN")
-        cur.execute("SET LOCAL app.current_agent_id = 'test-bogus-9'")
+        cur.execute("SET LOCAL app.current_agent_id = 'cc-bogus-9'")
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             cur.execute(
                 """
                 INSERT INTO agent_status (agent_id, base_agent_id, status)
-                VALUES ('test-bogus-9', 'cc-nonexistent', 'offline')
+                VALUES ('cc-bogus-9', 'cc-bogus', 'offline')
                 """
             )
         cur.execute("ROLLBACK")
