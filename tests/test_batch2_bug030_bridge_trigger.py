@@ -69,3 +69,20 @@ def test_strategic_decisions_has_bug030_columns():
             )
             actual = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
     assert actual == expected, f"columns mismatch: expected {expected}, got {actual}"
+
+
+def test_parent_msg_id_fk_rejects_nonexistent_id():
+    """AC-BUG030-1: FK REFERENCES agent_messages(id) must reject bad values."""
+    with _conn() as c:
+        with c.cursor() as cur:
+            with pytest.raises(psycopg.errors.ForeignKeyViolation):
+                cur.execute(
+                    """
+                    INSERT INTO strategic_decisions
+                      (decision_ref, title, decision, reasoning, domain, status,
+                       source, challenge_status, decided_by, parent_msg_id)
+                    VALUES ('TEST-BUG030-FK', 't', 'd', 'r', 'operations', 'active',
+                            'claude_ai_session', 'accepted', 'cai', 9999999999999)
+                    """
+                )
+            c.rollback()

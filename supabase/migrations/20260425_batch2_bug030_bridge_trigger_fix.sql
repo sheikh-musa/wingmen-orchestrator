@@ -46,3 +46,21 @@ COMMENT ON COLUMN strategic_decisions.announce_to_agent IS
 COMMENT ON COLUMN strategic_decisions.announce_thread_id IS
   'BUG-030: explicit override for bridge trigger thread_id. Highest precedence '
   'in the 3-tier COALESCE (explicit > inherit-from-parent > fresh uuid).';
+
+-- ============================================================
+-- SECTION 2: parent_msg_id FK → agent_messages(id)
+-- ============================================================
+-- ON DELETE RESTRICT — a decision row pointing at a parent message should
+-- prevent the parent's deletion; choose fail-loud over silent orphaning.
+-- Reverse:
+--   ALTER TABLE strategic_decisions DROP CONSTRAINT strategic_decisions_parent_msg_id_fkey;
+
+ALTER TABLE strategic_decisions
+  ADD CONSTRAINT strategic_decisions_parent_msg_id_fkey
+  FOREIGN KEY (parent_msg_id) REFERENCES agent_messages(id) ON DELETE RESTRICT;
+
+-- Partial index on populated parent_msg_id — trigger subquery + any parent-based
+-- ad-hoc queries benefit. 300+ existing rows have NULL, indexing them wastes space.
+CREATE INDEX IF NOT EXISTS strategic_decisions_parent_msg_id_idx
+  ON strategic_decisions (parent_msg_id)
+  WHERE parent_msg_id IS NOT NULL;
