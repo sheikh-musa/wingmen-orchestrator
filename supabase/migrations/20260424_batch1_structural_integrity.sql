@@ -89,7 +89,49 @@ ALTER TABLE strategic_decisions
 -- SECTION 5: populate_strategic_decisions_provenance trigger
 -- ============================================================
 
--- (Task 5 will fill this in)
+-- BUG-032 per CAI-RESP-077: parallel pattern to populate_agent_messages_provenance.
+-- Fires on INSERT OR UPDATE OF decided_by, challenge_status — UPDATE coverage is
+-- critical because the bulk-flip failure mode is UPDATE not INSERT.
+-- Reuses identity_allowlist from BUG-024 Phase 1A (zero-seed in Phase 1; Phase 2
+-- per-key auth populates).
+-- Reverse: DROP TRIGGER IF EXISTS trg_strategic_decisions_provenance ON strategic_decisions;
+--          DROP FUNCTION IF EXISTS populate_strategic_decisions_provenance();
+
+CREATE OR REPLACE FUNCTION populate_strategic_decisions_provenance()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  -- Only populate if caller did not explicitly set it (admin backfills preserved).
+  -- PHASE 2 REWRITE: when per-agent API keys land, replace `current_user` with
+  --   current_setting('request.jwt.claims', true)::json ->> 'agent_id'
+  -- Trigger signature stays the same; only this one line changes.
+  IF NEW.posted_by_identity IS NULL THEN
+    NEW.posted_by_identity := current_user;
+  END IF;
+
+  IF NEW.decided_by_verified IS NULL THEN
+    IF EXISTS (
+      SELECT 1 FROM identity_allowlist
+       WHERE posted_by = NEW.posted_by_identity
+         AND allowed_from_agent = NEW.decided_by
+    ) THEN
+      NEW.decided_by_verified := true;
+    ELSE
+      NEW.decided_by_verified := NULL;
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_strategic_decisions_provenance
+  BEFORE INSERT OR UPDATE OF decided_by, challenge_status ON strategic_decisions
+  FOR EACH ROW
+  EXECUTE FUNCTION populate_strategic_decisions_provenance();
 
 -- ============================================================
 -- SECTION 6: is_test columns on strategic_decisions + agent_messages

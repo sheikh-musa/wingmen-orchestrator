@@ -125,3 +125,81 @@ def test_strategic_decisions_decided_by_verified_column():
         assert row is not None
         assert row[0] == "boolean"
         assert row[1] == "YES"
+
+
+def test_strategic_decisions_trigger_populates_posted_by_identity():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by)
+            VALUES
+              ('TEST-SD-PROV-1', 't', 'd', 'r', 'architecture', 'active', 'informational', 'cc-ihsanos')
+            RETURNING posted_by_identity, decided_by_verified
+            """
+        )
+        pbi, verified = cur.fetchone()
+        try:
+            assert pbi is not None  # trigger populated from current_user
+            assert verified is None  # no allowlist match in Phase 1 zero-seed
+        finally:
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-SD-PROV-1'")
+
+
+def test_strategic_decisions_trigger_preserves_admin_seeded_value():
+    """IF NEW.posted_by_identity IS NULL pattern preserves caller-supplied values."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by,
+               posted_by_identity)
+            VALUES
+              ('TEST-SD-PROV-2', 't', 'd', 'r', 'architecture', 'active', 'informational', 'cc-ihsanos',
+               'manual_seed_value')
+            """
+        )
+        try:
+            cur.execute(
+                """
+                UPDATE strategic_decisions
+                   SET challenge_status = 'accepted'
+                 WHERE decision_ref = 'TEST-SD-PROV-2'
+                RETURNING posted_by_identity
+                """
+            )
+            pbi = cur.fetchone()[0]
+            assert pbi == 'manual_seed_value', f"trigger clobbered admin-seeded value: {pbi}"
+        finally:
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-SD-PROV-2'")
+
+
+def test_strategic_decisions_trigger_fires_on_update_challenge_status():
+    """UPDATE of challenge_status fires the trigger (bulk-flip failure mode coverage per CAI-RESP-077)."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by)
+            VALUES
+              ('TEST-SD-PROV-3', 't', 'd', 'r', 'architecture', 'active', 'informational', 'cc-ihsanos')
+            """
+        )
+        try:
+            # Directly null posted_by_identity (trigger doesn't fire on UPDATE of unrelated columns)
+            cur.execute(
+                "UPDATE strategic_decisions SET posted_by_identity = NULL WHERE decision_ref = 'TEST-SD-PROV-3'"
+            )
+            # Now UPDATE challenge_status → trigger should repopulate posted_by_identity
+            cur.execute(
+                """
+                UPDATE strategic_decisions
+                   SET challenge_status = 'accepted'
+                 WHERE decision_ref = 'TEST-SD-PROV-3'
+                RETURNING posted_by_identity
+                """
+            )
+            pbi = cur.fetchone()[0]
+            assert pbi is not None, "trigger should have repopulated NULL posted_by_identity on UPDATE OF challenge_status"
+        finally:
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-SD-PROV-3'")
