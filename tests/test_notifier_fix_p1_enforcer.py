@@ -63,3 +63,43 @@ def test_runtime_config_value_check_rejects_invalid_mode():
                 VALUES ('challenge_enforcer_mode', 'garbage_mode')
                 """
             )
+
+
+def test_dryrun_log_table_exists():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name, data_type FROM information_schema.columns
+             WHERE table_name = 'challenge_enforcer_dryrun_log'
+             ORDER BY ordinal_position
+            """
+        )
+        cols = {r[0]: r[1] for r in cur.fetchall()}
+        assert "decision_ref" in cols
+        assert cols.get("current_challenge_status") == "text"
+        assert cols.get("proposed_new_status") == "text"
+        assert "challengeable_until" in cols
+        assert "logged_at" in cols
+        assert cols.get("processed") == "boolean"
+
+
+def test_dryrun_log_unique_on_decision_ref():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO challenge_enforcer_dryrun_log
+              (decision_ref, current_challenge_status, challengeable_until, proposed_new_status)
+            VALUES ('TEST-DRYRUN-UNIQUE', 'challenge_window', now(), 'accepted_by_timeout')
+            """
+        )
+        try:
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                cur.execute(
+                    """
+                    INSERT INTO challenge_enforcer_dryrun_log
+                      (decision_ref, current_challenge_status, challengeable_until, proposed_new_status)
+                    VALUES ('TEST-DRYRUN-UNIQUE', 'challenge_window', now(), 'accepted_by_timeout')
+                    """
+                )
+        finally:
+            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-DRYRUN-UNIQUE'")

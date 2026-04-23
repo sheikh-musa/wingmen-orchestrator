@@ -73,7 +73,24 @@ VALUES ('challenge_enforcer_mode', 'dry_run');
 -- SECTION 3: challenge_enforcer_dryrun_log staging table
 -- ============================================================
 
--- (Task B3 will fill this in)
+-- Reverse: DROP TABLE challenge_enforcer_dryrun_log;
+-- Staging table for DRY_RUN enforcer proposals. Unique on decision_ref so
+-- re-runs don't accumulate duplicate rows. processed=true after Musa reviews
+-- and applies an outcome.
+CREATE TABLE challenge_enforcer_dryrun_log (
+  id                       BIGSERIAL PRIMARY KEY,
+  decision_ref             TEXT NOT NULL UNIQUE,
+  current_challenge_status TEXT NOT NULL,
+  challengeable_until      TIMESTAMPTZ,
+  proposed_new_status      TEXT NOT NULL DEFAULT 'accepted_by_timeout',
+  logged_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processed                BOOLEAN NOT NULL DEFAULT false,
+  review_outcome           TEXT,  -- nullable: 'timeout_accepted' | 'reopened_as_challenge' | 'manual'
+  review_notes             TEXT   -- nullable: free-form reviewer notes
+);
+
+CREATE INDEX idx_dryrun_log_unprocessed ON challenge_enforcer_dryrun_log (logged_at)
+  WHERE processed = false;
 
 -- ============================================================
 -- SECTION 4: NOT NULL challengeable_until trigger
