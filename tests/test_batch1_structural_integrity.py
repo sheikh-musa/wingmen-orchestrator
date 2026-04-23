@@ -203,3 +203,50 @@ def test_strategic_decisions_trigger_fires_on_update_challenge_status():
             assert pbi is not None, "trigger should have repopulated NULL posted_by_identity on UPDATE OF challenge_status"
         finally:
             cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-SD-PROV-3'")
+
+
+def test_strategic_decisions_has_is_test_column():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT data_type, is_nullable, column_default FROM information_schema.columns
+             WHERE table_name = 'strategic_decisions' AND column_name = 'is_test'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "boolean"
+        assert row[1] == "NO"
+        assert row[2] == "false"
+
+
+def test_agent_messages_has_is_test_column():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT data_type, is_nullable, column_default FROM information_schema.columns
+             WHERE table_name = 'agent_messages' AND column_name = 'is_test'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "boolean"
+        assert row[1] == "NO"
+        assert row[2] == "false"
+
+
+def test_agent_messages_is_test_defaults_false_on_insert():
+    """New rows default is_test=FALSE."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body)
+            VALUES ('cc-ihsanos', 'cai', 'update', 'TEST-IS-TEST-DEFAULT', 'b')
+            RETURNING id, is_test
+            """
+        )
+        mid, is_test = cur.fetchone()
+        try:
+            assert is_test is False
+        finally:
+            cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
