@@ -74,7 +74,16 @@ ALTER TABLE agent_status
 -- SECTION 4: strategic_decisions provenance columns
 -- ============================================================
 
--- (Task 4 will fill this in)
+-- BUG-032 / BUG-024 Phase 1C: parallel pattern to agent_messages Phase 1A.
+-- Reverse: ALTER TABLE strategic_decisions DROP COLUMN posted_by_identity;
+--          ALTER TABLE strategic_decisions DROP COLUMN decided_by_verified;
+ALTER TABLE strategic_decisions
+  ADD COLUMN posted_by_identity TEXT;
+
+-- Nullable: NULL = unverified (Phase 1 default), true = allowlist match,
+-- false = explicit admin mark (reserved; no auto-false via trigger).
+ALTER TABLE strategic_decisions
+  ADD COLUMN decided_by_verified BOOLEAN;
 
 -- ============================================================
 -- SECTION 5: populate_strategic_decisions_provenance trigger

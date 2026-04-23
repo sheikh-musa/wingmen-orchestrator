@@ -97,3 +97,31 @@ def test_agent_status_insert_with_base_agent_id_succeeds():
             assert ret == 'cc-scholar'
         finally:
             cur.execute("DELETE FROM agent_status WHERE agent_id = 'cc-scholar-99'")
+
+
+def test_strategic_decisions_posted_by_identity_column():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT data_type, is_nullable FROM information_schema.columns
+             WHERE table_name = 'strategic_decisions' AND column_name = 'posted_by_identity'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "text"
+        assert row[1] == "YES"
+
+
+def test_strategic_decisions_decided_by_verified_column():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT data_type, is_nullable FROM information_schema.columns
+             WHERE table_name = 'strategic_decisions' AND column_name = 'decided_by_verified'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "boolean"
+        assert row[1] == "YES"
