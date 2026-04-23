@@ -169,3 +169,26 @@ BEGIN
   RETURN NEW;
 END;
 $function$;
+
+-- ============================================================
+-- SECTION 4: post-apply assertion — trigger body carries the 3-tier pattern
+-- ============================================================
+-- This DO-block runs at migration time. If a future re-application of this
+-- migration finds that someone has since redefined the trigger without the
+-- 3-tier routing, the migration RAISES and aborts. Defence-in-depth beyond
+-- the pytest guard.
+
+DO $$
+DECLARE
+  body TEXT;
+BEGIN
+  SELECT pg_get_functiondef(oid) INTO body
+    FROM pg_proc WHERE proname = 'trigger_cai_decision_announce';
+  IF body NOT LIKE '%NEW.announce_to_agent%'
+     OR body NOT LIKE '%NEW.announce_thread_id%'
+     OR body NOT LIKE '%NEW.parent_msg_id%' THEN
+    RAISE EXCEPTION 'BUG-030 migration assertion failed: trigger body missing 3-tier pattern';
+  END IF;
+END $$;
+
+COMMIT;

@@ -278,3 +278,22 @@ def test_update_path_fires_trigger_on_challenge_status_change():
             msg_id = cur.fetchone()[0]
             assert msg_id is not None, "UPDATE path did not fire trigger"
         c.rollback()
+
+
+def test_trigger_body_contains_tiered_coalesce_pattern():
+    """Section 4 guard: trigger body must reference all three tier inputs.
+    A future refactor that drops announce_to_agent from the COALESCE silently
+    regresses BUG-030; this test catches it at commit time."""
+    with _conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pg_get_functiondef(oid)
+                  FROM pg_proc
+                 WHERE proname = 'trigger_cai_decision_announce'
+                """
+            )
+            body = cur.fetchone()[0]
+    for token in ("NEW.announce_to_agent", "NEW.announce_thread_id",
+                  "NEW.parent_msg_id", "cc-ihsanos"):
+        assert token in body, f"trigger body missing {token}"
