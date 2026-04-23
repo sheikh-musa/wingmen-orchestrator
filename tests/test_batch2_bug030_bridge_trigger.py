@@ -236,33 +236,44 @@ def test_tier3_legacy_fallback_when_parent_msg_id_null():
 
 
 def test_update_path_fires_trigger_on_challenge_status_change():
-    """AC-BUG030-5: UPDATE of challenge_status from accepted_by_timeout →
-    challenge_window must fire the bridge trigger (BUG-020 precedent preserved)."""
+    """AC-BUG030-5: UPDATE of challenge_status into ('challenge_window', 'accepted')
+    must fire the bridge trigger (BUG-020 precedent preserved).
+
+    Isolation: seeds with challenge_status='unchallenged' (not in the announcing
+    whitelist {'challenge_window','accepted'}) so the INSERT path early-returns
+    without announcing. A single UPDATE to 'challenge_window' then exercises ONLY
+    the UPDATE branch of the trigger.
+    """
     with _conn() as c:
         with c.cursor() as cur:
-            # Seed a decision in challenge_window with bypass_review=true
-            # — simulates the bypass-then-untbypass flow that triggers the UPDATE path.
             cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
             cur.execute(
                 """
                 INSERT INTO strategic_decisions
                   (decision_ref, title, decision, reasoning, domain, status,
-                   source, challenge_status, decided_by, bypass_review,
-                   challengeable_until)
+                   source, challenge_status, decided_by)
                 VALUES ('TEST-BUG030-UPD', 't', 'd', 'r', 'operations', 'active',
-                        'claude_ai_session', 'challenge_window', 'cai', true,
-                        now() + interval '1 day')
+                        'claude_ai_session', 'unchallenged', 'cai')
                 """
             )
-            # Flip bypass_review → false then flip challenge_status to trigger.
+            # INSERT: challenge_status='unchallenged' falls outside the trigger's
+            # whitelist → early return, announced_by_msg_id stays NULL. Verify.
             cur.execute(
-                "UPDATE strategic_decisions SET bypass_review = false "
+                "SELECT announced_by_msg_id FROM strategic_decisions "
                 "WHERE decision_ref = 'TEST-BUG030-UPD'"
             )
+            assert cur.fetchone()[0] is None, "INSERT should not have announced (status='proposed')"
+
+            # Now the UPDATE-path test: flip challenge_status into the whitelist +
+            # set challengeable_until (required by challenge_window constraint).
             cur.execute(
-                "UPDATE strategic_decisions SET challenge_status = 'accepted' "
-                "WHERE decision_ref = 'TEST-BUG030-UPD' "
-                "RETURNING announced_by_msg_id"
+                """
+                UPDATE strategic_decisions
+                   SET challenge_status = 'challenge_window',
+                       challengeable_until = now() + interval '1 day'
+                 WHERE decision_ref = 'TEST-BUG030-UPD'
+                 RETURNING announced_by_msg_id
+                """
             )
             msg_id = cur.fetchone()[0]
             assert msg_id is not None, "UPDATE path did not fire trigger"
