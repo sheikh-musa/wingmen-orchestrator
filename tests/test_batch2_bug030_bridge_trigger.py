@@ -169,3 +169,39 @@ def test_tier1_explicit_announce_to_agent_overrides_inference():
             cur.execute("SELECT to_agent FROM agent_messages WHERE id = %s", (msg_id,))
             assert cur.fetchone()[0] == "cc-scholar", "explicit override ignored"
         c.rollback()
+
+
+def test_tier1_explicit_announce_thread_id_overrides_inheritance():
+    """AC-BUG030-4 Tier 1: announce_thread_id populated → overrides parent.thread_id."""
+    override_thread = str(uuid.uuid4())
+    with _conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_messages
+                  (thread_id, from_agent, to_agent, message_type, subject, body)
+                VALUES (gen_random_uuid(), 'cc-cosem', 'cai', 'question', 'p', 'p')
+                RETURNING id, thread_id
+                """
+            )
+            parent_id, parent_thread = cur.fetchone()
+            assert str(parent_thread) != override_thread  # sanity
+
+            cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, domain, status,
+                   source, challenge_status, decided_by, parent_msg_id,
+                   announce_thread_id, challengeable_until)
+                VALUES ('TEST-BUG030-T1T', 't', 'd', 'r', 'operations', 'active',
+                        'claude_ai_session', 'challenge_window', 'cai', %s, %s,
+                        now() + interval '1 day')
+                RETURNING announced_by_msg_id
+                """,
+                (parent_id, override_thread),
+            )
+            msg_id = cur.fetchone()[0]
+            cur.execute("SELECT thread_id FROM agent_messages WHERE id = %s", (msg_id,))
+            assert str(cur.fetchone()[0]) == override_thread, "thread_id override ignored"
+        c.rollback()
