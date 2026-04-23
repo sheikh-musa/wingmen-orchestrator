@@ -168,15 +168,31 @@ BEGIN
       ON CONFLICT (decision_ref) DO NOTHING;
       RETURN QUERY SELECT rec.decision_ref, 'logged'::TEXT;
     ELSE
+      -- Race guard: a concurrent txn may have flipped the row from
+      -- challenge_window to challenged between the SELECT snapshot above and
+      -- this UPDATE. The AND challenge_status='challenge_window' predicate
+      -- prevents silently clobbering the challenge. GET DIAGNOSTICS detects
+      -- the zero-row-affected case so the caller sees 'skipped_raced'.
       UPDATE strategic_decisions
          SET challenge_status = 'accepted_by_timeout',
              updated_at = now()
-       WHERE strategic_decisions.decision_ref = rec.decision_ref;
-      RETURN QUERY SELECT rec.decision_ref, 'flipped'::TEXT;
+       WHERE strategic_decisions.decision_ref = rec.decision_ref
+         AND strategic_decisions.challenge_status = 'challenge_window';
+      IF FOUND THEN
+        RETURN QUERY SELECT rec.decision_ref, 'flipped'::TEXT;
+      ELSE
+        RETURN QUERY SELECT rec.decision_ref, 'skipped_raced'::TEXT;
+      END IF;
     END IF;
   END LOOP;
 END;
 $$;
+
+-- Lock down SECURITY DEFINER surface: only postgres (the pg_cron invoker) may
+-- execute. Prevents anon/authenticated roles from triggering the enforcer via
+-- direct SQL should any RLS policy expose the function.
+REVOKE EXECUTE ON FUNCTION enforce_challenge_window_timeouts() FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION enforce_challenge_window_timeouts() TO postgres;
 
 -- ============================================================
 -- SECTION 6: pg_cron schedule
