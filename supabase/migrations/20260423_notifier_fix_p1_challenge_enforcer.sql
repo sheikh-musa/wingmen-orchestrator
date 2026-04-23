@@ -141,6 +141,11 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+#variable_conflict use_column
+-- The RETURNS TABLE declares plpgsql OUT variable `decision_ref` which shadows
+-- the table column in INSERT ... ON CONFLICT (decision_ref). Directive
+-- use_column tells plpgsql to prefer column references when names clash;
+-- explicit `rec.decision_ref` still refers to the loop record.
 DECLARE
   mode TEXT;
   rec RECORD;

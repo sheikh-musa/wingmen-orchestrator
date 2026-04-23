@@ -33,7 +33,7 @@ def test_challenge_status_check_allows_accepted_by_timeout():
             INSERT INTO strategic_decisions
               (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by)
             VALUES
-              ('TEST-CHECK-TIMEOUT', 't', 'd', 'r', 'test_domain', 'active', 'accepted_by_timeout', 'cc-ihsanos')
+              ('TEST-CHECK-TIMEOUT', 't', 'd', 'r', 'architecture', 'active', 'accepted_by_timeout', 'cc-ihsanos')
             RETURNING decision_ref
             """
         )
@@ -113,7 +113,7 @@ def test_trigger_rejects_insert_challenge_window_with_null_expiry():
                 INSERT INTO strategic_decisions
                   (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by, challengeable_until)
                 VALUES
-                  ('TEST-TRIG-INSERT', 't', 'd', 'r', 'test_domain', 'active', 'challenge_window', 'cc-ihsanos', NULL)
+                  ('TEST-TRIG-INSERT', 't', 'd', 'r', 'architecture', 'active', 'challenge_window', 'cc-ihsanos', NULL)
                 """
             )
 
@@ -127,7 +127,7 @@ def test_trigger_rejects_update_challenge_window_with_null_expiry():
             INSERT INTO strategic_decisions
               (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by, challengeable_until)
             VALUES
-              ('TEST-TRIG-UPDATE', 't', 'd', 'r', 'test_domain', 'active', 'informational', 'cc-ihsanos', NULL)
+              ('TEST-TRIG-UPDATE', 't', 'd', 'r', 'architecture', 'active', 'informational', 'cc-ihsanos', NULL)
             RETURNING decision_ref
             """
         )
@@ -151,7 +151,7 @@ def test_trigger_accepts_challenge_window_with_expiry():
             INSERT INTO strategic_decisions
               (decision_ref, title, decision, reasoning, domain, status, challenge_status, decided_by, challengeable_until)
             VALUES
-              ('TEST-TRIG-OK', 't', 'd', 'r', 'test_domain', 'active', 'challenge_window', 'cc-ihsanos', now() + interval '24 hours')
+              ('TEST-TRIG-OK', 't', 'd', 'r', 'architecture', 'active', 'challenge_window', 'cc-ihsanos', now() + interval '24 hours')
             RETURNING decision_ref
             """
         )
@@ -189,7 +189,7 @@ def test_enforcer_dry_run_logs_not_flips():
               (decision_ref, title, decision, reasoning, domain, status, challenge_status,
                decided_by, decided_at, challengeable_until)
             VALUES
-              ('TEST-ENFORCER-DRY', 't', 'd', 'r', 'test_domain', 'active', 'challenge_window',
+              ('TEST-ENFORCER-DRY', 't', 'd', 'r', 'architecture', 'active', 'challenge_window',
                'cc-ihsanos', now() - interval '2 hours', now() - interval '30 minutes')
             """
         )
@@ -227,7 +227,7 @@ def test_enforcer_write_mode_flips_not_logs():
                   (decision_ref, title, decision, reasoning, domain, status, challenge_status,
                    decided_by, decided_at, challengeable_until)
                 VALUES
-                  ('TEST-ENFORCER-WRITE', 't', 'd', 'r', 'test_domain', 'active', 'challenge_window',
+                  ('TEST-ENFORCER-WRITE', 't', 'd', 'r', 'architecture', 'active', 'challenge_window',
                    'cc-ihsanos', now() - interval '2 hours', now() - interval '30 minutes')
                 """
             )
@@ -262,7 +262,7 @@ def test_enforcer_race_guard_skips_recent_rows():
               (decision_ref, title, decision, reasoning, domain, status, challenge_status,
                decided_by, decided_at, challengeable_until)
             VALUES
-              ('TEST-ENFORCER-RACE', 't', 'd', 'r', 'test_domain', 'active', 'challenge_window',
+              ('TEST-ENFORCER-RACE', 't', 'd', 'r', 'architecture', 'active', 'challenge_window',
                'cc-ihsanos', now() - interval '15 minutes', now() - interval '5 minutes')
             """
         )
