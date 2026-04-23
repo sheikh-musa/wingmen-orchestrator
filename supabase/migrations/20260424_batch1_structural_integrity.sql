@@ -137,7 +137,17 @@ CREATE TRIGGER trg_strategic_decisions_provenance
 -- SECTION 6: is_test columns on strategic_decisions + agent_messages
 -- ============================================================
 
--- (Task 6 will fill this in)
+-- BUG-031 (strategic_decisions) + BUG-029 Part A (agent_messages).
+-- Identical pattern on both tables: BOOLEAN NOT NULL DEFAULT FALSE.
+-- Test suites set is_test=TRUE on fixtures; production rows default FALSE.
+-- Reverse: ALTER TABLE strategic_decisions DROP COLUMN is_test;
+--          ALTER TABLE agent_messages DROP COLUMN is_test;
+
+ALTER TABLE strategic_decisions
+  ADD COLUMN is_test BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE agent_messages
+  ADD COLUMN is_test BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- ============================================================
 -- SECTION 7: enforce_challenge_window_timeouts REPLACE with test_mode parameter
