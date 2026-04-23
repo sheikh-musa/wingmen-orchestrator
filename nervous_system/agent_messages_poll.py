@@ -192,7 +192,7 @@ async def poll_agent_messages(
             "requires_response, priority, created_at"
         ).is_("read_at", "null").is_(
             "forwarded_to_telegram_at", "null"
-        ).is_("skipped_at", "null").order("priority", desc=False).order(
+        ).is_("skipped_at", "null").eq("is_test", False).order("priority", desc=False).order(
             "requires_response", desc=True
         ).order("created_at", desc=False).execute()
 
