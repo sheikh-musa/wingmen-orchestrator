@@ -22,7 +22,10 @@
 -- ============================================================
 
 -- Reverse: ALTER TABLE strategic_decisions DROP CONSTRAINT strategic_decisions_challenge_status_check;
---          (re-add original constraint if rolling back)
+--          Original CHECK (for rollback):
+--            CHECK (challenge_status IN ('unchallenged', 'challenge_window', 'challenged',
+--              'accepted', 'overridden', 'cai_review_requested', 'informational',
+--              'implemented', 'superseded'))
 -- Adds 'accepted_by_timeout' to the enumeration. Per CAI-RESP-074 C6: distinct
 -- from 'accepted' to preserve epistemic distinction between silent-consent and
 -- explicit agreement.
@@ -32,15 +35,16 @@ ALTER TABLE strategic_decisions
 ALTER TABLE strategic_decisions
   ADD CONSTRAINT strategic_decisions_challenge_status_check
   CHECK (challenge_status IN (
+    'unchallenged',
     'challenge_window',
+    'challenged',
     'accepted',
     'accepted_by_timeout',
-    'challenged',
-    'unchallenged',
     'overridden',
+    'cai_review_requested',
+    'informational',
     'implemented',
-    'rejected',
-    'informational'
+    'superseded'
   ));
 
 -- ============================================================
