@@ -50,12 +50,28 @@ UPDATE agent_status
    SET base_agent_id = regexp_replace(agent_id, '-[0-9]+$', '')
  WHERE base_agent_id IS NULL;
 
+-- CAI-RESP-081 CHECK 2: explicit assertion before SET NOT NULL.
+-- Belt-and-suspenders over transaction atomicity — Postgres would raise
+-- "column contains null values" on SET NOT NULL anyway, but this block
+-- surfaces the exact row count for diagnostic clarity if Section 2 regexp
+-- somehow fails to match any agent_id (shouldn't happen with current 5
+-- rows but guards against edge cases).
+DO $batch1_section2_assert$
+BEGIN
+  IF (SELECT count(*) FROM agent_status WHERE base_agent_id IS NULL) > 0 THEN
+    RAISE EXCEPTION 'Batch 1 Section 2 backfill incomplete: % rows still have NULL base_agent_id. Migration rolling back.',
+      (SELECT count(*) FROM agent_status WHERE base_agent_id IS NULL);
+  END IF;
+END
+$batch1_section2_assert$;
+
 -- ============================================================
 -- SECTION 3: agent_status base_agent_id NOT NULL + prefix CHECK
 -- ============================================================
 
--- After Section 2 backfill, enforce NOT NULL. Any future INSERT must supply
--- base_agent_id (auto_agent_id.py populates explicitly — see Task 12).
+-- After Section 2 backfill (verified by the DO block above), enforce NOT NULL.
+-- Any future INSERT must supply base_agent_id (auto_agent_id.py populates
+-- explicitly — see Task 12).
 -- Reverse: ALTER TABLE agent_status ALTER COLUMN base_agent_id DROP NOT NULL;
 ALTER TABLE agent_status
   ALTER COLUMN base_agent_id SET NOT NULL;
