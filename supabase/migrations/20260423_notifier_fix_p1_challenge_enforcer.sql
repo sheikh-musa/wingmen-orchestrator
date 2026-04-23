@@ -96,7 +96,32 @@ CREATE INDEX idx_dryrun_log_unprocessed ON challenge_enforcer_dryrun_log (logged
 -- SECTION 4: NOT NULL challengeable_until trigger
 -- ============================================================
 
--- (Task B4 will fill this in)
+-- Reverse: DROP TRIGGER IF EXISTS trg_challenge_window_requires_expiry ON strategic_decisions;
+--          DROP FUNCTION IF EXISTS enforce_challenge_window_requires_expiry();
+--
+-- CAI-RESP-074 C4: enforce NOT NULL challengeable_until whenever a row is in
+-- challenge_window state. Fires on INSERT AND UPDATE OF challenge_status,
+-- challengeable_until — covers both "new row with NULL expiry" and "UPDATE
+-- flipping an existing row to challenge_window with NULL expiry" paths.
+
+CREATE OR REPLACE FUNCTION enforce_challenge_window_requires_expiry()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.challenge_status = 'challenge_window' AND NEW.challengeable_until IS NULL THEN
+    RAISE EXCEPTION 'strategic_decisions.challenge_status=challenge_window requires challengeable_until IS NOT NULL (decision_ref=%)',
+      NEW.decision_ref
+      USING HINT = 'Set challengeable_until to a future timestamp when filing a challenge_window decision.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_challenge_window_requires_expiry
+  BEFORE INSERT OR UPDATE OF challenge_status, challengeable_until ON strategic_decisions
+  FOR EACH ROW
+  EXECUTE FUNCTION enforce_challenge_window_requires_expiry();
 
 -- ============================================================
 -- SECTION 5: enforce_challenge_window_timeouts function

@@ -103,3 +103,59 @@ def test_dryrun_log_unique_on_decision_ref():
                 )
         finally:
             cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-DRYRUN-UNIQUE'")
+
+
+def test_trigger_rejects_insert_challenge_window_with_null_expiry():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException):
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, status, challenge_status, decided_by, challengeable_until)
+                VALUES
+                  ('TEST-TRIG-INSERT', 't', 'd', 'r', 'active', 'challenge_window', 'cc-ihsanos', NULL)
+                """
+            )
+
+
+def test_trigger_rejects_update_challenge_window_with_null_expiry():
+    """An UPDATE that sets challenge_status='challenge_window' on a row with NULL
+    challengeable_until must be rejected — covers CAI-RESP-074 C4."""
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, status, challenge_status, decided_by, challengeable_until)
+            VALUES
+              ('TEST-TRIG-UPDATE', 't', 'd', 'r', 'active', 'informational', 'cc-ihsanos', NULL)
+            RETURNING decision_ref
+            """
+        )
+        try:
+            with pytest.raises(psycopg.errors.RaiseException):
+                cur.execute(
+                    """
+                    UPDATE strategic_decisions
+                       SET challenge_status = 'challenge_window'
+                     WHERE decision_ref = 'TEST-TRIG-UPDATE'
+                    """
+                )
+        finally:
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-TRIG-UPDATE'")
+
+
+def test_trigger_accepts_challenge_window_with_expiry():
+    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategic_decisions
+              (decision_ref, title, decision, reasoning, status, challenge_status, decided_by, challengeable_until)
+            VALUES
+              ('TEST-TRIG-OK', 't', 'd', 'r', 'active', 'challenge_window', 'cc-ihsanos', now() + interval '24 hours')
+            RETURNING decision_ref
+            """
+        )
+        try:
+            assert cur.fetchone()[0] == 'TEST-TRIG-OK'
+        finally:
+            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-TRIG-OK'")
