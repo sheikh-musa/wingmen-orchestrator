@@ -28,10 +28,12 @@ BEGIN;
 --   ALTER TABLE strategic_decisions DROP COLUMN announce_to_agent;
 --   ALTER TABLE strategic_decisions DROP COLUMN announce_thread_id;
 
+-- Idempotent re-apply: columns may already exist from incremental TDD apply.
+-- IF NOT EXISTS makes schema_migrations re-application a no-op on matched state.
 ALTER TABLE strategic_decisions
-  ADD COLUMN parent_msg_id BIGINT,
-  ADD COLUMN announce_to_agent TEXT,
-  ADD COLUMN announce_thread_id UUID;
+  ADD COLUMN IF NOT EXISTS parent_msg_id BIGINT,
+  ADD COLUMN IF NOT EXISTS announce_to_agent TEXT,
+  ADD COLUMN IF NOT EXISTS announce_thread_id UUID;
 
 COMMENT ON COLUMN strategic_decisions.parent_msg_id IS
   'BUG-030: BIGINT FK to agent_messages(id). If populated, bridge trigger '
@@ -55,9 +57,18 @@ COMMENT ON COLUMN strategic_decisions.announce_thread_id IS
 -- Reverse:
 --   ALTER TABLE strategic_decisions DROP CONSTRAINT strategic_decisions_parent_msg_id_fkey;
 
-ALTER TABLE strategic_decisions
-  ADD CONSTRAINT strategic_decisions_parent_msg_id_fkey
-  FOREIGN KEY (parent_msg_id) REFERENCES agent_messages(id) ON DELETE RESTRICT;
+-- ADD CONSTRAINT IF NOT EXISTS is PG16+; wrap defensively for portability.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'strategic_decisions_parent_msg_id_fkey'
+  ) THEN
+    ALTER TABLE strategic_decisions
+      ADD CONSTRAINT strategic_decisions_parent_msg_id_fkey
+      FOREIGN KEY (parent_msg_id) REFERENCES agent_messages(id) ON DELETE RESTRICT;
+  END IF;
+END $$;
 
 -- Partial index on populated parent_msg_id — trigger subquery + any parent-based
 -- ad-hoc queries benefit. 300+ existing rows have NULL, indexing them wastes space.
