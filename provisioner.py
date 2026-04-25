@@ -274,9 +274,10 @@ def _add_to_repos_json(repo_name: str, local_path: str, slug: str, deploy_url: s
     with open(REPOS_JSON) as f:
         data = json.load(f)
 
-    # Check if already exists
+    # Check if already exists (by canonical name or alias — prevents adding a
+    # duplicate entry that would shadow an existing repo's alias lookup).
     for repo in data["repos"]:
-        if repo["name"] == repo_name:
+        if repo["name"] == repo_name or repo_name in repo.get("aliases", []):
             return
 
     data["repos"].append({

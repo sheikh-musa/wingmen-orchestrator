@@ -20,7 +20,7 @@ def _load_repos() -> list[dict]:
 
 def get_repo_config(repo_name: str) -> dict:
     for repo in _load_repos():
-        if repo["name"] == repo_name:
+        if repo["name"] == repo_name or repo_name in repo.get("aliases", []):
             return repo
     raise ValueError(f"Repo '{repo_name}' not found in REPOS.json")
 

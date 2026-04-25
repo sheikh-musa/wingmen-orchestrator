@@ -71,6 +71,60 @@ def test_get_repo_config_not_found(repos_json):
             context_loader.get_repo_config("nonexistent")
 
 
+def test_get_repo_config_matches_alias(tmp_path, tmp_repo):
+    """msg #815: hifz BugReportButton posts repo='hifz' but canonical name is
+    'hifz-companion'. Aliases let the canonical entry handle both without
+    duplicating the row."""
+    repos = {
+        "repos": [
+            {
+                "name": "hifz-companion",
+                "aliases": ["hifz"],
+                "github": "https://github.com/sheikh-musa/hifz-companion",
+                "local_path": str(tmp_repo),
+                "vercel_project": "hifz-companion",
+                "deploy_url": "https://hifz-companion.vercel.app",
+                "supabase_project_ref": "xxx",
+                "status": "active",
+                "priority": 3,
+            }
+        ]
+    }
+    repos_file = tmp_path / "REPOS.json"
+    repos_file.write_text(json.dumps(repos))
+    with patch.object(context_loader, "REPOS_JSON", repos_file):
+        # Canonical name still works.
+        assert context_loader.get_repo_config("hifz-companion")["name"] == "hifz-companion"
+        # Alias resolves to same canonical entry.
+        cfg = context_loader.get_repo_config("hifz")
+        assert cfg["name"] == "hifz-companion"
+        assert cfg["priority"] == 3
+
+
+def test_get_repo_config_alias_not_found_still_raises(tmp_path, tmp_repo):
+    """Unknown names (not in name nor aliases) still raise ValueError."""
+    repos = {
+        "repos": [
+            {
+                "name": "hifz-companion",
+                "aliases": ["hifz"],
+                "github": "https://example.com",
+                "local_path": str(tmp_repo),
+                "vercel_project": None,
+                "deploy_url": None,
+                "supabase_project_ref": None,
+                "status": "active",
+                "priority": 3,
+            }
+        ]
+    }
+    repos_file = tmp_path / "REPOS.json"
+    repos_file.write_text(json.dumps(repos))
+    with patch.object(context_loader, "REPOS_JSON", repos_file):
+        with pytest.raises(ValueError, match="not found"):
+            context_loader.get_repo_config("unknown")
+
+
 @pytest.mark.asyncio
 async def test_load_context(repos_json, mock_supabase, tmp_repo):
     with patch.object(context_loader, "REPOS_JSON", repos_json):

@@ -65,6 +65,7 @@
     },
     {
       "name": "hifz-companion",
+      "aliases": ["hifz"],
       "github": "https://github.com/sheikh-musa/hifz-companion",
       "local_path": "~/wingmen/projects/hifz-companion",
       "vercel_project": "hifz-companion",
