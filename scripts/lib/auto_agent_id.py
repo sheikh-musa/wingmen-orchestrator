@@ -209,8 +209,19 @@ def allocate_sub_tag_and_register(
     for up to 5s. On timeout, query pg_locks for the holder and raise
     LockTimeoutError with the diagnostic attached.
 
+    base_agent_id population (BUG-033): the `base` argument is written to
+    agent_status.base_agent_id on both INSERT and UPSERT branches. This is
+    the FK back to agents(id) and is enforced NOT NULL. The prefix CHECK
+    (agent_status_base_agent_id_prefix_chk) ensures agent_id begins with
+    base_agent_id + '-' so a wrong base_agent_id at this layer still fails
+    at the DB. Pre-BUG-033 the INSERT branch omitted the column — fresh-
+    family first-spawn (never-seen base) hit NotNullViolation. Fixed by
+    including base in the INSERT column list + EXCLUDED.base_agent_id in
+    the ON CONFLICT UPDATE (idempotent refresh of the FK value).
+
     Args:
-        base: registered agents.id family (e.g. 'cc-ihsanos').
+        base: registered agents.id family (e.g. 'cc-ihsanos'). Written to
+            agent_status.base_agent_id (see note above).
         dsn: Postgres connection string with the GUC-capable user.
         repo: repo name for scope_repos (single-element array for now).
         stale_cutoff_minutes: rows whose last_heartbeat is older than this
@@ -313,19 +324,28 @@ def allocate_sub_tag_and_register(
                 "SELECT set_config('app.current_agent_id', %s, true)",
                 (sub_tag,),
             )
+            # BUG-033 fix: base_agent_id in INSERT column list. Fresh-family
+            # allocation (no prior agent_status rows for this base) hits the
+            # INSERT branch; prior code omitted base_agent_id and violated
+            # the NOT NULL constraint. The value is the `base` arg we already
+            # have — caller-provided, matches the regexp_replace pattern the
+            # agent_status_base_agent_id_prefix_chk CHECK enforces.
             cur.execute(
                 """
                 INSERT INTO agent_status
-                  (agent_id, status, current_task, scope_repos, last_heartbeat, updated_at)
-                VALUES (%s, 'working', 'session-launch', ARRAY[%s]::text[], now(), now())
+                  (agent_id, base_agent_id, status, current_task, scope_repos,
+                   last_heartbeat, updated_at)
+                VALUES (%s, %s, 'working', 'session-launch', ARRAY[%s]::text[],
+                        now(), now())
                 ON CONFLICT (agent_id) DO UPDATE SET
+                  base_agent_id = EXCLUDED.base_agent_id,
                   status = 'working',
                   current_task = 'session-launch',
                   scope_repos = ARRAY[%s]::text[],
                   last_heartbeat = now(),
                   updated_at = now()
                 """,
-                (sub_tag, repo, repo),
+                (sub_tag, base, repo, repo),
             )
         conn.commit()  # releases advisory lock
 

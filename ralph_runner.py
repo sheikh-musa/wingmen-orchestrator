@@ -460,3 +460,66 @@ async def run_claude(
                 logger.warning(
                     f"BUG-019: worktree cleanup (failure path) failed for job #{job_id}: {wt_e}"
                 )
+
+
+# ── ORCHESTRATOR-STATUS-001 Option C: publish after gates ───────────────────
+
+async def publish_job_commit(
+    repo_path: str,
+    job_id: int,
+    pr_title: str,
+    pr_body: str,
+) -> "PublisherResult":
+    """Create a canonical autofix/job-<id>-<sha> branch at repo HEAD and
+    publish it to origin, opening a PR against main.
+
+    Called from wingmen_orch AFTER ARCH-021 gates pass. The branch the
+    worktree was on (ralph-job-<id>) has typically been deleted by
+    _merge_and_remove_worktree by this point; we create a fresh branch
+    pointer at the merged HEAD and push that under the canonical name.
+
+    Per CAI-RESP-078 GAP 1: branch name is autofix/job-<id>-<short_sha>
+    to preempt collisions.
+    """
+    from agents.git_publisher import (
+        PublisherResult, build_branch_name, publish_and_open_pr,
+    )
+
+    # 1. Get HEAD sha from repo_path.
+    rev = await asyncio.create_subprocess_exec(
+        "git", "-C", repo_path, "rev-parse", "HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    rev_out, rev_err = await rev.communicate()
+    if rev.returncode != 0:
+        return PublisherResult(
+            ok=False,
+            error=(rev_err or rev_out).decode(errors="replace").strip(),
+            stage="push",  # categorize as push-stage for downstream status mapping
+        )
+    sha = rev_out.decode(errors="replace").strip()
+    if not sha:
+        return PublisherResult(ok=False, error="empty rev-parse output", stage="push")
+
+    # 2. Build canonical branch name.
+    branch = build_branch_name(job_id, sha)
+
+    # 3. Create a local branch pointer at that sha. Force-overwrite if
+    #    a stale pointer with the same name exists (shouldn't in practice
+    #    because sha is a collision-avoidance component).
+    create = await asyncio.create_subprocess_exec(
+        "git", "-C", repo_path, "branch", "--force", branch, sha,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, branch_err = await create.communicate()
+    if create.returncode != 0:
+        return PublisherResult(
+            ok=False, branch=branch,
+            error=(branch_err or b"").decode(errors="replace").strip(),
+            stage="push",
+        )
+
+    # 4. Publish + open PR.
+    return await publish_and_open_pr(repo_path, branch, pr_title, pr_body)
