@@ -626,3 +626,18 @@ class TestSkippedAtStamping:
         assert ("skipped_at", "null") in is_calls, (
             f"expected .is_('skipped_at', 'null') in poll query; got {is_calls}"
         )
+
+    @pytest.mark.asyncio
+    async def test_poll_query_filters_out_is_test_rows(self):
+        """BUG-029 Part A regression: is_test=TRUE rows must not be returned
+        by poll_agent_messages (notifier should not forward test rows to Telegram).
+        """
+        from nervous_system import agent_messages_poll as mod
+
+        sb = mock_supabase_chain([])
+        await mod.poll_agent_messages(sb, bot=None, musa_chat_id=None)
+
+        eq_calls = [call.args for call in sb.eq.call_args_list]
+        assert ("is_test", False) in eq_calls, (
+            f"expected .eq('is_test', False) in poll query; got {eq_calls}"
+        )

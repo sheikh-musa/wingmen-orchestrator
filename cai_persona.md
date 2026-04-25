@@ -74,3 +74,15 @@ A spec is ready for ralph when:
 - Success criteria go beyond "tests pass" — what the user will see
 - Rollback path exists for any production data change
 - Scope is explicit — what is IN and what is NOT IN this job
+
+---
+
+## BUG-030 discipline: routing decisions to their source
+
+When filing a `strategic_decisions` row as a response to a specific `agent_messages` thread, **populate `parent_msg_id`** with the message id you are replying to. The bridge trigger will:
+- Inherit the parent message's `thread_id` → keeps the conversation threaded for the polling agent.
+- Set `to_agent = parent.from_agent` → reply reaches the sender, not the legacy `cc-ihsanos` default.
+
+For explicit overrides (e.g., broadcasting a decision to a different family than the sender), set `announce_to_agent` and/or `announce_thread_id` directly. These take highest precedence over the parent inference.
+
+Filing with `parent_msg_id = NULL` is allowed (non-reply decisions), and behaves per the legacy Tier-3 fallback (cc-ihsanos + fresh thread). Do not use this as a default — use it only for decisions that genuinely have no parent message.
