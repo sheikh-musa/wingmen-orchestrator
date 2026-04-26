@@ -207,7 +207,9 @@ class TestCheckinSilence:
 class TestCheckAgentHealth:
 
     @pytest.mark.asyncio
-    async def test_runs_both_checks(self):
+    async def test_runs_heartbeat_only_checkin_disabled(self):
+        """Operator-disabled: check-in silence is no-op while autopilot is off.
+        Heartbeat staleness still runs (process-liveness signal)."""
         from unittest.mock import patch
         sb = MagicMock()
 
@@ -217,29 +219,7 @@ class TestCheckAgentHealth:
                        new_callable=AsyncMock) as mock_ci:
                 await check_agent_health(sb)
                 mock_hb.assert_called_once()
-                mock_ci.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_check_in_failure_does_not_block_heartbeat_check(self):
-        from unittest.mock import patch
-        sb = MagicMock()
-        call_log = []
-
-        async def hb_mock(*a, **kw):
-            call_log.append("hb")
-
-        async def ci_mock(*a, **kw):
-            call_log.append("ci")
-            raise ValueError("simulated failure")
-
-        with patch("nervous_system.agent_watchdog._check_heartbeat_staleness", side_effect=hb_mock):
-            with patch("nervous_system.agent_watchdog._check_checkin_silence", side_effect=ci_mock):
-                # Should not raise even if check-in check fails
-                try:
-                    await check_agent_health(sb)
-                except Exception:
-                    pass
-                assert "hb" in call_log
+                mock_ci.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
