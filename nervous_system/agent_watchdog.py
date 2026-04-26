@@ -41,12 +41,18 @@ _ALERT_DEDUP_MINUTES = 60  # don't re-alert within this window
 async def check_agent_health(
     supabase, bot=None, musa_chat_id: str | None = None
 ) -> None:
-    """Run both heartbeat staleness and check-in silence checks.
+    """Run heartbeat staleness check.
 
     Called every 20 polls (~10 min) from the main orchestrator loop.
+
+    Check-in silence (_check_checkin_silence) is intentionally disabled —
+    operator decision: without full automation the CC families don't run
+    on autopilot, so 45-min coordination-silence alerts are pure noise.
+    Heartbeat staleness still runs because it tracks process liveness
+    (different signal from coordination cadence).
     """
     await _check_heartbeat_staleness(supabase, bot, musa_chat_id)
-    await _check_checkin_silence(supabase, bot, musa_chat_id)
+    # await _check_checkin_silence(supabase, bot, musa_chat_id)  # disabled — see docstring
 
 
 # ---------------------------------------------------------------------------
