@@ -58,17 +58,23 @@ _HEADER_PATTERNS: dict[str, re.Pattern] = {
 }
 
 
-def parse_status_md(content: str) -> dict[str, str | None]:
+def parse_status_md(content: str) -> dict[str, object]:
     """Parse STATUS.md content into repo_context-shaped dict.
 
-    Returns a dict with keys {current_phase, blockers, known_debt, architecture_summary}.
+    Returns a dict with keys {current_phase: str|None, blockers: list[str]|None,
+    known_debt: list[str]|None, architecture_summary: str|None}.
+
+    Schema-typed:
+    - current_phase + architecture_summary are TEXT (str | None).
+    - blockers + known_debt are ARRAY (list[str] | None) — bullet items split.
+
     Missing fields are NULL (None). Lenient — non-canonical formats produce
     partial results, never exceptions.
     """
     if not content or not content.strip():
         return {k: None for k in ("current_phase", "blockers", "known_debt", "architecture_summary")}
 
-    out: dict[str, str | None] = {
+    out: dict[str, object] = {
         "current_phase": None,
         "blockers": None,
         "known_debt": None,
@@ -91,11 +97,33 @@ def parse_status_md(content: str) -> dict[str, str | None]:
     for col, aliases in _SECTION_ALIASES.items():
         for alias in aliases:
             section = _extract_section(content, alias)
-            if section:
-                out[col] = section[:2000]  # cap content
-                break  # first matching alias wins
+            if not section:
+                continue
+            if col in ("blockers", "known_debt"):
+                # ARRAY columns — parse bullet list. Lenient: accept '-' or '*'
+                # bullets at line start, fall back to single-element array of
+                # the whole section if no bullets present.
+                items = _parse_bullet_list(section)
+                out[col] = items[:50] if items else [section[:500]]
+            else:
+                out[col] = section[:2000]
+            break  # first matching alias wins
 
     return out
+
+
+def _parse_bullet_list(text: str) -> list[str]:
+    """Extract bullet items from a markdown section. Returns a list of bullet
+    contents (without the leading '- ' or '* '). Returns empty list if no
+    bullets recognized."""
+    items: list[str] = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*[-*]\s+(.+?)\s*$", line)
+        if m:
+            content = m.group(1).strip()
+            if content:
+                items.append(content[:500])  # cap per item
+    return items
 
 
 def _extract_section(content: str, heading: str) -> str | None:
