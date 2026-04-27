@@ -467,9 +467,18 @@ _handle_exit() {
         echo -e "${AMBER}▶ Pushing ${ahead} unpushed commit(s) before exit...${RESET}"
         if git -C "$CALLER_DIR" push origin main 2>&1; then
             _verify_vercel_deploy "$CALLER_DIR"
-            # ARCH-024: write repo_snapshot after successful push (best-effort)
-            "$VENV_PY" -m scripts.write_repo_snapshot \
-                --repo "$REPO_NAME" --dir "$CALLER_DIR" 2>/dev/null || true
+            # ARCH-024: write repo_snapshot after successful push.
+            # CAI-RESP-093 immediate fix: stderr was masked by `2>/dev/null` and
+            # `|| true` swallowed all failures silently. We keep the trap-completion
+            # guarantee (writer failures must NOT abort the launcher exit-trap) but
+            # surface stderr to launchd's log capture and explicitly log the outcome
+            # so launcher logs answer "did the snapshot writer fire and succeed?"
+            if "$VENV_PY" -m scripts.write_repo_snapshot \
+                    --repo "$REPO_NAME" --dir "$CALLER_DIR"; then
+                echo -e "${DIM}  ✓ repo_snapshot written for ${REPO_NAME}${RESET}"
+            else
+                echo -e "${RED}  ⚠ repo_snapshot write FAILED for ${REPO_NAME} (non-fatal, continuing)${RESET}" >&2
+            fi
         else
             echo -e "${RED}⚠ git push failed — commits remain local${RESET}"
         fi
