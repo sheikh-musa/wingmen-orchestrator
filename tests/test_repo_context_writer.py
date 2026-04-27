@@ -53,40 +53,60 @@ content
         out = parse_status_md(content)
         assert len(out["current_phase"]) == 500
 
-    def test_blockers_section_canonical(self):
+    def test_blockers_section_canonical_returns_array(self):
         content = """# STATUS
 
 ## Blockers
 - waiting on cai
 - migration pending
 """
-        assert "waiting on cai" in parse_status_md(content)["blockers"]
+        out = parse_status_md(content)
+        assert out["blockers"] == ["waiting on cai", "migration pending"]
 
-    def test_blocked_alias_recognized(self):
-        # 'Blocked' is the dookana convention; should also map to blockers
+    def test_blocked_alias_recognized_array(self):
+        # 'Blocked' is the dookana convention; should also map to blockers ARRAY
         content = """## Blocked
 - DB connection
 """
-        assert "DB connection" in parse_status_md(content)["blockers"]
+        assert parse_status_md(content)["blockers"] == ["DB connection"]
 
-    def test_known_debt_with_parens_alias(self):
+    def test_known_debt_with_parens_alias_array(self):
         # hifz convention: '## Known Debts (tracked)'
         content = """## Known Debts (tracked)
 - Test setup is fragile
 """
-        assert "fragile" in parse_status_md(content)["known_debt"]
+        assert parse_status_md(content)["known_debt"] == ["Test setup is fragile"]
 
-    def test_section_terminates_at_next_heading(self):
+    def test_section_terminates_at_next_heading_array(self):
         content = """## Blockers
-A
-B
+- A
+- B
 ## Other
-should not appear
+- should not appear
 """
         out = parse_status_md(content)
-        assert "A" in out["blockers"]
-        assert "B" in out["blockers"]
-        assert "should not appear" not in out["blockers"]
+        assert out["blockers"] == ["A", "B"]
+        assert "should not appear" not in (out["blockers"] or [])
+
+    def test_section_without_bullets_falls_back_to_single_element(self):
+        # Some repos (ihsanos, hifz) write Blockers as paragraphs not bullets.
+        # Lenient: capture the whole section as a single array element.
+        content = """## Blockers
+free-form paragraph describing the blocker
+spanning multiple lines.
+"""
+        out = parse_status_md(content)
+        assert isinstance(out["blockers"], list)
+        assert len(out["blockers"]) == 1
+        assert "free-form paragraph" in out["blockers"][0]
+
+    def test_mixed_asterisk_dash_bullets(self):
+        # Markdown convention varies — accept both
+        content = """## Blockers
+* asterisk one
+- dash two
+"""
+        assert parse_status_md(content)["blockers"] == ["asterisk one", "dash two"]
 
     def test_unrecognized_format_partial_result(self):
         # ihsanos-style: '## Shipped — Batch 1' — no recognized sections
