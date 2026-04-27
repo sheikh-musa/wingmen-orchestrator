@@ -297,3 +297,123 @@ def test_trigger_body_contains_tiered_coalesce_pattern():
     for token in ("NEW.announce_to_agent", "NEW.announce_thread_id",
                   "NEW.parent_msg_id", "cc-ihsanos"):
         assert token in body, f"trigger body missing {token}"
+
+
+def test_tier3_fallback_logs_to_notification_log():
+    """CAI-PROCESS-ROUTING-001 + CAI-RESP-091: Tier-3 fallback firing creates a
+    notification_log row with source='bridge_tier3_misroute' carrying full Tier
+    inputs (parent_msg_id, announce_to_agent, announce_thread_id) and the
+    spawned agent_messages id for forensic correlation."""
+    with _conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+            # Insert a strategic_decisions row with NO announce_to_agent and
+            # NO parent_msg_id → bridge fires Tier-3 fallback to cc-ihsanos.
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, domain, status,
+                   source, challenge_status, decided_by, challengeable_until)
+                VALUES ('TEST-BUG030-T3LOG', 't', 'd', 'r', 'operations', 'active',
+                        'claude_ai_session', 'challenge_window', 'cai',
+                        now() + interval '1 day')
+                RETURNING announced_by_msg_id
+                """
+            )
+            spawned_msg_id = cur.fetchone()[0]
+            assert spawned_msg_id is not None, "Tier-3 trigger did not announce"
+
+            # Audit row must exist — same transaction since bridge trigger is BEFORE INSERT.
+            cur.execute(
+                """
+                SELECT source, decision_ref, channel, recipient, message_text
+                  FROM notification_log
+                 WHERE decision_ref = 'TEST-BUG030-T3LOG'
+                   AND source = 'bridge_tier3_misroute'
+                """
+            )
+            row = cur.fetchone()
+            assert row is not None, "Tier-3 audit row not written to notification_log"
+            assert row[0] == "bridge_tier3_misroute"
+            assert row[1] == "TEST-BUG030-T3LOG"
+            assert row[2] == "agent_messages"
+            assert row[3] == "cc-ihsanos"
+            payload = row[4]
+            # Payload is JSON-as-text; verify keys via substring (not parsing — keep test simple)
+            for key in ("spawned_msg_id", "parent_msg_id", "announce_to_agent",
+                        "announce_thread_id", "reason"):
+                assert key in payload, f"audit payload missing {key!r}"
+            # spawned_msg_id should match the announced_by_msg_id we got back
+            assert str(spawned_msg_id) in payload, \
+                f"audit payload spawned_msg_id={spawned_msg_id} not in {payload}"
+        c.rollback()
+
+
+def test_tier1_explicit_does_not_log_to_notification_log():
+    """When announce_to_agent is explicitly set (Tier 1), the bridge routes to
+    the explicit recipient and does NOT write a Tier-3 audit row. Negative
+    case: ensures the audit gate fires only on true Tier-3, not Tier-1 routes."""
+    with _conn() as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, domain, status,
+                   source, challenge_status, decided_by, announce_to_agent,
+                   challengeable_until)
+                VALUES ('TEST-BUG030-T1NOLOG', 't', 'd', 'r', 'operations', 'active',
+                        'claude_ai_session', 'challenge_window', 'cai', 'cc-scholar',
+                        now() + interval '1 day')
+                """
+            )
+            cur.execute(
+                """
+                SELECT count(*) FROM notification_log
+                 WHERE decision_ref = 'TEST-BUG030-T1NOLOG'
+                   AND source = 'bridge_tier3_misroute'
+                """
+            )
+            count = cur.fetchone()[0]
+            assert count == 0, f"Tier-1 explicit route should NOT audit-log; got {count} rows"
+        c.rollback()
+
+
+def test_tier2_inferred_does_not_log_to_notification_log():
+    """When parent_msg_id is set (Tier 2), the bridge routes via parent inference
+    and does NOT write a Tier-3 audit row. Negative case complement to the
+    Tier-1 test."""
+    with _conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_messages
+                  (thread_id, from_agent, to_agent, message_type, subject, body)
+                VALUES (gen_random_uuid(), 'cc-cosem', 'cai', 'question', 'p', 'p')
+                RETURNING id
+                """
+            )
+            parent_id = cur.fetchone()[0]
+            cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+            cur.execute(
+                """
+                INSERT INTO strategic_decisions
+                  (decision_ref, title, decision, reasoning, domain, status,
+                   source, challenge_status, decided_by, parent_msg_id,
+                   challengeable_until)
+                VALUES ('TEST-BUG030-T2NOLOG', 't', 'd', 'r', 'operations', 'active',
+                        'claude_ai_session', 'challenge_window', 'cai', %s,
+                        now() + interval '1 day')
+                """,
+                (parent_id,),
+            )
+            cur.execute(
+                """
+                SELECT count(*) FROM notification_log
+                 WHERE decision_ref = 'TEST-BUG030-T2NOLOG'
+                   AND source = 'bridge_tier3_misroute'
+                """
+            )
+            count = cur.fetchone()[0]
+            assert count == 0, f"Tier-2 inferred route should NOT audit-log; got {count} rows"
+        c.rollback()
