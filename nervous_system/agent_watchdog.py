@@ -53,6 +53,7 @@ async def check_agent_health(
     """
     await _check_heartbeat_staleness(supabase, bot, musa_chat_id)
     # await _check_checkin_silence(supabase, bot, musa_chat_id)  # disabled — see docstring
+    await check_repo_context_health(supabase, bot, musa_chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +209,73 @@ async def _check_checkin_silence(
     except Exception as e:
         logger.error(f"agent_watchdog check-in silence check failed: {e}")
         error_tracker.track_exception("agent_watchdog.checkin_check", e)
+
+
+# ---------------------------------------------------------------------------
+# repo_context staleness — CAI-RESP-093 AC-4 /health endpoint surface
+# ---------------------------------------------------------------------------
+
+_REPO_CONTEXT_STALE_MINUTES = 60  # 4× the 15-min writer cadence
+
+
+async def check_repo_context_health(
+    supabase, bot=None, musa_chat_id: str | None = None
+) -> None:
+    """Telegram alert when public.repo_context is stale > 60 min, indicating
+    the repo_context_writer poll loop has not run successfully recently.
+
+    Per CAI-RESP-093 AC-4. Threshold is 4× the writer's 15-min cadence —
+    accounts for transient poll failures without false-alerting on every
+    network hiccup. Dedup via notification_log key on the hour bucket.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(minutes=_REPO_CONTEXT_STALE_MINUTES)).isoformat()
+
+        # max(updated_at) across all repo_context rows.
+        result = await supabase.table("repo_context").select(
+            "repo, updated_at"
+        ).order("updated_at", desc=True).limit(1).execute()
+        rows = result.data or []
+        if not rows:
+            logger.warning("agent_watchdog: repo_context is empty — writer never ran")
+            return  # Empty table: writer hasn't shipped its first sweep yet, do not alert
+
+        max_updated = rows[0].get("updated_at")
+        if not max_updated or max_updated >= cutoff:
+            return  # Fresh enough.
+
+        try:
+            last_dt = datetime.fromisoformat(max_updated.replace("Z", "+00:00"))
+            stale_minutes = int((now - last_dt).total_seconds() / 60)
+        except ValueError:
+            stale_minutes = None
+
+        dedup_key = f"agent_watchdog:repo_context_stale:{_dedup_bucket(now)}"
+        if await _check_dedup(supabase, dedup_key):
+            return
+
+        stale_str = f"{stale_minutes} min" if stale_minutes else "unknown duration"
+        msg = (
+            f"⚠️ repo_context writer stale\n\n"
+            f"Most recent update: {stale_str} ago "
+            f"(threshold: {_REPO_CONTEXT_STALE_MINUTES} min).\n"
+            f"repo_context_writer poll loop has not landed a successful sweep recently.\n\n"
+            f"Check orchestrator logs for `repo_context_writer:` entries; "
+            f"investigate via session digest if persistent."
+        )
+        await _send_and_log(
+            supabase,
+            bot=bot,
+            musa_chat_id=musa_chat_id,
+            msg=msg,
+            source="agent_watchdog.repo_context_stale",
+            decision_ref="CAI-RESP-093",
+            dedup_key=dedup_key,
+        )
+    except Exception as e:
+        logger.error(f"agent_watchdog repo_context health check failed: {e}")
+        error_tracker.track_exception("agent_watchdog.repo_context_check", e)
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ from nervous_system.bug_reports_poll import poll_bug_reports
 from nervous_system.pipeline_clock import tick_pipeline_clock
 from nervous_system.agent_watchdog import check_agent_health
 from nervous_system.qa_bridge import poll_qa_findings
+from nervous_system.repo_context_writer import update_repo_contexts
 from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from nervous_system.archive import run_archive
@@ -1629,6 +1630,7 @@ async def main_loop():
     bug_reports_counter = 0
     pipeline_clock_counter = 0
     agent_watchdog_counter = 0
+    repo_context_writer_counter = 0  # CAI-RESP-093: every 30 polls (~15 min)
     dream_counter = 0
     ecosystem_frequent_counter = 0   # GATE 4 every 10 polls (~5 min)
     ecosystem_half_hour_counter = 0  # GATE 2 every 60 polls (~30 min)
@@ -1845,6 +1847,19 @@ async def main_loop():
                     logger.error(f"Agent watchdog failed: {e}")
                     record_swallowed("agent_watchdog", e)
                 agent_watchdog_counter = 0
+
+            # repo_context writer — every 30 polls (~15 min).
+            # CAI-RESP-093: keep public.repo_context fresh per repo via
+            # mechanical fields (recent_changes, deploy_url) + STATUS.md
+            # parse for semantic fields. Health alert path is in agent_watchdog.
+            repo_context_writer_counter += 1
+            if repo_context_writer_counter >= 30:
+                try:
+                    await update_repo_contexts(supabase)
+                except Exception as e:
+                    logger.error(f"repo_context_writer failed: {e}")
+                    record_swallowed("repo_context_writer", e)
+                repo_context_writer_counter = 0
 
             # QA bridge — every 10 polls (~5 min).
             # Picks up qa_findings rows, deduplicates, bridges to bug_reports.
