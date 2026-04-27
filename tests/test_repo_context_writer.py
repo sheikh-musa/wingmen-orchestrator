@@ -1,11 +1,14 @@
 """Tests for nervous_system.repo_context_writer (CAI-RESP-093)."""
 from __future__ import annotations
 
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -13,6 +16,12 @@ from nervous_system.repo_context_writer import (
     parse_status_md,
     _extract_section,
     update_repo_contexts,
+)
+
+load_dotenv()
+_DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+pytestmark_integration = pytest.mark.skipif(
+    not _DSN, reason="DATABASE_URL not set — skipping Supabase integration tests"
 )
 
 
@@ -243,3 +252,126 @@ class TestUpdateRepoContexts:
             await update_repo_contexts(sb)
         # Both repos attempted (sweep continued past first failure)
         assert sb.table.return_value.upsert.return_value.execute.call_count == 2
+
+
+# ----------------------------------------------------------------------------
+# Live-DB integration test — would have caught the Gap 3 schema mismatch
+# (PR #9) at test-time. Hits the real schema; mocked-only tests missed it.
+# ----------------------------------------------------------------------------
+
+class TestRepoContextWriterLiveSchema:
+    """Asserts the writer's payload upserts cleanly against the actual live
+    schema. If a future schema change re-introduces NOT NULL on a column the
+    writer leaves None, or changes a column type incompatibly, this test fails.
+
+    Uses a sentinel repo name 'cc-test-writer-sentinel' that doesn't appear
+    in REPOS.json — cleaned up before AND after each run.
+    """
+
+    SENTINEL_REPO = "cc-test-writer-sentinel"
+
+    def _conn_factory(self):
+        # Lazy import to keep psycopg out of the fast unit-test path
+        import psycopg
+        return lambda: psycopg.connect(_DSN, autocommit=True)
+
+    def _purge_sentinel(self, conn_factory):
+        with conn_factory() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM repo_context WHERE repo = %s",
+                    (self.SENTINEL_REPO,),
+                )
+
+    @pytestmark_integration
+    def test_writer_payload_upserts_against_live_schema(self):
+        """The full writer payload (mechanical + semantic-NULL) must succeed
+        as an UPSERT on the real repo_context table. Catches NOT NULL drift
+        + type mismatches that mocked tests miss.
+
+        IMPORTANT: this is the Gap 3-class regression test. If schema changes
+        introduce a NOT NULL on current_phase / architecture_summary /
+        recent_changes, OR change blockers/known_debt away from text[], this
+        test fails with the same NotNullViolation / TypeMismatch the writer
+        would hit in production at the next 15-min sweep.
+
+        Uses psycopg directly (not supabase-py) — matches test_auto_agent_id.py's
+        live-DB pattern. Bypasses any supabase-py / httpx routing surface so
+        the test exercises only schema-vs-payload alignment.
+        """
+        import psycopg
+        conn_factory = self._conn_factory()
+        self._purge_sentinel(conn_factory)
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with conn_factory() as c:
+                with c.cursor() as cur:
+                    # First upsert: writer's NULL-on-missing-STATUS.md case.
+                    cur.execute(
+                        """
+                        INSERT INTO repo_context
+                          (repo, recent_changes, deploy_url, updated_at, updated_by,
+                           current_phase, blockers, known_debt, architecture_summary,
+                           active_modules)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (repo) DO UPDATE SET
+                          recent_changes        = EXCLUDED.recent_changes,
+                          deploy_url            = EXCLUDED.deploy_url,
+                          updated_at            = EXCLUDED.updated_at,
+                          updated_by            = EXCLUDED.updated_by,
+                          current_phase         = EXCLUDED.current_phase,
+                          blockers              = EXCLUDED.blockers,
+                          known_debt            = EXCLUDED.known_debt,
+                          architecture_summary  = EXCLUDED.architecture_summary
+                        """,
+                        (
+                            self.SENTINEL_REPO,
+                            "abcd1234 test commit",
+                            "https://example.test",
+                            now_iso,
+                            "cc-test-writer-sentinel",
+                            None, None, None, None,  # all semantic NULL
+                            [],                      # active_modules NOT NULL
+                        ),
+                    )
+                    cur.execute(
+                        "SELECT recent_changes, deploy_url, current_phase, "
+                        "blockers, known_debt, architecture_summary, updated_by "
+                        "FROM repo_context WHERE repo = %s",
+                        (self.SENTINEL_REPO,),
+                    )
+                    row = cur.fetchone()
+                    assert row is not None
+                    assert row[0] == "abcd1234 test commit"
+                    assert row[1] == "https://example.test"
+                    assert row[2] is None
+                    assert row[3] is None
+                    assert row[4] is None
+                    assert row[5] is None
+                    assert row[6] == "cc-test-writer-sentinel"
+
+                    # Second upsert: array-typed semantic fields populated.
+                    cur.execute(
+                        """
+                        UPDATE repo_context SET
+                          current_phase = %s, blockers = %s, known_debt = %s
+                         WHERE repo = %s
+                        """,
+                        (
+                            "test-phase",
+                            ["block-A", "block-B"],
+                            ["debt-X"],
+                            self.SENTINEL_REPO,
+                        ),
+                    )
+                    cur.execute(
+                        "SELECT current_phase, blockers, known_debt "
+                        "FROM repo_context WHERE repo = %s",
+                        (self.SENTINEL_REPO,),
+                    )
+                    row = cur.fetchone()
+                    assert row[0] == "test-phase"
+                    assert row[1] == ["block-A", "block-B"]
+                    assert row[2] == ["debt-X"]
+        finally:
+            self._purge_sentinel(conn_factory)

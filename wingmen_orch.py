@@ -45,6 +45,7 @@ from nervous_system.pipeline_clock import tick_pipeline_clock
 from nervous_system.agent_watchdog import check_agent_health
 from nervous_system.qa_bridge import poll_qa_findings
 from nervous_system.repo_context_writer import update_repo_contexts
+from nervous_system.orch_self_audit import run_orch_audit
 from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from nervous_system.archive import run_archive
@@ -1631,6 +1632,7 @@ async def main_loop():
     pipeline_clock_counter = 0
     agent_watchdog_counter = 0
     repo_context_writer_counter = 0  # CAI-RESP-093: every 30 polls (~15 min)
+    orch_self_audit_counter = 0      # ORCH-SELF-AUDIT: every 20 polls (~10 min)
     dream_counter = 0
     ecosystem_frequent_counter = 0   # GATE 4 every 10 polls (~5 min)
     ecosystem_half_hour_counter = 0  # GATE 2 every 60 polls (~30 min)
@@ -1860,6 +1862,27 @@ async def main_loop():
                     logger.error(f"repo_context_writer failed: {e}")
                     record_swallowed("repo_context_writer", e)
                 repo_context_writer_counter = 0
+
+            # orch self-audit — every 20 polls (~10 min).
+            # Defense funnel parallel to ihsanos amanah audits: writer
+            # freshness, bridge Tier-3 volume anomaly, migration drift.
+            # Each audit dedup'd via notification_log hour-bucket so alerts
+            # don't spam.
+            orch_self_audit_counter += 1
+            if orch_self_audit_counter >= 20:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                    if bot_token and musa_id:
+                        bot = Bot(token=bot_token)
+                        await run_orch_audit(supabase, bot, musa_id)
+                    else:
+                        await run_orch_audit(supabase)
+                except Exception as e:
+                    logger.error(f"orch_self_audit failed: {e}")
+                    record_swallowed("orch_self_audit", e)
+                orch_self_audit_counter = 0
 
             # QA bridge — every 10 polls (~5 min).
             # Picks up qa_findings rows, deduplicates, bridges to bug_reports.
