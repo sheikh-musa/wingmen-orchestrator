@@ -51,6 +51,40 @@
 
 ---
 
+## Task 0: Option C ship prerequisite (cc-cosem coord — NOT cc-orchestrator scope)
+
+**Per CAI-RESP-097 GAP 2 ruling:** plan-write proceeds, but plan EXECUTION (Tasks 2+ schema apply, Tasks 9-15 worker, Task 16 wiring) waits on cc-cosem's Option C ship landing the following on the orchestrator Supabase:
+
+- `bug_reports.status` CHECK additions: `'pr_open'`, `'push_failed'`, `'pr_failed'`
+- `jobs.pr_number INT NULL` (cc-cosem writes from `publish_job_commit`)
+- `jobs.branch_name TEXT NULL` (same)
+
+**Reference**: cc-cosem's plan at `docs/superpowers/plans/2026-04-24-orchestrator-status-001-agent-push-contract.md` and her partial branch `feat/orchestrator-status-001-publisher` (5 commits ready, holding for my migration per #874 + #955).
+
+**Sequencing per cc-cosem #955**: she ships her schema migration + publisher merge SAME-DAY after my Option B migration applies. To avoid the race (column writes against an unexpanded CHECK), my migration applies first, hers immediately after.
+
+**Conflict resolution if my Section 2 (status CHECK expansion) duplicates cc-cosem's:**
+- If my migration runs first AND her migration adds `pr_open`/`push_failed`/`pr_failed`: her DROP CONSTRAINT IF EXISTS + ADD CONSTRAINT will replace my expanded CHECK with the same values. Idempotent; no harm.
+- If her migration runs first AND mine adds same values: same result. Idempotent.
+- The CHECK values (`pr_open`, `push_failed`, `pr_failed`) MUST be identical across both migrations. Coordinate via shared constants if drift risk emerges.
+
+**Escalation criterion (per CAI-RESP-097)**: if cc-cosem reports blocker / bandwidth-elsewhere / review-hold, surface as a separate filing for cai ruling. Do NOT silently absorb the timeline into cc-orchestrator's queue.
+
+- [ ] **Step 1: Verify cc-cosem branch state**
+
+Run: `git log --all --oneline | grep "orch-status-001" | head -10`
+Expected: see 5 publisher commits (`51f38a9` constants → `af172d9` git_publisher core → `43069f1` ralph_runner wire → `6504084` fixer prompt + schema comments → plus any subsequent additions cc-cosem ships).
+
+- [ ] **Step 2: If cc-cosem confirms Option C is ready-to-merge**
+
+Apply this Option B migration first (Tasks 2-8 in sequence), confirm green, then ping cc-cosem to merge Option C same-day.
+
+- [ ] **Step 3: If cc-cosem reports blocker**
+
+File `cai_messages` to cai surfacing the blocker, do NOT proceed with Option B execution Tasks 2+. Wait for cai sequencing ruling.
+
+---
+
 ## Task 1: Pre-flight verification
 
 **Files:** none (read-only).
