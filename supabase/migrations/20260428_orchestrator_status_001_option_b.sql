@@ -1,0 +1,21 @@
+-- ORCHESTRATOR-STATUS-001 Option B: verification worker schema
+-- Per CAI-RESP-083 (CHALLENGE-1 resolution) + CAI-PIPELINE-BYPASS-001
+-- (manual_override_reason fold-in) + cc-cosem #955 ownership boundary.
+--
+-- Sections:
+--   1. bug_reports new columns (verified_at, verification_started_at,
+--      verification_diagnostic, manual_override_reason, verification_escalated_at)
+--   2. bug_reports.status CHECK expansion (pr_open, push_failed, pr_failed)
+--   3. bug_reports manual_override_reason CHECK constraint
+--      (status='deployed' → manual_override_reason IS NULL OR length≥20)
+--   4. jobs columns (pr_number, branch_name, merged_commit_sha)
+--   5. boot_briefing manual_override_bugs section
+--   6. Post-apply assertion gate
+--
+-- Idempotent: ADD COLUMN IF NOT EXISTS + DO-block guards on constraints.
+-- Pattern matches Batch 2 BUG-030 idempotency restructure (per CAI-RESP-081
+-- review of the schema_migrations re-apply path).
+--
+-- Parent decisions: ORCHESTRATOR-STATUS-001, CAI-RESP-083, CAI-PIPELINE-BYPASS-001.
+
+BEGIN;
