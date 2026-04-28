@@ -58,6 +58,9 @@ def test_bug_reports_status_check_accepts_pr_open():
     INSERTs a row with status='pr_open' inside an explicit transaction, then rolls
     back so no test row is committed. Pre-migration this raises CheckViolation.
     """
+    # reporter_source CHECK currently restricts to {'telegram','web'} —
+    # use 'telegram' for test rows. CheckViolation surfaces clearly if drift
+    # ever happens; this comment saves a future author 60s of digging.
     with psycopg.connect(_DSN, autocommit=False) as c:
         with c.cursor() as cur:
             cur.execute(
