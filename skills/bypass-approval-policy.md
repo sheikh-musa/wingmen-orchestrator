@@ -16,17 +16,53 @@ Direct application of the fix outside the orchestrator's pipeline (manual git co
 
 ## Procedure
 
-1. **CC files diagnosis + pipeline-gap report + bypass-approval-request** in agent_messages addressed to musa (P1, requires_response=true). Body must include:
-   - Diagnosis (root cause + grounding code/log refs)
-   - Pipeline gap (which step failed and why)
-   - Fix preview (what the bypass will do)
-   - Target CC ack (acknowledging the bypass shape)
+1. **CC files diagnosis + pipeline-gap report + bypass-approval-request** in agent_messages addressed to `musa` (priority='P1', requires_response=true). Body MUST follow this template:
+
+   ```
+   ## Bug context
+   - bug_id: <uuid>
+   - repo_name: <name>
+   - status before bypass: <pr_open / proposed / approved / etc>
+
+   ## Diagnosis
+   <root cause + grounding code/log refs — file:line format>
+
+   ## Pipeline gap
+   <which orchestrator step failed and why; specific exception or
+   condition that prevented the normal flow>
+
+   ## Fix preview
+   <what the bypass will do — specific git commits, deploy commands,
+   manual DB writes — verbatim>
+
+   ## Target CC ack
+   <agent_id of the CC that will execute the bypass; this CC posts
+   a separate AGREED reply on the same thread BEFORE Musa approval
+   to confirm they understand the fix preview and own its execution>
+
+   ## Risk window
+   <if emergency override path: estimated time-to-incident-if-not-bypassed,
+   typically <1hr like a user-facing crash blocking onboarding>
+   ```
 
 2. **Musa approval is captured per-incident** (bug_id, reason, fix preview, target CC ack). Approval is explicit; no implicit/silent consent.
 
 3. **No strategic_decisions row required per-incident.** Bypass is captured in `bug_reports.manual_override_reason` (≥20 chars trimmed) at the time of the manual `status='deployed'` write. Schema CHECK enforces the constraint.
 
 4. **Emergency override** (Musa unreachable, fix is <1hr risk): post-hoc P1 notification to Musa + cai within 15 minutes of the manual write. Same `manual_override_reason` discipline applies.
+
+## Emergency override examples
+
+**Qualifies (<1hr risk):**
+- User-facing onboarding flow crashes affecting a known active client (e.g., cc-scholar bug 2386d2a4 — report-bug button blocking playback during a Surah-completion session).
+- Production data corruption that compounds with each request (e.g., a bad migration that's mis-stamping fee rows).
+- Security exposure that's already in the wild (leaked secret, RLS bypass).
+
+**Does NOT qualify:**
+- Test suite failure not blocking a deploy.
+- Internal-only dashboard glitch.
+- "I want to ship the fix faster than the review window" — that's the perverse-incentive case CAI-PIPELINE-BYPASS-001 explicitly rejected.
+- Recurring failure pattern — recurrence means the pipeline needs structural fix, not bypass.
 
 ## What this is NOT
 
