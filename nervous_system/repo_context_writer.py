@@ -262,6 +262,11 @@ async def update_repo_contexts(supabase) -> None:
             "deploy_url": repo.get("deploy_url"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "updated_by": "cc-orchestrator",
+            # active_modules: writer has no parser signal for this column; default
+            # to empty array per CAI-RESP-104 (column kept NOT NULL/DEFAULT '{}'
+            # belt-and-braces over the DROP NOT NULL). PR follow-up if a parser
+            # section materializes.
+            "active_modules": [],
             **semantic_fields,
         }
 
