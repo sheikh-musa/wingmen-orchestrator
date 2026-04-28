@@ -80,3 +80,18 @@ ALTER TABLE bug_reports ADD CONSTRAINT bug_reports_manual_override_reason_chk
     OR manual_override_reason IS NULL
     OR length(trim(manual_override_reason)) >= 20
   );
+
+-- ============================================================
+-- SECTION 4: jobs columns for publisher (cc-cosem write) + verifier cache
+-- ============================================================
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS pr_number         INT NULL,
+  ADD COLUMN IF NOT EXISTS branch_name       TEXT NULL,
+  ADD COLUMN IF NOT EXISTS merged_commit_sha TEXT NULL;
+
+COMMENT ON COLUMN jobs.pr_number IS
+  'cc-cosem Option C publisher writes this from publish_job_commit. Used by Option B verifier as input to gh pr view --json mergeCommit.';
+COMMENT ON COLUMN jobs.branch_name IS
+  'cc-cosem Option C publisher writes this. Diagnostic + fallback for manual debugging.';
+COMMENT ON COLUMN jobs.merged_commit_sha IS
+  'CAI-RESP-083: Option B verifier cache. Worker fetches via gh pr view per tick on first CASE 3 observation; subsequent ticks reuse to avoid duplicate API calls.';

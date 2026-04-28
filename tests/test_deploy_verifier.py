@@ -110,3 +110,29 @@ def test_bug_reports_manual_override_reason_check_accepts_long():
                  "deployed", long_reason),
             )
         c.rollback()
+
+
+@pytestmark_integration
+def test_jobs_has_option_b_columns():
+    """cc-cosem #874 + #955 boundary: I add the columns; she writes pr_number
+    + branch_name from publish_job_commit. merged_commit_sha is Option B's
+    cache (live-fetched from gh pr view per CAI-RESP-083, written by
+    deploy_verifier on first observation per tick)."""
+    expected = {
+        "pr_number":         ("integer", "YES"),
+        "branch_name":       ("text", "YES"),
+        "merged_commit_sha": ("text", "YES"),
+    }
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name, data_type, is_nullable
+                  FROM information_schema.columns
+                 WHERE table_name = 'jobs'
+                   AND column_name = ANY(%s)
+                """,
+                (list(expected.keys()),),
+            )
+            actual = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    assert actual == expected, f"columns mismatch: expected {expected}, got {actual}"
