@@ -1,8 +1,44 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-24 02:44 SGT
+Last Updated: 2026-04-29 SGT
 Build Status: green
-Deploy: 0a85ba5 (launcher — dual-identity + Opus 4.7 default) on top of 469a79d (Step 2 app-code)
+Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
+
+## Last Completed (2026-04-29 — ORCHESTRATOR-STATUS-001 Option B + SKILLS-SUBSTRATE-001)
+
+### ORCHESTRATOR-STATUS-001 Option B — shipped (PR #11, CAI-RESP-102 AGREED)
+
+Plan: `docs/superpowers/plans/2026-04-28-orchestrator-status-001-option-b-implementation.md` (squash commit `fb15c79`)
+Thread: ORCHESTRATOR-STATUS-001 (CAI-RESP-083 design, CAI-RESP-080 R2 review protocol, CAI-RESP-102 AGREED)
+
+**Goal:** Mechanical pr_open → deployed verification chain. cc-cosem's publisher (Option C) sets `bug_reports.status='pr_open'` + `jobs.pr_number/branch_name`; this verifier polls every 5 min, confirms PR merged + commit on origin/main + deploy serving the SHA, then flips to `status='deployed'` + `verified_at`. Bypasses go through `manual_override_reason` (≥20-char CHECK per CAI-PIPELINE-BYPASS-001 AC-1).
+
+**Shape delivered:**
+- Migration `supabase/migrations/20260428_orchestrator_status_001_option_b.sql`: 5 bug_reports cols (verified_at / verification_started_at / verification_diagnostic / manual_override_reason / verification_escalated_at) + status CHECK expansion (pr_open / push_failed / pr_failed) + manual_override_reason ≥20-char CHECK + 3 jobs cols (pr_number / branch_name / merged_commit_sha) + boot_briefing rebuild with manual_override_bugs UNION branch + Section 6 DO-block assertion gate. Applied to live DB.
+- Worker `nervous_system/deploy_verifier.py` (590 lines): 3-case state machine (CASE 1 no PR / CASE 2 open / CASE 3 merged), Vercel target=production filter (CHALLENGE-2), Firebase degraded mode (ARCH-FIREBASE-DEPLOY-SHA tracks future), dual-window timeouts (30-min deploy-lag from pr.merged_at, 24h PR-open from pr.created_at), verification_escalated_at tombstone (CHALLENGE-4: P1 fires once, no infinite spam), `ORCHESTRATOR_VERIFY_ENABLED` env-flag gate (CHALLENGE-3 default false).
+- Wired into `wingmen_orch.py` main loop every 10 polls (~5 min).
+- Tests `tests/test_deploy_verifier.py` (30 tests passing): live-DB integration for migration + mocked subprocess/httpx for worker logic + per-bug isolation + tombstone-failure test.
+- Backfill `scripts/backfill_option_b_historical_bugs.py`: 5 historical bugs annotated with manual_override_reason. Idempotent. Already executed.
+
+### SKILLS-SUBSTRATE-001 — shipped inline with Option B (CAI-RESP-097)
+
+- `skills/README.md` — two-tier pattern + transclusion model + cross-CC-family domain skills (CAI-RESP-073)
+- `skills/bypass-approval-policy.md` — CAI-PIPELINE-BYPASS-001 AC-5 directive
+- `skills/inbox-check-protocol.md` — Fix 4 inbox discipline trigger (Mar 2026 ORCHESTRATOR-NOTIFIER-FIX-001-AMEND)
+- `docs/governance/inbox-check-directive.md` — canonical text (long-form procedure)
+
+cc-orchestrator owns `skills/` per CAI-AGENTS-002. AC-SKILLS-4 (cross-family submodule mount per CAI-RESP-073 GAP 3) tracked-deferred.
+
+**CAI verification (CAI-RESP-102):** 5 SQL queries against live DB — all PASSED. All 4 CHALLENGEs from CAI-RESP-080 satisfied (assertion gate / production-only filter / soak gate / escalation tombstone).
+
+**Soak window binding:** `ORCHESTRATOR_VERIFY_ENABLED` stays FALSE post-merge. Three-step handoff before flip:
+1. Observe one CASE 3 happy-path in production (PR merged + Vercel prod deploy detected + verified_at set)
+2. File evidence to CAI-RESP-102 thread
+3. CAI ratifies + authorizes flag flip
+
+**cc-cosem boundary:** Her #955 commits Option C publisher merges same-day after my migration applies. Migration applied → she is unblocked.
+
+---
 
 ## Last Completed (2026-04-20 — GOVERNANCE-CLEANUP-001 Step 3 launcher multi-repo + dual-identity + Opus 4.7)
 
