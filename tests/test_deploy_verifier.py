@@ -139,3 +139,45 @@ def test_jobs_has_option_b_columns():
             )
             actual = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
     assert actual == expected, f"columns mismatch: expected {expected}, got {actual}"
+
+
+@pytestmark_integration
+def test_boot_briefing_has_manual_override_bugs_section():
+    """CAI-PIPELINE-BYPASS-001 AC-3: boot_briefing view body includes the
+    manual_override_bugs UNION branch.
+
+    Test inspects pg_views.definition rather than `SELECT DISTINCT source`
+    because the latter only surfaces sources with ≥1 row at query time;
+    pre-backfill there are zero override rows so the source string would be
+    absent from the result set even with the UNION branch correctly defined.
+    """
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT definition FROM pg_views WHERE viewname = 'boot_briefing'"
+            )
+            body = cur.fetchone()[0]
+    assert "'manual_override_bugs'::text AS source" in body or "'manual_override_bugs'" in body, \
+        f"boot_briefing view body missing manual_override_bugs section"
+
+
+@pytestmark_integration
+def test_boot_briefing_existing_sections_preserved():
+    """Section 5 DROP+CREATE must preserve all 8 prior sections.
+
+    Catches the class of bug where a view rebuild silently loses a UNION
+    branch. Inspects pg_views.definition (not `SELECT DISTINCT source`)
+    because empty branches produce no source row even when correctly defined.
+    """
+    expected = ("repo_context", "repo_snapshot", "active_decision",
+                "open_qa_failure", "latest_cc_session", "latest_digest",
+                "last_cai_session", "unverified_decisions",
+                "manual_override_bugs")
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT definition FROM pg_views WHERE viewname = 'boot_briefing'"
+            )
+            body = cur.fetchone()[0]
+    missing = [s for s in expected if f"'{s}'" not in body]
+    assert not missing, f"boot_briefing view body missing sections: {missing}"
