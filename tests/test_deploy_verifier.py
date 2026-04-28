@@ -23,6 +23,7 @@ pytestmark_integration = pytest.mark.skipif(
 # Pattern matches tests/test_auto_agent_id.py + tests/test_repo_context_writer.py.
 
 
+@pytestmark_integration
 def test_bug_reports_has_option_b_columns():
     """AC-B-7 part 1: 5 new columns on bug_reports for verifier state."""
     expected = {
