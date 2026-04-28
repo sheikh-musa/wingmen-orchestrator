@@ -69,3 +69,44 @@ def test_bug_reports_status_check_accepts_pr_open():
                 (str(uuid.uuid4()), "test", "telegram", "cosem-tdu", "test bug", "pr_open"),
             )
         c.rollback()
+
+
+@pytestmark_integration
+def test_bug_reports_manual_override_reason_check_rejects_short():
+    """CAI-PIPELINE-BYPASS-001 AC-1: status='deployed' with manual_override_reason
+    shorter than 20 chars (after trim) must raise CheckViolation."""
+    with psycopg.connect(_DSN, autocommit=False) as c:
+        with c.cursor() as cur:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                cur.execute(
+                    """
+                    INSERT INTO bug_reports
+                      (id, reporter_name, reporter_source, repo_name, description,
+                       status, manual_override_reason)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (str(uuid.uuid4()), "test", "telegram", "cosem-tdu", "test bug",
+                     "deployed", "short"),
+                )
+        c.rollback()
+
+
+@pytestmark_integration
+def test_bug_reports_manual_override_reason_check_accepts_long():
+    """CAI-PIPELINE-BYPASS-001 AC-1: status='deployed' with manual_override_reason
+    >=20 chars (after trim) must succeed."""
+    long_reason = "operator-authorized bypass for verifier flake under known-degraded firebase"
+    assert len(long_reason.strip()) >= 20  # sanity
+    with psycopg.connect(_DSN, autocommit=False) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bug_reports
+                  (id, reporter_name, reporter_source, repo_name, description,
+                   status, manual_override_reason)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (str(uuid.uuid4()), "test", "telegram", "cosem-tdu", "test bug",
+                 "deployed", long_reason),
+            )
+        c.rollback()

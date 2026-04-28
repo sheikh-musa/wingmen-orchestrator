@@ -64,3 +64,19 @@ ALTER TABLE bug_reports ADD CONSTRAINT bug_reports_status_check
     'push_failed'::text,
     'pr_failed'::text
   ]));
+
+-- ============================================================
+-- SECTION 3: bug_reports.manual_override_reason CHECK constraint
+-- (CAI-PIPELINE-BYPASS-001 AC-1)
+-- Enforces: when status='deployed', manual_override_reason must
+-- either be NULL (normal verified-by-worker path) OR be at least
+-- 20 chars after trimming whitespace (operator-authorized bypass
+-- with audit-grade reasoning). Prevents 1-char "x" bypasses.
+-- ============================================================
+ALTER TABLE bug_reports DROP CONSTRAINT IF EXISTS bug_reports_manual_override_reason_chk;
+ALTER TABLE bug_reports ADD CONSTRAINT bug_reports_manual_override_reason_chk
+  CHECK (
+    status <> 'deployed'
+    OR manual_override_reason IS NULL
+    OR length(trim(manual_override_reason)) >= 20
+  );
