@@ -19,3 +19,24 @@
 -- Parent decisions: ORCHESTRATOR-STATUS-001, CAI-RESP-083, CAI-PIPELINE-BYPASS-001.
 
 BEGIN;
+
+-- ============================================================
+-- SECTION 1: bug_reports new columns (Option B verifier state)
+-- ============================================================
+ALTER TABLE bug_reports
+  ADD COLUMN IF NOT EXISTS verified_at              TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS verification_started_at  TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS verification_diagnostic  TEXT NULL,
+  ADD COLUMN IF NOT EXISTS manual_override_reason   TEXT NULL,
+  ADD COLUMN IF NOT EXISTS verification_escalated_at TIMESTAMPTZ NULL;
+
+COMMENT ON COLUMN bug_reports.verified_at IS
+  'CAI-RESP-083: timestamp when Option B verifier confirmed deploy. NULL = not yet verified or never reaches verifier (manual_override path).';
+COMMENT ON COLUMN bug_reports.verification_started_at IS
+  'CAI-RESP-083: timestamp of first verifier tick on this bug. Used for PR-open 24h timeout (CASE 2) and CASE 1 fallback.';
+COMMENT ON COLUMN bug_reports.verification_diagnostic IS
+  'CAI-RESP-083: human-readable diagnostic on escalation (e.g., "firebase-degraded", "pr-open-too-long", "no-pr-no-sha"). NULL on happy path.';
+COMMENT ON COLUMN bug_reports.manual_override_reason IS
+  'CAI-PIPELINE-BYPASS-001: operator-authorized bypass reason (>=20 chars trimmed). Verifier predicate excludes rows where this is set.';
+COMMENT ON COLUMN bug_reports.verification_escalated_at IS
+  'CAI-RESP-083 CHALLENGE-4: tombstone for already-escalated rows. Worker predicate excludes IS NOT NULL to prevent infinite P1 spam loop.';
