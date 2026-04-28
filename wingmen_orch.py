@@ -46,6 +46,7 @@ from nervous_system.agent_watchdog import check_agent_health
 from nervous_system.qa_bridge import poll_qa_findings
 from nervous_system.repo_context_writer import update_repo_contexts
 from nervous_system.orch_self_audit import run_orch_audit
+from nervous_system.deploy_verifier import run_deploy_verifier
 from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from nervous_system.archive import run_archive
@@ -1633,6 +1634,7 @@ async def main_loop():
     agent_watchdog_counter = 0
     repo_context_writer_counter = 0  # CAI-RESP-093: every 30 polls (~15 min)
     orch_self_audit_counter = 0      # ORCH-SELF-AUDIT: every 20 polls (~10 min)
+    deploy_verifier_counter = 0      # CAI-RESP-083: every 10 polls (~5 min), env-flag gated
     dream_counter = 0
     ecosystem_frequent_counter = 0   # GATE 4 every 10 polls (~5 min)
     ecosystem_half_hour_counter = 0  # GATE 2 every 60 polls (~30 min)
@@ -1883,6 +1885,29 @@ async def main_loop():
                     logger.error(f"orch_self_audit failed: {e}")
                     record_swallowed("orch_self_audit", e)
                 orch_self_audit_counter = 0
+
+            # Deploy verifier — every 10 polls (~5 min). Internal env-flag
+            # gate (ORCHESTRATOR_VERIFY_ENABLED, default false per CAI-RESP-080
+            # CHALLENGE-3) — wired now so flipping the env var on Mac Mini is
+            # the only step needed to activate, no code redeploy. Flips
+            # bug_reports.status pr_open→deployed once cc-cosem's publisher
+            # has set jobs.pr_number / branch_name and the PR has merged +
+            # deployed.
+            deploy_verifier_counter += 1
+            if deploy_verifier_counter >= 10:
+                try:
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                    if bot_token and musa_id:
+                        bot = Bot(token=bot_token)
+                        await run_deploy_verifier(supabase, bot, musa_id)
+                    else:
+                        await run_deploy_verifier(supabase)
+                except Exception as e:
+                    logger.error(f"deploy_verifier failed: {e}")
+                    record_swallowed("deploy_verifier", e)
+                deploy_verifier_counter = 0
 
             # QA bridge — every 10 polls (~5 min).
             # Picks up qa_findings rows, deduplicates, bridges to bug_reports.
