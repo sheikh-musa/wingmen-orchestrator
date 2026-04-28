@@ -7,6 +7,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import uuid
+
+import psycopg
 import pytest
 from dotenv import load_dotenv
 
@@ -33,7 +36,6 @@ def test_bug_reports_has_option_b_columns():
         "manual_override_reason": ("text", "YES"),
         "verification_escalated_at": ("timestamp with time zone", "YES"),
     }
-    import psycopg
     with psycopg.connect(_DSN, autocommit=True) as c:
         with c.cursor() as cur:
             cur.execute(
@@ -47,3 +49,23 @@ def test_bug_reports_has_option_b_columns():
             )
             actual = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
     assert actual == expected, f"columns mismatch: expected {expected}, got {actual}"
+
+
+@pytestmark_integration
+def test_bug_reports_status_check_accepts_pr_open():
+    """AC-B-9: bug_reports.status CHECK must accept new states pr_open / push_failed / pr_failed.
+
+    INSERTs a row with status='pr_open' inside an explicit transaction, then rolls
+    back so no test row is committed. Pre-migration this raises CheckViolation.
+    """
+    with psycopg.connect(_DSN, autocommit=False) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bug_reports
+                  (id, reporter_name, reporter_source, repo_name, description, status)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (str(uuid.uuid4()), "test", "telegram", "cosem-tdu", "test bug", "pr_open"),
+            )
+        c.rollback()

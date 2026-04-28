@@ -40,3 +40,27 @@ COMMENT ON COLUMN bug_reports.manual_override_reason IS
   'CAI-PIPELINE-BYPASS-001: operator-authorized bypass reason (>=20 chars trimmed). Verifier predicate excludes rows where this is set.';
 COMMENT ON COLUMN bug_reports.verification_escalated_at IS
   'CAI-RESP-083 CHALLENGE-4: tombstone for already-escalated rows. Worker predicate excludes IS NOT NULL to prevent infinite P1 spam loop.';
+
+-- ============================================================
+-- SECTION 2: bug_reports.status CHECK expansion (AC-B-9)
+-- Adds pr_open / push_failed / pr_failed to the allowed set so
+-- agent-driven push/PR-open paths can transition status without
+-- the verifier rejecting the row at write time.
+-- ============================================================
+ALTER TABLE bug_reports DROP CONSTRAINT IF EXISTS bug_reports_status_check;
+ALTER TABLE bug_reports ADD CONSTRAINT bug_reports_status_check
+  CHECK (status = ANY(ARRAY[
+    'new'::text,
+    'diagnosing'::text,
+    'proposed'::text,
+    'approved'::text,
+    'deploying'::text,
+    'deployed'::text,
+    'verified'::text,
+    'rejected'::text,
+    'escalated'::text,
+    'still_broken'::text,
+    'pr_open'::text,
+    'push_failed'::text,
+    'pr_failed'::text
+  ]));
