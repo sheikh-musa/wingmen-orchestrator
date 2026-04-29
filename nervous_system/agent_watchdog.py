@@ -54,6 +54,7 @@ async def check_agent_health(
     await _check_heartbeat_staleness(supabase, bot, musa_chat_id)
     # await _check_checkin_silence(supabase, bot, musa_chat_id)  # disabled — see docstring
     await check_repo_context_health(supabase, bot, musa_chat_id)
+    await check_inbox_sla_violations(supabase, bot, musa_chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +277,70 @@ async def check_repo_context_health(
     except Exception as e:
         logger.error(f"agent_watchdog repo_context health check failed: {e}")
         error_tracker.track_exception("agent_watchdog.repo_context_check", e)
+
+
+# ---------------------------------------------------------------------------
+# Inbox SLA violations — CAI-PROCESS-INBOX-CADENCE-001 Section E Phase 4
+# ---------------------------------------------------------------------------
+
+async def check_inbox_sla_violations(
+    supabase, bot=None, musa_chat_id: str | None = None
+) -> None:
+    """Telegram alert + notification_log row for P1 inbox_sla_violations.
+
+    Per CAI-PROCESS-INBOX-CADENCE-001 Section D: scheduled-sweep state mutations
+    are limited to (a) read_at — NEVER set by sweep, only by the in-session CC,
+    (b) notification_log on alarm, (c) boot_briefing surface. P1 unread/
+    unresponded → notification_log + Telegram cto_bot. P2/P3 surface in
+    boot_briefing only (already wired via Section E Phase 1 view).
+
+    Dedup hour-bucketed per (agent, message_id, violation_type) — fires once
+    per hour per offending row to bound alarm rate.
+    """
+    try:
+        result = await supabase.table("inbox_sla_violations").select(
+            "agent, message_id, priority, from_agent, subject, "
+            "violation_type, elapsed_minutes, threshold_minutes"
+        ).eq("priority", "P1").execute()
+        violations = result.data or []
+        if not violations:
+            return
+
+        now = datetime.now(timezone.utc)
+        bucket = _dedup_bucket(now)
+        for v in violations:
+            agent = v.get("agent")
+            msg_id = v.get("message_id")
+            vtype = v.get("violation_type")
+            dedup_key = f"agent_watchdog:inbox_sla_p1:{agent}:{msg_id}:{vtype}:{bucket}"
+            if await _check_dedup(supabase, dedup_key):
+                continue
+
+            elapsed = v.get("elapsed_minutes")
+            threshold = v.get("threshold_minutes")
+            from_agent = v.get("from_agent")
+            subject = (v.get("subject") or "")[:80]
+            msg = (
+                f"⚠️ Inbox SLA P1 — {vtype}\n\n"
+                f"Agent: {agent}\n"
+                f"Message #{msg_id} from {from_agent}\n"
+                f"Elapsed: {elapsed} min (threshold: {threshold} min)\n"
+                f"Subject: {subject}\n\n"
+                f"Per CAI-PROCESS-INBOX-CADENCE-001 Section A: "
+                f"{'read the message' if vtype == 'unread' else 'respond substantively'}."
+            )
+            await _send_and_log(
+                supabase,
+                bot=bot,
+                musa_chat_id=musa_chat_id,
+                msg=msg,
+                source="agent_watchdog.inbox_sla_p1",
+                decision_ref="CAI-PROCESS-INBOX-CADENCE-001",
+                dedup_key=dedup_key,
+            )
+    except Exception as e:
+        logger.error(f"agent_watchdog inbox SLA check failed: {e}")
+        error_tracker.track_exception("agent_watchdog.inbox_sla_check", e)
 
 
 # ---------------------------------------------------------------------------
