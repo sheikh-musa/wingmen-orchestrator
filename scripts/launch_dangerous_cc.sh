@@ -96,7 +96,6 @@ fi
 SESSION_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SESSION_START_EPOCH="$(date -u +%s)"
 HEARTBEAT_PID=""
-REMINDER_PID=""
 
 # ── Step 3: dual-identity resolution via scripts/lib/auto_agent_id ───────────
 
@@ -295,30 +294,11 @@ except Exception:
 _heartbeat_loop &
 HEARTBEAT_PID=$!
 
-# ── 4. Start check-in reminder loop ───────────────────────────────────────────
-
-_reminder_loop() {
-    while true; do
-        sleep 1500  # every 25 minutes
-        echo ""
-        echo -e "${AMBER}${BOLD}╔══════════════════════════════════════════════════════════════════════╗${RESET}"
-        echo -e "${AMBER}${BOLD}║  CHECK-IN DUE (ARCH-022) — post agent_message to cai:              ║${RESET}"
-        echo -e "${AMBER}${BOLD}║    message_type=update, what shipped, what's in progress, blockers  ║${RESET}"
-        echo -e "${AMBER}${BOLD}╚══════════════════════════════════════════════════════════════════════╝${RESET}"
-        # Check for unpushed commits in caller's repo
-        local ahead
-        ahead="$(git -C "$CALLER_DIR" log --oneline origin/main..HEAD 2>/dev/null | wc -l | tr -d ' ')"
-        if [ "${ahead:-0}" -gt 0 ]; then
-            echo -e "${RED}${BOLD}  ⚠ UNPUSHED COMMITS ($ahead ahead of origin) — run: git push origin main${RESET}"
-        fi
-        echo ""
-    done
-}
-
-_reminder_loop &
-REMINDER_PID=$!
-
-# ── 5. Vercel deployment verification ─────────────────────────────────────────
+# ── 4. Vercel deployment verification ─────────────────────────────────────────
+# Operator-decision (2026-04-30): the prior CHECK-IN reminder loop and
+# UNPUSHED-COMMITS warning fired every 25 min in the session. Removed —
+# CCs can't actually "check in" autonomously, so the banner was pure noise.
+# Operator can run `git status` directly when they want push state.
 # Call after every git push to confirm Vercel reaches READY or ERROR state.
 # Requires VERCEL_TOKEN + VERCEL_TEAM_ID in orchestrator .env (already present).
 # Falls back gracefully if token is missing.
@@ -460,7 +440,6 @@ _handle_exit() {
 
     # Kill background loops immediately
     [ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null || true
-    [ -n "$REMINDER_PID" ]  && kill "$REMINDER_PID"  2>/dev/null || true
 
     local session_end_epoch
     session_end_epoch="$(date -u +%s)"
@@ -635,7 +614,6 @@ except Exception:
 
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
-echo -e "${DIM}  Check-in loop:  PID ${REMINDER_PID} (25-min reminders)${RESET}"
 echo ""
 
 # Restore caller's directory for the actual claude session
