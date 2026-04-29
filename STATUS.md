@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-29 SGT
+Last Updated: 2026-04-29 08:52 SGT
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
 
@@ -293,15 +293,15 @@ Spec: `docs/superpowers/specs/2026-04-18-governance-comms-pipeline-hardening-des
 Docs-only change: created `README.md` with H1 + appended `<!-- PIPELINE-TEST-001: pipeline marker 2026-04-17 -->` marker. No code paths touched, no restart required. Audit row written to `work_outputs` by orchestrator.
 
 ## Completed (Last 5)
+- [green] Job #92: ihsanos — QURBAN-GAP-008 (concrete): animal_tag_id tracking (4m 22s, deploy: https://ihsanos-byiuvngpy-musaaaaaaas-projects.vercel.app)
+- [green] Job #98: ihsanos — [REVIEW-LIVE-001] Add CONTRIBUTING.md with one-line placeholder (2m 58s, deploy: https://ihsanos-aidum8r5m-musaaaaaaas-projects.vercel.app)
+- [red] Job #112: hifz — [BUG] visual audit smoke — claude end-to-end test (7m 44s, deploy: N/A)
+- [red] Job #92: ihsanos — QURBAN-GAP-008 (concrete): animal_tag_id tracking (5m 40s, deploy: N/A)
 - [green] Job #118: cosem-tdu — [BUG] cc-cosem diagnostic probe — remove if landed (1m 36s, deploy: N/A)
-- [red] Job #113: cosem-tdu — [BUG] tdu button target smoke test (1m 26s, deploy: N/A)
-- [green] Job #106: ihsanos — [BUG] still see an empty dashboard for qurban supplier (18m 0s, deploy: https://ihsanos-a1ok6x0o6-musaaaaaaas-projects.vercel.app)
-- [green] Job #105: ihsanos — [BUG] where does the qurban supplier add the slaughterman information? (5m 52s, deploy: https://ihsanos-fpshtw62t-musaaaaaaas-projects.vercel.app)
-- [red] Job #93: wingmen-orchestrator — PIPELINE-TEST-001: Add test marker comment to README.md (1m 1s, deploy: N/A)
 
-##                  Recent Jobs (auto-tracked)
+##                      Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-24 02:44 SGT
+Last Updated: 2026-04-29 08:52 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
@@ -314,7 +314,7 @@ Last Updated: 2026-04-24 02:44 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-24 02:44 SGT
+Last Updated: 2026-04-29 08:52 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
