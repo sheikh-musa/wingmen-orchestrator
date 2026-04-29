@@ -97,9 +97,19 @@ fi
 
 if [ "${unread}" = "0" ] && [ "${sla}" = "0" ]; then
     echo "[${ts}] ${FAMILY}: empty tick (unread=0 sla=0) — heartbeat + skip CC spawn"
-    # Heartbeat-only path. Safe-fail: heartbeat is informational; main
-    # wingmen_orch loop also writes heartbeat for the orchestrator's own
-    # sub-tag, so a failure here doesn't hide process liveness.
+    # Heartbeat-only path. Targets the family-base `agents.last_heartbeat`
+    # (single row, e.g. id='cc-orchestrator') — that surface is what
+    # agent_watchdog._check_heartbeat_staleness monitors.
+    #
+    # Per cc-orchestrator-5 sweep self-audit (2026-04-29 20:16Z): the prior
+    # version targeted agent_status sub-tag rows with WHERE status='active',
+    # but the only valid agent_status statuses are 'working'+'offline' so
+    # the UPDATE was silently no-op. Sub-tag liveness is the launcher's job
+    # via auto_agent_id; the wrapper's job is family-level liveness.
+    #
+    # Safe-fail: heartbeat is informational; main wingmen_orch loop also
+    # writes heartbeat for the family base, so a failure here doesn't hide
+    # process liveness.
     "${VENV_PY}" - <<'PYEOF' >/dev/null 2>&1 || true
 import os
 from dotenv import load_dotenv
@@ -111,9 +121,8 @@ if family and dsn:
     with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as c:
         with c.cursor() as cur:
             cur.execute(
-                "UPDATE agent_status SET last_heartbeat=now() "
-                "WHERE agent_id LIKE %s AND status='active'",
-                (f"{family}%",)
+                "UPDATE agents SET last_heartbeat=now() WHERE id=%s",
+                (family,)
             )
 PYEOF
     exit 0

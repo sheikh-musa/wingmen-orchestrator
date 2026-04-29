@@ -44,7 +44,10 @@ You MAY:
    `notification_log` for `agent_watchdog:inbox_sla_p1:<agent>:<msg_id>:<vtype>:
    <hour_bucket>` dedup_key), the alert is already covered — your job is just
    the agent-side close-via-read_at where applicable.
-4. UPDATE `agent_status.last_heartbeat = now()` for your sub-tag.
+4. UPDATE `agents.last_heartbeat = now() WHERE id = '<family-base>'` (single
+   row — the family-base agent). NOT `agent_status` (sub-tag rows; valid
+   statuses are 'working' + 'offline', and sub-tag heartbeat is the
+   launcher's job via auto_agent_id).
 5. File a `session_digest` summarizing the sweep IF you took non-trivial action.
    Skip if the tick was a no-op.
 
@@ -67,7 +70,8 @@ You MAY:
    the unprocessed message_ids per CAI-RESP-108 Section c suggestion. This
    converts silent-no-progress into visible-needs-attention without a
    drain-mode branch.
-5. Update `agent_status.last_heartbeat` for your sub-tag.
+5. Update `agents.last_heartbeat` for your family base (`UPDATE agents SET
+   last_heartbeat = now() WHERE id = '<family-base>'`).
 6. File `session_digest` if non-trivial action taken.
 7. Print `EXIT_OK` and exit.
 
@@ -106,9 +110,8 @@ VALUES ('scheduled_sweep.dialogue_pending',
         '<self>', 'msg #<X> requires interactive response',
         'scheduled_sweep:dialogue_pending:<self>:<X>:<hour_bucket>');
 
--- Step 4: heartbeat
-UPDATE agent_status SET last_heartbeat = now()
- WHERE agent_id LIKE '<self>%' AND status = 'active';
+-- Step 4: heartbeat (family base, NOT sub-tag)
+UPDATE agents SET last_heartbeat = now() WHERE id = '<family-base>';
 ```
 
 ## References
