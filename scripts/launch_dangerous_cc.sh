@@ -47,6 +47,7 @@ CALLER_DIR="$(pwd)"
 REPO_OVERRIDE=""
 CLAUDE_PASSTHROUGH=()
 PASS_THROUGH=false
+SCHEDULED_PROMPT_FILE=""
 while [ $# -gt 0 ]; do
     if $PASS_THROUGH; then
         CLAUDE_PASSTHROUGH+=("$1")
@@ -61,6 +62,18 @@ while [ $# -gt 0 ]; do
         --repo)
             shift
             REPO_OVERRIDE="${1:-}"
+            [ $# -gt 0 ] && shift
+            ;;
+        --scheduled-prompt=*)
+            # CAI-PROCESS-INBOX-CADENCE-001 Section E Phase 3: route into
+            # bounded non-interactive scheduled-sweep mode. Path is relative
+            # to ORCH_DIR (e.g. skills/scheduled-sweep-prompt.md).
+            SCHEDULED_PROMPT_FILE="${1#--scheduled-prompt=}"
+            shift
+            ;;
+        --scheduled-prompt)
+            shift
+            SCHEDULED_PROMPT_FILE="${1:-}"
             [ $# -gt 0 ] && shift
             ;;
         --)
@@ -640,8 +653,28 @@ if [ -n "$LAUNCH_CONTEXT" ] && [ ${#CLAUDE_PASSTHROUGH[@]} -eq 0 ]; then
     echo -e "${TEAL}  Context staged → /tmp/cc_launch_ctx.txt (SessionStart hook will inject)${RESET}"
 fi
 
-# Always launch interactively. Context (if staged above) arrives via the
-# SessionStart hook as a system-reminder, not via stdin.
 # --model $RESOLVED_MODEL first; CLAUDE_PASSTHROUGH appended AFTER so an
 # operator `-- --model X` wins via last-wins flag parsing.
-claude --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+#
+# Two launch modes:
+#   1. Interactive (default): claude opens an interactive REPL. Context
+#      arrives via SessionStart hook as system-reminder.
+#   2. Scheduled (--scheduled-prompt set): claude runs -p with the prompt
+#      file contents as the initial user message. Non-interactive — claude
+#      processes the prompt with tools + exits. Bounded by --max-turns
+#      (typically passed via CLAUDE_PASSTHROUGH from scheduled_cc_sweep.sh)
+#      and the launchd plist ExitTimeOut. Section E Phase 3.
+if [ -n "$SCHEDULED_PROMPT_FILE" ]; then
+    PROMPT_PATH="$ORCH_DIR/$SCHEDULED_PROMPT_FILE"
+    if [ ! -f "$PROMPT_PATH" ]; then
+        echo -e "${RED}ERROR: --scheduled-prompt file not found: $PROMPT_PATH${RESET}" >&2
+        exit 1
+    fi
+    echo -e "${TEAL}  Scheduled-sweep mode: reading prompt from $SCHEDULED_PROMPT_FILE${RESET}"
+    PROMPT_TEXT="$(cat "$PROMPT_PATH")"
+    claude --dangerously-skip-permissions --model "$RESOLVED_MODEL" -p "$PROMPT_TEXT" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+else
+    # Always launch interactively. Context (if staged above) arrives via the
+    # SessionStart hook as a system-reminder, not via stdin.
+    claude --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+fi
