@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-29 08:43 SGT
+Last Updated: 2026-04-29 08:45 SGT
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
 
@@ -293,15 +293,15 @@ Spec: `docs/superpowers/specs/2026-04-18-governance-comms-pipeline-hardening-des
 Docs-only change: created `README.md` with H1 + appended `<!-- PIPELINE-TEST-001: pipeline marker 2026-04-17 -->` marker. No code paths touched, no restart required. Audit row written to `work_outputs` by orchestrator.
 
 ## Completed (Last 5)
+- [green] Job #98: ihsanos — [REVIEW-LIVE-001] Add CONTRIBUTING.md with one-line placeholder (2m 58s, deploy: https://ihsanos-aidum8r5m-musaaaaaaas-projects.vercel.app)
 - [red] Job #112: hifz — [BUG] visual audit smoke — claude end-to-end test (7m 44s, deploy: N/A)
 - [red] Job #92: ihsanos — QURBAN-GAP-008 (concrete): animal_tag_id tracking (5m 40s, deploy: N/A)
 - [green] Job #118: cosem-tdu — [BUG] cc-cosem diagnostic probe — remove if landed (1m 36s, deploy: N/A)
 - [red] Job #113: cosem-tdu — [BUG] tdu button target smoke test (1m 26s, deploy: N/A)
-- [green] Job #106: ihsanos — [BUG] still see an empty dashboard for qurban supplier (18m 0s, deploy: https://ihsanos-a1ok6x0o6-musaaaaaaas-projects.vercel.app)
 
-##                    Recent Jobs (auto-tracked)
+##                     Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-29 08:43 SGT
+Last Updated: 2026-04-29 08:45 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
@@ -314,7 +314,7 @@ Last Updated: 2026-04-29 08:43 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-29 08:43 SGT
+Last Updated: 2026-04-29 08:45 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
