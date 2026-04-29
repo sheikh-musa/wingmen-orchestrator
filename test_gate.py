@@ -67,6 +67,27 @@ async def run_tests(repo_path: str, repo_name: str, job_id: int, supabase) -> di
     env["HOME"] = os.path.expanduser("~")
     env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
 
+    # Ensure node_modules are present before running npm test.
+    # Worktrees share .git but have no node_modules; the main repo may also
+    # have a partial install after a fresh clone or worktree merge.
+    if is_node and not (repo / "node_modules").exists():
+        await _log_to_supabase(supabase, job_id, repo_name, "node_modules missing — running npm install", "info")
+        try:
+            install_proc = await asyncio.create_subprocess_exec(
+                "npm", "install", "--prefer-offline",
+                cwd=repo_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            inst_out, inst_err = await asyncio.wait_for(install_proc.communicate(), timeout=180)
+            if install_proc.returncode != 0:
+                msg = f"npm install failed (rc={install_proc.returncode}): {(inst_out + inst_err).decode(errors='replace')[-1000:]}"
+                await _log_to_supabase(supabase, job_id, repo_name, msg, "error")
+                return {"passed": False, "output": msg, "skipped": False}
+        except asyncio.TimeoutError:
+            return {"passed": False, "output": "npm install timed out after 180s", "skipped": False}
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *test_cmd,
