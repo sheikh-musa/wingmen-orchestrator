@@ -35,6 +35,7 @@ def _multi_execute_mock(*return_values):
     sb.select.return_value = sb
     sb.update.return_value = sb
     sb.eq.return_value = sb
+    sb.gte.return_value = sb
     sb.lt.return_value = sb
     sb.like.return_value = sb
     sb.order.return_value = sb
@@ -314,6 +315,30 @@ class TestInboxSlaViolations:
         sb.table.return_value = sb
         sb.select.return_value = sb
         sb.eq.return_value = sb
+        sb.gte.return_value = sb
         sb.execute = AsyncMock(side_effect=RuntimeError("simulated DB outage"))
         # Must not raise
         await check_inbox_sla_violations(sb, bot=AsyncMock(), musa_chat_id="123")
+
+    @pytest.mark.asyncio
+    async def test_cutoff_filter_applied_to_query(self):
+        """CAI-RESP-108: query MUST include .gte('created_at', CADENCE_001_FILING_DATE)
+        so pre-CADENCE-001 transition-window violations are suppressed."""
+        from nervous_system.agent_watchdog import CADENCE_001_FILING_DATE
+        # Track which methods were called with which args
+        calls = []
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        def _record_eq(*args, **kw):
+            calls.append(("eq", args, kw)); return sb
+        def _record_gte(*args, **kw):
+            calls.append(("gte", args, kw)); return sb
+        sb.eq.side_effect = _record_eq
+        sb.gte.side_effect = _record_gte
+        sb.execute = AsyncMock(return_value=MagicMock(data=[]))
+        await check_inbox_sla_violations(sb, bot=None, musa_chat_id=None)
+        gte_calls = [c for c in calls if c[0] == "gte"]
+        assert any(args[0] == "created_at" and args[1] == CADENCE_001_FILING_DATE
+                   for _, args, _ in gte_calls), \
+            f"missing .gte('created_at', cutoff) — calls: {calls}"

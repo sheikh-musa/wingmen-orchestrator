@@ -57,6 +57,7 @@ async def run_orch_audit(
         (_audit_writer_health, "writer_health"),
         (_audit_bridge_tier3_volume, "bridge_tier3_volume"),
         (_audit_migration_consistency, "migration_consistency"),
+        (_audit_scheduled_sweep_drift, "scheduled_sweep_drift"),
     ):
         try:
             await check(supabase, bot, musa_chat_id)
@@ -228,6 +229,81 @@ async def _audit_migration_consistency(
         source="orch_self_audit.migration_drift",
         decision_ref="ORCH-SELF-AUDIT", dedup_key=dedup_key,
     )
+
+
+# ----------------------------------------------------------------------------
+# Audit 4 — scheduled_sweep_drift: Section D guardrail violation detection
+# ----------------------------------------------------------------------------
+
+# Per CAI-RESP-108 axis (d): scheduled-sweep MUST NOT set responded_at.
+# This audit catches violations by flagging agent_messages rows where
+# responded_at landed within 30s of read_at (suggests the sweep wrote both
+# in the same transaction). Watch-note: tune to 60s if false-positive rate
+# >5% in first 2 weeks (legitimate fast in-session replies catching the
+# alarm). Filter applies only to messages created after CADENCE-001 filing.
+_SWEEP_DRIFT_WINDOW_SECONDS = 30
+
+async def _audit_scheduled_sweep_drift(
+    supabase, bot=None, musa_chat_id: str | None = None
+) -> None:
+    """Alert when a row's responded_at lands within _SWEEP_DRIFT_WINDOW_SECONDS
+    of read_at — likely Section D violation by a scheduled-sweep CC session
+    (which is forbidden from setting responded_at). Filing-date cutoff so
+    pre-CADENCE-001 historical rows don't trigger.
+
+    Emits a single P2 dedup'd alert per offending message (hour-bucket per
+    message_id) so a clustered violation doesn't spam Musa."""
+    from nervous_system.agent_watchdog import CADENCE_001_FILING_DATE
+
+    now = datetime.now(timezone.utc)
+    # Pull recent rows where both read_at + responded_at are set; let the
+    # window check happen in Python (PostgREST .lt on a computed delta isn't
+    # directly expressible).
+    look_back = (now - timedelta(hours=24)).isoformat()
+    result = await supabase.table("agent_messages").select(
+        "id, from_agent, to_agent, subject, read_at, responded_at, created_at"
+    ).gte("created_at", CADENCE_001_FILING_DATE).gte(
+        "responded_at", look_back
+    ).not_.is_("read_at", "null").not_.is_(
+        "responded_at", "null"
+    ).execute()
+
+    rows = result.data or []
+    offenders = []
+    for r in rows:
+        try:
+            read_dt = datetime.fromisoformat(r["read_at"].replace("Z", "+00:00"))
+            resp_dt = datetime.fromisoformat(r["responded_at"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError, KeyError):
+            continue
+        delta = abs((resp_dt - read_dt).total_seconds())
+        if delta < _SWEEP_DRIFT_WINDOW_SECONDS:
+            offenders.append((r, delta))
+
+    if not offenders:
+        return
+
+    for r, delta in offenders[:5]:  # cap loop blast radius
+        dedup_key = f"orch_self_audit:sweep_drift:{r['id']}:{_dedup_bucket(now)}"
+        if await _check_dedup(supabase, dedup_key):
+            continue
+        msg = (
+            f"⚠️ orch_self_audit: Section D guardrail violation suspected\n\n"
+            f"agent_messages #{r['id']} ({r.get('from_agent')} → {r.get('to_agent')})\n"
+            f"responded_at within {int(delta)}s of read_at "
+            f"(threshold {_SWEEP_DRIFT_WINDOW_SECONDS}s)\n"
+            f"Subject: {(r.get('subject') or '')[:80]}\n\n"
+            f"Per CAI-PROCESS-INBOX-CADENCE-001 Section D: scheduled-sweep "
+            f"MUST NOT set responded_at. Likely a /scheduled CC session "
+            f"violated the prompt template. Inspect the source agent's "
+            f"sweep prompt + recent session digests."
+        )
+        await _send_and_log(
+            supabase,
+            bot=bot, musa_chat_id=musa_chat_id, msg=msg,
+            source="orch_self_audit.sweep_drift",
+            decision_ref="CAI-RESP-108", dedup_key=dedup_key,
+        )
 
 
 # ----------------------------------------------------------------------------
