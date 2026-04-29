@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  CAI-PROCESS-INBOX-CADENCE-001 Section E Phase 3 — per-CC scheduled-sweep
+  plist template. Substitute {{FAMILY}} (e.g. cc-orchestrator) and
+  {{CADENCE_SECONDS}} (P1=900 / P2=1800 / P3=14400) at registration time
+  per skills/scheduled-sweep-registration.md.
+
+  Phase 4 P1 alarm path remains the structural cadence floor; this plist
+  fires the per-family CC session that applies Section A semantics +
+  Section D guardrails to the family's own inbox.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.wingmen.{{FAMILY}}.scheduled</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/scheduled_cc_sweep.sh</string>
+        <string>--family</string>
+        <string>{{FAMILY}}</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>{{CADENCE_SECONDS}}</integer>
+
+    <!-- RunAtLoad=false: don't fire on launchd boot; first fire happens
+         StartInterval seconds after bootstrap. Avoids load spikes when
+         the Mac Mini wakes from sleep with 4× families queued. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/scheduled-{{FAMILY}}.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/scheduled-{{FAMILY}}.err</string>
+
+    <!-- 600s ceiling on each tick. Section D hard cap; CC session must
+         exit before this or launchd kills it. -->
+    <key>ExitTimeOut</key>
+    <integer>600</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

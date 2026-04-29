@@ -204,18 +204,21 @@ class TestMigrationConsistencyAudit:
 class TestRunOrchAudit:
 
     @pytest.mark.asyncio
-    async def test_runs_all_three_checks(self):
+    async def test_runs_all_four_checks(self):
         sb = MagicMock()
         with patch("nervous_system.orch_self_audit._audit_writer_health",
                    new_callable=AsyncMock) as wh, \
              patch("nervous_system.orch_self_audit._audit_bridge_tier3_volume",
                    new_callable=AsyncMock) as t3, \
              patch("nervous_system.orch_self_audit._audit_migration_consistency",
-                   new_callable=AsyncMock) as mc:
+                   new_callable=AsyncMock) as mc, \
+             patch("nervous_system.orch_self_audit._audit_scheduled_sweep_drift",
+                   new_callable=AsyncMock) as sd:
             await orch_self_audit.run_orch_audit(sb)
             wh.assert_called_once()
             t3.assert_called_once()
             mc.assert_called_once()
+            sd.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_one_check_failure_does_not_block_others(self):
@@ -224,7 +227,82 @@ class TestRunOrchAudit:
         async def ok(*a, **kw): pass
         with patch("nervous_system.orch_self_audit._audit_writer_health", side_effect=boom), \
              patch("nervous_system.orch_self_audit._audit_bridge_tier3_volume", side_effect=ok) as t3, \
-             patch("nervous_system.orch_self_audit._audit_migration_consistency", side_effect=ok) as mc:
+             patch("nervous_system.orch_self_audit._audit_migration_consistency", side_effect=ok) as mc, \
+             patch("nervous_system.orch_self_audit._audit_scheduled_sweep_drift", side_effect=ok) as sd:
             await orch_self_audit.run_orch_audit(sb)  # must not raise
             t3.assert_called_once()
             mc.assert_called_once()
+            sd.assert_called_once()
+
+
+# ----------------------------------------------------------------------------
+# Audit 4 — scheduled_sweep_drift (CAI-RESP-108 axis d)
+# ----------------------------------------------------------------------------
+
+def _ts(seconds_ago: int) -> str:
+    """ISO timestamp N seconds before now."""
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+
+
+def _drift_supabase_mock(rows):
+    """Supabase mock for the .gte/.not_.is_/.execute() chain in drift audit."""
+    sb = MagicMock()
+    sb.table.return_value = sb
+    sb.select.return_value = sb
+    sb.gte.return_value = sb
+    sb.lt.return_value = sb
+    sb.eq.return_value = sb
+    sb.not_ = sb           # chains .not_.is_ — both return sb
+    sb.is_.return_value = sb
+    sb.insert.return_value = sb
+    sb.limit.return_value = sb
+    sb.execute = AsyncMock(side_effect=[
+        MagicMock(data=rows),  # main agent_messages query
+        MagicMock(data=[]),    # _check_dedup → no existing
+        None,                  # _send_and_log notification_log insert
+    ])
+    return sb
+
+
+class TestScheduledSweepDrift:
+
+    @pytest.mark.asyncio
+    async def test_no_offenders_no_alert(self):
+        """Empty agent_messages query → no Telegram."""
+        sb = _drift_supabase_mock([])
+        bot = AsyncMock()
+        await orch_self_audit._audit_scheduled_sweep_drift(sb, bot, "123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_responded_within_window_fires_alert(self):
+        """responded_at landed 5s after read_at → P2 alert."""
+        read = _ts(20)
+        resp = _ts(15)  # 5s after read
+        rows = [{
+            "id": 4242, "from_agent": "cai", "to_agent": "cc-orchestrator",
+            "subject": "test", "read_at": read, "responded_at": resp,
+            "created_at": _ts(60),
+        }]
+        sb = _drift_supabase_mock(rows)
+        bot = AsyncMock()
+        bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        await orch_self_audit._audit_scheduled_sweep_drift(sb, bot, "123")
+        bot.send_message.assert_called_once()
+        text = bot.send_message.call_args.kwargs["text"]
+        assert "Section D" in text
+        assert "#4242" in text
+
+    @pytest.mark.asyncio
+    async def test_responded_outside_window_no_alert(self):
+        """responded_at 60s after read_at → outside 30s window, no alert."""
+        rows = [{
+            "id": 7, "from_agent": "cai", "to_agent": "cc-orchestrator",
+            "subject": "legit reply", "read_at": _ts(120),
+            "responded_at": _ts(60),  # 60s gap
+            "created_at": _ts(180),
+        }]
+        sb = _drift_supabase_mock(rows)
+        bot = AsyncMock()
+        await orch_self_audit._audit_scheduled_sweep_drift(sb, bot, "123")
+        bot.send_message.assert_not_called()

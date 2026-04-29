@@ -37,6 +37,15 @@ _HEARTBEAT_STALE_OFFLINE_HOURS = 2
 _CHECKIN_SILENCE_MINUTES = 45
 _ALERT_DEDUP_MINUTES = 60  # don't re-alert within this window
 
+# CAI-PROCESS-INBOX-CADENCE-001 filing timestamp. Per CAI-RESP-108: P1
+# alarms suppressed for messages created before this cutoff (transition-
+# window noise — pre-Section A backlog with mis-set requires_response=true,
+# plus cai's pre-discipline unread inbox). "No retroactive cleanup" applies
+# to metadata; this constant gates the alarm path so the queue drains
+# mechanically without spamming Musa with 30+ Telegrams/hour.
+# Bumpable via future cai amendment.
+CADENCE_001_FILING_DATE = "2026-04-28T22:30:00+00:00"
+
 
 async def check_agent_health(
     supabase, bot=None, musa_chat_id: str | None = None
@@ -296,12 +305,18 @@ async def check_inbox_sla_violations(
 
     Dedup hour-bucketed per (agent, message_id, violation_type) — fires once
     per hour per offending row to bound alarm rate.
+
+    Filing-date cutoff per CAI-RESP-108: messages created before
+    CADENCE_001_FILING_DATE are suppressed (transition-window noise — the
+    pre-Section A backlog drains mechanically as agents apply Section A
+    discipline forward; alerting on it would spam Musa with non-actionable
+    historical violations).
     """
     try:
         result = await supabase.table("inbox_sla_violations").select(
-            "agent, message_id, priority, from_agent, subject, "
+            "agent, message_id, priority, from_agent, subject, created_at, "
             "violation_type, elapsed_minutes, threshold_minutes"
-        ).eq("priority", "P1").execute()
+        ).eq("priority", "P1").gte("created_at", CADENCE_001_FILING_DATE).execute()
         violations = result.data or []
         if not violations:
             return

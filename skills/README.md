@@ -19,6 +19,8 @@ The directive content is the source of truth. CLAUDE.md files paraphrase only wh
 - `bypass-approval-policy.md` — CAI-PIPELINE-BYPASS-001 procedure for operator-authorized bypasses.
 - `inbox-check-protocol.md` — Fix 4 (ORCHESTRATOR-NOTIFIER-FIX-001-AMEND) inbox-status freshness discipline; points at canonical text in `docs/governance/inbox-check-directive.md`.
 - `inbox-monitor-pattern.md` — CAI-PROCESS-INBOX-CADENCE-001 Section B Architecture A (optional in-session Monitor for sub-cadence reactivity to incoming agent_messages).
+- `scheduled-sweep-prompt.md` — CAI-PROCESS-INBOX-CADENCE-001 Section E Phase 3 bounded prompt for non-interactive scheduled CC sessions; applies Section A semantics + Section D guardrails to own family inbox.
+- `scheduled-sweep-registration.md` — per-family runbook for registering with the launchctl-based scheduled-sweep substrate.
 
 Future skills slot in as separate `<name>.md` files. Naming convention: `<verb-or-noun>-<scope>.md` (e.g., `tafsir-defense-funnel.md`).
 
