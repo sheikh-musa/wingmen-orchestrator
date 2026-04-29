@@ -45,8 +45,11 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <!-- claude CLI lives at ~/.local/bin/claude per Anthropic's
+             standard install. Include both ~/.local/bin and ~/.npm-global/bin
+             (some installs put it there) so the launcher can resolve it. -->
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin</string>
+        <string>/Users/sheikhmusa/.npm-global/bin:/Users/sheikhmusa/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 </dict>
 </plist>
