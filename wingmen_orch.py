@@ -29,6 +29,7 @@ import build_audit
 import semantic_drift
 from nervous_system.bug_escalation import check_stale_bugs
 from nervous_system.paused_job_escalation import check_paused_jobs
+from nervous_system.paused_jobs_retry_policy import run_paused_jobs_retry_policy
 from nervous_system.queue_stall_detector import check_queue_stalls
 from bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
@@ -1677,9 +1678,20 @@ async def main_loop():
                     record_swallowed("bug_escalation_check", e)
                 escalation_counter = 0
 
-            # Check paused jobs every 60 polls (~30 min)
+            # Check paused jobs every 60 polls (~30 min). Two paths run on
+            # the same cadence:
+            #   - retry policy (PAUSED-JOBS-RETRY-POLICY-001): mechanical
+            #     auto-retry of stale-error allowlist class. Runs first so
+            #     successful retries don't trigger unnecessary escalations.
+            #   - escalation (existing 1hr/6hr Telegram path): surfaces
+            #     genuinely-stuck jobs to operator.
             paused_job_counter += 1
             if paused_job_counter >= 60:
+                try:
+                    await run_paused_jobs_retry_policy(supabase)
+                except Exception as e:
+                    logger.error(f"paused_jobs_retry_policy failed: {e}")
+                    record_swallowed("paused_jobs_retry_policy", e)
                 try:
                     from telegram import Bot
                     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
