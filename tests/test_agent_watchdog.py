@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from nervous_system.agent_watchdog import (
     check_agent_health,
+    check_inbox_sla_violations,
     _check_heartbeat_staleness,
     _check_checkin_silence,
     _dedup_bucket,
@@ -237,3 +238,82 @@ class TestDedupBucket:
         t1 = datetime(2026, 4, 16, 14, 0, tzinfo=timezone.utc)
         t2 = datetime(2026, 4, 16, 15, 0, tzinfo=timezone.utc)
         assert _dedup_bucket(t1) != _dedup_bucket(t2)
+
+
+# ---------------------------------------------------------------------------
+# Inbox SLA P1 alarm — CAI-PROCESS-INBOX-CADENCE-001 Section E Phase 4
+# ---------------------------------------------------------------------------
+
+def _violation(message_id=42, agent="cc-orchestrator", priority="P1",
+               from_agent="cai", subject="P1 ruling",
+               violation_type="unread", elapsed_minutes=120, threshold_minutes=60):
+    return {
+        "agent": agent, "message_id": message_id, "priority": priority,
+        "from_agent": from_agent, "subject": subject,
+        "violation_type": violation_type,
+        "elapsed_minutes": elapsed_minutes,
+        "threshold_minutes": threshold_minutes,
+    }
+
+
+class TestInboxSlaViolations:
+
+    @pytest.mark.asyncio
+    async def test_no_violations_no_calls(self):
+        """Empty inbox_sla_violations → no Telegram, no notification_log writes."""
+        sb = _multi_execute_mock([])  # view returns empty
+        bot = AsyncMock()
+        await check_inbox_sla_violations(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_p1_violation_alerts_when_not_dedup(self):
+        """P1 violation + empty notification_log → Telegram + log row."""
+        sb = _multi_execute_mock(
+            [_violation()],   # view query
+            [],               # _check_dedup → no existing row
+            None,             # _send_and_log notification_log insert
+        )
+        bot = AsyncMock()
+        sent = MagicMock(); sent.message_id = 99
+        bot.send_message = AsyncMock(return_value=sent)
+        await check_inbox_sla_violations(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_called_once()
+        # Message body sanity
+        sent_msg = bot.send_message.call_args.kwargs.get("text") or bot.send_message.call_args.args[1]
+        assert "P1" in sent_msg
+        assert "unread" in sent_msg
+        assert "#42" in sent_msg
+
+    @pytest.mark.asyncio
+    async def test_dedup_skips_already_alerted(self):
+        """Notification_log dedup row exists → no Telegram, no log."""
+        sb = _multi_execute_mock(
+            [_violation()],         # view query
+            [{"id": "prev"}],       # _check_dedup → existing row
+        )
+        bot = AsyncMock()
+        await check_inbox_sla_violations(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unresponded_includes_respond_substantively_hint(self):
+        """unresponded violations get the 'respond substantively' guidance."""
+        v = _violation(violation_type="unresponded", elapsed_minutes=300, threshold_minutes=240)
+        sb = _multi_execute_mock([v], [], None)
+        bot = AsyncMock()
+        bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        await check_inbox_sla_violations(sb, bot=bot, musa_chat_id="123")
+        sent_msg = bot.send_message.call_args.kwargs.get("text") or ""
+        assert "respond substantively" in sent_msg
+
+    @pytest.mark.asyncio
+    async def test_failure_in_view_query_does_not_propagate(self):
+        """View query exception → caught + logged; doesn't crash watchdog sweep."""
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.execute = AsyncMock(side_effect=RuntimeError("simulated DB outage"))
+        # Must not raise
+        await check_inbox_sla_violations(sb, bot=AsyncMock(), musa_chat_id="123")
