@@ -95,8 +95,15 @@ else
     sla="?"
 fi
 
-if [ "${unread}" = "0" ] && [ "${sla}" = "0" ]; then
-    echo "[${ts}] ${FAMILY}: empty tick (unread=0 sla=0) — heartbeat + skip CC spawn"
+# Spawn decision: ONLY based on unread count. SLA count is for telemetry,
+# not spawn — many SLA violations are 'unresponded' on already-read messages
+# that the sweep CC has no legal way to act on per Section D (responded_at
+# is reserved for substantive dialogue, not sweep). Spawning on those just
+# burns Opus 4.7 tokens to confirm "can't help, exiting." Empirical
+# observation 2026-04-30: 50 fires × all-spawn × ~$0.10-0.20 each = real
+# money before this fix.
+if [ "${unread}" = "0" ]; then
+    echo "[${ts}] ${FAMILY}: empty tick (unread=${unread} sla=${sla} — sla-only, sweep can't act per Section D) — heartbeat + skip CC spawn"
     # Heartbeat-only path. Targets the family-base `agents.last_heartbeat`
     # (single row, e.g. id='cc-orchestrator') — that surface is what
     # agent_watchdog._check_heartbeat_staleness monitors.
