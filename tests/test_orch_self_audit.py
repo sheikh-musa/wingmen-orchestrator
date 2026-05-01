@@ -204,7 +204,7 @@ class TestMigrationConsistencyAudit:
 class TestRunOrchAudit:
 
     @pytest.mark.asyncio
-    async def test_runs_all_four_checks(self):
+    async def test_runs_all_five_checks(self):
         sb = MagicMock()
         with patch("nervous_system.orch_self_audit._audit_writer_health",
                    new_callable=AsyncMock) as wh, \
@@ -213,12 +213,15 @@ class TestRunOrchAudit:
              patch("nervous_system.orch_self_audit._audit_migration_consistency",
                    new_callable=AsyncMock) as mc, \
              patch("nervous_system.orch_self_audit._audit_scheduled_sweep_drift",
-                   new_callable=AsyncMock) as sd:
+                   new_callable=AsyncMock) as sd, \
+             patch("nervous_system.orch_self_audit._audit_anthropic_sdk_direct_call_sites",
+                   new_callable=AsyncMock) as la:
             await orch_self_audit.run_orch_audit(sb)
             wh.assert_called_once()
             t3.assert_called_once()
             mc.assert_called_once()
             sd.assert_called_once()
+            la.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_one_check_failure_does_not_block_others(self):
@@ -228,11 +231,13 @@ class TestRunOrchAudit:
         with patch("nervous_system.orch_self_audit._audit_writer_health", side_effect=boom), \
              patch("nervous_system.orch_self_audit._audit_bridge_tier3_volume", side_effect=ok) as t3, \
              patch("nervous_system.orch_self_audit._audit_migration_consistency", side_effect=ok) as mc, \
-             patch("nervous_system.orch_self_audit._audit_scheduled_sweep_drift", side_effect=ok) as sd:
+             patch("nervous_system.orch_self_audit._audit_scheduled_sweep_drift", side_effect=ok) as sd, \
+             patch("nervous_system.orch_self_audit._audit_anthropic_sdk_direct_call_sites", side_effect=ok) as la:
             await orch_self_audit.run_orch_audit(sb)  # must not raise
             t3.assert_called_once()
             mc.assert_called_once()
             sd.assert_called_once()
+            la.assert_called_once()
 
 
 # ----------------------------------------------------------------------------
@@ -306,3 +311,159 @@ class TestScheduledSweepDrift:
         bot = AsyncMock()
         await orch_self_audit._audit_scheduled_sweep_drift(sb, bot, "123")
         bot.send_message.assert_not_called()
+
+
+# ----------------------------------------------------------------------------
+# Audit 5 — llm_routing_drift (CAI-PROCESS-MAX-FIRST-001)
+# ----------------------------------------------------------------------------
+
+class TestClassifyFinding:
+
+    def test_haiku_auto_passes(self):
+        f = {"model": "claude-haiku-4-5-20251001", "exempt_reason": None}
+        assert orch_self_audit._classify_finding(f) == "ok_haiku"
+
+    def test_haiku_substring_match(self):
+        f = {"model": "claude-haiku-4-5", "exempt_reason": None}
+        assert orch_self_audit._classify_finding(f) == "ok_haiku"
+
+    def test_sonnet_with_valid_exempt_passes(self):
+        f = {"model": "claude-sonnet-4-20250514",
+             "exempt_reason": "tool_use_with_caller_defined_tools"}
+        assert orch_self_audit._classify_finding(f) == "ok_exempt"
+
+    def test_sonnet_no_exempt_violation(self):
+        f = {"model": "claude-sonnet-4-20250514", "exempt_reason": None}
+        assert orch_self_audit._classify_finding(f) == "violation_no_exempt"
+
+    def test_sonnet_invalid_exempt_violation(self):
+        f = {"model": "claude-sonnet-4-20250514",
+             "exempt_reason": "i_just_felt_like_it"}
+        assert orch_self_audit._classify_finding(f) == "violation_invalid_exempt"
+
+    def test_unknown_model_no_exempt_violation(self):
+        """Model literal not detected (None) AND no exempt → violation."""
+        f = {"model": None, "exempt_reason": None}
+        assert orch_self_audit._classify_finding(f) == "violation_no_exempt"
+
+    def test_all_5_carve_out_reasons_accepted(self):
+        for reason in ("latency_budget_under_3s", "streaming_structured_output",
+                       "vision_multimodal", "tool_use_with_caller_defined_tools"):
+            f = {"model": "claude-sonnet-4-20250514", "exempt_reason": reason}
+            assert orch_self_audit._classify_finding(f) == "ok_exempt", \
+                f"reason {reason!r} should be valid"
+
+
+class TestScanCallSites:
+
+    def test_scan_finds_legit_call_sites(self):
+        """Live repo scan must detect known SDK instantiations."""
+        findings = orch_self_audit._scan_call_sites()
+        files_found = {f["file"] for f in findings}
+        # These are known direct-API call sites in the repo
+        assert "ralph_runner.py" in files_found
+        assert "nervous_system/ecosystem_auditor.py" in files_found
+        assert "nervous_system/council_agent.py" in files_found
+        assert "ai_provider.py" in files_found
+
+    def test_scan_excludes_tests_dir(self):
+        """tests/ excluded from audit (test files may import anthropic for mock)."""
+        findings = orch_self_audit._scan_call_sites()
+        assert not any(f["file"].startswith("tests/") for f in findings), \
+            f"tests/ files leaked into audit: {[f for f in findings if f['file'].startswith('tests/')]}"
+
+    def test_scan_skips_comment_only_self_match(self):
+        """Lines starting with `#` containing 'anthropic.Anthropic' must NOT
+        match — handles the regex-docstring self-match in orch_self_audit.py."""
+        findings = orch_self_audit._scan_call_sites()
+        # Self-match would show line ~329 (the regex docstring) — that line
+        # is a comment so should be excluded
+        own_findings = [f for f in findings if f["file"].endswith("orch_self_audit.py")]
+        assert not own_findings, \
+            f"orch_self_audit.py self-matched (false positive): {own_findings}"
+
+    def test_council_agent_classified_ok_exempt(self):
+        findings = orch_self_audit._scan_call_sites()
+        council = next((f for f in findings if f["file"].endswith("council_agent.py")), None)
+        assert council is not None, "council_agent.py not detected"
+        assert orch_self_audit._classify_finding(council) == "ok_exempt"
+        assert council["exempt_reason"] == "tool_use_with_caller_defined_tools"
+
+
+def _audit_supabase_mock(notif_existing=None):
+    """Mock for the dedup-check + send_and_log chain in audit 5."""
+    sb = MagicMock()
+    sb.table.return_value = sb
+    sb.select.return_value = sb
+    sb.eq.return_value = sb
+    sb.limit.return_value = sb
+    sb.insert.return_value = sb
+    sb.execute = AsyncMock(side_effect=[
+        MagicMock(data=notif_existing or []),  # dedup check
+        None,                                    # notif insert
+    ] * 10)  # plenty of slots
+    return sb
+
+
+class TestLlmRoutingAudit:
+
+    @pytest.mark.asyncio
+    async def test_no_violations_no_alert(self):
+        """Patched scan returning all-pass findings → no Telegram."""
+        sb = _audit_supabase_mock()
+        bot = AsyncMock()
+        with patch.object(orch_self_audit, "_scan_call_sites", return_value=[
+            {"file": "x.py", "line": 1, "model": "claude-haiku-4-5", "exempt_reason": None}
+        ]):
+            await orch_self_audit._audit_anthropic_sdk_direct_call_sites(sb, bot, "123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_violation_fires_alert(self):
+        sb = _audit_supabase_mock()
+        bot = AsyncMock()
+        bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        with patch.object(orch_self_audit, "_scan_call_sites", return_value=[
+            {"file": "bad.py", "line": 42,
+             "model": "claude-sonnet-4-20250514", "exempt_reason": None}
+        ]):
+            await orch_self_audit._audit_anthropic_sdk_direct_call_sites(sb, bot, "123")
+        bot.send_message.assert_called_once()
+        text = bot.send_message.call_args.kwargs["text"]
+        assert "CAI-PROCESS-MAX-FIRST-001" in text
+        assert "bad.py:42" in text
+        assert "violation_no_exempt" in text
+
+    @pytest.mark.asyncio
+    async def test_invalid_exempt_token_flagged(self):
+        sb = _audit_supabase_mock()
+        bot = AsyncMock()
+        bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        with patch.object(orch_self_audit, "_scan_call_sites", return_value=[
+            {"file": "x.py", "line": 1,
+             "model": "claude-opus-4-7", "exempt_reason": "creative_writing"}
+        ]):
+            await orch_self_audit._audit_anthropic_sdk_direct_call_sites(sb, bot, "123")
+        bot.send_message.assert_called_once()
+        text = bot.send_message.call_args.kwargs["text"]
+        assert "violation_invalid_exempt" in text
+
+    @pytest.mark.asyncio
+    async def test_dedup_skips_already_alerted(self):
+        sb = _audit_supabase_mock(notif_existing=[{"id": "prev"}])
+        bot = AsyncMock()
+        with patch.object(orch_self_audit, "_scan_call_sites", return_value=[
+            {"file": "x.py", "line": 1,
+             "model": "claude-sonnet-4-20250514", "exempt_reason": None}
+        ]):
+            await orch_self_audit._audit_anthropic_sdk_direct_call_sites(sb, bot, "123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scan_failure_isolated(self):
+        sb = MagicMock()
+        bot = AsyncMock()
+        with patch.object(orch_self_audit, "_scan_call_sites",
+                          side_effect=RuntimeError("scan blew up")):
+            # Must not raise
+            await orch_self_audit._audit_anthropic_sdk_direct_call_sites(sb, bot, "123")

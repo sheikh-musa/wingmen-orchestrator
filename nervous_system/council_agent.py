@@ -346,7 +346,13 @@ async def _generate_response(
         "content": f"[SYSTEM — fresh repo context]\n```json\n{json.dumps(context, default=str)[:4000]}\n```\nIt is now your turn to respond. Use tools if you need to check specific files.",
     })
 
-    # Call Claude API with tools
+    # Call Claude API with tools.
+    # llm_route_exempt: tool_use_with_caller_defined_tools
+    # CAI-PROCESS-MAX-FIRST-001 Carve-Out 5. council_agent uses Anthropic
+    # tool-use with 5 caller-defined tools (read_file, grep, list_files,
+    # git_log, sql) executed locally via the dispatcher in this module.
+    # CLI `claude -p` exposes Claude's own tools (Bash, Read, Edit) but
+    # cannot inject caller-defined-with-caller-execution tool surfaces.
     client = anthropic.Anthropic(api_key=api_key)
 
     try:

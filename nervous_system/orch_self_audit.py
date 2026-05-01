@@ -46,6 +46,19 @@ logger = logging.getLogger("wingmen.orch_self_audit")
 _WRITER_STALE_MINUTES = 60         # 4× the 15-min repo_context_writer cadence
 _TIER3_VOLUME_THRESHOLD = 3        # firings per 24h before alert
 _MIGRATIONS_DIR = Path(__file__).parent.parent / "supabase" / "migrations"
+_REPO_ROOT = Path(__file__).parent.parent
+
+# CAI-PROCESS-MAX-FIRST-001 Audit 5 — accepted carve-out reason tokens.
+# A direct-API call site is allowed if EITHER (a) its model is Haiku
+# (auto-pass via Carve-Out 4) OR (b) it carries a `# llm_route_exempt: <token>`
+# comment within ~10 lines and <token> is in this allowlist.
+_LLM_ROUTE_EXEMPT_REASONS = frozenset({
+    "latency_budget_under_3s",         # Carve-Out 1
+    "streaming_structured_output",     # Carve-Out 2
+    "vision_multimodal",               # Carve-Out 3
+    # (Carve-Out 4 is the Haiku auto-pass — model rule, no comment needed)
+    "tool_use_with_caller_defined_tools",  # Carve-Out 5
+})
 
 
 async def run_orch_audit(
@@ -58,6 +71,7 @@ async def run_orch_audit(
         (_audit_bridge_tier3_volume, "bridge_tier3_volume"),
         (_audit_migration_consistency, "migration_consistency"),
         (_audit_scheduled_sweep_drift, "scheduled_sweep_drift"),
+        (_audit_anthropic_sdk_direct_call_sites, "llm_routing_drift"),
     ):
         try:
             await check(supabase, bot, musa_chat_id)
@@ -303,6 +317,160 @@ async def _audit_scheduled_sweep_drift(
             bot=bot, musa_chat_id=musa_chat_id, msg=msg,
             source="orch_self_audit.sweep_drift",
             decision_ref="CAI-RESP-108", dedup_key=dedup_key,
+        )
+
+
+# ----------------------------------------------------------------------------
+# Audit 5 — llm_routing_drift: CAI-PROCESS-MAX-FIRST-001 enforcement
+# ----------------------------------------------------------------------------
+
+import re
+
+# Match `anthropic.Anthropic(...)` or `anthropic.AsyncAnthropic(...)` instantiations.
+# This is the substrate boundary — anything past this line bills against the
+# Anthropic API key (auto-recharge credits) instead of the Max plan.
+_ANTHROPIC_INSTANTIATION_RE = re.compile(
+    r"\banthropic\.(Async)?Anthropic\s*\("
+)
+# Match `model="..."` or `model='...'` keyword argument value within a few lines.
+_MODEL_KW_RE = re.compile(r"""model\s*=\s*['"]([^'"]+)['"]""")
+# Match exempt comment: `# llm_route_exempt: <token>`
+_EXEMPT_COMMENT_RE = re.compile(r"#\s*llm_route_exempt:\s*([a-z_0-9]+)")
+
+# Files / directories the audit walks. Excludes .venv, __pycache__, tests/,
+# node_modules. Tests deliberately excluded — they may import anthropic for
+# mocking purposes without making real calls.
+_AUDIT_PATHS = (
+    _REPO_ROOT,  # walks recursively, filtered below
+)
+_AUDIT_EXCLUDE_DIRS = frozenset({
+    ".venv", "__pycache__", "node_modules", ".git", "tests", "logs",
+})
+
+
+def _scan_call_sites() -> list[dict]:
+    """Walk the repo, return one dict per anthropic SDK instantiation.
+
+    Each dict carries: file (str), line (int), model (str|None — file-level
+    model detection: first model= literal anywhere in the file, since
+    instantiation + .messages.create may be in different functions),
+    exempt_reason (str|None — first llm_route_exempt match anywhere in the
+    file or within ±10 lines of the instantiation).
+
+    Excludes comment-only lines (starts with `#`) so the regex docstring in
+    this module doesn't self-match.
+    """
+    findings: list[dict] = []
+    for root in _AUDIT_PATHS:
+        for path in root.rglob("*.py"):
+            # Skip excluded dir prefixes
+            if any(part in _AUDIT_EXCLUDE_DIRS for part in path.parts):
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+
+            # File-level model detection — first model= literal anywhere.
+            # Files using anthropic SDK in production are single-model in
+            # practice; this avoids the false negative where instantiation
+            # is in helper() and messages.create is 50+ lines away.
+            file_model: str | None = None
+            for line in lines:
+                m = _MODEL_KW_RE.search(line)
+                if m:
+                    file_model = m.group(1)
+                    break
+
+            # File-level exempt detection
+            file_exempt: str | None = None
+            for line in lines:
+                m = _EXEMPT_COMMENT_RE.search(line)
+                if m:
+                    file_exempt = m.group(1)
+                    break
+
+            for i, line in enumerate(lines):
+                # Skip comment-only lines (handles docstring / regex-spec
+                # self-match in orch_self_audit.py itself)
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    continue
+                if not _ANTHROPIC_INSTANTIATION_RE.search(line):
+                    continue
+                findings.append({
+                    "file": str(path.relative_to(_REPO_ROOT)),
+                    "line": i + 1,
+                    "model": file_model,
+                    "exempt_reason": file_exempt,
+                })
+    return findings
+
+
+def _classify_finding(finding: dict) -> str:
+    """Return 'ok_haiku' / 'ok_exempt' / 'violation_no_exempt' / 'violation_invalid_exempt'."""
+    model = (finding.get("model") or "").lower()
+    if "haiku" in model:
+        return "ok_haiku"  # Carve-Out 4 — auto-pass via model rule
+    reason = finding.get("exempt_reason")
+    if reason is None:
+        return "violation_no_exempt"
+    if reason in _LLM_ROUTE_EXEMPT_REASONS:
+        return "ok_exempt"
+    return "violation_invalid_exempt"
+
+
+async def _audit_anthropic_sdk_direct_call_sites(
+    supabase, bot=None, musa_chat_id: str | None = None
+) -> None:
+    """Alert on direct anthropic SDK instantiations not covered by Carve-Outs
+    1–5 of CAI-PROCESS-MAX-FIRST-001.
+
+    Walks the repo, classifies each site, and surfaces violations:
+      - violation_no_exempt: Sonnet/Opus call site without `# llm_route_exempt`
+      - violation_invalid_exempt: comment present but reason not in allowlist
+
+    Catches drift while the migration sequence is in flight (cto_bot →
+    bug_pipeline → council_relay → council_summary). New direct-API call
+    sites added during the migration without proper carve-out comments
+    fire the audit on the next 10-min tick.
+
+    Hour-bucket dedup per (file, line) so a violation alerts once per hour
+    until fixed; doesn't spam.
+    """
+    try:
+        findings = _scan_call_sites()
+    except Exception as e:
+        logger.error(f"orch_self_audit.llm_routing scan failed: {e}")
+        error_tracker.track_exception("orch_self_audit.llm_routing_scan", e)
+        return
+
+    violations = [f for f in findings if _classify_finding(f).startswith("violation")]
+    if not violations:
+        return
+
+    now = datetime.now(timezone.utc)
+    for v in violations[:5]:  # cap blast radius
+        cls = _classify_finding(v)
+        dedup_key = f"orch_self_audit:llm_routing:{v['file']}:{v['line']}:{_dedup_bucket(now)}"
+        if await _check_dedup(supabase, dedup_key):
+            continue
+        msg = (
+            f"⚠️ orch_self_audit: CAI-PROCESS-MAX-FIRST-001 violation\n\n"
+            f"Direct anthropic SDK instantiation at "
+            f"{v['file']}:{v['line']}\n"
+            f"Model: {v.get('model') or '(not detected)'}\n"
+            f"Classification: {cls}\n"
+            f"Exempt reason: {v.get('exempt_reason') or '(none)'}\n\n"
+            f"Migrate to ai_provider.cli_route OR add comment near the call site:\n"
+            f"  # llm_route_exempt: <one of {sorted(_LLM_ROUTE_EXEMPT_REASONS)}>\n"
+            f"with rationale matching one of the 5 carve-outs."
+        )
+        await _send_and_log(
+            supabase,
+            bot=bot, musa_chat_id=musa_chat_id, msg=msg,
+            source="orch_self_audit.llm_routing_drift",
+            decision_ref="CAI-PROCESS-MAX-FIRST-001", dedup_key=dedup_key,
         )
 
 
