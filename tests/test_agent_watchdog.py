@@ -342,3 +342,59 @@ class TestInboxSlaViolations:
         assert any(args[0] == "created_at" and args[1] == CADENCE_001_FILING_DATE
                    for _, args, _ in gte_calls), \
             f"missing .gte('created_at', cutoff) — calls: {calls}"
+
+    @pytest.mark.asyncio
+    async def test_tombstone_suppresses_after_max_fires(self):
+        """Per-message tombstone: after _SLA_ALARM_MAX_FIRES alarms have fired
+        for the same (agent, msg_id, vtype) tuple, no further alarms."""
+        from nervous_system.agent_watchdog import _SLA_ALARM_MAX_FIRES
+        v = _violation(message_id=1038)
+        # Mock supabase: view returns the violation, dedup check empty,
+        # tombstone count returns >= max fires
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.gte.return_value = sb
+        sb.like.return_value = sb
+        sb.limit.return_value = sb
+        # Sequential .execute() returns:
+        #   (1) view query: 1 violation
+        #   (2) dedup _check_dedup: empty (no current-hour fire)
+        #   (3) tombstone count: count=_SLA_ALARM_MAX_FIRES
+        tombstone_resp = MagicMock(data=[], count=_SLA_ALARM_MAX_FIRES)
+        sb.execute = AsyncMock(side_effect=[
+            MagicMock(data=[v]),
+            MagicMock(data=[]),
+            tombstone_resp,
+        ])
+        bot = AsyncMock()
+        await check_inbox_sla_violations(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tombstone_allows_alert_when_under_threshold(self):
+        """Below tombstone threshold → alarm fires normally."""
+        from nervous_system.agent_watchdog import _SLA_ALARM_MAX_FIRES
+        v = _violation(message_id=2000)
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.eq.return_value = sb
+        sb.gte.return_value = sb
+        sb.like.return_value = sb
+        sb.limit.return_value = sb
+        sb.insert.return_value = sb
+        # Below threshold: count < _SLA_ALARM_MAX_FIRES
+        tombstone_resp = MagicMock(data=[], count=_SLA_ALARM_MAX_FIRES - 1)
+        sb.execute = AsyncMock(side_effect=[
+            MagicMock(data=[v]),
+            MagicMock(data=[]),
+            tombstone_resp,
+            None,  # send_and_log notification_log insert
+        ])
+        bot = AsyncMock()
+        sent = MagicMock(); sent.message_id = 99
+        bot.send_message = AsyncMock(return_value=sent)
+        await check_inbox_sla_violations(sb, bot=bot, musa_chat_id="123")
+        bot.send_message.assert_called_once()

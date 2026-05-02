@@ -261,12 +261,15 @@ async def _audit_scheduled_sweep_drift(
     supabase, bot=None, musa_chat_id: str | None = None
 ) -> None:
     """Alert when a row's responded_at lands within _SWEEP_DRIFT_WINDOW_SECONDS
-    of read_at — likely Section D violation by a scheduled-sweep CC session
-    (which is forbidden from setting responded_at). Filing-date cutoff so
-    pre-CADENCE-001 historical rows don't trigger.
+    of read_at AND the recipient is a CC family (scheduled-sweep population).
 
-    Emits a single P2 dedup'd alert per offending message (hour-bucket per
-    message_id) so a clustered violation doesn't spam Musa."""
+    Section D violations come from sweep CCs setting responded_at on inbound
+    messages — only CC families run scheduled sweeps. Messages addressed to
+    cai are interactive dialogue turns (cai legitimately closes both
+    timestamps in one transaction); excluded from the audit.
+
+    Filing-date cutoff so pre-CADENCE-001 rows don't trigger. Hour-bucket
+    dedup per message_id."""
     from nervous_system.agent_watchdog import CADENCE_001_FILING_DATE
 
     now = datetime.now(timezone.utc)
@@ -278,7 +281,9 @@ async def _audit_scheduled_sweep_drift(
         "id, from_agent, to_agent, subject, read_at, responded_at, created_at"
     ).gte("created_at", CADENCE_001_FILING_DATE).gte(
         "responded_at", look_back
-    ).not_.is_("read_at", "null").not_.is_(
+    ).like("to_agent", "cc-%").not_.is_(
+        "read_at", "null"
+    ).not_.is_(
         "responded_at", "null"
     ).execute()
 
