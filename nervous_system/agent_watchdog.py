@@ -46,6 +46,14 @@ _ALERT_DEDUP_MINUTES = 60  # don't re-alert within this window
 # Bumpable via future cai amendment.
 CADENCE_001_FILING_DATE = "2026-04-28T22:30:00+00:00"
 
+# Per-message tombstone threshold. After N hour-bucket alarms have fired
+# for the same (agent, message_id, violation_type), suppress further
+# alarms. Catches the persistent-noise tail where a post-cutoff message
+# legitimately violates SLA forever (no_retroactive_cleanup commitment
+# means cai's pre-Section-A mis-flagged rulings can't be patched).
+# 5 fires × 1/hour = 5 hours of operator awareness before tombstone.
+_SLA_ALARM_MAX_FIRES = 5
+
 
 async def check_agent_health(
     supabase, bot=None, musa_chat_id: str | None = None
@@ -311,6 +319,13 @@ async def check_inbox_sla_violations(
     pre-Section A backlog drains mechanically as agents apply Section A
     discipline forward; alerting on it would spam Musa with non-actionable
     historical violations).
+
+    Per-message tombstone: after _SLA_ALARM_MAX_FIRES alarms have fired for
+    the same (agent, message_id, violation_type) tuple, suppress further
+    alarms. Persistent post-cutoff violations (e.g. cai's pre-Section-A
+    mis-flagged rulings that no_retroactive_cleanup can't fix) burn 24
+    Telegrams/day otherwise. 5 fires × 1/hour = 5 hours of operator
+    awareness before tombstone.
     """
     try:
         result = await supabase.table("inbox_sla_violations").select(
@@ -330,6 +345,28 @@ async def check_inbox_sla_violations(
             dedup_key = f"agent_watchdog:inbox_sla_p1:{agent}:{msg_id}:{vtype}:{bucket}"
             if await _check_dedup(supabase, dedup_key):
                 continue
+
+            # Tombstone check: count prior fires for this (agent, msg_id,
+            # vtype) tuple. If we've already alerted N times, suppress —
+            # the operator has had ample awareness; further fires are noise.
+            try:
+                tombstone_pattern = f"agent_watchdog:inbox_sla_p1:{agent}:{msg_id}:{vtype}:%"
+                prior = (
+                    await supabase.table("notification_log")
+                    .select("id", count="exact")
+                    .like("dedup_key", tombstone_pattern)
+                    .execute()
+                )
+                prior_count = prior.count if hasattr(prior, "count") and prior.count is not None else len(prior.data or [])
+                if prior_count >= _SLA_ALARM_MAX_FIRES:
+                    logger.debug(
+                        f"inbox_sla_p1: tombstoned msg #{msg_id} "
+                        f"({prior_count} prior fires >= {_SLA_ALARM_MAX_FIRES} threshold)"
+                    )
+                    continue
+            except Exception as e:
+                logger.warning(f"inbox_sla_p1 tombstone check failed for #{msg_id}: {e}")
+                # Fail-open: proceed with alarm rather than silently suppress.
 
             elapsed = v.get("elapsed_minutes")
             threshold = v.get("threshold_minutes")

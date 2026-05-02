@@ -250,13 +250,14 @@ def _ts(seconds_ago: int) -> str:
 
 
 def _drift_supabase_mock(rows):
-    """Supabase mock for the .gte/.not_.is_/.execute() chain in drift audit."""
+    """Supabase mock for the .gte/.like/.not_.is_/.execute() chain in drift audit."""
     sb = MagicMock()
     sb.table.return_value = sb
     sb.select.return_value = sb
     sb.gte.return_value = sb
     sb.lt.return_value = sb
     sb.eq.return_value = sb
+    sb.like.return_value = sb  # to_agent LIKE 'cc-%'
     sb.not_ = sb           # chains .not_.is_ — both return sb
     sb.is_.return_value = sb
     sb.insert.return_value = sb
@@ -311,6 +312,35 @@ class TestScheduledSweepDrift:
         bot = AsyncMock()
         await orch_self_audit._audit_scheduled_sweep_drift(sb, bot, "123")
         bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_query_filters_to_cc_recipients_only(self):
+        """Audit only fires on messages addressed to cc-* families (the
+        scheduled-sweep population). Messages addressed to cai are
+        legitimate dialogue closes — cai writing read_at + responded_at
+        in one transaction is correct Section A behavior, not a violation.
+        Verified by asserting .like('to_agent', 'cc-%') is in the chain.
+        """
+        calls = []
+        sb = MagicMock()
+        sb.table.return_value = sb
+        sb.select.return_value = sb
+        sb.gte.return_value = sb
+        sb.lt.return_value = sb
+        sb.eq.return_value = sb
+        sb.not_ = sb
+        sb.is_.return_value = sb
+        sb.insert.return_value = sb
+        sb.limit.return_value = sb
+        def _record_like(*args, **kw):
+            calls.append(("like", args, kw)); return sb
+        sb.like.side_effect = _record_like
+        sb.execute = AsyncMock(return_value=MagicMock(data=[]))
+        await orch_self_audit._audit_scheduled_sweep_drift(sb, None, None)
+        like_calls = [c for c in calls if c[0] == "like"]
+        assert any(args[0] == "to_agent" and args[1] == "cc-%"
+                   for _, args, _ in like_calls), \
+            f"missing .like('to_agent', 'cc-%') filter — calls: {calls}"
 
 
 # ----------------------------------------------------------------------------
