@@ -21,6 +21,7 @@ The directive content is the source of truth. CLAUDE.md files paraphrase only wh
 - `inbox-monitor-pattern.md` — CAI-PROCESS-INBOX-CADENCE-001 Section B Architecture A (optional in-session Monitor for sub-cadence reactivity to incoming agent_messages).
 - `scheduled-sweep-prompt.md` — CAI-PROCESS-INBOX-CADENCE-001 Section E Phase 3 bounded prompt for non-interactive scheduled CC sessions; applies Section A semantics + Section D guardrails to own family inbox.
 - `scheduled-sweep-registration.md` — per-family runbook for registering with the launchctl-based scheduled-sweep substrate.
+- `api-vs-cli-routing.md` — CAI-PROCESS-MAX-FIRST-001 architectural-discipline pointer; default to `claude -p` CLI (Max-covered), 5 explicit carve-outs for direct Anthropic API.
 
 Future skills slot in as separate `<name>.md` files. Naming convention: `<verb-or-noun>-<scope>.md` (e.g., `tafsir-defense-funnel.md`).
 
