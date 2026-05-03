@@ -29,6 +29,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 from nervous_system import error_tracker
+from nervous_system.alert_format import format_alert
 
 logger = logging.getLogger("wingmen.agent_watchdog")
 
@@ -131,11 +132,22 @@ async def _check_heartbeat_staleness(
                 continue
 
             stale_str = f"{stale_minutes} min" if stale_minutes else "unknown"
-            msg = (
-                f"\u26a0\ufe0f {display_name} heartbeat stale\n\n"
-                f"Last seen: {stale_str} ago\n"
-                f"Session may have died or CC is not following ARCH-022 protocol.\n\n"
-                f"Check the session or run scripts/launch_dangerous_cc.sh to restart."
+            msg = format_alert(
+                title=f"{display_name} session looks dead",
+                what=(
+                    f"Last heartbeat was {stale_str} ago \u2014 the session is "
+                    f"either crashed or hung."
+                ),
+                why=(
+                    "Anything that family was supposed to be doing is paused. "
+                    "If it had a build job in flight, that job is stalled."
+                ),
+                do=(
+                    "Either reconnect to the existing session or relaunch with "
+                    "scripts/launch_dangerous_cc.sh from the family's repo."
+                ),
+                detail=f"agent_id={agent_id}; warn threshold {_HEARTBEAT_STALE_WARN_MINUTES} min",
+                ref="ARCH-022",
             )
 
             await _send_and_log(
@@ -207,11 +219,24 @@ async def _check_checkin_silence(
                 continue
 
             silence_str = f"{silence_minutes} min" if silence_minutes else "unknown duration"
-            msg = (
-                f"\U0001f4e1 {display_name} has not checked in\n\n"
-                f"No agent_message in the last {silence_str}.\n"
-                f"Agent status is active — heartbeat may be fine but coordination has stopped.\n\n"
-                f"ARCH-022: post an update to cai every 30 min of active work."
+            msg = format_alert(
+                icon="\U0001f4e1",
+                title=f"{display_name} hasn't messaged anyone recently",
+                what=(
+                    f"The session is alive (heartbeat fine) but hasn't sent any "
+                    f"agent_message in the last {silence_str}."
+                ),
+                why=(
+                    "Heartbeat means the process is running; check-ins mean the "
+                    "agent is coordinating. Long silence suggests it's stuck or "
+                    "lost."
+                ),
+                do=(
+                    "Open the session and check what it's doing. ARCH-022 expects "
+                    "an update every ~30 min of active work."
+                ),
+                detail=f"agent_id={agent_id}",
+                ref="ARCH-022",
             )
 
             await _send_and_log(
@@ -274,13 +299,22 @@ async def check_repo_context_health(
             return
 
         stale_str = f"{stale_minutes} min" if stale_minutes else "unknown duration"
-        msg = (
-            f"⚠️ repo_context writer stale\n\n"
-            f"Most recent update: {stale_str} ago "
-            f"(threshold: {_REPO_CONTEXT_STALE_MINUTES} min).\n"
-            f"repo_context_writer poll loop has not landed a successful sweep recently.\n\n"
-            f"Check orchestrator logs for `repo_context_writer:` entries; "
-            f"investigate via session digest if persistent."
+        msg = format_alert(
+            title="Repo state-tracker has stopped updating",
+            what=(
+                f"The orchestrator's repo state cache hasn't been refreshed for "
+                f"{stale_str} (it normally updates every 15 min)."
+            ),
+            why=(
+                "boot_briefing + repo_context surfaces are now serving stale "
+                "data to anything that reads them."
+            ),
+            do=(
+                "Check orch.log for recent 'repo_context_writer' lines — "
+                "they'll show whether the writer is crashing or just missing rows."
+            ),
+            detail=f"Threshold {_REPO_CONTEXT_STALE_MINUTES} min",
+            ref="CAI-RESP-093",
         )
         await _send_and_log(
             supabase,
@@ -372,14 +406,25 @@ async def check_inbox_sla_violations(
             threshold = v.get("threshold_minutes")
             from_agent = v.get("from_agent")
             subject = (v.get("subject") or "")[:80]
-            msg = (
-                f"⚠️ Inbox SLA P1 — {vtype}\n\n"
-                f"Agent: {agent}\n"
-                f"Message #{msg_id} from {from_agent}\n"
-                f"Elapsed: {elapsed} min (threshold: {threshold} min)\n"
-                f"Subject: {subject}\n\n"
-                f"Per CAI-PROCESS-INBOX-CADENCE-001 Section A: "
-                f"{'read the message' if vtype == 'unread' else 'respond substantively'}."
+            action = (
+                f"Open {agent}'s session and read msg #{msg_id}."
+                if vtype == "unread"
+                else f"{agent} should file a substantive response to msg #{msg_id} "
+                     f"(open their session)."
+            )
+            msg = format_alert(
+                title=f"{agent} hasn't {vtype} a P1 message in time",
+                what=(
+                    f"P1 message #{msg_id} from {from_agent} has been "
+                    f"{vtype} for {elapsed} min (threshold {threshold} min)."
+                ),
+                why=(
+                    "P1 means time-sensitive — the longer it sits, the more "
+                    "likely something downstream is blocked."
+                ),
+                do=action,
+                detail=f"Subject: {subject}",
+                ref="CAI-PROCESS-INBOX-CADENCE-001 Section A",
             )
             await _send_and_log(
                 supabase,

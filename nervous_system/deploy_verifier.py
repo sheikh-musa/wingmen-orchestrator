@@ -375,10 +375,27 @@ async def _escalate_bug(
             ).limit(1).execute()
             if existing.data:
                 return  # already alerted
-            sent = await bot.send_message(
-                chat_id=musa_chat_id,
-                text=f"⚠️ Deploy verification escalation\n\nBug {str(bug_id)[:8]} ({bug_row.get('repo_name')}): {diagnostic}",
+            from nervous_system.alert_format import format_alert
+            alert_text = format_alert(
+                title=f"Deploy stuck for bug {str(bug_id)[:8]}",
+                what=(
+                    f"A bug fix in {bug_row.get('repo_name')} got committed "
+                    f"but the deploy hasn't shown up where the verifier expects it."
+                ),
+                why=(
+                    "The fix may be merged but not actually serving traffic — "
+                    "users could still be hitting the original bug."
+                ),
+                do=(
+                    f"Either re-trigger the deploy manually, populate "
+                    f"manual_override_reason on bug_reports row {str(bug_id)[:8]} "
+                    f"(>=20 chars per CAI-PIPELINE-BYPASS-001), OR null "
+                    f"verification_escalated_at to retry."
+                ),
+                detail=diagnostic,
+                ref="CAI-RESP-083",
             )
+            sent = await bot.send_message(chat_id=musa_chat_id, text=alert_text)
             await supabase.table("notification_log").insert({
                 "source": "deploy_verifier.escalation",
                 "decision_ref": "CAI-RESP-083",

@@ -2417,19 +2417,14 @@ _chat_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent Claude calls
 
 
 async def _maybe_relay_cai_reply(update: Update, user: dict, user_msg: str) -> bool:
-    """If Musa replies to a bot notification for a requires_response agent_message,
-    auto-post the reply to agent_messages as cai's response to cc-ihsanos.
+    """Consume notification replies silently (relay disabled per MUSA-2026-05-03).
 
-    Returns True if the message was consumed as a cai relay (caller should skip
-    normal processing). Returns False if this is a regular message.
+    Returns True if the message is a Telegram reply to a previously-sent
+    notification (consumed without effect — no chat dispatch, no agent_messages
+    write). Returns False if it's a normal chat message.
 
-    Flow:
-      1. Message must be a Telegram reply (reply_to_message present)
-      2. Sender must be admin (Musa)
-      3. Look up notification_log by telegram_msg_id
-      4. Parse agent_message_id from dedup_key
-      5. Post reply to agent_messages as from_agent='cai'
-      6. Confirm to Musa
+    Function name + handler call site preserved so re-enabling is a localized
+    change. To send a substantive cai response, open cai's session.
     """
     if not is_admin(user):
         return False
@@ -2482,23 +2477,14 @@ async def _maybe_relay_cai_reply(update: Update, user: dict, user_msg: str) -> b
             orig_subject = orig_result.data[0].get("subject") or ""
             orig_from = orig_result.data[0].get("from_agent") or "cc-ihsanos"
 
-        # Post Musa's reply as cai's response
-        reply_subject = f"Re: {orig_subject}" if orig_subject else "cai reply"
-        await supabase.table("agent_messages").insert({
-            "from_agent": "cai",
-            "to_agent": orig_from,  # reply back to whoever asked (usually cc-ihsanos)
-            "message_type": "update",
-            "subject": reply_subject[:200],
-            "body": user_msg,
-            "requires_response": False,
-        }).execute()
-
+        # MUSA-2026-05-03: relay disabled. Mis-attribution by design — a
+        # Telegram one-liner was getting filed with cai's substrate weight.
+        # Reply is silently consumed (no agent_messages write, no AI chat
+        # dispatch). To send a substantive cai response, open cai's session.
+        _ = (orig_subject, orig_from, agent_message_id)  # preserved for re-enable
         logger.info(
-            f"cai relay: Musa reply → agent_messages "
-            f"(original msg_id={agent_message_id}, to={orig_from!r})"
-        )
-        await update.message.reply_text(
-            f"\u2705 Posted to cc-ihsanos as cai reply\n\nRe: {orig_subject[:80]}"
+            f"notification reply consumed (relay disabled): "
+            f"replied_msg_id={replied_msg_id}"
         )
         return True
 

@@ -39,6 +39,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from nervous_system import error_tracker
+from nervous_system.alert_format import format_alert
 
 logger = logging.getLogger("wingmen.orch_self_audit")
 
@@ -116,14 +117,23 @@ async def _audit_writer_health(
     if await _check_dedup(supabase, dedup_key):
         return
 
-    msg = (
-        f"⚠️ orch_self_audit: repo_context_writer stale\n\n"
-        f"No repo_context row updated in {stale_minutes or 'unknown'} min "
-        f"(threshold {_WRITER_STALE_MINUTES} min).\n"
-        f"Most recent: {most_recent}\n\n"
-        f"Likely silent-failure in nervous_system/repo_context_writer. "
-        f"Inspect orch.log for 'repo_context_writer' entries; "
-        f"check schema vs writer payload alignment."
+    msg = format_alert(
+        title="Repo state-tracker has stopped updating",
+        what=(
+            f"The orchestrator's repo state cache hasn't been refreshed for "
+            f"{stale_minutes or 'unknown'} minutes (it normally updates every 15)."
+        ),
+        why=(
+            "If the writer is silently failing, downstream features that read "
+            "boot_briefing or repo_context (e.g. bug pipeline, deploy verifier) "
+            "are working off stale data."
+        ),
+        do=(
+            "Check orch.log for recent 'repo_context_writer' lines — they'll "
+            "show whether the writer is crashing or just missing rows."
+        ),
+        detail=f"Threshold {_WRITER_STALE_MINUTES} min; most-recent updated_at: {most_recent}",
+        ref="CAI-RESP-093",
     )
     await _send_and_log(
         supabase,
@@ -159,15 +169,22 @@ async def _audit_bridge_tier3_volume(
     if await _check_dedup(supabase, dedup_key):
         return
 
-    msg = (
-        f"⚠️ orch_self_audit: Tier-3 fallback volume above threshold\n\n"
-        f"{count} bridge_tier3_misroute firings in last 24h "
-        f"(threshold {_TIER3_VOLUME_THRESHOLD}).\n\n"
-        f"CAI persona-discipline drift on CAI-PROCESS-ROUTING-001. "
-        f"strategic_decisions are being filed without announce_to_agent or "
-        f"parent_msg_id, falling through to cc-ihsanos legacy default. "
-        f"Query notification_log WHERE source='bridge_tier3_misroute' "
-        f"in last 24h for offending decision_refs."
+    msg = format_alert(
+        title="CAI decisions getting mis-routed",
+        what=(
+            f"{count} of CAI's recent decisions in the last 24h were delivered "
+            f"to cc-ihsanos as a default because they didn't say who they were for."
+        ),
+        why=(
+            "Some of those probably needed cc-orchestrator or cc-scholar instead — "
+            "they may not have seen rulings that affect them."
+        ),
+        do=(
+            "Nudge CAI to populate announce_to_agent on her strategic_decisions "
+            "filings going forward."
+        ),
+        detail=f"Threshold {_TIER3_VOLUME_THRESHOLD}/24h; query notification_log WHERE source='bridge_tier3_misroute'",
+        ref="CAI-PROCESS-ROUTING-001",
     )
     await _send_and_log(
         supabase,
@@ -227,15 +244,28 @@ async def _audit_migration_consistency(
     if await _check_dedup(supabase, dedup_key):
         return
 
-    msg = (
-        f"⚠️ orch_self_audit: migration drift detected\n\n"
-        f"{len(missing)} .sql file(s) in supabase/migrations/ have no "
-        f"matching row in schema_migrations:\n"
-        + "\n".join(f"  - {n}" for n in missing[:10])
+    file_list = (
+        "\n".join(f"  - {n}" for n in missing[:10])
         + (f"\n  (+{len(missing) - 10} more)" if len(missing) > 10 else "")
-        + "\n\nMigration may have been merged to main but never applied to "
-          "remote Supabase. Apply via psycopg + record in schema_migrations, "
-          "or remove the file if intentionally orphaned."
+    )
+    msg = format_alert(
+        title="Migration files merged but not applied",
+        what=(
+            f"{len(missing)} .sql migration file(s) exist in source-control "
+            f"but were never applied to the live Supabase database."
+        ),
+        why=(
+            "The schema in main is ahead of what's actually running. "
+            "Code that depends on those columns/tables will hit "
+            "'column does not exist' errors at runtime."
+        ),
+        do=(
+            "Either apply the migrations via psycopg (and record in "
+            "schema_migrations) or delete the .sql files if they were "
+            "intentionally orphaned."
+        ),
+        detail=f"Missing files:\n{file_list}",
+        ref="ORCH-SELF-AUDIT",
     )
     await _send_and_log(
         supabase,
@@ -306,16 +336,26 @@ async def _audit_scheduled_sweep_drift(
         dedup_key = f"orch_self_audit:sweep_drift:{r['id']}:{_dedup_bucket(now)}"
         if await _check_dedup(supabase, dedup_key):
             continue
-        msg = (
-            f"⚠️ orch_self_audit: Section D guardrail violation suspected\n\n"
-            f"agent_messages #{r['id']} ({r.get('from_agent')} → {r.get('to_agent')})\n"
-            f"responded_at within {int(delta)}s of read_at "
-            f"(threshold {_SWEEP_DRIFT_WINDOW_SECONDS}s)\n"
-            f"Subject: {(r.get('subject') or '')[:80]}\n\n"
-            f"Per CAI-PROCESS-INBOX-CADENCE-001 Section D: scheduled-sweep "
-            f"MUST NOT set responded_at. Likely a /scheduled CC session "
-            f"violated the prompt template. Inspect the source agent's "
-            f"sweep prompt + recent session digests."
+        msg = format_alert(
+            title="A scheduled CC sweep may be misbehaving",
+            what=(
+                f"Message #{r['id']} ({r.get('from_agent')} → {r.get('to_agent')}) "
+                f"got marked read AND responded within {int(delta)}s — that's a "
+                f"signature of a scheduled-sweep CC writing both fields when it "
+                f"should only mark read."
+            ),
+            why=(
+                "Scheduled sweeps aren't supposed to write substantive responses "
+                "(Section D). If one is, downstream agents may see fake replies "
+                "they didn't actually get."
+            ),
+            do=(
+                f"Check {r.get('to_agent')}'s recent session digests + their "
+                f"scheduled-sweep prompt. Tighten the prompt if it's bypassing "
+                f"the guardrail."
+            ),
+            detail=f"Threshold {_SWEEP_DRIFT_WINDOW_SECONDS}s; subject: {(r.get('subject') or '')[:60]}",
+            ref="CAI-PROCESS-INBOX-CADENCE-001 Section D",
         )
         await _send_and_log(
             supabase,
@@ -460,16 +500,29 @@ async def _audit_anthropic_sdk_direct_call_sites(
         dedup_key = f"orch_self_audit:llm_routing:{v['file']}:{v['line']}:{_dedup_bucket(now)}"
         if await _check_dedup(supabase, dedup_key):
             continue
-        msg = (
-            f"⚠️ orch_self_audit: CAI-PROCESS-MAX-FIRST-001 violation\n\n"
-            f"Direct anthropic SDK instantiation at "
-            f"{v['file']}:{v['line']}\n"
-            f"Model: {v.get('model') or '(not detected)'}\n"
-            f"Classification: {cls}\n"
-            f"Exempt reason: {v.get('exempt_reason') or '(none)'}\n\n"
-            f"Migrate to ai_provider.cli_route OR add comment near the call site:\n"
-            f"  # llm_route_exempt: <one of {sorted(_LLM_ROUTE_EXEMPT_REASONS)}>\n"
-            f"with rationale matching one of the 5 carve-outs."
+        msg = format_alert(
+            title="New code is burning Anthropic API credits",
+            what=(
+                f"Found a direct Anthropic API call at {v['file']}:{v['line']} "
+                f"that doesn't qualify for any of the 5 cost carve-outs."
+            ),
+            why=(
+                "This call routes to your API key (auto-recharge credits) "
+                "instead of the Max plan that's already paid for. Every call "
+                "costs real money."
+            ),
+            do=(
+                "Either migrate the caller to ai_provider.call_ai (CLI-route, "
+                "Max-covered) OR if it genuinely needs a carve-out, annotate "
+                "with `# llm_route_exempt: <reason>` near the call site."
+            ),
+            detail=(
+                f"Model: {v.get('model') or '(not detected)'}; "
+                f"Classification: {cls}; "
+                f"Exempt: {v.get('exempt_reason') or '(none)'}; "
+                f"Valid reasons: {sorted(_LLM_ROUTE_EXEMPT_REASONS)}"
+            ),
+            ref="CAI-PROCESS-MAX-FIRST-001",
         )
         await _send_and_log(
             supabase,
