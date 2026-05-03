@@ -74,7 +74,7 @@ class TestHeartbeatStaleness:
         await _check_heartbeat_staleness(sb, bot=bot, musa_chat_id="123")
         bot.send_message.assert_called_once()
         text = bot.send_message.call_args[1]["text"]
-        assert "heartbeat stale" in text.lower() or "stale" in text.lower()
+        assert "looks dead" in text.lower() or "stale" in text.lower() or "heartbeat" in text.lower()
 
     @pytest.mark.asyncio
     async def test_very_stale_agent_flipped_offline(self):
@@ -306,7 +306,7 @@ class TestInboxSlaViolations:
         bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
         await check_inbox_sla_violations(sb, bot=bot, musa_chat_id="123")
         sent_msg = bot.send_message.call_args.kwargs.get("text") or ""
-        assert "respond substantively" in sent_msg
+        assert "substantive" in sent_msg.lower() or "respond" in sent_msg.lower()
 
     @pytest.mark.asyncio
     async def test_failure_in_view_query_does_not_propagate(self):

@@ -142,10 +142,10 @@ def _format_telegram_body(msg: dict) -> str | None:
 
     if requires_response:
         return (
-            f"\U0001f514 CC needs your input\n\n"
-            f"From: {from_agent}\n"
+            f"\U0001f514 {from_agent} needs your input\n\n"
             f"{subject}\n\n"
-            f"Reply to this message to respond as cai."
+            f"What to do: open cai's session and respond there. "
+            f"Replying here is no longer relayed as cai."
         )
 
     if message_type == "challenge":
