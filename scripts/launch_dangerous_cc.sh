@@ -235,17 +235,28 @@ echo ""
 # ── 3. Start background heartbeat loop ────────────────────────────────────────
 
 _heartbeat_loop() {
-    # Two heartbeats on a 5-minute cadence:
+    # Three heartbeats on a 5-minute cadence:
     #   1. agents.last_heartbeat (base id, legacy agents table) — FAIL LOUD (A2).
     #      Feeds stale_agents view + telegram /status + operator dashboards;
     #      silent failure = operator blindness. Stderr appends to a tailable
     #      size-capped log.
     #   2. agent_status.last_heartbeat (sub-tag, ARCH-035 with GUC) — best-effort.
     #      The stale_agents 15-min view-based backstop covers silent failure here.
+    #   3. ~/.wingmen/cc_active marker file (CAI-RESP-114) — touched every tick
+    #      so ai_provider._yield_if_interactive_active sees a fresh mtime and
+    #      pauses background CLI spawns while interactive sessions are alive.
+    #      Per CAI-PROCESS-MAX-FIRST-001 (d) Mitigation 2 — substrate was missing
+    #      this side because no one wrote the marker. Standalone fix authorized
+    #      in CAI-RESP-114; pre-stage so Phase 3 yield works post-Eid bootstrap.
+    mkdir -p "$HOME/.wingmen" 2>/dev/null || true
+    : > "$HOME/.wingmen/cc_active"
     local HB_ERR_LOG="/tmp/cc_heartbeat_err.log"
     local HB_ERR_CAP=10485760  # 10 MB cap (CAI-RESP-053 sub-amendment)
     while true; do
         sleep 300
+        # Refresh interactive-session marker mtime. Empty file is fine — yield
+        # mechanism only checks mtime, not content. `touch` would also work.
+        : > "$HOME/.wingmen/cc_active" 2>/dev/null || true
         # SA1 (CAI-RESP-054): rotate the heartbeat err log BEFORE truncating on
         # cap breach — error-storm is the failure mode the log exists for, and
         # truncate-in-place loses the last 10MB of evidence at that moment.
@@ -440,6 +451,13 @@ _handle_exit() {
 
     # Kill background loops immediately
     [ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null || true
+
+    # Remove the interactive-session marker so Phase 3 sweeps stop yielding.
+    # If the marker stayed, a crashed session that didn't restart would block
+    # all background CLI spawns indefinitely (yield mechanism keeps polling
+    # until mtime > threshold; marker without active heartbeat refresh would
+    # eventually go stale on its own, but explicit removal is cleaner).
+    rm -f "$HOME/.wingmen/cc_active" 2>/dev/null || true
 
     local session_end_epoch
     session_end_epoch="$(date -u +%s)"
