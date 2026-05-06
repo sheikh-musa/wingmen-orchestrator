@@ -113,6 +113,23 @@ def _arch030_escalation_enabled() -> bool:
     )
 
 
+def _ralph_runner_enabled() -> bool:
+    """Operator kill-switch for ralphy. When false, pick_next_jobs returns []
+    so no queued bug-fix jobs get claimed. Existing 'running' jobs continue
+    to completion; new bug_reports still create queued rows but they wait.
+
+    Default true (preserves prior behaviour). Set RALPH_RUNNER_ENABLED=false
+    in .env (or via launchctl env override) to disable without restart —
+    the flag is read at every poll iteration.
+
+    Per Musa 2026-05-06: pause ralphy indefinitely while CC families fix
+    user-reported bugs manually. Resume by flipping the env var back.
+    """
+    return os.environ.get("RALPH_RUNNER_ENABLED", "true").lower() not in (
+        "false", "0", "no", "off",
+    )
+
+
 _supabase = None
 _supabase_lock = asyncio.Lock()
 
@@ -497,8 +514,18 @@ async def pick_next_jobs(supabase, running_repos: set[str], max_picks: int) -> l
     """Pick up to max_picks jobs, one per repo, skipping repos with running jobs.
 
     Uses CAS pattern to prevent race conditions.
+
+    Gated on _ralph_runner_enabled() — operator kill-switch. When ralphy is
+    disabled, returns [] without touching jobs. Already-running jobs continue
+    to completion; queued jobs wait until ralphy is re-enabled.
     """
     if max_picks <= 0:
+        return []
+
+    if not _ralph_runner_enabled():
+        # No-op tick. Don't log every poll — only on first transition would
+        # be ideal, but the simpler path is to log periodically. Skip log
+        # to avoid noise; status visible via env var + paused jobs in DB.
         return []
 
     result = await (

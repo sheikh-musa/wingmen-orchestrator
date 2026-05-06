@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-04-29 09:46 SGT
+Last Updated: 2026-05-06 12:45 SGT
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
 
@@ -293,15 +293,15 @@ Spec: `docs/superpowers/specs/2026-04-18-governance-comms-pipeline-hardening-des
 Docs-only change: created `README.md` with H1 + appended `<!-- PIPELINE-TEST-001: pipeline marker 2026-04-17 -->` marker. No code paths touched, no restart required. Audit row written to `work_outputs` by orchestrator.
 
 ## Completed (Last 5)
-- [red] Job #117: hifz — [BUG] lam + alif not displaying as لا (6m 18s, deploy: N/A)
-- [green] Job #92: ihsanos — QURBAN-GAP-008 (concrete): animal_tag_id tracking (4m 22s, deploy: https://ihsanos-byiuvngpy-musaaaaaaas-projects.vercel.app)
-- [green] Job #98: ihsanos — [REVIEW-LIVE-001] Add CONTRIBUTING.md with one-line placeholder (2m 58s, deploy: https://ihsanos-aidum8r5m-musaaaaaaas-projects.vercel.app)
-- [red] Job #112: hifz — [BUG] visual audit smoke — claude end-to-end test (7m 44s, deploy: N/A)
-- [red] Job #92: ihsanos — QURBAN-GAP-008 (concrete): animal_tag_id tracking (5m 40s, deploy: N/A)
+- [green] Job #125: cosem-tdu — [BUG] Visual review failed on attendance-home: [mobile] The Attendance Overview sectio (4m 54s, deploy: N/A)
+- [green] Job #124: cosem-tdu — [BUG] Visual review failed on attendance-home: [mobile] The Attendance Overview sectio (8m 55s, deploy: N/A)
+- [red] Job #124: cosem-tdu — [BUG] Visual review failed on attendance-home: [mobile] The Attendance Overview sectio (6m 37s, deploy: N/A)
+- [red] Job #124: cosem-tdu — [BUG] Visual review failed on attendance-home: [mobile] The Attendance Overview sectio (7m 15s, deploy: N/A)
+- [green] Job #122: ihsanos — [BUG] Test bug report from E2E — please ignore (3m 52s, deploy: https://ihsanos-mg85gxd3z-musaaaaaaas-projects.vercel.app)
 
-##                       Recent Jobs (auto-tracked)
+##                               Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-29 09:46 SGT
+Last Updated: 2026-05-06 12:45 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
@@ -314,7 +314,7 @@ Last Updated: 2026-04-29 09:46 SGT
 
 ## Recent Jobs (auto-tracked)
 
-Last Updated: 2026-04-29 09:46 SGT
+Last Updated: 2026-05-06 12:45 SGT
 
 | Job | Description | Status | Deploy |
 |-----|-------------|--------|--------|
