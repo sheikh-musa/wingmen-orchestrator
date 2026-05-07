@@ -82,3 +82,45 @@ class TestRuleB:
         # Spec says "(Test)" with capital T — lower-case "(test)" should NOT match
         bug = {"description": "real bug", "reporter_name": "Foo (test) Bar"}
         assert classify(bug) is None
+
+
+class TestRuleCDropped:
+    """Rule (c) was dropped per CAI-RESP-141 CL1 (no repro_steps column).
+
+    These tests assert that the patterns rule (c) WOULD have caught now
+    pass through unclassified — protects against accidental rule (c)
+    re-introduction.
+    """
+
+    def test_empty_description_does_not_classify(self):
+        bug = {"description": "", "reporter_name": "real human"}
+        assert classify(bug) is None
+
+    def test_whitespace_only_description_does_not_classify(self):
+        bug = {"description": "   \n  ", "reporter_name": "real human"}
+        assert classify(bug) is None
+
+    def test_none_fields_do_not_crash(self):
+        bug = {"description": None, "reporter_name": None}
+        assert classify(bug) is None
+
+    def test_missing_fields_do_not_crash(self):
+        bug = {}
+        assert classify(bug) is None
+
+
+class TestNormalBugs:
+    """Realistic bug_report rows must classify as None."""
+
+    def test_real_bug_with_full_description(self):
+        bug = {
+            "description": "When selecting a vehicle the menu is cutoff at the bottom",
+            "reporter_name": "Mulifatullah Bin Atan",
+        }
+        assert classify(bug) is None
+
+    def test_terse_real_bug(self):
+        # Important: terse bugs are NOT synthetic. Rule (c) was dropped
+        # specifically because it would have falsely flagged these.
+        bug = {"description": "page crashes on load", "reporter_name": "musa"}
+        assert classify(bug) is None
