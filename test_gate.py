@@ -87,6 +87,14 @@ async def run_tests(repo_path: str, repo_name: str, job_id: int, supabase) -> di
                 return {"passed": False, "output": msg, "skipped": False}
         except asyncio.TimeoutError:
             return {"passed": False, "output": "npm install timed out after 180s", "skipped": False}
+        except FileNotFoundError as e:
+            # MissingToolDrill: catch the case where npm itself isn't on PATH.
+            # Prior code propagated this to the caller as an uncaught exception;
+            # fire_drill_missing_tool asserts that test_gate returns a failure
+            # result rather than crashing.
+            msg = f"npm not found in PATH (cannot run tests): {e}"
+            await _log_to_supabase(supabase, job_id, repo_name, msg, "error")
+            return {"passed": False, "output": msg, "skipped": False}
 
     try:
         proc = await asyncio.create_subprocess_exec(
