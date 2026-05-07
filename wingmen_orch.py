@@ -1848,7 +1848,18 @@ async def main_loop():
             bug_reports_counter += 1
             if bug_reports_counter >= 1:
                 try:
-                    await poll_bug_reports(supabase)
+                    # Pass bot + musa_chat_id so the poll can fire an immediate
+                    # intake Telegram when ralphy is paused (sub-second alert
+                    # vs ~30min queue_stall_detector floor).
+                    from telegram import Bot
+                    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+                    musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+                    bot_instance = Bot(token=bot_token) if (bot_token and musa_id) else None
+                    await poll_bug_reports(
+                        supabase,
+                        bot=bot_instance,
+                        musa_chat_id=musa_id or None,
+                    )
                 except Exception as e:
                     logger.error(f"Bug reports poll failed: {e}")
                     record_swallowed("bug_reports_poll", e)

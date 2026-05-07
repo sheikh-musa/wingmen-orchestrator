@@ -9,6 +9,7 @@ Clears dedup records when jobs leave queued status (recovery sweep).
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 
 from supabase import AsyncClient as SupabaseAsyncClient
@@ -16,8 +17,17 @@ from telegram import Bot
 
 from notification_router import get_chat_id
 from nervous_system import error_tracker
+from nervous_system.alert_format import format_alert
 
 logger = logging.getLogger("wingmen.queue_stall_detector")
+
+
+def _ralph_runner_enabled() -> bool:
+    """Mirrors wingmen_orch._ralph_runner_enabled. When false, the queue-stall
+    alert text reads as 'expected during paused mode' rather than 'malfunction'."""
+    return os.environ.get("RALPH_RUNNER_ENABLED", "true").lower() not in (
+        "false", "0", "no", "off",
+    )
 
 
 async def check_queue_stalls(supabase: SupabaseAsyncClient, bot: Bot) -> None:
@@ -55,18 +65,51 @@ async def check_queue_stalls(supabase: SupabaseAsyncClient, bot: Bot) -> None:
             logger.warning(f"Dedup check failed for {dedup_key}: {e}")
             error_tracker.track_exception("queue_stall_detector.dedup_check", e)
 
-        try:
-            await bot.send_message(
-                chat_id=cto_id,
-                text=(
-                    f"\u23f3 Job #{job['id']} queued for 30min+ \u2014 not being picked up\n\n"
-                    f"Repo: {job['repo_name']}\n"
-                    f"Task: {(job.get('description') or '')[:200]}\n"
-                    f"Priority: {job.get('priority', 'N/A')}\n"
-                    f"Queued since: {job['created_at']}\n\n"
-                    f"/cancel {job['id']} to remove from queue"
-                ),
+        ralphy_paused = not _ralph_runner_enabled()
+        if ralphy_paused:
+            what = (
+                f"Job #{job['id']} ({job['repo_name']}) has been queued for "
+                f"30+ min \u2014 ralphy is currently paused via "
+                f"RALPH_RUNNER_ENABLED=false, so this is expected."
             )
+            why = (
+                "The bug fix won't auto-run until ralphy resumes. "
+                "Surfacing so it doesn't get forgotten in the queue."
+            )
+            do = (
+                f"Either fix manually via the {job['repo_name']} CC family "
+                f"session, OR resume ralphy: flip RALPH_RUNNER_ENABLED=true "
+                f"in .env + restart orchestrator + the job claims on next poll."
+            )
+        else:
+            what = (
+                f"Job #{job['id']} ({job['repo_name']}) has been queued for "
+                f"30+ min and ralphy hasn't picked it up \u2014 this is unusual."
+            )
+            why = (
+                "Either no build slots are free (3-concurrent cap), or ralphy "
+                "hit a transient issue claiming. Either way the bug fix is stalled."
+            )
+            do = (
+                f"Check the orchestrator logs for ralph claim activity. "
+                f"`/cancel {job['id']}` to remove from queue if intentional."
+            )
+
+        alert_text = format_alert(
+            icon="\u23f3",  # \u23f3
+            title=f"Job #{job['id']} stuck in queue",
+            what=what,
+            why=why,
+            do=do,
+            detail=(
+                f"Repo: {job['repo_name']}; priority: {job.get('priority', 'N/A')}; "
+                f"queued since: {job['created_at']}; "
+                f"task: {(job.get('description') or '')[:140]}"
+            ),
+        )
+
+        try:
+            await bot.send_message(chat_id=cto_id, text=alert_text)
         except Exception as e:
             logger.error(f"Queue stall alert for job {job['id']} failed: {e}")
             error_tracker.track_exception("queue_stall_detector.send_alert", e)
