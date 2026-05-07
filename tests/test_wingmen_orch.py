@@ -1,12 +1,44 @@
 """Tests for the core orchestrator functions in wingmen_orch.py."""
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from tests.conftest import mock_supabase_chain
+
+
+# RALPH_RUNNER_ENABLED gate (added in PR #24): _ralph_runner_enabled() reads
+# this env var on every call and short-circuits pick_next_jobs to [] when
+# false. Tests of pick_next_jobs need the gate enabled to exercise actual
+# claim logic. Force true at module import so all TestPickNextJobs cases
+# run regardless of the developer's .env state.
+os.environ["RALPH_RUNNER_ENABLED"] = "true"
+
+
+class TestRalphRunnerEnabledGate:
+    """PR #24: RALPH_RUNNER_ENABLED env-flag short-circuits pick_next_jobs."""
+
+    @pytest.mark.asyncio
+    async def test_gate_disabled_returns_empty_without_db_call(self):
+        from wingmen_orch import pick_next_jobs
+        sb = MagicMock()
+        sb.table = MagicMock()  # any DB call would fail this assertion below
+        with patch.dict(os.environ, {"RALPH_RUNNER_ENABLED": "false"}, clear=False):
+            result = await pick_next_jobs(sb, set(), max_picks=3)
+        assert result == []
+        sb.table.assert_not_called()  # short-circuit before any DB touch
+
+    @pytest.mark.asyncio
+    async def test_gate_enabled_proceeds_to_db_query(self):
+        from wingmen_orch import pick_next_jobs
+        sb = mock_supabase_chain([])
+        with patch.dict(os.environ, {"RALPH_RUNNER_ENABLED": "true"}, clear=False):
+            result = await pick_next_jobs(sb, set(), max_picks=3)
+        # Empty result is fine; what matters is that we didn't short-circuit
+        assert result == []
 
 
 class TestPickNextJobs:

@@ -57,9 +57,9 @@ class TestFormatTelegram:
     def test_requires_response_urgent_format(self):
         text = _format_telegram(self._msg(requires_response=True))
         assert text is not None
-        assert "CC needs your input" in text
+        assert "needs your input" in text
         assert "cc-ihsanos" in text
-        assert "Reply to this message" in text
+        assert "open cai's session" in text or "respond there" in text
 
     def test_blocker_includes_body_snippet(self):
         text = _format_telegram(self._msg(message_type="blocker", body="x" * 300))
@@ -201,8 +201,8 @@ class TestPollAgentMessages:
         await poll_agent_messages(sb, bot=bot, musa_chat_id="123456")
         bot.send_message.assert_called_once()
         text = bot.send_message.call_args[1]["text"]
-        assert "CC needs your input" in text
-        assert "Reply to this message" in text
+        assert "needs your input" in text
+        assert "open cai's session" in text or "respond there" in text
 
     @pytest.mark.asyncio
     async def test_blocker_sends_urgent_format(self):
@@ -557,7 +557,7 @@ class TestPriorityFormat:
         ))
         assert out is not None
         assert out.startswith("\U0001f534 ")
-        assert "CC needs your input" in out
+        assert "needs your input" in out
 
 
 # ---------------------------------------------------------------------------
