@@ -212,3 +212,35 @@ def test_backfill_did_not_touch_terminal_rows():
             """)
             leaked = cur.fetchone()[0]
     assert leaked == 0, f"{leaked} terminal rows incorrectly tagged with rejected_by"
+
+
+@pytestmark_integration
+def test_boot_briefing_view_has_synthetic_filter_arms():
+    """View definition should reference synthetic_filter / filtered_24h /
+    shadow_24h after the migration."""
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute("SELECT pg_get_viewdef('boot_briefing'::regclass, true)")
+            defn = cur.fetchone()[0]
+    assert "synthetic_filter" in defn, "boot_briefing view missing synthetic_filter source"
+    assert "filtered_24h" in defn, "boot_briefing view missing filtered_24h key"
+    assert "shadow_24h" in defn, "boot_briefing view missing shadow_24h key"
+
+
+@pytestmark_integration
+def test_boot_briefing_synthetic_filter_zero_count_omitted():
+    """When no synthetic_filter notification_log entries exist in 24h,
+    the boot_briefing view rows should be ABSENT (HAVING count > 0)."""
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute("""
+                DELETE FROM notification_log
+                 WHERE source='synthetic_filter'
+                   AND created_at >= now() - interval '24 hours'
+            """)
+            cur.execute("""
+                SELECT key FROM boot_briefing
+                 WHERE source = 'synthetic_filter'
+            """)
+            keys = [r[0] for r in cur.fetchall()]
+    assert keys == [], f"expected no synthetic_filter rows when log empty, got {keys}"
