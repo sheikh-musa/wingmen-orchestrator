@@ -119,3 +119,63 @@ def test_shadow_mode_writes_notification_log_does_not_update_bug():
             await supabase.table("bug_reports").delete().eq("id", bug_id).execute()
 
     asyncio.run(_run())
+
+
+@pytestmark_integration
+def test_enforce_mode_writes_log_and_rejects_bug():
+    """In enforce mode, apply_classification logs AND sets status='rejected'
+    + rejection_reason + rejected_at + rejected_by."""
+
+    async def _run():
+        from nervous_system.synthetic_filter import (
+            SyntheticClassification, apply_classification,
+        )
+        from supabase import acreate_client
+        from dotenv import dotenv_values
+
+        _env = dotenv_values(Path(__file__).parent.parent / ".env")
+        url = _env.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+        key = _env.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+        assert url and key, "SUPABASE_URL + SUPABASE_SERVICE_KEY required for integration tests"
+        assert "test.supabase.co" not in url, "Real SUPABASE_URL required, got test stub"
+        supabase = await acreate_client(url, key)
+
+        bug_id = str(uuid.uuid4())
+        test_marker = f"synthfilter-test-{uuid.uuid4().hex[:8]}"
+        insert_resp = await supabase.table("bug_reports").insert({
+            "id": bug_id,
+            "reporter_name": f"{test_marker} (Test)",
+            "reporter_source": "web",
+            "auth_provider": "none",
+            "repo_name": "cosem-tdu",
+            "description": "test",
+            "status": "new",
+        }).execute()
+        assert insert_resp.data
+
+        try:
+            classification = SyntheticClassification(
+                rule="b_test_reporter",
+                matched_text=f"{test_marker} (Test)",
+            )
+            bug = insert_resp.data[0]
+
+            await apply_classification(supabase, bug, classification, mode="enforce")
+
+            check = await supabase.table("bug_reports").select(
+                "status, rejection_reason, rejected_at, rejected_by"
+            ).eq("id", bug_id).execute()
+            row = check.data[0]
+            assert row["status"] == "rejected"
+            assert row["rejection_reason"] == "synthetic_e2e_test"
+            assert row["rejected_at"] is not None
+            assert row["rejected_by"] == "cc-orchestrator-filter"
+
+            log_check = await supabase.table("notification_log").select("message_text").eq("recipient", bug_id).execute()
+            msg = json.loads(log_check.data[0]["message_text"])
+            assert msg["mode"] == "enforce"
+        finally:
+            await supabase.table("notification_log").delete().eq("recipient", bug_id).execute()
+            await supabase.table("bug_reports").delete().eq("id", bug_id).execute()
+
+    asyncio.run(_run())

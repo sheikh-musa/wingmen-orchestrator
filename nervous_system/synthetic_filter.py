@@ -77,6 +77,7 @@ def _filter_mode() -> Literal["shadow", "enforce"]:
 
 import json
 import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger("wingmen.synthetic_filter")
 
@@ -118,6 +119,14 @@ async def apply_classification(
         "recipient": bug_id,
         "message_text": json.dumps(log_payload),
     }).execute()
+
+    if mode == "enforce":
+        await supabase.table("bug_reports").update({
+            "status": "rejected",
+            "rejection_reason": classification.reason,
+            "rejected_at": datetime.now(timezone.utc).isoformat(),
+            "rejected_by": _REJECTED_BY,
+        }).eq("id", bug_id).execute()
 
     logger.info(
         f"synthetic_filter: bug {bug_id} classified rule={classification.rule} "
