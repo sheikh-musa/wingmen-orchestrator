@@ -171,6 +171,32 @@ UNION ALL
     AND created_at >= now() - interval '24 hours'
   HAVING count(*) > 0;
 
+-- Section 4: assertion gate — fail loud per CAI-RESP-080 CHALLENGE-1
+DO $$
+DECLARE
+    backfilled_count INT;
+    view_def TEXT;
+    arm_count INT;
+BEGIN
+    -- Assert backfill flipped at least one row
+    SELECT count(*) INTO backfilled_count
+      FROM bug_reports
+     WHERE rejected_by = 'cc-orchestrator-filter-backfill';
+    IF backfilled_count = 0 THEN
+        RAISE WARNING 'synthetic-filter backfill matched 0 rows — patterns may be wrong (or this is a fresh DB)';
+    ELSE
+        RAISE NOTICE 'synthetic-filter backfill: % rows flipped to status=rejected', backfilled_count;
+    END IF;
+
+    -- Assert boot_briefing view contains both new UNION arms
+    SELECT pg_get_viewdef('boot_briefing'::regclass, true) INTO view_def;
+    SELECT (regexp_count(view_def, 'synthetic_filter')) INTO arm_count;
+    IF arm_count < 2 THEN
+        RAISE EXCEPTION 'boot_briefing view missing synthetic_filter UNION arms — only % occurrences found', arm_count;
+    END IF;
+    RAISE NOTICE 'boot_briefing view: % synthetic_filter references found', arm_count;
+END $$;
+
 COMMIT;
 
 INSERT INTO supabase_migrations.schema_migrations (version, name, statements)
