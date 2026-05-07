@@ -73,3 +73,53 @@ def _filter_mode() -> Literal["shadow", "enforce"]:
             in ("true", "1", "yes", "on"):
         return "enforce"
     return "shadow"
+
+
+import json
+import logging
+
+logger = logging.getLogger("wingmen.synthetic_filter")
+
+_DECISION_REF = "BUG-PIPELINE-SYNTHETIC-FILTER-001"
+_REJECTED_BY = "cc-orchestrator-filter"
+
+
+async def apply_classification(
+    supabase,
+    bug: dict,
+    classification: SyntheticClassification,
+    mode: Literal["shadow", "enforce"],
+) -> None:
+    """Apply a classification result.
+
+    - Writes a notification_log entry (always, both modes).
+    - In enforce mode: ALSO updates bug_reports.status='rejected' + audit fields.
+      (Enforce path lands in Task 7 — this commit is shadow path only.)
+    - boot_briefing counters are computed by the view from notification_log
+      on read — no Python-side counter writes needed.
+    """
+    bug_id = bug["id"]
+    desc_excerpt = (bug.get("description") or "")[:80]
+
+    log_payload = {
+        "bug_id": bug_id,
+        "rule": classification.rule,
+        "matched_text": classification.matched_text,
+        "mode": mode,
+        "would_reject": True,
+        "reporter_name": bug.get("reporter_name"),
+        "description_excerpt": desc_excerpt,
+    }
+
+    await supabase.table("notification_log").insert({
+        "source": "synthetic_filter",
+        "decision_ref": _DECISION_REF,
+        "channel": "bug_reports",
+        "recipient": bug_id,
+        "message_text": json.dumps(log_payload),
+    }).execute()
+
+    logger.info(
+        f"synthetic_filter: bug {bug_id} classified rule={classification.rule} "
+        f"mode={mode} reporter={bug.get('reporter_name')!r}"
+    )
