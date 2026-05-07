@@ -24,8 +24,19 @@ avoid overwhelming the review queue.
 from __future__ import annotations
 
 import logging
+import os
+
+from nervous_system.alert_format import format_alert
 
 logger = logging.getLogger("wingmen.bug_reports_poll")
+
+
+def _ralph_runner_enabled() -> bool:
+    """Mirrors wingmen_orch._ralph_runner_enabled — read on demand so a flip
+    in .env takes effect without restarting bug_reports_poll callers."""
+    return os.environ.get("RALPH_RUNNER_ENABLED", "true").lower() not in (
+        "false", "0", "no", "off",
+    )
 
 
 def _build_spec(bug: dict) -> str:
@@ -64,11 +75,16 @@ codebase. Do not guess at the root cause — read the relevant files first.
 """
 
 
-async def poll_bug_reports(supabase) -> None:
+async def poll_bug_reports(supabase, bot=None, musa_chat_id: str | None = None) -> None:
     """Pick up new bug reports and create pending_review jobs.
 
     Called every main loop iteration (~30s). Processes up to 3 per cycle.
     Both bug_reports and jobs are in the orchestrator Supabase project.
+
+    When ralphy is paused (RALPH_RUNNER_ENABLED=false) AND bot+musa_chat_id
+    are provided, fires an immediate Telegram alert per intake — operator
+    knows manual triage is needed within seconds rather than waiting for
+    queue_stall_detector to fire ~30 min later.
     """
     try:
         result = await (
@@ -130,6 +146,38 @@ async def poll_bug_reports(supabase) -> None:
                     f"bug_reports_poll: bug {bug_id} → job #{job_id} "
                     f"({repo_name} — {description[:50]})"
                 )
+
+                # If ralphy is paused, fire immediate Telegram so operator
+                # knows manual triage is needed. Without this, the operator
+                # would only learn ~30min later when queue_stall_detector
+                # fires its threshold alert.
+                if not _ralph_runner_enabled() and bot is not None and musa_chat_id:
+                    try:
+                        reporter = bug.get("reporter_name") or "(unknown)"
+                        alert_text = format_alert(
+                            icon="\U0001f7e1",  # 🟡 — yellow disk to match other intake alerts
+                            title=f"New bug needs manual triage ({repo_name})",
+                            what=(
+                                f"User '{reporter}' just filed a bug; ralphy is currently "
+                                f"paused via RALPH_RUNNER_ENABLED=false so no auto-fix "
+                                f"will run."
+                            ),
+                            why=(
+                                "Without manual triage, the bug will sit in 'diagnosing' "
+                                "state indefinitely (queue_stall_detector still fires at "
+                                "~30 min, but that's slow signal)."
+                            ),
+                            do=(
+                                f"Open the relevant CC family session ({repo_name}) and fix "
+                                f"manually, OR resume ralphy by flipping RALPH_RUNNER_ENABLED=true "
+                                f"in .env + restart orchestrator."
+                            ),
+                            detail=f"bug_id={str(bug_id)[:8]} job_id={job_id} desc: {description[:80]}",
+                        )
+                        await bot.send_message(chat_id=musa_chat_id, text=alert_text)
+                    except Exception as e:
+                        logger.warning(f"bug_reports_poll: paused-intake alert failed: {e}")
+                        # Fail open — bug is already in DB, queue_stall picks up later.
 
             except Exception as e:
                 logger.error(f"bug_reports_poll: failed processing bug {bug_id}: {e}")
