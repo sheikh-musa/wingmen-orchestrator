@@ -37,6 +37,27 @@ VALID_TRANSITIONS = {
 }
 
 
+def _detect_is_test(reporter_name: str, description: str) -> bool:
+    """PR #28: pattern-detect synthetic test intake at the bug-report layer.
+
+    Three patterns mark a bug as test-shaped (must mirror the SQL backfill
+    in 20260507_bug_reports_is_test.sql exactly so backfill-vs-intake match):
+      - reporter_name ends in "(Test)" — manually-flagged test client
+      - reporter_name matches "cc-*-e2e" — automated CC-family e2e suite
+      - description contains "please ignore" (case-insensitive) —
+        explicit operator hint in the bug body
+    """
+    rn = reporter_name or ""
+    desc = (description or "").lower()
+    if rn.endswith("(Test)"):
+        return True
+    if rn.startswith("cc-") and rn.endswith("-e2e"):
+        return True
+    if "please ignore" in desc:
+        return True
+    return False
+
+
 async def create_bug_report(
     supabase: SupabaseAsyncClient,
     *,
@@ -51,7 +72,13 @@ async def create_bug_report(
     page_url: str | None = None,
     severity: str | None = None,
 ) -> dict:
-    """Create a new bug report and kick off diagnosis."""
+    """Create a new bug report and kick off diagnosis.
+
+    Test-shaped intake (e2e suites, "(Test)" clients, "please ignore"
+    descriptions per _detect_is_test) gets is_test=true at insert time,
+    which causes bug_reports_poll to skip the job-spawn path. The
+    bug_reports row stays for forensics; no ralph job is created.
+    """
 
     # Dedup: check for similar open bugs in the last 24h
     existing = await supabase.table("bug_reports") \
@@ -82,6 +109,7 @@ async def create_bug_report(
         "screenshot_url": screenshot_url,
         "page_url": page_url,
         "status": "new",
+        "is_test": _detect_is_test(reporter_name, description),
     }
     if severity:
         insert_data["severity"] = severity

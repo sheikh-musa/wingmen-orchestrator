@@ -87,6 +87,9 @@ async def poll_bug_reports(supabase, bot=None, musa_chat_id: str | None = None) 
     queue_stall_detector to fire ~30 min later.
     """
     try:
+        # PR #28: skip is_test=true rows so e2e/test-pipeline intake
+        # doesn't create ralph jobs. Test rows stay in 'new' for
+        # forensics; no operator-attention surface fires.
         result = await (
             supabase.table("bug_reports")
             .select(
@@ -94,6 +97,7 @@ async def poll_bug_reports(supabase, bot=None, musa_chat_id: str | None = None) 
                 "reporter_name, reporter_email, created_at"
             )
             .eq("status", "new")
+            .eq("is_test", False)
             .is_("job_id", "null")
             .order("created_at", desc=False)
             .limit(3)
