@@ -56,3 +56,20 @@ def classify(bug: dict) -> Optional[SyntheticClassification]:
         )
 
     return None
+
+
+def _filter_enabled() -> bool:
+    """Kill-switch. Set ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED=false to bypass
+    the filter entirely and revert to PR #28-only behavior. Default: true."""
+    return os.environ.get("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", "true").lower() \
+        not in ("false", "0", "no", "off")
+
+
+def _filter_mode() -> Literal["shadow", "enforce"]:
+    """Mode toggle. Default 'shadow' — classify and log only, do not block
+    dispatch. Set ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE=true to flip to
+    'enforce' — classify, log, AND set bug_reports.status='rejected'."""
+    if os.environ.get("ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE", "false").lower() \
+            in ("true", "1", "yes", "on"):
+        return "enforce"
+    return "shadow"
