@@ -21,6 +21,22 @@ COMMENT ON COLUMN bug_reports.rejected_by IS
   'cc-orchestrator-filter-backfill, or operator). '
   'Per BUG-PIPELINE-SYNTHETIC-FILTER-001 (2026-05-08).';
 
+-- Section 2: backfill historical synthetic rows
+-- Per rule-scope-A decision: union of cai's rules (a) + (b) AND PR #28's
+-- is_test=true sweep. Non-terminal status only (new, diagnosing). Skips
+-- already-rejected/deployed/verified rows.
+UPDATE bug_reports
+   SET status            = 'rejected',
+       rejection_reason  = COALESCE(rejection_reason, 'synthetic_e2e_test'),
+       rejected_at       = now(),
+       rejected_by       = 'cc-orchestrator-filter-backfill'
+ WHERE status IN ('new', 'diagnosing')
+   AND (
+     description ~* '^E2E test bug report\.?\s*$'
+     OR reporter_name LIKE '%(Test)%'
+     OR is_test = true
+   );
+
 COMMIT;
 
 INSERT INTO supabase_migrations.schema_migrations (version, name, statements)

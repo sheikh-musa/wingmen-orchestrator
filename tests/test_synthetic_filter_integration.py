@@ -179,3 +179,36 @@ def test_enforce_mode_writes_log_and_rejects_bug():
             await supabase.table("bug_reports").delete().eq("id", bug_id).execute()
 
     asyncio.run(_run())
+
+
+@pytestmark_integration
+def test_backfill_flipped_existing_synthetic_to_rejected():
+    """Section 2 backfill: rows matching cai a/b OR PR #28 is_test=true,
+    in non-terminal status, must now have status='rejected' + audit fields."""
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute("""
+                SELECT count(*) FROM bug_reports
+                 WHERE rejected_by = 'cc-orchestrator-filter-backfill'
+                   AND rejection_reason = 'synthetic_e2e_test'
+                   AND status = 'rejected'
+            """)
+            backfilled = cur.fetchone()[0]
+    assert backfilled > 0, (
+        "expected backfill to flip at least one historical row "
+        "(cc-x-e2e + (Test) reporters known to exist)"
+    )
+
+
+@pytestmark_integration
+def test_backfill_did_not_touch_terminal_rows():
+    """Backfill must not flip already-rejected/deployed/verified rows."""
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute("""
+                SELECT count(*) FROM bug_reports
+                 WHERE status IN ('verified', 'deployed')
+                   AND rejected_by IS NOT NULL
+            """)
+            leaked = cur.fetchone()[0]
+    assert leaked == 0, f"{leaked} terminal rows incorrectly tagged with rejected_by"
