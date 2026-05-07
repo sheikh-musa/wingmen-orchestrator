@@ -39,12 +39,20 @@ def classify(bug: dict) -> Optional[SyntheticClassification]:
     Returns a SyntheticClassification if any rule matches.
     """
     description = (bug.get("description") or "").strip()
+    reporter_name = bug.get("reporter_name") or ""
 
     # Rule (a): E2E placeholder phrase
     if _RULE_A_PATTERN.match(description):
         return SyntheticClassification(
             rule="a_e2e_placeholder",
             matched_text=description,
+        )
+
+    # Rule (b): reporter contains "(Test)" substring (case-sensitive parens)
+    if "(Test)" in reporter_name:
+        return SyntheticClassification(
+            rule="b_test_reporter",
+            matched_text=reporter_name,
         )
 
     return None

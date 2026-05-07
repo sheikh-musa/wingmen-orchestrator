@@ -46,3 +46,39 @@ class TestRuleA:
         bug = {"description": "E2E test bug report — actually broken", "reporter_name": "real human"}
         result = classify(bug)
         assert result is None
+
+
+class TestRuleB:
+    """Rule (b): reporter_name contains substring '(Test)' (parens included)."""
+
+    def test_test_suffix_classifies(self):
+        bug = {"description": "real bug", "reporter_name": "BAPA Admin (Test)"}
+        result = classify(bug)
+        assert result is not None
+        assert result.rule == "b_test_reporter"
+        assert result.matched_text == "BAPA Admin (Test)"
+
+    def test_test_prefix_classifies(self):
+        bug = {"description": "real bug", "reporter_name": "(Test) Account"}
+        result = classify(bug)
+        assert result is not None
+        assert result.rule == "b_test_reporter"
+
+    def test_test_middle_classifies(self):
+        bug = {"description": "real bug", "reporter_name": "Foo (Test) Bar"}
+        result = classify(bug)
+        assert result is not None
+        assert result.rule == "b_test_reporter"
+
+    def test_test_word_without_parens_does_not_match(self):
+        bug = {"description": "real bug", "reporter_name": "Test User"}
+        assert classify(bug) is None
+
+    def test_my_test_user_does_not_match(self):
+        bug = {"description": "real bug", "reporter_name": "MyTest User"}
+        assert classify(bug) is None
+
+    def test_case_sensitive_parens(self):
+        # Spec says "(Test)" with capital T — lower-case "(test)" should NOT match
+        bug = {"description": "real bug", "reporter_name": "Foo (test) Bar"}
+        assert classify(bug) is None
