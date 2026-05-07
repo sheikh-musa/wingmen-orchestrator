@@ -244,3 +244,112 @@ def test_boot_briefing_synthetic_filter_zero_count_omitted():
             """)
             keys = [r[0] for r in cur.fetchall()]
     assert keys == [], f"expected no synthetic_filter rows when log empty, got {keys}"
+
+
+@pytestmark_integration
+def test_poll_shadow_mode_logs_but_dispatches(monkeypatch):
+    """In shadow mode, a synthetic bug should: (a) be classified+logged,
+    (b) STILL get a job created (dispatch proceeds)."""
+
+    async def _run():
+        from supabase import acreate_client
+        from dotenv import dotenv_values
+        from nervous_system.bug_reports_poll import poll_bug_reports
+
+        monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", "true")
+        monkeypatch.delenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE", raising=False)
+
+        _env = dotenv_values(Path(__file__).parent.parent / ".env")
+        url = _env.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+        key = _env.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+        assert url and "test.supabase.co" not in url
+        supabase = await acreate_client(url, key)
+
+        bug_id = str(uuid.uuid4())
+        test_marker = f"synthfilter-poll-{uuid.uuid4().hex[:8]}"
+        await supabase.table("bug_reports").insert({
+            "id": bug_id,
+            "reporter_name": f"{test_marker} (Test)",
+            "reporter_source": "web",
+            "auth_provider": "none",
+            "repo_name": "cosem-tdu",
+            "description": "real text",
+            "status": "new",
+        }).execute()
+
+        try:
+            await poll_bug_reports(supabase)
+
+            check = await supabase.table("bug_reports").select(
+                "status, job_id"
+            ).eq("id", bug_id).execute()
+            row = check.data[0]
+            assert row["status"] == "diagnosing", \
+                f"shadow mode should dispatch, got status={row['status']}"
+            assert row["job_id"] is not None
+
+            log_check = await supabase.table("notification_log").select(
+                "message_text"
+            ).eq("recipient", bug_id).execute()
+            assert len(log_check.data) == 1
+            msg = json.loads(log_check.data[0]["message_text"])
+            assert msg["mode"] == "shadow"
+        finally:
+            check = await supabase.table("bug_reports").select("job_id").eq("id", bug_id).execute()
+            job_id_to_delete = check.data[0].get("job_id") if check.data else None
+            # Null out the FK reference before deleting the job to avoid constraint error.
+            if job_id_to_delete:
+                await supabase.table("bug_reports").update({"job_id": None}).eq("id", bug_id).execute()
+                await supabase.table("jobs").delete().eq("id", job_id_to_delete).execute()
+            await supabase.table("notification_log").delete().eq("recipient", bug_id).execute()
+            await supabase.table("bug_reports").delete().eq("id", bug_id).execute()
+
+    asyncio.run(_run())
+
+
+@pytestmark_integration
+def test_poll_enforce_mode_rejects_does_not_dispatch(monkeypatch):
+    """In enforce mode, a synthetic bug should be rejected and NOT dispatched."""
+
+    async def _run():
+        from supabase import acreate_client
+        from dotenv import dotenv_values
+        from nervous_system.bug_reports_poll import poll_bug_reports
+
+        monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", "true")
+        monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE", "true")
+
+        _env = dotenv_values(Path(__file__).parent.parent / ".env")
+        url = _env.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+        key = _env.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+        assert url and "test.supabase.co" not in url
+        supabase = await acreate_client(url, key)
+
+        bug_id = str(uuid.uuid4())
+        test_marker = f"synthfilter-poll-{uuid.uuid4().hex[:8]}"
+        await supabase.table("bug_reports").insert({
+            "id": bug_id,
+            "reporter_name": f"{test_marker} (Test)",
+            "reporter_source": "web",
+            "auth_provider": "none",
+            "repo_name": "cosem-tdu",
+            "description": "real text",
+            "status": "new",
+        }).execute()
+
+        try:
+            await poll_bug_reports(supabase)
+
+            check = await supabase.table("bug_reports").select(
+                "status, job_id, rejection_reason, rejected_by"
+            ).eq("id", bug_id).execute()
+            row = check.data[0]
+            assert row["status"] == "rejected"
+            assert row["job_id"] is None
+            assert row["rejection_reason"] == "synthetic_e2e_test"
+            assert row["rejected_by"] == "cc-orchestrator-filter"
+        finally:
+            await supabase.table("notification_log").delete().eq("recipient", bug_id).execute()
+            await supabase.table("bug_reports").delete().eq("id", bug_id).execute()
+
+    asyncio.run(_run())
