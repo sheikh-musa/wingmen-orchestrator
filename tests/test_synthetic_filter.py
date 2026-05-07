@@ -126,7 +126,7 @@ class TestNormalBugs:
         assert classify(bug) is None
 
 
-from nervous_system.synthetic_filter import _filter_enabled, _filter_mode
+from nervous_system.synthetic_filter import filter_enabled, filter_mode
 
 
 class TestModeHelpers:
@@ -135,32 +135,32 @@ class TestModeHelpers:
 
     def test_default_enabled(self, monkeypatch):
         monkeypatch.delenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", raising=False)
-        assert _filter_enabled() is True
+        assert filter_enabled() is True
 
     def test_default_mode_shadow(self, monkeypatch):
         monkeypatch.delenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE", raising=False)
-        assert _filter_mode() == "shadow"
+        assert filter_mode() == "shadow"
 
     def test_disabled_via_false(self, monkeypatch):
         monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", "false")
-        assert _filter_enabled() is False
+        assert filter_enabled() is False
 
     def test_disabled_via_off(self, monkeypatch):
         monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", "off")
-        assert _filter_enabled() is False
+        assert filter_enabled() is False
 
     def test_disabled_case_insensitive(self, monkeypatch):
         monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", "FALSE")
-        assert _filter_enabled() is False
+        assert filter_enabled() is False
 
     def test_enforce_when_true(self, monkeypatch):
         monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE", "true")
-        assert _filter_mode() == "enforce"
+        assert filter_mode() == "enforce"
 
     def test_enforce_when_one(self, monkeypatch):
         monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE", "1")
-        assert _filter_mode() == "enforce"
+        assert filter_mode() == "enforce"
 
     def test_unrecognized_value_treated_as_shadow(self, monkeypatch):
         monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE", "maybe")
-        assert _filter_mode() == "shadow"
+        assert filter_mode() == "shadow"

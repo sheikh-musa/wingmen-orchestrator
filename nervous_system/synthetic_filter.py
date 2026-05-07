@@ -13,9 +13,12 @@ Called from nervous_system/bug_reports_poll.py inside the per-bug loop.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 
@@ -58,14 +61,14 @@ def classify(bug: dict) -> Optional[SyntheticClassification]:
     return None
 
 
-def _filter_enabled() -> bool:
+def filter_enabled() -> bool:
     """Kill-switch. Set ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED=false to bypass
     the filter entirely and revert to PR #28-only behavior. Default: true."""
     return os.environ.get("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", "true").lower() \
         not in ("false", "0", "no", "off")
 
 
-def _filter_mode() -> Literal["shadow", "enforce"]:
+def filter_mode() -> Literal["shadow", "enforce"]:
     """Mode toggle. Default 'shadow' — classify and log only, do not block
     dispatch. Set ORCHESTRATOR_SYNTHETIC_FILTER_ENFORCE=true to flip to
     'enforce' — classify, log, AND set bug_reports.status='rejected'."""
@@ -74,10 +77,6 @@ def _filter_mode() -> Literal["shadow", "enforce"]:
         return "enforce"
     return "shadow"
 
-
-import json
-import logging
-from datetime import datetime, timezone
 
 logger = logging.getLogger("wingmen.synthetic_filter")
 

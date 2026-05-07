@@ -30,8 +30,8 @@ from nervous_system.alert_format import format_alert
 from nervous_system.synthetic_filter import (
     classify as _synth_classify,
     apply_classification as _synth_apply,
-    _filter_enabled as _synth_filter_enabled,
-    _filter_mode as _synth_filter_mode,
+    filter_enabled as _synth_filter_enabled,
+    filter_mode as _synth_filter_mode,
 )
 
 logger = logging.getLogger("wingmen.bug_reports_poll")
