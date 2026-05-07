@@ -353,3 +353,53 @@ def test_poll_enforce_mode_rejects_does_not_dispatch(monkeypatch):
             await supabase.table("bug_reports").delete().eq("id", bug_id).execute()
 
     asyncio.run(_run())
+
+
+@pytestmark_integration
+def test_poll_filter_disabled_short_circuits(monkeypatch):
+    """ENABLED=false: filter never runs, no notification_log entry,
+    dispatch proceeds normally."""
+
+    async def _run():
+        from supabase import acreate_client
+        from dotenv import dotenv_values
+        from nervous_system.bug_reports_poll import poll_bug_reports
+
+        monkeypatch.setenv("ORCHESTRATOR_SYNTHETIC_FILTER_ENABLED", "false")
+
+        _env = dotenv_values(Path(__file__).parent.parent / ".env")
+        url = _env.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+        key = _env.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+        assert url and "test.supabase.co" not in url
+        supabase = await acreate_client(url, key)
+
+        bug_id = str(uuid.uuid4())
+        test_marker = f"synthfilter-disabled-{uuid.uuid4().hex[:8]}"
+        await supabase.table("bug_reports").insert({
+            "id": bug_id,
+            "reporter_name": f"{test_marker} (Test)",
+            "reporter_source": "web",
+            "auth_provider": "none",
+            "repo_name": "cosem-tdu",
+            "description": "real text",
+            "status": "new",
+        }).execute()
+
+        try:
+            await poll_bug_reports(supabase)
+
+            check = await supabase.table("bug_reports").select("status, job_id").eq("id", bug_id).execute()
+            row = check.data[0]
+            assert row["status"] == "diagnosing"
+            assert row["job_id"] is not None
+
+            log_check = await supabase.table("notification_log").select("id").eq("recipient", bug_id).execute()
+            assert len(log_check.data) == 0, "filter disabled should not write notification_log"
+        finally:
+            check = await supabase.table("bug_reports").select("job_id").eq("id", bug_id).execute()
+            if check.data and check.data[0].get("job_id"):
+                await supabase.table("bug_reports").update({"job_id": None}).eq("id", bug_id).execute()
+                await supabase.table("jobs").delete().eq("id", check.data[0]["job_id"]).execute()
+            await supabase.table("bug_reports").delete().eq("id", bug_id).execute()
+
+    asyncio.run(_run())
