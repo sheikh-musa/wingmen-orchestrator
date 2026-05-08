@@ -86,7 +86,7 @@ def test_shadow_mode_writes_notification_log_does_not_update_bug():
             "reporter_source": "web",
             "auth_provider": "none",
             "repo_name": "cosem-tdu",
-            "description": "real text — but flagged via reporter rule b",
+            "description": "integration test bug body",
             "status": "new",
         }).execute()
         assert insert_resp.data, "test setup: bug insert failed"
@@ -273,7 +273,7 @@ def test_poll_shadow_mode_logs_but_dispatches(monkeypatch):
             "reporter_source": "web",
             "auth_provider": "none",
             "repo_name": "cosem-tdu",
-            "description": "real text",
+            "description": "integration test bug body",
             "status": "new",
         }).execute()
 
@@ -333,7 +333,7 @@ def test_poll_enforce_mode_rejects_does_not_dispatch(monkeypatch):
             "reporter_source": "web",
             "auth_provider": "none",
             "repo_name": "cosem-tdu",
-            "description": "real text",
+            "description": "integration test bug body",
             "status": "new",
         }).execute()
 
@@ -381,7 +381,7 @@ def test_poll_filter_disabled_short_circuits(monkeypatch):
             "reporter_source": "web",
             "auth_provider": "none",
             "repo_name": "cosem-tdu",
-            "description": "real text",
+            "description": "integration test bug body",
             "status": "new",
         }).execute()
 
