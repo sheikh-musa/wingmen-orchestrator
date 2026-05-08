@@ -11,6 +11,12 @@ jobs:
     name: Lint & Test
     runs-on: ubuntu-latest
 
+    # Job-level env so step-level `if: env.DATABASE_URL != ''` resolves correctly.
+    # GitHub Actions disallows `secrets.X` in step-level `if:` expressions
+    # (parse-time error, results in 0-job startup failure).
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -36,13 +42,9 @@ jobs:
 
       - name: Test (unit + integration-skipped-when-no-DSN)
         run: python -m pytest tests/ -v
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
       - name: Integration tests gate (BLOCK MERGE per CAI-RESP-153 P1)
-        if: ${{ secrets.DATABASE_URL != '' }}
+        if: env.DATABASE_URL != ''
         run: |
           echo "DATABASE_URL secret is configured; explicitly running integration suite."
           python -m pytest tests/ -v -k "integration"
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
