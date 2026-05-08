@@ -16,33 +16,68 @@ from nervous_system.synthetic_filter import SyntheticClassification, classify
 
 
 class TestRuleA:
-    """Rule (a): description ~* '^E2E test bug report\\.?\\s*$'"""
+    """Rule (a): description normalize-matches PLACEHOLDER_STRINGS list.
 
-    def test_exact_phrase_no_period_classifies(self):
+    normalize() = lower + trim + strip trailing period.
+    Per BUG-PIPELINE-SYNTHETIC-FILTER-002: enumerated list, exact-after-normalize.
+    """
+
+    # Original placeholder
+    def test_e2e_test_bug_report_classifies(self):
         bug = {"description": "E2E test bug report", "reporter_name": "real human"}
         result = classify(bug)
         assert result is not None
         assert result.rule == "a_e2e_placeholder"
-        assert result.matched_text == "E2E test bug report"
 
-    def test_exact_phrase_with_period_classifies(self):
+    def test_e2e_test_bug_report_with_period_classifies(self):
         bug = {"description": "E2E test bug report.", "reporter_name": "real human"}
         result = classify(bug)
         assert result is not None
         assert result.rule == "a_e2e_placeholder"
 
-    def test_case_insensitive(self):
+    def test_e2e_case_insensitive(self):
         bug = {"description": "e2e TEST bug Report", "reporter_name": "real human"}
         result = classify(bug)
         assert result is not None
-        assert result.rule == "a_e2e_placeholder"
 
-    def test_trailing_whitespace_tolerated(self):
-        bug = {"description": "E2E test bug report.   \n", "reporter_name": "real human"}
+    # New placeholder (the one that leaked Jobs #142-145)
+    def test_real_text_classifies(self):
+        bug = {"description": "real text", "reporter_name": "real human"}
+        result = classify(bug)
+        assert result is not None
+        assert result.rule == "a_e2e_placeholder"
+        assert result.matched_text == "real text"
+
+    def test_real_text_with_trailing_space(self):
+        bug = {"description": "real text ", "reporter_name": "real human"}
         result = classify(bug)
         assert result is not None
 
-    def test_extra_text_after_phrase_does_not_match(self):
+    def test_real_text_uppercase(self):
+        bug = {"description": "REAL TEXT", "reporter_name": "real human"}
+        result = classify(bug)
+        assert result is not None
+
+    def test_real_text_with_period(self):
+        bug = {"description": "REAL TEXT.", "reporter_name": "real human"}
+        result = classify(bug)
+        assert result is not None
+
+    def test_real_text_with_leading_trailing_whitespace(self):
+        bug = {"description": "  real text  ", "reporter_name": "real human"}
+        result = classify(bug)
+        assert result is not None
+
+    # Negative — substring should NOT match (exact-after-normalize per spec)
+    def test_real_text_substring_does_not_match(self):
+        bug = {"description": "real text in error message", "reporter_name": "real human"}
+        assert classify(bug) is None
+
+    def test_see_real_text_below_does_not_match(self):
+        bug = {"description": "see real text below", "reporter_name": "real human"}
+        assert classify(bug) is None
+
+    def test_e2e_extra_text_does_not_match(self):
         bug = {"description": "E2E test bug report — actually broken", "reporter_name": "real human"}
         result = classify(bug)
         assert result is None

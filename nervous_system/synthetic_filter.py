@@ -16,15 +16,30 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
 
-# Rule (a): description matches "E2E test bug report" with optional trailing
-# period and whitespace, case-insensitive. Anchored to whole-string.
-_RULE_A_PATTERN = re.compile(r"^\s*E2E test bug report\.?\s*$", re.IGNORECASE)
+# Rule (a) per BUG-PIPELINE-SYNTHETIC-FILTER-002: enumerated placeholder strings,
+# exact-match after normalize (lower + trim + strip trailing period).
+# Growth protocol: new strings ONLY via decision_ref filing — do NOT silently
+# edit this list. File BUG-PIPELINE-SYNTHETIC-FILTER-NNN with observed instance
+# + operator confirmation first.
+PLACEHOLDER_STRINGS: tuple[str, ...] = (
+    "E2E test bug report",
+    "real text",
+)
+
+
+def _normalize_placeholder(s: str) -> str:
+    """Normalize for rule (a) matching: lower + trim + strip trailing period."""
+    return s.lower().strip().rstrip(".").strip()
+
+
+_NORMALIZED_PLACEHOLDERS: frozenset[str] = frozenset(
+    _normalize_placeholder(p) for p in PLACEHOLDER_STRINGS
+)
 
 
 @dataclass(frozen=True)
@@ -44,8 +59,8 @@ def classify(bug: dict) -> Optional[SyntheticClassification]:
     description = (bug.get("description") or "").strip()
     reporter_name = bug.get("reporter_name") or ""
 
-    # Rule (a): E2E placeholder phrase
-    if _RULE_A_PATTERN.match(description):
+    # Rule (a) per BUG-PIPELINE-SYNTHETIC-FILTER-002: normalized exact match
+    if _normalize_placeholder(description) in _NORMALIZED_PLACEHOLDERS and description:
         return SyntheticClassification(
             rule="a_e2e_placeholder",
             matched_text=description,
