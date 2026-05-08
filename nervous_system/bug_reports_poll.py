@@ -27,6 +27,12 @@ import logging
 import os
 
 from nervous_system.alert_format import format_alert
+from nervous_system.synthetic_filter import (
+    classify as _synth_classify,
+    apply_classification as _synth_apply,
+    filter_enabled as _synth_filter_enabled,
+    filter_mode as _synth_filter_mode,
+)
 
 logger = logging.getLogger("wingmen.bug_reports_poll")
 
@@ -112,6 +118,29 @@ async def poll_bug_reports(supabase, bot=None, musa_chat_id: str | None = None) 
 
         for bug in bugs:
             bug_id = bug["id"]
+
+            # BUG-PIPELINE-SYNTHETIC-FILTER-001: dispatch-time classifier.
+            # Shadow mode logs but proceeds; enforce mode rejects + skips.
+            if _synth_filter_enabled():
+                classification = _synth_classify(bug)
+                if classification is not None:
+                    mode = _synth_filter_mode()
+                    try:
+                        await _synth_apply(supabase, bug, classification, mode=mode)
+                    except Exception as e:
+                        logger.error(
+                            f"bug_reports_poll: synthetic_filter apply failed for "
+                            f"bug {bug_id}: {e} — falling through to dispatch (fail-open)"
+                        )
+                    else:
+                        if mode == "enforce":
+                            logger.info(
+                                f"bug_reports_poll: bug {bug_id} REJECTED by synthetic_filter "
+                                f"(rule={classification.rule}); skipping dispatch"
+                            )
+                            continue   # skip dispatch
+                        # shadow: fall through to dispatch
+
             repo_name = (bug.get("repo_name") or "ihsanos").strip()
             description = (bug.get("description") or "")[:80]
 
