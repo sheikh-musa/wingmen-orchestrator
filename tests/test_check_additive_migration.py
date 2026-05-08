@@ -298,3 +298,51 @@ def test_comment_mentioning_drop_table_does_not_trigger(tmp_path):
         tmp_path,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+# ---------------------------------------------------------------------------
+# INLINE ALLOWLIST (-- linter-allow: <reason>) — opt-out for pre-approved ops
+# ---------------------------------------------------------------------------
+
+
+def test_inline_allowlist_suppresses_finding(tmp_path):
+    """A `-- linter-allow: <reason>` comment on the line BEFORE a destructive op
+    suppresses that one finding. Reason text is required (forces author to
+    document why)."""
+    result = run_linter(
+        """
+        -- linter-allow: legacy schema relaxation, pre-CAI-RESP-102
+        ALTER TABLE foo ALTER COLUMN bar DROP NOT NULL;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 0, f"expected 0 (allowlist suppressed), got {result.returncode}: {result.stdout}{result.stderr}"
+
+
+def test_inline_allowlist_without_reason_does_not_suppress(tmp_path):
+    """Bare `-- linter-allow` (no reason text) is NOT a valid allowlist —
+    forces the author to document why."""
+    result = run_linter(
+        """
+        -- linter-allow
+        ALTER TABLE foo ALTER COLUMN bar DROP NOT NULL;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 1
+
+
+def test_inline_allowlist_only_suppresses_next_line(tmp_path):
+    """Allowlist applies ONLY to the line immediately after the comment.
+    A second destructive op below is still flagged."""
+    result = run_linter(
+        """
+        -- linter-allow: relaxation
+        ALTER TABLE a ALTER COLUMN x DROP NOT NULL;
+        DROP TABLE b;
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "DROP TABLE" in out

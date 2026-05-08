@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Comment stripping
+# Comment stripping and allowlist collection
 # ---------------------------------------------------------------------------
 
 def strip_sql_comments(sql: str) -> str:
@@ -37,6 +37,24 @@ def strip_sql_comments(sql: str) -> str:
     # Remove line comments
     sql = re.sub(r"--[^\n]*", " ", sql)
     return sql
+
+
+def _collect_allowlisted_lines(text: str) -> set[int]:
+    """Lines whose preceding line is `-- linter-allow: <reason>`.
+
+    Returns a set of 1-indexed line numbers that should suppress findings.
+    The allowlist only applies to the line immediately after the comment.
+    """
+    allowed = set()
+    lines = text.splitlines()
+    # Match `-- linter-allow: <reason>` where reason is non-empty (at least one non-whitespace char)
+    pattern = re.compile(r"^\s*--\s*linter-allow:\s*\S", re.IGNORECASE)
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            # i is 0-indexed; the line immediately after is at index i+1,
+            # which is 1-indexed line number i+2
+            allowed.add(i + 2)
+    return allowed
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +271,11 @@ def scan_file(path: Path) -> list[str]:
     Format: "<file>:<line>: <PATTERN>: <matched_text>"
     """
     raw = path.read_text(encoding="utf-8")
+
+    # Collect allowlisted lines BEFORE stripping comments
+    # (so we can match the `-- linter-allow:` pattern against the raw file)
+    allowed_lines = _collect_allowlisted_lines(raw)
+
     # Strip comments first (before dollar-quote stripping, to avoid stripping
     # comment text inside dollar-quoted blocks — those are already opaque to us)
     stripped = strip_sql_comments(raw)
@@ -280,6 +303,9 @@ def scan_file(path: Path) -> list[str]:
 
     def report(char_pos: int, label: str, matched: str) -> None:
         ln = lineno(char_pos)
+        # Skip findings on allowlisted lines
+        if ln in allowed_lines:
+            return
         snippet = matched.strip().replace("\n", " ")[:80]
         findings.append(f"{path}:{ln}: {label}: {snippet}")
 
