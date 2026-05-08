@@ -291,3 +291,43 @@ def test_migration_assertion_gate_passes():
     # Expect at least one NOTICE from the assertion gate
     assert any('substrate-visibility' in n.lower() or 'arm' in n.lower() for n in notices), \
         f"expected gate NOTICE; got: {notices}"
+
+
+@pytestmark_integration
+def test_record_session_cost_round_trip():
+    """End-to-end: invoke the helper script via subprocess; verify a row
+    exists in cc_session_costs afterward."""
+    import subprocess as sp
+    session_id = f"roundtrip-{uuid.uuid4().hex[:10]}"
+    result = sp.run(
+        [sys.executable,
+         str(Path(__file__).parent.parent / "scripts" / "record_session_cost.py"),
+         "--cc-identity", "cc-orchestrator",
+         "--sub-tag", "cc-orchestrator-2",
+         "--session-id", session_id,
+         "--input-tokens", "1234",
+         "--output-tokens", "567",
+         "--source", "claude_code_cli",
+         "--notes", "round-trip integration test"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"script exited {result.returncode}: stderr={result.stderr}"
+    try:
+        with psycopg.connect(_DSN, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT cc_identity, input_tokens, output_tokens, source, notes "
+                    "FROM cc_session_costs WHERE session_id=%s",
+                    (session_id,),
+                )
+                r = cur.fetchone()
+        assert r is not None, "row should exist after script run"
+        assert r[0] == "cc-orchestrator"
+        assert r[1] == 1234
+        assert r[2] == 567
+        assert r[3] == "claude_code_cli"
+        assert "round-trip" in r[4]
+    finally:
+        with psycopg.connect(_DSN, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("DELETE FROM cc_session_costs WHERE session_id=%s", (session_id,))
