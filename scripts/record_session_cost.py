@@ -48,7 +48,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--session-id", default=None,
                         help="Optional session id or label")
     parser.add_argument("--started-at", default=None,
-                        help="ISO 8601 timestamp; defaults to now() minus 1 hour if absent")
+                        help="ISO 8601 timestamp; defaults to current time if absent")
     parser.add_argument("--ended-at", default=None,
                         help="ISO 8601 timestamp; defaults to current time")
     parser.add_argument("--input-tokens", type=int, required=True,
