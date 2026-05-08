@@ -27,5 +27,12 @@ jobs:
       - name: Syntax check
         run: python -m py_compile cto_bot.py
 
+      - name: Migration additive linter
+        run: |
+          for f in supabase/migrations/*.sql; do
+            [ -f "$f" ] || continue
+            python scripts/check_additive_migration.py "$f"
+          done
+
       - name: Test
         run: python -m pytest tests/ -v
