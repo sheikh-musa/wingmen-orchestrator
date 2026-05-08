@@ -403,3 +403,42 @@ def test_poll_filter_disabled_short_circuits(monkeypatch):
             await supabase.table("bug_reports").delete().eq("id", bug_id).execute()
 
     asyncio.run(_run())
+
+
+@pytestmark_integration
+def test_filter_002_backfill_flipped_real_text_rows():
+    """FILTER-002 backfill: bug_reports with description='real text' (or
+    case/whitespace variants), in non-terminal status, must now be status='rejected'
+    via rejected_by='cc-orchestrator-filter-backfill-002'."""
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute("""
+                SELECT count(*) FROM bug_reports
+                 WHERE rejected_by = 'cc-orchestrator-filter-backfill-002'
+                   AND rejection_reason = 'synthetic_e2e_test'
+                   AND status = 'rejected'
+            """)
+            backfilled = cur.fetchone()[0]
+    assert backfilled > 0, (
+        "expected FILTER-002 backfill to flip at least one row "
+        "(Jobs #142-#145 known to exist with description='real text')"
+    )
+
+
+@pytestmark_integration
+def test_filter_002_jobs_142_to_145_cancelled():
+    """The 4 known leaked synthetic Jobs #142-#145 must be cancelled
+    by the FILTER-002 backfill migration."""
+    with psycopg.connect(_DSN, autocommit=True) as c:
+        with c.cursor() as cur:
+            cur.execute("""
+                SELECT id, status FROM jobs
+                 WHERE id IN (142, 143, 144, 145)
+                 ORDER BY id
+            """)
+            rows = cur.fetchall()
+    # All 4 should exist; all 4 should be in cancelled (or any terminal non-active state)
+    assert len(rows) == 4, f"expected jobs 142-145 to exist, found {len(rows)}"
+    for jid, status in rows:
+        assert status not in ('queued', 'paused', 'pending_review', 'running'), \
+            f"job #{jid} still active post-backfill: status={status}"
