@@ -227,6 +227,23 @@ async def poll_agent_messages(
                 # P3 suppression or non-routable shape — stamp skipped_at
                 # (GOVERNANCE-CLEANUP-001 Step 2) so the poll hot-set doesn't
                 # loop over it every 5-min cycle.
+                #
+                # EXCEPTION per CAI-STRUCT-INBOX-SKIP-001 (2026-05-16): rows
+                # with requires_response=True must remain audit-visible to the
+                # cai-side CAI-PING-PROTOCOL-001 operator-audit query (which
+                # filters skipped_at IS NULL). Stamping these would silently
+                # drop them from "open inbox" surfaces — label-lies failure.
+                # Trade-off accepted: the row stays in the poll's 5-min hot-set
+                # and re-fails _format_telegram each cycle. Cost is one P3
+                # fast-fail per row per 5-min — negligible vs the visibility
+                # win.
+                if msg.get("requires_response"):
+                    logger.debug(
+                        f"  -> message {msg_id} non-routable but "
+                        f"requires_response=true; leaving skipped_at NULL "
+                        f"for audit visibility (CAI-STRUCT-INBOX-SKIP-001)"
+                    )
+                    continue
                 await _mark_skipped(supabase, msg_id)
                 continue
 
