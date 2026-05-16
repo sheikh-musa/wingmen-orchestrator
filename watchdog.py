@@ -127,6 +127,113 @@ async def try_restart_service(service: str) -> bool:
         return False
 
 
+# ── CAI-WATCHDOG-MAC-STUDIO-001 — Mac Studio endpoint probes ──────────────
+# Tailscale-bound services on Mac Studio; nohup-spawned, don't survive
+# reboot. No remote restart capability — alerts only.
+
+MAC_STUDIO_HOST = "100.104.36.27"
+MAC_STUDIO_ENCODER_URL = f"http://{MAC_STUDIO_HOST}:8080/health"
+MAC_STUDIO_MLX_URL = f"http://{MAC_STUDIO_HOST}:8081/health"
+MAC_STUDIO_ALERT_AFTER_SECONDS = 300  # 5 minutes per spec
+
+
+class MacStudioEndpointState:
+    """Per-endpoint hysteresis tracker. Alert only after sustained failure
+    for alert_after_seconds; alert once per outage; signal recovery once."""
+
+    def __init__(self, name: str, alert_after_seconds: int = 300):
+        self.name = name
+        self.alert_after_seconds = alert_after_seconds
+        self.first_failure_at: float | None = None
+        self.alerted: bool = False
+
+    def record_probe(self, alive: bool, now_epoch: float) -> bool:
+        """Record a probe result. Returns True iff this probe caused a
+        transition event (alert-fires or recovery-fires), False otherwise."""
+        if alive:
+            if self.alerted:
+                # recovery transition
+                self.first_failure_at = None
+                self.alerted = False
+                return True
+            # alive and never alerted — no event
+            self.first_failure_at = None
+            return False
+        # not alive
+        if self.first_failure_at is None:
+            self.first_failure_at = now_epoch
+            return False
+        if self.alerted:
+            # still down, already alerted
+            return False
+        # threshold check
+        if now_epoch - self.first_failure_at >= self.alert_after_seconds:
+            self.alerted = True
+            return True
+        return False
+
+
+async def check_mac_studio_encoder() -> bool:
+    """Probe the bge-m3 encoder on Mac Studio. True if /health returns 200."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(MAC_STUDIO_ENCODER_URL)
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def check_mac_studio_mlx() -> bool:
+    """Probe mlx_lm.server on Mac Studio. True if /health returns 200."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(MAC_STUDIO_MLX_URL)
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+_encoder_state = MacStudioEndpointState(
+    name="bge-m3-encoder", alert_after_seconds=MAC_STUDIO_ALERT_AFTER_SECONDS
+)
+_mlx_state = MacStudioEndpointState(
+    name="mlx_lm-server", alert_after_seconds=MAC_STUDIO_ALERT_AFTER_SECONDS
+)
+
+
+async def _probe_mac_studio() -> None:
+    """One probe cycle for both Mac Studio endpoints. Alerts on transitions."""
+    import time as _time
+    now = _time.time()
+
+    for state, probe, port, role in [
+        (_encoder_state, check_mac_studio_encoder, 8080, "bge-m3 encoder"),
+        (_mlx_state, check_mac_studio_mlx, 8081, "mlx_lm.server"),
+    ]:
+        alive = await probe()
+        transitioned = state.record_probe(alive=alive, now_epoch=now)
+        if transitioned:
+            if state.alerted:
+                logger.warning(
+                    f"Mac Studio {state.name} ({MAC_STUDIO_HOST}:{port}) UNREACHABLE "
+                    f"for >{state.alert_after_seconds}s"
+                )
+                await alert_admin(
+                    f"⚠️ Mac Studio {role} ({MAC_STUDIO_HOST}:{port}) "
+                    f"unreachable for >5min.\n\n"
+                    f"Impact: mizan_bot fiqh retrieval falls back to FTS-only "
+                    f"(silent degradation — semantic-first stops contributing).\n\n"
+                    f"Action: Screen Share into Mac Studio + relaunch via "
+                    f"nohup. No auto-restart possible from Mac Mini."
+                )
+            else:
+                logger.info(f"Mac Studio {state.name} is back UP")
+                await alert_admin(
+                    f"✅ Mac Studio {role} ({MAC_STUDIO_HOST}:{port}) "
+                    f"is back online."
+                )
+
+
 async def main_loop():
     global _last_bot_status, _last_orch_status, _alerted
 
@@ -182,6 +289,8 @@ async def main_loop():
             if not _last_orch_status and orch_alive:
                 logger.info("Orchestrator is back UP")
                 await alert_admin("\u2705 Orchestrator is back online")
+
+            await _probe_mac_studio()
 
             _last_bot_status = bot_alive
             _last_orch_status = orch_alive
