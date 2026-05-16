@@ -52,6 +52,7 @@ from uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from nervous_system.archive import run_archive
 from nervous_system.wingmen_dream import run_dream
+from nervous_system.autonomous_loop_detector import sweep_active_autonomous_loops
 from nervous_system.ecosystem_auditor import (
     run_frequent_gates,
     run_half_hour_gates,
@@ -1663,6 +1664,7 @@ async def main_loop():
     repo_context_writer_counter = 0  # CAI-RESP-093: every 30 polls (~15 min)
     orch_self_audit_counter = 0      # ORCH-SELF-AUDIT: every 20 polls (~10 min)
     deploy_verifier_counter = 0      # CAI-RESP-083: every 10 polls (~5 min), env-flag gated
+    autonomous_loop_detector_counter = 0  # CAI-RESP-157 [A]: every 10 polls (~5 min)
     dream_counter = 0
     ecosystem_frequent_counter = 0   # GATE 4 every 10 polls (~5 min)
     ecosystem_half_hour_counter = 0  # GATE 2 every 60 polls (~30 min)
@@ -1986,6 +1988,19 @@ async def main_loop():
                     logger.error(f"Uptime monitor poll failed: {e}")
                     record_swallowed("uptime_monitor", e)
                 uptime_monitor_counter = 0
+
+            # Active autonomous loop detector — every 10 polls (~5 min).
+            # CAI-RESP-157 [A]: filesystem scan of ~/.claude/projects jsonl
+            # mtimes; upserts/deletes active_autonomous_loops table rows.
+            # Visibility only — auto-kill is [B] (separate PR).
+            autonomous_loop_detector_counter += 1
+            if autonomous_loop_detector_counter >= 10:
+                try:
+                    await sweep_active_autonomous_loops(supabase)
+                except Exception as e:
+                    logger.error(f"Autonomous loop detector sweep failed: {e}")
+                    record_swallowed("autonomous_loop_detector", e)
+                autonomous_loop_detector_counter = 0
 
             # Feature health signal — every 60 polls (~30 min).
             # Scans launchctl + logs + static files, writes advisory
