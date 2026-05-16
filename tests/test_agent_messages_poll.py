@@ -613,6 +613,47 @@ class TestSkippedAtStamping:
         )
 
     @pytest.mark.asyncio
+    async def test_p3_requires_response_does_NOT_stamp_skipped_at(self, monkeypatch):
+        """Per CAI-STRUCT-INBOX-SKIP-001 (2026-05-16): P3 rows with
+        requires_response=True must remain audit-visible (skipped_at IS NULL)
+        so cai's CAI-PING-PROTOCOL-001 operator-audit picks them up. The
+        4 cc-orchestrator→cai messages that got silently dropped pre-fix
+        (#1567, #1573, #1581, #1582) were exactly this shape.
+        """
+        from nervous_system import agent_messages_poll as mod
+
+        fixture = {
+            "id": 9002,
+            "from_agent": "cc-orchestrator",
+            "to_agent": "cai",
+            "message_type": "question",
+            "subject": "P3 ask requiring cai response",
+            "body": "needs ratification",
+            "requires_response": True,
+            "priority": "P3",
+            "created_at": "2026-05-16T00:00:00Z",
+        }
+
+        stamped: list[int] = []
+
+        async def fake_mark_skipped(sb, msg_id):
+            stamped.append(msg_id)
+
+        async def fake_already_notified(sb, dedup_key, msg_id):
+            return False
+
+        monkeypatch.setattr(mod, "_mark_skipped", fake_mark_skipped)
+        monkeypatch.setattr(mod, "_already_notified", fake_already_notified)
+
+        sb = mock_supabase_chain([fixture])
+        await mod.poll_agent_messages(sb, bot=None, musa_chat_id=None)
+
+        assert stamped == [], (
+            f"expected NO skipped_at stamp on requires_response=true P3 row, "
+            f"got stamped={stamped}"
+        )
+
+    @pytest.mark.asyncio
     async def test_poll_query_filters_out_already_skipped(self):
         """The poll query must chain .is_('skipped_at', 'null') so
         previously-skipped rows don't re-enter the hot set each cycle.
