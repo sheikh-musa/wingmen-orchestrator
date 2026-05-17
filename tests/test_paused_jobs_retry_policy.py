@@ -94,6 +94,11 @@ def _supabase_with_query_result(rows, update_returning=None):
     sb.gte.return_value = sb
     sb.lt.return_value = sb
     sb.execute = AsyncMock(side_effect=[
+        # Heartbeat call (CC-LONG-CALLER-REGISTRY-001 Phase A heartbeat at function start).
+        # The result is discarded by heartbeat() except for `data` truthiness check; an
+        # empty list signals "caller not registered" but the test's outer try/except
+        # absorbs that without affecting downstream work.
+        MagicMock(data=[]),
         MagicMock(data=rows),                            # main paused-jobs query
         *[MagicMock(data=update_returning or [{"id": r["id"], "status": _DISPATCHER_CLAIM_STATUS}])
           for r in rows]                                  # one UPDATE per row
