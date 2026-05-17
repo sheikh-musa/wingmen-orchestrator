@@ -114,6 +114,30 @@ class TestDetectActiveLoops:
         ccs = sorted(r["cc_identity"] for r in result)
         assert ccs == ["cc-ihsanos", "cc-scholar"]
 
+    def test_operator_session_dirs_flagged_with_operator_prefix(self, tmp_path):
+        """Non-CC-family managed repos (per REPOS.json) — runaway pattern detection
+        must still cover them via 'operator-<repo>' pseudo-identity. Prevents the
+        cc-scholar-runaway-style burn from going invisible if it happens in dookana
+        or cosem-adcda or other ad-hoc operator-session repo."""
+        for proj, expected_id in [
+            ("-Users-sheikhmusa-wingmen-projects-dookana", "operator-dookana"),
+            ("-Users-sheikhmusa-wingmen-projects-cosem-adcda", "operator-cosem-adcda"),
+            ("-Users-sheikhmusa-wingmen-projects-hifz-companion", "operator-hifz-companion"),
+            ("-Users-sheikhmusa-wingmen-projects-fastrans", "operator-fastrans"),
+        ]:
+            d = tmp_path / proj
+            d.mkdir()
+            for i in range(60):
+                _make_jsonl_at(d, f"s{i}.jsonl", age_seconds=i * 300 + 60)
+        result = detect_active_loops(claude_projects_root=tmp_path)
+        ids = sorted(r["cc_identity"] for r in result)
+        assert ids == sorted([
+            "operator-cosem-adcda",
+            "operator-dookana",
+            "operator-fastrans",
+            "operator-hifz-companion",
+        ]), f"all 4 operator-session repos should be flagged, got {ids}"
+
 
 def test_detection_threshold_default_50():
     """Threshold ratified at 50 per CAI-RESP-157 Q2."""

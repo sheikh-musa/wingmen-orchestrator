@@ -29,12 +29,26 @@ logger = logging.getLogger("wingmen.autonomous_loop_detector")
 DETECTION_THRESHOLD_SESSIONS_24H = 50
 _LOOKBACK_SECONDS = 24 * 3600
 
-# Map ~/.claude/projects/ subdirectory → cc-family identity.
+# Map ~/.claude/projects/ subdirectory → cc-family identity OR
+# repo-name pseudo-identity for ad-hoc operator sessions (non-CC-family repos).
+#
+# CC family entries: the canonical 4 ratified family identities.
+# Operator-session entries: managed repos that the operator may run interactive
+# claude sessions in (no formal CC family, no agent_messages routing, no
+# scheduled sweeps). Visibility-only — runaway pattern detection still flags
+# these so an operator-burn-while-offline doesn't go invisible (CAI-RESP-157
+# [A] coverage applies regardless of CC-family status).
 _DIR_TO_CC = {
-    "-Users-sheikhmusa-wingmen-orchestrator": "cc-orchestrator",
-    "-Users-sheikhmusa-wingmen-projects-ai-scholar": "cc-scholar",
-    "-Users-sheikhmusa-wingmen-projects-cosem-tdu": "cc-cosem",
-    "-Users-sheikhmusa-wingmen-projects-ihsanos": "cc-ihsanos",
+    # CC families
+    "-Users-sheikhmusa-wingmen-orchestrator":              "cc-orchestrator",
+    "-Users-sheikhmusa-wingmen-projects-ai-scholar":       "cc-scholar",
+    "-Users-sheikhmusa-wingmen-projects-cosem-tdu":        "cc-cosem",
+    "-Users-sheikhmusa-wingmen-projects-ihsanos":          "cc-ihsanos",
+    # Operator-session pseudo-identities (managed repos per REPOS.json)
+    "-Users-sheikhmusa-wingmen-projects-dookana":          "operator-dookana",
+    "-Users-sheikhmusa-wingmen-projects-cosem-adcda":      "operator-cosem-adcda",
+    "-Users-sheikhmusa-wingmen-projects-hifz-companion":   "operator-hifz-companion",
+    "-Users-sheikhmusa-wingmen-projects-fastrans":         "operator-fastrans",
 }
 
 
