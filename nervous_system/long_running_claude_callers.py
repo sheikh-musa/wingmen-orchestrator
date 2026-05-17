@@ -42,6 +42,15 @@ _REQUIRED_MANIFEST_FIELDS = (
     "ratified_by_decision_ref", "registered_by_identity", "purpose",
 )
 
+# Notification-log source-enum values per CAI-RESP-161 Q7. These are referenced
+# by Phase B watchdog wire-in (separate PR). Phase A uses CALLER_REGISTERED and
+# CALLER_REVOKED only; the others are forward-compat for Phase B.
+NOTIFICATION_SOURCE_WATCHDOG_HARD_KILL = "watchdog_hard_kill"
+NOTIFICATION_SOURCE_WATCHDOG_SOFT_ALERT = "watchdog_soft_alert"
+NOTIFICATION_SOURCE_CALLER_SELF_KILL = "caller_self_kill"
+NOTIFICATION_SOURCE_CALLER_REGISTERED = "caller_registered"
+NOTIFICATION_SOURCE_CALLER_REVOKED = "caller_revoked"
+
 
 @dataclass(frozen=True)
 class Manifest:
@@ -204,7 +213,7 @@ async def revoke(supabase, caller_name: str, reason: str) -> None:
         .execute()
     )
     await supabase.table("notification_log").insert({
-        "source": "caller_revoked",
+        "source": NOTIFICATION_SOURCE_CALLER_REVOKED,
         "decision_ref": "CC-LONG-CALLER-REGISTRY-001",
         "channel": "long_running_callers",
         "recipient": caller_name,
