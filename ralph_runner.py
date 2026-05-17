@@ -13,6 +13,8 @@ from pathlib import Path
 
 from supabase import AsyncClient as SupabaseAsyncClient
 
+from nervous_system.long_running_claude_callers import heartbeat as _lrcc_heartbeat
+
 # ── BUG-019 worktree isolation ────────────────────────────────────────────────
 
 async def _create_worktree(repo_path: str, job_id: int) -> tuple[str, str]:
@@ -217,6 +219,14 @@ async def run_claude(
     Gate 1 — Commit existence: if no commit produced since job_started_at, ghost success.
     Gate 2 — Intent alignment: Haiku checks if diff matches the stated decision.
     """
+    # CC-LONG-CALLER-REGISTRY-001 Phase A: heartbeat substrate-native ralphy caller.
+    # No-op if registry table absent; non-fatal if heartbeat fails.
+    try:
+        await _lrcc_heartbeat(supabase, "ralphy")
+    except Exception as _e:
+        # Don't let registry failures break ralphy execution.
+        pass
+
     prompt_file = Path(tempfile.gettempdir()) / f"ralph_job_{job_id}.md"
     prompt_file.write_text(prompt_text)
 

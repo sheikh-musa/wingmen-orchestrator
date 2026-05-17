@@ -30,6 +30,7 @@ import re
 from datetime import datetime, timezone, timedelta
 
 from nervous_system import error_tracker
+from nervous_system.long_running_claude_callers import heartbeat as _lrcc_heartbeat
 
 logger = logging.getLogger("wingmen.paused_jobs_retry_policy")
 
@@ -109,6 +110,12 @@ async def run_paused_jobs_retry_policy(
     Idempotent: jobs that have already been auto-retried (per result_summary
     annotation) are skipped on subsequent ticks.
     """
+    # CC-LONG-CALLER-REGISTRY-001 Phase A: heartbeat substrate-native paused-job-retry caller.
+    try:
+        await _lrcc_heartbeat(supabase, "paused-job-retry")
+    except Exception:
+        pass
+
     counts = {"considered": 0, "retried": 0, "skipped_permanent": 0,
               "skipped_already_retried": 0, "skipped_other": 0, "errors": 0}
     try:
