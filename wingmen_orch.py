@@ -62,6 +62,10 @@ from nervous_system.ecosystem_auditor import (
 )
 from heartbeat import write_orchestrator_heartbeat
 from nervous_system.swallowed_except_harness import record_swallowed
+from nervous_system.long_running_claude_callers import (
+    sweep_manifests as _lrcc_sweep_manifests,
+    register as _lrcc_register,
+)
 
 # ── Setup ────────────────────────────────────────────────────────
 load_dotenv(Path(__file__).parent / ".env")
@@ -1626,6 +1630,34 @@ async def main_loop():
 
     supabase = await get_supabase()
     logger.info("Connected to Supabase")
+
+    # CC-LONG-CALLER-REGISTRY-001 Phase A per CAI-RESP-161: sweep manifests
+    # on orchestrator boot. Each YAML/JSON manifest under
+    # manifests/long_running_callers/ is parsed and upserted to the registry.
+    # Errors logged but non-fatal.
+    try:
+        for _manifest in _lrcc_sweep_manifests():
+            try:
+                await _lrcc_register(
+                    supabase,
+                    caller_name=_manifest.caller_name,
+                    cmd=_manifest.cmd,
+                    expected_cadence_seconds=_manifest.expected_cadence_seconds,
+                    expected_tokens_per_day=_manifest.expected_tokens_per_day,
+                    ratified_by_decision_ref=_manifest.ratified_by_decision_ref,
+                    registered_by_identity=_manifest.registered_by_identity,
+                    purpose=_manifest.purpose,
+                    parent_pid=None,
+                    max_tokens_per_day=_manifest.max_tokens_per_day,
+                    auto_kill_policy=_manifest.auto_kill_policy,
+                )
+            except Exception as _e:
+                logger.warning(
+                    f"long_running_caller manifest registration failed "
+                    f"for {_manifest.caller_name}: {_e}"
+                )
+    except Exception as _e:
+        logger.warning(f"long_running_caller manifest sweep failed: {_e}")
 
     # Start webhook server for client bots
     try:

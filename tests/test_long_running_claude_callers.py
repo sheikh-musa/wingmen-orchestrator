@@ -142,3 +142,63 @@ def test_boot_briefing_view_has_long_running_caller_arm():
             cur.execute("SELECT pg_get_viewdef('boot_briefing'::regclass, true)")
             defn = cur.fetchone()[0]
     assert "long_running_caller" in defn, "boot_briefing view missing long_running_caller UNION arm"
+
+
+@pytestmark_integration
+def test_manifest_sweep_upserts_registry(tmp_path):
+    """sweep_manifests() reads YAML files and upserts via register() — round-trip."""
+    import asyncio
+    from dotenv import dotenv_values
+    from supabase import acreate_client
+    from nervous_system.long_running_claude_callers import sweep_manifests, register
+
+    test_name = f"test-sweep-{uuid.uuid4().hex[:8]}"
+    f = tmp_path / "test.yaml"
+    f.write_text(f"""
+caller_name: {test_name}
+cmd: echo test
+expected_cadence_seconds: 60
+expected_tokens_per_day: 1000
+ratified_by_decision_ref: TEST-REGISTRY-001
+registered_by_identity: cc_family
+purpose: round-trip integration test
+""")
+
+    async def _run():
+        env = dotenv_values(Path(__file__).parent.parent / ".env")
+        url = env.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+        key = env.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+        assert url and "test.supabase.co" not in url, "real SUPABASE_URL required"
+        sb = await acreate_client(url, key)
+        for m in sweep_manifests(tmp_path):
+            await register(
+                sb,
+                caller_name=m.caller_name,
+                cmd=m.cmd,
+                expected_cadence_seconds=m.expected_cadence_seconds,
+                expected_tokens_per_day=m.expected_tokens_per_day,
+                ratified_by_decision_ref=m.ratified_by_decision_ref,
+                registered_by_identity=m.registered_by_identity,
+                purpose=m.purpose,
+                max_tokens_per_day=m.max_tokens_per_day,
+                auto_kill_policy=m.auto_kill_policy,
+            )
+
+    asyncio.run(_run())
+
+    try:
+        with psycopg.connect(_DSN, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT caller_name, auto_kill_policy, ratified_by_decision_ref "
+                    "FROM long_running_claude_callers WHERE caller_name=%s",
+                    (test_name,)
+                )
+                r = cur.fetchone()
+        assert r is not None, f"manifest sweep should have registered {test_name}"
+        assert r[1] == "soft_alert", f"cc_family default auto_kill_policy=soft_alert, got {r[1]}"
+        assert r[2] == "TEST-REGISTRY-001"
+    finally:
+        with psycopg.connect(_DSN, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("DELETE FROM long_running_claude_callers WHERE caller_name=%s", (test_name,))
