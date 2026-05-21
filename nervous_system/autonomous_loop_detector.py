@@ -66,6 +66,29 @@ _CC_TO_CWD = {
     "operator-fastrans":       "/Users/sheikhmusa/wingmen/projects/fastrans",
 }
 
+# Drift guard: every identity in _DIR_TO_CC must have a cwd in _CC_TO_CWD so
+# _resolve_parent_pid can never silently no-op for a newly-added family. If
+# this fires, add the missing entry to _CC_TO_CWD.
+assert set(_DIR_TO_CC.values()) == set(_CC_TO_CWD.keys()), (
+    "_CC_TO_CWD drift vs _DIR_TO_CC: "
+    f"missing={set(_DIR_TO_CC.values()) - set(_CC_TO_CWD.keys())}, "
+    f"extra={set(_CC_TO_CWD.keys()) - set(_DIR_TO_CC.values())}"
+)
+
+
+def _is_claude_command(ps_output: str) -> bool:
+    """True iff ps's `command=` output's executable is the `claude` binary.
+
+    Tightens the prior `"claude" in stdout` substring check so a `tail -f
+    claude.log` or `vim claude_runner.py` parked in the same cwd isn't
+    mistaken for the actual claude session that needs watching.
+    """
+    first = ps_output.strip().split(None, 1)[0] if ps_output.strip() else ""
+    if not first:
+        return False
+    exe = first.rsplit("/", 1)[-1]
+    return exe == "claude"
+
 
 def _resolve_parent_pid(cc_identity: str) -> int | None:
     """Find the long-running claude process whose cwd matches cc_identity's repo.
@@ -102,7 +125,7 @@ def _resolve_parent_pid(cc_identity: str) -> int | None:
                     ["ps", "-p", str(pid), "-o", "command="],
                     capture_output=True, text=True, timeout=2,
                 )
-                if "claude" in cmd_proc.stdout:
+                if _is_claude_command(cmd_proc.stdout):
                     return pid
             except subprocess.SubprocessError:
                 continue
