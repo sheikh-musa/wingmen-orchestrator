@@ -41,6 +41,7 @@ from nervous_system.long_caller_watchdog import (
     decide_kill_with_pid_verify,
     build_telegram_body,
 )
+from nervous_system.autonomous_loop_detector import DETECTION_THRESHOLD_SESSIONS_24H
 
 # CAI-RESP-163 Phase B — long_caller_watchdog poll constants
 _LONG_CALLER_POLL_INTERVAL = 300  # 5min per CAI-RESP-163 Q2
@@ -304,7 +305,7 @@ async def _long_caller_sweep() -> None:
                     pid=parent_pid,
                     cwd="unknown",
                     sessions_24h=sessions_24h,
-                    threshold=50,
+                    threshold=DETECTION_THRESHOLD_SESSIONS_24H,
                 )
                 await alert_admin(body)
                 with psycopg.connect(dsn, autocommit=True) as conn:
