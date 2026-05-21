@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import statistics
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,64 @@ _DIR_TO_CC = {
     "-Users-sheikhmusa-wingmen-projects-hifz-companion":   "operator-hifz-companion",
     "-Users-sheikhmusa-wingmen-projects-fastrans":         "operator-fastrans",
 }
+
+
+# Reverse map: cc_identity → repo cwd for parent_pid lsof-based resolution
+# (CAI-RESP-163 Q3). Watchdog re-verifies cwd at SIGTERM time against PID recycle.
+_CC_TO_CWD = {
+    "cc-orchestrator":         "/Users/sheikhmusa/wingmen/orchestrator",
+    "cc-scholar":              "/Users/sheikhmusa/wingmen/projects/ai-scholar",
+    "cc-cosem":                "/Users/sheikhmusa/wingmen/projects/cosem-tdu",
+    "cc-ihsanos":              "/Users/sheikhmusa/wingmen/projects/ihsanos",
+    "operator-dookana":        "/Users/sheikhmusa/wingmen/projects/dookana",
+    "operator-cosem-adcda":    "/Users/sheikhmusa/wingmen/projects/cosem-adcda",
+    "operator-hifz-companion": "/Users/sheikhmusa/wingmen/projects/hifz-companion",
+    "operator-fastrans":       "/Users/sheikhmusa/wingmen/projects/fastrans",
+}
+
+
+def _resolve_parent_pid(cc_identity: str) -> int | None:
+    """Find the long-running claude process whose cwd matches cc_identity's repo.
+
+    Returns the PID of the best-match claude process, or any process with that
+    cwd if no claude process matches, or None on error / no match.
+
+    Per CAI-RESP-163 Q3: the watchdog re-verifies this PID's cwd at SIGTERM
+    time before killing, guarding against PID recycle between detector sweep
+    and kill decision.
+    """
+    cwd = _CC_TO_CWD.get(cc_identity)
+    if not cwd:
+        return None
+    try:
+        proc = subprocess.run(
+            ["lsof", "-d", "cwd", "-F", "pn"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode != 0:
+            return None
+        candidates: list[int] = []
+        current_pid: int | None = None
+        for line in proc.stdout.splitlines():
+            if line.startswith("p"):
+                current_pid = int(line[1:]) if line[1:].isdigit() else None
+            elif line.startswith("n") and current_pid is not None:
+                if line[1:] == cwd:
+                    candidates.append(current_pid)
+                current_pid = None
+        for pid in candidates:
+            try:
+                cmd_proc = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "command="],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if "claude" in cmd_proc.stdout:
+                    return pid
+            except subprocess.SubprocessError:
+                continue
+        return candidates[0] if candidates else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
 
 
 def scan_one_directory(directory: Path) -> dict[str, Any]:
@@ -125,6 +184,7 @@ def detect_active_loops(
                 "last_fire_at": scan["last_fire_at"],
                 "sessions_24h": scan["sessions_24h"],
                 "cadence_seconds": scan["cadence_seconds"],
+                "parent_pid": _resolve_parent_pid(cc_identity),
             })
     return flagged
 
@@ -149,6 +209,7 @@ async def sweep_active_autonomous_loops(supabase) -> None:
                     "sessions_24h":    row["sessions_24h"],
                     "cadence_seconds": row["cadence_seconds"],
                     "detected_at":     datetime.now(timezone.utc).isoformat(),
+                    "parent_pid":      row.get("parent_pid"),
                 })
                 .execute()
             )

@@ -142,3 +142,11 @@ class TestDetectActiveLoops:
 def test_detection_threshold_default_50():
     """Threshold ratified at 50 per CAI-RESP-157 Q2."""
     assert DETECTION_THRESHOLD_SESSIONS_24H == 50
+
+
+class TestResolveParentPid:
+    """parent_pid resolution: lsof-based cwd-matching."""
+
+    def test_unknown_cc_identity_returns_none(self):
+        from nervous_system.autonomous_loop_detector import _resolve_parent_pid
+        assert _resolve_parent_pid("alien-cc") is None
