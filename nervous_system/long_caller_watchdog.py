@@ -17,14 +17,11 @@ R2: Deferred per CAI-RESP-163 + CC-LONG-CALLER-AUTO-TOKEN-TRACK-001
 """
 from __future__ import annotations
 
-import logging
 import os
 import subprocess
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Optional
-
-logger = logging.getLogger("wingmen.long_caller_watchdog")
 
 
 # C2: substrate-native carve-out (hard-coded; cannot be overridden by registry)
