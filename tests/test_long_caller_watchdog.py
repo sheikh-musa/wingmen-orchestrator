@@ -70,10 +70,20 @@ class TestPanicButton:
 
     def test_panic_button_unset_normal_kill_flow(self, monkeypatch):
         monkeypatch.delenv("WINGMEN_LONG_CALLER_WATCHDOG_DISABLED", raising=False)
+        # Updated for CAI-RESP-164 R1-AMENDED: pass 3-of-3 ContentShape so the
+        # SIGTERM path is reachable (verifies panic-unset doesn't short-circuit).
+        from nervous_system.long_caller_watchdog import ContentShape
+        from nervous_system.content_shape_signals import SignalResult
+        shape = ContentShape(
+            signal_a=SignalResult(match=True, value=54000),
+            signal_b=SignalResult(match=True, value={"avg_gap": 300}),
+            signal_c=SignalResult(match=True, value="ok"),
+        )
         decision = decide_kill(
             caller_name="cc-evil-runaway",
             sessions_24h=200, cadence_seconds=300,
             registered=False, parent_pid=12345,
+            content_shape=shape,
         )
         assert decision.action == "hard_kill"
 
@@ -82,12 +92,23 @@ class TestR1HardKill:
     """R1 — unregistered + cadence pattern → hard_kill (synthetic runaway shape)."""
 
     def test_unregistered_pattern_kills(self):
+        # Updated for CAI-RESP-164 R1-AMENDED: hard_kill now requires 3-of-3
+        # content-shape signal match in addition to the unregistered + cadence
+        # pattern. Pass a 3-of-3 ContentShape so the SIGTERM path still lights up.
+        from nervous_system.long_caller_watchdog import ContentShape
+        from nervous_system.content_shape_signals import SignalResult
+        shape = ContentShape(
+            signal_a=SignalResult(match=True, value=54000),
+            signal_b=SignalResult(match=True, value={"avg_gap": 300}),
+            signal_c=SignalResult(match=True, value="ok"),
+        )
         decision = decide_kill(
             caller_name="cc-rogue",
             sessions_24h=200,
             cadence_seconds=300,
             registered=False,
             parent_pid=12345,
+            content_shape=shape,
         )
         assert decision.action == "hard_kill"
         assert decision.pid == 12345
@@ -109,7 +130,16 @@ class TestPidRecycleGuard:
     def test_pid_recycled_to_different_cwd_aborts(self, monkeypatch):
         """Mock the cwd-check to return a non-cc-* dir (simulating PID reuse)."""
         from nervous_system import long_caller_watchdog as mod
+        from nervous_system.long_caller_watchdog import ContentShape
+        from nervous_system.content_shape_signals import SignalResult
 
+        # Updated for CAI-RESP-164 R1-AMENDED: inner decide_kill must reach
+        # hard_kill before the PID-recycle guard fires. Provide 3-of-3 shape.
+        shape = ContentShape(
+            signal_a=SignalResult(match=True, value=54000),
+            signal_b=SignalResult(match=True, value={"avg_gap": 300}),
+            signal_c=SignalResult(match=True, value="ok"),
+        )
         monkeypatch.setattr(mod, "_resolve_pid_cwd", lambda pid: "/usr/bin")
         decision = mod.decide_kill_with_pid_verify(
             caller_name="cc-rogue",
@@ -117,6 +147,7 @@ class TestPidRecycleGuard:
             registered=False,
             parent_pid=12345,
             expected_cwd_prefix="/Users/sheikhmusa/wingmen/projects/",
+            content_shape=shape,
         )
         assert decision.action == "no_kill"
         assert "pid_recycled" in decision.reason
