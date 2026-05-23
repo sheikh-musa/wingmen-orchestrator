@@ -25,18 +25,30 @@ pytestmark_integration = pytest.mark.skipif(not _DSN, reason="DATABASE_URL not s
 
 @pytestmark_integration
 def test_synthetic_runaway_triggers_hard_kill_decision(monkeypatch):
-    """Insert synthetic active_autonomous_loops row; assert decide_kill returns hard_kill."""
-    from nervous_system.long_caller_watchdog import decide_kill
+    """Insert synthetic active_autonomous_loops row; assert decide_kill returns hard_kill.
+
+    Post CAI-RESP-164 R1-AMENDED: decide_kill requires a 3-of-3 ContentShape to
+    return hard_kill. This test passes a synthetic 3-of-3 shape to preserve the
+    original semantic — that the SIGTERM path is reachable under the new gate.
+    """
+    from nervous_system.long_caller_watchdog import decide_kill, ContentShape
+    from nervous_system.content_shape_signals import SignalResult
 
     fake_cc = f"cc-test-runaway-{uuid.uuid4().hex[:8]}"
     fake_pid = 99999
 
+    shape = ContentShape(
+        signal_a=SignalResult(match=True, value=54000),
+        signal_b=SignalResult(match=True, value={"avg_gap": 300}),
+        signal_c=SignalResult(match=True, value="ok"),
+    )
     decision = decide_kill(
         caller_name=fake_cc,
         sessions_24h=500,
         cadence_seconds=10,
         registered=False,
         parent_pid=fake_pid,
+        content_shape=shape,
     )
     assert decision.action == "hard_kill"
     assert decision.pid == fake_pid
