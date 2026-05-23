@@ -40,8 +40,20 @@ from notification_router import get_chat_id
 from nervous_system.long_caller_watchdog import (
     decide_kill_with_pid_verify,
     build_telegram_body,
+    ContentShape,
 )
-from nervous_system.autonomous_loop_detector import DETECTION_THRESHOLD_SESSIONS_24H
+from nervous_system.content_shape_signals import (
+    signal_a_median_size,
+    signal_b_cadence_band,
+    signal_c_identical_prompts,
+)
+from nervous_system.autonomous_loop_detector import (
+    DETECTION_THRESHOLD_SESSIONS_24H,
+    _DIR_TO_CC,
+)
+
+_CC_TO_CLAUDE_PROJECT_DIR = {v: k for k, v in _DIR_TO_CC.items()}
+_CLAUDE_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 
 # CAI-RESP-163 Phase B — long_caller_watchdog poll constants
 _LONG_CALLER_POLL_INTERVAL = 300  # 5min per CAI-RESP-163 Q2
@@ -283,6 +295,29 @@ async def _long_caller_sweep() -> None:
                 matched_name = name
                 break
 
+        # CAI-RESP-164: compute content-shape signals from JSONL transcripts
+        content_shape = None
+        project_dir = None
+        mangled = _CC_TO_CLAUDE_PROJECT_DIR.get(cc_id)
+        if mangled:
+            project_dir = _CLAUDE_PROJECTS_ROOT / mangled
+            if project_dir.exists():
+                try:
+                    jsonls = sorted(
+                        (p for p in project_dir.iterdir()
+                         if p.is_file() and p.name.endswith(".jsonl") and not p.name.startswith(".")),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )[:10]
+                except OSError:
+                    jsonls = []
+                if jsonls:
+                    content_shape = ContentShape(
+                        signal_a=signal_a_median_size(jsonls),
+                        signal_b=signal_b_cadence_band(jsonls),
+                        signal_c=signal_c_identical_prompts(jsonls),
+                    )
+
         decision = decide_kill_with_pid_verify(
             caller_name=matched_name,
             sessions_24h=sessions_24h,
@@ -290,9 +325,61 @@ async def _long_caller_sweep() -> None:
             registered=registered,
             registered_policy=policy,
             parent_pid=parent_pid,
+            content_shape=content_shape,
         )
 
         if decision.action == "hard_kill" and parent_pid:
+            # CAI-RESP-167 R5: pre-SIGTERM audit. SIGTERM only if audit INSERT succeeds.
+            audit_ok = False
+            try:
+                with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO notification_log "
+                        "(source, decision_ref, channel, recipient, message_text) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (
+                            "watchdog_pre_kill_audit",
+                            "CAI-RESP-167",
+                            "long_running_callers",
+                            matched_name,
+                            json.dumps({
+                                "caller_pid": parent_pid,
+                                "jsonl_dir": str(project_dir) if project_dir else None,
+                                "signal_a_value": content_shape.signal_a.value if content_shape else None,
+                                "signal_b_value": content_shape.signal_b.value if content_shape else None,
+                                "signal_c_value": content_shape.signal_c.value if content_shape else None,
+                                "signal_a_match": content_shape.signal_a.match if content_shape else None,
+                                "signal_b_match": content_shape.signal_b.match if content_shape else None,
+                                "signal_c_match": content_shape.signal_c.match if content_shape else None,
+                                "registration_status": "unregistered" if not registered else "registered",
+                                "check_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                            }, default=str),
+                        ),
+                    )
+                audit_ok = True
+            except Exception as audit_err:
+                logger.error(
+                    f"R5 audit write FAILED — skipping SIGTERM for {matched_name} (PID {parent_pid}): {audit_err}"
+                )
+                try:
+                    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO notification_log "
+                            "(source, decision_ref, channel, recipient, message_text) "
+                            "VALUES (%s, %s, %s, %s, %s)",
+                            (
+                                "watchdog_pre_kill_audit_failed",
+                                "CAI-RESP-167",
+                                "long_running_callers",
+                                matched_name,
+                                json.dumps({"error": str(audit_err), "pid": parent_pid}),
+                            ),
+                        )
+                except Exception:
+                    pass
+            if not audit_ok:
+                continue  # next flagged row; no SIGTERM without audit
+
             try:
                 os.kill(parent_pid, signal.SIGTERM)
                 logger.warning(
@@ -303,32 +390,70 @@ async def _long_caller_sweep() -> None:
                     event="hard_kill",
                     caller_name=matched_name,
                     pid=parent_pid,
-                    cwd="unknown",
+                    cwd=str(project_dir) if project_dir else "unknown",
                     sessions_24h=sessions_24h,
                     threshold=DETECTION_THRESHOLD_SESSIONS_24H,
                 )
                 await alert_admin(body)
-                with psycopg.connect(dsn, autocommit=True) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO notification_log "
-                            "(source, decision_ref, channel, recipient, message_text) "
-                            "VALUES (%s, %s, %s, %s, %s)",
-                            (
-                                "watchdog_hard_kill",
-                                "CAI-RESP-163",
-                                "long_running_callers",
-                                matched_name,
-                                json.dumps({
-                                    "sessions_24h": sessions_24h,
-                                    "cadence_seconds": cadence_seconds,
-                                    "pid": parent_pid,
-                                    "reason": decision.reason,
-                                }),
-                            ),
-                        )
+                with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO notification_log "
+                        "(source, decision_ref, channel, recipient, message_text) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (
+                            "watchdog_hard_kill",
+                            "CAI-RESP-167",
+                            "long_running_callers",
+                            matched_name,
+                            json.dumps({
+                                "sessions_24h": sessions_24h,
+                                "cadence_seconds": cadence_seconds,
+                                "pid": parent_pid,
+                                "reason": decision.reason,
+                            }),
+                        ),
+                    )
             except (ProcessLookupError, PermissionError) as e:
                 logger.warning(f"SIGTERM to {parent_pid} failed: {e}")
+        elif decision.action == "monitored":
+            sa = content_shape.signal_a if content_shape else None
+            sb = content_shape.signal_b if content_shape else None
+            sc = content_shape.signal_c if content_shape else None
+            try:
+                with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO watchdog_monitored_callers
+                          (caller_name, expires_at, sessions_24h, cadence_seconds,
+                           signal_a_value, signal_b_value, signal_c_value,
+                           signal_a_match, signal_b_match, signal_c_match)
+                        VALUES (%s, now() + interval '24 hours', %s, %s,
+                                %s, %s, %s,
+                                %s, %s, %s)
+                        ON CONFLICT (caller_name) DO UPDATE SET
+                          expires_at = EXCLUDED.expires_at,
+                          sessions_24h = EXCLUDED.sessions_24h,
+                          cadence_seconds = EXCLUDED.cadence_seconds,
+                          signal_a_value = EXCLUDED.signal_a_value,
+                          signal_b_value = EXCLUDED.signal_b_value,
+                          signal_c_value = EXCLUDED.signal_c_value,
+                          signal_a_match = EXCLUDED.signal_a_match,
+                          signal_b_match = EXCLUDED.signal_b_match,
+                          signal_c_match = EXCLUDED.signal_c_match
+                        """,
+                        (
+                            matched_name, sessions_24h, cadence_seconds,
+                            json.dumps(sa.value, default=str) if sa else None,
+                            json.dumps(sb.value, default=str) if sb else None,
+                            json.dumps(sc.value, default=str) if sc else None,
+                            sa.match if sa else None,
+                            sb.match if sb else None,
+                            sc.match if sc else None,
+                        ),
+                    )
+                logger.info(f"watchdog: monitored {matched_name} ({decision.reason})")
+            except Exception as e:
+                logger.error(f"watchdog_monitored_callers upsert failed for {matched_name}: {e}")
         elif decision.action == "no_kill" and "pid_recycled" in decision.reason:
             # Q3 PID-recycle abort — audit-log the aborted kill
             with psycopg.connect(dsn, autocommit=True) as conn:
