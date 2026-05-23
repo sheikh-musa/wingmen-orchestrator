@@ -8,13 +8,17 @@ Sets bot description to "offline" so clients see status before messaging.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import signal
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import httpx
+import psycopg
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -33,6 +37,15 @@ logging.basicConfig(
 logger = logging.getLogger("wingmen.watchdog")
 
 from notification_router import get_chat_id
+from nervous_system.long_caller_watchdog import (
+    decide_kill_with_pid_verify,
+    build_telegram_body,
+)
+from nervous_system.autonomous_loop_detector import DETECTION_THRESHOLD_SESSIONS_24H
+
+# CAI-RESP-163 Phase B — long_caller_watchdog poll constants
+_LONG_CALLER_POLL_INTERVAL = 300  # 5min per CAI-RESP-163 Q2
+_long_caller_last_poll = 0.0
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -234,6 +247,119 @@ async def _probe_mac_studio() -> None:
                 )
 
 
+async def _long_caller_sweep() -> None:
+    """One sweep cycle per CAI-RESP-163: read active_autonomous_loops +
+    long_running_claude_callers, decide kills, actuate SIGTERM, alert admin,
+    write notification_log audit. Pure-Python decision via long_caller_watchdog;
+    this function does the I/O.
+    """
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    if not dsn:
+        return
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT cc_identity, sessions_24h, cadence_seconds, parent_pid "
+                "FROM active_autonomous_loops"
+            )
+            flagged = cur.fetchall()
+            cur.execute(
+                "SELECT caller_name, auto_kill_policy FROM long_running_claude_callers "
+                "WHERE revoked_at IS NULL"
+            )
+            registry = {r[0]: r[1] for r in cur.fetchall()}
+
+    for cc_id, sessions_24h, cadence_seconds, parent_pid in flagged:
+        # CC families register under -interactive suffix per CC-FAMILY-INTERACTIVE-SESSIONS-001
+        possible_names = [cc_id, f"{cc_id}-interactive"]
+        registered = False
+        policy = None
+        matched_name = cc_id
+        for name in possible_names:
+            if name in registry:
+                registered = True
+                policy = registry[name]
+                matched_name = name
+                break
+
+        decision = decide_kill_with_pid_verify(
+            caller_name=matched_name,
+            sessions_24h=sessions_24h,
+            cadence_seconds=cadence_seconds or 0,
+            registered=registered,
+            registered_policy=policy,
+            parent_pid=parent_pid,
+        )
+
+        if decision.action == "hard_kill" and parent_pid:
+            try:
+                os.kill(parent_pid, signal.SIGTERM)
+                logger.warning(
+                    f"long_caller_watchdog: SIGTERM sent to PID {parent_pid} "
+                    f"(caller {matched_name})"
+                )
+                body = build_telegram_body(
+                    event="hard_kill",
+                    caller_name=matched_name,
+                    pid=parent_pid,
+                    cwd="unknown",
+                    sessions_24h=sessions_24h,
+                    threshold=DETECTION_THRESHOLD_SESSIONS_24H,
+                )
+                await alert_admin(body)
+                with psycopg.connect(dsn, autocommit=True) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO notification_log "
+                            "(source, decision_ref, channel, recipient, message_text) "
+                            "VALUES (%s, %s, %s, %s, %s)",
+                            (
+                                "watchdog_hard_kill",
+                                "CAI-RESP-163",
+                                "long_running_callers",
+                                matched_name,
+                                json.dumps({
+                                    "sessions_24h": sessions_24h,
+                                    "cadence_seconds": cadence_seconds,
+                                    "pid": parent_pid,
+                                    "reason": decision.reason,
+                                }),
+                            ),
+                        )
+            except (ProcessLookupError, PermissionError) as e:
+                logger.warning(f"SIGTERM to {parent_pid} failed: {e}")
+        elif decision.action == "no_kill" and "pid_recycled" in decision.reason:
+            # Q3 PID-recycle abort — audit-log the aborted kill
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO notification_log "
+                        "(source, decision_ref, channel, recipient, message_text) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (
+                            "watchdog_aborted_kill",
+                            "CAI-RESP-163",
+                            "long_running_callers",
+                            matched_name,
+                            json.dumps({"reason": decision.reason, "pid": parent_pid}),
+                        ),
+                    )
+
+
+async def _maybe_long_caller_poll() -> None:
+    """Gated wrapper — only fires every _LONG_CALLER_POLL_INTERVAL seconds."""
+    global _long_caller_last_poll
+    now = time.time()
+    if now - _long_caller_last_poll < _LONG_CALLER_POLL_INTERVAL:
+        return
+    _long_caller_last_poll = now
+    try:
+        await _long_caller_sweep()
+    except Exception as e:
+        logger.error(f"_long_caller_sweep failed: {e}")
+
+
 async def main_loop():
     global _last_bot_status, _last_orch_status, _alerted
 
@@ -291,6 +417,8 @@ async def main_loop():
                 await alert_admin("\u2705 Orchestrator is back online")
 
             await _probe_mac_studio()
+
+            await _maybe_long_caller_poll()
 
             _last_bot_status = bot_alive
             _last_orch_status = orch_alive

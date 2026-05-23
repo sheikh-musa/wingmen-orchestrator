@@ -142,3 +142,46 @@ class TestDetectActiveLoops:
 def test_detection_threshold_default_50():
     """Threshold ratified at 50 per CAI-RESP-157 Q2."""
     assert DETECTION_THRESHOLD_SESSIONS_24H == 50
+
+
+class TestResolveParentPid:
+    """parent_pid resolution: lsof-based cwd-matching."""
+
+    def test_unknown_cc_identity_returns_none(self):
+        from nervous_system.autonomous_loop_detector import _resolve_parent_pid
+        assert _resolve_parent_pid("alien-cc") is None
+
+    def test_empty_cc_identity_returns_none(self):
+        from nervous_system.autonomous_loop_detector import _resolve_parent_pid
+        assert _resolve_parent_pid("") is None
+
+    def test_cc_to_cwd_covers_every_dir_to_cc_identity(self):
+        """Drift guard: every identity the detector recognizes must be
+        resolvable to a cwd, else watchdog can never kill it."""
+        from nervous_system.autonomous_loop_detector import _CC_TO_CWD, _DIR_TO_CC
+        assert set(_DIR_TO_CC.values()) == set(_CC_TO_CWD.keys())
+
+
+class TestIsClaudeCommand:
+    """Tightened basename match so `tail -f claude.log` isn't mistaken for claude."""
+
+    def test_bare_claude_binary(self):
+        from nervous_system.autonomous_loop_detector import _is_claude_command
+        assert _is_claude_command("claude --some-flag\n") is True
+
+    def test_absolute_path_claude(self):
+        from nervous_system.autonomous_loop_detector import _is_claude_command
+        assert _is_claude_command("/usr/local/bin/claude -p hello\n") is True
+
+    def test_tail_claude_log_not_matched(self):
+        from nervous_system.autonomous_loop_detector import _is_claude_command
+        assert _is_claude_command("tail -f claude.log\n") is False
+
+    def test_vim_editing_claude_file_not_matched(self):
+        from nervous_system.autonomous_loop_detector import _is_claude_command
+        assert _is_claude_command("vim claude_runner.py\n") is False
+
+    def test_empty_output_not_matched(self):
+        from nervous_system.autonomous_loop_detector import _is_claude_command
+        assert _is_claude_command("") is False
+        assert _is_claude_command("   \n") is False
