@@ -58,6 +58,12 @@ _CLAUDE_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 # CAI-RESP-163 Phase B — long_caller_watchdog poll constants
 _LONG_CALLER_POLL_INTERVAL = 300  # 5min per CAI-RESP-163 Q2
 _long_caller_last_poll = 0.0
+# CAI-RESP-168 C1: fail-closed R4 arm check. If watchdog_monitored_callers
+# is absent from boot_briefing at startup or at any sweep, the long-caller
+# sweep PAUSES. Degraded observability halts the watchdog instead of letting
+# it run blind.
+_long_caller_paused_reason: str | None = None
+_long_caller_paused_alerted = False
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -472,13 +478,74 @@ async def _long_caller_sweep() -> None:
                     )
 
 
+def _check_r4_arm_present(dsn: str) -> tuple[bool, str | None]:
+    """CAI-RESP-168 C1: verify the watchdog_monitored_callers arm is in
+    boot_briefing. Returns (present, reason_if_missing). DB-error → (False, err)
+    so the watchdog fails closed on any uncertainty.
+    """
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute("SELECT pg_get_viewdef('boot_briefing'::regclass, true)")
+            defn = cur.fetchone()[0]
+        if "watchdog_monitored_callers" not in defn:
+            return False, "watchdog_monitored_callers arm missing from boot_briefing"
+        return True, None
+    except Exception as e:
+        return False, f"boot_briefing read failed: {e}"
+
+
 async def _maybe_long_caller_poll() -> None:
-    """Gated wrapper — only fires every _LONG_CALLER_POLL_INTERVAL seconds."""
-    global _long_caller_last_poll
+    """Gated wrapper — only fires every _LONG_CALLER_POLL_INTERVAL seconds.
+
+    CAI-RESP-168 C1: before each sweep, verify the watchdog_monitored_callers
+    arm is present in boot_briefing. If absent, PAUSE all sweeps until
+    operator restores the view + restarts the daemon. Degraded observability
+    halts the watchdog rather than letting it run blind.
+    """
+    global _long_caller_last_poll, _long_caller_paused_reason, _long_caller_paused_alerted
     now = time.time()
     if now - _long_caller_last_poll < _LONG_CALLER_POLL_INTERVAL:
         return
     _long_caller_last_poll = now
+
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    if not dsn:
+        return
+
+    present, why = _check_r4_arm_present(dsn)
+    if not present:
+        if _long_caller_paused_reason != why:
+            _long_caller_paused_reason = why
+            _long_caller_paused_alerted = False
+        if not _long_caller_paused_alerted:
+            logger.error(f"long_caller_watchdog PAUSED — fail-closed (CAI-RESP-168 C1): {why}")
+            try:
+                await alert_admin(
+                    "🛑 Watchdog long-caller sweep PAUSED (fail-closed)\n\n"
+                    f"reason: {why}\n\n"
+                    "Daemon will not SIGTERM until the watchdog_monitored_callers arm "
+                    "is restored in boot_briefing. Re-apply migration "
+                    "20260523_watchdog_monitored_callers.sql then "
+                    "`launchctl kickstart -k gui/$(id -u)/dev.wingmen.watchdog`."
+                )
+                _long_caller_paused_alerted = True
+            except Exception as alert_err:
+                logger.error(f"alert_admin failed during R4-pause notification: {alert_err}")
+        return
+
+    # Recovery path: arm came back. Reset pause state so future regressions re-alert.
+    if _long_caller_paused_reason is not None:
+        logger.info("long_caller_watchdog: R4 arm restored — resuming sweeps")
+        try:
+            await alert_admin(
+                "✅ Watchdog long-caller sweep RESUMED — "
+                "watchdog_monitored_callers arm restored in boot_briefing."
+            )
+        except Exception:
+            pass
+        _long_caller_paused_reason = None
+        _long_caller_paused_alerted = False
+
     try:
         await _long_caller_sweep()
     except Exception as e:
