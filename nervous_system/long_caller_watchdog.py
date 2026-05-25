@@ -23,6 +23,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Optional
 
+from nervous_system.content_shape_signals import SignalResult
+
 
 # C2: substrate-native carve-out (hard-coded; cannot be overridden by registry)
 SUBSTRATE_NATIVE_NEVER_KILL: frozenset[str] = frozenset({"ralphy", "paused-job-retry"})
@@ -52,6 +54,30 @@ class CadenceObservation:
     drift_detected: bool
     observed_cadence_seconds: Optional[float] = None
     sample_count: int = 0
+
+
+@dataclass(frozen=True)
+class ContentShape:
+    """Three content-shape signal results per CAI-RESP-164 R1-AMENDED.
+
+    R1-AMENDED requires ALL THREE signals to match before hard_kill.
+    Any unobservable → no_action. 0/1/2-of-3 → monitored.
+    """
+    signal_a: SignalResult
+    signal_b: SignalResult
+    signal_c: SignalResult
+
+    @property
+    def any_unobservable(self) -> bool:
+        return any(s.unobservable for s in (self.signal_a, self.signal_b, self.signal_c))
+
+    @property
+    def all_match(self) -> bool:
+        return (
+            self.signal_a.match is True
+            and self.signal_b.match is True
+            and self.signal_c.match is True
+        )
 
 
 class CadenceTracker:
@@ -112,6 +138,7 @@ def decide_kill(
     registered: bool,
     registered_policy: Optional[str] = None,
     parent_pid: Optional[int] = None,
+    content_shape: Optional[ContentShape] = None,
 ) -> KillDecision:
     """Pure decision function — given inputs, return KillDecision.
 
@@ -152,12 +179,50 @@ def decide_kill(
             pid=parent_pid,
         )
 
+    # CAI-RESP-164 R1-AMENDED: 3-of-3 content-shape AND-gate required for hard_kill.
+    if content_shape is None:
+        # No signals computed — conservative: don't kill, surface as monitored.
+        return KillDecision(
+            action="monitored",
+            reason="R1_unregistered_no_content_shape_computed",
+            caller_name=caller_name,
+            pid=parent_pid,
+            extras={"sessions_24h": sessions_24h, "cadence_seconds": cadence_seconds},
+        )
+    if content_shape.any_unobservable:
+        return KillDecision(
+            action="no_action",
+            reason="R3_signals_unobservable",
+            caller_name=caller_name,
+            pid=parent_pid,
+            extras={"sessions_24h": sessions_24h, "cadence_seconds": cadence_seconds},
+        )
+    if content_shape.all_match:
+        return KillDecision(
+            action="hard_kill",
+            reason="R1_AMENDED_unregistered_3of3_content_shape",
+            caller_name=caller_name,
+            pid=parent_pid,
+            extras={
+                "sessions_24h": sessions_24h,
+                "cadence_seconds": cadence_seconds,
+                "signal_a_value": content_shape.signal_a.value,
+                "signal_b_value": content_shape.signal_b.value,
+                "signal_c_value": content_shape.signal_c.value,
+            },
+        )
     return KillDecision(
-        action="hard_kill",
-        reason="R1_unregistered_pattern",
+        action="monitored",
+        reason="R1_AMENDED_unregistered_under_3of3",
         caller_name=caller_name,
         pid=parent_pid,
-        extras={"sessions_24h": sessions_24h, "cadence_seconds": cadence_seconds},
+        extras={
+            "sessions_24h": sessions_24h,
+            "cadence_seconds": cadence_seconds,
+            "signal_a_match": content_shape.signal_a.match,
+            "signal_b_match": content_shape.signal_b.match,
+            "signal_c_match": content_shape.signal_c.match,
+        },
     )
 
 
@@ -170,6 +235,7 @@ def decide_kill_with_pid_verify(
     registered_policy: Optional[str] = None,
     parent_pid: Optional[int] = None,
     expected_cwd_prefix: str = "/Users/sheikhmusa/wingmen/",
+    content_shape: Optional[ContentShape] = None,
 ) -> KillDecision:
     """Wraps decide_kill with the Q3 PID-recycle race guard.
 
@@ -183,6 +249,7 @@ def decide_kill_with_pid_verify(
         registered=registered,
         registered_policy=registered_policy,
         parent_pid=parent_pid,
+        content_shape=content_shape,
     )
     if inner.action != "hard_kill" or parent_pid is None:
         return inner
@@ -217,6 +284,14 @@ def build_telegram_body(
             "Next action — reply to this thread:\n"
             "  /legitimize → file CC-LONG-CALLER-INDIVIDUAL-NNN\n"
             "  /revoke    → confirm revocation, log to notification_log"
+        )
+    elif event == "monitored":
+        return (
+            "👁  Watchdog monitored caller (not killed)\n\n"
+            f"caller: {caller_name} (PID {pid}, cwd {cwd})\n"
+            f"observed: {sessions_24h} sessions/24h\n"
+            "0/3, 1/3, or 2/3 content-shape signals matched — insufficient evidence for SIGTERM.\n"
+            "24h auto-expire unless escalates to 3/3 or operator registers."
         )
     elif event == "soft_alert_cadence_drift":
         return (
