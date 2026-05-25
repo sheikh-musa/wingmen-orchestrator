@@ -5,6 +5,8 @@ Negative case (cc-scholar incident) must produce <3-of-3 → monitored.
 """
 from __future__ import annotations
 
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -21,6 +23,31 @@ from nervous_system.long_caller_watchdog import ContentShape, decide_kill
 
 PROBE_DIR = Path(__file__).parent / "fixtures" / "probe_max_throttle"
 SCHOLAR_DIR = Path(__file__).parent / "fixtures" / "cc_scholar_2026_05_19_2244"
+
+# Git doesn't preserve file mtimes across checkouts — clobbered to checkout-time.
+# signal_b's span calculation needs deterministic mtimes, so restore them from
+# the session-NN filename index before any fixture-driven test runs. Mirrors
+# what gen.py set when the probe fixture was authored.
+#
+# The cc-scholar fixture doesn't need this restoration: its desired behavior is
+# match=False on signal_b (whether due to mtimes-clobbered span~0s or genuinely
+# short span), so the negative test passes either way.
+_PROBE_BASE_MTIME = 1700000000.0
+_PROBE_CADENCE = 300.0
+_SESSION_INDEX_RE = re.compile(r"session-(\d+)\.jsonl$")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_probe_mtimes():
+    if PROBE_DIR.exists():
+        for p in PROBE_DIR.glob("session-*.jsonl"):
+            m = _SESSION_INDEX_RE.search(p.name)
+            if not m:
+                continue
+            idx = int(m.group(1))
+            mt = _PROBE_BASE_MTIME + idx * _PROBE_CADENCE
+            os.utime(p, (mt, mt))
+    yield
 
 
 def _jsonls(d: Path) -> list[Path]:
