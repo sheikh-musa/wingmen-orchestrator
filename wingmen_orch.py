@@ -1697,6 +1697,8 @@ async def main_loop():
     orch_self_audit_counter = 0      # ORCH-SELF-AUDIT: every 20 polls (~10 min)
     deploy_verifier_counter = 0      # CAI-RESP-083: every 10 polls (~5 min), env-flag gated
     autonomous_loop_detector_counter = 0  # CAI-RESP-157 [A]: every 10 polls (~5 min)
+    cc_session_costs_writer_counter = 0   # CC-LONG-CALLER-AUTO-TOKEN-TRACK-001-RESUME: every 20 polls (~10 min)
+    cc_session_costs_last_sweep_mtime = 0.0  # epoch-seconds floor for sweep_projects_root
     dream_counter = 0
     ecosystem_frequent_counter = 0   # GATE 4 every 10 polls (~5 min)
     ecosystem_half_hour_counter = 0  # GATE 2 every 60 polls (~30 min)
@@ -2033,6 +2035,34 @@ async def main_loop():
                     logger.error(f"Autonomous loop detector sweep failed: {e}")
                     record_swallowed("autonomous_loop_detector", e)
                 autonomous_loop_detector_counter = 0
+
+            # CC-LONG-CALLER-AUTO-TOKEN-TRACK-001-RESUME: every 20 polls (~10 min).
+            # Parse last 1h of jsonl mtimes, sum usage fields per session, upsert
+            # into cc_session_costs. R2 enforcement remains deferred; this is
+            # visibility only.
+            cc_session_costs_writer_counter += 1
+            if cc_session_costs_writer_counter >= 20:
+                try:
+                    from nervous_system.cc_session_costs_auto_writer import (
+                        sweep_projects_root,
+                        upsert_rows,
+                    )
+                    _t = time.time()
+                    cutoff = cc_session_costs_last_sweep_mtime or (_t - 3600)
+                    cc_session_costs_last_sweep_mtime = _t
+                    _projects_root = Path.home() / ".claude" / "projects"
+                    rows = sweep_projects_root(_projects_root, modified_since=cutoff)
+                    if rows:
+                        dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+                        if dsn:
+                            written = upsert_rows(dsn, rows)
+                            logger.info(
+                                f"cc_session_costs auto-writer: {written} rows upserted"
+                            )
+                except Exception as e:
+                    logger.error(f"cc_session_costs auto-writer failed: {e}")
+                    record_swallowed("cc_session_costs_auto_writer", e)
+                cc_session_costs_writer_counter = 0
 
             # Feature health signal — every 60 polls (~30 min).
             # Scans launchctl + logs + static files, writes advisory
