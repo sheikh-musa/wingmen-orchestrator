@@ -368,7 +368,74 @@ def scan_file(path: Path) -> list[str]:
     return findings
 
 
+def _warn_if_supabase_db_push_context() -> None:
+    """CC-SUBSTRATE-VIEW-INTEGRITY-001-FINDINGS M_PRIMARY: emit a loud warning
+    if this script appears to be invoked from a `supabase db push` workflow.
+
+    The CLI's shadow-diff re-applies historic CREATE OR REPLACE VIEW
+    statements that pre-date current boot_briefing arms — confirmed root
+    cause of the 2026-05-22 arm-loss incident. Operators must use the
+    orch's direct psycopg-apply pattern instead.
+
+    Heuristic: parent process command starts with `supabase ` (the CLI
+    binary). Argv check is NOT used — migration file paths begin with
+    `supabase/` and would false-positive.
+    """
+    import os as _os
+    import subprocess as _sp
+
+    try:
+        ppid = _os.getppid()
+        out = _sp.run(
+            ["ps", "-p", str(ppid), "-o", "command="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, _sp.SubprocessError):
+        return
+
+    parent_cmd = (out.stdout or "").strip()
+    # Match only the supabase CLI binary as the parent — exact basename check.
+    first = parent_cmd.split(None, 1)[0] if parent_cmd else ""
+    parent_exe = first.rsplit("/", 1)[-1]
+    if parent_exe != "supabase":
+        return
+
+    sys.stderr.write(
+        "\n⚠️  WARNING — invoked from supabase CLI\n"
+        f"   parent: {parent_cmd[:160]}\n"
+        "   Per CC-SUBSTRATE-VIEW-INTEGRITY-001-FINDINGS (decision 962) +\n"
+        "   CLAUDE.md rule: NEVER run `supabase db push` against production\n"
+        "   (project_ref ceayjeamtmcyzzvqflus). Shadow-diff re-applies historic\n"
+        "   CREATE OR REPLACE VIEW statements and silently strips arms from\n"
+        "   boot_briefing. Use the orch's direct psycopg-apply pattern — see\n"
+        "   PR #41 / #42 / #44 migration apply scripts.\n\n"
+    )
+
+
+_EMPTY_STATEMENTS_RE = re.compile(r"ARRAY\s*\[\s*\]\s*::\s*text\s*\[\s*\]", re.IGNORECASE)
+
+
+def _advise_if_empty_statements(path: Path, sql: str) -> None:
+    """CC-SUBSTRATE-VIEW-INTEGRITY-001-FINDINGS M_LEDGER_AUDIT advisory:
+    empty schema_migrations.statements array means the ledger has no
+    forensic record of what was applied. Recommend populating with the
+    SQL body. Non-blocking — emits to stderr.
+    """
+    stripped = strip_sql_comments(sql)
+    if "schema_migrations" not in stripped:
+        return  # migration doesn't write to the ledger at all; M_LEDGER_AUDIT irrelevant
+    if not _EMPTY_STATEMENTS_RE.search(stripped):
+        return
+    sys.stderr.write(
+        f"ADVISORY ({path.name}): schema_migrations.statements is empty "
+        "(ARRAY[]::text[]). Populate with the migration's SQL body so the "
+        "ledger preserves the forensic record. See "
+        "docs/substrate/migration-conventions.md §Convention 3. Non-blocking.\n"
+    )
+
+
 def main() -> None:
+    _warn_if_supabase_db_push_context()
     if len(sys.argv) < 2:
         print(
             "Usage: check_additive_migration.py <file.sql> [<file2.sql> ...]",
@@ -386,6 +453,7 @@ def main() -> None:
             sys.exit(2)
         findings = scan_file(path)
         all_findings.extend(findings)
+        _advise_if_empty_statements(path, path.read_text())
 
     if all_findings:
         exit_code = 1
