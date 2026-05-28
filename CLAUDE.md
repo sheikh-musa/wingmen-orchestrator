@@ -52,3 +52,4 @@ Context is scarce. Load the index first; fetch full content only when you need i
 - Log all build operations to the `build_log` table
 - All audit deliverables (build specs, diffs, test results, deploy URLs) must be written to Supabase `work_outputs` table — repo files alone are not sufficient
 - Restart orchestrator only via `scripts/restart_orch.sh` (launchctl). Never `nohup`.
+- **Never run `supabase db push` against production** (project_ref `ceayjeamtmcyzzvqflus`). Per CC-SUBSTRATE-VIEW-INTEGRITY-001-FINDINGS (decision 962): the CLI's shadow-diff path re-applies historic `CREATE OR REPLACE VIEW` statements from migrations whose view bodies pre-date current arms, silently stripping later arms from `boot_briefing`. Use the orch's direct psycopg-apply pattern instead — see PR #41 / #42 / #44 migration apply scripts. The shadow path is for local dev only.
