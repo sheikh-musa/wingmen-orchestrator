@@ -478,17 +478,42 @@ async def _long_caller_sweep() -> None:
                     )
 
 
+# CC-SUBSTRATE-VIEW-INTEGRITY-001-FINDINGS M_DETECTIVE: expand the C1
+# single-arm fingerprint into a full arm-set check. Catches any arm regression,
+# not just watchdog_monitored_callers. The supabase-db-push root cause can
+# strip ANY arm added after the locally-checked-out migrations, so the
+# detective control must be broad. Update this set whenever a new arm ships
+# (each boot_briefing-touching migration is the right place to amend).
+_EXPECTED_BOOT_BRIEFING_ARMS: frozenset[str] = frozenset({
+    "repo_context",
+    "active_decision",
+    "active_autonomous_loops",
+    "long_running_caller",
+    "watchdog_monitored_callers",
+})
+
+
 def _check_r4_arm_present(dsn: str) -> tuple[bool, str | None]:
-    """CAI-RESP-168 C1: verify the watchdog_monitored_callers arm is in
-    boot_briefing. Returns (present, reason_if_missing). DB-error → (False, err)
-    so the watchdog fails closed on any uncertainty.
+    """CAI-RESP-168 C1 + CC-SUBSTRATE-VIEW-INTEGRITY-001-FINDINGS M_DETECTIVE:
+    verify ALL load-bearing arms are in boot_briefing.
+
+    Original C1 spec checked only watchdog_monitored_callers. M_DETECTIVE
+    broadens to _EXPECTED_BOOT_BRIEFING_ARMS so any arm regression pauses
+    the sweep — not just the one cai's ratification named.
+
+    Returns (present, reason_if_missing). DB-error → (False, err) so the
+    watchdog fails closed on any uncertainty.
     """
     try:
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("SELECT pg_get_viewdef('boot_briefing'::regclass, true)")
             defn = cur.fetchone()[0]
-        if "watchdog_monitored_callers" not in defn:
-            return False, "watchdog_monitored_callers arm missing from boot_briefing"
+        missing = sorted(
+            arm for arm in _EXPECTED_BOOT_BRIEFING_ARMS
+            if f"'{arm}'::text" not in defn
+        )
+        if missing:
+            return False, f"boot_briefing arm(s) missing: {', '.join(missing)}"
         return True, None
     except Exception as e:
         return False, f"boot_briefing read failed: {e}"
