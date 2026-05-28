@@ -412,6 +412,28 @@ def _warn_if_supabase_db_push_context() -> None:
     )
 
 
+_EMPTY_STATEMENTS_RE = re.compile(r"ARRAY\s*\[\s*\]\s*::\s*text\s*\[\s*\]", re.IGNORECASE)
+
+
+def _advise_if_empty_statements(path: Path, sql: str) -> None:
+    """CC-SUBSTRATE-VIEW-INTEGRITY-001-FINDINGS M_LEDGER_AUDIT advisory:
+    empty schema_migrations.statements array means the ledger has no
+    forensic record of what was applied. Recommend populating with the
+    SQL body. Non-blocking — emits to stderr.
+    """
+    stripped = strip_sql_comments(sql)
+    if "schema_migrations" not in stripped:
+        return  # migration doesn't write to the ledger at all; M_LEDGER_AUDIT irrelevant
+    if not _EMPTY_STATEMENTS_RE.search(stripped):
+        return
+    sys.stderr.write(
+        f"ADVISORY ({path.name}): schema_migrations.statements is empty "
+        "(ARRAY[]::text[]). Populate with the migration's SQL body so the "
+        "ledger preserves the forensic record. See "
+        "docs/substrate/migration-conventions.md §Convention 3. Non-blocking.\n"
+    )
+
+
 def main() -> None:
     _warn_if_supabase_db_push_context()
     if len(sys.argv) < 2:
@@ -431,6 +453,7 @@ def main() -> None:
             sys.exit(2)
         findings = scan_file(path)
         all_findings.extend(findings)
+        _advise_if_empty_statements(path, path.read_text())
 
     if all_findings:
         exit_code = 1

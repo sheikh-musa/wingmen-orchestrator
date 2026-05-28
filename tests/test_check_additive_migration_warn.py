@@ -65,3 +65,67 @@ class TestSupabasePushWarning:
             sys_mock.stderr = capture
             cam._warn_if_supabase_db_push_context()
         assert capture.getvalue() == ""
+
+
+class TestEmptyStatementsAdvisory:
+    """M_LEDGER_AUDIT advisory — flag migrations that ship empty statements arrays."""
+
+    def test_empty_array_triggers_advisory(self, tmp_path):
+        sql = (
+            "CREATE TABLE foo (id int);\n"
+            "INSERT INTO supabase_migrations.schema_migrations\n"
+            "  (version, name, statements)\n"
+            "VALUES ('20260601000000', 'foo', ARRAY[]::text[])\n"
+            "ON CONFLICT (version) DO NOTHING;\n"
+        )
+        p = tmp_path / "m.sql"
+        p.write_text(sql)
+        capture = io.StringIO()
+        with patch.object(cam, "sys", create=True) as sys_mock:
+            sys_mock.stderr = capture
+            cam._advise_if_empty_statements(p, sql)
+        out = capture.getvalue()
+        assert "ADVISORY" in out
+        assert "schema_migrations.statements is empty" in out
+
+    def test_populated_array_no_advisory(self, tmp_path):
+        sql = (
+            "INSERT INTO supabase_migrations.schema_migrations\n"
+            "  (version, name, statements)\n"
+            "VALUES ('20260601000000', 'bar', ARRAY[$$ALTER TABLE x ADD COLUMN y int$$]::text[])\n"
+            "ON CONFLICT (version) DO NOTHING;\n"
+        )
+        p = tmp_path / "m.sql"
+        p.write_text(sql)
+        capture = io.StringIO()
+        with patch.object(cam, "sys", create=True) as sys_mock:
+            sys_mock.stderr = capture
+            cam._advise_if_empty_statements(p, sql)
+        assert capture.getvalue() == ""
+
+    def test_no_schema_migrations_no_advisory(self, tmp_path):
+        """If the migration doesn't touch schema_migrations at all, advisory irrelevant."""
+        sql = "ALTER TABLE foo ADD COLUMN z int;\n"
+        p = tmp_path / "m.sql"
+        p.write_text(sql)
+        capture = io.StringIO()
+        with patch.object(cam, "sys", create=True) as sys_mock:
+            sys_mock.stderr = capture
+            cam._advise_if_empty_statements(p, sql)
+        assert capture.getvalue() == ""
+
+    def test_empty_array_in_comment_no_advisory(self, tmp_path):
+        """The comment-stripping path must hide false positives."""
+        sql = (
+            "-- DO NOT do this: ARRAY[]::text[]\n"
+            "INSERT INTO supabase_migrations.schema_migrations\n"
+            "VALUES ('20260601000000', 'x', ARRAY[$$ok$$]::text[])\n"
+            "ON CONFLICT (version) DO NOTHING;\n"
+        )
+        p = tmp_path / "m.sql"
+        p.write_text(sql)
+        capture = io.StringIO()
+        with patch.object(cam, "sys", create=True) as sys_mock:
+            sys_mock.stderr = capture
+            cam._advise_if_empty_statements(p, sql)
+        assert capture.getvalue() == ""
