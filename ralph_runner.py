@@ -136,6 +136,45 @@ async def _check_commit_since(repo_path: str, since: datetime) -> bool:
     return bool(stdout.strip())
 
 
+_RALPH_GATE2_SHADOW_LOG = (
+    Path(__file__).parent / "logs" / "ralph_gate2_shadow.jsonl"
+)
+
+
+async def _shadow_call_ai_gate2(prompt: str) -> tuple[dict | None, str | None]:
+    """CAI-RESP-174 Q3 shadow path: call_ai(model='claude') alongside the
+    primary direct-API call. Returns (parsed_result, error_msg) — parsed is
+    None when call_ai or extract_json fails.
+    """
+    try:
+        from ai_provider import call_ai, extract_json
+        raw = await call_ai(
+            prompt,
+            model="claude",  # resolves to cli_route per CAI-PROCESS-MAX-FIRST-001
+            max_tokens=512,
+            json_mode=True,
+        )
+        parsed = extract_json(raw)
+        if not isinstance(parsed, dict):
+            return None, f"shadow returned non-dict JSON: type={type(parsed).__name__}"
+        return {
+            "aligned": bool(parsed.get("aligned", True)),
+            "confidence": int(parsed.get("confidence", 0)),
+            "mismatches": parsed.get("mismatches", []),
+        }, None
+    except Exception as exc:
+        return None, f"shadow call_ai failed: {exc}"
+
+
+def _append_gate2_shadow_log(entry: dict) -> None:
+    try:
+        _RALPH_GATE2_SHADOW_LOG.parent.mkdir(exist_ok=True)
+        with _RALPH_GATE2_SHADOW_LOG.open("a") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
+    except OSError as e:
+        logger.warning(f"ARCH-021 Gate 2: shadow log write failed: {e}")
+
+
 async def _check_intent_alignment(
     repo_path: str,
     decision_text: str,
@@ -145,6 +184,11 @@ async def _check_intent_alignment(
 
     ARCH-021 Gate 2: semantic drift check. Fails open if API is unavailable —
     never blocks a job on API outage.
+
+    Per CAI-RESP-174 Q3: PRIMARY remains the direct-API Haiku path until ralph
+    resume_gates validate shadow parity. SHADOW logs call_ai(model='claude')
+    results to logs/ralph_gate2_shadow.jsonl for operator review at resume.
+    DO NOT flip the default before parity holds.
 
     Returns {"aligned": bool, "confidence": int, "mismatches": list[str]}.
     """
@@ -167,8 +211,6 @@ async def _check_intent_alignment(
         if not diff_text.strip():
             return {"aligned": True, "confidence": 10, "mismatches": [], "note": "no_diff_empty_commit"}
 
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
         prompt = (
             "You are verifying whether a git diff implements a stated task.\n"
             "Return JSON only — no preamble:\n"
@@ -177,18 +219,37 @@ async def _check_intent_alignment(
             f"GIT DIFF:\n{diff_text}\n\n"
             f"CC RESULT SUMMARY:\n{result_summary[:500]}"
         )
+
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.content[0].text.strip()
-        result = json.loads(raw)
-        return {
-            "aligned": bool(result.get("aligned", True)),
-            "confidence": int(result.get("confidence", 0)),
-            "mismatches": result.get("mismatches", []),
+        parsed = json.loads(raw)
+        primary_result = {
+            "aligned": bool(parsed.get("aligned", True)),
+            "confidence": int(parsed.get("confidence", 0)),
+            "mismatches": parsed.get("mismatches", []),
         }
+
+        # CAI-RESP-174 Q3 shadow A/B — log only, do not affect return value.
+        shadow_result, shadow_error = await _shadow_call_ai_gate2(prompt)
+        _append_gate2_shadow_log({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "decision_head": decision_text[:200],
+            "primary": primary_result,
+            "shadow": shadow_result,
+            "shadow_error": shadow_error,
+            "aligned_match": (
+                shadow_result is not None
+                and shadow_result["aligned"] == primary_result["aligned"]
+            ),
+        })
+
+        return primary_result
     except Exception as e:
         logger.warning(f"ARCH-021 Gate 2: intent check failed ({e}) — failing open")
         return {"aligned": True, "confidence": -1, "mismatches": [], "note": f"check_failed: {e}"}
