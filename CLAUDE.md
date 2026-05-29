@@ -19,11 +19,11 @@ Always-on Python orchestrator running on Mac Mini that manages builds, deploys, 
 - `prompts/` — session prompt templates
 
 ## Repos Managed
-1. ihsandms (active, priority 1)
-2. dookana (active, priority 2)
-3. hifz-companion (active, priority 3)
-4. cosem-video-pipeline (specced, priority 4)
-5. dawah-pipeline (specced, priority 5)
+1. ihsanos (active, priority 1) — owns storefront backend + Telegram surface per IHSANOS-STOREFRONT-TG-001
+2. hifz-companion (active, priority 3)
+3. cosem-video-pipeline (specced, priority 4)
+4. dawah-pipeline (specced, priority 5)
+5. dookana (frozen-maintenance, priority 4) — sunset path per IHSANOS-STOREFRONT-TG-001; P0 + security only; storefront work moved to ihsanos repo
 
 ## Commands
 - `/status` — orchestrator state overview
