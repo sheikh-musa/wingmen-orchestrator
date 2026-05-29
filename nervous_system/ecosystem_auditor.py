@@ -340,7 +340,13 @@ async def run_gate4_cc_classification(supabase) -> None:
 # ── GATE 6: Contradiction Detection ──────────────────────────────────────────
 
 async def run_gate6_contradiction(supabase, bot=None, musa_id: str = "") -> None:
-    """Scan accepted+implemented decisions for semantic contradictions via Haiku."""
+    """Scan accepted+implemented decisions for semantic contradictions.
+
+    Per CAI-PROCESS-MAX-FIRST-001: routes through ai_provider.call_ai(model='claude')
+    which resolves to cli_route (Max-covered, free at the substrate level).
+    Previously instantiated anthropic.Anthropic() directly with Haiku — that
+    bypassed MAX-FIRST and depleted auto-recharge credits when Max was free.
+    """
     global _last_g6_run
     now = datetime.now(timezone.utc)
 
@@ -350,15 +356,6 @@ async def run_gate6_contradiction(supabase, bot=None, musa_id: str = "") -> None
     _last_g6_run = now
     dry = _dry_run("G6")
     logger.debug(f"GATE 6 running (dry_run={dry})")
-
-    # BUG-012: fail loud if the key is missing. Previously os.environ[...] raised
-    # KeyError inside the blanket try/except below, which silently returned and
-    # produced an empty Gate 6 result with no visible failure.
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY missing from orchestrator env — Gate 6 cannot run"
-        )
 
     # Fetch active accepted + implemented decisions (index only)
     rows = (
@@ -389,25 +386,26 @@ async def run_gate6_contradiction(supabase, bot=None, musa_id: str = "") -> None
     )
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        from ai_provider import call_ai, extract_json
+        raw = await call_ai(
+            prompt,
+            model="claude",         # CAI-PROCESS-MAX-FIRST-001: resolves to cli_route
             max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
+            json_mode=True,
         )
-        raw = response.content[0].text.strip()
-        result = json.loads(raw)
+        result = extract_json(raw)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"GATE 6 expected dict JSON, got: {type(result).__name__}")
         contradictions = result.get("contradictions", [])
     except Exception as e:
         # BUG-012: log the failure to ecosystem_audit_log (matching the other
         # gates' logging path) and re-raise so the caller/loop sees a loud
         # failure instead of an empty Gate 6 pass.
-        logger.error(f"GATE 6 Haiku call failed: {e}")
+        logger.error(f"GATE 6 call_ai failed: {e}")
         await _log_gate_run(
             supabase, "G6_contradiction", dry, 0,
             [{"type": "error", "error": str(e)}],
-            notes=f"gate 6 haiku call failed: {e}",
+            notes=f"gate 6 call_ai failed: {e}",
         )
         raise
 
