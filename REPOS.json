@@ -40,8 +40,9 @@
       "vercel_project": "dookana",
       "deploy_url": "https://dookana.com",
       "supabase_project_ref": "FILL_IN",
-      "status": "active",
-      "priority": 2
+      "status": "frozen-maintenance",
+      "priority": 4,
+      "note": "Per IHSANOS-STOREFRONT-TG-001 (2026-05-28): dookana sunsets — storefront work moves to ihsanos repo (one backend, two surfaces). Frozen-maintenance covers P0 production-breaking + security only. Formal decommission once TG surface reaches parity."
     },
     {
       "name": "fastrans",
