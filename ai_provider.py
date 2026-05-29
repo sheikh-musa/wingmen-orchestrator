@@ -84,6 +84,27 @@ def _get_cli_semaphore() -> asyncio.Semaphore:
     return _CLI_SEMAPHORE
 
 
+def _resolve_claude_bin() -> str:
+    """Resolve the absolute path to the `claude` CLI binary.
+
+    launchd-spawned daemons (orch, watchdog) don't inherit interactive shell
+    PATH, so bare "claude" fails with FileNotFoundError. Operator sets
+    CLAUDE_BIN in .env; we also try a few known macOS install locations.
+    Final fallback is bare "claude" (works for interactive operator runs).
+    """
+    explicit = os.environ.get("CLAUDE_BIN")
+    if explicit and os.access(explicit, os.X_OK):
+        return explicit
+    for candidate in (
+        os.path.expanduser("~/.local/bin/claude"),
+        "/usr/local/bin/claude",
+        "/opt/homebrew/bin/claude",
+    ):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return "claude"
+
+
 # Mitigation 2 (yield mechanism): pause CLI spawns while Musa's interactive
 # session is alive. The launcher writes ~/.wingmen/cc_active heartbeat every
 # 5 min; if mtime < threshold age, an interactive session is using the Max
@@ -246,8 +267,9 @@ async def _call_cli_route(
     async with sem:
         # Combine system + prompt — CLI -p takes a single string.
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
+        claude_bin = _resolve_claude_bin()
         proc = await asyncio.create_subprocess_exec(
-            "claude", "-p", full_prompt,
+            claude_bin, "-p", full_prompt,
             "--model", model_name,
             "--dangerously-skip-permissions",
             stdout=asyncio.subprocess.PIPE,

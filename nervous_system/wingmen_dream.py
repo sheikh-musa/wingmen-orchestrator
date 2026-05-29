@@ -42,7 +42,7 @@ MIN_HOURS_BETWEEN_RUNS = 6
 # Minimum new DB rows to justify a consolidation run
 MIN_ACTIVITY_THRESHOLD = 3
 
-CONSOLIDATION_PROMPT = """You are the Wingmen memory consolidation agent. Your job is to analyse the current system state and output a structured JSON consolidation report. You have NO ability to write files, run code, or make external calls. You output ONLY valid JSON.
+CONSOLIDATION_PROMPT = """You are the Wingmen memory consolidation agent. Your job is to read the current system state and output a brief narrative digest + actionable suggestions for Musa. You have NO ability to write files, run code, or make external calls. You output ONLY valid JSON.
 
 ## Current system state
 
@@ -50,16 +50,16 @@ CONSOLIDATION_PROMPT = """You are the Wingmen memory consolidation agent. Your j
 
 ## Your task
 
-Analyse the state above and output a JSON object with exactly these keys:
+Output a JSON object with exactly these two keys (no others):
 
 {{
-  "decisions_to_archive": ["list of decision_ref strings that are terminal and > 14 days old — these will be moved to archive"],
-  "stale_repo_contexts": ["list of repo names where repo_context is > 7 days stale"],
-  "contradictions_found": ["list of plain-English strings describing any contradictions between decisions, or between decisions and repo_context"],
-  "stale_blockers": ["list of plain-English strings for any blocker that appears unactioned for > 7 days"],
   "digest_summary": "2-4 sentence plain English summary of the current system health for the session_digest topics field",
   "action_items": ["list of up to 5 concrete action items for Musa or the orchestrator"]
 }}
+
+DO NOT include contradictions, archival lists, or staleness flags — those are owned by
+GATE 6 (contradictions), nervous_system/archive.py (archival), and boot_briefing's
+repo_context arm (staleness). This module's unique value is the narrative + action items.
 
 Output ONLY the JSON object. No preamble, no explanation."""
 
@@ -254,118 +254,42 @@ async def _run_consolidation(supabase, now: datetime) -> None:
     else:
         logger.error(f"Dream: consolidation output not a dict JSON: type={type(parsed).__name__}\nRaw: {raw_output[:500]}")
         result = {
-            "decisions_to_archive": [],
-            "stale_repo_contexts": [],
-            "contradictions_found": [],
-            "stale_blockers": [],
             "digest_summary": "Consolidation parse error — see logs.",
             "action_items": [],
         }
 
-    # ── Phase 4: PRUNE + WRITE ───────────────────────────────────────────────
-    archived_count = await _apply_archival(supabase, result.get("decisions_to_archive", []))
-    await _write_session_digest(supabase, now, result, archived_count, state_summary, index_rows)
-
-    # Log contradictions if found
-    contradictions = result.get("contradictions_found", [])
-    if contradictions:
-        logger.warning(f"Dream contradictions found ({len(contradictions)}): {contradictions}")
-    stale_blockers = result.get("stale_blockers", [])
-    if stale_blockers:
-        logger.warning(f"Dream stale blockers ({len(stale_blockers)}): {stale_blockers}")
-
-
-async def _apply_archival(supabase, refs_to_archive: list[str]) -> int:
-    """Move terminal decisions to archive if they pass the safety check."""
-    if not refs_to_archive:
-        return 0
-
-    now = datetime.now(timezone.utc).isoformat()
-    archived = 0
-    cutoff_14d = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
-
-    for ref in refs_to_archive:
-        try:
-            # Fetch the full row
-            rows = (
-                await supabase.table("strategic_decisions")
-                .select("*")
-                .eq("decision_ref", ref)
-                .execute()
-            ).data
-            if not rows:
-                logger.warning(f"Dream archive: {ref} not found in strategic_decisions")
-                continue
-
-            row = rows[0]
-            # Safety check: only archive if truly terminal and old enough
-            terminal = row.get("challenge_status") in ("implemented", "blocked", "overridden")
-            old_enough = (row.get("created_at") or "") < cutoff_14d
-            if not (terminal and old_enough):
-                logger.info(f"Dream archive: skipping {ref} (terminal={terminal}, old_enough={old_enough})")
-                continue
-
-            # Build archive row — matching strategic_decisions_archive schema
-            archive_row = {
-                "id": row["id"],
-                "decision_ref": row["decision_ref"],
-                "title": row["title"],
-                "decision": row.get("decision"),
-                "reasoning": row.get("reasoning"),
-                "repos_affected": row.get("repos_affected"),
-                "source": row.get("source"),
-                "challenge_status": row.get("challenge_status"),
-                "bypass_review": row.get("bypass_review"),
-                "notified_at": row.get("notified_at"),
-                "execution_status": row.get("execution_status"),
-                "completed_job_id": row.get("completed_job_id"),
-                "completed_at": row.get("completed_at"),
-                "category": row.get("category"),
-                "parent_ref": row.get("parent_ref"),
-                "created_at": row["created_at"],
-                "archived_at": now,
-            }
-            await supabase.table("strategic_decisions_archive").upsert(
-                archive_row, on_conflict="id"
-            ).execute()
-            await supabase.table("strategic_decisions").delete().eq("id", row["id"]).execute()
-            archived += 1
-            logger.info(f"Dream archive: moved {ref} to strategic_decisions_archive")
-        except Exception as e:
-            logger.error(f"Dream archive: failed to archive {ref}: {e}")
-
-    return archived
+    # ── Phase 4: WRITE session_digest ────────────────────────────────────────
+    # Dream's slimmed scope per the 2026-05-30 audit: only digest_summary +
+    # action_items. Contradictions are owned by GATE 6 (ecosystem_auditor),
+    # archival by nervous_system/archive.py, staleness by boot_briefing's
+    # repo_context arm. The session_digest row is dream's unique contribution
+    # — it surfaces in boot_briefing for every CC session's boot context.
+    await _write_session_digest(supabase, now, result, state_summary, index_rows)
 
 
 async def _write_session_digest(
     supabase,
     now: datetime,
     result: dict[str, Any],
-    archived_count: int,
     state_summary: str,
     index_rows: list[dict],
 ) -> None:
-    """Write a session_digest row summarising this consolidation run."""
+    """Write a session_digest row with the narrative + action items.
+
+    Slimmed per 2026-05-30 audit: dropped archived_count + contradictions +
+    stale_blockers — those flow through GATE 6 / archive.py / boot_briefing
+    respectively. Dream owns only the narrative digest + action items.
+    """
     digest_summary = result.get("digest_summary", "Memory consolidation run.")
     action_items = result.get("action_items", [])
-    contradictions = result.get("contradictions_found", [])
-    stale_blockers = result.get("stale_blockers", [])
-
-    topics = ["memory_consolidation"]
-    if archived_count > 0:
-        topics.append(f"archived_{archived_count}_decisions")
-    if contradictions:
-        topics.append("contradictions_flagged")
-
-    open_questions = contradictions + stale_blockers
 
     digest = {
         "session_date": now.date().isoformat(),
         "title": f"Wingmen Dream consolidation — {now.strftime('%Y-%m-%d %H:%M')} UTC",
-        "topics_covered": topics,
+        "topics_covered": ["memory_consolidation"],
         "key_reasoning": f"{digest_summary}\n\nState analysed:\n{state_summary[:800]}",
         "decisions_made": [],
-        "open_questions": open_questions[:10],
+        "open_questions": [],
         "action_items": action_items[:10],
         "chat_url": None,
         "council_sessions_referenced": [],
@@ -379,4 +303,4 @@ async def _write_session_digest(
     }
 
     await supabase.table("session_digests").insert(digest).execute()
-    logger.info(f"Dream: wrote session_digest (archived={archived_count}, contradictions={len(contradictions)})")
+    logger.info(f"Dream: wrote session_digest")
