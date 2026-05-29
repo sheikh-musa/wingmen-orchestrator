@@ -64,9 +64,10 @@ Analyse the state above and output a JSON object with exactly these keys:
 Output ONLY the JSON object. No preamble, no explanation."""
 
 
-def _get_client():
-    import anthropic
-    return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+# Per CAI-RESP-174 Q2: dream consolidation migrated from direct API
+# (anthropic.Anthropic + Haiku) to call_ai(model='claude'), which resolves to
+# cli_route via CAI-PROCESS-MAX-FIRST-001. Haiku-cheap rationale is void under
+# Max plan. The _get_client() helper is retired with this migration.
 
 
 async def _check_activity(supabase) -> int:
@@ -233,24 +234,25 @@ async def _run_consolidation(supabase, now: datetime) -> None:
     ).data or []
     logger.debug(f"Dream gather: {len(recent_decisions)} new decisions, {len(recent_sessions)} new sessions")
 
-    # ── Phase 3: CONSOLIDATE (Haiku API call) ────────────────────────────────
+    # ── Phase 3: CONSOLIDATE (call_ai → cli_route per CAI-RESP-174 Q2) ───────
     state_summary = _build_state_summary(index_rows, recent_decisions, recent_sessions, now)
     prompt = CONSOLIDATION_PROMPT.format(state_summary=state_summary)
 
-    client = _get_client()
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+    from ai_provider import call_ai, extract_json
+    raw_output = await call_ai(
+        prompt,
+        model="claude",         # CAI-PROCESS-MAX-FIRST-001 resolves to cli_route
         max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
+        json_mode=True,
     )
-    raw_output = response.content[0].text.strip()
-    logger.debug(f"Dream haiku response: {raw_output[:200]}...")
+    logger.debug(f"Dream consolidation response: {raw_output[:200]}...")
 
     # Parse JSON output
-    try:
-        result: dict[str, Any] = json.loads(raw_output)
-    except json.JSONDecodeError as e:
-        logger.error(f"Dream: Haiku output was not valid JSON: {e}\nRaw: {raw_output[:500]}")
+    parsed = extract_json(raw_output)
+    if isinstance(parsed, dict):
+        result: dict[str, Any] = parsed
+    else:
+        logger.error(f"Dream: consolidation output not a dict JSON: type={type(parsed).__name__}\nRaw: {raw_output[:500]}")
         result = {
             "decisions_to_archive": [],
             "stale_repo_contexts": [],

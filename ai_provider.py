@@ -18,6 +18,37 @@ for the 5 carve-outs (latency_budget_under_3s, streaming_structured_output,
 vision_multimodal, Haiku-via-model-rule, tool_use_with_caller_defined_tools).
 The vision case auto-routes to direct API; other carve-outs require explicit
 caller opt-in via model='claude_api' or by calling private helpers directly.
+
+═══════════════════════════════════════════════════════════════════════════
+REGISTRY OF RATIFIED DIRECT-API CARVE-OUTS (per CAI-RESP-174 + parent rule)
+═══════════════════════════════════════════════════════════════════════════
+Any callsite that bypasses call_ai() and directly instantiates
+anthropic.Anthropic() MUST appear in this registry with cai ratification.
+Audit-paths: `grep -rn "anthropic.Anthropic\\|anthropic.AsyncAnthropic"` should
+match only ai_provider.py itself + the registered callsites below. Any new
+match is a CAI-PROCESS-MAX-FIRST-001 violation requiring either migration
+or a new carve-out filing.
+
+  Carve-Out 5 — tool_use_with_caller_defined_tools
+    Callsite: nervous_system/council_agent.py
+    Ratified: CAI-RESP-174 (parent CAI-PROCESS-MAX-FIRST-001)
+    Reason:   CTO council reasoning uses Claude tool-use with 5 caller-
+              defined tools (read_file, grep, list_files, git_log, sql)
+              dispatched in-process by the council module. CLI `claude -p`
+              only exposes Claude's built-in tools (Bash/Read/Edit) and
+              cannot inject caller-defined tools with caller-side dispatch.
+              Direct API is structurally required, not discretionary spend
+              — exempt from the al-Isra 17:26-27 isrāf principle.
+    Model:    claude-sonnet-4-20250514
+
+  Carve-Out 3 — vision_multimodal (auto-routed via call_ai, no explicit opt-in)
+    Callsite: any call_ai(..., images=[...])
+    Ratified: CAI-PROCESS-MAX-FIRST-001 original
+    Reason:   cli_route doesn't expose vision; auto-route to direct API
+              in call_ai when images are present.
+
+(Carve-Outs 1/2/4 — latency / streaming / Haiku-via-model-rule — currently
+have no live callsites in this repo. Future additions land here.)
 """
 
 from __future__ import annotations
