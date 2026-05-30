@@ -268,12 +268,19 @@ async def _call_cli_route(
         # Combine system + prompt — CLI -p takes a single string.
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
         claude_bin = _resolve_claude_bin()
+        # CADENCE-003 INV-3: claude -p must use Max OAuth, never the API path.
+        # When ANTHROPIC_API_KEY is present in env (set in .env for council_agent's
+        # Carve-Out 5), the CLI prefers the API and falls back to depleted credits.
+        # Scrub it from the subprocess env so the CLI uses ~/.claude/.credentials.json
+        # (Max OAuth) instead.
+        clean_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         proc = await asyncio.create_subprocess_exec(
             claude_bin, "-p", full_prompt,
             "--model", model_name,
             "--dangerously-skip-permissions",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=clean_env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
