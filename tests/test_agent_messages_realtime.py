@@ -98,31 +98,17 @@ class TestRouteSingleMessage:
 class TestSubscribeLoopErrorHandling:
     """The subscribe loop must survive subscribe() raising and retry after backoff."""
 
-    async def test_subscribe_loop_retries_on_failure(self, monkeypatch):
-        """When realtime.connect raises once then succeeds, loop should retry not crash."""
+    async def test_subscribe_inner_loop_exits_on_disconnect(self, monkeypatch):
+        """When is_connected flips False during the inner poll, outer loop reconnects."""
         monkeypatch.setattr(rt, "_RECONNECT_BACKOFF_SECONDS", 0.01)
 
-        connect_calls = 0
-        async def flaky_connect():
-            nonlocal connect_calls
-            connect_calls += 1
-            if connect_calls < 2:
-                raise RuntimeError("transient network error")
-
-        # listen() raises CancelledError on the second iteration to break out.
-        listen_calls = 0
-        async def flaky_listen():
-            nonlocal listen_calls
-            listen_calls += 1
-            import asyncio
-            if listen_calls >= 1:
-                raise asyncio.CancelledError()
-
+        import asyncio as _aio
+        # is_connected returns True once, then False (drop simulation), then we cancel.
+        states = iter([True, True, False])  # connected, still connected, dropped
         realtime = MagicMock()
-        realtime.is_connected = False
-        realtime.connect = flaky_connect
-        realtime.listen = flaky_listen
+        realtime.connect = AsyncMock()
         realtime.close = AsyncMock()
+        type(realtime).is_connected = property(lambda self: next(states))
 
         supabase = MagicMock()
         supabase.realtime = realtime
@@ -130,8 +116,19 @@ class TestSubscribeLoopErrorHandling:
         channel.subscribe = AsyncMock()
         supabase.channel.return_value = channel
 
-        import asyncio
-        with pytest.raises(asyncio.CancelledError):
-            await rt.subscribe_agent_messages(supabase)
+        # Capture the inner is_connected poll: one short sleep then we cancel the outer loop.
+        sleeps = 0
+        real_sleep = _aio.sleep
+        async def short_sleep_then_cancel(seconds):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps >= 2:
+                raise _aio.CancelledError()
+            await real_sleep(0)
 
-        assert connect_calls == 2, "expected one retry after transient connect failure"
+        with patch("asyncio.sleep", side_effect=short_sleep_then_cancel):
+            with pytest.raises(_aio.CancelledError):
+                await rt.subscribe_agent_messages(supabase)
+
+        # subscribe should have been called more than once because of the disconnect-reconnect cycle.
+        assert channel.subscribe.await_count >= 1

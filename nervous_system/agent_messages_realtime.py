@@ -169,9 +169,16 @@ async def subscribe_agent_messages(
                 f"realtime: subscribed to {_TABLE} INSERT events on channel {_CHANNEL_NAME}"
             )
 
-            # Block here forever; AsyncRealtimeClient.listen() processes events
-            # and re-connects internally per its auto_reconnect setting.
-            await realtime.listen()
+            # supabase-py 2.28+: AsyncRealtimeClient.listen() is a deprecated
+            # no-op; the WebSocket pump runs in the client's internal
+            # _listen_task. After subscribe(), callbacks fire automatically.
+            # We just need to keep THIS coroutine alive and re-subscribe only
+            # on actual disconnect. Poll is_connected every 30s as the
+            # liveness gate; if it flips False, break to outer loop which
+            # reconnects + re-subscribes.
+            while realtime.is_connected:
+                await asyncio.sleep(30)
+            logger.warning("realtime: WS dropped, will reconnect+resubscribe")
         except asyncio.CancelledError:
             logger.info("realtime: subscription cancelled, closing")
             try:
