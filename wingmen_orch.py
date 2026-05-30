@@ -41,6 +41,7 @@ from nervous_system.council_executor import poll_executor
 from nervous_system.strategic_decisions_poll import poll_strategic_decisions, notify_decision_complete
 from nervous_system.cai_review_request import poll_cai_review_requests
 from nervous_system.agent_messages_poll import poll_agent_messages
+from nervous_system.agent_messages_realtime import subscribe_agent_messages
 from nervous_system.bug_reports_poll import poll_bug_reports
 from nervous_system.pipeline_clock import tick_pipeline_clock
 from nervous_system.agent_watchdog import check_agent_health
@@ -1676,6 +1677,26 @@ async def main_loop():
     zombie_count = await cleanup_zombie_jobs(supabase)
     if zombie_count:
         logger.info(f"Startup: cleaned {zombie_count} zombie running job(s)")
+
+    # CADENCE-003 Strategy A Level 1: spawn the Realtime subscriber as a
+    # background task. Sub-second Telegram push on agent_messages INSERT.
+    # The existing poll cadence remains as belt-and-suspenders — both paths
+    # converge on the same notification_log dedup so duplicates are impossible.
+    try:
+        from telegram import Bot as _Bot
+        _rt_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        _rt_musa_id = os.environ.get("MUSA_TELEGRAM_ID", "")
+        _rt_bot = _Bot(token=_rt_bot_token) if _rt_bot_token else None
+        asyncio.create_task(
+            subscribe_agent_messages(
+                supabase, bot=_rt_bot, musa_chat_id=_rt_musa_id or None
+            ),
+            name="agent_messages_realtime",
+        )
+        logger.info("Strategy A Level 1 (Realtime push) subscriber spawned")
+    except Exception as _e:
+        logger.error(f"Failed to spawn Realtime subscriber: {_e}")
+        record_swallowed("agent_messages_realtime_spawn", _e)
 
     recovery_counter = 0
     escalation_counter = 0
