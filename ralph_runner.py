@@ -220,6 +220,13 @@ async def _check_intent_alignment(
             f"CC RESULT SUMMARY:\n{result_summary[:500]}"
         )
 
+        # llm_route_exempt: shadow_ab_primary_pending_resume_gate
+        # Per CAI-RESP-174 Q3: PRIMARY remains direct-API Haiku until ralph
+        # resume_gates validate that the call_ai SHADOW path produces parity
+        # results. SHADOW (_shadow_call_ai_gate2) logs to
+        # logs/ralph_gate2_shadow.jsonl. Default-flip becomes a ralph
+        # resume_gate condition. Ralph is paused since 2026-04-28 so no
+        # live cadence is at risk.
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(

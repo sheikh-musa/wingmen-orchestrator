@@ -387,14 +387,28 @@ class TestClassifyFinding:
 class TestScanCallSites:
 
     def test_scan_finds_legit_call_sites(self):
-        """Live repo scan must detect known SDK instantiations."""
+        """Live repo scan must detect known SDK instantiations.
+
+        ecosystem_auditor.py was removed from this expected-set on 2026-06-02:
+        PR #47 migrated GATE 6 from direct API to call_ai → cli_route. The
+        only remaining mention of `anthropic.Anthropic` in that file is in a
+        post-migration docstring, which the triple-quoted-string skip
+        correctly filters out.
+        """
         findings = orch_self_audit._scan_call_sites()
         files_found = {f["file"] for f in findings}
         # These are known direct-API call sites in the repo
         assert "ralph_runner.py" in files_found
-        assert "nervous_system/ecosystem_auditor.py" in files_found
         assert "nervous_system/council_agent.py" in files_found
         assert "ai_provider.py" in files_found
+        # Guard against regression: ecosystem_auditor must NOT show up
+        # (the docstring mention is excluded; any real call would be a
+        # bug since PR #47 deliberately removed it).
+        assert "nervous_system/ecosystem_auditor.py" not in files_found, (
+            "ecosystem_auditor.py should not appear in the scan — PR #47 "
+            "migrated GATE 6 to call_ai. If this fails, a regression has "
+            "re-introduced a direct anthropic.Anthropic() callsite there."
+        )
 
     def test_scan_excludes_tests_dir(self):
         """tests/ excluded from audit (test files may import anthropic for mock)."""

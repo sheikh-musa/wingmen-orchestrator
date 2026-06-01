@@ -344,8 +344,9 @@ async def run_gate6_contradiction(supabase, bot=None, musa_id: str = "") -> None
 
     Per CAI-PROCESS-MAX-FIRST-001: routes through ai_provider.call_ai(model='claude')
     which resolves to cli_route (Max-covered, free at the substrate level).
-    Previously instantiated anthropic.Anthropic() directly with Haiku — that
-    bypassed MAX-FIRST and depleted auto-recharge credits when Max was free.
+    Previously instantiated the SDK client directly with Haiku — that bypassed
+    MAX-FIRST and depleted auto-recharge credits when Max was free. Migrated
+    in PR #47.
     """
     global _last_g6_run
     now = datetime.now(timezone.utc)

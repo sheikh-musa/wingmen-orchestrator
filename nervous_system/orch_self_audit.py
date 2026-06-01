@@ -59,6 +59,12 @@ _LLM_ROUTE_EXEMPT_REASONS = frozenset({
     "vision_multimodal",               # Carve-Out 3
     # (Carve-Out 4 is the Haiku auto-pass — model rule, no comment needed)
     "tool_use_with_caller_defined_tools",  # Carve-Out 5
+    # CAI-RESP-174 Q3: ralph Gate 2 PRIMARY remains direct-API until ralph
+    # resume_gates validate shadow A/B parity. Ralph is paused since
+    # 2026-04-28 so no live cadence at risk. SHADOW path
+    # (_shadow_call_ai_gate2) logs to logs/ralph_gate2_shadow.jsonl.
+    # Default-flip becomes a ralph resume_gate condition.
+    "shadow_ab_primary_pending_resume_gate",
 })
 
 
@@ -435,13 +441,46 @@ def _scan_call_sites() -> list[dict]:
                     file_exempt = m.group(1)
                     break
 
+            # Track triple-quoted-string state so docstrings mentioning the
+            # trigger pattern don't produce false positives. This is a
+            # line-granular state machine — sufficient for routine docstring
+            # mentions; a docstring containing the exact regex inside a
+            # single line would still false-positive but no such case exists
+            # in this repo.
+            in_triple_string: str | None = None  # holds the open delimiter or None
+
             for i, line in enumerate(lines):
-                # Skip comment-only lines (handles docstring / regex-spec
-                # self-match in orch_self_audit.py itself)
-                stripped = line.lstrip()
+                # First handle triple-quoted state — toggle on opening/closing
+                # quotes. We scan the line for delimiter pairs.
+                remaining = line
+                if in_triple_string is not None:
+                    end_idx = remaining.find(in_triple_string)
+                    if end_idx < 0:
+                        # Whole line is inside a docstring — skip
+                        continue
+                    # Closing found: consume past it, fall through to check
+                    # any code AFTER the close
+                    remaining = remaining[end_idx + 3:]
+                    in_triple_string = None
+                # Now look for an OPEN that isn't matched on the same line
+                # (i.e., docstring spanning to next line).
+                for delim in ('"""', "'''"):
+                    open_idx = remaining.find(delim)
+                    if open_idx < 0:
+                        continue
+                    close_idx = remaining.find(delim, open_idx + 3)
+                    if close_idx < 0:
+                        # Unmatched — docstring continues to next line
+                        in_triple_string = delim
+                        remaining = remaining[:open_idx]
+                        break
+
+                # Skip comment-only lines (handles regex-spec self-match in
+                # orch_self_audit.py itself)
+                stripped = remaining.lstrip()
                 if stripped.startswith("#"):
                     continue
-                if not _ANTHROPIC_INSTANTIATION_RE.search(line):
+                if not _ANTHROPIC_INSTANTIATION_RE.search(remaining):
                     continue
                 findings.append({
                     "file": str(path.relative_to(_REPO_ROOT)),
