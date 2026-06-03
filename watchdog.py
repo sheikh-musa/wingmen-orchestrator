@@ -334,6 +334,57 @@ async def _long_caller_sweep() -> None:
             content_shape=content_shape,
         )
 
+        # CC-WATCHDOG-CALIBRATION-001 + CAI-RESP-168 §5: log every evaluated
+        # caller regardless of action so the 30-day calibration window can
+        # surface signal_a near-misses (15% band around 80KB) and FP/TP rates.
+        # Fail-soft: never block the kill path on a calibration write.
+        try:
+            sa = content_shape.signal_a if content_shape else None
+            sb = content_shape.signal_b if content_shape else None
+            sc = content_shape.signal_c if content_shape else None
+
+            def _int_or_none(v):
+                if v is None:
+                    return None
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return None
+
+            with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO watchdog_calibration_observations
+                      (cc_identity, caller_name, sessions_24h, cadence_seconds, parent_pid,
+                       signal_a_value, signal_b_value, signal_c_value,
+                       signal_a_match, signal_b_match, signal_c_match,
+                       signal_a_unobservable, signal_b_unobservable, signal_c_unobservable,
+                       registered, registered_policy, action, decision_reason)
+                    VALUES (%s, %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s, %s)
+                    """,
+                    (
+                        cc_id, matched_name, sessions_24h, cadence_seconds, parent_pid,
+                        _int_or_none(sa.value) if sa else None,
+                        json.dumps(sb.value, default=str) if sb and sb.value is not None else None,
+                        json.dumps(sc.value, default=str) if sc and sc.value is not None else None,
+                        sa.match if sa else None,
+                        sb.match if sb else None,
+                        sc.match if sc else None,
+                        bool(sa.unobservable) if sa else False,
+                        bool(sb.unobservable) if sb else False,
+                        bool(sc.unobservable) if sc else False,
+                        registered, policy, decision.action, decision.reason,
+                    ),
+                )
+        except Exception as cal_err:
+            logger.warning(
+                f"calibration observation write failed for {matched_name}: {cal_err}"
+            )
+
         if decision.action == "hard_kill" and parent_pid:
             # CAI-RESP-167 R5: pre-SIGTERM audit. SIGTERM only if audit INSERT succeeds.
             audit_ok = False
