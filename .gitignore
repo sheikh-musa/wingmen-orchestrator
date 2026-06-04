@@ -7,3 +7,5 @@ logs/
 .DS_Store
 **/.DS_Store
 supabase/.temp/
+.venv-cc-cai/
+logs/cc_cai_daemon.*

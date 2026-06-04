@@ -1,0 +1,18 @@
+# cc-cai always-on triage daemon per CAI-RESP-185 Path C ratification.
+# Registers under long_running_claude_callers with no_kill so Phase B
+# watchdog never SIGTERMs it (it IS the operator-as-bus replacement).
+
+caller_name: cc-cai-daemon
+cmd: ".venv-cc-cai/bin/python -m cc_cai_daemon.main"
+registered_by_identity: cc_family
+auto_kill_policy: no_kill
+expected_cadence_seconds: 300  # 5-min poll cycle
+expected_tokens_per_day: 0     # rules-only Phase 1; no LLM calls
+ratified_by_decision_ref: CAI-RESP-185
+purpose: >-
+  CADENCE-006 Path C ratified: cc-cai always-on orchestrator daemon.
+  Polls cai's agent_messages inbox, classifies (mark_read_fyi / ack_fyi /
+  escalate per Phase 1 Q4 narrow lane), writes INV-5 audit row before every
+  side effect, escalates 8 reaches-operator categories to operator via
+  Telegram with [Approve][Defer][Delegate] inline buttons. INV-6 default
+  HOLD via kill_switch (confidence-drop + panic env flag).
