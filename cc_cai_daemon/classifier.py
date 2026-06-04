@@ -80,10 +80,16 @@ _CLIENT_FACING_PATTERNS = (
 )
 
 # CALIBRATION: extend during Phase 1 observation window
+# 2026-06-05 dry-run audit removed bare "ip " (40% of escalations were
+# technical IP-address / IP-rotation / TCP-IP / brainstorm mentions).
+# Use specific IP-rights phrases instead. "contract" remains broad and
+# may need to drop to "service contract" / "vendor contract" if it
+# false-positives on "API contract" / "Telegram contract" patterns —
+# observe in week 1.
 _IP_LEGAL_PATTERNS = (
-    "ip ", "intellectual property", "patent", "copyright", "license",
+    "intellectual property", "ip rights", "patent", "copyright",
     "trademark", "contract", "legal review", "open source license",
-    "gpl", "agpl", "proprietary",
+    "gpl ", "agpl", "proprietary code", "license terms",
 )
 
 # CALIBRATION: extend during Phase 1 observation window
