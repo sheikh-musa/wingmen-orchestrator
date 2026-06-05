@@ -314,7 +314,7 @@ async def _audit_scheduled_sweep_drift(
     # directly expressible).
     look_back = (now - timedelta(hours=24)).isoformat()
     result = await supabase.table("agent_messages").select(
-        "id, from_agent, to_agent, subject, read_at, responded_at, created_at"
+        "id, from_agent, to_agent, subject, read_at, responded_at, created_at, thread_id"
     ).gte("created_at", CADENCE_001_FILING_DATE).gte(
         "responded_at", look_back
     ).like("to_agent", "cc-%").not_.is_(
@@ -333,13 +333,19 @@ async def _audit_scheduled_sweep_drift(
             continue
         delta = abs((resp_dt - read_dt).total_seconds())
         if delta < _SWEEP_DRIFT_WINDOW_SECONDS:
-            offenders.append((r, delta))
+            offenders.append((r, delta, read_dt))
 
     if not offenders:
         return
 
-    for r, delta in offenders[:5]:  # cap loop blast radius
-        dedup_key = f"orch_self_audit:sweep_drift:{r['id']}:{_dedup_bucket(now)}"
+    for r, delta, read_dt in offenders[:5]:  # cap loop blast radius
+        # 2026-06-05 dedup fix: was hour-bucket, fired 24x/day per offender
+        # whenever interactive operator legitimately batch-processed cai
+        # filings in a single UPDATE. Now per-message permanent: each msg_id
+        # fires at most ONE alert ever. True sweeps still get flagged once;
+        # false-positives don't spam. Detection heuristic refinement (cohort
+        # size + outbound-response evidence) deferred to a follow-up.
+        dedup_key = f"orch_self_audit:sweep_drift:{r['id']}"
         if await _check_dedup(supabase, dedup_key):
             continue
         msg = format_alert(
