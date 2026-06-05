@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.wingmen.cc-cai-daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/sheikhmusa/wingmen/orchestrator/.venv-cc-cai/bin/python</string>
+        <string>-m</string>
+        <string>cc_cai_daemon.main</string>
+        <string>--log-level</string>
+        <string>INFO</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/cc_cai_daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/cc_cai_daemon.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
