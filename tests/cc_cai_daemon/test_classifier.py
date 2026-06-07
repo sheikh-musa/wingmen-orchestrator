@@ -97,6 +97,25 @@ def test_client_data_pii_escalates():
     assert r.confidence == 1.0
 
 
+def test_rls_substrate_vocab_does_not_trigger_amanah(
+    # Per CAI-RESP-188: 'rls' (Row Level Security) is substrate-engineering
+    # vocab, not a client_data_amanah signal. Tightening this pattern is the
+    # only blind classifier change ratified before the 30-day calibration.
+):
+    m = _msg(
+        subject="ARCH-035 RLS policy refactor",
+        body="propose RLS on agent_messages table; subset of policies refactored",
+        priority="P3",
+        message_type="update",
+    )
+    r = classify(m)
+    if r.label == "escalate":
+        assert r.escalation_category != "client_data_amanah", (
+            f"rls (Row Level Security) substrate vocab must not match "
+            f"client_data_amanah — got reason: {r.reason}"
+        )
+
+
 def test_client_facing_commitment_escalates():
     m = _msg(subject="draft", body="propose 99.9% uptime SLA to client")
     r = classify(m)

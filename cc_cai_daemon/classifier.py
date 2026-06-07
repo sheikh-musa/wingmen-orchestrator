@@ -66,10 +66,12 @@ _RIBA_PATTERNS = (
 # CALIBRATION: extend during Phase 1 observation window
 _ZAKAT_PATTERNS = ("zakat",)
 
-# CALIBRATION: extend during Phase 1 observation window
+# CALIBRATION: extend during Phase 1 observation window.
+# 'rls' / 'row level security' removed per CAI-RESP-188 (2026-06-05) —
+# substrate-engineering vocab, not a client_data_amanah signal.
 _CLIENT_DATA_PATTERNS = (
-    "pii", "personally identifiable", "tenant isolation", "rls",
-    "row level security", "encryption at rest", "field encryption",
+    "pii", "personally identifiable", "tenant isolation",
+    "encryption at rest", "field encryption",
     "data breach", "gdpr", "pdpa", "exfiltration",
 )
 

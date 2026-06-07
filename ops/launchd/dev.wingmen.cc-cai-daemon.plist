@@ -33,6 +33,11 @@
     <dict>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
+        <!-- Fail-closed default: daemon boots in panic_disabled state.
+             To enable: remove this key or set to "0", then reload via
+             `launchctl unload <plist> && launchctl load <plist>`. -->
+        <key>WINGMEN_CC_CAI_DAEMON_DISABLED</key>
+        <string>1</string>
     </dict>
 </dict>
 </plist>
