@@ -144,6 +144,13 @@ alter table clients add column if not exists bot_display_name text;
 alter table clients add column if not exists personality text;
 alter table clients add column if not exists welcome_message text;
 
+-- Shared-bot storefront: merchant slug carried by t.me/dookanabot?start=<slug>
+-- Must equal a valid ihsanos organizations.slug (cross-lane contract, msg #1913).
+alter table clients add column if not exists storefront_slug text;
+create unique index if not exists clients_storefront_slug_key
+  on clients (storefront_slug)
+  where storefront_slug is not null;
+
 -- Bot users (team members + customers per client bot)
 create table if not exists bot_users (
   id bigint generated always as identity primary key,
