@@ -18,7 +18,12 @@
 #
 # Environment:
 #   CC_REPO      — repo name override (default: caller pwd's git toplevel basename)
-#   MODEL        — claude model override (default: claude-opus-4-7)
+#   MODEL        — claude model override (default: claude-opus-4-8).
+#                  Opt-in to claude-fable-5 ($10/$50 per MTok, 2x Opus) via
+#                  MODEL=claude-fable-5 for genuinely hard long-horizon work.
+#                  Note (per CAI-RESP-192 amendment): Fable 5 blocks cyber-
+#                  security/biology and falls back to Opus 4.8 there — do
+#                  not route BUG-024 / RLS / identity hardening via Fable 5.
 #
 # Identity (GOVERNANCE-CLEANUP-001 Step 3, composes msgs 315/317/324):
 #   Base family (CC_BASE_AGENT_ID) resolved from pwd → data-driven family map
@@ -592,15 +597,15 @@ trap '_handle_exit' EXIT
 #                                         launcher command line).
 #   2. MODEL env var                    — resolves RESOLVED_MODEL, applied as
 #                                         the first --model flag on argv.
-#   3. hardcoded default claude-opus-4-7 — falls through when MODEL unset.
+#   3. hardcoded default claude-opus-4-8 — falls through when MODEL unset.
 # Sequencing: resolve RESOLVED_MODEL from (MODEL env || default) → append
 # `--model $RESOLVED_MODEL` to the claude call → append "${CLAUDE_PASSTHROUGH[@]}"
 # AFTER it, so a passthrough --model overrides by coming later on argv.
 
-RESOLVED_MODEL="${MODEL:-claude-opus-4-7}"
+RESOLVED_MODEL="${MODEL:-claude-opus-4-8}"
 echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}"
-if [ "$RESOLVED_MODEL" != "claude-opus-4-7" ]; then
-    echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-7)${RESET}"
+if [ "$RESOLVED_MODEL" != "claude-opus-4-8" ]; then
+    echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-8)${RESET}"
 fi
 
 # Also stamp resolved model into current_task so CAI can observe model drift
