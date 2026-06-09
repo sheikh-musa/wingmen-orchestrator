@@ -39,7 +39,7 @@ or a new carve-out filing.
               cannot inject caller-defined tools with caller-side dispatch.
               Direct API is structurally required, not discretionary spend
               — exempt from the al-Isra 17:26-27 isrāf principle.
-    Model:    claude-sonnet-4-20250514
+    Model:    claude-sonnet-4-6
 
   Carve-Out 3 — vision_multimodal (auto-routed via call_ai, no explicit opt-in)
     Callsite: any call_ai(..., images=[...])
@@ -185,7 +185,7 @@ async def _call_claude(
     system: str = "",
     images: list[str] | None = None,
     max_tokens: int = 4096,
-    model_name: str = "claude-sonnet-4-20250514",
+    model_name: str = "claude-sonnet-4-6",
 ) -> str:
     """Call Anthropic Claude API.
 

@@ -358,16 +358,16 @@ class TestClassifyFinding:
         assert orch_self_audit._classify_finding(f) == "ok_haiku"
 
     def test_sonnet_with_valid_exempt_passes(self):
-        f = {"model": "claude-sonnet-4-20250514",
+        f = {"model": "claude-sonnet-4-6",
              "exempt_reason": "tool_use_with_caller_defined_tools"}
         assert orch_self_audit._classify_finding(f) == "ok_exempt"
 
     def test_sonnet_no_exempt_violation(self):
-        f = {"model": "claude-sonnet-4-20250514", "exempt_reason": None}
+        f = {"model": "claude-sonnet-4-6", "exempt_reason": None}
         assert orch_self_audit._classify_finding(f) == "violation_no_exempt"
 
     def test_sonnet_invalid_exempt_violation(self):
-        f = {"model": "claude-sonnet-4-20250514",
+        f = {"model": "claude-sonnet-4-6",
              "exempt_reason": "i_just_felt_like_it"}
         assert orch_self_audit._classify_finding(f) == "violation_invalid_exempt"
 
@@ -379,7 +379,7 @@ class TestClassifyFinding:
     def test_all_5_carve_out_reasons_accepted(self):
         for reason in ("latency_budget_under_3s", "streaming_structured_output",
                        "vision_multimodal", "tool_use_with_caller_defined_tools"):
-            f = {"model": "claude-sonnet-4-20250514", "exempt_reason": reason}
+            f = {"model": "claude-sonnet-4-6", "exempt_reason": reason}
             assert orch_self_audit._classify_finding(f) == "ok_exempt", \
                 f"reason {reason!r} should be valid"
 
@@ -469,7 +469,7 @@ class TestLlmRoutingAudit:
         bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
         with patch.object(orch_self_audit, "_scan_call_sites", return_value=[
             {"file": "bad.py", "line": 42,
-             "model": "claude-sonnet-4-20250514", "exempt_reason": None}
+             "model": "claude-sonnet-4-6", "exempt_reason": None}
         ]):
             await orch_self_audit._audit_anthropic_sdk_direct_call_sites(sb, bot, "123")
         bot.send_message.assert_called_once()
@@ -498,7 +498,7 @@ class TestLlmRoutingAudit:
         bot = AsyncMock()
         with patch.object(orch_self_audit, "_scan_call_sites", return_value=[
             {"file": "x.py", "line": 1,
-             "model": "claude-sonnet-4-20250514", "exempt_reason": None}
+             "model": "claude-sonnet-4-6", "exempt_reason": None}
         ]):
             await orch_self_audit._audit_anthropic_sdk_direct_call_sites(sb, bot, "123")
         bot.send_message.assert_not_called()

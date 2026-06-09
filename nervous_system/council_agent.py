@@ -360,7 +360,7 @@ async def _generate_response(
         max_tool_rounds = 5
         for _ in range(max_tool_rounds):
             response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=2000,
                 system=system_prompt,
                 tools=TOOLS,
@@ -409,7 +409,7 @@ async def _generate_response(
         "context": {
             **context,
             "source": "council_agent",
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-6",
         },
     }).execute()
 
