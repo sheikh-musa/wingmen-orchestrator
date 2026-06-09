@@ -6,6 +6,7 @@ webhook_server -> message_dispatcher -> user resolver -> conversation -> permiss
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 from telegram import Bot
@@ -44,6 +45,51 @@ FLOW_TO_INTENT = {
     "site_edit": "site_edit",
     "team_manage": "manage_team",
 }
+
+from storefront.miniapp import build_miniapp_keyboard
+
+_STOREFRONT_WEB_BASE_DEFAULT = "https://ihsanos.com"
+
+
+async def _resolve_storefront_slug(supabase, slug: str) -> dict | None:
+    """Look up a merchant clients row by storefront_slug. Read-only."""
+    result = (
+        await supabase.table("clients")
+        .select("id, name, storefront_slug, ihsanos_org_id, welcome_message")
+        .eq("storefront_slug", slug)
+        .eq("active", True)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+async def _handle_storefront_start(bot, supabase, chat_id: str, slug: str) -> None:
+    """Shared-bot /start <slug>: resolve slug, send welcome + Mini App button.
+
+    Unknown slug -> graceful fallback. No state persisted; the slug travels in
+    the web_app button URL.
+    """
+    row = await _resolve_storefront_slug(supabase, slug)
+    if not row:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "That shop link doesn't look right. Please use the link the "
+                "shop shared with you, or ask them for a new one."
+            ),
+        )
+        return
+
+    web_base = os.environ.get("STOREFRONT_WEB_BASE", _STOREFRONT_WEB_BASE_DEFAULT)
+    keyboard = build_miniapp_keyboard(row["storefront_slug"], web_base)
+    welcome = row.get("welcome_message") or f"Welcome to {row['name']}!"
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"{welcome}\n\nTap below to start shopping \U0001f447",
+        reply_markup=keyboard,
+    )
 
 
 async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
@@ -91,6 +137,18 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
         # Create a Bot instance for sending responses
         bot = Bot(token=client_bot.token)
 
+        # --- Shared platform bot: /start <slug> opens the merchant Mini App ---
+        if client_bot.is_platform and text.startswith("/start "):
+            slug = text.split(" ", 1)[1].strip()
+            if slug.startswith("invite_"):
+                await _handle_invite(
+                    supabase, bot, client_bot, chat_id, from_user,
+                    slug.split("invite_", 1)[1].strip(),
+                )
+            else:
+                await _handle_storefront_start(bot, supabase, chat_id, slug)
+            return
+
         # --- Handle /start with invite code ---
         if text.startswith("/start invite_"):
             invite_code = text.split("invite_", 1)[1].strip()
@@ -99,6 +157,16 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
 
         # --- Handle /start (welcome message) ---
         if text == "/start":
+            if client_bot.is_platform:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "Welcome! Open a shop using the link your merchant "
+                        "shared with you."
+                    ),
+                    reply_to_message_id=reply_to,
+                )
+                return
             welcome = client_bot.welcome_message or f"Welcome to {client_bot.bot_display_name}! How can I help you?"
             await bot.send_message(chat_id=chat_id, text=welcome, reply_to_message_id=reply_to)
             # Auto-register as customer
@@ -106,6 +174,18 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
                 supabase, client_bot.client_id, user_chat_id,
                 telegram_username=from_user.get("username"),
                 display_name=from_user.get("first_name", "Customer"),
+            )
+            return
+
+        # MVP: the shared platform bot only launches the Mini App. Conversational
+        # ordering happens inside the Mini App, not in chat. Anything that isn't a
+        # recognized /start lands here. Chat->org binding is a follow-up
+        # (CC-ORCH-STOREFRONT-CHAT-BINDING-001).
+        if client_bot.is_platform:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Open your shop with its link to browse and order \U0001f6cd️",
+                reply_to_message_id=reply_to,
             )
             return
 

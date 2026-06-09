@@ -1604,6 +1604,11 @@ async def start_webhook_server(supabase):
         await bot_manager.register_all_webhooks()
         logger.info(f"Registered webhooks for {count} client bots")
 
+    from storefront.platform_bot import load_platform_bot
+    platform_bot = await load_platform_bot(bot_manager)
+    if platform_bot:
+        logger.info(f"Registered shared platform bot @{platform_bot.bot_username}")
+
     # Create the dispatch function with supabase bound
     async def handle_message(client_bot, update_data):
         await dispatch(client_bot, update_data, supabase)
