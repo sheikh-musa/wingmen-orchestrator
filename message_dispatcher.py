@@ -27,6 +27,8 @@ import handlers.site_edit_handler as site_edit_handler
 import handlers.team_handler as team_handler
 import handlers.help_handler as help_handler
 
+from storefront.miniapp import build_miniapp_keyboard
+
 logger = logging.getLogger("wingmen.dispatcher")
 
 # Intent -> handler mapping
@@ -45,8 +47,6 @@ FLOW_TO_INTENT = {
     "site_edit": "site_edit",
     "team_manage": "manage_team",
 }
-
-from storefront.miniapp import build_miniapp_keyboard
 
 _STOREFRONT_WEB_BASE_DEFAULT = "https://ihsanos.com"
 
