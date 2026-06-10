@@ -59,15 +59,20 @@ def synthetic_msg():
             " requires_response, is_test, priority, sub_tag) "
             "VALUES (gen_random_uuid(), %s, 'cai', 'review_request', "
             "        'test escalation subject', 'test body', true, true, 'P2', %s) "
-            "RETURNING id",
+            "RETURNING id, thread_id",
             (from_agent, sub_tag),
         )
-        msg_id = cur.fetchone()[0]
+        msg_id, thread_id = cur.fetchone()
     yield msg_id
+    # Delete everything on the synthetic thread (source + any button responses
+    # the handler posted back), so test traffic never lingers in the real inbox.
     with psycopg.connect(_DSN, autocommit=True) as c, c.cursor() as cur:
-        cur.execute("DELETE FROM cc_cai_audit_log WHERE agent_message_id = %s", (msg_id,))
-        cur.execute("DELETE FROM agent_messages WHERE id = %s OR sub_tag LIKE %s",
-                    (msg_id, "operator-button-%"))
+        cur.execute(
+            "DELETE FROM cc_cai_audit_log WHERE agent_message_id IN "
+            "  (SELECT id FROM agent_messages WHERE thread_id = %s)",
+            (thread_id,),
+        )
+        cur.execute("DELETE FROM agent_messages WHERE thread_id = %s", (thread_id,))
 
 
 def _audit():
@@ -111,6 +116,23 @@ def test_button_delegate_marks_read_but_not_responded(synthetic_msg):
         read_set, responded_set = cur.fetchone()
         assert read_set is True
         assert responded_set is False
+
+
+def test_button_response_inherits_is_test_from_source(synthetic_msg):
+    # synthetic_msg is is_test=true; the response the handler posts back to the
+    # thread must also be is_test=true so test traffic never pollutes the real
+    # inbox / SLA views / boot_briefing.
+    audit = _audit()
+    ok = handle_button_callback(_DSN, audit, "approve", synthetic_msg)
+    assert ok is True
+    with psycopg.connect(_DSN, autocommit=True) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT is_test FROM agent_messages "
+            "  WHERE thread_id = (SELECT thread_id FROM agent_messages WHERE id = %s) "
+            "    AND from_agent = 'musa' AND sub_tag = 'musa-button'",
+            (synthetic_msg,),
+        )
+        assert cur.fetchone()[0] is True
 
 
 def test_button_unknown_msg_id_returns_false():

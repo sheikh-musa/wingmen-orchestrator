@@ -65,21 +65,22 @@ def handle_button_callback(
             if action == "approve":
                 # Fetch original to know thread_id + from_agent
                 cur.execute(
-                    "SELECT thread_id, from_agent, subject FROM agent_messages WHERE id = %s",
+                    "SELECT thread_id, from_agent, subject, is_test FROM agent_messages WHERE id = %s",
                     (msg_id,),
                 )
                 row = cur.fetchone()
                 if not row:
                     logger.warning(f"approve: msg #{msg_id} not found")
                     return False
-                thread_id, original_from, original_subject = row
+                thread_id, original_from, original_subject, source_is_test = row
                 cur.execute(
                     "INSERT INTO agent_messages "
                     "(thread_id, from_agent, to_agent, message_type, subject, body, "
                     " requires_response, is_test, sub_tag, priority) "
-                    "VALUES (%s, 'musa', 'cai', 'agreed', %s, %s, false, false, "
+                    "VALUES (%s, 'musa', 'cai', 'agreed', %s, %s, false, %s, "
                     "        'musa-button', 'P3')",
-                    (thread_id, f"APPROVE: {original_subject[:80]}", "approved via telegram button"),
+                    (thread_id, f"APPROVE: {original_subject[:80]}", "approved via telegram button",
+                     source_is_test),
                 )
                 cur.execute(
                     "UPDATE agent_messages SET read_at = now(), responded_at = now() "
@@ -89,41 +90,43 @@ def handle_button_callback(
             elif action == "defer":
                 # Don't touch read_at/responded_at; just log a deferred note in thread
                 cur.execute(
-                    "SELECT thread_id, subject FROM agent_messages WHERE id = %s",
+                    "SELECT thread_id, subject, is_test FROM agent_messages WHERE id = %s",
                     (msg_id,),
                 )
                 row = cur.fetchone()
                 if not row:
                     return False
-                thread_id, original_subject = row
+                thread_id, original_subject, source_is_test = row
                 cur.execute(
                     "INSERT INTO agent_messages "
                     "(thread_id, from_agent, to_agent, message_type, subject, body, "
                     " requires_response, is_test, sub_tag, priority) "
-                    "VALUES (%s, 'musa', 'cai', 'update', %s, %s, false, false, "
+                    "VALUES (%s, 'musa', 'cai', 'update', %s, %s, false, %s, "
                     "        'musa-button', 'P3')",
-                    (thread_id, f"DEFER: {original_subject[:80]}", "deferred via telegram button"),
+                    (thread_id, f"DEFER: {original_subject[:80]}", "deferred via telegram button",
+                     source_is_test),
                 )
             elif action == "delegate":
                 # Phase 1: log the delegate intent; the multi-turn flow that
                 # captures the free-text reply lives in handle_free_text_reply
                 # below. Mark original as read so it doesn't keep alerting.
                 cur.execute(
-                    "SELECT thread_id, subject FROM agent_messages WHERE id = %s",
+                    "SELECT thread_id, subject, is_test FROM agent_messages WHERE id = %s",
                     (msg_id,),
                 )
                 row = cur.fetchone()
                 if not row:
                     return False
-                thread_id, original_subject = row
+                thread_id, original_subject, source_is_test = row
                 cur.execute(
                     "INSERT INTO agent_messages "
                     "(thread_id, from_agent, to_agent, message_type, subject, body, "
                     " requires_response, is_test, sub_tag, priority) "
-                    "VALUES (%s, 'musa', 'cai', 'update', %s, %s, false, false, "
+                    "VALUES (%s, 'musa', 'cai', 'update', %s, %s, false, %s, "
                     "        'musa-button', 'P3')",
                     (thread_id, f"DELEGATE: {original_subject[:80]}",
-                     "delegated via telegram button — awaiting operator free-text reply"),
+                     "delegated via telegram button — awaiting operator free-text reply",
+                     source_is_test),
                 )
                 cur.execute(
                     "UPDATE agent_messages SET read_at = now() WHERE id = %s",
