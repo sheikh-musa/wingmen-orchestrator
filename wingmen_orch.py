@@ -861,7 +861,7 @@ async def _spawn_escalation_session(
         cap_check = await (
             supabase.table("agent_messages")
             .select("id", count="exact")
-            .eq("from_agent", "arch-030-escalation")
+            .eq("sub_tag", "substrate-arch-030-escalation")
             .like("subject", f"ARCH-030: starting auto-diagnosis for job #{job_id}%")
             .execute()
         )
@@ -877,7 +877,8 @@ async def _spawn_escalation_session(
         )
         try:
             await supabase.table("agent_messages").insert({
-                "from_agent": "arch-030-escalation",
+                "from_agent": "substrate",
+                "sub_tag": "substrate-arch-030-escalation",
                 "to_agent": "cc-ihsanos",
                 "message_type": "blocker",
                 "subject": (
@@ -974,7 +975,7 @@ Recent commits:
    a. Write a concrete, explicit rewrite of the spec and update: SET session_prompt=<new prompt>, description=<clearer title>, status='queued', fail_count=0 WHERE id={job_id}.
    b. If you need Musa's input: leave status='paused', set requires_response=True below.
 4. Post your diagnosis to Supabase agent_messages:
-   INSERT (from_agent='arch-030-escalation', to_agent='cc-ihsanos', message_type='update',
+   INSERT (from_agent='substrate', sub_tag='substrate-arch-030-escalation', to_agent='cc-ihsanos', message_type='update',
            subject='ARCH-030 Job #{job_id}: <outcome in 60 chars>',
            body=<your diagnosis + what you did, under 2000 chars>,
            requires_response=<True only if human input genuinely required>)
@@ -986,7 +987,8 @@ Recent commits:
         # Announce escalation start
         try:
             await supabase.table("agent_messages").insert({
-                "from_agent": "arch-030-escalation",
+                "from_agent": "substrate",
+                "sub_tag": "substrate-arch-030-escalation",
                 "to_agent": "cc-ihsanos",
                 "message_type": "update",
                 "subject": f"ARCH-030: starting auto-diagnosis for job #{job_id}",
@@ -1025,7 +1027,8 @@ Recent commits:
                 body_parts.append(f"\nStderr:\n{cc_err[-400:]}")
 
             await supabase.table("agent_messages").insert({
-                "from_agent": "arch-030-escalation",
+                "from_agent": "substrate",
+                "sub_tag": "substrate-arch-030-escalation",
                 "to_agent": "cc-ihsanos",
                 "message_type": "update",
                 "subject": f"ARCH-030 Job #{job_id}: escalation {'done' if rc == 0 else 'errored (rc=' + str(rc) + ')'}",
@@ -1038,7 +1041,8 @@ Recent commits:
             logger.warning(f"ARCH-030: escalation timed out for job #{job_id} (15 min)")
             try:
                 await supabase.table("agent_messages").insert({
-                    "from_agent": "arch-030-escalation",
+                    "from_agent": "substrate",
+                    "sub_tag": "substrate-arch-030-escalation",
                     "to_agent": "cc-ihsanos",
                     "message_type": "blocker",
                     "subject": f"ARCH-030 Job #{job_id}: escalation timed out (15 min cap)",
@@ -1249,7 +1253,8 @@ async def run_job(supabase, job: dict) -> None:
                 )
                 try:
                     await supabase.table("agent_messages").insert({
-                        "from_agent": "ralph_runner",
+                        "from_agent": "substrate",
+                        "sub_tag": "substrate-ralph-runner",
                         "to_agent": "cc-ihsanos",
                         "message_type": "blocker",
                         "subject": f"Job #{job_id} deploy failed ({new_fail_count}/{MAX_FAIL_COUNT}): {job.get('description','')[:60]}",
@@ -1319,7 +1324,8 @@ async def run_job(supabase, job: dict) -> None:
                     f"Gate2 (intent): {'pass conf=' + str(_g2.get('confidence')) if _g2.get('passed') else 'n/a'}"
                 )
                 await supabase.table("agent_messages").insert({
-                    "from_agent": "ralph_runner",
+                    "from_agent": "substrate",
+                    "sub_tag": "substrate-ralph-runner",
                     "to_agent": "cc-ihsanos",
                     "message_type": "update",
                     "subject": f"Job #{job_id} completed: {job.get('description', '')[:80]}",
@@ -1412,7 +1418,8 @@ async def run_job(supabase, job: dict) -> None:
             await notify(job_id, repo_name, "queued", "Rate limited — re-queued, retry in ~30 min")
             try:
                 await supabase.table("agent_messages").insert({
-                    "from_agent": "ralph_runner",
+                    "from_agent": "substrate",
+                    "sub_tag": "substrate-ralph-runner",
                     "to_agent": "cc-ihsanos",
                     "message_type": "update",
                     "subject": f"Job #{job_id} rate-limited — re-queued with 30 min backoff",
@@ -1441,7 +1448,8 @@ async def run_job(supabase, job: dict) -> None:
                 # BUG-017: push blocker event to cc-ihsanos inbox (ARCH-018/ARCH-028)
                 try:
                     await supabase.table("agent_messages").insert({
-                        "from_agent": "ralph_runner",
+                        "from_agent": "substrate",
+                        "sub_tag": "substrate-ralph-runner",
                         "to_agent": "cc-ihsanos",
                         "message_type": "blocker",
                         "subject": f"Job #{job_id} paused after {new_fail_count} failures: {job.get('description', '')[:80]}",

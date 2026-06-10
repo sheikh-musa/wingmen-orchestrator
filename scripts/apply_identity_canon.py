@@ -13,12 +13,12 @@ Mapping is cai's, from the SUBSTRATE-COHERENCE-001 decision text:
      repos_affected == {cosem-tdu}  -> cc-cosem
      (single-repo wingmen-orchestrator, multi-repo, or null) -> cc-orchestrator
 
-SCOPE NOTE — the from_agent CHECK on agent_messages is DEFERRED, not applied
-here: live inserters use from_agent='ralph_runner' and 'arch-030-escalation'
-(escalation path), neither in the canonical set. A CHECK would silently reject
-those writers when they next fire. Raised as a challenge on SUBSTRATE-
-COHERENCE-001; the from_agent CHECK lands only after those identities are
-mapped + the code paths patched.
+SCOPE NOTE — RESOLVED (cai #1990, option b). from_agent on agent_messages is
+enforced by the existing validated FK to agents(id) (the closed canonical set).
+The two non-canonical writers (ralph_runner, arch-030-escalation) are migrated:
+they now post from_agent='substrate' with origin in sub_tag
+('substrate-ralph-runner' / 'substrate-arch-030-escalation'). 'substrate' is a
+registered agent. No separate CHECK is added — the FK already does the job.
 
 Usage:
   python scripts/apply_identity_canon.py            # dry-run (no writes)
