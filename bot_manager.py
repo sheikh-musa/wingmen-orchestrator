@@ -32,6 +32,8 @@ class ClientBot:
     repo_name: str | None
     platform: str | None
     ihsanos_org_id: str | None
+    is_platform: bool = False
+    slug: str | None = None
 
 
 def compute_token_hash(token: str) -> str:
