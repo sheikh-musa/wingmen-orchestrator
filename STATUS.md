@@ -1,8 +1,28 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-06-11 SGT
+Last Updated: 2026-06-11 SGT (incident #1994 fix + COHERENCE-001 D/E)
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
+
+## Last Completed (2026-06-11 — incident #1994 fix + COHERENCE-001 D/E close)
+
+### Incident #1994 / BUG-024 — operator-button identity gate (commit c8e8a65)
+- **Forensics:** #1980 from_agent='musa' APPROVE proven to be test-suite traffic — `handle_button_callback` has no live wiring; all 22 musa-button rows carry the test-fixture subject "test escalation subject". Severity down-classified. 0 forged real rows, 0 leaks.
+- **Fix:** `cc_cai_daemon/telegram_bot.py` `handle_button_callback` now takes `caller_telegram_id` + `operator_telegram_id`. `verified = bool(operator_telegram_id) and str(caller)==str(operator)`. Verified → from_agent='musa', from_agent_verified=true, side-effects applied, is_test inherits source. Unverified → from_agent='substrate', is_test=true, from_agent_verified=false, sub_tag='substrate-button-unverified', NO source mutation. Gate lives in the handler so a future dispatcher can't bypass it.
+- Tests `tests/cc_cai_daemon/test_telegram_bot.py` 15/15 (added verified/unverified/no-mutation cases).
+- `handle_free_text_reply` annotated: MUST gain the same gate when CADENCE-008 C wires it.
+- **Closure pending** operator real-press smoke test once buttons go live.
+
+### SUBSTRATE-COHERENCE-001 E — from_agent inserter migration (commit 1b79a55)
+- cai #1990 option (b): automation processes are NOT agents. `from_agent` stays a closed canonical set enforced by the (already-VALIDATED) `agent_messages_from_agent_fkey`. Discovered the FK had been silently rejecting ralph_runner / arch-030-escalation writes all along (0 such rows ever landed — swallowed exceptions).
+- `wingmen_orch.py` 10 sites migrated: 4 arch-030 + 4 ralph_runner inserts now post `from_agent='substrate'` with origin in `sub_tag` ('substrate-arch-030-escalation' / 'substrate-ralph-runner'); cap-check read + spawned-CC prompt text updated to match.
+- Registered `substrate` in the `agents` table (FK target).
+- **Restart required:** wingmen_orch.py is the always-on process — needs `scripts/restart_orch.sh` to take effect (flagged to cai, not auto-restarted).
+
+### SUBSTRATE-COHERENCE-001 D — archived status (commit 30daa2a)
+- cai #2001: `strategic_decisions_status_check` expanded to allow 'archived'. Applied to prod via `scripts/apply_archived_status.py` (idempotent psycopg-apply, decision-962 safe).
+- `schema.sql` reconciled (status column + CHECK were missing from the strategic_decisions definition — pre-existing drift, related to BUG-036).
+- decided_by canon (E from prior session): verified already-applied (all canonical, CHECK present) — not re-run.
 
 ## Last Completed (2026-06-11 — SUBSTRATE-COHERENCE-001 B + BUG-035 primitive)
 
