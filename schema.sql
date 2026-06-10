@@ -300,6 +300,11 @@ alter table strategic_decisions add column if not exists category text
 alter table strategic_decisions add column if not exists parent_ref text;
 create index if not exists idx_strategic_decisions_category on strategic_decisions(category) where category is not null;
 create index if not exists idx_strategic_decisions_parent on strategic_decisions(parent_ref) where parent_ref is not null;
+-- SUBSTRATE-COHERENCE-001 D (cai #2001): lifecycle status; 'archived' is first-class.
+alter table strategic_decisions add column if not exists status text default 'active';
+alter table strategic_decisions drop constraint if exists strategic_decisions_status_check;
+alter table strategic_decisions add constraint strategic_decisions_status_check
+  check (status = any (array['active', 'superseded', 'under_review', 'archived']));
 
 -- ARCH-007: notification dedup + cai visibility
 create table if not exists notification_log (
