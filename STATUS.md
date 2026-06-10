@@ -1,8 +1,24 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-05-06 18:08 SGT
+Last Updated: 2026-06-11 SGT
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
+
+## Last Completed (2026-06-11 — SUBSTRATE-COHERENCE-001 B + BUG-035 primitive)
+
+### SUBSTRATE-COHERENCE-001 (cai #1963) — B/C/E/F applied to prod
+- **B is_test hygiene:** 22 test rows backfilled; operator-button handler now propagates `is_test` from the source message (was hardcoding false → 21 leaked "test escalation subject" rows); `inbox_sla_violations` + `boot_briefing.inbox_hygiene` exclude `is_test`. Verified 0 leaks.
+- **C boot_briefing diet:** 656→141 rows (active_decision 30-day window + pinned set, inbox_sla aggregate, repo_snapshot arm dropped).
+- **E decided_by canon:** 93 rows normalized to canonical agent set + CHECK. `from_agent` CHECK DEFERRED — blocked on cai ruling re ralph_runner / arch-030-escalation writers (challenge #1967).
+- **F:** repo_snapshot arm removed from boot_briefing (table drop is a separate destructive step, not done).
+- **D, G:** gated on Irsyad-green + migration 064.
+- Apply scripts: `scripts/apply_{boot_briefing_diet,identity_canon,sla_is_test,boot_briefing_inbox_hygiene_istest}.py` (psycopg-apply, decision-962 safe).
+
+### BUG-035 reconciliation primitive (CAI-RESP-205) — shipped (substrate half)
+- **read != reconciled** fix: cross-agent BLOCKING handoffs now have a checked reconciliation state.
+- `blocking_tasks` table + `strategic_decisions.unblocks_task_id` + `open_blocking_tasks` view + `boot_briefing.open_blocking_task` arm. Helper `nervous_system/blocking_tasks.py` (create/reconcile/list, 6/6 TDD). `reconciled_at` is an explicit owner close, NOT auto-stamped on ruling-existence.
+- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-11-bug035-reconciliation-primitive*`. Apply: `scripts/apply_blocking_tasks_schema.py` + `scripts/apply_boot_briefing_blocking_tasks_arm.py`.
+- **Adoption handed to cc-ihsanos** (create at raise, reconcile at consume) — msg #2019.
 
 ## Last Completed (2026-04-29 — ORCHESTRATOR-STATUS-001 Option B + SKILLS-SUBSTRATE-001)
 
