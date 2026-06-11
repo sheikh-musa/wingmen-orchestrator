@@ -4,20 +4,25 @@ Last Updated: 2026-06-11 SGT (incident #1994 fix + COHERENCE-001 D/E)
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
 
-## In Progress (2026-06-11 — CADENCE-008 A drain worker, report-only scaffold)
+## In Progress (2026-06-11 — CADENCE-008 A drain worker, execute arm complete behind flag; go-live gated on window + operator)
 
 cc-ihsanos inbox-drain headless worker. Operator authorized the build; orchestrator restarted (pid 91630) to activate the COHERENCE-001 E inserter fix.
 
 - **Plan:** `docs/superpowers/plans/2026-06-11-cadence-008a-ihsanos-drain-worker.md` (7 tasks).
 - **Report-only scaffold SHIPPED (commit 3051afe, 17/17 TDD):** `ihsanos_drain/` package — kill_switch (env gate `WINGMEN_IHSANOS_DRAIN_DISABLED`), token_budget + `drain_token_ledger` (apply script dry-run-validated, NOT yet applied to prod), grant predicate, cc-ihsanos poller, substrate work-report writer, single-cycle `main` + `ops/launchd/dev.wingmen.ihsanos-drain.plist` (StartInterval=1800, RunAtLoad=false) + manifest. Never spawns `claude -p`, never mutates source.
 - **Grant predicate RATIFIED (cai #2067):** 4 parts as proposed + sha sub-rule (filename mandatory, sha optional-but-binding). Encoded in `ihsanos_drain/grant.py` with allowlist `CLOSED_CHALLENGE_STATES`.
-- **Execute-arm core + I/O wrappers BUILT & TDD-green (40/40, commits 129259b + bbaae8f):** `ihsanos_drain/runner.py` — `execute_ruling` (DI; all 4 safety branches: ambiguous / refused_migration / ci_red / merged), `build_prompt` (4 hard rules), `unauthorized_migrations` (migration gate), plus live wrappers `create_worktree`/`run_claude_in_worktree`/`git_changed_files` mirroring ralph_runner (env-whitelist + 30m timeout; changed-files unions committed+staged+untracked so new migrations can't slip the gate). Gated behind `DRAIN_EXECUTE_ENABLED`.
-- **Validation cycle #1 ran live (#2069, 09:51 UTC):** polled 3, would-execute 0, both grants held (windows open), kill-switch confirmed. cai requires ≥2 clean cycles before live.
-- **Execute arm go-live BLOCKED on:**
-  1. **cai #2071 (posted, P2)** — CI-gate/merge mechanism fork: local-replicate-&-ffmerge (spec) vs open-PR-&-await-real-GitHub-CI (recommended B2: PR + auto-merge-on-green). Surfaced from ihsanos `ci.yml` — a local CI replica is partial, so ff-merge-on-local-green risks merging PR-red to main. CI+merge left as an injected seam pending ruling.
-  2. **CADENCE-008 challenge window** — closes 2026-06-11 14:17 UTC.
-  3. **Validation cycle #2** + supervised first run (operator).
-- **Go-live (operator-gated):** apply token ledger, copy plist to `~/Library/LaunchAgents/`, bootstrap, run report-only cycles for operator review, THEN flip `DRAIN_EXECUTE_ENABLED=true`.
+- **Execute arm COMPLETE end-to-end behind `DRAIN_EXECUTE_ENABLED` (TDD-green 45/45; commits 129259b, bbaae8f, b3ee17d, 13b0966):** `ihsanos_drain/runner.py` + `main.py`.
+  - `execute_ruling` (DI) gates in order: claude-ok → has-diff (escalated_no_commit / ARCH-021 ghost guard) → migration-refusal → local pre-push CI → **open PR** (escalated_publish_failed / `pr_opened`).
+  - Live wrappers mirror ralph_runner (env-whitelist + timeouts): `create_worktree`/`remove_worktree`, `run_claude_in_worktree`, `git_changed_files` (unions committed+staged+**untracked** so new migrations can't slip the gate), `run_local_ci` (CI_STEPS: npm ci/lint/type-check/test, fail-fast), `publish_drain_pr` (reuses canonical `agents/git_publisher`).
+  - `run_cycle` drives the execute path per executable ruling when the flag is set; records ledger spend + posts a per-ruling outcome report. Flag defaults **false** → report-only.
+- **CI-gate/merge fork RESOLVED — cai #2078 / CAI-RESP-212 = Option B2 (as recommended):** drain pushes branch + opens PR; **REAL GitHub CI is the sole merge gate**; GitHub auto-merge-on-green scoped to `ihsanos-drain-*` branches. Local gates are pre-push filters only, never merge authority. Option A (local-replica + ff-merge) rejected.
+- **Validation cycles ran clean (report-only):** #1 (#2069, 09:51 UTC) and #2 (~10:50 UTC) — both polled live, executed 0, open-window rulings (IRSYAD-DEMO-001, TESTER-PERSONAS-IMPL-001) correctly held, kill-switch confirmed. cai's ≥2-clean-cycle gate now met.
+- **Execute arm go-live REMAINING gates:**
+  1. **CADENCE-008 challenge window** — closes 2026-06-11 14:17 UTC (TIME).
+  2. **CAI-RESP-212 condition (a) — OPERATOR click-path (on Musa's list per cai #2079):** enable branch protection on ihsanos `main` requiring all CI checks + configure GitHub auto-merge-on-green scoped to `ihsanos-drain-*`. Auto-merge is inert without it.
+  3. **Supervised first run** (operator).
+- **Go-live steps (operator-gated, ready):** apply `drain_token_ledger` to prod (dry-run validated), copy plist to `~/Library/LaunchAgents/`, bootstrap, operator-review a report-only cycle, THEN flip `DRAIN_EXECUTE_ENABLED=true`.
+- **CAI-RESP-212 condition (e) standing rule:** if canonical GitHub CI is found to gate *less* than the supervised-run baseline (e2e still disabled), PAUSE and escalate — partial canonical CI is acceptable as shared truth, a partial *replica* is not.
 
 ## Last Completed (2026-06-11 — incident #1994 fix + COHERENCE-001 D/E close)
 
