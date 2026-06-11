@@ -60,7 +60,11 @@ def summarize_ci(steps) -> dict:
 
 @dataclass(frozen=True)
 class ExecOutcome:
-    status: str  # merged | escalated_ci_red | escalated_ambiguous | refused_migration
+    # CAI-RESP-212 / Option B2: success terminal is pr_opened (drain never
+    # merges — real GitHub CI + auto-merge-on-green is the sole merge authority).
+    # pr_opened | escalated_ci_red | escalated_ambiguous | escalated_no_commit
+    # | escalated_publish_failed | refused_migration
+    status: str
     ruling_ref: str
     detail: str
     tokens_spent: int = 0
@@ -78,6 +82,24 @@ def unauthorized_migrations(changed_files, decision_text: str) -> list:
         if basename not in text and path not in text:
             bad.append(path)
     return bad
+
+
+def build_pr_body(ref: str, ruling: dict) -> str:
+    """PR description for a drain-authored PR. Self-documents the auto-merge
+    contract so a reviewer (or auditor) sees the authority chain on the PR."""
+    decision = (ruling.get("decision") or "").strip()
+    return (
+        f"Automated PR opened by the cc-ihsanos drain worker executing "
+        f"pre-authorized ruling **{ref}**.\n\n"
+        f"Ruling text:\n\n> {decision}\n\n"
+        "---\n"
+        "Authority: CADENCE-008 A + machine-checkable grant predicate (cai #2067).\n"
+        "Merge contract: CAI-RESP-212 / Option B2 — REAL GitHub CI is the sole "
+        "merge gate; GitHub auto-merge-on-green is scoped to `ihsanos-drain-*` "
+        "branches. The drain only opens this PR; it never merges.\n"
+        "Local pre-push filters already passed: migration-refusal gate + "
+        "lint/type-check/unit-tests."
+    )
 
 
 def build_prompt(ruling: dict) -> str:
@@ -105,8 +127,20 @@ def execute_ruling(
     run_claude,
     changed_files_fn,
     run_ci,
-    merge_fn,
+    publish_fn,
 ) -> ExecOutcome:
+    """Orchestrate one authorized ruling under Option B2 (CAI-RESP-212).
+
+    Order of gates (each fails closed, no merge authority lives here):
+      1. claude session ok?                  else escalated_ambiguous
+      2. produced a diff at all?             else escalated_no_commit (ghost)
+      3. only ruling-named migrations?       else refused_migration
+      4. local CI green? (pre-push filter)   else escalated_ci_red
+      5. push branch + open PR (publish_fn)  -> pr_opened / escalated_publish_failed
+
+    `run_ci` is the LOCAL pre-push filter (lint/type/test) — never the merge
+    gate. Real GitHub CI + auto-merge-on-green merges the PR downstream.
+    """
     ref = ruling.get("decision_ref", "(unknown)")
     prompt = build_prompt(ruling)
 
@@ -118,7 +152,14 @@ def execute_ruling(
             res.get("summary", "claude session failed/ambiguous"), tokens,
         )
 
-    bad = unauthorized_migrations(changed_files_fn(), ruling.get("decision", ""))
+    changed = changed_files_fn()
+    if not changed:
+        return ExecOutcome(
+            "escalated_no_commit", ref,
+            "claude exited 0 but produced no diff (stopped/reported)", tokens,
+        )
+
+    bad = unauthorized_migrations(changed, ruling.get("decision", ""))
     if bad:
         return ExecOutcome(
             "refused_migration", ref, f"unauthorized migrations: {bad}", tokens,
@@ -128,8 +169,13 @@ def execute_ruling(
     if not ci.get("green"):
         return ExecOutcome("escalated_ci_red", ref, ci.get("detail", "ci red"), tokens)
 
-    merge_fn()
-    return ExecOutcome("merged", ref, res.get("summary", "merged"), tokens)
+    pub = publish_fn() or {}
+    if not pub.get("ok"):
+        return ExecOutcome(
+            "escalated_publish_failed", ref,
+            pub.get("error", "branch push / PR open failed"), tokens,
+        )
+    return ExecOutcome("pr_opened", ref, pub.get("pr_url", "pr opened"), tokens)
 
 
 # ── Live I/O wrappers (system boundary — gated behind DRAIN_EXECUTE_ENABLED) ──
@@ -223,3 +269,21 @@ def run_claude_in_worktree(prompt: str, wt_path: str) -> dict:
     ok = res.returncode == 0
     summary = (res.stdout or res.stderr or "").strip()[-2000:]
     return {"ok": ok, "summary": summary, "tokens": 0}
+
+
+def publish_drain_pr(ref: str, ruling: dict) -> dict:
+    """CAI-RESP-212 publish seam: push the drain branch + open a PR against
+    ihsanos main, reusing the canonical (tested) git_publisher. The drain never
+    merges — GitHub auto-merge-on-green (scoped to ihsanos-drain-* branches)
+    handles that. Returns {ok, pr_url, error}."""
+    import asyncio
+
+    from agents.git_publisher import publish_and_open_pr
+
+    _, branch = worktree_paths(ref)
+    title = f"[drain] {ref}: {(ruling.get('decision') or '').strip()[:60]}".rstrip(": ")
+    body = build_pr_body(ref, ruling)
+    result = asyncio.run(
+        publish_and_open_pr(_repo_path(), branch, title, body, base="main")
+    )
+    return {"ok": result.ok, "pr_url": result.pr_url, "error": result.error}

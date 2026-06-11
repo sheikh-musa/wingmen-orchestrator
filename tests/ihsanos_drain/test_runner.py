@@ -1,4 +1,5 @@
 from ihsanos_drain.runner import (
+    build_pr_body,
     build_prompt,
     execute_ruling,
     parse_changed_files,
@@ -110,62 +111,105 @@ def test_build_prompt_contains_ref_and_hard_migration_rule():
     assert "not named in this ruling" in p.lower() or "named in the ruling" in p.lower()
 
 
-# ---- execute_ruling (orchestration via DI) ----
+# ---- build_pr_body (pure) ----
+
+def test_build_pr_body_names_ruling_and_drain_provenance():
+    body = build_pr_body("CADENCE-008", {"decision_ref": "CADENCE-008", "decision": "do X"})
+    assert "CADENCE-008" in body
+    assert "drain" in body.lower()
+    # the auto-merge contract (CAI-RESP-212) must be self-documented on the PR
+    assert "CAI-RESP-212" in body or "auto-merge" in body.lower()
+
+
+# ---- execute_ruling (orchestration via DI, CAI-RESP-212 / Option B2) ----
+# Under B2 the drain NEVER merges: on green local pre-push filters it pushes the
+# branch + opens a PR; REAL GitHub CI + auto-merge-on-green is the sole merge
+# authority. So the success terminal is "pr_opened", not "merged".
 
 def _ruling():
     return {"decision_ref": "R1", "decision": "do the thing"}
 
 
-def test_execute_ci_green_merges_and_records():
-    merged = []
+def test_execute_green_opens_pr_does_not_merge():
+    published = []
     out = execute_ruling(
         _ruling(),
         run_claude=lambda prompt: {"ok": True, "summary": "did it", "tokens": 1234},
         changed_files_fn=lambda: ["src/app.py"],
         run_ci=lambda: {"green": True, "detail": "12 passed"},
-        merge_fn=lambda: merged.append(True),
+        publish_fn=lambda: published.append(True) or {"ok": True, "pr_url": "https://x/pr/7"},
     )
-    assert out.status == "merged"
+    assert out.status == "pr_opened"
     assert out.tokens_spent == 1234
-    assert merged == [True]
+    assert "https://x/pr/7" in out.detail
+    assert published == [True]
 
 
-def test_execute_ci_red_escalates_no_merge():
-    merged = []
+def test_execute_local_ci_red_escalates_no_publish():
+    published = []
     out = execute_ruling(
         _ruling(),
         run_claude=lambda prompt: {"ok": True, "summary": "did it", "tokens": 50},
         changed_files_fn=lambda: ["src/app.py"],
         run_ci=lambda: {"green": False, "detail": "2 failed"},
-        merge_fn=lambda: merged.append(True),
+        publish_fn=lambda: published.append(True) or {"ok": True},
     )
     assert out.status == "escalated_ci_red"
-    assert merged == []
+    assert published == []  # red local filter never reaches push/PR
 
 
-def test_execute_unauthorized_migration_refuses_no_merge():
-    merged = []
+def test_execute_unauthorized_migration_refuses_no_ci_no_publish():
+    published = []
     ci_calls = []
     out = execute_ruling(
         {"decision_ref": "R1", "decision": "do the thing"},
         run_claude=lambda prompt: {"ok": True, "summary": "added a migration", "tokens": 99},
         changed_files_fn=lambda: ["supabase/migrations/20260612_sneaky.sql"],
         run_ci=lambda: ci_calls.append(True) or {"green": True, "detail": ""},
-        merge_fn=lambda: merged.append(True),
+        publish_fn=lambda: published.append(True) or {"ok": True},
     )
     assert out.status == "refused_migration"
-    assert merged == []
+    assert published == []
     assert ci_calls == []  # refuse before even running CI
 
 
 def test_execute_claude_failure_escalates():
-    merged = []
+    published = []
     out = execute_ruling(
         _ruling(),
         run_claude=lambda prompt: {"ok": False, "summary": "timeout", "tokens": 0},
         changed_files_fn=lambda: [],
         run_ci=lambda: {"green": True, "detail": ""},
-        merge_fn=lambda: merged.append(True),
+        publish_fn=lambda: published.append(True) or {"ok": True},
     )
     assert out.status == "escalated_ambiguous"
-    assert merged == []
+    assert published == []
+
+
+def test_execute_no_commit_is_ghost_success_escalates():
+    # claude exited 0 but produced no diff (it STOPPED and reported per hard
+    # rule 4). ARCH-021 Gate 1: never treat a no-commit run as work done.
+    published = []
+    ci_calls = []
+    out = execute_ruling(
+        _ruling(),
+        run_claude=lambda prompt: {"ok": True, "summary": "I need clarification", "tokens": 20},
+        changed_files_fn=lambda: [],
+        run_ci=lambda: ci_calls.append(True) or {"green": True, "detail": ""},
+        publish_fn=lambda: published.append(True) or {"ok": True},
+    )
+    assert out.status == "escalated_no_commit"
+    assert published == []
+    assert ci_calls == []  # no CI on an empty diff
+
+
+def test_execute_publish_failure_escalates():
+    out = execute_ruling(
+        _ruling(),
+        run_claude=lambda prompt: {"ok": True, "summary": "did it", "tokens": 10},
+        changed_files_fn=lambda: ["src/app.py"],
+        run_ci=lambda: {"green": True, "detail": ""},
+        publish_fn=lambda: {"ok": False, "error": "push rejected"},
+    )
+    assert out.status == "escalated_publish_failed"
+    assert "push rejected" in out.detail
