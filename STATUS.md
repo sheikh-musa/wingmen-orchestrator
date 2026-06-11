@@ -4,6 +4,17 @@ Last Updated: 2026-06-11 SGT (incident #1994 fix + COHERENCE-001 D/E)
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
 
+## In Progress (2026-06-11 — CADENCE-008 A drain worker, report-only scaffold)
+
+cc-ihsanos inbox-drain headless worker. Operator authorized the build; orchestrator restarted (pid 91630) to activate the COHERENCE-001 E inserter fix.
+
+- **Plan:** `docs/superpowers/plans/2026-06-11-cadence-008a-ihsanos-drain-worker.md` (7 tasks).
+- **Report-only scaffold SHIPPED (commit 3051afe, 17/17 TDD):** `ihsanos_drain/` package — kill_switch (env gate `WINGMEN_IHSANOS_DRAIN_DISABLED`), token_budget + `drain_token_ledger` (apply script dry-run-validated, NOT yet applied to prod), grant predicate, cc-ihsanos poller, substrate work-report writer, single-cycle `main` + `ops/launchd/dev.wingmen.ihsanos-drain.plist` (StartInterval=1800, RunAtLoad=false) + manifest. Never spawns `claude -p`, never mutates source.
+- **Execute arm (Task 7) BLOCKED on two gates:**
+  1. **cai #2066** — ratify the machine-checkable execution-grant predicate (proposed: `execution_status='granted'` + ihsanos executor + challenge-window-closed + migration-filename-named). Posted, awaiting cai.
+  2. **CADENCE-008 challenge window** — closes 2026-06-11 14:17 UTC. No executing worker loads before then.
+- **Go-live (operator-gated):** apply token ledger, copy plist to `~/Library/LaunchAgents/`, bootstrap, run report-only cycles for operator review, THEN flip `DRAIN_EXECUTE_ENABLED=true`.
+
 ## Last Completed (2026-06-11 — incident #1994 fix + COHERENCE-001 D/E close)
 
 ### Incident #1994 / BUG-024 — operator-button identity gate (commit c8e8a65)
