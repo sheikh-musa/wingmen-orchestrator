@@ -1,8 +1,81 @@
 from ihsanos_drain.runner import (
     build_prompt,
     execute_ruling,
+    parse_changed_files,
+    sanitize_ref,
+    summarize_ci,
     unauthorized_migrations,
+    worktree_paths,
 )
+
+
+# ---- sanitize_ref (pure) ----
+
+def test_sanitize_ref_keeps_safe_chars():
+    assert sanitize_ref("CADENCE-008") == "CADENCE-008"
+    assert sanitize_ref("BUG-024.1") == "BUG-024.1"
+
+
+def test_sanitize_ref_replaces_unsafe_runs_with_single_dash():
+    # path/shell metacharacters must never reach a branch name or /tmp path
+    assert sanitize_ref("a/b c;rm -rf") == "a-b-c-rm-rf"
+
+
+def test_sanitize_ref_empty_or_all_unsafe_falls_back():
+    assert sanitize_ref("") == "unknown"
+    assert sanitize_ref("///") == "unknown"
+
+
+# ---- worktree_paths (pure) ----
+
+def test_worktree_paths_derive_branch_and_tmp_path():
+    wt, branch = worktree_paths("CADENCE-008")
+    assert branch == "ihsanos-drain-CADENCE-008"
+    assert wt == "/tmp/wingmen-wt-ihsanos-drain-CADENCE-008"
+
+
+def test_worktree_paths_sanitizes_ref():
+    wt, branch = worktree_paths("a/b")
+    assert branch == "ihsanos-drain-a-b"
+    assert wt == "/tmp/wingmen-wt-ihsanos-drain-a-b"
+
+
+# ---- summarize_ci (pure) ----
+
+def test_summarize_ci_all_green():
+    r = summarize_ci([("lint", 0, ""), ("unit-tests", 0, "12 passed")])
+    assert r["green"] is True
+    assert "2" in r["detail"]  # mentions how many steps passed
+
+
+def test_summarize_ci_first_failure_wins_and_names_step():
+    r = summarize_ci(
+        [("lint", 0, ""), ("type-check", 1, "TS2345 boom"), ("unit-tests", 0, "")]
+    )
+    assert r["green"] is False
+    assert "type-check" in r["detail"]
+    assert "TS2345" in r["detail"]
+
+
+def test_summarize_ci_empty_is_not_green():
+    # no steps ran -> cannot assert green; fail closed
+    r = summarize_ci([])
+    assert r["green"] is False
+
+
+# ---- parse_changed_files (pure) ----
+
+def test_parse_changed_files_splits_and_drops_blanks():
+    out = "src/app.tsx\nsupabase/migrations/x.sql\n\n"
+    assert parse_changed_files(out) == [
+        "src/app.tsx",
+        "supabase/migrations/x.sql",
+    ]
+
+
+def test_parse_changed_files_empty():
+    assert parse_changed_files("") == []
+    assert parse_changed_files("\n  \n") == []
 
 
 # ---- unauthorized_migrations (pure) ----
