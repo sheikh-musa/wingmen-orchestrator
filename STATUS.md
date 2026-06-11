@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-06-11 SGT (incident #1994 fix + COHERENCE-001 D/E)
+Last Updated: 2026-06-11 SGT (BUG-024 P2 build complete + reported to cai; incident #1994 fix + COHERENCE-001 D/E)
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
 
@@ -24,7 +24,14 @@ cc-ihsanos inbox-drain headless worker. Operator authorized the build; orchestra
 - **Go-live steps (operator-gated, ready):** apply `drain_token_ledger` to prod (dry-run validated), copy plist to `~/Library/LaunchAgents/`, bootstrap, operator-review a report-only cycle, THEN flip `DRAIN_EXECUTE_ENABLED=true`.
 - **CAI-RESP-212 condition (e) standing rule:** if canonical GitHub CI is found to gate *less* than the supervised-run baseline (e2e still disabled), PAUSE and escalate — partial canonical CI is acceptable as shared truth, a partial *replica* is not.
 
-## Last Completed (2026-06-11 — incident #1994 fix + COHERENCE-001 D/E close)
+## Last Completed (2026-06-11 — BUG-024 Phase 2 build: migration + tests + dry-run)
+
+### BUG-024 Phase 2 — agent identity enforcement (branch feat/bug024-phase2-identity-enforcement, commit 8172325; NOT applied to prod)
+- **Authority:** cai #2064 (migration + tests: GO; apply gated on operator distributing per-agent creds). Reported complete to cai in msg #2082 (thread 6df8aaaf).
+- **Shipped:** `scripts/apply_bug024_identity_enforcement.py` (dry-run/`--apply`, decision-962 safe) + `tests/migrations/` (ephemeral PG17 cluster fixture + 5 AC tests via SET ROLE). Hardens both `populate_*_provenance` triggers to **SECURITY INVOKER + OVERWRITE** (posted_by_identity = coalesce(jwt agent_id, current_user), caller input ignored), adds RLS INSERT policies (from_agent/decided_by must match resolved identity or identity_allowlist), seeds operator→cai/musa allowlist, VOIDs all pre-existing verified flags.
+- **Tested:** 5/5 ACs green on local PG17 substrate (prod-via-pooler unusable for SET ROLE). Dry-run vs prod CLEAN (rolled back): would void 60 agent_messages + 20 strategic_decisions stale flags; existing trigger/policy names confirmed matching.
+- **Design finding (INVOKER):** existing triggers were SECURITY DEFINER → current_user=postgres inside them, so stamp would disagree with RLS (which sees real caller). INVOKER makes stamp + enforcement agree; behavior-neutral on legacy shared-key path.
+- **GATING finding flagged to cai (#2082):** migration is INSERT-only, adds NO SELECT policy. A non-BYPASSRLS per-agent role can INSERT but cannot read back rows (incl own inbox) or do INSERT...RETURNING. Per-agent SELECT policies are a **required Track-A companion** gating the operator credential rollout — the SELECT-visibility model is a separate design decision (offered to draft next). Awaiting cai.
 
 ### Incident #1994 / BUG-024 — operator-button identity gate (commit c8e8a65)
 - **Forensics:** #1980 from_agent='musa' APPROVE proven to be test-suite traffic — `handle_button_callback` has no live wiring; all 22 musa-button rows carry the test-fixture subject "test escalation subject". Severity down-classified. 0 forged real rows, 0 leaks.
