@@ -1,8 +1,74 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-05-06 18:08 SGT
+Last Updated: 2026-06-11 SGT (BUG-024 P2 COMPLETE — INSERT + both SELECT policies, cai-ratified, 10/10 green; incident #1994 fix + COHERENCE-001 D/E)
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
+
+## In Progress (2026-06-11 — CADENCE-008 A drain worker, execute arm complete behind flag; go-live gated on window + operator)
+
+cc-ihsanos inbox-drain headless worker. Operator authorized the build; orchestrator restarted (pid 91630) to activate the COHERENCE-001 E inserter fix.
+
+- **Plan:** `docs/superpowers/plans/2026-06-11-cadence-008a-ihsanos-drain-worker.md` (7 tasks).
+- **Report-only scaffold SHIPPED (commit 3051afe, 17/17 TDD):** `ihsanos_drain/` package — kill_switch (env gate `WINGMEN_IHSANOS_DRAIN_DISABLED`), token_budget + `drain_token_ledger` (apply script dry-run-validated, NOT yet applied to prod), grant predicate, cc-ihsanos poller, substrate work-report writer, single-cycle `main` + `ops/launchd/dev.wingmen.ihsanos-drain.plist` (StartInterval=1800, RunAtLoad=false) + manifest. Never spawns `claude -p`, never mutates source.
+- **Grant predicate RATIFIED (cai #2067):** 4 parts as proposed + sha sub-rule (filename mandatory, sha optional-but-binding). Encoded in `ihsanos_drain/grant.py` with allowlist `CLOSED_CHALLENGE_STATES`.
+- **Execute arm COMPLETE end-to-end behind `DRAIN_EXECUTE_ENABLED` (TDD-green 45/45; commits 129259b, bbaae8f, b3ee17d, 13b0966):** `ihsanos_drain/runner.py` + `main.py`.
+  - `execute_ruling` (DI) gates in order: claude-ok → has-diff (escalated_no_commit / ARCH-021 ghost guard) → migration-refusal → local pre-push CI → **open PR** (escalated_publish_failed / `pr_opened`).
+  - Live wrappers mirror ralph_runner (env-whitelist + timeouts): `create_worktree`/`remove_worktree`, `run_claude_in_worktree`, `git_changed_files` (unions committed+staged+**untracked** so new migrations can't slip the gate), `run_local_ci` (CI_STEPS: npm ci/lint/type-check/test, fail-fast), `publish_drain_pr` (reuses canonical `agents/git_publisher`).
+  - `run_cycle` drives the execute path per executable ruling when the flag is set; records ledger spend + posts a per-ruling outcome report. Flag defaults **false** → report-only.
+- **CI-gate/merge fork RESOLVED — cai #2078 / CAI-RESP-212 = Option B2 (as recommended):** drain pushes branch + opens PR; **REAL GitHub CI is the sole merge gate**; GitHub auto-merge-on-green scoped to `ihsanos-drain-*` branches. Local gates are pre-push filters only, never merge authority. Option A (local-replica + ff-merge) rejected.
+- **Validation cycles ran clean (report-only):** #1 (#2069, 09:51 UTC) and #2 (~10:50 UTC) — both polled live, executed 0, open-window rulings (IRSYAD-DEMO-001, TESTER-PERSONAS-IMPL-001) correctly held, kill-switch confirmed. cai's ≥2-clean-cycle gate now met.
+- **Execute arm go-live REMAINING gates:**
+  1. **CADENCE-008 challenge window** — closes 2026-06-11 14:17 UTC (TIME).
+  2. **CAI-RESP-212 condition (a) — OPERATOR click-path (on Musa's list per cai #2079):** enable branch protection on ihsanos `main` requiring all CI checks + configure GitHub auto-merge-on-green scoped to `ihsanos-drain-*`. Auto-merge is inert without it.
+  3. **Supervised first run** (operator).
+- **Go-live steps (operator-gated, ready):** apply `drain_token_ledger` to prod (dry-run validated), copy plist to `~/Library/LaunchAgents/`, bootstrap, operator-review a report-only cycle, THEN flip `DRAIN_EXECUTE_ENABLED=true`.
+- **CAI-RESP-212 condition (e) standing rule:** if canonical GitHub CI is found to gate *less* than the supervised-run baseline (e2e still disabled), PAUSE and escalate — partial canonical CI is acceptable as shared truth, a partial *replica* is not.
+
+## Last Completed (2026-06-11 — BUG-024 Phase 2 build: migration + tests + dry-run)
+
+### BUG-024 Phase 2 — agent identity enforcement (branch feat/bug024-phase2-identity-enforcement, commit 8172325; NOT applied to prod)
+- **Authority:** cai #2064 (migration + tests: GO; apply gated on operator distributing per-agent creds). Reported complete to cai in msg #2082 (thread 6df8aaaf).
+- **Shipped:** `scripts/apply_bug024_identity_enforcement.py` (dry-run/`--apply`, decision-962 safe) + `tests/migrations/` (ephemeral PG17 cluster fixture + 5 AC tests via SET ROLE). Hardens both `populate_*_provenance` triggers to **SECURITY INVOKER + OVERWRITE** (posted_by_identity = coalesce(jwt agent_id, current_user), caller input ignored), adds RLS INSERT policies (from_agent/decided_by must match resolved identity or identity_allowlist), seeds operator→cai/musa allowlist, VOIDs all pre-existing verified flags.
+- **Tested:** 5/5 ACs green on local PG17 substrate (prod-via-pooler unusable for SET ROLE). Dry-run vs prod CLEAN (rolled back): would void 60 agent_messages + 20 strategic_decisions stale flags; existing trigger/policy names confirmed matching.
+- **Design finding (INVOKER):** existing triggers were SECURITY DEFINER → current_user=postgres inside them, so stamp would disagree with RLS (which sees real caller). INVOKER makes stamp + enforcement agree; behavior-neutral on legacy shared-key path.
+- **SELECT-visibility companion COMPLETE (cai CAI-RESP-213/214; reported green #2089).** Both SELECT policies now in the same script as the INSERT migration — INSERT half must never apply alone (CAI-RESP-213); both ride the single operator gate.
+  - **agent_messages SELECT (commit bb0370b, ACs 6-9):** own inbox (to_agent=self) + own sent (from_agent=self) + broadcast. Ratified as-built; cai endorsed the `'broadcast'` literal over their `'all'` guess.
+  - **strategic_decisions SELECT (commit e220d9a, AC10):** shared-ledger `USING(true)` per CAI-RESP-214 (b). Own-only overruled — drain grant-check + challenge windows read others' decisions every cycle; own-only would silently starve them. WRITE integrity stays with the INSERT policy.
+  - **10/10 ACs green; full dry-run vs prod clean.** Branch local only (not pushed). Apply gated on operator per-agent role provisioning.
+
+### Incident #1994 / BUG-024 — operator-button identity gate (commit c8e8a65)
+- **Forensics:** #1980 from_agent='musa' APPROVE proven to be test-suite traffic — `handle_button_callback` has no live wiring; all 22 musa-button rows carry the test-fixture subject "test escalation subject". Severity down-classified. 0 forged real rows, 0 leaks.
+- **Fix:** `cc_cai_daemon/telegram_bot.py` `handle_button_callback` now takes `caller_telegram_id` + `operator_telegram_id`. `verified = bool(operator_telegram_id) and str(caller)==str(operator)`. Verified → from_agent='musa', from_agent_verified=true, side-effects applied, is_test inherits source. Unverified → from_agent='substrate', is_test=true, from_agent_verified=false, sub_tag='substrate-button-unverified', NO source mutation. Gate lives in the handler so a future dispatcher can't bypass it.
+- Tests `tests/cc_cai_daemon/test_telegram_bot.py` 15/15 (added verified/unverified/no-mutation cases).
+- `handle_free_text_reply` annotated: MUST gain the same gate when CADENCE-008 C wires it.
+- **Closure pending** operator real-press smoke test once buttons go live.
+
+### SUBSTRATE-COHERENCE-001 E — from_agent inserter migration (commit 1b79a55)
+- cai #1990 option (b): automation processes are NOT agents. `from_agent` stays a closed canonical set enforced by the (already-VALIDATED) `agent_messages_from_agent_fkey`. Discovered the FK had been silently rejecting ralph_runner / arch-030-escalation writes all along (0 such rows ever landed — swallowed exceptions).
+- `wingmen_orch.py` 10 sites migrated: 4 arch-030 + 4 ralph_runner inserts now post `from_agent='substrate'` with origin in `sub_tag` ('substrate-arch-030-escalation' / 'substrate-ralph-runner'); cap-check read + spawned-CC prompt text updated to match.
+- Registered `substrate` in the `agents` table (FK target).
+- **Restart required:** wingmen_orch.py is the always-on process — needs `scripts/restart_orch.sh` to take effect (flagged to cai, not auto-restarted).
+
+### SUBSTRATE-COHERENCE-001 D — archived status (commit 30daa2a)
+- cai #2001: `strategic_decisions_status_check` expanded to allow 'archived'. Applied to prod via `scripts/apply_archived_status.py` (idempotent psycopg-apply, decision-962 safe).
+- `schema.sql` reconciled (status column + CHECK were missing from the strategic_decisions definition — pre-existing drift, related to BUG-036).
+- decided_by canon (E from prior session): verified already-applied (all canonical, CHECK present) — not re-run.
+
+## Last Completed (2026-06-11 — SUBSTRATE-COHERENCE-001 B + BUG-035 primitive)
+
+### SUBSTRATE-COHERENCE-001 (cai #1963) — B/C/E/F applied to prod
+- **B is_test hygiene:** 22 test rows backfilled; operator-button handler now propagates `is_test` from the source message (was hardcoding false → 21 leaked "test escalation subject" rows); `inbox_sla_violations` + `boot_briefing.inbox_hygiene` exclude `is_test`. Verified 0 leaks.
+- **C boot_briefing diet:** 656→141 rows (active_decision 30-day window + pinned set, inbox_sla aggregate, repo_snapshot arm dropped).
+- **E decided_by canon:** 93 rows normalized to canonical agent set + CHECK. `from_agent` CHECK DEFERRED — blocked on cai ruling re ralph_runner / arch-030-escalation writers (challenge #1967).
+- **F:** repo_snapshot arm removed from boot_briefing (table drop is a separate destructive step, not done).
+- **D, G:** gated on Irsyad-green + migration 064.
+- Apply scripts: `scripts/apply_{boot_briefing_diet,identity_canon,sla_is_test,boot_briefing_inbox_hygiene_istest}.py` (psycopg-apply, decision-962 safe).
+
+### BUG-035 reconciliation primitive (CAI-RESP-205) — shipped (substrate half)
+- **read != reconciled** fix: cross-agent BLOCKING handoffs now have a checked reconciliation state.
+- `blocking_tasks` table + `strategic_decisions.unblocks_task_id` + `open_blocking_tasks` view + `boot_briefing.open_blocking_task` arm. Helper `nervous_system/blocking_tasks.py` (create/reconcile/list, 6/6 TDD). `reconciled_at` is an explicit owner close, NOT auto-stamped on ruling-existence.
+- Spec/plan: `docs/superpowers/{specs,plans}/2026-06-11-bug035-reconciliation-primitive*`. Apply: `scripts/apply_blocking_tasks_schema.py` + `scripts/apply_boot_briefing_blocking_tasks_arm.py`.
+- **Adoption handed to cc-ihsanos** (create at raise, reconcile at consume) — msg #2019.
 
 ## Last Completed (2026-04-29 — ORCHESTRATOR-STATUS-001 Option B + SKILLS-SUBSTRATE-001)
 

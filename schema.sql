@@ -300,6 +300,11 @@ alter table strategic_decisions add column if not exists category text
 alter table strategic_decisions add column if not exists parent_ref text;
 create index if not exists idx_strategic_decisions_category on strategic_decisions(category) where category is not null;
 create index if not exists idx_strategic_decisions_parent on strategic_decisions(parent_ref) where parent_ref is not null;
+-- SUBSTRATE-COHERENCE-001 D (cai #2001): lifecycle status; 'archived' is first-class.
+alter table strategic_decisions add column if not exists status text default 'active';
+alter table strategic_decisions drop constraint if exists strategic_decisions_status_check;
+alter table strategic_decisions add constraint strategic_decisions_status_check
+  check (status = any (array['active', 'superseded', 'under_review', 'archived']));
 
 -- ARCH-007: notification dedup + cai visibility
 create table if not exists notification_log (
@@ -564,3 +569,38 @@ language sql stable security definer as $$
         test_health, deploy_url, architecture_summary, updated_at
     from repo_context where repo = key limit 1;
 $$;
+
+-- BUG-035 / CAI-RESP-205: reconciliation primitive for cross-agent BLOCKING
+-- handoffs. Each blocker gets a substrate row with an id; rulings reference it
+-- via strategic_decisions.unblocks_task_id; reconciled_at is set by an explicit
+-- owner close (never auto-stamped on ruling-existence — that is the read !=
+-- reconciled bug). Applied via scripts/apply_blocking_tasks_schema.py.
+create table if not exists blocking_tasks (
+  id bigint generated always as identity primary key,
+  owner_agent text not null,
+  created_by text not null,
+  subject text not null,
+  detail text,
+  thread_id uuid,
+  status text not null default 'open'
+    check (status in ('open', 'reconciled', 'cancelled')),
+  created_at timestamptz not null default now(),
+  reconciled_at timestamptz,
+  reconciled_by_decision_ref text,
+  is_test boolean not null default false
+);
+alter table strategic_decisions
+  add column if not exists unblocks_task_id bigint references blocking_tasks(id);
+
+-- Blocker view: open cross-agent tasks, excluding test traffic. ruling_issued
+-- distinguishes "ruling delivered but not reconciled" (chase signal) from
+-- "still waiting on cai". Surfaced as the boot_briefing open_blocking_task arm.
+create or replace view open_blocking_tasks as
+select bt.id, bt.owner_agent, bt.created_by, bt.subject, bt.detail,
+       bt.thread_id, bt.created_at, bt.is_test,
+       sd.decision_ref as unblocking_ruling_ref,
+       (sd.decision_ref is not null) as ruling_issued,
+       (now() - bt.created_at) as age
+from blocking_tasks bt
+left join strategic_decisions sd on sd.unblocks_task_id = bt.id
+where bt.status = 'open' and bt.is_test is not true;

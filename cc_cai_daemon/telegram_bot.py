@@ -46,8 +46,17 @@ def parse_callback_data(data: str) -> tuple[str, int] | None:
 
 def handle_button_callback(
     dsn: str, audit: AuditLogger, action: str, msg_id: int,
+    *, caller_telegram_id: str | None, operator_telegram_id: str,
 ) -> bool:
     """Apply an operator-button decision to agent_messages.
+
+    BUG-024 incident #1994: the caller's Telegram id is validated against the
+    registered operator id BEFORE any from_agent='musa' row is written. Only a
+    verified operator press carries authority (from_agent='musa',
+    from_agent_verified=true, side-effects applied). Any unverified press writes
+    a from_agent='substrate', is_test=true, from_agent_verified=false forensic
+    note and applies NO side-effects — it cannot resolve the escalation. This
+    gate lives in the handler so a future live dispatcher cannot bypass it.
 
     Audit FIRST per INV-5; side effects only fire if audit row landed.
     Returns True on success, False on audit or DB failure.
@@ -60,26 +69,49 @@ def handle_button_callback(
     if audit_id is None:
         return False
 
+    verified = bool(operator_telegram_id) and (
+        str(caller_telegram_id) == str(operator_telegram_id)
+    )
+
     try:
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            if action == "approve":
-                # Fetch original to know thread_id + from_agent
-                cur.execute(
-                    "SELECT thread_id, from_agent, subject FROM agent_messages WHERE id = %s",
-                    (msg_id,),
+            cur.execute(
+                "SELECT thread_id, subject, is_test FROM agent_messages WHERE id = %s",
+                (msg_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                logger.warning(f"{action}: msg #{msg_id} not found")
+                return False
+            thread_id, original_subject, source_is_test = row
+
+            if not verified:
+                # No authority: forensic substrate+test note, source untouched.
+                logger.warning(
+                    f"unverified button press {action}:{msg_id} from "
+                    f"telegram id {caller_telegram_id!r} — no authority applied"
                 )
-                row = cur.fetchone()
-                if not row:
-                    logger.warning(f"approve: msg #{msg_id} not found")
-                    return False
-                thread_id, original_from, original_subject = row
                 cur.execute(
                     "INSERT INTO agent_messages "
                     "(thread_id, from_agent, to_agent, message_type, subject, body, "
-                    " requires_response, is_test, sub_tag, priority) "
-                    "VALUES (%s, 'musa', 'cai', 'agreed', %s, %s, false, false, "
+                    " requires_response, is_test, from_agent_verified, sub_tag, priority) "
+                    "VALUES (%s, 'substrate', 'cai', 'update', %s, %s, false, true, false, "
+                    "        'substrate-button-unverified', 'P3')",
+                    (thread_id, f"UNVERIFIED {action.upper()}: {original_subject[:70]}",
+                     "button press from unregistered telegram id; no authority applied"),
+                )
+                return True
+
+            # Verified operator press: real decision semantics.
+            if action == "approve":
+                cur.execute(
+                    "INSERT INTO agent_messages "
+                    "(thread_id, from_agent, to_agent, message_type, subject, body, "
+                    " requires_response, is_test, from_agent_verified, sub_tag, priority) "
+                    "VALUES (%s, 'musa', 'cai', 'agreed', %s, %s, false, %s, true, "
                     "        'musa-button', 'P3')",
-                    (thread_id, f"APPROVE: {original_subject[:80]}", "approved via telegram button"),
+                    (thread_id, f"APPROVE: {original_subject[:80]}", "approved via telegram button",
+                     source_is_test),
                 )
                 cur.execute(
                     "UPDATE agent_messages SET read_at = now(), responded_at = now() "
@@ -89,41 +121,27 @@ def handle_button_callback(
             elif action == "defer":
                 # Don't touch read_at/responded_at; just log a deferred note in thread
                 cur.execute(
-                    "SELECT thread_id, subject FROM agent_messages WHERE id = %s",
-                    (msg_id,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return False
-                thread_id, original_subject = row
-                cur.execute(
                     "INSERT INTO agent_messages "
                     "(thread_id, from_agent, to_agent, message_type, subject, body, "
-                    " requires_response, is_test, sub_tag, priority) "
-                    "VALUES (%s, 'musa', 'cai', 'update', %s, %s, false, false, "
+                    " requires_response, is_test, from_agent_verified, sub_tag, priority) "
+                    "VALUES (%s, 'musa', 'cai', 'update', %s, %s, false, %s, true, "
                     "        'musa-button', 'P3')",
-                    (thread_id, f"DEFER: {original_subject[:80]}", "deferred via telegram button"),
+                    (thread_id, f"DEFER: {original_subject[:80]}", "deferred via telegram button",
+                     source_is_test),
                 )
             elif action == "delegate":
                 # Phase 1: log the delegate intent; the multi-turn flow that
                 # captures the free-text reply lives in handle_free_text_reply
                 # below. Mark original as read so it doesn't keep alerting.
                 cur.execute(
-                    "SELECT thread_id, subject FROM agent_messages WHERE id = %s",
-                    (msg_id,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return False
-                thread_id, original_subject = row
-                cur.execute(
                     "INSERT INTO agent_messages "
                     "(thread_id, from_agent, to_agent, message_type, subject, body, "
-                    " requires_response, is_test, sub_tag, priority) "
-                    "VALUES (%s, 'musa', 'cai', 'update', %s, %s, false, false, "
+                    " requires_response, is_test, from_agent_verified, sub_tag, priority) "
+                    "VALUES (%s, 'musa', 'cai', 'update', %s, %s, false, %s, true, "
                     "        'musa-button', 'P3')",
                     (thread_id, f"DELEGATE: {original_subject[:80]}",
-                     "delegated via telegram button — awaiting operator free-text reply"),
+                     "delegated via telegram button — awaiting operator free-text reply",
+                     source_is_test),
                 )
                 cur.execute(
                     "UPDATE agent_messages SET read_at = now() WHERE id = %s",
@@ -141,6 +159,10 @@ def handle_free_text_reply(
     """Operator's free-text reply on a thread → posted as operator → cai message.
 
     Audit-first per INV-5. Returns True on success.
+
+    BUG-024: this writes from_agent='musa'. It has NO live caller yet. When
+    CADENCE-008 C wires it, it MUST gain the same caller_telegram_id validation
+    as handle_button_callback — an unverified reply must NOT post as 'musa'.
     """
     audit_id = audit.log_tool_call(
         tool_name="operator_free_text_reply",

@@ -1,0 +1,9 @@
+caller_name: ihsanos-drain
+registered_by_identity: cc_family
+expected_cadence_seconds: 1800
+expected_tokens_per_day: 200000
+max_tokens_per_day: 400000
+auto_kill_policy: kill_on_red
+notes: >
+  CADENCE-008 A cc-ihsanos inbox-drain worker. Report-only until cai #2066
+  grant predicate ratified AND CADENCE-008 challenge window closed.
