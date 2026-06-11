@@ -12,6 +12,11 @@ from typing import Optional
 
 GRANT_SIGNAL = "granted"  # set ONLY by the ruling author (cai)
 EXECUTOR_REPO = "ihsanos"
+# A window is CLOSED (executable) only for affirmatively-closed states. Allowlist,
+# not blocklist: an actively 'challenged' / 'superseded' / still-open ruling must
+# never execute, and the timer-flip process guarantees a closed window leaves
+# 'challenge_window' (verified: zero stale-open rows in prod).
+CLOSED_CHALLENGE_STATES = frozenset({"accepted", "accepted_by_timeout", "unchallenged"})
 GRANTED = "granted"
 REPORT_ONLY = "report_only"
 REFUSED_MIGRATION = "refused_migration"
@@ -31,8 +36,8 @@ def evaluate_grant(
     repos = row.get("repos_affected") or []
     if EXECUTOR_REPO not in repos:
         return Verdict(REPORT_ONLY, "ruling does not name ihsanos as executor")
-    if row.get("challenge_status") == "challenge_window":
-        return Verdict(REPORT_ONLY, "ruling still in challenge window")
+    if row.get("challenge_status") not in CLOSED_CHALLENGE_STATES:
+        return Verdict(REPORT_ONLY, "challenge window not affirmatively closed")
     if is_migration:
         decision_text = row.get("decision") or ""
         if not migration_filename or migration_filename not in decision_text:

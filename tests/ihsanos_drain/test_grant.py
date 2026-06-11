@@ -10,7 +10,7 @@ def _row(**kw):
     base = dict(
         execution_status="granted",
         repos_affected=["ihsanos"],
-        challenge_status="ratified",
+        challenge_status="accepted_by_timeout",
         decision="do the thing",
     )
     base.update(kw)
@@ -20,6 +20,23 @@ def _row(**kw):
 def test_granted_when_all_conditions_met():
     v = evaluate_grant(_row(), is_migration=False, migration_filename=None)
     assert v.status == GRANTED
+
+
+def test_granted_for_each_closed_challenge_state():
+    for cs in ("accepted", "accepted_by_timeout", "unchallenged"):
+        v = evaluate_grant(
+            _row(challenge_status=cs), is_migration=False, migration_filename=None
+        )
+        assert v.status == GRANTED, cs
+
+
+def test_report_only_for_open_or_active_challenge_states():
+    # window-open, actively challenged, superseded, or ambiguous => never execute
+    for cs in ("challenge_window", "challenged", "superseded", "informational", None):
+        v = evaluate_grant(
+            _row(challenge_status=cs), is_migration=False, migration_filename=None
+        )
+        assert v.status == REPORT_ONLY, cs
 
 
 def test_report_only_when_execution_status_not_granted():
@@ -33,15 +50,6 @@ def test_report_only_when_execution_status_not_granted():
 def test_report_only_when_not_ihsanos_executor():
     v = evaluate_grant(
         _row(repos_affected=["orchestrator"]), is_migration=False, migration_filename=None
-    )
-    assert v.status == REPORT_ONLY
-
-
-def test_report_only_when_challenge_window_open():
-    v = evaluate_grant(
-        _row(challenge_status="challenge_window"),
-        is_migration=False,
-        migration_filename=None,
     )
     assert v.status == REPORT_ONLY
 

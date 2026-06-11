@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 
+from ihsanos_drain.granted_work import candidate_query, summarize
 from ihsanos_drain.kill_switch import drain_disabled
 from ihsanos_drain.poller import inbox_query
 from ihsanos_drain.report import build_report_row
@@ -21,23 +22,29 @@ def _execute_enabled() -> bool:
 
 def run_cycle(cur, *, caller_name: str, token_cap) -> dict:
     if drain_disabled():
-        return {"mode": "disabled", "executed": 0, "polled": 0}
+        return {"mode": "disabled", "executed": 0, "polled": 0,
+                "executable": [], "held": []}
 
     sql, params = inbox_query(limit=50)
     cur.execute(sql, params)
-    rows = cur.fetchall()
-    polled = len(rows)
+    polled = len(cur.fetchall())
 
-    # REPORT-ONLY: execute arm (plan Task 7) is intentionally absent until both
-    # gates clear. Never spawns claude -p; never mutates source messages.
-    mode = "report_only"
-    executed = 0
-    summary = (
-        f"polled {polled}, granted 0, executed 0 "
-        f"(report-only; execute_enabled={_execute_enabled()})"
+    csql, cparams = candidate_query()
+    cur.execute(csql, cparams)
+    grouped = summarize(cur.fetchall())
+    executable = grouped["executable"]
+    held = grouped["held"]
+
+    # REPORT-ONLY: even when `executable` is non-empty the execute arm (plan
+    # Task 7) is intentionally absent until both gates clear — never spawns
+    # claude -p, never mutates source. It only reports what it WOULD execute.
+    body = (
+        f"polled {polled}; granted candidates {len(executable) + len(held)}; "
+        f"would-execute {len(executable)}: {executable}; "
+        f"held {len(held)}: {held}; "
+        f"execute_enabled={_execute_enabled()} (report-only build)"
     )
-
-    report = build_report_row(summary=summary, report_only=True)
+    report = build_report_row(summary=body, report_only=True)
     cur.execute(
         "INSERT INTO agent_messages "
         "(from_agent, to_agent, message_type, subject, body, requires_response, "
@@ -47,16 +54,24 @@ def run_cycle(cur, *, caller_name: str, token_cap) -> dict:
         " %(sub_tag)s, %(priority)s)",
         report,
     )
-    return {"mode": mode, "executed": executed, "polled": polled}
+    return {
+        "mode": "report_only",
+        "executed": 0,
+        "polled": polled,
+        "executable": executable,
+        "held": [ref for ref, _ in held],
+    }
 
 
 def _main() -> int:
     import psycopg
     from dotenv import load_dotenv
+    from psycopg.rows import dict_row
 
     load_dotenv("/Users/sheikhmusa/wingmen/orchestrator/.env")
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn, \
+            conn.cursor() as cur:
         result = run_cycle(cur, caller_name="ihsanos-drain", token_cap=400_000)
     print(result)
     return 0
