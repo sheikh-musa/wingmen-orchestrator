@@ -38,6 +38,7 @@ def db(fresh_db):
     cur.execute(mig.CREATE_RLS_AGENT_MESSAGES)
     cur.execute(mig.CREATE_RLS_SELECT_AGENT_MESSAGES)
     cur.execute(mig.CREATE_RLS_STRATEGIC_DECISIONS)
+    cur.execute(mig.CREATE_RLS_SELECT_STRATEGIC_DECISIONS)
     yield conn
     conn.close()
 
@@ -143,3 +144,17 @@ def test_ac9_agent_cannot_read_other_agents_messages(db):
     cur.execute('set role "cc-ihsanos"')
     cur.execute("select count(*) from agent_messages")
     assert cur.fetchone()[0] == 0            # filtered out entirely
+
+
+# --- strategic_decisions SELECT: shared governance ledger (cai CAI-RESP-214 = (b)).
+# Challenge-window polling and the ihsanos-drain grant-check are definitionally reads
+# of decisions the agent did NOT author, so every agent role reads the full ledger.
+
+def test_ac10_agent_roles_read_full_decision_ledger(db):
+    cur = db.cursor()
+    cur.execute("reset role")
+    cur.execute("insert into strategic_decisions (decided_by) values ('cai')")         # not authored by cc-ihsanos
+    cur.execute("insert into strategic_decisions (decided_by) values ('cc-ihsanos')")  # own
+    cur.execute('set role "cc-ihsanos"')
+    cur.execute("select count(*) from strategic_decisions")
+    assert cur.fetchone()[0] == 2            # shared ledger: sees others' decisions + its own

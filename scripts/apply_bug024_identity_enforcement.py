@@ -131,6 +131,21 @@ create policy "decided_by must match posting identity" on strategic_decisions
                  and allowed_from_agent = decided_by));
 """
 
+# strategic_decisions SELECT: the decision ledger is shared governance canon
+# (cai CAI-RESP-214). Challenge-window polling and the ihsanos-drain grant-check
+# read decisions the agent did NOT author every cycle; own-only would silently
+# starve them. Least privilege protects the WRITE surface (the INSERT policy
+# above); the READ surface is shared by design. is_test is intentionally NOT
+# filtered here — consumers (e.g. the drain poller) filter is_test at the app
+# layer, and there is no role-level test/non-test distinction for RLS to key on.
+DROP_RLS_SELECT_STRATEGIC_DECISIONS = (
+    'drop policy if exists "agent roles read the full decision ledger" on strategic_decisions;'
+)
+CREATE_RLS_SELECT_STRATEGIC_DECISIONS = """
+create policy "agent roles read the full decision ledger" on strategic_decisions
+  for select using (true);
+"""
+
 # The void runs with the provenance trigger disabled. strategic_decisions has a
 # BEFORE UPDATE provenance trigger that would otherwise recompute the flag the
 # void UPDATE touches; agent_messages' trigger is INSERT-only but is disabled
@@ -162,6 +177,8 @@ MIGRATION = [
     ("create rls agent_messages select", CREATE_RLS_SELECT_AGENT_MESSAGES),
     ("drop rls strategic_decisions insert", DROP_RLS_STRATEGIC_DECISIONS),
     ("create rls strategic_decisions insert", CREATE_RLS_STRATEGIC_DECISIONS),
+    ("drop rls strategic_decisions select", DROP_RLS_SELECT_STRATEGIC_DECISIONS),
+    ("create rls strategic_decisions select", CREATE_RLS_SELECT_STRATEGIC_DECISIONS),
 ]
 
 
