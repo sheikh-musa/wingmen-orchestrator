@@ -10,9 +10,13 @@ cc-ihsanos inbox-drain headless worker. Operator authorized the build; orchestra
 
 - **Plan:** `docs/superpowers/plans/2026-06-11-cadence-008a-ihsanos-drain-worker.md` (7 tasks).
 - **Report-only scaffold SHIPPED (commit 3051afe, 17/17 TDD):** `ihsanos_drain/` package — kill_switch (env gate `WINGMEN_IHSANOS_DRAIN_DISABLED`), token_budget + `drain_token_ledger` (apply script dry-run-validated, NOT yet applied to prod), grant predicate, cc-ihsanos poller, substrate work-report writer, single-cycle `main` + `ops/launchd/dev.wingmen.ihsanos-drain.plist` (StartInterval=1800, RunAtLoad=false) + manifest. Never spawns `claude -p`, never mutates source.
-- **Execute arm (Task 7) BLOCKED on two gates:**
-  1. **cai #2066** — ratify the machine-checkable execution-grant predicate (proposed: `execution_status='granted'` + ihsanos executor + challenge-window-closed + migration-filename-named). Posted, awaiting cai.
-  2. **CADENCE-008 challenge window** — closes 2026-06-11 14:17 UTC. No executing worker loads before then.
+- **Grant predicate RATIFIED (cai #2067):** 4 parts as proposed + sha sub-rule (filename mandatory, sha optional-but-binding). Encoded in `ihsanos_drain/grant.py` with allowlist `CLOSED_CHALLENGE_STATES`.
+- **Execute-arm core + I/O wrappers BUILT & TDD-green (40/40, commits 129259b + bbaae8f):** `ihsanos_drain/runner.py` — `execute_ruling` (DI; all 4 safety branches: ambiguous / refused_migration / ci_red / merged), `build_prompt` (4 hard rules), `unauthorized_migrations` (migration gate), plus live wrappers `create_worktree`/`run_claude_in_worktree`/`git_changed_files` mirroring ralph_runner (env-whitelist + 30m timeout; changed-files unions committed+staged+untracked so new migrations can't slip the gate). Gated behind `DRAIN_EXECUTE_ENABLED`.
+- **Validation cycle #1 ran live (#2069, 09:51 UTC):** polled 3, would-execute 0, both grants held (windows open), kill-switch confirmed. cai requires ≥2 clean cycles before live.
+- **Execute arm go-live BLOCKED on:**
+  1. **cai #2071 (posted, P2)** — CI-gate/merge mechanism fork: local-replicate-&-ffmerge (spec) vs open-PR-&-await-real-GitHub-CI (recommended B2: PR + auto-merge-on-green). Surfaced from ihsanos `ci.yml` — a local CI replica is partial, so ff-merge-on-local-green risks merging PR-red to main. CI+merge left as an injected seam pending ruling.
+  2. **CADENCE-008 challenge window** — closes 2026-06-11 14:17 UTC.
+  3. **Validation cycle #2** + supervised first run (operator).
 - **Go-live (operator-gated):** apply token ledger, copy plist to `~/Library/LaunchAgents/`, bootstrap, run report-only cycles for operator review, THEN flip `DRAIN_EXECUTE_ENABLED=true`.
 
 ## Last Completed (2026-06-11 — incident #1994 fix + COHERENCE-001 D/E close)
