@@ -8,7 +8,7 @@ import scripts.apply_bug024_identity_enforcement as mig
 SCHEMA = [
     "create table identity_allowlist (posted_by text not null, allowed_from_agent text not null, note text)",
     "create table agent_messages (id serial primary key, from_agent text not null,"
-    " posted_by_identity text, from_agent_verified boolean)",
+    " to_agent text, posted_by_identity text, from_agent_verified boolean)",
     "create table strategic_decisions (id serial primary key, decided_by text not null,"
     " posted_by_identity text, decided_by_verified boolean)",
     "create trigger trg_agent_messages_provenance before insert on agent_messages"
@@ -36,6 +36,7 @@ def db(fresh_db):
         cur.execute(stmt)
     cur.execute(mig.SEED_ALLOWLIST)
     cur.execute(mig.CREATE_RLS_AGENT_MESSAGES)
+    cur.execute(mig.CREATE_RLS_SELECT_AGENT_MESSAGES)
     cur.execute(mig.CREATE_RLS_STRATEGIC_DECISIONS)
     yield conn
     conn.close()
@@ -100,3 +101,45 @@ def test_ac5_strategic_decisions_decided_by_is_enforced(db):
     identity, verified = cur.fetchone()
     assert identity == "cc-ihsanos"
     assert verified is True
+
+
+# --- SELECT-visibility policy (agent_messages): own inbox + own sent + broadcast.
+# Rows are seeded as the superuser owner (bypasses RLS), then read back under the
+# agent role to assert exactly which rows the SELECT policy exposes.
+
+def _seed(cur, from_agent, to_agent):
+    cur.execute("reset role")
+    cur.execute("insert into agent_messages (from_agent, to_agent) values (%s, %s)",
+                (from_agent, to_agent))
+
+
+def test_ac6_agent_reads_its_own_inbox(db):
+    cur = db.cursor()
+    _seed(cur, "cai", "cc-ihsanos")          # addressed TO cc-ihsanos
+    cur.execute('set role "cc-ihsanos"')
+    cur.execute("select count(*) from agent_messages where to_agent = 'cc-ihsanos'")
+    assert cur.fetchone()[0] == 1
+
+
+def test_ac7_agent_reads_its_own_sent(db):
+    cur = db.cursor()
+    _seed(cur, "cc-ihsanos", "cai")          # sent BY cc-ihsanos
+    cur.execute('set role "cc-ihsanos"')
+    cur.execute("select count(*) from agent_messages where from_agent = 'cc-ihsanos'")
+    assert cur.fetchone()[0] == 1
+
+
+def test_ac8_agent_reads_broadcasts(db):
+    cur = db.cursor()
+    _seed(cur, "cai", "broadcast")
+    cur.execute('set role "cc-ihsanos"')
+    cur.execute("select count(*) from agent_messages where to_agent = 'broadcast'")
+    assert cur.fetchone()[0] == 1
+
+
+def test_ac9_agent_cannot_read_other_agents_messages(db):
+    cur = db.cursor()
+    _seed(cur, "cai", "cc-scholar")          # neither to nor from cc-ihsanos
+    cur.execute('set role "cc-ihsanos"')
+    cur.execute("select count(*) from agent_messages")
+    assert cur.fetchone()[0] == 0            # filtered out entirely

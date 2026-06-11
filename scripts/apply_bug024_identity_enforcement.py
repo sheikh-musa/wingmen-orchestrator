@@ -94,6 +94,27 @@ create policy "from_agent must match posting identity" on agent_messages
                  and allowed_from_agent = from_agent));
 """
 
+# SELECT visibility for non-BYPASSRLS per-agent roles: an agent sees its own
+# inbox (to_agent = identity), its own sent messages (from_agent = identity,
+# needed for INSERT ... RETURNING and BUG-035 reconciliation read-backs), and
+# broadcasts. service_role bypasses RLS, so this does not change the legacy path.
+# Cross-thread / governance-wide reads stay on the service_role path. Grounded in
+# the actual poller filters (every reader uses `to_agent = <self>`).
+DROP_RLS_SELECT_AGENT_MESSAGES = (
+    'drop policy if exists "agents read own inbox, sent, and broadcasts" on agent_messages;'
+)
+CREATE_RLS_SELECT_AGENT_MESSAGES = """
+create policy "agents read own inbox, sent, and broadcasts" on agent_messages
+  for select using (
+    to_agent = coalesce(
+      current_setting('request.jwt.claims', true)::json ->> 'agent_id',
+      current_user)
+    or from_agent = coalesce(
+      current_setting('request.jwt.claims', true)::json ->> 'agent_id',
+      current_user)
+    or to_agent = 'broadcast');
+"""
+
 DROP_RLS_STRATEGIC_DECISIONS = (
     'drop policy if exists "decided_by must match posting identity" on strategic_decisions;'
 )
@@ -137,6 +158,8 @@ MIGRATION = [
     *VOID,
     ("drop rls agent_messages insert", DROP_RLS_AGENT_MESSAGES),
     ("create rls agent_messages insert", CREATE_RLS_AGENT_MESSAGES),
+    ("drop rls agent_messages select", DROP_RLS_SELECT_AGENT_MESSAGES),
+    ("create rls agent_messages select", CREATE_RLS_SELECT_AGENT_MESSAGES),
     ("drop rls strategic_decisions insert", DROP_RLS_STRATEGIC_DECISIONS),
     ("create rls strategic_decisions insert", CREATE_RLS_STRATEGIC_DECISIONS),
 ]
