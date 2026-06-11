@@ -1,4 +1,8 @@
+from collections import namedtuple
+
 from ihsanos_drain.main import run_cycle
+
+_Out = namedtuple("_Out", "ruling_ref status detail tokens_spent")
 
 
 class FakeCur:
@@ -55,6 +59,50 @@ def test_cycle_reports_would_execute_and_held(monkeypatch):
     # the would-execute breakdown is in the report body
     insert_sql, params = cur.inserted[0]
     assert "A" in params["body"]
+
+
+def test_execute_enabled_runs_executor_only_for_executable(monkeypatch):
+    monkeypatch.setenv("DRAIN_EXECUTE_ENABLED", "true")
+    monkeypatch.delenv("WINGMEN_IHSANOS_DRAIN_DISABLED", raising=False)
+    candidates = [
+        dict(decision_ref="A", execution_status="granted",
+             repos_affected=["ihsanos"], challenge_status="accepted_by_timeout",
+             decision="x"),
+        dict(decision_ref="B", execution_status="granted",
+             repos_affected=["ihsanos"], challenge_status="challenge_window",
+             decision="x"),
+    ]
+    cur = FakeCur(inbox_rows=[], candidate_rows=candidates)
+    called = []
+
+    def fake_exec(ruling):
+        called.append(ruling["decision_ref"])
+        return _Out(ruling["decision_ref"], "pr_opened", "https://x/pr/1", 10)
+
+    result = run_cycle(
+        cur, caller_name="ihsanos-drain", token_cap=200_000, execute_fn=fake_exec
+    )
+    assert result["mode"] == "execute"
+    assert called == ["A"]  # only the closed-window ruling, not the held one
+    assert result["executed"] == 1
+    assert result["outcomes"] == [("A", "pr_opened")]
+
+
+def test_execute_disabled_never_calls_executor(monkeypatch):
+    monkeypatch.setenv("DRAIN_EXECUTE_ENABLED", "false")
+    monkeypatch.delenv("WINGMEN_IHSANOS_DRAIN_DISABLED", raising=False)
+    candidates = [
+        dict(decision_ref="A", execution_status="granted",
+             repos_affected=["ihsanos"], challenge_status="accepted_by_timeout",
+             decision="x"),
+    ]
+    cur = FakeCur(inbox_rows=[], candidate_rows=candidates)
+    called = []
+    run_cycle(
+        cur, caller_name="ihsanos-drain", token_cap=200_000,
+        execute_fn=lambda r: called.append(r) or _Out("A", "pr_opened", "", 0),
+    )
+    assert called == []  # flag off => executor never runs
 
 
 def test_kill_switch_short_circuits(monkeypatch):

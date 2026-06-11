@@ -271,6 +271,39 @@ def run_claude_in_worktree(prompt: str, wt_path: str) -> dict:
     return {"ok": ok, "summary": summary, "tokens": 0}
 
 
+# Local pre-push filter steps (CAI-RESP-212 condition c). NOT the merge gate —
+# real GitHub CI is. A subset is acceptable because this only stops red work from
+# ever reaching CI; it never authorizes a merge. `npm ci` first so lint/type/test
+# run against installed deps, mirroring ihsanos .github/workflows/ci.yml.
+CI_STEPS = (
+    ("install", ["npm", "ci"]),
+    ("lint", ["npm", "run", "lint"]),
+    ("type-check", ["npm", "run", "type-check"]),
+    ("unit-tests", ["npm", "test"]),
+)
+_CI_STEP_TIMEOUT_S = 900  # 15 min per step
+
+
+def run_local_ci(wt_path: str) -> dict:
+    """Run the pre-push filter steps in the worktree; first failure short-circuits.
+    Returns summarize_ci(...) → {green, detail}."""
+    results = []
+    for name, argv in CI_STEPS:
+        try:
+            res = subprocess.run(
+                argv, cwd=wt_path, capture_output=True, text=True,
+                env=_safe_env(), timeout=_CI_STEP_TIMEOUT_S,
+            )
+            tail = (res.stdout or "")[-1500:] + (res.stderr or "")[-1500:]
+            results.append((name, res.returncode, tail))
+            if res.returncode != 0:
+                break  # fail fast — no point running later steps
+        except subprocess.TimeoutExpired:
+            results.append((name, 124, f"{name} timed out ({_CI_STEP_TIMEOUT_S}s)"))
+            break
+    return summarize_ci(results)
+
+
 def publish_drain_pr(ref: str, ruling: dict) -> dict:
     """CAI-RESP-212 publish seam: push the drain branch + open a PR against
     ihsanos main, reusing the canonical (tested) git_publisher. The drain never
