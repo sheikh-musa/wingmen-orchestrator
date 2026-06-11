@@ -1,6 +1,6 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-06-11 SGT (BUG-024 P2 build complete + reported to cai; incident #1994 fix + COHERENCE-001 D/E)
+Last Updated: 2026-06-11 SGT (BUG-024 P2 COMPLETE — INSERT + both SELECT policies, cai-ratified, 10/10 green; incident #1994 fix + COHERENCE-001 D/E)
 Build Status: green
 Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
 
@@ -31,9 +31,10 @@ cc-ihsanos inbox-drain headless worker. Operator authorized the build; orchestra
 - **Shipped:** `scripts/apply_bug024_identity_enforcement.py` (dry-run/`--apply`, decision-962 safe) + `tests/migrations/` (ephemeral PG17 cluster fixture + 5 AC tests via SET ROLE). Hardens both `populate_*_provenance` triggers to **SECURITY INVOKER + OVERWRITE** (posted_by_identity = coalesce(jwt agent_id, current_user), caller input ignored), adds RLS INSERT policies (from_agent/decided_by must match resolved identity or identity_allowlist), seeds operator→cai/musa allowlist, VOIDs all pre-existing verified flags.
 - **Tested:** 5/5 ACs green on local PG17 substrate (prod-via-pooler unusable for SET ROLE). Dry-run vs prod CLEAN (rolled back): would void 60 agent_messages + 20 strategic_decisions stale flags; existing trigger/policy names confirmed matching.
 - **Design finding (INVOKER):** existing triggers were SECURITY DEFINER → current_user=postgres inside them, so stamp would disagree with RLS (which sees real caller). INVOKER makes stamp + enforcement agree; behavior-neutral on legacy shared-key path.
-- **SELECT-visibility prerequisite (flagged #2082):** a non-BYPASSRLS per-agent role can INSERT but can't read back rows (incl own inbox) or do INSERT...RETURNING without a SELECT policy.
-  - **agent_messages SELECT policy BUILT (commit bb0370b, ACs 6-9, 9/9 green):** own inbox (to_agent=self) + own sent (from_agent=self) + broadcast; grounded in actual poller reads. Cross-thread/governance reads stay on service_role.
-  - **strategic_decisions SELECT visibility — OPEN FORK escalated to cai (#2085):** (a) own-only [recommended] vs (b) shared-ledger. Awaiting cai's call before adding that policy + ACs.
+- **SELECT-visibility companion COMPLETE (cai CAI-RESP-213/214; reported green #2089).** Both SELECT policies now in the same script as the INSERT migration — INSERT half must never apply alone (CAI-RESP-213); both ride the single operator gate.
+  - **agent_messages SELECT (commit bb0370b, ACs 6-9):** own inbox (to_agent=self) + own sent (from_agent=self) + broadcast. Ratified as-built; cai endorsed the `'broadcast'` literal over their `'all'` guess.
+  - **strategic_decisions SELECT (commit e220d9a, AC10):** shared-ledger `USING(true)` per CAI-RESP-214 (b). Own-only overruled — drain grant-check + challenge windows read others' decisions every cycle; own-only would silently starve them. WRITE integrity stays with the INSERT policy.
+  - **10/10 ACs green; full dry-run vs prod clean.** Branch local only (not pushed). Apply gated on operator per-agent role provisioning.
 
 ### Incident #1994 / BUG-024 — operator-button identity gate (commit c8e8a65)
 - **Forensics:** #1980 from_agent='musa' APPROVE proven to be test-suite traffic — `handle_button_callback` has no live wiring; all 22 musa-button rows carry the test-fixture subject "test escalation subject". Severity down-classified. 0 forged real rows, 0 leaks.
