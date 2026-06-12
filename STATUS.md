@@ -1,10 +1,23 @@
 # wingmen-orchestrator STATUS
 
-Last Updated: 2026-06-11 SGT (BUG-024 P2 COMPLETE — INSERT + both SELECT policies, cai-ratified, 10/10 green; incident #1994 fix + COHERENCE-001 D/E)
+Last Updated: 2026-06-13 SGT (Reel Triage v1 BUILD COMPLETE — 12/12 TDD tasks, 45/45 green, branch feat/reel-triage-v1; reversible-only, go-live operator-gated)
 Build Status: green
-Deploy: fb15c79 (ORCHESTRATOR-STATUS-001 Option B merged) on top of 0a85ba5 (launcher dual-identity)
+Deploy: n/a (feature-flagged module, default OFF; no deploy — Mac Mini bot + Mac Studio worker host)
 
-## In Progress (2026-06-11 — CADENCE-008 A drain worker, execute arm complete behind flag; go-live gated on window + operator)
+## In Progress (2026-06-13 — Reel Triage v1, CAI-RESP-216/218: full build SHIPPED on branch, reversible-only)
+
+Instagram reel → single concrete action triage. Feature-flagged (`WINGMEN_REEL_TRIAGE_ENABLED`, default OFF), no fork. Three surfaces over one cross-project table `reel_inbox` (Supabase `tscuymavysscrvoberrr`, NOT orch prod): INGEST+DIGEST in the Telegram bot (Mac Mini), WORKER headless on Mac Studio (launchd, fail-closed).
+
+- **Plan:** `docs/superpowers/plans/2026-06-13-reel-triage-v1.md` (12 TDD tasks).
+- **Phase:** build complete (all 12 tasks), reversible-only per CAI-RESP-218; merge/apply/deploy gated on window close + operator deps.
+- **Build status:** green — 45/45 reel_triage tests pass; cto_bot.py compiles with handlers wired behind the flag.
+- **Completed (commits f969b6d→1120ec6):** T1 migration `001_reel_inbox` + psycopg apply script + schema tests; T2-3 config/db/IG-link parsing; T4-5 Meta DYI ZIP parse + idempotent ingest; T6-7 `claude -p` strict-JSON structurer + yt-dlp/ffmpeg fetcher (NO cookies) + whisper transcriber; T8 serial worker loop (claim/full-stderr capture/media cleanup); T9 digest (top5, WIP cap 3, done/discard, auto-discard after 2 digests via `digests_shown`); T10 identity-gated TG ingest + Apply/Discard/Done callbacks, wired into cto_bot in a higher-priority handler group with ApplicationHandlerStop (non-reel text/docs fall through); T11 Friday digest sender + `scripts/run_reel_digest.py` + fail-closed Mac Studio worker plist; T12 zero-IG-creds acceptance guard (green).
+- **Binding constraints honored:** identity-gated ingest (Musa's verified TG ID only, silent-ignore otherwise); ZERO IG credentials (grep-guarded); yt-dlp public fetch only, no cookies; media never persists (deleted post-extraction, transcript retained); serial fetch w/ 30-60s sleeps; `priority=impact*confidence/effort_weight`; WIP cap 3; auto-discard after 2 digests; decision-962-safe psycopg apply (never `supabase db push`).
+- **Failed/Blocked (operator-gated, NOT mine):** worker not yet on Mac Studio (no `.venv-reel`/toolchain); migration NOT applied (`REEL_INBOX_DB_URL` not provisioned); flag OFF on bot host. All by design — reversible-only window.
+- **Next Up:** push branch + open DRAFT PR (reversible-only); then operator go-live steps in the plan's "Operator-Gated Go-Live" section.
+- **Questions for CTO (in plan + below):** (1) `REEL_INBOX_DB_URL` creds for project `tscuymavysscrvoberrr`; (2) Mac Studio worker host + toolchain (yt-dlp/ffmpeg/faster-whisper/`claude` CLI) under `.venv-reel`; (3) Friday 09:00 SGT schedule mechanism (orch scheduler vs launchd calendar job) — runner is ready either way.
+
+## Prior In Progress (2026-06-11 — CADENCE-008 A drain worker, execute arm complete behind flag; go-live gated on window + operator)
 
 cc-ihsanos inbox-drain headless worker. Operator authorized the build; orchestrator restarted (pid 91630) to activate the COHERENCE-001 E inserter fix.
 
