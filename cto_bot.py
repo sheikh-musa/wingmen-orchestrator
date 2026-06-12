@@ -3873,6 +3873,26 @@ def main():
     # Bug approval/verification inline keyboard callbacks
     app.add_handler(CallbackQueryHandler(_handle_bug_callback, pattern=r"^bug_"))
 
+    # reel_triage feature (CAI-RESP-216) — registered only when flag is on.
+    # Higher-priority group so reel ingest intercepts Musa's IG-link / DYI-ZIP
+    # messages; non-reel text/docs return False and fall through to the normal
+    # handlers below (ApplicationHandlerStop only fires on an actual ingest).
+    from reel_triage import config as _rt_config
+    if _rt_config.reel_triage_enabled():
+        from telegram.ext import ApplicationHandlerStop
+        from reel_triage import telegram_handlers as _rt
+
+        async def _reel_message(update, ctx):
+            if await _rt.handle_message(update, ctx):
+                raise ApplicationHandlerStop
+
+        app.add_handler(
+            MessageHandler(filters.TEXT | filters.Document.ZIP, _reel_message),
+            group=-1)
+        app.add_handler(
+            CallbackQueryHandler(_rt.handle_callback, pattern=r"^(apply|discard|done):"),
+            group=-1)
+
     # Free text + voice → brainstorm
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
