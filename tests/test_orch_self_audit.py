@@ -198,6 +198,50 @@ class TestMigrationConsistencyAudit:
 
 
 # ----------------------------------------------------------------------------
+# _day_bucket — day-granularity dedup for 24h-window audits
+# ----------------------------------------------------------------------------
+
+class TestDayBucket:
+
+    def test_same_day_different_hours_same_bucket(self):
+        t1 = datetime(2026, 6, 16, 3, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 6, 16, 21, 0, tzinfo=timezone.utc)
+        assert orch_self_audit._day_bucket(t1) == orch_self_audit._day_bucket(t2)
+
+    def test_different_days_different_bucket(self):
+        t1 = datetime(2026, 6, 16, 23, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 6, 17, 1, 0, tzinfo=timezone.utc)
+        assert orch_self_audit._day_bucket(t1) != orch_self_audit._day_bucket(t2)
+
+
+class TestTier3VolumeDayBucketed:
+
+    @pytest.mark.asyncio
+    async def test_alert_dedup_key_is_day_granular(self):
+        """The 24h-window misroute audit must dedup once per DAY, not per hour,
+        so a persistently-above-threshold count fires once/day not 24x/day."""
+        sb = _stub_chain(MagicMock(), [
+            MagicMock(data=[{"id": i} for i in range(7)]),  # 7 > threshold 3
+            MagicMock(data=[]),  # dedup empty
+            MagicMock(data=[]),  # log insert
+        ])
+        bot = AsyncMock()
+        sent_mock = MagicMock(); sent_mock.message_id = 99
+        bot.send_message = AsyncMock(return_value=sent_mock)
+        captured = {}
+        orig_insert = sb.table.return_value.insert
+        def capture_insert(payload):
+            captured["dedup_key"] = payload.get("dedup_key")
+            return orig_insert.return_value
+        sb.table.return_value.insert.side_effect = capture_insert
+        with patch("nervous_system.orch_self_audit.datetime") as dt_mock:
+            dt_mock.now.return_value = datetime(2026, 6, 16, 14, 0, tzinfo=timezone.utc)
+            dt_mock.fromisoformat = datetime.fromisoformat
+            await orch_self_audit._audit_bridge_tier3_volume(sb, bot, "123")
+        assert captured["dedup_key"] == "orch_self_audit:tier3_volume:2026-06-16"
+
+
+# ----------------------------------------------------------------------------
 # run_orch_audit — orchestrating function
 # ----------------------------------------------------------------------------
 
