@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# boot_cai.sh — perpetual launcher for cc-cai, the always-on strategic body of `cai`.
+#
+# PROPOSED (pending cai's ratification of the launch path — see thread 8d400ea9).
+# Why a dedicated boot and NOT scripts/launch_dangerous_cc.sh:
+#   The engineer launcher resolves identity via scripts.lib.auto_agent_id, which
+#   (a) only maps `cc-%` families (cai is not one) and (b) allocates a SUB-TAG
+#   `cai-N`. CAI-RESP-254 + CLAUDE.md §6.7 require agent_id='cai' EXACTLY, as a
+#   singleton — no sub-tags, no family FK, no code-push/Vercel/cc_work_sessions
+#   (cai adjudicates; it does not ship code). So this reuses the launcher's
+#   heartbeat + clean-exit PATTERN but pins identity to cai/cai and drops the
+#   engineer-lane machinery. ZERO schema changes (uses existing agents /
+#   agent_status rows, per CAI-RESP-254).
+#
+# Usage:  ./boot_cai.sh        # interactive, opus-4-8, perpetual
+set -uo pipefail
+
+CAI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORCH_DIR="$HOME/wingmen/orchestrator"
+VENV_PY="$ORCH_DIR/.venv/bin/python3"
+MODEL="${MODEL:-claude-opus-4-8}"
+AGENT_ID="cai"   # exact — singleton strategic node, never a sub-tag
+
+# .env (DSN etc.) lives in the orchestrator; cai shares the substrate.
+set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# .env carries ANTHROPIC_API_KEY for the orch's own API calls, but `claude`
+# must NOT inherit it: a present ANTHROPIC_API_KEY forces API-usage billing and
+# bypasses the Mac Mini's Claude Max subscription login. Scrub it so cai runs on
+# the Max OAuth session (Keychain), not metered API credits.
+unset ANTHROPIC_API_KEY
+DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
+if [ -z "$DSN" ]; then
+    echo "ERROR: DATABASE_URL not set in $ORCH_DIR/.env — cannot bring cai online" >&2
+    exit 1
+fi
+
+_sql() { "$VENV_PY" - "$@" <<'PY'
+import os, sys, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+sql = sys.argv[1]
+# BUG-024/ARCH-035 identity trigger: every agent_status/agents write requires the
+# app.current_agent_id GUC == row's agent_id, SET LOCAL within the same transaction.
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+    cur.execute(sql)
+    conn.commit()
+PY
+}
+
+# ── Bring cai online (agent_status + agents). Exact agent_id='cai'. ──────────
+# base_agent_id='cai' satisfies the prefix CHECK (base == id with -N stripped).
+_sql "
+INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, last_heartbeat, updated_at)
+VALUES ('cai','cai','working','cc-cai perpetual strategic lane', ARRAY['*']::text[], now(), now())
+ON CONFLICT (agent_id) DO UPDATE
+  SET status='working', current_task='cc-cai perpetual strategic lane',
+      last_heartbeat=now(), updated_at=now();
+UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cai';
+"
+echo "▶ cai online: agent_status + agents heartbeat set (model=$MODEL, dir=$CAI_DIR)"
+
+# ── Background heartbeat (5-min), auto-killed on exit ────────────────────────
+_heartbeat_loop() {
+    while true; do
+        sleep 300
+        "$VENV_PY" - <<'PY' 2>/dev/null || true
+import os, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+    cur.execute("UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id='cai'")
+    cur.execute("UPDATE agents SET last_heartbeat=now() WHERE id='cai'")
+    conn.commit()
+PY
+    done
+}
+_heartbeat_loop &
+HB_PID=$!
+
+# ── Clean exit: kill heartbeat, mark cai offline ────────────────────────────
+_handle_exit() {
+    [ -n "${HB_PID:-}" ] && kill "$HB_PID" 2>/dev/null || true
+    "$VENV_PY" - <<'PY' 2>/dev/null || true
+import os, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
+    cur.execute("UPDATE agent_status SET status='offline', current_task=NULL, last_heartbeat=now(), updated_at=now() WHERE agent_id='cai'")
+    cur.execute("UPDATE agents SET status='idle' WHERE id='cai'")
+    conn.commit()
+PY
+    echo "▶ cai offline (clean exit)."
+}
+trap '_handle_exit' EXIT
+
+# ── Launch. CLAUDE.md in $CAI_DIR auto-loads as project instructions; cai runs
+#    its own boot SQL (CLAUDE.md §6.1) — boot_briefing, open windows, inbox. ──
+echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $CAI_DIR"
+cd "$CAI_DIR"
+claude --dangerously-skip-permissions --model "$MODEL"
