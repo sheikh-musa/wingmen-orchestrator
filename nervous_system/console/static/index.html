@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex,nofollow" />
+<title>Fleet Console</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --panel-2: #1a2030; --line: #232a3a;
+    --txt: #d7dce5; --dim: #8a93a6; --accent: #5b8cff; --good: #3ecf8e;
+    --warn: #f0b429; --bad: #ff6b6b; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .conn { font: 12px/1 var(--mono); color: var(--dim); }
+  header .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim); margin-right: 6px; vertical-align: middle; }
+  header .dot.live { background: var(--good); box-shadow: 0 0 6px var(--good); }
+  header .dot.down { background: var(--bad); }
+  .token-row { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .token-row input {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--txt);
+    border-radius: 6px; padding: 6px 8px; font: 12px var(--mono); width: 240px;
+  }
+  button {
+    background: var(--accent); border: 0; color: #fff; border-radius: 6px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  button.ghost { background: var(--panel-2); border: 1px solid var(--line); color: var(--txt); }
+  main { display: grid; grid-template-columns: 1fr 360px; gap: 0; height: calc(100vh - 49px); }
+  .col { overflow: auto; }
+  .col.conv { border-right: 1px solid var(--line); }
+  .panel-head {
+    position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 10px 14px; display: flex; align-items: center; gap: 10px; z-index: 2;
+  }
+  .panel-head h2 { font-size: 13px; margin: 0; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .6px; color: var(--dim); }
+  .filters { margin-left: auto; display: flex; gap: 6px; }
+  .filters input {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--txt);
+    border-radius: 6px; padding: 4px 8px; font: 12px var(--mono); width: 120px;
+  }
+  .msg { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .msg.flash { animation: flash 1.2s ease-out; }
+  @keyframes flash { from { background: rgba(91,140,255,.16); } to { background: transparent; } }
+  .msg .meta { display: flex; gap: 8px; align-items: center; font: 12px var(--mono); color: var(--dim); }
+  .msg .route { color: var(--txt); }
+  .msg .arrow { color: var(--accent); }
+  .msg .type { color: var(--dim); }
+  .msg .pri { padding: 0 5px; border-radius: 4px; background: var(--panel-2); font-size: 11px; }
+  .msg .pri.P0, .msg .pri.P1 { color: var(--bad); }
+  .msg .rr { color: var(--warn); }
+  .msg .time { margin-left: auto; }
+  .msg .subj { margin-top: 3px; font-weight: 600; }
+  .msg .body { margin-top: 2px; color: var(--dim); white-space: pre-wrap;
+    overflow-wrap: anywhere; }
+  .lane {
+    padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex;
+    flex-direction: column; gap: 3px;
+  }
+  .lane .top { display: flex; align-items: center; gap: 8px; }
+  .lane .id { font: 12px var(--mono); }
+  .lane .st { margin-left: auto; font-size: 11px; padding: 1px 7px; border-radius: 10px;
+    background: var(--panel-2); }
+  .lane .st.working { color: var(--good); } .lane .st.idle { color: var(--accent); }
+  .lane .st.offline, .lane .st.blocked { color: var(--bad); }
+  .lane .task { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
+  .lane .hb { font: 11px var(--mono); }
+  .lane .hb.fresh { color: var(--good); } .lane .hb.stale { color: var(--warn); }
+  .lane .hb.dead { color: var(--bad); }
+  .lane .desired { font: 11px var(--mono); color: var(--dim); }
+  .empty { padding: 24px 14px; color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fleet Console</h1>
+  <span class="conn"><span id="dot" class="dot"></span><span id="connTxt">offline</span></span>
+  <div class="token-row">
+    <input id="token" type="password" placeholder="operator token" autocomplete="off" />
+    <button id="connect">Connect</button>
+  </div>
+</header>
+<main>
+  <section class="col conv">
+    <div class="panel-head">
+      <h2>Conversation</h2>
+      <div class="filters">
+        <input id="fThread" placeholder="thread_id" />
+        <input id="fAgent" placeholder="agent" />
+        <button class="ghost" id="applyFilters">Filter</button>
+      </div>
+    </div>
+    <div id="messages"><div class="empty">Enter the operator token and Connect.</div></div>
+  </section>
+  <section class="col lanes">
+    <div class="panel-head"><h2>Lane status</h2>
+      <button class="ghost" id="refreshLanes" style="margin-left:auto">Refresh</button></div>
+    <div id="lanes"><div class="empty">—</div></div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

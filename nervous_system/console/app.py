@@ -1,0 +1,315 @@
+"""Fleet Console v1 HTTP app (CAI-RESP-264).
+
+A dependency-light, stdlib-only HTTP server (http.server, ThreadingHTTPServer)
+serving:
+  GET /                 -> static SPA (index.html)
+  GET /static/<file>    -> SPA assets (app.js)
+  GET /healthz          -> liveness (open, no auth)
+  GET /api/messages     -> recent bus rows (auth, PII-redacted)
+  GET /api/lanes        -> agents ⋈ agent_status ⋈ fleet_lanes (auth)
+  GET /api/stream       -> SSE live feed of new bus rows (auth)
+
+Why stdlib, not FastAPI/uvicorn: neither is in the venv, and the hard constraint
+is "no new heavyweight deps if avoidable". http.server + psycopg (already
+present) covers the entire read-only surface and keeps the module trivially
+VPS-portable.
+
+Process isolation (condition 5): this module is launched as its OWN process
+(`python -m nervous_system.console`), never inside wingmen_orch. A background
+asyncio loop owns the Broadcaster + feeder for SSE; the threaded HTTP server
+bridges to it via run_coroutine_threadsafe.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import pathlib
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+from nervous_system.console import auth, db, pii
+from nervous_system.console.feed import Broadcaster, feeder
+
+logger = logging.getLogger("wingmen.console.app")
+
+_STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
+_DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_PORT = 8787
+
+# --- shared SSE infrastructure (one event loop per server) --------------------
+
+
+class _FeedLoop:
+    """Owns an asyncio loop in a background thread for the SSE broadcaster."""
+
+    def __init__(self, fetch_since=None) -> None:
+        self.loop = asyncio.new_event_loop()
+        self.broadcaster = Broadcaster()
+        self._fetch_since = fetch_since or _fetch_since
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._stop = None
+        self._ready = threading.Event()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        self._stop = asyncio.Event()
+        self.loop.create_task(
+            feeder(self.broadcaster, self._fetch_since, stop_event=self._stop)
+        )
+        self.loop.call_soon(self._ready.set)
+        self.loop.run_forever()
+
+    def start(self) -> None:
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def stop(self) -> None:
+        """Stop the feeder + event loop (lets stale loops die between tests)."""
+        try:
+            if self._stop is not None:
+                self.loop.call_soon_threadsafe(self._stop.set)
+
+            def _cancel_and_stop():
+                for task in asyncio.all_tasks(self.loop):
+                    task.cancel()
+                self.loop.stop()
+
+            self.loop.call_soon_threadsafe(_cancel_and_stop)
+        except Exception:
+            pass
+
+    def subscribe(self):
+        fut = asyncio.run_coroutine_threadsafe(self._async_subscribe(), self.loop)
+        return fut.result(timeout=5)
+
+    async def _async_subscribe(self):
+        return self.broadcaster.subscribe()
+
+    def get_next(self, q, timeout: float):
+        """Block (in the HTTP thread) for the next event, or None on timeout."""
+        async def _get():
+            try:
+                return await asyncio.wait_for(q.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return None
+
+        fut = asyncio.run_coroutine_threadsafe(_get(), self.loop)
+        try:
+            return fut.result(timeout=timeout + 2)
+        except Exception:
+            return None
+
+    def unsubscribe(self, q) -> None:
+        asyncio.run_coroutine_threadsafe(
+            self._async_unsubscribe(q), self.loop
+        )
+
+    async def _async_unsubscribe(self, q) -> None:
+        self.broadcaster.unsubscribe(q)
+
+
+def _fetch_since(last_id):
+    """Feeder callback: rows with id > last_id (or baseline when None)."""
+    if last_id is None:
+        return db.fetch_messages(limit=1)
+    sql = (
+        "SELECT id, thread_id, from_agent, to_agent, message_type, subject, "
+        "body, priority, requires_response, sub_tag, created_at "
+        "FROM agent_messages WHERE id > %s ORDER BY id ASC LIMIT %s"
+    )
+    return db._query(sql, [last_id, db.MAX_LIMIT])
+
+
+# --- request handler ----------------------------------------------------------
+
+
+def _make_handler(feedloop: "_FeedLoop"):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "FleetConsole/1.0"
+        protocol_version = "HTTP/1.1"
+
+        # Silence default stderr logging; we audit explicitly.
+        def log_message(self, fmt, *args):  # noqa: A003
+            return
+
+        # --- helpers ---
+        def _client(self) -> str:
+            # Honor a reverse-proxy / tunnel forwarded IP if present.
+            fwd = self.headers.get("X-Forwarded-For")
+            if fwd:
+                return fwd.split(",")[0].strip()
+            return self.client_address[0] if self.client_address else "-"
+
+        def _json(self, code: int, payload) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authed(self, parsed) -> bool:
+            query = parse_qs(parsed.query)
+            return auth.check_bearer(dict(self.headers), query)
+
+        # --- routing ---
+        def do_GET(self):  # noqa: N802
+            parsed = urlparse(self.path)
+            path = parsed.path
+
+            if path == "/healthz":
+                auth.audit(self._client(), path, "200")
+                return self._json(200, {"ok": True})
+
+            if path == "/" or path == "/index.html":
+                return self._serve_static("index.html", path)
+
+            if path.startswith("/static/"):
+                name = path[len("/static/"):]
+                return self._serve_static(name, path)
+
+            # Everything below is auth-gated.
+            if not self._authed(parsed):
+                auth.audit(self._client(), path, "401")
+                return self._json(401, {"error": "unauthorized"})
+
+            try:
+                if path == "/api/messages":
+                    qs = parse_qs(parsed.query)
+                    limit = int(qs.get("limit", [db.DEFAULT_LIMIT])[0])
+                    thread = qs.get("thread", [None])[0]
+                    agent = qs.get("agent", [None])[0]
+                    rows = db.fetch_messages(limit=limit, thread=thread, agent=agent)
+                    rows = [pii.redact_message_row(r) for r in rows]
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable(rows))
+
+                if path == "/api/lanes":
+                    rows = db.fetch_lanes()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable(rows))
+
+                if path == "/api/stream":
+                    return self._serve_sse(parsed)
+            except Exception as e:  # read failures are 500, never a write
+                logger.warning("api error on %s: %s", path, e)
+                auth.audit(self._client(), path, "500")
+                return self._json(500, {"error": "internal"})
+
+            auth.audit(self._client(), path, "404")
+            return self._json(404, {"error": "not found"})
+
+        def _serve_static(self, name: str, path: str) -> None:
+            # Prevent path traversal.
+            safe = (_STATIC_DIR / name).resolve()
+            if not str(safe).startswith(str(_STATIC_DIR.resolve())) or not safe.is_file():
+                auth.audit(self._client(), path, "404")
+                return self._json(404, {"error": "not found"})
+            ctype = "text/html" if safe.suffix == ".html" else (
+                "application/javascript" if safe.suffix == ".js" else "text/plain"
+            )
+            data = safe.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype + "; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            auth.audit(self._client(), path, "200")
+
+        def _sse_chunk(self, text: str) -> None:
+            """Write one HTTP/1.1 chunked-transfer frame (SSE body)."""
+            data = text.encode("utf-8")
+            self.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
+            self.wfile.write(data)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+
+        def _serve_sse(self, parsed) -> None:
+            auth.audit(self._client(), "/api/stream", "200")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            # Chunked transfer so the threaded HTTP/1.1 server can stream
+            # indefinitely without a Content-Length.
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            q = feedloop.subscribe()
+            try:
+                # Initial comment so EventSource opens immediately.
+                self._sse_chunk(": connected\n\n")
+                while True:
+                    evt = feedloop.get_next(q, timeout=15.0)
+                    if evt is None:
+                        # Heartbeat keeps the connection (and proxies) alive.
+                        self._sse_chunk(": ping\n\n")
+                        continue
+                    if not evt.get("_resync"):
+                        evt = pii.redact_message_row(evt)
+                    payload = json.dumps(_jsonable(evt))
+                    self._sse_chunk(f"data: {payload}\n\n")
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                feedloop.unsubscribe(q)
+                try:
+                    self.wfile.write(b"0\r\n\r\n")  # terminating chunk
+                    self.wfile.flush()
+                except OSError:
+                    pass
+
+    return Handler
+
+
+def _jsonable(obj):
+    """Best-effort JSON coercion (datetimes, UUIDs -> str)."""
+    if isinstance(obj, list):
+        return [_jsonable(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
+def make_server(
+    host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT, fetch_since=None
+) -> ThreadingHTTPServer:
+    feedloop = _FeedLoop(fetch_since=fetch_since)
+    feedloop.start()
+    handler = _make_handler(feedloop)
+    httpd = ThreadingHTTPServer((host, port), handler)
+    httpd.daemon_threads = True
+    httpd.feedloop = feedloop  # for lifecycle / shutdown
+
+    # Tear the feed loop down when the server is shut down so stale background
+    # loops don't linger (matters for the test suite and clean restarts).
+    _orig_shutdown = httpd.shutdown
+
+    def _shutdown():
+        _orig_shutdown()
+        feedloop.stop()
+
+    httpd.shutdown = _shutdown  # type: ignore[assignment]
+    return httpd
+
+
+def run() -> None:
+    logging.basicConfig(level=logging.INFO)
+    host = os.environ.get("CONSOLE_HOST", _DEFAULT_HOST)
+    port = int(os.environ.get("CONSOLE_PORT", str(_DEFAULT_PORT)))
+    if not os.environ.get("CONSOLE_TOKEN"):
+        logger.warning(
+            "CONSOLE_TOKEN is not set — auth fails closed; all /api requests 401."
+        )
+    httpd = make_server(host, port)
+    logger.info("Fleet Console listening on http://%s:%d", host, port)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.shutdown()
