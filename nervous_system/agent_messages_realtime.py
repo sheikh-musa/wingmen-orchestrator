@@ -163,7 +163,7 @@ async def subscribe_agent_messages(
     """
     realtime = supabase.realtime
 
-    async def _on_insert(payload: dict) -> None:
+    async def _handle_insert(payload: dict) -> None:
         try:
             data = payload.get("data", {})
             record = data.get("record") or {}
@@ -171,10 +171,20 @@ async def subscribe_agent_messages(
             if not isinstance(msg_id, int):
                 logger.debug(f"realtime: INSERT payload without int id: {payload}")
                 return
+            logger.info(f"realtime: _on_insert fired for msg #{msg_id}")
             await _route_single_message(supabase, bot, musa_chat_id, msg_id)
         except Exception as e:
             logger.error(f"realtime: _on_insert handler failed: {e}")
             track_exception("agent_messages_realtime.callback", e)
+
+    def _on_insert(payload: dict) -> None:
+        # This realtime lib invokes the callback SYNCHRONOUSLY and does NOT await
+        # a returned coroutine (RuntimeWarning: coroutine ... was never awaited).
+        # A bare `async def` callback was therefore created-and-dropped — the whole
+        # realtime path silently no-op'd, masking it behind the 5-min poll and
+        # leaving #111 auto-wake inert. Schedule the async handler on the running
+        # loop so it actually executes.
+        asyncio.ensure_future(_handle_insert(payload))
 
     while True:
         try:
