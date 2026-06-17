@@ -131,18 +131,38 @@ def _pane_busy(session: str) -> bool:
         return False
 
 
-def _read_wakes(agent_id: str) -> list[float]:
+def _load(agent_id: str) -> dict:
     try:
-        return list(json.loads((_WAKE_DIR / f"{agent_id}.json").read_text()).get("wakes", []))
+        return json.loads((_WAKE_DIR / f"{agent_id}.json").read_text())
     except Exception:
-        return []
+        return {}
+
+
+def _save(agent_id: str, state: dict) -> None:
+    _WAKE_DIR.mkdir(parents=True, exist_ok=True)
+    (_WAKE_DIR / f"{agent_id}.json").write_text(json.dumps(state))
+
+
+def _read_wakes(agent_id: str) -> list[float]:
+    return list(_load(agent_id).get("wakes", []))
 
 
 def _record_wake(agent_id: str, now: float) -> None:
-    _WAKE_DIR.mkdir(parents=True, exist_ok=True)
-    recent = [t for t in _read_wakes(agent_id) if now - t < _CAP_WINDOW_S]
-    recent.append(now)
-    (_WAKE_DIR / f"{agent_id}.json").write_text(json.dumps({"wakes": recent}))
+    state = _load(agent_id)
+    state["wakes"] = [t for t in state.get("wakes", []) if now - t < _CAP_WINDOW_S] + [now]
+    _save(agent_id, state)
+
+
+def cap_alert_due(agent_id: str, now: float) -> bool:
+    """CAI-RESP-262 fast-follow #1: a cap-hit alert fires at most once per agent
+    per cap-window — fail LOUD, not spammy."""
+    return (now - _load(agent_id).get("cap_alerted", 0)) >= _CAP_WINDOW_S
+
+
+def _record_cap_alert(agent_id: str, now: float) -> None:
+    state = _load(agent_id)
+    state["cap_alerted"] = now
+    _save(agent_id, state)
 
 
 def cap_state(agent_id: str, now: float) -> dict:
@@ -168,6 +188,11 @@ def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False, now: floa
         return {"woke": False, "why": "no live session"}
     gate = cap_state(agent_id, now)
     if not gate["allow"]:
+        if gate.get("cap_hit"):
+            # Loud-but-not-spammy: tell the caller to alert only once per window.
+            gate["alert_due"] = cap_alert_due(agent_id, now)
+            if gate["alert_due"]:
+                _record_cap_alert(agent_id, now)
         return {"woke": False, "session": session, **gate}
     if _pane_busy(session):
         return {"woke": False, "why": "busy (mid-turn)", "session": session}

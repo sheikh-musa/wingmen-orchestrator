@@ -65,3 +65,26 @@ def test_cap_window_expires_old_wakes(wake_dir):
     # only 2 of these are within 300s of now=1000 -> allowed
     _seed(wake_dir, "cc-ihsanos", [600.0, 650.0, 800.0, 850.0])
     assert agent_wake.cap_state("cc-ihsanos", now=1000.0)["allow"] is True
+
+
+# ── cap-hit alert debounce (CAI-RESP-262 fast-follow #1) ──────────────────────
+def test_cap_alert_due_first_time(wake_dir):
+    assert agent_wake.cap_alert_due("cc-ihsanos", now=1000.0) is True
+
+
+def test_cap_alert_debounced_within_window(wake_dir):
+    _seed(wake_dir, "cc-ihsanos", [])
+    (wake_dir / "cc-ihsanos.json").write_text(json.dumps({"wakes": [], "cap_alerted": 1000.0}))
+    assert agent_wake.cap_alert_due("cc-ihsanos", now=1100.0) is False   # 100s < 300s window
+    assert agent_wake.cap_alert_due("cc-ihsanos", now=1400.0) is True    # 400s >= window, due again
+
+
+def test_wake_agent_cap_sets_alert_due_once(wake_dir, monkeypatch):
+    # 5 wakes in window -> cap hit; first call alert_due=True, second False (debounced)
+    monkeypatch.setattr(agent_wake, "resolve_tmux_session", lambda a: "sess")
+    monkeypatch.setattr(agent_wake, "_pane_busy", lambda s: False)
+    _seed(wake_dir, "cc-ihsanos", [800.0, 850.0, 900.0, 920.0, 940.0])
+    r1 = agent_wake.wake_agent("cc-ihsanos", now=1000.0)
+    assert r1.get("cap_hit") is True and r1.get("alert_due") is True
+    r2 = agent_wake.wake_agent("cc-ihsanos", now=1010.0)
+    assert r2.get("cap_hit") is True and r2.get("alert_due") is False

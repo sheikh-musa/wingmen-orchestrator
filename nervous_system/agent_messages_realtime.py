@@ -88,7 +88,7 @@ async def _route_single_message(
         try:
             res = await asyncio.to_thread(agent_wake.wake_agent, msg["to_agent"], f"msg #{msg_id}")
             logger.info(f"realtime: auto-wake {msg.get('to_agent')} for #{msg_id}: {res}")
-            if res.get("cap_hit") and bot and musa_chat_id:
+            if res.get("alert_due") and bot and musa_chat_id:
                 await bot.send_message(
                     chat_id=musa_chat_id,
                     text=(f"⚠️ wake cap: {msg['to_agent']} hit {res.get('count')} wakes/5min "
