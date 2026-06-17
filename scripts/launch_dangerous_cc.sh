@@ -475,12 +475,27 @@ _handle_exit() {
     echo ""
     echo -e "${DIM}Session ended: ${outcome} | exit_code=${exit_code} | duration=${duration_seconds}s${RESET}"
 
-    # Auto-push any unpushed commits before closing out, then verify Vercel deploy
-    local ahead
-    ahead="$(git -C "$CALLER_DIR" log --oneline origin/main..HEAD 2>/dev/null | wc -l | tr -d ' ')"
-    if [ "${ahead:-0}" -gt 0 ]; then
-        echo -e "${AMBER}▶ Pushing ${ahead} unpushed commit(s) before exit...${RESET}"
-        if git -C "$CALLER_DIR" push origin main 2>&1; then
+    # Auto-push any unpushed commits before closing out, then verify Vercel deploy.
+    # CAI-RESP-255 #1: push the LANE'S OWN branch (HEAD), never a blanket `push
+    # origin main`. Hard invariant: lanes never sit on main, so a HEAD-only push
+    # can't touch main; we additionally refuse to auto-push when HEAD resolves to
+    # main/master (defence in depth — this was the source of the historic
+    # `main -> main (non-fast-forward)` rejection noise on every exit).
+    local cur_branch upstream ahead
+    cur_branch="$(git -C "$CALLER_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+    # Commits the branch has beyond its own upstream; fall back to all of HEAD
+    # when there is no upstream yet (first push of a fresh lane branch).
+    upstream="$(git -C "$CALLER_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+    if [ -n "$upstream" ]; then
+        ahead="$(git -C "$CALLER_DIR" log --oneline "${upstream}..HEAD" 2>/dev/null | wc -l | tr -d ' ')"
+    else
+        ahead="$(git -C "$CALLER_DIR" log --oneline HEAD 2>/dev/null | wc -l | tr -d ' ')"
+    fi
+    if [ "$cur_branch" = "main" ] || [ "$cur_branch" = "master" ]; then
+        echo -e "${RED}⚠ lane is on ${cur_branch} — refusing auto-push (lanes must never sit on main; commits remain local)${RESET}"
+    elif [ "${ahead:-0}" -gt 0 ]; then
+        echo -e "${AMBER}▶ Pushing ${ahead} commit(s) on ${cur_branch} before exit...${RESET}"
+        if git -C "$CALLER_DIR" push -u origin HEAD 2>&1; then
             _verify_vercel_deploy "$CALLER_DIR"
             # ARCH-024: write repo_snapshot after successful push.
             # CAI-RESP-093 immediate fix: stderr was masked by `2>/dev/null` and
