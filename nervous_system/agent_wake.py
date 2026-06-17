@@ -89,13 +89,50 @@ def _expected_cwd_tokens(agent_id: str) -> list[str]:
     return [r for r in scope if r and r != "*"]
 
 
+def _ppid(pid: int) -> int:
+    try:
+        return int(subprocess.check_output(
+            ["ps", "-o", "ppid=", "-p", str(pid)], text=True, stderr=subprocess.DEVNULL).strip())
+    except Exception:
+        return 0
+
+
+def _session_for_pid(pid: int, sess_by_pane: dict) -> str | None:
+    """Walk the parent chain until a pid matches a tmux pane pid -> its session."""
+    cur = pid
+    for _ in range(12):
+        if cur in sess_by_pane:
+            return sess_by_pane[cur]
+        cur = _ppid(cur)
+        if cur <= 1:
+            return None
+    return None
+
+
 def _live_claude_panes() -> list[dict]:
-    """[{pid, cwd, session}] for every running dangerous-CC lane."""
+    """[{pid, cwd, session}] for every running dangerous-CC lane.
+
+    Robust under launchd: maps each claude pid -> tmux session via tmux's OWN
+    pane->pid table (`tmux list-panes -a`) + a parent-pid walk — NOT by reading
+    the lane's TMUX_PANE env. Cross-process `ps eww` env reads are restricted
+    under the launchd sandbox, which silently broke resolution and the wake.
+    """
     out = []
     try:
         pids = subprocess.check_output(
             ["pgrep", "-f", "claude --dangerously-skip-permissions"],
             text=True, stderr=subprocess.DEVNULL).split()
+    except Exception:
+        return out
+    sess_by_pane: dict[int, str] = {}
+    try:
+        panes = subprocess.check_output(
+            ["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}"],
+            text=True, stderr=subprocess.DEVNULL)
+        for ln in panes.splitlines():
+            parts = ln.split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit():
+                sess_by_pane[int(parts[0])] = parts[1].strip()
     except Exception:
         return out
     for pid in pids:
@@ -104,14 +141,9 @@ def _live_claude_panes() -> list[dict]:
                 ["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
                 text=True, stderr=subprocess.DEVNULL)
             cwd = next((ln[1:] for ln in cwd.splitlines() if ln.startswith("n")), "")
-            env = subprocess.check_output(["ps", "eww", pid], text=True, stderr=subprocess.DEVNULL)
-            m = re.search(r"TMUX_PANE=(\S+)", env)
-            if not m:
-                continue
-            session = subprocess.check_output(
-                ["tmux", "display-message", "-p", "-t", m.group(1), "#{session_name}"],
-                text=True, stderr=subprocess.DEVNULL).strip()
-            out.append({"pid": pid, "cwd": cwd, "session": session})
+            session = _session_for_pid(int(pid), sess_by_pane)
+            if session:
+                out.append({"pid": pid, "cwd": cwd, "session": session})
         except Exception:
             continue
     return out
