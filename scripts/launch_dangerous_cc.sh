@@ -111,10 +111,14 @@ HEARTBEAT_PID=""
 # in .env, not the operator's shell).
 # shellcheck disable=SC1091
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
-# .env carries ANTHROPIC_API_KEY for the orch's own API calls, but `claude`
-# must NOT inherit it: a present ANTHROPIC_API_KEY forces API-usage billing and
-# bypasses the Mac Mini's Claude Max subscription login. Scrub it so every lane
-# authenticates via the Max OAuth session (Keychain), not metered API credits.
+# Max-subscription billing for lanes — two parts, both load-bearing:
+#  1. Scrub ANTHROPIC_API_KEY: .env carries it for the orch's own API calls, but
+#     a present ANTHROPIC_API_KEY makes `claude` use metered API-usage billing.
+#  2. Keep CLAUDE_CODE_OAUTH_TOKEN (also from .env): tmux/headless lanes run
+#     OUTSIDE the GUI login session, so they can't read the interactive `/login`
+#     OAuth from the Keychain — without this sk-ant-oat token they fall back to
+#     API billing. The token bills to the Max subscription. (Verified 2026-06-17:
+#     with the token a lane's banner matches an interactive Max terminal.)
 unset ANTHROPIC_API_KEY
 DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
 if [ -z "$DSN" ]; then

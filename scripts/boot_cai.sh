@@ -23,10 +23,13 @@ AGENT_ID="cai"   # exact — singleton strategic node, never a sub-tag
 
 # .env (DSN etc.) lives in the orchestrator; cai shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
-# .env carries ANTHROPIC_API_KEY for the orch's own API calls, but `claude`
-# must NOT inherit it: a present ANTHROPIC_API_KEY forces API-usage billing and
-# bypasses the Mac Mini's Claude Max subscription login. Scrub it so cai runs on
-# the Max OAuth session (Keychain), not metered API credits.
+# Max-subscription billing for cai — two parts, both load-bearing:
+#  1. Scrub ANTHROPIC_API_KEY: .env carries it for the orch's own API calls, but
+#     a present ANTHROPIC_API_KEY makes `claude` use metered API-usage billing.
+#  2. Keep CLAUDE_CODE_OAUTH_TOKEN (also from .env): cai runs under tmux OUTSIDE
+#     the GUI login session, so it can't read the interactive `/login` OAuth from
+#     the Keychain — without this sk-ant-oat token it falls back to API billing.
+#     The token bills to the Max subscription. (Verified 2026-06-17.)
 unset ANTHROPIC_API_KEY
 DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
 if [ -z "$DSN" ]; then
