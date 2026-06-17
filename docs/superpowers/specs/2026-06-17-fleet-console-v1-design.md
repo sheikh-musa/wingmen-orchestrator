@@ -51,6 +51,14 @@ Operator-token (long random secret in orch `.env`) checked by `auth.py` on every
 - Tunnel-agnostic: cloudflared now, nginx/caddy on the VPS later.
 - Add a `Dockerfile` for the console module so the VPS migration is a lift-and-shift.
 
+## cai hardenings — BINDING (CAI-RESP-264)
+Agreed it satisfies 261; build with these folded in (the lone static token is too thin for an internet-exposed window into every client's bus):
+1. **Network/identity layer IN FRONT of the token** — Cloudflare Access (SSO/email-gated, native to cloudflared) OR IP allowlist OR mTLS. The bus must not be reachable by secret-possession alone.
+2. **Read-only BY CONSTRUCTION** — connect with a **SELECT-only Postgres role** (`console_readonly`), NOT the read-write service key. A bug/injection structurally cannot write. Role creation via decision-962 dry-run→apply. App reads `CONSOLE_DB_URL` (the read-only role's DSN); never the service key.
+3. **Token hygiene** — rotatable, `Authorization` header ONLY (never URL/query), fail-closed 401, **audit-log every access** (who/when/path).
+4. **No raw client PII on the bus** — enforce the invariant (agents never put NRIC/full donor PII in `agent_messages` bodies; the bus is coordination, not data). Redact in-view as defense-in-depth if not guaranteed.
+5. **Process isolation** — run as a SEPARATE process/port; a console fault (slow SSE consumer, client storm, crash) must NEVER degrade the core orch coordination or the #111 wake path. Watching surface isolated from the doing surface.
+
 ## Verification
 - Auth: unauthenticated request → 401; valid token → 200.
 - API: `/api/messages` returns recent bus rows server-side (no key in any response/asset); `/api/lanes` reflects live agent_status.
