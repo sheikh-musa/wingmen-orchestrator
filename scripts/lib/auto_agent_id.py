@@ -146,6 +146,42 @@ def resolve_base_agent_id(pwd: str, family_map: dict[str, str]) -> str:
     )
 
 
+# ── CC_BASE_OVERRIDE guardrail (CAI-RESP-258) ─────────────────────────────────
+_AUTHORITY_IDS = frozenset({"cai", "musa", "substrate", "broadcast"})
+
+
+class OverrideRefused(ValueError):
+    """CC_BASE_OVERRIDE rejected. Per CAI-RESP-258: overriding into an authority/
+    system identity forges from_agent (hard-never); unknown / non-cc-* families
+    are default-denied. Whitelist = registered cc-* worker families only."""
+
+
+def validate_base_override(base: str, known_cc_families: set[str]) -> str:
+    """Return `base` iff it is a safe CC_BASE_OVERRIDE target, else raise.
+
+    Defense in depth: explicit authority refusal, then cc-* prefix, then a
+    whitelist membership check against the live cc-* family set.
+    """
+    if base in _AUTHORITY_IDS:
+        raise OverrideRefused(
+            f"refuses authority/system identity {base!r} — forging from_agent is hard-never"
+        )
+    if not base.startswith("cc-"):
+        raise OverrideRefused(f"default-deny non cc-* family {base!r}")
+    if base not in known_cc_families:
+        raise OverrideRefused(f"unknown base id {base!r} — not a registered cc-* family")
+    return base
+
+
+def load_cc_families(dsn: str) -> set[str]:
+    """Set of registered cc-* agent family ids (the override whitelist)."""
+    import psycopg  # local import: keep the module import-light for pure callers
+
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM agents WHERE id LIKE 'cc-%%'")
+        return {r[0] for r in cur.fetchall()}
+
+
 def pick_sub_tag(base: str, active: list[str]) -> str:
     """Pick the smallest positive integer N such that f'{base}-{N}' is not in active.
 
@@ -420,10 +456,17 @@ def main(argv: list[str] | None = None) -> int:
         # Data-driven map (delta-v2 L1-B2): load from agents.repo_scope each boot.
         # Drift from hardcoded constants is structurally impossible.
         if args.base_override:
-            base = args.base_override
+            # CAI-RESP-258 guardrail: hard-refuse forging an authority identity;
+            # default-deny non-cc-* / unknown families. Whitelist = live cc-* set.
+            base = validate_base_override(args.base_override, load_cc_families(args.dsn))
+            override_used = True
         else:
             family_map = load_family_map(args.dsn)
             base = resolve_base_agent_id(args.pwd, family_map)
+            override_used = False
+    except OverrideRefused as e:
+        sys.stderr.write(f"OverrideRefused: {e}\n")
+        return 1
     except UnknownRepoError as e:
         sys.stderr.write(f"UnknownRepoError: {e}\n")
         return 1
@@ -456,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         {
             "sub_tag": result.sub_tag,
             "base": base,
+            "override_used": override_used,  # CAI-RESP-258 audit: provenance of identity
             "siblings": list(result.siblings),
             # list of [agent_id, heartbeat_age_s] pairs (JSON-serialised tuples).
             "overlap_warnings": [[aid, age] for (aid, age) in overlaps],

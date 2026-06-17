@@ -607,3 +607,31 @@ def test_allocate_sub_tag_populates_base_agent_id():
             f"base_agent_id should be cc-test-family, got {row[1]}"
         )
     # Autouse fixture handles teardown.
+
+
+# ── CC_BASE_OVERRIDE guardrail (CAI-RESP-258) ─────────────────────────────────
+# Pure unit tests — no DB. The override lets spawn_reviewer.sh allocate
+# cc-reviewer-N regardless of pwd; the guardrail must hard-refuse forging an
+# authority/system identity and default-deny unknown / non-cc-* families.
+
+_KNOWN = {"cc-ihsanos", "cc-cosem", "cc-reviewer"}
+
+
+@pytest.mark.parametrize("authority", ["cai", "musa", "substrate", "broadcast"])
+def test_base_override_refuses_authority_identity(authority):
+    with pytest.raises(auto_agent_id.OverrideRefused):
+        auto_agent_id.validate_base_override(authority, _KNOWN)
+
+
+def test_base_override_refuses_non_cc_prefix():
+    with pytest.raises(auto_agent_id.OverrideRefused):
+        auto_agent_id.validate_base_override("random-family", _KNOWN)
+
+
+def test_base_override_refuses_unknown_cc_family():
+    with pytest.raises(auto_agent_id.OverrideRefused):
+        auto_agent_id.validate_base_override("cc-ghost", _KNOWN)
+
+
+def test_base_override_accepts_known_cc_family():
+    assert auto_agent_id.validate_base_override("cc-reviewer", _KNOWN) == "cc-reviewer"

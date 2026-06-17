@@ -127,9 +127,13 @@ if [ -z "$DSN" ]; then
     exit 1
 fi
 
+# CC_BASE_OVERRIDE (CAI-RESP-258): spawn_reviewer.sh sets this so auto_agent_id
+# allocates cc-reviewer-N regardless of pwd. The CLI hard-refuses authority/
+# system identities + default-denies unknown / non-cc-* families (exits non-zero).
 ALLOC_JSON="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.auto_agent_id \
     --pwd "$CALLER_DIR" \
     --repo "$REPO_NAME" \
+    ${CC_BASE_OVERRIDE:+--base-override "$CC_BASE_OVERRIDE"} \
     --dsn "$DSN" 2>/tmp/cc_alloc_err.log)" || {
     echo -e "\033[31mERROR: identity allocation failed\033[0m" >&2
     cat /tmp/cc_alloc_err.log >&2
