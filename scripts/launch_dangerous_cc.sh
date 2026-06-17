@@ -636,8 +636,12 @@ if [ "$RESOLVED_MODEL" != "claude-opus-4-8" ]; then
     echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-8)${RESET}"
 fi
 
-# Also stamp resolved model into current_task so CAI can observe model drift
-# across sessions via agent_status.current_task sampling.
+# Stamp resolved model into current_task (CAI observes model drift) AND
+# SELF-REGISTER this lane's tmux session for #111 launchd-safe wake delivery:
+# the lane knows its own session from inside its pane; the wake then resolves via
+# a pure DB read instead of cross-process introspection (sandbox-blocked under
+# launchd). Empty when not launched inside tmux -> stored NULL.
+CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
@@ -655,8 +659,8 @@ try:
         with conn.cursor() as cur:
             cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$CC_AGENT_ID',))
             cur.execute(
-                \"UPDATE agent_status SET current_task = %s, updated_at=now() WHERE agent_id = %s\",
-                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_AGENT_ID'),
+                \"UPDATE agent_status SET current_task = %s, tmux_session = NULLIF(%s, ''), updated_at=now() WHERE agent_id = %s\",
+                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_TMUX_SESSION', '$CC_AGENT_ID'),
             )
         conn.commit()
 except Exception:

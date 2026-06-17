@@ -52,11 +52,15 @@ PY
 
 # ── Bring cai online (agent_status + agents). Exact agent_id='cai'. ──────────
 # base_agent_id='cai' satisfies the prefix CHECK (base == id with -N stripped).
+# Self-register the tmux session for #111 launchd-safe wake delivery (cai is in
+# the wake set, CAI-RESP-255 #3) — read from inside cai's own pane.
+CAI_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 _sql "
-INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, last_heartbeat, updated_at)
-VALUES ('cai','cai','working','cc-cai perpetual strategic lane', ARRAY['*']::text[], now(), now())
+INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, last_heartbeat, updated_at)
+VALUES ('cai','cai','working','cc-cai perpetual strategic lane', ARRAY['*']::text[], NULLIF('$CAI_TMUX_SESSION',''), now(), now())
 ON CONFLICT (agent_id) DO UPDATE
   SET status='working', current_task='cc-cai perpetual strategic lane',
+      tmux_session=NULLIF('$CAI_TMUX_SESSION',''),
       last_heartbeat=now(), updated_at=now();
 UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cai';
 "

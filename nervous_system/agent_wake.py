@@ -154,12 +154,30 @@ def _live_claude_panes() -> list[dict]:
 
 
 def resolve_tmux_session(agent_id: str) -> str | None:
+    # DB-FIRST (launchd-safe): each live lane self-registers its tmux session in
+    # agent_status at boot, so the wake resolves with a pure DB read — no
+    # cross-process introspection (which the launchd sandbox blocks).
+    base = _base_family(agent_id)
+    if _DSN:
+        try:
+            with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT tmux_session FROM agent_status "
+                    "WHERE base_agent_id=%s AND status<>'offline' AND tmux_session IS NOT NULL "
+                    "ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1",
+                    (base,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    return row[0]
+        except Exception:
+            pass
+    # FALLBACK: process introspection — works from a login shell (e.g. spawn_reviewer,
+    # manual calls); may return None under launchd. Kept for non-launchd callers.
     tokens = _expected_cwd_tokens(agent_id)
     if not tokens:
         return None
     for pane in _live_claude_panes():
-        cwd = pane["cwd"]
-        if any(f"/{t}" in cwd for t in tokens):
+        if any(f"/{t}" in pane["cwd"] for t in tokens):
             return pane["session"]
     return None
 
