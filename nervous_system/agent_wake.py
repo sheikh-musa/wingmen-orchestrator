@@ -13,6 +13,7 @@ agent_status.tmux_session column (follow-up).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import re
@@ -146,6 +147,9 @@ def _live_claude_panes() -> list[dict]:
                 out.append({"pid": pid, "cwd": cwd, "session": session})
         except Exception:
             continue
+    logging.getLogger("wingmen.agent_wake").info(
+        f"wake-resolve: pgrep={len(pids)} panes={len(sess_by_pane)} matched={len(out)} "
+        f"panes_map={sess_by_pane} out={[(o['session'], o['cwd'][-20:]) for o in out]}")
     return out
 
 
