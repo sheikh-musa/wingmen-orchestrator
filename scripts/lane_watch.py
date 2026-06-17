@@ -96,9 +96,15 @@ def main() -> int:
             cur.execute("SELECT COALESCE(MAX(id),0) FROM agent_messages WHERE to_agent='cc-orchestrator'")
             st["last_msg_id"] = cur.fetchone()[0]
         else:
+            # CAI-RESP-259 Q5 de-dup: only alert on messages Realtime did NOT
+            # already push to Telegram (forwarded_to_telegram_at IS NULL). This
+            # retires the duplicated notification while KEEPING the unique
+            # coverage — CC-worker→cc-orchestrator traffic (Realtime suppresses
+            # CC-to-CC) and the belt-and-suspenders fallback if Realtime is down.
             cur.execute("""SELECT id, from_agent, message_type, requires_response, subject
                            FROM agent_messages
                            WHERE to_agent='cc-orchestrator' AND id > %s
+                             AND forwarded_to_telegram_at IS NULL
                            ORDER BY id""", (st["last_msg_id"],))
             rows = cur.fetchall()
             if rows:

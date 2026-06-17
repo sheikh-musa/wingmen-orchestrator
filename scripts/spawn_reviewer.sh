@@ -40,18 +40,24 @@ defect (also notify the builder, requires_response=true); 'challenge' ONLY to di
 You review, you never rule — verdicts are advisory to cai. Cite file:line for every finding. When \
 done, exit."
 
-mkdir -p "$ORCH_DIR/logs"
-# Audit (CAI-RESP-258): record the spawn provenance BEFORE launch.
-printf '%s | spawn target=%s diff=%s session=%s scope=%q\n' \
-    "$(date -u +%FT%TZ)" "$TARGET_DIR" "$DIFF_REF" "$SESSION" "$SCOPE" >> "$AUDIT_LOG"
+mkdir -p "$ORCH_DIR/logs" "$ORCH_DIR/logs/reviewer-briefs"
+# CAI-RESP-258 should-fix: the semantic review brief is a spawn-time brief-FILE the
+# fresh lane reads on boot — NOT shipped over send-keys (no semantic content on the
+# signal channel, §7/§9). send-keys carries only a bare lifecycle pointer.
+BRIEF_FILE="$ORCH_DIR/logs/reviewer-briefs/${SESSION}.md"
+printf '%s\n' "$REVIEW_BRIEF" > "$BRIEF_FILE"
+
+# Audit (CAI-RESP-258): record the spawn provenance + brief-file BEFORE launch.
+printf '%s | spawn target=%s diff=%s session=%s brief=%s scope=%q\n' \
+    "$(date -u +%FT%TZ)" "$TARGET_DIR" "$DIFF_REF" "$SESSION" "$BRIEF_FILE" "$SCOPE" >> "$AUDIT_LOG"
 
 # Fresh lane via STANDARD launcher; identity forced to cc-reviewer-N by the override.
 CC_BASE_OVERRIDE="cc-reviewer" \
     tmux new-session -d -s "$SESSION" -c "$TARGET_DIR" "$LAUNCHER"
 
-# Deliver the review brief as the lane's task (send-keys = signal/initial-task only).
+# Bare lifecycle pointer only — the brief CONTENT lives in BRIEF_FILE (above).
 sleep 6
-tmux send-keys -t "$SESSION" -l "$REVIEW_BRIEF"
+tmux send-keys -t "$SESSION" -l "[reviewer-start] Read your review brief at ${BRIEF_FILE} and execute it. Read-only; post your verdict to the bus."
 sleep 1
 tmux send-keys -t "$SESSION" Enter
 

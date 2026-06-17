@@ -12,3 +12,4 @@ logs/cc_cai_daemon.*
 
 scripts/.lane_watch/
 scripts/.agent_wake/
+logs/reviewer-briefs/
