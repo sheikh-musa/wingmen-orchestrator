@@ -24,6 +24,14 @@ from dotenv import load_dotenv
 
 ORCH = pathlib.Path(__file__).resolve().parent.parent
 load_dotenv(ORCH / ".env")
+
+# launchd hands the orchestrator a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+# that OMITS Homebrew (/usr/local/bin), where `tmux` lives. Without this, every
+# tmux shell-out below fails under launchd, no lane resolves, and the wake can
+# never be delivered (it silently returns 'no live session'). Additive only.
+for _d in ("/usr/local/bin", "/opt/homebrew/bin"):
+    if os.path.isdir(_d) and _d not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _d
 _DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 _WAKE_DIR = ORCH / "scripts" / ".agent_wake"
 _DEBOUNCE_S = 45
