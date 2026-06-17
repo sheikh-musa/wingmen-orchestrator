@@ -27,8 +27,39 @@ load_dotenv(ORCH / ".env")
 _DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 _WAKE_DIR = ORCH / "scripts" / ".agent_wake"
 _DEBOUNCE_S = 45
+_CAP_LIMIT = 5            # CAI-RESP-259 Q4: hard cap...
+_CAP_WINDOW_S = 300      # ...of 5 wakes per 5 min per agent; cap-hit must fail LOUD.
 _SIGNAL = "[wake] new inbox item — read your agent_messages inbox and act"
 _SUBTAG_RE = re.compile(r"-\d+$")
+
+# CAI-RESP-259 Q1 trigger policy (the wake doorbell fires iff this is true).
+_WAKE_TYPES = frozenset(
+    {"blocker", "question", "review_request", "decision", "challenge"}
+)
+
+
+def auto_wake_enabled() -> bool:
+    """Kill-switch (CAI-RESP-259 activation cond.1). Default OFF until the
+    activation diff is cai-reviewed and the operator flips AUTO_WAKE_ENABLED=1."""
+    return os.environ.get("AUTO_WAKE_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+
+
+def should_auto_wake(
+    to_agent: str | None,
+    message_type: str,
+    requires_response: bool,
+    priority: str,
+    is_test: bool,
+) -> bool:
+    """CAI-RESP-259 Q1: wake iff recipient is a live CC WORKER lane or cai (NOT
+    cc-orchestrator — it stays operator-attended — and never the operator), not a
+    test, not P3, and (requires_response OR an actionable type OR P0/P1 floor)."""
+    if is_test or priority == "P3":
+        return False
+    is_worker = bool(to_agent) and to_agent.startswith("cc-") and to_agent != "cc-orchestrator"
+    if not (is_worker or to_agent == "cai"):
+        return False
+    return requires_response or message_type in _WAKE_TYPES or priority in ("P0", "P1")
 
 
 def _base_family(agent_id: str) -> str:
@@ -100,34 +131,51 @@ def _pane_busy(session: str) -> bool:
         return False
 
 
-def _debounced(agent_id: str) -> bool:
-    f = _WAKE_DIR / f"{agent_id}.json"
+def _read_wakes(agent_id: str) -> list[float]:
     try:
-        last = json.loads(f.read_text()).get("last_wake", 0)
+        return list(json.loads((_WAKE_DIR / f"{agent_id}.json").read_text()).get("wakes", []))
     except Exception:
-        return False
-    return (time.time() - last) < _DEBOUNCE_S
+        return []
 
 
-def _record_wake(agent_id: str) -> None:
+def _record_wake(agent_id: str, now: float) -> None:
     _WAKE_DIR.mkdir(parents=True, exist_ok=True)
-    (_WAKE_DIR / f"{agent_id}.json").write_text(json.dumps({"last_wake": time.time()}))
+    recent = [t for t in _read_wakes(agent_id) if now - t < _CAP_WINDOW_S]
+    recent.append(now)
+    (_WAKE_DIR / f"{agent_id}.json").write_text(json.dumps({"wakes": recent}))
 
 
-def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False) -> dict:
-    """Send the fixed wake signal to agent_id's lane. Returns a status dict."""
+def cap_state(agent_id: str, now: float) -> dict:
+    """Pure: classify the wake request against debounce + the 5/5min cap."""
+    recent = [t for t in _read_wakes(agent_id) if now - t < _CAP_WINDOW_S]
+    if recent and (now - max(recent)) < _DEBOUNCE_S:
+        return {"allow": False, "why": "debounced"}
+    if len(recent) >= _CAP_LIMIT:
+        return {"allow": False, "why": "wake-cap", "cap_hit": True, "count": len(recent)}
+    return {"allow": True}
+
+
+def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False, now: float | None = None) -> dict:
+    """Send the fixed wake signal to agent_id's lane. Returns a status dict.
+
+    On a cap hit returns {cap_hit: True} so the caller can fail LOUD (notify the
+    operator) per CAI-RESP-259 Q4 — never silently drop. The message itself is
+    never lost; the bus is the durable channel and the agent sees it next cycle.
+    """
+    now = time.time() if now is None else now
     session = resolve_tmux_session(agent_id)
     if not session:
         return {"woke": False, "why": "no live session"}
-    if _debounced(agent_id):
-        return {"woke": False, "why": "debounced", "session": session}
+    gate = cap_state(agent_id, now)
+    if not gate["allow"]:
+        return {"woke": False, "session": session, **gate}
     if _pane_busy(session):
         return {"woke": False, "why": "busy (mid-turn)", "session": session}
     if dry_run:
         return {"woke": False, "why": "dry-run", "session": session, "signal": _SIGNAL}
     subprocess.run(["tmux", "send-keys", "-t", session, "-l", _SIGNAL], check=False)
     subprocess.run(["tmux", "send-keys", "-t", session, "Enter"], check=False)
-    _record_wake(agent_id)
+    _record_wake(agent_id, now)
     return {"woke": True, "session": session, "reason": reason}
 
 
