@@ -74,9 +74,20 @@ def _tmux_socket() -> str | None:
     return None
 
 
+def _tmux_bin() -> str:
+    """Absolute tmux path — launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin) does
+    NOT include /usr/local/bin or /opt/homebrew/bin, so a bare "tmux" raises
+    FileNotFoundError under the service."""
+    for p in ("/usr/local/bin/tmux", "/opt/homebrew/bin/tmux", "/usr/bin/tmux"):
+        if os.path.exists(p):
+            return p
+    return "tmux"
+
+
 def _tmux(*args) -> list[str]:
     sock = _tmux_socket()
-    return (["tmux", "-S", sock] if sock else ["tmux"]) + list(args)
+    base = [_tmux_bin()] + (["-S", sock] if sock else [])
+    return base + list(args)
 
 
 def get_updates(offset: int):
@@ -159,7 +170,8 @@ def main() -> None:
                 text = m.get("text", "")
                 if chat == OPERATOR and text:
                     handle(text, chat, parse_tag(text))
-        except Exception:
+        except Exception as e:
+            print(f"[tg_bridge] loop error: {type(e).__name__}: {e}", flush=True)
             time.sleep(5)
 
 
