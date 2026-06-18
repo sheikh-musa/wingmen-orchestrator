@@ -55,6 +55,30 @@ ALIASES = {
 }
 
 
+def _tmux_socket() -> str | None:
+    """Find the live tmux server socket. Under launchd the default socket-path
+    computation can miss the user's server (it lives at a fixed /private/tmp
+    path, not under $TMPDIR), so we probe a hint file + the standard locations."""
+    cands: list[str] = []
+    hint = ORCH / "logs" / ".orch_tmux_socket"
+    if hint.exists() and hint.read_text().strip():
+        cands.append(hint.read_text().strip())
+    uid = os.getuid()
+    cands += [f"/private/tmp/tmux-{uid}/default", f"/tmp/tmux-{uid}/default"]
+    td = os.environ.get("TMPDIR", "").rstrip("/")
+    if td:
+        cands.append(f"{td}/tmux-{uid}/default")
+    for s in cands:
+        if os.path.exists(s):
+            return s
+    return None
+
+
+def _tmux(*args) -> list[str]:
+    sock = _tmux_socket()
+    return (["tmux", "-S", sock] if sock else ["tmux"]) + list(args)
+
+
 def get_updates(offset: int):
     url = f"{API}/getUpdates?timeout=30" + (f"&offset={offset}" if offset else "")
     with urllib.request.urlopen(url, timeout=45) as r:
@@ -66,7 +90,7 @@ def tg_send(text: str) -> None:
 
 
 def live_session() -> str | None:
-    r = subprocess.run(["tmux", "has-session", "-t", TMUX_EXACT], capture_output=True)
+    r = subprocess.run(_tmux("has-session", "-t", TMUX_EXACT), capture_output=True)
     return TMUX_EXACT if r.returncode == 0 else None
 
 
@@ -80,8 +104,8 @@ def parse_tag(text: str) -> str | None:
 def inject(text: str, tag: str | None) -> None:
     prefix = f"📱 Operator (Telegram{', @' + tag if tag else ''}): "
     line = prefix + " ".join(text.splitlines())
-    subprocess.run(["tmux", "send-keys", "-t", TMUX_EXACT, "-l", line], check=False)
-    subprocess.run(["tmux", "send-keys", "-t", TMUX_EXACT, "Enter"], check=False)
+    subprocess.run(_tmux("send-keys", "-t", TMUX_EXACT, "-l", line), check=False)
+    subprocess.run(_tmux("send-keys", "-t", TMUX_EXACT, "Enter"), check=False)
 
 
 def status_snapshot() -> str:
