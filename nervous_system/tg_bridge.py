@@ -112,11 +112,29 @@ def parse_tag(text: str) -> str | None:
     return None
 
 
-def inject(text: str, tag: str | None) -> None:
+def _orch_pane() -> str | None:
+    """Resolve session orch's active pane id. `send-keys -t =orch` fails with
+    'can't find pane' (the = exact-match prefix doesn't resolve to a pane), so
+    we target the unambiguous pane id (e.g. %3) instead."""
+    r = subprocess.run(
+        _tmux("list-panes", "-t", TMUX_EXACT, "-F", "#{pane_active} #{pane_id}"),
+        capture_output=True, text=True)
+    panes = [ln.split() for ln in r.stdout.splitlines() if ln.strip()]
+    for active, pid in panes:
+        if active == "1":
+            return pid
+    return panes[0][1] if panes else None
+
+
+def inject(text: str, tag: str | None) -> bool:
+    pane = _orch_pane()
+    if not pane:
+        return False
     prefix = f"📱 Operator (Telegram{', @' + tag if tag else ''}): "
     line = prefix + " ".join(text.splitlines())
-    subprocess.run(_tmux("send-keys", "-t", TMUX_EXACT, "-l", line), check=False)
-    subprocess.run(_tmux("send-keys", "-t", TMUX_EXACT, "Enter"), check=False)
+    subprocess.run(_tmux("send-keys", "-t", pane, "-l", line), check=False)
+    subprocess.run(_tmux("send-keys", "-t", pane, "Enter"), check=False)
+    return True
 
 
 def status_snapshot() -> str:
@@ -141,11 +159,45 @@ def status_snapshot() -> str:
     return "Fleet snapshot —\n" + ("\n".join(parts) if parts else "all quiet")
 
 
-def handle(text: str, chat: str, tag: str | None) -> None:
-    operator_log.log("inbound", text, chat_id=chat, tag=tag)
-    if live_session():
-        inject(text, tag)
-    elif text.strip().lower().lstrip("/") == "status":
+def _download_photo(photos: list) -> str:
+    """Download the largest size of a Telegram photo to logs/tg_media and return
+    the local path (so cc-orchestrator can Read the image). Token stays in the
+    download URL only — never logged."""
+    file_id = photos[-1]["file_id"]
+    with urllib.request.urlopen(f"{API}/getFile?file_id={file_id}", timeout=30) as r:
+        fp = json.load(r)["result"]["file_path"]
+    media = ORCH / "logs" / "tg_media"
+    media.mkdir(parents=True, exist_ok=True)
+    dest = media / fp.replace("/", "_")
+    urllib.request.urlretrieve(f"https://api.telegram.org/file/bot{TOKEN}/{fp}", dest)
+    return str(dest)
+
+
+def handle(m: dict, chat: str) -> None:
+    text = m.get("text") or m.get("caption") or ""
+    tag = parse_tag(text)
+    content = text
+
+    # screenshot / photo -> download + hand cc-orchestrator the path to Read
+    if m.get("photo"):
+        try:
+            path = _download_photo(m["photo"])
+            content = f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
+        except Exception as e:
+            content = f"sent a photo (download failed: {e})" + (f" | {text}" if text else "")
+
+    # reply-threading -> prepend the quoted message so I know what it refers to
+    rep = m.get("reply_to_message")
+    if rep:
+        snip = (rep.get("text") or rep.get("caption") or "[media]").strip().replace("\n", " ")[:70]
+        content = f'↩️ re "{snip}": {content}'
+
+    if not content:
+        return
+    operator_log.log("inbound", content, chat_id=chat, tag=tag)
+    if live_session() and inject(content, tag):
+        return
+    if text.strip().lower().lstrip("/") == "status":
         tg_send(status_snapshot())
     else:
         tg_send("📥 Logged — but the desk (tmux) orchestrator isn't live right "
@@ -167,9 +219,8 @@ def main() -> None:
                 OFFSET_FILE.write_text(str(offset))
                 m = u.get("message") or u.get("edited_message") or {}
                 chat = str(m.get("chat", {}).get("id", ""))
-                text = m.get("text", "")
-                if chat == OPERATOR and text:
-                    handle(text, chat, parse_tag(text))
+                if chat == OPERATOR:
+                    handle(m, chat)
         except Exception as e:
             print(f"[tg_bridge] loop error: {type(e).__name__}: {e}", flush=True)
             time.sleep(5)
