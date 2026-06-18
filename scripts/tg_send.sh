@@ -18,14 +18,14 @@ TEXT="${1:-$(cat)}"
 TAG="${2:-}"   # optional @alias context this reply pertains to
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
 
-resp=$(curl -s "https://api.telegram.org/bot${TOK}/sendMessage" \
-  --data-urlencode "chat_id=${CHAT}" \
-  --data-urlencode "text=${TEXT}")
-# report ok/error without ever surfacing the token
-ok=$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print('1' if d.get('ok') else '0:'+str(d.get('description')))")
-# durable log every reply (best-effort — never fail the send on a log hiccup)
+# Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
+# token/chat/text passed via env, never argv — keeps the token out of `ps`.
+if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \
+     "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/_tg_chunked_send.py"; then
+  sent=1
+else
+  sent=0
+fi
+# durable log every reply (full text, once; best-effort — never fail on a log hiccup)
 "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" ${TAG:+--tag "$TAG"} >/dev/null 2>&1 || true
-case "$ok" in
-  1) exit 0 ;;
-  *) echo "tg_send error: ${ok#0:}" >&2; exit 1 ;;
-esac
+[ "$sent" = 1 ] && exit 0 || { echo "tg_send failed" >&2; exit 1; }
