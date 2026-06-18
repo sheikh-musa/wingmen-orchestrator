@@ -116,12 +116,16 @@
           var st = (l.status || "unknown").toLowerCase();
           var hb = l.heartbeat_age_s;
           var hbTxt = hb == null ? "no heartbeat" : hb + "s ago";
+          // "working on" = latest bus activity (current_task is just the boot string)
+          var task = l.activity || l.current_task || "";
+          var taskAge = l.activity != null && l.activity_age_s != null ? fmtAge(l.activity_age_s) : "";
           return '<div class="lane">' +
             '<div class="top">' +
               '<span class="id">' + esc(l.agent_id) + '</span>' +
               '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
             '</div>' +
-            (l.current_task ? '<div class="task">' + esc(l.current_task) + '</div>' : '') +
+            (task ? '<div class="task">' + esc(task) +
+              (taskAge ? ' <span class="taskage">&middot; ' + esc(taskAge) + '</span>' : '') + '</div>' : '') +
             '<div class="hb ' + laneHbClass(hb) + '">hb ' + esc(hbTxt) + '</div>' +
             (l.desired_state ? '<div class="desired">desired: ' + esc(l.desired_state) +
               (l.lane ? ' (' + esc(l.lane) + ')' : '') + '</div>' : '') +
