@@ -19,6 +19,7 @@ LAUNCHER="$HOME/wingmen/orchestrator/scripts/launch_dangerous_cc.sh"
 # Edit this block to add/remove lanes. Keep paths absolute.
 read -r -d '' LANES <<EOF || true
 mirror	$HOME/.config/superpowers/worktrees/ihsanos/mirror
+scholar	$HOME/wingmen/projects/ai-scholar
 EOF
 # -----------------------------------------------------------------------------
 

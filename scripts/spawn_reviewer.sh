@@ -32,8 +32,9 @@ You did NOT write this code and you are NOT this repo's engineer. HARD RULES: do
 commit, push, or run mutating commands; you review and report only. Review the diff: \
 ${DIFF_REF} in $(basename "$TARGET_DIR"). Scope: ${SCOPE}. Apply the mandatory review_dimensions \
 from the substrate (SELECT name, description, applies_when FROM review_dimensions) — finance \
-(money flows/totals/reconciliation) and security (PII/auth/secrets/RLS) where the diff touches \
-them. Then POST an artifact-cited verdict to agent_messages, from_agent='cc-reviewer' (set \
+(money flows/totals/reconciliation), security (PII/auth/secrets/RLS), and design (UI usability + \
+beauty + HONESTY vs the ihsan bar — judge real usability, not just 'does it render'; advisory per \
+267-H1, informs the operator deploy gate, never auto-blocks) where the diff touches them. Then POST an artifact-cited verdict to agent_messages, from_agent='cc-reviewer' (set \
 app.current_agent_id to your cc-reviewer-N sub_tag), to_agent='cai' (always) and 'cc-orchestrator', \
 on its own thread, routed: message_type='update' if clean/advisory (no rr); 'blocker' if a real \
 defect (also notify the builder, requires_response=true); 'challenge' ONLY to dispute a ruling/spec. \
