@@ -30,6 +30,15 @@
     return isNaN(d) ? esc(iso) : d.toLocaleTimeString();
   }
 
+  // seconds -> compact "just now / 5m / 3h / 2d" age label
+  function fmtAge(s) {
+    if (s == null) return "";
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.round(s / 60) + "m ago";
+    if (s < 86400) return Math.round(s / 3600) + "h ago";
+    return Math.round(s / 86400) + "d ago";
+  }
+
   function renderMessage(m, flash) {
     if (m._resync) { resyncMessages(); return; }
     if (seen[m.id]) return;
@@ -121,6 +130,40 @@
       });
   }
 
+  // Known stages get a class for colour; anything else falls back to dim.
+  var STAGES = { pending: 1, pushed: 1, in_review: 1, merged: 1, live: 1, blocked: 1 };
+
+  function loadDeploys() {
+    return fetch("/api/deploys", { headers: authHeaders() })
+      .then(function (r) {
+        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        return r.json();
+      })
+      .then(function (rows) {
+        var box = $("deploys");
+        if (!rows.length) { box.innerHTML = '<div class="empty">No deploys tracked.</div>'; return; }
+        box.innerHTML = rows.map(function (d) {
+          var stage = (d.stage || "").toLowerCase();
+          var stageClass = STAGES[stage] ? stage : "pending";
+          var url = d.url
+            ? '<a class="url" href="' + esc(d.url) + '" target="_blank" rel="noopener">' + esc(d.url) + '</a>'
+            : "";
+          return '<div class="dep">' +
+            '<div class="top">' +
+              '<span class="ws">' + esc(d.workstream) + '</span>' +
+              '<span class="stage ' + stageClass + '">' + esc(stage || "—") + '</span>' +
+            '</div>' +
+            '<div class="sub">' +
+              (d.repo ? '<span class="repo">' + esc(d.repo) + '</span>' : '') +
+              '<span class="age">' + esc(fmtAge(d.updated_age_s)) + '</span>' +
+            '</div>' +
+            (d.detail ? '<div class="detail">' + esc(d.detail) + '</div>' : '') +
+            url +
+          '</div>';
+        }).join("");
+      });
+  }
+
   // SSE via fetch streaming (so the token stays a header, never the URL).
   function openStream() {
     if (es) { es.abort(); es = null; }
@@ -162,16 +205,20 @@
     if (!token) return;
     sessionStorage.setItem("console_token", token);
     setConn("…");
-    Promise.all([loadMessages(), loadLanes()])
+    Promise.all([loadMessages(), loadLanes(), loadDeploys()])
       .then(function () { openStream(); })
       .catch(function () { setConn("down"); });
     if (lanesTimer) clearInterval(lanesTimer);
-    lanesTimer = setInterval(function () { loadLanes().catch(function () {}); }, 10000);
+    lanesTimer = setInterval(function () {
+      loadLanes().catch(function () {});
+      loadDeploys().catch(function () {});
+    }, 10000);
   }
 
   $("connect").addEventListener("click", connect);
   $("applyFilters").addEventListener("click", function () { loadMessages().catch(function () {}); });
   $("refreshLanes").addEventListener("click", function () { loadLanes().catch(function () {}); });
+  $("refreshDeploys").addEventListener("click", function () { loadDeploys().catch(function () {}); });
   $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
 
   if (token) { $("token").value = token; connect(); }

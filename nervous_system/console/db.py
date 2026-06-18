@@ -91,6 +91,20 @@ def build_lanes_query() -> Tuple[str, list]:
     return sql, []
 
 
+def build_deploys_query() -> Tuple[str, list]:
+    """deploy_status — each workstream's push/live state across the fleet.
+    `blocked` rows surface first (they need attention); the rest by recency so
+    the latest movement is at the top."""
+    sql = (
+        "SELECT workstream, repo, stage, detail, url, "
+        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s, "
+        "  updated_by "
+        "FROM deploy_status "
+        "ORDER BY (stage = 'blocked') DESC, updated_at DESC"
+    )
+    return sql, []
+
+
 def _query(sql: str, params: list) -> List[dict]:
     dsn = resolve_dsn()
     if not dsn:
@@ -117,4 +131,9 @@ def fetch_messages(
 
 def fetch_lanes() -> List[dict]:
     sql, params = build_lanes_query()
+    return _query(sql, params)
+
+
+def fetch_deploys() -> List[dict]:
+    sql, params = build_deploys_query()
     return _query(sql, params)
