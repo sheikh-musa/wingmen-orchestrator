@@ -196,12 +196,13 @@ async def run_forever(*, dry_run: bool = False, max_cycles: int | None = None) -
     if not dry_run:
         try:
             from telegram import Bot
-            token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+            # ihsanosbot retired -> cai escalations now ride @wingmennorchbot
+            token = os.environ.get("WINGMEN_BOT_TOKEN", "")
             if token and chat_id:
                 bot = Bot(token=token)
                 logger.info("Telegram bot initialized")
             else:
-                logger.warning("TELEGRAM_BOT_TOKEN or MUSA_TELEGRAM_ID missing — "
+                logger.warning("WINGMEN_BOT_TOKEN or MUSA_TELEGRAM_ID missing — "
                                "escalations cannot push")
         except ImportError:
             logger.warning("python-telegram-bot not installed — no escalation push")

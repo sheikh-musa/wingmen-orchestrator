@@ -27,6 +27,7 @@ import logging
 
 from context_loader import get_repo_config
 from notification_router import get_chat_id
+from nervous_system.operator_notify import notify_operator
 
 logger = logging.getLogger("wingmen.schema_gate")
 
@@ -120,9 +121,7 @@ async def check_and_block(
     except Exception as e:
         logger.warning(f"Schema gate dedup check failed: {e}")
 
-    cto_id = get_chat_id("cto")
-    if not (bot and cto_id):
-        return True
+    cto_id = get_chat_id("cto")  # legacy chat; delivery now via @wingmennorchbot
 
     # Message is addressed to CC-here or cai — either can apply via the
     # Supabase MCP without Musa having to paste SQL anywhere. Musa just
@@ -138,10 +137,8 @@ async def check_and_block(
         f"SQL:\n{sql_block[:2500]}\n\n"
         f"After apply: /resume {job_id}"
     )
-    try:
-        await bot.send_message(chat_id=cto_id, text=msg)
-    except Exception as e:
-        logger.error(f"Schema gate Telegram send failed: {e}")
+    if not await asyncio.to_thread(notify_operator, msg, "fleet"):
+        logger.error("Schema gate operator notify failed")
     try:
         await supabase.table("notification_log").insert({
             "source": "schema_gate",

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.wingmen.ctobot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/cto_bot.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/cto_bot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/cto_bot.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/Users/sheikhmusa/wingmen/orchestrator/.venv/bin</string>
+    <key>HOME</key>
+    <string>/Users/sheikhmusa</string>
+  </dict>
+</dict>
+</plist>

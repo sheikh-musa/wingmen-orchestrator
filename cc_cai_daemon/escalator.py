@@ -77,18 +77,14 @@ async def escalate_to_operator(
     # 2. Build the body + inline keyboard
     text = _format_escalation_body(msg, reason, category)
     msg_id = msg["id"]
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=f"approve:{msg_id}"),
-            InlineKeyboardButton("⏸ Defer",    callback_data=f"defer:{msg_id}"),
-            InlineKeyboardButton("↪︎ Delegate", callback_data=f"delegate:{msg_id}"),
-        ],
-    ])
+    # Approve/Defer/Delegate buttons removed — their handler (ctobot on the
+    # retired @ihsanosbot) is gone; the operator replies via the @wingmennorchbot
+    # bridge instead. Plain escalation text on the new bot.
 
     # 3. Send via Telegram
     try:
         sent = await bot.send_message(
-            chat_id=chat_id, text=text, reply_markup=keyboard,
+            chat_id=chat_id, text=text,
         )
     except Exception as e:
         logger.error(
