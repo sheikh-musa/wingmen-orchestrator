@@ -63,16 +63,20 @@ async def check_agent_health(
 
     Called every 20 polls (~10 min) from the main orchestrator loop.
 
-    Check-in silence (_check_checkin_silence) is intentionally disabled —
-    operator decision: without full automation the CC families don't run
-    on autopilot, so 45-min coordination-silence alerts are pure noise.
-    Heartbeat staleness still runs because it tracks process liveness
-    (different signal from coordination cadence).
+    Check-in silence (_check_checkin_silence) AND inbox-SLA P1 alarms
+    (check_inbox_sla_violations) are intentionally disabled — operator
+    decision: without full automation the CC families don't read their
+    inboxes on autopilot, so "agent X hasn't read/responded to msg #N"
+    nags are pure noise (a human operator can't action another family's
+    unread inbox; agents read when their sessions run). P1 unread still
+    surfaces in boot_briefing for in-session agents, so no real signal is
+    lost. Heartbeat staleness still runs because it tracks process
+    liveness (different signal from coordination cadence).
     """
     await _check_heartbeat_staleness(supabase, bot, musa_chat_id)
     # await _check_checkin_silence(supabase, bot, musa_chat_id)  # disabled — see docstring
     await check_repo_context_health(supabase, bot, musa_chat_id)
-    await check_inbox_sla_violations(supabase, bot, musa_chat_id)
+    # await check_inbox_sla_violations(supabase, bot, musa_chat_id)  # disabled — fake-autopilot nag (see docstring)
 
 
 # ---------------------------------------------------------------------------

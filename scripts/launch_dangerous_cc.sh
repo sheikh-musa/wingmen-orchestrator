@@ -111,6 +111,15 @@ HEARTBEAT_PID=""
 # in .env, not the operator's shell).
 # shellcheck disable=SC1091
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# Max-subscription billing for lanes — two parts, both load-bearing:
+#  1. Scrub ANTHROPIC_API_KEY: .env carries it for the orch's own API calls, but
+#     a present ANTHROPIC_API_KEY makes `claude` use metered API-usage billing.
+#  2. Keep CLAUDE_CODE_OAUTH_TOKEN (also from .env): tmux/headless lanes run
+#     OUTSIDE the GUI login session, so they can't read the interactive `/login`
+#     OAuth from the Keychain — without this sk-ant-oat token they fall back to
+#     API billing. The token bills to the Max subscription. (Verified 2026-06-17:
+#     with the token a lane's banner matches an interactive Max terminal.)
+unset ANTHROPIC_API_KEY
 DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
 if [ -z "$DSN" ]; then
     echo -e "\033[31mERROR: DATABASE_URL not set — cannot allocate agent identity\033[0m" >&2
@@ -118,9 +127,13 @@ if [ -z "$DSN" ]; then
     exit 1
 fi
 
+# CC_BASE_OVERRIDE (CAI-RESP-258): spawn_reviewer.sh sets this so auto_agent_id
+# allocates cc-reviewer-N regardless of pwd. The CLI hard-refuses authority/
+# system identities + default-denies unknown / non-cc-* families (exits non-zero).
 ALLOC_JSON="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.auto_agent_id \
     --pwd "$CALLER_DIR" \
     --repo "$REPO_NAME" \
+    ${CC_BASE_OVERRIDE:+--base-override "$CC_BASE_OVERRIDE"} \
     --dsn "$DSN" 2>/tmp/cc_alloc_err.log)" || {
     echo -e "\033[31mERROR: identity allocation failed\033[0m" >&2
     cat /tmp/cc_alloc_err.log >&2
@@ -475,12 +488,27 @@ _handle_exit() {
     echo ""
     echo -e "${DIM}Session ended: ${outcome} | exit_code=${exit_code} | duration=${duration_seconds}s${RESET}"
 
-    # Auto-push any unpushed commits before closing out, then verify Vercel deploy
-    local ahead
-    ahead="$(git -C "$CALLER_DIR" log --oneline origin/main..HEAD 2>/dev/null | wc -l | tr -d ' ')"
-    if [ "${ahead:-0}" -gt 0 ]; then
-        echo -e "${AMBER}▶ Pushing ${ahead} unpushed commit(s) before exit...${RESET}"
-        if git -C "$CALLER_DIR" push origin main 2>&1; then
+    # Auto-push any unpushed commits before closing out, then verify Vercel deploy.
+    # CAI-RESP-255 #1: push the LANE'S OWN branch (HEAD), never a blanket `push
+    # origin main`. Hard invariant: lanes never sit on main, so a HEAD-only push
+    # can't touch main; we additionally refuse to auto-push when HEAD resolves to
+    # main/master (defence in depth — this was the source of the historic
+    # `main -> main (non-fast-forward)` rejection noise on every exit).
+    local cur_branch upstream ahead
+    cur_branch="$(git -C "$CALLER_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+    # Commits the branch has beyond its own upstream; fall back to all of HEAD
+    # when there is no upstream yet (first push of a fresh lane branch).
+    upstream="$(git -C "$CALLER_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+    if [ -n "$upstream" ]; then
+        ahead="$(git -C "$CALLER_DIR" log --oneline "${upstream}..HEAD" 2>/dev/null | wc -l | tr -d ' ')"
+    else
+        ahead="$(git -C "$CALLER_DIR" log --oneline HEAD 2>/dev/null | wc -l | tr -d ' ')"
+    fi
+    if [ "$cur_branch" = "main" ] || [ "$cur_branch" = "master" ]; then
+        echo -e "${RED}⚠ lane is on ${cur_branch} — refusing auto-push (lanes must never sit on main; commits remain local)${RESET}"
+    elif [ "${ahead:-0}" -gt 0 ]; then
+        echo -e "${AMBER}▶ Pushing ${ahead} commit(s) on ${cur_branch} before exit...${RESET}"
+        if git -C "$CALLER_DIR" push -u origin HEAD 2>&1; then
             _verify_vercel_deploy "$CALLER_DIR"
             # ARCH-024: write repo_snapshot after successful push.
             # CAI-RESP-093 immediate fix: stderr was masked by `2>/dev/null` and
@@ -608,8 +636,12 @@ if [ "$RESOLVED_MODEL" != "claude-opus-4-8" ]; then
     echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-8)${RESET}"
 fi
 
-# Also stamp resolved model into current_task so CAI can observe model drift
-# across sessions via agent_status.current_task sampling.
+# Stamp resolved model into current_task (CAI observes model drift) AND
+# SELF-REGISTER this lane's tmux session for #111 launchd-safe wake delivery:
+# the lane knows its own session from inside its pane; the wake then resolves via
+# a pure DB read instead of cross-process introspection (sandbox-blocked under
+# launchd). Empty when not launched inside tmux -> stored NULL.
+CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
@@ -627,8 +659,8 @@ try:
         with conn.cursor() as cur:
             cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$CC_AGENT_ID',))
             cur.execute(
-                \"UPDATE agent_status SET current_task = %s, updated_at=now() WHERE agent_id = %s\",
-                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_AGENT_ID'),
+                \"UPDATE agent_status SET current_task = %s, tmux_session = NULLIF(%s, ''), updated_at=now() WHERE agent_id = %s\",
+                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_TMUX_SESSION', '$CC_AGENT_ID'),
             )
         conn.commit()
 except Exception:

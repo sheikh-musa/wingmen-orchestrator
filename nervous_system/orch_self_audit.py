@@ -171,7 +171,10 @@ async def _audit_bridge_tier3_volume(
     if count <= _TIER3_VOLUME_THRESHOLD:
         return
 
-    dedup_key = f"orch_self_audit:tier3_volume:{_dedup_bucket(now)}"
+    # Day-bucketed: the misroute count is a rolling 24h-window volume that
+    # stays above threshold continuously, so an hour bucket re-fires the
+    # identical alert 24×/day. One alert per UTC day is the right cadence.
+    dedup_key = f"orch_self_audit:tier3_volume:{_day_bucket(now)}"
     if await _check_dedup(supabase, dedup_key):
         return
 
@@ -585,6 +588,14 @@ def _dedup_bucket(now: datetime) -> str:
     """Hour-granularity dedup bucket — caps any audit alert at one Telegram
     fire per hour per bucket key."""
     return now.strftime("%Y-%m-%dT%H")
+
+
+def _day_bucket(now: datetime) -> str:
+    """Day-granularity dedup bucket — caps an alert at one fire per UTC day.
+    Used by 24h-window volume audits (tier3 misroute) where the condition
+    stays above threshold continuously, so an hour bucket would re-fire the
+    identical alert 24×/day with no new information."""
+    return now.strftime("%Y-%m-%d")
 
 
 async def _check_dedup(supabase, dedup_key: str) -> bool:

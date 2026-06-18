@@ -27,6 +27,7 @@ import logging
 from typing import Any
 
 from nervous_system import agent_messages_poll
+from nervous_system import agent_wake
 from nervous_system.error_tracker import track_exception
 
 logger = logging.getLogger("wingmen.agent_messages_realtime")
@@ -73,6 +74,30 @@ async def _route_single_message(
         return
     if msg.get("is_test"):
         return
+
+    # #111 auto-wake (CAI-RESP-259) — INDEPENDENT of Telegram routing, and placed
+    # BEFORE _is_routable because that gate drops CC-to-CC traffic, which is
+    # exactly the inter-agent messages a recipient lane needs woken for. The wake
+    # is a doorbell (fixed signal, zero authority); kill-switch gated; runs off the
+    # event loop (resolve + send-keys are blocking). Cap-hit fails LOUD (Q4).
+    if agent_wake.auto_wake_enabled() and agent_wake.should_auto_wake(
+        msg.get("to_agent"), msg.get("message_type", ""),
+        bool(msg.get("requires_response")), msg.get("priority", "P2"),
+        bool(msg.get("is_test")),
+    ):
+        try:
+            res = await asyncio.to_thread(agent_wake.wake_agent, msg["to_agent"], f"msg #{msg_id}")
+            logger.info(f"realtime: auto-wake {msg.get('to_agent')} for #{msg_id}: {res}")
+            if res.get("alert_due") and bot and musa_chat_id:
+                await bot.send_message(
+                    chat_id=musa_chat_id,
+                    text=(f"⚠️ wake cap: {msg['to_agent']} hit {res.get('count')} wakes/5min "
+                          f"— possible loop. Auto-wake paused for it; msg #{msg_id} still on the bus."),
+                )
+        except Exception as e:
+            logger.error(f"realtime: auto-wake failed for #{msg_id}: {e}")
+            track_exception("agent_messages_realtime.auto_wake", e)
+
     if not agent_messages_poll._is_routable(msg):
         logger.debug(f"realtime: msg #{msg_id} not routable")
         return
@@ -138,7 +163,7 @@ async def subscribe_agent_messages(
     """
     realtime = supabase.realtime
 
-    async def _on_insert(payload: dict) -> None:
+    async def _handle_insert(payload: dict) -> None:
         try:
             data = payload.get("data", {})
             record = data.get("record") or {}
@@ -146,10 +171,20 @@ async def subscribe_agent_messages(
             if not isinstance(msg_id, int):
                 logger.debug(f"realtime: INSERT payload without int id: {payload}")
                 return
+            logger.info(f"realtime: _on_insert fired for msg #{msg_id}")
             await _route_single_message(supabase, bot, musa_chat_id, msg_id)
         except Exception as e:
             logger.error(f"realtime: _on_insert handler failed: {e}")
             track_exception("agent_messages_realtime.callback", e)
+
+    def _on_insert(payload: dict) -> None:
+        # This realtime lib invokes the callback SYNCHRONOUSLY and does NOT await
+        # a returned coroutine (RuntimeWarning: coroutine ... was never awaited).
+        # A bare `async def` callback was therefore created-and-dropped — the whole
+        # realtime path silently no-op'd, masking it behind the 5-min poll and
+        # leaving #111 auto-wake inert. Schedule the async handler on the running
+        # loop so it actually executes.
+        asyncio.ensure_future(_handle_insert(payload))
 
     while True:
         try:

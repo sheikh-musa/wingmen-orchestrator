@@ -9,3 +9,7 @@ logs/
 supabase/.temp/
 .venv-cc-cai/
 logs/cc_cai_daemon.*
+
+scripts/.lane_watch/
+scripts/.agent_wake/
+logs/reviewer-briefs/

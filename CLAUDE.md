@@ -34,6 +34,15 @@ Always-on Python orchestrator running on Mac Mini that manages builds, deploys, 
 - `/tunnel` — check tunnel status
 - `/schema` — compare DB schema vs schema.sql
 
+## Fleet lanes (tmux)
+
+Start the other CC agents from this (cc-orchestrator) session via tmux. Both
+launchers `unset ANTHROPIC_API_KEY` after sourcing `.env`, so every lane runs on
+the Mac Mini's Claude **Max** subscription, not metered API billing.
+
+- **Engineer lanes** (mirror, etc.): `scripts/lanes.sh ls` (status), `scripts/lanes.sh up [lane]` (boot down lanes, each in its own tmux session), `scripts/lanes.sh attach <lane>`. Idempotent: skips a lane that already has a `claude` running in its dir. Each lane runs `scripts/launch_dangerous_cc.sh` in a worktree.
+- **cc-cai** (singleton strategic node, agent_id='cai' exactly): boot via `scripts/boot_cai.sh` under tmux — `tmux new-session -d -s cai -c ~/wingmen/wingmen-cai scripts/boot_cai.sh`. NOT lanes.sh-managed (fleet_lanes registry desired_state='down'); operator-booted. The live copy at `~/wingmen/wingmen-cai/boot_cai.sh` should stay in sync with `scripts/boot_cai.sh` (canonical, tracked).
+
 ## Boot Sequence (three-tier memory)
 
 Context is scarce. Load the index first; fetch full content only when you need it.

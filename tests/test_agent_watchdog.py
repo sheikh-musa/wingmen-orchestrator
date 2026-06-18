@@ -209,19 +209,23 @@ class TestCheckinSilence:
 class TestCheckAgentHealth:
 
     @pytest.mark.asyncio
-    async def test_runs_heartbeat_only_checkin_disabled(self):
-        """Operator-disabled: check-in silence is no-op while autopilot is off.
-        Heartbeat staleness still runs (process-liveness signal)."""
+    async def test_runs_heartbeat_only_checkin_and_sla_disabled(self):
+        """Operator-disabled: check-in silence AND inbox-SLA P1 alarms are
+        no-ops while autopilot is off (fake-autopilot nags). Heartbeat
+        staleness still runs (process-liveness signal)."""
         from unittest.mock import patch
         sb = MagicMock()
 
         with patch("nervous_system.agent_watchdog._check_heartbeat_staleness",
-                   new_callable=AsyncMock) as mock_hb:
-            with patch("nervous_system.agent_watchdog._check_checkin_silence",
-                       new_callable=AsyncMock) as mock_ci:
-                await check_agent_health(sb)
-                mock_hb.assert_called_once()
-                mock_ci.assert_not_called()
+                   new_callable=AsyncMock) as mock_hb, \
+             patch("nervous_system.agent_watchdog._check_checkin_silence",
+                   new_callable=AsyncMock) as mock_ci, \
+             patch("nervous_system.agent_watchdog.check_inbox_sla_violations",
+                   new_callable=AsyncMock) as mock_sla:
+            await check_agent_health(sb)
+            mock_hb.assert_called_once()
+            mock_ci.assert_not_called()
+            mock_sla.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
