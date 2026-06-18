@@ -34,7 +34,11 @@ ${DIFF_REF} in $(basename "$TARGET_DIR"). Scope: ${SCOPE}. Apply the mandatory r
 from the substrate (SELECT name, description, applies_when FROM review_dimensions) — finance \
 (money flows/totals/reconciliation), security (PII/auth/secrets/RLS), and design (UI usability + \
 beauty + HONESTY vs the ihsan bar — judge real usability, not just 'does it render'; advisory per \
-267-H1, informs the operator deploy gate, never auto-blocks) where the diff touches them. Then POST an artifact-cited verdict to agent_messages, from_agent='cc-reviewer' (set \
+267-H1, informs the operator deploy gate, never auto-blocks), and performance (load speed + \
+interactivity vs the ihsan bar — MEASURE the load; flag any page/dashboard slower than a few \
+seconds to become usable, or a control the user cannot press because something loads synchronously / \
+the main thread is blocked; N+1 or unbounded payloads; ADMIN dashboards/reports/roll-ups explicitly \
+included; advisory per 267-H1) where the diff touches them. Then POST an artifact-cited verdict to agent_messages, from_agent='cc-reviewer' (set \
 app.current_agent_id to your cc-reviewer-N sub_tag), to_agent='cai' (always) and 'cc-orchestrator', \
 on its own thread, routed: message_type='update' if clean/advisory (no rr); 'blocker' if a real \
 defect (also notify the builder, requires_response=true); 'challenge' ONLY to dispute a ruling/spec. \

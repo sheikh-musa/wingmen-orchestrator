@@ -71,7 +71,13 @@ def build_messages_query(
 
 def build_lanes_query() -> Tuple[str, list]:
     """agents ⋈ agent_status ⋈ fleet_lanes — each instance's live status,
-    current task, heartbeat age, and desired_state vs derived-live."""
+    heartbeat age, desired_state, and its CURRENT ACTIVITY.
+
+    `current_task` only holds the boot string ("session-launch model=…"); lanes
+    don't refresh it. The truthful "what is this lane working on now" signal is
+    the subject of the latest bus message it authored, so we LATERAL-join that
+    and expose it as `activity` (+ age). Falls back to current_task in the view
+    if a lane has never posted."""
     sql = (
         "SELECT "
         "  s.agent_id, "
@@ -82,10 +88,18 @@ def build_lanes_query() -> Tuple[str, list]:
         "  round(extract(epoch FROM (now() - s.last_heartbeat)))::int "
         "    AS heartbeat_age_s, "
         "  l.desired_state, "
-        "  l.lane "
+        "  l.lane, "
+        "  act.subject AS activity, "
+        "  round(extract(epoch FROM (now() - act.created_at)))::int "
+        "    AS activity_age_s "
         "FROM agent_status s "
         "LEFT JOIN agents a ON a.id = s.base_agent_id "
         "LEFT JOIN fleet_lanes l ON l.base_agent_id = s.base_agent_id "
+        "LEFT JOIN LATERAL ("
+        "  SELECT subject, created_at FROM agent_messages m "
+        "  WHERE m.from_agent = s.base_agent_id "
+        "  ORDER BY m.id DESC LIMIT 1"
+        ") act ON true "
         "ORDER BY s.base_agent_id, s.agent_id"
     )
     return sql, []
