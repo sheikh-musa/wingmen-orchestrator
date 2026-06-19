@@ -168,6 +168,50 @@
       });
   }
 
+  function loadQueue() {
+    return fetch("/api/queue", { headers: authHeaders() })
+      .then(function (r) {
+        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        return r.json();
+      })
+      .then(function (rows) {
+        var box = $("queue");
+        if (!rows.length) { box.innerHTML = '<div class="empty">No queued tasks.</div>'; return; }
+        // group by lane, preserving the server's (lane, priority_rank) order
+        var groups = {}, order = [];
+        rows.forEach(function (t) {
+          if (!groups[t.lane]) { groups[t.lane] = []; order.push(t.lane); }
+          groups[t.lane].push(t);
+        });
+        box.innerHTML = order.map(function (lane) {
+          var items = groups[lane].map(function (t, i) {
+            var st = (t.status || "queued").toLowerCase();
+            // SLA chip: elapsed-vs-budget. Only show once the task is started
+            // and has an SLA. over_sla (server-computed) turns the chip red.
+            var sla = "";
+            if (t.sla_minutes != null && t.elapsed_min != null) {
+              var over = !!t.over_sla;
+              sla = '<span class="sla' + (over ? ' over' : '') + '">' +
+                      (over ? '⚠ ' : '') + t.elapsed_min + 'm/' + t.sla_minutes + 'm' +
+                    '</span>';
+            } else if (t.sla_minutes != null) {
+              sla = '<span class="sla idle">SLA ' + t.sla_minutes + 'm</span>';
+            }
+            return '<div class="qtask' + (t.over_sla ? ' breached' : '') + '">' +
+              '<div class="top">' +
+                '<span class="rank">' + (i + 1) + '.</span>' +
+                '<span class="title">' + esc(t.title) + '</span>' +
+                sla +
+                '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
+              '</div>' +
+              (t.detail ? '<div class="detail">' + esc(t.detail) + '</div>' : '') +
+            '</div>';
+          }).join("");
+          return '<div class="qlane">@' + esc(lane) + '</div>' + items;
+        }).join("");
+      });
+  }
+
   // SSE via fetch streaming (so the token stays a header, never the URL).
   function openStream() {
     if (es) { es.abort(); es = null; }
@@ -209,13 +253,14 @@
     if (!token) return;
     sessionStorage.setItem("console_token", token);
     setConn("…");
-    Promise.all([loadMessages(), loadLanes(), loadDeploys()])
+    Promise.all([loadMessages(), loadLanes(), loadDeploys(), loadQueue()])
       .then(function () { openStream(); })
       .catch(function () { setConn("down"); });
     if (lanesTimer) clearInterval(lanesTimer);
     lanesTimer = setInterval(function () {
       loadLanes().catch(function () {});
       loadDeploys().catch(function () {});
+      loadQueue().catch(function () {});
     }, 10000);
   }
 
@@ -223,6 +268,7 @@
   $("applyFilters").addEventListener("click", function () { loadMessages().catch(function () {}); });
   $("refreshLanes").addEventListener("click", function () { loadLanes().catch(function () {}); });
   $("refreshDeploys").addEventListener("click", function () { loadDeploys().catch(function () {}); });
+  $("refreshQueue").addEventListener("click", function () { loadQueue().catch(function () {}); });
   $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
 
   if (token) { $("token").value = token; connect(); }

@@ -198,6 +198,11 @@ def _make_handler(feedloop: "_FeedLoop"):
                     auth.audit(self._client(), path, "200")
                     return self._json(200, _jsonable(rows))
 
+                if path == "/api/queue":
+                    rows = db.fetch_queue()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable(rows))
+
                 if path == "/api/stream":
                     return self._serve_sse(parsed)
             except Exception as e:  # read failures are 500, never a write

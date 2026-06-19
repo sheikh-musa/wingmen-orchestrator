@@ -170,11 +170,27 @@ async def _run_one_cycle(
         elif effective_label == "ack_fyi" and kill_switch.should_act_silently():
             handle_ack_fyi(supabase, audit, msg, classification.reason)
         elif kill_switch.should_escalate():
-            await escalate_to_operator(
-                bot, chat_id, msg, audit,
-                reason=classification.reason,
-                category=classification.escalation_category,
-            )
+            # novel_low_confidence = the classifier's "not sure how to file this"
+            # safety net (INV-6 default-HOLD). It is NOT a human decision —
+            # pushing it to the operator's phone is noise ("what am I supposed to
+            # do with this"). cai already polls every bus message, so we AUDIT it
+            # and hold for cai instead of buzzing the operator; nothing slips
+            # (still bus-visible + audited). Genuine operator-decision categories
+            # still push to the phone.
+            if classification.escalation_category == "novel_low_confidence":
+                audit.log_escalation(
+                    agent_message_id=msg["id"],
+                    reason=f"held-for-cai (novel_low_confidence, not operator-pushed): {classification.reason}",
+                )
+                logger.info(
+                    f"msg #{msg['id']}: novel_low_confidence held for cai (not pushed to operator)"
+                )
+            else:
+                await escalate_to_operator(
+                    bot, chat_id, msg, audit,
+                    reason=classification.reason,
+                    category=classification.escalation_category,
+                )
         else:
             logger.info(f"msg #{msg['id']}: kill_switch blocks all action")
 
@@ -196,12 +212,13 @@ async def run_forever(*, dry_run: bool = False, max_cycles: int | None = None) -
     if not dry_run:
         try:
             from telegram import Bot
-            token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+            # ihsanosbot retired -> cai escalations now ride @wingmennorchbot
+            token = os.environ.get("WINGMEN_BOT_TOKEN", "")
             if token and chat_id:
                 bot = Bot(token=token)
                 logger.info("Telegram bot initialized")
             else:
-                logger.warning("TELEGRAM_BOT_TOKEN or MUSA_TELEGRAM_ID missing — "
+                logger.warning("WINGMEN_BOT_TOKEN or MUSA_TELEGRAM_ID missing — "
                                "escalations cannot push")
         except ImportError:
             logger.warning("python-telegram-bot not installed — no escalation push")
