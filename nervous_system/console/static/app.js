@@ -186,10 +186,22 @@
         box.innerHTML = order.map(function (lane) {
           var items = groups[lane].map(function (t, i) {
             var st = (t.status || "queued").toLowerCase();
-            return '<div class="qtask">' +
+            // SLA chip: elapsed-vs-budget. Only show once the task is started
+            // and has an SLA. over_sla (server-computed) turns the chip red.
+            var sla = "";
+            if (t.sla_minutes != null && t.elapsed_min != null) {
+              var over = !!t.over_sla;
+              sla = '<span class="sla' + (over ? ' over' : '') + '">' +
+                      (over ? '⚠ ' : '') + t.elapsed_min + 'm/' + t.sla_minutes + 'm' +
+                    '</span>';
+            } else if (t.sla_minutes != null) {
+              sla = '<span class="sla idle">SLA ' + t.sla_minutes + 'm</span>';
+            }
+            return '<div class="qtask' + (t.over_sla ? ' breached' : '') + '">' +
               '<div class="top">' +
                 '<span class="rank">' + (i + 1) + '.</span>' +
                 '<span class="title">' + esc(t.title) + '</span>' +
+                sla +
                 '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
               '</div>' +
               (t.detail ? '<div class="detail">' + esc(t.detail) + '</div>' : '') +

@@ -111,7 +111,11 @@ def build_queue_query() -> Tuple[str, list]:
     reorders via the bridge (cc-orchestrator updates priority_rank)."""
     sql = (
         "SELECT lane, title, detail, priority_rank, status, "
-        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s "
+        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s, "
+        "  round(extract(epoch FROM (now() - started_at))/60)::int AS elapsed_min, "
+        "  sla_minutes, "
+        "  (sla_minutes IS NOT NULL AND started_at IS NOT NULL "
+        "     AND now() > started_at + (sla_minutes || ' minutes')::interval) AS over_sla "
         "FROM lane_tasks WHERE status <> 'done' "
         "ORDER BY lane, priority_rank, id"
     )
