@@ -126,45 +126,91 @@ def _orch_pane() -> str | None:
     return panes[0][1] if panes else None
 
 
-def _pane_tail(pane: str, n: int = 14) -> str:
-    """The bottom n visible lines of the pane — i.e. the input box region where
-    just-typed (not-yet-submitted) text sits. Used to confirm an injection
-    actually landed before we hit Enter."""
+def _capture(pane: str, n: int = 30) -> list[str]:
     r = subprocess.run(_tmux("capture-pane", "-p", "-t", pane),
                        capture_output=True, text=True)
-    return "\n".join(r.stdout.splitlines()[-n:])
+    return r.stdout.splitlines()[-n:]
+
+
+def _norm(s: str) -> str:
+    """ASCII-printable only, whitespace collapsed. Makes comparison robust to (a)
+    emoji that render in the pane but get stripped from our needle, and (b) the
+    input box wrapping a long line across rows."""
+    return re.sub(r"\s+", " ", "".join(c for c in s if 32 <= ord(c) < 127)).strip()
+
+
+def _is_rule(line: str) -> bool:
+    s = line.strip()
+    return len(s) >= 10 and set(s) <= set("─-—")
+
+
+def _input_text(pane: str) -> str:
+    """The normalized text currently sitting IN the input box — NOT the
+    conversation scrollback. The input box is anchored by the `❯` prompt (we take
+    the LAST one, which is the live input at the bottom of the pane) and spans
+    from there down to the box's bottom horizontal rule. This lets us distinguish
+    'typed but unsent' (text after ❯) from 'submitted and now shown above the
+    prompt' (text that has left the box)."""
+    lines = _capture(pane, 30)
+    pi = None
+    for i, l in enumerate(lines):
+        if "❯" in l:
+            pi = i  # keep the last (lowest) prompt
+    if pi is None:
+        return ""  # prompt not visible (e.g. mid-render) — treat as unknown
+    seg = []
+    for l in lines[pi:]:
+        if _is_rule(l):
+            break  # bottom border of the input box
+        seg.append(l)
+    seg = [l.replace("❯", " ", 1) for l in seg]
+    return _norm(" ".join(seg))
+
+
+def _clear_input(pane: str) -> None:
+    """Belt-and-suspenders clear of a possibly multi-line / wrapped input box.
+    C-a then C-k handles wrapped content that a lone C-u leaves behind."""
+    for _ in range(2):
+        subprocess.run(_tmux("send-keys", "-t", pane, "C-a"), check=False)
+        subprocess.run(_tmux("send-keys", "-t", pane, "C-k"), check=False)
+        subprocess.run(_tmux("send-keys", "-t", pane, "C-u"), check=False)
 
 
 def inject(text: str, tag: str | None) -> bool:
-    """Type the operator's message into the live orch pane and submit it.
+    """Type the operator's message into the live orch pane and submit it,
+    verifying each step against the actual input box.
 
-    CRITICAL (2026-06-19 fix): a bare send-keys can be SILENTLY DROPPED if it
-    collides with the pane's own streaming output (e.g. a tool is mid-run). The
-    old code pressed Enter and returned True unconditionally — a false success
-    that suppressed the headless fallback, so the operator's message vanished.
-
-    Now we type the text, VERIFY a content-bearing slice of it is actually
-    visible in the input box, and only THEN press Enter. If it didn't land we
-    clear the line (C-u) and retry; after 3 misses we return False so the caller
-    can ack on Telegram instead of dropping the message on the floor."""
+    CRITICAL (2026-06-19): a bare send-keys can be SILENTLY DROPPED when it
+    collides with the pane's own streaming output (a tool mid-run). The first
+    fix verified the text landed but (a) built the needle by stripping emoji, so
+    it never matched the rendered pane for reply-quotes (↩️/🚨) and (b) retried
+    with a lone C-u that didn't clear wrapped text — typing the title 3× and
+    never submitting. This version normalizes both sides, inspects the input box
+    specifically, clears robustly before each attempt, and confirms the text
+    actually LEFT the box (i.e. submitted) before returning True."""
     pane = _orch_pane()
     if not pane:
         return False
     prefix = f"📱 Operator (Telegram{', @' + tag if tag else ''}): "
     line = prefix + " ".join(text.splitlines())
-    # A distinctive ASCII slice of the CONTENT (not the generic prefix) so a
-    # stale prior injection in scrollback can't produce a false match.
-    ascii_content = "".join(ch for ch in " ".join(text.splitlines()) if ord(ch) < 128)
-    needle = ascii_content.strip()[:24]
+    needle = _norm(line)[:40]
     for _ in range(3):
+        _clear_input(pane)
+        time.sleep(0.15)
         subprocess.run(_tmux("send-keys", "-t", pane, "-l", line), check=False)
-        time.sleep(0.25)
-        if not needle or needle in _pane_tail(pane):
-            subprocess.run(_tmux("send-keys", "-t", pane, "Enter"), check=False)
+        time.sleep(0.3)
+        if needle and needle not in _input_text(pane):
+            continue  # didn't land — clear-first on next loop and retry
+        subprocess.run(_tmux("send-keys", "-t", pane, "Enter"), check=False)
+        time.sleep(0.4)
+        # submitted iff the text has LEFT the input box (it now shows above it)
+        if needle not in _input_text(pane):
             return True
-        # dropped — clear whatever partially landed and retry
-        subprocess.run(_tmux("send-keys", "-t", pane, "C-u"), check=False)
-        time.sleep(0.35)
+        subprocess.run(_tmux("send-keys", "-t", pane, "Enter"), check=False)  # nudge
+        time.sleep(0.4)
+        if needle not in _input_text(pane):
+            return True
+    _clear_input(pane)  # leave no half-typed mess behind
     return False
 
 
