@@ -52,6 +52,7 @@ The operator's 2-way bridge to cc-orchestrator (pure hub — operator talks to y
 - **Live-you requires tmux:** the operator gets the live session only when the orchestrator runs as tmux session **exactly** `orch` (`tmux new -s orch -- claude --resume`). The bridge exact-matches `=orch` (so it never hits the idle `orchestrator` session).
 - **Tagging:** `@adcda`/`@tdu`/`@cosem`, `@ihsanos`/`@irsyad`, `@scholar`/`@mizan`, `@qr`, `@fleet`/`@console`, `@cai`. The tag is *context*, not routing — you still own the conversation and delegate. Echo the context you assumed (e.g. lead a reply with `[cosem-tdu]`) so a wrong guess is correctable.
 - **Durability:** every message both directions is logged to `operator_messages` (inbound by the bridge, outbound by `tg_send.sh`). That log is the shared memory keeping the live-you and any headless/rebooted-you coherent — read `operator_log.recent()` to catch up.
+- **Option B — durable log is the source of truth (CAI-RESP-277):** delivery is guaranteed by the LOG + reconciliation, NOT by the keystroke nudge (which is signal-only/best-effort — never rely on it). At the start of each turn (and on the autonomous wakeup) read `operator_log.unprocessed()`; answer any unhandled inbound; then `operator_log.mark_handled_through(<max_id>)` to stamp them (at-least-once: a rare re-surface beats a loss). `operator_messages.handled_at` (timestamptz) is the cursor. This is why a dropped/garbled keystroke can no longer lose an operator message.
 
 ## Boot Sequence (three-tier memory)
 
