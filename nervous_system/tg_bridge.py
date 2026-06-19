@@ -42,6 +42,11 @@ TMUX_TARGET = os.environ.get("TG_BRIDGE_TMUX_TARGET", "orch")
 # "orchestrator" session. The "=" prefix forces an EXACT session-name match.
 TMUX_EXACT = "=" + TMUX_TARGET
 OFFSET_FILE = ORCH / "logs" / ".tg_bridge_offset"
+# Max chars to TYPE into the orch TUI. Longer messages inject a preview + pointer
+# (full text stays in operator_messages). Kept SMALL on purpose: at this size the
+# paste never wraps past ~2 rows, so verify is reliable AND a failed attempt
+# clears cleanly (multi-line wrapped input is what resists clearing — 2026-06-19).
+_INJECT_CAP = 150
 API = f"https://api.telegram.org/bot{TOKEN}"
 
 # @alias -> context label. The bridge resolves the tag; cc-orchestrator
@@ -170,10 +175,12 @@ def _input_text(pane: str) -> str:
 def _clear_input(pane: str) -> None:
     """Belt-and-suspenders clear of a possibly multi-line / wrapped input box.
     C-a then C-k handles wrapped content that a lone C-u leaves behind."""
-    for _ in range(2):
+    for _ in range(3):
         subprocess.run(_tmux("send-keys", "-t", pane, "C-a"), check=False)
         subprocess.run(_tmux("send-keys", "-t", pane, "C-k"), check=False)
         subprocess.run(_tmux("send-keys", "-t", pane, "C-u"), check=False)
+        subprocess.run(_tmux("send-keys", "-t", pane, "C-e"), check=False)
+        subprocess.run(_tmux("send-keys", "-t", pane, "C-k"), check=False)
 
 
 def inject(text: str, tag: str | None) -> bool:
@@ -273,7 +280,17 @@ def handle(m: dict, chat: str) -> None:
         return
     operator_log.log("inbound", content, chat_id=chat, tag=tag)
     if live_session():
-        if inject(content, tag):
+        # Cap what we TYPE into the TUI. A long paste (e.g. a forwarded tafsir,
+        # 2026-06-19: 2360 chars) wraps to many rows — verify gets racy and a
+        # failed attempt can't be fully cleared, so the residue bleeds into the
+        # next message. The full text is always in operator_messages, so inject a
+        # short preview + a pointer and let cc-orchestrator read the rest there.
+        inject_text = content
+        if len(content) > _INJECT_CAP:
+            inject_text = (content[:_INJECT_CAP].rstrip() +
+                           f" …[+{len(content) - _INJECT_CAP} chars truncated — "
+                           f"full text: operator_log.recent()]")
+        if inject(inject_text, tag):
             return
         # Desk IS live but the injection couldn't land (busy pane). Don't claim
         # offline — tell the operator it's saved + queued so nothing feels lost.
