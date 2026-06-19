@@ -126,15 +126,46 @@ def _orch_pane() -> str | None:
     return panes[0][1] if panes else None
 
 
+def _pane_tail(pane: str, n: int = 14) -> str:
+    """The bottom n visible lines of the pane — i.e. the input box region where
+    just-typed (not-yet-submitted) text sits. Used to confirm an injection
+    actually landed before we hit Enter."""
+    r = subprocess.run(_tmux("capture-pane", "-p", "-t", pane),
+                       capture_output=True, text=True)
+    return "\n".join(r.stdout.splitlines()[-n:])
+
+
 def inject(text: str, tag: str | None) -> bool:
+    """Type the operator's message into the live orch pane and submit it.
+
+    CRITICAL (2026-06-19 fix): a bare send-keys can be SILENTLY DROPPED if it
+    collides with the pane's own streaming output (e.g. a tool is mid-run). The
+    old code pressed Enter and returned True unconditionally — a false success
+    that suppressed the headless fallback, so the operator's message vanished.
+
+    Now we type the text, VERIFY a content-bearing slice of it is actually
+    visible in the input box, and only THEN press Enter. If it didn't land we
+    clear the line (C-u) and retry; after 3 misses we return False so the caller
+    can ack on Telegram instead of dropping the message on the floor."""
     pane = _orch_pane()
     if not pane:
         return False
     prefix = f"📱 Operator (Telegram{', @' + tag if tag else ''}): "
     line = prefix + " ".join(text.splitlines())
-    subprocess.run(_tmux("send-keys", "-t", pane, "-l", line), check=False)
-    subprocess.run(_tmux("send-keys", "-t", pane, "Enter"), check=False)
-    return True
+    # A distinctive ASCII slice of the CONTENT (not the generic prefix) so a
+    # stale prior injection in scrollback can't produce a false match.
+    ascii_content = "".join(ch for ch in " ".join(text.splitlines()) if ord(ch) < 128)
+    needle = ascii_content.strip()[:24]
+    for _ in range(3):
+        subprocess.run(_tmux("send-keys", "-t", pane, "-l", line), check=False)
+        time.sleep(0.25)
+        if not needle or needle in _pane_tail(pane):
+            subprocess.run(_tmux("send-keys", "-t", pane, "Enter"), check=False)
+            return True
+        # dropped — clear whatever partially landed and retry
+        subprocess.run(_tmux("send-keys", "-t", pane, "C-u"), check=False)
+        time.sleep(0.35)
+    return False
 
 
 def status_snapshot() -> str:
@@ -195,7 +226,13 @@ def handle(m: dict, chat: str) -> None:
     if not content:
         return
     operator_log.log("inbound", content, chat_id=chat, tag=tag)
-    if live_session() and inject(content, tag):
+    if live_session():
+        if inject(content, tag):
+            return
+        # Desk IS live but the injection couldn't land (busy pane). Don't claim
+        # offline — tell the operator it's saved + queued so nothing feels lost.
+        tg_send("📥 Got it — saved. The desk was mid-task so it didn't surface "
+                "instantly; I'll pick it up on my next breath. (Nothing lost.)")
         return
     if text.strip().lower().lstrip("/") == "status":
         tg_send(status_snapshot())
