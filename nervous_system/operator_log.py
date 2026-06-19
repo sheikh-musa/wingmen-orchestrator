@@ -42,6 +42,41 @@ def recent(limit: int = 20) -> list:
         return list(reversed(cur.fetchall()))
 
 
+# --- Option B: durable-log-as-source-of-truth (CAI-RESP-277) ---------------
+# The keystroke injection is a best-effort NUDGE; the guarantee that an operator
+# message is seen + answered lives HERE. Every inbound is logged with
+# handled_at=NULL; cc-orchestrator reconciles by reading unprocessed() each turn
+# / on the autonomous wakeup, answers, then stamps via mark_handled_through().
+# At-least-once: a rare re-surfacing beats a silent loss (cai's ruling).
+
+def unprocessed(limit: int = 20) -> list:
+    """Inbound operator messages not yet marked handled, oldest-first. The
+    reconciliation read that makes delivery independent of keystrokes landing."""
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, tag, text, created_at FROM operator_messages "
+            "WHERE direction='inbound' AND handled_at IS NULL "
+            "ORDER BY id ASC LIMIT %s", (limit,))
+        return cur.fetchall()
+
+
+def mark_handled_through(max_id: int) -> int:
+    """Stamp every inbound up to and including max_id as handled. Called after
+    cc-orchestrator has read + answered the operator's current messages. Returns
+    the number of rows stamped."""
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+        cur.execute(
+            "UPDATE operator_messages SET handled_at=now() "
+            "WHERE direction='inbound' AND handled_at IS NULL AND id <= %s",
+            (max_id,))
+        n = cur.rowcount
+        conn.commit()
+        return n
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("direction", choices=["inbound", "outbound"])
