@@ -19,6 +19,7 @@ Audit-first ordering per INV-5 hard ship condition:
 from __future__ import annotations
 
 import logging
+import pathlib
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,6 +27,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from cc_cai_daemon.audit import AuditLogger
 
 logger = logging.getLogger("cc_cai.escalator")
+
+# Operator-mute flag. When this file exists, escalations are still AUDITED (cai
+# sees everything) but NOT pushed to the operator's phone. Set by cc-orchestrator
+# per operator request (2026-06-19: mute keyword false-positives until cai rules
+# on the escalation-noise fix). Reversible: delete the file.
+_MUTE_FLAG = pathlib.Path(__file__).resolve().parent.parent / "logs" / ".ccai_operator_mute"
 
 
 def _format_escalation_body(msg: dict, reason: str, category: str | None) -> str:
@@ -74,9 +81,22 @@ async def escalate_to_operator(
         )
         return None
 
+    msg_id = msg["id"]
+
+    # 1b. Operator mute — audit landed above (cai still sees it); skip the phone
+    # push. Logged as a distinct audit row so the suppression itself is evidence.
+    if _MUTE_FLAG.exists():
+        logger.info(f"operator mute active — msg #{msg_id} audited, not pushed")
+        audit.log_tool_call(
+            tool_name="telegram_send_escalation_MUTED",
+            tool_input={"agent_message_id": msg_id, "category": category},
+            tool_output={"muted": True},
+            agent_message_id=msg_id,
+        )
+        return None
+
     # 2. Build the body + inline keyboard
     text = _format_escalation_body(msg, reason, category)
-    msg_id = msg["id"]
     # Approve/Defer/Delegate buttons removed — their handler (ctobot on the
     # retired @ihsanosbot) is gone; the operator replies via the @wingmennorchbot
     # bridge instead. Plain escalation text on the new bot.
