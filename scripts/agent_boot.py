@@ -24,9 +24,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Agent ids are a controlled vocabulary (e.g. cc-orchestrator, cc-reviewer-13).
+# _inbox_or_filter interpolates the id into a PostgREST `or=` string whose
+# structure uses commas/parens/dots — so reject anything outside the known-safe
+# charset rather than let a stray comma/paren/dot corrupt the filter (CAI-RESP-296
+# A2). Dot is excluded deliberately: it's PostgREST's operator separator (eq./is.).
+_SAFE_AGENT_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -56,7 +64,13 @@ def _inbox_or_filter(agent_id: str) -> str:
     (requires_response=true AND responded_at IS NULL). Written in DNF (a flat
     OR of and()-groups) so it's a single unambiguous `or=` param — postgrest-py
     does not reliably AND two separate .or_() calls.
+
+    agent_id is interpolated raw into the filter, so validate it against the
+    known-safe charset (CAI-RESP-296 A2): a comma/paren/dot in the id would
+    corrupt the filter structure. Fail closed rather than build a broken filter.
     """
+    if not _SAFE_AGENT_ID.match(agent_id):
+        raise ValueError(f"unsafe agent_id for PostgREST filter: {agent_id!r}")
     return (
         f"and(to_agent.eq.{agent_id},read_at.is.null),"
         f"and(to_agent.eq.{agent_id},requires_response.eq.true,responded_at.is.null),"

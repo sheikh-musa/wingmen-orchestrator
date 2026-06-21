@@ -28,10 +28,34 @@ TEST_AGENT = "cc-test-sweep296"
 pytestmark = pytest.mark.skipif(not DSN, reason="DATABASE_URL not set — skipping integration tests")
 
 # The exact count query scheduled_cc_sweep.sh uses for the spawn trigger.
+# CAI-RESP-296 B1: excludes asks already surfaced as scheduled_sweep_dialogue_pending
+# in notification_log (kept in sync with scripts/scheduled_cc_sweep.sh).
 UNRESPONDED_COUNT_SQL = (
-    "SELECT count(*) FROM agent_messages "
-    "WHERE to_agent=%s AND requires_response=true AND responded_at IS NULL"
+    "SELECT count(*) FROM agent_messages m "
+    "WHERE m.to_agent=%s AND m.requires_response=true "
+    "AND m.responded_at IS NULL "
+    "AND NOT EXISTS ("
+    "  SELECT 1 FROM notification_log n "
+    "  WHERE n.source='scheduled_sweep.dialogue_pending' "
+    "  AND n.dedup_key LIKE 'scheduled_sweep:dialogue_pending:' "
+    "      || m.to_agent || ':' || m.id::text || ':%%'"
+    ")"
 )
+
+# dedup_key shape the sweep prompt writes for a blocked ask (Section D case b):
+# scheduled_sweep:dialogue_pending:<self>:<msg_id>:<hour_bucket>
+def _flag_dialogue_pending(msg_id: int, agent: str = None) -> None:
+    agent = agent or TEST_AGENT
+    with _conn() as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO notification_log (source, channel, recipient, message_text, dedup_key) "
+            "VALUES ('scheduled_sweep.dialogue_pending','internal',%s,%s,%s)",
+            (
+                agent,
+                f"msg #{msg_id} requires interactive response",
+                f"scheduled_sweep:dialogue_pending:{agent}:{msg_id}:2026-06-22T00",
+            ),
+        )
 
 
 def _conn():
@@ -44,16 +68,25 @@ def _conn():
 def _isolated_test_agent():
     """Ensure the test agent exists (FK target for agent_messages.to_agent) and
     purge its messages before + after each test. Never touches real rows."""
+    def _purge(cur):
+        cur.execute("DELETE FROM agent_messages WHERE to_agent=%s", (TEST_AGENT,))
+        # B1: also purge this agent's dialogue_pending flags (crash-safe).
+        cur.execute(
+            "DELETE FROM notification_log WHERE source='scheduled_sweep.dialogue_pending' "
+            "AND dedup_key LIKE %s",
+            (f"scheduled_sweep:dialogue_pending:{TEST_AGENT}:%",),
+        )
+
     with _conn() as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO agents (id, display_name, status) VALUES (%s, %s, 'offline') "
             "ON CONFLICT (id) DO NOTHING",
             (TEST_AGENT, "sweep296 test agent"),
         )
-        cur.execute("DELETE FROM agent_messages WHERE to_agent=%s", (TEST_AGENT,))
+        _purge(cur)
     yield
     with _conn() as c, c.cursor() as cur:
-        cur.execute("DELETE FROM agent_messages WHERE to_agent=%s", (TEST_AGENT,))
+        _purge(cur)
 
 
 def _insert_msg_fixed(read: bool, requires_response: bool, responded: bool) -> int:
@@ -158,6 +191,46 @@ def test_mark_responded_closes_loop_and_is_idempotent():
 
     second = agent_boot.mark_responded(mid)
     assert second is False, "mark_responded must be idempotent (no overwrite)"
+
+
+# ── B1: backoff/dedup — a flagged (known-blocked) ask stops re-spawning ─────────
+
+def test_dialogue_pending_flagged_ask_excluded_from_spawn_trigger():
+    """B1 cost guard: an unresponded ask the sweep already surfaced as
+    scheduled_sweep_dialogue_pending must NOT keep re-triggering a spawn
+    (it stays visible elsewhere; it just no longer FORCES a full CC every tick).
+    A fresh, unflagged unresponded ask still triggers."""
+    blocked = _insert_msg_fixed(read=True, requires_response=True, responded=False)
+    assert _unresponded_count() == 1, "fresh unresponded ask must trigger"
+
+    _flag_dialogue_pending(blocked)
+    assert _unresponded_count() == 0, "a flagged (known-blocked) ask must stop re-spawning"
+
+    # A new unflagged ask still triggers (the trigger isn't globally muted).
+    fresh = _insert_msg_fixed(read=True, requires_response=True, responded=False)
+    assert _unresponded_count() == 1, "a fresh unflagged ask must still trigger"
+    assert fresh != blocked
+
+
+def test_flag_for_other_msg_does_not_exclude_this_one():
+    """The dedup_key is msg-id-scoped — a flag for a DIFFERENT message id must
+    not suppress this ask (no prefix-collision, e.g. id 3 vs 30)."""
+    mid = _insert_msg_fixed(read=True, requires_response=True, responded=False)
+    _flag_dialogue_pending(mid + 999999)  # flag a different (non-existent) id
+    assert _unresponded_count() == 1, "a flag for another msg id must not exclude this ask"
+
+
+# ── A2: agent_id is validated before going into the PostgREST filter ────────────
+
+def test_inbox_or_filter_rejects_unsafe_agent_id():
+    from scripts import agent_boot
+
+    # valid ids pass + still encode the predicate
+    assert "read_at.is.null" in agent_boot._inbox_or_filter("cc-reviewer-13")
+    # structural chars that would corrupt the or= filter are rejected
+    for bad in ["cc,evil", "cc-x(or(to_agent.eq.cai))", 'cc"x', "cc.x", "cc x"]:
+        with pytest.raises(ValueError):
+            agent_boot._inbox_or_filter(bad)
 
 
 # ── Sweep script stays valid bash ──────────────────────────────────────────────

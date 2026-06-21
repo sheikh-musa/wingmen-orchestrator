@@ -81,9 +81,28 @@ with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as c:
         # (the exact CAI-RESP-274 bug, never applied to this sweep), so routed
         # asks sat unanswered. The spawned session can substantively reply +
         # close the loop (Section D, fixed) — so unresponded is now actionable.
+        # CAI-RESP-296 B1 (backoff/dedup — cost guard): exclude asks the sweep
+        # has ALREADY surfaced as `scheduled_sweep_dialogue_pending` (Section D
+        # case (b): genuinely can't resolve this session — needs operator / a
+        # lane / a build). Their responded_at stays unset (no fabricated
+        # closure), so without this they'd re-spawn a full CC every 15-min tick
+        # forever with zero progress — the exact cost-sink the old unread-only
+        # comment warned about. Mirrors the SLA path's notification_log dedup:
+        # a known-blocked ask spawns ONCE to surface+flag it, then stops until
+        # its state changes (answered, or a fresh unflagged ask arrives). It
+        # stays visible (notification_log + boot_briefing + the boot inbox
+        # view) — it just no longer FORCES a spawn. dedup_key shape per the
+        # sweep prompt: scheduled_sweep:dialogue_pending:<self>:<msg_id>:<bucket>
         cur.execute(
-            "SELECT count(*) FROM agent_messages "
-            "WHERE to_agent=%s AND requires_response=true AND responded_at IS NULL",
+            "SELECT count(*) FROM agent_messages m "
+            "WHERE m.to_agent=%s AND m.requires_response=true "
+            "AND m.responded_at IS NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM notification_log n "
+            "  WHERE n.source='scheduled_sweep.dialogue_pending' "
+            "  AND n.dedup_key LIKE 'scheduled_sweep:dialogue_pending:' "
+            "      || m.to_agent || ':' || m.id::text || ':%%'"
+            ")",
             (family,)
         )
         unresponded = cur.fetchone()[0]
