@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3 /Users/sheikhmusa/wingmen/orchestrator/scripts/precompact_digest.py"
+          }
+        ]
+      }
+    ]
+  }
+}

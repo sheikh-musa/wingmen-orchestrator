@@ -21,6 +21,8 @@ import httpx
 import psycopg
 from dotenv import load_dotenv
 
+from nervous_system.operator_notify import notify_operator
+
 load_dotenv(Path(__file__).parent / ".env")
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -129,18 +131,8 @@ async def set_bot_description(online: bool) -> None:
 
 
 async def alert_admin(message: str) -> None:
-    """Send alert to ops group (or Musa DM as fallback)."""
-    chat_id = get_chat_id("ops")
-    if not TELEGRAM_TOKEN or not chat_id:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(
-                f"{TELEGRAM_API}/sendMessage",
-                json={"chat_id": chat_id, "text": message},
-            )
-    except Exception:
-        pass
+    """Alert the operator on @wingmennorchbot (ihsanosbot + its ops group retired)."""
+    await asyncio.to_thread(notify_operator, message, "fleet")
 
 
 async def try_restart_service(service: str) -> bool:

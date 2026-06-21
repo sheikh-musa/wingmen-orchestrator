@@ -52,7 +52,7 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # Heredoc subshells inherit env, not bash locals — export before invoking.
 export SCHEDULED_FAMILY="${FAMILY}"
 
-# Pre-filter via Python+psycopg. Returns "unread,sla" or "ERR" on exception.
+# Pre-filter via Python+psycopg. Returns "unread,unresponded,sla" or "ERR" on exception.
 # Empty-tick fast-path keeps cost low — typical run is ~200ms (interpreter
 # + connection establishment). Connect-on-error: fall through to spawn-CC
 # so transient DB glitches don't silently swallow real work.
@@ -76,34 +76,68 @@ with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as c:
             (family,)
         )
         unread = cur.fetchone()[0]
+        # CAI-RESP-296: read-but-UNANSWERED requires_response asks must also
+        # trigger a spawn. The read_at signal alone dropped them permanently
+        # (the exact CAI-RESP-274 bug, never applied to this sweep), so routed
+        # asks sat unanswered. The spawned session can substantively reply +
+        # close the loop (Section D, fixed) — so unresponded is now actionable.
+        # CAI-RESP-296 B1 (backoff/dedup — cost guard): exclude asks the sweep
+        # has ALREADY surfaced as `scheduled_sweep_dialogue_pending` (Section D
+        # case (b): genuinely can't resolve this session — needs operator / a
+        # lane / a build). Their responded_at stays unset (no fabricated
+        # closure), so without this they'd re-spawn a full CC every 15-min tick
+        # forever with zero progress — the exact cost-sink the old unread-only
+        # comment warned about. Mirrors the SLA path's notification_log dedup:
+        # a known-blocked ask spawns ONCE to surface+flag it, then stops until
+        # its state changes (answered, or a fresh unflagged ask arrives). It
+        # stays visible (notification_log + boot_briefing + the boot inbox
+        # view) — it just no longer FORCES a spawn. dedup_key shape per the
+        # sweep prompt: scheduled_sweep:dialogue_pending:<self>:<msg_id>:<bucket>
+        cur.execute(
+            "SELECT count(*) FROM agent_messages m "
+            "WHERE m.to_agent=%s AND m.requires_response=true "
+            "AND m.responded_at IS NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM notification_log n "
+            "  WHERE n.source='scheduled_sweep.dialogue_pending' "
+            "  AND n.dedup_key LIKE 'scheduled_sweep:dialogue_pending:' "
+            "      || m.to_agent || ':' || m.id::text || ':%%'"
+            ")",
+            (family,)
+        )
+        unresponded = cur.fetchone()[0]
         cur.execute(
             "SELECT count(*) FROM inbox_sla_violations "
             "WHERE agent=%s AND priority IN ('P1','P2') AND created_at >= %s",
             (family, CUTOFF)
         )
         sla = cur.fetchone()[0]
-print(f"{unread},{sla}")
+print(f"{unread},{unresponded},{sla}")
 PYEOF
 )
 
 # Decode counts; on ERR or malformed, default to spawn-CC (fail-open).
-if [[ "${counts}" =~ ^([0-9]+),([0-9]+)$ ]]; then
+if [[ "${counts}" =~ ^([0-9]+),([0-9]+),([0-9]+)$ ]]; then
     unread="${BASH_REMATCH[1]}"
-    sla="${BASH_REMATCH[2]}"
+    unresponded="${BASH_REMATCH[2]}"
+    sla="${BASH_REMATCH[3]}"
 else
     unread="?"
+    unresponded="?"
     sla="?"
 fi
 
-# Spawn decision: ONLY based on unread count. SLA count is for telemetry,
-# not spawn — many SLA violations are 'unresponded' on already-read messages
-# that the sweep CC has no legal way to act on per Section D (responded_at
-# is reserved for substantive dialogue, not sweep). Spawning on those just
-# burns Opus 4.7 tokens to confirm "can't help, exiting." Empirical
-# observation 2026-04-30: 50 fires × all-spawn × ~$0.10-0.20 each = real
-# money before this fix.
-if [ "${unread}" = "0" ]; then
-    echo "[${ts}] ${FAMILY}: empty tick (unread=${unread} sla=${sla} — sla-only, sweep can't act per Section D) — heartbeat + skip CC spawn"
+# Spawn decision (CAI-RESP-296): fire on unread OR unresponded.
+# - unread: a fresh message not yet read in any session.
+# - unresponded: a requires_response item that's been READ but never ANSWERED.
+#   Pre-296 the sweep keyed on unread alone, so read-but-unanswered asks (e.g.
+#   072-apply #3042, 071-review #3048, +42 others) dropped out permanently and
+#   sat 15 days. Now the spawned session resurfaces + genuinely answers them,
+#   closing the loop via responded_at (Section D fixed: real reply closes, no
+#   fabrication). SLA count stays telemetry-only (the unresponded signal
+#   already covers the actionable subset; SLA is the broader observability view).
+if [ "${unread}" = "0" ] && [ "${unresponded}" = "0" ]; then
+    echo "[${ts}] ${FAMILY}: empty tick (unread=${unread} unresponded=${unresponded} sla=${sla}) — heartbeat + skip CC spawn"
     # Heartbeat-only path. Targets the family-base `agents.last_heartbeat`
     # (single row, e.g. id='cc-orchestrator') — that surface is what
     # agent_watchdog._check_heartbeat_staleness monitors.
@@ -135,7 +169,7 @@ PYEOF
     exit 0
 fi
 
-echo "[${ts}] ${FAMILY}: spawning scheduled CC (unread=${unread} sla=${sla})"
+echo "[${ts}] ${FAMILY}: spawning scheduled CC (unread=${unread} unresponded=${unresponded} sla=${sla})"
 
 # Spawn the bounded CC session. The launcher's --scheduled-prompt flag
 # routes claude into non-interactive mode (claude -p) pointed at

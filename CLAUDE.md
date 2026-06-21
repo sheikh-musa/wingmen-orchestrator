@@ -43,6 +43,17 @@ the Mac Mini's Claude **Max** subscription, not metered API billing.
 - **Engineer lanes** (mirror, etc.): `scripts/lanes.sh ls` (status), `scripts/lanes.sh up [lane]` (boot down lanes, each in its own tmux session), `scripts/lanes.sh attach <lane>`. Idempotent: skips a lane that already has a `claude` running in its dir. Each lane runs `scripts/launch_dangerous_cc.sh` in a worktree.
 - **cc-cai** (singleton strategic node, agent_id='cai' exactly): boot via `scripts/boot_cai.sh` under tmux — `tmux new-session -d -s cai -c ~/wingmen/wingmen-cai scripts/boot_cai.sh`. NOT lanes.sh-managed (fleet_lanes registry desired_state='down'); operator-booted. The live copy at `~/wingmen/wingmen-cai/boot_cai.sh` should stay in sync with `scripts/boot_cai.sh` (canonical, tracked).
 
+## Operator Telegram bridge (@wingmennorchbot)
+
+The operator's 2-way bridge to cc-orchestrator (pure hub — operator talks to you, you delegate to lanes). `nervous_system/tg_bridge.py` (launchd `dev.wingmen.tg-bridge`) long-polls the bot and routes each operator message.
+
+- **Inbound:** when a live `orch` tmux session exists, the bridge injects the message into it as `📱 Operator (Telegram[, @tag]): <text>`. When you see that prefix you MUST reply with `scripts/tg_send.sh "<reply>" [tag]` — your terminal answer alone does NOT reach the operator's phone. (No live `orch` session → the bridge gives a graceful headless ack / deterministic `status`.)
+- **CRITICAL (failure on 2026-06-19):** a bridge message can arrive MID-TASK as a harness *"the user sent a new message while you were working"* injection — there the `📱` prefix is easy to miss, and replying only in the terminal means the operator gets NOTHING on his phone. So in the live `orch` session, **treat EVERY operator message as Telegram-bound: ALWAYS `tg_send` your reply**, regardless of whether the `📱` prefix is visible. Don't rely on the prefix — if you're the `orch` session, the operator is on his phone.
+- **Live-you requires tmux:** the operator gets the live session only when the orchestrator runs as tmux session **exactly** `orch` (`tmux new -s orch -- claude --resume`). The bridge exact-matches `=orch` (so it never hits the idle `orchestrator` session).
+- **Tagging:** `@adcda`/`@tdu`/`@cosem`, `@ihsanos`/`@irsyad`, `@scholar`/`@mizan`, `@qr`, `@fleet`/`@console`, `@cai`. The tag is *context*, not routing — you still own the conversation and delegate. Echo the context you assumed (e.g. lead a reply with `[cosem-tdu]`) so a wrong guess is correctable.
+- **Durability:** every message both directions is logged to `operator_messages` (inbound by the bridge, outbound by `tg_send.sh`). That log is the shared memory keeping the live-you and any headless/rebooted-you coherent — read `operator_log.recent()` to catch up.
+- **Option B — durable log is the source of truth (CAI-RESP-277):** delivery is guaranteed by the LOG + reconciliation, NOT by the keystroke nudge (which is signal-only/best-effort — never rely on it). At the start of each turn (and on the autonomous wakeup) read `operator_log.unprocessed()`; answer any unhandled inbound; then `operator_log.mark_handled_through(<max_id>)` to stamp them (at-least-once: a rare re-surface beats a loss). `operator_messages.handled_at` (timestamptz) is the cursor. This is why a dropped/garbled keystroke can no longer lose an operator message.
+
 ## Boot Sequence (three-tier memory)
 
 Context is scarce. Load the index first; fetch full content only when you need it.

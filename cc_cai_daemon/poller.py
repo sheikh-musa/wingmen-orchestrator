@@ -44,6 +44,11 @@ def fetch_unread_for_cai(dsn: str) -> list[dict]:
         "   AND read_at IS NULL "
         "   AND is_test = false "
         "   AND skipped_at IS NULL "
+        # Freshness bound: never escalate/reminder-loop on stale messages. A
+        # genuinely-pending cai item is handled within days; cai rarely sets
+        # read_at (it just replies on the bus), so without this an ancient
+        # un-read_at message (e.g. #2135, 300 days old) re-escalates forever.
+        "   AND am.created_at > now() - interval '4 days' "
         "   AND NOT EXISTS ("
         "       SELECT 1 FROM cc_cai_audit_log "
         "        WHERE agent_message_id = am.id "

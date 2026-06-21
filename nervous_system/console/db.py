@@ -105,6 +105,23 @@ def build_lanes_query() -> Tuple[str, list]:
     return sql, []
 
 
+def build_queue_query() -> Tuple[str, list]:
+    """lane_tasks — each lane's queued/active work in manual priority order
+    (lower priority_rank = higher priority). Done tasks excluded; the operator
+    reorders via the bridge (cc-orchestrator updates priority_rank)."""
+    sql = (
+        "SELECT lane, title, detail, priority_rank, status, "
+        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s, "
+        "  round(extract(epoch FROM (now() - started_at))/60)::int AS elapsed_min, "
+        "  sla_minutes, "
+        "  (sla_minutes IS NOT NULL AND started_at IS NOT NULL "
+        "     AND now() > started_at + (sla_minutes || ' minutes')::interval) AS over_sla "
+        "FROM lane_tasks WHERE status <> 'done' "
+        "ORDER BY lane, priority_rank, id"
+    )
+    return sql, []
+
+
 def build_deploys_query() -> Tuple[str, list]:
     """deploy_status — each workstream's push/live state across the fleet.
     `blocked` rows surface first (they need attention); the rest by recency so
@@ -150,4 +167,9 @@ def fetch_lanes() -> List[dict]:
 
 def fetch_deploys() -> List[dict]:
     sql, params = build_deploys_query()
+    return _query(sql, params)
+
+
+def fetch_queue() -> List[dict]:
+    sql, params = build_queue_query()
     return _query(sql, params)
