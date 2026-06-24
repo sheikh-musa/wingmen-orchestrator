@@ -28,9 +28,9 @@ import os
 import pathlib
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from nervous_system.console import auth, db, pii
+from nervous_system.console import auth, db, docs, media, pii
 from nervous_system.console.feed import Broadcaster, feeder
 
 logger = logging.getLogger("wingmen.console.app")
@@ -152,6 +152,14 @@ def _make_handler(feedloop: "_FeedLoop"):
             self.end_headers()
             self.wfile.write(body)
 
+        def _bytes(self, code: int, body: bytes, ctype: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
         def _authed(self, parsed) -> bool:
             query = parse_qs(parsed.query)
             return auth.check_bearer(dict(self.headers), query)
@@ -167,6 +175,18 @@ def _make_handler(feedloop: "_FeedLoop"):
 
             if path == "/" or path == "/index.html":
                 return self._serve_static("index.html", path)
+
+            # DOCS section: /docs and any /docs/<repo>/<path> deep link all serve
+            # the same SPA shell (open, like /). The shell reads window.location
+            # + the stored bearer token and fetches /api/docs* with the header,
+            # keeping auth header-only end to end (matches the rest of the SPA).
+            if path == "/docs" or path == "/docs/" or path.startswith("/docs/"):
+                return self._serve_static("docs.html", path)
+
+            # SCREENSHOTS section: mirrors DOCS — open SPA shell; the page fetches
+            # /api/media* with the stored bearer token (header-only).
+            if path == "/media" or path == "/media/" or path.startswith("/media/"):
+                return self._serve_static("media.html", path)
 
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
@@ -202,6 +222,51 @@ def _make_handler(feedloop: "_FeedLoop"):
                     rows = db.fetch_queue()
                     auth.audit(self._client(), path, "200")
                     return self._json(200, _jsonable(rows))
+
+                if path == "/api/docs":
+                    # Catalog of all fleet docs, grouped by repo/vertical.
+                    groups = docs.list_docs()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable(groups))
+
+                if path.startswith("/api/docs/"):
+                    # /api/docs/<repo>/<rel/path.md> -> one rendered doc.
+                    rest = path[len("/api/docs/"):]
+                    repo, sep, rel = rest.partition("/")
+                    repo = unquote(repo)
+                    rel = unquote(rel)
+                    if not sep or not repo or not rel:
+                        auth.audit(self._client(), path, "404")
+                        return self._json(404, {"error": "not found"})
+                    doc = docs.read_doc(repo, rel)
+                    if doc is None:
+                        auth.audit(self._client(), path, "404")
+                        return self._json(404, {"error": "not found"})
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable(doc))
+
+                if path == "/api/media":
+                    # Catalog of all screenshots/assets, grouped by project folder.
+                    groups = media.list_media()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable(groups))
+
+                if path.startswith("/api/media-file/"):
+                    # /api/media-file/<project>/<rel/path.png> -> raw image/pdf bytes.
+                    rest = path[len("/api/media-file/"):]
+                    project, sep, rel = rest.partition("/")
+                    project = unquote(project)
+                    rel = unquote(rel)
+                    if not sep or not project or not rel:
+                        auth.audit(self._client(), path, "404")
+                        return self._json(404, {"error": "not found"})
+                    blob = media.read_media_bytes(project, rel)
+                    if blob is None:
+                        auth.audit(self._client(), path, "404")
+                        return self._json(404, {"error": "not found"})
+                    raw, ctype = blob
+                    auth.audit(self._client(), path, "200")
+                    return self._bytes(200, raw, ctype)
 
                 if path == "/api/stream":
                     return self._serve_sse(parsed)

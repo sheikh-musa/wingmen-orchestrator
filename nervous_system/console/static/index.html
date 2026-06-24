@@ -31,6 +31,8 @@
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
   header .conn { font: 12px/1 var(--mono); color: var(--dim); }
+  header .navlink { font: 13px/1 var(--mono); color: var(--accent); text-decoration: none; font-weight: 600; }
+  header .navlink:active { opacity: .7; }
   header .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     background: var(--dim); margin-right: 6px; vertical-align: middle; }
   header .dot.live { background: var(--good); box-shadow: 0 0 6px var(--good); }
@@ -174,6 +176,8 @@
 <header>
   <h1>Fleet Console</h1>
   <span class="conn"><span id="dot" class="dot"></span><span id="connTxt">offline</span></span>
+  <a class="navlink" href="/docs">Docs &rarr;</a>
+  <a class="navlink" href="/media">Screenshots &rarr;</a>
   <div class="token-row">
     <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
     <button id="connect">Connect</button>
