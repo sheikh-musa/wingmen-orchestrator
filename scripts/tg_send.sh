@@ -10,7 +10,9 @@
 set -euo pipefail
 ORCH_DIR="$HOME/wingmen/orchestrator"
 TOK=$(grep '^WINGMEN_BOT_TOKEN=' "$ORCH_DIR/.env" | cut -d= -f2-)
-CHAT=$(grep '^MUSA_TELEGRAM_ID=' "$ORCH_DIR/.env" | cut -d= -f2-)
+# Default target = the operator (Musa). TG_CHAT_OVERRIDE lets the bridge route a
+# reply to a different authorized chat (e.g. the shipforge/storefront group).
+CHAT="${TG_CHAT_OVERRIDE:-$(grep '^MUSA_TELEGRAM_ID=' "$ORCH_DIR/.env" | cut -d= -f2-)}"
 [ -n "${TOK:-}" ] || { echo "WINGMEN_BOT_TOKEN missing from .env" >&2; exit 1; }
 [ -n "${CHAT:-}" ] || { echo "MUSA_TELEGRAM_ID missing from .env" >&2; exit 1; }
 

@@ -37,6 +37,11 @@ def _env(key: str) -> str | None:
 
 TOKEN = _env("WINGMEN_BOT_TOKEN")
 OPERATOR = str(_env("MUSA_TELEGRAM_ID"))
+# Scoped partner (Desmond Shen): authorized by Telegram @username; his numeric id
+# + the shipforge/storefront group id are LEARNED and pinned on first contact.
+# His SCOPE (shipforge+storefront only) is enforced by cc-orchestrator, not here.
+DESMOND_USER = (_env("DESMOND_TELEGRAM_USERNAME") or "").lower()
+PARTNERS_FILE = ORCH / "logs" / ".tg_partners.json"
 TMUX_TARGET = os.environ.get("TG_BRIDGE_TMUX_TARGET", "orch")
 # tmux does prefix/glob matching on -t, so "orch" would falsely match an idle
 # "orchestrator" session. The "=" prefix forces an EXACT session-name match.
@@ -101,8 +106,56 @@ def get_updates(offset: int):
         return json.load(r).get("result", [])
 
 
-def tg_send(text: str) -> None:
-    subprocess.run([str(ORCH / "scripts" / "tg_send.sh"), text], check=False)
+def tg_send(text: str, chat: str | None = None) -> None:
+    env = os.environ.copy()
+    if chat:
+        env["TG_CHAT_OVERRIDE"] = chat
+    subprocess.run([str(ORCH / "scripts" / "tg_send.sh"), text], check=False, env=env)
+
+
+def _load_partners() -> dict:
+    try:
+        return json.loads(PARTNERS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_partners(d: dict) -> None:
+    try:
+        PARTNERS_FILE.write_text(json.dumps(d))
+    except Exception:
+        pass
+
+
+def authorize(m: dict) -> dict | None:
+    """Identify the SENDER (not just the chat). Returns a sender descriptor for
+    an authorized person, else None. Musa = full operator (any chat); Desmond =
+    scoped partner (shipforge/storefront). Learns + pins Desmond's id + group id."""
+    frm = m.get("from") or {}
+    from_id = str(frm.get("id", ""))
+    from_user = (frm.get("username") or "").lower()
+    chat = m.get("chat") or {}
+    chat_id = str(chat.get("id", ""))
+    chat_type = chat.get("type", "")
+    sender = None
+    if from_id and from_id == OPERATOR:
+        sender = {"name": "Musa", "role": "operator", "scope": "all", "chat": chat_id}
+    else:
+        p = _load_partners()
+        if DESMOND_USER and (from_user == DESMOND_USER
+                             or (p.get("desmond_id") and from_id == p["desmond_id"])):
+            if from_id and p.get("desmond_id") != from_id:
+                p["desmond_id"] = from_id
+                _save_partners(p)
+            sender = {"name": "Desmond", "role": "partner",
+                      "scope": "shipforge/storefront", "chat": chat_id}
+    # Learn + pin the group id from EITHER authorized sender's first group message.
+    if sender and chat_type in ("group", "supergroup"):
+        p = _load_partners()
+        if p.get("group_id") != chat_id:
+            p["group_id"] = chat_id
+            _save_partners(p)
+    return sender
 
 
 def live_session() -> str | None:
@@ -183,7 +236,7 @@ def _clear_input(pane: str) -> None:
         subprocess.run(_tmux("send-keys", "-t", pane, "C-k"), check=False)
 
 
-def inject(text: str, tag: str | None) -> bool:
+def inject(text: str, tag: str | None, prefix: str | None = None) -> bool:
     """Type the operator's message into the live orch pane and submit it,
     verifying each step against the actual input box.
 
@@ -198,7 +251,8 @@ def inject(text: str, tag: str | None) -> bool:
     pane = _orch_pane()
     if not pane:
         return False
-    prefix = f"📱 Operator (Telegram{', @' + tag if tag else ''}): "
+    if prefix is None:
+        prefix = f"📱 Operator (Telegram{', @' + tag if tag else ''}): "
     line = prefix + " ".join(text.splitlines())
     needle = _norm(line)[:40]
     for _ in range(3):
@@ -257,7 +311,26 @@ def _download_photo(photos: list) -> str:
     return str(dest)
 
 
-def handle(m: dict, chat: str) -> None:
+def _download_document(doc: dict) -> str:
+    """Download a Telegram document (PDF/docx/csv/xlsx/etc.) to logs/tg_media and
+    return the local path. Preserves the operator's original file name (sanitised)
+    so cc-orchestrator can recognise + Read it. Token stays in the download URL
+    only — never logged. (getFile supports files up to ~20MB.)"""
+    file_id = doc["file_id"]
+    with urllib.request.urlopen(f"{API}/getFile?file_id={file_id}", timeout=30) as r:
+        fp = json.load(r)["result"]["file_path"]
+    media = ORCH / "logs" / "tg_media"
+    media.mkdir(parents=True, exist_ok=True)
+    # prefer the human file name; fall back to the telegram path basename
+    name = doc.get("file_name") or fp.rsplit("/", 1)[-1]
+    safe = "".join(ch if (ch.isalnum() or ch in "._- ") else "_" for ch in name).strip() or "file"
+    dest = media / safe
+    urllib.request.urlretrieve(f"https://api.telegram.org/file/bot{TOKEN}/{fp}", dest)
+    return str(dest)
+
+
+def handle(m: dict, chat: str, sender: dict | None = None) -> None:
+    sender = sender or {"name": "Musa", "role": "operator", "scope": "all"}
     text = m.get("text") or m.get("caption") or ""
     tag = parse_tag(text)
     content = text
@@ -269,6 +342,14 @@ def handle(m: dict, chat: str) -> None:
             content = f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             content = f"sent a photo (download failed: {e})" + (f" | {text}" if text else "")
+
+    # document (PDF/docx/csv/xlsx/etc.) -> download + hand cc-orchestrator the path
+    elif m.get("document"):
+        try:
+            path = _download_document(m["document"])
+            content = f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
+        except Exception as e:
+            content = f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
 
     # reply-threading -> prepend the quoted message so I know what it refers to
     rep = m.get("reply_to_message")
@@ -290,19 +371,29 @@ def handle(m: dict, chat: str) -> None:
             inject_text = (content[:_INJECT_CAP].rstrip() +
                            f" …[+{len(content) - _INJECT_CAP} chars truncated — "
                            f"full text: operator_log.recent()]")
-        if inject(inject_text, tag):
+        # Non-Musa senders get a labelled prefix so cc-orchestrator always knows
+        # WHO is speaking (provenance — never merge Musa/Desmond) + WHERE to reply.
+        prefix = None
+        if sender.get("name") != "Musa":
+            prefix = (f"📱 {sender['name']} [partner · {sender['scope']} · "
+                      f"reply→{chat}] (Telegram{', @' + tag if tag else ''}): ")
+        elif chat != OPERATOR:
+            # Musa, but posting in a group (not his private DM) → reply to the group.
+            prefix = (f"📱 Operator [group · reply→{chat}] "
+                      f"(Telegram{', @' + tag if tag else ''}): ")
+        if inject(inject_text, tag, prefix):
             return
         # Desk IS live but the injection couldn't land (busy pane). Don't claim
         # offline — tell the operator it's saved + queued so nothing feels lost.
         tg_send("📥 Got it — saved. The desk was mid-task so it didn't surface "
-                "instantly; I'll pick it up on my next breath. (Nothing lost.)")
+                "instantly; I'll pick it up on my next breath. (Nothing lost.)", chat)
         return
     if text.strip().lower().lstrip("/") == "status":
-        tg_send(status_snapshot())
+        tg_send(status_snapshot(), chat)
     else:
         tg_send("📥 Logged — but the desk (tmux) orchestrator isn't live right "
                 "now, so I'll pick this up the moment it is. Send 'status' for an "
-                "instant fleet snapshot in the meantime.")
+                "instant fleet snapshot in the meantime.", chat)
 
 
 def main() -> None:
@@ -319,8 +410,9 @@ def main() -> None:
                 OFFSET_FILE.write_text(str(offset))
                 m = u.get("message") or u.get("edited_message") or {}
                 chat = str(m.get("chat", {}).get("id", ""))
-                if chat == OPERATOR:
-                    handle(m, chat)
+                sender = authorize(m)
+                if sender:
+                    handle(m, chat, sender)
         except Exception as e:
             print(f"[tg_bridge] loop error: {type(e).__name__}: {e}", flush=True)
             time.sleep(5)
