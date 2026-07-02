@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""lane_watchdog.py — autonomous fleet progress-watchdog (CAI-RESP-284).
+
+THE PROBLEM it solves: the fleet is coordinated through cc-orchestrator (the hub).
+When the hub is busy, lanes that stall sit unnoticed until a manual sweep — shipforge
+sat idle ~a day on 2026-06-20; storefront/cosem-tdu/mirror repeatedly stalled on
+unsent keystrokes. This watchdog runs on a launchd timer INDEPENDENT of the hub's
+attention and keeps every lane on track.
+
+WHAT IT DOES per scan (every ~5 min):
+  - WORKING ('esc to interrupt')        -> leave alone (NEVER touch a working lane).
+  - FROZEN at folder-trust prompt        -> auto-answer (Enter = trust) immediately.
+  - IDLE + UNSENT INPUT (the dumb stall) -> verified-submit (Enter, confirm it took;
+        retry once; else escalate). Acts ONLY if the SAME unsent text persisted since
+        the previous scan (≈5 min) — avoids firing on a lane mid-keystroke.
+  - ON A DECISION DIALOG ('Enter to select') -> ESCALATE to the hub (needs judgment;
+        never auto-pick an option).
+  - IDLE-CLEAN (empty prompt)            -> leave alone (legitimately done/awaiting).
+
+SAFETY (cai HARD RULE 1, CAI-RESP-284): recovery NEVER depends on a bare blind
+send-keys — every auto-submit is VERIFIED (re-capture, confirm the pane entered a
+working state) and escalates if it can't. Working lanes are never disturbed.
+
+Escalations + actions are logged (logs/lane_watchdog.log) and posted to the bus
+(agent_messages -> cc-orchestrator) so the live hub sees them next turn.
+State persists in logs/lane_watchdog_state.json (for the cross-scan persistence guard).
+"""
+from __future__ import annotations
+import json, os, subprocess, sys, time
+from pathlib import Path
+from datetime import datetime, timezone
+
+ORCH = Path(os.path.expanduser("~/wingmen/orchestrator"))
+STATE_FILE = ORCH / "logs" / "lane_watchdog_state.json"
+LOG_FILE = ORCH / "logs" / "lane_watchdog.log"
+
+# Watch every live tmux lane by DENYLIST, not a hardcoded allowlist — the
+# allowlist silently failed to watch new/worktree sessions (e.g. 'cosem-adcda-2'
+# ran 3h dark on 2026-07-02 because it wasn't in the set). Now: watch all live
+# sessions EXCEPT the operator-attended hub and transient reviewers.
+# NEVER watch 'orch'/'orchestrator' (operator hub) or 'reviewer-*' (transient).
+NON_LANE_SESSIONS = {"orch", "orchestrator"}
+NON_LANE_PREFIXES = ("reviewer-", "billingtest", "catest")
+
+def log(msg: str) -> None:
+    line = f"{datetime.now(timezone.utc).isoformat()} | {msg}"
+    print(line)
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+def tmux(*args: str) -> str:
+    try:
+        return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return ""
+
+def live_sessions() -> list[str]:
+    out = tmux("list-sessions", "-F", "#{session_name}")
+    lanes = []
+    for s in out.splitlines():
+        if not s or s in NON_LANE_SESSIONS or s.startswith(NON_LANE_PREFIXES):
+            continue
+        lanes.append(s)
+    return lanes
+
+def capture(sess: str) -> str:
+    return tmux("capture-pane", "-t", sess, "-p")
+
+def input_line(cap: str) -> str:
+    # the Claude-Code TUI input line starts with the prompt glyph
+    for ln in reversed(cap.splitlines()):
+        s = ln.strip()
+        if s.startswith("❯"):           # ❯
+            return s[1:].strip()
+    return ""
+
+def classify(cap: str) -> str:
+    low = cap.lower()
+    footer = "\n".join(l for l in cap.splitlines() if l.strip())[-400:].lower()
+    # token-window wall signal (the real indicator we're hitting the Max limit) —
+    # check FIRST, it can appear over a 'working' or idle pane.
+    if ("usage limit" in low or "limit will reset" in low
+            or "reached your usage" in low or "approaching your usage" in low):
+        return "USAGE_LIMIT"
+    if "esc to interrupt" in footer:
+        return "WORKING"
+    if "trust this folder" in low or "do you trust" in low or "yes, i trust" in low:
+        return "TRUST_PROMPT"
+    if "enter to select" in footer:
+        return "ON_DIALOG"
+    if "for agents" in footer:                 # idle footer
+        return "IDLE_UNSENT" if input_line(cap) else "IDLE_CLEAN"
+    return "UNKNOWN"
+
+def verified_enter(sess: str) -> bool:
+    """Bare Enter (for the folder-trust prompt, where the 'Yes' option is
+    pre-highlighted). Confirm the pane left the prompt; retry once."""
+    for _ in range(2):
+        tmux("send-keys", "-t", sess, "Enter")
+        time.sleep(4)
+        if "esc to interrupt" in capture(sess).lower():
+            return True
+    return False
+
+def verified_resubmit(sess: str, text: str) -> bool:
+    """Reliably (re)submit a lane's own unsent prompt. Bare Enter is unreliable
+    (proven 2026-06-20) — use scripts/lane_nudge.sh (clear → retype → Enter →
+    VERIFY it entered a working state; retries; exit 0 = confirmed submitted)."""
+    if not text:
+        return verified_enter(sess)
+    try:
+        r = subprocess.run([str(ORCH / "scripts" / "lane_nudge.sh"), sess, text],
+                           capture_output=True, text=True, timeout=90)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+def escalate(sess: str, state: str, detail: str) -> None:
+    log(f"ESCALATE {sess}: {state} — {detail}")
+    try:
+        sys.path.insert(0, str(ORCH))
+        from dotenv import load_dotenv
+        import psycopg
+        load_dotenv(str(ORCH / ".env"))
+        dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+        with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
+            cur.execute(
+                """insert into agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority)
+                   values ('cc-orchestrator','cc-orchestrator','update',%s,%s,false,'P2')""",
+                (f"[watchdog] lane '{sess}' needs attention: {state}",
+                 f"lane_watchdog: '{sess}' is {state}. {detail} (Auto-recovery not applicable / exhausted — hub judgment needed.)"))
+            c.commit()
+    except Exception as e:
+        log(f"escalate-bus-failed {sess}: {e}")
+
+def main() -> int:
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except Exception:
+        state = {}
+    new_state = {}
+    for sess in live_sessions():
+        cap = capture(sess)
+        st = classify(cap)
+        inp = input_line(cap)
+        prev = state.get(sess, {})
+        new_state[sess] = {"state": st, "input": inp, "ts": time.time()}
+
+        if st == "USAGE_LIMIT":
+            # the token-window wall — escalate every scan (it's the one thing the
+            # operator explicitly wants caught before a forced reset-wait)
+            escalate(sess, st, "Claude usage-limit warning visible — pace/throttle the fleet NOW (pause speculative lanes, protect revenue + time-sensitive).")
+            continue
+        if st in ("WORKING", "IDLE_CLEAN", "UNKNOWN"):
+            continue
+        if st == "TRUST_PROMPT":
+            ok = verified_enter(sess)   # answering trust → returns to working/ready
+            log(f"{sess}: TRUST_PROMPT auto-answered (recovered={ok})")
+            if not ok:
+                escalate(sess, st, "folder-trust prompt would not clear")
+            continue
+        if st == "ON_DIALOG":
+            # needs a human/hub decision — escalate, but only once it's persisted a scan
+            if prev.get("state") == "ON_DIALOG":
+                escalate(sess, st, "sitting on a decision dialog across ≥2 scans — pick an option")
+            continue
+        if st == "IDLE_UNSENT":
+            # only auto-submit if the SAME unsent text persisted since the last scan
+            if prev.get("state") == "IDLE_UNSENT" and prev.get("input") == inp and inp:
+                ok = verified_resubmit(sess, inp)
+                log(f"{sess}: IDLE_UNSENT auto-submitted (recovered={ok}) input={inp[:60]!r}")
+                if not ok:
+                    escalate(sess, st, f"unsent prompt would not submit: {inp[:80]!r}")
+            else:
+                log(f"{sess}: IDLE_UNSENT (first sight — waiting one scan to confirm) input={inp[:60]!r}")
+    reap_ghosts()
+    log_burn()
+    try:
+        STATE_FILE.write_text(json.dumps(new_state))
+    except Exception as e:
+        log(f"state-write-failed: {e}")
+    return 0
+
+def reap_ghosts() -> None:
+    """Audited periodic reap of stale agent_status ghosts (CAI-RESP-292).
+
+    Instances that die uncleanly never run their clean-exit trap, so they linger
+    as status='working' forever. This calls the identity-respecting SECURITY
+    DEFINER sweeper to offline any non-offline row whose heartbeat is older than
+    the 8h freshness bound, stamping reaped_by='lane_watchdog' (honest, attributed
+    — never an anonymous forge, never disables the identity trigger, never touches
+    a live lane)."""
+    try:
+        sys.path.insert(0, str(ORCH))
+        from dotenv import load_dotenv
+        import psycopg
+        load_dotenv(str(ORCH / ".env"))
+        dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+        with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
+            cur.execute("select reaped_agent_id, stale_hours "
+                        "from sweep_stale_agents(interval '8 hours', 'lane_watchdog')")
+            reaped = cur.fetchall()
+            c.commit()
+        if reaped:
+            log("REAPED stale ghosts: " + ", ".join(f"{a}({h}h)" for a, h in reaped))
+    except Exception as e:
+        log(f"reap-ghosts-failed: {e}")
+
+def log_burn() -> None:
+    """Log the fleet's 5h OUTPUT-token burn (the limited resource) for trend
+    visibility. No precise Max cap is queryable, so we track the trend + rely on
+    the USAGE_LIMIT pane signal for the actual wall."""
+    try:
+        sys.path.insert(0, str(ORCH))
+        from dotenv import load_dotenv
+        import psycopg
+        load_dotenv(str(ORCH / ".env"))
+        dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+        with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
+            cur.execute("select coalesce(sum(coalesce(output_tokens,0)),0) "
+                        "from cc_session_costs where created_at > now() - interval '5 hours'")
+            out5h = float(cur.fetchone()[0] or 0)
+        log(f"BURN 5h-output={out5h/1e6:.2f}M tokens")
+    except Exception as e:
+        log(f"burn-log-failed: {e}")
+
+if __name__ == "__main__":
+    raise SystemExit(main())
