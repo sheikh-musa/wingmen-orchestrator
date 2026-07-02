@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import pathlib
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
@@ -372,9 +373,29 @@ def make_server(
     return httpd
 
 
+def _resolve_host(configured: str) -> str:
+    """CONSOLE_HOST='auto' (or 'tailscale') binds this host's OWN tailnet IP,
+    resolved at startup — a hardcoded IP in .env crash-loops the console the
+    moment the machine re-registers with a new tailnet address (2026-06-19),
+    and breaks again on every host migration (Mini→Studio→Linux)."""
+    if configured not in ("auto", "tailscale"):
+        return configured
+    for ts in ("/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
+               "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tailscale"):
+        try:
+            out = subprocess.run([ts, "ip", "-4"], capture_output=True,
+                                 text=True, timeout=5).stdout.strip().splitlines()
+            if out and out[0].startswith("100."):
+                return out[0]
+        except Exception:
+            continue
+    logger.warning("CONSOLE_HOST=auto but tailscale IP unresolvable — binding 127.0.0.1 (fail-closed)")
+    return "127.0.0.1"
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
-    host = os.environ.get("CONSOLE_HOST", _DEFAULT_HOST)
+    host = _resolve_host(os.environ.get("CONSOLE_HOST", _DEFAULT_HOST))
     port = int(os.environ.get("CONSOLE_PORT", str(_DEFAULT_PORT)))
     if not os.environ.get("CONSOLE_TOKEN"):
         logger.warning(
