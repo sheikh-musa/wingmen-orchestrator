@@ -124,13 +124,17 @@ def sweep() -> list[tuple[str, str, str]]:
             findings.append(("CRITICAL", name, f"NO git remote configured — {n} commits exist ONLY on this host"))
             continue
         git(repo, "fetch", "--all", "--quiet", timeout=120)
-        # 1. AUTO-HEAL: push branches ahead of an existing tracked upstream
+        # 1. AUTO-HEAL forgotten pushes; alert only on REAL tracking-branch trouble.
+        #    A branch tracking origin/<same-name> that is ahead+behind = genuine
+        #    divergence (alert). A feature branch tracking origin/main that is just
+        #    "behind main" is normal staleness, NOT a finding — suppress it.
         for b in branches(repo):
             up = upstream(repo, b)
             if not up:
                 continue
             ahead = git(repo, "rev-list", "--count", f"{up}..{b}")
             behind = git(repo, "rev-list", "--count", f"{b}..{up}")
+            same_name_upstream = up.split("/", 1)[-1] == b
             if ahead not in ("", "0") and behind in ("", "0"):
                 r = subprocess.run(["git", "-C", str(repo), "push", "origin", b],
                                    capture_output=True, text=True)
@@ -138,23 +142,26 @@ def sweep() -> list[tuple[str, str, str]]:
                     findings.append(("HEALED", name, f"auto-pushed {b} (+{ahead} ahead of {up})"))
                 else:
                     findings.append(("WARN", name, f"{b} +{ahead} ahead but push failed: {r.stderr.strip()[:80]}"))
-            elif ahead not in ("", "0") and behind not in ("", "0"):
-                findings.append(("WARN", name, f"{b} DIVERGED from {up} (+{ahead}/-{behind}) — needs reconcile"))
-        # 2. stranded commits (reachable from no remote)
+            elif ahead not in ("", "0") and behind not in ("", "0") and same_name_upstream:
+                # its own remote branch diverged — a real reconcile the lane must do
+                findings.append(("WARN", name, f"{b} DIVERGED from its own {up} (+{ahead}/-{behind}) — needs reconcile"))
+        # 2. stranded commits — log-only (mostly stashes / abandoned local branches).
         stranded = git(repo, "rev-list", "--count", "--all", "--not", "--remotes")
         if stranded not in ("", "0"):
-            findings.append(("WARN", name, f"{stranded} commit(s) on no remote (local-only branches / stash)"))
-        # 3. aged uncommitted
+            findings.append(("INFO", name, f"{stranded} commit(s) on no remote (likely stash/abandoned local branches)"))
+        # 3. uncommitted — log-only unless it's genuinely aging WIP on the checked-out branch.
         dirty = [l for l in git(repo, "status", "--porcelain").splitlines() if l]
         if dirty:
-            # age of the newest change in the working tree
             try:
                 mtimes = [os.path.getmtime(repo / l[3:].split(" -> ")[-1])
                           for l in dirty if (repo / l[3:].split(" -> ")[-1]).exists()]
                 oldest_hrs = (time.time() - min(mtimes)) / 3600 if mtimes else 0
             except Exception:
                 oldest_hrs = 0
-            sev = "WARN" if oldest_hrs >= STALE_HRS else "INFO"
+            # Only ALERT on aged WIP in a primary lane repo (projects/), not secondary
+            # checkouts like the Studio's orchestrator mirror. Otherwise log-only.
+            is_lane = repo.parent.name == "projects"
+            sev = "WARN" if (oldest_hrs >= STALE_HRS and is_lane and oldest_hrs < 24 * 30) else "INFO"
             findings.append((sev, name, f"{len(dirty)} uncommitted file(s), oldest ~{oldest_hrs:.0f}h"))
         # 4. deploy gap (Firebase)
         dg = firebase_deploy_behind(name, repo)
