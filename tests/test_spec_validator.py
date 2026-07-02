@@ -50,7 +50,9 @@ def test_wrong_job_id_in_promise_fails():
 
 
 def test_case_insensitive_headings():
-    spec = "### role\nfoo\n### task\nbar\n### constraints\nbaz\n### acceptance criteria\nqux\n### files to touch\n| f |\n<promise>JOB_5_DONE</promise>"
+    spec = ("### role\nfoo\n### task\nbar\n### constraints\nbaz\n### acceptance criteria\nqux\n"
+            "### files to touch\n| f |\n<promise>JOB_5_DONE</promise>\n"
+            f"### base ref (pinned — cai-resp-358)\npinned at spec time: origin/main @ `{'d' * 40}`.\n")
     ok, errs = validate_spec(spec, 5)
     assert ok
     assert errs == []
