@@ -32,10 +32,12 @@ if [ "$HTTP" != "200" ] && [ "$HTTP" != "307" ]; then
 fi
 
 # 2. Orchestrator Supabase (tscuymavysscrvoberrr = wingmen-ops).
-#    Query bot_heartbeat (orchestrator-owned) not organizations (ihsanos-owned
-#    and about to be dropped in Phase C).
+#    Probe `agents` (core substrate table, never dropped). Was bot_heartbeat,
+#    which the 2026-07-01 monolith cleanup dropped with the bot_* test tables —
+#    the probe then 404'd forever and paged the operator hourly about a healthy
+#    DB (diagnosed by cai 2026-07-02).
 HTTP=$(ping_http \
-  "https://tscuymavysscrvoberrr.supabase.co/rest/v1/bot_heartbeat?select=service&limit=1" \
+  "https://tscuymavysscrvoberrr.supabase.co/rest/v1/agents?select=id&limit=1" \
   -H "apikey: $SUPABASE_SERVICE_KEY" \
   -H "Authorization: Bearer $SUPABASE_SERVICE_KEY")
 if [ "$HTTP" != "200" ]; then
@@ -54,37 +56,58 @@ if [ -n "${IHSANOS_SUPABASE_SERVICE_KEY:-}" ]; then
   fi
 fi
 
-# 3. Check bot process
-if ! pgrep -f "cto_bot.py" > /dev/null 2>&1; then
-  ISSUES="$ISSUES\n❌ ihsanOS Bot: not running"
-fi
+# 3. (retired) ihsanOS bot — cto_bot.py is RETIRED, replaced by @dookanabot
+#    (env token is IHSANOSBOT_TOKEN_RETIRED; launchd plist moved to
+#    ops/launchd/disabled-ihsanosbot/). No live process to monitor, so this
+#    check was a permanent false "not running" alert — removed (OPS-HEALTH-338 #1).
 
-# 4. Check Mizan bot process
-if ! pgrep -f "mizan_bot.py" > /dev/null 2>&1; then
-  ISSUES="$ISSUES\n❌ Mizan Bot: not running"
-fi
+# 4. (suspended) Mizan bot process — dark since the Mac Mini cutover; alerting
+#    on a bot we KNOW is down pages the operator hourly with no action to take.
+#    Revives as an ai-responder channel in bot-ingest P3 (CAI-RESP-357); at P4
+#    the watchdog reads bot_channels.enabled instead of pgrep, and this whole
+#    check class is deleted. Suspended by cai 2026-07-02.
+# if ! pgrep -f "mizan_bot.py" > /dev/null 2>&1; then
+#   ISSUES="$ISSUES\n❌ Mizan Bot: not running"
+# fi
 
-# 5. Check brain_sync freshness (should run every 4h)
-BRAIN_AGE=$(python3 -c "
-import os, time
-p = os.path.expanduser('~/wingmen/BRAIN.md')
-if os.path.exists(p):
-    age = (time.time() - os.path.getmtime(p)) / 3600
-    print(f'{age:.1f}')
-else:
-    print('999')
-" 2>/dev/null || echo "999")
-
-if python3 -c "exit(0 if float('$BRAIN_AGE') < 5 else 1)" 2>/dev/null; then
-  : # Brain is fresh
-else
-  ISSUES="$ISSUES\n⚠️ Brain sync stale: ${BRAIN_AGE}h old"
-fi
+# 5. (retired) Brain-sync freshness — wingmen_brain/BRAIN.md sync is DEPRECATED,
+#    superseded by the Supabase substrate. Its only writer was cto_bot (retired),
+#    so the file always went stale and this check fired permanently. cai
+#    confirmed RETIRE (OPS-HEALTH-338 #4 / item C).
 
 # 6. Check disk space
 DISK_USED=$(df -h / | tail -1 | awk '{print $5}' | tr -d '%')
 if [ "$DISK_USED" -gt 90 ]; then
   ISSUES="$ISSUES\n⚠️ Disk space: ${DISK_USED}% used"
+fi
+
+# 7. CI health — detect a GitHub Actions startup_failure outage (CAI-RESP-338).
+#    The billing API is 404 to our token, so we detect the FAILURE SIGNAL instead:
+#    if the latest 3 ihsanos runs ALL conclude startup_failure (0s, runner never
+#    starts), Actions is blocked — almost always the monthly minutes/budget cap,
+#    the exact outage of 2026-06-28 that was discovered only via a broken merge.
+#    Alerts the WAR ROOM ONCE per outage (own dedup, cleared on recovery), so it
+#    never again surfaces through a failed merge. Independent of the DM alert above.
+CI_ALERT_FILE="/tmp/ci_down_alert_sent"
+GH_BIN="$(command -v gh || echo /usr/local/bin/gh)"
+if [ -x "$GH_BIN" ] && [ -n "${GH_TOKEN:-}" ]; then
+  CI_CONCS=$("$GH_BIN" run list -R sheikh-musa/ihsanos --limit 3 --json conclusion -q '.[].conclusion' 2>/dev/null)
+  CI_TOTAL=$(printf '%s\n' "$CI_CONCS" | grep -c .)
+  CI_FAILS=$(printf '%s\n' "$CI_CONCS" | grep -c 'startup_failure')
+  if [ "$CI_TOTAL" -ge 3 ] && [ "$CI_FAILS" = "$CI_TOTAL" ]; then
+    if [ ! -f "$CI_ALERT_FILE" ]; then
+      TG_CHAT_OVERRIDE="-5383530504" "$HOME/wingmen/orchestrator/scripts/tg_send.sh" \
+        "🚨 CI DOWN — GitHub Actions is failing at startup on every run (latest $CI_TOTAL all died at 0s). Most likely the monthly Actions minutes/budget is exhausted, so merges will block. Fix: raise the GitHub Actions spending limit (or wait for the next billing cycle reset). This is NOT a code bug." >/dev/null 2>&1
+      touch "$CI_ALERT_FILE"
+      echo "$(date): CI-DOWN alert sent to war-room ($CI_FAILS/$CI_TOTAL startup_failure)"
+    fi
+  else
+    # CI recovered (a non-failing run appeared) — clear the dedup so a future outage re-alerts
+    if [ -f "$CI_ALERT_FILE" ]; then
+      rm -f "$CI_ALERT_FILE"
+      echo "$(date): CI recovered — alert flag cleared"
+    fi
+  fi
 fi
 
 # Alert if issues found
