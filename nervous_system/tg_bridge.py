@@ -19,6 +19,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -149,8 +150,12 @@ def authorize(m: dict) -> dict | None:
                 _save_partners(p)
             sender = {"name": "Desmond", "role": "partner",
                       "scope": "shipforge/storefront", "chat": chat_id}
-    # Learn + pin the group id from EITHER authorized sender's first group message.
-    if sender and chat_type in ("group", "supergroup"):
+    # Learn + pin the partner group id from the PARTNER's group messages ONLY.
+    # (Was "either authorized sender" — but the operator sits in multiple groups,
+    # so his war-room messages kept re-pinning the war room as the partner group.
+    # Operator correction 2026-07-02: -5383530504 = war room, NOT Shen's group.
+    # Dies at ingest cutover: bot_channels.group_routing owns this as config.)
+    if sender and sender["role"] == "partner" and chat_type in ("group", "supergroup"):
         p = _load_partners()
         if p.get("group_id") != chat_id:
             p["group_id"] = chat_id
@@ -188,6 +193,17 @@ def _capture(pane: str, n: int = 30) -> list[str]:
     r = subprocess.run(_tmux("capture-pane", "-p", "-t", pane),
                        capture_output=True, text=True)
     return r.stdout.splitlines()[-n:]
+
+
+def _pane_busy(pane: str) -> bool:
+    """True iff the orch session is mid-task (WORKING), using the same observable
+    heuristic as scripts/lane_nudge.sh: the live footer (last 3 non-blank rows)
+    shows 'esc to interrupt' AND NOT 'for agents'. Pure read-only capture-pane —
+    never types. Callers MUST wrap in try/except (any failure => treat as not
+    busy, so the normal inject path is never blocked)."""
+    cap = "\n".join(l for l in _capture(pane, 30) if l.strip())[-2000:]
+    tail = "\n".join(cap.splitlines()[-3:])
+    return ("esc to interrupt" in tail) and ("for agents" not in tail)
 
 
 def _norm(s: str) -> str:
@@ -297,6 +313,33 @@ def status_snapshot() -> str:
     return "Fleet snapshot —\n" + ("\n".join(parts) if parts else "all quiet")
 
 
+def _fetch_telegram_file(fp: str, dest) -> str:
+    """Download api.telegram.org/file/<fp> -> dest with retry + backoff.
+    Telegram's file CDN intermittently drops the connection mid-download (Errno 54
+    'Connection reset by peer'); a bare urlretrieve has no retry, which silently
+    lost the operator's signed DPA + ADCDA photos twice (2026-06-28, CAI-RESP).
+    Stream in chunks, retry transient failures, verify the file is non-empty."""
+    url = f"https://api.telegram.org/file/bot{TOKEN}/{fp}"
+    last = None
+    for i in range(4):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r, open(dest, "wb") as f:
+                shutil.copyfileobj(r, f, length=65536)
+            if os.path.getsize(dest) > 0:
+                return str(dest)
+            last = "empty download"
+        except Exception as e:  # ConnectionResetError / URLError / socket timeout / …
+            last = e
+        try:
+            if os.path.exists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+        if i < 3:
+            time.sleep(min(2 ** i, 8))  # 1s, 2s, 4s
+    raise RuntimeError(f"telegram file download failed after 4 attempts: {last}")
+
+
 def _download_photo(photos: list) -> str:
     """Download the largest size of a Telegram photo to logs/tg_media and return
     the local path (so cc-orchestrator can Read the image). Token stays in the
@@ -307,8 +350,7 @@ def _download_photo(photos: list) -> str:
     media = ORCH / "logs" / "tg_media"
     media.mkdir(parents=True, exist_ok=True)
     dest = media / fp.replace("/", "_")
-    urllib.request.urlretrieve(f"https://api.telegram.org/file/bot{TOKEN}/{fp}", dest)
-    return str(dest)
+    return _fetch_telegram_file(fp, dest)
 
 
 def _download_document(doc: dict) -> str:
@@ -325,8 +367,7 @@ def _download_document(doc: dict) -> str:
     name = doc.get("file_name") or fp.rsplit("/", 1)[-1]
     safe = "".join(ch if (ch.isalnum() or ch in "._- ") else "_" for ch in name).strip() or "file"
     dest = media / safe
-    urllib.request.urlretrieve(f"https://api.telegram.org/file/bot{TOKEN}/{fp}", dest)
-    return str(dest)
+    return _fetch_telegram_file(fp, dest)
 
 
 def handle(m: dict, chat: str, sender: dict | None = None) -> None:
@@ -381,12 +422,26 @@ def handle(m: dict, chat: str, sender: dict | None = None) -> None:
             # Musa, but posting in a group (not his private DM) → reply to the group.
             prefix = (f"📱 Operator [group · reply→{chat}] "
                       f"(Telegram{', @' + tag if tag else ''}): ")
+        # INSTANT BUSY-ACK: if the session is mid-task it can't surface the reply
+        # until it frees, so fire an immediate honest ack so the operator is never
+        # left in silence (the real reply still follows via the unchanged inject
+        # path below). Fully guarded: ANY failure falls through to normal flow.
+        busy_acked = False
+        try:
+            _pane = _orch_pane()
+            if _pane and _pane_busy(_pane):
+                tg_send("got it 👍 — mid-task, real reply coming shortly.", chat)
+                busy_acked = True
+        except Exception as e:
+            print(f"[tg_bridge] busy-ack skipped: {type(e).__name__}: {e}", flush=True)
         if inject(inject_text, tag, prefix):
             return
         # Desk IS live but the injection couldn't land (busy pane). Don't claim
         # offline — tell the operator it's saved + queued so nothing feels lost.
-        tg_send("📥 Got it — saved. The desk was mid-task so it didn't surface "
-                "instantly; I'll pick it up on my next breath. (Nothing lost.)", chat)
+        # (Skip if we already fired the instant busy-ack — no need to double up.)
+        if not busy_acked:
+            tg_send("📥 Got it — saved. The desk was mid-task so it didn't surface "
+                    "instantly; I'll pick it up on my next breath. (Nothing lost.)", chat)
         return
     if text.strip().lower().lstrip("/") == "status":
         tg_send(status_snapshot(), chat)
