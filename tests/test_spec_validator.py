@@ -3,7 +3,7 @@
 from spec_generator import validate_spec
 
 
-def _make_spec(job_id=1, sections=None, promise=True):
+def _make_spec(job_id=1, sections=None, promise=True, base_ref=True):
     """Build a spec string with the given sections."""
     if sections is None:
         sections = ["### Role", "### Task", "### Implementation Plan",
@@ -13,6 +13,10 @@ def _make_spec(job_id=1, sections=None, promise=True):
         parts.append(f"{s}\nSome content here.\n")
     if promise:
         parts.append(f"<promise>JOB_{job_id}_DONE</promise>")
+    if base_ref:
+        # CAI-RESP-358: every valid spec carries a pinned base ref
+        parts.append("### Base Ref (pinned — CAI-RESP-358)\n"
+                     f"Pinned at spec time: origin/main @ `{'c' * 40}`.\n")
     return "\n".join(parts)
 
 
