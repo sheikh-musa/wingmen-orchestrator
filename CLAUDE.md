@@ -2,6 +2,11 @@
 
 Always-on Python orchestrator running on Mac Mini that manages builds, deploys, and jobs across multiple repos via Telegram commands.
 
+## Fleet doctrine (cai-ratified — binding on every agent from boot)
+
+- **TENANT-RESIDENCY-001** — a client's DATA (rows) lives in that client's designated store, ALWAYS, for every client. Shared generalized code / one-repo-zero-forks is fine; commingling a client's rows into another project's DB is not. A new client's silo is provisioned/designated BEFORE the first client data write — never "temporarily" in a shared project. Residency exceptions require a joint operator+cai grant and must expire. Verify the write-target silo before ANY client data path goes live (standing pre-live residency gate).
+- **LAYER-VOCAB-001** — bare product names ("ihsanos", "cosem") are INVALID as data references. Always name the layer — **frontend** (shared app) vs **data** — and for data name the exact store + `project ref` per `docs/data-store-registry.md` (e.g. "ihsanos multi-tenant DB `ceayjeamtmcyzzvqflus`" vs "irsyad silo (goumlyne) `goumlynecruxrlmzlntp`"). Data-writes/gate-requests carry the ref; layer-ambiguity in a data-path spec is a review FINDING, not style (same rejection class as an unpinned migration).
+
 ## Stack
 - Python 3.9 (venv at `.venv/`)
 - Supabase (DB: jobs, build_log, repo_memory, clients)
