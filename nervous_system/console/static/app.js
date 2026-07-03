@@ -185,70 +185,130 @@
     }
   });
 
+  // SLA chip + task card markup, shared by the merged Lanes view below (used
+  // to be the standalone Queue tab — folded into Lanes per operator layout
+  // decision, msg re: 3-tab layout).
+  function renderQtask(t, i) {
+    var st = (t.status || "queued").toLowerCase();
+    var sla = "";
+    if (t.sla_minutes != null && t.elapsed_min != null) {
+      var over = !!t.over_sla;
+      sla = '<span class="sla' + (over ? ' over' : '') + '">' +
+              (over ? '⚠ ' : '') + t.elapsed_min + 'm/' + t.sla_minutes + 'm' +
+            '</span>';
+    } else if (t.sla_minutes != null) {
+      sla = '<span class="sla idle">SLA ' + t.sla_minutes + 'm</span>';
+    }
+    return '<div class="qtask' + (t.over_sla ? ' breached' : '') + '">' +
+      '<div class="top">' +
+        '<span class="rank">' + (i + 1) + '.</span>' +
+        '<span class="title">' + esc(t.title) + '</span>' +
+        sla +
+        '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
+      '</div>' +
+      (t.detail ? '<div class="detail">' + esc(t.detail) + '</div>' : '') +
+    '</div>';
+  }
+
+  // Lanes tab = merged status + queue + live-peek (3-tab layout: Lanes,
+  // Messages, Deploys — Queue is no longer a separate tab). Fetches both
+  // /api/lanes and /api/queue and folds each lane's tasks + peek control
+  // into its own card.
   function loadLanes() {
-    return fetch("/api/lanes", { headers: authHeaders() })
-      .then(function (r) {
-        if (r.status === 401) { setConn("down"); $("lanes").innerHTML = UNAUTH_HINT; throw new Error("unauthorized"); }
-        return r.json();
-      })
-      .then(function (rows) {
-        var box = $("lanes");
-        if (!rows.length) { box.innerHTML = '<div class="empty">No lanes.</div>'; return; }
-        // Dark/stale-and-should-be-up lanes float to the top — that's the
-        // thing worth an operator's attention on a small screen first.
-        rows = rows.slice().sort(function (a, b) {
-          var ra = FLAG_RANK[laneFlag(a)]; var rb = FLAG_RANK[laneFlag(b)];
-          if (ra == null) ra = 2; if (rb == null) rb = 2;
-          return ra - rb;
-        });
-        var reopenSession = openPeek ? openPeek.session : null;
-        if (peekTimer) { clearInterval(peekTimer); peekTimer = null; } // rebind to the fresh DOM below
-        box.innerHTML = rows.map(function (l) {
-          var st = (l.status || "unknown").toLowerCase();
-          var hb = l.heartbeat_age_s;
-          var hbTxt = hb == null ? "no heartbeat" : fmtAge(hb);
-          var flag = laneFlag(l);
-          // "working on" = latest bus activity (current_task is just the boot string)
-          var task = l.activity || l.current_task || "";
-          var taskAge = l.activity != null && l.activity_age_s != null ? fmtAge(l.activity_age_s) : "";
-          return '<div class="lane' + (flag ? ' flag-' + flag : '') + '">' +
-            '<div class="top">' +
-              '<span class="id">' + esc(l.agent_id) + '</span>' +
-              (flag ? '<span class="flag ' + flag + '">' + (flag === "dark" ? "dark" : "going stale") + '</span>' : '') +
-              '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
-            '</div>' +
-            (task ? '<div class="task">' + esc(task) +
-              (taskAge ? ' <span class="taskage">&middot; ' + esc(taskAge) + '</span>' : '') + '</div>' : '') +
-            '<div class="hb ' + laneHbClass(hb) + '">hb ' + esc(hbTxt) + '</div>' +
-            (l.desired_state ? '<div class="desired">desired: ' + esc(l.desired_state) +
-              (l.lane ? ' (' + esc(l.lane) + ')' : '') + '</div>' : '') +
-            (l.lane ?
-              '<button class="ghost peek-toggle" data-lane="' + esc(l.lane) + '">Peek</button>' +
-              '<div class="peek-box" data-lane="' + esc(l.lane) + '"></div>'
-              : '') +
-          '</div>';
-        }).join("");
-        box.querySelectorAll(".peek-toggle").forEach(function (btn) {
-          var session = btn.getAttribute("data-lane");
-          var peekBox = btn.closest(".lane").querySelector(".peek-box");
-          btn.addEventListener("click", function () {
-            if (openPeek && openPeek.session === session) {
-              peekBox.classList.remove("open");
-              stopPeek();
-              btn.textContent = "Peek";
-              return;
-            }
-            box.querySelectorAll(".peek-box.open").forEach(function (b) { b.classList.remove("open"); });
-            box.querySelectorAll(".peek-toggle").forEach(function (b) { b.textContent = "Peek"; });
-            startPeek(session, peekBox);
-            btn.textContent = "Hide";
-          });
-          if (session === reopenSession) {
-            startPeek(session, peekBox);
-            btn.textContent = "Hide";
-          }
-        });
+    return Promise.all([
+      fetch("/api/lanes", { headers: authHeaders() }),
+      fetch("/api/queue", { headers: authHeaders() }),
+    ]).then(function (resps) {
+      if (resps[0].status === 401 || resps[1].status === 401) {
+        setConn("down"); $("lanes").innerHTML = UNAUTH_HINT; throw new Error("unauthorized");
+      }
+      return Promise.all(resps.map(function (r) { return r.json(); }));
+    }).then(function (results) {
+      var rows = results[0], queueRows = results[1];
+      var box = $("lanes");
+      if (!rows.length && !queueRows.length) { box.innerHTML = '<div class="empty">No lanes.</div>'; return; }
+
+      // group queue tasks by lane so each lane card can show its own work.
+      var tasksByLane = {};
+      queueRows.forEach(function (t) {
+        if (!tasksByLane[t.lane]) tasksByLane[t.lane] = [];
+        tasksByLane[t.lane].push(t);
       });
+      var consumed = {};
+
+      // Dark/stale-and-should-be-up lanes float to the top — that's the
+      // thing worth an operator's attention on a small screen first.
+      rows = rows.slice().sort(function (a, b) {
+        var ra = FLAG_RANK[laneFlag(a)]; var rb = FLAG_RANK[laneFlag(b)];
+        if (ra == null) ra = 2; if (rb == null) rb = 2;
+        return ra - rb;
+      });
+      var reopenSession = openPeek ? openPeek.session : null;
+      if (peekTimer) { clearInterval(peekTimer); peekTimer = null; } // rebind to the fresh DOM below
+
+      var laneCards = rows.map(function (l) {
+        var st = (l.status || "unknown").toLowerCase();
+        var hb = l.heartbeat_age_s;
+        var hbTxt = hb == null ? "no heartbeat" : fmtAge(hb);
+        var flag = laneFlag(l);
+        // "working on" = latest bus activity (current_task is just the boot string)
+        var task = l.activity || l.current_task || "";
+        var taskAge = l.activity != null && l.activity_age_s != null ? fmtAge(l.activity_age_s) : "";
+        var tasks = l.lane && tasksByLane[l.lane] ? tasksByLane[l.lane] : [];
+        if (l.lane) consumed[l.lane] = true;
+        var tasksHtml = tasks.length
+          ? '<div class="tasks">' + tasks.map(renderQtask).join("") + '</div>'
+          : "";
+        return '<div class="lane' + (flag ? ' flag-' + flag : '') + '">' +
+          '<div class="top">' +
+            '<span class="id">' + esc(l.agent_id) + '</span>' +
+            (flag ? '<span class="flag ' + flag + '">' + (flag === "dark" ? "dark" : "going stale") + '</span>' : '') +
+            '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
+          '</div>' +
+          (task ? '<div class="task">' + esc(task) +
+            (taskAge ? ' <span class="taskage">&middot; ' + esc(taskAge) + '</span>' : '') + '</div>' : '') +
+          '<div class="hb ' + laneHbClass(hb) + '">hb ' + esc(hbTxt) + '</div>' +
+          (l.desired_state ? '<div class="desired">desired: ' + esc(l.desired_state) +
+            (l.lane ? ' (' + esc(l.lane) + ')' : '') + '</div>' : '') +
+          tasksHtml +
+          (l.lane ?
+            '<button class="ghost peek-toggle" data-lane="' + esc(l.lane) + '">Peek</button>' +
+            '<div class="peek-box" data-lane="' + esc(l.lane) + '"></div>'
+            : '') +
+        '</div>';
+      }).join("");
+
+      // Queued work for a lane with no live agent_status row (e.g. not yet
+      // booted) still needs to be visible — nothing silently dropped.
+      var orphanCards = Object.keys(tasksByLane).filter(function (ln) { return !consumed[ln]; })
+        .map(function (ln) {
+          return '<div class="qlane">@' + esc(ln) + ' (no live status)</div>' +
+            tasksByLane[ln].map(renderQtask).join("");
+        }).join("");
+
+      box.innerHTML = laneCards + orphanCards;
+
+      box.querySelectorAll(".peek-toggle").forEach(function (btn) {
+        var session = btn.getAttribute("data-lane");
+        var peekBox = btn.closest(".lane").querySelector(".peek-box");
+        btn.addEventListener("click", function () {
+          if (openPeek && openPeek.session === session) {
+            peekBox.classList.remove("open");
+            stopPeek();
+            btn.textContent = "Peek";
+            return;
+          }
+          box.querySelectorAll(".peek-box.open").forEach(function (b) { b.classList.remove("open"); });
+          box.querySelectorAll(".peek-toggle").forEach(function (b) { b.textContent = "Peek"; });
+          startPeek(session, peekBox);
+          btn.textContent = "Hide";
+        });
+        if (session === reopenSession) {
+          startPeek(session, peekBox);
+          btn.textContent = "Hide";
+        }
+      });
+    });
   }
 
   // Known stages get a class for colour; anything else falls back to dim.
@@ -291,50 +351,6 @@
             (d.detail ? '<div class="detail">' + esc(d.detail) + '</div>' : '') +
             url +
           '</div>';
-        }).join("");
-      });
-  }
-
-  function loadQueue() {
-    return fetch("/api/queue", { headers: authHeaders() })
-      .then(function (r) {
-        if (r.status === 401) { setConn("down"); $("queue").innerHTML = UNAUTH_HINT; throw new Error("unauthorized"); }
-        return r.json();
-      })
-      .then(function (rows) {
-        var box = $("queue");
-        if (!rows.length) { box.innerHTML = '<div class="empty">No queued tasks.</div>'; return; }
-        // group by lane, preserving the server's (lane, priority_rank) order
-        var groups = {}, order = [];
-        rows.forEach(function (t) {
-          if (!groups[t.lane]) { groups[t.lane] = []; order.push(t.lane); }
-          groups[t.lane].push(t);
-        });
-        box.innerHTML = order.map(function (lane) {
-          var items = groups[lane].map(function (t, i) {
-            var st = (t.status || "queued").toLowerCase();
-            // SLA chip: elapsed-vs-budget. Only show once the task is started
-            // and has an SLA. over_sla (server-computed) turns the chip red.
-            var sla = "";
-            if (t.sla_minutes != null && t.elapsed_min != null) {
-              var over = !!t.over_sla;
-              sla = '<span class="sla' + (over ? ' over' : '') + '">' +
-                      (over ? '⚠ ' : '') + t.elapsed_min + 'm/' + t.sla_minutes + 'm' +
-                    '</span>';
-            } else if (t.sla_minutes != null) {
-              sla = '<span class="sla idle">SLA ' + t.sla_minutes + 'm</span>';
-            }
-            return '<div class="qtask' + (t.over_sla ? ' breached' : '') + '">' +
-              '<div class="top">' +
-                '<span class="rank">' + (i + 1) + '.</span>' +
-                '<span class="title">' + esc(t.title) + '</span>' +
-                sla +
-                '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
-              '</div>' +
-              (t.detail ? '<div class="detail">' + esc(t.detail) + '</div>' : '') +
-            '</div>';
-          }).join("");
-          return '<div class="qlane">@' + esc(lane) + '</div>' + items;
         }).join("");
       });
   }
@@ -384,14 +400,13 @@
     if (token) { localStorage.setItem("console_token", token); }
     else { localStorage.removeItem("console_token"); }
     setConn("…");
-    Promise.all([loadMessages(), loadLanes(), loadDeploys(), loadQueue()])
+    Promise.all([loadMessages(), loadLanes(), loadDeploys()])
       .then(function () { openStream(); })
       .catch(function () { setConn("down"); });
     if (lanesTimer) clearInterval(lanesTimer);
     lanesTimer = setInterval(function () {
       loadLanes().catch(function () {});
       loadDeploys().catch(function () {});
-      loadQueue().catch(function () {});
     }, 10000);
   }
 
@@ -399,7 +414,6 @@
   $("applyFilters").addEventListener("click", function () { loadMessages().catch(function () {}); });
   $("refreshLanes").addEventListener("click", function () { loadLanes().catch(function () {}); });
   $("refreshDeploys").addEventListener("click", function () { loadDeploys().catch(function () {}); });
-  $("refreshQueue").addEventListener("click", function () { loadQueue().catch(function () {}); });
   $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
 
   if (token) { $("token").value = token; }

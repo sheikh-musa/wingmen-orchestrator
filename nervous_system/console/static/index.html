@@ -68,8 +68,7 @@
   .tabbar button { font-size: 13px; }
   main[data-tab="conv"]    .tabbar button[data-go="conv"],
   main[data-tab="lanes"]   .tabbar button[data-go="lanes"],
-  main[data-tab="deploys"] .tabbar button[data-go="deploys"],
-  main[data-tab="queue"]   .tabbar button[data-go="queue"] { color: var(--txt); border-bottom-color: var(--accent); }
+  main[data-tab="deploys"] .tabbar button[data-go="deploys"] { color: var(--txt); border-bottom-color: var(--accent); }
 
   /* ---- main (mobile-first: one panel at a time via tabs) ---- */
   main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -77,8 +76,7 @@
   .col { flex: 1; min-width: 0; overflow: auto; -webkit-overflow-scrolling: touch; }
   main[data-tab="conv"]    .col:not(.conv),
   main[data-tab="lanes"]   .col:not(.lanes),
-  main[data-tab="deploys"] .col:not(.deploys),
-  main[data-tab="queue"]   .col:not(.queue) { display: none; }
+  main[data-tab="deploys"] .col:not(.deploys) { display: none; }
 
   .panel-head {
     position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line);
@@ -169,7 +167,8 @@
   .dep a.url:active { opacity: .7; }
   .dep .age { margin-left: auto; }
 
-  /* ---- queue panel (per-lane task lists, manual priority order) ---- */
+  /* ---- lane tasks (folded into the Lanes card, was a separate Queue tab) ---- */
+  .lane .tasks { margin: 6px -14px 0; border-top: 1px dashed var(--line); }
   .qlane { padding: 10px 14px 5px; font: 11px var(--mono); font-weight: 700; text-transform: uppercase;
     letter-spacing: .5px; color: var(--accent); border-bottom: 1px solid var(--line);
     position: sticky; top: 0; background: var(--bg); z-index: 1; }
@@ -197,13 +196,13 @@
     .token-row input { width: 240px; flex: none; height: 34px; }
     button { height: 34px; }
     .tabbar { display: none; }
-    /* conv spans both rows on the left; lanes + deploys stack in the right column */
-    .panels { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: 1fr 1fr 1fr; }
+    /* conv (Messages) spans both rows on the left; lanes (now incl. queue +
+       peek, so given more height) + deploys stack in the right column */
+    .panels { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: 3fr 2fr; }
     .col { display: block !important; overflow: auto; }
-    .col.conv    { grid-column: 1; grid-row: 1 / 4; border-right: 1px solid var(--line); }
+    .col.conv    { grid-column: 1; grid-row: 1 / 3; border-right: 1px solid var(--line); }
     .col.lanes   { grid-column: 2; grid-row: 1; border-bottom: 1px solid var(--line); }
-    .col.deploys { grid-column: 2; grid-row: 2; border-bottom: 1px solid var(--line); }
-    .col.queue   { grid-column: 2; grid-row: 3; }
+    .col.deploys { grid-column: 2; grid-row: 2; }
     .filters input { height: 30px; } .filters button.ghost { height: 30px; }
   }
 </style>
@@ -220,17 +219,16 @@
   </div>
 </header>
 
-<main data-tab="conv">
+<main data-tab="lanes">
   <nav class="tabbar">
-    <button data-go="conv">Bus</button>
     <button data-go="lanes">Lanes</button>
+    <button data-go="conv">Messages</button>
     <button data-go="deploys">Deploys</button>
-    <button data-go="queue">Queue</button>
   </nav>
   <div class="panels">
     <section class="col conv">
       <div class="panel-head">
-        <h2>Bus</h2>
+        <h2>Messages</h2>
         <div class="filters">
           <input id="fThread" placeholder="thread" inputmode="numeric" />
           <input id="fAgent" placeholder="agent" autocapitalize="off" autocorrect="off" spellcheck="false" />
@@ -240,7 +238,7 @@
       <div id="messages"><div class="empty">Connecting&hellip;</div></div>
     </section>
     <section class="col lanes">
-      <div class="panel-head"><h2>Lane status</h2>
+      <div class="panel-head"><h2>Lanes</h2>
         <button class="ghost" id="refreshLanes" style="margin-left:auto">Refresh</button></div>
       <div id="lanes"><div class="empty">—</div></div>
     </section>
@@ -248,11 +246,6 @@
       <div class="panel-head"><h2>Deploys</h2>
         <button class="ghost" id="refreshDeploys" style="margin-left:auto">Refresh</button></div>
       <div id="deploys"><div class="empty">—</div></div>
-    </section>
-    <section class="col queue">
-      <div class="panel-head"><h2>Queue · per lane</h2>
-        <button class="ghost" id="refreshQueue" style="margin-left:auto">Refresh</button></div>
-      <div id="queue"><div class="empty">—</div></div>
     </section>
   </div>
 </main>
