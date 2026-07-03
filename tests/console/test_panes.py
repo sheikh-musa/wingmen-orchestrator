@@ -21,7 +21,7 @@ def test_live_sessions_parses_tmux_output(monkeypatch):
         sessions = panes.live_sessions()
     assert sessions == ["orch", "cosem-tdu", "reviewer-abc-123"]
     args = mock_run.call_args[0][0]
-    assert args == ["tmux", "list-sessions", "-F", "#{session_name}"]
+    assert args == [panes._TMUX, "list-sessions", "-F", "#{session_name}"]
 
 
 def test_live_sessions_returns_empty_on_tmux_failure():
@@ -61,7 +61,7 @@ def test_capture_pane_returns_text_for_a_live_session():
     # capped at the last 40 lines even if tmux somehow returned more
     assert result.splitlines() == [f"line{i}" for i in range(10, 50)]
     args, kwargs = mock_run.call_args
-    assert args[0] == ["tmux", "capture-pane", "-t", "=cosem-tdu:0.0", "-p", "-S", "-40"]
+    assert args[0] == [panes._TMUX, "capture-pane", "-t", "=cosem-tdu:0.0", "-p", "-S", "-40"]
     # argv-list only — never a shell string, never shell=True
     assert kwargs.get("shell") is not True
 

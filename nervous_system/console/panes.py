@@ -17,11 +17,28 @@ can't break out of its single argv slot.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import List, Optional
 
 _TIMEOUT_S = 5
 _CAPTURE_LINES = 40
+
+
+def _tmux_bin() -> str:
+    """launchd runs this process with a minimal PATH (/usr/bin:/bin:/usr/sbin
+    :/sbin) that does NOT include /opt/homebrew/bin — a bare "tmux" silently
+    fails there (caught by the broad except below) and live_sessions() always
+    returns [], making every session look "not live" even though real ones
+    exist. Same class of bug _resolve_host already works around for
+    tailscale; same fix here: try known absolute paths first."""
+    for candidate in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "tmux"  # PATH-relative fallback for interactive/dev shells
+
+
+_TMUX = _tmux_bin()
 
 
 def live_sessions() -> List[str]:
@@ -30,7 +47,7 @@ def live_sessions() -> List[str]:
     read."""
     try:
         r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            [_TMUX, "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True, timeout=_TIMEOUT_S,
         )
         if r.returncode != 0:
@@ -56,7 +73,7 @@ def capture_pane(session: str) -> Optional[str]:
         return None
     try:
         r = subprocess.run(
-            ["tmux", "capture-pane", "-t", f"={session}:0.0", "-p", "-S", "-40"],
+            [_TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", "-40"],
             capture_output=True, text=True, timeout=_TIMEOUT_S,
         )
         if r.returncode != 0:

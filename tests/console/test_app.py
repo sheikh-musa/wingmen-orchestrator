@@ -181,7 +181,7 @@ def test_pane_endpoint_returns_captured_text_for_a_live_session(server):
     assert body["text"] == "line1\nline2"
     # read-only: capture-pane only, never send-keys or any other subcommand
     call_args = mock_run.call_args[0][0]
-    assert call_args[:2] == ["tmux", "capture-pane"]
+    assert call_args[1] == "capture-pane"
 
 
 def test_pane_endpoint_rejects_crafted_session_name_without_shelling_out(server):
