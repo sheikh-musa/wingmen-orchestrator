@@ -11,7 +11,11 @@
   var seen = {};          // de-dup message ids
 
   var $ = function (id) { return document.getElementById(id); };
-  function authHeaders() { return { Authorization: "Bearer " + token }; }
+  // Auth is IP-allowlist-first now (server-side, CONSOLE_ALLOWED_IPS) — an
+  // allowlisted device needs no header at all. *token* here is only ever the
+  // dormant breakglass recovery secret, so omit the header entirely when
+  // it's empty rather than sending a meaningless "Bearer ".
+  function authHeaders() { return token ? { Authorization: "Bearer " + token } : {}; }
 
   function setConn(state) {
     var dot = $("dot"), txt = $("connTxt");
@@ -73,6 +77,13 @@
     return u;
   }
 
+  // 401 means this device's IP isn't in CONSOLE_ALLOWED_IPS — the normal
+  // (allowlisted) case never hits this. Point at the breakglass fallback
+  // rather than failing silently.
+  var UNAUTH_HINT =
+    '<div class="empty">Not authorized from this device/network.<br>' +
+    "If this is expected (off-tailnet, IP changed), enter the breakglass token above and Retry.</div>";
+
   function loadMessages() {
     var params = {
       limit: 80,
@@ -81,7 +92,7 @@
     };
     return fetch(apiUrl("/api/messages", params), { headers: authHeaders() })
       .then(function (r) {
-        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        if (r.status === 401) { setConn("down"); $("messages").innerHTML = UNAUTH_HINT; throw new Error("unauthorized"); }
         return r.json();
       })
       .then(function (rows) {
@@ -103,25 +114,47 @@
     return "dead";
   }
 
+  // Dark = a lane that's SUPPOSED to be up (desired_state=up) but its
+  // heartbeat is dead/stale — the signal an operator scanning a phone screen
+  // needs to catch first, so these sort to the top and get a loud badge
+  // rather than just a small colored heartbeat line.
+  function laneFlag(l) {
+    var hbClass = laneHbClass(l.heartbeat_age_s);
+    var shouldBeUp = (l.desired_state || "").toLowerCase() === "up";
+    if (shouldBeUp && hbClass === "dead") return "dark";
+    if (shouldBeUp && hbClass === "stale") return "stale";
+    return null;
+  }
+  var FLAG_RANK = { dark: 0, stale: 1 };
+
   function loadLanes() {
     return fetch("/api/lanes", { headers: authHeaders() })
       .then(function (r) {
-        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        if (r.status === 401) { setConn("down"); $("lanes").innerHTML = UNAUTH_HINT; throw new Error("unauthorized"); }
         return r.json();
       })
       .then(function (rows) {
         var box = $("lanes");
         if (!rows.length) { box.innerHTML = '<div class="empty">No lanes.</div>'; return; }
+        // Dark/stale-and-should-be-up lanes float to the top — that's the
+        // thing worth an operator's attention on a small screen first.
+        rows = rows.slice().sort(function (a, b) {
+          var ra = FLAG_RANK[laneFlag(a)]; var rb = FLAG_RANK[laneFlag(b)];
+          if (ra == null) ra = 2; if (rb == null) rb = 2;
+          return ra - rb;
+        });
         box.innerHTML = rows.map(function (l) {
           var st = (l.status || "unknown").toLowerCase();
           var hb = l.heartbeat_age_s;
-          var hbTxt = hb == null ? "no heartbeat" : hb + "s ago";
+          var hbTxt = hb == null ? "no heartbeat" : fmtAge(hb);
+          var flag = laneFlag(l);
           // "working on" = latest bus activity (current_task is just the boot string)
           var task = l.activity || l.current_task || "";
           var taskAge = l.activity != null && l.activity_age_s != null ? fmtAge(l.activity_age_s) : "";
-          return '<div class="lane">' +
+          return '<div class="lane' + (flag ? ' flag-' + flag : '') + '">' +
             '<div class="top">' +
               '<span class="id">' + esc(l.agent_id) + '</span>' +
+              (flag ? '<span class="flag ' + flag + '">' + (flag === "dark" ? "dark" : "going stale") + '</span>' : '') +
               '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
             '</div>' +
             (task ? '<div class="task">' + esc(task) +
@@ -137,10 +170,18 @@
   // Known stages get a class for colour; anything else falls back to dim.
   var STAGES = { pending: 1, pushed: 1, in_review: 1, merged: 1, live: 1, blocked: 1 };
 
+  // "Freshness vs main" without a commits-behind signal (no such column
+  // exists yet — see build report): a workstream sitting in an in-flight
+  // stage (not live, not already flagged blocked) for a long time is the
+  // honest proxy we DO have — the pipeline stalled, not necessarily that
+  // it's behind a specific commit count.
+  var STALL_AFTER_S = 6 * 3600;
+  var STALLABLE_STAGES = { pending: 1, pushed: 1, in_review: 1, merged: 1 };
+
   function loadDeploys() {
     return fetch("/api/deploys", { headers: authHeaders() })
       .then(function (r) {
-        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        if (r.status === 401) { setConn("down"); $("deploys").innerHTML = UNAUTH_HINT; throw new Error("unauthorized"); }
         return r.json();
       })
       .then(function (rows) {
@@ -149,12 +190,14 @@
         box.innerHTML = rows.map(function (d) {
           var stage = (d.stage || "").toLowerCase();
           var stageClass = STAGES[stage] ? stage : "pending";
+          var stalled = STALLABLE_STAGES[stage] && d.updated_age_s != null && d.updated_age_s > STALL_AFTER_S;
           var url = d.url
             ? '<a class="url" href="' + esc(d.url) + '" target="_blank" rel="noopener">' + esc(d.url) + '</a>'
             : "";
-          return '<div class="dep">' +
+          return '<div class="dep' + (stalled ? ' flag-stalled' : '') + '">' +
             '<div class="top">' +
               '<span class="ws">' + esc(d.workstream) + '</span>' +
+              (stalled ? '<span class="stalled">stalled ' + esc(fmtAge(d.updated_age_s)) + '</span>' : '') +
               '<span class="stage ' + stageClass + '">' + esc(stage || "—") + '</span>' +
             '</div>' +
             '<div class="sub">' +
@@ -171,7 +214,7 @@
   function loadQueue() {
     return fetch("/api/queue", { headers: authHeaders() })
       .then(function (r) {
-        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        if (r.status === 401) { setConn("down"); $("queue").innerHTML = UNAUTH_HINT; throw new Error("unauthorized"); }
         return r.json();
       })
       .then(function (rows) {
@@ -248,10 +291,14 @@
       });
   }
 
+  // Called on load AND as the manual "Retry" button — token is optional in
+  // both cases. Most devices (the operator's allowlisted phone/Macs) never
+  // need it; it only matters when IP auth failed and a breakglass token is
+  // being supplied to recover.
   function connect() {
     token = $("token").value.trim();
-    if (!token) return;
-    sessionStorage.setItem("console_token", token);
+    if (token) { sessionStorage.setItem("console_token", token); }
+    else { sessionStorage.removeItem("console_token"); }
     setConn("…");
     Promise.all([loadMessages(), loadLanes(), loadDeploys(), loadQueue()])
       .then(function () { openStream(); })
@@ -271,5 +318,6 @@
   $("refreshQueue").addEventListener("click", function () { loadQueue().catch(function () {}); });
   $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
 
-  if (token) { $("token").value = token; connect(); }
+  if (token) { $("token").value = token; }
+  connect(); // always attempt — IP-allowlisted devices need no token at all
 })();

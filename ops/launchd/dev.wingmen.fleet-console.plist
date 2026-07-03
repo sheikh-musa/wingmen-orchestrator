@@ -9,22 +9,53 @@
   the #111 wake path.
 
   Required env (set below or in the shell that bootstraps launchd):
-    CONSOLE_TOKEN   - long random operator secret; Authorization: Bearer only.
+    CONSOLE_ALLOWED_IPS     - comma-separated Tailscale IPs allowed to reach
+                              /api/*. This IS the primary gate (real TCP peer
+                              address, checked server-side — never trust
+                              X-Forwarded-For for this). FAILS CLOSED: empty
+                              means every request 401s, never "open". Seed
+                              with the operator's phone + BOTH his Macs
+                              (Studio + MacBook) as anti-lockout recovery —
+                              phone-only would strand him the moment it
+                              re-registers with a new tailnet IP.
+    CONSOLE_BREAKGLASS_TOKEN - DORMANT emergency recovery secret (Authorization:
+                              Bearer only, same as the old CONSOLE_TOKEN).
+                              Leave unset in normal operation; only needed if
+                              every allowlisted IP somehow becomes unreachable.
+                              Every use is logged loudly (BREAKGLASS marker).
+                              NOTE (cc-reviewer-4 advisory): this only recovers
+                              a SET-but-mismatched allowlist (e.g. a device's
+                              tailnet IP changed) — a fully EMPTY
+                              CONSOLE_ALLOWED_IPS still fails closed with no
+                              breakglass rescue (auth.py checks the allowlist
+                              first and returns before the breakglass branch).
+                              Don't read "breakglass exists" as "the allowlist
+                              can be blank."
     CONSOLE_DB_URL  - DSN of the SELECT-only `console_readonly` role (Task 1).
                       NEVER the Supabase service key. (Falls back to DATABASE_URL
                       for local dev only — do NOT do that in prod.)
     CONSOLE_PORT    - port to bind (default 8787).
-    CONSOLE_HOST    - bind host (default 127.0.0.1; keep loopback and front it
-                      with the tunnel + Cloudflare Access).
+    CONSOLE_HOST    - MUST be "auto" (or "tailscale") — binds THIS HOST'S OWN
+                      Tailscale IP directly (_resolve_host in app.py). NEVER
+                      127.0.0.1/loopback behind a locally-terminating tunnel:
+                      a tunnel makes every request's TCP peer 127.0.0.1,
+                      which either locks the operator out entirely (matches
+                      nothing in CONSOLE_ALLOWED_IPS) or, if 127.0.0.1 is
+                      added to "fix" that, authorizes every tunnel client —
+                      turning the allowlist into theater (cc-reviewer-4
+                      finding, msg 5920/5919, 2026-07-03). There is NO tunnel
+                      in this deployment; devices connect directly over
+                      Tailscale.
 
-  NETWORK LAYER IN FRONT (condition 1): put Cloudflare Access (email/SSO-gated)
-  on the console hostname in the cloudflared tunnel config — the bus must NOT be
-  reachable by token-possession alone. The token is the SECOND gate, not the
-  first. Bind to loopback (CONSOLE_HOST=127.0.0.1) so only the tunnel reaches it.
+  NETWORK LAYER IN FRONT (condition 1): the Tailscale IP-allowlist above IS
+  this layer — the bus is NOT reachable by secret-possession alone, only from
+  an allowlisted tailnet peer connecting DIRECTLY (CONSOLE_HOST=auto, no
+  tunnel/proxy in front — see CONSOLE_HOST note above for why a tunnel would
+  neutralize this gate).
 
   Install:
     cp ops/launchd/dev.wingmen.fleet-console.plist ~/Library/LaunchAgents/
-    # edit CONSOLE_TOKEN / CONSOLE_DB_URL below (or source from .env via __main__)
+    # edit CONSOLE_ALLOWED_IPS / CONSOLE_DB_URL below (or source from .env via __main__)
     launchctl load ~/Library/LaunchAgents/dev.wingmen.fleet-console.plist
 -->
 <plist version="1.0">
@@ -52,12 +83,13 @@
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
         <key>CONSOLE_HOST</key>
-        <string>127.0.0.1</string>
+        <string>auto</string>
         <key>CONSOLE_PORT</key>
         <string>8787</string>
-        <!-- CONSOLE_TOKEN and CONSOLE_DB_URL are read from .env by
-             nervous_system/console/__main__.py (load_dotenv). Set them there,
-             NOT inline here, to keep secrets out of this tracked file. -->
+        <!-- CONSOLE_ALLOWED_IPS, CONSOLE_BREAKGLASS_TOKEN and CONSOLE_DB_URL
+             are read from .env by nervous_system/console/__main__.py
+             (load_dotenv). Set them there, NOT inline here, to keep secrets
+             out of this tracked file. -->
     </dict>
 </dict>
 </plist>

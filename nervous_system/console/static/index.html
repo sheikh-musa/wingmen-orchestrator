@@ -6,6 +6,14 @@
 <meta name="robots" content="noindex,nofollow" />
 <meta name="color-scheme" content="dark" />
 <title>Fleet Console</title>
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#0b0e14" />
+<link rel="icon" href="/static/icons/icon-192.png" />
+<!-- iOS ignores the manifest for install chrome; these cover Add-to-Home-Screen there. -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Fleet" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
 <style>
   :root {
     --bg: #0b0e14; --panel: #131722; --panel-2: #1a2030; --line: #232a3a;
@@ -98,9 +106,18 @@
   .msg .subj { margin-top: 4px; font-weight: 600; line-height: 1.4; }
   .msg .body { margin-top: 3px; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
 
-  .lane { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+  .lane { padding: 12px 14px; border-bottom: 1px solid var(--line); border-left: 3px solid transparent;
+    display: flex; flex-direction: column; gap: 4px; }
+  .lane.flag-dark  { border-left-color: var(--bad); background: rgba(255,107,107,.07); }
+  .lane.flag-stale { border-left-color: var(--warn); background: rgba(240,180,41,.06); }
   .lane .top { display: flex; align-items: center; gap: 8px; }
   .lane .id { font: 13px var(--mono); }
+  .lane .flag {
+    font: 11px/1 var(--mono); font-weight: 700; letter-spacing: .3px; padding: 3px 8px;
+    border-radius: 9px; text-transform: uppercase;
+  }
+  .lane .flag.dark  { color: var(--bad);  background: rgba(255,107,107,.14); border: 1px solid rgba(255,107,107,.5); }
+  .lane .flag.stale { color: var(--warn); background: rgba(240,180,41,.14); border: 1px solid rgba(240,180,41,.5); }
   .lane .st { margin-left: auto; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--panel-2); }
   .lane .st.working { color: var(--good); } .lane .st.idle { color: var(--accent); }
   .lane .st.offline, .lane .st.blocked { color: var(--bad); }
@@ -112,7 +129,8 @@
   .empty { padding: 28px 16px; color: var(--dim); font-size: 14px; text-align: center; }
 
   /* ---- deploys panel ---- */
-  .dep { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+  .dep { padding: 12px 14px; border-bottom: 1px solid var(--line); border-left: 3px solid transparent;
+    display: flex; flex-direction: column; gap: 4px; }
   .dep .top { display: flex; align-items: center; gap: 8px; }
   .dep .ws { font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
   .dep .stage {
@@ -126,6 +144,12 @@
   .dep .stage.pushed  { color: var(--accent); border-color: rgba(91,140,255,.55); }
   .dep .stage.pending { color: var(--dim); }
   .dep .stage.blocked { color: var(--bad); border-color: var(--bad); box-shadow: 0 0 6px rgba(255,107,107,.5); }
+  .dep.flag-stalled { border-left: 3px solid var(--warn); background: rgba(240,180,41,.06); }
+  .dep .stalled {
+    font: 11px/1 var(--mono); font-weight: 700; letter-spacing: .3px; text-transform: uppercase;
+    color: var(--warn); background: rgba(240,180,41,.14); border: 1px solid rgba(240,180,41,.5);
+    padding: 3px 8px; border-radius: 9px;
+  }
   .dep .sub { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font: 12px var(--mono); color: var(--dim); }
   .dep .repo { color: var(--txt); }
   .dep .detail { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
@@ -179,14 +203,14 @@
   <a class="navlink" href="/docs">Docs &rarr;</a>
   <a class="navlink" href="/media">Screenshots &rarr;</a>
   <div class="token-row">
-    <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
-    <button id="connect">Connect</button>
+    <input id="token" type="password" inputmode="text" placeholder="breakglass token (only if this device isn't allowlisted)" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+    <button id="connect" class="ghost">Retry</button>
   </div>
 </header>
 
 <main data-tab="conv">
   <nav class="tabbar">
-    <button data-go="conv">Convo</button>
+    <button data-go="conv">Bus</button>
     <button data-go="lanes">Lanes</button>
     <button data-go="deploys">Deploys</button>
     <button data-go="queue">Queue</button>
@@ -194,14 +218,14 @@
   <div class="panels">
     <section class="col conv">
       <div class="panel-head">
-        <h2>Conversation</h2>
+        <h2>Bus</h2>
         <div class="filters">
           <input id="fThread" placeholder="thread" inputmode="numeric" />
           <input id="fAgent" placeholder="agent" autocapitalize="off" autocorrect="off" spellcheck="false" />
           <button class="ghost" id="applyFilters">Filter</button>
         </div>
       </div>
-      <div id="messages"><div class="empty">Enter the operator token and Connect.</div></div>
+      <div id="messages"><div class="empty">Connecting&hellip;</div></div>
     </section>
     <section class="col lanes">
       <div class="panel-head"><h2>Lane status</h2>
@@ -228,6 +252,22 @@
     var main = document.querySelector('main');
     document.querySelectorAll('.tabbar button').forEach(function (b) {
       b.addEventListener('click', function () { main.setAttribute('data-tab', b.getAttribute('data-go')); });
+    });
+  })();
+
+  /* PWA service worker: register + reload EXACTLY once when a new worker
+     takes control. The guard prevents a refresh loop (its own blank/thrash
+     failure distinct from, but as bad as, never updating at all). */
+  (function () {
+    if (!('serviceWorker' in navigator)) return;
+    var refreshing = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    });
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function (e) {
+      console.warn('SW registration failed', e);
     });
   })();
 </script>

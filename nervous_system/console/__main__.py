@@ -2,7 +2,8 @@
 
 Runs on its OWN port (CONSOLE_PORT), NEVER inside the orchestrator process
 (CAI-RESP-264 condition 5: process isolation). Loads .env for local dev so
-CONSOLE_TOKEN / CONSOLE_DB_URL / DATABASE_URL resolve.
+CONSOLE_ALLOWED_IPS / CONSOLE_BREAKGLASS_TOKEN / CONSOLE_DB_URL / DATABASE_URL
+resolve.
 """
 from __future__ import annotations
 

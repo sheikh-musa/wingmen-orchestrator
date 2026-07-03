@@ -15,7 +15,11 @@ from nervous_system.console import db
 
 @pytest.fixture
 def stream_server(monkeypatch):
-    monkeypatch.setenv("CONSOLE_TOKEN", "stream-token")
+    # Loopback (the test client's real peer) is deliberately NOT allowlisted
+    # so these requests exercise the breakglass path, same shape as the old
+    # CONSOLE_TOKEN.
+    monkeypatch.setenv("CONSOLE_ALLOWED_IPS", "203.0.113.9")
+    monkeypatch.setenv("CONSOLE_BREAKGLASS_TOKEN", "stream-token")
 
     # A growing fake bus: the feeder calls _fetch_since via db._query.
     state = {"next_id": 1}

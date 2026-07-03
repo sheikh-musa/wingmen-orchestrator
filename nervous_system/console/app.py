@@ -39,6 +39,13 @@ logger = logging.getLogger("wingmen.console.app")
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8787
+_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+}
 
 # --- shared SSE infrastructure (one event loop per server) --------------------
 
@@ -138,10 +145,11 @@ def _make_handler(feedloop: "_FeedLoop"):
 
         # --- helpers ---
         def _client(self) -> str:
-            # Honor a reverse-proxy / tunnel forwarded IP if present.
-            fwd = self.headers.get("X-Forwarded-For")
-            if fwd:
-                return fwd.split(",")[0].strip()
+            # Real TCP peer ONLY. X-Forwarded-For is client-supplied and
+            # trivially spoofed — trusting it (for auth OR the audit trail)
+            # would make IP-allowlisting worse than the password it replaces,
+            # and would launder a spoofed identity into the log exactly when
+            # it matters most (a breakglass/incident review).
             return self.client_address[0] if self.client_address else "-"
 
         def _json(self, code: int, payload) -> None:
@@ -161,9 +169,9 @@ def _make_handler(feedloop: "_FeedLoop"):
             self.end_headers()
             self.wfile.write(body)
 
-        def _authed(self, parsed) -> bool:
-            query = parse_qs(parsed.query)
-            return auth.check_bearer(dict(self.headers), query)
+        def _authed(self) -> bool:
+            authed, _method = auth.check_access(self._client(), dict(self.headers))
+            return authed
 
         # --- routing ---
         def do_GET(self):  # noqa: N802
@@ -193,8 +201,24 @@ def _make_handler(feedloop: "_FeedLoop"):
                 name = path[len("/static/"):]
                 return self._serve_static(name, path)
 
+            # PWA shell: manifest + service worker + its precached assets
+            # MUST be reachable pre-auth, same tier as the SPA shell above —
+            # a browser can't fetch the manifest or register the SW behind a
+            # 401, which would silently break Add-to-Home-Screen/offline
+            # while the app still looks fine (orch probe finding, 2026-07-03).
+            # Neither is sensitive: static, non-PII, read-only assets.
+            if path == "/manifest.json":
+                return self._serve_static("manifest.json", path)
+
+            if path == "/sw.js":
+                # no-cache: the SW script itself must always be revalidated
+                # by the browser's HTTP layer, independent of its own
+                # internal cache — serving a stale sw.js is a second, easy
+                # way to make "the app never updates" happen.
+                return self._serve_static("sw.js", path, cache_control="no-cache")
+
             # Everything below is auth-gated.
-            if not self._authed(parsed):
+            if not self._authed():
                 auth.audit(self._client(), path, "401")
                 return self._json(401, {"error": "unauthorized"})
 
@@ -279,19 +303,25 @@ def _make_handler(feedloop: "_FeedLoop"):
             auth.audit(self._client(), path, "404")
             return self._json(404, {"error": "not found"})
 
-        def _serve_static(self, name: str, path: str) -> None:
-            # Prevent path traversal.
+        def _serve_static(self, name: str, path: str, cache_control: str = None) -> None:
+            # Prevent path traversal. is_relative_to (not a string-prefix
+            # check) so a sibling like static-x/ can't false-accept just
+            # because "static-x" starts with "static" (cc-reviewer-4 advisory
+            # — pre-existing, not exploitable today since no such sibling
+            # exists, hardened anyway).
             safe = (_STATIC_DIR / name).resolve()
-            if not str(safe).startswith(str(_STATIC_DIR.resolve())) or not safe.is_file():
+            if not safe.is_relative_to(_STATIC_DIR.resolve()) or not safe.is_file():
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
-            ctype = "text/html" if safe.suffix == ".html" else (
-                "application/javascript" if safe.suffix == ".js" else "text/plain"
-            )
+            ctype = _CONTENT_TYPES.get(safe.suffix, "text/plain; charset=utf-8")
+            if safe.name == "manifest.json":
+                ctype = "application/manifest+json"
             data = safe.read_bytes()
             self.send_response(200)
-            self.send_header("Content-Type", ctype + "; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
+            if cache_control:
+                self.send_header("Cache-Control", cache_control)
             self.end_headers()
             self.wfile.write(data)
             auth.audit(self._client(), path, "200")
@@ -397,10 +427,13 @@ def run() -> None:
     logging.basicConfig(level=logging.INFO)
     host = _resolve_host(os.environ.get("CONSOLE_HOST", _DEFAULT_HOST))
     port = int(os.environ.get("CONSOLE_PORT", str(_DEFAULT_PORT)))
-    if not os.environ.get("CONSOLE_TOKEN"):
+    if not os.environ.get("CONSOLE_ALLOWED_IPS"):
         logger.warning(
-            "CONSOLE_TOKEN is not set — auth fails closed; all /api requests 401."
+            "CONSOLE_ALLOWED_IPS is not set — auth fails closed; all /api "
+            "requests 401 (an empty allowlist must never mean 'open')."
         )
+    if os.environ.get("CONSOLE_BREAKGLASS_TOKEN"):
+        logger.info("CONSOLE_BREAKGLASS_TOKEN is configured (dormant recovery path).")
     httpd = make_server(host, port)
     logger.info("Fleet Console listening on http://%s:%d", host, port)
     try:

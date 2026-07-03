@@ -15,7 +15,14 @@ from nervous_system.console import db
 
 @pytest.fixture
 def server(monkeypatch):
-    monkeypatch.setenv("CONSOLE_TOKEN", "test-console-token")
+    # The test client always connects from loopback (127.0.0.1), so the
+    # allowlist here deliberately does NOT include it — that forces every
+    # request through the breakglass path below, exercising the
+    # Bearer-token-shaped tests exactly like the old CONSOLE_TOKEN did.
+    # test_loopback_allowlisted_ip_needs_no_token (below) separately proves
+    # the real IP-allowlist path end to end.
+    monkeypatch.setenv("CONSOLE_ALLOWED_IPS", "203.0.113.9")
+    monkeypatch.setenv("CONSOLE_BREAKGLASS_TOKEN", "test-console-token")
     # Hermetic DB stubs.
     monkeypatch.setattr(
         db, "fetch_messages",
@@ -105,3 +112,72 @@ def test_static_index_served(server):
     r = httpx.get(server + "/", timeout=5)
     assert r.status_code == 200
     assert "text/html" in r.headers.get("content-type", "")
+
+
+def test_x_forwarded_for_spoof_does_not_grant_access(server):
+    """Regression test for the exact bug this change removes: the test
+    client's real peer IP (127.0.0.1) is never in the allowlist here, and a
+    spoofed X-Forwarded-For claiming to BE an allowed IP must not matter —
+    prove the server ignores that header entirely for auth."""
+    r = httpx.get(
+        server + "/api/messages",
+        headers={"X-Forwarded-For": "203.0.113.9"},
+        timeout=5,
+    )
+    assert r.status_code == 401
+
+
+@pytest.fixture
+def server_ip_allowed(monkeypatch):
+    """The real IP-allowlist path, end to end: the test client connects from
+    127.0.0.1, and 127.0.0.1 IS the allowlist — no token/header needed at all."""
+    monkeypatch.setenv("CONSOLE_ALLOWED_IPS", "127.0.0.1")
+    monkeypatch.delenv("CONSOLE_BREAKGLASS_TOKEN", raising=False)
+    monkeypatch.setattr(
+        db, "fetch_messages", lambda limit=50, thread=None, agent=None: []
+    )
+    srv = console_app.make_server(host="127.0.0.1", port=0)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(50):
+        try:
+            httpx.get(base + "/healthz", timeout=1.0)
+            break
+        except Exception:
+            time.sleep(0.05)
+    yield base
+    srv.shutdown()
+
+
+def test_loopback_allowlisted_ip_needs_no_token(server_ip_allowed):
+    r = httpx.get(server_ip_allowed + "/api/messages", timeout=5)
+    assert r.status_code == 200
+
+
+def test_manifest_served_unauthenticated(server):
+    """PWA regression (orch probe, 2026-07-03): the manifest and SW must be
+    reachable pre-auth, or the browser can never install/register them even
+    though the app otherwise renders fine."""
+    r = httpx.get(server + "/manifest.json", timeout=5)
+    assert r.status_code == 200
+    assert r.headers.get("content-type") == "application/manifest+json"
+    body = r.json()
+    assert body["name"] == "Fleet Console"
+    assert body["display"] == "standalone"
+
+
+def test_service_worker_served_unauthenticated(server):
+    r = httpx.get(server + "/sw.js", timeout=5)
+    assert r.status_code == 200
+    assert "javascript" in r.headers.get("content-type", "")
+    assert r.headers.get("cache-control") == "no-cache"
+    assert "skipWaiting" in r.text
+    assert "clients.claim" in r.text
+
+
+def test_icons_served_unauthenticated(server):
+    r = httpx.get(server + "/static/icons/icon-192.png", timeout=5)
+    assert r.status_code == 200
+    assert r.headers.get("content-type") == "image/png"
