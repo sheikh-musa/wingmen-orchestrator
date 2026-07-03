@@ -212,6 +212,56 @@ def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
         return False   # headless: the durable log already has it
 
 
+# ── Busy-aware nudge policy (CAI-RESP-382) ────────────────────────────────────
+# The operator's complaint: the daemon interrupted him mid-task on EVERY message.
+# Fix: nudge immediately only when the target agent is IDLE; when it's WORKING a
+# default-priority message DEFERS (no keystroke) — Option B's durable log + the
+# agent's per-turn reconciliation deliver it at the next natural pause — and one
+# throttled tg_out ack tells the operator it landed. URGENT overrides (always
+# nudge); BTW is never-nudge (drains at the next idle/boot). Sensing is
+# capture-pane only — zero send-keys, no auto-submit (unlike the watchdog).
+URGENT_KW = "urgent"
+BTW_KW = "btw"
+ACK_THROTTLE_SEC = 600   # at most one "I'm mid-task" ack per 10 min per channel
+
+
+def pane_working(session: str) -> bool:
+    """SENSE ONLY: is the target agent mid-task? 'esc to interrupt' in the pane
+    footer = WORKING (same signal the lane-watchdog reads). Never sends keys."""
+    tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
+    try:
+        r = subprocess.run([tmux, "capture-pane", "-t", f"={session}:0.0", "-p"],
+                           check=True, capture_output=True, timeout=5, text=True)
+        return "esc to interrupt" in r.stdout.lower()
+    except Exception:
+        return False   # can't sense → treat as idle (nudge); fail toward delivery
+
+
+def urgency(text: str) -> str:
+    t = (text or "").strip().lower()
+    if t.startswith(URGENT_KW):
+        return "urgent"
+    if t.startswith(BTW_KW):
+        return "btw"
+    return "default"
+
+
+def throttled_busy_ack(conn, ch: "Channel") -> None:
+    """Enqueue ONE 'got it, mid-task' ack per ACK_THROTTLE_SEC per channel (via
+    the tg_out queue), so a deferred operator isn't left wondering."""
+    ack = ("\U0001F4E8 Got your message — I'm mid-task right now, I'll reply at "
+           "my next pause. (Reply URGENT to interrupt now.)")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM tg_out WHERE channel_key=%s AND text=%s "
+            "AND created_at > now() - make_interval(secs => %s) LIMIT 1",
+            (ch.key, ack, ACK_THROTTLE_SEC))
+        if cur.fetchone():
+            return   # already acked within the window
+        cur.execute("INSERT INTO tg_out (channel_key, text) VALUES (%s,%s)", (ch.key, ack))
+        conn.commit()
+
+
 # ── Per-update processing (sync, called from the channel task) ────────────────
 
 def process_update(conn, ch: Channel, upd: dict) -> bool:
@@ -255,11 +305,21 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         _log_line(f"{ch.key}: update {upd_id} gated (chat {chat_id}) — logged, not routed")
         return True
 
-    # 4. ROUTE (transport only — A2).
-    if ch.mode == "agent-session":
-        nudge_session(ch.inject_target, ch.key, unread_count(conn, ch))
-    elif ch.mode == "log-and-route":
-        nudge_session("orch", ch.key, unread_count(conn, ch))
+    # 4. ROUTE (transport only — A2) with busy-aware nudge policy (CAI-RESP-382).
+    if ch.mode in ("agent-session", "log-and-route"):
+        target = ch.inject_target if ch.mode == "agent-session" else "orch"
+        text = msg.get("text") or msg.get("caption") or ""
+        urg = urgency(text)
+        if urg == "btw":
+            _log_line(f"{ch.key}: BTW — logged, not nudged (drains at next idle)")
+        elif urg == "urgent" or not pane_working(target):
+            nudge_session(target, ch.key, unread_count(conn, ch))
+        else:
+            # target WORKING + default priority: DEFER (no interrupt). Option B's
+            # log + the agent's per-turn reconciliation deliver at the next pause;
+            # a throttled ack tells the operator it landed.
+            throttled_busy_ack(conn, ch)
+            _log_line(f"{ch.key}: '{target}' WORKING — nudge deferred (Option B delivers), throttled ack")
     # ai-responder: nothing — responder_runner drains the log (A2).
     return True
 
