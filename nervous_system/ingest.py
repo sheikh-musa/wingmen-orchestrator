@@ -238,11 +238,13 @@ def pane_working(session: str) -> bool:
 
 
 def urgency(text: str) -> str:
+    # Token-boundary match, not bare startswith: 'btworks'/'between' must NOT
+    # read as BTW (a BTW false-positive SUPPRESSES the nudge — fails toward
+    # non-delivery, the one direction that hurts).
     t = (text or "").strip().lower()
-    if t.startswith(URGENT_KW):
-        return "urgent"
-    if t.startswith(BTW_KW):
-        return "btw"
+    for kw, tag in ((URGENT_KW, "urgent"), (BTW_KW, "btw")):
+        if t == kw or t.startswith(kw + " ") or t.startswith(kw + ":"):
+            return tag
     return "default"
 
 
@@ -315,9 +317,12 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         elif urg == "urgent" or not pane_working(target):
             nudge_session(target, ch.key, unread_count(conn, ch))
         else:
-            # target WORKING + default priority: DEFER (no interrupt). Option B's
-            # log + the agent's per-turn reconciliation deliver at the next pause;
-            # a throttled ack tells the operator it landed.
+            # target WORKING + default priority: DEFER (no interrupt). Delivery
+            # then relies on the target running Option B unprocessed() each turn
+            # (true for orch/cai — the only agent-session targets today) OR a
+            # later message riding the accumulated unread_count when the pane
+            # next reads idle. Busy-defer is only sound for Option-B targets;
+            # a non-reconciling inject_target would need an idle-drain sweep.
             throttled_busy_ack(conn, ch)
             _log_line(f"{ch.key}: '{target}' WORKING — nudge deferred (Option B delivers), throttled ack")
     # ai-responder: nothing — responder_runner drains the log (A2).
