@@ -28,7 +28,7 @@ if [ "$bytes" -gt 52428800 ]; then
   echo "file too large for Telegram (${bytes} bytes > 50MB)" >&2; exit 1
 fi
 
-resp=$(curl -s "https://api.telegram.org/bot${TOK}/sendDocument" \
+resp=$(curl -s --ipv4 "https://api.telegram.org/bot${TOK}/sendDocument" \
   -F "chat_id=${CHAT}" \
   -F "document=@${FILE}" \
   ${CAPTION:+-F "caption=${CAPTION}"})
