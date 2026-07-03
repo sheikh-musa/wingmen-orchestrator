@@ -125,22 +125,33 @@ def _download_media(token: str, file_id: str, name: str | None = None) -> str:
 
 def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
     """Human-readable content for the log row — text, or a downloaded-media
-    pointer cc-orchestrator can Read, or a last-resort non-text marker."""
+    pointer cc-orchestrator can Read, or a last-resort non-text marker. Reply
+    context is preserved so cc-orch knows which message the operator answered."""
     text = msg.get("text") or msg.get("caption") or ""
     if msg.get("photo"):
         try:
             path = _download_media(ch.token, msg["photo"][-1]["file_id"])
-            return f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
+            content = f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
-            return f"sent a photo (download failed: {e})" + (f" | {text}" if text else "")
-    if msg.get("document"):
+            content = f"sent a photo (download failed: {e})" + (f" | {text}" if text else "")
+    elif msg.get("document"):
         doc = msg["document"]
         try:
             path = _download_media(ch.token, doc["file_id"], doc.get("file_name"))
-            return f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
+            content = f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
-            return f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
-    return text or f"[non-text update {upd_id}]"
+            content = f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
+    else:
+        content = text or f"[non-text update {upd_id}]"
+
+    # Reply-threading: prepend the quoted message so cc-orch knows the referent
+    # (parity with the retired bridge — an operator reply loses its meaning
+    # without the thing it replies to).
+    rep = msg.get("reply_to_message")
+    if rep:
+        snip = (rep.get("text") or rep.get("caption") or "[media]").strip().replace("\n", " ")[:80]
+        content = f'↩️ re "{snip}": {content}'
+    return content
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
