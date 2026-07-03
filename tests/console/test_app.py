@@ -5,6 +5,7 @@ httpx. The DB layer is monkeypatched so tests are hermetic (no live Supabase).
 """
 import threading
 import time
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -154,6 +155,43 @@ def server_ip_allowed(monkeypatch):
 def test_loopback_allowlisted_ip_needs_no_token(server_ip_allowed):
     r = httpx.get(server_ip_allowed + "/api/messages", timeout=5)
     assert r.status_code == 200
+
+
+def test_pane_endpoint_requires_auth(server):
+    """Same gate as everything else under /api/* — no new exposure."""
+    r = httpx.get(server + "/api/lanes/cosem-tdu/pane", timeout=5)
+    assert r.status_code == 401
+
+
+def test_pane_endpoint_404s_for_a_non_live_session(server):
+    with patch("nervous_system.console.panes.live_sessions", return_value=["orch"]):
+        r = httpx.get(server + "/api/lanes/not-a-real-session/pane", headers=H(), timeout=5)
+    assert r.status_code == 404
+
+
+def test_pane_endpoint_returns_captured_text_for_a_live_session(server):
+    with patch("nervous_system.console.panes.live_sessions", return_value=["cosem-tdu"]), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "line1\nline2\n"
+        r = httpx.get(server + "/api/lanes/cosem-tdu/pane", headers=H(), timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["session"] == "cosem-tdu"
+    assert body["text"] == "line1\nline2"
+    # read-only: capture-pane only, never send-keys or any other subcommand
+    call_args = mock_run.call_args[0][0]
+    assert call_args[:2] == ["tmux", "capture-pane"]
+
+
+def test_pane_endpoint_rejects_crafted_session_name_without_shelling_out(server):
+    """A session name isn't in live_sessions() -> 404 before any subprocess
+    call, regardless of what characters it contains."""
+    with patch("nervous_system.console.panes.live_sessions", return_value=["cosem-tdu"]), \
+         patch("subprocess.run") as mock_run:
+        r = httpx.get(server + "/api/lanes/%3B%20rm%20-rf%20%2F/pane", headers=H(), timeout=5)
+    assert r.status_code == 404
+    mock_run.assert_not_called()
 
 
 def test_manifest_served_unauthenticated(server):

@@ -31,7 +31,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from nervous_system.console import auth, db, docs, media, pii
+from nervous_system.console import auth, db, docs, media, panes, pii
 from nervous_system.console.feed import Broadcaster, feeder
 
 logger = logging.getLogger("wingmen.console.app")
@@ -237,6 +237,20 @@ def _make_handler(feedloop: "_FeedLoop"):
                     rows = db.fetch_lanes()
                     auth.audit(self._client(), path, "200")
                     return self._json(200, _jsonable(rows))
+
+                if path.startswith("/api/lanes/") and path.endswith("/pane"):
+                    # Live tmux pane peek (read-only) — operator-requested,
+                    # thread f869956c/msg 6156. session is validated against
+                    # the REAL live tmux session list inside capture_pane;
+                    # an unrecognized name (or anything crafted to look like
+                    # one) just 404s, it never reaches a subprocess call.
+                    session = unquote(path[len("/api/lanes/"):-len("/pane")])
+                    text = panes.capture_pane(session)
+                    if text is None:
+                        auth.audit(self._client(), path, "404")
+                        return self._json(404, {"error": "session not live"})
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, {"session": session, "text": text})
 
                 if path == "/api/deploys":
                     rows = db.fetch_deploys()

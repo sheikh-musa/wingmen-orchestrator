@@ -5,7 +5,10 @@
 (function () {
   "use strict";
 
-  var token = sessionStorage.getItem("console_token") || "";
+  // localStorage (not sessionStorage) so the operator's token persists across
+  // tab/browser/app restarts — enter it ONCE per device, never re-type. The
+  // token still travels header-only (never the URL). Console is tailnet-bound.
+  var token = localStorage.getItem("console_token") || sessionStorage.getItem("console_token") || "";
   var es = null;          // AbortController for the fetch-based stream
   var lanesTimer = null;
   var seen = {};          // de-dup message ids
@@ -127,6 +130,61 @@
   }
   var FLAG_RANK = { dark: 0, stale: 1 };
 
+  // Live pane peek (read-only) — the DB-derived card (current_task/heartbeat)
+  // is a dumb 5-min timer that shows "up", never "what's happening"; this
+  // polls the lane's real tmux pane instead. Accordion: at most ONE peek
+  // polls at a time (lightweight/throttled, per the ask) — opening another
+  // lane's peek, or the periodic 10s lane-list refresh finding the lane
+  // gone, stops the previous poll.
+  var openPeek = null;   // { session } of the currently-expanded peek, or null
+  var peekTimer = null;
+
+  function stopPeek() {
+    if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+    openPeek = null;
+  }
+
+  function fetchPeek(session, box) {
+    fetch("/api/lanes/" + encodeURIComponent(session) + "/pane", { headers: authHeaders() })
+      .then(function (r) {
+        if (r.status === 401) { setConn("down"); stopPeek(); return null; }
+        if (r.status === 404) { return { dead: true }; }
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data) return;
+        if (data.dead) { box.innerHTML = '<span class="peek-empty">session not live</span>'; return; }
+        box.textContent = data.text || "";
+        box.scrollTop = box.scrollHeight; // auto-scroll to bottom
+      })
+      .catch(function () {});
+  }
+
+  function startPeek(session, box) {
+    if (peekTimer) clearInterval(peekTimer);
+    openPeek = { session: session };
+    box.classList.add("open");
+    box.innerHTML = '<span class="peek-empty">loading&hellip;</span>';
+    fetchPeek(session, box);
+    peekTimer = setInterval(function () { fetchPeek(session, box); }, 2500);
+  }
+
+  // Pause polling while backgrounded (phone screen off / app switched away) —
+  // no point burning battery/data on a peek nobody's looking at. Resumes
+  // against the SAME session's box when the app comes back, if it's still
+  // in the DOM (the periodic lane refresh may have removed it if the lane
+  // itself is gone by then, which is fine — nothing to resume onto).
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+      return;
+    }
+    if (openPeek && typeof CSS !== "undefined" && CSS.escape) {
+      var box = document.querySelector('.peek-box[data-lane="' + CSS.escape(openPeek.session) + '"]');
+      if (box) startPeek(openPeek.session, box);
+    }
+  });
+
   function loadLanes() {
     return fetch("/api/lanes", { headers: authHeaders() })
       .then(function (r) {
@@ -143,6 +201,8 @@
           if (ra == null) ra = 2; if (rb == null) rb = 2;
           return ra - rb;
         });
+        var reopenSession = openPeek ? openPeek.session : null;
+        if (peekTimer) { clearInterval(peekTimer); peekTimer = null; } // rebind to the fresh DOM below
         box.innerHTML = rows.map(function (l) {
           var st = (l.status || "unknown").toLowerCase();
           var hb = l.heartbeat_age_s;
@@ -162,8 +222,32 @@
             '<div class="hb ' + laneHbClass(hb) + '">hb ' + esc(hbTxt) + '</div>' +
             (l.desired_state ? '<div class="desired">desired: ' + esc(l.desired_state) +
               (l.lane ? ' (' + esc(l.lane) + ')' : '') + '</div>' : '') +
+            (l.lane ?
+              '<button class="ghost peek-toggle" data-lane="' + esc(l.lane) + '">Peek</button>' +
+              '<div class="peek-box" data-lane="' + esc(l.lane) + '"></div>'
+              : '') +
           '</div>';
         }).join("");
+        box.querySelectorAll(".peek-toggle").forEach(function (btn) {
+          var session = btn.getAttribute("data-lane");
+          var peekBox = btn.closest(".lane").querySelector(".peek-box");
+          btn.addEventListener("click", function () {
+            if (openPeek && openPeek.session === session) {
+              peekBox.classList.remove("open");
+              stopPeek();
+              btn.textContent = "Peek";
+              return;
+            }
+            box.querySelectorAll(".peek-box.open").forEach(function (b) { b.classList.remove("open"); });
+            box.querySelectorAll(".peek-toggle").forEach(function (b) { b.textContent = "Peek"; });
+            startPeek(session, peekBox);
+            btn.textContent = "Hide";
+          });
+          if (session === reopenSession) {
+            startPeek(session, peekBox);
+            btn.textContent = "Hide";
+          }
+        });
       });
   }
 
@@ -297,8 +381,8 @@
   // being supplied to recover.
   function connect() {
     token = $("token").value.trim();
-    if (token) { sessionStorage.setItem("console_token", token); }
-    else { sessionStorage.removeItem("console_token"); }
+    if (token) { localStorage.setItem("console_token", token); }
+    else { localStorage.removeItem("console_token"); }
     setConn("…");
     Promise.all([loadMessages(), loadLanes(), loadDeploys(), loadQueue()])
       .then(function () { openStream(); })

@@ -20,6 +20,7 @@ LAUNCHER="$HOME/wingmen/orchestrator/scripts/launch_dangerous_cc.sh"
 read -r -d '' LANES <<EOF || true
 mirror	$HOME/.config/superpowers/worktrees/ihsanos/mirror
 scholar	$HOME/wingmen/projects/ai-scholar
+tarbiyah	$HOME/wingmen/projects/tarbiyah
 EOF
 # -----------------------------------------------------------------------------
 

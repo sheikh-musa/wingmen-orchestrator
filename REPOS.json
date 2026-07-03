@@ -96,6 +96,17 @@
       "priority": 5
     },
     {
+      "name": "wordpress-sites",
+      "github": null,
+      "local_path": "~/wingmen/projects/wordpress-sites",
+      "vercel_project": null,
+      "deploy_url": null,
+      "supabase_project_ref": null,
+      "status": "scaffold",
+      "priority": 4,
+      "note": "Layer-1 WordPress site-clone toolchain (CAI-WEB-CLONE-001/002/003). Owned by cc-ihsanos Lane C (sub_tag=cc-ihsanos-mirror); the mirror lane runs as the ihsanos worktree at ~/.config/superpowers/worktrees/ihsanos/mirror (branch feature/mirror/v0.1) and writes the toolchain into this repo for zero contention. Local-only until first push. Single-writer migrations: mirror requests schema from Lane B, never authors migrations."
+    },
+    {
       "name": "wingmen-orchestrator",
       "github": "https://github.com/sheikh-musa/wingmen-orchestrator",
       "local_path": "~/wingmen/orchestrator",

@@ -59,8 +59,10 @@ class TestLoadFamilyMap:
         assert m["hifz-companion"] == "cc-scholar"
         assert m["dookana"] == "cc-web"
         assert m["wordpress-sites"] == "cc-web"
-        assert m["cosem-tdu"] == "cc-cosem"
-        assert m["cosem-adcda"] == "cc-cosem"
+        # cosem family split into distinct identities (adcda + tdu) so the two
+        # repos no longer share one bus inbox — each maps to its own base.
+        assert m["cosem-tdu"] == "cc-cosem-tdu"
+        assert m["cosem-adcda"] == "cc-cosem-adcda"
 
     def test_duplicate_claim_raises(self):
         # Can't easily test in integration without mutating agents table.
