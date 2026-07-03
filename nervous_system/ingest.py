@@ -78,6 +78,71 @@ def tg_call(token: str, method: str, params: dict, timeout: int = POLL_TIMEOUT +
     return payload["result"]
 
 
+# ── Media (photos / documents) — download to logs/tg_media, log the path ──────
+# Parity with the retired tg_bridge: a non-text update (screenshot, PDF, xlsx)
+# must be DOWNLOADED and its local path logged, or cc-orchestrator can't Read it.
+# Token stays in the download URL only — never logged. Per-channel token (ch.token).
+
+_MEDIA_DIR = os.path.join(os.path.dirname(__file__), "..", "logs", "tg_media")
+
+
+def _tg_download_file(token: str, file_path: str, dest: str) -> str:
+    """Stream api.telegram.org/file/<file_path> -> dest with retry+backoff.
+    Telegram's file CDN intermittently resets mid-download (Errno 54); a bare
+    fetch silently lost the operator's DPA + ADCDA photos twice (2026-06-28)."""
+    url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+    last = None
+    for i in range(4):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r, open(dest, "wb") as f:
+                shutil.copyfileobj(r, f, length=65536)
+            if os.path.getsize(dest) > 0:
+                return dest
+            last = "empty download"
+        except Exception as e:
+            last = e
+        try:
+            if os.path.exists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+        if i < 3:
+            time.sleep(min(2 ** i, 8))
+    raise RuntimeError(f"telegram file download failed after 4 attempts: {last}")
+
+
+def _download_media(token: str, file_id: str, name: str | None = None) -> str:
+    with urllib.request.urlopen(
+            f"https://api.telegram.org/bot{token}/getFile?file_id={file_id}", timeout=30) as r:
+        fp = json.load(r)["result"]["file_path"]
+    os.makedirs(_MEDIA_DIR, exist_ok=True)
+    if name:
+        safe = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in name).strip() or "file"
+    else:
+        safe = fp.replace("/", "_")
+    return _tg_download_file(token, fp, os.path.join(_MEDIA_DIR, safe))
+
+
+def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
+    """Human-readable content for the log row — text, or a downloaded-media
+    pointer cc-orchestrator can Read, or a last-resort non-text marker."""
+    text = msg.get("text") or msg.get("caption") or ""
+    if msg.get("photo"):
+        try:
+            path = _download_media(ch.token, msg["photo"][-1]["file_id"])
+            return f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
+        except Exception as e:
+            return f"sent a photo (download failed: {e})" + (f" | {text}" if text else "")
+    if msg.get("document"):
+        doc = msg["document"]
+        try:
+            path = _download_media(ch.token, doc["file_id"], doc.get("file_name"))
+            return f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
+        except Exception as e:
+            return f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
+    return text or f"[non-text update {upd_id}]"
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 class Channel:
@@ -145,7 +210,6 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
     msg = upd.get("message") or upd.get("edited_message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
     username = (msg.get("from") or {}).get("username")
-    text = msg.get("text") or msg.get("caption") or ""
 
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
@@ -159,12 +223,13 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             conn.commit()
             return False          # replay of an already-processed update
 
-        # 2. LOG — durable first, always (even non-text/service updates leave a marker).
+        # 2. LOG — durable first, always. Media is downloaded here so the row
+        #    carries the local path (screenshot/doc), not a bare non-text marker.
         cur.execute(
             "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
             "VALUES ('inbound','telegram',%s,%s,%s,true) RETURNING id",
             (str(chat_id) if chat_id is not None else None, ch.channel_tag,
-             text or f"[non-text update {upd_id}]"),
+             message_content(ch, msg, upd_id)),
         )
         op_msg_id = cur.fetchone()[0]
         cur.execute(
