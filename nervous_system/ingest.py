@@ -223,6 +223,9 @@ def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
 URGENT_KW = "urgent"
 BTW_KW = "btw"
 ACK_THROTTLE_SEC = 600   # at most one "I'm mid-task" ack per 10 min per channel
+MAX_DEFER_SEC = 600      # busy-defer CAP: a message unhandled past this nudges
+                         # ANYWAY (CAI-RESP-382) — deferral must never strand the
+                         # operator, even if the agent stays busy indefinitely.
 
 
 def pane_working(session: str) -> bool:
@@ -262,6 +265,33 @@ def throttled_busy_ack(conn, ch: "Channel") -> None:
             return   # already acked within the window
         cur.execute("INSERT INTO tg_out (channel_key, text) VALUES (%s,%s)", (ch.key, ack))
         conn.commit()
+
+
+def drain_stale_deferred(conn, ch: "Channel") -> None:
+    """CAI-RESP-382 max-latency cap: if any inbound message has sat UNHANDLED
+    longer than MAX_DEFER_SEC, nudge anyway — busy-defer must never strand the
+    operator (the 45-min-silence bug). Re-nudge throttled to once per cap window
+    so a persistently-busy agent isn't spammed every poll."""
+    if ch.mode not in ("agent-session", "log-and-route"):
+        return
+    target = ch.inject_target if ch.mode == "agent-session" else "orch"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), min(created_at) FROM operator_messages "
+            "WHERE direction='inbound' AND tag=%s AND handled_at IS NULL",
+            (ch.channel_tag,))
+        n, oldest = cur.fetchone()
+        if not oldest:
+            return
+        cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, MAX_DEFER_SEC))
+        if not cur.fetchone()[0]:
+            return
+    now = time.monotonic()
+    if now - getattr(ch, "_last_stale_nudge", 0.0) < MAX_DEFER_SEC:
+        return   # throttle: re-nudge at most once per cap window
+    ch._last_stale_nudge = now
+    nudge_session(target, ch.key, n)
+    _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
 
 
 # ── Per-update processing (sync, called from the channel task) ────────────────
@@ -357,19 +387,23 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
             if ch.poll_offset is not None:
                 params["offset"] = ch.poll_offset + 1
             updates = await asyncio.to_thread(tg_call, ch.token, "getUpdates", params)
-            if not updates:
-                continue
             with psycopg.connect(_dsn()) as conn:
-                for upd in updates:
+                for upd in (updates or []):
                     process_update(conn, ch, upd)
-                # Offset fail-safe: ack ONLY after the whole batch is durable.
-                new_off = updates[-1]["update_id"]
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE bot_channels SET poll_offset=%s, updated_at=now() "
-                        "WHERE channel_key=%s", (new_off, ch.key))
-                conn.commit()
-                ch.poll_offset = new_off
+                if updates:
+                    # Offset fail-safe: ack ONLY after the whole batch is durable.
+                    new_off = updates[-1]["update_id"]
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE bot_channels SET poll_offset=%s, updated_at=now() "
+                            "WHERE channel_key=%s", (new_off, ch.key))
+                    conn.commit()
+                    ch.poll_offset = new_off
+                # CAI-RESP-382 max-latency cap — runs every cycle (incl. empty
+                # polls) so a message deferred while the agent stays busy still
+                # nudges once it crosses MAX_DEFER_SEC. This is what was missing
+                # when the operator waited 45 min on a deferred message.
+                drain_stale_deferred(conn, ch)
         except psycopg.Error as e:
             # DB unreachable: offset stays un-acked → Telegram will redeliver →
             # A1 dedupe absorbs. Surface loudly for the watchdog (CAI-RESP-357).
