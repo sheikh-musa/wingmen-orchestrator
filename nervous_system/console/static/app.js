@@ -259,6 +259,13 @@
         var tasksHtml = tasks.length
           ? '<div class="tasks">' + tasks.map(renderQtask).join("") + '</div>'
           : "";
+        // Peek target: tmux_session (self-registered per INSTANCE at boot,
+        // migration 005) is the real live session name, always correct.
+        // fleet_lanes.lane is a static label shared by a whole agent FAMILY
+        // (every cc-reviewer-N row has lane='reviewer') and can't resolve to
+        // one specific on-demand session when several are live at once —
+        // fall back to it only if a lane hasn't self-registered yet.
+        var peekTarget = l.tmux_session || l.lane;
         return '<div class="lane' + (flag ? ' flag-' + flag : '') + '">' +
           '<div class="top">' +
             '<span class="id">' + esc(l.agent_id) + '</span>' +
@@ -271,9 +278,9 @@
           (l.desired_state ? '<div class="desired">desired: ' + esc(l.desired_state) +
             (l.lane ? ' (' + esc(l.lane) + ')' : '') + '</div>' : '') +
           tasksHtml +
-          (l.lane ?
-            '<button class="ghost peek-toggle" data-lane="' + esc(l.lane) + '">Peek</button>' +
-            '<div class="peek-box" data-lane="' + esc(l.lane) + '"></div>'
+          (peekTarget ?
+            '<button class="ghost peek-toggle" data-lane="' + esc(peekTarget) + '">Peek</button>' +
+            '<div class="peek-box" data-lane="' + esc(peekTarget) + '"></div>'
             : '') +
         '</div>';
       }).join("");

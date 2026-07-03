@@ -15,7 +15,7 @@ from nervous_system.console import db
 
 
 @pytest.fixture
-def server(monkeypatch):
+def server(monkeypatch, tmp_path):
     # The test client always connects from loopback (127.0.0.1), so the
     # allowlist here deliberately does NOT include it — that forces every
     # request through the breakglass path below, exercising the
@@ -24,6 +24,12 @@ def server(monkeypatch):
     # the real IP-allowlist path end to end.
     monkeypatch.setenv("CONSOLE_ALLOWED_IPS", "203.0.113.9")
     monkeypatch.setenv("CONSOLE_BREAKGLASS_TOKEN", "test-console-token")
+    # Isolate the access-audit log: without this it defaults to the real repo's
+    # logs/console_access.log — which, since the LIVE console also runs from
+    # this same checkout, means test runs silently write fake entries into
+    # the production audit trail (found live 2026-07-04, mixed in with real
+    # phone traffic).
+    monkeypatch.setenv("CONSOLE_ACCESS_LOG", str(tmp_path / "console_access.log"))
     # Hermetic DB stubs.
     monkeypatch.setattr(
         db, "fetch_messages",
@@ -129,11 +135,12 @@ def test_x_forwarded_for_spoof_does_not_grant_access(server):
 
 
 @pytest.fixture
-def server_ip_allowed(monkeypatch):
+def server_ip_allowed(monkeypatch, tmp_path):
     """The real IP-allowlist path, end to end: the test client connects from
     127.0.0.1, and 127.0.0.1 IS the allowlist — no token/header needed at all."""
     monkeypatch.setenv("CONSOLE_ALLOWED_IPS", "127.0.0.1")
     monkeypatch.delenv("CONSOLE_BREAKGLASS_TOKEN", raising=False)
+    monkeypatch.setenv("CONSOLE_ACCESS_LOG", str(tmp_path / "console_access.log"))
     monkeypatch.setattr(
         db, "fetch_messages", lambda limit=50, thread=None, agent=None: []
     )

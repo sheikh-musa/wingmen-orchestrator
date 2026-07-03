@@ -5,7 +5,20 @@ IP-allowlist variant). Peer IP is the primary gate; the breakglass token is
 header-only (Authorization: Bearer), dormant, and logged loudly when used.
 Fail-closed on an empty allowlist; audit-log every access (who/when/path/outcome).
 """
+import pytest
+
 from nervous_system.console import auth
+
+
+@pytest.fixture(autouse=True)
+def _isolate_access_log(monkeypatch, tmp_path):
+    """A successful check_access() call (including via breakglass) always
+    writes an audit line as a side effect, even in tests not specifically
+    ABOUT logging — without this, every such test here silently writes into
+    the real repo's logs/console_access.log (found live 2026-07-04, test
+    noise mixed into real phone traffic). autouse so a new test added later
+    can't reintroduce the leak by forgetting to isolate it manually."""
+    monkeypatch.setenv("CONSOLE_ACCESS_LOG", str(tmp_path / "console_access.log"))
 
 
 def test_empty_allowlist_fails_closed_even_for_any_ip(monkeypatch):

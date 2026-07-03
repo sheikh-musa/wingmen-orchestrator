@@ -77,7 +77,17 @@ def build_lanes_query() -> Tuple[str, list]:
     don't refresh it. The truthful "what is this lane working on now" signal is
     the subject of the latest bus message it authored, so we LATERAL-join that
     and expose it as `activity` (+ age). Falls back to current_task in the view
-    if a lane has never posted."""
+    if a lane has never posted.
+
+    `tmux_session` (agent_status, migration 005) is the actual live tmux
+    session name each INSTANCE self-registers at boot — the correct target
+    for the live-pane peek. `fleet_lanes.lane` is a static label shared by an
+    entire agent FAMILY (e.g. every cc-reviewer-N row has lane='reviewer'),
+    which can never resolve to one specific on-demand session when several
+    are live at once (proven live 2026-07-04: 3 simultaneous reviewer
+    sessions, one static label). tmux_session is per-instance and always
+    correct; the console prefers it and only falls back to `lane` if a lane
+    hasn't self-registered."""
     sql = (
         "SELECT "
         "  s.agent_id, "
@@ -85,6 +95,7 @@ def build_lanes_query() -> Tuple[str, list]:
         "  a.display_name, "
         "  s.status, "
         "  s.current_task, "
+        "  s.tmux_session, "
         "  round(extract(epoch FROM (now() - s.last_heartbeat)))::int "
         "    AS heartbeat_age_s, "
         "  l.desired_state, "
