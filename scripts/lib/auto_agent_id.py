@@ -427,6 +427,36 @@ def scan_overlap_siblings(
             return [(r[0], int(r[1])) for r in cur.fetchall()]
 
 
+def reap_stale_family(base: str, dsn: str) -> None:
+    """CAI-RESP-292 launcher reap-on-relaunch: honestly offline this family's
+    stale ghosts at boot.
+
+    Instances that die uncleanly never run their clean-exit trap (the ARCH-035
+    offline UPSERT in launch_dangerous_cc.sh), so they linger as status='working'
+    forever. The launcher, as the family's spawner, is the legitimate actor to
+    offline them — via the identity-respecting SECURITY DEFINER sweeper, which
+    stamps reaped_by so the reap is attributed, not an anonymous forge.
+
+    Best-effort + ISOLATED: its own autocommit connection, never inside the
+    allocation transaction, wrapped so a failure can never abort the launch.
+    Scoped to THIS base, at the 8h freshness bound — never touches a live or
+    merely-idle sibling.
+    """
+    import psycopg
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT reaped_agent_id FROM sweep_stale_agents(interval '8 hours', %s, %s)",
+                (f"launcher:{base}", base),
+            )
+            reaped = [r[0] for r in cur.fetchall()]
+        if reaped:
+            sys.stderr.write(f"launcher reaped stale {base} ghosts: {reaped}\n")
+    except Exception as e:
+        # non-fatal: a reap failure must never block a launch
+        sys.stderr.write(f"reap_stale_family non-fatal ({base}): {type(e).__name__}: {e}\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint: emit JSON {sub_tag, base, siblings, overlap_warnings}.
 
@@ -475,6 +505,10 @@ def main(argv: list[str] | None = None) -> int:
         # the real cause, not a misleading 'not registered' message.
         sys.stderr.write(f"DatabaseError: {type(e).__name__}: {e}\n")
         return 1
+
+    # CAI-RESP-292: reap this family's stale ghosts at relaunch (best-effort,
+    # isolated — never blocks the launch). Complements the watchdog global sweep.
+    reap_stale_family(base, args.dsn)
 
     try:
         result = allocate_sub_tag_and_register(

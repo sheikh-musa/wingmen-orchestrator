@@ -1,63 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!--
-  Fleet Console v1 — standalone, read-only web console (CAI-RESP-264).
-
-  PROCESS ISOLATION (condition 5): this runs as its OWN launchd job, a SEPARATE
-  process from the orchestrator (com.wingmen.orchestrator). A console fault
-  (slow SSE consumer, client storm, crash) cannot degrade orch coordination or
-  the #111 wake path.
-
-  Required env (set below or in the shell that bootstraps launchd):
-    CONSOLE_TOKEN   - long random operator secret; Authorization: Bearer only.
-    CONSOLE_DB_URL  - DSN of the SELECT-only `console_readonly` role (Task 1).
-                      NEVER the Supabase service key. (Falls back to DATABASE_URL
-                      for local dev only — do NOT do that in prod.)
-    CONSOLE_PORT    - port to bind (default 8787).
-    CONSOLE_HOST    - bind host (default 127.0.0.1; keep loopback and front it
-                      with the tunnel + Cloudflare Access).
-
-  NETWORK LAYER IN FRONT (condition 1): put Cloudflare Access (email/SSO-gated)
-  on the console hostname in the cloudflared tunnel config — the bus must NOT be
-  reachable by token-possession alone. The token is the SECOND gate, not the
-  first. Bind to loopback (CONSOLE_HOST=127.0.0.1) so only the tunnel reaches it.
-
-  Install:
-    cp ops/launchd/dev.wingmen.fleet-console.plist ~/Library/LaunchAgents/
-    # edit CONSOLE_TOKEN / CONSOLE_DB_URL below (or source from .env via __main__)
-    launchctl load ~/Library/LaunchAgents/dev.wingmen.fleet-console.plist
--->
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>dev.wingmen.fleet-console</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
-        <string>-m</string>
-        <string>nervous_system.console</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/Users/sheikhmusa/wingmen/orchestrator</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/fleet_console.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/fleet_console.err</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PYTHONUNBUFFERED</key>
-        <string>1</string>
-        <key>CONSOLE_HOST</key>
-        <string>127.0.0.1</string>
-        <key>CONSOLE_PORT</key>
-        <string>8787</string>
-        <!-- CONSOLE_TOKEN and CONSOLE_DB_URL are read from .env by
-             nervous_system/console/__main__.py (load_dotenv). Set them there,
-             NOT inline here, to keep secrets out of this tracked file. -->
-    </dict>
-</dict>
-</plist>
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.wingmen.fleet-console</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>-m</string><string>nervous_system.console</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/console.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/console.log</string>
+</dict></plist>

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Windows Task Scheduler — Wingmen Mirror Orchestrator
+
+  Import via: Task Scheduler → Action → Import Task → select this file
+  Or via PowerShell (run as Administrator):
+    Register-ScheduledTask -Xml (Get-Content ".\wingmen-mirror-orch.xml" -Raw) -TaskName "WingmenMirrorOrch" -Force
+  Or via CMD (run as Administrator):
+    schtasks /Create /TN "WingmenMirrorOrch" /XML "wingmen-mirror-orch.xml" /F
+
+  IMPORTANT: Edit the WSL distro name below if yours differs from "Ubuntu".
+  Check with: wsl --list --verbose
+
+  Default mode: COLD STANDBY — orch boots in the WSL session but bridges are OFF.
+  To activate (Mini is down): open a WSL terminal and run:
+    ACTIVATE=true ~/wingmen/orchestrator/scripts/boot_mirror.sh
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Wingmen orchestrator mirror node (cold standby). Starts WSL2 orch session at login. Bridges are OFF by default — activate manually if Mac Mini is down.</Description>
+    <Author>wingmen-cc-orch</Author>
+  </RegistrationInfo>
+
+  <Triggers>
+    <!-- Start at every user login, with a 30s delay to let WSL2 initialise -->
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT30S</Delay>
+    </LogonTrigger>
+  </Triggers>
+
+  <Actions Context="Author">
+    <Exec>
+      <!-- wsl.exe is in System32, no full path needed -->
+      <Command>wsl.exe</Command>
+      <!-- Edit "Ubuntu" below to match your WSL2 distro name -->
+      <Arguments>-d Ubuntu -- bash /root/wingmen/orchestrator/scripts/boot_mirror.sh</Arguments>
+    </Exec>
+  </Actions>
+
+  <Settings>
+    <!-- Don't launch a second instance if already running -->
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <!-- Run on battery (laptop / PC UPS) -->
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <!-- No execution time limit -->
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <!-- Retry up to 3 times with 1 min interval if the initial start fails -->
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+    <Enabled>true</Enabled>
+  </Settings>
+
+  <Principals>
+    <Principal id="Author">
+      <!-- Run as the logged-in user (interactive) so WSL2 inherits their session -->
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+</Task>

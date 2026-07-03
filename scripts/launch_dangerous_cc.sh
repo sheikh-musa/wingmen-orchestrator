@@ -630,7 +630,15 @@ trap '_handle_exit' EXIT
 # `--model $RESOLVED_MODEL` to the claude call → append "${CLAUDE_PASSTHROUGH[@]}"
 # AFTER it, so a passthrough --model overrides by coming later on argv.
 
-RESOLVED_MODEL="${MODEL:-claude-opus-4-8}"
+# FLEET_MODEL lever (scripts/fleet_model.sh): precedence MODEL env > .fleet_model file > opus default.
+# Lets the operator flip new engineer-lane launches Opus<->Sonnet in one place for token conservation.
+_FLEET_MODEL_FILE="$ORCH_DIR/.fleet_model"
+_FLEET_MODEL_DEFAULT="claude-opus-4-8"
+if [ -r "$_FLEET_MODEL_FILE" ]; then
+    _fm="$(tr -d '[:space:]' < "$_FLEET_MODEL_FILE")"
+    [ -n "$_fm" ] && _FLEET_MODEL_DEFAULT="$_fm"
+fi
+RESOLVED_MODEL="${MODEL:-$_FLEET_MODEL_DEFAULT}"
 echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}"
 if [ "$RESOLVED_MODEL" != "claude-opus-4-8" ]; then
     echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-8)${RESET}"

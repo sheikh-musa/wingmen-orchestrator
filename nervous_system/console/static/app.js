@@ -5,7 +5,10 @@
 (function () {
   "use strict";
 
-  var token = sessionStorage.getItem("console_token") || "";
+  // localStorage (not sessionStorage) so the operator's token persists across
+  // tab/browser/app restarts — enter it ONCE per device, never re-type. The
+  // token still travels header-only (never the URL). Console is tailnet-bound.
+  var token = localStorage.getItem("console_token") || sessionStorage.getItem("console_token") || "";
   var es = null;          // AbortController for the fetch-based stream
   var lanesTimer = null;
   var seen = {};          // de-dup message ids
@@ -251,7 +254,7 @@
   function connect() {
     token = $("token").value.trim();
     if (!token) return;
-    sessionStorage.setItem("console_token", token);
+    localStorage.setItem("console_token", token);
     setConn("…");
     Promise.all([loadMessages(), loadLanes(), loadDeploys(), loadQueue()])
       .then(function () { openStream(); })

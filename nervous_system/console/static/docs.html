@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex,nofollow" />
+<meta name="color-scheme" content="dark" />
+<title>Fleet Docs</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --panel-2: #1a2030; --line: #232a3a;
+    --txt: #d7dce5; --dim: #8a93a6; --accent: #5b8cff; --good: #3ecf8e;
+    --warn: #f0b429; --bad: #ff6b6b; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --tap: 44px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    height: 100vh; height: 100dvh;
+    -webkit-text-size-adjust: 100%;
+    padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+  }
+  header {
+    flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .navlink { font: 13px/1 var(--mono); color: var(--accent); text-decoration: none; font-weight: 600; }
+  header .navlink:active { opacity: .7; }
+  .token-row { width: 100%; display: flex; gap: 8px; align-items: center; }
+  .token-row input {
+    flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--line);
+    color: var(--txt); border-radius: 8px; padding: 0 12px; height: var(--tap);
+    font: 13px var(--mono);
+  }
+  button {
+    background: var(--accent); border: 0; color: #fff; border-radius: 8px;
+    padding: 0 16px; height: var(--tap); font-size: 14px; font-weight: 600; cursor: pointer;
+    white-space: nowrap; flex: none;
+  }
+  button:active { transform: translateY(1px); }
+  button.ghost { background: var(--panel-2); border: 1px solid var(--line); color: var(--txt); font-weight: 500; }
+
+  main { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; }
+
+  /* ---- catalog ---- */
+  .repo-head {
+    position: sticky; top: 0; z-index: 1; background: var(--bg);
+    padding: 12px 14px 6px; font: 11px var(--mono); font-weight: 700; text-transform: uppercase;
+    letter-spacing: .6px; color: var(--accent); border-bottom: 1px solid var(--line);
+  }
+  .repo-head .count { color: var(--dim); font-weight: 500; }
+  .doc {
+    display: block; text-decoration: none; color: inherit;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  }
+  .doc:active { background: var(--panel-2); }
+  .doc .title { font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+  .doc .meta { margin-top: 3px; font: 11px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+  .empty { padding: 28px 16px; color: var(--dim); font-size: 14px; text-align: center; }
+  .search { width: 100%; }
+  .search input {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--txt);
+    border-radius: 8px; padding: 0 12px; height: 38px; font: 13px var(--mono);
+  }
+
+  /* ---- doc viewer ---- */
+  .docview { max-width: 760px; margin: 0 auto; padding: 16px 16px 64px; }
+  .docview .backbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .docview .crumb { font: 11px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+  .article { word-break: break-word; }
+  .article h1 { font-size: 24px; margin: 18px 0 10px; line-height: 1.25; }
+  .article h2 { font-size: 20px; margin: 22px 0 8px; line-height: 1.3; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+  .article h3 { font-size: 17px; margin: 18px 0 6px; }
+  .article h4, .article h5, .article h6 { font-size: 15px; margin: 14px 0 4px; color: var(--dim); }
+  .article p { margin: 10px 0; }
+  .article a { color: var(--accent); }
+  .article ul, .article ol { padding-left: 22px; margin: 8px 0; }
+  .article li { margin: 4px 0; }
+  .article code {
+    font: 13px var(--mono); background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 5px;
+  }
+  .article pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  .article pre code { background: none; border: 0; padding: 0; font-size: 12.5px; line-height: 1.5; }
+  .article blockquote {
+    margin: 10px 0; padding: 4px 14px; border-left: 3px solid var(--accent);
+    color: var(--dim); background: var(--panel);
+  }
+  .article hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+  .article strong { color: #fff; }
+
+  @media (min-width: 760px) {
+    body { font-size: 15px; }
+    .token-row { width: auto; margin-left: auto; }
+    .token-row input { width: 240px; flex: none; height: 34px; }
+    button { height: 34px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fleet Docs</h1>
+  <a class="navlink" href="/">&larr; Console</a>
+  <div class="token-row">
+    <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+    <button id="connect">Connect</button>
+  </div>
+</header>
+
+<main id="main">
+  <div class="empty">Enter the operator token and Connect.</div>
+</main>
+
+<script src="/static/docs.js"></script>
+</body>
+</html>
