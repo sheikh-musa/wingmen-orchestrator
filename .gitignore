@@ -13,3 +13,9 @@ logs/cc_cai_daemon.*
 scripts/.lane_watch/
 scripts/.agent_wake/
 logs/reviewer-briefs/
+
+# secret-bearing + machine-local artifacts (never track — hygiene 2026-07-03)
+.env.bak*
+.env.*.bak
+backups/
+sandbox/
