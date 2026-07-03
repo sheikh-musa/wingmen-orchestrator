@@ -28,6 +28,9 @@ if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \
 else
   sent=0
 fi
-# durable log every reply (full text, once; best-effort — never fail on a log hiccup)
-"$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" ${TAG:+--tag "$TAG"} >/dev/null 2>&1 || true
+# durable log every reply (full text, once; best-effort — never fail on a log hiccup).
+# PYTHONPATH pins the package root so the `-m` import works regardless of CWD (a
+# bare `-m nervous_system.operator_log` only resolves when run from $ORCH_DIR;
+# any other caller-CWD would ModuleNotFoundError and silently drop the log).
+PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" ${TAG:+--tag "$TAG"} >/dev/null 2>&1 || true
 [ "$sent" = 1 ] && exit 0 || { echo "tg_send failed" >&2; exit 1; }

@@ -15,10 +15,14 @@
 # Usage:  ./boot_cai.sh        # interactive, opus-4-8, perpetual
 set -uo pipefail
 
-CAI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# PINNED (not derived from ${BASH_SOURCE[0]} dirname): running this via the
+# orchestrator's absolute path resolved CAI_DIR to orchestrator/scripts and
+# booted cai with the ORCHESTRATOR's CLAUDE.md = a 2nd cc-orchestrator (silent
+# governance outage 2026-06-20). Pin to cai's home so invocation path can't matter.
+CAI_DIR="$HOME/wingmen/wingmen-cai"
 ORCH_DIR="$HOME/wingmen/orchestrator"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
-MODEL="${MODEL:-claude-opus-4-8}"
+MODEL="${MODEL:-claude-fable-5}"
 AGENT_ID="cai"   # exact — singleton strategic node, never a sub-tag
 
 # .env (DSN etc.) lives in the orchestrator; cai shares the substrate.
