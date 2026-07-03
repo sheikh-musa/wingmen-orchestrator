@@ -40,6 +40,20 @@ import urllib.request
 
 from nervous_system import operator_log
 
+import socket as _socket_ipv4patch
+# Force IPv4 for api.telegram.org only — broken IPv6 route to Telegram on this
+# network hangs long-polls ~18s before IPv4 fallback (2026-07-03). Postgres/other
+# hosts untouched.
+_ORIG_GAI = _socket_ipv4patch.getaddrinfo
+def _gai_ipv4_tg(host, *a, **k):
+    res = _ORIG_GAI(host, *a, **k)
+    if isinstance(host, str) and "telegram.org" in host:
+        v4 = [r for r in res if r[0] == _socket_ipv4patch.AF_INET]
+        return v4 or res
+    return res
+_socket_ipv4patch.getaddrinfo = _gai_ipv4_tg
+
+
 ORCH = pathlib.Path(__file__).resolve().parent.parent
 
 # Scoped tag stamped on every Gazzabyte/Irsyad-Support message in operator_messages.

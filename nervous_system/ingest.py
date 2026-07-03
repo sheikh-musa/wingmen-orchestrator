@@ -45,10 +45,27 @@ import time
 import urllib.parse
 import urllib.request
 
+import socket
+
 import psycopg
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+# Force IPv4 for api.telegram.org ONLY. This network's IPv6 route to Telegram is
+# broken (2001:67c:4e8:f004::9 times out ~20s on the TLS handshake) while IPv4
+# works instantly and IPv6 is fine to everything else. Python prefers the IPv6
+# result getaddrinfo returns first, so every long-poll wasted ~18s hanging on the
+# dead route before falling back — 83 timeouts/hr and the operator's message lag.
+# Leaves Postgres (Supabase is IPv6) and all other hosts untouched (2026-07-03).
+_ORIG_GETADDRINFO = socket.getaddrinfo
+def _getaddrinfo_ipv4_telegram(host, *args, **kwargs):
+    res = _ORIG_GETADDRINFO(host, *args, **kwargs)
+    if isinstance(host, str) and "telegram.org" in host:
+        v4 = [r for r in res if r[0] == socket.AF_INET]
+        return v4 or res
+    return res
+socket.getaddrinfo = _getaddrinfo_ipv4_telegram
 
 POLL_TIMEOUT = 25          # Telegram long-poll seconds
 ERROR_BACKOFF = 5          # seconds after a per-channel error

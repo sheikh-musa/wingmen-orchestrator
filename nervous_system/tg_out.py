@@ -33,6 +33,20 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
+import socket as _socket_ipv4patch
+# Force IPv4 for api.telegram.org only — broken IPv6 route to Telegram on this
+# network hangs long-polls ~18s before IPv4 fallback (2026-07-03). Postgres/other
+# hosts untouched.
+_ORIG_GAI = _socket_ipv4patch.getaddrinfo
+def _gai_ipv4_tg(host, *a, **k):
+    res = _ORIG_GAI(host, *a, **k)
+    if isinstance(host, str) and "telegram.org" in host:
+        v4 = [r for r in res if r[0] == _socket_ipv4patch.AF_INET]
+        return v4 or res
+    return res
+_socket_ipv4patch.getaddrinfo = _gai_ipv4_tg
+
+
 CHUNK = 4096
 MAX_ATTEMPTS = 5
 DRAIN_INTERVAL = 2          # seconds between queue polls
