@@ -42,6 +42,26 @@ LOG_FILE = ORCH / "logs" / "lane_watchdog.log"
 NON_LANE_SESSIONS = {"orch", "orchestrator"}
 NON_LANE_PREFIXES = ("reviewer-", "billingtest", "catest")
 
+# GOVERNANCE / CONVERSATIONAL CONSOLES (CAI-RESP-381): these are watched for
+# liveness but must NEVER receive an auto-submit / auto-answer send-keys. On
+# 2026-07-03 the watchdog treated 'cai' as a build lane and re-submitted staged
+# 'YES PURGE' text into the governance console every 300s (its verifier couldn't
+# confirm cai's TUI, so recovered=False forever = infinite replay) — 11 phantom
+# authorization claims. An agent injecting fabricated operator input into a
+# governance console is the worst identity-doctrine violation possible, so for
+# these sessions the ONLY sanctioned action is escalation (bus-notify), never a
+# keystroke. cai/orch, any ai-responder persona console, belong here.
+GOVERNANCE_CONSOLES = {"cai"}
+GOVERNANCE_PREFIXES = ("mamadah", "nutri", "mizan")   # ai-responder persona consoles
+
+# Anti-replay cap (CAI-RESP-381): a given unsent input gets at most this many
+# verified auto-submit attempts before the watchdog escalates and HOLDS — it
+# will not re-fire the same text on subsequent scans until the input changes.
+MAX_AUTOSUBMIT_ATTEMPTS = 1
+
+def is_governance_console(sess: str) -> bool:
+    return sess in GOVERNANCE_CONSOLES or sess.startswith(GOVERNANCE_PREFIXES)
+
 def log(msg: str) -> None:
     line = f"{datetime.now(timezone.utc).isoformat()} | {msg}"
     print(line)
@@ -148,7 +168,14 @@ def main() -> int:
         st = classify(cap)
         inp = input_line(cap)
         prev = state.get(sess, {})
-        new_state[sess] = {"state": st, "input": inp, "ts": time.time()}
+        # carry the per-input auto-submit attempt counter + held-escalation flag
+        # forward while the unsent text is unchanged (anti-replay); a changed
+        # input resets both so a genuinely new prompt gets a fresh nudge.
+        same_input = prev.get("input") == inp
+        attempts = prev.get("attempts", 0) if same_input else 0
+        held_escalated = prev.get("held_escalated", False) if same_input else False
+        new_state[sess] = {"state": st, "input": inp, "ts": time.time(),
+                           "attempts": attempts, "held_escalated": held_escalated}
 
         if st == "USAGE_LIMIT":
             # the token-window wall — escalate every scan (it's the one thing the
@@ -157,6 +184,15 @@ def main() -> int:
             continue
         if st in ("WORKING", "IDLE_CLEAN", "UNKNOWN"):
             continue
+
+        # GOVERNANCE / CONVERSATIONAL CONSOLES (CAI-RESP-381): escalate ONLY,
+        # never a keystroke — no auto-submit, no auto-answer. This is the hard
+        # exclusion that makes the 2026-07-03 phantom-injection class impossible.
+        if is_governance_console(sess):
+            if prev.get("state") != st:   # escalate on transition, not every scan
+                escalate(sess, st, f"governance console in state {st} — NOT auto-actioned (keystroke injection forbidden here); hub judgment only")
+            continue
+
         if st == "TRUST_PROMPT":
             ok = verified_enter(sess)   # answering trust → returns to working/ready
             log(f"{sess}: TRUST_PROMPT auto-answered (recovered={ok})")
@@ -169,12 +205,30 @@ def main() -> int:
                 escalate(sess, st, "sitting on a decision dialog across ≥2 scans — pick an option")
             continue
         if st == "IDLE_UNSENT":
-            # only auto-submit if the SAME unsent text persisted since the last scan
+            # Auto-submit ONLY if the SAME unsent text persisted since the last scan
+            # AND we haven't exhausted the attempt cap. The cap (CAI-RESP-381) stops
+            # a failed/ineffective submit from re-firing the same text every 300s
+            # forever (the infinite-replay bug): after MAX_AUTOSUBMIT_ATTEMPTS we
+            # escalate and HOLD until the input changes.
             if prev.get("state") == "IDLE_UNSENT" and prev.get("input") == inp and inp:
-                ok = verified_resubmit(sess, inp)
-                log(f"{sess}: IDLE_UNSENT auto-submitted (recovered={ok}) input={inp[:60]!r}")
-                if not ok:
-                    escalate(sess, st, f"unsent prompt would not submit: {inp[:80]!r}")
+                if attempts >= MAX_AUTOSUBMIT_ATTEMPTS:
+                    # cap reached: escalate EXACTLY ONCE (keyed on the persisted
+                    # held_escalated flag, not on the attempt count — the latter is
+                    # invariant inside this block so it never fired), then hold
+                    # silently with no replay until the input changes. This closes
+                    # the observability gap for the incident's own failure mode
+                    # (a nudge that falsely verifies success leaves the lane stuck).
+                    if not held_escalated:
+                        escalate(sess, st, f"unsent prompt did not clear after {attempts} verified attempt(s) — holding (no replay): {inp[:80]!r}")
+                        new_state[sess]["held_escalated"] = True
+                    else:
+                        log(f"{sess}: IDLE_UNSENT HELD (cap reached, already escalated, no replay) input={inp[:60]!r}")
+                else:
+                    ok = verified_resubmit(sess, inp)
+                    new_state[sess]["attempts"] = attempts + 1
+                    log(f"{sess}: IDLE_UNSENT auto-submitted (recovered={ok}, attempt={attempts+1}) input={inp[:60]!r}")
+                    if not ok:
+                        escalate(sess, st, f"unsent prompt would not submit: {inp[:80]!r}")
             else:
                 log(f"{sess}: IDLE_UNSENT (first sight — waiting one scan to confirm) input={inp[:60]!r}")
     reap_ghosts()
