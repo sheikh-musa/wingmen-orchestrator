@@ -216,6 +216,15 @@ def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
     try:
         subprocess.run([tmux, "has-session", "-t", f"={target}"],
                        check=True, capture_output=True, timeout=5)
+        # Clear any leftover unsent text FIRST (C-u). 2026-07-04: the orch idled
+        # with an unsent draft ('ping me when...') and the nudge got appended onto
+        # it instead of landing — the operator's 'status' was silently swallowed.
+        # A nudge only fires when the target is idle, so clearing an abandoned draft
+        # is safe. This is send-keys of a CONTROL key only — never payload text
+        # (still CAI-RESP-357 compliant: the nudge line below carries no content).
+        subprocess.run([tmux, "send-keys", "-t", f"={target}:0.0", "C-u"],
+                       check=True, capture_output=True, timeout=5)
+        time.sleep(0.3)
         # '=name:0.0' — exact session match AND explicit pane: tmux 3.7a's
         # send-keys can fail to resolve a bare '=name' to a pane ("can't find
         # pane") even when has-session passes.
