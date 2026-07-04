@@ -154,8 +154,14 @@
       .then(function (data) {
         if (!data) return;
         if (data.dead) { box.innerHTML = '<span class="peek-empty">session not live</span>'; return; }
+        // Only auto-scroll if the user was ALREADY pinned to the bottom
+        // before this update — otherwise a poll every ~2.5s yanks them away
+        // mid-read every time (operator feedback). Checked BEFORE replacing
+        // content, since scrollHeight changes once the new text is set; a
+        // few px of tolerance absorbs sub-pixel rounding.
+        var wasPinnedToBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 4;
         box.textContent = data.text || "";
-        box.scrollTop = box.scrollHeight; // auto-scroll to bottom
+        if (wasPinnedToBottom) { box.scrollTop = box.scrollHeight; }
       })
       .catch(function () {});
   }

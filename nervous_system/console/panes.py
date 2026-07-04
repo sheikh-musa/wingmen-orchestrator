@@ -18,11 +18,50 @@ can't break out of its single argv slot.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from typing import List, Optional
 
 _TIMEOUT_S = 5
-_CAPTURE_LINES = 40
+_RAW_CAPTURE_LINES = 200  # generous raw window BEFORE chrome-filtering — filter
+                          # first then cap to _CAPTURE_LINES, not the reverse,
+                          # or a noise-dominated tail leaves little real content
+_CAPTURE_LINES = 60       # shown to the operator, after filtering (msg re: UX fixes)
+
+# Claude-Code-TUI chrome to strip so what's left reads as actual activity, not
+# boot banner clutter (operator feedback: a low-activity/freshly-booted lane's
+# boot banner genuinely hasn't scrolled out of the pane yet — real content,
+# but unreadable buried in box-drawing + footer noise).
+_BOX_CHARS = set("─═│║╔╗╚╝╭╮╰╯┌┐└┘├┤┬┴┼")
+_FOOTER_RE = re.compile(r"bypass permissions|esc to interrupt|shift\+tab to cycle|for agents")
+_CLEAR_HINT_RE = re.compile(r"new task\?.*token", re.IGNORECASE)
+_BARE_PROMPT_RE = re.compile(r"^\s*❯\s*$")
+
+
+def _is_chrome(line: str) -> bool:
+    """True for a line that's TUI decoration, not activity: pure box-drawing/
+    separator lines, the bypass-permissions/esc-to-interrupt footer, the
+    /clear-to-save-tokens hint, a bare empty prompt, or blank lines. A prompt
+    line WITH typed content, or banner text alongside a border character, is
+    NOT stripped — only lines that are mostly/purely decorative."""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if _BARE_PROMPT_RE.match(line):
+        return True
+    if _FOOTER_RE.search(line):
+        return True
+    if _CLEAR_HINT_RE.search(line):
+        return True
+    non_space = [c for c in stripped if not c.isspace()]
+    if non_space and sum(1 for c in non_space if c in _BOX_CHARS) / len(non_space) > 0.6:
+        return True
+    return False
+
+
+def _clean_pane_text(raw: str) -> str:
+    kept = [ln for ln in raw.splitlines() if not _is_chrome(ln)]
+    return "\n".join(kept[-_CAPTURE_LINES:])
 
 
 def _tmux_bin() -> str:
@@ -58,27 +97,30 @@ def live_sessions() -> List[str]:
 
 
 def capture_pane(session: str) -> Optional[str]:
-    """Return the last ~40 lines of *session*'s pane 0, or None if the
-    session isn't live right now (checked against live_sessions(), not
-    trusted from the caller) or the capture otherwise fails.
+    """Return the last ~60 lines of *session*'s pane 0 AFTER stripping TUI
+    chrome, or None if the session isn't live right now (checked against
+    live_sessions(), not trusted from the caller) or the capture otherwise
+    fails.
 
-    `-S -40` asks tmux for the last 40 lines directly (not just whatever the
-    current viewport happens to be); the result is also sliced client-side as
-    a belt-and-suspenders cap. The `=session:0.0` target is tmux's EXACT-match
-    session selector (never substring/prefix) — defense in depth on top of
-    the live_sessions() membership check, since by the time this runs the
-    name has already been confirmed to be a real, live session.
+    Captures a generous raw window (-S -200, clamped automatically by tmux to
+    whatever's actually available — never an error, never padded) and filters
+    BEFORE capping to _CAPTURE_LINES: filtering first then capping means a
+    chrome-dominated tail still leaves a full _CAPTURE_LINES of real content
+    where available, instead of capping first and filtering a narrow raw
+    window down to almost nothing. The `=session:0.0` target is tmux's
+    EXACT-match session selector (never substring/prefix) — defense in depth
+    on top of the live_sessions() membership check, since by the time this
+    runs the name has already been confirmed to be a real, live session.
     """
     if not session or session not in live_sessions():
         return None
     try:
         r = subprocess.run(
-            [_TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", "-40"],
+            [_TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", f"-{_RAW_CAPTURE_LINES}"],
             capture_output=True, text=True, timeout=_TIMEOUT_S,
         )
         if r.returncode != 0:
             return None
-        lines = r.stdout.splitlines()
-        return "\n".join(lines[-_CAPTURE_LINES:])
+        return _clean_pane_text(r.stdout)
     except Exception:
         return None
