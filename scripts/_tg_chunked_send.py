@@ -13,6 +13,17 @@ import time
 import urllib.parse
 import urllib.request
 
+import socket as _socket_ipv4patch
+_ORIG_GAI = _socket_ipv4patch.getaddrinfo
+def _gai_ipv4_tg(host, *a, **k):
+    res = _ORIG_GAI(host, *a, **k)
+    if isinstance(host, str) and "telegram.org" in host:
+        v4 = [r for r in res if r[0] == _socket_ipv4patch.AF_INET]
+        return v4 or res
+    return res
+_socket_ipv4patch.getaddrinfo = _gai_ipv4_tg
+
+
 LIMIT = 4000  # under Telegram's 4096 hard cap, leaving margin
 
 

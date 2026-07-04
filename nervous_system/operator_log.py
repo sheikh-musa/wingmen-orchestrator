@@ -17,14 +17,15 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 
 def log(direction: str, text: str, chat_id: str | None = None,
-        tag: str | None = None, delivered: bool = True) -> int:
+        tag: str | None = None, delivered: bool = True,
+        channel: str = "telegram") -> int:
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
         cur.execute(
             "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
-            "VALUES (%s,'telegram',%s,%s,%s,%s) RETURNING id",
-            (direction, chat_id, tag, text, delivered),
+            "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            (direction, channel, chat_id, tag, text, delivered),
         )
         rid = cur.fetchone()[0]
         conn.commit()
@@ -84,8 +85,10 @@ def main() -> int:
     ap.add_argument("--chat")
     ap.add_argument("--tag")
     ap.add_argument("--undelivered", action="store_true")
+    ap.add_argument("--channel", default="telegram",
+                    help="entry surface: telegram (default) | tmux-console | cockpit")
     a = ap.parse_args()
-    print(log(a.direction, a.text, a.chat, a.tag, not a.undelivered))
+    print(log(a.direction, a.text, a.chat, a.tag, not a.undelivered, a.channel))
     return 0
 
 

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>dev.wingmen.media-cleanup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/cleanup_media.py</string>
+        <string>--apply</string>
+        <string>--purge-archive-older-than</string>
+        <string>60</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>4</integer>
+        <key>Minute</key><integer>30</integer>
+    </dict>
+    <key>RunAtLoad</key><false/>
+    <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/media-cleanup.log</string>
+    <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/media-cleanup.log</string>
+</dict>
+</plist>

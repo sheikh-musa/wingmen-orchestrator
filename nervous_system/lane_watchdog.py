@@ -58,9 +58,41 @@ GOVERNANCE_PREFIXES = ("mamadah", "nutri", "mizan")   # ai-responder persona con
 # verified auto-submit attempts before the watchdog escalates and HOLDS — it
 # will not re-fire the same text on subsequent scans until the input changes.
 MAX_AUTOSUBMIT_ATTEMPTS = 1
+IDLE_NUDGE_THROTTLE = 600   # re-nudge an idle-with-unread-work lane at most once/10min
 
 def is_governance_console(sess: str) -> bool:
     return sess in GOVERNANCE_CONSOLES or sess.startswith(GOVERNANCE_PREFIXES)
+
+
+def unread_bus_work(sess: str) -> int:
+    """Count UNREAD agent_messages addressed to this lane's base agent. An
+    IDLE-CLEAN lane with unread dispatched work has stalled without picking it
+    up — the overnight-stall class. Maps tmux session → fleet_lanes.base_agent_id."""
+    try:
+        sys.path.insert(0, str(ORCH))
+        from dotenv import load_dotenv
+        import psycopg
+        load_dotenv(str(ORCH / ".env"))
+        dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+        with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
+            cur.execute("SELECT base_agent_id FROM fleet_lanes WHERE lane=%s", (sess,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return 0
+            # RECENT + ACTIONABLE unread only. Lanes rarely mark_read, so their
+            # unread backlog is huge (97+) regardless of priority — counting all of
+            # it would nudge every idle lane forever. The stall class is: fresh work
+            # dispatched, lane idled without picking it up. Catching it within the
+            # window (watchdog runs every 5min) prevents a 30min blip becoming a 7h
+            # stall, without re-nudging on stale backlog.
+            cur.execute(
+                "SELECT count(*) FROM agent_messages WHERE to_agent=%s AND read_at IS NULL "
+                "AND (requires_response OR priority='P1') "
+                "AND created_at > now() - interval '45 minutes'", (row[0],))
+            return cur.fetchone()[0]
+    except Exception as e:
+        log(f"unread-bus-work-failed {sess}: {e}")
+        return 0
 
 def log(msg: str) -> None:
     line = f"{datetime.now(timezone.utc).isoformat()} | {msg}"
@@ -182,15 +214,29 @@ def main() -> int:
             # operator explicitly wants caught before a forced reset-wait)
             escalate(sess, st, "Claude usage-limit warning visible — pace/throttle the fleet NOW (pause speculative lanes, protect revenue + time-sensitive).")
             continue
-        if st in ("WORKING", "IDLE_CLEAN", "UNKNOWN"):
+        if st in ("WORKING", "UNKNOWN"):
             continue
 
         # GOVERNANCE / CONVERSATIONAL CONSOLES (CAI-RESP-381): escalate ONLY,
         # never a keystroke — no auto-submit, no auto-answer. This is the hard
         # exclusion that makes the 2026-07-03 phantom-injection class impossible.
         if is_governance_console(sess):
-            if prev.get("state") != st:   # escalate on transition, not every scan
+            if st not in ("IDLE_CLEAN",) and prev.get("state") != st:  # idle gov = fine, no noise
                 escalate(sess, st, f"governance console in state {st} — NOT auto-actioned (keystroke injection forbidden here); hub judgment only")
+            continue
+
+        if st == "IDLE_CLEAN":
+            # Legitimately idle — BUT if the lane has UNREAD dispatched work on its
+            # bus, it stalled without picking it up (the overnight-stall class,
+            # 2026-07-04: lanes idled for 7h on queued work while the hub was away).
+            # Nudge it to drain, throttled so an ignored message isn't spammed. This
+            # is what keeps the fleet moving without live babysitting.
+            new_state[sess]["idle_nudge_ts"] = prev.get("idle_nudge_ts", 0)
+            n = unread_bus_work(sess)
+            if n > 0 and (time.time() - prev.get("idle_nudge_ts", 0)) > IDLE_NUDGE_THROTTLE:
+                ok = verified_resubmit(sess, f"\U0001F4E5 {n} unread agent_messages addressed to you — drain your inbox and act on them (mark read).")
+                new_state[sess]["idle_nudge_ts"] = time.time()
+                log(f"{sess}: IDLE_CLEAN + {n} unread bus msgs — nudged to drain (recovered={ok})")
             continue
 
         if st == "TRUST_PROMPT":
@@ -205,32 +251,25 @@ def main() -> int:
                 escalate(sess, st, "sitting on a decision dialog across ≥2 scans — pick an option")
             continue
         if st == "IDLE_UNSENT":
-            # Auto-submit ONLY if the SAME unsent text persisted since the last scan
-            # AND we haven't exhausted the attempt cap. The cap (CAI-RESP-381) stops
-            # a failed/ineffective submit from re-firing the same text every 300s
-            # forever (the infinite-replay bug): after MAX_AUTOSUBMIT_ATTEMPTS we
-            # escalate and HOLD until the input changes.
+            # NEVER auto-submit unsent text. Pressing Enter on a lane's own draft
+            # feeds it text the lane then reads as an OPERATOR directive it never
+            # received — the phantom-injection class, TWICE now via this exact path:
+            #   07-03: auto-resubmit into the cai console ("YES PURGE").
+            #   07-04: the mirror/cc-ihsanos lane's unsent 'override the 084 gate,
+            #          apply now' was auto-submitted -> a MONEY migration applied to
+            #          production on a fabricated operator override.
+            # The old attempt-cap only bounded infinite REPLAY; the SINGLE submit is
+            # the injury. There is no safe number of auto-submits of unsent text.
+            # So: ESCALATE ONLY — a human/hub reads the draft and decides. The
+            # watchdog never keystrokes unsent text into any lane, ever.
             if prev.get("state") == "IDLE_UNSENT" and prev.get("input") == inp and inp:
-                if attempts >= MAX_AUTOSUBMIT_ATTEMPTS:
-                    # cap reached: escalate EXACTLY ONCE (keyed on the persisted
-                    # held_escalated flag, not on the attempt count — the latter is
-                    # invariant inside this block so it never fired), then hold
-                    # silently with no replay until the input changes. This closes
-                    # the observability gap for the incident's own failure mode
-                    # (a nudge that falsely verifies success leaves the lane stuck).
-                    if not held_escalated:
-                        escalate(sess, st, f"unsent prompt did not clear after {attempts} verified attempt(s) — holding (no replay): {inp[:80]!r}")
-                        new_state[sess]["held_escalated"] = True
-                    else:
-                        log(f"{sess}: IDLE_UNSENT HELD (cap reached, already escalated, no replay) input={inp[:60]!r}")
+                if not held_escalated:
+                    escalate(sess, st, f"unsent prompt sitting ≥2 scans — NOT auto-submitted (phantom-injection guard, 07-04 084 incident); hub/operator must read + decide: {inp[:100]!r}")
+                    new_state[sess]["held_escalated"] = True
                 else:
-                    ok = verified_resubmit(sess, inp)
-                    new_state[sess]["attempts"] = attempts + 1
-                    log(f"{sess}: IDLE_UNSENT auto-submitted (recovered={ok}, attempt={attempts+1}) input={inp[:60]!r}")
-                    if not ok:
-                        escalate(sess, st, f"unsent prompt would not submit: {inp[:80]!r}")
+                    log(f"{sess}: IDLE_UNSENT held (escalated once, NEVER auto-submitted) input={inp[:60]!r}")
             else:
-                log(f"{sess}: IDLE_UNSENT (first sight — waiting one scan to confirm) input={inp[:60]!r}")
+                log(f"{sess}: IDLE_UNSENT (first sight — will escalate next scan, never auto-submit) input={inp[:60]!r}")
     reap_ghosts()
     log_burn()
     try:

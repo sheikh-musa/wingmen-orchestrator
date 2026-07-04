@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""tg_bridge.py — inbound half of the operator<->orchestrator Telegram bridge.
+"""cai_bridge.py — inbound half of the operator<->cai Telegram bridge.
 
-Long-polls the Wingmen Orchestrator bot (@wingmennorchbot) for operator messages
-and routes each one:
+A clean copy of tg_bridge.py adapted for the singleton "cai" governance node.
+Long-polls the cai bot (@cai_orch_bot) for operator messages and routes each one:
   1. LOG every inbound message to operator_messages (durable — nothing lost,
-     even if the rest fails).
-  2. If a live cc-orchestrator tmux session exists -> INJECT via send-keys, so
-     the operator's words reach the live "tmux you" (true continuity).
-  3. Else -> graceful HEADLESS fallback: ack on Telegram that the desk session
+     even if the rest fails). Tagged 'cai-channel' so the cai channel is
+     distinguishable from the cc-orchestrator operator channel in the log.
+  2. If a live `cai` tmux session exists -> INJECT via send-keys, so the
+     operator's words reach the live cai session (true continuity).
+  3. Else -> graceful HEADLESS fallback: ack on Telegram that the cai session
      is offline, and answer a deterministic `status` query straight from the
      substrate (no LLM needed).
 
-Security: only the operator's chat_id is honoured (others ignored). The bot
+Security: ONLY the operator's chat_id is honoured (everyone else ignored). No
+partner/Desmond logic — cai is the governance brain, operator-only. The bot
 token is read from .env and never echoed.
+
+This is a SEPARATE bridge from tg_bridge.py: different bot token, different
+offset file, different tmux target. It does NOT touch the live orch bridge.
 """
 from __future__ import annotations
 import json
@@ -30,6 +35,9 @@ from nervous_system import operator_log
 
 ORCH = pathlib.Path(__file__).resolve().parent.parent
 
+# Distinguishing tag stamped on every cai-channel message in operator_messages.
+CHANNEL_TAG = "cai-channel"
+
 
 def _env(key: str) -> str | None:
     for ln in open(ORCH / ".env"):
@@ -38,27 +46,22 @@ def _env(key: str) -> str | None:
     return None
 
 
-TOKEN = _env("WINGMEN_BOT_TOKEN")
+TOKEN = _env("CAI_TELEGRAM_BOT_TOKEN")
 OPERATOR = str(_env("MUSA_TELEGRAM_ID"))
-# Scoped partner (Desmond Shen): authorized by Telegram @username; his numeric id
-# + the shipforge/storefront group id are LEARNED and pinned on first contact.
-# His SCOPE (shipforge+storefront only) is enforced by cc-orchestrator, not here.
-DESMOND_USER = (_env("DESMOND_TELEGRAM_USERNAME") or "").lower()
-PARTNERS_FILE = ORCH / "logs" / ".tg_partners.json"
-TMUX_TARGET = os.environ.get("TG_BRIDGE_TMUX_TARGET", "orch")
-# tmux does prefix/glob matching on -t, so "orch" would falsely match an idle
-# "orchestrator" session. The "=" prefix forces an EXACT session-name match.
+TMUX_TARGET = os.environ.get("CAI_BRIDGE_TMUX_TARGET", "cai")
+# tmux does prefix/glob matching on -t, so "cai" could falsely match another
+# session whose name starts with "cai". The "=" prefix forces an EXACT match.
 TMUX_EXACT = "=" + TMUX_TARGET
-OFFSET_FILE = ORCH / "logs" / ".tg_bridge_offset"
-# Max chars to TYPE into the orch TUI. Longer messages inject a preview + pointer
+OFFSET_FILE = ORCH / "logs" / ".cai_bridge_offset"
+# Max chars to TYPE into the cai TUI. Longer messages inject a preview + pointer
 # (full text stays in operator_messages). Kept SMALL on purpose: at this size the
 # paste never wraps past ~2 rows, so verify is reliable AND a failed attempt
 # clears cleanly (multi-line wrapped input is what resists clearing — 2026-06-19).
 _INJECT_CAP = 150
 API = f"https://api.telegram.org/bot{TOKEN}"
 
-# @alias -> context label. The bridge resolves the tag; cc-orchestrator
-# interprets the intent. (Kept in sync with the CLAUDE.md bridge protocol.)
+# @alias -> context label. The bridge resolves the tag; cai interprets the
+# intent. (Kept in sync with the CLAUDE.md bridge protocol.)
 ALIASES = {
     "adcda": "cosem-adcda", "tdu": "cosem-tdu", "cosem": "cosem",
     "ihsanos": "ihsanos", "irsyad": "ihsanos",
@@ -114,56 +117,7 @@ def tg_send(text: str, chat: str | None = None) -> None:
     env = os.environ.copy()
     if chat:
         env["TG_CHAT_OVERRIDE"] = chat
-    subprocess.run([str(ORCH / "scripts" / "tg_send.sh"), text], check=False, env=env)
-
-
-def _load_partners() -> dict:
-    try:
-        return json.loads(PARTNERS_FILE.read_text())
-    except Exception:
-        return {}
-
-
-def _save_partners(d: dict) -> None:
-    try:
-        PARTNERS_FILE.write_text(json.dumps(d))
-    except Exception:
-        pass
-
-
-def authorize(m: dict) -> dict | None:
-    """Identify the SENDER (not just the chat). Returns a sender descriptor for
-    an authorized person, else None. Musa = full operator (any chat); Desmond =
-    scoped partner (shipforge/storefront). Learns + pins Desmond's id + group id."""
-    frm = m.get("from") or {}
-    from_id = str(frm.get("id", ""))
-    from_user = (frm.get("username") or "").lower()
-    chat = m.get("chat") or {}
-    chat_id = str(chat.get("id", ""))
-    chat_type = chat.get("type", "")
-    sender = None
-    if from_id and from_id == OPERATOR:
-        sender = {"name": "Musa", "role": "operator", "scope": "all", "chat": chat_id}
-    else:
-        p = _load_partners()
-        if DESMOND_USER and (from_user == DESMOND_USER
-                             or (p.get("desmond_id") and from_id == p["desmond_id"])):
-            if from_id and p.get("desmond_id") != from_id:
-                p["desmond_id"] = from_id
-                _save_partners(p)
-            sender = {"name": "Desmond", "role": "partner",
-                      "scope": "shipforge/storefront", "chat": chat_id}
-    # Learn + pin the partner group id from the PARTNER's group messages ONLY.
-    # (Was "either authorized sender" — but the operator sits in multiple groups,
-    # so his war-room messages kept re-pinning the war room as the partner group.
-    # Operator correction 2026-07-02: -5383530504 = war room, NOT Shen's group.
-    # Dies at ingest cutover: bot_channels.group_routing owns this as config.)
-    if sender and sender["role"] == "partner" and chat_type in ("group", "supergroup"):
-        p = _load_partners()
-        if p.get("group_id") != chat_id:
-            p["group_id"] = chat_id
-            _save_partners(p)
-    return sender
+    subprocess.run([str(ORCH / "scripts" / "cai_send.sh"), text], check=False, env=env)
 
 
 def live_session() -> str | None:
@@ -178,8 +132,8 @@ def parse_tag(text: str) -> str | None:
     return None
 
 
-def _orch_pane() -> str | None:
-    """Resolve session orch's active pane id. `send-keys -t =orch` fails with
+def _cai_pane() -> str | None:
+    """Resolve session cai's active pane id. `send-keys -t =cai` fails with
     'can't find pane' (the = exact-match prefix doesn't resolve to a pane), so
     we target the unambiguous pane id (e.g. %3) instead."""
     r = subprocess.run(
@@ -199,7 +153,7 @@ def _capture(pane: str, n: int = 30) -> list[str]:
 
 
 def _pane_busy(pane: str) -> bool:
-    """True iff the orch session is mid-task (WORKING), using the same observable
+    """True iff the cai session is mid-task (WORKING), using the same observable
     heuristic as scripts/lane_nudge.sh: the live footer (last 3 non-blank rows)
     shows 'esc to interrupt' AND NOT 'for agents'. Pure read-only capture-pane —
     never types. Callers MUST wrap in try/except (any failure => treat as not
@@ -256,22 +210,19 @@ def _clear_input(pane: str) -> None:
 
 
 def inject(text: str, tag: str | None, prefix: str | None = None) -> bool:
-    """Type the operator's message into the live orch pane and submit it,
+    """Type the operator's message into the live cai pane and submit it,
     verifying each step against the actual input box.
 
     CRITICAL (2026-06-19): a bare send-keys can be SILENTLY DROPPED when it
-    collides with the pane's own streaming output (a tool mid-run). The first
-    fix verified the text landed but (a) built the needle by stripping emoji, so
-    it never matched the rendered pane for reply-quotes (↩️/🚨) and (b) retried
-    with a lone C-u that didn't clear wrapped text — typing the title 3× and
-    never submitting. This version normalizes both sides, inspects the input box
-    specifically, clears robustly before each attempt, and confirms the text
-    actually LEFT the box (i.e. submitted) before returning True."""
-    pane = _orch_pane()
+    collides with the pane's own streaming output (a tool mid-run). This
+    version normalizes both sides, inspects the input box specifically, clears
+    robustly before each attempt, and confirms the text actually LEFT the box
+    (i.e. submitted) before returning True."""
+    pane = _cai_pane()
     if not pane:
         return False
     if prefix is None:
-        prefix = f"📱 Operator (Telegram{', @' + tag if tag else ''}): "
+        prefix = f"📱 Operator (Telegram→cai{', @' + tag if tag else ''}): "
     line = prefix + " ".join(text.splitlines())
     needle = _norm(line)[:40]
     for _ in range(3):
@@ -345,8 +296,8 @@ def _fetch_telegram_file(fp: str, dest) -> str:
 
 def _download_photo(photos: list) -> str:
     """Download the largest size of a Telegram photo to logs/tg_media and return
-    the local path (so cc-orchestrator can Read the image). Token stays in the
-    download URL only — never logged."""
+    the local path (so cai can Read the image). Token stays in the download URL
+    only — never logged."""
     file_id = photos[-1]["file_id"]
     with urllib.request.urlopen(f"{API}/getFile?file_id={file_id}", timeout=30) as r:
         fp = json.load(r)["result"]["file_path"]
@@ -359,8 +310,8 @@ def _download_photo(photos: list) -> str:
 def _download_document(doc: dict) -> str:
     """Download a Telegram document (PDF/docx/csv/xlsx/etc.) to logs/tg_media and
     return the local path. Preserves the operator's original file name (sanitised)
-    so cc-orchestrator can recognise + Read it. Token stays in the download URL
-    only — never logged. (getFile supports files up to ~20MB.)"""
+    so cai can recognise + Read it. Token stays in the download URL only — never
+    logged. (getFile supports files up to ~20MB.)"""
     file_id = doc["file_id"]
     with urllib.request.urlopen(f"{API}/getFile?file_id={file_id}", timeout=30) as r:
         fp = json.load(r)["result"]["file_path"]
@@ -373,13 +324,12 @@ def _download_document(doc: dict) -> str:
     return _fetch_telegram_file(fp, dest)
 
 
-def handle(m: dict, chat: str, sender: dict | None = None) -> None:
-    sender = sender or {"name": "Musa", "role": "operator", "scope": "all"}
+def handle(m: dict, chat: str) -> None:
     text = m.get("text") or m.get("caption") or ""
     tag = parse_tag(text)
     content = text
 
-    # screenshot / photo -> download + hand cc-orchestrator the path to Read
+    # screenshot / photo -> download + hand cai the path to Read
     if m.get("photo"):
         try:
             path = _download_photo(m["photo"])
@@ -387,7 +337,7 @@ def handle(m: dict, chat: str, sender: dict | None = None) -> None:
         except Exception as e:
             content = f"sent a photo (download failed: {e})" + (f" | {text}" if text else "")
 
-    # document (PDF/docx/csv/xlsx/etc.) -> download + hand cc-orchestrator the path
+    # document (PDF/docx/csv/xlsx/etc.) -> download + hand cai the path
     elif m.get("document"):
         try:
             path = _download_document(m["document"])
@@ -395,7 +345,7 @@ def handle(m: dict, chat: str, sender: dict | None = None) -> None:
         except Exception as e:
             content = f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
 
-    # reply-threading -> prepend the quoted message so I know what it refers to
+    # reply-threading -> prepend the quoted message so cai knows what it refers to
     rep = m.get("reply_to_message")
     if rep:
         snip = (rep.get("text") or rep.get("caption") or "[media]").strip().replace("\n", " ")[:70]
@@ -403,55 +353,45 @@ def handle(m: dict, chat: str, sender: dict | None = None) -> None:
 
     if not content:
         return
-    operator_log.log("inbound", content, chat_id=chat, tag=tag)
+    operator_log.log("inbound", content, chat_id=chat, tag=CHANNEL_TAG)
     if live_session():
-        # Cap what we TYPE into the TUI. A long paste (e.g. a forwarded tafsir,
-        # 2026-06-19: 2360 chars) wraps to many rows — verify gets racy and a
-        # failed attempt can't be fully cleared, so the residue bleeds into the
-        # next message. The full text is always in operator_messages, so inject a
-        # short preview + a pointer and let cc-orchestrator read the rest there.
+        # Cap what we TYPE into the TUI. A long paste wraps to many rows — verify
+        # gets racy and a failed attempt can't be fully cleared, so the residue
+        # bleeds into the next message. The full text is always in
+        # operator_messages, so inject a short preview + a pointer and let cai
+        # read the rest there.
         inject_text = content
         if len(content) > _INJECT_CAP:
             inject_text = (content[:_INJECT_CAP].rstrip() +
                            f" …[+{len(content) - _INJECT_CAP} chars truncated — "
                            f"full text: operator_log.recent()]")
-        # Non-Musa senders get a labelled prefix so cc-orchestrator always knows
-        # WHO is speaking (provenance — never merge Musa/Desmond) + WHERE to reply.
-        prefix = None
-        if sender.get("name") != "Musa":
-            prefix = (f"📱 {sender['name']} [partner · {sender['scope']} · "
-                      f"reply→{chat}] (Telegram{', @' + tag if tag else ''}): ")
-        elif chat != OPERATOR:
-            # Musa, but posting in a group (not his private DM) → reply to the group.
-            prefix = (f"📱 Operator [group · reply→{chat}] "
-                      f"(Telegram{', @' + tag if tag else ''}): ")
         # INSTANT BUSY-ACK: if the session is mid-task it can't surface the reply
         # until it frees, so fire an immediate honest ack so the operator is never
         # left in silence (the real reply still follows via the unchanged inject
         # path below). Fully guarded: ANY failure falls through to normal flow.
         busy_acked = False
         try:
-            _pane = _orch_pane()
+            _pane = _cai_pane()
             if _pane and _pane_busy(_pane):
-                tg_send("got it 👍 — mid-task, real reply coming shortly.", chat)
+                tg_send("got it 👍 — cai is mid-task, real reply coming shortly.", chat)
                 busy_acked = True
         except Exception as e:
-            print(f"[tg_bridge] busy-ack skipped: {type(e).__name__}: {e}", flush=True)
-        if inject(inject_text, tag, prefix):
+            print(f"[cai_bridge] busy-ack skipped: {type(e).__name__}: {e}", flush=True)
+        if inject(inject_text, tag):
             return
-        # Desk IS live but the injection couldn't land (busy pane). Don't claim
+        # cai IS live but the injection couldn't land (busy pane). Don't claim
         # offline — tell the operator it's saved + queued so nothing feels lost.
         # (Skip if we already fired the instant busy-ack — no need to double up.)
         if not busy_acked:
-            tg_send("📥 Got it — saved. The desk was mid-task so it didn't surface "
+            tg_send("📥 Got it — saved. cai was mid-task so it didn't surface "
                     "instantly; I'll pick it up on my next breath. (Nothing lost.)", chat)
         return
     if text.strip().lower().lstrip("/") == "status":
         tg_send(status_snapshot(), chat)
     else:
-        tg_send("📥 Logged — but the desk (tmux) orchestrator isn't live right "
-                "now, so I'll pick this up the moment it is. Send 'status' for an "
-                "instant fleet snapshot in the meantime.", chat)
+        tg_send("📥 Logged — but the cai (tmux) session isn't live right now, so "
+                "I'll pick this up the moment it is. Send 'status' for an instant "
+                "fleet snapshot in the meantime.", chat)
 
 
 def main() -> None:
@@ -461,40 +401,39 @@ def main() -> None:
             offset = int(OFFSET_FILE.read_text().strip())
         except ValueError:
             offset = 0
-    # Offset advances ONLY after a message is fully handled, so a timeout/outage
-    # never loses a message (Telegram redelivers from the un-acked offset). The
-    # backoff below just avoids hammering a down network / a dual-poller 409.
+    # Offset advances ONLY after a message is fully handled (durable log first),
+    # so a timeout/outage never loses a message — Telegram redelivers from the
+    # un-acked offset. The 2026-07-03 "frozen offset / kickstart didn't fix"
+    # symptom was NOT this loop: the launchd plist pointed at a decommissioned
+    # host path so the service could never actually run. Backoff below just keeps
+    # a down network / a dual-poller 409 from tight-looping.
     while True:
         try:
             for u in get_updates(offset):
                 m = u.get("message") or u.get("edited_message") or {}
                 chat = str(m.get("chat", {}).get("id", ""))
-                sender = authorize(m)
-                if sender:
-                    handle(m, chat, sender)
-                # advance the offset only AFTER handle() (which logs durably) —
-                # a crash mid-handle re-delivers rather than silently dropping.
+                from_id = str((m.get("from") or {}).get("id", ""))
+                # Operator-only: ignore everyone but Musa (no partner logic).
+                if from_id and from_id == OPERATOR:
+                    handle(m, chat)
+                # advance only AFTER handle() logs durably — crash re-delivers.
                 offset = u["update_id"] + 1
                 OFFSET_FILE.write_text(str(offset))
         except urllib.error.HTTPError as e:
             if e.code == 409:
-                # 409 Conflict = ANOTHER poller holds getUpdates for this bot
-                # token (a second machine, or the unified ingest daemon). Two
-                # pollers split/lose the operator's messages — this is a real
-                # misdelivery hazard, so back off hard and shout for the watchdog
-                # instead of tight-looping. SINGLE-POLLER is the invariant.
-                print("[tg_bridge] FATAL 409 Conflict: another getUpdates poller "
-                      "is active on this bot token — messages WILL be split/lost. "
+                # 409 Conflict = another getUpdates poller holds this bot token
+                # (a second machine, or the unified ingest daemon). Two pollers
+                # split/lose messages — back off hard and shout for the watchdog.
+                print("[cai_bridge] FATAL 409 Conflict: another getUpdates poller "
+                      "is active on the cai bot token — messages WILL be split/lost. "
                       "Ensure exactly one poller (this bridge XOR unified ingest).",
                       flush=True)
                 time.sleep(30)
             else:
-                print(f"[tg_bridge] loop error: HTTPError {e.code}: {e}", flush=True)
+                print(f"[cai_bridge] loop error: HTTPError {e.code}: {e}", flush=True)
                 time.sleep(5 + random.uniform(0, 3))
         except Exception as e:
-            # transient network (DNS/timeout/reset — common on a laptop that
-            # sleeps/roams): jittered backoff, offset held, self-heals on return.
-            print(f"[tg_bridge] loop error: {type(e).__name__}: {e}", flush=True)
+            print(f"[cai_bridge] loop error: {type(e).__name__}: {e}", flush=True)
             time.sleep(5 + random.uniform(0, 3))
 
 

@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>dev.wingmen.tg-bridge</string>
+  <key>Label</key><string>dev.wingmen.tg-out</string>
   <key>ProgramArguments</key><array>
     <string>/Users/musa/wingmen/orchestrator/.venv/bin/python3</string>
-    <string>-m</string><string>nervous_system.tg_bridge</string>
+    <string>-m</string><string>nervous_system.tg_out</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/musa/wingmen/orchestrator</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/musa/wingmen/orchestrator/logs/tg_bridge.log</string>
-  <key>StandardErrorPath</key><string>/Users/musa/wingmen/orchestrator/logs/tg_bridge.log</string>
+  <key>StandardOutPath</key><string>/Users/musa/wingmen/orchestrator/logs/tg-out.log</string>
+  <key>StandardErrorPath</key><string>/Users/musa/wingmen/orchestrator/logs/tg-out.log</string>
 </dict></plist>

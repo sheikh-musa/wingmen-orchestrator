@@ -5,8 +5,8 @@
 set -uo pipefail
 
 source "$HOME/wingmen/orchestrator/.env"
-BOT_TOKEN="$(grep TELEGRAM_BOT_TOKEN $HOME/wingmen/orchestrator/.env | cut -d= -f2)"
-CHAT_ID="$(grep MUSA_TELEGRAM_ID $HOME/wingmen/orchestrator/.env | cut -d= -f2)"
+BOT_TOKEN="$(grep "^WINGMEN_BOT_TOKEN=" $HOME/wingmen/orchestrator/.env | cut -d= -f2)"
+CHAT_ID="$(grep "^MUSA_TELEGRAM_ID=" $HOME/wingmen/orchestrator/.env | cut -d= -f2)"
 ALERT_FILE="/tmp/ihsanos_health_alert_sent"
 
 ISSUES=""
