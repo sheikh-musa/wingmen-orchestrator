@@ -11,7 +11,6 @@
 set -euo pipefail
 
 ORCH_DIR="$HOME/wingmen/orchestrator"
-SESSION="orch"
 CLAUDE_BIN="$(command -v claude || echo /usr/local/bin/claude)"
 SLEEP_BETWEEN_RESTARTS=5
 
@@ -24,6 +23,12 @@ if [[ -f "$ORCH_DIR/.env" ]]; then
     source "$ORCH_DIR/.env"
     set +a
 fi
+
+# ORCH-TOPOLOGY-001: session name is body-scoped. The hub boots as `orch`
+# (bridge exact-matches =orch); the console body (Nazim, operator's MacBook)
+# sets ORCH_TMUX_SESSION=nazim in .env so a non-hub session NEVER claims the
+# hub's name (the leftover `orch` name is how the 07-04 pen-(iv) slip happened).
+SESSION="${ORCH_TMUX_SESSION:-orch}"
 
 # Kill any stale session so the bridge sees a clean restart
 if tmux has-session -t "$SESSION" 2>/dev/null; then
