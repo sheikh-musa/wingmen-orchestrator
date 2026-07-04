@@ -249,6 +249,9 @@ def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
 URGENT_KW = "urgent"
 BTW_KW = "btw"
 ACK_THROTTLE_SEC = 600   # at most one "I'm mid-task" ack per 10 min per channel
+ACK_AFTER_SEC = 45       # belt-and-suspenders (ihsan): reassure the operator if
+                         # his message sits unhandled this long — busy, idle, OR
+                         # wedged. He is NEVER left wondering whether it landed.
 MAX_DEFER_SEC = 600      # busy-defer CAP: a message unhandled past this nudges
                          # ANYWAY (CAI-RESP-382) — deferral must never strand the
                          # operator, even if the agent stays busy indefinitely.
@@ -318,6 +321,39 @@ def drain_stale_deferred(conn, ch: "Channel") -> None:
     ch._last_stale_nudge = now
     nudge_session(target, ch.key, n)
     _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
+
+
+def reassure_if_unhandled(conn, ch: "Channel") -> None:
+    """Belt-and-suspenders ack (ihsan — 2026-07-04): if ANY inbound has sat
+    unhandled past ACK_AFTER_SEC, send ONE reassurance — regardless of whether the
+    target is busy, idle, or wedged. Closes the gap where a stuck-IDLE hub gave the
+    operator neither a reply NOR a busy-ack, leaving him wondering if it landed.
+    Dedups against the busy-ack (both start '📨 Got your message') so he gets
+    exactly one acknowledgment per window — never two, never zero."""
+    if ch.mode not in ("agent-session", "log-and-route"):
+        return
+    ack = ("\U0001F4E8 Got your message — it's logged and I'll get to it shortly. "
+           "(Reply URGENT to bump it now.)")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), min(created_at) FROM operator_messages "
+            "WHERE direction='inbound' AND tag=%s AND handled_at IS NULL",
+            (ch.channel_tag,))
+        n, oldest = cur.fetchone()
+        if not oldest:
+            return
+        cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, ACK_AFTER_SEC))
+        if not cur.fetchone()[0]:
+            return   # not stale enough yet — a fast reply needs no ack
+        cur.execute(
+            "SELECT 1 FROM tg_out WHERE channel_key=%s AND text LIKE %s "
+            "AND created_at > now() - make_interval(secs => %s) LIMIT 1",
+            (ch.key, "%Got your message%", ACK_THROTTLE_SEC))
+        if cur.fetchone():
+            return   # already acked (busy-ack OR reassurance) within the window
+        cur.execute("INSERT INTO tg_out (channel_key, text) VALUES (%s,%s)", (ch.key, ack))
+        conn.commit()
+    _log_line(f"{ch.key}: {n} unhandled past {ACK_AFTER_SEC}s — reassurance ack (belt+suspenders)")
 
 
 # ── Per-update processing (sync, called from the channel task) ────────────────
@@ -430,6 +466,10 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
                 # nudges once it crosses MAX_DEFER_SEC. This is what was missing
                 # when the operator waited 45 min on a deferred message.
                 drain_stale_deferred(conn, ch)
+                # Belt-and-suspenders (ihsan): shorter-fuse reassurance so the
+                # operator is acked within ACK_AFTER_SEC even when the hub is
+                # stuck-idle (neither replying nor busy) — never left wondering.
+                reassure_if_unhandled(conn, ch)
         except psycopg.Error as e:
             # DB unreachable: offset stays un-acked → Telegram will redeliver →
             # A1 dedupe absorbs. Surface loudly for the watchdog (CAI-RESP-357).
