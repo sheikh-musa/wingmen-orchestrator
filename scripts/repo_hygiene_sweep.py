@@ -181,12 +181,29 @@ def main() -> int:
     if alertable:
         lines = [f"{'🔴' if s=='CRITICAL' else '🟡'} {n}: {m}" for s, n, m in alertable]
         heal_note = f"\n(✅ auto-pushed {len(healed)} forgotten branch(es))" if healed else ""
-        body = ("🧹 Repo-hygiene sweep found issues:\n" + "\n".join(lines) + heal_note +
-                "\nMerged/committed work not fully shipped — see logs/repo_hygiene.log")
+        body = ("Repo-hygiene sweep — fleet-internal, ORCH to action (not operator-facing):\n"
+                + "\n".join(lines) + heal_note
+                + "\nLanes: commit WIP. Orch: close deploy gaps / reconcile branches. "
+                  "Escalate to the operator ONLY if a decision is genuinely his.")
+        # Report to the ORCH BUS, not the operator's phone. Repo hygiene is a
+        # fleet-internal concern; pinging the operator's Telegram with it every 3h
+        # (unresolved) is exactly the noise he flagged 2026-07-04 ("till judgement
+        # day?"). Orch drains this + acts; the operator only hears a hygiene item
+        # if orch judges it genuinely his call.
         try:
-            subprocess.run([str(ORCH / "scripts" / "tg_send.sh"), body], timeout=30)
+            import os as _os, psycopg
+            from dotenv import load_dotenv
+            load_dotenv(str(ORCH / ".env"))
+            dsn = _os.environ.get("DATABASE_URL") or _os.environ.get("SUPABASE_DB_URL")
+            with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
+                cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+                cur.execute(
+                    "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
+                    "VALUES ('cc-orchestrator','cc-orchestrator','update',%s,%s,false,'P2')",
+                    (f"[repo-hygiene] {len(alertable)} issue(s) — orch action", body))
+                c.commit()
         except Exception as e:
-            log(f"tg_send failed: {e}")
+            log(f"bus post failed: {e}")
     else:
         log(f"clean sweep ({len(healed)} auto-healed)" if healed else "clean sweep — all repos pushed + committed")
     return 0
