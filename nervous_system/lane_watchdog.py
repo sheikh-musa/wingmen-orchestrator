@@ -251,32 +251,25 @@ def main() -> int:
                 escalate(sess, st, "sitting on a decision dialog across ≥2 scans — pick an option")
             continue
         if st == "IDLE_UNSENT":
-            # Auto-submit ONLY if the SAME unsent text persisted since the last scan
-            # AND we haven't exhausted the attempt cap. The cap (CAI-RESP-381) stops
-            # a failed/ineffective submit from re-firing the same text every 300s
-            # forever (the infinite-replay bug): after MAX_AUTOSUBMIT_ATTEMPTS we
-            # escalate and HOLD until the input changes.
+            # NEVER auto-submit unsent text. Pressing Enter on a lane's own draft
+            # feeds it text the lane then reads as an OPERATOR directive it never
+            # received — the phantom-injection class, TWICE now via this exact path:
+            #   07-03: auto-resubmit into the cai console ("YES PURGE").
+            #   07-04: the mirror/cc-ihsanos lane's unsent 'override the 084 gate,
+            #          apply now' was auto-submitted -> a MONEY migration applied to
+            #          production on a fabricated operator override.
+            # The old attempt-cap only bounded infinite REPLAY; the SINGLE submit is
+            # the injury. There is no safe number of auto-submits of unsent text.
+            # So: ESCALATE ONLY — a human/hub reads the draft and decides. The
+            # watchdog never keystrokes unsent text into any lane, ever.
             if prev.get("state") == "IDLE_UNSENT" and prev.get("input") == inp and inp:
-                if attempts >= MAX_AUTOSUBMIT_ATTEMPTS:
-                    # cap reached: escalate EXACTLY ONCE (keyed on the persisted
-                    # held_escalated flag, not on the attempt count — the latter is
-                    # invariant inside this block so it never fired), then hold
-                    # silently with no replay until the input changes. This closes
-                    # the observability gap for the incident's own failure mode
-                    # (a nudge that falsely verifies success leaves the lane stuck).
-                    if not held_escalated:
-                        escalate(sess, st, f"unsent prompt did not clear after {attempts} verified attempt(s) — holding (no replay): {inp[:80]!r}")
-                        new_state[sess]["held_escalated"] = True
-                    else:
-                        log(f"{sess}: IDLE_UNSENT HELD (cap reached, already escalated, no replay) input={inp[:60]!r}")
+                if not held_escalated:
+                    escalate(sess, st, f"unsent prompt sitting ≥2 scans — NOT auto-submitted (phantom-injection guard, 07-04 084 incident); hub/operator must read + decide: {inp[:100]!r}")
+                    new_state[sess]["held_escalated"] = True
                 else:
-                    ok = verified_resubmit(sess, inp)
-                    new_state[sess]["attempts"] = attempts + 1
-                    log(f"{sess}: IDLE_UNSENT auto-submitted (recovered={ok}, attempt={attempts+1}) input={inp[:60]!r}")
-                    if not ok:
-                        escalate(sess, st, f"unsent prompt would not submit: {inp[:80]!r}")
+                    log(f"{sess}: IDLE_UNSENT held (escalated once, NEVER auto-submitted) input={inp[:60]!r}")
             else:
-                log(f"{sess}: IDLE_UNSENT (first sight — waiting one scan to confirm) input={inp[:60]!r}")
+                log(f"{sess}: IDLE_UNSENT (first sight — will escalate next scan, never auto-submit) input={inp[:60]!r}")
     reap_ghosts()
     log_burn()
     try:
