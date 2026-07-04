@@ -64,3 +64,14 @@ Agreed it satisfies 261; build with these folded in (the lone static token is to
 - API: `/api/messages` returns recent bus rows server-side (no key in any response/asset); `/api/lanes` reflects live agent_status.
 - SSE: a new `agent_messages` INSERT appears in a connected browser sub-second; a lane status flip appears live.
 - Portability: runs from env config with zero Mac-specific paths; `python -m nervous_system.console` boots clean.
+
+## Update (2026-07-03) — hardening #1 implemented: Tailscale IP-allowlist
+
+Implements the "IP allowlist" option from the cai hardenings list above (§ "Network/identity layer IN FRONT of the token"), **replacing** the static `CONSOLE_TOKEN` password rather than adding to it:
+
+- Primary gate is now `CONSOLE_ALLOWED_IPS` (comma-separated Tailscale IPs), checked against the real TCP peer address (`self.client_address[0]`) — **never** `X-Forwarded-For`, which is client-supplied and spoofable. Fails closed on an empty allowlist.
+- `CONSOLE_BREAKGLASS_TOKEN` replaces `CONSOLE_TOKEN` as a **dormant** recovery path only (unset by default), guarding against a Tailscale re-registration locking the operator out with no recovery — the seeded allowlist itself already covers this by including the operator's phone *and* both Macs, not phone-only.
+- Every breakglass use is logged loudly and separately from normal per-request audit (`auth.py`'s `_log_breakglass`).
+- See `nervous_system/console/auth.py` for the implementation and `tests/console/test_auth.py` for the behavioral spec (including a regression test proving a spoofed `X-Forwarded-For` cannot substitute for the real peer IP).
+
+**Deployment topology consequence (found by cc-reviewer-4, msg 5920/5919, 2026-07-03):** this option makes the original architecture diagram above (§ "Architecture" — `browser → cloudflared tunnel → console backend`) **void**. A locally-terminating tunnel/proxy makes every request's TCP peer `127.0.0.1`, which either locks the operator out entirely or, if `127.0.0.1` is added to the allowlist to compensate, authorizes every tunnel client — the allowlist becomes theater either way, since peer-IP identity and a local reverse hop are fundamentally incompatible (the code deliberately refuses to trust `X-Forwarded-For` to fix this, since that reopens the spoofing hole this whole change exists to close). **There is no tunnel in this deployment** — `CONSOLE_HOST` must be `auto`/`tailscale` (binds the host's own Tailscale IP directly; see `app.py`'s `_resolve_host`), and devices reach the console directly over the tailnet. Cloudflare Access (the other hardening-#1 option from the list above) is the one to reach for if a public/non-tailnet reachability requirement ever comes back — it composes with a real reverse proxy in a way peer-IP allowlisting cannot.

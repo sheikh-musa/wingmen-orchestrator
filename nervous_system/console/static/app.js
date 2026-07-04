@@ -14,7 +14,11 @@
   var seen = {};          // de-dup message ids
 
   var $ = function (id) { return document.getElementById(id); };
-  function authHeaders() { return { Authorization: "Bearer " + token }; }
+  // Auth is IP-allowlist-first now (server-side, CONSOLE_ALLOWED_IPS) — an
+  // allowlisted device needs no header at all. *token* here is only ever the
+  // dormant breakglass recovery secret, so omit the header entirely when
+  // it's empty rather than sending a meaningless "Bearer ".
+  function authHeaders() { return token ? { Authorization: "Bearer " + token } : {}; }
 
   function setConn(state) {
     var dot = $("dot"), txt = $("connTxt");
@@ -76,6 +80,13 @@
     return u;
   }
 
+  // 401 means this device's IP isn't in CONSOLE_ALLOWED_IPS — the normal
+  // (allowlisted) case never hits this. Point at the breakglass fallback
+  // rather than failing silently.
+  var UNAUTH_HINT =
+    '<div class="empty">Not authorized from this device/network.<br>' +
+    "If this is expected (off-tailnet, IP changed), enter the breakglass token above and Retry.</div>";
+
   function loadMessages() {
     var params = {
       limit: 80,
@@ -84,7 +95,7 @@
     };
     return fetch(apiUrl("/api/messages", params), { headers: authHeaders() })
       .then(function (r) {
-        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        if (r.status === 401) { setConn("down"); $("messages").innerHTML = UNAUTH_HINT; throw new Error("unauthorized"); }
         return r.json();
       })
       .then(function (rows) {
@@ -106,44 +117,228 @@
     return "dead";
   }
 
-  function loadLanes() {
-    return fetch("/api/lanes", { headers: authHeaders() })
+  // Dark = a lane that's SUPPOSED to be up (desired_state=up) but its
+  // heartbeat is dead/stale — the signal an operator scanning a phone screen
+  // needs to catch first, so these sort to the top and get a loud badge
+  // rather than just a small colored heartbeat line.
+  function laneFlag(l) {
+    var hbClass = laneHbClass(l.heartbeat_age_s);
+    var shouldBeUp = (l.desired_state || "").toLowerCase() === "up";
+    if (shouldBeUp && hbClass === "dead") return "dark";
+    if (shouldBeUp && hbClass === "stale") return "stale";
+    return null;
+  }
+  var FLAG_RANK = { dark: 0, stale: 1 };
+
+  // Live pane peek (read-only) — the DB-derived card (current_task/heartbeat)
+  // is a dumb 5-min timer that shows "up", never "what's happening"; this
+  // polls the lane's real tmux pane instead. Accordion: at most ONE peek
+  // polls at a time (lightweight/throttled, per the ask) — opening another
+  // lane's peek, or the periodic 10s lane-list refresh finding the lane
+  // gone, stops the previous poll.
+  var openPeek = null;   // { session } of the currently-expanded peek, or null
+  var peekTimer = null;
+
+  function stopPeek() {
+    if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+    openPeek = null;
+  }
+
+  function fetchPeek(session, box) {
+    fetch("/api/lanes/" + encodeURIComponent(session) + "/pane", { headers: authHeaders() })
       .then(function (r) {
-        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        if (r.status === 401) { setConn("down"); stopPeek(); return null; }
+        if (r.status === 404) { return { dead: true }; }
         return r.json();
       })
-      .then(function (rows) {
-        var box = $("lanes");
-        if (!rows.length) { box.innerHTML = '<div class="empty">No lanes.</div>'; return; }
-        box.innerHTML = rows.map(function (l) {
-          var st = (l.status || "unknown").toLowerCase();
-          var hb = l.heartbeat_age_s;
-          var hbTxt = hb == null ? "no heartbeat" : hb + "s ago";
-          // "working on" = latest bus activity (current_task is just the boot string)
-          var task = l.activity || l.current_task || "";
-          var taskAge = l.activity != null && l.activity_age_s != null ? fmtAge(l.activity_age_s) : "";
-          return '<div class="lane">' +
-            '<div class="top">' +
-              '<span class="id">' + esc(l.agent_id) + '</span>' +
-              '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
-            '</div>' +
-            (task ? '<div class="task">' + esc(task) +
-              (taskAge ? ' <span class="taskage">&middot; ' + esc(taskAge) + '</span>' : '') + '</div>' : '') +
-            '<div class="hb ' + laneHbClass(hb) + '">hb ' + esc(hbTxt) + '</div>' +
-            (l.desired_state ? '<div class="desired">desired: ' + esc(l.desired_state) +
-              (l.lane ? ' (' + esc(l.lane) + ')' : '') + '</div>' : '') +
-          '</div>';
-        }).join("");
+      .then(function (data) {
+        if (!data) return;
+        if (data.dead) { box.innerHTML = '<span class="peek-empty">session not live</span>'; return; }
+        // Only auto-scroll if the user was ALREADY pinned to the bottom
+        // before this update — otherwise a poll every ~2.5s yanks them away
+        // mid-read every time (operator feedback). Checked BEFORE replacing
+        // content, since scrollHeight changes once the new text is set; a
+        // few px of tolerance absorbs sub-pixel rounding.
+        var wasPinnedToBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 4;
+        box.textContent = data.text || "";
+        if (wasPinnedToBottom) { box.scrollTop = box.scrollHeight; }
+      })
+      .catch(function () {});
+  }
+
+  function startPeek(session, box) {
+    if (peekTimer) clearInterval(peekTimer);
+    openPeek = { session: session };
+    box.classList.add("open");
+    box.innerHTML = '<span class="peek-empty">loading&hellip;</span>';
+    fetchPeek(session, box);
+    peekTimer = setInterval(function () { fetchPeek(session, box); }, 2500);
+  }
+
+  // Pause polling while backgrounded (phone screen off / app switched away) —
+  // no point burning battery/data on a peek nobody's looking at. Resumes
+  // against the SAME session's box when the app comes back, if it's still
+  // in the DOM (the periodic lane refresh may have removed it if the lane
+  // itself is gone by then, which is fine — nothing to resume onto).
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+      return;
+    }
+    if (openPeek && typeof CSS !== "undefined" && CSS.escape) {
+      var box = document.querySelector('.peek-box[data-lane="' + CSS.escape(openPeek.session) + '"]');
+      if (box) startPeek(openPeek.session, box);
+    }
+  });
+
+  // SLA chip + task card markup, shared by the merged Lanes view below (used
+  // to be the standalone Queue tab — folded into Lanes per operator layout
+  // decision, msg re: 3-tab layout).
+  function renderQtask(t, i) {
+    var st = (t.status || "queued").toLowerCase();
+    var sla = "";
+    if (t.sla_minutes != null && t.elapsed_min != null) {
+      var over = !!t.over_sla;
+      sla = '<span class="sla' + (over ? ' over' : '') + '">' +
+              (over ? '⚠ ' : '') + t.elapsed_min + 'm/' + t.sla_minutes + 'm' +
+            '</span>';
+    } else if (t.sla_minutes != null) {
+      sla = '<span class="sla idle">SLA ' + t.sla_minutes + 'm</span>';
+    }
+    return '<div class="qtask' + (t.over_sla ? ' breached' : '') + '">' +
+      '<div class="top">' +
+        '<span class="rank">' + (i + 1) + '.</span>' +
+        '<span class="title">' + esc(t.title) + '</span>' +
+        sla +
+        '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
+      '</div>' +
+      (t.detail ? '<div class="detail">' + esc(t.detail) + '</div>' : '') +
+    '</div>';
+  }
+
+  // Lanes tab = merged status + queue + live-peek (3-tab layout: Lanes,
+  // Messages, Deploys — Queue is no longer a separate tab). Fetches both
+  // /api/lanes and /api/queue and folds each lane's tasks + peek control
+  // into its own card.
+  function loadLanes() {
+    return Promise.all([
+      fetch("/api/lanes", { headers: authHeaders() }),
+      fetch("/api/queue", { headers: authHeaders() }),
+    ]).then(function (resps) {
+      if (resps[0].status === 401 || resps[1].status === 401) {
+        setConn("down"); $("lanes").innerHTML = UNAUTH_HINT; throw new Error("unauthorized");
+      }
+      return Promise.all(resps.map(function (r) { return r.json(); }));
+    }).then(function (results) {
+      var rows = results[0], queueRows = results[1];
+      var box = $("lanes");
+      if (!rows.length && !queueRows.length) { box.innerHTML = '<div class="empty">No lanes.</div>'; return; }
+
+      // group queue tasks by lane so each lane card can show its own work.
+      var tasksByLane = {};
+      queueRows.forEach(function (t) {
+        if (!tasksByLane[t.lane]) tasksByLane[t.lane] = [];
+        tasksByLane[t.lane].push(t);
       });
+      var consumed = {};
+
+      // Dark/stale-and-should-be-up lanes float to the top — that's the
+      // thing worth an operator's attention on a small screen first.
+      rows = rows.slice().sort(function (a, b) {
+        var ra = FLAG_RANK[laneFlag(a)]; var rb = FLAG_RANK[laneFlag(b)];
+        if (ra == null) ra = 2; if (rb == null) rb = 2;
+        return ra - rb;
+      });
+      var reopenSession = openPeek ? openPeek.session : null;
+      if (peekTimer) { clearInterval(peekTimer); peekTimer = null; } // rebind to the fresh DOM below
+
+      var laneCards = rows.map(function (l) {
+        var st = (l.status || "unknown").toLowerCase();
+        var hb = l.heartbeat_age_s;
+        var hbTxt = hb == null ? "no heartbeat" : fmtAge(hb);
+        var flag = laneFlag(l);
+        // "working on" = latest bus activity (current_task is just the boot string)
+        var task = l.activity || l.current_task || "";
+        var taskAge = l.activity != null && l.activity_age_s != null ? fmtAge(l.activity_age_s) : "";
+        var tasks = l.lane && tasksByLane[l.lane] ? tasksByLane[l.lane] : [];
+        if (l.lane) consumed[l.lane] = true;
+        var tasksHtml = tasks.length
+          ? '<div class="tasks">' + tasks.map(renderQtask).join("") + '</div>'
+          : "";
+        // Peek target: tmux_session (self-registered per INSTANCE at boot,
+        // migration 005) is the real live session name, always correct.
+        // fleet_lanes.lane is a static label shared by a whole agent FAMILY
+        // (every cc-reviewer-N row has lane='reviewer') and can't resolve to
+        // one specific on-demand session when several are live at once —
+        // fall back to it only if a lane hasn't self-registered yet.
+        var peekTarget = l.tmux_session || l.lane;
+        return '<div class="lane' + (flag ? ' flag-' + flag : '') + '">' +
+          '<div class="top">' +
+            '<span class="id">' + esc(l.agent_id) + '</span>' +
+            (flag ? '<span class="flag ' + flag + '">' + (flag === "dark" ? "dark" : "going stale") + '</span>' : '') +
+            '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
+          '</div>' +
+          (task ? '<div class="task">' + esc(task) +
+            (taskAge ? ' <span class="taskage">&middot; ' + esc(taskAge) + '</span>' : '') + '</div>' : '') +
+          '<div class="hb ' + laneHbClass(hb) + '">hb ' + esc(hbTxt) + '</div>' +
+          (l.desired_state ? '<div class="desired">desired: ' + esc(l.desired_state) +
+            (l.lane ? ' (' + esc(l.lane) + ')' : '') + '</div>' : '') +
+          tasksHtml +
+          (peekTarget ?
+            '<button class="ghost peek-toggle" data-lane="' + esc(peekTarget) + '">Peek</button>' +
+            '<div class="peek-box" data-lane="' + esc(peekTarget) + '"></div>'
+            : '') +
+        '</div>';
+      }).join("");
+
+      // Queued work for a lane with no live agent_status row (e.g. not yet
+      // booted) still needs to be visible — nothing silently dropped.
+      var orphanCards = Object.keys(tasksByLane).filter(function (ln) { return !consumed[ln]; })
+        .map(function (ln) {
+          return '<div class="qlane">@' + esc(ln) + ' (no live status)</div>' +
+            tasksByLane[ln].map(renderQtask).join("");
+        }).join("");
+
+      box.innerHTML = laneCards + orphanCards;
+
+      box.querySelectorAll(".peek-toggle").forEach(function (btn) {
+        var session = btn.getAttribute("data-lane");
+        var peekBox = btn.closest(".lane").querySelector(".peek-box");
+        btn.addEventListener("click", function () {
+          if (openPeek && openPeek.session === session) {
+            peekBox.classList.remove("open");
+            stopPeek();
+            btn.textContent = "Peek";
+            return;
+          }
+          box.querySelectorAll(".peek-box.open").forEach(function (b) { b.classList.remove("open"); });
+          box.querySelectorAll(".peek-toggle").forEach(function (b) { b.textContent = "Peek"; });
+          startPeek(session, peekBox);
+          btn.textContent = "Hide";
+        });
+        if (session === reopenSession) {
+          startPeek(session, peekBox);
+          btn.textContent = "Hide";
+        }
+      });
+    });
   }
 
   // Known stages get a class for colour; anything else falls back to dim.
   var STAGES = { pending: 1, pushed: 1, in_review: 1, merged: 1, live: 1, blocked: 1 };
 
+  // "Freshness vs main" without a commits-behind signal (no such column
+  // exists yet — see build report): a workstream sitting in an in-flight
+  // stage (not live, not already flagged blocked) for a long time is the
+  // honest proxy we DO have — the pipeline stalled, not necessarily that
+  // it's behind a specific commit count.
+  var STALL_AFTER_S = 6 * 3600;
+  var STALLABLE_STAGES = { pending: 1, pushed: 1, in_review: 1, merged: 1 };
+
   function loadDeploys() {
     return fetch("/api/deploys", { headers: authHeaders() })
       .then(function (r) {
-        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        if (r.status === 401) { setConn("down"); $("deploys").innerHTML = UNAUTH_HINT; throw new Error("unauthorized"); }
         return r.json();
       })
       .then(function (rows) {
@@ -152,12 +347,14 @@
         box.innerHTML = rows.map(function (d) {
           var stage = (d.stage || "").toLowerCase();
           var stageClass = STAGES[stage] ? stage : "pending";
+          var stalled = STALLABLE_STAGES[stage] && d.updated_age_s != null && d.updated_age_s > STALL_AFTER_S;
           var url = d.url
             ? '<a class="url" href="' + esc(d.url) + '" target="_blank" rel="noopener">' + esc(d.url) + '</a>'
             : "";
-          return '<div class="dep">' +
+          return '<div class="dep' + (stalled ? ' flag-stalled' : '') + '">' +
             '<div class="top">' +
               '<span class="ws">' + esc(d.workstream) + '</span>' +
+              (stalled ? '<span class="stalled">stalled ' + esc(fmtAge(d.updated_age_s)) + '</span>' : '') +
               '<span class="stage ' + stageClass + '">' + esc(stage || "—") + '</span>' +
             '</div>' +
             '<div class="sub">' +
@@ -167,50 +364,6 @@
             (d.detail ? '<div class="detail">' + esc(d.detail) + '</div>' : '') +
             url +
           '</div>';
-        }).join("");
-      });
-  }
-
-  function loadQueue() {
-    return fetch("/api/queue", { headers: authHeaders() })
-      .then(function (r) {
-        if (r.status === 401) { setConn("down"); throw new Error("unauthorized"); }
-        return r.json();
-      })
-      .then(function (rows) {
-        var box = $("queue");
-        if (!rows.length) { box.innerHTML = '<div class="empty">No queued tasks.</div>'; return; }
-        // group by lane, preserving the server's (lane, priority_rank) order
-        var groups = {}, order = [];
-        rows.forEach(function (t) {
-          if (!groups[t.lane]) { groups[t.lane] = []; order.push(t.lane); }
-          groups[t.lane].push(t);
-        });
-        box.innerHTML = order.map(function (lane) {
-          var items = groups[lane].map(function (t, i) {
-            var st = (t.status || "queued").toLowerCase();
-            // SLA chip: elapsed-vs-budget. Only show once the task is started
-            // and has an SLA. over_sla (server-computed) turns the chip red.
-            var sla = "";
-            if (t.sla_minutes != null && t.elapsed_min != null) {
-              var over = !!t.over_sla;
-              sla = '<span class="sla' + (over ? ' over' : '') + '">' +
-                      (over ? '⚠ ' : '') + t.elapsed_min + 'm/' + t.sla_minutes + 'm' +
-                    '</span>';
-            } else if (t.sla_minutes != null) {
-              sla = '<span class="sla idle">SLA ' + t.sla_minutes + 'm</span>';
-            }
-            return '<div class="qtask' + (t.over_sla ? ' breached' : '') + '">' +
-              '<div class="top">' +
-                '<span class="rank">' + (i + 1) + '.</span>' +
-                '<span class="title">' + esc(t.title) + '</span>' +
-                sla +
-                '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
-              '</div>' +
-              (t.detail ? '<div class="detail">' + esc(t.detail) + '</div>' : '') +
-            '</div>';
-          }).join("");
-          return '<div class="qlane">@' + esc(lane) + '</div>' + items;
         }).join("");
       });
   }
@@ -251,19 +404,22 @@
       });
   }
 
+  // Called on load AND as the manual "Retry" button — token is optional in
+  // both cases. Most devices (the operator's allowlisted phone/Macs) never
+  // need it; it only matters when IP auth failed and a breakglass token is
+  // being supplied to recover.
   function connect() {
     token = $("token").value.trim();
-    if (!token) return;
-    localStorage.setItem("console_token", token);
+    if (token) { localStorage.setItem("console_token", token); }
+    else { localStorage.removeItem("console_token"); }
     setConn("…");
-    Promise.all([loadMessages(), loadLanes(), loadDeploys(), loadQueue()])
+    Promise.all([loadMessages(), loadLanes(), loadDeploys()])
       .then(function () { openStream(); })
       .catch(function () { setConn("down"); });
     if (lanesTimer) clearInterval(lanesTimer);
     lanesTimer = setInterval(function () {
       loadLanes().catch(function () {});
       loadDeploys().catch(function () {});
-      loadQueue().catch(function () {});
     }, 10000);
   }
 
@@ -271,8 +427,8 @@
   $("applyFilters").addEventListener("click", function () { loadMessages().catch(function () {}); });
   $("refreshLanes").addEventListener("click", function () { loadLanes().catch(function () {}); });
   $("refreshDeploys").addEventListener("click", function () { loadDeploys().catch(function () {}); });
-  $("refreshQueue").addEventListener("click", function () { loadQueue().catch(function () {}); });
   $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
 
-  if (token) { $("token").value = token; connect(); }
+  if (token) { $("token").value = token; }
+  connect(); // always attempt — IP-allowlisted devices need no token at all
 })();
