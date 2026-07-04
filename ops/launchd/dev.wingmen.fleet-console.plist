@@ -64,20 +64,20 @@
     <string>dev.wingmen.fleet-console</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+        <string>/Users/Musa/wingmen/orchestrator/.venv/bin/python3</string>
         <string>-m</string>
         <string>nervous_system.console</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+    <string>/Users/Musa/wingmen/orchestrator</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/fleet_console.log</string>
+    <string>/Users/Musa/wingmen/orchestrator/logs/fleet_console.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/fleet_console.err</string>
+    <string>/Users/Musa/wingmen/orchestrator/logs/fleet_console.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONUNBUFFERED</key>
