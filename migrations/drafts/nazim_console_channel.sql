@@ -1,0 +1,52 @@
+-- DRAFT — nazim-console DR channel (CAI-RESP-389 grant; conditions binding).
+-- Console body drafts, HUB reviews + applies + wires transport (its pens).
+-- NOT applied by orch-console. Seeded DISABLED per the 014 pattern.
+--
+-- Cross-machine transport design (the one problem the grant leaves open):
+-- ingest runs on the Studio, but this channel's inject target (tmux `nazim`)
+-- lives on the operator's MacBook. Proposal: per-host channel polling —
+-- each ingest instance claims only its rows. This ALSO permanently kills the
+-- dual-poller 409-Conflict class (two daemons fighting one bot token, seen
+-- Jul 3): a channel is polled by exactly one host, enforced by config.
+--
+--   ALTER TABLE bot_channels ADD COLUMN IF NOT EXISTS poll_host text;
+--   -- NULL = hub host (legacy behavior, zero migration risk for existing rows)
+--   -- ingest.py change (hub-side, ~3 lines): load_channels() filters
+--   --   WHERE enabled AND (poll_host IS NULL OR poll_host = <this hostname>)
+--   -- MacBook then runs a second ingest instance that claims ONLY this row
+--   -- (its archived plist re-arms with an env marker; console-body machine).
+--
+-- Channel row (column names per ingest.py Channel.COLS; hub corrects on review):
+--
+--   INSERT INTO bot_channels
+--     (channel_key, token_env_key, mode, inject_target, inject_prefix,
+--      allowed_usernames, group_routing, channel_tag, log_target,
+--      poll_offset, enabled, poll_host)
+--   VALUES
+--     ('nazim-console',
+--      'NAZIM_BOT_TOKEN',              -- distinct bot identity; NEVER @wingmennorchbot
+--      'agent-session',                -- nudge-only inject w/ provenance header (R1 pattern)
+--      'nazim',                        -- exact-match tmux target on the MacBook
+--      NULL,                           -- default count-only nudge line
+--      NULL,                           -- allowlist: MUSA_TELEGRAM_ID ONLY (deny-by-default;
+--                                      --   hub sets the exact allowlist columns per 014 shape)
+--      NULL,                           -- no group routing — DM channel, purpose-scoped
+--      'nazim-console',                -- durable two-way log tag in operator_messages
+--      0, false,                       -- seeded DISABLED until round-trip verified
+--      '<macbook-hostname>');          -- claimed by the MacBook ingest instance
+--
+-- Outbound: tg_out drains nazim-console rows using NAZIM_BOT_TOKEN under the
+-- nazim identity only (pen-gated per CAI-RESP-389; identity separation is by
+-- token+channel). DR posture: if the hub is dead (the scenario this channel
+-- exists for), tg_out is dead too — on a lease takeover the console body
+-- re-arms its archived local tg_out/ingest as part of the DR runbook, which
+-- the per-host column makes clean (it flips poll_host claims).
+--
+-- Operator prerequisites (pre-Aug-25 deadline): create the bot via @BotFather
+-- (e.g. @wingmennazimbot), token into Studio .env AND MacBook .env as
+-- NAZIM_BOT_TOKEN (MacBook copy = DR provision).
+--
+-- Go-live checklist (hub): apply column + row (disabled) -> tokens present both
+-- machines -> MacBook ingest instance up claiming only this channel -> enable
+-- row -> operator round-trip (inbound nudge lands in `nazim`; outbound reply
+-- arrives from the nazim bot) -> report live on the CAI-RESP-389 thread.
