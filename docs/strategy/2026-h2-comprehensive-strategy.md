@@ -69,7 +69,7 @@ The coordination layer is the **speed multiplier** that lets a solo operator run
 - Residency is the selling point — but it is **two DIFFERENT sells, never blurred**:
   - **(a) Gulf governments:** "your data in YOUR jurisdiction, portable, we operate." Singapore is the COMPANY's neutral contracting jurisdiction — **never the Gulf data home** (their law requires in-country data).
   - **(b) SEA/diaspora Muslim institutions:** Singapore-custody premium — neutral, strong data law, exportable.
-- **⚠️ CONTRADICTION (blocks positioning ④):** the ADCDA flagship itself runs on **Firestore (Google/US cloud)**. The "never on foreign surveillance cloud" claim is unsellable and violates no-deception doctrine until the flagship complies or the claim is honestly scoped. Until then, sell portability + jurisdiction-of-choice, not cloud-purity.
+- **⚠️ CONTRADICTION (blocks positioning ④) — fork SETTLED at filing (#6606):** the ADCDA flagship runs on **Firestore (Google/US cloud)**, so the standing position is: sell **portability + jurisdiction-of-choice** honestly, never sovereign-cloud purity; migration is **deal-funded** only when a Gulf contract requires in-country hosting — never before the showcase.
 - Keep the store registry + migration discipline (the direct psycopg-apply pattern; never `db push` to prod).
 
 ### E — Infrastructure trajectory
@@ -103,10 +103,12 @@ A premium wrapper around ③ and ②: "your data, your jurisdiction, exportable.
 - **#②** re-ranks below #③ if the post-showcase ADCDA relationship read is lukewarm.
 - **#④** stays unclaimable until the R3 residency fix closes.
 
-### Allocation v0 (R6)
-- **Cosem lanes** own opportunities ① / ② (the engine + the wedge).
-- **Shipforge** owns near-cash (hook → concierge; floor locked).
-- **PROTECTED TITHE:** ihsanos + scholar lanes keep a **guaranteed minimum allocation regardless of govtech pull** — the mission leg comes off the top, like zakat, non-negotiable. cc-cai proposes concrete lane numbers in the WINGMEN-STRATEGY-001 filing.
+### Allocation v0 (R6 — numbers SET at filing, #6606)
+- **40% cosem/govtech** through the ADCDA showcase, then **35%** (opportunities ① / ②).
+- **25% near-cash** (shipforge / fastrans / storefront; floor locked).
+- **20% PROTECTED TITHE floor** — ihsanos + scholar + hifz, **inviolable, off the top** like zakat.
+- **15% infra-to-unattended**, rising as needed to hit the Aug 15 HARD gate.
+- Hub flexes ±5 points at its discretion — **never from the tithe**. First weekly allocation report due 2026-07-12 (alongside ORCH-TOPOLOGY-001 A6 counts).
 - **Scope note:** the Islamic-finance/musharakah wedge stays OUT of the 6-18mo map — zero-cost demand validation only (one question to two merchants); future module of ③. It re-ranks nothing.
 
 ---
