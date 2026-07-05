@@ -22,7 +22,7 @@ Musa is sitting on a **four-way intersection almost no one else occupies**:
 
 **Wedding Aug 28 (SG) + ~18-day honeymoon → operator blackout ≈ Aug 25 – Sep 21.** Everything below bends around this:
 - **Unattended fleet deadline = Aug 15, HARD** — not an aspiration. The fleet must run a week+ with direction-setting only, before the blackout.
-- **VPS/Linux migration pulls FORWARD from Q4 to Jul 20 – Aug 15** (post-ADCDA-showcase window; kit already staged; DO SGP1 recommended per cai).
+- **VPS/Linux migration pulls FORWARD from Q4 to ~Jul 21 – Aug 15** (post-DIRECTOR window — ADCDA is two-stage: Jul 13 internal to Nahar → refine week → director ~wk of Jul 20; kit already staged; DO SGP1 recommended per cai).
 - **TDU/NEA**: functionally complete by Aug 15, OR client expectations set NOW for post-Sep 25 delivery (cai cockpit drafts that client message for the operator's approval).
 - **Gulf relationship work front-loads into July** while the operator is physically in UAE.
 
@@ -116,12 +116,12 @@ A premium wrapper around ③ and ②: "your data, your jurisdiction, exportable.
 ## 4. The 6–18 month sequence
 
 **July 2026 (land + front-load; operator in UAE):**
-- Ship **ADCDA (~Jul 16)** — everything yields to it (the fence is correct).
+- Ship **ADCDA — two-stage (operator-clarified 07-05):** internal presentation to **Nahar Jul 13** (hard) → one refine/polish week → **DIRECTOR presentation ~wk of Jul 20**. Everything yields to it, and **the fence holds through the director date** — the refine week is when polish matters most, not when allocation steps down.
 - **Gulf relationship work front-loads NOW** (R2d) — the in-person month; capture the edges into the graph the same week (R5).
 - shipforge: hook conversion evidence from the live pilot (floor locked 07-05; the metric is preview→paid %).
 - Unblock irsyad live-testing (the goumlyne connection).
 
-**Jul 20 – Aug 15 (the hard window; R2):**
+**~Jul 21 – Aug 15 (the hard window, compressed a few days by the director stage; R2):**
 - **VPS/Linux migration** (pulled forward from Q4; kit staged, DO SGP1). Substrate reliability push completes here: auto-checkpoint, hard operator-reconcile guarantee, honest-heartbeat fleet-wide, watchdog auto-nudge.
 - **Unattended-fleet gate: Aug 15 HARD** — fleet runs a week with direction-setting only, proven before the blackout.
 - **TDU/NEA fork decided**: functionally complete by Aug 15, or the client-expectation message (cai-drafted, operator-approved) goes out now for post-Sep 25 delivery.
