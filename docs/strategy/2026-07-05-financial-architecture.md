@@ -42,7 +42,8 @@ Rules of thumb: one store sub ≈ 1.6 site subs of coverage; ~14 hook sales ≈ 
 4. **Variable COGS stays out of fixed burn**: metered API per customer is priced into unit contributions, not the floor — double-counting it would overstate targets.
 5. Post-VPS, re-examine Claude Max seats vs API for the fleet itself (MODEL-POLICY-001 territory; today Max is strictly cheaper than metered for fleet workloads).
 6. **Ledger in SGD, product pricing in USD** — bridge at the monthly-reviewed fx (currently 1.35). Never mix currencies in one figure without the S$/US$ prefix.
-7. **Claude Max weekly cap is a BUDGET, rationed like the allocation** (first applied 2026-07-05, #2305: 75% @ 61% window): if all-models >70% before day 5 of the window → hub downshifts routine work to Sonnet 5 (MODEL-POLICY-001), defers non-showcase background burn past the reset, showcase lanes keep Opus priority; daily digest carries cap-% during rations. Extra-usage credits = crunch-week insurance only, spend logged to the ledger when used.
+7. **Every metered API key maps to a NAMED consumer** with an expected burn (shipforge worker → costs.jsonl receipts; bot responders; Stagehand). Unexplained API usage = incident, not noise — same attribution discipline as console writes. Daily API draw rides the digest during rations.
+8. **Claude Max weekly cap is a BUDGET, rationed like the allocation** (first applied 2026-07-05, #2305: 75% @ 61% window): if all-models >70% before day 5 of the window → hub downshifts routine work to Sonnet 5 (MODEL-POLICY-001), defers non-showcase background burn past the reset, showcase lanes keep Opus priority; daily digest carries cap-% during rations. Extra-usage credits = crunch-week insurance only, spend logged to the ledger when used.
 
 ## Hosting architecture — the three-planes principle (standing)
 
