@@ -329,17 +329,21 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
     target is busy, idle, or wedged. Closes the gap where a stuck-IDLE hub gave the
     operator neither a reply NOR a busy-ack, leaving him wondering if it landed.
     Dedups against the busy-ack (both start '📨 Got your message') so he gets
-    exactly one acknowledgment per window — never two, never zero."""
+    exactly one acknowledgment PER UNHANDLED MESSAGE — never two, never zero.
+    (2026-07-05: dedup is since-the-newest-unhandled-inbound, not per throttle
+    window — a message stuck for an hour used to re-ack every window, spamming
+    8+ identical acks at a dead channel. One ack per message says everything;
+    repeats add nothing. drain_stale_deferred still owns waking the target.)"""
     if ch.mode not in ("agent-session", "log-and-route"):
         return
     ack = ("\U0001F4E8 Got your message — it's logged and I'll get to it shortly. "
            "(Reply URGENT to bump it now.)")
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*), min(created_at) FROM operator_messages "
+            "SELECT count(*), min(created_at), max(created_at) FROM operator_messages "
             "WHERE direction='inbound' AND tag=%s AND handled_at IS NULL",
             (ch.channel_tag,))
-        n, oldest = cur.fetchone()
+        n, oldest, newest = cur.fetchone()
         if not oldest:
             return
         cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, ACK_AFTER_SEC))
@@ -347,10 +351,10 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
             return   # not stale enough yet — a fast reply needs no ack
         cur.execute(
             "SELECT 1 FROM tg_out WHERE channel_key=%s AND text LIKE %s "
-            "AND created_at > now() - make_interval(secs => %s) LIMIT 1",
-            (ch.key, "%Got your message%", ACK_THROTTLE_SEC))
+            "AND created_at > %s LIMIT 1",
+            (ch.key, "%Got your message%", newest))
         if cur.fetchone():
-            return   # already acked (busy-ack OR reassurance) within the window
+            return   # this batch already acked once (busy-ack OR reassurance)
         cur.execute("INSERT INTO tg_out (channel_key, text) VALUES (%s,%s)", (ch.key, ack))
         conn.commit()
     _log_line(f"{ch.key}: {n} unhandled past {ACK_AFTER_SEC}s — reassurance ack (belt+suspenders)")
