@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ORCH-TOPOLOGY-001 O1: hub lease heartbeat. Renews the orch-hub lease
+  (orch_lease, TTL 900s) every 300s so the five singleton pens stay bound to
+  this body in the substrate table — not to a hostname, not to a promise.
+  The renew script reads .env itself (ORCH_BODY_ROLE=hub set there).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.orch-lease-renew</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/Musa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/Musa/wingmen/orchestrator/scripts/lib/orch_lease.py</string>
+    <string>renew</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/Musa/wingmen/orchestrator</string>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/Musa/wingmen/orchestrator/logs/orch_lease_renew.log</string>
+  <key>StandardErrorPath</key><string>/Users/Musa/wingmen/orchestrator/logs/orch_lease_renew.log</string>
+</dict>
+</plist>
