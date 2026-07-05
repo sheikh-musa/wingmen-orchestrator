@@ -18,6 +18,14 @@ CHAT="${TG_CHAT_OVERRIDE:-$(grep '^MUSA_TELEGRAM_ID=' "$ORCH_DIR/.env" | cut -d=
 [ -n "${TOK:-}" ] || { echo "WINGMEN_BOT_TOKEN missing from .env" >&2; exit 1; }
 [ -n "${CHAT:-}" ] || { echo "MUSA_TELEGRAM_ID missing from .env" >&2; exit 1; }
 
+# ORCH-TOPOLOGY-001 pen (iv): only the lease-holder hub speaks on this channel.
+if ! GATE=$("$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/lib/orch_lease.py" check); then
+  echo "tg_send_file REFUSED — $GATE" >&2
+  mkdir -p "$ORCH_DIR/logs" 2>/dev/null || true
+  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') tg_send_file REFUSED (pen iv) :: ${1:-}" >> "$ORCH_DIR/logs/pen_gate.log" 2>/dev/null || true
+  exit 3
+fi
+
 FILE="${1:?usage: tg_send_file.sh <filepath> [caption]}"
 CAPTION="${2:-}"
 [ -f "$FILE" ] || { echo "file not found: $FILE" >&2; exit 1; }

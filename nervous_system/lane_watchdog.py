@@ -59,6 +59,8 @@ GOVERNANCE_PREFIXES = ("mamadah", "nutri", "mizan")   # ai-responder persona con
 # will not re-fire the same text on subsequent scans until the input changes.
 MAX_AUTOSUBMIT_ATTEMPTS = 1
 IDLE_NUDGE_THROTTLE = 600   # re-nudge an idle-with-unread-work lane at most once/10min
+ORCH_ESC_NUDGE_THROTTLE = 300  # wake the 24/7 orch to ACTION escalations at most once/5min
+_escalation_count = 0       # escalations posted THIS scan (escalate() increments)
 
 def is_governance_console(sess: str) -> bool:
     return sess in GOVERNANCE_CONSOLES or sess.startswith(GOVERNANCE_PREFIXES)
@@ -172,6 +174,8 @@ def verified_resubmit(sess: str, text: str) -> bool:
         return False
 
 def escalate(sess: str, state: str, detail: str) -> None:
+    global _escalation_count
+    _escalation_count += 1
     log(f"ESCALATE {sess}: {state} — {detail}")
     try:
         sys.path.insert(0, str(ORCH))
@@ -189,7 +193,33 @@ def escalate(sess: str, state: str, detail: str) -> None:
     except Exception as e:
         log(f"escalate-bus-failed {sess}: {e}")
 
+
+def nudge_orch_escalations(n: int) -> bool:
+    """Wake the ALWAYS-ON Studio orch to ACTION accumulated lane escalations
+    (operator directive 2026-07-04: the 24/7 orch owns escalation-action, not the
+    laptop-bound direct session). Clean count-nudge ONLY — C-u clears any stuck
+    draft first (phantom-injection-safe, no text-submit), fired only when the orch
+    is IDLE so it never interrupts real work. Best-effort: the escalations are
+    already durable on the bus; this just wakes the actioner."""
+    line = (f"\U0001F4E5 {n} lane escalation(s) need action — drain your agent_messages "
+            f"(watchdog 'needs attention' items) and act on / route each. You own these now.")
+    try:
+        if subprocess.run(["tmux", "has-session", "-t", "=orch"],
+                          capture_output=True, timeout=5).returncode != 0:
+            return False
+        tmux("send-keys", "-t", "=orch:0.0", "C-u")     # clear any stuck draft
+        time.sleep(0.3)
+        tmux("send-keys", "-t", "=orch:0.0", "-l", line)
+        time.sleep(0.5)
+        tmux("send-keys", "-t", "=orch:0.0", "Enter")
+        return True
+    except Exception:
+        return False
+
+
 def main() -> int:
+    global _escalation_count
+    _escalation_count = 0
     try:
         state = json.loads(STATE_FILE.read_text())
     except Exception:
@@ -270,6 +300,24 @@ def main() -> int:
                     log(f"{sess}: IDLE_UNSENT held (escalated once, NEVER auto-submitted) input={inp[:60]!r}")
             else:
                 log(f"{sess}: IDLE_UNSENT (first sight — will escalate next scan, never auto-submit) input={inp[:60]!r}")
+
+    # Wake the ALWAYS-ON orch to ACTION escalations (operator directive 07-04): the
+    # watchdog DETECTS stalls but only ACTIONS them by waking the 24/7 orch — so an
+    # escalation no longer sits unread until the laptop-bound session happens to look.
+    # Fired only when the orch is idle + throttled; a persistent stall re-escalates
+    # each scan so the nudge recurs until the orch clears it.
+    last_orch_nudge = state.get("_orch_esc_nudge_ts", 0)
+    new_state["_orch_esc_nudge_ts"] = last_orch_nudge
+    if _escalation_count > 0 and (time.time() - last_orch_nudge) > ORCH_ESC_NUDGE_THROTTLE:
+        try:
+            orch_cap = capture("orch")
+            if orch_cap and "esc to interrupt" not in orch_cap.lower():   # orch idle
+                if nudge_orch_escalations(_escalation_count):
+                    new_state["_orch_esc_nudge_ts"] = time.time()
+                    log(f"orch: {_escalation_count} escalation(s) this scan — nudged the 24/7 orch to action")
+        except Exception as e:
+            log(f"orch-escalation-nudge-failed: {e}")
+
     reap_ghosts()
     log_burn()
     try:

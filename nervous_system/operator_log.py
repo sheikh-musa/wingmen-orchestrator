@@ -16,12 +16,36 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 
+# --- ORCH-TOPOLOGY-001 body scoping -----------------------------------------
+# Two orch bodies share this table (Studio hub + MacBook console/Nazim). Each
+# body reconciles + stamps ONLY its own surface, enforced here (A3: in code
+# that reads the env, not by promise): console sees channel='tmux-console'
+# only; hub sees everything EXCEPT tmux-console (console messages are answered
+# in-console by the console body). Unset role = legacy single-body behavior.
+
+def _agent_id() -> str:
+    return os.environ.get("ORCH_AGENT_ID", "cc-orchestrator")
+
+
+def _body_role() -> str:
+    return os.environ.get("ORCH_BODY_ROLE", "").strip().lower()
+
+
+def _channel_scope_sql() -> str:
+    role = _body_role()
+    if role == "console":
+        return " AND channel='tmux-console'"
+    if role == "hub":
+        return " AND channel<>'tmux-console'"
+    return ""
+
+
 def log(direction: str, text: str, chat_id: str | None = None,
         tag: str | None = None, delivered: bool = True,
         channel: str = "telegram") -> int:
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
         cur.execute(
             "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
             "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
@@ -57,8 +81,9 @@ def unprocessed(limit: int = 20) -> list:
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT id, tag, text, created_at FROM operator_messages "
-            "WHERE direction='inbound' AND handled_at IS NULL "
-            "ORDER BY id ASC LIMIT %s", (limit,))
+            "WHERE direction='inbound' AND handled_at IS NULL"
+            + _channel_scope_sql() +
+            " ORDER BY id ASC LIMIT %s", (limit,))
         return cur.fetchall()
 
 
@@ -68,10 +93,11 @@ def mark_handled_through(max_id: int) -> int:
     the number of rows stamped."""
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
         cur.execute(
             "UPDATE operator_messages SET handled_at=now() "
-            "WHERE direction='inbound' AND handled_at IS NULL AND id <= %s",
+            "WHERE direction='inbound' AND handled_at IS NULL AND id <= %s"
+            + _channel_scope_sql(),
             (max_id,))
         n = cur.rowcount
         conn.commit()
