@@ -121,7 +121,7 @@ A premium wrapper around ③ and ②: "your data, your jurisdiction, exportable.
 - shipforge: hook conversion evidence from the live pilot (floor locked 07-05; the metric is preview→paid %).
 - Unblock irsyad live-testing (the goumlyne connection).
 
-**~Jul 21 – Aug 15 (the hard window, compressed a few days by the director stage; R2):**
+**~Jul 21 – Aug 15 (the hard window, compressed a few days by the director stage; R2, formalized CAI-RESP-390 — stepdown+fence key on DIRECTOR completion; if the director date slips past Jul 22, hub flags it and VPS starts anyway, sharing capacity):**
 - **VPS/Linux migration** (pulled forward from Q4; kit staged, DO SGP1). Substrate reliability push completes here: auto-checkpoint, hard operator-reconcile guarantee, honest-heartbeat fleet-wide, watchdog auto-nudge.
 - **Unattended-fleet gate: Aug 15 HARD** — fleet runs a week with direction-setting only, proven before the blackout.
 - **TDU/NEA fork decided**: functionally complete by Aug 15, or the client-expectation message (cai-drafted, operator-approved) goes out now for post-Sep 25 delivery.
