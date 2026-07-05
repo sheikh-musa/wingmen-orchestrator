@@ -94,10 +94,18 @@ def mark_handled_through(max_id: int) -> int:
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
+        # Hub stamps must never eat another agent's channel: cai-channel rows
+        # are cai's to handle (2026-07-05 — a blanket stamp nearly marked the
+        # operator's message to cai as handled while cai was still booting).
+        # unprocessed() intentionally still SHOWS them to the hub as a
+        # visibility backstop; only the stamp is scoped away.
+        scope = _channel_scope_sql()
+        if _body_role() == "hub":
+            scope += " AND channel IS DISTINCT FROM 'cai-channel'"
         cur.execute(
             "UPDATE operator_messages SET handled_at=now() "
             "WHERE direction='inbound' AND handled_at IS NULL AND id <= %s"
-            + _channel_scope_sql(),
+            + scope,
             (max_id,))
         n = cur.rowcount
         conn.commit()
