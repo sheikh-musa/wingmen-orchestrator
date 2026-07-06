@@ -22,7 +22,7 @@ set -uo pipefail
 CAI_DIR="$HOME/wingmen/wingmen-cai"
 ORCH_DIR="$HOME/wingmen/orchestrator"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
-MODEL="${MODEL:-claude-fable-5}"
+MODEL="${MODEL:-claude-opus-4-8}"
 AGENT_ID="cai"   # exact — singleton strategic node, never a sub-tag
 
 # .env (DSN etc.) lives in the orchestrator; cai shares the substrate.

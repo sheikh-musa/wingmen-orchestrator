@@ -41,7 +41,7 @@ log "starting orch session (claude --resume in tmux '$SESSION')"
 
 # Create session detached so this script stays as the blocking "waiter"
 tmux new-session -d -s "$SESSION" -c "$ORCH_DIR" -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
-    -- "$CLAUDE_BIN" --resume
+    -- "$CLAUDE_BIN" --resume --model claude-opus-4-8
 
 log "session '$SESSION' is live — waiting for it to exit"
 
