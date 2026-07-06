@@ -25,11 +25,13 @@ ping_http() {
   echo "$http"
 }
 
-# 1. ihsanOS web
-HTTP=$(ping_http "https://ihsanos.com")
-if [ "$HTTP" != "200" ] && [ "$HTTP" != "307" ]; then
-  ISSUES="$ISSUES\n❌ ihsanos.com: HTTP $HTTP"
-fi
+# 1. (RETIRED 2026-07-06) ihsanOS web (https://ihsanos.com) uptime ping.
+#    Removed per operator — it false-paged on transient HTTP 000 blips (a single
+#    DNS/edge hiccup surviving the one retry), while the site was healthy (200).
+#    The bare marketing domain is not the critical path; actual data-layer health
+#    is covered by the Supabase probes (#2, #3) below. Can be re-added as a
+#    consecutive-failure check (page only after N straight fails) if uptime
+#    monitoring is wanted without the blip noise.
 
 # 2. Orchestrator Supabase (tscuymavysscrvoberrr = wingmen-ops).
 #    Probe `agents` (core substrate table, never dropped). Was bot_heartbeat,
