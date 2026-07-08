@@ -22,7 +22,7 @@ This reframes the "not enough firefighter academies" concern: the addressable ma
 
 The platform was never a grand plan. It grew, one genuine request at a time — which is exactly why it fits real work. For an audience new to the apps, this is the arc:
 
-1. **A simple tool for our own trainers.** Onboarding and attendance, built to solve COSEM instructors' day-to-day — nothing more.
+1. **An in-house toolkit for our own trainers.** The day-to-day COSEM instructors needed: onboarding, attendance, automated namelist & ORBAT generation, and inventory management.
 2. **TDU wanted their own version.** We cloned the app and began tailoring it to TDU's use case (equipment/vehicle ops — charging, maintenance, defects). *Still ongoing.*
 3. **Skill sheets — a single source of truth.** One authoritative record of trainee competencies, replacing scattered paper/spreadsheets.
 4. **Practical skill-sheet testing.** On request, skill sheets grew from a record into an assessment tool — structured practical testing against the competency matrix.
