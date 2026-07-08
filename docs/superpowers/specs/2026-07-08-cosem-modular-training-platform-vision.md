@@ -1,8 +1,10 @@
-# COSEM → Modular Training & Operations Platform — 3-Year Vision & Transition Plan
+# COSEM → Modular Training & Operations Platform — Origin & the Year Ahead
 
 **Status:** Design (brainstormed + operator-approved 2026-07-08). Precedes an implementation plan (writing-plans).
-**Owner:** Nazim (CTO console) · **Audience:** operator, board/client, cosem engineering lanes.
+**Owner:** Nazim (CTO console) · **Audience:** COSEM director (Singapore — new to the apps), operator, cosem engineering lanes.
 **Grounding:** two code audits (2026-07-08) — current cosem apps + the ihsanos modular pattern.
+**Velocity thesis:** the roadmap below is a **one-year plan**. At AI-driven development velocity, one year delivers what three years of pre-AI development would — the compression is the story.
+**Confidentiality (operator directive 2026-07-08):** director- / client-facing materials MUST NOT reference ihsanos, storefront, shipforge, or any other venture. The ihsanos pattern is named in THIS internal spec purely as the engineering template the lanes emulate; scrub it from anything the COSEM director sees.
 
 ---
 
@@ -16,7 +18,21 @@ This reframes the "not enough firefighter academies" concern: the addressable ma
 
 ---
 
-## 2. Where we are today (current state)
+## 2. The journey so far — how we got here
+
+The platform was never a grand plan. It grew, one genuine request at a time — which is exactly why it fits real work. For an audience new to the apps, this is the arc:
+
+1. **A simple tool for our own trainers.** Onboarding and attendance, built to solve COSEM instructors' day-to-day — nothing more.
+2. **TDU wanted their own version.** We cloned the app and began tailoring it to TDU's use case (equipment/vehicle ops — charging, maintenance, defects). *Still ongoing.*
+3. **Skill sheets — a single source of truth.** One authoritative record of trainee competencies, replacing scattered paper/spreadsheets.
+4. **Practical skill-sheet testing.** On request, skill sheets grew from a record into an assessment tool — structured practical testing against the competency matrix.
+5. **The exam module (current).** Theory + practical assessment — the capability that revealed the real opportunity.
+
+Each step came from a real need, not a roadmap. Read together they show a pattern: **these capabilities aren't cosem-specific — they're products.** That insight is what turns "a set of internal tools" into the platform in the next section.
+
+---
+
+## 3. Where we are today (current state)
 
 | Dimension | cosem-adcda | cosem-tdu |
 |---|---|---|
@@ -35,7 +51,7 @@ This reframes the "not enough firefighter academies" concern: the addressable ma
 
 ---
 
-## 3. Target architecture (the ihsanos pattern applied)
+## 4. Target architecture (the ihsanos pattern applied)
 
 A **modular monolith**, multi-tenant, on Next.js App Router + Supabase Postgres. The five deltas cosem must adopt:
 
@@ -49,7 +65,7 @@ A **modular monolith**, multi-tenant, on Next.js App Router + Supabase Postgres.
 
 ---
 
-## 4. The module map
+## 5. The module map
 
 The unit of value is the module. Two product lines, plus commerce (already a separate workstream on the same idea). All are grounded in code that already exists in cosem or ihsanos.
 
@@ -64,25 +80,24 @@ The unit of value is the module. Two product lines, plus commerce (already a sep
 6. **Asset & equipment ops.** Inventory, maintenance, defects, charging logs (TDU). Any org with fleets/gear/labs.
 7. **Incident & safety reporting.** Observations + incident templates. Construction, security, manufacturing, healthcare.
 
-### Commerce (existing workstream)
-Storefront / POS / payments — same modular platform, different vertical (see shipforge+storefront monetization sprint).
+*(Other verticals — e.g. commerce — can ride the same modular platform later; kept out of COSEM-facing materials per the confidentiality note above.)*
 
 ---
 
-## 5. AI thesis — "the engine, not a badge"
+## 6. AI thesis — "the engine, not a badge"
 
 **Test for every AI touch:** does it kill a repeated human cost, or do something impossible without it? If neither, it does not ship. High-stakes AI (certification, grading, safety) is **always human-in-the-loop.**
 
 1. **AI-authored assessment (the moat).** Point the exam engine at a syllabus / manual / SOP → it drafts the question bank (MCQs, distractors, difficulty-tagged) for instructor approval; grades free-text against a rubric; flags practical-assessor drift from the norm. This is a different category from ExamView, and it alone justifies the flagship.
 2. **Closed learning loop.** From results → targeted remediation (what was wrong, what to study next) + a tutor **grounded (RAG) in the client's own course material** — not a generic chatbot.
-3. **Run it by chat.** The same conversational-management pattern as shipforge/storefront: set up an exam, ask "how did cohort 3 do on pump-ops", or onboard a new client by *describing* the course → the platform scaffolds the module config + seeds the question bank. This is what makes multi-tenant onboarding nearly free — the core economic thesis.
+3. **Run it by chat.** Conversational management: set up an exam, ask "how did cohort 3 do on pump-ops", or onboard a new client by *describing* the course → the platform scaffolds the module config + seeds the question bank. This is what makes multi-tenant onboarding nearly free — the core economic thesis.
 4. **Ops intelligence.** AI-assisted incident/observation drafting from notes + photos; pattern detection across incidents (surfaces recurring safety issues).
 
 **Takalluf exclusions (deliberately NOT built):** a generic chatbot in the corner; AI content/grades shipped without human review where stakes are high; "predictive" anything before the data exists; "AI-powered" badges on plain forms.
 
 ---
 
-## 6. Transition strategy — strangler, not big-bang
+## 7. Transition strategy — strangler, not big-bang
 
 Rebuilding two live products at once is reckless. Approach:
 
@@ -94,21 +109,23 @@ Rebuilding two live products at once is reckless. Approach:
 
 ---
 
-## 7. Three-year phased roadmap
+## 8. One-year roadmap (AI-accelerated)
 
-**Phase 0 — Foundation (Q1).** Provision the multi-tenant core (orgs, org_members, RLS helpers, module registry, action-gate, audit) on Supabase; jurisdiction-siloed DBs; the modular-monolith skeleton + boundary lint; the shared design system. Deliverable: an empty-but-correct platform that can host a module.
+A **one-year** plan. At AI-driven development velocity this delivers what a pre-AI team would spend roughly **three years** on — that compression is the point, and the credibility for it is the journey in §2 (an exam module already stands where a traditional team would still be scoping).
 
-**Phase 1 — Flagship (Q2–Q3).** Exam & Assessment engine built new on the platform, incl. AI question-authoring (human-reviewed) and rubric grading. Onboarding module. First real client (adcda) runs its theory/practical exams on the new stack in parallel with Firestore. Deliverable: a sellable exam product + first paying non-cosem pilot.
+**Q1 — Foundation.** Multi-tenant core (orgs, memberships, RLS helpers, module registry, action-gate, audit) on Supabase; jurisdiction-siloed DBs; the modular-monolith skeleton + boundary lint; shared design system. → An empty-but-correct platform that can host a module.
 
-**Phase 2 — LMS + first Operations module (Year 1→2).** LMS core (courses/progress/certification) wraps exams; HR/workforce module (generalized from TDU). Conversational management + NL analytics. Migrate tdu onto the platform. Deliverable: full training suite + the multi-tenant onboarding-by-chat that proves near-zero marginal cost.
+**Q2 — Flagship.** The Exam & Assessment engine, built new and AI-native (AI question-authoring + rubric grading, human-reviewed). Onboarding module. ADCDA runs its theory/practical exams on the new stack in parallel with Firestore. → A sellable exam product + first paying non-cosem pilot.
 
-**Phase 3 — Operations breadth + scale (Year 2→3).** Attendance, asset/equipment ops, incident/safety modules. Ops intelligence AI. Retire the Firestore apps. Harden for scale (many small tenants). Deliverable: the full modular ERP for training + operations, several clients across verticals.
+**Q3 — Suite.** LMS core (courses/progress/certification) wraps exams; HR/workforce module generalized from TDU; conversational management + NL analytics. TDU migrates onto the platform. → Full training suite + onboarding-by-chat proving near-zero marginal cost per client.
 
-*(Phase boundaries are directional; each phase gets its own implementation plan.)*
+**Q4 — Breadth & scale.** Attendance, asset/equipment ops, incident/safety modules + ops intelligence. Retire the Firestore apps. Harden for many small tenants. → The full modular ERP for training + operations, several clients across verticals.
+
+*(Quarter boundaries are directional; each gets its own implementation plan.)*
 
 ---
 
-## 8. Risks & open decisions
+## 9. Risks & open decisions
 
 - **Residency across jurisdictions** — SG vs UAE siloing must be settled before any cross-tenant feature (cai gate).
 - **Live-product continuity** — the strangler must never break adcda/tdu in production during migration.
@@ -118,7 +135,7 @@ Rebuilding two live products at once is reckless. Approach:
 
 ---
 
-## 9. Success metrics
+## 10. Success metrics
 
 - **Marginal cost per new client** trends toward ~zero (multi-tenant onboarding replaces repo-cloning).
 - **Time to onboard a new client/course** (target: hours, via describe-the-course scaffolding — vs weeks of cloning today).
