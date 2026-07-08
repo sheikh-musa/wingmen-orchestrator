@@ -11,7 +11,15 @@
 set -euo pipefail
 
 ORCH_DIR="$HOME/wingmen/orchestrator"
-CLAUDE_BIN="$(command -v claude || echo /usr/local/bin/claude)"
+# Resolve claude robustly: under launchd (and non-login SSH) PATH is minimal, so
+# `command -v claude` can miss a per-user install (the Mini keeps it at
+# ~/.local/bin/claude). Fall back through the known install locations.
+CLAUDE_BIN="$(command -v claude || true)"
+if [[ -z "$CLAUDE_BIN" ]]; then
+    for _c in "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
+        [[ -x "$_c" ]] && CLAUDE_BIN="$_c" && break
+    done
+fi
 SLEEP_BETWEEN_RESTARTS=5
 
 log() { echo "[boot_orch] $(date '+%H:%M:%S') $*"; }

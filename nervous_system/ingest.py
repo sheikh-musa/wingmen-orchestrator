@@ -188,7 +188,20 @@ class Channel:
 
 def load_channels(conn) -> dict[str, Channel]:
     with conn.cursor() as cur:
-        cur.execute(f"SELECT {Channel.COLS} FROM bot_channels WHERE enabled")
+        # INGEST_CHANNELS (comma-separated channel_keys) PINS this daemon to a
+        # specific set of channels regardless of the `enabled` flag — the per-host
+        # isolation that lets a non-hub box (the Mini running Nazim's console)
+        # poll ONLY its own bot (@nazim_cto_bot) while the hub keeps polling every
+        # `enabled` channel. A channel pinned here stays enabled=false in the
+        # registry, so the hub's ingest never touches it → the dual-poller 409
+        # class (two daemons fighting one bot token, seen Jul 3) can't recur.
+        override = os.environ.get("INGEST_CHANNELS", "").strip()
+        if override:
+            keys = [k.strip() for k in override.split(",") if k.strip()]
+            cur.execute(f"SELECT {Channel.COLS} FROM bot_channels "
+                        f"WHERE channel_key = ANY(%s)", (keys,))
+        else:
+            cur.execute(f"SELECT {Channel.COLS} FROM bot_channels WHERE enabled")
         return {c.key: c for c in (Channel(r) for r in cur.fetchall())}
 
 

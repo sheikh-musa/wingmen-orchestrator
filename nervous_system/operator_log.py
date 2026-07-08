@@ -34,9 +34,14 @@ def _body_role() -> str:
 def _channel_scope_sql() -> str:
     role = _body_role()
     if role == "console":
-        return " AND channel='tmux-console'"
+        # Nazim reconciles his OWN surfaces: in-console typing (channel
+        # 'tmux-console') AND his private Telegram DM channel — @nazim_cto_bot,
+        # which ingest logs as channel='telegram', tag='nazim-console'.
+        return " AND (channel='tmux-console' OR tag='nazim-console')"
     if role == "hub":
-        return " AND channel<>'tmux-console'"
+        # Hub owns every operator surface EXCEPT the console body's two, so it
+        # never answers a Nazim DM on @wingmennorchbot (wrong voice/pen).
+        return " AND channel<>'tmux-console' AND tag IS DISTINCT FROM 'nazim-console'"
     return ""
 
 
