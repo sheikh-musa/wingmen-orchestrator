@@ -180,6 +180,12 @@ class Channel:
          self.allowed_usernames, self.group_routing, self.channel_tag,
          self.log_target, self.poll_offset) = row
         self.token = os.environ.get(self.token_env_key or "", "")
+        # Per-channel override (in the group_routing JSONB bag): nudge EVEN WHEN the
+        # target reads WORKING, instead of busy-deferring (CAI-RESP-382). ON for the
+        # operator's CTO console (nazim-console) — he wants immediate delivery and
+        # Nazim handles a mid-task injection gracefully. A build lane keeps the
+        # default busy-defer so it isn't interrupted mid-task.
+        self.nudge_when_busy = bool((self.group_routing or {}).get("nudge_when_busy"))
 
     COLS = ("channel_key, token_env_key, mode, inject_target, inject_prefix, "
             "responder_ref, allowed_chat_ids, allowed_usernames, group_routing, "
@@ -432,7 +438,7 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         urg = urgency(text)
         if urg == "btw":
             _log_line(f"{ch.key}: BTW — logged, not nudged (drains at next idle)")
-        elif urg == "urgent" or not pane_working(target):
+        elif urg == "urgent" or ch.nudge_when_busy or not pane_working(target):
             nudge_session(target, ch.key, unread_count(conn, ch))
         else:
             # target WORKING + default priority: DEFER (no interrupt). Delivery
