@@ -312,26 +312,35 @@ def throttled_busy_ack(conn, ch: "Channel") -> None:
 def drain_stale_deferred(conn, ch: "Channel") -> None:
     """CAI-RESP-382 max-latency cap: if any inbound message has sat UNHANDLED
     longer than MAX_DEFER_SEC, nudge anyway — busy-defer must never strand the
-    operator (the 45-min-silence bug). Re-nudge throttled to once per cap window
-    so a persistently-busy agent isn't spammed every poll."""
+    operator (the 45-min-silence bug). ONE forced nudge per unhandled batch, keyed
+    on the NEWEST unhandled message id — NOT a wall-clock throttle.
+
+    Why id-dedup, not a time throttle (2026-07-08): the old throttle lived on the
+    Channel object (`_last_stale_nudge`), but main() recreates every Channel each
+    CONFIG_REFRESH (~60s) and carries only poll_offset forward — so the throttle
+    reset every refresh and re-fired the SAME forced nudge repeatedly (operator saw
+    3 nudges for one message in ~90s). Keying on max(id) of the unhandled batch and
+    carrying `_last_forced_nudge_id` forward across refresh survives that, and
+    matches reassure_if_unhandled: one nudge per message, repeats add nothing. A
+    genuinely NEWER stuck message still re-nudges; Option B + 'reply URGENT' cover a
+    persistently-busy agent."""
     if ch.mode not in ("agent-session", "log-and-route"):
         return
     target = ch.inject_target if ch.mode == "agent-session" else "orch"
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*), min(created_at) FROM operator_messages "
+            "SELECT count(*), min(created_at), max(id) FROM operator_messages "
             "WHERE direction='inbound' AND tag=%s AND handled_at IS NULL",
             (ch.channel_tag,))
-        n, oldest = cur.fetchone()
+        n, oldest, newest_id = cur.fetchone()
         if not oldest:
             return
         cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, MAX_DEFER_SEC))
         if not cur.fetchone()[0]:
             return
-    now = time.monotonic()
-    if now - getattr(ch, "_last_stale_nudge", 0.0) < MAX_DEFER_SEC:
-        return   # throttle: re-nudge at most once per cap window
-    ch._last_stale_nudge = now
+    if newest_id <= getattr(ch, "_last_forced_nudge_id", 0):
+        return   # already force-nudged this batch — one forced nudge per message
+    ch._last_forced_nudge_id = newest_id
     nudge_session(target, ch.key, n)
     _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
 
@@ -517,6 +526,11 @@ async def main():
             if k in channels and channels[k].poll_offset is not None and (
                     ch.poll_offset is None or ch.poll_offset < channels[k].poll_offset):
                 ch.poll_offset = channels[k].poll_offset
+            # Carry the forced-nudge dedup marker forward too, else recreating the
+            # Channel every refresh resets it and re-fires a forced nudge for the
+            # same message (the 3-nudges-for-one-message bug, 2026-07-08).
+            if k in channels:
+                ch._last_forced_nudge_id = getattr(channels[k], "_last_forced_nudge_id", 0)
         channels.clear()
         channels.update(fresh)
         for k in list(channels):
