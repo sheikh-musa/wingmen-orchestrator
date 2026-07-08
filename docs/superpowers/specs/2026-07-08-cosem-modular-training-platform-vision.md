@@ -4,7 +4,7 @@
 **Owner:** Nazim (CTO console) · **Audience:** COSEM director (Singapore — new to the apps), operator, cosem engineering lanes.
 **Grounding:** two code audits (2026-07-08) — current cosem apps + the ihsanos modular pattern.
 **Velocity thesis:** the roadmap below is a **one-year plan**. At AI-driven development velocity, one year delivers what three years of pre-AI development would — the compression is the story.
-**Confidentiality (operator directive 2026-07-08):** director- / client-facing materials MUST NOT reference ihsanos, storefront, shipforge, or any other venture. The ihsanos pattern is named in THIS internal spec purely as the engineering template the lanes emulate; scrub it from anything the COSEM director sees.
+**Confidentiality (operator directive 2026-07-08):** director- / client-facing materials MUST NOT reference ihsanos, storefront, shipforge, or any other venture; also omit **TDU** and specific client/jurisdiction names (Abu Dhabi, Singapore, ADCDA) — keep director materials COSEM-focused and generic (per Nahar's read). The ihsanos pattern + TDU are named in THIS internal spec purely as engineering/build context for the lanes; scrub them from anything the COSEM director sees.
 
 ---
 
@@ -29,6 +29,22 @@ The platform was never a grand plan. It grew, one genuine request at a time — 
 5. **The exam module (current).** Theory + practical assessment — the capability that revealed the real opportunity.
 
 Each step came from a real need, not a roadmap. Read together they show a pattern: **these capabilities aren't cosem-specific — they're products.** That insight is what turns "a set of internal tools" into the platform in the next section.
+
+### 2.1 What the app replaced — paper → app (gap analysis)
+
+Requested by Nahar for the director briefing: the pain points the app removes versus the paper system.
+
+| Paper pain point | What the app resolves |
+|---|---|
+| Attendance on sign-in sheets — proxy sign-ins, lost sheets, manual tallying | Geofenced + face check-in; tamper-evident, instant, auto-tallied |
+| Namelists & ORBAT typed by hand — error-prone, stale the moment they print | Auto-generated from the live roster; always current, one-click print |
+| Skill records in folders — no single source of truth, sheets lost, progress invisible | One digital source of truth; live competency matrix |
+| Paper marking — slow, inconsistent between assessors, delayed feedback | Digital assessment; faster, consistent, instant results |
+| Inventory on spreadsheets — discrepancies, no audit trail | Live inventory with a full audit trail |
+| Paper onboarding + photocopied IDs — manual entry, data-entry errors | Self-serve digital onboarding with ID capture |
+| Reports compiled by hand — days pulling numbers from files | Instant report generation from live data |
+
+**Cross-cutting:** paper isn't searchable, isn't backed up, has no audit trail, and takes days to compile — the app makes all of it real-time, searchable, backed up, and audit-trailed. *(Paper pain points inferred from the module set + typical paper training-admin; sharpen with real COSEM specifics before the briefing.)*
 
 ---
 
