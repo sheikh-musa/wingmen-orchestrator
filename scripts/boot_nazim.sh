@@ -33,4 +33,6 @@ fi
 [[ -n "$CLAUDE_BIN" ]] || { echo "[boot_nazim] claude binary not found" >&2; exit 1; }
 
 echo "[boot_nazim] $(date '+%H:%M:%S') launching $CLAUDE_BIN as ${ORCH_AGENT_ID:-orch-console} (body=${ORCH_BODY_ROLE:-?}, session=${ORCH_TMUX_SESSION:-?})"
-exec "$CLAUDE_BIN" --dangerously-skip-permissions "$@"
+# Opus 4.8 — parity with the hub orch + cai (fleet orch-body default). A caller
+# --model in "$@" comes later on argv and wins (claude uses last-wins parsing).
+exec "$CLAUDE_BIN" --dangerously-skip-permissions --model claude-opus-4-8 "$@"
