@@ -31,4 +31,10 @@ curl -s -o /dev/null -w '%{http_code}' \
   "https://api.telegram.org/bot${TOK}/sendAudio" \
   -F "chat_id=${CHAT}" \
   -F "audio=@${M4A}" \
-  -F "title=Nazim" | grep -q '^200$' && echo "spoken ✓" || { echo "nazim_say: send failed" >&2; exit 1; }
+  -F "title=Nazim" | grep -q '^200$' || { echo "nazim_say: send failed" >&2; exit 1; }
+
+# Audit: the spoken text ALWAYS lands in the durable log (voice never bypasses
+# operator_messages). Prefixed so the log shows it was delivered as voice.
+PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
+  outbound "[voice] $TEXT" --chat "$CHAT" --tag nazim-console >/dev/null 2>&1 || true
+echo "spoken ✓ (logged)"

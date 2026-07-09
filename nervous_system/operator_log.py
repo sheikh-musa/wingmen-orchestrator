@@ -61,6 +61,23 @@ def log(direction: str, text: str, chat_id: str | None = None,
         return rid
 
 
+def attach_transcript(msg_id: int, transcript: str) -> bool:
+    """Enrich a logged voice-note row with its transcript, so the operator's
+    actual WORDS are in the durable audit log — not just an audio-file pointer.
+    Voice is a delivery layer on top of the text log, never a replacement."""
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
+        cur.execute(
+            "UPDATE operator_messages SET text = text || ' | transcript: ' || %s "
+            "WHERE id=%s AND text NOT LIKE '%% | transcript: %%'",
+            (transcript, msg_id),
+        )
+        n = cur.rowcount
+        conn.commit()
+        return n > 0
+
+
 def recent(limit: int = 20) -> list:
     """Latest exchanges, oldest-first — the continuity context a fresh
     (headless or rebooted) cc-orchestrator reads to catch up."""
