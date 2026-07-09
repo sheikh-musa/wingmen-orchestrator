@@ -158,6 +158,16 @@ def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
             content = f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             content = f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
+    elif msg.get("voice") or msg.get("audio"):
+        media = msg.get("voice") or msg.get("audio")
+        try:
+            name = media.get("file_name") or f"voice_{media['file_id'][:12]}.ogg"
+            path = _download_media(ch.token, media["file_id"], name)
+            dur = media.get("duration")
+            content = (f"sent a VOICE note ({dur}s) → {path}"
+                       + (f"  | caption: {text}" if text else ""))
+        except Exception as e:
+            content = f"sent a voice note (download failed: {e})" + (f" | {text}" if text else "")
     else:
         content = text or f"[non-text update {upd_id}]"
 
