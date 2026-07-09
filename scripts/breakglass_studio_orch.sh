@@ -55,7 +55,7 @@ fi
 echo "[remote] starting '$SESSION' (claude --continue, role=$ROLE)"
 "$TMUX_BIN" new-session -d -s "$SESSION" -c "$HOME/wingmen/orchestrator" \
   -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
-  -- "$CLAUDE_BIN" --continue --model claude-opus-4-8
+  -- "$CLAUDE_BIN" --dangerously-skip-permissions --continue --model claude-opus-4-8
 sleep 6
 
 if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
