@@ -86,9 +86,16 @@ def main() -> int:
         try:
             with psycopg.connect(dsn) as conn:
                 mx, need = _state(conn)
-            if mx > last_max:
-                _nudge(mx - last_max, need)
-                last_max = mx
+                if mx > last_max:
+                    # Count ACTUAL new rows to orch-console, not the id-delta:
+                    # agent_messages.id is a global sequence, so mx-last_max
+                    # over-counts by every row addressed to other agents.
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT count(*) FROM agent_messages "
+                                    "WHERE to_agent='orch-console' AND id>%s", (last_max,))
+                        n_new = cur.fetchone()[0]
+                    _nudge(n_new, need)
+                    last_max = mx
         except Exception as e:  # never die on a transient DB blip
             _log(f"poll error ({type(e).__name__}): {e}")
         time.sleep(POLL_SEC)
