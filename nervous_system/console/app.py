@@ -278,12 +278,12 @@ def _make_handler(feedloop: "_FeedLoop"):
                 auth.audit(self._client(), path, "200")
                 return self._json(200, {"ok": True})
 
-            if path == "/" or path == "/index.html":
+            if path == "/classic" or path == "/index.html":
                 return self._serve_static("index.html", path)
 
             # Attention-first Fleet view (redesign #7576) — served alongside the
             # classic console during review; flips to "/" once the operator OKs.
-            if path == "/fleet" or path == "/fleet/":
+            if path == "/" or path == "/fleet" or path == "/fleet/":
                 return self._serve_static("fleet.html", path)
 
             # DOCS section: /docs and any /docs/<repo>/<path> deep link all serve
