@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.wingmen.billing-monitor</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/Musa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/Musa/wingmen/orchestrator/scripts/billing_monitor.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/Musa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>21600</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/Musa</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>ORCH_HOME</key><string>/Users/Musa/wingmen/orchestrator</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/Musa/wingmen/orchestrator/logs/billing-monitor.log</string>
+  <key>StandardErrorPath</key><string>/Users/Musa/wingmen/orchestrator/logs/billing-monitor.log</string>
+</dict></plist>
