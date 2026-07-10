@@ -15,7 +15,13 @@
 // Never touches /api/*, /docs*, /media* — those are live, auth-sensitive
 // data and must always hit the network.
 
-const VERSION = "fc-v1"; // bump whenever a static asset changes
+// Bump whenever a static asset changes. The bump is what an already-installed
+// PWA detects (sw.js is served no-cache) — it invalidates the old shell cache
+// so a phone can't stay stuck on a stale shell (the exact bug: operator's
+// iPhone kept serving the removed breakglass input after 80bf1a6). v2 also
+// makes app.js network-first (below) so future JS changes propagate without a
+// manual bump — the bump is now only a belt-and-suspenders cache reset.
+const VERSION = "fc-v2";
 const SHELL_CACHE = `fleet-console-shell-${VERSION}`;
 const SHELL_ASSETS = [
   "/",
@@ -80,9 +86,28 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Static assets (JS/manifest/icons): stale-while-revalidate — instant from
-  // cache, refreshed in the background for next time.
-  if (url.pathname.startsWith("/static/") || url.pathname === "/manifest.json") {
+  // app.js + manifest: NETWORK-FIRST (like the shell). These carry the app's
+  // behaviour, so a stale copy is as bad as a stale shell — serving them
+  // cache-first (the old stale-while-revalidate) meant a JS change needed a
+  // second reload to land, and a version that never bumped never landed at
+  // all. Network-first => fresh on every online load; cache is offline-only
+  // fallback. Files are tiny and tailnet-local, so the cost is negligible.
+  if (url.pathname === "/static/app.js" || url.pathname === "/manifest.json") {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(SHELL_CACHE).then((cache) => cache.put(req, copy));
+          return res;
+        })
+        .catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  // Other static assets (icons, etc.): stale-while-revalidate — instant from
+  // cache, refreshed in the background. Fine for rarely-changing binary assets.
+  if (url.pathname.startsWith("/static/")) {
     event.respondWith(
       caches.open(SHELL_CACHE).then((cache) =>
         cache.match(req).then((cached) => {

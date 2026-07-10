@@ -206,9 +206,27 @@
     .col.deploys { grid-column: 2; grid-row: 2; }
     .filters input { height: 30px; } .filters button.ghost { height: 30px; }
   }
+
+  /* ---- pull-to-refresh (mobile/PWA: iOS standalone has no native PTR) ---- */
+  #ptr {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    height: 0; overflow: hidden; pointer-events: none;
+    background: var(--panel); color: var(--dim);
+    font: 12px/1 var(--mono); letter-spacing: .3px;
+    padding-top: env(safe-area-inset-top);
+    transition: none; /* JS drives height while dragging; set for the snap-back */
+  }
+  #ptr .spin { display: inline-block; transition: transform .15s ease; }
+  #ptr.armed { color: var(--accent); }
+  #ptr.armed .spin { transform: rotate(180deg); }
+  #ptr.snap { transition: height .2s ease; }
+  #ptr.refreshing .spin { animation: ptrspin .7s linear infinite; }
+  @keyframes ptrspin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
+<div id="ptr"><span class="spin">&darr;</span><span id="ptrTxt">Pull to refresh</span></div>
 <header>
   <h1>Fleet Console</h1>
   <span class="conn"><span id="dot" class="dot"></span><span id="connTxt">offline</span></span>

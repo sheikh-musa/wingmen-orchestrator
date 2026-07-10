@@ -84,9 +84,13 @@
   // 401 means this device's IP isn't in CONSOLE_ALLOWED_IPS — the normal
   // (allowlisted) case never hits this. Point at the breakglass fallback
   // rather than failing silently.
+  // The breakglass token input was removed (operator declutter, 80bf1a6);
+  // recovery is now a localStorage('console_token') value set from devtools, so
+  // the hint no longer points at an on-screen field that doesn't exist.
   var UNAUTH_HINT =
     '<div class="empty">Not authorized from this device/network.<br>' +
-    "If this is expected (off-tailnet, IP changed), enter the breakglass token above and Retry.</div>";
+    "If this is expected (off-tailnet, IP changed), set a breakglass token in " +
+    "localStorage('console_token') and pull down to refresh.</div>";
 
   function loadMessages() {
     var params = {
@@ -492,6 +496,62 @@
   $("applyFilters").addEventListener("click", function () { loadMessages().catch(function () {}); });
   $("refreshLanes").addEventListener("click", function () { loadLanes().catch(function () {}); });
   $("refreshDeploys").addEventListener("click", function () { loadDeploys().catch(function () {}); });
+
+  // ---- pull-to-refresh (operator ask) --------------------------------------
+  // iOS standalone PWAs have no native pull-to-refresh, and the console is a
+  // monitoring surface the operator reaches for exactly when he suspects it's
+  // stale — a full reload also re-checks the service worker, so this is the
+  // primary way a phone busts a stuck shell. Only engages at the top of the
+  // active scroll column, pulling DOWN; normal scrolling is untouched.
+  (function () {
+    var ptr = $("ptr"), ptrTxt = $("ptrTxt");
+    if (!ptr) return;
+    var startY = 0, pulling = false, scroller = null, armed = false;
+    var ARM = 90, DAMP = 0.5, MAX = 90;
+
+    document.addEventListener("touchstart", function (e) {
+      if (e.touches.length !== 1 || ptr.classList.contains("refreshing")) return;
+      // Don't hijack a nested scroller (e.g. an open lane peek-box).
+      if (e.target.closest && e.target.closest(".peek-box")) { pulling = false; return; }
+      scroller = e.target.closest ? e.target.closest(".col") : null;
+      if (!scroller || scroller.scrollTop > 0) { pulling = false; return; }
+      startY = e.touches[0].clientY; pulling = true; armed = false;
+      ptr.classList.remove("snap");
+    }, { passive: true });
+
+    document.addEventListener("touchmove", function (e) {
+      if (!pulling) return;
+      var dy = e.touches[0].clientY - startY;
+      if (dy <= 0 || scroller.scrollTop > 0) { // moved up / scroller left top
+        pulling = false; ptr.style.height = "0px"; return;
+      }
+      e.preventDefault(); // take over the gesture from native overscroll
+      ptr.style.height = Math.min(MAX, dy * DAMP) + "px";
+      armed = dy >= ARM;
+      ptr.classList.toggle("armed", armed);
+      ptrTxt.textContent = armed ? "Release to refresh" : "Pull to refresh";
+    }, { passive: false });
+
+    function end() {
+      if (!pulling) return;
+      pulling = false;
+      ptr.classList.add("snap");
+      if (armed) {
+        ptr.classList.add("refreshing");
+        ptrTxt.textContent = "Refreshing…";
+        ptr.style.height = "44px";
+        setTimeout(function () { window.location.reload(); }, 150);
+      } else {
+        ptr.style.height = "0px";
+        ptr.classList.remove("armed");
+      }
+    }
+    document.addEventListener("touchend", end);
+    document.addEventListener("touchcancel", function () {
+      pulling = false; ptr.classList.add("snap"); ptr.style.height = "0px";
+      ptr.classList.remove("armed");
+    });
+  })();
 
   connect(); // always attempt — IP-allowlisted devices need no token at all
 })();
