@@ -46,5 +46,13 @@ PY
 
 cd "$SHARE_DIR"
 echo "deploying to production…"
-vercel deploy --prod --scope "$SCOPE" --yes >/dev/null
+DEP=$(vercel deploy --prod --scope "$SCOPE" --yes 2>/dev/null | grep -oE 'https://[a-z0-9-]+\.vercel\.app' | tail -1)
+# The custom domain is a per-deployment alias (not an auto-following project prod
+# domain), so re-point it at each new deployment or new docs 404.
+if [ -n "$DEP" ]; then
+  vercel alias set "$DEP" share.wingmen.dev --scope "$SCOPE" >/dev/null 2>&1 \
+    || echo "warn: 'vercel alias set $DEP share.wingmen.dev' failed — re-alias manually" >&2
+else
+  echo "warn: could not capture deployment URL — verify share.wingmen.dev points at the new deploy" >&2
+fi
 echo "→ https://share.wingmen.dev/r/$SLUG"
