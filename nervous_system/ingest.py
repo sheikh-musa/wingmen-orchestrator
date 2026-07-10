@@ -223,15 +223,21 @@ def load_channels(conn) -> dict[str, Channel]:
 
 # ── Per-chat tag routing + shared-awareness feeds (WAR-ROOM-FEED-001) ─────────
 # A chat routed (via a channel's group_routing bag) to one of these tags is a
-# CROSS-BOT shared feed: the war-room group has 3 member bots (operator-orch +
-# cai-channel on the hub, nazim-console on the Mini), each polling every group
-# message on its own token. Such a message is logged ONCE — keyed on its cross-bot
-# identity (chat_id, message_id) — tagged as the feed, and is LOG-ONLY here: the
-# per-bot DM nudge path is NOT fired (the responder that reads the feed and answers
-# is wired separately — out of ingest's scope). Mirrors operator_log._SHARED_FEED_TAGS
-# (which carves these tags out of every body's PERSONAL reconciliation), so a feed
-# message never pollutes a DM inbox.
+# shared-awareness FEED: it's logged tagged as the feed and is LOG-ONLY here (the
+# per-bot DM nudge path is NOT fired — the responder that reads the feed and
+# answers is wired separately, out of ingest's scope). Mirrors
+# operator_log._SHARED_FEED_TAGS, which carves these tags out of every body's
+# PERSONAL reconciliation, so a feed message never pollutes a DM inbox.
 SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
+
+# The subset of feeds that MULTIPLE bots receive — so the SAME logical message
+# arrives on >1 ingest loop and must be deduped by its cross-bot identity
+# (chat_id, message_id), or it logs Nx. war-room has 3 member bots (operator-orch
+# + cai-channel on the hub, nazim-console on the Mini). hafiz-partner has exactly
+# ONE (@nazim_cto_bot — Nazim's NDA-gated partner room), so it needs NO cross-bot
+# dedup: its single loop plus the per-bot ingest_dedup already guarantee one row.
+# A feed gains dedup by being added here (do so if it ever gains a 2nd member bot).
+CROSS_BOT_FEED_TAGS = ("war-room",)
 
 
 def resolve_tag(ch: "Channel", chat_id) -> tuple:
@@ -445,8 +451,11 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
     message_id = msg.get("message_id")
     username = (msg.get("from") or {}).get("username")
     tag, is_shared_feed = resolve_tag(ch, chat_id)
-    # Cross-bot dedup only has a stable key when the message carries its identity.
-    shared = is_shared_feed and chat_id is not None and message_id is not None
+    # Cross-bot dedup engages only for multi-bot feeds (war-room), and only when
+    # the message carries a stable identity (chat_id, message_id). Single-bot feeds
+    # (hafiz-partner) skip it — one loop + the per-bot guard already log once.
+    needs_dedup = (tag in CROSS_BOT_FEED_TAGS
+                   and chat_id is not None and message_id is not None)
 
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
@@ -462,14 +471,14 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             conn.commit()
             return False          # replay of an already-processed update (this bot)
 
-        # 1b. CROSS-BOT shared-feed dedupe (WAR-ROOM-FEED-001). (chat_id,
-        #     message_id) is the message's identity — identical across every bot
-        #     that received it AND across machines (all share this substrate). The
-        #     first ingest loop to claim it logs; the rest skip the log entirely,
-        #     so a war-room post is ONE 'war-room' row, not 3× with DM tags. The
-        #     per-bot guard above still recorded that THIS bot processed the update
-        #     (audit); it simply produced no operator_messages row.
-        if shared:
+        # 1b. CROSS-BOT shared-feed dedupe (WAR-ROOM-FEED-001) — multi-bot feeds
+        #     only. (chat_id, message_id) is the message's identity — identical
+        #     across every bot that received it AND across machines (all share this
+        #     substrate). The first ingest loop to claim it logs; the rest skip the
+        #     log entirely, so a war-room post is ONE 'war-room' row, not 3× with DM
+        #     tags. The per-bot guard above still recorded that THIS bot processed
+        #     the update (audit); it simply produced no operator_messages row.
+        if needs_dedup:
             cur.execute(
                 "INSERT INTO shared_feed_dedup (chat_id, message_id, channel_key) "
                 "VALUES (%s,%s,%s) ON CONFLICT DO NOTHING RETURNING chat_id",
@@ -496,7 +505,7 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             "WHERE channel_key=%s AND telegram_update_id=%s",
             (op_msg_id, ch.key, upd_id),
         )
-        if shared:
+        if needs_dedup:
             cur.execute(
                 "UPDATE shared_feed_dedup SET operator_msg_id=%s "
                 "WHERE chat_id=%s AND message_id=%s",
