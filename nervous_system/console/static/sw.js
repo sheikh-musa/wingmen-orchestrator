@@ -21,10 +21,13 @@
 // iPhone kept serving the removed breakglass input after 80bf1a6). v2 also
 // makes app.js network-first (below) so future JS changes propagate without a
 // manual bump — the bump is now only a belt-and-suspenders cache reset.
-const VERSION = "fc-v2";
+const VERSION = "fc-v3";
 const SHELL_CACHE = `fleet-console-shell-${VERSION}`;
 const SHELL_ASSETS = [
+  // "/" now serves the Fleet view (operator #3440), so fleet.js is the primary
+  // shell script and must be precached for offline; app.js still backs /classic.
   "/",
+  "/static/fleet.js",
   "/static/app.js",
   "/manifest.json",
   "/static/icons/icon-192.png",

@@ -30,11 +30,16 @@
   .wrap { max-width: 720px; margin: 0 auto; }
   a { color: var(--accent); text-decoration: none; }
 
-  /* pull-to-refresh */
-  #ptr { position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+  /* pull-to-refresh — box-sizing:content-box (NOT the global border-box) so the
+     env(safe-area-inset-top) padding is ADDITIVE above the JS-set height. Under
+     border-box the notch inset ate into the height and clipped the label on
+     iPhones (operator #3440: "pull-to-refresh text is cropped"). */
+  #ptr { position: fixed; top: 0; left: 0; right: 0; z-index: 60; box-sizing: content-box;
     display: flex; align-items: center; justify-content: center; gap: 8px;
     height: 0; overflow: hidden; pointer-events: none; background: var(--panel);
-    color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px; padding-top: env(safe-area-inset-top); }
+    color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px;
+    white-space: nowrap; padding-top: env(safe-area-inset-top); }
+  #ptr #ptrTxt { white-space: nowrap; }
   #ptr .spin { display: inline-block; transition: transform .15s ease; }
   #ptr.armed { color: var(--accent); } #ptr.armed .spin { transform: rotate(180deg); }
   #ptr.snap { transition: height .2s ease; }
@@ -140,7 +145,7 @@
   <div id="pulse" class="pulse">
     <div class="brandrow">
       <span class="brand">Fleet <span id="liveDot" class="live">● live</span></span>
-      <span class="navs"><a href="/">Classic</a><a href="/docs">Docs</a><a href="/media">Screens</a></span>
+      <span class="navs"><a href="/classic">Classic</a><a href="/docs">Docs</a><a href="/media">Screens</a></span>
     </div>
     <div class="headline"><span class="orb"></span><span id="pulseBig" class="big">Loading…</span></div>
     <div id="strip" class="strip"></div>
@@ -163,7 +168,7 @@
 
   <section>
     <div class="sec-h"><h2>Feed</h2><span class="count">bus · newest first</span></div>
-    <div class="feednote">The full message stream lives in the <a href="/">classic console</a> → Messages. The pulse + needs-you above surface anything that actually wants you.</div>
+    <div class="feednote">The full message stream lives in the <a href="/classic">classic console</a> → Messages. The pulse + needs-you above surface anything that actually wants you.</div>
   </section>
 
 </div>
