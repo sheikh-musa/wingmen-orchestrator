@@ -31,17 +31,36 @@ def _body_role() -> str:
     return os.environ.get("ORCH_BODY_ROLE", "").strip().lower()
 
 
+# SHARED-AWARENESS feeds — read deliberately by every body, NEVER auto-drained
+# from any single body's PERSONAL DM inbox (#24, Nazim carve-out call 2026-07-10):
+#   war-room     = fleet room; all 3 read, respond-by-protocol (CAI-RESP-339:
+#                  hub=ops/status/fleet, cai=governance, Nazim=console/CTO).
+#   hafiz-partner= external partner group (Nazim-owned, NDA-gated).
+# They get their OWN tag and are carved out of BOTH the hub and console personal
+# reconciliation scopes, so a fleet/partner message never pollutes a DM inbox.
+_SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
+
+
+def _shared_feed_exclusion() -> str:
+    tags = ",".join("'%s'" % t for t in _SHARED_FEED_TAGS)
+    return f" AND (tag IS NULL OR tag NOT IN ({tags}))"
+
+
 def _channel_scope_sql() -> str:
     role = _body_role()
     if role == "console":
         # Nazim reconciles his OWN surfaces: in-console typing (channel
         # 'tmux-console') AND his private Telegram DM channel — @nazim_cto_bot,
-        # which ingest logs as channel='telegram', tag='nazim-console'.
-        return " AND (channel='tmux-console' OR tag='nazim-console')"
+        # which ingest logs as channel='telegram', tag='nazim-console'. Shared
+        # feeds are excluded (a war-room/Hafiz msg is not a personal-DM nudge).
+        return (" AND (channel='tmux-console' OR tag='nazim-console')"
+                + _shared_feed_exclusion())
     if role == "hub":
-        # Hub owns every operator surface EXCEPT the console body's two, so it
-        # never answers a Nazim DM on @wingmennorchbot (wrong voice/pen).
-        return " AND channel<>'tmux-console' AND tag IS DISTINCT FROM 'nazim-console'"
+        # Hub owns every operator surface EXCEPT the console body's two and the
+        # shared feeds, so it never answers a Nazim DM on @wingmennorchbot (wrong
+        # voice/pen) nor drains a shared-awareness feed as personal DM.
+        return (" AND channel<>'tmux-console' AND tag IS DISTINCT FROM 'nazim-console'"
+                + _shared_feed_exclusion())
     return ""
 
 
