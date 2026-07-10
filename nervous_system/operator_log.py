@@ -56,10 +56,15 @@ def _channel_scope_sql() -> str:
         return (" AND (channel='tmux-console' OR tag='nazim-console')"
                 + _shared_feed_exclusion())
     if role == "hub":
-        # Hub owns every operator surface EXCEPT the console body's two and the
-        # shared feeds, so it never answers a Nazim DM on @wingmennorchbot (wrong
-        # voice/pen) nor drains a shared-awareness feed as personal DM.
-        return (" AND channel<>'tmux-console' AND tag IS DISTINCT FROM 'nazim-console'"
+        # Hub owns every operator surface EXCEPT the OTHER bodies' DMs (Nazim's
+        # console @nazim_cto_bot, cai's @cai bot) and the shared feeds — so it
+        # never answers another body's DM on the wrong bot/voice/pen, nor drains
+        # a shared-awareness feed as a personal DM. (cai-channel was already
+        # carved from mark_handled; carving it from the read scope too closes the
+        # leak the operator's 2026-07-10 pipeline test exposed.)
+        return (" AND channel<>'tmux-console'"
+                " AND tag IS DISTINCT FROM 'nazim-console'"
+                " AND tag IS DISTINCT FROM 'cai-channel'"
                 + _shared_feed_exclusion())
     return ""
 
