@@ -15,10 +15,11 @@ PK with "return the key iff newly inserted" is behaviourally exact for what the
 code branches on. operator_messages is a plain list so we can assert exactly
 which rows (and tags) were written.
 
-Spec verification covered here:
-  1. one war-room message seen by all 3 bot loops -> exactly ONE 'war-room' row,
+Spec verification covered here (BOTH shared feeds — war-room and hafiz-partner —
+which ride the identical per-chat-tag + dedup path, no per-feed code):
+  1. one feed message seen by all 3 bot loops -> exactly ONE feed-tagged row,
      no DM-tag rows, no nudge (log-only; responder wired separately).
-  2. war-room is carved out of every body's PERSONAL reconciliation scope.
+  2. both feeds are carved out of every body's PERSONAL reconciliation scope.
   3. the operator's normal DM still tags 'orch-channel' and still nudges.
 """
 import pytest
@@ -28,6 +29,7 @@ pytest.importorskip("psycopg")  # ingest imports psycopg at module load
 from nervous_system import ingest, operator_log  # noqa: E402
 
 WAR_ROOM_ID = -5383530504
+HAFIZ_ID = -5557014342      # Hafiz partner group — 2nd shared feed, identical path
 OPERATOR_DM = 286619815
 
 
@@ -111,14 +113,15 @@ def _ch(key, target, tag, group_routing):
     #        key, token_env, mode,          inject_target, prefix, responder,
     #        allowed_chat_ids,               allowed_usernames, group_routing, tag, log, offset
     row = (key, "TOK", "agent-session", target, None, None,
-           [OPERATOR_DM, WAR_ROOM_ID], [], group_routing, tag, "substrate", None)
+           [OPERATOR_DM, WAR_ROOM_ID, HAFIZ_ID], [], group_routing, tag, "substrate", None)
     return ingest.Channel(row)
 
 
-OP_ORCH = _ch("operator-orch", "orch", "orch-channel", {"-5383530504": "war-room"})
-CAI = _ch("cai-channel", "cai", "cai-channel", {"-5383530504": "war-room"})
-NAZIM = _ch("nazim-console", "nazim", "nazim-console",
-            {"-5383530504": "war-room", "nudge_when_busy": True})
+# Both feeds routed on all 3 channels — exactly the post-cutover config.
+_FEEDS = {"-5383530504": "war-room", "-5557014342": "hafiz-partner"}
+OP_ORCH = _ch("operator-orch", "orch", "orch-channel", dict(_FEEDS))
+CAI = _ch("cai-channel", "cai", "cai-channel", dict(_FEEDS))
+NAZIM = _ch("nazim-console", "nazim", "nazim-console", {**_FEEDS, "nudge_when_busy": True})
 ALL_LOOPS = [OP_ORCH, CAI, NAZIM]
 
 
@@ -131,10 +134,10 @@ def _upd(update_id, chat_id, message_id, text, username=None):
 
 # ── (spec §1) per-chat tag routing is a pure decision — exhaustively unit-test ─
 
-def test_resolve_tag_routes_war_room_and_leaves_dm_default():
-    assert ingest.resolve_tag(OP_ORCH, WAR_ROOM_ID) == ("war-room", True)
-    assert ingest.resolve_tag(CAI, WAR_ROOM_ID) == ("war-room", True)
-    assert ingest.resolve_tag(NAZIM, WAR_ROOM_ID) == ("war-room", True)
+def test_resolve_tag_routes_both_feeds_and_leaves_dm_default():
+    for ch in ALL_LOOPS:
+        assert ingest.resolve_tag(ch, WAR_ROOM_ID) == ("war-room", True)
+        assert ingest.resolve_tag(ch, HAFIZ_ID) == ("hafiz-partner", True)
     # operator DM keeps the channel's default tag, not a shared feed
     assert ingest.resolve_tag(OP_ORCH, OPERATOR_DM) == ("orch-channel", False)
     assert ingest.resolve_tag(NAZIM, OPERATOR_DM) == ("nazim-console", False)
@@ -142,20 +145,26 @@ def test_resolve_tag_routes_war_room_and_leaves_dm_default():
     assert ingest.resolve_tag(OP_ORCH, None) == ("orch-channel", False)
 
 
-# ── (spec §1+§2) ONE war-room message, three bot loops -> ONE 'war-room' row ───
+# ── (spec §1+§2) ONE feed message, three bot loops -> ONE feed-tagged row ──────
+# Parametrized over BOTH shared feeds — war-room and the Hafiz partner group ride
+# the IDENTICAL per-chat-tag + cross-bot-dedup path (no per-feed code).
 
-def test_war_room_logged_once_across_three_bots(monkeypatch):
+@pytest.mark.parametrize("feed_id, feed_tag", [
+    (WAR_ROOM_ID, "war-room"),
+    (HAFIZ_ID, "hafiz-partner"),
+])
+def test_shared_feed_logged_once_across_three_bots(monkeypatch, feed_id, feed_tag):
     nudges = []
     monkeypatch.setattr(ingest, "nudge_session", lambda *a: nudges.append(a) or True)
     db = FakeConn()
     # The SAME logical message: identical (chat_id, message_id), a DIFFERENT
     # update_id per bot (each bot's getUpdates numbers independently).
     for i, ch in enumerate(ALL_LOOPS):
-        assert ingest.process_update(db, ch, _upd(1000 + i, WAR_ROOM_ID, 777, "fleet: status?")) is True
+        assert ingest.process_update(db, ch, _upd(1000 + i, feed_id, 777, "fleet: status?")) is True
 
     assert len(db.messages) == 1                                  # logged exactly ONCE
-    assert db.messages[0]["tag"] == "war-room"                    # tagged as the feed
-    assert db.messages[0]["chat_id"] == str(WAR_ROOM_ID)
+    assert db.messages[0]["tag"] == feed_tag                      # tagged as the feed
+    assert db.messages[0]["chat_id"] == str(feed_id)
     assert all(m["tag"] not in ("orch-channel", "cai-channel", "nazim-console")
                for m in db.messages)                             # NO DM-tag pollution
     assert nudges == []                                          # log-only; responder wired separately
@@ -163,12 +172,23 @@ def test_war_room_logged_once_across_three_bots(monkeypatch):
     assert len(db.ingest_dedup) == 3                             # each bot still recorded its own update
 
     # winner recorded its operator_msg_id on the shared guard (audit joint)
-    assert db.shared_feed_dedup[(WAR_ROOM_ID, 777)]["operator_msg_id"] == db.messages[0]["id"]
+    assert db.shared_feed_dedup[(feed_id, 777)]["operator_msg_id"] == db.messages[0]["id"]
 
     # A Telegram REDELIVERY to the bot that already logged (same update_id) is a
     # per-bot replay -> False, no new row.
-    assert ingest.process_update(db, OP_ORCH, _upd(1000, WAR_ROOM_ID, 777, "fleet: status?")) is False
+    assert ingest.process_update(db, OP_ORCH, _upd(1000, feed_id, 777, "fleet: status?")) is False
     assert len(db.messages) == 1
+
+
+def test_two_feeds_are_independent_never_cross_dedup(monkeypatch):
+    """A war-room msg and a Hafiz msg with the SAME message_id are distinct
+    identities (different chat_id) — both log, each tagged its own feed."""
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    db = FakeConn()
+    ingest.process_update(db, OP_ORCH, _upd(4000, WAR_ROOM_ID, 42, "war-room msg"))
+    ingest.process_update(db, OP_ORCH, _upd(4001, HAFIZ_ID, 42, "hafiz msg"))
+    assert sorted(m["tag"] for m in db.messages) == ["hafiz-partner", "war-room"]
+    assert len(db.shared_feed_dedup) == 2
 
 
 def test_war_room_winner_is_order_independent(monkeypatch):
@@ -199,9 +219,11 @@ def test_operator_dm_unaffected_by_per_chat_routing(monkeypatch):
 
 # ── (spec §2) war-room is carved out of every body's PERSONAL reconciliation ──
 
-def test_war_room_carved_from_personal_reconciliation(monkeypatch):
+def test_shared_feeds_carved_from_personal_reconciliation(monkeypatch):
     assert "war-room" in operator_log._SHARED_FEED_TAGS
+    assert "hafiz-partner" in operator_log._SHARED_FEED_TAGS
     for role in ("hub", "console"):
         monkeypatch.setenv("ORCH_BODY_ROLE", role)
         scope = operator_log._channel_scope_sql()
-        assert "war-room" in scope   # unprocessed()/mark_handled exclude it -> no DM pollution
+        # unprocessed()/mark_handled exclude both feeds -> no DM pollution
+        assert "war-room" in scope and "hafiz-partner" in scope
