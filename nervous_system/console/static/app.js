@@ -428,9 +428,10 @@
   // need it; it only matters when IP auth failed and a breakglass token is
   // being supplied to recover.
   function connect() {
-    token = $("token").value.trim();
-    if (token) { localStorage.setItem("console_token", token); }
-    else { localStorage.removeItem("console_token"); }
+    // IP-allowlisted devices need no token; breakglass recovery token (rare) is
+    // read from localStorage — set it via the console via `localStorage.setItem`
+    // if the allowlist ever locks you out. No visible input (operator: declutter).
+    token = localStorage.getItem("console_token") || "";
     setConn("…");
     Promise.all([loadMessages(), loadLanes(), loadDeploys()])
       .then(function () { openStream(); })
@@ -442,12 +443,9 @@
     }, 10000);
   }
 
-  $("connect").addEventListener("click", connect);
   $("applyFilters").addEventListener("click", function () { loadMessages().catch(function () {}); });
   $("refreshLanes").addEventListener("click", function () { loadLanes().catch(function () {}); });
   $("refreshDeploys").addEventListener("click", function () { loadDeploys().catch(function () {}); });
-  $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
 
-  if (token) { $("token").value = token; }
   connect(); // always attempt — IP-allowlisted devices need no token at all
 })();
