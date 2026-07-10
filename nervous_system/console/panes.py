@@ -116,6 +116,77 @@ def live_sessions() -> List[str]:
         return []
 
 
+# Spinner glyphs Claude-Code shows on its ACTIVE status line. Used only for
+# working-detection on RAW text (below); the cleaner peels these off, which is
+# exactly why working-detection can't run on cleaned text.
+_SPINNER_GLYPHS = "✻✳✶✷✸✹✺✽❋⚹"
+
+
+def _raw_capture(session: str) -> Optional[str]:
+    """The unfiltered pane text (last _RAW_CAPTURE_LINES). Callers do the
+    live-session membership check first; this is just the subprocess."""
+    try:
+        r = subprocess.run(
+            [_TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", f"-{_RAW_CAPTURE_LINES}"],
+            capture_output=True, text=True, timeout=_TIMEOUT_S,
+        )
+        if r.returncode != 0:
+            return None
+        return r.stdout
+    except Exception:
+        return None
+
+
+def _is_working(raw: str) -> bool:
+    """True if the RAW pane shows Claude actively generating a turn. The two
+    reliable signals are the 'esc to interrupt' footer (present ONLY while a
+    turn runs) and an active spinner status line ('✻ … N tokens / thinking').
+    Both are TUI chrome that _clean_pane_text STRIPS — so working-detection
+    MUST read raw text, not the cleaned peek text. Reading cleaned text is the
+    '0 working / every lane idle' bug (2026-07-11)."""
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    # Primary, reliable signal: the footer is shown ONLY while a turn runs.
+    if any("esc to interrupt" in ln.lower() for ln in lines):
+        return True
+    # Secondary: an ACTIVE spinner status line. Match only genuinely-in-progress
+    # markers — the '…' ellipsis of a running verb ('Bloviating…'), a live
+    # up/down token counter, or present-tense 'thinking'. Deliberately NOT the
+    # past-tense DONE summaries the same glyph also draws between turns
+    # ('✻ Cooked for 4m', 'Baked for 3m', 'Thought for 5s'), which would
+    # otherwise mis-read an idle-at-prompt lane as working.
+    spinner = next((ln for ln in reversed(lines) if ln.lstrip()[:1] in _SPINNER_GLYPHS), None)
+    if spinner:
+        if "…" in spinner or "↑" in spinner or "↓" in spinner or "thinking" in spinner.lower():
+            return True
+    return False
+
+
+def capture(session: str, live: Optional[set] = None):
+    """One raw capture, BOTH derivations: returns (state, cleaned_text) or
+    (None, None) if the session isn't live. state = {running, state:
+    'working'|'idle', activity}. `live` lets the caller pass a pre-fetched
+    live-session set so an N-lane fleet sweep does one `list-sessions`, not N.
+
+    working/idle comes from the RAW pane (_is_working); the human-readable
+    `activity` and the peek text come from the cleaned pane — the split is why
+    a lane can read 'working' while its card still shows a readable activity
+    line."""
+    sessions = live if live is not None else set(live_sessions())
+    if not session or session not in sessions:
+        return None, None
+    raw = _raw_capture(session)
+    if raw is None:
+        return None, None
+    cleaned = _clean_pane_text(raw)
+    activity = cleaned.splitlines()[-1][:140] if cleaned else ""
+    state = {
+        "running": True,
+        "state": "working" if _is_working(raw) else "idle",
+        "activity": activity,
+    }
+    return state, cleaned
+
+
 def capture_pane(session: str) -> Optional[str]:
     """Return the last ~60 lines of *session*'s pane 0 AFTER stripping TUI
     chrome, or None if the session isn't live right now (checked against
@@ -134,13 +205,5 @@ def capture_pane(session: str) -> Optional[str]:
     """
     if not session or session not in live_sessions():
         return None
-    try:
-        r = subprocess.run(
-            [_TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", f"-{_RAW_CAPTURE_LINES}"],
-            capture_output=True, text=True, timeout=_TIMEOUT_S,
-        )
-        if r.returncode != 0:
-            return None
-        return _clean_pane_text(r.stdout)
-    except Exception:
-        return None
+    raw = _raw_capture(session)
+    return _clean_pane_text(raw) if raw is not None else None

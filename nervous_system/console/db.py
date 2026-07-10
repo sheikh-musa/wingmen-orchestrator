@@ -12,11 +12,16 @@ psycopg (v3) is already in the venv; no new dependency.
 """
 from __future__ import annotations
 
+import logging
 import os
+import queue
+import threading
 from typing import List, Optional, Tuple
 
 import psycopg
 from psycopg.rows import dict_row
+
+logger = logging.getLogger("wingmen.console.db")
 
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
@@ -222,29 +227,147 @@ def build_needs_you_query() -> Tuple[str, list]:
     return sql, []
 
 
+def warm_pool(n: int = 3) -> None:
+    """Open and stash up to *n* connections so the FIRST /api/fleet after a
+    console restart is already warm (~150ms) instead of paying the ~650ms×N
+    cold-connect on the operator's first tap. Best-effort: a DB blip at boot
+    must not crash the console — the pool just fills lazily on demand instead.
+    Called in a background thread from make_server()."""
+    n = min(n, _POOL_MAX)
+    conns = []
+    try:
+        for _ in range(n):
+            conns.append(_get_conn())
+    except Exception as e:
+        logger.warning("pool pre-warm skipped (fills lazily): %s", e)
+    finally:
+        for c in conns:
+            _return_conn(c)
+
+
 def fetch_needs_you() -> List[dict]:
     sql, params = build_needs_you_query()
     return _query(sql, params)
 
 
-def _query(sql: str, params: list) -> List[dict]:
+# --- persistent connection pool ----------------------------------------------
+#
+# WHY: the DSN is the Supabase pooler in ap-southeast-2. A *fresh* connection
+# costs ~650ms (TCP+TLS+auth handshake over that RTT) plus ~100ms for the
+# per-session `SET statement_timeout` round-trip — paid on EVERY _query() call.
+# /api/fleet issues three reads, so a cold-connect-per-query design spent
+# ~2.6s/request almost entirely in handshakes (query bodies are ~100ms each).
+# That slowness is what tripped the phone's client-side timeout -> the hard
+# "Could not connect" screen (2026-07-11 regression). A warm, reused connection
+# pays connect + SET ONCE (at pool fill), so a fleet request drops to ~3×100ms
+# of actual query time — comfortably under the <500ms budget.
+#
+# The pool is a tiny stdlib affair (no psycopg_pool dep, which isn't in the
+# venv): a LIFO of idle connections, bounded by CONSOLE_DB_POOL. Borrow-time
+# health checks + a single transparent reconnect-and-retry make a server-side
+# idle disconnect (the pooler culls idle sessions) invisible to callers: the
+# first request after an idle gap pays one reconnect, the rest stay warm.
+_POOL_MAX = max(1, int(os.environ.get("CONSOLE_DB_POOL", "6")))
+_idle: "queue.LifoQueue[psycopg.Connection]" = queue.LifoQueue()
+_pool_lock = threading.Lock()
+_pool_size = 0  # live connections that exist (idle + checked-out), guarded by lock
+
+
+def _new_conn() -> psycopg.Connection:
+    """Open one warm read-only connection with the statement-timeout already
+    set, so the per-request hot path never pays the connect or the SET."""
     dsn = resolve_dsn()
     if not dsn:
         raise RuntimeError("no read-only DSN configured (set CONSOLE_DB_URL)")
     # autocommit=True + read-only session: belt-and-suspenders on top of the
     # SELECT-only role. A console fault structurally cannot write.
-    with psycopg.connect(
+    conn = psycopg.connect(
         dsn, connect_timeout=_CONNECT_TIMEOUT, autocommit=True,
         row_factory=dict_row,
-    ) as conn:
-        conn.read_only = True
-        with conn.cursor() as cur:
-            # Cap this session before the real query so a DB blip fails fast
-            # instead of hanging the panel. Literal int (our own constant, not
-            # user input) — SET doesn't bind a parameter for its value.
-            cur.execute(f"SET statement_timeout = {int(_STATEMENT_TIMEOUT_MS)}")
-            cur.execute(sql, params)
-            return [dict(r) for r in cur.fetchall()]
+    )
+    conn.read_only = True
+    with conn.cursor() as cur:
+        # Cap every query on this session so a DB blip fails fast instead of
+        # hanging a panel. Literal int (our own constant, not user input) — SET
+        # doesn't bind a parameter for its value. Set once per connection; it
+        # persists for the life of the pooled session (Supavisor session mode
+        # keeps one server backend per client connection).
+        cur.execute(f"SET statement_timeout = {int(_STATEMENT_TIMEOUT_MS)}")
+    return conn
+
+
+def _get_conn() -> psycopg.Connection:
+    """Borrow a warm connection: reuse an idle one, else open a new one up to
+    _POOL_MAX, else block for one to be returned."""
+    global _pool_size
+    try:
+        conn = _idle.get_nowait()
+        if not (conn.closed or conn.broken):
+            return conn
+        # a dead idle connection: drop it, fall through to make a replacement
+        with _pool_lock:
+            _pool_size -= 1
+    except queue.Empty:
+        pass
+
+    with _pool_lock:
+        may_create = _pool_size < _POOL_MAX
+        if may_create:
+            _pool_size += 1
+    if may_create:
+        try:
+            return _new_conn()
+        except Exception:
+            with _pool_lock:
+                _pool_size -= 1
+            raise
+    # at capacity: wait for a peer to return one.
+    return _idle.get()
+
+
+def _return_conn(conn: psycopg.Connection) -> None:
+    """Return a healthy connection to the idle pool (drop it if it went bad)."""
+    global _pool_size
+    if conn.closed or conn.broken:
+        with _pool_lock:
+            _pool_size -= 1
+        return
+    _idle.put(conn)
+
+
+def _discard_conn(conn: psycopg.Connection) -> None:
+    global _pool_size
+    try:
+        conn.close()
+    except Exception:
+        pass
+    with _pool_lock:
+        _pool_size -= 1
+
+
+def _query(sql: str, params: list) -> List[dict]:
+    # Up to two attempts: a pooled connection the server culled while idle only
+    # reveals itself as broken on first use, so on a connection-level failure we
+    # drop it and retry ONCE with a fresh one. A query-level error (bad SQL,
+    # statement timeout) leaves the connection healthy — return it and re-raise.
+    last_err: Optional[Exception] = None
+    for attempt in range(2):
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+            _return_conn(conn)
+            return rows
+        except psycopg.Error as e:
+            if (conn.closed or conn.broken) and attempt == 0:
+                _discard_conn(conn)
+                last_err = e
+                logger.debug("pooled connection died mid-query, reconnecting: %s", e)
+                continue
+            _return_conn(conn)
+            raise
+    raise last_err  # pragma: no cover - loop always returns or raises above
 
 
 def fetch_messages(

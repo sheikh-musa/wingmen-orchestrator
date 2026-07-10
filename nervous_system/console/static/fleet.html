@@ -30,15 +30,25 @@
   .wrap { max-width: 720px; margin: 0 auto; }
   a { color: var(--accent); text-decoration: none; }
 
-  /* pull-to-refresh — box-sizing:content-box (NOT the global border-box) so the
-     env(safe-area-inset-top) padding is ADDITIVE above the JS-set height. Under
-     border-box the notch inset ate into the height and clipped the label on
-     iPhones (operator #3440: "pull-to-refresh text is cropped"). */
-  #ptr { position: fixed; top: 0; left: 0; right: 0; z-index: 60; box-sizing: content-box;
+  /* pull-to-refresh — the WHOLE element is offset BELOW the notch via
+     `top: env(safe-area-inset-top)`, so its band + centered label can never
+     render under the notch. The earlier top:0 + padding-top + content-box
+     trick still clipped on a real iPhone (operator 2026-07-11): the label
+     centered across the padded box drifted back under the inset. Offsetting the
+     element's top removes that whole class of box-sizing ambiguity — on desktop
+     the inset is 0 so top:0 (unchanged); on iOS it starts exactly at the notch
+     edge. A backdrop strip (::before) fills the notch area with the panel bg so
+     the pull still reads as one solid sheet, not a floating band. */
+  #ptr { position: fixed; top: env(safe-area-inset-top); left: 0; right: 0; z-index: 60;
     display: flex; align-items: center; justify-content: center; gap: 8px;
     height: 0; overflow: hidden; pointer-events: none; background: var(--panel);
-    color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px;
-    white-space: nowrap; padding-top: env(safe-area-inset-top); }
+    color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px; white-space: nowrap; }
+  /* fill the notch strip above the band (only while pulling) so the sheet is
+     continuous; height 0 at rest keeps it invisible when not pulling. */
+  #ptr::before { content: ""; position: fixed; top: 0; left: 0; right: 0;
+    height: env(safe-area-inset-top); background: var(--panel); z-index: 60;
+    display: none; }
+  #ptr.pulling::before, #ptr.refreshing::before { display: block; }
   #ptr #ptrTxt { white-space: nowrap; }
   #ptr .spin { display: inline-block; transition: transform .15s ease; }
   #ptr.armed { color: var(--accent); } #ptr.armed .spin { transform: rotate(180deg); }

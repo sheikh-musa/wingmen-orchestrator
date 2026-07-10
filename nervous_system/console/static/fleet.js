@@ -19,10 +19,25 @@
     if (s < 86400) return Math.round(s / 3600) + "h";
     return Math.round(s / 86400) + "d";
   }
-  function setLive(ok) {
+  function setLive(ok, label) {
     var d = $("liveDot");
     d.className = "live" + (ok ? "" : " down");
-    d.textContent = ok ? "● live" : "● offline";
+    d.textContent = label || (ok ? "● live" : "● offline");
+  }
+
+  // Last-good /api/fleet payload, persisted so a cold launch (or a launch on a
+  // slow/degraded tailnet) paints real data INSTANTLY from cache and NEVER
+  // shows a hard error — the network fetch then quietly refreshes it. This is
+  // the data-layer twin of the SW serving the cached shell: shell + last-good
+  // data together mean the operator always sees his console, reconnect happens
+  // in the background (2026-07-11: the slow first fetch used to hard-error).
+  var LAST_GOOD_KEY = "fleet_last_good";
+  function saveLastGood(d) {
+    try { localStorage.setItem(LAST_GOOD_KEY, JSON.stringify(d)); } catch (e) {}
+  }
+  function loadLastGood() {
+    try { return JSON.parse(localStorage.getItem(LAST_GOOD_KEY) || "null"); }
+    catch (e) { return null; }
   }
 
   var UNAUTH =
@@ -256,41 +271,86 @@
   }
 
   // ---- load + refresh -----------------------------------------------------
+  // Paint a payload with full UI-state preservation (window scroll + open
+  // peek's inner scroll). Shared by the live fetch AND the boot-time last-good
+  // render, so a cached paint restores exactly what a live paint would.
+  function applyData(d) {
+    var scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    var pb = currentPeekBox();
+    var pbBody = pb ? pb.querySelector(".body") : null;
+    var peekScroll = pbBody ? pbBody.scrollTop : 0;
+
+    renderPulse(d.pulse || {});
+    renderNeeds(d.needs_you || []);
+    renderLanes(d.lanes || []);
+    renderDeploys(d.deploys || []);
+
+    reflectOpenPeek(peekScroll);      // re-open peek + restore its inner scroll
+    window.scrollTo(0, scrollY);      // restore page scroll AFTER layout settles
+  }
+
+  // Fetch /api/fleet with a hard deadline. A slow tailnet must fail FAST into
+  // the retry loop (keeping last-good on screen), never hang the UI — the hang
+  // is exactly what tripped the phone's hard "Could not connect" (2026-07-11).
+  var FETCH_TIMEOUT_MS = 12000;
+  function fetchFleet() {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS);
+    return fetch("/api/fleet", { headers: authHeaders(), signal: ctrl.signal })
+      .then(function (r) { clearTimeout(timer); return r; },
+            function (e) { clearTimeout(timer); throw e; });
+  }
+
   function load() {
-    return fetch("/api/fleet", { headers: authHeaders() })
+    return fetchFleet()
       .then(function (r) {
-        if (r.status === 401) { setLive(false); $("needs").innerHTML = UNAUTH; $("lanes").innerHTML = ""; throw new Error("unauth"); }
+        if (r.status === 401) {
+          // Auth failure is NOT a connection failure — show the (actionable)
+          // unauthorized message, don't fall into the reconnect loop's UI.
+          setLive(false, "● unauthorized");
+          $("needs").innerHTML = UNAUTH; $("lanes").innerHTML = "";
+          var err = new Error("unauth"); err.unauth = true; throw err;
+        }
+        if (!r.ok) throw new Error("http " + r.status);
         return r.json();
       })
       .then(function (d) {
         setLive(true);
-        // Capture UI state synchronously, right before the DOM is mutated, so a
-        // live data tick preserves exactly what the operator was looking at:
-        // window scroll + the open peek's inner scroll. (Routine expansion and
-        // which peek is open live in module vars and survive on their own.)
-        var scrollY = window.scrollY || document.documentElement.scrollTop || 0;
-        var pb = currentPeekBox();
-        var pbBody = pb ? pb.querySelector(".body") : null;
-        var peekScroll = pbBody ? pbBody.scrollTop : 0;
-
-        renderPulse(d.pulse || {});
-        renderNeeds(d.needs_you || []);
-        renderLanes(d.lanes || []);
-        renderDeploys(d.deploys || []);
-
-        reflectOpenPeek(peekScroll);      // re-open peek + restore its inner scroll
-        window.scrollTo(0, scrollY);      // restore page scroll AFTER layout settles
+        saveLastGood(d);
+        applyData(d);
       });
   }
 
-  var refreshTimer = null;
+  // Self-scheduling refresh with reconnect backoff. On success -> steady 8s
+  // cadence. On a network/timeout failure -> keep last-good on screen, flip the
+  // dot to a quiet "reconnecting…", and retry with exponential backoff (capped)
+  // — the app NEVER blanks or hard-errors on a bad first/next load.
+  var REFRESH_MS = 8000, RETRY_MAX_MS = 15000;
+  var refreshTimer = null, backoff = 0;
+  function schedule(ms) {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(tick, ms);
+  }
+  function tick() {
+    load().then(function () {
+      backoff = 0;
+      schedule(REFRESH_MS);            // healthy -> normal cadence
+    }).catch(function (e) {
+      if (e && e.unauth) {             // unauthorized: retry occasionally in case
+        backoff = RETRY_MAX_MS;        // the IP/tailnet comes back, no fast spin
+      } else {
+        setLive(false, "● reconnecting…");
+        backoff = Math.min(backoff ? backoff * 2 : 2000, RETRY_MAX_MS);
+      }
+      schedule(backoff);
+    });
+  }
   function start() {
-    load().catch(function () { setLive(false); });
-    if (refreshTimer) clearInterval(refreshTimer);
-    // Refresh runs even with a peek open — state is preserved across the
-    // repaint (peek re-opened, scrolls restored), so the data stays live
-    // without ever collapsing what the operator opened.
-    refreshTimer = setInterval(function () { load().catch(function () {}); }, 8000);
+    // Paint last-good FIRST so the operator sees his console immediately, even
+    // before (or entirely without) a network response. tick() then refreshes.
+    var cached = loadLastGood();
+    if (cached) { setLive(false, "● reconnecting…"); applyData(cached); }
+    tick();
   }
 
   // ---- pull-to-refresh ----------------------------------------------------
@@ -308,8 +368,11 @@
     document.addEventListener("touchmove", function (e) {
       if (!pulling) return;
       var dy = e.touches[0].clientY - startY;
-      if (dy <= 0) { pulling = false; ptr.style.height = "0px"; return; }
+      if (dy <= 0) { pulling = false; ptr.classList.remove("pulling"); ptr.style.height = "0px"; return; }
       e.preventDefault();
+      // .pulling shows the notch-fill strip (::before) so the pull reads as one
+      // continuous sheet from the notch down, not a band floating below it.
+      ptr.classList.add("pulling");
       ptr.style.height = Math.min(MAX, dy * DAMP) + "px";
       armed = dy >= ARM; ptr.classList.toggle("armed", armed);
       ptrTxt.textContent = armed ? "Release to refresh" : "Pull to refresh";
@@ -318,10 +381,10 @@
       if (!pulling) return; pulling = false; ptr.classList.add("snap");
       if (armed) { ptr.classList.add("refreshing"); ptrTxt.textContent = "Refreshing…"; ptr.style.height = "44px";
         setTimeout(function () { window.location.reload(); }, 150); }
-      else { ptr.style.height = "0px"; ptr.classList.remove("armed"); }
+      else { ptr.style.height = "0px"; ptr.classList.remove("armed"); ptr.classList.remove("pulling"); }
     }
     document.addEventListener("touchend", end);
-    document.addEventListener("touchcancel", function () { pulling = false; ptr.style.height = "0px"; ptr.classList.remove("armed"); });
+    document.addEventListener("touchcancel", function () { pulling = false; ptr.style.height = "0px"; ptr.classList.remove("armed"); ptr.classList.remove("pulling"); });
   })();
 
   start();

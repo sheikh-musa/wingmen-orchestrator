@@ -28,6 +28,8 @@ import os
 import pathlib
 import subprocess
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -139,60 +141,98 @@ class _FeedLoop:
 
 def _enrich_lanes_live(rows):
     """Fold a LIVE tmux summary into each lane row (shared by /api/lanes and
-    /api/fleet) so a card shows what the lane is ACTUALLY doing now, not the
-    stale boot-string current_task. One read-only capture_pane per lane."""
+    /api/fleet) so a card shows — and is CLASSIFIED by — what the lane is
+    ACTUALLY doing now (working/idle from the live pane), not the stale
+    agent_status.status / boot-string current_task (which reads 'active' +
+    task=None for every lane, the '0 working' bug 2026-07-11).
+
+    The tmux state is the truth: pane running + 'esc to interrupt'/spinner =
+    working; running + idle prompt = idle; no live pane = offline. Two refinements
+    keep the COUNT honest:
+      * one `list-sessions` for the whole sweep (not one per lane); and
+      * each live session is OWNED by the freshest-heartbeat lane targeting it,
+        so two rows sharing a session label (e.g. cc-infra-1 & the stale
+        cc-infra-2, both -> 'infra') don't both count as working — only the
+        live owner does; the stale twin reads offline."""
+    live = set(panes.live_sessions())
+
+    # 1) resolve each row's target tmux session (per-instance tmux_session wins;
+    #    the orchestrator doesn't self-register, so target its known 'orch').
     for r in rows:
         sess = r.get("tmux_session") or r.get("lane")
-        # the orchestrator doesn't self-register a tmux session; target its
-        # known 'orch' session so the operator can peek the hub (operator 2637).
         if not r.get("tmux_session") and str(r.get("agent_id", "")).startswith("cc-orchestrator"):
             sess = "orch"
             r["tmux_session"] = "orch"
-        txt = panes.capture_pane(sess) if sess else None
-        if not txt:
+        r["_sess"] = sess
+
+    # 2) ownership: freshest heartbeat wins a contested live session.
+    def _hb(r):
+        h = r.get("heartbeat_age_s")
+        return h if h is not None else 10 ** 9
+    owner = {}
+    for r in sorted(rows, key=_hb):
+        s = r.get("_sess")
+        if s and s in live and s not in owner:
+            owner[s] = r.get("agent_id")
+
+    # 3) capture each owned live session ONCE; non-owners / no pane -> offline.
+    cache = {}
+    for r in rows:
+        s = r.pop("_sess", None)
+        if not s or s not in live or owner.get(s) != r.get("agent_id"):
             r["live"] = {"running": False}
             continue
-        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-        spinner = next((ln for ln in reversed(lines)
-                        if ln[:1] in "✻✳✶✷✸✹✺✽❋⚹"), None)
-        active = bool(spinner and ("token" in spinner.lower()
-                      or "↑" in spinner or "↓" in spinner or "…" in spinner))
-        working = active or any("esc to interrupt" in ln.lower() for ln in lines)
-        activity = spinner or (lines[-1] if lines else "")
-        r["live"] = {"running": True,
-                     "state": "working" if working else "idle",
-                     "activity": activity[:140]}
+        if s not in cache:
+            state, _txt = panes.capture(s, live=live)
+            cache[s] = state or {"running": False}
+        r["live"] = cache[s]
     return rows
 
 
 def _lane_bucket(l):
-    """working / idle / offline / flagged classification for a lane row, from
-    live tmux state + heartbeat + desired_state (the redesign's exception-first
-    + working-first sort keys). 'flagged' = desired up but heartbeat dead/stale."""
-    hb = l.get("heartbeat_age_s")
+    """working / idle / offline / flagged classification for a lane row. The
+    LIVE tmux pane is authoritative (operator 2026-07-11: agent_status.status
+    reads 'active' + task=None for every lane, so it can't tell working from
+    idle — the '0 working' bug). So: live pane working -> working; live pane
+    idle -> idle; NO live pane -> offline. Heartbeat/desired_state no longer
+    decide the bucket, only whether to FLAG it: a lane the fleet WANTS up
+    (desired_state='up') but that has no live pane is dark and needs attention."""
     desired_up = str(l.get("desired_state") or "").lower() == "up"
     live = l.get("live") or {}
-    dead = hb is None or hb >= 900
-    stale = hb is not None and 120 <= hb < 900
-    flagged = desired_up and (dead or stale)
-    if live.get("running") and live.get("state") == "working":
+    running = bool(live.get("running"))
+    if running and live.get("state") == "working":
         state = "working"
-    elif live.get("running"):
+    elif running:
         state = "idle"
-    elif dead:
-        state = "offline"
     else:
-        state = "idle"
+        state = "offline"
+    flagged = desired_up and state == "offline"  # supposed to be up, but dark
     return state, flagged
+
+
+# Soft budget for the whole /api/fleet aggregate. Over this we log a warning so
+# a slow-query regression is caught in the log before it's caught on the phone
+# (the 2026-07-11 regression showed up as a client-side timeout, not a metric).
+_FLEET_BUDGET_MS = int(os.environ.get("CONSOLE_FLEET_BUDGET_MS", "500"))
 
 
 def _fleet_payload():
     """The single live-derived aggregate behind /api/fleet (redesign #7576):
     pulse counts + needs-you hero + exception-first flagged lanes + working-first
-    lanes + deploys, all from real tables. One round-trip for the phone."""
-    lanes = _enrich_lanes_live(db.fetch_lanes())
-    deploys = db.fetch_deploys()
-    needs = db.fetch_needs_you()
+    lanes + deploys, all from real tables. One round-trip for the phone.
+
+    The three reads are independent, so they fire CONCURRENTLY on the warm
+    connection pool (db._query reuses connections): wall-clock is one query RTT
+    (~100ms) instead of three serial ones. The tmux pane enrichment runs after
+    the lanes read returns (it needs those rows)."""
+    t0 = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_lanes = ex.submit(db.fetch_lanes)
+        f_deploys = ex.submit(db.fetch_deploys)
+        f_needs = ex.submit(db.fetch_needs_you)
+        lanes = _enrich_lanes_live(f_lanes.result())
+        deploys = f_deploys.result()
+        needs = f_needs.result()
 
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for l in lanes:
@@ -206,6 +246,13 @@ def _fleet_payload():
     # working first, then idle, then offline; flagged floats up within its group.
     order = {"working": 0, "idle": 1, "offline": 2}
     lanes.sort(key=lambda l: (0 if l["flagged"] else 1, order.get(l["bucket"], 3)))
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    if elapsed_ms > _FLEET_BUDGET_MS:
+        logger.warning(
+            "fleet payload over budget: %.0fms > %dms (%d lanes)",
+            elapsed_ms, _FLEET_BUDGET_MS, len(lanes),
+        )
 
     return {
         "pulse": {**counts, "needs_you": len(needs)},
@@ -513,6 +560,11 @@ def make_server(
 ) -> ThreadingHTTPServer:
     feedloop = _FeedLoop(fetch_since=fetch_since)
     feedloop.start()
+    # Pre-warm the DB connection pool off the main thread so the operator's
+    # first /api/fleet after a restart is already warm (~150ms), not a
+    # ~650ms×N cold connect. Non-blocking + fail-soft: a DB blip at boot just
+    # means the pool fills lazily on first request instead.
+    threading.Thread(target=db.warm_pool, kwargs={"n": 3}, daemon=True).start()
     handler = _make_handler(feedloop)
     httpd = _QuietThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
