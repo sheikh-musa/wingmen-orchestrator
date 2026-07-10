@@ -21,6 +21,18 @@ from psycopg.rows import dict_row
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
 _CONNECT_TIMEOUT = 15
+# Server-side ceiling on any single console query. Without it, a panel load
+# only fails after the full _CONNECT_TIMEOUT (or a longer server default),
+# hanging the UI on a spinner. 8s fails fast -> the client shows its retry
+# state and the 10s periodic refresh repaints on the next good response.
+#
+# Applied via `SET statement_timeout` on the freshly-opened connection, NOT a
+# libpq `-c` startup option: the console's DSN is the Supabase *session* pooler
+# (Supavisor), which silently swallows startup options (verified: `-c
+# statement_timeout=8000` left SHOW reporting the role default 10s) but honors
+# a per-session SET. Session mode keeps one server connection for the whole
+# client session, so the SET holds for the query that follows it.
+_STATEMENT_TIMEOUT_MS = 8000
 
 # Columns surfaced for the conversation panel. (No money/PII columns exist on
 # the bus; bodies are additionally PII-redacted in-view by the API layer.)
@@ -155,10 +167,15 @@ def _query(sql: str, params: list) -> List[dict]:
     # autocommit=True + read-only session: belt-and-suspenders on top of the
     # SELECT-only role. A console fault structurally cannot write.
     with psycopg.connect(
-        dsn, connect_timeout=_CONNECT_TIMEOUT, autocommit=True, row_factory=dict_row
+        dsn, connect_timeout=_CONNECT_TIMEOUT, autocommit=True,
+        row_factory=dict_row,
     ) as conn:
         conn.read_only = True
         with conn.cursor() as cur:
+            # Cap this session before the real query so a DB blip fails fast
+            # instead of hanging the panel. Literal int (our own constant, not
+            # user input) — SET doesn't bind a parameter for its value.
+            cur.execute(f"SET statement_timeout = {int(_STATEMENT_TIMEOUT_MS)}")
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
 

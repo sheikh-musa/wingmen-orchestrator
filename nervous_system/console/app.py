@@ -47,6 +47,24 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
 }
 
+class _QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that doesn't dump a full traceback for benign client
+    disconnects. A phone closing an idle keep-alive socket, or an EventSource
+    the browser aborts, surfaces as ConnectionResetError [Errno 54] /
+    BrokenPipeError raised deep in socketserver — the stock handle_error prints
+    a ~15-line traceback per event, which had grown to be ~100% of console.log
+    and buried every real error. These are expected and handled; log one terse
+    line at DEBUG and move on. Any OTHER exception still gets the full trace."""
+
+    def handle_error(self, request, client_address):  # noqa: D102
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError)):
+            logger.debug("client %s disconnected: %s", client_address, exc)
+            return
+        super().handle_error(request, client_address)
+
+
 # --- shared SSE infrastructure (one event loop per server) --------------------
 
 
@@ -432,7 +450,7 @@ def make_server(
     feedloop = _FeedLoop(fetch_since=fetch_since)
     feedloop.start()
     handler = _make_handler(feedloop)
-    httpd = ThreadingHTTPServer((host, port), handler)
+    httpd = _QuietThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
     httpd.feedloop = feedloop  # for lifecycle / shutdown
 

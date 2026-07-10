@@ -12,6 +12,7 @@
   var es = null;          // AbortController for the fetch-based stream
   var lanesTimer = null;
   var seen = {};          // de-dup message ids
+  var messagesLoaded = false;  // initial backlog loaded? (gates periodic retry)
 
   var $ = function (id) { return document.getElementById(id); };
   // Auth is IP-allowlist-first now (server-side, CONSOLE_ALLOWED_IPS) — an
@@ -388,20 +389,36 @@
   }
 
   // SSE via fetch streaming (so the token stays a header, never the URL).
+  // Reconnect is scheduled from ONE place (reconnectStream) so a clean close
+  // and an errored close are handled identically — anything but an explicit
+  // abort or a 401 gets a backoff-and-retry.
+  function reconnectStream(ctrl) {
+    if (ctrl.signal.aborted) return;   // superseded by a newer openStream()
+    setConn("down");
+    setTimeout(function () { if (es === ctrl) openStream(); }, 3000);
+  }
+
   function openStream() {
     if (es) { es.abort(); es = null; }
     var ctrl = new AbortController();
     es = ctrl;
     fetch("/api/stream", { headers: authHeaders(), signal: ctrl.signal })
       .then(function (resp) {
-        if (resp.status === 401) { setConn("down"); throw new Error("unauthorized"); }
+        // 401 is terminal: retrying the same un-allowlisted IP just loops. The
+        // dot stays down; a manual Retry (with a breakglass token) is the fix.
+        if (resp.status === 401) { setConn("down"); return; }
         setConn("live");
         var reader = resp.body.getReader();
         var decoder = new TextDecoder();
         var buf = "";
         function pump() {
           return reader.read().then(function (res) {
-            if (res.done) { setConn("down"); return; }
+            // res.done = the server closed the stream CLEANLY (feeder/loop
+            // teardown, a statement-timeout tearing the response, a proxy
+            // idle close, the terminating chunk). The old code set "down" and
+            // stopped here — a clean close permanently wedged the feed until a
+            // manual Retry. Reconnect on a clean end exactly like an error.
+            if (res.done) { reconnectStream(ctrl); return; }
             buf += decoder.decode(res.value, { stream: true });
             var parts = buf.split("\n\n");
             buf = parts.pop();
@@ -415,12 +432,20 @@
         }
         return pump();
       })
-      .catch(function () {
-        if (!ctrl.signal.aborted) {
-          setConn("down");
-          setTimeout(function () { if (es === ctrl) openStream(); }, 3000);
-        }
-      });
+      .catch(function () { reconnectStream(ctrl); });
+  }
+
+  // Render a per-panel error+retry state so ONE failing panel is contained to
+  // its own column — it must never blank its siblings or (the old bug) block
+  // the live feed. "unauthorized" already painted its own UNAUTH_HINT; skip.
+  // The live SSE feed keeps flowing regardless, so say so.
+  function panelError(id, e) {
+    if (e && e.message === "unauthorized") return;  // UNAUTH_HINT already shown
+    var box = $(id);
+    if (box) {
+      box.innerHTML = '<div class="empty">Couldn\'t load — the live feed is still active.' +
+        '<br>Retrying automatically&hellip;</div>';
+    }
   }
 
   // Called on load AND as the manual "Retry" button — token is optional in
@@ -433,11 +458,32 @@
     // if the allowlist ever locks you out. No visible input (operator: declutter).
     token = localStorage.getItem("console_token") || "";
     setConn("…");
-    Promise.all([loadMessages(), loadLanes(), loadDeploys()])
-      .then(function () { openStream(); })
-      .catch(function () { setConn("down"); });
+    // The SSE stream is opened INDEPENDENTLY of the REST panel loads. The old
+    // code gated openStream() behind Promise.all([messages,lanes,deploys]) —
+    // so a single flaky panel (a DB blip -> 500, a fetch reset) rejected the
+    // whole Promise.all, the stream never opened, and the conn dot wedged on
+    // "…"/down until a manual Retry (the "SSE stuck on Connecting…" bug).
+    // Each panel now loads + fails on its own; the feed no longer depends on
+    // any of them.
+    openStream();
+    messagesLoaded = false;
+    loadMessages()
+      .then(function () { messagesLoaded = true; })
+      .catch(function (e) { panelError("messages", e); });
+    loadLanes().catch(function (e) { panelError("lanes", e); });
+    loadDeploys().catch(function (e) { panelError("deploys", e); });
     if (lanesTimer) clearInterval(lanesTimer);
+    // Periodic refresh silently keeps the LAST good render on a transient
+    // failure (no panelError here) — a blip must not wipe populated panels;
+    // it just retries and repaints on the next success. Messages are NOT
+    // refreshed here once loaded (the live SSE stream owns their liveness;
+    // rebuilding every 10s would flash + lose scroll) — we only RETRY the
+    // backlog load while the initial one is still failing, so a failed first
+    // load recovers on its own without a manual Retry.
     lanesTimer = setInterval(function () {
+      if (!messagesLoaded) {
+        loadMessages().then(function () { messagesLoaded = true; }).catch(function () {});
+      }
       loadLanes().catch(function () {});
       loadDeploys().catch(function () {});
     }, 10000);
