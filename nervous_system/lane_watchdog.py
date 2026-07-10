@@ -38,8 +38,12 @@ LOG_FILE = ORCH / "logs" / "lane_watchdog.log"
 # allowlist silently failed to watch new/worktree sessions (e.g. 'cosem-adcda-2'
 # ran 3h dark on 2026-07-02 because it wasn't in the set). Now: watch all live
 # sessions EXCEPT the operator-attended hub and transient reviewers.
-# NEVER watch 'orch'/'orchestrator' (operator hub) or 'reviewer-*' (transient).
-NON_LANE_SESSIONS = {"orch", "orchestrator"}
+# NEVER watch the orchestrator BODIES — 'orch'/'orchestrator' (Studio hub) and
+# 'nazim' (console/CTO body, ORCH-TOPOLOGY-001). Neither is a build lane; both
+# are conversational consoles where a watchdog keystroke is the 2026-07-03
+# phantom-injection class (cai was the specimen; nazim is the same identity
+# category — an orch body, not a lane). 'reviewer-*' etc. is transient.
+NON_LANE_SESSIONS = {"orch", "orchestrator", "nazim"}
 NON_LANE_PREFIXES = ("reviewer-", "billingtest", "catest")
 
 # GOVERNANCE / CONVERSATIONAL CONSOLES (CAI-RESP-381): these are watched for

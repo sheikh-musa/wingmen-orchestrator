@@ -158,6 +158,16 @@ def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
             content = f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             content = f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
+    elif msg.get("voice") or msg.get("audio"):
+        media = msg.get("voice") or msg.get("audio")
+        try:
+            name = media.get("file_name") or f"voice_{media['file_id'][:12]}.ogg"
+            path = _download_media(ch.token, media["file_id"], name)
+            dur = media.get("duration")
+            content = (f"sent a VOICE note ({dur}s) → {path}"
+                       + (f"  | caption: {text}" if text else ""))
+        except Exception as e:
+            content = f"sent a voice note (download failed: {e})" + (f" | {text}" if text else "")
     else:
         content = text or f"[non-text update {upd_id}]"
 
@@ -180,6 +190,12 @@ class Channel:
          self.allowed_usernames, self.group_routing, self.channel_tag,
          self.log_target, self.poll_offset) = row
         self.token = os.environ.get(self.token_env_key or "", "")
+        # Per-channel override (in the group_routing JSONB bag): nudge EVEN WHEN the
+        # target reads WORKING, instead of busy-deferring (CAI-RESP-382). ON for the
+        # operator's CTO console (nazim-console) — he wants immediate delivery and
+        # Nazim handles a mid-task injection gracefully. A build lane keeps the
+        # default busy-defer so it isn't interrupted mid-task.
+        self.nudge_when_busy = bool((self.group_routing or {}).get("nudge_when_busy"))
 
     COLS = ("channel_key, token_env_key, mode, inject_target, inject_prefix, "
             "responder_ref, allowed_chat_ids, allowed_usernames, group_routing, "
@@ -188,7 +204,20 @@ class Channel:
 
 def load_channels(conn) -> dict[str, Channel]:
     with conn.cursor() as cur:
-        cur.execute(f"SELECT {Channel.COLS} FROM bot_channels WHERE enabled")
+        # INGEST_CHANNELS (comma-separated channel_keys) PINS this daemon to a
+        # specific set of channels regardless of the `enabled` flag — the per-host
+        # isolation that lets a non-hub box (the Mini running Nazim's console)
+        # poll ONLY its own bot (@nazim_cto_bot) while the hub keeps polling every
+        # `enabled` channel. A channel pinned here stays enabled=false in the
+        # registry, so the hub's ingest never touches it → the dual-poller 409
+        # class (two daemons fighting one bot token, seen Jul 3) can't recur.
+        override = os.environ.get("INGEST_CHANNELS", "").strip()
+        if override:
+            keys = [k.strip() for k in override.split(",") if k.strip()]
+            cur.execute(f"SELECT {Channel.COLS} FROM bot_channels "
+                        f"WHERE channel_key = ANY(%s)", (keys,))
+        else:
+            cur.execute(f"SELECT {Channel.COLS} FROM bot_channels WHERE enabled")
         return {c.key: c for c in (Channel(r) for r in cur.fetchall())}
 
 
@@ -307,26 +336,35 @@ def throttled_busy_ack(conn, ch: "Channel") -> None:
 def drain_stale_deferred(conn, ch: "Channel") -> None:
     """CAI-RESP-382 max-latency cap: if any inbound message has sat UNHANDLED
     longer than MAX_DEFER_SEC, nudge anyway — busy-defer must never strand the
-    operator (the 45-min-silence bug). Re-nudge throttled to once per cap window
-    so a persistently-busy agent isn't spammed every poll."""
+    operator (the 45-min-silence bug). ONE forced nudge per unhandled batch, keyed
+    on the NEWEST unhandled message id — NOT a wall-clock throttle.
+
+    Why id-dedup, not a time throttle (2026-07-08): the old throttle lived on the
+    Channel object (`_last_stale_nudge`), but main() recreates every Channel each
+    CONFIG_REFRESH (~60s) and carries only poll_offset forward — so the throttle
+    reset every refresh and re-fired the SAME forced nudge repeatedly (operator saw
+    3 nudges for one message in ~90s). Keying on max(id) of the unhandled batch and
+    carrying `_last_forced_nudge_id` forward across refresh survives that, and
+    matches reassure_if_unhandled: one nudge per message, repeats add nothing. A
+    genuinely NEWER stuck message still re-nudges; Option B + 'reply URGENT' cover a
+    persistently-busy agent."""
     if ch.mode not in ("agent-session", "log-and-route"):
         return
     target = ch.inject_target if ch.mode == "agent-session" else "orch"
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*), min(created_at) FROM operator_messages "
+            "SELECT count(*), min(created_at), max(id) FROM operator_messages "
             "WHERE direction='inbound' AND tag=%s AND handled_at IS NULL",
             (ch.channel_tag,))
-        n, oldest = cur.fetchone()
+        n, oldest, newest_id = cur.fetchone()
         if not oldest:
             return
         cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, MAX_DEFER_SEC))
         if not cur.fetchone()[0]:
             return
-    now = time.monotonic()
-    if now - getattr(ch, "_last_stale_nudge", 0.0) < MAX_DEFER_SEC:
-        return   # throttle: re-nudge at most once per cap window
-    ch._last_stale_nudge = now
+    if newest_id <= getattr(ch, "_last_forced_nudge_id", 0):
+        return   # already force-nudged this batch — one forced nudge per message
+    ch._last_forced_nudge_id = newest_id
     nudge_session(target, ch.key, n)
     _log_line(f"{ch.key}: {n} unhandled past {MAX_DEFER_SEC}s — FORCED nudge (max-latency cap)")
 
@@ -422,7 +460,7 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         urg = urgency(text)
         if urg == "btw":
             _log_line(f"{ch.key}: BTW — logged, not nudged (drains at next idle)")
-        elif urg == "urgent" or not pane_working(target):
+        elif urg == "urgent" or ch.nudge_when_busy or not pane_working(target):
             nudge_session(target, ch.key, unread_count(conn, ch))
         else:
             # target WORKING + default priority: DEFER (no interrupt). Delivery
@@ -516,6 +554,11 @@ async def main():
             if k in channels and channels[k].poll_offset is not None and (
                     ch.poll_offset is None or ch.poll_offset < channels[k].poll_offset):
                 ch.poll_offset = channels[k].poll_offset
+            # Carry the forced-nudge dedup marker forward too, else recreating the
+            # Channel every refresh resets it and re-fires a forced nudge for the
+            # same message (the 3-nudges-for-one-message bug, 2026-07-08).
+            if k in channels:
+                ch._last_forced_nudge_id = getattr(channels[k], "_last_forced_nudge_id", 0)
         channels.clear()
         channels.update(fresh)
         for k in list(channels):
