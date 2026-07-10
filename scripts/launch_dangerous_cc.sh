@@ -111,6 +111,12 @@ HEARTBEAT_PID=""
 # in .env, not the operator's shell).
 # shellcheck disable=SC1091
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# Per-lane OAuth token override (e.g. a donor/loaner account during a cap crunch).
+# Applied AFTER the .env source so it wins; distinct var name so `set -a; . .env`
+# cannot clobber it. Unset for normal lanes → no effect on billing.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"
+fi
 # Max-subscription billing for lanes — two parts, both load-bearing:
 #  1. Scrub ANTHROPIC_API_KEY: .env carries it for the orch's own API calls, but
 #     a present ANTHROPIC_API_KEY makes `claude` use metered API-usage billing.

@@ -12,17 +12,26 @@ ALERT_FILE="/tmp/ihsanos_health_alert_sent"
 ISSUES=""
 
 # Ping a URL, return clean HTTP code (000 = connection failed, no appended junk).
-# Retries once with a short backoff so a single DNS blip doesn't page Musa.
+#
+# HTTP 000 is a CONNECTION-level failure (DNS/edge/network hiccup from THIS probe
+# host) — almost always transient, NOT a real Supabase outage (a down project
+# returns 5xx, or sustained 000). A single retry (the old logic) wasn't enough:
+# a blip surviving two attempts 2s apart still paged. That is the exact class
+# that retired the ihsanos.com ping (2026-07-06) and re-fired on the Supabase
+# probe (operator, 2026-07-10). So: a REAL http status (incl. 4xx/5xx) returns
+# immediately and pages as before; only 000 gets retried — up to 4 attempts with
+# growing backoff (~12s) — and we report 000 ONLY if EVERY attempt fails (a
+# genuine sustained outage). Kills single-blip false-pages, keeps real-outage
+# detection.
 ping_http() {
   local url="$1"; shift
-  local http
-  http=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$@" "$url" 2>/dev/null)
-  if [ -z "$http" ] || [ "$http" = "000" ]; then
-    sleep 2
+  local http backoff
+  for backoff in 0 2 4 6; do
+    [ "$backoff" -gt 0 ] && sleep "$backoff"
     http=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$@" "$url" 2>/dev/null)
-    [ -z "$http" ] && http="000"
-  fi
-  echo "$http"
+    [ -n "$http" ] && [ "$http" != "000" ] && { echo "$http"; return; }
+  done
+  echo "000"
 }
 
 # 1. (RETIRED 2026-07-06) ihsanOS web (https://ihsanos.com) uptime ping.

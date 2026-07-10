@@ -10,7 +10,7 @@ Tighter cadence than the Sunday weekly UX job, for the active client-testing
 period. Runs daily via launchd (dev.wingmen.irsyad-daily-digest).
 """
 from __future__ import annotations
-import os, sys, subprocess, urllib.request, json
+import os, sys, subprocess, urllib.request, urllib.parse, json
 import psycopg
 from dotenv import load_dotenv
 
@@ -69,20 +69,35 @@ def build_digest() -> str:
     if not tok:
         lines.append("\n🐞 App errors: captured to Sentry (add SENTRY_AUTH_TOKEN to surface counts here).")
     else:
-        try:
-            org = os.environ.get("SENTRY_ORG", "irsyad")
-            proj = os.environ.get("SENTRY_PROJECT", "ihsanos-irsyad")
-            req = urllib.request.Request(
-                f"https://sentry.io/api/0/projects/{org}/{proj}/issues/?statsPeriod=24h&query=is:unresolved",
-                headers={"Authorization": f"Bearer {tok}"})
+        # Real slugs are ihsanos/ihsanos (one shared Next.js app; irsyad is a
+        # tenant WITHIN it, not a separate project). The old defaults
+        # irsyad/ihsanos-irsyad 404'd — the digest was blind until 2026-07-08.
+        org = os.environ.get("SENTRY_ORG", "ihsanos")
+        proj = os.environ.get("SENTRY_PROJECT", "ihsanos")
+
+        def _sentry_issues(query: str):
+            url = (f"https://sentry.io/api/0/projects/{org}/{proj}/issues/"
+                   f"?statsPeriod=24h&query={urllib.parse.quote(query)}")
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
             with urllib.request.urlopen(req, timeout=15) as r:
-                issues = json.load(r)
+                return json.load(r)
+
+        try:
+            issues = _sentry_issues("is:unresolved")
             if issues:
-                lines.append(f"\n🐞 Sentry — {len(issues)} unresolved error(s), 24h:")
+                lines.append(f"\n🐞 Sentry — {len(issues)} unresolved error(s), 24h (whole ihsanos app):")
                 for i in issues[:5]:
                     lines.append(f"  • {i.get('title','?')[:60]} ({i.get('count','?')}x)")
             else:
                 lines.append("\n🐞 Sentry: no unresolved errors in 24h.")
+            # Break out the irsyad-tenant slice (operator ask 2026-07-08: keep the
+            # whole-app view so nothing untagged slips, AND surface the irsyad
+            # count). Sparse until tenant-tagging matures across the app.
+            try:
+                irsyad = _sentry_issues("is:unresolved tenant:irsyad")
+                lines.append(f"  ↳ tagged tenant:irsyad: {len(irsyad)}")
+            except Exception:
+                pass
         except Exception as e:
             lines.append(f"\n🐞 Sentry query failed ({type(e).__name__}) — check the dashboard.")
     return "\n".join(lines)

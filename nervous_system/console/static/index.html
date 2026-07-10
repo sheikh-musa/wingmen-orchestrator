@@ -130,11 +130,12 @@
   }
   .lane .peek-box {
     display: none; margin-top: 6px; background: #05070c; border: 1px solid var(--line);
-    border-radius: 8px; padding: 8px 10px; max-height: 220px; overflow-y: auto;
+    border-radius: 8px; padding: 8px 10px; max-height: 50vh; overflow-y: auto;
     -webkit-overflow-scrolling: touch; font: 11px/1.5 var(--mono); color: #9fe8b0;
     white-space: pre-wrap; word-break: break-all;
   }
   .lane .peek-box.open { display: block; }
+  .lane.peeking { outline: 1px solid var(--accent, #4ade80); outline-offset: -1px; }
   .lane .peek-box .peek-empty { color: var(--dim); font-style: italic; }
   .empty { padding: 28px 16px; color: var(--dim); font-size: 14px; text-align: center; }
 

@@ -36,6 +36,15 @@ _BOX_CHARS = set("─═│║╔╗╚╝╭╮╰╯┌┐└┘├┤┬┴�
 _FOOTER_RE = re.compile(r"bypass permissions|esc to interrupt|shift\+tab to cycle|for agents")
 _CLEAR_HINT_RE = re.compile(r"new task\?.*token", re.IGNORECASE)
 _BARE_PROMPT_RE = re.compile(r"^\s*❯\s*$")
+# extra noise to drop so the peek reads like an activity log, not a terminal
+# (operator: "more human-readable peeks", 2026-07-08): TUI hint lines + the
+# sub-agent "◯ Explore … N tokens" status rows that are pure churn telemetry.
+_NOISE_RE = re.compile(r"Press up to edit queued|↑ to manage|ctrl\+t to|◯\s+Explore\b", re.IGNORECASE)
+# leading tool/spinner glyphs to peel off each kept line's front so text starts
+# with actual content, and a trailing "(Ns · ↓Nk tokens · thinking)" telemetry
+# suffix on spinner lines that adds nothing human-readable.
+_LEADING_GLYPHS = "⎿●◯○✻✳✶✷✸✹✺✽❋⚹⏵⎾⌐▶ ·\t"
+_SPINNER_TELEMETRY_RE = re.compile(r"\s*[(·]\s*\d+m?\s*\d*s?\b.*?(tokens|thinking|thought for).*$", re.IGNORECASE)
 
 
 def _is_chrome(line: str) -> bool:
@@ -53,6 +62,8 @@ def _is_chrome(line: str) -> bool:
         return True
     if _CLEAR_HINT_RE.search(line):
         return True
+    if _NOISE_RE.search(line):
+        return True
     non_space = [c for c in stripped if not c.isspace()]
     if non_space and sum(1 for c in non_space if c in _BOX_CHARS) / len(non_space) > 0.6:
         return True
@@ -60,7 +71,16 @@ def _is_chrome(line: str) -> bool:
 
 
 def _clean_pane_text(raw: str) -> str:
-    kept = [ln for ln in raw.splitlines() if not _is_chrome(ln)]
+    kept = []
+    for ln in raw.splitlines():
+        if _is_chrome(ln):
+            continue
+        # peel leading tool/spinner glyphs + drop the trailing token-telemetry
+        # so each line reads as plain activity, not terminal chrome.
+        s = ln.rstrip().lstrip(_LEADING_GLYPHS)
+        s = _SPINNER_TELEMETRY_RE.sub("", s).rstrip()
+        if s:
+            kept.append(s)
     return "\n".join(kept[-_CAPTURE_LINES:])
 
 

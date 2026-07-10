@@ -196,14 +196,15 @@
   // decision, msg re: 3-tab layout).
   function renderQtask(t, i) {
     var st = (t.status || "queued").toLowerCase();
+    // Was an SLA ratio (27104m/240m) — pointless once a task runs for days
+    // (operator 2634). Replaced with a plain AGE, flagged 'stale' when a task
+    // has sat open > 1 day — which is the real "stuck for ages" signal (2632).
     var sla = "";
-    if (t.sla_minutes != null && t.elapsed_min != null) {
-      var over = !!t.over_sla;
-      sla = '<span class="sla' + (over ? ' over' : '') + '">' +
-              (over ? '⚠ ' : '') + t.elapsed_min + 'm/' + t.sla_minutes + 'm' +
-            '</span>';
-    } else if (t.sla_minutes != null) {
-      sla = '<span class="sla idle">SLA ' + t.sla_minutes + 'm</span>';
+    var ageMin = t.elapsed_min != null ? t.elapsed_min
+               : (t.updated_age_s != null ? Math.round(t.updated_age_s / 60) : null);
+    if (ageMin != null) {
+      sla = '<span class="sla' + (ageMin > 1440 ? ' over' : ' idle') + '">' +
+              fmtAge(ageMin * 60) + '</span>';
     }
     return '<div class="qtask' + (t.over_sla ? ' breached' : '') + '">' +
       '<div class="top">' +
@@ -244,7 +245,17 @@
 
       // Dark/stale-and-should-be-up lanes float to the top — that's the
       // thing worth an operator's attention on a small screen first.
+      // Control plane pinned to the top (operator ask): orch first, cai next,
+      // then dark/stale-should-be-up lanes, then the rest.
+      function pinRank(l) {
+        var id = l.agent_id || "";
+        if (id.indexOf("cc-orchestrator") === 0) return 0;
+        if (id === "cai" || id.indexOf("cc-cai") === 0) return 1;
+        return 2;
+      }
       rows = rows.slice().sort(function (a, b) {
+        var pa = pinRank(a), pb = pinRank(b);
+        if (pa !== pb) return pa - pb;
         var ra = FLAG_RANK[laneFlag(a)]; var rb = FLAG_RANK[laneFlag(b)];
         if (ra == null) ra = 2; if (rb == null) rb = 2;
         return ra - rb;
@@ -272,12 +283,17 @@
         // one specific on-demand session when several are live at once —
         // fall back to it only if a lane hasn't self-registered yet.
         var peekTarget = l.tmux_session || l.lane;
-        return '<div class="lane' + (flag ? ' flag-' + flag : '') + '">' +
+        return '<div class="lane' + (flag ? ' flag-' + flag : '') + '"' +
+          (peekTarget ? ' data-peek="' + esc(peekTarget) + '" style="cursor:pointer"' : '') + '>' +
           '<div class="top">' +
             '<span class="id">' + esc(l.agent_id) + '</span>' +
             (flag ? '<span class="flag ' + flag + '">' + (flag === "dark" ? "dark" : "going stale") + '</span>' : '') +
             '<span class="st ' + esc(st) + '">' + esc(st) + '</span>' +
           '</div>' +
+          (l.live && l.live.running ?
+            '<div class="task" style="color:' + (l.live.state === "working" ? "#4ade80" : "#8891a5") + ';font-weight:600">' +
+            (l.live.state === "working" ? "● " : "○ ") + esc(l.live.activity || l.live.state) + '</div>'
+            : '') +
           (task ? '<div class="task">' + esc(task) +
             (taskAge ? ' <span class="taskage">&middot; ' + esc(taskAge) + '</span>' : '') + '</div>' : '') +
           '<div class="hb ' + laneHbClass(hb) + '">hb ' + esc(hbTxt) + '</div>' +
@@ -285,7 +301,6 @@
             (l.lane ? ' (' + esc(l.lane) + ')' : '') + '</div>' : '') +
           tasksHtml +
           (peekTarget ?
-            '<button class="ghost peek-toggle" data-lane="' + esc(peekTarget) + '">Peek</button>' +
             '<div class="peek-box" data-lane="' + esc(peekTarget) + '"></div>'
             : '') +
         '</div>';
@@ -301,24 +316,28 @@
 
       box.innerHTML = laneCards + orphanCards;
 
-      box.querySelectorAll(".peek-toggle").forEach(function (btn) {
-        var session = btn.getAttribute("data-lane");
-        var peekBox = btn.closest(".lane").querySelector(".peek-box");
-        btn.addEventListener("click", function () {
+      // Whole card is the peek toggle now (operator: remove the Peek button,
+      // click anywhere on the card). Clicks inside an already-open peek-box
+      // (to scroll/select the pane text) must NOT toggle it shut.
+      box.querySelectorAll(".lane[data-peek]").forEach(function (card) {
+        var session = card.getAttribute("data-peek");
+        var peekBox = card.querySelector(".peek-box");
+        card.addEventListener("click", function (ev) {
+          if (ev.target.closest(".peek-box")) return;
           if (openPeek && openPeek.session === session) {
             peekBox.classList.remove("open");
             stopPeek();
-            btn.textContent = "Peek";
+            card.classList.remove("peeking");
             return;
           }
           box.querySelectorAll(".peek-box.open").forEach(function (b) { b.classList.remove("open"); });
-          box.querySelectorAll(".peek-toggle").forEach(function (b) { b.textContent = "Peek"; });
+          box.querySelectorAll(".lane.peeking").forEach(function (c) { c.classList.remove("peeking"); });
           startPeek(session, peekBox);
-          btn.textContent = "Hide";
+          card.classList.add("peeking");
         });
         if (session === reopenSession) {
           startPeek(session, peekBox);
-          btn.textContent = "Hide";
+          card.classList.add("peeking");
         }
       });
     });

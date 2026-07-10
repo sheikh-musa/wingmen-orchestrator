@@ -117,9 +117,10 @@ def build_lanes_query() -> Tuple[str, list]:
 
 
 def build_queue_query() -> Tuple[str, list]:
-    """lane_tasks — each lane's queued/active work in manual priority order
-    (lower priority_rank = higher priority). Done tasks excluded; the operator
-    reorders via the bridge (cc-orchestrator updates priority_rank)."""
+    """lane_tasks — each lane's queued/active work in FIFO order (oldest first,
+    by id) so nothing gets starved / 'stuck for days' — operator doctrine
+    2026-07-08. Blocked rows sink to the bottom (they can't progress until the
+    blocker clears); everything else is strict FIFO. Done tasks excluded."""
     sql = (
         "SELECT lane, title, detail, priority_rank, status, "
         "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s, "
@@ -128,7 +129,7 @@ def build_queue_query() -> Tuple[str, list]:
         "  (sla_minutes IS NOT NULL AND started_at IS NOT NULL "
         "     AND now() > started_at + (sla_minutes || ' minutes')::interval) AS over_sla "
         "FROM lane_tasks WHERE status <> 'done' "
-        "ORDER BY lane, priority_rank, id"
+        "ORDER BY lane, (status = 'blocked'), id"
     )
     return sql, []
 

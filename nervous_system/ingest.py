@@ -249,7 +249,11 @@ def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
 URGENT_KW = "urgent"
 BTW_KW = "btw"
 ACK_THROTTLE_SEC = 600   # at most one "I'm mid-task" ack per 10 min per channel
-ACK_AFTER_SEC = 45       # belt-and-suspenders (ihsan): reassure the operator if
+ACK_AFTER_SEC = 150      # belt-and-suspenders (ihsan): reassure the operator if
+                         # (raised 45->150 2026-07-10 per operator: the client group
+                         #  was getting a "got your message" on nearly every message
+                         #  since 45s is often < one mid-task turn; only reassure when
+                         #  genuinely slow so quick replies stand alone, no redundant ack)
                          # his message sits unhandled this long — busy, idle, OR
                          # wedged. He is NEVER left wondering whether it landed.
 MAX_DEFER_SEC = 600      # busy-defer CAP: a message unhandled past this nudges
@@ -283,8 +287,12 @@ def urgency(text: str) -> str:
 def throttled_busy_ack(conn, ch: "Channel") -> None:
     """Enqueue ONE 'got it, mid-task' ack per ACK_THROTTLE_SEC per channel (via
     the tg_out queue), so a deferred operator isn't left wondering."""
-    ack = ("\U0001F4E8 Got your message — I'm mid-task right now, I'll reply at "
-           "my next pause. (Reply URGENT to interrupt now.)")
+    ack = (
+        # client perimeter (log-and-route): no operator-internal phrasing
+        "\U0001F4E8 Got your message — we'll get back to you shortly."
+        if ch.mode == "log-and-route"
+        else "\U0001F4E8 Got your message — I'm mid-task right now, I'll reply at "
+             "my next pause. (Reply URGENT to interrupt now.)")
     with conn.cursor() as cur:
         cur.execute(
             "SELECT 1 FROM tg_out WHERE channel_key=%s AND text=%s "
@@ -336,8 +344,12 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
     repeats add nothing. drain_stale_deferred still owns waking the target.)"""
     if ch.mode not in ("agent-session", "log-and-route"):
         return
-    ack = ("\U0001F4E8 Got your message — it's logged and I'll get to it shortly. "
-           "(Reply URGENT to bump it now.)")
+    ack = (
+        # client perimeter (log-and-route): no operator-internal phrasing
+        "\U0001F4E8 Got your message — we'll get back to you shortly."
+        if ch.mode == "log-and-route"
+        else "\U0001F4E8 Got your message — it's logged and I'll get to it shortly. "
+             "(Reply URGENT to bump it now.)")
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*), min(created_at), max(created_at) FROM operator_messages "

@@ -235,6 +235,37 @@ def _make_handler(feedloop: "_FeedLoop"):
 
                 if path == "/api/lanes":
                     rows = db.fetch_lanes()
+                    # Fold a LIVE tmux summary into each lane so the card shows
+                    # what the lane is ACTUALLY doing right now — not the stale
+                    # boot-string current_task / last-bus-post (operator ask,
+                    # 2026-07-08). Reuses the read-only capture_pane; one server
+                    # -side peek per lane so the phone still makes a single call.
+                    for r in rows:
+                        sess = r.get("tmux_session") or r.get("lane")
+                        # the orchestrator doesn't self-register a tmux session;
+                        # target its known session 'orch' so the operator can peek
+                        # what the hub is doing without SSHing in (operator 2637).
+                        if not r.get("tmux_session") and str(r.get("agent_id", "")).startswith("cc-orchestrator"):
+                            sess = "orch"
+                            r["tmux_session"] = "orch"
+                        txt = panes.capture_pane(sess) if sess else None
+                        if not txt:
+                            r["live"] = {"running": False}
+                            continue
+                        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+                        spinner = next((ln for ln in reversed(lines)
+                                        if ln[:1] in "✻✳✶✷✸✹✺✽❋⚹"), None)
+                        # capture_pane filters the "esc to interrupt" footer, so
+                        # detect "working" from the live spinner instead: an active
+                        # turn shows live token counts (↑/↓ N tokens) or an ellipsis;
+                        # a finished turn reads "Baked/Cooked for Nm" with neither.
+                        active = bool(spinner and ("token" in spinner.lower()
+                                      or "↑" in spinner or "↓" in spinner or "…" in spinner))
+                        working = active or any("esc to interrupt" in ln.lower() for ln in lines)
+                        activity = spinner or (lines[-1] if lines else "")
+                        r["live"] = {"running": True,
+                                     "state": "working" if working else "idle",
+                                     "activity": activity[:140]}
                     auth.audit(self._client(), path, "200")
                     return self._json(200, _jsonable(rows))
 

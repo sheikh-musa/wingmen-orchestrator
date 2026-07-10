@@ -156,6 +156,28 @@ def deliver_one(conn, row: tuple) -> None:
     rid, channel_key, chat_id, text, file_path, attempts = row
     try:
         token, default_chat, tag = _resolve(conn, channel_key)
+        # Stale-ack guard (2026-07-10, operator-flagged): a "📨 Got your message"
+        # reassurance/busy-ack is only meaningful while something is still
+        # unhandled. It rides this async queue, so a fast DIRECT reply
+        # (tg_send.sh) can overtake it — the ack then lands AFTER the real answer,
+        # which reads as noise ("you already replied, why say you'll get to it?").
+        # So at SEND time, if this channel's tag has NO unhandled inbound left,
+        # DROP the ack instead of sending it. Only the ack strings are gated;
+        # real replies (any other text) always send.
+        if text and text.startswith("\U0001F4E8 Got your message"):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM operator_messages "
+                    "WHERE direction='inbound' AND tag=%s AND handled_at IS NULL LIMIT 1",
+                    (tag,))
+                if not cur.fetchone():
+                    cur.execute(
+                        "UPDATE tg_out SET status='skipped', sent_at=now(), "
+                        "last_error='stale-ack: channel already answered' WHERE id=%s",
+                        (rid,))
+                    conn.commit()
+                    _log_line(f"row {rid} SKIPPED stale ack on '{channel_key}' (already answered)")
+                    return
         target = chat_id or default_chat
         if target is None:
             raise LookupError(f"no chat target for '{channel_key}' (empty allowlist, no override)")

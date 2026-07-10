@@ -42,7 +42,7 @@
       "supabase_project_ref": "FILL_IN",
       "status": "frozen-maintenance",
       "priority": 4,
-      "note": "Per IHSANOS-STOREFRONT-TG-001 (2026-05-28): dookana sunsets — storefront work moves to ihsanos repo (one backend, two surfaces). Frozen-maintenance covers P0 production-breaking + security only. Formal decommission once TG surface reaches parity."
+      "note": "Per IHSANOS-STOREFRONT-TG-001 (2026-05-28): dookana sunsets \u2014 storefront work moves to ihsanos repo (one backend, two surfaces). Frozen-maintenance covers P0 production-breaking + security only. Formal decommission once TG surface reaches parity."
     },
     {
       "name": "fastrans",
@@ -66,7 +66,9 @@
     },
     {
       "name": "hifz-companion",
-      "aliases": ["hifz"],
+      "aliases": [
+        "hifz"
+      ],
       "github": "https://github.com/sheikh-musa/hifz-companion",
       "local_path": "~/wingmen/projects/hifz-companion",
       "vercel_project": "hifz-companion",
@@ -115,6 +117,18 @@
       "supabase_project_ref": "tscuymavysscrvoberrr",
       "status": "active",
       "priority": 1
+    },
+    {
+      "name": "cosem-platform",
+      "github": "https://github.com/sheikh-musa/cosem-platform",
+      "local_path": "~/wingmen/projects/cosem-platform",
+      "vercel_project": "cosem-platform",
+      "deploy_url": null,
+      "supabase_project_ref": null,
+      "supabase_region": "ap-southeast-1",
+      "status": "active-greenfield",
+      "priority": 2,
+      "notes": "Greenfield multi-tenant training platform (Next.js+Supabase), strangler re-platform of COSEM apps. Lane cc-cosem-platform. GitHub remote + Supabase project TBD."
     }
   ]
 }
