@@ -86,25 +86,31 @@
     '</div>';
   }
 
+  // Whether the "N lanes idle & fine" group is expanded. A MODULE var (not DOM
+  // state) so it survives the innerHTML rebuild on every live refresh — a
+  // background data tick must never re-collapse what the operator opened
+  // (operator #3440: "expanded lanes auto contract").
+  var routineExpanded = false;
+
   function renderLanes(lanes) {
     var primary = lanes.filter(function (l) { return l.bucket === "working" || l.flagged; });
     var routine = lanes.filter(function (l) { return !(l.bucket === "working" || l.flagged); });
     var html = primary.map(laneCard).join("");
     if (routine.length) {
-      html += '<div class="collapsed" id="routineToggle">▸ <b>' + routine.length + ' lane' +
+      html += '<div class="collapsed" id="routineToggle">' + (routineExpanded ? "▾" : "▸") +
+        ' <b>' + routine.length + ' lane' +
         (routine.length > 1 ? 's' : '') + '</b> idle &amp; fine — ' +
         esc(routine.map(function (l) { return l.agent_id; }).slice(0, 6).join(", ")) +
         (routine.length > 6 ? "…" : "") + '</div>' +
-        '<div id="routine" style="display:none">' + routine.map(laneCard).join("") + '</div>';
+        '<div id="routine" style="display:' + (routineExpanded ? "block" : "none") + '">' +
+        routine.map(laneCard).join("") + '</div>';
     }
     $("lanes").innerHTML = html || '<div class="empty">No lanes.</div>';
     var t = $("routineToggle");
     if (t) t.addEventListener("click", function () {
-      var r = $("routine");
-      var open = r.style.display !== "none";
-      r.style.display = open ? "none" : "block";
-      t.innerHTML = t.innerHTML.replace(open ? "▾" : "▸", open ? "▸" : "▾");
-      if (open) t.firstChild.textContent = "▸ "; // collapse arrow
+      routineExpanded = !routineExpanded;
+      $("routine").style.display = routineExpanded ? "block" : "none";
+      t.firstChild.textContent = (routineExpanded ? "▾" : "▸") + " ";
       bindPeeks();
     });
     bindPeeks();
@@ -126,13 +132,45 @@
   }
 
   // ---- readable peek ------------------------------------------------------
+  // Peek state is held in MODULE vars keyed by session, NOT in the DOM, so it
+  // survives the lane list's innerHTML rebuild on every live refresh: which
+  // lane is peeked (openPeek), each session's raw/feed toggle (peekRaw), and
+  // the last captured text (peekText, for an instant repaint before the next
+  // poll). This is why a background data tick no longer snaps a peek shut
+  // (operator #3440: "peeks auto snap up").
   var openPeek = null, peekTimer = null;
-  function stopPeek() { if (peekTimer) { clearInterval(peekTimer); peekTimer = null; } openPeek = null; }
+  var peekRaw = {};   // session -> bool (raw mode)
+  var peekText = {};  // session -> last captured pane text
+
+  // The .peek box for the currently-open session in the CURRENT DOM (the node
+  // is replaced on every re-render, so always look it up fresh).
+  function currentPeekBox() {
+    if (!openPeek) return null;
+    var found = null;
+    document.querySelectorAll(".peek[data-peekbox]").forEach(function (b) {
+      if (b.getAttribute("data-peekbox") === openPeek) found = b;
+    });
+    return found;
+  }
+
+  function stopPeekPolling() { if (peekTimer) { clearInterval(peekTimer); peekTimer = null; } }
+  function startPeekPolling() {
+    stopPeekPolling();
+    peekTimer = setInterval(function () {
+      var box = currentPeekBox();
+      if (box) fetchPeek(openPeek, box);
+    }, 3000);
+  }
 
   // Render the cleaned pane text as an activity feed: one row per line, the
   // last line highlighted as the current action. A "raw" toggle drops back to
-  // the plain capture for power use.
+  // the plain capture for power use. Preserves the scroll position of the
+  // scrollable body across its own repaint so the 3s self-refresh (and a live
+  // data tick) never yanks the operator back to the top mid-read.
   function renderPeek(box, text, raw) {
+    var sess = box.getAttribute("data-peekbox");
+    var prevBody = box.querySelector(".body");
+    var prevScroll = prevBody ? prevBody.scrollTop : 0;
     if (!text) { box.innerHTML = '<div class="peek-empty">nothing captured</div>'; return; }
     var head = '<div class="ph">live peek <span class="raw" data-raw>' + (raw ? "feed ›" : "raw ⌄") + '</span></div>';
     if (raw) { box.innerHTML = head + '<pre class="raw-pre">' + esc(text) + '</pre>'; }
@@ -144,39 +182,75 @@
           (i === last ? "▶" : "·") + '</span><span class="tx">' + esc(ln) + '</span></div>';
       }).join("");
       box.innerHTML = head + '<div class="body">' + body + '</div>';
+      var newBody = box.querySelector(".body");
+      if (newBody) newBody.scrollTop = prevScroll;
     }
     var rawBtn = box.querySelector("[data-raw]");
     if (rawBtn) rawBtn.addEventListener("click", function (e) {
-      e.stopPropagation(); box.dataset.raw = raw ? "" : "1"; renderPeek(box, box._text || text, !raw);
+      e.stopPropagation();
+      peekRaw[sess] = !raw;
+      renderPeek(box, peekText[sess] != null ? peekText[sess] : text, !raw);
     });
   }
 
   function fetchPeek(session, box) {
     fetch("/api/lanes/" + encodeURIComponent(session) + "/pane", { headers: authHeaders() })
-      .then(function (r) { if (r.status === 401) { setLive(false); stopPeek(); return null; }
+      .then(function (r) { if (r.status === 401) { setLive(false); closePeek(); return null; }
         if (r.status === 404) return { dead: true }; return r.json(); })
       .then(function (data) {
-        if (!data) return;
+        if (!data || session !== openPeek) return;         // a newer open owns the box now
+        box = currentPeekBox() || box;                     // box may have been replaced by a re-render
+        if (!box) return;
         if (data.dead) { box.innerHTML = '<div class="peek-empty">session not live</div>'; return; }
-        box._text = data.text || "";
-        renderPeek(box, box._text, box.dataset.raw === "1");
+        peekText[session] = data.text || "";
+        renderPeek(box, peekText[session], !!peekRaw[session]);
       }).catch(function () {});
+  }
+
+  function openPeek_(session) {
+    document.querySelectorAll(".peek.open").forEach(function (b) { b.classList.remove("open"); });
+    openPeek = session;
+    var box = currentPeekBox();
+    if (!box) return;
+    box.classList.add("open");
+    if (peekText[session] != null) renderPeek(box, peekText[session], !!peekRaw[session]);
+    else box.innerHTML = '<div class="peek-empty">loading…</div>';
+    fetchPeek(session, box);
+    startPeekPolling();
+  }
+
+  function closePeek() {
+    var box = currentPeekBox();
+    if (box) box.classList.remove("open");
+    openPeek = null;
+    stopPeekPolling();
+  }
+
+  // After a full re-render, re-open the peek the operator had open and restore
+  // its inner scroll — the highest-value state-preservation path.
+  function reflectOpenPeek(savedScroll) {
+    if (!openPeek) return;
+    var box = currentPeekBox();
+    if (!box) { openPeek = null; stopPeekPolling(); return; } // lane left the list
+    box.classList.add("open");
+    if (peekText[openPeek] != null) {
+      renderPeek(box, peekText[openPeek], !!peekRaw[openPeek]);
+      var body = box.querySelector(".body");
+      if (body && savedScroll != null) body.scrollTop = savedScroll;
+    } else {
+      box.innerHTML = '<div class="peek-empty">loading…</div>';
+    }
+    startPeekPolling(); // repoint the timer at the fresh box
   }
 
   function bindPeeks() {
     document.querySelectorAll(".lane[data-peek]").forEach(function (card) {
       if (card._bound) return; card._bound = true;
       var session = card.getAttribute("data-peek");
-      var box = card.querySelector(".peek");
       card.addEventListener("click", function (ev) {
         if (ev.target.closest(".peek")) return; // clicks inside the peek don't toggle
-        if (openPeek === session) { box.classList.remove("open"); stopPeek(); return; }
-        document.querySelectorAll(".peek.open").forEach(function (b) { b.classList.remove("open"); });
-        stopPeek();
-        openPeek = session; box.classList.add("open");
-        box.innerHTML = '<div class="peek-empty">loading…</div>';
-        fetchPeek(session, box);
-        peekTimer = setInterval(function () { fetchPeek(session, box); }, 3000);
+        if (openPeek === session) { closePeek(); return; }
+        openPeek_(session);
       });
     });
   }
@@ -190,10 +264,22 @@
       })
       .then(function (d) {
         setLive(true);
+        // Capture UI state synchronously, right before the DOM is mutated, so a
+        // live data tick preserves exactly what the operator was looking at:
+        // window scroll + the open peek's inner scroll. (Routine expansion and
+        // which peek is open live in module vars and survive on their own.)
+        var scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+        var pb = currentPeekBox();
+        var pbBody = pb ? pb.querySelector(".body") : null;
+        var peekScroll = pbBody ? pbBody.scrollTop : 0;
+
         renderPulse(d.pulse || {});
         renderNeeds(d.needs_you || []);
         renderLanes(d.lanes || []);
         renderDeploys(d.deploys || []);
+
+        reflectOpenPeek(peekScroll);      // re-open peek + restore its inner scroll
+        window.scrollTo(0, scrollY);      // restore page scroll AFTER layout settles
       });
   }
 
@@ -201,8 +287,10 @@
   function start() {
     load().catch(function () { setLive(false); });
     if (refreshTimer) clearInterval(refreshTimer);
-    // Don't repaint while a peek is open (would drop the user's expanded view).
-    refreshTimer = setInterval(function () { if (!openPeek) load().catch(function () {}); }, 8000);
+    // Refresh runs even with a peek open — state is preserved across the
+    // repaint (peek re-opened, scrolls restored), so the data stays live
+    // without ever collapsing what the operator opened.
+    refreshTimer = setInterval(function () { load().catch(function () {}); }, 8000);
   }
 
   // ---- pull-to-refresh ----------------------------------------------------

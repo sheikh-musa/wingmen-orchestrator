@@ -278,13 +278,15 @@ def _make_handler(feedloop: "_FeedLoop"):
                 auth.audit(self._client(), path, "200")
                 return self._json(200, {"ok": True})
 
-            if path == "/" or path == "/index.html":
-                return self._serve_static("index.html", path)
-
-            # Attention-first Fleet view (redesign #7576) — served alongside the
-            # classic console during review; flips to "/" once the operator OKs.
-            if path == "/fleet" or path == "/fleet/":
+            # Attention-first Fleet view (redesign #7576) is now the DEFAULT
+            # console (operator #3440 — "remove the classic version"). It serves
+            # "/" and "/fleet"; the classic message/deploy console is retained
+            # (its full lists are still reachable) at "/classic".
+            if path in ("/", "/index.html", "/fleet", "/fleet/"):
                 return self._serve_static("fleet.html", path)
+
+            if path in ("/classic", "/classic/"):
+                return self._serve_static("index.html", path)
 
             # DOCS section: /docs and any /docs/<repo>/<path> deep link all serve
             # the same SPA shell (open, like /). The shell reads window.location
