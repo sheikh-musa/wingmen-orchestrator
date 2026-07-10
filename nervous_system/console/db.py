@@ -160,6 +160,73 @@ def build_deploys_query() -> Tuple[str, list]:
     return sql, []
 
 
+def build_needs_you_query() -> Tuple[str, list]:
+    """The NEEDS-YOU hero feed (redesign #7576): everything genuinely waiting on
+    the operator, high-signal only. NOT every requires_response row — there are
+    ~70 unanswered agent-to-hub asks at any time and drowning the operator in
+    those is the opposite of "surface what's HIS". Scope:
+      1. unanswered requires_response addressed to the HUMAN (musa/operator);
+      2. unanswered requires_response to the hub (cc-orchestrator) that are P0/P1
+         and recent — real decisions the fleet is stuck on, not routine chatter;
+      3. blocked lanes / blocked lane_tasks / blocked deploys.
+    Ordered P0-first, then oldest (a stuck item rotting for days must rise)."""
+    # Precision matters more than recall here: agents over-use requires_response
+    # for progress FYIs and under-set responded_at, so a naive "unanswered
+    # requires_response" list is a flood (one agent posting 8 progress updates
+    # would show 8 times, drowning the 1 genuinely-blocked item). So: (a)
+    # human-directed asks show individually; (b) hub-directed asks collapse to
+    # the FRESHEST one per agent, fresh window only; (c) structural blocks
+    # (lane/task/deploy) are always exact. Better to under-surface a redundant
+    # FYI than to cry wolf and make the operator ignore the hero section.
+    sql = (
+        "SELECT * FROM ("
+        "  SELECT 'response' AS kind, from_agent AS who, 'needs response' AS tag, "
+        "         COALESCE(NULLIF(subject,''), left(body,140)) AS what, "
+        "         round(extract(epoch FROM (now()-created_at)))::int AS age_s, "
+        "         COALESCE(priority,'P2') AS priority, id::text AS ref "
+        "  FROM agent_messages "
+        "  WHERE requires_response AND responded_at IS NULL AND skipped_at IS NULL "
+        "    AND lower(to_agent) IN ('musa','operator') "
+        "    AND created_at > now() - interval '14 days' "
+        "  UNION ALL "
+        "  SELECT * FROM ("
+        "    SELECT DISTINCT ON (from_agent) 'response' AS kind, from_agent AS who, "
+        "           'needs response' AS tag, "
+        "           COALESCE(NULLIF(subject,''), left(body,140)) AS what, "
+        "           round(extract(epoch FROM (now()-created_at)))::int AS age_s, "
+        "           COALESCE(priority,'P2') AS priority, id::text AS ref "
+        "    FROM agent_messages "
+        "    WHERE requires_response AND responded_at IS NULL AND skipped_at IS NULL "
+        "      AND to_agent = 'cc-orchestrator' AND priority IN ('P0','P1') "
+        "      AND created_at > now() - interval '24 hours' "
+        "    ORDER BY from_agent, created_at DESC"
+        "  ) hub "
+        "  UNION ALL "
+        "  SELECT 'blocked_lane', agent_id, 'lane blocked', "
+        "         COALESCE(blocked_on_description, current_task, 'blocked'), "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', agent_id "
+        "  FROM agent_status WHERE status = 'blocked' "
+        "  UNION ALL "
+        "  SELECT 'blocked_task', lane, 'task blocked', title, "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', id::text "
+        "  FROM lane_tasks WHERE status = 'blocked' "
+        "  UNION ALL "
+        "  SELECT 'blocked_deploy', workstream, 'deploy blocked', "
+        "         COALESCE(NULLIF(detail,''), workstream), "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P0', workstream "
+        "  FROM deploy_status WHERE stage = 'blocked' "
+        # '%%' not '%': this query is executed with a (bound) params list, so
+        # psycopg scans for placeholders — a literal % in the LIKE must be doubled.
+        ") q ORDER BY (kind LIKE 'blocked%%') DESC, priority ASC, age_s ASC LIMIT 12"
+    )
+    return sql, []
+
+
+def fetch_needs_you() -> List[dict]:
+    sql, params = build_needs_you_query()
+    return _query(sql, params)
+
+
 def _query(sql: str, params: list) -> List[dict]:
     dsn = resolve_dsn()
     if not dsn:

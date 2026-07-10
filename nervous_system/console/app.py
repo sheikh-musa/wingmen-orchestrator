@@ -137,6 +137,84 @@ class _FeedLoop:
         self.broadcaster.unsubscribe(q)
 
 
+def _enrich_lanes_live(rows):
+    """Fold a LIVE tmux summary into each lane row (shared by /api/lanes and
+    /api/fleet) so a card shows what the lane is ACTUALLY doing now, not the
+    stale boot-string current_task. One read-only capture_pane per lane."""
+    for r in rows:
+        sess = r.get("tmux_session") or r.get("lane")
+        # the orchestrator doesn't self-register a tmux session; target its
+        # known 'orch' session so the operator can peek the hub (operator 2637).
+        if not r.get("tmux_session") and str(r.get("agent_id", "")).startswith("cc-orchestrator"):
+            sess = "orch"
+            r["tmux_session"] = "orch"
+        txt = panes.capture_pane(sess) if sess else None
+        if not txt:
+            r["live"] = {"running": False}
+            continue
+        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+        spinner = next((ln for ln in reversed(lines)
+                        if ln[:1] in "✻✳✶✷✸✹✺✽❋⚹"), None)
+        active = bool(spinner and ("token" in spinner.lower()
+                      or "↑" in spinner or "↓" in spinner or "…" in spinner))
+        working = active or any("esc to interrupt" in ln.lower() for ln in lines)
+        activity = spinner or (lines[-1] if lines else "")
+        r["live"] = {"running": True,
+                     "state": "working" if working else "idle",
+                     "activity": activity[:140]}
+    return rows
+
+
+def _lane_bucket(l):
+    """working / idle / offline / flagged classification for a lane row, from
+    live tmux state + heartbeat + desired_state (the redesign's exception-first
+    + working-first sort keys). 'flagged' = desired up but heartbeat dead/stale."""
+    hb = l.get("heartbeat_age_s")
+    desired_up = str(l.get("desired_state") or "").lower() == "up"
+    live = l.get("live") or {}
+    dead = hb is None or hb >= 900
+    stale = hb is not None and 120 <= hb < 900
+    flagged = desired_up and (dead or stale)
+    if live.get("running") and live.get("state") == "working":
+        state = "working"
+    elif live.get("running"):
+        state = "idle"
+    elif dead:
+        state = "offline"
+    else:
+        state = "idle"
+    return state, flagged
+
+
+def _fleet_payload():
+    """The single live-derived aggregate behind /api/fleet (redesign #7576):
+    pulse counts + needs-you hero + exception-first flagged lanes + working-first
+    lanes + deploys, all from real tables. One round-trip for the phone."""
+    lanes = _enrich_lanes_live(db.fetch_lanes())
+    deploys = db.fetch_deploys()
+    needs = db.fetch_needs_you()
+
+    counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
+    for l in lanes:
+        state, flagged = _lane_bucket(l)
+        l["bucket"] = state
+        l["flagged"] = flagged
+        counts[state] = counts.get(state, 0) + 1
+        if flagged:
+            counts["flagged"] += 1
+
+    # working first, then idle, then offline; flagged floats up within its group.
+    order = {"working": 0, "idle": 1, "offline": 2}
+    lanes.sort(key=lambda l: (0 if l["flagged"] else 1, order.get(l["bucket"], 3)))
+
+    return {
+        "pulse": {**counts, "needs_you": len(needs)},
+        "needs_you": _jsonable(needs),
+        "lanes": _jsonable(lanes),
+        "deploys": _jsonable(deploys),
+    }
+
+
 def _fetch_since(last_id):
     """Feeder callback: rows with id > last_id (or baseline when None)."""
     if last_id is None:
@@ -203,6 +281,11 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path == "/" or path == "/index.html":
                 return self._serve_static("index.html", path)
 
+            # Attention-first Fleet view (redesign #7576) — served alongside the
+            # classic console during review; flips to "/" once the operator OKs.
+            if path == "/fleet" or path == "/fleet/":
+                return self._serve_static("fleet.html", path)
+
             # DOCS section: /docs and any /docs/<repo>/<path> deep link all serve
             # the same SPA shell (open, like /). The shell reads window.location
             # + the stored bearer token and fetches /api/docs* with the header,
@@ -252,40 +335,19 @@ def _make_handler(feedloop: "_FeedLoop"):
                     return self._json(200, _jsonable(rows))
 
                 if path == "/api/lanes":
-                    rows = db.fetch_lanes()
-                    # Fold a LIVE tmux summary into each lane so the card shows
-                    # what the lane is ACTUALLY doing right now — not the stale
-                    # boot-string current_task / last-bus-post (operator ask,
-                    # 2026-07-08). Reuses the read-only capture_pane; one server
-                    # -side peek per lane so the phone still makes a single call.
-                    for r in rows:
-                        sess = r.get("tmux_session") or r.get("lane")
-                        # the orchestrator doesn't self-register a tmux session;
-                        # target its known session 'orch' so the operator can peek
-                        # what the hub is doing without SSHing in (operator 2637).
-                        if not r.get("tmux_session") and str(r.get("agent_id", "")).startswith("cc-orchestrator"):
-                            sess = "orch"
-                            r["tmux_session"] = "orch"
-                        txt = panes.capture_pane(sess) if sess else None
-                        if not txt:
-                            r["live"] = {"running": False}
-                            continue
-                        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-                        spinner = next((ln for ln in reversed(lines)
-                                        if ln[:1] in "✻✳✶✷✸✹✺✽❋⚹"), None)
-                        # capture_pane filters the "esc to interrupt" footer, so
-                        # detect "working" from the live spinner instead: an active
-                        # turn shows live token counts (↑/↓ N tokens) or an ellipsis;
-                        # a finished turn reads "Baked/Cooked for Nm" with neither.
-                        active = bool(spinner and ("token" in spinner.lower()
-                                      or "↑" in spinner or "↓" in spinner or "…" in spinner))
-                        working = active or any("esc to interrupt" in ln.lower() for ln in lines)
-                        activity = spinner or (lines[-1] if lines else "")
-                        r["live"] = {"running": True,
-                                     "state": "working" if working else "idle",
-                                     "activity": activity[:140]}
+                    # Fold a LIVE tmux summary into each lane (shared helper,
+                    # also used by /api/fleet) so the card shows what the lane is
+                    # ACTUALLY doing now, not the stale boot-string current_task.
+                    rows = _enrich_lanes_live(db.fetch_lanes())
                     auth.audit(self._client(), path, "200")
                     return self._json(200, _jsonable(rows))
+
+                if path == "/api/fleet":
+                    # Single live-derived aggregate for the attention-first Fleet
+                    # view (redesign #7576): pulse + needs-you + lanes + deploys.
+                    payload = _fleet_payload()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, payload)
 
                 if path.startswith("/api/lanes/") and path.endswith("/pane"):
                     # Live tmux pane peek (read-only) — operator-requested,

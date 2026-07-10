@@ -92,7 +92,7 @@ self.addEventListener("fetch", (event) => {
   // second reload to land, and a version that never bumped never landed at
   // all. Network-first => fresh on every online load; cache is offline-only
   // fallback. Files are tiny and tailnet-local, so the cost is negligible.
-  if (url.pathname === "/static/app.js" || url.pathname === "/manifest.json") {
+  if (url.pathname === "/static/app.js" || url.pathname === "/static/fleet.js" || url.pathname === "/manifest.json") {
     event.respondWith(
       fetch(req)
         .then((res) => {
