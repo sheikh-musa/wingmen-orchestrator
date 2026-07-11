@@ -21,7 +21,7 @@
 // iPhone kept serving the removed breakglass input after 80bf1a6). v2 also
 // makes app.js network-first (below) so future JS changes propagate without a
 // manual bump — the bump is now only a belt-and-suspenders cache reset.
-const VERSION = "fc-v6";
+const VERSION = "fc-v7";
 
 // Network-first with a HARD deadline. The failure this fixes (2026-07-11): the
 // navigation/shell fetch was network-first but had NO timeout, so a slow-but-

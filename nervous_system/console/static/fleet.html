@@ -147,12 +147,11 @@
   .peek.open { display:block; }
   .peek .ph { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); font:11px var(--mono); color:var(--dim); }
   .peek .ph .raw { margin-left:auto; color:var(--accent); cursor:pointer; }
-  .peek .body { max-height:46vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
-  .peek .row { display:flex; gap:10px; padding:7px 12px; border-bottom:1px solid rgba(35,42,58,.5); font-size:13px; line-height:1.4; }
-  .peek .row:last-child{border-bottom:0}
-  .peek .row .g { width:16px; flex:none; text-align:center; opacity:.85; color:var(--dim); }
-  .peek .row .tx { min-width:0; overflow-wrap:anywhere; }
-  .peek .row.now { background: rgba(91,140,255,.07); } .peek .row.now .tx { color:#bcd0ff; }
+  .peek .body { max-height:46vh; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:8px 0; }
+  /* Flowing, borderless lines: each pane line wraps as a whole paragraph so a
+     long line stays readable at 430px instead of breaking into boxed shards. */
+  .peek .ln { padding:2px 14px; font-size:13px; line-height:1.5; overflow-wrap:anywhere; white-space:pre-wrap; color:var(--txt); }
+  .peek .ln.now { color:#bcd0ff; box-shadow:inset 3px 0 0 var(--accent); }
   .peek .raw-pre { margin:0; padding:10px 12px; white-space:pre-wrap; word-break:break-word; font:11px/1.5 var(--mono); color:#9fe8b0; }
   .peek .peek-empty { padding:10px 12px; color:var(--dim); font-style:italic; }
 

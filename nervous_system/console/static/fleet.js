@@ -35,7 +35,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = "fc-v6";
+  var APP_BUILD = "fc-v7";
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
     if (!el) return;
@@ -317,11 +317,15 @@
     var head = '<div class="ph">live peek <span class="raw" data-raw>' + (raw ? "feed ›" : "raw ⌄") + '</span></div>';
     if (raw) { box.innerHTML = head + '<pre class="raw-pre">' + esc(text) + '</pre>'; }
     else {
+      // Render the cleaned pane as continuous, flowing text — one borderless
+      // block per pane line so a wrapped line reads as a whole paragraph, not
+      // choppy boxed shards (operator 2026-07-12: peek "reads broken
+      // mid-sentence"). No leading dot/box per row; the last (current) line
+      // gets a subtle emphasis so you can still spot the live tail.
       var lines = text.split("\n").filter(function (l) { return l.trim(); });
       var last = lines.length - 1;
       var body = lines.map(function (ln, i) {
-        return '<div class="row' + (i === last ? ' now' : '') + '"><span class="g">' +
-          (i === last ? "▶" : "·") + '</span><span class="tx">' + esc(ln) + '</span></div>';
+        return '<div class="ln' + (i === last ? ' now' : '') + '">' + esc(ln) + '</div>';
       }).join("");
       box.innerHTML = head + '<div class="body">' + body + '</div>';
       var newBody = box.querySelector(".body");
