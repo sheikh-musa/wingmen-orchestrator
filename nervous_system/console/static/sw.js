@@ -21,7 +21,7 @@
 // iPhone kept serving the removed breakglass input after 80bf1a6). v2 also
 // makes app.js network-first (below) so future JS changes propagate without a
 // manual bump — the bump is now only a belt-and-suspenders cache reset.
-const VERSION = "fc-v5";
+const VERSION = "fc-v6";
 
 // Network-first with a HARD deadline. The failure this fixes (2026-07-11): the
 // navigation/shell fetch was network-first but had NO timeout, so a slow-but-
@@ -47,6 +47,7 @@ const SHELL_ASSETS = [
   "/manifest.json",
   "/static/icons/icon-192.png",
   "/static/icons/icon-512.png",
+  "/static/icons/favicon.ico",
 ];
 
 self.addEventListener("install", (event) => {

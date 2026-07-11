@@ -35,7 +35,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = "fc-v5";
+  var APP_BUILD = "fc-v6";
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
     if (!el) return;
@@ -90,6 +90,33 @@
   // response.who is a from_agent (base id), blocked_task.who is a lane label.
   var laneIndex = {};
   var lastLanes = [];
+
+  // A tmux session hosts exactly ONE live lane, so two lane cards carrying the
+  // same data-peek/data-peekbox can only mean a stale duplicate row (e.g. a
+  // cc-infra-2 left in the registry alongside the live cc-infra-1, same
+  // tmux_session 'infra'). Two nodes sharing that key collide in the peek DOM
+  // lookup — querySelector('.lane[data-peek=…]') / currentPeekBox() grab the
+  // WRONG card, so the peek renders another agent's pane (operator, 2026-07-11).
+  // Collapse to one card per peek key here, keeping the liveliest row, so the
+  // collision can't recur even if a duplicate registry row slips back in.
+  // Lower rank = livelier = the row we keep.
+  function laneRank(l) {
+    if (l.bucket === "working" || l.flagged) return 0;   // active beats idle/dead
+    var hb = l.heartbeat_age_s;
+    if (hb == null) return 1e12;                          // no heartbeat = least alive
+    return hb;                                            // otherwise freshest hb wins
+  }
+  function dedupeLanes(lanes) {
+    var slots = [], idxByKey = {};
+    (lanes || []).forEach(function (l) {
+      var key = l.tmux_session || l.lane;
+      if (!key) { slots.push(l); return; }               // no peek target → can't collide
+      if (idxByKey[key] === undefined) { idxByKey[key] = slots.length; slots.push(l); }
+      else if (laneRank(l) < laneRank(slots[idxByKey[key]])) slots[idxByKey[key]] = l;
+    });
+    return slots;
+  }
+
   function buildLaneIndex(lanes) {
     laneIndex = {};
     (lanes || []).forEach(function (l) {
@@ -351,10 +378,11 @@
     var pbBody = pb ? pb.querySelector(".body") : null;
     var peekScroll = pbBody ? pbBody.scrollTop : 0;
 
-    buildLaneIndex(d.lanes || []);    // before renderNeeds, so items know their lane
+    var lanes = dedupeLanes(d.lanes || []);   // one card per tmux session (no peek DOM collision)
+    buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
     renderPulse(d.pulse || {});
     renderNeeds(d.needs_you || []);
-    renderLanes(d.lanes || []);
+    renderLanes(lanes);
     renderDeploys(d.deploys || []);
 
     reflectOpenPeek(peekScroll);      // re-open peek + restore its inner scroll
