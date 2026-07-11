@@ -100,6 +100,12 @@
   .need.crit .tag { background: rgba(255,107,107,.16); color:var(--bad); }
   .need .age { margin-left:auto; font:11px var(--mono); color:var(--dim); }
   .need .what { margin-top:4px; font-size:13.5px; color:var(--txt); line-height:1.4; overflow-wrap:anywhere; }
+  /* A needs-you row is tappable ONLY when it maps to a real lane (jump to that
+     lane + open its peek); the chevron/cursor is shown only then, so the
+     affordance never promises a destination that isn't there. */
+  .need.tappable { cursor:pointer; }
+  .need.tappable:active { transform:scale(.995); }
+  .need .go { align-self:center; flex:none; margin-left:2px; color:var(--accent); font-size:18px; line-height:1; }
 
   /* lanes */
   .lane { padding:12px 14px; margin-bottom:9px; background: var(--panel); border:1px solid var(--line);
@@ -120,7 +126,7 @@
   .lane .meta .tap { margin-left:auto; color:var(--accent); }
   .collapsed { display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--panel);
     border:1px dashed var(--line); border-radius:13px; color:var(--dim); font-size:13px; cursor:pointer; }
-  .collapsed b { color:var(--txt); }
+  .collapsed b { color:var(--txt); white-space:nowrap; }
 
   /* readable peek */
   .peek { margin-top:10px; background:#0a0d13; border:1px solid var(--line); border-radius:11px; overflow:hidden; display:none; }

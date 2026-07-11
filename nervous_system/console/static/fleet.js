@@ -59,21 +59,66 @@
       (p.offline ? '<span class="chip"><span class="d bad"></span><b>' + p.offline + '</b> offline</span>' : '');
   }
 
+  // who -> peek session, so a NEEDS-YOU item can jump to its lane. Keyed by
+  // every identifier a needs `who` might carry (instance id, base id, lane
+  // label, tmux session) since kinds differ: blocked_lane.who is an agent_id,
+  // response.who is a from_agent (base id), blocked_task.who is a lane label.
+  var laneIndex = {};
+  var lastLanes = [];
+  function buildLaneIndex(lanes) {
+    laneIndex = {};
+    (lanes || []).forEach(function (l) {
+      var sess = l.tmux_session || l.lane;
+      if (!sess) return;
+      [l.agent_id, l.base_agent_id, l.lane, l.tmux_session].forEach(function (k) {
+        if (k) laneIndex[k] = sess;
+      });
+    });
+  }
+
   var NEED_ICON = { blocked_deploy: "⛔", blocked_lane: "\u{1F6AB}", blocked_task: "⏸", response: "\u{1F4AC}" };
   function renderNeeds(items) {
     $("needsCount").textContent = items.length ? String(items.length) : "";
     if (!items.length) { $("needs").innerHTML = '<div class="empty">Nothing waiting on you. ✨</div>'; return; }
     $("needs").innerHTML = items.map(function (n) {
       var crit = n.priority === "P0" || n.kind === "blocked_deploy";
-      return '<div class="need' + (crit ? ' crit' : '') + '">' +
+      var jump = laneIndex[n.who] || "";   // only lane-backed items are tappable
+      return '<div class="need' + (crit ? ' crit' : '') + (jump ? ' tappable' : '') + '"' +
+          (jump ? ' data-jump="' + esc(jump) + '"' : '') + '>' +
         '<div class="ico">' + (NEED_ICON[n.kind] || "❗") + '</div>' +
         '<div class="m"><div class="k">' +
           '<span class="who">' + esc(n.who) + '</span>' +
           '<span class="tag">' + esc(n.tag) + '</span>' +
           '<span class="age">' + esc(fmtAge(n.age_s)) + '</span>' +
         '</div><div class="what">' + esc(n.what) + '</div></div>' +
+        (jump ? '<div class="go">›</div>' : '') +
       '</div>';
     }).join("");
+    bindNeeds();
+  }
+
+  function bindNeeds() {
+    document.querySelectorAll("#needs .need.tappable").forEach(function (row) {
+      if (row._bound) return; row._bound = true;
+      row.addEventListener("click", function () { jumpToLane(row.getAttribute("data-jump")); });
+    });
+  }
+
+  // Jump to a lane card: expand the collapsed 'idle & fine' group if the card
+  // lives there, scroll it into view, and open its peek — the natural next look
+  // when something needs the operator.
+  function jumpToLane(session) {
+    if (!session) return;
+    var sel = '.lane[data-peek="' + ((window.CSS && CSS.escape) ? CSS.escape(session) : session) + '"]';
+    var card = document.querySelector(sel);
+    if (!card && !routineExpanded) {   // hidden inside the collapsed routine group
+      routineExpanded = true;
+      renderLanes(lastLanes);
+      card = document.querySelector(sel);
+    }
+    if (!card) return;
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    openPeek_(session);
   }
 
   function laneCard(l) {
@@ -108,6 +153,7 @@
   var routineExpanded = false;
 
   function renderLanes(lanes) {
+    lastLanes = lanes;   // kept so jumpToLane can re-render (expand routine) if needed
     var primary = lanes.filter(function (l) { return l.bucket === "working" || l.flagged; });
     var routine = lanes.filter(function (l) { return !(l.bucket === "working" || l.flagged); });
     var html = primary.map(laneCard).join("");
@@ -280,6 +326,7 @@
     var pbBody = pb ? pb.querySelector(".body") : null;
     var peekScroll = pbBody ? pbBody.scrollTop : 0;
 
+    buildLaneIndex(d.lanes || []);    // before renderNeeds, so items know their lane
     renderPulse(d.pulse || {});
     renderNeeds(d.needs_you || []);
     renderLanes(d.lanes || []);
