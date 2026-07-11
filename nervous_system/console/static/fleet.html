@@ -111,7 +111,15 @@
      affordance never promises a destination that isn't there. */
   .need.tappable { cursor:pointer; }
   .need.tappable:active { transform:scale(.995); }
-  .need .go { align-self:center; flex:none; margin-left:2px; color:var(--accent); font-size:18px; line-height:1; }
+  /* "peek ›" — the tap opens the lane's live peek (watch), it is NOT a reply
+     affordance; kept small + mono so it reads as an action label, not a chevron. */
+  .need .go { align-self:center; flex:none; margin-left:2px; color:var(--accent);
+    font:11px/1 var(--mono); white-space:nowrap; }
+  /* "Fleet is handling" rows: hub-owned, not the operator's to answer — dimmed
+     and never crit-red so they don't read as demanding his response. */
+  .need.handling { opacity:.72; border-color: var(--line); background: var(--panel-2); }
+  .need.handling .who { color: var(--dim); }
+  .need.handling .what { color: var(--dim); }
 
   /* lanes */
   .lane { padding:12px 14px; margin-bottom:9px; background: var(--panel); border:1px solid var(--line);
@@ -176,6 +184,11 @@
   <section>
     <div class="sec-h needs"><h2>Needs you</h2><span id="needsCount" class="count"></span></div>
     <div id="needs"></div>
+  </section>
+
+  <section id="handlingSec" style="display:none">
+    <div class="sec-h"><h2>Fleet is handling</h2><span class="count">hub owns these · tap to peek</span><span id="handlingCount" class="count"></span></div>
+    <div id="handling"></div>
   </section>
 
   <section>

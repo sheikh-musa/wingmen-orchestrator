@@ -174,7 +174,25 @@ def build_needs_you_query() -> Tuple[str, list]:
       2. unanswered requires_response to the hub (cc-orchestrator) that are P0/P1
          and recent — real decisions the fleet is stuck on, not routine chatter;
       3. blocked lanes / blocked lane_tasks / blocked deploys.
-    Ordered P0-first, then oldest (a stuck item rotting for days must rise)."""
+    Ordered P0-first, then oldest (a stuck item rotting for days must rise).
+
+    AUDIENCE split (operator flag, 2026-07-12): the operator only reaches lanes
+    THROUGH the hub, so a hub-directed decision (a '[D2 RULING NEEDED]' to
+    cc-orchestrator, a blocked lane/task/deploy) is NOT his to answer — showing
+    it in the same hero as a human-addressed ask makes him think he must reply
+    when the HUB owns it. Each row now carries `audience`:
+      • 'operator' — requires_response literally addressed to musa/operator; the
+        only rows that belong in the "Needs you" hero.
+      • 'fleet'    — hub-directed asks + all structural blocks; the client demotes
+        these to a lower-emphasis "Fleet is handling" group (peek-only, not
+        reply). To move a class across the line (e.g. make blocked deploys
+        operator-facing), flip its literal below — nothing else changes.
+
+    STALE filter (operator flag, 2026-07-12): a block resolves by flipping its
+    row's status, with no resolved_at, so a row left at status='blocked' and
+    never flipped (the 19d 'cosem-adcda TASK BLOCKED' zombie) rises forever. A
+    genuinely live block gets touched; one untouched for >7d is resolved-but-
+    not-flipped noise, so structural blocks are capped to updated_at within 7d."""
     # Precision matters more than recall here: agents over-use requires_response
     # for progress FYIs and under-set responded_at, so a naive "unanswered
     # requires_response" list is a flood (one agent posting 8 progress updates
@@ -188,7 +206,8 @@ def build_needs_you_query() -> Tuple[str, list]:
         "  SELECT 'response' AS kind, from_agent AS who, 'needs response' AS tag, "
         "         COALESCE(NULLIF(subject,''), left(body,140)) AS what, "
         "         round(extract(epoch FROM (now()-created_at)))::int AS age_s, "
-        "         COALESCE(priority,'P2') AS priority, id::text AS ref "
+        "         COALESCE(priority,'P2') AS priority, id::text AS ref, "
+        "         'operator' AS audience "
         "  FROM agent_messages "
         "  WHERE requires_response AND responded_at IS NULL AND skipped_at IS NULL "
         "    AND lower(to_agent) IN ('musa','operator') "
@@ -199,7 +218,8 @@ def build_needs_you_query() -> Tuple[str, list]:
         "           'needs response' AS tag, "
         "           COALESCE(NULLIF(subject,''), left(body,140)) AS what, "
         "           round(extract(epoch FROM (now()-created_at)))::int AS age_s, "
-        "           COALESCE(priority,'P2') AS priority, id::text AS ref "
+        "           COALESCE(priority,'P2') AS priority, id::text AS ref, "
+        "           'fleet' AS audience "
         "    FROM agent_messages "
         "    WHERE requires_response AND responded_at IS NULL AND skipped_at IS NULL "
         "      AND to_agent = 'cc-orchestrator' AND priority IN ('P0','P1') "
@@ -209,20 +229,25 @@ def build_needs_you_query() -> Tuple[str, list]:
         "  UNION ALL "
         "  SELECT 'blocked_lane', agent_id, 'lane blocked', "
         "         COALESCE(blocked_on_description, current_task, 'blocked'), "
-        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', agent_id "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', agent_id, 'fleet' "
         "  FROM agent_status WHERE status = 'blocked' "
+        "    AND updated_at > now() - interval '7 days' "
         "  UNION ALL "
         "  SELECT 'blocked_task', lane, 'task blocked', title, "
-        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', id::text "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', id::text, 'fleet' "
         "  FROM lane_tasks WHERE status = 'blocked' "
+        "    AND updated_at > now() - interval '7 days' "
         "  UNION ALL "
         "  SELECT 'blocked_deploy', workstream, 'deploy blocked', "
         "         COALESCE(NULLIF(detail,''), workstream), "
-        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P0', workstream "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P0', workstream, 'fleet' "
         "  FROM deploy_status WHERE stage = 'blocked' "
+        "    AND updated_at > now() - interval '7 days' "
         # '%%' not '%': this query is executed with a (bound) params list, so
         # psycopg scans for placeholders — a literal % in the LIKE must be doubled.
-        ") q ORDER BY (kind LIKE 'blocked%%') DESC, priority ASC, age_s ASC LIMIT 12"
+        # operator-audience rows sort to the top so the hero is always his first.
+        ") q ORDER BY (audience = 'operator') DESC, (kind LIKE 'blocked%%') DESC, "
+        "             priority ASC, age_s ASC LIMIT 12"
     )
     return sql, []
 

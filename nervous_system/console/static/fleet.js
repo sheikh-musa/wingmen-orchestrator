@@ -129,28 +129,57 @@
   }
 
   var NEED_ICON = { blocked_deploy: "⛔", blocked_lane: "\u{1F6AB}", blocked_task: "⏸", response: "\u{1F4AC}" };
+
+  // One needs-you row. `handling` = a fleet/hub-facing item shown in the lower-
+  // emphasis "Fleet is handling" group: the operator reaches lanes only through
+  // the hub, so these aren't his to answer — they're demoted (never crit-red)
+  // and their tap affordance reads "peek ›" (open the lane's peek to WATCH), not
+  // a reply chevron (operator flag, 2026-07-12).
+  function needCard(n, handling) {
+    var crit = !handling && (n.priority === "P0" || n.kind === "blocked_deploy");
+    var jump = laneIndex[n.who] || "";   // only lane-backed items are tappable
+    return '<div class="need' + (crit ? ' crit' : '') + (handling ? ' handling' : '') +
+        (jump ? ' tappable' : '') + '"' + (jump ? ' data-jump="' + esc(jump) + '"' : '') + '>' +
+      '<div class="ico">' + (NEED_ICON[n.kind] || "❗") + '</div>' +
+      '<div class="m"><div class="k">' +
+        '<span class="who">' + esc(n.who) + '</span>' +
+        '<span class="tag">' + esc(n.tag) + '</span>' +
+        '<span class="age">' + esc(fmtAge(n.age_s)) + '</span>' +
+      '</div><div class="what">' + esc(n.what) + '</div></div>' +
+      (jump ? '<span class="go">peek ›</span>' : '') +
+    '</div>';
+  }
+
+  // Split the feed by audience: 'operator' rows are genuinely HIS (a
+  // requires_response addressed to musa/operator) and own the "Needs you" hero;
+  // everything else ('fleet' — hub-directed decisions, blocked lanes/tasks/
+  // deploys) drops to a lower-emphasis "Fleet is handling" group so the operator
+  // isn't tricked into thinking he must respond to the hub's work.
   function renderNeeds(items) {
-    $("needsCount").textContent = items.length ? String(items.length) : "";
-    if (!items.length) { $("needs").innerHTML = '<div class="empty">Nothing waiting on you. ✨</div>'; return; }
-    $("needs").innerHTML = items.map(function (n) {
-      var crit = n.priority === "P0" || n.kind === "blocked_deploy";
-      var jump = laneIndex[n.who] || "";   // only lane-backed items are tappable
-      return '<div class="need' + (crit ? ' crit' : '') + (jump ? ' tappable' : '') + '"' +
-          (jump ? ' data-jump="' + esc(jump) + '"' : '') + '>' +
-        '<div class="ico">' + (NEED_ICON[n.kind] || "❗") + '</div>' +
-        '<div class="m"><div class="k">' +
-          '<span class="who">' + esc(n.who) + '</span>' +
-          '<span class="tag">' + esc(n.tag) + '</span>' +
-          '<span class="age">' + esc(fmtAge(n.age_s)) + '</span>' +
-        '</div><div class="what">' + esc(n.what) + '</div></div>' +
-        (jump ? '<div class="go">›</div>' : '') +
-      '</div>';
-    }).join("");
+    var ops = [], fleet = [];
+    (items || []).forEach(function (n) {
+      (n.audience === "operator" ? ops : fleet).push(n);
+    });
+    $("needsCount").textContent = ops.length ? String(ops.length) : "";
+    $("needs").innerHTML = ops.length
+      ? ops.map(function (n) { return needCard(n, false); }).join("")
+      : '<div class="empty">Nothing waiting on you. ✨</div>';
+    var hsec = $("handlingSec");
+    if (fleet.length) {
+      $("handling").innerHTML = fleet.map(function (n) { return needCard(n, true); }).join("");
+      $("handlingCount").textContent = String(fleet.length);
+      if (hsec) hsec.style.display = "";
+    } else {
+      $("handling").innerHTML = "";
+      $("handlingCount").textContent = "";
+      if (hsec) hsec.style.display = "none";
+    }
     bindNeeds();
   }
 
+  // Tapping a needs/handling row opens that lane's peek (watch), never a reply.
   function bindNeeds() {
-    document.querySelectorAll("#needs .need.tappable").forEach(function (row) {
+    document.querySelectorAll("#needs .need.tappable, #handling .need.tappable").forEach(function (row) {
       if (row._bound) return; row._bound = true;
       row.addEventListener("click", function () { jumpToLane(row.getAttribute("data-jump")); });
     });
