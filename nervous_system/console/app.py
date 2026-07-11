@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import subprocess
 import threading
 import time
@@ -39,6 +40,7 @@ from nervous_system.console.feed import Broadcaster, feeder
 logger = logging.getLogger("wingmen.console.app")
 
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8787
 _CONTENT_TYPES = {
@@ -48,6 +50,41 @@ _CONTENT_TYPES = {
     ".png": "image/png",
     ".svg": "image/svg+xml",
 }
+
+def _build_version() -> str:
+    """The build identity shown in the version badge + reported by /api/version.
+    Single source of truth = the VERSION baked into sw.js (the same constant
+    that names the SW cache), read once at startup. So there is exactly ONE
+    place to bump per deploy."""
+    try:
+        sw = (_STATIC_DIR / "sw.js").read_text(encoding="utf-8")
+        m = re.search(r'VERSION\s*=\s*"([^"]+)"', sw)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _build_sha() -> str:
+    """Short git SHA of the DEPLOYED tree, resolved once at process start — so a
+    kickstart after a deploy reports the new commit, and the operator can see on
+    his device exactly which commit he's running."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=str(_REPO_ROOT),
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+_BUILD_VERSION = _build_version()
+_BUILD_SHA = _build_sha()
+
 
 class _QuietThreadingHTTPServer(ThreadingHTTPServer):
     """ThreadingHTTPServer that doesn't dump a full traceback for benign client
@@ -324,6 +361,14 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path == "/healthz":
                 auth.audit(self._client(), path, "200")
                 return self._json(200, {"ok": True})
+
+            # Build identity: OPEN (like /healthz), non-sensitive (version + short
+            # SHA). Open so the version badge renders even off-tailnet / pre-auth
+            # — the operator must always be able to see which build he's on, which
+            # is the whole point of the badge (PWA-cache-loop fix 2026-07-11).
+            if path == "/api/version":
+                auth.audit(self._client(), path, "200")
+                return self._json(200, {"version": _BUILD_VERSION, "sha": _BUILD_SHA})
 
             # Attention-first Fleet view (redesign #7576) is now the DEFAULT
             # console (operator #3440 — "remove the classic version"). It serves

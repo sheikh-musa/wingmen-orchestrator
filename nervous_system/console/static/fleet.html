@@ -62,6 +62,11 @@
   .pulse .brandrow { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
   .pulse .brand { font-size: 13px; font-weight: 600; letter-spacing:.3px; color: var(--dim); }
   .pulse .brand .live { color: var(--good); } .pulse .brand .live.down { color: var(--bad); }
+  /* build badge — always-visible so the operator can SEE which build his device
+     is running (PWA-cache-loop fix). .stale (a newer build is deployed than the
+     one this cached bundle is) turns it amber until the one-shot reload lands. */
+  .pulse .brand .build { font:10px/1 var(--mono); letter-spacing:.3px; color:var(--dim); font-weight:400; }
+  .pulse .brand .build.stale { color:var(--warn); }
   .pulse .navs { margin-left:auto; display:flex; gap:14px; font:12px var(--mono); }
   .pulse .headline { display:flex; align-items:center; gap:11px; }
   .pulse .orb { width:12px; height:12px; border-radius:50%; flex:none; background: var(--dim); }
@@ -160,7 +165,7 @@
 
   <div id="pulse" class="pulse">
     <div class="brandrow">
-      <span class="brand">Fleet <span id="liveDot" class="live">● live</span></span>
+      <span class="brand">Fleet <span id="liveDot" class="live">● live</span> <span id="build" class="build" title="build running on this device"></span></span>
       <span class="navs"><a href="/classic">Classic</a><a href="/docs">Docs</a><a href="/media">Screens</a></span>
     </div>
     <div class="headline"><span class="orb"></span><span id="pulseBig" class="big">Loading…</span></div>
@@ -192,9 +197,19 @@
 <script>
   (function () {
     if (!('serviceWorker' in navigator)) return;
-    var refreshing = false;
+    // ONE-SHOT reload when a new SW takes control, so a fresh deploy lands in a
+    // SINGLE reopen (kills the iOS 2-launch update lag). Guarded so it can NEVER
+    // infinite-loop (the exact failure the sw.js header warns about):
+    //   - the guard is in sessionStorage, which SURVIVES the reload — an
+    //     in-memory bool (the old code) resets on the new page and can re-fire;
+    //   - we only reload on a real UPDATE (a controller already existed), never
+    //     on the first-install claim (which would reload every first visit).
+    var hadController = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener('controllerchange', function () {
-      if (refreshing) return; refreshing = true; window.location.reload();
+      if (!hadController) return;                                // first install, not an update
+      if (sessionStorage.getItem('fleet_sw_reloaded')) return;  // already reloaded this session
+      sessionStorage.setItem('fleet_sw_reloaded', '1');
+      window.location.reload();
     });
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
   })();

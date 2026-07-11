@@ -31,6 +31,31 @@
   // the data-layer twin of the SW serving the cached shell: shell + last-good
   // data together mean the operator always sees his console, reconnect happens
   // in the background (2026-07-11: the slow first fetch used to hard-error).
+  // Build identity of THIS cached bundle. MUST be bumped in lockstep with sw.js
+  // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
+  // build the DEVICE actually loaded — a stale cached page shows its OLD version,
+  // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
+  var APP_BUILD = "fc-v5";
+  function renderBuild(serverVersion, serverSha) {
+    var el = $("build");
+    if (!el) return;
+    if (serverVersion && serverVersion !== APP_BUILD) {
+      // a newer build is deployed than this cached bundle -> flag it amber; the
+      // one-shot SW reload (fleet.html) converges the device on next control change.
+      el.textContent = APP_BUILD + " → " + serverVersion;
+      el.className = "build stale";
+      return;
+    }
+    el.textContent = APP_BUILD + (serverSha ? " · " + serverSha : "");
+    el.className = "build";
+  }
+  function loadBuild() {
+    renderBuild(null, null);   // show the device build instantly (works pre-auth / offline)
+    fetch("/api/version").then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (v) { if (v) renderBuild(v.version, v.sha); })
+      .catch(function () {});
+  }
+
   var LAST_GOOD_KEY = "fleet_last_good";
   function saveLastGood(d) {
     try { localStorage.setItem(LAST_GOOD_KEY, JSON.stringify(d)); } catch (e) {}
@@ -393,6 +418,7 @@
     });
   }
   function start() {
+    loadBuild();   // always-visible build badge (which build is this device on?)
     // Paint last-good FIRST so the operator sees his console immediately, even
     // before (or entirely without) a network response. tick() then refreshes.
     var cached = loadLastGood();
