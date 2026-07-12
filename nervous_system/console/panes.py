@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
+import time
 from typing import List, Optional
 
 _TIMEOUT_S = 5
@@ -237,11 +239,95 @@ def capture(session: str, live: Optional[set] = None):
     return state, cleaned
 
 
+# --- cross-host coordinator panes (operator #3729) --------------------------
+# Some coordinator bodies run on a DIFFERENT machine than the console host —
+# Nazim's 'nazim' tmux lives on the Mini, not the Studio. To peek those, the
+# console SSHes to the host and runs the SAME read-only capture-pane there.
+#
+# SECURITY: host / user / tmux-path / target below are FIXED constants — NEVER
+# derived from client input. The peek endpoint's session name is only ever used
+# as a dict KEY lookup here; an unknown/crafted name finds no entry and gets no
+# capture. The remote command is a fixed argv (capture-pane -p, read-only), run
+# over BatchMode ssh (fails instead of ever prompting) with hard connect + overall
+# timeouts, so an asleep/unreachable host fails CLOSED — the peek degrades to the
+# card's bus-activity view and never hangs the fleet payload.
+class _RemotePane:
+    __slots__ = ("host", "tmux", "target")
+
+    def __init__(self, host: str, tmux: str, target: str):
+        self.host = host
+        self.tmux = tmux
+        self.target = target
+
+
+_REMOTE_PANES = {
+    # Nazim (2nd coordinator) runs on the Mini under sheikhmusa via the Intel
+    # tmux path; reachable from the Studio over Tailscale SSH (key auth).
+    "nazim": _RemotePane("Musa@100.83.21.34", "/usr/local/bin/tmux", "=nazim:0.0"),
+}
+_SSH = "/usr/bin/ssh"
+_REMOTE_TIMEOUT_S = 8          # overall subprocess cap (ssh ConnectTimeout is 5)
+_REACH_TTL_S = 45             # how long a reachability-probe result is trusted
+_reach_cache = {}            # session -> {"ok": bool, "ts": float}
+_reach_lock = threading.Lock()
+_reach_inflight = set()      # sessions with a probe currently running (dedupe)
+
+
+def _remote_raw_capture(spec: "_RemotePane") -> Optional[str]:
+    """Read-only capture-pane over ssh with a FIXED argv. Fails closed (None) on
+    any error/timeout — never raises, never hangs past _REMOTE_TIMEOUT_S."""
+    try:
+        # ssh runs the remote command through the login shell (zsh on the Mini),
+        # so the target MUST be single-quoted or zsh's `=`-expansion mangles the
+        # `=nazim:0.0` exact-match selector ("zsh: nazim:0.0 not found"). All
+        # fields are FIXED constants (no client input), so quoting is safe.
+        remote_cmd = f"{spec.tmux} capture-pane -t '{spec.target}' -p -S -{_RAW_CAPTURE_LINES}"
+        r = subprocess.run(
+            [_SSH, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+             "-o", "StrictHostKeyChecking=accept-new", spec.host, remote_cmd],
+            capture_output=True, text=True, timeout=_REMOTE_TIMEOUT_S,
+        )
+        if r.returncode != 0:
+            return None
+        return r.stdout
+    except Exception:
+        return None
+
+
+def _stamp_reach(session: str, ok: bool) -> None:
+    with _reach_lock:
+        _reach_cache[session] = {"ok": ok, "ts": time.time()}
+        _reach_inflight.discard(session)
+
+
+def _refresh_reach(session: str, spec: "_RemotePane") -> None:
+    _stamp_reach(session, _remote_raw_capture(spec) is not None)
+
+
+def remote_peekable(session: str) -> bool:
+    """Whether a cross-host coordinator pane is currently reachable. NON-BLOCKING:
+    returns the cached probe result; on a stale/missing cache it kicks a
+    background probe and returns the last-known value (optimistic True on first
+    sight) so the fleet payload never waits on ssh. The card's peek arrow tracks
+    this, so an unreachable host shows NO arrow (keeps its bus-activity view)."""
+    spec = _REMOTE_PANES.get(session)
+    if spec is None:
+        return False
+    now = time.time()
+    with _reach_lock:
+        entry = _reach_cache.get(session)
+        if entry is not None and (now - entry["ts"]) < _REACH_TTL_S:
+            return entry["ok"]
+        if session not in _reach_inflight:
+            _reach_inflight.add(session)
+            threading.Thread(target=_refresh_reach, args=(session, spec), daemon=True).start()
+        return entry["ok"] if entry is not None else True   # optimistic first paint
+
+
 def capture_pane(session: str) -> Optional[str]:
     """Return the last ~60 lines of *session*'s pane 0 AFTER stripping TUI
-    chrome, or None if the session isn't live right now (checked against
-    live_sessions(), not trusted from the caller) or the capture otherwise
-    fails.
+    chrome + reflowing, or None if the session isn't a live local session, isn't
+    a known cross-host coordinator pane, or the capture otherwise fails.
 
     Captures a generous raw window (-S -200, clamped automatically by tmux to
     whatever's actually available — never an error, never padded) and filters
@@ -252,8 +338,17 @@ def capture_pane(session: str) -> Optional[str]:
     EXACT-match session selector (never substring/prefix) — defense in depth
     on top of the live_sessions() membership check, since by the time this
     runs the name has already been confirmed to be a real, live session.
+
+    A session that isn't local-live is checked against the FIXED cross-host
+    registry (_REMOTE_PANES) — an unknown name never reaches any subprocess.
     """
-    if not session or session not in live_sessions():
-        return None
-    raw = _raw_capture(session)
-    return _clean_pane_text(raw) if raw is not None else None
+    if session and session in live_sessions():
+        raw = _raw_capture(session)
+        return _clean_pane_text(raw) if raw is not None else None
+    # not local: a known cross-host coordinator pane (e.g. Nazim on the Mini)?
+    spec = _REMOTE_PANES.get(session)
+    if spec is not None:
+        raw = _remote_raw_capture(spec)
+        _stamp_reach(session, raw is not None)   # a real peek is a fresh reachability signal
+        return _clean_pane_text(raw) if raw is not None else None
+    return None

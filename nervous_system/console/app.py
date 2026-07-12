@@ -282,12 +282,14 @@ def _fleet_payload():
         needs = f_needs.result()
         coordinators = f_coord.result()
 
-    # A coordinator card is peekable only when its pane is a LOCAL live tmux
-    # session (orch on this Studio host). Nazim's 'nazim' pane lives on the
-    # MacBook, so it's absent here -> peekable stays False and the card keeps
-    # its bus-activity view instead of a peek that would only 404.
+    # A coordinator card is peekable when its pane is a LOCAL live tmux session
+    # (orch on this Studio host) OR a reachable CROSS-HOST coordinator pane
+    # (Nazim's 'nazim' on the Mini, reached over ssh — operator #3729).
+    # remote_peekable is non-blocking (cached reachability, background refresh),
+    # so an unreachable Mini just leaves Nazim's card on its bus-activity view.
     for c in coordinators:
-        c["peekable"] = bool(c.get("tmux_session") and c["tmux_session"] in live)
+        sess = c.get("tmux_session")
+        c["peekable"] = bool(sess and (sess in live or panes.remote_peekable(sess)))
 
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for l in lanes:
@@ -464,8 +466,9 @@ def _make_handler(feedloop: "_FeedLoop"):
 
                 if path.startswith("/api/lanes/") and path.endswith("/pane"):
                     # Live tmux pane peek (read-only) — operator-requested,
-                    # thread f869956c/msg 6156. session is validated against
-                    # the REAL live tmux session list inside capture_pane;
+                    # thread f869956c/msg 6156. session is validated inside
+                    # capture_pane against the REAL live local tmux list OR the
+                    # FIXED cross-host coordinator registry (Nazim on the Mini);
                     # an unrecognized name (or anything crafted to look like
                     # one) just 404s, it never reaches a subprocess call.
                     session = unquote(path[len("/api/lanes/"):-len("/pane")])
