@@ -108,6 +108,26 @@ POS_COLS_FULL = [("pos_orders", c, "text", "YES") for c in
                   "currency", "session_id", "surface_key")]
 
 
+def _f(obj, sev="CRITICAL", kind="column_missing"):
+    return {"silo": "goumlyne", "silo_ref": "r", "dimension": "columns", "kind": kind,
+            "object": obj, "severity": sev, "expected": False, "is_money": True,
+            "detail": {}, "reason": None}
+
+
+def test_alert_fires_only_on_new_drift_beyond_baseline(monkeypatch):
+    pages, buses = [], []
+    monkeypatch.setattr(dd, "_tg_war_room", lambda t: pages.append(t) or True)
+    monkeypatch.setattr(dd, "_bus", lambda conn, s, b, p: buses.append((s, p)))
+    known = {("goumlyne", "column_missing", "pos_orders.currency")}          # in baseline
+    findings = [_f("pos_orders.currency"), _f("pos_orders.session_id")]      # 1 known, 1 new
+    dd.alert(None, "run1", findings, known)
+    assert len(pages) == 1 and "session_id" in pages[0] and "currency" not in pages[0]
+    # a run with ONLY known drift pages nothing (the standing-daemon quiet path)
+    pages.clear(); buses.clear()
+    dd.alert(None, "run2", [_f("pos_orders.currency")], known)
+    assert pages == [] and buses == []
+
+
 def test_pos_orders_regression_flag_prefix_clear_postfix():
     ref = snap(tables=["pos_orders"], columns=POS_COLS_FULL)
     pre = snap(tables=["pos_orders"])                        # pre-092: all 6 payment cols missing

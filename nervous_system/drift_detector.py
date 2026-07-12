@@ -314,9 +314,27 @@ def _bus(conn, subject: str, body: str, priority: str) -> None:
         conn.commit()
 
 
-def alert(conn, run_id: str, findings: list) -> None:
-    crit = [f for f in findings if f["severity"] == "CRITICAL" and not f["expected"]]
-    notable = [f for f in findings if f["severity"] == "NOTABLE" and not f["expected"]]
+def _known_keys(conn) -> set:
+    """(silo, kind, object) already recorded by ANY prior run — the persisted
+    baseline. We page/bus ONLY on drift NOT in this set, so a standing daemon
+    stays quiet on known drift and fires only on something NEW (or reappeared)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT silo, kind, object FROM schema_drift_findings "
+                    "WHERE expected = false")
+        return {(r[0], r[1], r[2]) for r in cur.fetchall()}
+
+
+def alert(conn, run_id: str, findings: list, known_keys: set | None = None) -> None:
+    known = known_keys or set()
+
+    def _new(sev):
+        return [f for f in findings if f["severity"] == sev and not f["expected"]
+                and (f["silo"], f["kind"], f["object"]) not in known]
+    crit = _new("CRITICAL")
+    notable = _new("NOTABLE")
+    if not crit and not notable:
+        _log("no NEW drift beyond baseline — no alert")
+        return
     if crit:
         lines = [f"- [{f['silo']}] {f['kind']} {f['object']}" for f in crit[:15]]
         more = f"\n(+{len(crit)-15} more)" if len(crit) > 15 else ""
@@ -362,9 +380,16 @@ def run(reason_run: str = "daily", write: bool = True, alert_on: bool = True) ->
     if write:
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         with psycopg.connect(dsn) as conn:
+            # Snapshot the baseline (prior runs) BEFORE inserting this run, so
+            # alerting fires only on drift NEW beyond the persisted baseline.
+            known = _known_keys(conn) if alert_on else set()
             persist(conn, run_id, reason_run, all_findings)
             if alert_on:
-                alert(conn, run_id, all_findings)
+                new_crit = sum(1 for f in all_findings if f["severity"] == "CRITICAL"
+                               and not f["expected"]
+                               and (f["silo"], f["kind"], f["object"]) not in known)
+                summary["new_critical"] = new_crit
+                alert(conn, run_id, all_findings, known)
         # SCHEMA-1 + schema-half of MIGRATION-1 hold only when there is NO
         # non-expected drift. A dirty run leaves them non-COVERED (honest).
         if not non_expected:
