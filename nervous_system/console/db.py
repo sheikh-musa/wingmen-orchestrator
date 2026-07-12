@@ -278,9 +278,13 @@ def fetch_needs_you() -> List[dict]:
 def build_coordinators_query() -> Tuple[str, list]:
     """The two orchestrator bodies (orch hub + Nazim) - not lanes, so absent
     from fleet_lanes. Liveness = freshest of their latest bus row or outbound
-    operator message; activity = latest bus subject."""
+    operator message; activity = latest bus subject. tmux_session names the
+    body's live pane so the console can peek it like a lane (operator #3672) —
+    'orch' is the hub session on THIS (Studio) host; 'nazim' is Nazim's console
+    session (on the MacBook, so only peekable when that pane is local — the
+    caller marks it peekable only if the session is in local list-sessions)."""
     sql = (
-        "SELECT c.agent_id, c.short, c.role_label, "
+        "SELECT c.agent_id, c.short, c.role_label, c.tmux_session, "
         "  (SELECT subject FROM agent_messages m "
         "     WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1) AS activity, "
         "  (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM agent_messages m "
@@ -292,9 +296,9 @@ def build_coordinators_query() -> Tuple[str, list]:
         "       WHERE o.direction = 'outbound' AND o.tag = c.op_tag ORDER BY o.id DESC LIMIT 1) "
         "  ) AS last_seen_s "
         "FROM (VALUES "
-        "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel'), "
-        "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console') "
-        ") AS c(agent_id, short, role_label, op_tag) "
+        "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel','orch'), "
+        "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console','nazim') "
+        ") AS c(agent_id, short, role_label, op_tag, tmux_session) "
         "ORDER BY c.agent_id"
     )
     return sql, []

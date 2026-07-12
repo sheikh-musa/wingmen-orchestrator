@@ -176,7 +176,7 @@ class _FeedLoop:
         self.broadcaster.unsubscribe(q)
 
 
-def _enrich_lanes_live(rows):
+def _enrich_lanes_live(rows, live=None):
     """Fold a LIVE tmux summary into each lane row (shared by /api/lanes and
     /api/fleet) so a card shows — and is CLASSIFIED by — what the lane is
     ACTUALLY doing now (working/idle from the live pane), not the stale
@@ -190,8 +190,13 @@ def _enrich_lanes_live(rows):
       * each live session is OWNED by the freshest-heartbeat lane targeting it,
         so two rows sharing a session label (e.g. cc-infra-1 & the stale
         cc-infra-2, both -> 'infra') don't both count as working — only the
-        live owner does; the stale twin reads offline."""
-    live = set(panes.live_sessions())
+        live owner does; the stale twin reads offline.
+
+    `live` lets the caller pass a pre-fetched local live-session set (so the
+    whole /api/fleet sweep does ONE list-sessions, shared with the coordinator
+    peekable-check), matching panes.capture's own `live` optimization."""
+    if live is None:
+        live = set(panes.live_sessions())
 
     # 1) resolve each row's target tmux session (per-instance tmux_session wins;
     #    the orchestrator doesn't self-register, so target its known 'orch').
@@ -263,15 +268,26 @@ def _fleet_payload():
     (~100ms) instead of three serial ones. The tmux pane enrichment runs after
     the lanes read returns (it needs those rows)."""
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    # ONE list-sessions for the whole aggregate: the lane enrichment and the
+    # coordinator peekable-check share it (a subprocess each would otherwise
+    # cost ~2x). The 4 reads are independent -> fire concurrently.
+    live = set(panes.live_sessions())
+    with ThreadPoolExecutor(max_workers=4) as ex:
         f_lanes = ex.submit(db.fetch_lanes)
         f_deploys = ex.submit(db.fetch_deploys)
         f_needs = ex.submit(db.fetch_needs_you)
-        lanes = _enrich_lanes_live(f_lanes.result())
+        f_coord = ex.submit(db.fetch_coordinators)
+        lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         deploys = f_deploys.result()
         needs = f_needs.result()
+        coordinators = f_coord.result()
 
-    coordinators = db.fetch_coordinators()
+    # A coordinator card is peekable only when its pane is a LOCAL live tmux
+    # session (orch on this Studio host). Nazim's 'nazim' pane lives on the
+    # MacBook, so it's absent here -> peekable stays False and the card keeps
+    # its bus-activity view instead of a peek that would only 404.
+    for c in coordinators:
+        c["peekable"] = bool(c.get("tmux_session") and c["tmux_session"] in live)
 
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for l in lanes:

@@ -35,13 +35,21 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = "fc-v7";
+  var APP_BUILD = "fc-v10";
+  function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
+    var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
+    return m ? parseInt(m[1], 10) : null;
+  }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
     if (!el) return;
-    if (serverVersion && serverVersion !== APP_BUILD) {
-      // a newer build is deployed than this cached bundle -> flag it amber; the
-      // one-shot SW reload (fleet.html) converges the device on next control change.
+    var sv = verNum(serverVersion), cv = verNum(APP_BUILD);
+    if (sv != null && cv != null && sv > cv) {
+      // a STRICTLY-newer build is deployed than this cached bundle -> amber; the
+      // page-level version gate (checkVersion) hard-resets the device onto it.
+      // Only forward (sv>cv): a server BEHIND this page (the window after a
+      // static deploy but before the server process restarts, when /api/version
+      // still reports the OLD baked-in build) is NOT stale — don't cry wolf.
       el.textContent = APP_BUILD + " → " + serverVersion;
       el.className = "build stale";
       return;
@@ -49,11 +57,57 @@
     el.textContent = APP_BUILD + (serverSha ? " · " + serverSha : "");
     el.className = "build";
   }
+
+  // ---- bulletproof version gate (op #3640) --------------------------------
+  // A wedged / orphaned service worker must NEVER strand the operator on a stale
+  // build (iOS PWA stuck on an old SW; full close+reopen didn't help — "I can't
+  // be deleting and re-adding for every update"). This page-level gate does NOT
+  // depend on the SW updating (controllerchange is the unreliable path): it asks
+  // the server its version and, if the server is STRICTLY AHEAD of the build THIS
+  // page is running, force-clears every SW + cache and reloads from network —
+  // bypassing the SW-update path entirely. /api/version is open and never
+  // SW-cached (sw.js returns early for /api/*), and we cache-bust the URL, so the
+  // read is trustworthy even under a wedged old SW that might intercept /api/*.
+  function hardResetForVersion(target) {
+    // Loop-safe: hard-reset AT MOST once per target version per tab session. If
+    // the network somehow still serves the old bundle after the reset, we do NOT
+    // loop — the target is stamped, so we fall back to the amber "stale" badge.
+    var key = "fleet_hardreset_" + target;
+    try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, "1"); } catch (e) {}
+    var finish = function () { window.location.reload(); };
+    var jobs = [];
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      jobs.push(navigator.serviceWorker.getRegistrations()
+        .then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); })
+        .catch(function () {}));
+    }
+    if (window.caches && caches.keys) {
+      jobs.push(caches.keys()
+        .then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); })
+        .catch(function () {}));
+    }
+    Promise.all(jobs).then(finish, finish);
+  }
+  function checkVersion() {
+    // cache-bust so even a mis-behaving old SW doing cache-first on /api/* can't
+    // feed us a stale version (a never-cached unique URL misses its cache).
+    return fetch("/api/version?_=" + Date.now(), { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (v) {
+        if (!v) return;
+        renderBuild(v.version, v.sha);
+        var sv = verNum(v.version), cv = verNum(APP_BUILD);
+        if (sv != null && cv != null && sv > cv) hardResetForVersion(v.version);
+      })
+      .catch(function () {});
+  }
   function loadBuild() {
     renderBuild(null, null);   // show the device build instantly (works pre-auth / offline)
-    fetch("/api/version").then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (v) { if (v) renderBuild(v.version, v.sha); })
-      .catch(function () {});
+    checkVersion();
+    // Re-check periodically so a deploy lands even while the PWA stays OPEN — the
+    // belt that makes a wedged SW unable to strand a still-open session (not just
+    // a reopen). Loop-safe via the per-target sessionStorage stamp.
+    setInterval(checkVersion, 60000);
   }
 
   var LAST_GOOD_KEY = "fleet_last_good";
@@ -239,7 +293,13 @@
     var hbClass = seen == null ? "dead" : (seen < 1800 ? "fresh" : (seen < 7200 ? "stale" : "dead"));
     var seenTxt = seen == null ? "quiet" : "active " + fmtAge(seen);
     var age = (c.activity != null && c.activity_age_s != null) ? " - " + fmtAge(c.activity_age_s) : "";
-    return '<div class="lane coord">' +
+    // Peekable only when the backend confirmed the coordinator's pane is a LOCAL
+    // live tmux session (orch on this host). Non-peekable coords (Nazim's pane on
+    // the MacBook) get NO peek affordance — no dead-end "peek ›" that would 404.
+    // Reuses the exact lane peek machinery (data-peek + .peek box, bound by
+    // bindPeeks) so the coordinator peek renders + toggles identically.
+    var peek = c.peekable ? (c.tmux_session || "") : "";
+    return '<div class="lane coord"' + (peek ? ' data-peek="' + esc(peek) + '"' : '') + '>' +
       '<div class="top">' +
         '<span class="st-dot ' + dot + '"></span>' +
         '<span class="id">' + esc(c.short || c.agent_id) + '</span>' +
@@ -247,7 +307,10 @@
       '</div>' +
       (c.activity ? '<div class="act">' + esc(c.activity) + esc(age) + '</div>'
                   : '<div class="act coordidle">nothing on the bus recently</div>') +
-      '<div class="meta"><span class="hb ' + hbClass + '">' + esc(seenTxt) + '</span></div>' +
+      '<div class="meta"><span class="hb ' + hbClass + '">' + esc(seenTxt) + '</span>' +
+        (peek ? '<span class="tap">peek ›</span>' : '') +
+      '</div>' +
+      (peek ? '<div class="peek" data-peekbox="' + esc(peek) + '"></div>' : '') +
     '</div>';
   }
   function renderCoordinators(items) {
