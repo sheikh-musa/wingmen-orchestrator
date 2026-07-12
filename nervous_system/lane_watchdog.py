@@ -26,7 +26,7 @@ Escalations + actions are logged (logs/lane_watchdog.log) and posted to the bus
 State persists in logs/lane_watchdog_state.json (for the cross-scan persistence guard).
 """
 from __future__ import annotations
-import json, os, subprocess, sys, time
+import hashlib, json, os, subprocess, sys, time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -64,6 +64,17 @@ GOVERNANCE_PREFIXES = ("mamadah", "nutri", "mizan")   # ai-responder persona con
 MAX_AUTOSUBMIT_ATTEMPTS = 1
 IDLE_NUDGE_THROTTLE = 600   # re-nudge an idle-with-unread-work lane at most once/10min
 ORCH_ESC_NUDGE_THROTTLE = 300  # wake the 24/7 orch to ACTION escalations at most once/5min
+
+# PROGRESS-STALL (op #3695): the blind spot behind cc-cosem-platform's 16h stall.
+# A lane can look WORKING (stale status='working' + fresh heartbeat) OR sit
+# IDLE_CLEAN with an empty composer and make ZERO real progress — evading
+# IDLE_UNSENT (needs composer text) and WORKING (never touched). Detect on real
+# PROGRESS (a new bus post / pane-scrollback delta / new commit), never on the
+# heartbeat that lies. Flag ONLY if the lane ALSO holds unactioned work; escalate-
+# only (never a keystroke). Tuned generous so a genuinely-busy long build (which
+# streams scrollback / posts / commits) never trips it.
+PROGRESS_STALL_SEC = 1200     # no progress this long = candidate stall (20 min)
+STALL_REESCALATE_SEC = 1800   # re-escalate a persisting stall at most once/30min
 _escalation_count = 0       # escalations posted THIS scan (escalate() increments)
 
 def is_governance_console(sess: str) -> bool:
@@ -99,6 +110,73 @@ def unread_bus_work(sess: str) -> int:
     except Exception as e:
         log(f"unread-bus-work-failed {sess}: {e}")
         return 0
+
+def scrollback_digest(cap: str) -> str:
+    """Hash the pane content ABOVE the composer glyph line, so the animated input
+    widget + footer (spinner, elapsed timer, 'esc to interrupt (Ns · ↑ tokens)')
+    do NOT read as progress — only real streamed conversation output (new
+    scrollback) moves the digest. An idle or wedged pane has a static scrollback →
+    static digest; a genuinely-working lane streams new lines → digest changes."""
+    lines = cap.splitlines()
+    cut = None
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].lstrip().startswith("❯"):   # ❯ composer glyph
+            cut = i
+            break
+    if cut is None:
+        cut = max(0, len(lines) - 3)                 # no composer found: drop the volatile tail
+    body = "\n".join(l.rstrip() for l in lines[:cut]).strip()
+    return hashlib.sha1(body.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def lane_progress_state(sess: str):
+    """(last_bus_id, last_commit_sha, unactioned_directives) for the lane's base
+    agent. Real progress = a NEW bus post OR a NEW commit. 'unactioned' = a
+    requires_response directive to this lane still UNANSWERED — WIDER than the
+    45min recent-unread window (unactioned_bus_work), because the 16h stall was
+    work that had aged out of that window. DB failure => unactioned=0 (fail toward
+    NOT crying wolf: never manufacture a stall from a DB blip)."""
+    try:
+        sys.path.insert(0, str(ORCH))
+        from dotenv import load_dotenv
+        import psycopg
+        load_dotenv(str(ORCH / ".env"))
+        dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+        with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
+            cur.execute("SELECT base_agent_id FROM fleet_lanes WHERE lane=%s", (sess,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return ("", "", 0)
+            aid = row[0]
+            cur.execute("SELECT coalesce(max(id),0) FROM agent_messages WHERE from_agent=%s", (aid,))
+            last_bus = cur.fetchone()[0]
+            cur.execute("SELECT last_commit_sha FROM agent_status WHERE agent_id=%s OR base_agent_id=%s "
+                        "ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1", (aid, aid))
+            r = cur.fetchone()
+            last_commit = (r[0] if r else "") or ""
+            cur.execute("SELECT count(*) FROM agent_messages WHERE to_agent=%s AND requires_response "
+                        "AND responded_at IS NULL AND skipped_at IS NULL "
+                        "AND created_at > now() - interval '24 hours'", (aid,))
+            unactioned = cur.fetchone()[0]
+            return (str(last_bus), last_commit, unactioned)
+    except Exception as e:
+        log(f"progress-probe-failed {sess}: {e}")
+        return ("", "", 0)
+
+
+def progress_fingerprint(sess: str, cap: str):
+    """(fingerprint, unactioned). fingerprint combines the three independent
+    progress signals; ANY one advancing between scans = the lane progressed."""
+    last_bus, last_commit, unactioned = lane_progress_state(sess)
+    return f"{scrollback_digest(cap)}|{last_bus}|{last_commit}", unactioned
+
+
+def progress_stalled(stalled_sec: float, unactioned: int) -> bool:
+    """Pure decision: a lane is stalled only when it has made no progress for the
+    window AND is holding work it should be doing (so an idle-and-DONE lane with no
+    pending directive is never flagged)."""
+    return stalled_sec > PROGRESS_STALL_SEC and unactioned > 0
+
 
 def log(msg: str) -> None:
     line = f"{datetime.now(timezone.utc).isoformat()} | {msg}"
@@ -242,6 +320,31 @@ def main() -> int:
         held_escalated = prev.get("held_escalated", False) if same_input else False
         new_state[sess] = {"state": st, "input": inp, "ts": time.time(),
                            "attempts": attempts, "held_escalated": held_escalated}
+
+        # ── PROGRESS-STALL (op #3695) — runs for EVERY watched lane, incl. WORKING
+        #    and IDLE_CLEAN (the two the classify-path skips). Progress is measured
+        #    by real advance (bus post / pane scrollback / commit), NOT the heartbeat
+        #    that can lie 'working' for 16h. Escalate-only; never a keystroke.
+        #    Governance consoles are excluded (not build lanes; escalate-only class).
+        if not is_governance_console(sess):
+            fp, unactioned = progress_fingerprint(sess, cap)
+            progressed = fp != prev.get("progress_fp")
+            prog_ts = time.time() if progressed else prev.get("progress_ts", time.time())
+            new_state[sess]["progress_fp"] = fp
+            new_state[sess]["progress_ts"] = prog_ts
+            stalled_sec = time.time() - prog_ts
+            stall_esc_ts = prev.get("stall_esc_ts", 0)
+            if progress_stalled(stalled_sec, unactioned):
+                if time.time() - stall_esc_ts > STALL_REESCALATE_SEC:
+                    escalate(sess, "PROGRESS_STALL",
+                             f"no real progress (bus/pane/commit) for {int(stalled_sec/60)}min while "
+                             f"holding {unactioned} unactioned directive(s) — status/heartbeat may be "
+                             f"lying (looks working or idle-clean, empty composer, the 16h-stall class). "
+                             f"Verify the lane + kick or reassign; do NOT trust status='working'.")
+                    stall_esc_ts = time.time()
+                new_state[sess]["stall_esc_ts"] = stall_esc_ts
+            else:
+                new_state[sess]["stall_esc_ts"] = 0
 
         if st == "USAGE_LIMIT":
             # the token-window wall — escalate every scan (it's the one thing the
