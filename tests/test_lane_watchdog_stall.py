@@ -82,6 +82,28 @@ def test_idle_unsent_detection_not_regressed():
     assert w.classify(empty) == "IDLE_CLEAN"
 
 
+def test_PROOF_flags_idle_stall_but_spares_busy_build(monkeypatch):
+    """THE health evidence: a genuinely-busy long build is NOT flagged, while an
+    idle lane holding unactioned directives with no progress IS flagged."""
+    # 2 unactioned directives on both lanes; bus/commit held constant so the ONLY
+    # thing that can move the fingerprint is the pane (token-delta / scrollback).
+    monkeypatch.setattr(w, "lane_progress_state", lambda s: ("50", "sha1", 2))
+
+    # BUSY BUILD — two scans 25 min apart, but the model kept generating (token
+    # counter 1.0k -> 90k) -> fingerprint MOVED -> progress timer resets -> never flagged.
+    busy1, _ = w.progress_fingerprint("busy", _pane(BODY, "esc to interrupt (30s · ↑ 1.0k tokens)"))
+    busy2, un = w.progress_fingerprint("busy", _pane(BODY, "esc to interrupt (1500s · ↑ 90k tokens)"))
+    assert busy1 != busy2                                       # progressed
+    assert w.progress_stalled(0, un) is False                  # fresh progress -> NOT flagged
+
+    # IDLE STALL — identical fingerprint across scans (nothing moved) + unactioned
+    # work + past the 20-min window -> FLAGGED (the 16h-stall class).
+    idle1, _ = w.progress_fingerprint("idle", _pane(BODY, "? for shortcuts · for agents"))
+    idle2, un = w.progress_fingerprint("idle", _pane(BODY, "? for shortcuts · for agents"))
+    assert idle1 == idle2                                      # no progress
+    assert w.progress_stalled(w.PROGRESS_STALL_SEC + 300, un) is True   # stalled 25min + work -> FLAG
+
+
 def test_fingerprint_shape_combines_signals(monkeypatch):
     # progress_fingerprint blends pane digest + last bus id + last commit; any one
     # advancing changes the fingerprint (so a bus post / commit resets the timer
