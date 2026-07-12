@@ -43,31 +43,58 @@ def sha256_file(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _recorded(conn, repo: str, name: str, silo_ref: str) -> str | None:
+def _ledger_exists(conn) -> bool:
+    # to_regclass returns NULL (not an error) if the table is absent, so it never
+    # poisons the caller's transaction.
     with conn.cursor() as cur:
-        # Tolerate a not-yet-initialized ledger (e.g. applying the very migration
-        # that CREATES migration_ledger). to_regclass returns NULL, not an error,
-        # so it never poisons the caller's transaction. Treated as "no record".
         cur.execute("SELECT to_regclass('public.migration_ledger')")
-        if cur.fetchone()[0] is None:
-            return None
-        cur.execute(
-            "SELECT sha256 FROM migration_ledger WHERE repo=%s AND migration_name=%s AND silo_ref=%s",
-            (repo, name, silo_ref))
-        row = cur.fetchone()
-        return row[0] if row else None
+        return cur.fetchone()[0] is not None
+
+
+def _recorded(conn, repo: str, name: str, silo_ref: str) -> str | None:
+    """Recorded hash for (repo, name, silo), or None if this migration was never
+    applied (NEW). FAILS CLOSED — raises LedgerUnavailable if the ledger table is
+    absent or the read errors, so the caller cannot proceed unverified."""
+    if not _ledger_exists(conn):
+        raise LedgerUnavailable(
+            "migration_ledger table not present — cannot verify migration immutability")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT sha256 FROM migration_ledger WHERE repo=%s AND migration_name=%s AND silo_ref=%s",
+                (repo, name, silo_ref))
+            row = cur.fetchone()
+    except psycopg.Error as e:
+        raise LedgerUnavailable(f"migration_ledger read failed: {e}") from e
+    return row[0] if row else None
 
 
 class ImmutabilityViolation(RuntimeError):
     """An already-applied migration's file body changed — the banned in-place amend."""
 
 
-def check_one(conn, repo: str, name: str, silo_ref: str, path: str | Path) -> str | None:
-    """Return None if OK (new migration, or unchanged body); raise
-    ImmutabilityViolation if the recorded hash differs from the current file.
-    Called BEFORE applying — the apply must abort on a raise."""
+class LedgerUnavailable(RuntimeError):
+    """The migration_ledger cannot be read (table absent / query error). The guard
+    FAILS CLOSED on this: the apply path must ABORT, never silently skip the check.
+    The ONLY sanctioned exception is bootstrapping the ledger-creating migration
+    itself, via the explicit allow_missing_ledger flag."""
+
+
+def check_one(conn, repo: str, name: str, silo_ref: str, path: str | Path,
+              allow_missing_ledger: bool = False) -> str | None:
+    """Return None if OK (a NEW migration with no ledger row, or an unchanged
+    body); raise ImmutabilityViolation if the recorded hash differs from the
+    current file (a MUTATED applied migration). Raise LedgerUnavailable (FAIL
+    CLOSED) if the ledger can't be read — unless allow_missing_ledger (bootstrap
+    of the ledger migration itself). Called BEFORE applying; the apply MUST abort
+    on any raise."""
     cur_hash = sha256_file(path)
-    rec = _recorded(conn, repo, name, silo_ref)
+    try:
+        rec = _recorded(conn, repo, name, silo_ref)   # None => never applied (NEW)
+    except LedgerUnavailable:
+        if allow_missing_ledger:
+            return None       # documented bootstrap: this migration CREATES the ledger
+        raise                 # FAIL CLOSED — cannot verify, refuse to apply
     if rec is not None and rec != cur_hash:
         raise ImmutabilityViolation(
             f"{repo}/{name} @ {silo_ref}: applied body hash {rec[:12]} != current file "
@@ -122,7 +149,11 @@ def main() -> int:
     ap.add_argument("--by", default="cc-infra")
     a = ap.parse_args()
     if a.check:
-        v = assert_repo(a.repo, a.dir, a.silo)
+        try:
+            v = assert_repo(a.repo, a.dir, a.silo)
+        except LedgerUnavailable as e:
+            print(f"FAIL CLOSED — ledger unavailable, cannot verify immutability: {e}", file=sys.stderr)
+            return 1
         if v:
             print(f"IMMUTABILITY VIOLATION — {len(v)} amended migration(s) in {a.repo} @ {a.silo}:")
             for x in v:

@@ -110,6 +110,16 @@ def test_per_silo_independence(tmp_path):
         g.check_one(conn, "ihsanos", "061.sql", "ceayj", f)
 
 
-def test_ledger_not_initialized_is_treated_as_new(tmp_path):
-    conn = FakeConn(exists=False)   # migration that CREATES the ledger, self-check
-    assert g.check_one(conn, "orchestrator", "023.sql", REF, _mig(tmp_path, "023.sql", "x")) is None
+def test_missing_ledger_FAILS_CLOSED(tmp_path):
+    # Ledger table absent/unreadable => refuse to apply (never silently skip).
+    conn = FakeConn(exists=False)
+    with pytest.raises(g.LedgerUnavailable):
+        g.check_one(conn, "orchestrator", "999.sql", REF, _mig(tmp_path, "999.sql", "x"))
+
+
+def test_missing_ledger_bootstrap_escape_hatch(tmp_path):
+    # The ONLY sanctioned pass on a missing ledger: bootstrapping the migration
+    # that creates it, via the explicit flag.
+    conn = FakeConn(exists=False)
+    assert g.check_one(conn, "orchestrator", "023_migration_ledger.sql", REF,
+                       _mig(tmp_path, "023.sql", "x"), allow_missing_ledger=True) is None

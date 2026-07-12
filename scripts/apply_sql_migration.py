@@ -38,8 +38,11 @@ def statements(sql: str):
 
 
 def main() -> int:
-    args = [a for a in sys.argv[1:] if a != "--dry-run"]
+    args = [a for a in sys.argv[1:] if a not in ("--dry-run", "--allow-missing-ledger")]
     dry = "--dry-run" in sys.argv
+    # ONLY for bootstrapping the migration that CREATES migration_ledger. Absent
+    # this flag, a missing ledger FAILS CLOSED (refuse to apply unverified).
+    allow_missing = "--allow-missing-ledger" in sys.argv
     if len(args) < 3:
         print("usage: apply_sql_migration.py <file> <version> <name> [--dry-run]", file=sys.stderr)
         return 2
@@ -50,11 +53,17 @@ def main() -> int:
     mig_name = Path(path).name
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-infra',true)")
-        # GATE (before write): refuse to (re-)apply an amended already-applied body.
+        # GATE (before write): refuse to (re-)apply an amended already-applied body,
+        # and FAIL CLOSED if the ledger can't be read (never apply unverified).
         try:
-            guard.check_one(conn, "orchestrator", mig_name, SUBSTRATE_REF, path)
+            guard.check_one(conn, "orchestrator", mig_name, SUBSTRATE_REF, path,
+                            allow_missing_ledger=allow_missing)
         except guard.ImmutabilityViolation as e:
             print(f"ABORT — immutability violation: {e}", file=sys.stderr)
+            return 1
+        except guard.LedgerUnavailable as e:
+            print(f"ABORT — FAIL CLOSED, ledger unavailable (will not apply unverified): {e}",
+                  file=sys.stderr)
             return 1
         for s in stmts:
             print(f"  {' '.join(s.split())[:72]}")
