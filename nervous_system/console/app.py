@@ -252,6 +252,13 @@ def _lane_bucket(l):
     return state, flagged
 
 
+# Cross-host coordinators (bodies that don't run on THIS console host) are
+# peeked via a DB read of their bus activity, NOT ssh — keeps the console's
+# surface local read-only (operator #3729). Maps peek session -> coordinator
+# from_agent. A session name only ever LOOKS UP here; unknown names fall through.
+_COORD_DB_PEEK = {"nazim": "orch-console"}
+
+
 # Soft budget for the whole /api/fleet aggregate. Over this we log a warning so
 # a slow-query regression is caught in the log before it's caught on the phone
 # (the 2026-07-11 regression showed up as a client-side timeout, not a metric).
@@ -283,13 +290,12 @@ def _fleet_payload():
         coordinators = f_coord.result()
 
     # A coordinator card is peekable when its pane is a LOCAL live tmux session
-    # (orch on this Studio host) OR a reachable CROSS-HOST coordinator pane
-    # (Nazim's 'nazim' on the Mini, reached over ssh — operator #3729).
-    # remote_peekable is non-blocking (cached reachability, background refresh),
-    # so an unreachable Mini just leaves Nazim's card on its bus-activity view.
+    # (orch on this Studio host) OR it's a cross-host coordinator we surface via a
+    # DB-read activity feed (Nazim on the Mini — reverted from ssh to a DB read,
+    # operator #3729). The DB source is always available, so no reachability probe.
     for c in coordinators:
         sess = c.get("tmux_session")
-        c["peekable"] = bool(sess and (sess in live or panes.remote_peekable(sess)))
+        c["peekable"] = bool(sess and (sess in live or sess in _COORD_DB_PEEK))
 
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for l in lanes:
@@ -466,13 +472,17 @@ def _make_handler(feedloop: "_FeedLoop"):
 
                 if path.startswith("/api/lanes/") and path.endswith("/pane"):
                     # Live tmux pane peek (read-only) — operator-requested,
-                    # thread f869956c/msg 6156. session is validated inside
-                    # capture_pane against the REAL live local tmux list OR the
-                    # FIXED cross-host coordinator registry (Nazim on the Mini);
-                    # an unrecognized name (or anything crafted to look like
-                    # one) just 404s, it never reaches a subprocess call.
+                    # thread f869956c/msg 6156. A LOCAL session is validated
+                    # against the real live tmux list inside capture_pane; a
+                    # cross-host coordinator (Nazim on the Mini) is served from a
+                    # DB read of its bus activity instead of ssh (operator #3729).
+                    # An unrecognized name matches neither -> 404, no subprocess.
                     session = unquote(path[len("/api/lanes/"):-len("/pane")])
-                    text = panes.capture_pane(session)
+                    coord_agent = _COORD_DB_PEEK.get(session)
+                    if coord_agent is not None:
+                        text = db.fetch_coordinator_peek(coord_agent) or None
+                    else:
+                        text = panes.capture_pane(session)
                     if text is None:
                         auth.audit(self._client(), path, "404")
                         return self._json(404, {"error": "session not live"})

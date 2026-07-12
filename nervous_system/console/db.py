@@ -16,6 +16,7 @@ import logging
 import os
 import queue
 import threading
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 import psycopg
@@ -307,6 +308,45 @@ def build_coordinators_query() -> Tuple[str, list]:
 def fetch_coordinators() -> List[dict]:
     sql, params = build_coordinators_query()
     return _query(sql, params)
+
+
+# How many recent bus rows a cross-host coordinator peek shows.
+_COORD_PEEK_LIMIT = 16
+
+
+def build_coordinator_peek_query(agent_id: str, limit: int = _COORD_PEEK_LIMIT):
+    """Recent bus activity FROM a coordinator body — the DB-read that stands in
+    for a live pane peek when the body runs off-box (Nazim on the Mini). This is
+    the low-privilege replacement for the reverted cross-host ssh peek (operator
+    #3729): the console already reads agent_messages, so no new surface."""
+    sql = (
+        "SELECT created_at, message_type, to_agent, subject "
+        "FROM agent_messages WHERE from_agent = %s "
+        "ORDER BY id DESC LIMIT %s"
+    )
+    return sql, [agent_id, limit]
+
+
+def fetch_coordinator_peek(agent_id: str, limit: int = _COORD_PEEK_LIMIT) -> str:
+    """A readable activity feed for *agent_id*, newest LAST so it reads
+    top-to-bottom like a pane scrollback. Each line: 'Hm →to  [type] subject'.
+    Empty string if the coordinator has posted nothing (peek shows 'nothing
+    captured', same as an empty pane)."""
+    sql, params = build_coordinator_peek_query(agent_id, limit)
+    rows = _query(sql, params)
+    lines = []
+    for r in reversed(rows):
+        ts = r.get("created_at")
+        age = ""
+        if ts is not None:
+            secs = max(0, int((datetime.now(timezone.utc) - ts).total_seconds()))
+            age = ("%dm" % (secs // 60)) if secs < 3600 else ("%dh" % (secs // 3600))
+        to = r.get("to_agent") or ""
+        mtype = r.get("message_type") or ""
+        subject = (r.get("subject") or "").strip()
+        prefix = " ".join(p for p in ((age and age + " ago"), (to and "→ " + to), (mtype and "[" + mtype + "]")) if p)
+        lines.append((prefix + "  " + subject).strip() if prefix else subject)
+    return "\n".join(lines)
 
 
 # --- persistent connection pool ----------------------------------------------
