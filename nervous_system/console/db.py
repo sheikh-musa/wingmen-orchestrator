@@ -310,30 +310,35 @@ def fetch_coordinators() -> List[dict]:
     return _query(sql, params)
 
 
-# How many recent bus rows a cross-host coordinator peek shows.
+# How many recent bus rows the coordinator activity-feed fallback shows.
 _COORD_PEEK_LIMIT = 16
+# A published pane snapshot older than this is treated as stale (publisher hiccup)
+# and the peek falls back to the bus-activity feed. Publisher writes every ~10s,
+# so this tolerates ~9 missed writes before falling back.
+_COORD_SNAPSHOT_MAX_AGE_S = 90
 
 
-def build_coordinator_peek_query(agent_id: str, limit: int = _COORD_PEEK_LIMIT):
-    """Recent bus activity FROM a coordinator body — the DB-read that stands in
-    for a live pane peek when the body runs off-box (Nazim on the Mini). This is
-    the low-privilege replacement for the reverted cross-host ssh peek (operator
-    #3729): the console already reads agent_messages, so no new surface."""
-    sql = (
-        "SELECT created_at, message_type, to_agent, subject "
-        "FROM agent_messages WHERE from_agent = %s "
-        "ORDER BY id DESC LIMIT %s"
+def _fetch_pane_snapshot(agent_id: str, max_age_s: int = _COORD_SNAPSHOT_MAX_AGE_S) -> Optional[str]:
+    """The latest FRESH published tmux-pane snapshot for a cross-host coordinator
+    (Mini-side publisher UPSERTs coordinator_panes; migration 024). None if there's
+    no row or it's staler than max_age_s. No ssh — a plain substrate read."""
+    rows = _query(
+        "SELECT pane_text FROM coordinator_panes "
+        "WHERE agent_id = %s AND captured_at > now() - make_interval(secs => %s)",
+        [agent_id, max_age_s],
     )
-    return sql, [agent_id, limit]
+    return rows[0]["pane_text"] if rows else None
 
 
-def fetch_coordinator_peek(agent_id: str, limit: int = _COORD_PEEK_LIMIT) -> str:
-    """A readable activity feed for *agent_id*, newest LAST so it reads
-    top-to-bottom like a pane scrollback. Each line: 'Hm →to  [type] subject'.
-    Empty string if the coordinator has posted nothing (peek shows 'nothing
-    captured', same as an empty pane)."""
-    sql, params = build_coordinator_peek_query(agent_id, limit)
-    rows = _query(sql, params)
+def _fetch_bus_activity_feed(agent_id: str, limit: int = _COORD_PEEK_LIMIT) -> str:
+    """A readable activity feed from a coordinator's recent bus posts, newest LAST
+    so it reads top-to-bottom like a pane scrollback. Each line:
+    'Hm ago → to  [type] subject'. The fallback when no fresh pane snapshot exists."""
+    rows = _query(
+        "SELECT created_at, message_type, to_agent, subject "
+        "FROM agent_messages WHERE from_agent = %s ORDER BY id DESC LIMIT %s",
+        [agent_id, limit],
+    )
     lines = []
     for r in reversed(rows):
         ts = r.get("created_at")
@@ -347,6 +352,18 @@ def fetch_coordinator_peek(agent_id: str, limit: int = _COORD_PEEK_LIMIT) -> str
         prefix = " ".join(p for p in ((age and age + " ago"), (to and "→ " + to), (mtype and "[" + mtype + "]")) if p)
         lines.append((prefix + "  " + subject).strip() if prefix else subject)
     return "\n".join(lines)
+
+
+def fetch_coordinator_peek(agent_id: str, limit: int = _COORD_PEEK_LIMIT) -> str:
+    """The peek text for a cross-host coordinator body (Nazim on the Mini). ONE
+    source switch (operator #3729): PREFER a fresh published tmux-pane snapshot
+    (reflowed exactly like a local pane) and FALL BACK to the recent bus-activity
+    feed when the publisher hasn't landed / is stale. No ssh either way."""
+    snap = _fetch_pane_snapshot(agent_id)
+    if snap:
+        from nervous_system.console import panes  # lazy import: reflow the raw pane
+        return panes._clean_pane_text(snap)
+    return _fetch_bus_activity_feed(agent_id, limit)
 
 
 # --- persistent connection pool ----------------------------------------------
