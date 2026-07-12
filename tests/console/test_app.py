@@ -121,6 +121,21 @@ def test_static_index_served(server):
     assert "text/html" in r.headers.get("content-type", "")
 
 
+def test_root_serves_fleet_view(server):
+    # operator #3440: Fleet is now the default console at "/" (and "/fleet").
+    for path in ("/", "/fleet"):
+        r = httpx.get(server + path, timeout=5)
+        assert r.status_code == 200
+        assert 'id="pulseBig"' in r.text, f"{path} should serve the Fleet shell"
+
+
+def test_classic_console_reachable(server):
+    # The classic message/deploy console (full lists) is retained at /classic.
+    r = httpx.get(server + "/classic", timeout=5)
+    assert r.status_code == 200
+    assert 'class="tabbar"' in r.text
+
+
 def test_x_forwarded_for_spoof_does_not_grant_access(server):
     """Regression test for the exact bug this change removes: the test
     client's real peer IP (127.0.0.1) is never in the allowlist here, and a

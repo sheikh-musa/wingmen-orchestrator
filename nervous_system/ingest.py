@@ -221,6 +221,36 @@ def load_channels(conn) -> dict[str, Channel]:
         return {c.key: c for c in (Channel(r) for r in cur.fetchall())}
 
 
+# ── Per-chat tag routing + shared-awareness feeds (WAR-ROOM-FEED-001) ─────────
+# A chat routed (via a channel's group_routing bag) to one of these tags is a
+# shared-awareness FEED: it's logged tagged as the feed and is LOG-ONLY here (the
+# per-bot DM nudge path is NOT fired — the responder that reads the feed and
+# answers is wired separately, out of ingest's scope). Mirrors
+# operator_log._SHARED_FEED_TAGS, which carves these tags out of every body's
+# PERSONAL reconciliation, so a feed message never pollutes a DM inbox.
+SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
+
+# The subset of feeds that MULTIPLE bots receive — so the SAME logical message
+# arrives on >1 ingest loop and must be deduped by its cross-bot identity
+# (chat_id, message_id), or it logs Nx. war-room has 3 member bots (operator-orch
+# + cai-channel on the hub, nazim-console on the Mini). hafiz-partner has exactly
+# ONE (@nazim_cto_bot — Nazim's NDA-gated partner room), so it needs NO cross-bot
+# dedup: its single loop plus the per-bot ingest_dedup already guarantee one row.
+# A feed gains dedup by being added here (do so if it ever gains a 2nd member bot).
+CROSS_BOT_FEED_TAGS = ("war-room",)
+
+
+def resolve_tag(ch: "Channel", chat_id) -> tuple:
+    """Per-chat tag routing. A chat_id present in the channel's group_routing bag
+    re-tags to its mapped value (e.g. the war-room group_id -> 'war-room');
+    otherwise the channel's default channel_tag. Returns (tag, is_shared_feed).
+    group_routing also carries non-chat control keys (nudge_when_busy); chat_ids
+    are numeric strings so a control key can never be read as a route."""
+    routed = (ch.group_routing or {}).get(str(chat_id)) if chat_id is not None else None
+    tag = routed or ch.channel_tag
+    return tag, tag in SHARED_FEED_TAGS
+
+
 # ── Gate (deny-by-default, pure function — unit-tested) ───────────────────────
 
 def gate_allows(ch: Channel, chat_id: int, username: str | None) -> bool:
@@ -418,11 +448,20 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
     upd_id = upd["update_id"]
     msg = upd.get("message") or upd.get("edited_message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
     username = (msg.get("from") or {}).get("username")
+    tag, is_shared_feed = resolve_tag(ch, chat_id)
+    # Cross-bot dedup engages only for multi-bot feeds (war-room), and only when
+    # the message carries a stable identity (chat_id, message_id). Single-bot feeds
+    # (hafiz-partner) skip it — one loop + the per-bot guard already log once.
+    needs_dedup = (tag in CROSS_BOT_FEED_TAGS
+                   and chat_id is not None and message_id is not None)
 
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
-        # 1. A1 dedupe — the processing gate.
+        # 1. A1 PER-BOT dedupe — the replay guard, keyed on THIS bot's update_id.
+        #    It cannot dedup the same message seen by a DIFFERENT bot (each bot
+        #    assigns its own update_id) — that's the cross-bot guard's job (1b).
         cur.execute(
             "INSERT INTO ingest_dedup (channel_key, telegram_update_id) "
             "VALUES (%s,%s) ON CONFLICT DO NOTHING RETURNING channel_key",
@@ -430,14 +469,34 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         )
         if cur.fetchone() is None:
             conn.commit()
-            return False          # replay of an already-processed update
+            return False          # replay of an already-processed update (this bot)
 
-        # 2. LOG — durable first, always. Media is downloaded here so the row
-        #    carries the local path (screenshot/doc), not a bare non-text marker.
+        # 1b. CROSS-BOT shared-feed dedupe (WAR-ROOM-FEED-001) — multi-bot feeds
+        #     only. (chat_id, message_id) is the message's identity — identical
+        #     across every bot that received it AND across machines (all share this
+        #     substrate). The first ingest loop to claim it logs; the rest skip the
+        #     log entirely, so a war-room post is ONE 'war-room' row, not 3× with DM
+        #     tags. The per-bot guard above still recorded that THIS bot processed
+        #     the update (audit); it simply produced no operator_messages row.
+        if needs_dedup:
+            cur.execute(
+                "INSERT INTO shared_feed_dedup (chat_id, message_id, channel_key) "
+                "VALUES (%s,%s,%s) ON CONFLICT DO NOTHING RETURNING chat_id",
+                (chat_id, message_id, ch.key),
+            )
+            if cur.fetchone() is None:
+                conn.commit()
+                _log_line(f"{ch.key}: shared-feed msg {chat_id}/{message_id} already "
+                          f"logged by another loop — skip (cross-bot dedup)")
+                return True       # a real update for this bot; just not ours to log
+
+        # 2. LOG — durable first, always, with the RESOLVED tag (per-chat routing).
+        #    Media is downloaded here so the row carries the local path
+        #    (screenshot/doc), not a bare non-text marker.
         cur.execute(
             "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
             "VALUES ('inbound','telegram',%s,%s,%s,true) RETURNING id",
-            (str(chat_id) if chat_id is not None else None, ch.channel_tag,
+            (str(chat_id) if chat_id is not None else None, tag,
              message_content(ch, msg, upd_id)),
         )
         op_msg_id = cur.fetchone()[0]
@@ -446,11 +505,27 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             "WHERE channel_key=%s AND telegram_update_id=%s",
             (op_msg_id, ch.key, upd_id),
         )
+        if needs_dedup:
+            cur.execute(
+                "UPDATE shared_feed_dedup SET operator_msg_id=%s "
+                "WHERE chat_id=%s AND message_id=%s",
+                (op_msg_id, chat_id, message_id),
+            )
         conn.commit()
 
     # 3. GATE — deny-by-default; disallowed stays logged-and-skipped.
     if chat_id is None or not gate_allows(ch, chat_id, username):
         _log_line(f"{ch.key}: update {upd_id} gated (chat {chat_id}) — logged, not routed")
+        return True
+
+    # 3b. Shared-awareness feed: LOG-ONLY here. The responder that reads the feed
+    #     and answers (per CAI-RESP-339) is wired separately — NOT ingest's job.
+    #     Firing the agent-session DM nudge would be wrong anyway: unread_count
+    #     keys on ch.channel_tag (the DM tag), not the feed tag, so it would nudge
+    #     the wrong (DM) count. Kept out of the ROUTE block deliberately.
+    if is_shared_feed:
+        _log_line(f"{ch.key}: shared-feed '{tag}' msg logged (chat {chat_id}) — "
+                  f"respond wired separately, not nudged")
         return True
 
     # 4. ROUTE (transport only — A2) with busy-aware nudge policy (CAI-RESP-382).
