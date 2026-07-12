@@ -21,7 +21,7 @@
 // iPhone kept serving the removed breakglass input after 80bf1a6). v2 also
 // makes app.js network-first (below) so future JS changes propagate without a
 // manual bump — the bump is now only a belt-and-suspenders cache reset.
-const VERSION = "fc-v2";
+const VERSION = "fc-v8";
 const SHELL_CACHE = `fleet-console-shell-${VERSION}`;
 const SHELL_ASSETS = [
   "/",
