@@ -260,6 +260,16 @@ class _RemotePane:
         self.target = target
 
 
+# DESIGN/SECURITY GATE (operator #3729): cross-host peek gives the console
+# OUTBOUND SSH — an attack-surface expansion the operator has HELD for a security
+# nod (least-privilege: dedicated key / command allowlist / no shell / maybe cai).
+# So it is DEFAULT-OFF and fully inert (no ssh ever fires) unless the console's
+# env explicitly opts in with CONSOLE_CROSS_HOST_PEEK=1. This is also the belt
+# against a launchd respawn silently activating it: a respawn onto this HEAD is
+# safe because the flag defaults off. Flip the env var (not the code) to enable
+# once the review clears.
+_CROSS_HOST_ENABLED = os.environ.get("CONSOLE_CROSS_HOST_PEEK", "").strip().lower() in ("1", "true", "yes", "on")
+
 _REMOTE_PANES = {
     # Nazim (2nd coordinator) runs on the Mini under sheikhmusa via the Intel
     # tmux path; reachable from the Studio over Tailscale SSH (key auth).
@@ -310,6 +320,8 @@ def remote_peekable(session: str) -> bool:
     background probe and returns the last-known value (optimistic True on first
     sight) so the fleet payload never waits on ssh. The card's peek arrow tracks
     this, so an unreachable host shows NO arrow (keeps its bus-activity view)."""
+    if not _CROSS_HOST_ENABLED:
+        return False                          # capability held (default-off) — no ssh, no arrow
     spec = _REMOTE_PANES.get(session)
     if spec is None:
         return False
@@ -346,7 +358,8 @@ def capture_pane(session: str) -> Optional[str]:
         raw = _raw_capture(session)
         return _clean_pane_text(raw) if raw is not None else None
     # not local: a known cross-host coordinator pane (e.g. Nazim on the Mini)?
-    spec = _REMOTE_PANES.get(session)
+    # Gated OFF by default — no ssh unless the console opts in (security hold).
+    spec = _REMOTE_PANES.get(session) if _CROSS_HOST_ENABLED else None
     if spec is not None:
         raw = _remote_raw_capture(spec)
         _stamp_reach(session, raw is not None)   # a real peek is a fresh reachability signal
