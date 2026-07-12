@@ -165,6 +165,9 @@
   .dep a { display:block; margin-top:4px; font:11px var(--mono); overflow-wrap:anywhere; }
 
   .feednote { color:var(--dim); font-size:12.5px; padding: 2px 2px 0; }
+  .lane.coord { border-left:3px solid var(--accent); background: linear-gradient(90deg, rgba(91,140,255,.07), var(--panel) 42%); }
+  .state.coordrole { color: var(--accent); text-transform:none; font-weight:600; }
+  .act.coordidle { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -183,6 +186,11 @@
   <section>
     <div class="sec-h needs"><h2>Needs you</h2><span id="needsCount" class="count"></span></div>
     <div id="needs"></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Coordinators</h2><span class="count">hub + console</span></div>
+    <div id="coordinators"><div class="empty">Loading…</div></div>
   </section>
 
   <section id="handlingSec" style="display:none">

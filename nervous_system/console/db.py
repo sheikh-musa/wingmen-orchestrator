@@ -275,6 +275,36 @@ def fetch_needs_you() -> List[dict]:
     return _query(sql, params)
 
 
+def build_coordinators_query() -> Tuple[str, list]:
+    """The two orchestrator bodies (orch hub + Nazim) - not lanes, so absent
+    from fleet_lanes. Liveness = freshest of their latest bus row or outbound
+    operator message; activity = latest bus subject."""
+    sql = (
+        "SELECT c.agent_id, c.short, c.role_label, "
+        "  (SELECT subject FROM agent_messages m "
+        "     WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1) AS activity, "
+        "  (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM agent_messages m "
+        "     WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1) AS activity_age_s, "
+        "  LEAST( "
+        "    (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM agent_messages m "
+        "       WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1), "
+        "    (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM operator_messages o "
+        "       WHERE o.direction = 'outbound' AND o.tag = c.op_tag ORDER BY o.id DESC LIMIT 1) "
+        "  ) AS last_seen_s "
+        "FROM (VALUES "
+        "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel'), "
+        "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console') "
+        ") AS c(agent_id, short, role_label, op_tag) "
+        "ORDER BY c.agent_id"
+    )
+    return sql, []
+
+
+def fetch_coordinators() -> List[dict]:
+    sql, params = build_coordinators_query()
+    return _query(sql, params)
+
+
 # --- persistent connection pool ----------------------------------------------
 #
 # WHY: the DSN is the Supabase pooler in ap-southeast-2. A *fresh* connection

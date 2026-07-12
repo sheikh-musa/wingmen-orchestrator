@@ -233,6 +233,29 @@
   // (operator #3440: "expanded lanes auto contract").
   var routineExpanded = false;
 
+  function coordCard(c) {
+    var seen = c.last_seen_s;
+    var dot = (seen != null && seen < 1800) ? "working" : "idle";
+    var hbClass = seen == null ? "dead" : (seen < 1800 ? "fresh" : (seen < 7200 ? "stale" : "dead"));
+    var seenTxt = seen == null ? "quiet" : "active " + fmtAge(seen);
+    var age = (c.activity != null && c.activity_age_s != null) ? " - " + fmtAge(c.activity_age_s) : "";
+    return '<div class="lane coord">' +
+      '<div class="top">' +
+        '<span class="st-dot ' + dot + '"></span>' +
+        '<span class="id">' + esc(c.short || c.agent_id) + '</span>' +
+        '<span class="state coordrole">' + esc(c.role_label || "") + '</span>' +
+      '</div>' +
+      (c.activity ? '<div class="act">' + esc(c.activity) + esc(age) + '</div>'
+                  : '<div class="act coordidle">nothing on the bus recently</div>') +
+      '<div class="meta"><span class="hb ' + hbClass + '">' + esc(seenTxt) + '</span></div>' +
+    '</div>';
+  }
+  function renderCoordinators(items) {
+    var el = document.getElementById("coordinators");
+    if (!el) return;
+    if (!items || !items.length) { el.innerHTML = '<div class="empty">No coordinators.</div>'; return; }
+    el.innerHTML = items.map(coordCard).join("");
+  }
   function renderLanes(lanes) {
     lastLanes = lanes;   // kept so jumpToLane can re-render (expand routine) if needed
     var primary = lanes.filter(function (l) { return l.bucket === "working" || l.flagged; });
@@ -415,6 +438,7 @@
     buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
     renderPulse(d.pulse || {});
     renderNeeds(d.needs_you || []);
+    renderCoordinators(d.coordinators || []);
     renderLanes(lanes);
     renderDeploys(d.deploys || []);
 

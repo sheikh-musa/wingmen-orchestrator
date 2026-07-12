@@ -271,6 +271,8 @@ def _fleet_payload():
         deploys = f_deploys.result()
         needs = f_needs.result()
 
+    coordinators = db.fetch_coordinators()
+
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for l in lanes:
         state, flagged = _lane_bucket(l)
@@ -294,6 +296,7 @@ def _fleet_payload():
     return {
         "pulse": {**counts, "needs_you": len(needs)},
         "needs_you": _jsonable(needs),
+        "coordinators": _jsonable(coordinators),
         "lanes": _jsonable(lanes),
         "deploys": _jsonable(deploys),
     }
