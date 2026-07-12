@@ -193,6 +193,7 @@ def _fleet_payload():
     lanes = _enrich_lanes_live(db.fetch_lanes())
     deploys = db.fetch_deploys()
     needs = db.fetch_needs_you()
+    coordinators = db.fetch_coordinators()
 
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for l in lanes:
@@ -210,6 +211,7 @@ def _fleet_payload():
     return {
         "pulse": {**counts, "needs_you": len(needs)},
         "needs_you": _jsonable(needs),
+        "coordinators": _jsonable(coordinators),
         "lanes": _jsonable(lanes),
         "deploys": _jsonable(deploys),
     }

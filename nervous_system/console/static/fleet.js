@@ -86,6 +86,28 @@
     '</div>';
   }
 
+  function coordCard(c) {
+    var seen = c.last_seen_s;
+    var dot = (seen != null && seen < 1800) ? "working" : "idle";
+    var hbClass = seen == null ? "dead" : (seen < 1800 ? "fresh" : (seen < 7200 ? "stale" : "dead"));
+    var seenTxt = seen == null ? "quiet" : "active " + fmtAge(seen);
+    var age = (c.activity != null && c.activity_age_s != null) ? " · " + fmtAge(c.activity_age_s) : "";
+    return '<div class="lane coord">' +
+      '<div class="top">' +
+        '<span class="st-dot ' + dot + '"></span>' +
+        '<span class="id">' + esc(c.short || c.agent_id) + '</span>' +
+        '<span class="state coordrole">' + esc(c.role_label || "") + '</span>' +
+      '</div>' +
+      (c.activity ? '<div class="act">' + esc(c.activity) + esc(age) + '</div>'
+                  : '<div class="act coordidle">nothing on the bus recently</div>') +
+      '<div class="meta"><span class="hb ' + hbClass + '">' + esc(seenTxt) + '</span></div>' +
+    '</div>';
+  }
+  function renderCoordinators(items) {
+    if (!items || !items.length) { $("coordinators").innerHTML = '<div class="empty">No coordinators.</div>'; return; }
+    $("coordinators").innerHTML = items.map(coordCard).join("");
+  }
+
   function renderLanes(lanes) {
     var primary = lanes.filter(function (l) { return l.bucket === "working" || l.flagged; });
     var routine = lanes.filter(function (l) { return !(l.bucket === "working" || l.flagged); });
@@ -192,6 +214,7 @@
         setLive(true);
         renderPulse(d.pulse || {});
         renderNeeds(d.needs_you || []);
+        renderCoordinators(d.coordinators || []);
         renderLanes(d.lanes || []);
         renderDeploys(d.deploys || []);
       });

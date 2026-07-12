@@ -90,6 +90,9 @@
   .lane { padding:12px 14px; margin-bottom:9px; background: var(--panel); border:1px solid var(--line);
     border-radius:13px; border-left:3px solid transparent; }
   .lane.flag { border-left-color: var(--bad); background: linear-gradient(90deg, rgba(255,107,107,.06), var(--panel) 40%); }
+  .lane.coord { border-left:3px solid var(--accent); background: linear-gradient(90deg, rgba(91,140,255,.07), var(--panel) 42%); }
+  .state.coordrole { color: var(--accent); text-transform:none; font-weight:600; }
+  .act.coordidle { color: var(--dim); }
   .lane[data-peek] { cursor: pointer; }
   .lane .top { display:flex; align-items:center; gap:9px; }
   .lane .st-dot { width:9px; height:9px; border-radius:50%; flex:none; }
@@ -149,6 +152,11 @@
   <section>
     <div class="sec-h needs"><h2>Needs you</h2><span id="needsCount" class="count"></span></div>
     <div id="needs"></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Coordinators</h2><span class="count">hub + console</span></div>
+    <div id="coordinators"><div class="empty">Loading…</div></div>
   </section>
 
   <section>
