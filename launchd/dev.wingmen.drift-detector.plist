@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Cross-silo schema drift-detector (CAI-RESP-420 #50). cc-infra daemon, NEVER
+     the hub. Daily baseline sweep; the on-apply + pre-live invocations run the
+     same module with --reason on-apply|pre-live from the migration apply path /
+     a pre-live gate. Install (operator/hub go, since it PAGES the war-room):
+       cp launchd/dev.wingmen.drift-detector.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/dev.wingmen.drift-detector.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.drift-detector</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/Musa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>-m</string>
+    <string>nervous_system.drift_detector</string>
+    <string>--once</string>
+    <string>--reason</string>
+    <string>daily</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/Musa/wingmen/orchestrator</string>
+  <key>StartInterval</key><integer>86400</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/Musa/wingmen/orchestrator/logs/drift_detector.log</string>
+  <key>StandardErrorPath</key><string>/Users/Musa/wingmen/orchestrator/logs/drift_detector.log</string>
+</dict>
+</plist>
