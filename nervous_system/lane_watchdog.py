@@ -26,7 +26,7 @@ Escalations + actions are logged (logs/lane_watchdog.log) and posted to the bus
 State persists in logs/lane_watchdog_state.json (for the cross-scan persistence guard).
 """
 from __future__ import annotations
-import hashlib, json, os, subprocess, sys, time
+import hashlib, json, os, re, subprocess, sys, time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -164,11 +164,25 @@ def lane_progress_state(sess: str):
         return ("", "", 0)
 
 
+_TOK_RE = re.compile(r"([\d][\d.,]*\s*k?)\s*tokens", re.IGNORECASE)
+
+
+def footer_tokens(cap: str) -> str:
+    """The pane's live token counter(s) (e.g. '↑ 1.2k tokens') from the footer —
+    it RISES as the model GENERATES (real work), so a busy build advances it every
+    scan. Deliberately NOT the elapsed timer (which ticks regardless of work). A
+    frozen counter = not generating; an idle pane has no counter (empty)."""
+    tail = "\n".join(cap.splitlines()[-4:])
+    return ",".join(m.replace(" ", "") for m in _TOK_RE.findall(tail))
+
+
 def progress_fingerprint(sess: str, cap: str):
-    """(fingerprint, unactioned). fingerprint combines the three independent
-    progress signals; ANY one advancing between scans = the lane progressed."""
+    """(fingerprint, unactioned). Progress = advance in ANY of FOUR independent
+    signals — a genuinely-busy lane moves at least one every scan, so it can't be
+    a false positive: pane scrollback (streamed output), pane TOKEN-DELTA (model
+    generating), latest bus post id, last commit sha. Never the heartbeat."""
     last_bus, last_commit, unactioned = lane_progress_state(sess)
-    return f"{scrollback_digest(cap)}|{last_bus}|{last_commit}", unactioned
+    return f"{scrollback_digest(cap)}|{footer_tokens(cap)}|{last_bus}|{last_commit}", unactioned
 
 
 def progress_stalled(stalled_sec: float, unactioned: int) -> bool:

@@ -47,7 +47,42 @@ def test_stall_requires_both_no_progress_AND_unactioned_work():
     assert w.progress_stalled(under, 2) is False       # progressed recently -> not a stall
 
 
-def test_fingerprint_shape_combines_three_signals(monkeypatch):
+def test_footer_tokens_extracts_counter_not_timer():
+    assert w.footer_tokens("  esc to interrupt (12s · ↑ 1.2k tokens)") == "1.2k"
+    assert w.footer_tokens("  esc to interrupt (48s)") == ""          # timer only, no token counter
+    assert w.footer_tokens("  ? for shortcuts · for agents") == ""    # idle pane, no counter
+
+
+def test_token_delta_is_progress_even_if_scrollback_static(monkeypatch):
+    # THE busy-build guarantee: a generating lane advances the token counter every
+    # scan, so its fingerprint moves and it is NEVER flagged — even mid-tool with a
+    # momentarily static scrollback.
+    monkeypatch.setattr(w, "lane_progress_state", lambda s: ("100", "abc", 1))
+    a = _pane(BODY, "  esc to interrupt (12s · ↑ 1.2k tokens)")
+    b = _pane(BODY, "  esc to interrupt (30s · ↑ 4.8k tokens)")   # same scrollback, tokens rose
+    fpa, _ = w.progress_fingerprint("l", a)
+    fpb, _ = w.progress_fingerprint("l", b)
+    assert fpa != fpb
+
+
+def test_elapsed_timer_alone_is_NOT_progress(monkeypatch):
+    # The elapsed timer ticking with everything else frozen must NOT read as progress
+    # (that would mask a real wedge).
+    monkeypatch.setattr(w, "lane_progress_state", lambda s: ("100", "abc", 1))
+    a = _pane(BODY, "  esc to interrupt (12s)")
+    b = _pane(BODY, "  esc to interrupt (600s)")   # only the timer moved
+    assert w.progress_fingerprint("l", a)[0] == w.progress_fingerprint("l", b)[0]
+
+
+def test_idle_unsent_detection_not_regressed():
+    # Condition (2): the existing stuck-draft path still classifies correctly.
+    draft = "some tool output\n❯ override the gate, apply now\n  ? for agents"
+    empty = "some tool output\n❯ \n  ? for agents"
+    assert w.classify(draft) == "IDLE_UNSENT"
+    assert w.classify(empty) == "IDLE_CLEAN"
+
+
+def test_fingerprint_shape_combines_signals(monkeypatch):
     # progress_fingerprint blends pane digest + last bus id + last commit; any one
     # advancing changes the fingerprint (so a bus post / commit resets the timer
     # even if the pane is momentarily static).
