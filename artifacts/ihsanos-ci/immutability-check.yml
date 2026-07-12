@@ -1,0 +1,47 @@
+# migration-immutability.yml — DROP-IN GitHub Actions workflow for the IHSANOS repo
+# (CAI-RESP-420 #50, Deliverable C part 2). Catches an in-place migration amend at
+# PR time — the 061->092 fault — as a required check, BEFORE it can reach a silo.
+#
+# cc-ihsanos wiring steps (coordinated via bus):
+#   1. Vendor the guard: copy scripts/gates/migration_immutability_guard.py from
+#      the orchestrator repo into this repo (e.g. ci/migration_immutability_guard.py),
+#      OR add orchestrator as a checkout step. It needs only psycopg + python-dotenv.
+#   2. Add this workflow as .github/workflows/migration-immutability.yml.
+#   3. Backfill the ledger ONCE (establishes the forward-immutable baseline):
+#        for ref in ceayjeamtmcyzzvqflus goumlynecruxrlmzlntp; do
+#          for f in migrations/*.sql; do
+#            python migration_immutability_guard.py --record --repo ihsanos \
+#              --migration "$(basename $f)" --file "$f" --silo "$ref"; done; done
+#      (Records CURRENT file hashes = forward protection. The historical 061
+#       cross-silo divergence is caught by the drift-detector, not retroactively here.)
+#   4. Mark this check REQUIRED in branch protection.
+#
+# DATABASE_URL secret = the orchestrator SUBSTRATE dsn (where migration_ledger lives).
+
+name: migration-immutability
+on:
+  pull_request:
+    paths: ["migrations/**"]
+  push:
+    branches: [main]
+    paths: ["migrations/**"]
+
+jobs:
+  immutability:
+    runs-on: [self-hosted, studio]     # same runner class as the ihsanos CI gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install psycopg[binary] python-dotenv
+      - name: Assert no applied migration was amended in place (both silos)
+        env:
+          DATABASE_URL: ${{ secrets.SUBSTRATE_DATABASE_URL }}
+        run: |
+          set -e
+          for ref in ceayjeamtmcyzzvqflus goumlynecruxrlmzlntp; do
+            echo "== checking ihsanos migrations vs ledger @ $ref =="
+            python ci/migration_immutability_guard.py \
+              --check --repo ihsanos --dir migrations --silo "$ref"
+          done

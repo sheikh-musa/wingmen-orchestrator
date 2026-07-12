@@ -21,6 +21,13 @@ ORCH = Path(__file__).resolve().parent.parent
 load_dotenv(ORCH / ".env")
 DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
+# Migration-immutability guard (CAI-RESP-420 #50): the orchestrator apply path is
+# the FIRST enforcement point — check before write, record after.
+sys.path.insert(0, str(ORCH / "scripts" / "gates"))
+import migration_immutability_guard as guard  # noqa: E402
+
+SUBSTRATE_REF = "tscuymavysscrvoberrr"   # orchestrator substrate (data-store-registry)
+
 
 def statements(sql: str):
     stripped = "\n".join(
@@ -40,8 +47,15 @@ def main() -> int:
     sql = Path(path).read_text()
     stmts = statements(sql)
     print(f"apply {name} ({version}) — {len(stmts)} statements (dry_run={dry})")
+    mig_name = Path(path).name
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-infra',true)")
+        # GATE (before write): refuse to (re-)apply an amended already-applied body.
+        try:
+            guard.check_one(conn, "orchestrator", mig_name, SUBSTRATE_REF, path)
+        except guard.ImmutabilityViolation as e:
+            print(f"ABORT — immutability violation: {e}", file=sys.stderr)
+            return 1
         for s in stmts:
             print(f"  {' '.join(s.split())[:72]}")
             if not dry:
@@ -53,6 +67,8 @@ def main() -> int:
                 (version, name, [f"{name}: {len(stmts)} DDL statements"]),
             )
             conn.commit()
+            # LEDGER (after write): record the applied body hash for future checks.
+            guard.record(conn, "orchestrator", mig_name, SUBSTRATE_REF, path)
         else:
             conn.rollback()
     print("done" if not dry else "dry-run only (rolled back)")
