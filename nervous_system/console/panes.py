@@ -46,6 +46,57 @@ _NOISE_RE = re.compile(r"Press up to edit queued|↑ to manage|ctrl\+t to|◯\s+
 _LEADING_GLYPHS = "⎿●◯○✻✳✶✷✸✹✺✽❋⚹⏵⎾⌐▶ ·\t"
 _SPINNER_TELEMETRY_RE = re.compile(r"\s*[(·]\s*\d+m?\s*\d*s?\b.*?(tokens|thinking|thought for).*$", re.IGNORECASE)
 
+# Wrap-continuation REFLOW (operator #3729): the Claude-Code TUI word-wraps its
+# output and draws each wrapped row as its OWN physical line, so one sentence
+# arrives split across 2-3 lines and the peek reads as broken mid-sentence prose.
+# Because the TUI word-wraps (breaks at spaces, so a wrapped line ends SHORT of
+# the pane width, not exactly at it) a "line fills the width" test can't tell a
+# wrap from a real newline — so we reflow the Markdown way: collapse the soft
+# newlines WITHIN a run of consecutive prose lines into spaces, and break only on
+# real boundaries. Boundaries = chrome/blank lines AND structure-starts (a line
+# beginning with a bullet, task/tool glyph, or "N." marker) — so intentional
+# lists + blank-separated paragraphs stay separate instead of smearing into one
+# blob, while a wrapped sentence rejoins into flowing prose.
+# structure-start chars: bullets/task-glyphs/tool-glyphs Claude draws each on
+# their own line — a line beginning with one starts a NEW logical line.
+_STRUCTURE_CHARS = set("⎿●◯○✻✳✶✷✸✹✺✽❋⚹⏵▶→◼◻▪✔✅✓✗✘☐☑-*•◦‣❯")
+_NUM_LIST_RE = re.compile(r"^[0-9]+[.)]\s")
+
+
+def _starts_structure(stripped: str) -> bool:
+    """True if a (whitespace-stripped) content line begins a new list item /
+    bulleted or tool row — a hard boundary the reflow must NOT join onto the
+    previous line, so lists stay lists."""
+    if not stripped:
+        return False
+    return stripped[0] in _STRUCTURE_CHARS or bool(_NUM_LIST_RE.match(stripped))
+
+
+def _reflow(raw: str):
+    """Join soft-wrapped continuation lines into flowing logical lines. Returns a
+    list of logical lines: chrome dropped, consecutive prose rejoined with a
+    single space, lists + blank-separated paragraphs kept as their own lines."""
+    out = []
+    buf = None
+    for ln in raw.splitlines():
+        if _is_chrome(ln):                       # box/footer/blank/bare-prompt/noise = boundary
+            if buf is not None:
+                out.append(buf)
+                buf = None
+            continue
+        content = ln.rstrip()
+        stripped = content.lstrip()
+        if buf is not None and _starts_structure(stripped):
+            out.append(buf)                       # a new bullet/list item = its own logical line
+            buf = None
+        if buf is None:
+            buf = content
+        else:
+            buf = buf + " " + stripped            # soft-wrap continuation: rejoin with a single space
+    if buf is not None:
+        out.append(buf)
+    return out
+
 
 def _is_chrome(line: str) -> bool:
     """True for a line that's TUI decoration, not activity: pure box-drawing/
@@ -71,13 +122,12 @@ def _is_chrome(line: str) -> bool:
 
 
 def _clean_pane_text(raw: str) -> str:
+    """Chrome-strip + REFLOW the raw pane into readable prose: rejoin soft-wrapped
+    lines into flowing logical lines, then peel each logical line's leading
+    tool/spinner glyphs and drop its trailing token-telemetry."""
     kept = []
-    for ln in raw.splitlines():
-        if _is_chrome(ln):
-            continue
-        # peel leading tool/spinner glyphs + drop the trailing token-telemetry
-        # so each line reads as plain activity, not terminal chrome.
-        s = ln.rstrip().lstrip(_LEADING_GLYPHS)
+    for s in _reflow(raw):
+        s = s.lstrip(_LEADING_GLYPHS)
         s = _SPINNER_TELEMETRY_RE.sub("", s).rstrip()
         if s:
             kept.append(s)
