@@ -45,6 +45,16 @@ if [[ -f "$ORCH_DIR/.env" ]]; then
     set +a
 fi
 
+# Scrub ANTHROPIC_API_KEY before launching the hub session (mirrors
+# scripts/launch_dangerous_cc.sh): .env carries the key for the orch's own
+# direct-API helpers (which re-source .env themselves), but a present
+# ANTHROPIC_API_KEY makes `claude` bill metered API-usage instead of the Mac
+# Mini's Max subscription. The tmux session inherits this shell's env, so without
+# this unset the hub boots on metered billing — the "Opus 4.8 · Claude API" splash
+# Nazim caught on 2026-07-15 (bus #8806). CLAUDE_CODE_OAUTH_TOKEN (also from .env)
+# is passed through explicitly below so the session runs on Max.
+unset ANTHROPIC_API_KEY
+
 # ORCH-TOPOLOGY-001: session name is body-scoped. The hub boots as `orch`
 # (bridge exact-matches =orch); the console body (Nazim, operator's MacBook)
 # sets ORCH_TMUX_SESSION=nazim in .env so a non-hub session NEVER claims the
