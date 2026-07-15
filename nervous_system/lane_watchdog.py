@@ -55,7 +55,12 @@ NON_LANE_PREFIXES = ("reviewer-", "billingtest", "catest")
 # governance console is the worst identity-doctrine violation possible, so for
 # these sessions the ONLY sanctioned action is escalation (bus-notify), never a
 # keystroke. cai/orch, any ai-responder persona console, belong here.
-GOVERNANCE_CONSOLES = {"cai"}
+# 'support' (cc-support, op#4537) is a client-facing conversational agent — a
+# phantom keystroke there could send garbage to the LIVE irsyad/Gazzabyte client,
+# the worst-case blast radius. Idle-until-a-client-message is its NORMAL state
+# (the empty-REPL placeholder reads as IDLE_UNSENT, a false positive). Watch it
+# for liveness, NEVER auto-submit.
+GOVERNANCE_CONSOLES = {"cai", "support"}
 GOVERNANCE_PREFIXES = ("mamadah", "nutri", "mizan")   # ai-responder persona consoles
 
 # Anti-replay cap (CAI-RESP-381): a given unsent input gets at most this many
