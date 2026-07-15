@@ -49,10 +49,20 @@ fi
 # scripts/launch_dangerous_cc.sh): .env carries the key for the orch's own
 # direct-API helpers (which re-source .env themselves), but a present
 # ANTHROPIC_API_KEY makes `claude` bill metered API-usage instead of the Mac
-# Mini's Max subscription. The tmux session inherits this shell's env, so without
-# this unset the hub boots on metered billing — the "Opus 4.8 · Claude API" splash
-# Nazim caught on 2026-07-15 (bus #8806). CLAUDE_CODE_OAUTH_TOKEN (also from .env)
-# is passed through explicitly below so the session runs on Max.
+# Studio's Max subscription — the "Opus 4.8 · Claude API" splash Nazim caught on
+# 2026-07-15 (bus #8806). CLAUDE_CODE_OAUTH_TOKEN (also from .env) is passed
+# through explicitly below so the session runs on Max.
+#
+# TWO sources inject the key, both must be scrubbed (2026-07-15, second pass):
+#   1. THIS shell's env (the `set -a; source .env` above) — the `unset` here.
+#   2. The tmux SERVER's *global* environment — `tmux new-session` copies the
+#      server-global env into every new pane, which OVERRIDES the shell unset.
+#      A long-lived server (shared with cai/console/lane sessions) that was
+#      started with the key in its env re-injects it on every spawn. The first
+#      fix (shell unset only) did NOT stop the leak: the respawn still booted
+#      metered because the server-global copy won. So we also `setenv -gu` it off
+#      the server (below, where a server is guaranteed) and blank it per-session
+#      with `-e ANTHROPIC_API_KEY=`.
 unset ANTHROPIC_API_KEY
 
 # ORCH-TOPOLOGY-001: session name is body-scoped. The hub boots as `orch`
@@ -71,13 +81,20 @@ if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
     log "adopting existing live '$SESSION' session (no restart)"
 else
     log "starting orch session (claude --continue in tmux '$SESSION')"
+    # Scrub ANTHROPIC_API_KEY off the tmux SERVER-global env so new-session does
+    # not re-inject it into the pane (see the block above). start-server first so
+    # setenv has a target even on a cold boot; both are harmless no-ops otherwise.
+    "$TMUX_BIN" start-server 2>/dev/null || true
+    "$TMUX_BIN" setenv -gu ANTHROPIC_API_KEY 2>/dev/null || true
     # --continue (NOT --resume): --resume opens an interactive session PICKER
     # that, unattended in a detached tmux, hangs at the menu instead of coming
     # up live — so a launchd/manual restart would leave the hub stuck at a
     # chooser. --continue auto-resumes the most-recent conversation in this dir
     # (the hub's own ongoing session) → an unattended restart returns LIVE with
-    # context.
-    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ORCH_DIR" -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
+    # context. `-e ANTHROPIC_API_KEY=` blanks it for this pane belt-and-suspenders.
+    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ORCH_DIR" \
+        -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
+        -e "ANTHROPIC_API_KEY=" \
         -- "$CLAUDE_BIN" --dangerously-skip-permissions --continue --model claude-opus-4-8
 fi
 
