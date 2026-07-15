@@ -56,7 +56,15 @@ boot_one() {
   if tmux has-session -t "$name" 2>/dev/null; then
     echo "SKIP $name — tmux session already exists (attach with: lanes.sh attach $name)"; return
   fi
-  tmux new-session -d -s "$name" -c "$dir" "$LAUNCHER"
+  # Metered-API defense-in-depth (op#4449): scrub ANTHROPIC_API_KEY off the tmux
+  # SERVER-global env + blank it per-pane so the lane session never inherits the
+  # key. The launcher ($LAUNCHER) already unsets it before exec-ing claude, so the
+  # claude process is clean either way — but this keeps the SESSION env clean too
+  # and guards a launcher that runs claude as a direct pane cmd. A shell unset
+  # alone is INSUFFICIENT: tmux new-session copies the server-global over it.
+  tmux start-server 2>/dev/null || true
+  tmux setenv -gu ANTHROPIC_API_KEY 2>/dev/null || true
+  tmux new-session -d -s "$name" -c "$dir" -e "ANTHROPIC_API_KEY=" "$LAUNCHER"
   echo "BOOTED $name → tmux session '$name' ($dir)"
 }
 

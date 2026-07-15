@@ -41,6 +41,13 @@ fi
 #     the Keychain — without this sk-ant-oat token it falls back to API billing.
 #     The token bills to the Max subscription. (Verified 2026-06-17.)
 unset ANTHROPIC_API_KEY
+# The shell unset above keeps cai's own claude clean (it is exec'd as a child of
+# this script). Also scrub the tmux SERVER-global copy (op#4449 permanent fix):
+# tmux new-session copies the server-global env into every pane, overriding a
+# shell unset — so a dirty server-global would meter any DIRECT-claude-pane
+# session on this server. cai runs inside its tmux pane, so it can scrub the
+# server for whole-fleet hygiene. Harmless no-op if not under tmux.
+tmux setenv -gu ANTHROPIC_API_KEY 2>/dev/null || true
 DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
 if [ -z "$DSN" ]; then
     echo "ERROR: DATABASE_URL not set in $ORCH_DIR/.env — cannot bring cai online" >&2
