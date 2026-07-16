@@ -12,6 +12,7 @@ R3 inheritance: all reads are defensive — missing/corrupt files return None.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -20,12 +21,29 @@ from nervous_system.autonomous_loop_detector import _DIR_TO_CC
 from nervous_system.jsonl_safe_read import safe_file_stats
 
 
+# Project-dir names are host-specific: the _DIR_TO_CC keys are the Mini's
+# `-Users-sheikhmusa-...` form, but the same repo on another host (e.g. the
+# Studio hub, home /Users/Musa -> `-Users-Musa-...`) has a different dir name.
+# Rewrite the leading `-Users-<user>-` to the canonical Mini form so the sweep
+# resolves cc_identity regardless of which host runs it (the 2026-07-08 topology
+# move to the Studio hub is exactly why the writer silently matched zero dirs).
+_HOME_PREFIX_RE = re.compile(r"^-Users-[^-]+-")
+
+
+def _canonical_dir(name: str) -> str:
+    return _HOME_PREFIX_RE.sub("-Users-sheikhmusa-", name, count=1)
+
+
 @dataclass(frozen=True)
 class SessionTokens:
     input_tokens: int
     output_tokens: int
     cache_creation_input_tokens: int
     cache_read_input_tokens: int
+    # Current-context size = the LAST assistant turn's actual input context
+    # (fresh input + cache-read + cache-creation). Unlike the summed fields
+    # above (lifetime cost), this is how full the window is *right now*.
+    latest_context_tokens: int = 0
 
 
 def parse_jsonl_usage(path: Path) -> Optional[SessionTokens]:
@@ -36,6 +54,7 @@ def parse_jsonl_usage(path: Path) -> Optional[SessionTokens]:
     """
     try:
         in_t = out_t = cc_t = cr_t = 0
+        last_ctx = 0
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
@@ -55,15 +74,22 @@ def parse_jsonl_usage(path: Path) -> Optional[SessionTokens]:
                 usage = msg.get("usage")
                 if not isinstance(usage, dict):
                     continue
-                in_t += int(usage.get("input_tokens") or 0)
+                m_in = int(usage.get("input_tokens") or 0)
+                m_cc = int(usage.get("cache_creation_input_tokens") or 0)
+                m_cr = int(usage.get("cache_read_input_tokens") or 0)
+                in_t += m_in
                 out_t += int(usage.get("output_tokens") or 0)
-                cc_t += int(usage.get("cache_creation_input_tokens") or 0)
-                cr_t += int(usage.get("cache_read_input_tokens") or 0)
+                cc_t += m_cc
+                cr_t += m_cr
+                # Overwrite each turn -> holds the LAST assistant turn's context
+                # depth (the live window fill), not the running sum.
+                last_ctx = m_in + m_cr + m_cc
         return SessionTokens(
             input_tokens=in_t,
             output_tokens=out_t,
             cache_creation_input_tokens=cc_t,
             cache_read_input_tokens=cr_t,
+            latest_context_tokens=last_ctx,
         )
     except (OSError, FileNotFoundError):
         return None
@@ -72,6 +98,7 @@ def parse_jsonl_usage(path: Path) -> Optional[SessionTokens]:
 def sweep_projects_root(
     projects_root: Path,
     modified_since: float,
+    body_role: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Walk projects_root/<mangled-repo>/*.jsonl, parse usage, return upsert rows.
 
@@ -90,9 +117,19 @@ def sweep_projects_root(
     except OSError:
         return rows
     for repo_dir in repo_dirs:
-        cc_identity = _DIR_TO_CC.get(repo_dir.name)
+        cc_identity = _DIR_TO_CC.get(repo_dir.name) or _DIR_TO_CC.get(
+            _canonical_dir(repo_dir.name)
+        )
         if not cc_identity:
             continue
+        # Body-aware relabel: the orchestrator repo dir is SHARED by the hub
+        # (cc-orchestrator, Studio) and the console body (Nazim / orch-console,
+        # Mini). The directory alone can't tell them apart — they differ only by
+        # which host/body runs the session (ORCH_BODY_ROLE per ORCH-TOPOLOGY-001).
+        # When the writer runs under the console body, relabel so Nazim's context
+        # lands as its own console row instead of commingling with the hub's gauge.
+        if cc_identity == "cc-orchestrator" and body_role == "console":
+            cc_identity = "orch-console"
         try:
             jsonls = [
                 p for p in repo_dir.iterdir()
@@ -117,6 +154,7 @@ def sweep_projects_root(
                 "output_tokens": tokens.output_tokens,
                 "cache_creation_input_tokens": tokens.cache_creation_input_tokens,
                 "cache_read_input_tokens": tokens.cache_read_input_tokens,
+                "latest_context_tokens": tokens.latest_context_tokens,
                 "mtime": stats.mtime,
             })
     return rows
@@ -152,6 +190,7 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                       output_tokens = %s,
                       cache_creation_input_tokens = %s,
                       cache_read_input_tokens = %s,
+                      latest_context_tokens = %s,
                       ended_at = %s
                     WHERE id = %s
                     """,
@@ -160,6 +199,7 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                         row["output_tokens"],
                         row["cache_creation_input_tokens"],
                         row["cache_read_input_tokens"],
+                        row.get("latest_context_tokens", 0),
                         started_at,
                         existing[0],
                     ),
@@ -171,13 +211,15 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                       (cc_identity, session_id, started_at, ended_at,
                        input_tokens, output_tokens,
                        cache_creation_input_tokens, cache_read_input_tokens,
+                       latest_context_tokens,
                        source, has_per_message_detail)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, false)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false)
                     """,
                     (
                         row["cc_identity"], row["session_id"], started_at, started_at,
                         row["input_tokens"], row["output_tokens"],
                         row["cache_creation_input_tokens"], row["cache_read_input_tokens"],
+                        row.get("latest_context_tokens", 0),
                         source,
                     ),
                 )
