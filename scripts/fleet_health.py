@@ -10,9 +10,17 @@ runs on a launchd timer so the substrate self-heals:
   3. RECONCILE: cross-check agent_status against live tmux sessions and flag
      drift — a "working" row with no live session (crashed lane) or a live
      CC session with no fresh row (unregistered lane).
+  4. ARCHIVE dead-letters: mark read the unread agent_messages addressed to
+     agents that are gone (no fresh heartbeat AND no sent-message in 24h) and
+     older than ARCHIVE_MIN_AGE_H. Keeps the console's bus/queue counts honest
+     (dead lanes accumulate tombstones nobody drains — operator-flagged 2026-07-16)
+     WITHOUT hiding anything live: recipients that heartbeat OR have sent recently
+     (incl. unregistered coordinators like cc-orchestrator/orch-console) are
+     spared, human-addressed (musa/operator) + substrate rows are never touched,
+     and only messages older than the grace window are swept.
 
-Read-only on the model side; only touches agent_status (status + delete).
-Run on demand:  python3 scripts/fleet_health.py [--quiet]
+Only touches agent_status (status + delete) and agent_messages.read_at (archive).
+Run on demand:  python3 scripts/fleet_health.py [--quiet] [--no-archive]
 """
 import os, re, subprocess, sys
 import psycopg
@@ -20,6 +28,8 @@ from dotenv import load_dotenv
 
 STALE_MIN = 30      # heartbeat older than this => mark offline
 PRUNE_DAYS = 1      # offline rows older than this => delete
+ARCHIVE_MIN_AGE_H = 72   # dead-letter grace: only archive unread older than this
+SENDER_LIVE_WINDOW_H = 24  # a recipient that SENT within this window is "live" -> spared
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -52,6 +62,30 @@ def main():
         pruned = [r[0] for r in cur.fetchall()]
         conn.commit()
 
+        # 4. ARCHIVE dead-letters — mark read unread messages to gone agents.
+        # "Gone" = no fresh heartbeat AND hasn't sent in SENDER_LIVE_WINDOW_H
+        # (the sent-recently clause spares unregistered coordinators that never
+        # write agent_status, e.g. cc-orchestrator/orch-console). Human + substrate
+        # rows excluded; only messages past the ARCHIVE_MIN_AGE_H grace are swept.
+        archived = []
+        if "--no-archive" not in sys.argv:
+            cur.execute(f"""
+                UPDATE agent_messages SET read_at = now()
+                WHERE read_at IS NULL
+                  AND to_agent IS NOT NULL
+                  AND lower(to_agent) NOT IN ('musa','operator','substrate')
+                  AND created_at < now() - interval '{ARCHIVE_MIN_AGE_H} hours'
+                  AND to_agent NOT IN (
+                      SELECT DISTINCT from_agent FROM agent_messages
+                      WHERE from_agent IS NOT NULL
+                        AND created_at > now() - interval '{SENDER_LIVE_WINDOW_H} hours')
+                  AND to_agent NOT IN (
+                      SELECT agent_id FROM agent_status
+                      WHERE last_heartbeat > now() - interval '{STALE_MIN} minutes')
+                RETURNING to_agent""")
+            archived = [r[0] for r in cur.fetchall()]
+            conn.commit()
+
         cur.execute("""SELECT agent_id, status, tmux_session,
                        round(extract(epoch from (now()-last_heartbeat))/60) AS m
                        FROM agent_status ORDER BY last_heartbeat DESC NULLS LAST""")
@@ -69,6 +103,13 @@ def main():
     for s in sessions:
         if s not in registered_sessions and not re.match(r"^(claude|orchestrator)$", s):
             drift.append(f"  ? tmux '{s}' alive but no agent_status row points to it (unregistered/zombie)")
+
+    # archive is a mutation — always log it (even in --quiet), it's rare + auditable
+    if archived:
+        from collections import Counter
+        by = Counter(archived)
+        print(f"archived {len(archived)} dead-letters: " +
+              ", ".join(f"{a}×{n}" for a, n in by.most_common()))
 
     if not quiet:
         if marked:
