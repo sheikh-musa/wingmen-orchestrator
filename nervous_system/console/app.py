@@ -264,6 +264,48 @@ _COORD_DB_PEEK = {"nazim": "orch-console"}
 # (the 2026-07-11 regression showed up as a client-side timeout, not a metric).
 _FLEET_BUDGET_MS = int(os.environ.get("CONSOLE_FLEET_BUDGET_MS", "500"))
 
+# Context-bloat normalization: an always-on agent's CURRENT context size
+# (latest_context_tokens = the last turn's input+cache_read+cache_creation)
+# ÷ the model context window => 0-100%. Opus 4.8 runs a 1M-token window here
+# (verified via /context; the model's max_input_tokens is 1,000,000 — NOT 2M).
+# Overridable via CONSOLE_CTX_WINDOW. Soft/hard thresholds (green→amber→red) at
+# 60% (~600K) / 80% (~800K).
+_CTX_WINDOW = int(os.environ.get("CONSOLE_CTX_WINDOW", "1000000"))
+_CTX_SOFT = 0.60
+_CTX_HARD = 0.80
+
+
+def _context_bloat(rows):
+    """Annotate each latest-per-agent row with CURRENT-context pct (of the model
+    window) + a green/amber/red level, sorted fullest-first. `ctx_tokens` is the
+    live window fill (the last turn's actual input context). Rows whose value is
+    missing, non-positive, or impossibly large (> the window — a single call
+    cannot exceed the context window) are DROPPED as bad data rather than shown.
+    The caller surfaces `age_s` so a stale reading is never mistaken for live."""
+    out = []
+    if _CTX_WINDOW <= 0:
+        return out
+    for r in rows or []:
+        ctx = r.get("ctx_tokens")
+        if ctx is None:
+            continue
+        ctx = int(ctx)
+        if ctx <= 0 or ctx > _CTX_WINDOW:
+            continue  # bad data — cannot be a real current-context reading
+        frac = ctx / _CTX_WINDOW
+        pct = round(min(frac, 1.0) * 100)
+        level = "red" if frac >= _CTX_HARD else ("amber" if frac >= _CTX_SOFT else "green")
+        out.append({
+            "agent": r.get("cc_identity"),
+            "ctx_tokens": ctx,
+            "window": _CTX_WINDOW,
+            "pct": pct,
+            "level": level,
+            "age_s": r.get("age_s"),
+        })
+    out.sort(key=lambda x: x["pct"], reverse=True)
+    return out
+
 
 def _fleet_payload():
     """The single live-derived aggregate behind /api/fleet (redesign #7576):
@@ -279,15 +321,35 @@ def _fleet_payload():
     # coordinator peekable-check share it (a subprocess each would otherwise
     # cost ~2x). The 4 reads are independent -> fire concurrently.
     live = set(panes.live_sessions())
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=7) as ex:
         f_lanes = ex.submit(db.fetch_lanes)
         f_deploys = ex.submit(db.fetch_deploys)
         f_needs = ex.submit(db.fetch_needs_you)
         f_coord = ex.submit(db.fetch_coordinators)
+        # three new operator-visibility signals, fired concurrently:
+        f_drain = ex.submit(db.fetch_bus_drain)          # hub's owed bus backlog
+        f_bloat = ex.submit(db.fetch_context_bloat)      # per-agent context %
+        f_auth = ex.submit(panes.lane_token_auth)        # Max vs metered + acct
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         deploys = f_deploys.result()
         needs = f_needs.result()
         coordinators = f_coord.result()
+        # each guarded: a signal failing must not blank the whole aggregate.
+        try:
+            bus_drain = f_drain.result()
+        except Exception as e:
+            logger.warning("bus_drain failed: %s", e)
+            bus_drain = {"owed": None}
+        try:
+            context_bloat = _context_bloat(f_bloat.result())
+        except Exception as e:
+            logger.warning("context_bloat failed: %s", e)
+            context_bloat = []
+        try:
+            token_auth = f_auth.result()
+        except Exception as e:
+            logger.warning("token_auth failed: %s", e)
+            token_auth = {"lanes": [], "summary": {"by_owner": {}, "metered": 0, "total": 0}}
 
     # A coordinator card is peekable when its pane is a LOCAL live tmux session
     # (orch on this Studio host) OR it's a cross-host coordinator we surface via a
@@ -323,6 +385,9 @@ def _fleet_payload():
         "coordinators": _jsonable(coordinators),
         "lanes": _jsonable(lanes),
         "deploys": _jsonable(deploys),
+        "bus_drain": _jsonable(bus_drain),
+        "context_bloat": _jsonable(context_bloat),
+        "token_auth": _jsonable(token_auth),
     }
 
 

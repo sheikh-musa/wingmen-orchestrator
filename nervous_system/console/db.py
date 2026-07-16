@@ -508,3 +508,76 @@ def fetch_deploys() -> List[dict]:
 def fetch_queue() -> List[dict]:
     sql, params = build_queue_query()
     return _query(sql, params)
+
+
+def build_bus_drain_query() -> Tuple[str, list]:
+    """The hub's actionable bus backlog — what cc-orchestrator STILL OWES.
+
+    A row is owed when it's addressed to the hub AND either unread OR a
+    requires_response that hasn't been responded/skipped. Test rows are
+    excluded. Alongside the single `owed` count we return an AGE DISTRIBUTION
+    (fresh <1h / 1-6h / 6-24h / >24h) + the oldest age — an honest 'is it
+    draining or rotting?' signal computable from current state (there is no
+    backlog time-series table, so this is the real trend surface: a healthy
+    hub keeps the tail small and the bulk fresh)."""
+    sql = (
+        "SELECT "
+        "  count(*) AS owed, "
+        "  count(*) FILTER (WHERE created_at > now() - interval '1 hour') AS fresh_1h, "
+        "  count(*) FILTER (WHERE created_at <= now() - interval '1 hour' "
+        "    AND created_at > now() - interval '6 hours') AS h1_6, "
+        "  count(*) FILTER (WHERE created_at <= now() - interval '6 hours' "
+        "    AND created_at > now() - interval '24 hours') AS h6_24, "
+        "  count(*) FILTER (WHERE created_at <= now() - interval '24 hours') AS older_24h, "
+        "  round(extract(epoch FROM (now() - min(created_at))))::int AS oldest_age_s "
+        "FROM agent_messages "
+        "WHERE to_agent = 'cc-orchestrator' "
+        "  AND COALESCE(is_test, false) = false "
+        "  AND (read_at IS NULL "
+        "       OR (requires_response AND responded_at IS NULL AND skipped_at IS NULL))"
+    )
+    return sql, []
+
+
+def fetch_bus_drain() -> dict:
+    """One row: the hub's owed-backlog count + age distribution. Always returns a
+    dict (zeros if the bus is clear)."""
+    sql, params = build_bus_drain_query()
+    rows = _query(sql, params)
+    if rows:
+        return rows[0]
+    return {"owed": 0, "fresh_1h": 0, "h1_6": 0, "h6_24": 0, "older_24h": 0, "oldest_age_s": None}
+
+
+def build_context_bloat_query() -> Tuple[str, list]:
+    """Latest current-context size per always-on agent (window fill).
+
+    `latest_context_tokens` on the FRESHEST cc_session_costs row per identity is
+    the LAST assistant turn's actual input context (fresh input + cache-read +
+    cache-creation) = how full that agent's context window is RIGHT NOW. NOTE:
+    `cache_read_input_tokens` is a LIFETIME SUM across every turn (e.g. 98M vs a
+    1M window) and is NOT a current-context signal — using it was the pre-
+    2026-07-16 gauge bug that showed impossible 100% readings. Freshness is by
+    activity time (ended_at = the session jsonl mtime), not DB-insert time.
+    One-off `operator-*` capture sessions are excluded; a 45-day window drops
+    long-dead identities; rows without a current-context value are skipped.
+    `age_s` surfaces a stale reading (writer paused), never shown as live."""
+    sql = (
+        "SELECT DISTINCT ON (cc_identity) "
+        "  cc_identity, "
+        "  latest_context_tokens AS ctx_tokens, "
+        "  input_tokens, "
+        "  round(extract(epoch FROM (now() - COALESCE(ended_at, created_at))))::int AS age_s, "
+        "  COALESCE(ended_at, created_at) AS latest_at "
+        "FROM cc_session_costs "
+        "WHERE cc_identity NOT LIKE 'operator-%%' "
+        "  AND latest_context_tokens IS NOT NULL "
+        "  AND COALESCE(ended_at, created_at) > now() - interval '45 days' "
+        "ORDER BY cc_identity, COALESCE(ended_at, created_at) DESC"
+    )
+    return sql, []
+
+
+def fetch_context_bloat() -> List[dict]:
+    sql, params = build_context_bloat_query()
+    return _query(sql, params)

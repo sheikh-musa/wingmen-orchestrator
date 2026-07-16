@@ -17,10 +17,12 @@ can't break out of its single argv slot.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 _TIMEOUT_S = 5
 _RAW_CAPTURE_LINES = 200  # generous raw window BEFORE chrome-filtering — filter
@@ -261,3 +263,155 @@ def capture_pane(session: str) -> Optional[str]:
         return None
     raw = _raw_capture(session)
     return _clean_pane_text(raw) if raw is not None else None
+
+
+# --- token / auth per lane (Max vs metered, + which Max account) --------------
+#
+# Each fleet lane is a `claude` CLI process on THIS console host (local-only,
+# same surface as the tmux peek — never reaches off-box). Two signals per lane:
+#
+#   * BILLING: a NON-EMPTY ANTHROPIC_API_KEY in the process env => metered API
+#     (red). Absent OR present-but-empty (the launchers scrub it to run on the
+#     Max subscription) => Max (green). Empty-but-present is why a bare "is the
+#     var set" test is WRONG — orch runs with ANTHROPIC_API_KEY= (scrubbed).
+#   * ACCOUNT: a FINGERPRINT of CLAUDE_CODE_OAUTH_TOKEN (sha256 prefix — the raw
+#     token NEVER leaves this function, is never returned, logged, or displayed)
+#     mapped to an owner label. The console host's OWN .env token (os.environ)
+#     is the operator's, auto-labelled 'operator'; other fingerprints are
+#     labelled via CONSOLE_MAX_ACCT_OWNERS (JSON {fp: label}) or, absent that,
+#     shown as 'Max (unknown acct)' — never nothing.
+#
+# READ-ONLY: only `ps` + tmux `list-panes` are invoked, argv lists, no shell.
+_UNKNOWN_ACCT = "Max (unknown acct)"
+_METERED = "metered"
+
+
+def _fingerprint(token: str) -> str:
+    """A stable, NON-reversible short id for an OAuth token. sha256 prefix — the
+    raw token is never surfaced anywhere."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+
+
+def _owner_map() -> Dict[str, str]:
+    """fingerprint -> owner label. The console host's own .env OAuth token
+    (already loaded into os.environ by __main__) is the operator's, so its
+    fingerprint auto-maps to 'operator' — no config needed for the common case.
+    CONSOLE_MAX_ACCT_OWNERS (JSON) adds/overrides other accounts (e.g. Syed)."""
+    m: Dict[str, str] = {}
+    own = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if own:
+        m[_fingerprint(own)] = "operator"
+    raw = os.environ.get("CONSOLE_MAX_ACCT_OWNERS")
+    if raw:
+        try:
+            extra = json.loads(raw)
+            if isinstance(extra, dict):
+                # explicit config wins over the auto-derived operator label
+                m.update({str(k): str(v) for k, v in extra.items()})
+        except Exception:
+            pass
+    return m
+
+
+def _pid_to_session() -> Dict[int, str]:
+    """Map every live tmux pane's process pid -> its session name, so a claude
+    pid can be walked up its parent chain to the owning lane."""
+    out: Dict[int, str] = {}
+    try:
+        r = subprocess.run(
+            [_TMUX, "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+            capture_output=True, text=True, timeout=_TIMEOUT_S,
+        )
+        if r.returncode != 0:
+            return out
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                out[int(parts[1])] = parts[0]
+    except Exception:
+        pass
+    return out
+
+
+def _ppid_map() -> Dict[int, int]:
+    """pid -> ppid for every process (so a claude pid can be walked up to a tmux
+    pane pid to resolve its lane)."""
+    out: Dict[int, int] = {}
+    try:
+        r = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid="], capture_output=True, text=True, timeout=_TIMEOUT_S,
+        )
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                out[int(parts[0])] = int(parts[1])
+    except Exception:
+        pass
+    return out
+
+
+def _session_for(pid: int, pane_pids: Dict[int, str], ppid: Dict[int, int]) -> Optional[str]:
+    cur, seen = pid, 0
+    while cur and cur > 1 and seen < 40:
+        if cur in pane_pids:
+            return pane_pids[cur]
+        cur = ppid.get(cur)
+        seen += 1
+    return None
+
+
+def lane_token_auth() -> dict:
+    """Per-lane billing (Max vs metered) + Max-account owner, with a fleet
+    summary. Local `ps eww` on the console host; the raw OAuth token is fingerprinted
+    in-process and never returned. Best-effort: any failure returns an empty set
+    rather than raising into the fleet aggregate.
+
+    Returns {"lanes": [{session, metered, acct, owner}], "summary": {...}}."""
+    owner_map = _owner_map()
+    pane_pids = _pid_to_session()
+    ppid = _ppid_map()
+    lanes: List[dict] = []
+    try:
+        r = subprocess.run(
+            ["ps", "eww", "-o", "pid=,command="],
+            capture_output=True, text=True, timeout=_TIMEOUT_S,
+        )
+        eww = r.stdout
+    except Exception:
+        eww = ""
+
+    for ln in eww.splitlines():
+        low = ln.lower()
+        # A fleet lane = the claude CLI booted with --dangerously-skip-permissions.
+        if "claude" not in low or "--dangerously-skip-permissions" not in ln:
+            continue
+        m = re.match(r"\s*(\d+)\s", ln)
+        if not m:
+            continue
+        pid = int(m.group(1))
+        # NON-EMPTY ANTHROPIC_API_KEY = metered (empty/absent = scrubbed => Max).
+        km = re.search(r"ANTHROPIC_API_KEY=(\S*)", ln)
+        metered = bool(km and km.group(1))
+        tok = re.search(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)", ln)
+        fp = _fingerprint(tok.group(1)) if tok else None
+        if metered:
+            owner = _METERED
+        elif fp is not None:
+            owner = owner_map.get(fp, _UNKNOWN_ACCT)
+        else:
+            owner = _UNKNOWN_ACCT
+        session = _session_for(pid, pane_pids, ppid) or ("pid:%d" % pid)
+        lanes.append({"session": session, "metered": metered, "acct": fp, "owner": owner})
+
+    lanes.sort(key=lambda x: (x["metered"] is False, x["owner"], x["session"]))
+    by_owner: Dict[str, int] = {}
+    metered_n = 0
+    for l in lanes:
+        if l["metered"]:
+            metered_n += 1
+        else:
+            by_owner[l["owner"]] = by_owner.get(l["owner"], 0) + 1
+    return {
+        "lanes": lanes,
+        "summary": {"by_owner": by_owner, "metered": metered_n, "total": len(lanes)},
+    }

@@ -35,7 +35,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = "fc-v10";
+  var APP_BUILD = "fc-v12";
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -359,6 +359,86 @@
     }).join("") + '</div>';
   }
 
+  // ---- bus-queue drain (hub's owed backlog) -------------------------------
+  function fmtTok(n) {
+    if (n == null) return "—";
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+    if (n >= 1e3) return Math.round(n / 1e3) + "k";
+    return String(n);
+  }
+  function renderBusDrain(d) {
+    var el = $("busDrain");
+    if (!el) return;
+    d = d || {};
+    var owed = d.owed;
+    if (owed == null) { el.innerHTML = '<div class="empty">Backlog unavailable.</div>'; return; }
+    var lvl = owed === 0 ? "green" : (owed <= 5 ? "amber" : "red");
+    var seg = function (label, n, cls) {
+      n = n || 0;
+      return '<span class="dseg"><b class="' + cls + '">' + n + '</b> ' + label + '</span>';
+    };
+    // age distribution IS the trend: a healthy hub keeps the tail (>24h) empty
+    // and the bulk fresh; a growing stale tail = the backlog is rotting.
+    el.innerHTML =
+      '<div class="drain">' +
+      '<div class="dbig ' + lvl + '"><span class="dn">' + owed + '</span>' +
+        '<span class="dl">' + (owed === 1 ? "message owed" : "messages owed") + '</span></div>' +
+      '<div class="dbreak">' +
+        seg("&lt;1h", d.fresh_1h, "good") +
+        seg("1–6h", d.h1_6, "dim") +
+        seg("6–24h", d.h6_24, "warn") +
+        seg("&gt;24h", d.older_24h, "bad") +
+        (d.oldest_age_s != null && owed > 0 ? '<span class="dseg oldest">oldest ' + esc(fmtAge(d.oldest_age_s)) + '</span>' : "") +
+      '</div></div>';
+  }
+
+  // ---- context bloat (per always-on agent) --------------------------------
+  function renderContextBloat(rows) {
+    var el = $("ctxBloat");
+    if (!el) return;
+    if (!rows || !rows.length) { el.innerHTML = '<div class="empty">No context telemetry.</div>'; return; }
+    el.innerHTML = rows.map(function (r) {
+      var pct = r.pct == null ? 0 : r.pct;
+      var stale = r.age_s != null && r.age_s > 86400;   // >1d old reading -> flag it
+      return '<div class="ctx">' +
+        '<div class="ctxtop">' +
+          '<span class="ctxid">' + esc(r.agent) + '</span>' +
+          '<span class="ctxpct ' + esc(r.level) + '">' + pct + '%</span>' +
+        '</div>' +
+        '<div class="bar"><div class="fill ' + esc(r.level) + '" style="width:' + pct + '%"></div></div>' +
+        '<div class="ctxmeta">' + fmtTok(r.ctx_tokens) + ' / ' + fmtTok(r.window || 1000000) +
+          (r.age_s != null ? ' · <span class="' + (stale ? "staler" : "") + '">' + esc(fmtAge(r.age_s)) + ' ago</span>' : "") +
+        '</div>' +
+      '</div>';
+    }).join("");
+  }
+
+  // ---- token / auth per lane (Max vs metered + which account) -------------
+  function renderTokenAuth(ta) {
+    var el = $("tokenAuth");
+    if (!el) return;
+    ta = ta || {};
+    var lanes = ta.lanes || [], sum = ta.summary || {};
+    // fleet summary line: N on <owner>-Max · … · K metered
+    var parts = [];
+    var by = sum.by_owner || {};
+    Object.keys(by).forEach(function (o) { parts.push('<b class="good">' + by[o] + '</b> ' + esc(o)); });
+    if (sum.metered) parts.push('<b class="bad">' + sum.metered + '</b> metered');
+    $("tokenSummary").innerHTML = parts.length ? parts.join(" · ") : "";
+    if (!lanes.length) { el.innerHTML = '<div class="empty">No lane processes seen on this host.</div>'; return; }
+    el.innerHTML = lanes.map(function (l) {
+      var cls = l.metered ? "bad" : "good";
+      var lbl = l.metered ? "metered API" : "Max";
+      var acct = l.metered ? "" : (l.owner ? l.owner : "Max (unknown acct)");
+      return '<div class="tok">' +
+        '<span class="tdot ' + cls + '"></span>' +
+        '<span class="tsess">' + esc(l.session) + '</span>' +
+        '<span class="tbadge ' + cls + '">' + esc(lbl) + '</span>' +
+        (acct ? '<span class="tacct">' + esc(acct) + (l.acct ? ' · ' + esc(l.acct) : "") + '</span>' : "") +
+      '</div>';
+    }).join("");
+  }
+
   // ---- readable peek ------------------------------------------------------
   // Peek state is held in MODULE vars keyed by session, NOT in the DOM, so it
   // survives the lane list's innerHTML rebuild on every live refresh: which
@@ -502,6 +582,9 @@
     renderPulse(d.pulse || {});
     renderNeeds(d.needs_you || []);
     renderCoordinators(d.coordinators || []);
+    renderBusDrain(d.bus_drain || {});
+    renderContextBloat(d.context_bloat || []);
+    renderTokenAuth(d.token_auth || {});
     renderLanes(lanes);
     renderDeploys(d.deploys || []);
 
