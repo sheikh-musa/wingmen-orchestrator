@@ -418,7 +418,17 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
     upd_id = upd["update_id"]
     msg = upd.get("message") or upd.get("edited_message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
-    username = (msg.get("from") or {}).get("username")
+    # Sender identity (BOT-INGEST-SENDER-001): Telegram carries the individual
+    # sender in message.from — capture it so a GROUP message (negative chat_id)
+    # can be attributed to the human who sent it, not blanket-read as the operator.
+    # All-nullable: a service/channel-post update with no `from` logs NULLs.
+    frm = msg.get("from") or {}
+    username = frm.get("username")
+    from_user_id = str(frm["id"]) if frm.get("id") is not None else None
+    from_username = frm.get("username")
+    from_name = (" ".join(
+        p for p in (frm.get("first_name"), frm.get("last_name")) if p).strip()
+        or None)
 
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
@@ -435,10 +445,13 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         # 2. LOG — durable first, always. Media is downloaded here so the row
         #    carries the local path (screenshot/doc), not a bare non-text marker.
         cur.execute(
-            "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
-            "VALUES ('inbound','telegram',%s,%s,%s,true) RETURNING id",
+            "INSERT INTO operator_messages "
+            "(direction, channel, chat_id, tag, text, delivered, "
+            " from_user_id, from_username, from_name) "
+            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s) RETURNING id",
             (str(chat_id) if chat_id is not None else None, ch.channel_tag,
-             message_content(ch, msg, upd_id)),
+             message_content(ch, msg, upd_id),
+             from_user_id, from_username, from_name),
         )
         op_msg_id = cur.fetchone()[0]
         cur.execute(

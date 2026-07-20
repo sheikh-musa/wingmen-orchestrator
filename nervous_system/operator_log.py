@@ -31,6 +31,48 @@ def _body_role() -> str:
     return os.environ.get("ORCH_BODY_ROLE", "").strip().lower()
 
 
+# --- Sender identity (BOT-INGEST-SENDER-001) --------------------------------
+# ingest.py now records message.from into from_user_id / from_username /
+# from_name. These helpers derive a human label + a source hint (DM vs group)
+# so a reader can tell WHO sent a row — individuals within a group, not just
+# the chat. Requires migration 020 applied (adds the three columns); the read
+# functions below SELECT them, so run 020 before exercising this module.
+
+def _musa_id() -> str:
+    return os.environ.get("MUSA_TELEGRAM_ID", "").strip()
+
+
+def _sender_label(from_user_id, from_name, from_username) -> str:
+    """Human name for the sender: the operator himself → 'Musa'; else the
+    Telegram first/last name; else @username; else 'unknown' (older rows / no
+    message.from)."""
+    musa = _musa_id()
+    if from_user_id and musa and str(from_user_id) == musa:
+        return "Musa"
+    if from_name:
+        return from_name
+    if from_username:
+        return "@" + str(from_username).lstrip("@")
+    return "unknown"
+
+
+def _source_hint(chat_id, from_user_id) -> str:
+    """'DM' when the message came from a private chat (positive chat_id, incl.
+    the operator's own DM whose chat_id == MUSA_TELEGRAM_ID); 'group' for a
+    negative group/supergroup chat_id. Unknown chat_id → 'group' (conservative:
+    assume shared, don't mis-label as a private DM)."""
+    musa = _musa_id()
+    try:
+        cid = int(chat_id) if chat_id is not None else None
+    except (TypeError, ValueError):
+        cid = None
+    if cid is not None and cid > 0:
+        return "DM"
+    if from_user_id and musa and str(from_user_id) == musa and cid is not None and cid > 0:
+        return "DM"
+    return "group"
+
+
 # SHARED-AWARENESS feeds — read deliberately by every body, NEVER auto-drained
 # from any single body's PERSONAL DM inbox (#24, Nazim carve-out call 2026-07-10):
 #   war-room     = fleet room; all 3 read, respond-by-protocol (CAI-RESP-339:
@@ -104,13 +146,28 @@ def attach_transcript(msg_id: int, transcript: str) -> bool:
 
 def recent(limit: int = 20) -> list:
     """Latest exchanges, oldest-first — the continuity context a fresh
-    (headless or rebooted) cc-orchestrator reads to catch up."""
+    (headless or rebooted) cc-orchestrator reads to catch up.
+
+    Return shape (BACKWARD-COMPATIBLE — first 4 positions unchanged, sender
+    fields APPENDED at the end):
+        (direction, tag, text, created_at,          # original 4
+         from_user_id, from_username, from_name,    # raw message.from
+         sender_label, source)                      # derived: 'Musa'/name, 'DM'/'group'
+    """
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT direction, tag, text, created_at FROM operator_messages "
+            "SELECT direction, tag, text, created_at, chat_id, "
+            "from_user_id, from_username, from_name FROM operator_messages "
             "ORDER BY id DESC LIMIT %s", (limit,))
-        return list(reversed(cur.fetchall()))
+        rows = cur.fetchall()
+    out = []
+    for (direction, tag, text, created_at, chat_id,
+         fuid, funame, fname) in reversed(rows):
+        out.append((direction, tag, text, created_at, fuid, funame, fname,
+                    _sender_label(fuid, fname, funame),
+                    _source_hint(chat_id, fuid)))
+    return out
 
 
 # --- Option B: durable-log-as-source-of-truth (CAI-RESP-277) ---------------
@@ -122,15 +179,28 @@ def recent(limit: int = 20) -> list:
 
 def unprocessed(limit: int = 20) -> list:
     """Inbound operator messages not yet marked handled, oldest-first. The
-    reconciliation read that makes delivery independent of keystrokes landing."""
+    reconciliation read that makes delivery independent of keystrokes landing.
+
+    Return shape (BACKWARD-COMPATIBLE — first 4 positions unchanged, sender
+    fields APPENDED at the end):
+        (id, tag, text, created_at,                 # original 4
+         from_user_id, from_username, from_name,    # raw message.from
+         sender_label, source)                      # derived: 'Musa'/name, 'DM'/'group'
+    """
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, tag, text, created_at FROM operator_messages "
+            "SELECT id, tag, text, created_at, chat_id, "
+            "from_user_id, from_username, from_name FROM operator_messages "
             "WHERE direction='inbound' AND handled_at IS NULL"
             + _channel_scope_sql() +
             " ORDER BY id ASC LIMIT %s", (limit,))
-        return cur.fetchall()
+        rows = cur.fetchall()
+    return [(rid, tag, text, created_at, fuid, funame, fname,
+             _sender_label(fuid, fname, funame),
+             _source_hint(chat_id, fuid))
+            for (rid, tag, text, created_at, chat_id,
+                 fuid, funame, fname) in rows]
 
 
 def mark_handled_through(max_id: int) -> int:
