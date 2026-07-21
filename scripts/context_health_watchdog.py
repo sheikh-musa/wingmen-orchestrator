@@ -7,27 +7,32 @@ orchestrates the safe reset-from-handoff procedure (checkpoint -> /clear -> boot
 the same "reset-from-Mini" playbook a human runs by hand today.
 
   ┌─ SAFETY / STATUS ─────────────────────────────────────────────────────────┐
-  │ BUILT, NOT RUN (op#4676: "build it but dont run it yet").                  │
-  │ - NOT loaded into launchd (no active plist).                              │
+  │ EXECUTOR WIRED, but DRY-RUN by default and arm-gated.                     │
+  │ - The active launchd plist runs --alert ONLY (detect + page). It is NOT   │
+  │   --arm, so the destructive executor never runs from the scheduler.       │
   │ - Default mode is DRY-RUN: it DETECTS + LOGS what it *would* do and       │
   │   NEVER touches an agent. The reset path only executes under --arm AND    │
-  │   after per-agent idle + fresh-handoff verification both pass.            │
-  │ Auto-triggering /clear on a live agent can lose work if it misfires, so   │
-  │ the reset is hard-gated on: agent IDLE + a FRESH handoff on disk.         │
+  │   after per-agent idle + AUTH + fresh-handoff verification all pass.      │
+  │ - Every step re-verifies live; a mid-reset failure ABORTS + pages the     │
+  │   operator LOUDLY and leaves the body in a SAFE state (never half-cleared │
+  │   without a saved handoff). Self (orch-console) is NEVER auto-reset.      │
   └────────────────────────────────────────────────────────────────────────────┘
 
 Thresholds (% of the model context window, default 1M):
   green  < SOFT (60%)
-  amber  SOFT..HARD        -> nudge the agent to CHECKPOINT (write a handoff), no reset
-  red    >= HARD (80%)     -> reset-ELIGIBLE (armed + gates -> reset; else log)
+  amber  SOFT..HARD        -> CHECKPOINT-only (get a fresh handoff written), no reset
+  red    >= HARD (80%)     -> full reset (armed + gates; else DRY-RUN/log)
 
-Reset sequence (ARMED only — the reset-from-Mini playbook, each step gated):
-  1. agent pane must be IDLE  (footer NOT "esc to interrupt")
-  2. a FRESH handoff must exist (mtime within HANDOFF_MAX_AGE_MIN); else nudge to
-     checkpoint and SKIP the reset this cycle — never reset without a saved state
-  3. /clear via tmux (type -> verify text present -> Enter phantom-guard)
-  4. boot from the handoff (prompt referencing the handoff path)
-Never /clear a non-idle agent or one lacking a fresh handoff.
+Reset sequence (ARMED only — the from-Mini playbook a break-glass agent ran on the
+hub on 2026-07-21, now codified; each step gated + re-verified live):
+  1. pane must be IDLE (footer NOT "esc to interrupt") AND authenticated
+  2. preserve any UNSENT input-box text (log verbatim, C-u clear, fold into nudge)
+  3. a FRESH handoff must exist (mtime within HANDOFF_MAX_AGE_MIN); else checkpoint
+     first and verify one appeared — never reset without a saved state
+  4. /clear in place via tmux (type -> phantom-guard the text landed -> Enter)
+  5. verify after clear: alive, authenticated, fresh prompt (auth broke -> page + stop)
+  6. boot from the handoff (read boot_briefing/STATUS/handoff), verify it starts
+Never /clear a non-idle, unauthenticated, or handoff-less agent; never kill-session.
 
 Usage:
     context_health_watchdog.py                 # dry-run (default): detect + log only
@@ -40,9 +45,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
@@ -81,11 +88,30 @@ _HANDOFF_MAX_AGE_MIN = int(os.environ.get("CTX_WD_HANDOFF_MAX_AGE_MIN", "30"))
 # alerts  — whether an amber/red crossing pages the operator (nazim-console). Only
 #           the degrade-prone 1M bodies alert; the self-compacting Mini body does
 #           not (that would be noise for a condition it resolves on its own).
+# handoff_dir — base dir (on the agent's host) the handoff_glob is relative to.
+#   The hub's handoffs live in the Studio orchestrator checkout; cai's in its own
+#   ~/wingmen/wingmen-cai checkout; Nazim's in this Mini checkout. Used to verify a
+#   fresh handoff cross-host BEFORE any /clear.
+# auto_reset — whether the ARMED executor may drive checkpoint/reset for this body.
+#   ONLY the degrade-prone 1M Studio bodies. orch-console (self, Mini) is
+#   self-compacting and IS this watchdog's own host — NEVER auto-reset self.
 _AGENT_REGISTRY = {
-    "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "window": 1_000_000, "alerts": True,  "label": "The hub (orch, Studio)"},
-    "cai":             {"host": "mac-studio", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "window": 1_000_000, "alerts": True,  "label": "cai (Studio)"},
-    "orch-console":    {"host": "self",        "tmux": "nazim", "handoff_glob": "reports/nazim-handoff-*.md",  "window":   200_000, "alerts": False, "label": "Nazim (console, Mini)"},
+    "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "label": "The hub (orch, Studio)"},
+    "cai":             {"host": "mac-studio", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "handoff_dir": "~/wingmen/wingmen-cai",  "window": 1_000_000, "alerts": True,  "auto_reset": True,  "label": "cai (Studio)"},
+    "orch-console":    {"host": "self",        "tmux": "nazim", "handoff_glob": "reports/nazim-handoff-*.md",  "handoff_dir": str(_ORCH_DIR),           "window":   200_000, "alerts": False, "auto_reset": False, "label": "Nazim (console, Mini)"},
 }
+
+# --- executor tunables (only consulted under --arm) ------------------------- #
+# Waiting for a body to actually WRITE a handoff after a checkpoint nudge; the
+# process blocks up to _CHECKPOINT_WAIT_S (the launchd cadence is 10min, so a
+# multi-minute blocking wait is fine and far cheaper than a lost reset).
+_CHECKPOINT_WAIT_S = int(os.environ.get("CTX_WD_CHECKPOINT_WAIT_S", "240"))
+_CHECKPOINT_POLL_S = int(os.environ.get("CTX_WD_CHECKPOINT_POLL_S", "15"))
+_POST_STEP_SETTLE_S = int(os.environ.get("CTX_WD_SETTLE_S", "8"))
+# De-dup windows: don't re-checkpoint/re-reset the same body every cycle.
+_CHECKPOINT_DEDUP_MIN = int(os.environ.get("CTX_WD_CHECKPOINT_DEDUP_MIN", "45"))
+_RESET_DEDUP_MIN = int(os.environ.get("CTX_WD_RESET_DEDUP_MIN", "30"))
+_EXEC_STATE_FILE = _ORCH_DIR / "logs" / "context_health_exec_state.json"
 
 
 @dataclass
@@ -181,81 +207,412 @@ def _tmux_bin(host: str) -> str:
     return os.environ.get("REMOTE_TMUX_BIN", "/opt/homebrew/bin/tmux")
 
 
-def _agent_is_idle(reg: dict) -> Optional[bool]:
-    """True if the agent pane is idle (not running). None if unknown/unreachable.
-
-    An agent showing 'esc to interrupt' in its footer is mid-task -> NEVER reset.
-    """
-    tmux = reg["tmux"]
+def _tmux_run(reg: dict, args: list[str], timeout: int = 20):
+    """Run one tmux subcommand for `reg`, local or over ssh. Returns the
+    CompletedProcess, or None on any transport failure. Uses argv (local) /
+    shlex-quoted argv (remote) — never a raw shell string — so pane text and
+    send-keys payloads cannot be shell-interpreted."""
     tbin = _tmux_bin(reg["host"])
-    cap = (
-        f'{tbin} capture-pane -t {tmux} -p 2>/dev/null | tail -3'
-    )
-    cmd = cap if reg["host"] == "self" else f"ssh -o ConnectTimeout=8 Musa@{reg['host']} '{cap}'"
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20)
+        if reg["host"] == "self":
+            return subprocess.run([tbin, *args], capture_output=True, text=True, timeout=timeout)
+        remote = " ".join(shlex.quote(x) for x in [tbin, *args])
+        return subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=8", f"Musa@{reg['host']}", remote],
+            capture_output=True, text=True, timeout=timeout,
+        )
     except Exception:
         return None
-    if r.returncode != 0:
+
+
+def _capture_pane(reg: dict, lines: int = 40) -> Optional[str]:
+    """Last `lines` of the agent's tmux pane (cross-host). None if unreachable."""
+    r = _tmux_run(reg, ["capture-pane", "-t", reg["tmux"], "-p"])
+    if r is None or r.returncode != 0:
         return None
-    pane = r.stdout
-    if "esc to interrupt" in pane:
-        return False   # working
-    return True        # idle prompt
+    return "\n".join(r.stdout.splitlines()[-lines:])
 
 
-def _fresh_handoff(reg: dict) -> Optional[Path]:
-    """Newest handoff matching the glob if within HANDOFF_MAX_AGE_MIN, else None.
+_BUSY_MARKER = "esc to interrupt"
+# Markers that mean the pane is NOT a normal authenticated Claude prompt (a
+# login / model-picker / error / expired-session screen). If ANY appears we
+# refuse to act — that is a break-glass condition, never an auto-reset target.
+_UNAUTH_MARKERS = (
+    "select login method", "sign in to claude", "log in with", "please run /login",
+    "invalid api key", "authentication_error", "authentication error",
+    "select a model", "choose a model", "credit balance is too low",
+    "api error: 401", "session expired", "not logged in", "welcome to claude code",
+)
 
-    Only checked for host=self here; cross-host handoff freshness would be
-    verified over ssh in a fuller impl. Kept conservative: unknown -> None -> SKIP.
-    """
-    if reg["host"] != "self":
-        return None  # conservative: don't claim freshness we can't verify -> no reset
-    import time
-    newest, newest_m = None, 0.0
-    for p in _ORCH_DIR.glob(reg["handoff_glob"]):
-        try:
-            m = p.stat().st_mtime
-        except OSError:
+
+@dataclass
+class PaneState:
+    reachable: bool
+    idle: Optional[bool]          # True=idle, False=busy, None=unknown
+    authenticated: Optional[bool] # True=normal prompt, False=bad screen, None=unsure
+    input_text: str = ""          # best-effort unsent text in the prompt box
+    raw: str = ""
+
+
+def _extract_input_text(pane: str) -> str:
+    """Best-effort: pull UNSENT text out of the Claude Code prompt box.
+
+    The box renders a line like `│ > typed words                 │`. We take the
+    content after the first `>` on that line, drop the box rule, and ignore the
+    dimmed placeholder (`Try ...`). Conservative: any doubt -> "". This only ever
+    ADDS a preserve-note; it is never used to justify DISCARDING input."""
+    for line in reversed(pane.splitlines()):
+        if "│ >" not in line and "│>" not in line:
             continue
-        if m > newest_m:
-            newest, newest_m = p, m
-    if newest and (time.time() - newest_m) <= _HANDOFF_MAX_AGE_MIN * 60:
-        return newest
+        after = line.split(">", 1)[1].replace("│", " ").strip()
+        if not after or after.startswith("Try ") or after.startswith("? for"):
+            return ""
+        return after
+    return ""
+
+
+def _pane_state(reg: dict) -> PaneState:
+    """Classify the agent pane: reachable / idle / authenticated / unsent-input."""
+    pane = _capture_pane(reg)
+    if pane is None:
+        return PaneState(reachable=False, idle=None, authenticated=None)
+    low = pane.lower()
+    busy = _BUSY_MARKER in low
+    unauth = any(m in low for m in _UNAUTH_MARKERS)
+    # Authenticated = a normal prompt: no known bad-screen marker AND showing the
+    # busy footer, the prompt box, or the shortcut hint (i.e. a live CC session).
+    has_prompt = busy or ("│ >" in pane) or ("? for shortcuts" in low)
+    if unauth:
+        authed: Optional[bool] = False
+    elif has_prompt:
+        authed = True
+    else:
+        authed = None  # unrecognised screen -> caller treats as NOT-safe
+    return PaneState(reachable=True, idle=not busy, authenticated=authed,
+                     input_text=_extract_input_text(pane), raw=pane)
+
+
+def _agent_is_idle(reg: dict) -> Optional[bool]:
+    """True if the agent pane is idle. None if unknown/unreachable. (Thin wrapper
+    over _pane_state, kept for the planner + tests.)"""
+    return _pane_state(reg).idle
+
+
+def _newest_handoff(reg: dict) -> Optional[tuple[str, float]]:
+    """(name, mtime_epoch) of the newest handoff matching the glob, cross-host.
+
+    Local: python glob. Remote (macOS Studio — `find -printf` is unavailable):
+    `ls -t <glob> | head -1` then `stat -f %m`. Handoff names carry no spaces.
+    None if none found / unreachable."""
+    glob = reg["handoff_glob"]
+    if reg["host"] == "self":
+        base = Path(os.path.expanduser(reg.get("handoff_dir", str(_ORCH_DIR))))
+        newest, newest_m = None, 0.0
+        for p in base.glob(glob):
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if m > newest_m:
+                newest, newest_m = p.name, m
+        return (newest, newest_m) if newest else None
+    base = reg.get("handoff_dir", "~/wingmen/orchestrator")
+    remote = (f"cd {base} 2>/dev/null && f=$(ls -t {glob} 2>/dev/null | head -1); "
+              f'[ -n "$f" ] && echo "$(stat -f %m $f) $f"')
+    try:
+        r = subprocess.run(["ssh", "-o", "ConnectTimeout=8", f"Musa@{reg['host']}", remote],
+                           capture_output=True, text=True, timeout=20)
+    except Exception:
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    try:
+        mtime_s, name = r.stdout.strip().split(" ", 1)
+        return (name, float(mtime_s))
+    except ValueError:
+        return None
+
+
+def _fresh_handoff(reg: dict) -> Optional[str]:
+    """Name of the newest handoff if it is within HANDOFF_MAX_AGE_MIN, else None."""
+    nh = _newest_handoff(reg)
+    if nh and (time.time() - nh[1]) <= _HANDOFF_MAX_AGE_MIN * 60:
+        return nh[0]
     return None
 
 
 def plan_reset(a: AgentCtx, armed: bool) -> str:
-    """Return the decision string. When NOT armed, always 'DRY-RUN: would <x>'.
-
-    Even when armed, this only DECIDES; actual /clear+boot execution is left to a
-    reviewed, separately-enabled executor (deliberately not wired in this build).
-    """
+    """Return the DECISION string (a pure planner — no side effects beyond the
+    read-only pane/handoff probes it makes when `armed`). The actual
+    checkpoint/clear/boot execution lives in run_executor(); this only describes
+    what would/should happen so the classification line + --json stay honest.
+    Staged: amber -> checkpoint-only, red+idle+fresh-handoff -> full reset."""
     reg = _AGENT_REGISTRY.get(a.agent)
     if a.action == "ok":
         return "ok"
     if a.action == "checkpoint-nudge":
-        return f"{'WOULD ' if not armed else ''}nudge {a.agent} to checkpoint (amber {a.pct}%)"
+        if reg and not reg.get("auto_reset"):
+            return f"amber {a.pct}% — detect-only body (self-compacting), no checkpoint"
+        return f"{'WOULD ' if not armed else ''}checkpoint-nudge {a.agent} (amber {a.pct}%) — writes a fresh handoff, no reset"
     # reset-eligible (red)
     if not reg:
         return f"detect-only: {a.agent} red {a.pct}% but not in reset registry"
-    idle = _agent_is_idle(reg) if armed else None
-    handoff = _fresh_handoff(reg) if armed else None
-    gate = []
-    if armed:
-        if idle is not True:
-            gate.append(f"NOT-IDLE({idle})")
-        if handoff is None:
-            gate.append("NO-FRESH-HANDOFF")
+    if not reg.get("auto_reset"):
+        return f"detect-only: {a.agent} red {a.pct}% — self-compacting body, never auto-reset"
     if not armed:
-        return f"DRY-RUN: would reset {a.agent} (red {a.pct}%) IF idle+fresh-handoff"
+        return (f"DRY-RUN: would full-reset {a.agent} (red {a.pct}%) IF idle+authed+fresh-handoff "
+                f"(checkpoint if stale -> /clear -> boot)")
+    idle = _agent_is_idle(reg)
+    handoff = _fresh_handoff(reg)
+    gate = []
+    if idle is not True:
+        gate.append(f"NOT-IDLE({idle})")
+    if handoff is None:
+        gate.append("NO-FRESH-HANDOFF(will-checkpoint-first)")
     if gate:
-        return f"SKIP reset {a.agent} — gate failed: {','.join(gate)} (nudge-to-checkpoint instead)"
-    # Gates passed + armed. Execution intentionally NOT performed here — the
-    # actual /clear+boot is left to a reviewed executor to avoid a first-run
-    # foot-gun. Log the ready state loudly.
-    return f"RESET-READY {a.agent} (red {a.pct}%, idle+handoff {handoff.name}) — executor not wired (build-not-run)"
+        return f"ARMED: {a.agent} red {a.pct}% — {','.join(gate)}; executor handles this cycle"
+    return f"ARMED: RESET-READY {a.agent} (red {a.pct}%, idle+handoff {handoff}) — executor runs this cycle"
+
+
+# --------------------------------------------------------------------------- #
+# ARMED EXECUTOR — the real checkpoint / /clear / boot driver (op#5516 follow-up,
+# codifying the from-Mini reset a break-glass agent ran on the hub on 2026-07-21).
+# Runs ONLY when --arm is passed AND every per-step gate holds. Wrapped in a
+# dead-man's-switch: any failure mid-reset pages the operator LOUDLY and leaves
+# the body in a SAFE state (never half-cleared without a saved handoff).
+# --------------------------------------------------------------------------- #
+
+# Chars that break `tmux send-keys` quoting / could be shell-interpreted. Our own
+# nudge wording avoids them; folded operator text is scrubbed of them (the
+# verbatim original is written to the preserve-log first, so nothing is lost).
+_FORBIDDEN_NUDGE_CHARS = "'\"()`$;|&\n\r\t"
+
+
+def _sanitize_nudge(s: str) -> str:
+    out = "".join(" " if c in _FORBIDDEN_NUDGE_CHARS else c for c in s)
+    return " ".join(out.split())
+
+
+def _send_literal(reg: dict, text: str) -> bool:
+    """tmux send-keys -l <text> (literal — no key-name lookup)."""
+    r = _tmux_run(reg, ["send-keys", "-t", reg["tmux"], "-l", text])
+    return bool(r and r.returncode == 0)
+
+
+def _send_key(reg: dict, key: str) -> bool:
+    """tmux send-keys <key> (named key: Enter, C-u, ...)."""
+    r = _tmux_run(reg, ["send-keys", "-t", reg["tmux"], key])
+    return bool(r and r.returncode == 0)
+
+
+def _load_exec_state() -> dict:
+    try:
+        return json.loads(_EXEC_STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_exec_state(state: dict) -> None:
+    try:
+        _EXEC_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _EXEC_STATE_FILE.write_text(json.dumps(state, indent=2))
+    except OSError:
+        pass
+
+
+def _page_loud(text: str) -> None:
+    """Dependency-free operator page (does NOT import nervous_system) — the
+    dead-man's-switch path. CTX_WD_ALERT_STDOUT=1 prints instead (for tests)."""
+    if os.environ.get("CTX_WD_ALERT_STDOUT") == "1":
+        print("[PAGE-would-send]\n" + text + "\n")
+        return
+    try:
+        subprocess.run([str(_ORCH_DIR / "scripts" / "nazim_send.sh"), text],
+                       timeout=30, cwd=str(_ORCH_DIR))
+    except Exception as e:  # pragma: no cover — a page must never crash the loop
+        print(f"[ctx-health] loud page failed: {e}", file=sys.stderr)
+
+
+def _checkpoint_nudge(a: AgentCtx, reg: dict, folded: str = "") -> str:
+    hint = reg["handoff_glob"].replace("*", "NOW")
+    base = (f"CONTEXT CHECKPOINT auto-watchdog: you are at about {a.pct} percent of your context window. "
+            f"Write a FRESH handoff file {hint} capturing current state, open threads and next actions, "
+            f"then persist a session_digest. This is a clean restore point before any reset.")
+    if folded:
+        base += (f" NOTE you had unsent text in your input box, preserved here as an open thread: {folded}")
+    return _sanitize_nudge(base)
+
+
+def _boot_nudge(reg: dict) -> str:
+    hint = reg["handoff_glob"].replace("*", "latest")
+    return _sanitize_nudge(
+        f"BOOT after auto-reset: read boot_briefing then STATUS.md then your latest handoff {hint}. "
+        f"Reconcile operator_log.unprocessed and your agent_messages inbox, then resume. "
+        f"Confirm you are oriented before acting.")
+
+
+def _preserve_input_box(reg: dict, st: PaneState) -> str:
+    """If the prompt box holds unsent operator text: log it VERBATIM first, then
+    clear the box (C-u), and return a sanitized copy to fold into the nudge.
+    Never silently clobbers — the verbatim text is durably logged before any key."""
+    txt = (st.input_text or "").strip()
+    if not txt:
+        return ""
+    try:
+        _EXEC_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        with (_ORCH_DIR / "logs" / "context_health_preserved_input.log").open("a") as fh:
+            fh.write(f"{datetime.now(timezone.utc).isoformat()} {reg['tmux']}: {txt}\n")
+    except OSError:
+        pass
+    _send_key(reg, "C-u")  # clear the box so the nudge types into a clean line
+    return _sanitize_nudge(txt)[:400]
+
+
+def _do_checkpoint(a: AgentCtx, reg: dict, st: PaneState) -> tuple[bool, str]:
+    """Nudge the body to write a fresh handoff, wait, verify one appeared that is
+    NEWER than any pre-existing handoff. Caller must have already confirmed the
+    idle+authenticated gates. Returns (ok, detail)."""
+    before = _newest_handoff(reg)
+    before_m = before[1] if before else 0.0
+    t0 = time.time()
+    folded = _preserve_input_box(reg, st)
+    nudge = _checkpoint_nudge(a, reg, folded)
+    if not _send_literal(reg, nudge) or not _send_key(reg, "Enter"):
+        return False, "send-keys checkpoint nudge failed"
+    deadline = t0 + _CHECKPOINT_WAIT_S
+    while time.time() < deadline:
+        time.sleep(_CHECKPOINT_POLL_S)
+        nh = _newest_handoff(reg)
+        if nh and nh[1] > before_m and (time.time() - nh[1]) <= _HANDOFF_MAX_AGE_MIN * 60:
+            return True, f"fresh handoff {nh[0]}"
+    return False, f"no fresh handoff after {_CHECKPOINT_WAIT_S}s"
+
+
+def _do_reset(a: AgentCtx, reg: dict) -> tuple[bool, str]:
+    """Full from-Mini reset: gate -> (checkpoint if stale) -> re-verify -> /clear
+    (phantom-guarded, in-place, NEVER kill-session) -> verify -> boot. Any step
+    failure ABORTS and pages loudly, leaving the body in a safe state."""
+    st = _pane_state(reg)
+    if not st.reachable:
+        return False, "SKIP: pane unreachable"
+    if st.idle is not True:
+        return False, f"SKIP: not idle (idle={st.idle}) — never reset a busy body"
+    if st.authenticated is not True:
+        return False, f"SKIP: not clearly authenticated (auth={st.authenticated})"
+
+    # 1. Guarantee a fresh saved state. Checkpoint if the handoff is stale, OR if
+    #    there is unsent operator text we must fold in before /clear discards it.
+    fresh = _fresh_handoff(reg)
+    if (not fresh) or st.input_text.strip():
+        ok, detail = _do_checkpoint(a, reg, st)
+        if not ok:
+            _page_loud(f"🚨 ctx-watchdog ABORTED reset of {a.agent}: checkpoint failed ({detail}). "
+                       f"Body left INTACT — never /clear without a saved handoff. Manual reset needed.")
+            return False, f"ABORT: checkpoint failed ({detail})"
+        fresh = detail
+
+    # Re-verify idle+auth immediately before the destructive step (state may have
+    # changed while the body was writing its handoff).
+    st2 = _pane_state(reg)
+    if st2.idle is not True or st2.authenticated is not True:
+        return False, f"SKIP: state changed before /clear (idle={st2.idle} auth={st2.authenticated})"
+
+    # 2. /clear in place, phantom-guarded: type it, VERIFY it landed in the box,
+    #    only THEN press Enter. Never kill-session.
+    if not _send_literal(reg, "/clear"):
+        _page_loud(f"🚨 ctx-watchdog: failed to type /clear for {a.agent}. Body INTACT (handoff {fresh}).")
+        return False, "ABORT: /clear type failed"
+    time.sleep(2)
+    guard = _capture_pane(reg) or ""
+    if "/clear" not in guard:
+        _send_key(reg, "C-u")  # scrub whatever half-typed rather than blind-Enter
+        _page_loud(f"🚨 ctx-watchdog: phantom-guard FAILED for {a.agent} (/clear not in the box) — did "
+                   f"NOT press Enter. Body INTACT (handoff {fresh}).")
+        return False, "ABORT: phantom-guard failed"
+    if not _send_key(reg, "Enter"):
+        _page_loud(f"🚨 ctx-watchdog: failed to submit /clear for {a.agent}. Body INTACT (handoff {fresh}).")
+        return False, "ABORT: /clear submit failed"
+    time.sleep(_POST_STEP_SETTLE_S)
+
+    # 3. Verify after clear: alive, still authenticated, fresh prompt.
+    st3 = _pane_state(reg)
+    if not st3.reachable:
+        _page_loud(f"🚨 ctx-watchdog: {a.agent} pane UNREACHABLE after /clear — may need break-glass. "
+                   f"Handoff {fresh} was saved first.")
+        return False, "ABORT: unreachable after clear"
+    if st3.authenticated is False:
+        _page_loud(f"🚨 ctx-watchdog: {a.agent} auth BROKE after /clear — needs break-glass login. "
+                   f"Handoff {fresh} was saved first.")
+        return False, "ABORT: auth broke after clear"
+
+    # 4. Boot from the handoff.
+    if not _send_literal(reg, _boot_nudge(reg)) or not _send_key(reg, "Enter"):
+        _page_loud(f"🚨 ctx-watchdog: {a.agent} cleared OK but the BOOT nudge failed to send — it is at an "
+                   f"empty prompt, please boot it. Handoff {fresh}.")
+        return False, "ABORT: boot nudge send failed"
+    time.sleep(_POST_STEP_SETTLE_S)
+    st4 = _pane_state(reg)
+    booting = (st4.idle is False) or ("boot" in (st4.raw or "").lower())
+    if not booting:
+        _page_loud(f"⚠️ ctx-watchdog: {a.agent} cleared + boot nudge sent but no activity yet — verify it "
+                   f"started reading. Handoff {fresh}.")
+    return True, f"reset OK (handoff {fresh}; booting={booting})"
+
+
+def run_executor(rows: list[AgentCtx]) -> list[str]:
+    """ARMED entry point. Per body: amber -> checkpoint-only, red -> full reset.
+    De-duped via _EXEC_STATE_FILE; each body wrapped in a dead-man's-switch so a
+    crash pages loudly instead of dying silent. Only touches auto_reset bodies
+    (never self / orch-console)."""
+    state = _load_exec_state()
+    now = time.time()
+    results: list[str] = []
+    for a in rows:
+        reg = _AGENT_REGISTRY.get(a.agent)
+        if not reg or not reg.get("auto_reset") or a.action == "ok":
+            continue  # detect-only / self body / green — never auto-act
+        est = state.get(a.agent, {})
+        try:
+            if a.level == "amber":
+                last_cp = float(est.get("checkpoint_at", 0) or 0)
+                if (now - last_cp) < _CHECKPOINT_DEDUP_MIN * 60 and _fresh_handoff(reg):
+                    results.append(f"{a.agent}: amber — checkpoint deduped (fresh handoff exists)")
+                    continue
+                st = _pane_state(reg)
+                if not st.reachable:
+                    results.append(f"{a.agent}: amber — pane unreachable, skip")
+                    continue
+                if st.idle is not True or st.authenticated is not True:
+                    results.append(f"{a.agent}: amber — not idle/authed (idle={st.idle} auth={st.authenticated}), skip")
+                    continue
+                ok, detail = _do_checkpoint(a, reg, st)
+                if ok:
+                    est["checkpoint_at"] = now
+                    state[a.agent] = est
+                else:
+                    _page_loud(f"⚠️ ctx-watchdog: amber checkpoint of {a.agent} did not confirm a handoff ({detail}).")
+                results.append(f"{a.agent}: amber checkpoint {'OK' if ok else 'FAILED'} — {detail}")
+
+            elif a.level == "red":
+                last_rs = float(est.get("reset_at", 0) or 0)
+                if (now - last_rs) < _RESET_DEDUP_MIN * 60:
+                    results.append(f"{a.agent}: red — reset deduped (last {int((now - last_rs) / 60)}m ago)")
+                    continue
+                ok, detail = _do_reset(a, reg)
+                if ok:
+                    est["reset_at"] = now
+                    est["checkpoint_at"] = now
+                    state[a.agent] = est
+                results.append(f"{a.agent}: red reset {'OK' if ok else 'SKIP/ABORT'} — {detail}")
+        except Exception as e:  # dead-man's-switch: never die silent mid-reset
+            import traceback
+            traceback.print_exc()
+            _page_loud(f"🐛 ctx-watchdog EXECUTOR CRASHED mid-action on {a.agent}: {e}. The body may be "
+                       f"mid-reset — CHECK IT NOW. The watchdog is not guarding the fleet until fixed.")
+            results.append(f"{a.agent}: EXECUTOR EXCEPTION {e}")
+    _save_exec_state(state)
+    return results
 
 
 # --------------------------------------------------------------------------- #
@@ -377,12 +734,14 @@ def main() -> int:
 
     rows = read_context_gauge()
     if args.json:
-        print(json.dumps([{**asdict(r), "plan": plan_reset(r, args.arm)} for r in rows], indent=2))
+        out = [{**asdict(r), "plan": plan_reset(r, args.arm)} for r in rows]
+        exec_results = run_executor(rows) if args.arm else []
+        print(json.dumps({"rows": out, "exec": exec_results}, indent=2))
         if args.alert:
             run_alerts(rows)
         return 0
 
-    reset_mode = "ARMED" if args.arm else "DRY-RUN (build-not-run)"
+    reset_mode = "ARMED — LIVE EXECUTOR" if args.arm else "DRY-RUN (detect+plan only)"
     alert_mode = "ON" if args.alert else "off"
     print(f"[ctx-health] soft={_SOFT:.0%} hard={_HARD:.0%} reset={reset_mode} alert={alert_mode}")
     if not rows:
@@ -391,6 +750,10 @@ def main() -> int:
     for r in rows:
         win = _AGENT_REGISTRY.get(r.agent, {}).get("window", _CTX_WINDOW)
         print(f"  {r.level:5} {r.agent:16} {r.pct:3}% of {win//1000}K  ({r.ctx_tokens:>9,})  age={r.age_s}s  -> {plan_reset(r, args.arm)}")
+    if args.arm:
+        print("[ctx-health] ARMED: running executor (checkpoint/reset, gated + deduped)...")
+        for line in run_executor(rows):
+            print(f"    exec: {line}")
     if args.alert:
         fired = run_alerts(rows)
         if fired:
