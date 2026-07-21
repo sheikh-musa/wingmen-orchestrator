@@ -4,11 +4,16 @@
 # docs/ihsan-gate.md stays the human doctrine (the bar as prose); THIS file is
 # the same bar turned into DATA a reader/gate can mechanically evaluate.
 #
-# Phase 1 (Head of Quality, reports/head-of-quality-spec.md §8): CODIFY ONLY.
-#   - This is INERT DATA. Nothing in any merge/deploy/ship path reads it yet.
-#   - Zero enforcement, zero behavior change. It blocks NOTHING.
-#   - Read-only consumers: nervous_system/ihsan_gate.py (a pure reader).
-#   - Enforcement (a gate that fail-closes merge/deploy) is Phase 2+, gated on cai.
+# Phases (Head of Quality, reports/head-of-quality-spec.md §8):
+#   - Phase 1 CODIFY: this manifest — inert doctrine-as-data.
+#   - Phase 2 SHADOW (current): nervous_system/quality_gate.py evaluates a diff's
+#     evidence against this manifest and produces a would-block verdict — but in
+#     shadow mode it BLOCKS NOTHING (observation only). Still no ship-path is wired
+#     to it and no code runs it in block mode; enforcement stays OFF.
+#   - Read-only consumers: nervous_system/ihsan_gate.py (pure reader) +
+#     nervous_system/quality_gate.py (pure evaluator; shadow, non-enforcing).
+#   - Fail-closing merge/deploy (block mode wired into a ship wrapper) is Phase 2+
+#     hard-arm, gated on cai. Nothing does that yet.
 #
 # SYNC CONTRACT: docs/ihsan-gate.md and this manifest must not drift. The six
 # doctrine items (ihsan-gate.md §"The gate") map onto the G1–G10 taxonomy below
