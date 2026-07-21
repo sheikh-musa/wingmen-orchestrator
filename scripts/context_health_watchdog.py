@@ -76,6 +76,24 @@ if str(_ORCH_DIR) not in sys.path:
     sys.path.insert(0, str(_ORCH_DIR))
 load_dotenv(_ORCH_DIR / ".env")
 
+# CAI-RESP-501: the watchdog (pen iii) is now held via the fleet_health_lease
+# single-owner lease (default holder = cc-fleet-health; hub reclaims on expiry).
+# Self-contained import (no PYTHONPATH under launchd — see the note above).
+from scripts.lib import fleet_health_lease, fleet_health_boundaries  # noqa: E402
+
+
+def _log_pen_gate(msg: str) -> None:
+    """Append a pen-gate decision to the shared gate log (best-effort, mirrors
+    tg_send.sh's pen_gate.log)."""
+    try:
+        (_ORCH_DIR / "logs").mkdir(exist_ok=True)
+        from datetime import datetime, timezone
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(_ORCH_DIR / "logs" / "pen_gate.log", "a") as fh:
+            fh.write(f"{stamp} ctx-watchdog {msg}\n")
+    except Exception:
+        pass
+
 # Window + thresholds (overridable via env, mirrors the console gauge _CTX_WINDOW).
 _CTX_WINDOW = int(os.environ.get("CONSOLE_CTX_WINDOW", "1000000"))
 _SOFT = float(os.environ.get("CTX_WD_SOFT", "0.60"))   # amber -> checkpoint-nudge
@@ -631,6 +649,15 @@ def run_executor(rows: list[AgentCtx], arm_level: str = "red") -> list[str]:
     is reachable ONLY when arm_level == 'red'."""
     if arm_level not in ("amber", "red"):
         return []  # 'off' or anything unexpected — never execute
+    # CAI-RESP-501: the self-healing EXECUTOR is the watchdog pen (iii) ACTING.
+    # Only the fleet_health_lease holder runs it — fail-closed on positive
+    # evidence a different live body holds the pen (so the SRE and a reclaiming
+    # hub never both self-heal). Detection + the operator degrade-alert stay
+    # UNGATED (a safety page must never be silenced by lease state).
+    ok, why = fleet_health_lease.gate()
+    if not ok:
+        _log_pen_gate(f"executor DEFERRED (arm={arm_level}) :: {why}")
+        return [f"executor DEFERRED — {why}"]
     state = _load_exec_state()
     now = time.time()
     results: list[str] = []
@@ -812,6 +839,12 @@ def main() -> int:
                     help="page the operator (nazim-console) on amber/red for alert-enabled bodies")
     args = ap.parse_args()
     arm_level = _resolve_arm_level(args)
+
+    # CAI-RESP-501 hard boundary (a): cc-fleet-health has NO singleton-body reset
+    # authority. The destructive red /clear is a SEPARATE, CAI-500-gated executor
+    # the SRE never drives; only the write-only amber checkpoint half is ever
+    # armed for it. Fail-closed (loud crash -> the __main__ dead-man page).
+    fleet_health_boundaries.assert_no_sre_red_reset(arm_level)
 
     rows = read_context_gauge()
     if args.json:

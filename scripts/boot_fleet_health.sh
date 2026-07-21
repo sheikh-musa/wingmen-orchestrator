@@ -101,6 +101,16 @@ UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cc-fleet-healt
 "
 echo "▶ cc-fleet-health online: agent_status + agents heartbeat set (model=$MODEL, dir=$FH_DIR)"
 
+# ── TAKE the watchdog + fleet-status lease (CAI-RESP-501) ────────────────────
+# The SRE HOLDS the single-owner fleet_health_lease (pens iii watchdog + v
+# fleet-status). `take` is a CAS acquire: succeeds if already ours OR expired;
+# it NEVER steals a fresh lease held by a live hub reclaim (defers instead). The
+# heartbeat below renews it; on this body's death the lease expires (TTL 900s)
+# and the hub reclaims (dead-man fallback). Best-effort at boot — a take miss
+# means a live hub still holds it; the watchdog gate then fail-closes correctly.
+"$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_health_lease.py" take --reason "cc-fleet-health boot" || \
+    echo "⚠️  fleet_health_lease take deferred (a live holder still owns it) — watchdog defers to it"
+
 # ── Background heartbeat (5-min), auto-killed on exit ────────────────────────
 _heartbeat_loop() {
     while true; do
@@ -114,6 +124,12 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("UPDATE agents SET last_heartbeat=now() WHERE id='cc-fleet-health'")
     conn.commit()
 PY
+        # RENEW the watchdog + fleet-status lease (CAI-RESP-501). Renewal is tied
+        # to THIS body being alive — that is the dead-man's switch: if this tmux
+        # session dies the renewals stop, the lease expires (TTL 900s), and the
+        # hub reclaims. Do NOT move renewal to a standalone launchd job or the
+        # fallback breaks (the lease would never expire on the SRE's death).
+        "$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_health_lease.py" renew >/dev/null 2>&1 || true
     done
 }
 _heartbeat_loop &

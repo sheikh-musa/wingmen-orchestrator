@@ -50,6 +50,11 @@ LOG_FILE = ORCH / "logs" / "priority_sla_watchdog.log"
 
 sys.path.insert(0, str(ORCH))
 
+# CAI-RESP-501: SLA escalation is the watchdog pen (iii) ACTING — gated on the
+# fleet_health_lease single-owner lease (default holder cc-fleet-health; hub
+# reclaims on expiry) so the SRE and a reclaiming hub never double-nudge/page.
+from scripts.lib import fleet_health_lease  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Config — all overridable via environment (launchd EnvironmentVariables).
 # ---------------------------------------------------------------------------
@@ -114,6 +119,12 @@ STATE_TTL_SEC = 7 * 24 * 3600
 # Hub agents unreachable via lane_nudge — reached by count-only tmux send-keys on
 # the Studio (ssh). Session names are best-effort; flag if wrong.
 STUDIO_SSH = os.environ.get("SLA_STUDIO_SSH", "Musa@mac-studio")
+# Full path to tmux on the Studio — a NON-interactive ssh shell (zsh) does NOT
+# have /opt/homebrew/bin on PATH, so a bare `tmux` over ssh fails ("command not
+# found") and every hub-nudge silently no-ops (then escalates to paging the
+# operator). Diagnosed 2026-07-17. Override via SLA_REMOTE_TMUX if the Studio
+# moves tmux.
+REMOTE_TMUX = os.environ.get("SLA_REMOTE_TMUX", "/opt/homebrew/bin/tmux")
 HUB_SESSIONS = {
     "cc-orchestrator": os.environ.get("SLA_HUB_SESSION_ORCH", "orch"),
     "cc-infra": os.environ.get("SLA_HUB_SESSION_INFRA", "infra"),
@@ -254,9 +265,20 @@ def _countonly_line(agent: str, n: int) -> str:
 def _tmux_countonly(session: str, line: str, host: str | None = None) -> bool:
     """Count-only send-keys into a tmux session (optionally over ssh to the
     Studio). Clears any stuck draft (C-u) first; only fires if the pane is idle
-    (never interrupts a working session). Best-effort."""
+    (never interrupts a working session). Best-effort.
+
+    Over ssh the remote runs a NON-interactive shell (zsh on the Studio): a bare
+    `tmux` is not on its PATH, and an unquoted `=orch` target triggers zsh's
+    `=`-filename-expansion ("orch not found") — both silently break the nudge.
+    So for the remote case we send ONE command string that (a) uses the full
+    tmux path and (b) single-quotes every arg so the target survives verbatim."""
     def tm(*args: str) -> subprocess.CompletedProcess:
-        base = ["ssh", "-o", "ConnectTimeout=8", host, "tmux", *args] if host else ["tmux", *args]
+        if host:
+            # force-single-quote each arg so zsh leaves `=orch`/the line literal
+            remote = " ".join([REMOTE_TMUX] + ["'" + a.replace("'", "'\\''") + "'" for a in args])
+            base = ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", host, remote]
+        else:
+            base = ["tmux", *args]
         return subprocess.run(base, capture_output=True, text=True, timeout=25)
     try:
         if tm("has-session", "-t", f"={session}").returncode != 0:
@@ -288,12 +310,25 @@ def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool) -> tuple[str, 
     if agent == "cai":
         if dry:
             return ("nudge_cai.sh", True)
-        try:
-            r = subprocess.run([str(ORCH / "scripts" / "nudge_cai.sh")],
-                               capture_output=True, text=True, timeout=40)
-            return ("nudge_cai.sh", r.returncode == 0)
-        except Exception:
-            return ("nudge_cai.sh", False)
+        # nudge_cai.sh exits 0 with "no live cai session" when cai's tmux isn't
+        # on THIS host — so returncode==0 alone is NOT proof of reach. cai lives
+        # on the Studio; this watchdog runs on the Mini. Try local, then run the
+        # nudger ON the Studio over ssh (its non-interactive PATH needs
+        # /opt/homebrew/bin for tmux; the script sources its own .env + venv).
+        def _reached_cai(argv) -> bool:
+            try:
+                r = subprocess.run(argv, capture_output=True, text=True, timeout=45)
+                out = (r.stdout + r.stderr).lower()
+                return r.returncode == 0 and "no live cai session" not in out
+            except Exception:
+                return False
+        if _reached_cai([str(ORCH / "scripts" / "nudge_cai.sh")]):
+            return ("nudge_cai.sh", True)
+        remote = ("cd ~/wingmen/orchestrator && "
+                  "PATH=/opt/homebrew/bin:$PATH bash scripts/nudge_cai.sh")
+        ok = _reached_cai(["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
+                           STUDIO_SSH, remote])
+        return ("nudge_cai.sh@studio", ok)
     if agent in HUB_SESSIONS:
         sess = HUB_SESSIONS[agent]
         if dry:
@@ -467,6 +502,18 @@ def run(dry: bool, injected: list[dict] | None = None,
         return 1
 
     try:
+        if not dry:
+            # Pen gate (CAI-RESP-501): only the fleet_health_lease holder may
+            # nudge/page. If a different live body holds the pen, DON'T act —
+            # downgrade to dry-run (still scan + log what we WOULD do) so the
+            # SRE and a reclaiming hub never double-page. Fail-safe otherwise
+            # (missing/unreadable lease -> proceed; never strand SLA coverage).
+            ok, why = fleet_health_lease.gate()
+            if not ok:
+                log(f"pen-gate: SLA watchdog DEFERRED (CAI-RESP-501) — {why}; "
+                    f"downgrading to dry-run (no nudge/page this scan)")
+                dry = True
+                persist = False
         if not dry:
             ensure_identity(conn)
         lanes = lane_map(conn)
