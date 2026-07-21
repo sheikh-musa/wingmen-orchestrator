@@ -171,3 +171,49 @@ def test_evaluate_is_pure_no_mutation_of_evidence():
     snapshot = copy.deepcopy(ev)
     quality_gate.evaluate("docs-copy", ev)
     assert ev == snapshot, "evaluate must not mutate the caller's evidence"
+
+
+# --------------------------------------------------------------------------- #
+# CLI seam (what a merge/deploy wrapper invokes)
+# --------------------------------------------------------------------------- #
+
+import io
+import json
+
+
+def _run_cli(change_class, evidence, extra_argv=()):
+    """Invoke main() in-process with evidence piped on stdin. Returns (rc, stdout)."""
+    argv = ["--class", change_class, *extra_argv]
+    stdin = io.StringIO(json.dumps(evidence))
+    stdout = io.StringIO()
+    rc = quality_gate.main(argv, stdin=stdin, stdout=stdout)
+    return rc, stdout.getvalue()
+
+
+def test_cli_prints_verdict_json():
+    rc, out = _run_cli("docs-copy", _all_pass_evidence("docs-copy"))
+    payload = json.loads(out)
+    assert payload["change_class"] == "docs-copy"
+    assert payload["would_block"] is False
+
+
+def test_cli_shadow_returns_zero_even_when_would_block():
+    # Shadow must NEVER break a ship: a would-block verdict still exits 0.
+    ev = _all_pass_evidence("docs-copy")
+    ev["checks"]["typecheck"] = "fail"
+    rc, out = _run_cli("docs-copy", ev, extra_argv=["--mode", "shadow"])
+    assert json.loads(out)["would_block"] is True
+    assert rc == 0
+
+
+def test_cli_block_mode_returns_nonzero_when_would_block():
+    ev = _all_pass_evidence("docs-copy")
+    ev["checks"]["typecheck"] = "fail"
+    rc, out = _run_cli("docs-copy", ev, extra_argv=["--mode", "block"])
+    assert json.loads(out)["enforced"] is True
+    assert rc != 0
+
+
+def test_cli_block_mode_returns_zero_when_green():
+    rc, out = _run_cli("docs-copy", _all_pass_evidence("docs-copy"), extra_argv=["--mode", "block"])
+    assert rc == 0

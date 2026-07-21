@@ -235,3 +235,43 @@ def should_block(verdict: GateVerdict) -> bool:
     """Whether the caller (a merge/deploy wrapper) must REFUSE. True only when
     the verdict is enforced — i.e. block mode + would_block. Shadow/off: False."""
     return bool(verdict.enforced)
+
+
+def main(argv=None, *, stdin=None, stdout=None) -> int:
+    """CLI seam for a merge/deploy wrapper: read an evidence JSON on stdin,
+    evaluate it against a change class, print the verdict JSON, and return an
+    exit code that is NON-ZERO only when the verdict is ENFORCED (block mode +
+    would_block). Shadow/off always exit 0 — a shadow gate can never break a ship.
+
+    Usage:  quality_gate.py --class <change-class> [--mode off|shadow|block] < evidence.json
+    """
+    import argparse
+    import json
+    import sys
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    parser = argparse.ArgumentParser(prog="quality_gate", description=(
+        "Head of Quality shadow gate — score a diff's evidence against the "
+        "ihsan bar. Shadow mode logs a would-block verdict but exits 0."))
+    parser.add_argument("--class", dest="change_class", required=True,
+                        help="the change class (or alias); unknown -> strictest default")
+    parser.add_argument("--mode", dest="mode", default=None,
+                        help="off|shadow|block (default: QUALITY_GATE_MODE env, else shadow)")
+    args = parser.parse_args(argv)
+
+    try:
+        evidence = json.load(stdin) or {}
+    except (ValueError, TypeError):
+        evidence = {}
+
+    verdict = evaluate(args.change_class, evidence, mode=args.mode)
+    stdout.write(json.dumps(verdict.to_dict(), indent=2) + "\n")
+    # Fail the caller ONLY when the gate is actually enforcing. Shadow -> 0.
+    return 1 if should_block(verdict) else 0
+
+
+if __name__ == "__main__":   # pragma: no cover
+    import sys
+    sys.exit(main())
