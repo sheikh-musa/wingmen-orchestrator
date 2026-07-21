@@ -53,6 +53,16 @@ PANE_INPUT_TEXT = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_no_owed_action(monkeypatch):
+    """Default seam state for the CAI-500 owed-action gate (cond 1): operator
+    inbox drained + no open in-flight executor. Keeps the pre-existing _do_reset
+    tests exercising the /clear sequence; the owed-action / capture tests override
+    these two seams explicitly. Nothing here touches a real DB."""
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 0)
+    monkeypatch.setattr(w, "_open_executor_count", lambda a, reg: 0)
+
+
 # --------------------------------------------------------------------------- #
 # idle vs busy detection
 # --------------------------------------------------------------------------- #
@@ -503,6 +513,152 @@ def test_plan_armed_gate_fail(monkeypatch):
     monkeypatch.setattr(w, "_fresh_handoff", lambda reg: None)
     plan = w.plan_reset(_ctx(pct=88, level="red", action="reset-eligible"), armed=True)
     assert "NOT-IDLE" in plan
+
+
+# --------------------------------------------------------------------------- #
+# CAI-500 condition 1 — idle = NO OWED ACTION in flight. A body is red-reset-
+# eligible ONLY when it has nothing owed: operator inbox drained AND no open
+# in-flight executor AND pane idle. Any owed action -> DEFER, never /clear.
+# --------------------------------------------------------------------------- #
+
+def test_owed_action_none_when_fully_quiescent(monkeypatch):
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 0)
+    monkeypatch.setattr(w, "_open_executor_count", lambda a, reg: 0)
+    st = w.PaneState(reachable=True, idle=True, authenticated=True)
+    assert w._owed_action_in_flight(_ctx(), REG, st) is None
+
+
+def test_owed_action_defers_on_unhandled_operator_msg(monkeypatch):
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 2)
+    monkeypatch.setattr(w, "_open_executor_count", lambda a, reg: 0)
+    st = w.PaneState(reachable=True, idle=True, authenticated=True)
+    reason = w._owed_action_in_flight(_ctx(), REG, st)
+    assert reason and "operator message" in reason  # inbox not drained -> owed
+
+
+def test_owed_action_defers_on_open_executor(monkeypatch):
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 0)
+    monkeypatch.setattr(w, "_open_executor_count", lambda a, reg: 1)
+    st = w.PaneState(reachable=True, idle=True, authenticated=True)
+    reason = w._owed_action_in_flight(_ctx(), REG, st)
+    assert reason and "executor" in reason
+
+
+def test_owed_action_defers_on_indeterminate_inbox(monkeypatch):
+    """Fail-safe: if the inbox drain is UNPROVABLE (DB down / undeclared scope)
+    the body counts as owed — we never /clear what we cannot prove is drained."""
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: None)
+    monkeypatch.setattr(w, "_open_executor_count", lambda a, reg: 0)
+    st = w.PaneState(reachable=True, idle=True, authenticated=True)
+    reason = w._owed_action_in_flight(_ctx(), REG, st)
+    assert reason and "UNPROVABLE" in reason
+
+
+def test_owed_action_defers_on_indeterminate_executor(monkeypatch):
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 0)
+    monkeypatch.setattr(w, "_open_executor_count", lambda a, reg: None)
+    st = w.PaneState(reachable=True, idle=True, authenticated=True)
+    reason = w._owed_action_in_flight(_ctx(), REG, st)
+    assert reason and "UNPROVABLE" in reason
+
+
+def test_owed_action_defers_when_not_idle(monkeypatch):
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 0)
+    monkeypatch.setattr(w, "_open_executor_count", lambda a, reg: 0)
+    st = w.PaneState(reachable=True, idle=False, authenticated=True)
+    reason = w._owed_action_in_flight(_ctx(), REG, st)
+    assert reason and "not idle" in reason
+
+
+def test_do_reset_defers_when_owed_action(monkeypatch):
+    """End-to-end: an owed operator message -> _do_reset DEFERS, NEVER /clear."""
+    monkeypatch.setattr(w, "_pane_state",
+                        lambda reg: w.PaneState(True, True, True, "", ""))
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: "session-handoff-now.md")
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 3)  # inbox NOT drained
+    monkeypatch.setattr(w, "_open_executor_count", lambda a, reg: 0)
+    cleared = []
+    monkeypatch.setattr(w, "_send_literal", lambda reg, t: cleared.append(t) or True)
+    monkeypatch.setattr(w, "_send_key", lambda reg, k: True)
+
+    ok, detail = w._do_reset(_ctx(), REG)
+    assert ok is False and "DEFER" in detail
+    assert "/clear" not in cleared  # owed action -> never cleared
+
+
+# --------------------------------------------------------------------------- #
+# CAI-500 condition 2 — PROVABLE capture before the irreversible /clear. If the
+# capture of un-drained input cannot be VERIFIED, ABORT — never /clear.
+# --------------------------------------------------------------------------- #
+
+def test_verify_capture_ok_when_saved_and_drained(monkeypatch):
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: "session-handoff-now.md")
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 0)
+    st = w.PaneState(True, True, True, "", "")
+    ok, detail = w._verify_capture_before_clear(REG, st)
+    assert ok is True and "verified" in detail
+
+
+def test_verify_capture_fails_no_handoff(monkeypatch):
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: None)
+    st = w.PaneState(True, True, True, "", "")
+    ok, detail = w._verify_capture_before_clear(REG, st)
+    assert ok is False and "handoff" in detail  # state NOT saved -> refuse
+
+
+def test_verify_capture_fails_inbox_not_drained(monkeypatch):
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: "session-handoff-now.md")
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 1)  # arrived mid-checkpoint
+    st = w.PaneState(True, True, True, "", "")
+    ok, detail = w._verify_capture_before_clear(REG, st)
+    assert ok is False and "drained" in detail
+
+
+def test_verify_capture_fails_indeterminate_inbox(monkeypatch):
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: "session-handoff-now.md")
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: None)  # can't re-verify
+    st = w.PaneState(True, True, True, "", "")
+    ok, detail = w._verify_capture_before_clear(REG, st)
+    assert ok is False
+
+
+def test_verify_capture_fails_unsent_input_present(monkeypatch):
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: "session-handoff-now.md")
+    monkeypatch.setattr(w, "_unhandled_operator_count", lambda reg: 0)
+    st = w.PaneState(True, True, True, "still typing this", "")  # unsent text remains
+    ok, detail = w._verify_capture_before_clear(REG, st)
+    assert ok is False and "input-box" in detail
+
+
+def test_do_reset_aborts_when_capture_unverified(monkeypatch):
+    """If capture cannot be VERIFIED before /clear -> ABORT loudly, never /clear."""
+    paged, cleared = [], []
+    monkeypatch.setattr(w, "_pane_state",
+                        lambda reg: w.PaneState(True, True, True, "", ""))
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: "session-handoff-now.md")
+    monkeypatch.setattr(w, "_verify_capture_before_clear",
+                        lambda reg, st: (False, "inbox re-check unprovable"))
+    monkeypatch.setattr(w, "_page_loud", lambda text: paged.append(text))
+    monkeypatch.setattr(w, "_send_literal", lambda reg, t: cleared.append(t) or True)
+    monkeypatch.setattr(w, "_send_key", lambda reg, k: True)
+
+    ok, detail = w._do_reset(_ctx(), REG)
+    assert ok is False and "ABORT" in detail and "capture" in detail
+    assert "/clear" not in cleared            # dead-man's-switch: body left SAFE
+    assert paged and "ABORTED" in paged[0]    # loud page
+
+
+# --------------------------------------------------------------------------- #
+# CAI-500 condition 4 — NEVER-SELF, enforced at the executor boundary too (not
+# only by the run_executor registry filter).
+# --------------------------------------------------------------------------- #
+
+def test_do_reset_refuses_self():
+    """A never-self / detect-only body (auto_reset=False) is refused even on a
+    DIRECT _do_reset call — the never-self invariant holds at the executor edge."""
+    self_reg = w._AGENT_REGISTRY["orch-console"]
+    ok, detail = w._do_reset(_ctx(agent="orch-console"), self_reg)
+    assert ok is False and "never-self" in detail
 
 
 if __name__ == "__main__":

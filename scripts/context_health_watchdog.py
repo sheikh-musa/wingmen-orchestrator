@@ -125,8 +125,8 @@ _HANDOFF_MAX_AGE_MIN = int(os.environ.get("CTX_WD_HANDOFF_MAX_AGE_MIN", "30"))
 #   ONLY the degrade-prone 1M Studio bodies. orch-console (self, Mini) is
 #   self-compacting and IS this watchdog's own host — NEVER auto-reset self.
 _AGENT_REGISTRY = {
-    "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "label": "The hub (orch, Studio)"},
-    "cai":             {"host": "mac-studio", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "handoff_dir": "~/wingmen/wingmen-cai",  "window": 1_000_000, "alerts": True,  "auto_reset": True,  "label": "cai (Studio)"},
+    "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "inbox_scope": "hub", "label": "The hub (orch, Studio)"},
+    "cai":             {"host": "mac-studio", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "handoff_dir": "~/wingmen/wingmen-cai",  "window": 1_000_000, "alerts": True,  "auto_reset": True,  "inbox_scope": "cai", "label": "cai (Studio)"},
     # window was hardcoded 200K (stale/wrong — op-caught 2026-07-21: the gauge showed
     # orch-console at 776K live tokens, impossible in a 200K window). Real window is
     # ~1M like the other bodies. Nazim DOES fill toward its limit and must be watched;
@@ -543,10 +543,134 @@ def _do_checkpoint(a: AgentCtx, reg: dict, st: PaneState) -> tuple[bool, str]:
     return False, f"no fresh handoff after {_CHECKPOINT_WAIT_S}s"
 
 
+# --------------------------------------------------------------------------- #
+# CAI-500 condition 1 — "idle = NO OWED ACTION in flight". A body is red-reset-
+# eligible ONLY with NOTHING owed: operator inbox drained + no open in-flight
+# executor + pane idle. These two probes are the DB boundary (mockable seams for
+# the unit tests). Both fail-SAFE toward "owed" (return None) so we NEVER /clear a
+# body we cannot PROVE is quiescent.
+# --------------------------------------------------------------------------- #
+
+_INBOX_SCOPE_SQL = {
+    # Mirrors nervous_system/operator_log._channel_scope_sql: the HUB owns every
+    # operator surface EXCEPT the other bodies' DMs + shared feeds; cai owns only
+    # its own channel. A body with an UNDECLARED scope -> None -> treated as owed.
+    "hub": (" AND channel <> 'tmux-console'"
+            " AND tag IS DISTINCT FROM 'nazim-console'"
+            " AND tag IS DISTINCT FROM 'cai-channel'"),
+    "cai": (" AND tag = 'cai-channel'"),
+}
+
+
+def _pg_connect():
+    """psycopg(2) connect callable, or None if neither is importable."""
+    try:
+        import psycopg  # type: ignore
+        return psycopg.connect
+    except ImportError:  # pragma: no cover
+        try:
+            import psycopg2  # type: ignore
+            return psycopg2.connect
+        except ImportError:
+            return None
+
+
+def _unhandled_operator_count(reg: dict) -> Optional[int]:
+    """Count of UNHANDLED inbound operator_messages in this body's channel scope.
+    0 = inbox drained (no owed operator action). None = INDETERMINATE (DB down, no
+    driver, or the body has no declared inbox scope) -> the caller MUST treat as
+    owed and DEFER (never /clear a body whose inbox we cannot prove drained)."""
+    scope = reg.get("inbox_scope")
+    if scope not in _INBOX_SCOPE_SQL:
+        return None
+    dsn = _dsn()
+    connect = _pg_connect()
+    if not dsn or connect is None:
+        return None
+    try:
+        with connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM operator_messages "
+                "WHERE direction='inbound' AND handled_at IS NULL"
+                + _INBOX_SCOPE_SQL[scope])
+            return int(cur.fetchone()[0])
+    except Exception:
+        return None
+
+
+def _open_executor_count(a: AgentCtx, reg: dict) -> Optional[int]:
+    """Count of OPEN in-flight exec_work_items owned by this body (state claimed/
+    running). 0 = none in flight. None = INDETERMINATE (DB down, or the exec-
+    reliability layer's table is not yet deployed) -> treated as owed -> DEFER.
+    This deliberately keeps red UNREACHABLE until the exec layer exists to PROVE
+    no work-item is mid-flight — the safe direction for a DISARMED path."""
+    dsn = _dsn()
+    connect = _pg_connect()
+    if not dsn or connect is None:
+        return None
+    try:
+        with connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM exec_work_items "
+                "WHERE claimed_by=%s AND state IN ('claimed','running')",
+                (a.agent,))
+            return int(cur.fetchone()[0])
+    except Exception:
+        return None
+
+
+def _owed_action_in_flight(a: AgentCtx, reg: dict, st: PaneState) -> Optional[str]:
+    """CAI-500 condition 1. Return a REASON string iff ANY owed action is in
+    flight (so the red /clear must DEFER this cycle), else None (quiescent -> may
+    proceed to capture+clear). Owed = pane not idle, OR operator inbox not
+    PROVABLY drained, OR an open in-flight executor. INDETERMINATE probes count AS
+    owed — we never /clear a body we cannot PROVE has nothing owed."""
+    if st.idle is not True:
+        return f"pane not idle (idle={st.idle}) — mid-task"
+    n_inbox = _unhandled_operator_count(reg)
+    if n_inbox is None:
+        return "operator-inbox drain UNPROVABLE (DB down / undeclared scope) — defer"
+    if n_inbox > 0:
+        return f"{n_inbox} unhandled operator message(s) owed in '{reg.get('inbox_scope')}' scope"
+    n_exec = _open_executor_count(a, reg)
+    if n_exec is None:
+        return "open-executor state UNPROVABLE (DB down / exec table absent) — defer"
+    if n_exec > 0:
+        return f"{n_exec} open in-flight executor(s) for {a.agent}"
+    return None
+
+
+def _verify_capture_before_clear(reg: dict, st: PaneState) -> tuple[bool, str]:
+    """CAI-500 condition 2. PROVE that all un-drained input was durably captured
+    BEFORE the irreversible /clear. Returns (ok, detail); if capture cannot be
+    VERIFIED the caller ABORTS (never clears). Verifies: (a) a FRESH handoff is on
+    disk (state saved + verified within the age window), (b) the operator inbox is
+    STILL drained — re-read here, so nothing slipped in during the checkpoint
+    window, (c) the prompt input box holds NO unsent text (any was preserved +
+    C-u cleared during the checkpoint step)."""
+    fresh = _fresh_handoff(reg)
+    if not fresh:
+        return False, "no fresh handoff on disk — state NOT saved"
+    n_inbox = _unhandled_operator_count(reg)
+    if n_inbox is None:
+        return False, "cannot re-verify operator inbox is drained (DB/scope) — refuse"
+    if n_inbox > 0:
+        return False, f"{n_inbox} operator message(s) arrived during checkpoint — inbox NOT drained"
+    if (st.input_text or "").strip():
+        return False, "unsent input-box text still present — capture incomplete"
+    return True, f"capture verified (handoff {fresh}; inbox drained; input box clear)"
+
+
 def _do_reset(a: AgentCtx, reg: dict) -> tuple[bool, str]:
     """Full from-Mini reset: gate -> (checkpoint if stale) -> re-verify -> /clear
     (phantom-guarded, in-place, NEVER kill-session) -> verify -> boot. Any step
     failure ABORTS and pages loudly, leaving the body in a safe state."""
+    # CAI-500 condition 4 — NEVER-SELF, at the executor boundary (defense in
+    # depth; run_executor already filters non-auto_reset bodies out). A body the
+    # registry marks detect-only / self-compacting (orch-console) is refused even
+    # on a direct call — it never resets itself.
+    if not reg.get("auto_reset"):
+        return False, f"SKIP: {a.agent} is a never-self / detect-only body — refusing reset"
     st = _pane_state(reg)
     if not st.reachable:
         return False, "SKIP: pane unreachable"
@@ -554,6 +678,13 @@ def _do_reset(a: AgentCtx, reg: dict) -> tuple[bool, str]:
         return False, f"SKIP: not idle (idle={st.idle}) — never reset a busy body"
     if st.authenticated is not True:
         return False, f"SKIP: not clearly authenticated (auth={st.authenticated})"
+
+    # CAI-500 condition 1 — NO OWED ACTION in flight (inbox drained + no open
+    # executor + idle). Any owed action -> DEFER (log + skip), never /clear.
+    owed = _owed_action_in_flight(a, reg, st)
+    if owed is not None:
+        _log_pen_gate(f"red reset DEFERRED for {a.agent}: {owed}")
+        return False, f"DEFER: owed action in flight — {owed} (no /clear this cycle)"
 
     # 1. Guarantee a fresh saved state. Checkpoint if the handoff is stale, OR if
     #    there is unsent operator text we must fold in before /clear discards it.
@@ -571,6 +702,17 @@ def _do_reset(a: AgentCtx, reg: dict) -> tuple[bool, str]:
     st2 = _pane_state(reg)
     if st2.idle is not True or st2.authenticated is not True:
         return False, f"SKIP: state changed before /clear (idle={st2.idle} auth={st2.authenticated})"
+
+    # CAI-500 condition 2 — PROVABLE capture before the irreversible /clear. Prove
+    # a fresh handoff landed, the inbox is STILL drained (re-read), and no unsent
+    # input remains. If capture cannot be VERIFIED -> ABORT loudly, never /clear
+    # (dead-man's-switch: body left INTACT with its saved state).
+    ok_cap, cap_detail = _verify_capture_before_clear(reg, st2)
+    if not ok_cap:
+        _page_loud(f"🚨 ctx-watchdog ABORTED reset of {a.agent}: capture NOT verified ({cap_detail}). "
+                   f"Body left INTACT — never /clear without provably-captured input. Manual reset needed.")
+        _log_pen_gate(f"red reset ABORTED for {a.agent}: capture unverified ({cap_detail})")
+        return False, f"ABORT: capture unverified ({cap_detail})"
 
     # 2. /clear in place, phantom-guarded: type it, VERIFY it landed in the box,
     #    only THEN press Enter. Never kill-session.
