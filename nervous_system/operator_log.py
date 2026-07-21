@@ -13,6 +13,8 @@ import sys
 import psycopg
 from dotenv import load_dotenv
 
+from nervous_system import triage  # PASSIVE CoS triage annotation (read-only)
+
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 
@@ -54,6 +56,21 @@ def _sender_label(from_user_id, from_name, from_username) -> str:
     if from_username:
         return "@" + str(from_username).lstrip("@")
     return "unknown"
+
+
+# --- Passive CoS triage annotation (chief-of-staff spec, Step 1) -------------
+# READ-ONLY: unprocessed()/recent() append a `triage` suggestion so Nazim can see
+# the likely route when he reconciles. Prefer the stored cos_triage (computed by
+# ingest at inbound time); fall back to recomputing from the text for legacy /
+# NULL rows (deterministic — nothing is lost). This never routes or sends.
+
+def _triage_for(stored, text, tag) -> dict:
+    if isinstance(stored, dict) and stored:
+        return stored
+    try:
+        return triage.classify(text, tag=tag).to_dict()
+    except Exception:
+        return {}
 
 
 def _source_hint(chat_id, from_user_id) -> str:
@@ -149,24 +166,26 @@ def recent(limit: int = 20) -> list:
     (headless or rebooted) cc-orchestrator reads to catch up.
 
     Return shape (BACKWARD-COMPATIBLE — first 4 positions unchanged, sender
-    fields APPENDED at the end):
+    fields then the passive triage suggestion APPENDED at the end):
         (direction, tag, text, created_at,          # original 4
          from_user_id, from_username, from_name,    # raw message.from
-         sender_label, source)                      # derived: 'Musa'/name, 'DM'/'group'
+         sender_label, source,                      # derived: 'Musa'/name, 'DM'/'group'
+         triage)                                    # passive CoS route suggestion (dict), read-only
     """
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT direction, tag, text, created_at, chat_id, "
-            "from_user_id, from_username, from_name FROM operator_messages "
+            "from_user_id, from_username, from_name, cos_triage FROM operator_messages "
             "ORDER BY id DESC LIMIT %s", (limit,))
         rows = cur.fetchall()
     out = []
     for (direction, tag, text, created_at, chat_id,
-         fuid, funame, fname) in reversed(rows):
+         fuid, funame, fname, cos_triage) in reversed(rows):
         out.append((direction, tag, text, created_at, fuid, funame, fname,
                     _sender_label(fuid, fname, funame),
-                    _source_hint(chat_id, fuid)))
+                    _source_hint(chat_id, fuid),
+                    _triage_for(cos_triage, text, tag)))
     return out
 
 
@@ -182,25 +201,27 @@ def unprocessed(limit: int = 20) -> list:
     reconciliation read that makes delivery independent of keystrokes landing.
 
     Return shape (BACKWARD-COMPATIBLE — first 4 positions unchanged, sender
-    fields APPENDED at the end):
+    fields then the passive triage suggestion APPENDED at the end):
         (id, tag, text, created_at,                 # original 4
          from_user_id, from_username, from_name,    # raw message.from
-         sender_label, source)                      # derived: 'Musa'/name, 'DM'/'group'
+         sender_label, source,                      # derived: 'Musa'/name, 'DM'/'group'
+         triage)                                    # passive CoS route suggestion (dict), read-only
     """
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT id, tag, text, created_at, chat_id, "
-            "from_user_id, from_username, from_name FROM operator_messages "
+            "from_user_id, from_username, from_name, cos_triage FROM operator_messages "
             "WHERE direction='inbound' AND handled_at IS NULL"
             + _channel_scope_sql() +
             " ORDER BY id ASC LIMIT %s", (limit,))
         rows = cur.fetchall()
     return [(rid, tag, text, created_at, fuid, funame, fname,
              _sender_label(fuid, fname, funame),
-             _source_hint(chat_id, fuid))
+             _source_hint(chat_id, fuid),
+             _triage_for(cos_triage, text, tag))
             for (rid, tag, text, created_at, chat_id,
-                 fuid, funame, fname) in rows]
+                 fuid, funame, fname, cos_triage) in rows]
 
 
 def mark_handled_through(max_id: int) -> int:

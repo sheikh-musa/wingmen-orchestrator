@@ -50,6 +50,8 @@ import socket
 import psycopg
 from dotenv import load_dotenv
 
+from nervous_system import triage  # PASSIVE CoS triage annotation (read-only; no routing)
+
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 # Force IPv4 for api.telegram.org ONLY. This network's IPv6 route to Telegram is
@@ -444,14 +446,26 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
 
         # 2. LOG — durable first, always. Media is downloaded here so the row
         #    carries the local path (screenshot/doc), not a bare non-text marker.
+        content = message_content(ch, msg, upd_id)
+        # PASSIVE CoS triage (Step 1): compute the read-only route suggestion and
+        # store it in the additive `cos_triage` column. STRICTLY additive — it
+        # never routes, sends, or gates. Dead-man's-switch: any classifier error
+        # → cos_triage NULL → today's manual behavior, LOG still succeeds. The
+        # text-based route (msg.text) is used, not the media pointer, so a
+        # screenshot's caption still triages.
+        try:
+            cos_triage = json.dumps(triage.classify(
+                msg.get("text") or msg.get("caption") or content,
+                tag=ch.channel_tag).to_dict())
+        except Exception:
+            cos_triage = None
         cur.execute(
             "INSERT INTO operator_messages "
             "(direction, channel, chat_id, tag, text, delivered, "
-            " from_user_id, from_username, from_name) "
-            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s) RETURNING id",
+            " from_user_id, from_username, from_name, cos_triage) "
+            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s) RETURNING id",
             (str(chat_id) if chat_id is not None else None, ch.channel_tag,
-             message_content(ch, msg, upd_id),
-             from_user_id, from_username, from_name),
+             content, from_user_id, from_username, from_name, cos_triage),
         )
         op_msg_id = cur.fetchone()[0]
         cur.execute(

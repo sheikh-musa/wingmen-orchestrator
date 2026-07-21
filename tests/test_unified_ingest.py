@@ -35,7 +35,8 @@ def db():
                   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                   direction TEXT NOT NULL, channel TEXT, chat_id TEXT, tag TEXT,
                   text TEXT NOT NULL, delivered BOOLEAN NOT NULL DEFAULT true,
-                  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), handled_at TIMESTAMPTZ)
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), handled_at TIMESTAMPTZ,
+                  cos_triage JSONB)
             """)
             cur.execute("TRUNCATE ingest_dedup, tg_out, operator_messages")
             cur.execute("""
