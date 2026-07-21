@@ -210,6 +210,101 @@ def test_run_executor_red_full_reset(monkeypatch, tmp_path):
     assert "red reset OK" in res[0]
 
 
+# --------------------------------------------------------------------------- #
+# GRANULAR ARMING (CAI-RESP-500): amber = write-only checkpoint half; red = also
+# the destructive /clear. The safety-critical invariant is that arm=amber can
+# NEVER reach _do_reset / a tmux /clear, even for a RED body.
+# --------------------------------------------------------------------------- #
+
+def test_arm_amber_red_body_stays_dry_run_no_reset(monkeypatch, tmp_path):
+    """arm=amber on a RED body: checkpoint-only (write-only), NEVER _do_reset."""
+    calls = {"checkpoint": 0, "reset": 0}
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    monkeypatch.setattr(w, "_pane_state",
+                        lambda reg: w.PaneState(True, True, True, "", ""))
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: None)  # force a checkpoint attempt
+    monkeypatch.setattr(w, "_do_checkpoint",
+                        lambda a, reg, st: (calls.__setitem__("checkpoint", calls["checkpoint"] + 1), (True, "fresh handoff x.md"))[1])
+    monkeypatch.setattr(w, "_do_reset",
+                        lambda a, reg: (calls.__setitem__("reset", calls["reset"] + 1), (True, "reset OK"))[1])
+
+    res = w.run_executor([_ctx(pct=88, level="red", action="reset-eligible")], arm_level="amber")
+    assert calls["reset"] == 0        # THE invariant: amber NEVER /clear-resets a red body
+    assert calls["checkpoint"] == 1   # but it DOES write-only checkpoint it (≥SOFT)
+    assert "WOULD reset" in res[0] and "UNARMED" in res[0]
+
+
+def test_arm_amber_amber_body_checkpoints(monkeypatch, tmp_path):
+    """arm=amber on an amber body: DOES invoke the checkpoint path, never reset."""
+    calls = {"checkpoint": 0, "reset": 0}
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    monkeypatch.setattr(w, "_pane_state",
+                        lambda reg: w.PaneState(True, True, True, "", ""))
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: None)
+    monkeypatch.setattr(w, "_do_checkpoint",
+                        lambda a, reg, st: (calls.__setitem__("checkpoint", calls["checkpoint"] + 1), (True, "fresh handoff x.md"))[1])
+    monkeypatch.setattr(w, "_do_reset",
+                        lambda a, reg: (calls.__setitem__("reset", calls["reset"] + 1), (True, "reset OK"))[1])
+
+    res = w.run_executor([_ctx(pct=70, level="amber", action="checkpoint-nudge")], arm_level="amber")
+    assert calls["checkpoint"] == 1
+    assert calls["reset"] == 0
+    assert "amber checkpoint OK" in res[0]
+
+
+def test_arm_red_red_body_resets(monkeypatch, tmp_path):
+    """arm=red on a RED body: the destructive reset path IS reachable."""
+    calls = {"reset": 0}
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    monkeypatch.setattr(w, "_do_reset",
+                        lambda a, reg: (calls.__setitem__("reset", calls["reset"] + 1), (True, "reset OK (handoff x)"))[1])
+    res = w.run_executor([_ctx(pct=88, level="red", action="reset-eligible")], arm_level="red")
+    assert calls["reset"] == 1
+    assert "red reset OK" in res[0]
+
+
+def test_arm_off_is_a_noop(monkeypatch, tmp_path):
+    """arm=off never executes anything, even for a red body."""
+    calls = {"n": 0}
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    monkeypatch.setattr(w, "_do_reset", lambda a, reg: (calls.__setitem__("n", calls["n"] + 1), (True, "x"))[1])
+    monkeypatch.setattr(w, "_do_checkpoint", lambda a, reg, st: (calls.__setitem__("n", calls["n"] + 1), (True, "x"))[1])
+    assert w.run_executor([_ctx(pct=88, level="red", action="reset-eligible")], arm_level="off") == []
+    assert calls["n"] == 0
+
+
+def test_plan_arm_amber_red_body_dry_run(monkeypatch):
+    """The PRINTED plan for a red body under arm=amber is a dry-run 'WOULD reset',
+    and it does NOT probe the live pane (off/amber never touches the agent)."""
+    monkeypatch.setattr(w, "_agent_is_idle",
+                        lambda reg: pytest.fail("planner probed a live pane under arm=amber"))
+    monkeypatch.setattr(w, "_do_reset",
+                        lambda a, reg: pytest.fail("planner executed a reset under arm=amber"))
+    plan = w.plan_reset(_ctx(pct=88, level="red", action="reset-eligible"), arm_level="amber")
+    assert "WOULD reset" in plan and "UNARMED" in plan
+
+
+def test_plan_arm_amber_amber_body_will_checkpoint(monkeypatch):
+    plan = w.plan_reset(_ctx(pct=70, level="amber", action="checkpoint-nudge"), arm_level="amber")
+    assert plan.startswith("checkpoint-nudge")  # no 'WOULD' — it will fire
+
+
+def test_resolve_arm_level_flag_and_env(monkeypatch):
+    import argparse
+    # flag wins
+    ns = argparse.Namespace(arm="amber")
+    monkeypatch.setenv("CTX_WD_ARM", "red")
+    assert w._resolve_arm_level(ns) == "amber"
+    # no flag -> env
+    ns2 = argparse.Namespace(arm=None)
+    monkeypatch.setenv("CTX_WD_ARM", "amber")
+    assert w._resolve_arm_level(ns2) == "amber"
+    # no flag, no/invalid env -> off
+    ns3 = argparse.Namespace(arm=None)
+    monkeypatch.delenv("CTX_WD_ARM", raising=False)
+    assert w._resolve_arm_level(ns3) == "off"
+
+
 def test_run_executor_never_touches_self(monkeypatch, tmp_path):
     """orch-console (self, Mini, self-compacting) must NEVER be auto-reset."""
     calls = {"n": 0}

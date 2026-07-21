@@ -3,17 +3,22 @@
 <plist version="1.0">
 <dict>
   <key>Label</key><string>dev.wingmen.context-health-watchdog</string>
-  <!-- ARMED FOR ALERTS (op#5516, operator 2026-07-19). Runs --alert: DETECTS +
-       PAGES the operator on nazim-console when a 1M body (hub/cai) fogs, so it
-       gets reset before he notices. It NEVER touches an agent — safe every cycle.
-       NOT --arm: the destructive /clear+boot executor stays UNWIRED (auto-clearing
-       a live agent can lose work). To enable auto-reset later: add --arm, wire the
-       executor + cross-host handoff verification, AND only after review. -->
+  <!-- ARMED=AMBER (CAI-RESP-500 + operator sign-off 2026-07-22). Runs
+       `--alert --arm=amber`:
+         --alert     : DETECTS + PAGES the operator on nazim-console when a 1M
+                       body (hub/cai) fogs.
+         --arm=amber : the WRITE-ONLY half of the executor — auto-checkpoints
+                       degrade-prone bodies at ≥SOFT (nudges them to write a fresh
+                       handoff). ZERO-RISK: it NEVER runs /clear.
+       The destructive RED half (/clear + boot) stays UNARMED from the scheduler
+       — cai gated it on stricter conditions not yet built. To enable auto-reset
+       later: change --arm=amber -> --arm=red, ONLY after those gates + review. -->
   <key>ProgramArguments</key><array>
     <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
     <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/context_health_watchdog.py</string>
     <string>--alert</string>
-    <!-- detect + page operator; NO --arm (no auto-reset execution) -->
+    <string>--arm=amber</string>
+    <!-- detect + page + WRITE-ONLY auto-checkpoint; NO /clear (red stays unarmed) -->
   </array>
   <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
   <key>RunAtLoad</key><true/>

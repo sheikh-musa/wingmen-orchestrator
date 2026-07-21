@@ -7,14 +7,21 @@ orchestrates the safe reset-from-handoff procedure (checkpoint -> /clear -> boot
 the same "reset-from-Mini" playbook a human runs by hand today.
 
   ┌─ SAFETY / STATUS ─────────────────────────────────────────────────────────┐
-  │ EXECUTOR WIRED, but DRY-RUN by default and arm-gated.                     │
-  │ - The active launchd plist runs --alert ONLY (detect + page). It is NOT   │
-  │   --arm, so the destructive executor never runs from the scheduler.       │
-  │ - Default mode is DRY-RUN: it DETECTS + LOGS what it *would* do and       │
-  │   NEVER touches an agent. The reset path only executes under --arm AND    │
-  │   after per-agent idle + AUTH + fresh-handoff verification all pass.      │
-  │ - Every step re-verifies live; a mid-reset failure ABORTS + pages the     │
-  │   operator LOUDLY and leaves the body in a SAFE state (never half-cleared │
+  │ EXECUTOR WIRED, DRY-RUN by default, GRANULARLY arm-gated (CAI-RESP-500).  │
+  │ Arm levels: off | amber | red.                                            │
+  │ - off  (default / no --arm): DETECTS + LOGS what it *would* do, touches   │
+  │   NO agent.                                                                │
+  │ - amber (`--arm=amber`, the ACTIVE plist mode): the WRITE-ONLY half only  │
+  │   — nudges ≥SOFT bodies to write a fresh handoff. ZERO-RISK: it NEVER     │
+  │   runs /clear. A RED body under amber is checkpoint-only + dry-run note.  │
+  │ - red  (`--arm=red` / bare `--arm`): ALSO the destructive /clear+boot     │
+  │   reset, and ONLY after per-agent idle + AUTH + fresh-handoff all pass.   │
+  │   GATED by cai on stricter conditions — kept UNARMED until those are met. │
+  │ - The active launchd plist runs `--alert --arm=amber`: detect + page +    │
+  │   auto-checkpoint; the destructive /clear executor never runs from the    │
+  │   scheduler.                                                               │
+  │ - Every reset step re-verifies live; a mid-reset failure ABORTS + pages   │
+  │   the operator LOUDLY and leaves the body SAFE (never half-cleared        │
   │   without a saved handoff). Self (orch-console) is NEVER auto-reset.      │
   └────────────────────────────────────────────────────────────────────────────┘
 
@@ -37,8 +44,12 @@ Never /clear a non-idle, unauthenticated, or handoff-less agent; never kill-sess
 Usage:
     context_health_watchdog.py                 # dry-run (default): detect + log only
     context_health_watchdog.py --json          # machine-readable classification
-    context_health_watchdog.py --arm           # DANGER: enable the real reset path
-                                               #   (still gated on idle + fresh handoff)
+    context_health_watchdog.py --arm=amber     # WRITE-ONLY: auto-checkpoint ≥SOFT bodies,
+                                               #   NEVER /clear (zero-risk; the plist mode)
+    context_health_watchdog.py --arm=red       # DANGER: also the /clear+boot reset path
+    context_health_watchdog.py --arm           #   (bare --arm == --arm=red, legacy: both)
+                                               #   red still gated on idle + auth + fresh handoff
+    # Env equivalent: CTX_WD_ARM=off|amber|red (the --arm flag overrides it).
 """
 from __future__ import annotations
 
@@ -347,25 +358,44 @@ def _fresh_handoff(reg: dict) -> Optional[str]:
     return None
 
 
-def plan_reset(a: AgentCtx, armed: bool) -> str:
+def plan_reset(a: AgentCtx, armed: bool = False, arm_level: Optional[str] = None) -> str:
     """Return the DECISION string (a pure planner — no side effects beyond the
-    read-only pane/handoff probes it makes when `armed`). The actual
-    checkpoint/clear/boot execution lives in run_executor(); this only describes
-    what would/should happen so the classification line + --json stay honest.
-    Staged: amber -> checkpoint-only, red+idle+fresh-handoff -> full reset."""
+    read-only pane/handoff probes it makes when the RED executor is armed). The
+    actual checkpoint/clear/boot execution lives in run_executor(); this only
+    describes what would/should happen so the classification line + --json stay
+    honest.
+
+    Granular arming (CAI-RESP-500): `arm_level` is off | amber | red.
+      - off   : pure DRY-RUN, no execution, no live probes.
+      - amber : the WRITE-ONLY half only — amber bodies get a checkpoint nudge,
+                and a RED body is STILL only checkpointed (never /clear'd); its
+                plan shows a dry-run reset so the operator sees red was NOT reset.
+      - red   : both — amber checkpoints AND red bodies may be /clear-reset
+                (still gated live on idle+auth+fresh-handoff).
+    `armed` (legacy bool) maps to arm_level red when True, off when False, and is
+    only consulted when arm_level is not given (keeps older callers/tests valid).
+    The invariant: red /clear can ONLY happen when arm_level == 'red'."""
+    if arm_level is None:
+        arm_level = "red" if armed else "off"
     reg = _AGENT_REGISTRY.get(a.agent)
     if a.action == "ok":
         return "ok"
     if a.action == "checkpoint-nudge":
         if reg and not reg.get("auto_reset"):
             return f"amber {a.pct}% — detect-only body (self-compacting), no checkpoint"
-        return f"{'WOULD ' if not armed else ''}checkpoint-nudge {a.agent} (amber {a.pct}%) — writes a fresh handoff, no reset"
+        will_checkpoint = arm_level in ("amber", "red")
+        return f"{'' if will_checkpoint else 'WOULD '}checkpoint-nudge {a.agent} (amber {a.pct}%) — writes a fresh handoff, no reset"
     # reset-eligible (red)
     if not reg:
         return f"detect-only: {a.agent} red {a.pct}% but not in reset registry"
     if not reg.get("auto_reset"):
         return f"detect-only: {a.agent} red {a.pct}% — self-compacting body, never auto-reset"
-    if not armed:
+    if arm_level != "red":
+        # off OR amber — the destructive /clear half is UNARMED. Under amber we
+        # still checkpoint the red body (write-only, ≥SOFT), but NEVER reset it.
+        if arm_level == "amber":
+            return (f"DRY-RUN (arm=amber): WOULD reset {a.agent} (red {a.pct}%) — red executor UNARMED; "
+                    f"checkpoint-only this cycle (write-only handoff, no /clear)")
         return (f"DRY-RUN: would full-reset {a.agent} (red {a.pct}%) IF idle+authed+fresh-handoff "
                 f"(checkpoint if stale -> /clear -> boot)")
     idle = _agent_is_idle(reg)
@@ -566,11 +596,41 @@ def _do_reset(a: AgentCtx, reg: dict) -> tuple[bool, str]:
     return True, f"reset OK (handoff {fresh}; booting={booting})"
 
 
-def run_executor(rows: list[AgentCtx]) -> list[str]:
-    """ARMED entry point. Per body: amber -> checkpoint-only, red -> full reset.
+def _run_checkpoint_for(a: AgentCtx, reg: dict, est: dict, now: float) -> tuple[bool, str]:
+    """The WRITE-ONLY checkpoint half: nudge a body to write a fresh handoff.
+    Zero-risk (never touches /clear). Deduped, gated on idle+auth. Returns
+    (state_touched, result_line). Shared by amber bodies (any arm) and red bodies
+    under arm=amber."""
+    last_cp = float(est.get("checkpoint_at", 0) or 0)
+    if (now - last_cp) < _CHECKPOINT_DEDUP_MIN * 60 and _fresh_handoff(reg):
+        return False, f"{a.agent}: {a.level} — checkpoint deduped (fresh handoff exists)"
+    st = _pane_state(reg)
+    if not st.reachable:
+        return False, f"{a.agent}: {a.level} — pane unreachable, skip"
+    if st.idle is not True or st.authenticated is not True:
+        return False, f"{a.agent}: {a.level} — not idle/authed (idle={st.idle} auth={st.authenticated}), skip"
+    ok, detail = _do_checkpoint(a, reg, st)
+    if ok:
+        est["checkpoint_at"] = now
+    else:
+        _page_loud(f"⚠️ ctx-watchdog: {a.level} checkpoint of {a.agent} did not confirm a handoff ({detail}).")
+    return ok, f"{a.agent}: {a.level} checkpoint {'OK' if ok else 'FAILED'} — {detail}"
+
+
+def run_executor(rows: list[AgentCtx], arm_level: str = "red") -> list[str]:
+    """ARMED entry point — GRANULAR (CAI-RESP-500). `arm_level` gates HOW far it acts:
+      - 'off'   : no-op (should not be called, but fail-safe returns []).
+      - 'amber' : the WRITE-ONLY half ONLY. Every ≥SOFT auto_reset body (amber OR
+                  red) is checkpoint-nudged; a RED body is NEVER /clear'd here — it
+                  is checkpoint-only + a dry-run note. `_do_reset` is never called.
+      - 'red'   : both — amber -> checkpoint, red -> full /clear reset (still gated
+                  live on idle+auth+fresh-handoff).
     De-duped via _EXEC_STATE_FILE; each body wrapped in a dead-man's-switch so a
     crash pages loudly instead of dying silent. Only touches auto_reset bodies
-    (never self / orch-console)."""
+    (never self / orch-console). The invariant guarded HERE: _do_reset (the /clear)
+    is reachable ONLY when arm_level == 'red'."""
+    if arm_level not in ("amber", "red"):
+        return []  # 'off' or anything unexpected — never execute
     state = _load_exec_state()
     now = time.time()
     results: list[str] = []
@@ -580,27 +640,10 @@ def run_executor(rows: list[AgentCtx]) -> list[str]:
             continue  # detect-only / self body / green — never auto-act
         est = state.get(a.agent, {})
         try:
-            if a.level == "amber":
-                last_cp = float(est.get("checkpoint_at", 0) or 0)
-                if (now - last_cp) < _CHECKPOINT_DEDUP_MIN * 60 and _fresh_handoff(reg):
-                    results.append(f"{a.agent}: amber — checkpoint deduped (fresh handoff exists)")
-                    continue
-                st = _pane_state(reg)
-                if not st.reachable:
-                    results.append(f"{a.agent}: amber — pane unreachable, skip")
-                    continue
-                if st.idle is not True or st.authenticated is not True:
-                    results.append(f"{a.agent}: amber — not idle/authed (idle={st.idle} auth={st.authenticated}), skip")
-                    continue
-                ok, detail = _do_checkpoint(a, reg, st)
-                if ok:
-                    est["checkpoint_at"] = now
-                    state[a.agent] = est
-                else:
-                    _page_loud(f"⚠️ ctx-watchdog: amber checkpoint of {a.agent} did not confirm a handoff ({detail}).")
-                results.append(f"{a.agent}: amber checkpoint {'OK' if ok else 'FAILED'} — {detail}")
-
-            elif a.level == "red":
+            # The ONLY path that reaches _do_reset (/clear): a red body under the
+            # explicit red arm. Everything else is the write-only checkpoint half.
+            do_destructive_reset = (a.level == "red" and arm_level == "red")
+            if do_destructive_reset:
                 last_rs = float(est.get("reset_at", 0) or 0)
                 if (now - last_rs) < _RESET_DEDUP_MIN * 60:
                     results.append(f"{a.agent}: red — reset deduped (last {int((now - last_rs) / 60)}m ago)")
@@ -611,6 +654,14 @@ def run_executor(rows: list[AgentCtx]) -> list[str]:
                     est["checkpoint_at"] = now
                     state[a.agent] = est
                 results.append(f"{a.agent}: red reset {'OK' if ok else 'SKIP/ABORT'} — {detail}")
+            else:
+                # amber body (any arm), OR red body under arm=amber -> WRITE-ONLY.
+                touched, line = _run_checkpoint_for(a, reg, est, now)
+                if touched:
+                    state[a.agent] = est
+                if a.level == "red":
+                    line += "  (WOULD reset — red /clear executor UNARMED at arm=amber)"
+                results.append(line)
         except Exception as e:  # dead-man's-switch: never die silent mid-reset
             import traceback
             traceback.print_exc()
@@ -739,36 +790,55 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
     return fired
 
 
+def _resolve_arm_level(args) -> str:
+    """off | amber | red. --arm flag wins; else env CTX_WD_ARM; else off.
+    Granular (CAI-RESP-500): amber = write-only checkpoint half; red = also the
+    destructive /clear reset. `--arm` with no value means red (legacy: both)."""
+    if getattr(args, "arm", None) is not None:
+        return args.arm
+    env = (os.environ.get("CTX_WD_ARM") or "off").strip().lower()
+    return env if env in ("amber", "red") else "off"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    ap.add_argument("--arm", action="store_true",
-                    help="DANGER: enable the reset decision path (still gated on idle+handoff)")
+    ap.add_argument("--arm", nargs="?", const="red", choices=["amber", "red"], default=None,
+                    help="arm the executor GRANULARLY: --arm=amber = WRITE-ONLY checkpoint half "
+                         "(zero-risk, never /clear); --arm or --arm=red = also the destructive "
+                         "/clear+boot reset (gated on idle+auth+fresh-handoff). Absent -> off "
+                         "(dry-run). Overrides env CTX_WD_ARM.")
     ap.add_argument("--alert", action="store_true",
                     help="page the operator (nazim-console) on amber/red for alert-enabled bodies")
     args = ap.parse_args()
+    arm_level = _resolve_arm_level(args)
 
     rows = read_context_gauge()
     if args.json:
-        out = [{**asdict(r), "plan": plan_reset(r, args.arm)} for r in rows]
-        exec_results = run_executor(rows) if args.arm else []
-        print(json.dumps({"rows": out, "exec": exec_results}, indent=2))
+        out = [{**asdict(r), "plan": plan_reset(r, arm_level=arm_level)} for r in rows]
+        exec_results = run_executor(rows, arm_level) if arm_level != "off" else []
+        print(json.dumps({"rows": out, "exec": exec_results, "arm_level": arm_level}, indent=2))
         if args.alert:
             run_alerts(rows)
         return 0
 
-    reset_mode = "ARMED — LIVE EXECUTOR" if args.arm else "DRY-RUN (detect+plan only)"
+    reset_mode = {
+        "off": "DRY-RUN (detect+plan only)",
+        "amber": "ARMED=AMBER — write-only checkpoint half (NO /clear)",
+        "red": "ARMED=RED — LIVE checkpoint + destructive /clear reset",
+    }[arm_level]
     alert_mode = "ON" if args.alert else "off"
-    print(f"[ctx-health] soft={_SOFT:.0%} hard={_HARD:.0%} reset={reset_mode} alert={alert_mode}")
+    print(f"[ctx-health] soft={_SOFT:.0%} hard={_HARD:.0%} arm={arm_level} reset={reset_mode} alert={alert_mode}")
     if not rows:
         print("[ctx-health] no context telemetry (writer running?)")
         return 0
     for r in rows:
         win = _AGENT_REGISTRY.get(r.agent, {}).get("window", _CTX_WINDOW)
-        print(f"  {r.level:5} {r.agent:16} {r.pct:3}% of {win//1000}K  ({r.ctx_tokens:>9,})  age={r.age_s}s  -> {plan_reset(r, args.arm)}")
-    if args.arm:
-        print("[ctx-health] ARMED: running executor (checkpoint/reset, gated + deduped)...")
-        for line in run_executor(rows):
+        print(f"  {r.level:5} {r.agent:16} {r.pct:3}% of {win//1000}K  ({r.ctx_tokens:>9,})  age={r.age_s}s  -> {plan_reset(r, arm_level=arm_level)}")
+    if arm_level != "off":
+        print(f"[ctx-health] ARMED={arm_level}: running executor "
+              f"({'checkpoint-only, no /clear' if arm_level == 'amber' else 'checkpoint + reset'}, gated + deduped)...")
+        for line in run_executor(rows, arm_level):
             print(f"    exec: {line}")
     if args.alert:
         fired = run_alerts(rows)
