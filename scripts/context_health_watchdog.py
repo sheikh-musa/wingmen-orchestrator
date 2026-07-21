@@ -98,7 +98,13 @@ _HANDOFF_MAX_AGE_MIN = int(os.environ.get("CTX_WD_HANDOFF_MAX_AGE_MIN", "30"))
 _AGENT_REGISTRY = {
     "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "label": "The hub (orch, Studio)"},
     "cai":             {"host": "mac-studio", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "handoff_dir": "~/wingmen/wingmen-cai",  "window": 1_000_000, "alerts": True,  "auto_reset": True,  "label": "cai (Studio)"},
-    "orch-console":    {"host": "self",        "tmux": "nazim", "handoff_glob": "reports/nazim-handoff-*.md",  "handoff_dir": str(_ORCH_DIR),           "window":   200_000, "alerts": False, "auto_reset": False, "label": "Nazim (console, Mini)"},
+    # window was hardcoded 200K (stale/wrong — op-caught 2026-07-21: the gauge showed
+    # orch-console at 776K live tokens, impossible in a 200K window). Real window is
+    # ~1M like the other bodies. Nazim DOES fill toward its limit and must be watched;
+    # the difference from the Studio bodies is only the RELEASE VALVE — Claude Code
+    # AUTO-COMPACTS (so alerts=True to warn, but auto_reset=False: recovery is a
+    # compaction, not a /clear — and never reset the body the watchdog runs beside).
+    "orch-console":    {"host": "self",        "tmux": "nazim", "handoff_glob": "reports/nazim-handoff-*.md",  "handoff_dir": str(_ORCH_DIR),           "window": 1_000_000, "alerts": True,  "auto_reset": False, "label": "Nazim (console, Mini — auto-compacts)"},
 }
 
 # --- executor tunables (only consulted under --arm) ------------------------- #
