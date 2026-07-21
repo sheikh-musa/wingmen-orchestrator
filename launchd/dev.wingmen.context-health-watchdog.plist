@@ -23,6 +23,7 @@
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
     <!-- Thresholds overridable: CTX_WD_SOFT (0.60), CTX_WD_HARD (0.80),
          CTX_WD_HANDOFF_MAX_AGE_MIN (30), CONSOLE_CTX_WINDOW (1000000). -->
   </dict>

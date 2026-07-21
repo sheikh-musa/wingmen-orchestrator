@@ -50,6 +50,12 @@ from typing import Optional
 from dotenv import load_dotenv
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
+# Self-contained package imports: under launchd there is NO PYTHONPATH, so
+# `import nervous_system` (used by the alert formatter) ModuleNotFound'd and the
+# whole alert-send path crashed SILENTLY — the hub hit 94% with zero page on
+# 2026-07-21 for exactly this reason. Never depend on the env for our own imports.
+if str(_ORCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_ORCH_DIR))
 load_dotenv(_ORCH_DIR / ".env")
 
 # Window + thresholds (overridable via env, mirrors the console gauge _CTX_WINDOW).
@@ -299,8 +305,18 @@ def _send_alert(text: str) -> None:
 
 
 def _alert_text(a: AgentCtx, reg: dict) -> str:
-    from nervous_system.alert_format import format_alert
     label = reg.get("label", a.agent)
+    try:
+        from nervous_system.alert_format import format_alert
+    except Exception:
+        # A DELIVERED plain alert beats a pretty one that crashes into silence.
+        head = "🚨 near-full — reset before it fogs" if a.level == "red" else "⚠️ context filling"
+        tail = ("Reset it (checkpoint handoff -> in-place /clear -> boot) — say the word and I'll drive it."
+                if a.level == "red" else
+                "Checkpoint if you're mid-thread; I'll page again if it crosses the reset line.")
+        return (f"{head}: {label} (~{a.pct}%)\n"
+                f"{label} is at ~{a.pct}% of its 1M window ({a.ctx_tokens:,} tokens, age {a.age_s}s) "
+                f"and does not auto-compact. {tail}")
     if a.level == "amber":
         return format_alert(
             icon="⚠️", title=f"{label} context filling (~{a.pct}%)",
@@ -383,4 +399,25 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Dead-man's-switch: a watchdog that dies silently is worse than none (the hub
+    # hit 94% unwarned on 2026-07-21 because an unhandled crash in the alert path
+    # exited 1 with no page). If ANYTHING here throws, page the operator via the
+    # dependency-free subprocess path (does NOT import nervous_system) so the
+    # failure of the guard is itself surfaced.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as _e:
+        import traceback
+        traceback.print_exc()
+        try:
+            subprocess.run(
+                [str(_ORCH_DIR / "scripts" / "nazim_send.sh"),
+                 f"🐛 Context watchdog CRASHED — it is NOT guarding the fleet right now: {_e}. "
+                 f"Fix before relying on context alerts."],
+                timeout=30, cwd=str(_ORCH_DIR),
+            )
+        except Exception:
+            pass
+        sys.exit(1)
