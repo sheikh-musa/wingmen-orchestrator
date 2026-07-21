@@ -104,7 +104,7 @@ _AGENT_REGISTRY = {
     # the difference from the Studio bodies is only the RELEASE VALVE — Claude Code
     # AUTO-COMPACTS (so alerts=True to warn, but auto_reset=False: recovery is a
     # compaction, not a /clear — and never reset the body the watchdog runs beside).
-    "orch-console":    {"host": "self",        "tmux": "nazim", "handoff_glob": "reports/nazim-handoff-*.md",  "handoff_dir": str(_ORCH_DIR),           "window": 1_000_000, "alerts": True,  "auto_reset": False, "label": "Nazim (console, Mini — auto-compacts)"},
+    "orch-console":    {"host": "self",        "tmux": "nazim", "handoff_glob": "reports/nazim-handoff-*.md",  "handoff_dir": str(_ORCH_DIR),           "window": 1_000_000, "alerts": True,  "auto_reset": False, "self_compacts": True, "label": "Nazim (console, Mini — auto-compacts)"},
 }
 
 # --- executor tunables (only consulted under --arm) ------------------------- #
@@ -669,6 +669,16 @@ def _send_alert(text: str) -> None:
 
 def _alert_text(a: AgentCtx, reg: dict) -> str:
     label = reg.get("label", a.agent)
+    if reg.get("self_compacts"):
+        # This body (Claude Code) AUTO-COMPACTS as its release valve — the harness
+        # summarizes its own context before it fogs, so there is nothing to /clear.
+        # The alert is INFORMATIONAL, not a reset alarm (op-caught 2026-07-21: the
+        # generic 'reset before it fogs' copy kept telling the operator to reset a
+        # body that heals itself).
+        return (f"ℹ️ {label} at ~{a.pct}% — no action needed, it auto-compacts.\n"
+                f"{label} is at ~{a.pct}% of its window ({a.ctx_tokens:,} tokens); Claude Code "
+                f"summarizes its own context before it fogs, so there's nothing to reset. "
+                f"Checkpoint a fresh handoff if it's mid-thread so continuity is clean through the compaction.")
     try:
         from nervous_system.alert_format import format_alert
     except Exception:
