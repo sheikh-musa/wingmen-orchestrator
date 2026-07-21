@@ -18,5 +18,24 @@
 - Lanes report the gate evidence (review verdicts, screenshots, CI status, DB-proofs) — the hub does not take "verified" on faith (re-check the high-risk items).
 - Not every item applies to every change (a docs tweak isn't a money-gate) — but the applicable subset is a hard floor, and money/PII/client-facing always pulls the full gate.
 
+## Machine-readable projection (Head of Quality, Phase 1)
+
+This doctrine (the bar as prose) has a versioned, machine-readable **projection**:
+`docs/ihsan-gate-manifest.yaml`, read by the pure reader `nervous_system/ihsan_gate.py`.
+The manifest maps each **change class** (docs/copy, UI/frontend, backend/action,
+DB migration, money/payment, PII/gov-data, deploy-to-prod, deploy-to-client) →
+the required **gate items** (the six items above, taxonomized as G1–G10), each
+tagged `deterministic` (auto-checkable) or `judgment` (needs a reviewer).
+
+**Phase 1 = CODIFY ONLY (per `reports/head-of-quality-spec.md` §8).** The manifest
+is INERT DATA + a read-only reader. It enforces NOTHING — no merge/deploy/ship
+path reads it, nothing blocks, no reviewer is auto-invoked. Enforcement (a
+fail-closed gate) is Phase 2+, gated on cai.
+
+**SYNC CONTRACT (don't drift):** this file stays the human doctrine; the manifest
+is its data projection. When this doctrine's gate items or risk-scaling change,
+update `docs/ihsan-gate-manifest.yaml` in the SAME commit and bump its `v`. Each
+manifest gate item carries a `doctrine_ref` back to a numbered item here.
+
 ## Related doctrine
-`ihsan-quality-bar` (UI every-page, iterate), `ihsan-factory-mandate` (the 4 pillars), CAI-RESP money-gate, TENANT-RESIDENCY-001, LAYER-VOCAB-001, `stale-tracking-ref-review-trap`.
+`ihsan-quality-bar` (UI every-page, iterate), `ihsan-factory-mandate` (the 4 pillars), CAI-RESP money-gate, TENANT-RESIDENCY-001, LAYER-VOCAB-001, `stale-tracking-ref-review-trap`, `docs/ihsan-gate-manifest.yaml` (this doctrine as data).

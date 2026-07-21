@@ -1,0 +1,229 @@
+# THE IHSAN GATE — machine-readable manifest
+#
+# This file is the versioned, machine-readable PROJECTION of docs/ihsan-gate.md.
+# docs/ihsan-gate.md stays the human doctrine (the bar as prose); THIS file is
+# the same bar turned into DATA a reader/gate can mechanically evaluate.
+#
+# Phase 1 (Head of Quality, reports/head-of-quality-spec.md §8): CODIFY ONLY.
+#   - This is INERT DATA. Nothing in any merge/deploy/ship path reads it yet.
+#   - Zero enforcement, zero behavior change. It blocks NOTHING.
+#   - Read-only consumers: nervous_system/ihsan_gate.py (a pure reader).
+#   - Enforcement (a gate that fail-closes merge/deploy) is Phase 2+, gated on cai.
+#
+# SYNC CONTRACT: docs/ihsan-gate.md and this manifest must not drift. The six
+# doctrine items (ihsan-gate.md §"The gate") map onto the G1–G10 taxonomy below
+# (see each item's `doctrine_ref`). When the doctrine changes, this file changes
+# in the same commit; a manifest bump is an auditable event (bump `v`).
+#
+# VERSION: bump `v` on ANY change to gate_items, change_classes, or default_class.
+
+v: 1
+
+meta:
+  source_doctrine: docs/ihsan-gate.md
+  spec: reports/head-of-quality-spec.md
+  phase: 1
+  enforcement: none            # Phase 1 is codify-only. Nothing reads this to block.
+  description: >-
+    Maps each change class to the required gate items that codify the ihsan
+    quality bar. Each gate item is tagged `deterministic` (auto-checkable) or
+    `judgment` (needs a reviewer). This manifest is READ-ONLY doctrine-as-data;
+    it does not gate, block, or auto-invoke anything in Phase 1.
+
+# ---------------------------------------------------------------------------
+# GATE ITEM TAXONOMY (G1–G10). Each item is:
+#   type: deterministic  -> machine auto-evaluates, hard pass/fail (no LLM)
+#   type: judgment       -> a fresh reviewer evaluates; verdict is ADVISORY
+#                           (267-H1 preserved), never an auto-block
+# `doctrine_ref` ties the item back to docs/ihsan-gate.md so the two can't drift.
+# ---------------------------------------------------------------------------
+gate_items:
+  G1:
+    title: CI green
+    type: deterministic
+    doctrine_ref: "ihsan-gate.md #3 (CI green — tests + lint + typecheck)"
+    detail: >-
+      Unit + e2e pass; lint 0 (incl. architecture/module-boundary lint);
+      typecheck 0.
+    checks: [typecheck, lint, boundaries, unit-tests, e2e-tests]
+    blocks_on: any red CI for the diff SHA
+
+  G2:
+    title: Design pipeline for UI
+    type: judgment            # presence is deterministic; taste is judgment (advisory)
+    doctrine_ref: "ihsan-gate.md #2 (UI/UX review — design pipeline)"
+    detail: >-
+      frontend-design applied + cc-reviewer design dimension ran; mobile-first.
+      Presence of the design-pipeline artifact is deterministic; the taste
+      verdict is advisory.
+    checks: [design-pipeline-artifact-present, design-dim-verdict-present]
+    blocks_on: missing design-pipeline artifact (presence only; taste is advisory)
+
+  G3:
+    title: Mobile + desktop eyeball
+    type: judgment            # capture presence deterministic; render quality advisory
+    doctrine_ref: "ihsan-gate.md #2 (UI/UX review — EVERY page, mobile + desktop)"
+    detail: >-
+      Every changed route captured & read at 390px and 1440px
+      (spawn_uiux_review.sh / uiux_capture.mjs). Missing captures block;
+      render-quality is advisory.
+    checks: [screenshot-manifest-390, screenshot-manifest-1440, no-console-errors]
+    blocks_on: missing captures for any changed route (presence only)
+
+  G4:
+    title: Role x flow synthetic matrix
+    type: deterministic
+    doctrine_ref: "ihsan-gate.md #5 (ihsan polish — no glitches) / synthetic-test gate"
+    detail: >-
+      Every role x every touched flow driven headless. Fail on any console
+      error, any 4xx/5xx, any error-toast, broken layout, missing empty-state.
+    checks: [no-console-errors, no-4xx-5xx, no-error-toast, no-broken-layout, empty-states-present]
+    blocks_on: any hard failure in the role x flow matrix
+
+  G5:
+    title: Scoping / security
+    type: judgment            # leak scan deterministic; security review is judgment
+    doctrine_ref: "ihsan-gate.md #4 (Security review for money/PII/auth) + TENANT-RESIDENCY-001"
+    detail: >-
+      Deny-by-default preserved; least-privilege; RLS/permission DB-enforced
+      not UI-only; no PII or credential/secret in diff, logs, or client-facing
+      output; residency (TENANT-RESIDENCY-001) verified for client data.
+    checks: [no-secret-leak, no-pii-leak, deny-by-default-preserved, residency-verified, security-review-present]
+    blocks_on: any secret/PII leak (deterministic); missing security review or unverified residency on a money/PII path
+
+  G6:
+    title: i18n parity
+    type: deterministic
+    doctrine_ref: "ihsan-gate.md #5 (content-complete) / i18n parity bar"
+    detail: >-
+      No missing keys, no hardcoded strings on a localized surface, both
+      locales render.
+    checks: [i18n-key-parity, no-hardcoded-strings, both-locales-render]
+    blocks_on: any missing key or hardcoded string on a localized surface
+
+  G7:
+    title: Deployed == GitHub
+    type: deterministic
+    doctrine_ref: "ihsan-gate.md #6 (Reproducible + tracked — deploy source verified)"
+    detail: >-
+      The promoted artifact's real source == the intended main SHA. Trace CLI
+      deploys (no git SHA -> ahead-of-GitHub is a defect). Ancestor-of-origin/main
+      check + deploy provenance (server / x-vercel-id headers).
+    checks: [deploy-sha-equals-main, ancestor-of-origin-main, deploy-provenance-verified]
+    blocks_on: deployed SHA != intended SHA
+
+  G8:
+    title: No test-pollution
+    type: deterministic
+    doctrine_ref: "ihsan-gate.md #6 (migrations tracked, no out-of-band schema)"
+    detail: >-
+      No synthetic/test rows, seed data, or scaffolding left in a prod/client
+      store; migrations tracked (no out-of-band schema).
+    checks: [no-test-rows-on-prod, no-seed-scaffolding, migrations-tracked]
+    blocks_on: leftover test data on a client/prod store; untracked schema
+
+  G9:
+    title: Ihsan polish
+    type: judgment            # never auto-blocks; advisory, escalate genuine forks
+    doctrine_ref: "ihsan-gate.md #5 (Ihsan polish bar met)"
+    detail: >-
+      On-brand, content-complete, no glitches, responsive, fast (measured load,
+      no blocked-main-thread controls). cc-reviewer design + performance dims
+      (advisory, 267-H1).
+    checks: [on-brand, content-complete, responsive, fast-load]
+    blocks_on: never auto-blocked (advisory); escalates a genuine sub-bar call to operator/cai
+
+  G10:
+    title: Reproducible + tracked
+    type: deterministic
+    doctrine_ref: "ihsan-gate.md #6 (Reproducible + tracked — proofs on the bus)"
+    detail: >-
+      Committed on a branch, work-outputs/proofs on the bus (work_outputs),
+      review verdicts + screenshots + CI + DB-proofs recorded.
+    checks: [committed-on-branch, evidence-bundle-present]
+    blocks_on: missing evidence bundle for the applicable subset
+
+# ---------------------------------------------------------------------------
+# CHANGE CLASSES. Each maps a class -> the required gate items for that class.
+# `aliases` let a caller name the class in natural forms (docs/copy, UI/frontend,
+# etc.); the reader normalizes input against these.
+# `mandatory_reviews` names items whose *human/reviewer* arm is required (not just
+# the deterministic presence check) for this class — money/PII pull cc-reviewer.
+# Rule (spec §3.2): class is overridable UPWARD, never silently downward;
+# ambiguous/unknown -> default to the STRICTEST class (see default_class).
+# ---------------------------------------------------------------------------
+change_classes:
+  docs-copy:
+    title: Docs / copy / comment / non-shipping
+    aliases: [docs, copy, comment, doc, docs/copy, non-shipping, "docs-copy"]
+    required_items: [G1, G7, G10]
+    mandatory_reviews: []
+    cai_gate: false
+    note: G1 only if CI is touched. Seconds — no reviewer, no human.
+
+  ui-frontend:
+    title: UI / frontend (client-visible)
+    aliases: [ui, frontend, "ui/frontend", ui-frontend, client-visible-ui]
+    required_items: [G1, G2, G3, G4, G6, G7, G8, G9, G10]
+    mandatory_reviews: [G2, G3]
+    cai_gate: false
+    note: Full design pipeline + mobile+desktop eyeball.
+
+  backend-action:
+    title: Backend / action (server-side, non-UI)
+    aliases: [backend, action, "backend/action", backend-action, server-action]
+    required_items: [G1, G4, G5, G7, G8, G10]
+    mandatory_reviews: []
+    cai_gate: false
+    note: Server correctness + scoping; no UI pipeline unless it touches a surface.
+
+  db-migration:
+    title: DB migration / schema change
+    aliases: [db, migration, "db-migration", schema, "db/migration", "database-migration"]
+    required_items: [G1, G5, G7, G8, G10]
+    mandatory_reviews: [G5]
+    cai_gate: false
+    note: >-
+      Migrations tracked (G8); residency + scoping (G5). If the migration is on a
+      money/PII/client store, treat as money-payment or pii-gov-data (stricter).
+
+  money-payment:
+    title: Money / payment / auth
+    aliases: [money, payment, "money/payment", money-payment, auth, financial]
+    required_items: [G1, G2, G3, G4, G5, G6, G7, G8, G9, G10]
+    mandatory_reviews: [G5]
+    cai_gate: true
+    note: >-
+      ALL items + G5 mandatory cc-reviewer security. cai money-gate +
+      require_verified_authorization + residency gate apply (governance, not
+      codified here — Phase 1 is inert).
+
+  pii-gov-data:
+    title: PII / government data
+    aliases: [pii, gov, "gov-data", "pii/gov-data", pii-gov-data, gov-pii, personal-data]
+    required_items: [G1, G2, G3, G4, G5, G6, G7, G8, G9, G10]
+    mandatory_reviews: [G5]
+    cai_gate: true
+    note: >-
+      ALL items + G5 mandatory security + TENANT-RESIDENCY-001 residency gate.
+      Real gov PII never in a demo/shared store (project doctrine).
+
+  deploy-prod:
+    title: Deploy to prod
+    aliases: [prod, "deploy-prod", "deploy-to-prod", production, promote-prod]
+    required_items: [G1, G2, G3, G4, G5, G6, G7, G8, G9, G10]
+    mandatory_reviews: [G5]
+    cai_gate: true
+    note: The full floor is a hard wall (Phase 2+). Re-checks G7/G8/G5 at deploy time.
+
+  deploy-client:
+    title: Deploy to client
+    aliases: [client, "deploy-client", "deploy-to-client", client-facing, client-deploy]
+    required_items: [G1, G2, G3, G4, G5, G6, G7, G8, G9, G10]
+    mandatory_reviews: [G5]
+    cai_gate: true
+    note: The full floor is a hard wall (Phase 2+). Client-facing = strictest.
+
+# Unknown / ambiguous change class -> resolve to this class (the STRICTEST).
+# "Ambiguous = flag-not-guess"; the safe default is the full floor.
+default_class: deploy-client
