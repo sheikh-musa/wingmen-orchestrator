@@ -45,6 +45,17 @@ if [[ -f "$ORCH_DIR/.env" ]]; then
     set +a
 fi
 
+# Force the Mac Mini's Claude Max subscription, never metered API billing.
+# .env carries a live ANTHROPIC_API_KEY; if it survives into the environment,
+# `claude` silently routes this session — the single most continuously-running
+# body in the fleet — through the paid API instead of Max (MEMORY: "Lane .env
+# ANTHROPIC_API_KEY forces METERED API"). Every sibling launcher (boot_nazim.sh,
+# boot_cai.sh, boot_fleet_health.sh, launch_dangerous_cc.sh) already strips it
+# here; boot_orch.sh was the lone omission (fable substrate scan, critic #2).
+# Keep CLAUDE_CODE_OAUTH_TOKEN — tmux/headless can't read the GUI-login OAuth
+# from the Keychain and needs it for auth.
+unset ANTHROPIC_API_KEY
+
 # ORCH-TOPOLOGY-001: session name is body-scoped. The hub boots as `orch`
 # (bridge exact-matches =orch); the console body (Nazim, operator's MacBook)
 # sets ORCH_TMUX_SESSION=nazim in .env so a non-hub session NEVER claims the

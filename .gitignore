@@ -19,3 +19,13 @@ logs/reviewer-briefs/
 .env.*.bak
 backups/
 sandbox/
+
+# Browser session-state dumps (Playwright/Puppeteer storageState) — these hold
+# live Supabase auth tokens + plaintext refresh_tokens. One was found untracked
+# AND ungitignored at the repo root, one `git add -A` from permanent history
+# (fable substrate scan, critic #1). Never track any of them.
+scratch_state.json
+*storage_state*.json
+*storageState*.json
+*.session.json
+playwright/.auth/
