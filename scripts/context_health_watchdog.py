@@ -314,9 +314,20 @@ def _pane_state(reg: dict) -> PaneState:
     low = pane.lower()
     busy = _BUSY_MARKER in low
     unauth = any(m in low for m in _UNAUTH_MARKERS)
-    # Authenticated = a normal prompt: no known bad-screen marker AND showing the
-    # busy footer, the prompt box, or the shortcut hint (i.e. a live CC session).
-    has_prompt = busy or ("│ >" in pane) or ("? for shortcuts" in low)
+    # Authenticated = a normal prompt: no known bad-screen marker AND showing a
+    # live-CC-session signal. We match BOTH the old TUI (│ > box, "? for shortcuts")
+    # AND the current TUI (a "❯" prompt between horizontal rules, with a
+    # "⏵⏵ bypass permissions … ← for agents" footer) — the old markers alone missed
+    # the current TUI, so cai/orch read as authed=None and the watchdog skipped even
+    # the safe checkpoint (op#6179). Footer markers are footer-specific and only
+    # reached when NO unauth marker is present, so a login/error screen still wins.
+    has_prompt = (
+        busy
+        or ("│ >" in pane) or ("│>" in pane)          # old TUI prompt box
+        or ("? for shortcuts" in low)                 # old TUI shortcut hint
+        or ("for agents" in low)                      # current TUI idle footer ("← for agents")
+        or ("bypass permissions" in low)              # current TUI permission-mode footer
+    )
     if unauth:
         authed: Optional[bool] = False
     elif has_prompt:

@@ -51,6 +51,16 @@ PANE_INPUT_TEXT = (
     "╰──────────────────────────────────────────────╯\n"
     "  ? for shortcuts\n"
 )
+# The CURRENT Claude Code TUI (what cai/orch actually show cross-host): a `❯`
+# prompt between horizontal rules + a "⏵⏵ bypass permissions … ← for agents"
+# footer. It has NO "│ >" box and NO "? for shortcuts" — the OLD markers miss it.
+PANE_IDLE_AUTHED_CURRENT_TUI = (
+    "  ⏺ done with the last task\n"
+    "────────────────────────────────────────────────────────────────\n"
+    "❯                                                               \n"
+    "────────────────────────────────────────────────────────────────\n"
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -110,6 +120,25 @@ def test_auth_bad_login_screen(monkeypatch):
 def test_auth_unknown_unrecognised_screen(monkeypatch):
     monkeypatch.setattr(w, "_capture_pane", lambda reg, lines=40: "some random garbage\nno prompt here\n")
     assert w._pane_state(REG).authenticated is None  # unsure -> caller treats as not-safe
+
+
+def test_auth_ok_current_tui_prompt(monkeypatch):
+    # REGRESSION: the current Claude Code TUI (❯ prompt + horizontal rules +
+    # "⏵⏵ bypass permissions … ← for agents" footer) must read as authenticated.
+    # The old markers (│ >, ? for shortcuts) missed it -> authed=None -> the
+    # watchdog SKIPPED even the safe checkpoint for cai/orch (op#6179).
+    monkeypatch.setattr(w, "_capture_pane", lambda reg, lines=40: PANE_IDLE_AUTHED_CURRENT_TUI)
+    st = w._pane_state(REG)
+    assert st.authenticated is True
+    assert st.idle is True
+
+
+def test_auth_current_tui_login_still_unsafe(monkeypatch):
+    # A login/error screen must STILL read False even if a stray footer word
+    # appears — the unauth markers take precedence.
+    monkeypatch.setattr(w, "_capture_pane", lambda reg, lines=40:
+                        "  Select login method:\n  1. Claude account\n  ← for agents\n")
+    assert w._pane_state(REG).authenticated is False
 
 
 # --------------------------------------------------------------------------- #
