@@ -27,7 +27,7 @@ load_dotenv(os.path.join(ROOT, ".env"))
 
 MIG = os.path.join(ROOT, "migrations", "031_anon_write_truncate_lockdown.sql")
 FIVE = ("clients", "payments", "chat_history", "pending_signups", "site_templates")
-SILO_REF = "ceayjeamtmcyzzvqflus"  # ihsanos multi-tenant DB (the substrate this migration hardens)
+SILO_REF = "tscuymavysscrvoberrr"  # hub substrate (the DB this migration hardens; CAI-512 label fix)
 
 
 class _AnonTruncDenied(Exception):
