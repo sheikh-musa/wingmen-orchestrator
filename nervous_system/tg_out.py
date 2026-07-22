@@ -31,6 +31,8 @@ import urllib.request
 import psycopg
 from dotenv import load_dotenv
 
+from nervous_system.secret_redact import redact
+
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 import socket as _socket_ipv4patch
@@ -119,6 +121,10 @@ def _resolve(conn, channel_key: str) -> tuple[str, int | None, str]:
 
 
 def _send_text(token: str, chat_id: int, text: str) -> None:
+    # Scrub secret patterns BEFORE the Telegram API send (redact the full text
+    # before chunking so a secret straddling a chunk boundary can't slip). Clean
+    # text is unchanged.
+    text = redact(text)
     for part in chunk_text(text):
         data = urllib.parse.urlencode({"chat_id": chat_id, "text": part}).encode()
         with urllib.request.urlopen(

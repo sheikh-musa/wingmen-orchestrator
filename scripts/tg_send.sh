@@ -29,6 +29,14 @@ TEXT="${1:-$(cat)}"
 TAG="${2:-}"   # optional @alias context this reply pertains to
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
 
+# Scrub secret patterns (pg DSNs, bot tokens, API keys) BEFORE anything leaves
+# the process — the send AND the durable log both use the scrubbed text. Clean
+# input round-trips byte-identical; a redactor hiccup must not drop the message,
+# so fall back to the original text on failure.
+if REDACTED="$(printf '%s' "$TEXT" | PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.secret_redact 2>/dev/null)"; then
+  TEXT="$REDACTED"
+fi
+
 # Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
 # token/chat/text passed via env, never argv — keeps the token out of `ps`.
 if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \

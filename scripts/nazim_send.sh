@@ -23,6 +23,14 @@ CHAT="${TG_CHAT_OVERRIDE:-$(grep '^MUSA_TELEGRAM_ID=' "$ORCH_DIR/.env" | cut -d=
 TEXT="${1:-$(cat)}"
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
 
+# Scrub secret patterns (pg DSNs, bot tokens, API keys) BEFORE anything leaves
+# the process — the send AND the durable log both use the scrubbed text. Clean
+# input round-trips byte-identical; a redactor hiccup must not drop the message,
+# so fall back to the original text on failure.
+if REDACTED="$(printf '%s' "$TEXT" | PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.secret_redact 2>/dev/null)"; then
+  TEXT="$REDACTED"
+fi
+
 # Send (chunked at Telegram's 4096-char limit). token/chat/text via env, not argv.
 if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \
      "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/_tg_chunked_send.py"; then

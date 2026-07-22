@@ -105,8 +105,25 @@ def _shared_feed_exclusion() -> str:
     return f" AND (tag IS NULL OR tag NOT IN ({tags}))"
 
 
+# Recognized body roles. ANY other value MUST fail CLOSED, never silently fall
+# through to "" (an unscoped query). The 2026-07-05 incident (commit 3691cea):
+# a misconfigured/typo'd ORCH_BODY_ROLE fell through and made
+# mark_handled_through() stamp EVERY channel's inbound handled in ONE call —
+# cross-body message loss. '' (unset) is the SANCTIONED legacy single-body
+# behavior and stays permitted; a non-empty UNRECOGNIZED role raises loudly.
+_RECOGNIZED_BODY_ROLES = frozenset({"console", "hub", ""})
+
+
 def _channel_scope_sql() -> str:
     role = _body_role()
+    if role not in _RECOGNIZED_BODY_ROLES:
+        raise ValueError(
+            "ORCH_BODY_ROLE=%r is not a recognized orch body role "
+            "(expected 'console', 'hub', or empty). Refusing to build an "
+            "UNSCOPED channel query: an unrecognized role must never silently "
+            "let unprocessed()/mark_handled_through() span EVERY channel "
+            "(cross-body message loss — see commit 3691cea, 2026-07-05)." % role
+        )
     if role == "console":
         # Nazim reconciles his OWN surfaces: in-console typing (channel
         # 'tmux-console') AND his private Telegram DM channel — @nazim_cto_bot,

@@ -362,6 +362,32 @@ def build_page(v: dict, nudges: int) -> str:
     vtype = v["violation_type"]
     subject = (v.get("subject") or "")[:90]
     from_agent = v.get("from_agent")
+
+    # cai is the SINGLETON governance node — it carries ~55% of fleet rulings
+    # with NO failover, so a stalled/absent cai is NOT a routine stuck lane: it
+    # means the fleet's ruling path is DOWN and everything awaiting a ruling is
+    # now unqueueable. Page it distinctly so the operator reads "governance queue
+    # stalled", not "an engineer lane is slow". Page-template ONLY — reviving cai
+    # is a SEPARATE, gated executor (CAI-510); this must NOT touch that.
+    if agent == "cai":
+        return format_alert(
+            icon="\U0001F6A8",
+            title="GOVERNANCE QUEUE STALLED — no live cai ruling path",
+            what=(f"cai (the fleet's governance node) has a {pr} ruling request "
+                  f"(#{mid} from {from_agent}) {vtype} for {elapsed} min and a "
+                  f"re-nudge did not reach a live cai session — items awaiting a "
+                  f"ruling are now unqueueable."),
+            why=("cai carries ~55% of fleet rulings and has NO failover — while "
+                 "its queue is stalled, every gate/decision behind it is blocked "
+                 "(a fleet-wide governance outage, not one slow engineer lane)."),
+            do=("Confirm cai has a live session (boot via scripts/boot_cai.sh if "
+                f"absent), then action ruling #{mid}, or hand it to the "
+                "operator/hub as tie-breaker."),
+            detail=(f"agent=cai msg_id={mid} type={vtype} elapsed={elapsed}m "
+                    f"prior_nudges={nudges} subject={subject!r}"),
+            ref="PRIORITY-SLA-WATCHDOG / GOVERNANCE-QUEUE-STALLED",
+        )
+
     return format_alert(
         icon="\U0001F6A8",
         title=f"{pr} bus message stuck — {agent} not responding",
