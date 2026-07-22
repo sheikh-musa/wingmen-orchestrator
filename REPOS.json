@@ -122,13 +122,14 @@
       "name": "cosem-platform",
       "github": "https://github.com/sheikh-musa/cosem-platform",
       "local_path": "~/wingmen/projects/cosem-platform",
-      "vercel_project": "cosem-platform",
+      "vercel_project": "cosem-platform-demo",
       "deploy_url": null,
-      "supabase_project_ref": null,
+      "supabase_project_ref": "ywrpttpxwfcoodovxhsr",
       "supabase_region": "ap-southeast-1",
-      "status": "active-greenfield",
+      "supabase_note": "ywrpttpxwfcoodovxhsr is the shared DEMO/DEV DB (synthetic only) — NOT a home for real tenant data. Real ADCDA data needs its own UAE silo; TDU a dedicated SG prod org. See docs/data-store-registry.md (TENANT-RESIDENCY-001).",
+      "status": "active",
       "priority": 2,
-      "notes": "Greenfield multi-tenant training platform (Next.js+Supabase), strangler re-platform of COSEM apps. Lane cc-cosem-platform. GitHub remote + Supabase project TBD."
+      "notes": "Multi-tenant training platform (Next.js 16 + Supabase), strangler re-platform of COSEM apps — modules already LIVE (onboarding/people/exams/nfpa/attendance/assets/hr). Lane cc-cosem-platform. vercel_project corrected to cosem-platform-demo (per .vercel/project.json)."
     }
   ]
 }

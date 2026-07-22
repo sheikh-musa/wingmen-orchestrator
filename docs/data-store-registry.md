@@ -16,6 +16,9 @@ fine, commingled data is not.
 | **ihsanos multi-tenant DB** | `ceayjeamtmcyzzvqflus` | ihsanos + org-scoped sub-tenants (default home for tenants w/o a silo) | ap-southeast-1 (SG) |
 | **irsyad silo** (goumlyne) | `goumlynecruxrlmzlntp` | irsyad ONLY (tabung, DMS, school-fees, nasi-mandi donor data) — under Gazzabyte account | — |
 | **wingmen-personal** | `brrgastulcffamlbggyu` | operator life-graph + Zahidah second-brain (mamadah) | ap-southeast-1 (SG) |
+| **cosem-platform demo/dev** | `ywrpttpxwfcoodovxhsr` | shared DEMO + dev DB — **NOT a home for real tenant data** (synthetic only) | ap-southeast-1 (SG) |
+| **cosem-platform ADCDA silo** | _not yet provisioned_ | ADCDA real trainee data (Emirates-ID gov-PII) — needs its OWN UAE-region silo before the first real write (TENANT-RESIDENCY-001) | UAE (TBD) |
+| **cosem-platform TDU silo** | _designation pending_ | TDU real staff/asset data — dedicated SG production org, never the demo project | ap-southeast-1 (SG) |
 
 ## Firebase (cosem apps — separate stack)
 
