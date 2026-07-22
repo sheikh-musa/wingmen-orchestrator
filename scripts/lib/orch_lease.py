@@ -75,7 +75,11 @@ def _role() -> str:
 
 
 def _me() -> str:
-    return socket.gethostname()
+    # Short host label — collapse the macOS gethostname() flap where the same machine reports
+    # "Mac-Studio" vs "Mac-Studio.local" on network-state changes, which false-refused the hub's
+    # pens against a stored holder_host="Mac-Studio" (fleet bugfix folded from the Studio checkout,
+    # cc-orchestrator 2026-07-22). "mac-mini" stays "mac-mini" — cross-body protection intact.
+    return socket.gethostname().split(".")[0]
 
 
 def _holder_id() -> str:
