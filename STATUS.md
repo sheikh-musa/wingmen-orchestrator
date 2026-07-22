@@ -576,3 +576,9 @@ Last Updated: 2026-05-06 18:08 SGT
 **wingmen.dev**: full Vercel cutover chosen (retain Google MX), Vercel domains attached, gated on operator STYLE PICK.
 **cai**: re-engaged (was idle/bloated->/clear); governing 307(Vercel platform std)+308(self-audit)+permissions-security+079; assigned me the consolidated substrate-as-product roadmap (non-urgent).
 **Self-audit findings** banked: identity/authorship-verification, stale-views, dups, zombies, blocking-dialogs, governance-node-idle, restart-orphaned-creds.
+
+## Checkpoint 2026-07-22 (Nazim console, post-/clear autonomous run)
+**Fable substrate fixes LANDED** on `feat/operator-telegram-bridge`: 4 safe fixes (repo_context watchdog LIVE, secret redactor, operator_log fail-closed, cai-stalled page) — `bf6a70e`; watchdog false-positive fixed (psycopg not REST) `c2407ab`. **CAI-RESP-511**: migration 031 (anon write/TRUNCATE lockdown, formalizes cai's live fixes + default-priv hardening) APPLIED + dual-ledger + `scripts/rls_grant_lint.py` — `35368a0`. repo_context unfrozen (was 13d stale) + auto-watchdog every 15min.
+**Routed to cai** (bus 10718): mig 032 exec-grant for 76-table anon-write REVOKE (latent, RLS-gated) + `organizations` LIVE anon-read leak + orch_lease #5 TTL review.
+**cosem port**: design+scaffold workflow running (wf_1b5af3b4); full port + tests to follow (synthetic; real-data residency-gated). Design at reports/cosem-platform-unified-port-design-20260722.md.
+**Owed**: shipforge(11)+storefront(8) fable branches → hub to ship; new-hire wiring pass (operator GO); cred rotation.
