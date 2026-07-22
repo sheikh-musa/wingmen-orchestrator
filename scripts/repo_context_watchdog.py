@@ -70,6 +70,12 @@ REPOS_JSON = _ORCH_DIR / "REPOS.json"
 # persistent freeze — not a single transient miss.
 _FRESH_THRESHOLD_S = int(os.environ.get("REPO_CTX_WD_THRESHOLD_S", str(2 * 3600)))
 
+# Read-after-write re-check pause: if a repo looks stale immediately after a
+# successful sweep, wait this long and re-read once before paging — absorbs the
+# Supabase read-after-write lag between the upsert connection and the read
+# connection (a genuine >2h freeze survives the re-check and still pages).
+_RECHECK_DELAY_S = float(os.environ.get("REPO_CTX_WD_RECHECK_DELAY_S", "3"))
+
 
 # --------------------------------------------------------------------------- #
 # Pure freshness logic — no DB / no I/O, unit-testable in isolation.
@@ -173,15 +179,26 @@ async def _make_supabase():
     return await acreate_client(url, key)
 
 
-async def fetch_updated_at(supabase) -> dict[str, Optional[datetime]]:
-    """Read repo -> repo_context.updated_at (tz-aware) for every row present."""
-    resp = await supabase.table("repo_context").select("repo, updated_at").execute()
-    rows = resp.data or []
+async def fetch_updated_at(supabase=None) -> dict[str, Optional[datetime]]:
+    """Read repo -> repo_context.updated_at (tz-aware) for every row present.
+
+    Reads via DIRECT psycopg (DATABASE_URL) — the primary connection, strongly
+    consistent. The sweep upserts via the Supabase REST client, whose READ path
+    can lag behind a just-written row (PostgREST/pooler read-after-write), which
+    surfaced as a false 'no repo_context row' page for a random repo right after a
+    successful sweep. The freshness VERIFY must use the authoritative connection,
+    not the same eventually-consistent path it is trying to check. `supabase` is
+    accepted for call-site compatibility but unused.
+    """
+    import psycopg
+
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     out: dict[str, Optional[datetime]] = {}
-    for row in rows:
-        name = row.get("repo")
-        if name:
-            out[name] = _parse_ts(row.get("updated_at"))
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT repo, updated_at FROM public.repo_context")
+        for name, ts in cur.fetchall():
+            if name:
+                out[name] = ts if isinstance(ts, datetime) else _parse_ts(ts)
     return out
 
 
@@ -265,6 +282,24 @@ async def run(do_update: bool = True, threshold_s: int = _FRESH_THRESHOLD_S) -> 
     now = datetime.now(timezone.utc)
     rows = evaluate_freshness(updated_at_by_repo, active, now, threshold_s)
     stale = [r for r in rows if r.stale]
+
+    # Read-after-write guard: the sweep's upserts and this freshness read use
+    # different pooled connections, so a row we JUST wrote can be briefly invisible
+    # (Supabase read-after-write lag) — that surfaced as a false "no repo_context
+    # row" page on first launchd run. A GENUINE freeze has an OLD row that survives
+    # a re-check; a race clears. So if anything looks stale right after a successful
+    # sweep, pause once and re-evaluate before paging. A real >2h freeze still pages.
+    if stale and update_ok:
+        await asyncio.sleep(_RECHECK_DELAY_S)
+        updated_at_by_repo = await fetch_updated_at(supabase)
+        now = datetime.now(timezone.utc)
+        rows = evaluate_freshness(updated_at_by_repo, active, now, threshold_s)
+        recheck_stale = [r for r in rows if r.stale]
+        cleared = {r.repo for r in stale} - {r.repo for r in recheck_stale}
+        if cleared:
+            print(f"[repo-ctx-wd] re-check cleared (read-after-write race): {', '.join(sorted(cleared))}",
+                  file=sys.stderr)
+        stale = recheck_stale
 
     if stale or not update_ok:
         if not update_ok:
