@@ -666,7 +666,12 @@ CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 CC_HOST="$(hostname -s 2>/dev/null || echo unknown)"
 CC_AUTH_LABEL="${CLAUDE_ACCOUNT_LABEL:-unlabelled}"
 CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
+# Two guards, because an empty token hashes to a REAL-LOOKING value. sha256("") starts
+# e3b0c44298fc — identical for every agent that computes it, so an unguarded stamp would show
+# a set of lanes confidently sharing one account. That is strictly worse than blank: blank reads
+# as missing data, e3b0c442 reads as an answer. (Trap spotted by cc-caai, 2026-07-25.)
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || CC_AUTH_FP=""
+[ "$CC_AUTH_FP" = "e3b0c44298fc" ] && CC_AUTH_FP=""
 "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
