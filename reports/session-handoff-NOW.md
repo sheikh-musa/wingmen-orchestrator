@@ -22,6 +22,21 @@ Hub reset in place; lease held (`orch_lease.py check` exit 0); operator_log.unpr
 - Disagree with something already sent → send it to **cai**, not the operator; original writer corrects in place. Override only for a real P0 where the writer is unreachable/stale, and say you're overriding.
 - **Danger window = a freshly-reset hub** (confident, just built a board picture, wants to demonstrate it). Be quietest on channels you don't own.
 
+### 🛑 P0 GATE LIVE — **ELLY'S 945-ROW BANK-IMPORT COMMIT IS BLOCKED** (cai CAI-570 §4; relayed to cc-irsyad #11241)
+**VERIFIED NOT YET RUN** before relaying: goumlyne donations = **2,588** (historical load only) and irsyad audit chain still **676 rows**. We are ahead of it.
+- **WHY:** a 945-row bank import is a BULK import ⇒ writes up to **945 NEW unverifiable audit rows** into the very log we're correcting the client about, days before their September audit, while our correction calls the problem bounded. Turns a historical defect into an actively growing one.
+- **RELEASE CONDITION:** bulk-writer audit path must produce reproducible hashes. **Override ONLY on an explicit operator decision WITH the consequence disclosed to the client in the SAME message — never silently** (cai's clause, marked not-negotiable at lane level).
+- **SCOPED DELIBERATELY:** tooling / parsing / matching / review UI / write-nothing dry-runs are **NOT** blocked — only the committing write. *A gate broader than its justification gets worked around.*
+- Told the lane **not to improvise a reason to Elly** and specifically not to imply her upload is faulty — it verified clean (945 credits, S$222,463.79 vs embedded total). Client wording routes through cai so the support thread can't pre-empt the correction piecemeal.
+- **cai's §4 note worth keeping:** his CAI-560 cond3 amendment (content re-verification of rows written by the commit under test) **would have failed this import at the gate** — written because linkage was insufficient, NOT because he foresaw a bank import. **A condition tightened to the PRINCIPLE caught a case nobody imagined; one tightened to the known failure would have missed it.**
+
+### ✅ RECORD + GUARD RE-KEYED TO WRITER CLASS (CAI-570 §2) — main **ee8528d → a569fb2**, orch `837d595`
+- Row 1 gains `discriminator` = **"WRITER CLASS (application vs bulk-import/seed script) — NOT the id or the date"**, plus `reproducible_writers` / `non_reproducible_writers` arrays; `below_status`/`above_status` now **"HISTORICAL DESCRIPTION ONLY — id 741 is where the bulk import ended; it is NOT the discriminator"**.
+- **Both of my wrong explanations RETRACTED IN THE RECORD, not deleted** ("flat payloads"; "real behaviour change ~2026-06-22") — each named false with the reason. An auditor should see what we believed and why we stopped; silently swapping in a third explanation would be tidier and worse.
+- **⭐ THE GUARD IS RE-KEYED TOO** — re-keying the record fixes it once; the *framing* needed guarding because an id/date axis is falsified by the next bulk import. Drift check now FAILS unless the substrate carries a WRITER CLASS discriminator + both writer lists + the HISTORICAL-DESCRIPTION-ONLY marker. **Verified by reverting the discriminator to `id boundary 741` → exit 1, then restoring → exit 0.** Third guard tonight checked by breaking what it guards.
+- Mechanism still stated as **strongly indicated, NOT proven** — the importer that wrote the 613 `persons` rows is **still unlocated**.
+- Gates: 204 files / 2025 tests / 0 failures, tsc 0, drift check green.
+
 ### 🔑 ROOT CAUSE IDENTIFIED — **NOTHING changed on 22 June. The date boundary is an ARTIFACT.** (cai #11235, P0)
 cai REQUIRED "identify what changed around the boundary". Answer: **nothing did.** The split is **100% BY WRITER**, zero exceptions in 676 rows:
 ```
