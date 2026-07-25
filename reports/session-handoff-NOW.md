@@ -61,6 +61,24 @@ The deployed `/auth/confirm` consumed `token_hash` on a bare GET (its own docstr
 ## 🔑 TOKEN STATE — hub now authenticates as the OPERATOR
 `.env SUPABASE_ACCESS_TOKEN` swapped to the operator's Owner PAT (`sbp_2180…b069`); old partner token (`sbp_f670…4e34`) removed; backup `.env.bak-token-swap-20260725`. `/v1/profile` → `sheikh.musa@outlook.com`. **⚠️ THE NEW TOKEN WAS PASTED INTO TELEGRAM** → row 7256 **SCRUBBED** (0 `sbp_` tokens remain in the log, verified) but treat it as **BURNED — operator must revoke + reissue.** Owner-scoped: it can read api-keys (hence the service_role key) on BOTH projects.
 
+## 🔴 FLEET DEFECT FIXED — THE MESSAGE LOG ASSERTED DELIVERY IT NEVER CHECKED (25701aa)
+All three send scripts (`tg_send.sh`, `irsyad_support_send.sh`, `cai_send.sh`) ran the `operator_log` line **unconditionally**, and `operator_log` defaults `delivered=TRUE`. So **a FAILED send was recorded as delivered, on every channel, for as long as those scripts have existed.** The `--undelivered` flag already existed and was never passed. Fixed in all three; verified by driving the real path, not by inspection.
+**Caught live:** a client reply failed (`read operation timed out`) yet logged `delivered=True` — so the log could not answer whether the client had our answer. **Corroboration:** the client asked the same question 3× in 6 min while every reply showed delivered, and went silent the instant a send actually succeeded (23:28:48Z).
+**OPEN UNKNOWN, not an all-clear:** which past sends actually landed is unrecoverable — the evidence that would settle it is the evidence that was wrong.
+⚠️ **`| tail` ate the exit code again** — the script printed failure, my captured code was 0. Capture exit codes DIRECTLY; this trap is in this very file and I hit it anyway.
+
+## 🧪 POSITIVE CONTROLS MUST TEST **COVERAGE**, NOT JUST SENSITIVITY (CAI-597, extended)
+cai planted his control INSIDE the search root; so did I (`orchestrator/.env`). Both passed. Both were **structurally incapable of catching a BOUNDARY error** — and the root WAS wrong: the Mini is a different host. I did not find the Mini's live partner token by method; I found it because cai said to look there.
+**RULE: a positive control must sit where a boundary error would put it — outside the assumed root, on the other host. A control inside the search space tests sensitivity, never coverage.**
+
+## 🧭 THE SESSION'S ONE DEFECT, IN FIVE SYSTEMS
+A check that silently operates on a SUBSET and reports on the WHOLE: (1) `verifyChain` row-cap → false VERIFIED · (2) `grep`/`find` wrapped + gitignore-aware → "clean" from 0 files scanned · (3) the 7-path token gate → Studio-only, missed the Mini · (4) the message log → delivery asserted, never checked · (5) `canonicalPayloadJson` hashing only keys it could see. Same shape, five unrelated layers, one day.
+
+## ↩️ CLAIMS I WITHDREW (retract-in-place)
+- "Gazzabyte had already signed in" → that was the **burned invite**, 23s after `invited_at`, 0 sessions.
+- "They can't be unstuck until templates land" → a working password had existed since 13:41Z; templates break **self-service reset**, a different thing.
+- "The lane resolved who signed in" (to Nazim) → it did **not**; it wrote a reply true either way and said so. **The CLIENT resolved it** at 23:05:49Z. Neither body earned that.
+
 ## ✅ GAZZABYTE UNBLOCKED — CONFIRMED BY THE CLIENT, 23:05:49Z
 Client's own words: *"sales@gazzabyte.sg able to login and set password."* Silo agrees: `last_sign_in_at 22:51:13Z`, confirmed, `sessions=1` (was 0 for the account's entire life), `requires_password_setup=false`. The session I flagged as ambiguous (`user_agent='node'` — expected, our `/auth/confirm` verifies server-side) **was her**. Reply sent by **Nazim/orch-console 23:12:45Z** under the cc-irsyad supervised-send arrangement — **hub must not duplicate on #7272**.
 
