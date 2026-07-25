@@ -38,6 +38,53 @@ SME dev groups. All three exist and are on the SAME staircase.
 - **Latency:** `scripts/irsyad_latency_report.py` — hub vs lane-draft vs lane-sent per message.
   Baseline 2026-07-25: **hub median 0.8 min over 70 messages / 48h.**
 
+## SESSION UPDATE (later same day) — what changed after the lanes went up
+
+**FOUR lanes now, not three.** Added `cosem-port` (tmux `cosem-port`, agent `cc-cosem-platform`,
+worktree `~/wingmen/projects/cosem-port-lane`) — the dedicated ADCDA→platform PORT lane (op#7117).
+First deliverable is a GAP INVENTORY, not code. **Owed to the operator: the real next-batch start
+date** — I asked; the platform data doesn't carry it and I told the lane not to invent one.
+
+**A live credential defect, still open.** cc-cosem-exams found that the trainee record PDF printed
+DOB + Emirates-ID-last-4 adjacently, and `deriveLoginPin(dob,last4)` = DDMMYYYY+last4 → the audit
+PDF exposed the login PIN. Fixed + merged (239911b). Then, building cai's derived-credential
+registry, it found a SECOND derivation: `syntheticTraineeEmail(askariyah)` = the login HANDLE. So
+askariyah + dob + last4 is a COMPLETE WORKING LOGIN.
+- I had waived the same field pair in the archive ZIP. **Waiver revoked** (CAI-556).
+- cai's correction, which matters most: **the exports are only where it became VISIBLE.** The
+  credential is a LOOKUP — anyone with record read-access can reconstruct any trainee's login with
+  no export at all. Do NOT let clean exports read as closed.
+- NEW INVARIANT: **never derive an authentication factor from stored PII.** The registry is its gate.
+- **I OWE cai A DATED PLAN BY 2026-07-26**: random initial credentials, forced-reset path, trainee +
+  client comms, interim compensating control. cai put the interim either/or to the operator (#7126,
+  recommending HOLD); I agree with hold.
+- Open findings routed: the backfill script that derives dob+last4+askariyah from the register number
+  has NO runtime guard (→ cosem-port, P1, fail-closed guard); the intake import template makes the
+  CLIENT assemble a cohort's logins in a spreadsheet (→ folds into the scheme plan).
+
+**Company hires: HoQ + HoR both formally RATIFIED** (CAI-552/553) after cai read the specs. The three
+specs were untracked on the Mini — invisible to every other body — now committed AND PUSHED
+(1712cf3). New doctrine: **COMMITTED IS NOT FLEET-VISIBLE** — the test is "can a second host read it?"
+CoS was already ruled (CAI-RESP-502) and needs building, not ratifying.
+- HoQ binding conditions: deterministic floor in **CI, not a lease**; derived-credential check starts
+  **ADVISORY** with shadow mode reporting each would-be block; skipped renders SKIPPED never pass;
+  anything changing what BLOCKS goes through cai in both directions; ONE break-glass, time-boxed.
+- First floor check BUILT: `scripts/lint_no_bare_timeout.py` (blocks day one; macOS has no `timeout`,
+  so the wrapped command never runs and its empty output gets consumed as a measurement).
+- **Q4, cai-owned:** grants + payment corridors + client-data custody are ONE question — what legal
+  entity are we. cai is assembling it. **Do not register anything in isolation.**
+
+**Fleet/token:** both hosts now on the operator's account (Studio .env swapped, old value kept as
+`CLAUDE_CODE_OAUTH_TOKEN_PREV`); the hub was relaunched to pick it up; the other Studio lanes were
+STOPPED rather than restarted (they had no unread work — a later boot reads .env fresh). Studio went
+16 sessions → 2. `agent_status` now carries host/auth_account/auth_fp (migration 033).
+
+**OWNERSHIP — I broke CAI-547 twice in 20 minutes.** Both times I correctly identified that a topic
+was cai's and then wrote to the operator anyway ("I'll also tell him" reads as helpfulness, not as a
+violation). Binding on me now: **intent to write to the operator on another body's topic is a
+PROPOSAL THAT WAITS**, not a notification. cai's topic-keyed sender guard is the real fix; the
+text-similarity duplicate guard I built canNOT catch it (the two duplicate messages were 8% similar).
+
 ## OPEN — pick these up first
 1. **Drill verdicts for exams + caai.** Both were mid-drill at handoff. Review their reports on
    the bus, then advance each to `supervised` (and to `direct` within days — they're low-stakes
