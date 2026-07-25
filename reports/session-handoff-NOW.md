@@ -22,6 +22,18 @@ Hub reset in place; lease held (`orch_lease.py check` exit 0); operator_log.unpr
 - Disagree with something already sent → send it to **cai**, not the operator; original writer corrects in place. Override only for a real P0 where the writer is unreachable/stale, and say you're overriding.
 - **Danger window = a freshly-reset hub** (confident, just built a board picture, wants to demonstrate it). Be quietest on channels you don't own.
 
+### ✅ FIRST LIVE verifyChain RUN — DONE (CAI-564 GRANTED). **BROKEN ABSENT.** Prediction off by 6, fully reconciled.
+Read-only on goumlyne, using the **real merged code** (bc62f36) not a reimplementation; temp test file deleted, worktree clean.
+```json
+{"rows":676,"boundaryFromId":742,"result":{"valid":false,"status":"UNVERIFIABLE_PRE_FIX",
+ "verifiedCount":40,"unverifiableCount":636},"brokenPresent":false}
+```
+- **Stop-condition did NOT trigger** (cai: any BROKEN = STOP + escalate, do not debug into it, do not adjust the verifier).
+- **⚠️ MY PREDICTION WAS WRONG: predicted 34/642, actual 40/636.** Reconciled: above boundary 34 reproduce / 0 don't; below boundary **6 reproduce** (ids **93, 95, 96, 97, 733, 734**) / 636 don't. `34+6=40`, `642−6=636`. **The boundary marks where reproduction is GUARANTEED, not where it is impossible** — a pre-fix row whose hash demonstrably recomputes IS verified, and downgrading it would discard real evidence to keep a category tidy. **Code correct; my prediction imprecise.** The figures were already in my own #11199 measurement — I just didn't carry them into the prediction.
+- **ESTABLISHES:** the CAI-560 hazard is closed **in practice, not just in tests** (same command previously asserted a client's donation records were BROKEN); **34/34 above the boundary verify ⇒ the boundary is POSITIVELY confirmed on live data**, not merely a bound on failure; zero linkage breaks.
+- **CAI-564 §3 NEW RULE ACCEPTED — "FAIL-CLOSED PLACEMENT FOLLOWS THE CREDENTIALS."** A fail-closed check placed where a dependency is structurally absent doesn't become strict, it becomes **permanently red — and permanently-red gates get disabled or routed around, converting a control into nothing while everyone still believes it exists.** CAI-549 §1 refined: "in CI" = *in a CI that can actually run it*; a check spanning a trust boundary lives on the side holding the credentials, the other side consumes the verdict.
+- **cai's §1 generalisation worth keeping: a test written specifically to satisfy a gate is exactly where tautology is most likely** — the incentive at the moment of writing is to make it pass. "The gate is satisfied" should RAISE interest in how, not lower it. It hit me twice in one hour (tautological drift test; then mis-measuring `tail`'s exit code while validating its replacement).
+
 ### ✅✅ VERIFIER + BOUNDARY MERGED & LIVE — main **4346cea → bc62f36** (CAI-563 MERGE GRANTED, sha unchanged, no re-pin)
 Both prods READY at bc62f36; live verified (ihsanos.com/login 200, irsyad.ihsanos.com/login 200, /reset-password 200). Gates on merged tree: 204 files / 2025 tests / 0 failures, tsc 0.
 - **CAI-563 §4 PRE-MERGE CONDITION: the mirror drift test must FAIL CLOSED, not skip.** My honest answer: it was **WORSE than a skip** — the ihsanos test pinned the mirror against **literals in the same file** and **never contacted the substrate**, so it could not detect drift in EITHER direction and would have passed forever while row 1 changed underneath. cai's condition caught a real defect.
