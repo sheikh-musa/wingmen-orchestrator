@@ -33,13 +33,13 @@ This file is current: written fresh at 90%, amended for the template publication
 
 ---
 
-# 🚨 0. OPERATOR ACTIONS — (a) ✅ CLOSED 2026-07-25 22:07Z · (b) still open
+# 🚨 0. OPERATOR ACTIONS — (a) ✅ CLOSED 22:07Z · (b) ✅ CLOSED 22:48Z · (c) 🔑 token to ROTATE
 
 ## ✅ (a) VERCEL KEY — **RESOLVED AND VERIFIED 2026-07-25 22:07Z. Gazzabyte hold RELEASED.**
 Operator rotated + redeployed at 22:00Z; **first attempt FAILED** (`database:error`) — the pasted key carried **whitespace**. Caught by driving the real server-side path, not a page load. He re-pasted at 22:07:39Z, redeploy 22:07:48Z (9s later, right order).
 **VERIFIED:** `/api/health` on live production = `{"app":"ok","database":"ok"}` × 3 stable — that route calls `createServiceClient()` and really queries goumlyne. Control: `ihsanos.com` = `ok` throughout on the same commit, so the isolation was to the irsyad env, never the code.
 **Method worth reusing:** `/api/health` is the definitive probe for this class — the site returns 200 on `/` and `/login` in BOTH states, so page codes prove nothing.
-**Gazzabyte (`sal…@gazzabyte.sg`) had already signed in 12:29Z** — confirmed, password set. Login was never the broken part; everything *after* login was. Client notified directly on the group at 22:12:49Z (`tag=gazzabyte-irsyad`, `delivered=True`) to retry anything that errored earlier.
+~~**Gazzabyte had already signed in 12:29Z** — login was never the broken part.~~ **STRUCK — I WAS WRONG** (retract-in-place). `last_sign_in_at 12:29:18Z` is **23s after `invited_at` 12:28:55Z`, with `sessions=0` and `refresh_tokens=0` ever** — that is the **INVITE LINK BEING BURNED** by their mail scanner, i.e. a *symptom of the defect*, which I read as evidence things were fine. Operator caught it, not me. **NEVER infer acceptance from `last_sign_in_at`** (migration 123's own COMMENT says exactly this). Client notified 22:12:49Z to retry failed actions — that message did not claim their login worked.
 
 ## 🔴 (c) IDENTITY FINDING — the hub's `SUPABASE_ACCESS_TOKEN` is the PARTNER's, not ours
 **Measured:** `GET /v1/profile` → `primary_email = sales@gazzabyte.sg`. Format `sbp_` (personal access token).
