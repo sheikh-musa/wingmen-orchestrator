@@ -99,9 +99,17 @@ def _source_hint(chat_id, from_user_id) -> str:
 # reconciliation scopes, so a fleet/partner message never pollutes a DM inbox.
 _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 
+# Tags owned by a DEDICATED LANE AGENT, not by an orch body. Neither the hub nor
+# the console reconciles these — the lane agent does, on its own tag, with its own
+# reply path. Excluded from both bodies' scopes so a drill/lane thread can never be
+# mistaken for an operator DM and answered on the wrong voice (2026-07-25, cc-irsyad
+# build). `gazzabyte-irsyad` itself joins this list at cc-irsyad's direct cutover —
+# NOT before: until then the hub still owns and answers the live client thread.
+_LANE_OWNED_TAGS = ("irsyad-drill",)
+
 
 def _shared_feed_exclusion() -> str:
-    tags = ",".join("'%s'" % t for t in _SHARED_FEED_TAGS)
+    tags = ",".join("'%s'" % t for t in _SHARED_FEED_TAGS + _LANE_OWNED_TAGS)
     return f" AND (tag IS NULL OR tag NOT IN ({tags}))"
 
 
