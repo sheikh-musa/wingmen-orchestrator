@@ -1,5 +1,22 @@
 # Session handoff — 2026-07-25 ~22:20 SGT / 14:20Z (cc-orchestrator / hub, Studio)
 
+---
+## 🆕 DELTA — fresh hub session, 2026-07-25 18:51Z → 19:40Z (op#7220 reset). READ THIS BEFORE §0.
+Both inboxes reconciled to zero. Lease held. Operator pinged. Nothing applied to any silo; **the bank-import gate is still HELD**.
+
+1. **§4b gap 1 CLOSED — real-corpus per-shape RPC proof.** 945 real OCBC credits / S$222,463.79 through the real `append_audit_log`/`_batch` (121+122) on throwaway local PG. 8 measured classes by name + full 945-row chain, `hash_version=2`, 0 broken links, rooted at genesis; tamper control detects amount/narrative/delete at the exact index. **Byte pre-flight: 0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII — BLOCKING COUNT 0.** Adversarially verified from scratch on a separate DB: all 7 claims CONFIRMED. Report: `reports/real-corpus-rpc-proof-20260725.md`.
+   - **Negative result, both axes:** all 945 payloads are FLAT ⇒ v1==v2 byte-identical, so the real corpus proves **CORRECTNESS, NOT DETECTION** (25 rows declared v1 verify GREEN); and it has zero non-ASCII bytes so it cannot exercise the UTF-8 axis either. **The synthetic nested shapes stay load-bearing.**
+   - **Count correction:** "29/29" was at `a3d6497`; at `c440136` that suite is **32** tests.
+   - `c440136` **NOT moved** — proof lives in gitignored `.mif-samples/`; commit it as a regression test only AFTER cai's confirm-match.
+2. **🔴 CAI-587 — NEW BLOCKING DEFECT, cai CONFIRMED it.** `verifyChain` reported `{valid:true}` on a PARTIAL chain: `verifyChainIntegrity` never asserted row 0 is genesis + un-ranged `.select("*")` + PostgREST silently caps at 1000 (measured 1000/10205, HTTP 200, no error). irsyad is **678** rows; +945 = **1,623**. **FIXED + negative control** on a real PostgREST at db-max-rows=1000, 1,623-row chain, row tampered at index 1400 beyond the cap: OLD → examined 1000/1623, `{valid:true}` FALSE VERIFIED; NEW → **BROKEN at 1400**; truncated read → **INCOMPLETE**. Branch `fix/cai-587-verify-completeness` @ **3f42357**, pushed with hooks. Suite 2025 passed / 0 failed. **AUTHORED-UNAPPLIED, not merged — Elly gains a 4th prerequisite (e), satisfied in CODE not in PRODUCTION.**
+3. **v4 CONFIRMED SAFE** against the verifier's ACTUAL fetch, not arithmetic: at run time the scope held **676** and the run fetched **676** ⇒ complete. (+2 rows since, ids 3143/3144 → 678 now.) v4 needs no change.
+4. **CAI-561 was NOT unauthored** — the handoff was wrong. `121_audit_log_hash_version.sql:146-147` ALREADY executes `REVOKE ALL … FROM anon` + `REVOKE UPDATE, DELETE, TRUNCATE … FROM authenticated`. Applying 121 closes it. Exposure calibrated: RLS has INSERT+SELECT policies only ⇒ DML grants affect **0 rows** (verified wet on the substrate in BEGIN/ROLLBACK) = defence-in-depth, **not** a live exploit.
+5. **Repo-hygiene DEPLOY-GAP alerts were PHANTOM.** `time.mktime()` parsed Firebase `releaseTime` as local (UTC+8) → every deploy landing within 8h of its tip commit looked undeployed. Fixed `91a6fe4`; verified with the exception handler disarmed. Sweep clean.
+6. **cai is at 100% CONTEXT** with background agents running (observed 19:40Z) — it is working, not stuck; the `IDLE_UNSENT` watchdog row was a false positive. Do **not** pile on nudges. Bus to cai: **#11366, #11369, #11370, #11372** (#11372 = the CAI-587 fix review, P1 requires_response).
+7. **Correction owed to cai and already sent:** CAI-587 §G calls the OCBC corpus "the one with a NUL byte". It is not — 0 NUL. Ask that the parenthetical be struck before CAI-587 is cited.
+---
+
+
 **⏰ DATE ROLLOVER — IT IS NOW 2026-07-26. cai's CHALLENGE WINDOWS CLOSE *TODAY*, NOT "in ~20h":**
 `CAI-576 → 2026-07-26T11:24:32Z` · `CAI-584 → 2026-07-26T13:19:25Z`. After those times the clock objection falls away and only cai's **confirm-match at file+number+sha** plus the **real-corpus per-shape proof** (§4b) remain between here and the 121/122 grants. **Do not press him before those times; do surface it after.**
 
