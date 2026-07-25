@@ -67,6 +67,15 @@ cai CAI-574/575; relayed to cc-irsyad (#11241/#11256/#11263). **Verified not yet
 | captcha frontend (BOTH silos) · A2 shared cron-secret guard | queued | hub |
 | 2 cosem DEPLOY-GAPs (cosem-adcda, cosem-tdu) | owner-gated, deliberately left | other lanes |
 
+## 4b. 🟢 OPERATOR DECISION — ELLY KEEPS POS (op#7155, 2026-07-25 11:22Z)
+Operator: *"for elly grant her pos access as well."* **VERIFIED LIVE BEFORE ACTING — no change was needed.**
+`org_role_permissions` for org 73339164 role `preparer` already grants, all `full`: **donations · pos · tabung · bank_import**. POS was already there.
+- **⚠️ THIS REVERSES THE SPECCED CLEAN ROLE**, which was going to REMOVE pos (`reports/irsyad-access-model-roles-overrides-design-20260725.md`, slim preparer = tabung + bank_import only). **POS now STAYS** — told the operator explicitly rather than silently dropping the spec change.
+- **CLEAN ROLE FOR ELLY = what she has today** (tabung + bank_import + pos + donations). The work left is to define it deliberately, not to change the grants.
+- **Mitigating fact found on inspection: only TWO accounts hold `preparer`** — `elly@irsyad.edu.sg` and `zz-verify-preparer@qa-madrasah.test` (QA). So it is not genuinely shared and defining it around Elly's duties widens nobody. The grab-bag risk was smaller than the spec assumed.
+- **NO client-silo mutation was made ⇒ no cai gate consumed.** Standing rule restated to the operator: **new need = new role, never widen an existing one.**
+- ⚠️ Note for whoever does eventually edit these: module-permission changes write `organization` audit rows, and those are **exactly the 12 rows whose nested before/after values are NOT hash-covered**. Don't churn permissions needlessly until v2 hashing lands.
+
 ## 5. 👥 FLEET
 - **cai: ~92% context, P0/live-client-harm only.** Restore point `reports/cai-handoff-NOW.md` ref 575. **Nazim has taken the pen to cycle it**, waiting on **4 in-flight background agents** (Xendit research) to land. *Nazim correctly caught that my readiness check missed those — **"no background agents in flight" belongs next to "restore point fresh"**.*
 - **NEVER nudge cai.** `nudge_cai.sh` uses `send-keys -l` and would concatenate onto half-typed composer text and submit it. Hub never nudged once all session. **Nazim is fixing the script** (C-u first, or refuse when the composer is non-empty) — he called it *"not safe — unexploded"*, and treating it as a defect rather than a caution is right.
