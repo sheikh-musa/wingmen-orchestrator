@@ -37,7 +37,7 @@ Blocked = **only the committing write**. Override = explicit operator decision *
 | Item | State | Owner |
 |---|---|---|
 | **§0 (a) Vercel key + redeploy** · **(b) templates** | **blocking a live client** | operator |
-| **mig 121+122 grants** | `feat/audit-chain-version-integration` @ **c440136**. **All hub-side conditions MET**: 121 re-runnable ✓ · enumeration reconciled (9 files/18 call sites, command recorded) ✓ · per-shape RPC proof ✓. 212 files/2145 tests/0 failed. **Awaiting cai confirm-match at file+number+sha.** ⚠️ 121's real defect was a **SILENT DUPLICATE** (1→1→**2**→2) not a died-mid-apply; negative control reproduces the duplicate-key death, and the fix **stands alone without 122's mitigation**. | cai grants |
+| **mig 121+122 grants** | ⛔ **NO GRANT (CAI-586) — the CHALLENGE WINDOWS are open ~20h**: CAI-576 until **2026-07-26T11:24:32Z**, CAI-584 until **13:19:25Z**. *A window that yields the moment everything looks ready is a formality.* **Do NOT press to shorten.** STILL OUTSTANDING beyond the clock: **(i) per-shape RPC proof over the REAL OCBC narrative corpus — the 29/29 used SYNTHETIC shapes only, this is a genuine gap, QUEUED NOT STARTED**; (ii) cai's confirm-match at file+number+sha. `feat/audit-chain-version-integration` @ **c440136**. Other hub-side conditions met: 121 re-runnable ✓ · enumeration reconciled (9 files/18 call sites, command recorded) ✓ · per-shape RPC proof ✓. 212 files/2145 tests/0 failed. **Awaiting cai confirm-match at file+number+sha.** ⚠️ 121's real defect was a **SILENT DUPLICATE** (1→1→**2**→2) not a died-mid-apply; negative control reproduces the duplicate-key death, and the fix **stands alone without 122's mitigation**. | cai grants |
 | **onboarding fix** | `fix/invite-prefetch-safe-resend` @ **fe737b5**, hub-verified by **breaking it** (old route → 9 failed incl. the test named after the incident; restored → 10 passed). **Code approved by cai; live template change GATED (§0b).** 206 files/2043 passed. | operator applies |
 | **v4 client correction** | **HUB-CLEARED**, cai batching to operator with the entity ask. **NOT SENT.** | operator |
 | **money/audit shared fate** | NOT STARTED — cai to rule shape (single txn / compensating rollback / loss-proof outbox) | cai→hub |
@@ -45,6 +45,10 @@ Blocked = **only the committing write**. Override = explicit operator decision *
 | **CAI-578 EXIT proof** | **Gate is a RESTORE, not an export**: clean-db restore → per-table counts · money **2,587 / S$1,718,341.46 exact** · `verifyChain` on the restored copy. Per check. Binding: no new client project into a personally-owned org; **do NOT migrate goumlyne**. | hub |
 | agreement in git | **RESOLVED (CAI-585): STAYS**, no force-push (desyncs clones). Marked **CONFIDENTIAL**, grandfathered as exception-not-precedent; forward policy = signed instruments not in code repos by default. Axis = **readership**, not permanence. | done |
 | lane_tasks #41 · GIRO · eNETS · PITR · captcha · A2 guard · CAI-579 entity | unchanged, no dates promised | various |
+
+## 4b. 📋 QUEUED, NOT STARTED (I ran out of context)
+- **Per-shape RPC proof over the REAL bank-narrative corpus** (945 credits / S$222,463.79, already parsed — no silo needed). The existing proof was synthetic-only.
+- **Make the pre-push prod smoke STRUCTURALLY read-only** (CAI-586): today it is read-only *by inspection*, which is an act of remembering, and remembering fails silently. Give it a role that **cannot** write, and get prod out of the push path entirely.
 
 ## 5. ⚠️ RESIDUALS WORTH KNOWING
 - **The repo's pre-push hook runs a read-only role-access smoke against ihsanos PRODUCTION on every push** (7/7; zero write calls verified). Not a violation, but know it rather than discover it.
@@ -63,6 +67,7 @@ Blocked = **only the committing write**. Override = explicit operator decision *
 - **cai's gate is STOP-AND-DISCLOSE, never a veto over the operator.** He is the principal.
 - **A rotated key that something still holds isn't rotated, it's broken.**
 - **The fix is not always where the bug appears** — the invite burn happened at the *provider*, upstream of all our code.
+- **STATE THE CONCERN AND THE MECHANISM SEPARATELY** (cai, 3rd instance today of *his mechanism wrong / concern correct*). A wrong mechanism must not take a correct concern down with it — the negative control is what kept the 121 defect alive after his predicted failure mode proved wrong. My inverse shape: measurement right, summary wrong.
 - ⚠️ **MY PATTERN, five instances:** measurements held; **my summaries shrank or over-read**. Latest: I checked the repo was private and *still* didn't think about readership — **being right about permanence made me stop looking.**
 
 ## 7. ▶️ NEXT ACTIONS
