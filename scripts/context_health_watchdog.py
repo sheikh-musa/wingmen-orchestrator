@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -286,6 +287,7 @@ class PaneState:
     idle: Optional[bool]          # True=idle, False=busy, None=unknown
     authenticated: Optional[bool] # True=normal prompt, False=bad screen, None=unsure
     input_text: str = ""          # best-effort unsent text in the prompt box
+    bg_agents: int = 0            # in-flight background agents (a /clear discards them)
     raw: str = ""
 
 
@@ -297,6 +299,21 @@ def _extract_input_text(pane: str) -> str:
     dimmed placeholder (`Try ...`). Conservative: any doubt -> "". This only ever
     ADDS a preserve-note; it is never used to justify DISCARDING input."""
     for line in reversed(pane.splitlines()):
+        # MODERN TUI (2026-07-25): the composer renders as '❯' + U+00A0 NON-BREAKING
+        # SPACE + text — no box rule at all. The legacy '│ >' patterns below match
+        # NOTHING against it, so this extractor silently returned "" for every live
+        # pane, and _verify_capture_before_clear's condition (c) — "input box holds no
+        # unsent text" — passed by never being able to see any. A guard that cannot
+        # observe what it guards fails OPEN while reading as protection. Verified
+        # against real panes: cai held "reset me", cc-cosem-exams held "check the
+        # inbox", and both extracted as "" before this fix.
+        if line.startswith("\u276f"):
+            after = line[1:].replace("\u00a0", " ").strip()
+            if not after or after.startswith("Try ") or after.startswith("? for"):
+                return ""
+            if after.startswith("Press up to edit"):   # queued-message hint, not a draft
+                return ""
+            return after
         if "│ >" not in line and "│>" not in line:
             continue
         after = line.split(">", 1)[1].replace("│", " ").strip()
@@ -304,6 +321,20 @@ def _extract_input_text(pane: str) -> str:
             return ""
         return after
     return ""
+
+
+# A body "Waiting for N background agents to finish" shows NO busy marker — the footer
+# looks idle because the main loop IS idle. But a /clear discards those agents and their
+# work. Observed 2026-07-25: cai sat at 92% context, idle by every existing check, with 4
+# background agents 26+ minutes into the research feeding its next deliverable. Every
+# CAI-500 precondition passed. Only a human reading the pane footer would have caught it.
+_BG_AGENT_RE = re.compile(r"waiting for\s+(\d+)\s+background agent", re.I)
+
+
+def _background_agents(pane: str) -> int:
+    """Count in-flight background agents in a pane. 0 when none / unknown."""
+    m = _BG_AGENT_RE.search(pane or "")
+    return int(m.group(1)) if m else 0
 
 
 def _pane_state(reg: dict) -> PaneState:
@@ -335,7 +366,8 @@ def _pane_state(reg: dict) -> PaneState:
     else:
         authed = None  # unrecognised screen -> caller treats as NOT-safe
     return PaneState(reachable=True, idle=not busy, authenticated=authed,
-                     input_text=_extract_input_text(pane), raw=pane)
+                     input_text=_extract_input_text(pane),
+                     bg_agents=_background_agents(pane), raw=pane)
 
 
 def _agent_is_idle(reg: dict) -> Optional[bool]:
@@ -669,6 +701,9 @@ def _verify_capture_before_clear(reg: dict, st: PaneState) -> tuple[bool, str]:
         return False, f"{n_inbox} operator message(s) arrived during checkpoint — inbox NOT drained"
     if (st.input_text or "").strip():
         return False, "unsent input-box text still present — capture incomplete"
+    if st.bg_agents:
+        return False, (f"{st.bg_agents} background agent(s) still in flight — a /clear discards "
+                       f"their work and it is NOT recoverable from the handoff")
     return True, f"capture verified (handoff {fresh}; inbox drained; input box clear)"
 
 
