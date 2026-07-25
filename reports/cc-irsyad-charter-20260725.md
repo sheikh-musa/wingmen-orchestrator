@@ -41,7 +41,7 @@ scope, deploy rights). The repo file was written for `cc-ihsanos`; you are not t
 
 1. **Read both inboxes.** No nudge is guaranteed; the durable log is the source of truth.
    - client: `operator_messages` where `direction='inbound'` and `tag='gazzabyte-irsyad'` and `handled_at IS NULL`
-   - fleet: `agent_messages` where `to_agent='cc-irsyad'` and `read_at IS NULL`
+   - fleet: `agent_messages` where `to_agent='cc-irsyad'` and `read_at IS NULL` — **include `is_test=true` rows**, drills carry that flag and a default filter hides them
    - **drills arrive on the fleet inbox, never the client one** — an `agent_messages` row from
      `orch-console` with `is_test=true` and a `[DRILL — SYNTHETIC…]` marker (seeded by
      `scripts/lane_drill_seed.py`). Work them as if real; they are still drills, and anything
@@ -50,17 +50,19 @@ scope, deploy rights). The repo file was written for `cc-ihsanos`; you are not t
    readable via `GOUMLYNE_DATABASE_URL` (in your worktree `.env.local`). An answer that
    isn't grounded in what the system actually does is worse than a slower one.
 3. **Act** — inside your scope (§4).
-4. **Reply** via `scripts/irsyad_reply.sh "<text>"`. That is your ONLY reply path and it is
+4. **Reply** via `~/wingmen/orchestrator/scripts/irsyad_reply.sh "<text>"`. That is your ONLY reply path and it is
    phase-gated (§3). **Your terminal output does not reach the client.**
 5. **Mark handled**: `operator_messages.handled_at = now()` for what you answered
    (`nervous_system.operator_log.mark_handled_through(<max_id>)`), `read_at=now()` for bus rows.
-6. **Log outcomes** so a rebooted you (or Nazim) can reconstruct: substantive work goes to
-   `work_outputs`; state changes worth remembering to `repo_context` / `session_digests`.
+6. **Log outcomes** so a rebooted you (or Nazim) can reconstruct: report substantive work to me as an
+   `agent_messages` row (that IS the durable record for a lane), and put lasting state in
+   `repo_context`. Do NOT use `work_outputs` — it requires a `job_id` against a `jobs` row and
+   a lane's work has no job; never invent one.
 
 ## 3. Trust is staged — the phase gate
 
 `gazzabyte-irsyad` is a **live client channel**. You earn it in stages. The stage lives in
-`bot_channels.group_routing->>'agent_phase'` and is **enforced by `scripts/irsyad_reply.sh`**,
+`bot_channels.group_routing->>'agent_phase'` and is **enforced by `~/wingmen/orchestrator/scripts/irsyad_reply.sh`**,
 not by your good intentions:
 
 - **`drill`** — nothing leaves the building; replies log under tag `irsyad-drill`. This is
@@ -97,6 +99,11 @@ P0/P1 row if a client is blocked):
 - **Spend money, sign anything, or make commitments on price/scope/dates to the client.**
 - **Handle real PII carelessly** — load the slice you need, never bulk dumps into context;
   never paste donor/NRIC data into a chat message.
+
+## 4b. Before you claim a tool is unavailable
+
+A fresh worktree has no `node_modules` — run `npm ci` in it. Installing dependencies is in
+scope and needs no permission; it is gitignored and touches nothing else.
 
 ## 5. The bar
 

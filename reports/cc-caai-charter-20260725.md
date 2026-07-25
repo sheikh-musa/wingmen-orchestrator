@@ -53,13 +53,15 @@ than a blocked one.
 
 1. **Read both inboxes** (the durable log is the truth; nudges are best-effort):
    - SME: `operator_messages` where `direction='inbound'`, `tag='cosem-caai'`, `handled_at IS NULL`
-   - fleet: `agent_messages` where `to_agent='cc-caai'` and `read_at IS NULL`
+   - fleet: `agent_messages` where `to_agent='cc-caai'` and `read_at IS NULL` — **include `is_test=true` rows**, drills carry that flag and a default filter hides them
    - **drills** arrive on the fleet inbox with `is_test=true` and a `[DRILL — SYNTHETIC…]` marker.
 2. **Ground yourself** in the model doc and the solver code before answering.
 3. **Act** inside your scope (§5).
-4. **Reply** via `scripts/lane_reply.sh cosem-caai "<text>"` — your ONLY reply path, phase-gated
+4. **Reply** via `~/wingmen/orchestrator/scripts/lane_reply.sh cosem-caai "<text>"` — your ONLY reply path, phase-gated
    (§4). **Your terminal output does not reach Syed.**
-5. **Mark handled** (`handled_at` / `read_at`), and log substantive work to `work_outputs`.
+5. **Mark handled** (`handled_at` / `read_at`), and report substantive work as an
+   `agent_messages` row to your reviewer. NOT `work_outputs` — it requires a `job_id` against a
+   `jobs` row and a lane's work has no job; never invent one.
 
 ## 4. Trust is staged — the phase gate
 
@@ -84,6 +86,11 @@ comparisons; ask Syed precise modelling questions.
   sit on the platform's schedule module, but that seam is the core owner's to build.
 - **Merge, deploy, or promise Syed dates, scope, or price.**
 - **Spend money.**
+
+## 5b. Before you claim a tool is unavailable
+
+A fresh worktree may be missing its dependencies — installing them is in scope and needs no
+permission.
 
 ## 6. The bar
 

@@ -37,17 +37,19 @@ and your escalation path.
 
 1. **Read both inboxes** — the durable log is the source of truth, no nudge is guaranteed.
    - SME: `operator_messages` where `direction='inbound'`, `tag='cosem-exams'`, `handled_at IS NULL`
-   - fleet: `agent_messages` where `to_agent='cc-cosem-exams'` and `read_at IS NULL`
+   - fleet: `agent_messages` where `to_agent='cc-cosem-exams'` and `read_at IS NULL` — **include `is_test=true` rows**, drills carry that flag and a default filter hides them
    - **drills** arrive on the fleet inbox with `is_test=true` and a `[DRILL — SYNTHETIC…]`
      marker (`scripts/lane_drill_seed.py`). Work them as if real; never present drill content
      to Hariz as something he asked for.
 2. **Ground yourself before answering** — read the actual module code and, where it matters,
    query the demo DB. Do not answer exams-domain questions from intuition; Hariz will know.
 3. **Act** inside your scope (§4).
-4. **Reply** via `scripts/lane_reply.sh cosem-exams "<text>"`. That is your ONLY reply path and
+4. **Reply** via `~/wingmen/orchestrator/scripts/lane_reply.sh cosem-exams "<text>"`. That is your ONLY reply path and
    it is phase-gated (§3). **Your terminal output does not reach Hariz.**
 5. **Mark handled** — `handled_at` on what you answered, `read_at` on bus rows.
-6. **Log outcomes** to `work_outputs` so your work survives a reboot.
+6. **Log outcomes** as an `agent_messages` row to your reviewer — that is a lane's durable
+   record — and put lasting state in `repo_context`. NOT `work_outputs`: it requires a `job_id`
+   against a `jobs` row, and a lane's work has no job. Never invent one.
 
 ## 3. Trust is staged — the phase gate
 
@@ -82,6 +84,11 @@ quickly — by being right, not by asking.
   in progress. Reads are free; bulk mutations need Nazim's go-ahead.
 - **Put real government/trainee PII into dev work.** Synthetic or demo data only.
 - **Spend money, or commit to Hariz on dates, scope, or price.**
+
+## 4b. Before you claim a tool is unavailable
+
+A fresh worktree has no `node_modules` — run `npm ci` in it. Installing dependencies is in
+scope and needs no permission; it is gitignored and touches nothing else.
 
 ## 5. The bar
 

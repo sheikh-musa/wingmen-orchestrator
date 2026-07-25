@@ -29,16 +29,44 @@ TEXT="${2:-$(cat)}"
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
 
 ORCH_DIR="$ORCH_DIR" PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" - "$CHANNEL" "$TEXT" <<'PY'
-import os, re, sys, subprocess, psycopg
+import os, re, sys, shutil, subprocess, psycopg
 
 CHANNEL, TEXT = sys.argv[1], sys.argv[2]
 ORCH = os.environ.get("ORCH_DIR", os.path.expanduser("~/wingmen/orchestrator"))
-AGENT = os.environ.get("CC_BASE_AGENT_ID") or os.environ.get("LANE_AGENT_ID") or ""
 SUB_TAG = os.environ.get("CC_AGENT_ID") or None
-if not AGENT:
-    sys.exit("cannot attribute this reply: neither CC_BASE_AGENT_ID nor LANE_AGENT_ID is set.\n"
-             "A lane launched via launch_dangerous_cc.sh has these; if you are calling this by "
-             "hand, set LANE_AGENT_ID=<your agent id> so the log names who spoke.")
+
+
+def _agent_from_tmux(dsn):
+    """Resolve the speaker from the tmux session via fleet_lanes.
+
+    Why: the launcher exports CC_BASE_AGENT_ID into the `claude` process, but a lane's
+    shell tool does NOT reliably inherit it (found 2026-07-25 by cc-cosem-exams, which hit
+    this script cold and would have concluded it had no reply path at all). The tmux session
+    name is a fact about where we are running, so derive from it and treat env as the hint,
+    not the requirement.
+    """
+    tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
+    try:
+        sess = subprocess.run([tmux, "display-message", "-p", "#S"],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:                                   # noqa: BLE001
+        return None
+    if not sess:
+        return None
+    with psycopg.connect(dsn) as c, c.cursor() as cur:
+        # agent_status.tmux_session is stamped by launch_dangerous_cc.sh from inside the
+        # pane, so it is the authoritative session->agent mapping. fleet_lanes is the
+        # fallback for lanes whose row name matches the session (they need not: the exams
+        # lane is `cosem-exams` in the registry but runs in tmux `exams`).
+        cur.execute("SELECT base_agent_id FROM agent_status WHERE tmux_session=%s "
+                    "AND base_agent_id IS NOT NULL ORDER BY last_heartbeat DESC NULLS LAST "
+                    "LIMIT 1", (sess,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        cur.execute("SELECT base_agent_id FROM fleet_lanes WHERE lane=%s", (sess,))
+        row = cur.fetchone()
+    return row[0] if row else None
 if SUB_TAG and not SUB_TAG.startswith(AGENT + "-"):
     SUB_TAG = None                      # agent_messages sub_tag family-prefix CHECK
 
@@ -48,6 +76,16 @@ def env_val(key):
     return m.group(1).strip() if m else None
 
 dsn = os.environ.get("DATABASE_URL") or env_val("DATABASE_URL")
+
+AGENT = (os.environ.get("CC_BASE_AGENT_ID") or os.environ.get("LANE_AGENT_ID")
+         or _agent_from_tmux(dsn) or "")
+if not AGENT:
+    sys.exit("cannot attribute this reply: no CC_BASE_AGENT_ID / LANE_AGENT_ID, and this tmux "
+             "session does not match a fleet_lanes.lane row.\nSet LANE_AGENT_ID=<your agent id> "
+             "so the log names who spoke.")
+if SUB_TAG and not SUB_TAG.startswith(AGENT + "-"):
+    SUB_TAG = None                      # agent_messages sub_tag family-prefix CHECK
+
 with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("SELECT token_env_key, allowed_chat_ids, channel_tag, "
                 "coalesce(group_routing->>'agent_phase','drill'), "
