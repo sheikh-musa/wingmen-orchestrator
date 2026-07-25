@@ -41,6 +41,14 @@ Operator rotated + redeployed at 22:00Z; **first attempt FAILED** (`database:err
 **Method worth reusing:** `/api/health` is the definitive probe for this class — the site returns 200 on `/` and `/login` in BOTH states, so page codes prove nothing.
 **Gazzabyte (`sal…@gazzabyte.sg`) had already signed in 12:29Z** — confirmed, password set. Login was never the broken part; everything *after* login was. Client notified directly on the group at 22:12:49Z (`tag=gazzabyte-irsyad`, `delivered=True`) to retry anything that errored earlier.
 
+## 🔴 (c) IDENTITY FINDING — the hub's `SUPABASE_ACCESS_TOKEN` is the PARTNER's, not ours
+**Measured:** `GET /v1/profile` → `primary_email = sales@gazzabyte.sg`. Format `sbp_` (personal access token).
+Org **`lqbojdqwgzgxhioezfgb` "sheikh-musa's Org" owns BOTH** `goumlynecruxrlmzlntp` (irsyad) **and** `ceayjeamtmcyzzvqflus` (ihsanos). Members: `sheikh.musa@outlook.com` = **Owner**, `sales@gazzabyte.sg` = **Developer**.
+- **Developer can read project config, not write it** ⇒ that is the entire GET-200/PATCH-403 story. No key swap fixes it; it is a ROLE.
+- **KILLS A TWICE-REPEATED MIS-DIAGNOSIS:** the handoff's "403 because the project moved to his account" is **wrong** — goumlyne never left his org.
+- **Attribution is inverted:** every Management-API action the hub takes is recorded as the client contact, not us — the exact inverse of the row-3144 agent-identity pattern cai praised.
+- **Fix (operator, ~30s):** issue a PAT from his own Owner account → `.env` on the Studio; revoke the gazzabyte token; drop the Developer seat unless needed. Asked; not done. Sent to cai as **#11391**.
+
 ## ⏳ (b) SUPABASE EMAIL TEMPLATES — still open, but **NOT "dashboard-only"** (that was wrong)
 **Tested, not inherited:** on goumlyne `GET /v1/projects/{ref}/config/auth` → **200** (all 14 templates readable); `PATCH` → **403 insufficient privileges**. The hub token went **read-only** when the project moved to the operator's account. So the templates ARE Management-API-settable — just not by this token. The earlier "403 on api-keys" note was true but too narrow.
 **Rollback banked** (cai's first gate condition, done regardless of who applies): all 14 current bodies → `reports/rollback/goumlyne-auth-templates-rollback-20260725.json` (commit `ac6c834`). Confirms the defect is live — invite/magic_link/recovery all still carry stock `{{ .ConfirmationURL }}`, none carry `token_hash`.
