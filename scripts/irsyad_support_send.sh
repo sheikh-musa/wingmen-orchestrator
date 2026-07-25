@@ -34,5 +34,8 @@ else
 fi
 # durable log every reply (full text, once; best-effort — never fail on a log hiccup).
 # PYTHONPATH pins the package root so the `-m` import works regardless of CWD.
-PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" --tag "$TAG" >/dev/null 2>&1 || true
+# CAI-598: log DELIVERY, not intent. This log line used to run unconditionally with
+# delivered defaulting to TRUE, so a failed send was recorded as delivered — the
+# durable log asserted an outcome it never checked. Pass --undelivered on failure.
+PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" --tag "$TAG" $([ "$sent" = 1 ] || echo --undelivered) >/dev/null 2>&1 || true
 [ "$sent" = 1 ] && exit 0 || { echo "irsyad_support_send failed" >&2; exit 1; }

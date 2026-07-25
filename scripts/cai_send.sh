@@ -33,5 +33,8 @@ fi
 # runs this from ~/wingmen/wingmen-cai, where a bare `-m nervous_system.operator_log`
 # would ModuleNotFoundError and silently drop the log (caught 2026-06-28: cai's
 # war-room sends delivered but never logged because of exactly this).
-PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" --tag "$TAG" >/dev/null 2>&1 || true
+# CAI-598: log DELIVERY, not intent. This log line used to run unconditionally with
+# delivered defaulting to TRUE, so a failed send was recorded as delivered — the
+# durable log asserted an outcome it never checked. Pass --undelivered on failure.
+PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" --tag "$TAG" $([ "$sent" = 1 ] || echo --undelivered) >/dev/null 2>&1 || true
 [ "$sent" = 1 ] && exit 0 || { echo "cai_send failed" >&2; exit 1; }
