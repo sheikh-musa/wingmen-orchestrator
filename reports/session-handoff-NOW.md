@@ -61,6 +61,24 @@ The deployed `/auth/confirm` consumed `token_hash` on a bare GET (its own docstr
 ## 🔑 TOKEN STATE — hub now authenticates as the OPERATOR
 `.env SUPABASE_ACCESS_TOKEN` swapped to the operator's Owner PAT (`sbp_2180…b069`); old partner token (`sbp_f670…4e34`) removed; backup `.env.bak-token-swap-20260725`. `/v1/profile` → `sheikh.musa@outlook.com`. **⚠️ THE NEW TOKEN WAS PASTED INTO TELEGRAM** → row 7256 **SCRUBBED** (0 `sbp_` tokens remain in the log, verified) but treat it as **BURNED — operator must revoke + reissue.** Owner-scoped: it can read api-keys (hence the service_role key) on BOTH projects.
 
+## 🔑 OPEN ACTION — TOKEN SEQUENCE (CAI-592 §B, ordering is the ruling)
+`.env` holds the operator's Owner PAT `sbp_2180…b069` — **BURNED** (pasted into Telegram; row 7256 scrubbed, 0 tokens remain in log, but **a scrub is not an unsend**). Required order, and step 4 before step 3 strands the fleet:
+1. **REVOKE** the burned token at the provider — *replacing is not enough; an unrevoked token in a chat history stays live.* ("rotate" was my word and it was too weak — cai's correction.)
+2. Operator generates a third and **places it himself at the machine** (`.env`). Secrets never travel over a messaging channel.
+3. Hub **re-verifies the 7 Management-API paths** — observed, not assumed.
+4. **Only then** remove the `sales@gazzabyte.sg` Developer seat.
+Verified safe-to-remove today: 7/7 paths 200 as `sheikh.musa@outlook.com`; **no stored CLI credential** (`~/.supabase/access-token` absent; `supabase` CLI not installed on the Studio at all).
+**Attribution window is BOUNDED:** fleet Management-API actions before **22:40:45Z** are logged by Supabase as `sales@gazzabyte.sg`; after, as the operator.
+
+## ✅ GAZZABYTE — FIRST EVER SESSION ON THAT ACCOUNT
+`recovery_sent_at` 22:48:44Z → **SESSION CREATED 22:51:13Z** (2.5 min later), `updated_at` 22:51:40Z, `requires_password_setup=false`, `recovery_sent_at` cleared (= token genuinely consumed). **Sessions were 0 for the entire life of the account.**
+⚠️ `user_agent='node'` is **EXPECTED** (our `/auth/confirm` verifies server-side) — so it does **not** distinguish the client from the operator testing. **Not declared as "she's in"; confirmation requested instead.**
+**Link expiry ≠ link burning.** `mailer_otp_exp = 3600` (measured) — links still expire in 1h; the fix stopped them being *consumed by scanners*, not expiring.
+**NEVER generate a password for a person** (CAI-592 §D.1): if two people know a credential, no action is attributable to either — the same identity defect as the 660 test-account rows and the scanner-consumed invite.
+
+## ⚠️ cai STATE — 100% CONTEXT, RULING FROM STALE DATA
+CAI-592 §D.2 asserted the templates were "NOT yet applied / Safe-Links still burns / no resend path" — **all three false** as of 22:48-22:51Z and already reported to him in #11398. Countered in **#11403**. Carrying that instruction verbatim would have told the operator his live client was still broken *while a session was already open*. **Verify cai's factual premises against live state before acting on them while he is at 100%.** 4 background agents in flight — do **not** reset. Composer unstuck (pen ii), no extra work injected.
+
 ## ⏳ (b-old) SUPABASE EMAIL TEMPLATES — superseded by the block above
 **Tested, not inherited:** on goumlyne `GET /v1/projects/{ref}/config/auth` → **200** (all 14 templates readable); `PATCH` → **403 insufficient privileges**. The hub token went **read-only** when the project moved to the operator's account. So the templates ARE Management-API-settable — just not by this token. The earlier "403 on api-keys" note was true but too narrow.
 **Rollback banked** (cai's first gate condition, done regardless of who applies): all 14 current bodies → `reports/rollback/goumlyne-auth-templates-rollback-20260725.json` (commit `ac6c834`). Confirms the defect is live — invite/magic_link/recovery all still carry stock `{{ .ConfirmationURL }}`, none carry `token_hash`.
