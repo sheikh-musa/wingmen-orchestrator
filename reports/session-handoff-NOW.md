@@ -22,6 +22,15 @@ Hub reset in place; lease held (`orch_lease.py check` exit 0); operator_log.unpr
 - Disagree with something already sent → send it to **cai**, not the operator; original writer corrects in place. Override only for a real P0 where the writer is unreachable/stale, and say you're overriding.
 - **Danger window = a freshly-reset hub** (confident, just built a board picture, wants to demonstrate it). Be quietest on channels you don't own.
 
+### ✅ CAI-566 §3 — CITABLE RECORD CORRECTED (it OVERSTATED). main **bc62f36 → 90bdde9**, both prods READY, live 200
+The substrate row said pre-fix rows were "CONTENT-HASH NOT REPRODUCIBLE" — **FALSE for 6 rows**. cai: *an auditor handed "these 642 cannot be verified" who finds six that verify perfectly will distrust the ENTIRE record.*
+- **Row 1 now: `LINKAGE-VERIFIED, CONTENT-HASH NOT GUARANTEED REPRODUCIBLE (pre-fix serialisation)`** and carries **BOTH partitions** — by boundary position `676 = 642 + 34`, by reproducibility `676 = 40 + 636` — plus `reproducing_pre_fix_ids = {93,95,96,97,733,734}` and the live-run outcome (no BROKEN). Keeps the two causes distinct (jsonb normalisation vs the array-replacer **filtering**).
+- **ROOT IMPRECISION: conflating BOUNDARY POSITION with VERIFIABILITY** — two different partitions of the same 676 rows, both true. cai owned the wording; **I noted I had already measured "642 / 6 reproducible" in my own #11199 and failed to carry it into the forecast** — his wording made the error easy, not inevitable.
+- **⭐ THE GUARD NOW PROTECTS THE CLAIM, NOT JUST THE NUMBERS.** The drift check previously compared values only and would have passed while `below_status` said something false. It now FAILS on: reproducing/not-reproducing drift · **partitions failing to reconcile** · missing reproducibility partition · **`below_status` no longer saying NOT GUARANTEED REPRODUCIBLE**. Proved by **actually reverting the substrate wording and catching it**, then restoring. Controls: match→0 · 40→41→1 · 636→600→1 · unset creds→1 · substrate overstatement→1 · restored→0.
+- ihsanos tests now assert the partitions **reconcile to the same total** and every listed pre-fix-reproducing id sits below the boundary.
+- Gates: 204 files / 2025 tests / 0 failures, tsc 0. Orchestrator side `77bd9d1`. **No verifier behaviour changed** — governance-record precision only.
+- **⛔ CLIENT CORRECTION STILL HELD** — cai drafts it (operator-approved client comms). Now stronger AND honest: *no evidence any entry was altered; everything from 23 June fully verifiable; for the earlier period we can still prove nothing was added or removed.* Only available because the run preceded the writing.
+
 ### ✅ FIRST LIVE verifyChain RUN — DONE (CAI-564 GRANTED). **BROKEN ABSENT.** Prediction off by 6, fully reconciled.
 Read-only on goumlyne, using the **real merged code** (bc62f36) not a reimplementation; temp test file deleted, worktree clean.
 ```json
