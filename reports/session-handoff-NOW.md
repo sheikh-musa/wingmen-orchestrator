@@ -33,9 +33,21 @@ This file is current: written fresh at 90%, amended for the template publication
 
 ---
 
-# 🚨 0. TWO OPERATOR DASHBOARD ACTIONS BLOCK A LIVE CLIENT
-Neither is executable by the hub. Both were sent to him.
+# 🚨 0. OPERATOR ACTIONS — (a) ✅ CLOSED 2026-07-25 22:07Z · (b) still open
 
+## ✅ (a) VERCEL KEY — **RESOLVED AND VERIFIED 2026-07-25 22:07Z. Gazzabyte hold RELEASED.**
+Operator rotated + redeployed at 22:00Z; **first attempt FAILED** (`database:error`) — the pasted key carried **whitespace**. Caught by driving the real server-side path, not a page load. He re-pasted at 22:07:39Z, redeploy 22:07:48Z (9s later, right order).
+**VERIFIED:** `/api/health` on live production = `{"app":"ok","database":"ok"}` × 3 stable — that route calls `createServiceClient()` and really queries goumlyne. Control: `ihsanos.com` = `ok` throughout on the same commit, so the isolation was to the irsyad env, never the code.
+**Method worth reusing:** `/api/health` is the definitive probe for this class — the site returns 200 on `/` and `/login` in BOTH states, so page codes prove nothing.
+**Gazzabyte (`sal…@gazzabyte.sg`) had already signed in 12:29Z** — confirmed, password set. Login was never the broken part; everything *after* login was. Client notified directly on the group at 22:12:49Z (`tag=gazzabyte-irsyad`, `delivered=True`) to retry anything that errored earlier.
+
+## ⏳ (b) SUPABASE EMAIL TEMPLATES — still open, but **NOT "dashboard-only"** (that was wrong)
+**Tested, not inherited:** on goumlyne `GET /v1/projects/{ref}/config/auth` → **200** (all 14 templates readable); `PATCH` → **403 insufficient privileges**. The hub token went **read-only** when the project moved to the operator's account. So the templates ARE Management-API-settable — just not by this token. The earlier "403 on api-keys" note was true but too narrow.
+**Rollback banked** (cai's first gate condition, done regardless of who applies): all 14 current bodies → `reports/rollback/goumlyne-auth-templates-rollback-20260725.json` (commit `ac6c834`). Confirms the defect is live — invite/magic_link/recovery all still carry stock `{{ .ConfirmationURL }}`, none carry `token_hash`.
+**Ask sent to operator:** grant the hub token write on the goumlyne project and the hub owns this end-to-end (apply → trigger real recovery+invite → click → report OBSERVED). If he keeps write to himself, it stays a dashboard paste.
+
+---
+### ORIGINAL §0 TEXT (superseded, retained per retract-in-place)
 **(a) VERCEL KEY — MOST URGENT.** He rotated the goumlyne `service_role` key. `ihsanos-irsyad` (`prj_AgYdB27PBf7tMLlySjFNPqdoCsKM`) still holds the OLD `SUPABASE_SERVICE_ROLE_KEY` on **production**. Site answers 200 only because `/login` doesn't touch it — **it fails on the first real server-side action.** Fix: update env var → **redeploy production** (no effect until redeploy). Check the `ihsanos` project too.
 **HUB UNAFFECTED (verified):** our keys are `tscuy` + `ceayj`; ceayj still authenticates 200. No goumlyne service key in `.env`. My `SUPABASE_ACCESS_TOKEN` now 403s on goumlyne api-keys (narrowed when the project moved to his account).
 
