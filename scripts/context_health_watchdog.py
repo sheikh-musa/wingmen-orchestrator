@@ -331,10 +331,45 @@ def _extract_input_text(pane: str) -> str:
 _BG_AGENT_RE = re.compile(r"waiting for\s+(\d+)\s+background agent", re.I)
 
 
+_BG_TIMER_RE = re.compile(r"(\d+m\s*\d+s)")
+
+
 def _background_agents(pane: str) -> int:
     """Count in-flight background agents in a pane. 0 when none / unknown."""
     m = _BG_AGENT_RE.search(pane or "")
     return int(m.group(1)) if m else 0
+
+
+def _bg_agents_live(reg: dict, settle_s: int = 20) -> tuple[int, str]:
+    """Are the background agents ACTUALLY RUNNING, or a stale footer?
+
+    Two samples, because the footer LIES. Observed 2026-07-26: cai's pane showed
+    "Waiting for 4 background agents to finish ... 26m 42s" — the identical string, with
+    the identical elapsed time, across a /clear AND a full reset, for hours. They were
+    stale duplicates from a relaunch after the token-cap deaths; cai itself ruled them
+    expendable. A live agent's timer ADVANCES; a phantom's does not.
+
+    This matters as much as the guard it protects: keying a refusal off a single sample
+    would have blocked EVERY future cai reset forever on a footer nobody can clear. A
+    guard that never lets anything through is not safer than one that lets everything
+    through — it just fails in the direction that looks responsible.
+
+    Returns (count, reason). count==0 means "nothing live in the way".
+    """
+    first = _capture_pane(reg)
+    n = _background_agents(first or "")
+    if not n:
+        return 0, "no background agents"
+    t1 = _BG_TIMER_RE.search(first or "")
+    time.sleep(settle_s)
+    second = _capture_pane(reg)
+    if _background_agents(second or "") == 0:
+        return 0, "background agents finished during the settle window"
+    t2 = _BG_TIMER_RE.search(second or "")
+    if t1 and t2 and t1.group(1) == t2.group(1):
+        return 0, (f"{n} background agent(s) shown but the elapsed timer is FROZEN at "
+                   f"{t1.group(1)} across {settle_s}s — stale footer, not live work")
+    return n, f"{n} background agent(s) live (timer advancing)"
 
 
 def _pane_state(reg: dict) -> PaneState:
@@ -702,8 +737,11 @@ def _verify_capture_before_clear(reg: dict, st: PaneState) -> tuple[bool, str]:
     if (st.input_text or "").strip():
         return False, "unsent input-box text still present — capture incomplete"
     if st.bg_agents:
-        return False, (f"{st.bg_agents} background agent(s) still in flight — a /clear discards "
-                       f"their work and it is NOT recoverable from the handoff")
+        live, why = _bg_agents_live(reg)
+        if live:
+            return False, (f"{live} background agent(s) still in flight — a /clear discards their "
+                           f"work and it is NOT recoverable from the handoff ({why})")
+        _log_pen_gate(f"background-agent guard cleared: {why}")
     return True, f"capture verified (handoff {fresh}; inbox drained; input box clear)"
 
 
