@@ -61,6 +61,16 @@ The deployed `/auth/confirm` consumed `token_hash` on a bare GET (its own docstr
 ## 🔑 TOKEN STATE — hub now authenticates as the OPERATOR
 `.env SUPABASE_ACCESS_TOKEN` swapped to the operator's Owner PAT (`sbp_2180…b069`); old partner token (`sbp_f670…4e34`) removed; backup `.env.bak-token-swap-20260725`. `/v1/profile` → `sheikh.musa@outlook.com`. **⚠️ THE NEW TOKEN WAS PASTED INTO TELEGRAM** → row 7256 **SCRUBBED** (0 `sbp_` tokens remain in the log, verified) but treat it as **BURNED — operator must revoke + reissue.** Owner-scoped: it can read api-keys (hence the service_role key) on BOTH projects.
 
+## ✅ GAZZABYTE UNBLOCKED — CONFIRMED BY THE CLIENT, 23:05:49Z
+Client's own words: *"sales@gazzabyte.sg able to login and set password."* Silo agrees: `last_sign_in_at 22:51:13Z`, confirmed, `sessions=1` (was 0 for the account's entire life), `requires_password_setup=false`. The session I flagged as ambiguous (`user_agent='node'` — expected, our `/auth/confirm` verifies server-side) **was her**. Reply sent by **Nazim/orch-console 23:12:45Z** under the cc-irsyad supervised-send arrangement — **hub must not duplicate on #7272**.
+
+## 🧪 INSTRUMENT WARNING — SHELL SEARCHES HERE ARE BLIND (CAI-593 §3, extended)
+**`grep` AND `find` are both wrapped shell functions** (Claude Code snapshot); `grep -r` honours `.gitignore` so it **cannot see `.env*`**, and my `find` sweeps returned **1** then **0** files while printing "clean" underneath. A negative from an unproven instrument is not evidence.
+**RULE: on this box, any negative from a shell search is inadmissible without a positive control in the same command.** The only trustworthy sweep was `os.walk` in Python (1,809 files, control passed).
+
+## ✅ PARTNER TOKEN PURGED FROM DISK (CAI-593 task)
+Redacted the `SUPABASE_ACCESS_TOKEN=` line only (all other bytes preserved) in **7** files — cai's 5 in `~/wingmen/orchestrator`, **plus 2 he did not have**: `~/wingmen/_mini_migration_backup/orchestrator-mini/.env` and `.env.bak.goumlyne-sync` (his scan was orchestrator-scoped). Final: **partner token `sbp_f670` = ZERO on disk**; the only full-shape token left is the operator's in `orchestrator/.env`, whose apparent duplicate at `orchestrator-wt/preventative-gates/.env` is a **symlink to the same file**. That token is Gazzabyte's — **not ours to revoke, so deleting our copies is the whole remedy**.
+
 ## 🔑 OPEN ACTION — TOKEN SEQUENCE (CAI-592 §B, ordering is the ruling)
 `.env` holds the operator's Owner PAT `sbp_2180…b069` — **BURNED** (pasted into Telegram; row 7256 scrubbed, 0 tokens remain in log, but **a scrub is not an unsend**). Required order, and step 4 before step 3 strands the fleet:
 1. **REVOKE** the burned token at the provider — *replacing is not enough; an unrevoked token in a chat history stays live.* ("rotate" was my word and it was too weak — cai's correction.)
