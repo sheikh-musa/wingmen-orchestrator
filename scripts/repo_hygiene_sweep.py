@@ -28,6 +28,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -37,6 +38,15 @@ HOME = Path(os.path.expanduser("~"))
 ORCH = HOME / "wingmen" / "orchestrator"
 LOG = ORCH / "logs" / "repo_hygiene.log"
 STALE_HRS = 12                      # uncommitted work older than this -> alert
+
+# Untracked paths that are NEVER "work at risk". Counting these as aging WIP is
+# how the sweep reported 549h of urgent work that was two empty node_modules dirs.
+JUNK_NAMES = {"node_modules", ".next", "dist", "build", "coverage", ".DS_Store",
+              ".turbo", ".venv", "__pycache__", ".pytest_cache"}
+
+# Files that must NEVER be committed. Matched on BASENAME so backups/variants are
+# caught too: .env, .env.local, .env.bak-preflip-1784673952, id_rsa, *.pem, *.key.
+SECRET_RE = re.compile(r"^(\.env($|[.\-])|.*\.(pem|key|p12|pfx)$|id_rsa|.*\.keystore$)", re.I)
 SCAN_GLOBS = [str(HOME / "wingmen" / "projects" / "*"), str(ORCH)]
 
 # Firebase site mappings for the merged-but-undeployed check (repo basename -> site).
@@ -152,17 +162,36 @@ def sweep() -> list[tuple[str, str, str]]:
         # 3. uncommitted — log-only unless it's genuinely aging WIP on the checked-out branch.
         dirty = [l for l in git(repo, "status", "--porcelain").splitlines() if l]
         if dirty:
-            try:
-                mtimes = [os.path.getmtime(repo / l[3:].split(" -> ")[-1])
-                          for l in dirty if (repo / l[3:].split(" -> ")[-1]).exists()]
-                oldest_hrs = (time.time() - min(mtimes)) / 3600 if mtimes else 0
-            except Exception:
-                oldest_hrs = 0
-            # Only ALERT on aged WIP in a primary lane repo (projects/), not secondary
-            # checkouts like the Studio's orchestrator mirror. Otherwise log-only.
-            is_lane = repo.parent.name == "projects"
-            sev = "WARN" if (oldest_hrs >= STALE_HRS and is_lane and oldest_hrs < 24 * 30) else "INFO"
-            findings.append((sev, name, f"{len(dirty)} uncommitted file(s), oldest ~{oldest_hrs:.0f}h"))
+            # CLASSIFY before counting. 2026-07-25: this check reported shipforge's
+            # `.env.bak-preflip-*` as "1 uncommitted file" alongside the advice
+            # "Lanes: commit WIP" — that file held LIVE SUPABASE_SERVICE_KEY /
+            # ANTHROPIC_API_KEY / VERCEL_TOKEN and was not gitignored, so following
+            # the advice with `git add -A` would have committed production secrets
+            # into git history. It also counted bare `node_modules` dirs as ~549h of
+            # "work at risk". An alert that miscounts junk as work AND tells you to
+            # commit a credentials file is worse than no alert.
+            paths = [l[3:].split(" -> ")[-1] for l in dirty]
+            secrets = [p for p in paths if SECRET_RE.search(os.path.basename(p.rstrip("/")))]
+            junk = [p for p in paths if os.path.basename(p.rstrip("/")) in JUNK_NAMES]
+            work = [p for p in paths if p not in secrets and p not in junk]
+            if secrets:
+                findings.append(("CRITICAL", name,
+                                 f"{len(secrets)} untracked SECRET-BEARING file(s) "
+                                 f"({', '.join(sorted(os.path.basename(p) for p in secrets)[:3])}) "
+                                 f"— DO NOT COMMIT; gitignore them and rotate if ever pushed"))
+            if work:
+                try:
+                    mtimes = [os.path.getmtime(repo / p) for p in work if (repo / p).exists()]
+                    oldest_hrs = (time.time() - min(mtimes)) / 3600 if mtimes else 0
+                except Exception:
+                    oldest_hrs = 0
+                # Only ALERT on aged WIP in a primary lane repo (projects/), not secondary
+                # checkouts like the Studio's orchestrator mirror. Otherwise log-only.
+                is_lane = repo.parent.name == "projects"
+                sev = "WARN" if (oldest_hrs >= STALE_HRS and is_lane and oldest_hrs < 24 * 30) else "INFO"
+                findings.append((sev, name, f"{len(work)} uncommitted file(s), oldest ~{oldest_hrs:.0f}h"))
+            if junk and not work and not secrets:
+                findings.append(("INFO", name, f"{len(junk)} untracked build-junk dir(s) — gitignore, not work"))
         # 4. deploy gap (Firebase)
         dg = firebase_deploy_behind(name, repo)
         if dg:
