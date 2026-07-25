@@ -12,6 +12,7 @@ Neither is executable by the hub. Both were sent to him.
 
 **(b) SUPABASE EMAIL TEMPLATES.** Paste bodies from `fix/invite-prefetch-safe-resend`: `supabase/templates/{invite,magic_link,recovery}.html` → Dashboard → Auth → Email Templates. **All three** — magic_link carries Resend, recovery is the escape hatch that failed Gazzabyte the second time.
 The whole fix is one line: stock `{{ .ConfirmationURL }}` (provider's `/auth/v1/verify`, burns the token on any GET) → `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=…&next=/set-password`.
+**PUBLISHED FOR COPY-PASTE: `https://share.wingmen.dev/r/irsyad-email-templates`** (share password; 401 until login = gate working). All three blocks labelled by dashboard template name. Published **from the Mini** — the Studio has the `wingmen-share` dir but NOT `app/docs.json`, so `publish_share.sh` fails there; scp + ssh to `Musa@100.83.21.34`.
 **cai's gate:** capture the CURRENT body as rollback FIRST · then actually send + click a test invite · **report OBSERVED, not expected.**
 
 **Gazzabyte is unblocked meanwhile** — password set via admin API + `requires_password_setup` cleared (verified in DB). Hold releasing it until (a) is done.
