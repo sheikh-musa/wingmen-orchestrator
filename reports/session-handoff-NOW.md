@@ -1,5 +1,9 @@
 # Session handoff — 2026-07-25 ~22:20 SGT / 14:20Z (cc-orchestrator / hub, Studio)
 
+**RESTORE POINT — session ended here by operator instruction ("reset and continue") at ~14:55Z / 22:55 SGT.**
+This file is current: written fresh at 90%, amended for the template publication and for CAI-586. Digests **873 / 874 / 875**.
+**A fresh hub should read §0 first, then §2, then §7.** Nothing is mid-flight that a reset corrupts — no agents running, both branches pushed, nothing applied to any silo, no grant assumed.
+
 **FRESH FILE at 90% context.** Supersedes `session-handoff-20260725-1350Z-ARCHIVE.md` (→1320Z→1245Z→1145Z→1100Z→0430Z).
 
 ---
