@@ -25,6 +25,7 @@ until someone manually checked. This makes stranding self-heal or self-report.
 """
 from __future__ import annotations
 
+import calendar
 import glob
 import json
 import os
@@ -107,7 +108,11 @@ def firebase_deploy_behind(repo_name: str, repo: Path) -> str | None:
             return None
         # released time (epoch) vs main HEAD commit time
         rel_iso = rels[0].get("releaseTime", "")[:19]
-        rel_epoch = time.mktime(time.strptime(rel_iso, "%Y-%m-%dT%H:%M:%S"))
+        # Firebase releaseTime is UTC. time.mktime() reads a naive struct_time as
+        # LOCAL time, which on the Studio (UTC+8) shifted every release 8h earlier
+        # and reported a phantom DEPLOY-GAP for any deploy that landed within 8h
+        # of its own tip commit — i.e. every normal CI deploy. timegm reads UTC.
+        rel_epoch = calendar.timegm(time.strptime(rel_iso, "%Y-%m-%dT%H:%M:%S"))
         git(repo, "fetch", "origin", "main")
         head_epoch = int(git(repo, "log", "-1", "--format=%ct", "origin/main") or 0)
         if head_epoch > rel_epoch + 60:
