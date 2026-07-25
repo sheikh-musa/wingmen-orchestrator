@@ -27,7 +27,8 @@ whole downstream sequence dominoes.
 
 **The architecture is neurosymbolic: the LLM proposes, the solver proves.** A schedule that
 "looks right" is worthless here — Ray's trust gate is provable conflict-freeness. The first cut
-(OR-Tools CP-SAT, synthetic data) already proves conflict-freeness across ~1640 constraints,
+(OR-Tools CP-SAT, synthetic data) already proves conflict-freeness — the independent verifier runs 1640 CHECKS over a model
+that posts 822 CP-SAT constraints (say which number you mean; a sceptic running model.py finds 822),
 computes the exam-slip domino, and rejects illegal states by naming the exact rule violated.
 Keep that property. Never replace a proof with a plausible answer.
 
