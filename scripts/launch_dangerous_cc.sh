@@ -656,6 +656,17 @@ fi
 # a pure DB read instead of cross-process introspection (sandbox-blocked under
 # launchd). Empty when not launched inside tmux -> stored NULL.
 CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+
+# AUTH ATTRIBUTION (op#7094, migration 033): stamp WHICH MACHINE and WHICH CLAUDE ACCOUNT this
+# session actually authenticated with. The fleet console used to display every lane as the
+# operator's; it never knew — it assumed, and was wrong for months (the Studio ran on a different
+# account entirely, which only surfaced when it hit a session cap the Mini didn't share).
+# CLAUDE_ACCOUNT_LABEL is a human CLAIM from this host's .env; the fingerprint is the FACT.
+# Only sha256(token)[:12] is stored — never the token.
+CC_HOST="$(hostname -s 2>/dev/null || echo unknown)"
+CC_AUTH_LABEL="${CLAUDE_ACCOUNT_LABEL:-unlabelled}"
+CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
+[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || CC_AUTH_FP=""
 "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
@@ -673,13 +684,31 @@ try:
         with conn.cursor() as cur:
             cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$CC_AGENT_ID',))
             cur.execute(
-                \"UPDATE agent_status SET current_task = %s, tmux_session = NULLIF(%s, ''), updated_at=now() WHERE agent_id = %s\",
-                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_TMUX_SESSION', '$CC_AGENT_ID'),
+                \"UPDATE agent_status SET current_task = %s, tmux_session = NULLIF(%s, ''), \"
+                \"host = NULLIF(%s,''), auth_account = NULLIF(%s,''), auth_fp = NULLIF(%s,''), \"
+                \"updated_at=now() WHERE agent_id = %s\",
+                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_TMUX_SESSION',
+                 '$CC_HOST', '$CC_AUTH_LABEL', '$CC_AUTH_FP', '$CC_AGENT_ID'),
             )
         conn.commit()
 except Exception:
     pass
 " 2>/dev/null || true
+
+
+# Resolve claude robustly: when a lane is booted over a NON-LOGIN SSH session
+# (Nazim spinning the fan-out from the Mini) or under launchd, PATH is minimal
+# and bare `claude` isn't found — the lane dies at launch. Mirror boot_orch.sh:
+# prefer `command -v`, then fall back through the known per-user/brew locations.
+# (Studio-local fix, 2026-07-25 — recovered from an APFS snapshot after Nazim
+# scp'd over it; folded into the canonical copy so it stops living on one host.)
+CLAUDE_BIN="$(command -v claude || true)"
+if [[ -z "$CLAUDE_BIN" ]]; then
+    for _c in "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
+        [[ -x "$_c" ]] && CLAUDE_BIN="$_c" && break
+    done
+fi
+[[ -n "$CLAUDE_BIN" ]] || { echo -e "${RED}FATAL: claude binary not found (PATH=$PATH)${RESET}" >&2; exit 1; }
 
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
@@ -719,9 +748,9 @@ if [ -n "$SCHEDULED_PROMPT_FILE" ]; then
     fi
     echo -e "${TEAL}  Scheduled-sweep mode: reading prompt from $SCHEDULED_PROMPT_FILE${RESET}"
     PROMPT_TEXT="$(cat "$PROMPT_PATH")"
-    claude --dangerously-skip-permissions --model "$RESOLVED_MODEL" -p "$PROMPT_TEXT" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+    "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" -p "$PROMPT_TEXT" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
 else
     # Always launch interactively. Context (if staged above) arrives via the
     # SessionStart hook as a system-reminder, not via stdin.
-    claude --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+    "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
 fi
