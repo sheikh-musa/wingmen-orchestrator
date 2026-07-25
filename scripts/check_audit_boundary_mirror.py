@@ -70,7 +70,8 @@ def main() -> None:
                 """SELECT project_ref, org_id::text, boundary_id, below_count, above_count,
                           to_char(below_latest_at   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                           to_char(above_earliest_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-                          id, reproducing_count, not_reproducing_count, below_status
+                          id, reproducing_count, not_reproducing_count, below_status,
+                          discriminator, reproducible_writers, non_reproducible_writers
                      FROM audit_chain_boundaries
                     WHERE project_ref = %s AND org_id::text = %s""",
                 (mir["project_ref"], mir["org_id"]),
@@ -83,7 +84,8 @@ def main() -> None:
         fail(f"no audit_chain_boundaries row for {mir['project_ref']} / {mir['org_id']}")
 
     (ref, org, bid, below_n, above_n, below_at, above_at, row_id,
-     repro_n, not_repro_n, below_status) = row
+     repro_n, not_repro_n, below_status,
+     discriminator, repro_writers, non_repro_writers) = row
     problems = []
     # mirror stores the FIRST verifiable id, substrate stores the BOUNDARY id
     if str(bid + 1) != mir["content_from"]:
@@ -106,8 +108,17 @@ def main() -> None:
         problems.append("substrate row is missing the reproducibility partition (CAI-566 §3)")
     elif repro_n + not_repro_n != below_n + above_n:
         problems.append(f"partitions do not reconcile: {repro_n}+{not_repro_n} != {below_n}+{above_n}")
-    if "NOT GUARANTEED REPRODUCIBLE" not in (below_status or ""):
-        problems.append("below_status overstates: must say NOT GUARANTEED REPRODUCIBLE (CAI-566 §3)")
+    # CAI-RESP-570 §2: the record must be keyed on the WRITER CLASS, never on the
+    # id or the date. An id/date framing is falsified by the next bulk import,
+    # which writes non-reproducing rows above any boundary you pick.
+    if not discriminator or "WRITER CLASS" not in discriminator:
+        problems.append("discriminator missing or not keyed on WRITER CLASS (CAI-570 §2) — "
+                        "an id/date framing is falsified by the next bulk import")
+    if not repro_writers or not non_repro_writers:
+        problems.append("reproducible_writers / non_reproducible_writers not recorded (CAI-570 §2)")
+    if "HISTORICAL DESCRIPTION ONLY" not in (below_status or ""):
+        problems.append("below_status must mark the id boundary as HISTORICAL DESCRIPTION ONLY, "
+                        "not as the discriminator (CAI-570 §2)")
     if mir["substrate_record"] != f"audit_chain_boundaries#{row_id}":
         problems.append(f"substrateRecord={mir['substrate_record']} != audit_chain_boundaries#{row_id}")
 
