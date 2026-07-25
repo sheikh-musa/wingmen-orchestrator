@@ -14,7 +14,7 @@ an unmissable DRILL marker, so even a misrouted read cannot mistake it for a cli
 
 Usage:
     scripts/lane_drill_seed.py cc-irsyad drills/irsyad-round2.json
-    scripts/lane_drill_seed.py cc-irsyad --announce   # tell the hub before you start
+    scripts/lane_drill_seed.py cc-irsyad --announce --note "..."   # BEFORE you seed
 
 The drill file is a JSON list of objects: [{"from": "Gazzabyte group", "text": "..."}, ...]
 """
@@ -78,12 +78,16 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("agent", help="lane agent id, e.g. cc-irsyad")
     ap.add_argument("drill_file", nargs="?", help="JSON list of {from, text}")
-    ap.add_argument("--announce", metavar="NOTE", nargs="?", const="Routine lane drill.",
+    # A flag + separate --note: an optional-value option would swallow the drill_file
+    # positional ("--announce 'text' file.json" parses as note='text', file unrecognized).
+    ap.add_argument("--announce", action="store_true",
                     help="announce the drill to the hub (do this BEFORE seeding)")
+    ap.add_argument("--note", default="Routine lane drill.",
+                    help="text of the announcement")
     args = ap.parse_args()
 
     if args.announce:
-        print("announced to hub as agent_messages #%d" % announce(args.agent, args.announce))
+        print("announced to hub as agent_messages #%d" % announce(args.agent, args.note))
     if args.drill_file:
         items = json.load(open(args.drill_file))
         if not isinstance(items, list) or not all("text" in i for i in items):
