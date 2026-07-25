@@ -338,7 +338,12 @@ def main() -> int:
         attempts = prev.get("attempts", 0) if same_input else 0
         held_escalated = prev.get("held_escalated", False) if same_input else False
         new_state[sess] = {"state": st, "input": inp, "ts": time.time(),
-                           "attempts": attempts, "held_escalated": held_escalated}
+                           "attempts": attempts, "held_escalated": held_escalated,
+                           # governance-console escalation key, carried across
+                           # WORKING/UNKNOWN scans (those `continue` early, so a
+                           # value set only in the governance block would be lost
+                           # and the same alert would re-fire on every re-entry).
+                           "gov_esc_key": prev.get("gov_esc_key")}
 
         # ── PROGRESS-STALL (op #3695) — runs for EVERY watched lane, incl. WORKING
         #    and IDLE_CLEAN (the two the classify-path skips). Progress is measured
@@ -377,8 +382,20 @@ def main() -> int:
         # never a keystroke — no auto-submit, no auto-answer. This is the hard
         # exclusion that makes the 2026-07-03 phantom-injection class impossible.
         if is_governance_console(sess):
-            if st not in ("IDLE_CLEAN",) and prev.get("state") != st:  # idle gov = fine, no noise
+            # Escalate ONCE per (state, composer-text), not once per re-entry into
+            # the state. The old guard was `prev["state"] != st`, but WORKING and
+            # UNKNOWN `continue` above — so a console that oscillates
+            # IDLE_UNSENT -> WORKING -> IDLE_UNSENT re-fired every cycle with the
+            # SAME unsent text. 2026-07-25: 'cai' paged the hub 7x in 2 days while
+            # legitimately working with background agents running, on an alert the
+            # hub is doctrinally FORBIDDEN from actioning (no keystroke here, ever).
+            # An unactionable alert that repeats is noise that buries real signal.
+            # Keying on the composer text means genuinely NEW unsent text — the
+            # thing a human would want to know about — still escalates immediately.
+            gov_key = f"{st}\x00{inp}"
+            if st != "IDLE_CLEAN" and prev.get("gov_esc_key") != gov_key:  # idle gov = fine, no noise
                 escalate(sess, st, f"governance console in state {st} — NOT auto-actioned (keystroke injection forbidden here); hub judgment only")
+                new_state[sess]["gov_esc_key"] = gov_key
             continue
 
         if st == "IDLE_CLEAN":
