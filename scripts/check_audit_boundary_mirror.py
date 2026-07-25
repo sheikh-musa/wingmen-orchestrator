@@ -49,6 +49,8 @@ def parse_mirror(text: str) -> dict:
         "substrate_record": grab("substrateRecord"),
         "reproducing": grab("reproducingCount"),
         "not_reproducing": grab("notReproducingCount"),
+        "fully_covered": grab("fullyCoveredCount"),
+        "partially_covered": grab("partiallyCoveredCount"),
     }
 
 
@@ -71,7 +73,8 @@ def main() -> None:
                           to_char(below_latest_at   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                           to_char(above_earliest_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                           id, reproducing_count, not_reproducing_count, below_status,
-                          discriminator, reproducible_writers, non_reproducible_writers
+                          discriminator, reproducible_writers, non_reproducible_writers,
+                          fully_covered_count, partially_covered_count
                      FROM audit_chain_boundaries
                     WHERE project_ref = %s AND org_id::text = %s""",
                 (mir["project_ref"], mir["org_id"]),
@@ -85,7 +88,8 @@ def main() -> None:
 
     (ref, org, bid, below_n, above_n, below_at, above_at, row_id,
      repro_n, not_repro_n, below_status,
-     discriminator, repro_writers, non_repro_writers) = row
+     discriminator, repro_writers, non_repro_writers,
+     fully_n, partial_n) = row
     problems = []
     # mirror stores the FIRST verifiable id, substrate stores the BOUNDARY id
     if str(bid + 1) != mir["content_from"]:
@@ -119,6 +123,18 @@ def main() -> None:
     if "HISTORICAL DESCRIPTION ONLY" not in (below_status or ""):
         problems.append("below_status must mark the id boundary as HISTORICAL DESCRIPTION ONLY, "
                         "not as the discriminator (CAI-570 §2)")
+    # CAI-RESP-577: the mirror must also carry the COVERAGE partition. It previously
+    # carried only reproducing/not-reproducing, so a defect in the 28/12 split — and
+    # in the prose describing WHAT the 12 are — was invisible to this check. A guard
+    # protects its axis and is blind everywhere else.
+    if str(fully_n) != mir["fully_covered"]:
+        problems.append(f"fullyCoveredCount={mir['fully_covered']} != substrate {fully_n}")
+    if str(partial_n) != mir["partially_covered"]:
+        problems.append(f"partiallyCoveredCount={mir['partially_covered']} != substrate {partial_n}")
+    if fully_n is None or partial_n is None:
+        problems.append("substrate row is missing the coverage partition (CAI-577)")
+    elif repro_n is not None and fully_n + partial_n != repro_n:
+        problems.append(f"coverage partition does not reconcile: {fully_n}+{partial_n} != reproducing {repro_n}")
     if mir["substrate_record"] != f"audit_chain_boundaries#{row_id}":
         problems.append(f"substrateRecord={mir['substrate_record']} != audit_chain_boundaries#{row_id}")
 
