@@ -30,6 +30,15 @@ pane_working() {
   printf '%s' "$cap" | grep -q 'esc to interrupt' && ! printf '%s' "$cap" | grep -q 'for agents'
 }
 
+pane_queued() {
+  # A BUSY lane accepts the nudge into its message QUEUE — the TUI shows "Press up to edit
+  # queued messages". That is a SUCCESSFUL delivery, but pane_working() can't see it (the
+  # footer shows both hints at once), so the retry loop used to retype twice more and leave
+  # three identical queued nudges behind. Observed 2026-07-25 on cosem-port, 34 min into a
+  # task: one nudge became three. Delivery is the goal; queued IS delivered.
+  tmux capture-pane -t "$SESSION" -p 2>/dev/null | tail -6 | grep -q 'queued message'
+}
+
 for try in $(seq 1 "$MAX_TRIES"); do
   # clear any stale/unsent input, then type fresh, then submit
   tmux send-keys -t "$SESSION" C-u; sleep 0.4
@@ -39,10 +48,18 @@ for try in $(seq 1 "$MAX_TRIES"); do
   if pane_working; then
     echo "lane_nudge: '$SESSION' submitted + working (try $try)"; exit 0
   fi
+  if pane_queued; then
+    echo "lane_nudge: '$SESSION' is BUSY — nudge accepted into its queue (try $try). Delivered; it reads at its next pause."
+    exit 0
+  fi
   # one extra Enter in case the TUI consumed the first as focus
   tmux send-keys -t "$SESSION" Enter; sleep 3
   if pane_working; then
     echo "lane_nudge: '$SESSION' submitted + working (try $try, 2nd Enter)"; exit 0
+  fi
+  if pane_queued; then
+    echo "lane_nudge: '$SESSION' is BUSY — nudge accepted into its queue (try $try, 2nd Enter)."
+    exit 0
   fi
   echo "lane_nudge: '$SESSION' not yet working after try $try — retrying" >&2
 done
