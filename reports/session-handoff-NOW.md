@@ -49,7 +49,19 @@ Org **`lqbojdqwgzgxhioezfgb` "sheikh-musa's Org" owns BOTH** `goumlynecruxrlmzln
 - **Attribution is inverted:** every Management-API action the hub takes is recorded as the client contact, not us — the exact inverse of the row-3144 agent-identity pattern cai praised.
 - **Fix (operator, ~30s):** issue a PAT from his own Owner account → `.env` on the Studio; revoke the gazzabyte token; drop the Developer seat unless needed. Asked; not done. Sent to cai as **#11391**.
 
-## ⏳ (b) SUPABASE EMAIL TEMPLATES — still open, but **NOT "dashboard-only"** (that was wrong)
+## ✅ (b) SUPABASE EMAIL TEMPLATES — **APPLIED, AND THE HALF-FIX CAUGHT** (2026-07-25 22:48Z)
+All three (invite/magic_link/recovery) PATCHed onto goumlyne via Management API and **verified by read-back, byte-exact**; internal incident comments stripped so client emails carry no internal detail.
+**🔴 THE CATCH — templates ALONE only MOVED the burn.** Driven, not assumed, on a synthetic account:
+`BEFORE main@f3c3ce9` prefetch → **307, 0 bytes**, token then **403 otp_expired = BURNED**.
+The deployed `/auth/confirm` consumed `token_hash` on a bare GET (its own docstring said so); the prefetch-safe route was on the **unmerged** fix branch. Had I stopped at "templates applied + verified" I would have reported a fix that wasn't one.
+`AFTER main@231714a` prefetch → **200, 2456 bytes, real interstitial**; token then **200, session issued = SURVIVED**. Control throughout: fresh token, no prefetch → 200, so the route was the variable, not the tokens.
+**Merged** `fix/invite-prefetch-safe-resend` (cai had already approved that code). Pre-push check that mattered: it carries **migration 123, which is COMMENT-ONLY** and `accepted_at` already exists on both silos ⇒ no unapplied-schema dependency. 207 files / 2049 tests / 0 failed, tsc clean, `next build` exit **0** (captured directly). Post-deploy both projects `database:ok`.
+**Gazzabyte:** real reset triggered via the same endpoint the Forgot-password button uses; `recovery_sent_at` null → **22:48:44Z**. That proves OUR side dispatched it, **not** inbox delivery. Client told on the group 22:49:30Z (`delivered=True`).
+
+## 🔑 TOKEN STATE — hub now authenticates as the OPERATOR
+`.env SUPABASE_ACCESS_TOKEN` swapped to the operator's Owner PAT (`sbp_2180…b069`); old partner token (`sbp_f670…4e34`) removed; backup `.env.bak-token-swap-20260725`. `/v1/profile` → `sheikh.musa@outlook.com`. **⚠️ THE NEW TOKEN WAS PASTED INTO TELEGRAM** → row 7256 **SCRUBBED** (0 `sbp_` tokens remain in the log, verified) but treat it as **BURNED — operator must revoke + reissue.** Owner-scoped: it can read api-keys (hence the service_role key) on BOTH projects.
+
+## ⏳ (b-old) SUPABASE EMAIL TEMPLATES — superseded by the block above
 **Tested, not inherited:** on goumlyne `GET /v1/projects/{ref}/config/auth` → **200** (all 14 templates readable); `PATCH` → **403 insufficient privileges**. The hub token went **read-only** when the project moved to the operator's account. So the templates ARE Management-API-settable — just not by this token. The earlier "403 on api-keys" note was true but too narrow.
 **Rollback banked** (cai's first gate condition, done regardless of who applies): all 14 current bodies → `reports/rollback/goumlyne-auth-templates-rollback-20260725.json` (commit `ac6c834`). Confirms the defect is live — invite/magic_link/recovery all still carry stock `{{ .ConfirmationURL }}`, none carry `token_hash`.
 **Ask sent to operator:** grant the hub token write on the goumlyne project and the hub owns this end-to-end (apply → trigger real recovery+invite → click → report OBSERVED). If he keeps write to himself, it stays a dashboard paste.
