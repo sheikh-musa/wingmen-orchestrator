@@ -47,6 +47,8 @@ def parse_mirror(text: str) -> dict:
         "below_latest": grab("belowLatestAt"),
         "above_earliest": grab("aboveEarliestAt"),
         "substrate_record": grab("substrateRecord"),
+        "reproducing": grab("reproducingCount"),
+        "not_reproducing": grab("notReproducingCount"),
     }
 
 
@@ -68,7 +70,7 @@ def main() -> None:
                 """SELECT project_ref, org_id::text, boundary_id, below_count, above_count,
                           to_char(below_latest_at   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                           to_char(above_earliest_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-                          id
+                          id, reproducing_count, not_reproducing_count, below_status
                      FROM audit_chain_boundaries
                     WHERE project_ref = %s AND org_id::text = %s""",
                 (mir["project_ref"], mir["org_id"]),
@@ -80,7 +82,8 @@ def main() -> None:
     if row is None:
         fail(f"no audit_chain_boundaries row for {mir['project_ref']} / {mir['org_id']}")
 
-    ref, org, bid, below_n, above_n, below_at, above_at, row_id = row
+    (ref, org, bid, below_n, above_n, below_at, above_at, row_id,
+     repro_n, not_repro_n, below_status) = row
     problems = []
     # mirror stores the FIRST verifiable id, substrate stores the BOUNDARY id
     if str(bid + 1) != mir["content_from"]:
@@ -93,6 +96,18 @@ def main() -> None:
         problems.append(f"belowLatestAt={mir['below_latest']} != substrate {below_at}")
     if above_at != mir["above_earliest"]:
         problems.append(f"aboveEarliestAt={mir['above_earliest']} != substrate {above_at}")
+    # CAI-RESP-566 §3: the record must be true in BOTH directions — by boundary
+    # position AND by actual reproducibility — or it is not citable to an auditor.
+    if str(repro_n) != mir["reproducing"]:
+        problems.append(f"reproducingCount={mir['reproducing']} != substrate {repro_n}")
+    if str(not_repro_n) != mir["not_reproducing"]:
+        problems.append(f"notReproducingCount={mir['not_reproducing']} != substrate {not_repro_n}")
+    if repro_n is None or not_repro_n is None:
+        problems.append("substrate row is missing the reproducibility partition (CAI-566 §3)")
+    elif repro_n + not_repro_n != below_n + above_n:
+        problems.append(f"partitions do not reconcile: {repro_n}+{not_repro_n} != {below_n}+{above_n}")
+    if "NOT GUARANTEED REPRODUCIBLE" not in (below_status or ""):
+        problems.append("below_status overstates: must say NOT GUARANTEED REPRODUCIBLE (CAI-566 §3)")
     if mir["substrate_record"] != f"audit_chain_boundaries#{row_id}":
         problems.append(f"substrateRecord={mir['substrate_record']} != audit_chain_boundaries#{row_id}")
 
