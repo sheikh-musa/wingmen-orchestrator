@@ -22,6 +22,16 @@ Hub reset in place; lease held (`orch_lease.py check` exit 0); operator_log.unpr
 - Disagree with something already sent → send it to **cai**, not the operator; original writer corrects in place. Override only for a real P0 where the writer is unreachable/stale, and say you're overriding.
 - **Danger window = a freshly-reset hub** (confident, just built a board picture, wants to demonstrate it). Be quietest on channels you don't own.
 
+### ⚠️ cai IS AT ~92% CONTEXT AND HAS GONE **P0 / live-client-harm ONLY** (10:43Z). Cycle flagged to Nazim (#11291 — his pen).
+cai's restore point is fresh: `reports/cai-handoff-NOW.md` ref 575, digest 866 synced ⇒ a cycle is cheap and loses nothing.
+- **HANDED FORWARD BY cai, UNFINISHED (do NOT absorb into the hub's lane):** **v4 client correction** to Gazzabyte (author = cai, verify = hub, per CAI-569) · **entity decision** · **org/client-exit ruling**.
+- **v4 IS NOT SENT AND MUST NOT BE.** Drafts v1/v2/v3 each had defects the hub caught. **All measurements a successor needs are citable in substrate `audit_chain_boundaries` row 1** — three-way split 28/12/636, the 12 ids, the arbitrariness, row-754 demonstration — **no re-derivation required.**
+- **mig 121 RETURNS TO cai for a §6.6 named-file grant** — file + number + sha, **confirm-match first, NEVER hand-applied and NEVER ridden along inside another apply.** Recorded here so a fresh hub inherits the *prohibition*, not just the intention. It is authored-unapplied, so it cannot be applied by accident while cai is out.
+- **PER-SHAPE PROOF IS THE GATE, not a formality** — *"a global pass is what nearly cleared this in the first place."* Test what the bank corpus **actually contains** (a NUL byte and a lone surrogate were already found in 945 narratives), not what the schema implies.
+- **Ordering constraint holds WITHIN the three prerequisites:** discriminator first or same commit, never sorter-first. **Shared-fate stays SEPARATE — cai's reason is better than mine: they fail differently, and a combined change makes a rollback ambiguous.**
+- **cai's sharpening of the portable lesson (better than my version):** the 691/691 proof was **not weak — it was SOUND FOR THE QUESTION IT ANSWERED.** The defect was **a binary question asked of a non-binary property**. *"Is the preimage unchanged?" must be asked PER SHAPE, because the answer can be yes-for-some-and-no-for-others* — a question-shape to be alert to generally, not just for hashes.
+- **cai console note for the watchdog side:** cai has sat in `IDLE_UNSENT` with **genuinely-changing** composer text for many turns tonight. **NEVER nudge it** — `nudge_cai.sh` uses `send-keys -l` and would concatenate onto half-typed text and submit it. Hub never nudged it once all session.
+
 ### 📋 CAI-575 — DISCRIMINATOR FIRST, NEVER SORTER-FIRST. Block prerequisites now **THREE**.
 ```
 1. hash-version discriminator   DISPATCHED (feat/audit-hash-version-discriminator, AUTHORED-UNAPPLIED, mig 121)
