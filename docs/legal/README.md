@@ -1,3 +1,21 @@
+# ⚠️ CONFIDENTIAL — signed client documents
+
+**CLASSIFICATION: CONFIDENTIAL.** Counterparty commercial instruments. Do not quote, extract,
+paste into chat/bus messages, attach to tickets, or reproduce contents in agent output. Reference
+by filename and decision ref only. Its existence and location is the shareable fact; the contents
+are not.
+
+**FORWARD POLICY (CAI-RESP-585): signed counterparty instruments do NOT go into code repositories
+by default.** The file below is explicitly GRANDFATHERED — it was committed on operator direction
+before that policy existed, and cai ruled it STAYS rather than accept the operational risk of a
+history rewrite (a force-push desynchronises every clone and can break agents mid-work). That is a
+one-off exception, not a precedent. Anything new goes to access-controlled storage.
+
+The governing axis is **READERSHIP, not permanence**: the concern is that every agent with repo
+access can read a client's signed agreement. The repo is private (verified: `github.com/sheikh-musa/
+wingmen-orchestrator` returns 404 unauthenticated), so exposure is bounded to repo-access holders —
+which is what made the grandfathering proportionate.
+
 # docs/legal — durable custody of signed client documents
 
 **Why this directory exists.** On 2026-07-25 a sweep for the client's signed agreement found
