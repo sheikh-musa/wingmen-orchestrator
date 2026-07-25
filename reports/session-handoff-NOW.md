@@ -22,6 +22,22 @@ Hub reset in place; lease held (`orch_lease.py check` exit 0); operator_log.unpr
 - Disagree with something already sent → send it to **cai**, not the operator; original writer corrects in place. Override only for a real P0 where the writer is unreachable/stale, and say you're overriding.
 - **Danger window = a freshly-reset hub** (confident, just built a board picture, wants to demonstrate it). Be quietest on channels you don't own.
 
+### 🔑 ROOT CAUSE IDENTIFIED — **NOTHING changed on 22 June. The date boundary is an ARTIFACT.** (cai #11235, P0)
+cai REQUIRED "identify what changed around the boundary". Answer: **nothing did.** The split is **100% BY WRITER**, zero exceptions in 676 rows:
+```
+REPRODUCE 40/40 (app writes)   : organization 12 · org_member 8 · tabung_kk_tin 6 · tabung_weekly_report 6
+                                 · tabung_umum_tin 3 · sch_fee 3 · tabung_bank_reference_correction 1 · tabung_kk_batch 1
+FAIL     636/636 (script/bulk) : persons 613 · bank_keyword_mappings 15 · donation_categories 7 · organizations 1
+```
+Every entity type is **either 100% reproducible or 100% not** — no mixed category. Tell: `organization` (singular, app) 12/12 reproduce vs `organizations` (plural, 1 row) fails — a writer signature.
+- **PROOF IT IS NOT TEMPORAL:** the "anomalous six" below the boundary (93/95/96/97 `organization`, 733/734 `tabung_umum_tin` written **15 June**) are simply APP writes — never anomalies. **And NO commit touched `src/core/audit/` or `hashchain.ts` between 14 and 26 June** (`d04a973` 14 Jun → `1a020ae` 26 Jun) — there was no change to find.
+- **I RETRACTED my own "real behaviour change around 2026-06-22" claim** — it was inference from correlation; the writer breakdown dissolves it. (Second self-retraction on this record; the first was "because flat".)
+- **MECHANISM stated at supportable confidence only:** a non-app writer serialised the payload differently before hashing (out-of-process importer computing its own hash, different JSON bytes). **STRONGLY INDICATED, NOT PROVEN** — I did not locate the importer that wrote the 613 `persons` rows. The RULE holds regardless of mechanism.
+- **🔴 BIGGEST CONSEQUENCE: the exposure is DORMANT AND RE-TRIGGERABLE, not behind us.** Nothing stops the next bulk import (donor load, bank-statement import, migration backfill) writing another ~600 unverifiable rows dated tomorrow. **The permanent fix must cover EVERY writer, not just `writeAuditLog`** — ties directly to CAI-536's 7-8 direct/bulk writers bypassing the canonical path. An import-time gate matters as much as the hashing change.
+- **⚠️ v3 CLIENT MESSAGE: the "23 June onward" framing is now FALSE** — true only by accident of when the import ran. Better AND more accurate story: the unverifiable set is the **bulk historical import of legacy records**; **everything recorded through the application re-verifies, including entries older than June**. Must also say the gap can RECUR on the next bulk import.
+- **SUBSTRATE ROW 1 needs the same reframing (writer-split as the rule; boundary id descriptive not causal). NOT edited yet** — 2nd correction in 2h to the auditor-citable artifact; asked cai to rule the wording rather than revise it a third time unilaterally.
+- **cai's STRUCTURAL RULING accepted (CAI-569 §5): cai authors client text; the party holding the measurements verifies EVERY factual claim before the operator sees it; the draft carries a verification block (claim → query/artifact).** Standing brief on this document. Note this finding came from checking a claim **we both believed** — one I had put in the record myself.
+
 ### 🛑 P0 #2 — v2 DRAFT STILL DEFECTIVE (5th), + I CORRECTED MY OWN ERROR IN THE CITABLE RECORD (cai #11229)
 cai confirmed all 3 of my v1 findings, **found a 4th himself** (opening line "we've already fixed it"), withdrew v1, staged v2. **v2 fixes all four but introduces a fifth.**
 - **⚠️ v2 LINE 39 CONTRADICTS LINE 21.** L21: *"from 23 June onward the original claim is fully true — each reproduces exactly."* L39: *"new entries will have the same limitation as the older ones."* Both can't be true — and **L39 is the wrong one**: post-boundary rows are 25 flat + **9 NESTED, and ALL 9 nested reproduce**. New entries verify today. **v1 overstated the remediation; v2 overstates the defect** — cai's own rule: overstating our defect is its own inaccuracy.
