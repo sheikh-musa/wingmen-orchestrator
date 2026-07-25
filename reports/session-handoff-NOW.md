@@ -22,6 +22,21 @@ Hub reset in place; lease held (`orch_lease.py check` exit 0); operator_log.unpr
 - Disagree with something already sent → send it to **cai**, not the operator; original writer corrects in place. Override only for a real P0 where the writer is unreachable/stale, and say you're overriding.
 - **Danger window = a freshly-reset hub** (confident, just built a board picture, wants to demonstrate it). Be quietest on channels you don't own.
 
+### 📋 CAI-575 — DISCRIMINATOR FIRST, NEVER SORTER-FIRST. Block prerequisites now **THREE**.
+```
+1. hash-version discriminator   DISPATCHED (feat/audit-hash-version-discriminator, AUTHORED-UNAPPLIED, mig 121)
+2. recursive sorter             ships WITH or AFTER 1 — NEVER before
+3. money/audit shared fate      NOT STARTED — being SCOPED, not bolted on
+```
+- **Design:** v1 = existing lossy top-level replacer (**KEPT, not deleted** — historical rows depend on it); v2 = recursive key-sorting serializer; **verifier selects the preimage by the row's DECLARED version**, defaulting v1 when absent; write path stamps v2. ⇒ the 12 verify correctly **under v1 rules**, new rows under v2, **nothing rewritten**.
+- **cai's design point:** with a version column **the verifier never reasons about payload shape at all.** *"Flat rows are safe either way"* is true TODAY and stops being true the first time someone adds a nested field to an existing entity type — **with nothing to announce it.**
+- **BOTH ALTERNATIVES REJECTED (carried to the agent as prohibitions + reasoning, so they can't be rediscovered as clever ideas):** ❌ **re-hashing the 12** (REPORT-IMMUT-1/CAI-503; destroys the only evidence of what those hashes were) · ❌ **allowlisting the 12 ids** — cai: *a maintained allowlist converts a structural guarantee into an ACT OF REMEMBERING, and the remembering fails silently* (CAI-528 precedent).
+- **⭐⭐ THE PORTABLE LESSON (cai §3):** *"'The serializer is unchanged' is a claim about **CODE**; 'the preimage is unchanged' is a claim about **DATA** — and only the second one matters."* My CAI-559 691/691 proof was real but answered a **code** question we both read as a **data** answer — **had that sample happened to be all-flat, the strike would have cleared a genuinely breaking change.**
+- **NEW RULE:** any change to the hash preimage requires a version discriminator **AND** compatibility proven **PER PAYLOAD SHAPE, never globally** — *partial compatibility is the dangerous case, because a global test on an unrepresentative sample reports "compatible."*
+- **SEQUENCING IS SILENT IF REVERSED:** sorter-first makes the 12 read BROKEN in the window between — **on a client silo that window IS the problem, not a transitional inconvenience.**
+- **SHARED-FATE (item 3) scoping, flagged early:** `writeAuditLogBatch` is called **AFTER** donations commit and **deliberately returns rather than throws** so a failed audit can't fail a money action — **the invariant inverts that by design.** Needs one txn spanning both / compensating rollback / loss-proof outbox; **other callers depend on the best-effort contract** ⇒ blast radius beyond bank-import. Asked cai to rule the shape before I build.
+- **cc-irsyad holding** — will re-word the GIRO spec ONCE against the settled basis. cai: *a spec re-worded four times against four successive bases reads as churn even when every edit was right.*
+
 ### 🛑 BLOCK STANDS (3rd re-founding: ATOMICITY) + ⚠️ THE FIX ITSELF WOULD BREAK 12 CLIENT ROWS (cai #11282, awaiting ruling)
 **CAI-574: test PASSED 945/945 but the block does NOT lift** — the NUL-byte finding is worse than what was being blocked. **NEW INVARIANT: the money write and its audit write MUST SHARE A FATE** (if the audit batch can't be written, the money must not commit — not "log and continue"). cai: exact inverse of CAI-559's phantom-audit ruling — *there an audit row asserting money that never moved, here money moving with no audit at all.* **Block now lifts on BOTH: the recursive-sorter fix AND money/audit shared fate.**
 - **cai: "my round-trip measured the WRONG PROPERTY"** — *"does the row reproduce its hash" is not "does the hash cover the row."* Registry formulation replaced with a **COVERAGE test: mutating any field, at ANY DEPTH, must change the hash.** CAI-560 said *never hash bytes you don't store*; it should also have said **hash all the bytes you do store.**
