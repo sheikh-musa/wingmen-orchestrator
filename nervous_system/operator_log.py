@@ -107,10 +107,19 @@ _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 # NOT before: until then the hub still owns and answers the live client thread.
 _LANE_OWNED_TAGS = ("irsyad-drill",)
 
+# Suffixes written by the lane phase-gate (scripts/lane_reply.sh): '<tag>-drill' is a reply
+# that never left the building, '<tag>-draft' is one awaiting a reviewer's send. Neither is
+# ever an operator surface, for either body — excluded by shape so a new lane can't reintroduce
+# the 2026-07-25 leak just by existing.
+_LANE_TAG_SUFFIXES = ("-drill", "-draft")
+
 
 def _shared_feed_exclusion() -> str:
     tags = ",".join("'%s'" % t for t in _SHARED_FEED_TAGS + _LANE_OWNED_TAGS)
-    return f" AND (tag IS NULL OR tag NOT IN ({tags}))"
+    # '%%' — this SQL is passed to psycopg alongside %s parameters, so a literal percent
+    # must be doubled or it is parsed as a (malformed) placeholder.
+    suffixes = " AND ".join("tag NOT LIKE '%%" + s + "'" for s in _LANE_TAG_SUFFIXES)
+    return f" AND (tag IS NULL OR (tag NOT IN ({tags}) AND {suffixes}))"
 
 
 # Recognized body roles. ANY other value MUST fail CLOSED, never silently fall
