@@ -1,0 +1,41 @@
+### DB PROOF (prove-118, apply-in-txn -> ROLLBACK) ###
+PASS | 1. anon SELECT storefront_reviews REJECTED
+PASS | 2. anon INSERT storefront_reviews REJECTED
+PASS | 3. authenticated SELECT storefront_reviews REJECTED
+PASS | 4. authenticated INSERT storefront_reviews REJECTED
+PASS | 5. service_role INSERT storefront_reviews SUCCEEDS (submit-action path)
+PASS | 6. UNIQUE(order_id): 2nd review same order REJECTED
+PASS | 7a. stars=0 REJECTED
+PASS | 7b. stars=6 REJECTED
+PASS | 7c. stars=1 OK
+PASS | 8a. comment 501 chars REJECTED
+PASS | 8b. comment 500 chars OK
+PASS | 9. empty store -> aggregate returns NO row (reader shows New)
+PASS | 10. aggregate avg+count correct (5,4 -> 4.50, 2)
+PASS | 11a. anon CAN read the PII-free aggregate view
+PASS | 11b. aggregate view exposes ONLY org_id/avg_stars/review_count (no comment/reviewer_ref)
+PASS | 12. soft-deleted review excluded from aggregate (only the 5 counts)
+PASS | 13. FLOW: TG owner + completed order -> guard matches (action proceeds)
+PASS | 14. DENY non-customer: wrong TG id -> guard 0 rows (NOT_FOUND)
+PASS | 15. DENY non-completed: owner of a 'ready' order -> guard 0 rows (FORBIDDEN)
+PASS | 16. FLOW: web owner + matching email/order# + completed -> guard matches
+PASS | 17. DENY web wrong email -> guard 0 rows (NOT_FOUND)
+PASS | 18. DENY web wrong order# -> guard 0 rows (NOT_FOUND)
+RESULT: 22/22 passed  (ROLLED BACK — no DDL/rows committed)
+
+### TS GATE UNIT TESTS (submitReviewCore — drives the real code) ###
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — happy paths > TG customer of a completed order → review accepted, aggregate returned 2ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — happy paths > web customer with matching email + order_number → accepted, reviewer_ref hashed 1ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — happy paths > empty comment is stored as null 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: non-customer (TG id mismatch) → NOT_FOUND, no insert 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: non-completed order (owner) → FORBIDDEN, no insert 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: unbound TG order (telegram_user_id null) → NOT_FOUND 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: invalid/expired initData → NOT_FOUND 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: web wrong email → NOT_FOUND 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: web wrong order_number → NOT_FOUND 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: no identity proof at all → NOT_FOUND 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: order does not exist → NOT_FOUND 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: second review on the same order (UNIQUE 23505) → CONFLICT 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: stars out of range (0) → VALIDATION_ERROR (never reaches DB) 0ms
+ ✓ src/modules/storefront/__tests__/submit-review.test.ts > submitReviewCore — DENIALS (integrity gate) > DENY: comment over 500 chars → VALIDATION_ERROR 0ms
+      Tests  14 passed (14)

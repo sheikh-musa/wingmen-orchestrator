@@ -1,0 +1,34 @@
+LIVE SINGLE-PROCESS E2E — ceayj (118 applied by hub), synthetic store qa-shop-test
+org_id=25f933d8-495d-43e9-b248-61c868d06894
+
+FIXTURES (real rows on ceayj synthetic store; place->complete represented):
+  COMPLETED order  public_id=7b20ab9b-eac5-42d1-bdb1-553c473688be  order_number=E2E-RATE-001  customer_email=e2e-cust@proof.test
+  READY order      public_id=1469ecaf-8aa1-4fd5-9700-032fad5852a3  order_number=E2E-RATE-002  (non-completed)
+
+BEFORE aggregate (storefront_store_rating for org): NO ROW  -> reader shows "New"
+
+HAPPY (real POST /api/storefront/submit-review, email+order# path, completed order):
+  HTTP 200  {"data":{"avg_stars":5,"review_count":1},"error":null}
+  PERSISTED review row (read back via service_role):
+    id             = 24535764-0906-4df2-8e51-173c6bf92417
+    org_id         = 25f933d8-495d-43e9-b248-61c868d06894
+    order_id       = 3133dc23-e19b-40b1-b81b-8ddf9e0b6c87
+    order_public_id= 7b20ab9b-eac5-42d1-bdb1-553c473688be
+    reviewer_ref   = email:4837ee9db17d656c20453bfdf07a0fd679019550626c28e092ac26549ec8b828
+                     (== sha256(lower('e2e-cust@proof.test')) — verified, NO raw PII)
+    stars          = 5
+    comment        = "Genuinely great nasi lemak — will reorder."
+
+AFTER aggregate: (5.00, 1)   [NO ROW/New -> 5.00/1]
+/shop badge (live render): "Rated 5.0 out of 5 by 1 customer"  (screenshots live-rated-{mobile,desktop}.png)
+
+LIVE DENIALS (each a real POST):
+  non-customer (wrong email)          -> HTTP 404  NOT_FOUND "Order not found."
+  non-completed (READY order, owner)  -> HTTP 403  FORBIDDEN "You can review an order once it's completed."
+  second review (same completed order)-> HTTP 409  CONFLICT  "You've already reviewed this order. Thank you!"
+  wrong order_number (correct email)  -> HTTP 404  NOT_FOUND "Order not found."
+  BONUS (6th POST in 60s window)      -> HTTP 429  RATE_LIMITED (per-IP 5/min limiter fired live)
+
+HUB INDEPENDENT-READ QUERY:
+  select id,order_public_id,reviewer_ref,stars,comment,created_at
+  from storefront_reviews where order_public_id='7b20ab9b-eac5-42d1-bdb1-553c473688be';

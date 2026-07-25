@@ -1,0 +1,42 @@
+{
+  "baseUrl": "https://ihsanos.com",
+  "outDir": "/Users/Musa/wingmen/orchestrator/reports/uiux/uiux-20260719-121549",
+  "shots": [
+    {
+      "viewport": "mobile",
+      "route": "/m/preview",
+      "file": "/Users/Musa/wingmen/orchestrator/reports/uiux/uiux-20260719-121549/mobile__m_preview.png",
+      "ok": true
+    },
+    {
+      "viewport": "mobile",
+      "route": "/m/preview?lang=ar",
+      "file": "/Users/Musa/wingmen/orchestrator/reports/uiux/uiux-20260719-121549/mobile__m_preview_lang_ar.png",
+      "ok": true
+    },
+    {
+      "viewport": "mobile",
+      "route": "/shop/test-kitchen",
+      "file": "/Users/Musa/wingmen/orchestrator/reports/uiux/uiux-20260719-121549/mobile__shop_test_kitchen.png",
+      "ok": true
+    },
+    {
+      "viewport": "desktop",
+      "route": "/m/preview",
+      "file": "/Users/Musa/wingmen/orchestrator/reports/uiux/uiux-20260719-121549/desktop__m_preview.png",
+      "ok": true
+    },
+    {
+      "viewport": "desktop",
+      "route": "/m/preview?lang=ar",
+      "file": "/Users/Musa/wingmen/orchestrator/reports/uiux/uiux-20260719-121549/desktop__m_preview_lang_ar.png",
+      "ok": true
+    },
+    {
+      "viewport": "desktop",
+      "route": "/shop/test-kitchen",
+      "file": "/Users/Musa/wingmen/orchestrator/reports/uiux/uiux-20260719-121549/desktop__shop_test_kitchen.png",
+      "ok": true
+    }
+  ]
+}

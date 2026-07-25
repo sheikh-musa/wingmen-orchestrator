@@ -1,0 +1,24 @@
+FAILED mobile /m/preview: TimeoutError: page.goto: Timeout 30000ms exceeded.
+Call log:
+[2m  - navigating to "https://ihsanos.com/m/preview", waiting until "networkidle"[22m
+
+FAILED mobile /m/preview?lang=ar: TimeoutError: page.goto: Timeout 30000ms exceeded.
+Call log:
+[2m  - navigating to "https://ihsanos.com/m/preview?lang=ar", waiting until "networkidle"[22m
+
+FAILED mobile /shop/test-kitchen: TimeoutError: page.goto: Timeout 30000ms exceeded.
+Call log:
+[2m  - navigating to "https://ihsanos.com/shop/test-kitchen", waiting until "networkidle"[22m
+
+FAILED desktop /m/preview: TimeoutError: page.goto: Timeout 30000ms exceeded.
+Call log:
+[2m  - navigating to "https://ihsanos.com/m/preview", waiting until "networkidle"[22m
+
+FAILED desktop /m/preview?lang=ar: TimeoutError: page.goto: Timeout 30000ms exceeded.
+Call log:
+[2m  - navigating to "https://ihsanos.com/m/preview?lang=ar", waiting until "networkidle"[22m
+
+FAILED desktop /shop/test-kitchen: TimeoutError: page.goto: Timeout 30000ms exceeded.
+Call log:
+[2m  - navigating to "https://ihsanos.com/shop/test-kitchen", waiting until "networkidle"[22m
+
