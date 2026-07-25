@@ -67,8 +67,7 @@ def _agent_from_tmux(dsn):
         cur.execute("SELECT base_agent_id FROM fleet_lanes WHERE lane=%s", (sess,))
         row = cur.fetchone()
     return row[0] if row else None
-if SUB_TAG and not SUB_TAG.startswith(AGENT + "-"):
-    SUB_TAG = None                      # agent_messages sub_tag family-prefix CHECK
+
 
 def env_val(key):
     """Read a key from the orchestrator .env. Never printed."""
