@@ -4,7 +4,16 @@
 
 ---
 
-# ⚡ 0. DO THIS FIRST — LIVE OPERATOR INSTRUCTION, NOT STARTED
+# 🛑 0-A. **HOLD — DO NOT EXECUTE §0-B BELOW.** P0 landed after the operator's instruction.
+**cai CAI-RESP-580 (P0), independently confirmed by hub:** `sales@gazzabyte.sg` holds **org-level Developer** on `lqbojdqwgzgxhioezfgb`, which contains **FIVE** projects — `tscuymavysscrvoberrr` (**orchestrator HUB**: 944 strategic_decisions · 7,030 operator_messages · 10,155 agent_messages · 767 session_digests), `ceayjeamtmcyzzvqflus` (**ihsanos PRODUCTION**, 16 orgs), `brrgastulcffamlbggyu`, `ywrpttpxwfcoodovxhsr`, and `goumlynecruxrlmzlntp` (the only arguably-theirs one).
+**Developer can run arbitrary SQL AND READ service_role + anon keys + JWT secrets ⇒ REVOCATION IS NOT REMEDIATION** (keys may already be copied; no log exposes whether they were).
+**⇒ §0-B is HELD.** Granting that shared mailbox a fresh app-level org_admin while it is under P0 review would be indefensible, and cai §(c) rules the opposite: **never a shared `sales@` mailbox — named individual, MFA, scoped to goumlyne ONLY.** An operator directive does not waive an active cai gate. **NOTHING STARTED — no partial state.**
+**Sequencing (do NOT collapse):** (a) membership removal = instant, reversible, **operator-only** (Developers can't manage members); (b) rotate service_role + JWT secrets on all five = **PLANNED, with a window** — rotation logs client staff out and can break integrations **9 weeks before their audit** (captcha precedent); (c) re-grant only if deliberate, scoped + named + MFA.
+**cai owns the operator message on this** (security posture) — hub stays OFF that thread (CAI-547).
+**Still arguably safe and asked of cai:** re-sending **Zuremi's** invite (existing org_admin, `accepted_at IS NULL`, widens nothing).
+**Offered to cai, not started:** read-only survey of which services hold `SUPABASE_SERVICE_KEY`/anon keys per project, so the (b) rotation window is planned against a list rather than discovered during it.
+
+# ⚡ 0-B. (HELD by 0-A) — LIVE OPERATOR INSTRUCTION, NOT STARTED
 **op#7161 follow-up, verbatim: "do B and resend zuremi s invite too"**
 
 I deliberately did **NOT** start it — it is a multi-step mutation on a **live client silo** and starting it minutes before a context reset risks leaving a **test org_admin re-enabled on the client's donation system**. There is **no partial state**; nothing has been touched.
