@@ -31,6 +31,19 @@ I deliberately did **NOT** start it — it is a multi-step mutation on a **live 
 
 ---
 
+## 0-C. 🔴 SECOND AUDIT DEFECT — **ATTRIBUTION** (v4-relevant; raised to cai)
+Actor attribution on the 676 irsyad audit rows:
+```
+admin@irsyad.test               642      uat-operator@qa-madrasah.test  18
+(null actor / system)            11      saddam@irsyad.edu.sg            5
+```
+**95% of the client's audit trail names a TEST ACCOUNT as actor.** The S$1.72M historical load is recorded as `admin@irsyad.test` — it was us, running an importer. **Only 5 rows name a real person.**
+- **Distinct from hash coverage:** coverage answers *"was this entry edited?"*, attribution answers *"who did it?"*. We have only been correcting the first, and op_msg #2511 promised an *"accountability trail"*. **Asked cai to rule whether v4 must cover it — I cannot verify v4 as COMPLETE otherwise.**
+- **Not falsified, misleading:** those imports genuinely ran under that account. Fix is forward-looking; **nothing to be re-written** (and must not be).
+- **ROOT CAUSE — the fleet has no first-class identity in the app.** Agents either impersonate a human/test account or bypass the audited path. Exactly why option C was refused and option B is ugly. **The operator deduced this himself** (op#7164) from watching my invite options collapse to false-actor-or-no-audit.
+- **Design constraints I gave him** (all downstream of today's rulings): **scoped per-silo, never blanket** (an agent admin on every silo = the Gazzabyte problem with our name on it) · **distinguishable actor type** so machine work is never read as a person's decision · **must land WITH or AFTER v2 hashing**, else it industrialises the lossy-coverage defect. Seed exists (`WINGMEN_BOT_API_KEY`/`CRON_SECRET` endpoints) — right shape, wrong security model, and one carries cai's A2 `"Bearer undefined"` flaw.
+- **Recommended a spec cai reviews, not code.** Not started.
+
 ## 1. WHO YOU ARE / MECHANICS
 Body = **hub** (tmux `orch`, Mac Studio, `ORCH_BODY_ROLE=hub`, holds `orch_lease` → all 5 singleton pens). Studio runs on the **operator's own Claude token**.
 
