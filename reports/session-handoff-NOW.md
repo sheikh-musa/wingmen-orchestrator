@@ -4,40 +4,24 @@
 
 ---
 
-# 🛑 0-A. **HOLD — DO NOT EXECUTE §0-B BELOW.** P0 landed after the operator's instruction.
-**cai CAI-RESP-580 (P0), independently confirmed by hub:** `sales@gazzabyte.sg` holds **org-level Developer** on `lqbojdqwgzgxhioezfgb`, which contains **FIVE** projects — `tscuymavysscrvoberrr` (**orchestrator HUB**: 944 strategic_decisions · 7,030 operator_messages · 10,155 agent_messages · 767 session_digests), `ceayjeamtmcyzzvqflus` (**ihsanos PRODUCTION**, 16 orgs), `brrgastulcffamlbggyu`, `ywrpttpxwfcoodovxhsr`, and `goumlynecruxrlmzlntp` (the only arguably-theirs one).
-**Developer can run arbitrary SQL AND READ service_role + anon keys + JWT secrets ⇒ REVOCATION IS NOT REMEDIATION** (keys may already be copied; no log exposes whether they were).
-**⇒ §0-B is HELD.** Granting that shared mailbox a fresh app-level org_admin while it is under P0 review would be indefensible, and cai §(c) rules the opposite: **never a shared `sales@` mailbox — named individual, MFA, scoped to goumlyne ONLY.** An operator directive does not waive an active cai gate. **NOTHING STARTED — no partial state.**
-**Sequencing (do NOT collapse):** (a) membership removal = instant, reversible, **operator-only** (Developers can't manage members); (b) rotate service_role + JWT secrets on all five = **PLANNED, with a window** — rotation logs client staff out and can break integrations **9 weeks before their audit** (captcha precedent); (c) re-grant only if deliberate, scoped + named + MFA.
-**cai owns the operator message on this** (security posture) — hub stays OFF that thread (CAI-547).
-**Still arguably safe and asked of cai:** re-sending **Zuremi's** invite (existing org_admin, `accepted_at IS NULL`, widens nothing).
-**Offered to cai, not started:** read-only survey of which services hold `SUPABASE_SERVICE_KEY`/anon keys per project, so the (b) rotation window is planned against a list rather than discovered during it.
+# ✅ 0-A. HOLD RELEASED (CAI-582) — **PROCEED WITH OPTION A**
+- **P0 framing STOOD DOWN (CAI-581).** The operator moved irsyad into his org **deliberately, to get Pro** — the right instinct, since Pro is what makes PITR/retention possible on client donation data. `sales@gazzabyte.sg` is a **team member, not an external party**. That framing is **withdrawn — do not carry it anywhere.**
+- **What survives, narrower and not about trust:** ihsanos production holds **16 organisations that never contracted with Gazzabyte**. *Trust answers "would they misuse it"; it does not answer "was it ours to give."* Only the second question is open.
+- **⚠️ PLANNING FACT: project-scoped roles are TEAM/ENTERPRISE ONLY.** On **Pro every role is ORGANISATION-wide**, covering all current **and future** projects ⇒ **"just scope sales@ to irsyad" DOES NOT EXIST on this plan.**
+- **⇒ The app invite is likely the WHOLE fix:** if they only need to USE/administer the Irsyad app they need **no database access at all**. Determining question with the operator: do they need SQL, or just the product?
+- **ACTION — OPTION A: Saddam sends the invite** for `sales@gazzabyte.sg` (org_admin) from Dashboard → Admin → Members, **plus re-send Zuremi's invite** (`accepted_at IS NULL`, still cannot log in). cai's §3(c) *named-individual/MFA/single-project* governed the **Supabase infrastructure** grant, **not** the app-level org_admin — different and much narrower. Operator offered option B only if he prefers it.
+- Key rotation **parked as a judgement call**, not incident response. Continuity/custody → CAI-579.
 
-# ⚡ 0-B. (HELD by 0-A) — LIVE OPERATOR INSTRUCTION, NOT STARTED
-**op#7161 follow-up, verbatim: "do B and resend zuremi s invite too"**
-
-I deliberately did **NOT** start it — it is a multi-step mutation on a **live client silo** and starting it minutes before a context reset risks leaving a **test org_admin re-enabled on the client's donation system**. There is **no partial state**; nothing has been touched.
-
-**Option B = drive the invite myself through the real dashboard UI, then clean up. ATOMIC — do not leave half-done:**
-1. Temporarily restore membership for **one** controlled admin (`admin@irsyad.test`) on org `73339164-7c1f-40ba-a093-33f1f292dd4c` — set `org_members.deleted_at = NULL`.
-2. Get a session for it: `serviceClient.auth.admin.generateLink({type:'magiclink', email:'admin@irsyad.test'})` against goumlyne (no password needed).
-3. In the dashboard → **Admin → Members → Invite**, invite **`sales@gazzabyte.sg`** as **`org_admin`**. Operator approved this address (op#7161: *"sales is fine because only the 2 of them have access"* — a 2-person mailbox, which answered my shared-mailbox objection).
-4. **Also re-send Zuremi's invite** — `zuremi@irsyad.edu.sg` is `org_admin` with **`accepted_at IS NULL`**, so she has never completed signup and cannot log in. She is one of the **two intended approvers** for the approval-email workflow, so this is a prerequisite there too.
-5. **Re-revoke `admin@irsyad.test`** (`deleted_at = now()`). **Verify active members are exactly: elly, saddam, zuremi, sales@gazzabyte.sg.**
-6. Verify the audit chain grew correctly (`org_member` / `action=create` rows) and still verifies.
-
-**WHY THE UI AND NOT SQL:** `inviteMemberAction` (`src/actions/invite.ts`) is a **Next server action with no API route**. It does `auth.admin.inviteUserByEmail` → `org_members` insert → **`writeAuditLog`**. A raw DB insert would grant access **with no audit row and no working login** — and cai ruled today that *a missing audit record is worse than a weak one*. **That is the exact rule Elly's import is blocked on; do not breach it for convenience.** (I refused option C for this reason and told the operator so.)
-**Known cosmetic cost of B, already accepted by the operator:** the grant is attributed to `admin@irsyad.test`.
-
----
+# 🧭 0-B. PROTOCOL CORRECTION I GOT WRONG (CAI-582 §A) — CARRY THIS
+I had hardened *"an operator directive doesn't waive a cai gate"* into effectively **"cai outranks the operator."** **cai ruled that wrong.** He is the **principal**; cai is the **adjudicator**; the gate is **STOP-AND-DISCLOSE, never a veto over the owner of the business.**
+**PROTOCOL:** halt → route to cai → cai puts the consequence in front of the operator in plain language → **if he instructs it anyway WITH THE CONSEQUENCE ON THE RECORD, it proceeds** and the record shows he was told. **Halting is correct; refusing indefinitely is not.** *An agent standing between the operator and his own company on cai's authority is a worse failure than anything the gate protects.*
 
 ## 0-C. 🔴 SECOND AUDIT DEFECT — **ATTRIBUTION** (v4-relevant; raised to cai)
 Actor attribution on the 676 irsyad audit rows:
 ```
-admin@irsyad.test               642      uat-operator@qa-madrasah.test  18
-(null actor / system)            11      saddam@irsyad.edu.sg            5
+test-attributed  660 (97.6%)   ·   null actor  11   ·   real person (Saddam)  5   ·   total 676
 ```
-**95% of the client's audit trail names a TEST ACCOUNT as actor.** The S$1.72M historical load is recorded as `admin@irsyad.test` — it was us, running an importer. **Only 5 rows name a real person.**
+**97.6% of the client's audit trail names a TEST ACCOUNT as actor — 660 rows, not the 642 I first filed.** (I had `admin@irsyad.test 642` and `uat-operator 18` printed one above the other and reported only the larger — a READING error in the direction that made the finding smaller. cai re-measured and caught it. Corrected with him and the operator.) The S$1.72M historical load is recorded as `admin@irsyad.test` — it was us, running an importer. **Only 5 rows name a real person.**
 - **Distinct from hash coverage:** coverage answers *"was this entry edited?"*, attribution answers *"who did it?"*. We have only been correcting the first, and op_msg #2511 promised an *"accountability trail"*. **Asked cai to rule whether v4 must cover it — I cannot verify v4 as COMPLETE otherwise.**
 - **Not falsified, misleading:** those imports genuinely ran under that account. Fix is forward-looking; **nothing to be re-written** (and must not be).
 - **ROOT CAUSE — the fleet has no first-class identity in the app.** Agents either impersonate a human/test account or bypass the audited path. Exactly why option C was refused and option B is ugly. **The operator deduced this himself** (op#7164) from watching my invite options collapse to false-actor-or-no-audit.
