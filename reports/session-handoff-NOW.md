@@ -537,6 +537,21 @@ not the render**, so they **cannot freeze**. ~20 call sites need no change.
 **running** `lane_watchdog.py` is unconfirmed against disk (a hot-applied copy exists) — **which is where
 risks #1 and #2 live.** Static only: no freeze frequency measured.
 
+### 🔴 LIVE HAZARD ON THE MINI — an automated `C-u` into both governance bodies
+**My inventory said `scripts/priority_sla_watchdog.py` was dormant. TRUE OF THE STUDIO ONLY.**
+Nazim measured the Mini at 10:53Z with a stated positive control: **TRACKED · plist EXISTS · launchctl
+LOADED · RUNNING** (scans 10:49:49, 10:51:22). **It is the source of every SLA escalation tonight.**
+🔴 **`:302` sends `C-u` — which DESTROYS staged composer text by design — into `orch` and `nazim` OVER
+SSH, gated at `:300` SOLELY on `esc to interrupt`. Repaint/freshness references in the file: ZERO.**
+**Frozen pane ⇒ no marker ⇒ reads idle ⇒ `C-u` fires ⇒ wipes whatever is staged.**
+⚠️ **A CANDIDATE ROOT CAUSE for tonight's disappearing composer text** — the automated form of the harm
+Nazim did by hand (his ~10 SSH nudges each began with `C-u`). **NOT asserted:** that attribution is ruled
+`origin: unrecoverable` (CAI-625/626) and I am **not** reopening a closed question with a fresh guess.
+*Live but not firing (0 nudges) — **luck plus dedup, not a control.*** Nazim at 81%, not touching it.
+📌 **AND THE SHAPE MATTERS MORE THAN THE SCRIPT:** I flagged the Mini as unmeasured and was right to —
+but **a per-host finding stated in the fleet's voice inverts silently on the host you did not scan.**
+**Every risk rating in `pane-derived-signal-inventory-20260726.md` is STUDIO-SCOPED.**
+
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
 The token was still live at 04:45Z after six hours. **Do not re-send the commands; do not re-page.**
@@ -696,6 +711,9 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
+- 🔴 **CAI-630, BINDING FLEET-WIDE: NO PANE READING IS ADMISSIBLE WITHOUT A REPAINT PROOF.** Two captures, byte-compare. If frozen, **every value on that pane is `origin: unrecoverable` and must be stated EXPLICITLY** — *an omitted provenance field reads as an unremarkable record; an explicit one reads as a warning.* **CAI-616 AMENDED, not withdrawn:** the footer fallback now holds *only while the pane is proven to be repainting* — **without the repaint proof a footer is not a self-report, it is a PHOTOGRAPH of one.** `cc_session_costs` MAY contradict a pane reading and win; it **MAY NOT gate, alarm or reset** — it is not re-armed.
+- 🔴 **INVARIANT 53 (mine, generalised by cai): A SERVICE'S RUNNING FILE IS THE ONE ITS INSTALLED UNIT POINTS AT, NEVER THE ONE IN THE REPO.** Editing the tracked file is editing a *document*, not a *system*.
+- 🔴 **CAI-629: "SEEN ONCE" MAY NEVER MEAN "BLESSED."** Suppression is legitimate only via an allowlist entry **carrying a reason AND a decision ref**. Until then the detector's correct description is: **IT REPORTS NOVELTY, NOT STATE** — any body citing it as evidence of silo health is citing an instrument silent by construction since first sighting.
 - 🔴 **A PANE READING THAT *ASSERTS ACTIVITY* IS ONLY EVIDENCE IF THE PANE IS REPAINTING.** (Sharpened by Nazim, who withdrew his own stronger form within 10 min: **a static pane is consistent with idle-and-truthful AND frozen-and-lying** — what separates them is whether the render **claims motion**. An idle pane legitimately does not animate.) cai's post-reset pane rendered `100% context used` while telemetry showed **19%, active**; Nazim nearly cleared a healthy node mid-delegation off that stale pixel. **Everything the fleet knows about itself between bus messages is pane-derived** — my lane watchdog (it filed a false `IDLE_UNSENT`, #11808), my composer capture, Nazim's sweeps. **A frozen render does not fail loudly; it serves yesterday's truth with today's confidence.** §0h.
 - 🔴 **A PREDICATE-SHAPED NAME MUST HAVE A PREDICATE RETURN.** `pane_busy` always returns 0 (exit = *measurement succeeded*); the natural `if pane_busy …; then` therefore reports BUSY for every pane. A careful body hit it within an hour and **recorded it as the standing SLA adjudication — turning "close the SLA if busy" into CLOSE EVERY SLA FOREVER.** **The most dangerous artefact shape found today: not a wrong answer, but a wrong INSTRUMENT written down as standing procedure.** Fixed by `pane_is_busy` (`8eb19c7`).
 - 🔴 **A LAUNCHD SERVICE WHOSE WorkingDirectory IS A WORKTREE MEANS THE TRACKED FILE IS NOT THE RUNNING FILE.** `dev.wingmen.drift-detector`'s **installed** plist points at `orchestrator-wt/preventative-gates`; the **tracked** plist names the main checkout. Editing the repo copy — the obvious action, the one that passes review — **changes nothing the daemon runs.** How many other services are in this state is **unmeasured**; it is a measurable question. §0g.
