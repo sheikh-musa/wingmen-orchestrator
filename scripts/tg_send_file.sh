@@ -43,8 +43,11 @@ resp=$(curl -s --ipv4 "https://api.telegram.org/bot${TOK}/sendDocument" \
 ok=$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print('1' if d.get('ok') else '0:'+str(d.get('description')))")
 
 # durable log (best-effort)
+# CAI-599: log DELIVERY, not intent. operator_log defaults delivered=TRUE, so calling it
+# unconditionally records a FAILED send as delivered. The text-send scripts were fixed in
+# 25701aa; the FILE-send paths were missed by that sweep and by the "four scripts" count.
 "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound \
-  "[file] $(basename "$FILE")${CAPTION:+ — $CAPTION}" --chat "$CHAT" >/dev/null 2>&1 || true
+  "[file] $(basename "$FILE")${CAPTION:+ — $CAPTION}" --chat "$CHAT" $([ "$ok" = 1 ] || echo --undelivered) >/dev/null 2>&1 || true
 
 case "$ok" in
   1) exit 0 ;;

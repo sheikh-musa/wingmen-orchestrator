@@ -34,7 +34,10 @@ ok=$(printf '%s' "$resp" | "$ORCH_DIR/.venv/bin/python3" -c 'import sys,json;pri
 
 # durable log every outbound file (best-effort — never fail on a log hiccup).
 NOTE="sent a FILE → $(basename "$FILE")$([ -n "$CAPTION" ] && echo "  | caption: $CAPTION")"
-PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$NOTE" --chat "$CHAT" --tag "gazzabyte-irsyad" >/dev/null 2>&1 || true
+# CAI-599: log DELIVERY, not intent. operator_log defaults delivered=TRUE, so calling it
+# unconditionally records a FAILED send as delivered. The text-send scripts were fixed in
+# 25701aa; the FILE-send paths were missed by that sweep and by the "four scripts" count.
+PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$NOTE" --chat "$CHAT" --tag "gazzabyte-irsyad" $([ "$ok" = "True" ] || echo --undelivered) >/dev/null 2>&1 || true
 
 if [ "$ok" = "True" ]; then
   echo "sent: $(basename "$FILE") -> $CHAT"
