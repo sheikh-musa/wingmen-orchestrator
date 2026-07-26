@@ -110,6 +110,16 @@ P0_SURFACE_MIN = _envint("SLA_P0_SURFACE_MIN", HARD_ESCALATE_MIN["P0"])
 # Agents to drop from actioning entirely (comma-separated). Lever for Nazim to
 # exclude e.g. the operator-attended hub itself if paging on the hub's own
 # chronic unread proves circular/noisy. Empty by default (nothing excluded).
+# A message an agent sent to ITSELF is a NOTE, not a coordination stall — nobody else can
+# action it and nobody is waiting on it. Left in, it escalates: and because the escalation
+# ladder treats "recipient == orch-console" as "the internal path IS the stall", a self-note
+# would fall straight through to an OPERATOR PAGE. I filed exactly such a note at 01:2xZ as a
+# durable reminder, while the operator was DRIVING, and it would have paged him within the
+# hour — the same noise the ladder was built an hour earlier to stop.
+def is_self_note(v: dict) -> bool:
+    return bool(v.get("from_agent")) and v.get("from_agent") == v.get("agent")
+
+
 EXCLUDE_AGENTS = {
     a.strip() for a in os.environ.get("SLA_EXCLUDE_AGENTS", "").split(",") if a.strip()
 }
@@ -207,7 +217,9 @@ def fetch_actionable(conn) -> list[dict]:
         )
         cols = [d[0] for d in cur.description]
         for r in cur.fetchall():
-            out.append(dict(zip(cols, r)))
+            row = dict(zip(cols, r))
+            if not is_self_note(row):
+                out.append(row)
 
         # (2) P0 supplement — the view cannot surface P0 (no threshold row).
         # Mirror the view's violation semantics for priority='P0' only.
