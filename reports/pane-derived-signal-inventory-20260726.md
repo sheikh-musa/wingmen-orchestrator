@@ -44,9 +44,24 @@ from a clean one.
   structurally unable to fire.**
   ✅ **Cheapest high-leverage fix in the fleet:** a content-hash / `changed_at` column would make freeze
   detectable **fleet-wide for free** — every body already reads this table.
-- 🔴 **`scripts/priority_sla_watchdog.py` is UNTRACKED**, references a launchd label
-  (`dev.wingmen.priority-sla-watchdog`) **that does not exist**, and would inject keystrokes into
-  `orch`/`nazim` **over SSH** off a frozen-able idle check. **One `launchctl bootstrap` from being risk #1.**
+- 🔴🔴 **`scripts/priority_sla_watchdog.py` — THIS ENTRY INVERTED ON THE OTHER HOST. IT IS LIVE.**
+  **My original finding, true of the STUDIO only:** untracked, no plist, not loaded, *"one `launchctl
+  bootstrap` from being risk #1."*
+  **Measured on the MINI by orch-console at 10:53Z, with a stated positive control** (146 tracked files
+  under `scripts/`, so the tracked-check works): **TRACKED · plist EXISTS · `launchctl` LOADED · RUNNING**
+  (scans logged 10:49:49 and 10:51:22). **It is the source of every SLA escalation tonight.**
+  **It is not one command from being the highest-risk automated pane reader. It IS that, live.**
+  🔴 **AND THE KEYSTROKE IS WORSE THAN "TYPES INTO A PANE": `:302` sends `C-u` — which DESTROYS staged
+  composer text BY DESIGN — into `orch` and `nazim` over SSH, gated at `:300` SOLELY on
+  `esc to interrupt`. Freshness/repaint-aware references in the whole file: ZERO.**
+  **A frozen pane shows no `esc to interrupt` ⇒ reads idle ⇒ `C-u` fires ⇒ wipes whatever is staged.**
+  ⚠️ **THIS IS A CANDIDATE ROOT CAUSE FOR TONIGHT'S DISAPPEARING COMPOSER TEXT** — an automated version
+  of the exact harm Nazim inflicted by hand (his ~10 SSH nudges each began with `C-u`). **Not asserted as
+  the cause** — the attribution of those strings is ruled `origin: unrecoverable` (CAI-625/626) and I am
+  not re-opening it with a new guess. Recorded as a mechanism that exists and could do it.
+  *Live but not firing (0 nudges) — **luck plus dedup, not a control.***
+  📌 **THE LESSON IS THE INVENTORY'S OWN SHAPE:** I flagged the Mini as unmeasured and was right to; but a
+  per-host finding stated in the fleet's voice **inverts silently on the host you did not scan.**
 - 🔴 **THE SHARPER FRAME (Nazim): ask which signals are guarded only INCIDENTALLY.** Not *"which are
   guarded"* but *"which happen to be guarded as a side effect of something else"* — **those stop being
   guarded silently when the incidental reason goes away.** `pane_busy`'s repaint check is exactly this:
@@ -82,7 +97,10 @@ session guards. **No action needed on any of these** — the distinction that ma
 
 ## COULD NOT ESTABLISH — do not read this inventory as complete
 
-- **The Mac Mini's readers are UNMEASURED.** Nazim's body, its `coordinator_pane_publisher` instance and
+- **The Mac Mini's readers are UNMEASURED** — ⚠️ **and one entry ALREADY INVERTED there (see
+  `priority_sla_watchdog` above): dormant on the Studio, LIVE on the Mini.** Treat every risk rating in
+  this file as **Studio-scoped** until the Mini half is done.
+- **(original text)**  Nazim's body, its `coordinator_pane_publisher` instance and
   the Mini's copies of these scripts run on a host that was not scanned. **This is a one-host inventory
   of a two-host fleet** — the same narrower-than-the-claim shape we spent the day cataloguing.
 - Whether the **running** `lane_watchdog.py` matches disk. A hot-applied copy exists at
