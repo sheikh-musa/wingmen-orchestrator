@@ -163,15 +163,67 @@ multi-line composer capture silently truncates to one line, `BSpace -N 120` unde
 
 ### Measured this block
 - **Heartbeat VERIFIED LIVE** — see §0a. Closes the loop the previous block explicitly refused to close.
-- **The 3h40m inbound silence is NOT a dead ingest.** Telegram's own `getWebhookInfo` reports
-  `pending_update_count = 0` on the orch bot and the cai bot (no webhook; polling mode). A wedged
-  long-poller would let updates QUEUE at Telegram, so zero-pending means nothing is undelivered.
-  Daemon `dev.wingmen.ingest` running, pid 64141, up since 07-23. → cai #11659.
-  🔴 **TWO LIMITS, do not let this read wider than it is:** `nazim-console` is **UNMEASURED** (its
-  bot token lives on the Mini, not this host), and zero-queued proves nothing is STUCK, **not that
-  the daemon can still DELIVER**. Only a real inbound row proves that.
-- **LIVE BOT TOKENS IN ARGV** — cai's 409 liveness probe passed two full bot tokens inline on the
-  command line (visible to any `ps` on this box). Flagged #11666. Rotation is the operator's call.
+- **INGEST: THE TELEGRAM→DAEMON LEG IS ALIVE — PROVEN 05:40Z. THE DAEMON→POSTGRES LEG IS NOT.**
+  ⚠️ **I first wrote this as "the daemon is alive, proven" and cai correctly narrowed it (CAI-620 §C).
+  `pending=0` and a `409` both rule out a WEDGED POLLER. Neither rules out a daemon that polls, ACKs,
+  then FAILS ITS INSERT** — that also shows zero pending and is indistinguishable from healthy on
+  Telegram's side. **It fails toward calm. Only one real round-trip closes it, and that is still owed.**
+  ✅ **`nazim-console` is NO LONGER unmeasured** — cai's probe surfaced as a 409 in the **Mini's**
+  ingest log (pid 47040). All four loops measured alive.
+  📌 **TOPOLOGY CORRECTION: ingest is SPLIT ACROSS BOTH HOSTS**, not Mini-only as previously briefed.
+  Studio pid 64141 runs `operator-orch`, `cai-channel`, `gazzabyte-irsyad`; the Mini runs `nazim-console`.
+  *This is why I could not measure nazim-console from here — not a token-location quirk, a topology fact.*
+  Evidence for the polling leg, kept because the method is reusable:
+  First pass (05:26Z) was absence-of-evidence only: `getWebhookInfo` showed `pending_update_count = 0`
+  on the orch and cai bots, which rules out a *queue backing up* but cannot distinguish a live daemon
+  from a dead one plus a quiet operator. **So I ran the discriminator:** a competing `getUpdates`
+  against the orch bot, with a fabricated-token positive control first (→ `401`, proving the probe
+  can see failure). **Attempt 3 of 4 returned `409 Conflict: terminated by other getUpdates request`
+  — a competing poller demonstrably EXISTS.** Independently confirmed from the daemon's own side: its
+  log records it *receiving* those 409s at `05:40:15/24Z`. Both directions agree. **Question closed.**
+  *(1 of 4 probes found no poller — consistent with the daemon polling N channels sequentially, so any
+  one bot is only held a fraction of the time. That is latency, not loss: Telegram queues.)*
+  🔴 **STILL UNMEASURED: `nazim-console`** — its bot token lives on the Mini, not this host.
+
+### 🔴 THE MEASUREMENT WAS DAMAGING THE THING MEASURED — BOTH SINGLETONS, INDEPENDENTLY
+The ingest log is littered with `loop error HTTPError: HTTP Error 409: Conflict`. **Those are ours.**
+`05:28–05:29Z` — a burst across `operator-orch`, `cai-channel` AND `gazzabyte-irsyad` (**the live
+client channel**): cai's 409 liveness probe. `05:40:15/24Z` — mine.
+**Every 409 the daemon absorbs is a poll cycle LOST on that channel.** cai and I each independently
+reached for a competing poll to answer "is the daemon alive", and in doing so degraded the inbound
+rail — including the client's — while investigating whether the inbound rail was degraded.
+**A new member of the house-defect family, and a different one: not a check reporting on too narrow a
+scope, but a check that PERTURBS the system it is measuring.** The instrument was writing the symptom.
+🔴 **RULED FOR MYSELF, and asked of cai: the 409 probe is now RETIRED. Do not run competing
+`getUpdates` against a bot the daemon owns.** It answered the question once and it must not become a
+monitoring habit. If liveness needs re-checking, do it from the daemon side (its own log, its process
+state) or by an actual inbound message — never by contending for the poll.
+*Not claimed: that any message was lost. Telegram queues, and the daemon retries and recovered (pid
+unchanged). The cost was latency and poll cycles, not delivery.*
+### 🔴 CAI-622 — SECRETS IN ARGV: THE MANDATED METHOD LEAKS, AND MY FIX FOR IT WAS WRONG
+I flagged cai's 409 probe for passing two full bot tokens inline on the command line, visible to any
+`ps` on this box (#11666). He confirmed and closed the exposure (pids gone, nothing left in argv) —
+**then measured it wider than I had, and it indicts a rule in §6 of this very file.**
+
+- **The leak is not the probe, it is `curl`.** §6 mandates *use `curl`, not a Python client* (because
+  the Python client returns Cloudflare 403/1010 identically for valid and fabricated tokens — right on
+  accuracy, and **nobody priced the instrument**). `curl -H "Authorization: Bearer $TOK"` puts the
+  **full token in argv**. So **every credential probe run tonight under the mandated method leaked** —
+  including cai's own P0 measurements of the burned token at 05:25Z and 05:38Z. *We have been measuring
+  a leaked credential by leaking it again, once per look, for seven hours.*
+- 🔴 **MY PROPOSED FIX DOES NOT WORK, AND I SHIPPED THE BUG WHILE DEMONSTRATING THE FIX.** I advised
+  "pass it via the environment rather than argv". **The shell expands `$TOK` BEFORE `exec`, so the
+  literal secret lands in `curl`'s argv regardless of where the value came from.** It is a fix that
+  **fails toward calm**: you watch the obvious leak vanish and still ship the token every call. And I
+  did exactly this in my own 409 probe at 05:40Z — **eleven minutes after flagging cai for the same
+  class.** Same bounding as his applies (transient `curl`, process exited, single-user host).
+- ✅ **THE SUBSTITUTE, both control legs passed through the safe pattern itself:** **`curl -K -`**
+  (options on stdin) → argv is literally `curl -K - -o /dev/null`; real token → 200, fabricated → 401.
+  **Adopt it; do not use `-H` with a secret.**
+- 📌 **NAMED OPEN, NOT CLOSED (cai):** argv is gone, but **shell history and captured transcripts are
+  the DURABLE surface** and nobody has measured them. Deliberately not swept on a night with one live
+  P0. Nazim-bot rotation is **the operator's call** and **queues behind the token revocation** — we do
+  not hand him a second credential ask while the first has sat seven hours.
 
 ### ↩️ A claim I made and withdrew WITHIN THIS BLOCK
 **"cai was not reset"** — WRONG, and I told the operator so before checking. I saw a 26-minute
@@ -220,20 +272,84 @@ already `queued` and never scans reports. No DB trigger, no `pg_cron`/`pg_net`. 
 no backfill. **So any report that transitioned before 120 existed is structurally unreachable** — true
 as a property, but currently vacuous, because the only such report is deleted.
 
-### 🔴 THE REAL FINDING: A SIGNED MONEY REPORT WAS DELETED WITH NO ATTRIBUTABLE ACTOR
-Row 31 has `was_ever_signed = true`, `deleted_at` set — and **`deleted_by` NULL, `delete_reason` NULL**,
-with **no `audit_log` action recorded for it after 2026-07-09**. A *signed* weekly donation report left
-the client's live records and **the substrate cannot say who did it or why.** Migration 107 is named
-`delete_before_sign`, i.e. it appears intended to forbid exactly this.
-⚠️ **NOT YET ESTABLISHED, and I am not asserting it:** whether the guard has a hole, or whether the
-delete simply pre-dates the guard. **Do not resolve that from `schema_migrations` — CAI-615 forbids it;
-probe the trigger/constraint objects.** Escalated to cai as a money/audit attribution finding.
-*This sits directly on top of §4's existing ATTRIBUTION defect (660/676 chain rows name a TEST account).*
+### 🔴 SIGNED MONEY REPORTS DELETED WITH NO ACTOR — **REVISED 06:05Z, I HAD THE WRONG ROW**
+↩️ **Row 31 is NOT the finding, and my first write-up of it was wrong.** An object probe found its
+audit row: **`audit_log` id 1311, `'preparer_signed->voided(soft_delete)'`, actor `cc-orchestrator`,
+`on_behalf_of client:gazzabyte/elly`.** It IS attributed — a legitimate voiding done by us for the
+client. I reported "no attributable actor" after querying `deleted_by`/`delete_reason` (both NULL) and
+one audit query that missed it. **The columns were empty; the audit row was not. I checked one of two
+places and reported on both.**
+
+🔴 **THE ACTUAL FINDING IS WORSE AND IT IS THREE OTHER ROWS.** Six rows carry `deleted_at`; **four have
+`was_ever_signed = true`**. Ids **5, 10** (identical to the microsecond, `2026-07-23 07:02:43.568085Z`
+— so ONE bulk statement) and **56** (`07-23 07:34:21Z`) were soft-deleted **AFTER** migration 107 was
+applied, with **`deleted_by` NULL, `delete_reason` NULL, and NO audit row at all**. Only id 63 carries
+the app's fingerprint. **Three signed weekly donation reports were removed by a direct DB write that
+bypassed the application path entirely, and the substrate cannot say who.** Postgres does not retain it.
+
+**AND THE GUARD DOES NOT GUARD THIS.** Migration 107 is FULLY PRESENT — but its trigger body is *only*
+`IF OLD.was_ever_signed = true AND NEW.was_ever_signed = false THEN RAISE`. **It forbids UN-LATCHING
+the flag. Nothing anywhere references `deleted_at`.** The delete-before-sign rule lives **only** in
+`deleteWeeklyReportAction`'s `.eq("status","draft").eq("was_ever_signed", false)` WHERE clause
+(`ihsanos/src/actions/tabung-weekly-reports.ts`). 107's own header claims it *"fires for EVERY path —
+RLS-independent"*; **that is true of the LATCH and false of the DELETION.**
+**So the client-facing invariant "a signed report can never be deleted" is NOT enforced by the database
+— it is enforced by one Next.js action, and three rows already went around it.**
+*Sits on top of §4's ATTRIBUTION defect (660/676 chain rows name a TEST account). **A name is not an
+implementation** — and here a migration named `delete_before_sign` does not implement delete-before-sign.*
 
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
 The token was still live at 04:45Z after six hours. **Do not re-send the commands; do not re-page.**
 Correct per CAI-613: no new information, risk is not time-decaying, revocation needs his own account.
+
+---
+
+## 0e. 📐 GOUMLYNE MEASURED BY OBJECT PROBE — the CAI-615 measurement, done (06:10Z)
+
+**This is the evidence base the §6.6 grants now require.** Nothing here is from `schema_migrations`;
+every line is `to_regclass` / `pg_indexes` / `pg_proc` / `pg_constraint` / `pg_trigger` / grants / row
+counts. The ledger appears only as a *subject*, never as evidence.
+
+| # | State | Notes |
+|---|---|---|
+| **119** | **DOES NOT EXIST** | 🔴 **The number is VACANT on every branch.** Both former 119s were renumbered — `119_audit_chain_per_org_lock` → **122**, `119_tabung_approval_notifications` → **120**. **Any hold or gate citing "119" is citing a NUMBER, NOT AN OBJECT** and must be restated as 120 or 122. |
+| **120** | **FULLY PRESENT** | Both tables, all 10 indexes, trigger, RLS, org_admin policy, anon revoked, genesis row. **Carries NO ledger row** — an independent 2nd instance of CAI-615. |
+| **121** | **ABSENT (cleanly)** | `hash_version` column, CHECK, the anon REVOKEs, genesis row — none present. No partial. |
+| **122** | **ABSENT (cleanly)** | No `append_audit_log`/`_batch`, no `uq_audit_log_org_prev_hash`, no grants. |
+| **124** | **ABSENT** | No revokes applied; default ACLs untouched. |
+
+**🔴 ORDERING CONSTRAINT NOBODY HAD STATED: 122 depends on `hash_version`, which 121 creates.
+122 CANNOT be applied before 121.** A grant for 122 alone is unexecutable.
+
+**✅ THE AUDIT-LOCK CLAIM IS RE-ESTABLISHED — PROPERLY THIS TIME.** `uq_audit_log_org_prev_hash`
+ABSENT; **zero** functions matching `%audit%`/`%chain%`/`%hash%`/`%verify%` (the app writes `audit_log`
+by direct INSERT); `hash_version` ABSENT. `audit_log` has 782 rows. **So the struck §2 claim was TRUE
+— but note it was true by coincidence of direction, not because the ledger worked**: the same ledger
+simultaneously hides live migration 120. *Being right for an inadmissible reason is still inadmissible.*
+**Bonus, and it settles §0.7/§0b by measurement rather than by reading the SQL:** the chain is
+**currently FORK-FREE** (0 `(org_id, prev_hash)` groups with count>1 outside sentinels) ⇒ **migration
+122 would today build its FULL index arm**, exactly as the earlier read of the file predicted.
+
+### ⚠️ GRANT POSTURE ON THE LIVE CLIENT SILO — a latent defect, NOT a live exploit
+The probe reported `anon` holding **INSERT on 77 public tables, UPDATE 76, DELETE 76, TRUNCATE 77**,
+including `public.audit_log` itself, with default ACLs re-granting to every FUTURE table. That reads
+like a P0. **I verified it myself before escalating, and the escalation is NOT warranted:**
+- ✅ `anon` and `authenticated` are **NOLOGIN** (`rolcanlogin=false`) — **no direct Postgres session is
+  possible as those roles**, and PostgREST does not expose `TRUNCATE`. *TRUNCATE ignores RLS, so the
+  grant would be decisive if it were reachable. It is not.*
+- ✅ **RLS is ENABLED on all 87 public tables (`rls_off = 0`).** `audit_log`'s two policies both require
+  `org_admin`/`cashier` org membership, so an anonymous JWT satisfies neither.
+- ✅ No `pg_net` / `pg_cron` / `http` extensions — no in-DB egress or scheduling path.
+🔴 **What IS true and still matters: there is NO defence in depth.** The only thing between the public
+anon key and the client's money-audit chain is **RLS policy correctness** — one missing or wrong policy
+on one table is a live exposure, because the grant layer offers no backstop. **This is precisely what
+migration 124 exists to fix, which raises 124's value above "hygiene".** And the default-ACL half is
+the known trap: *new tables inherit blanket anon grants.*
+📌 **FLAGGED, UNASSESSED:** 11 `SECURITY DEFINER` functions are EXECUTE-able by `anon`. Nine are auth
+helpers; **`purge_wc_ingest_pii` and `rls_auto_enable` are not**, and a definer-rights function callable
+by an unauthenticated caller over `/rpc/` deserves a read. **I have not read them — not asserting a
+defect, asserting that nobody has looked.**
 
 ---
 
@@ -336,7 +452,10 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - `timeout` absent on macOS · `git ls-tree` needs `-r` · **`UID` reserved in zsh** · long inline python needs `<<'PYEOF'`.
 - `agent_messages.message_type` ∈ review_request/question/decision/agreed/challenge/update/blocker/counter; body col is **`body`**. `session_digests` uses **ARRAY** columns.
 - **Pushing `main` auto-deploys BOTH ihsanos projects to PRODUCTION.**
-- Supabase Management API 403s from `urllib` (Cloudflare `1010`) — **use `curl`**.
+- Supabase Management API 403s from `urllib` (Cloudflare `1010`) — **use `curl`**. 🔴 **BUT NEVER
+  `curl -H "…$TOK"` WITH A SECRET — that puts the full token in argv, and the shell expands it before
+  `exec` so passing it "via the environment" does NOT help. Use `curl -K -` (options on stdin).**
+  CAI-622, §0c. This trap and that one are a pair: obeying the first one naively violates the second.
 - ihsanos prod is under Vercel team `team_mYxOkemmlg8a3HnKFAE9di7N`, NOT the `.env` VERCEL_TEAM_ID.
 
 ---
