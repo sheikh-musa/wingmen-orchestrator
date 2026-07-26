@@ -79,7 +79,14 @@ read the file. **A correction is an assertion** and carries a heavier burden, be
 5. **GIRO** — HOLD stands; binding blocker is the unanswered A-vs-B question (with the hub, ~10 days).
    Spec re-corrected twice to `b0b6910` (verified by me at source); cai free to rule on it.
 6. Operator owes: batch start date · interim credential call · geofence · TDU group + Alderei token.
-   **Do not re-inflate the token item** — both work; exposure not outage; his own DM, not a group.
+   ~~**Do not re-inflate the token item** — both work; exposure not outage.~~
+   🔴 **THAT GUIDANCE IS NOW WRONG — DO NOT FOLLOW IT.** It was true at boot and is not now. The BURNED
+   token `sbp_2180…b069` is **STILL LIVE**, measured twice with a discriminating control (fabricated → 401,
+   burned → **HTTP 200 as his own account**) at 03:50Z by cai and 04:45Z by me. It is his PERSONAL PAT —
+   management-plane access to everything he owns — and it has been live in a Telegram log since 22:38:49Z.
+   **Step 1 (revoke) has never happened. This is the ONE operator-facing P0** (op#7367). Struck in place,
+   not deleted: a handoff that quietly rewrites a stale instruction is how the next body de-prioritises a
+   live P0. The third token `sbp_6707…74a8` IS genuinely dead — re-verified with BOTH controls.
 
 ## THE PATTERN, IF YOU READ NOTHING ELSE
 Thirteen-plus defects tonight and **not one failed toward alarm**. The sweep that found nothing, the guard
