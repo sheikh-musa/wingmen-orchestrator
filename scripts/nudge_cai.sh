@@ -26,7 +26,41 @@ fi
 case "$N" in (*[!0-9]*|'') echo "nudge_cai: count must be numeric — free text is forbidden (R1)" >&2; exit 2;; esac
 
 LINE="[cc-orchestrator relay] ${N} unread on the bus — drain agent_messages"
-"$TMUX_BIN" has-session -t '=cai' 2>/dev/null || { echo "nudge_cai: no live cai session (log is durable; nothing lost)" >&2; exit 0; }
+
+# CROSS-HOST (2026-07-26, Nazim). cai's tmux lives on the STUDIO; this script was
+# checking the LOCAL tmux and, from the Mini, printing "no live cai session" — a
+# claim about a host it cannot see. cai was alive and idle with 4 unread at the
+# time. That is tonight's defect class exactly: a measurement whose instrument
+# cannot reach what it certifies must report THAT, never a finding.
+#
+# So: no local '=cai' session is NOT evidence of absence. Re-exec over SSH on
+# cai's host (reset_cai.sh's documented convention), where the composer guard
+# below runs against the REAL pane. Non-interactive ssh gets a bare PATH, so
+# tmux must be reachable — hence the explicit PATH (a bare 'tmux' there fails
+# with 'command not found', which would look identical to a dead session).
+CAI_SSH_HOST="${CAI_SSH_HOST:-Musa@mac-studio}"
+if ! "$TMUX_BIN" has-session -t '=cai' 2>/dev/null; then
+  if [ -n "${NUDGE_CAI_REMOTE:-}" ]; then
+    # We ARE the remote leg and still see no session — now absence is observed.
+    echo "nudge_cai: no live cai session on $(hostname -s) (log is durable; nothing lost)" >&2
+    exit 0
+  fi
+  # rc must be captured from ssh ITSELF: after `fi`, $? is the if-statement's
+  # status (0 when the condition merely tested false), which silently turned an
+  # unreachable host back into a success. `|| rc=$?` also shields it from set -e.
+  rc=0
+  ssh -o ConnectTimeout=10 -o BatchMode=yes "$CAI_SSH_HOST" \
+      "cd ~/wingmen/orchestrator && NUDGE_CAI_REMOTE=1 PATH=/opt/homebrew/bin:\$PATH bash scripts/nudge_cai.sh $N" \
+      || rc=$?
+  [ "$rc" = 0 ] && exit 0
+  # Distinguish "cai refused/absent" (the remote leg spoke) from "we never got
+  # to ask" — ssh's own failure is 255. Never convert unreachability into a verdict.
+  if [ "$rc" = 255 ]; then
+    echo "nudge_cai: COULD NOT CHECK — cai is not local and $CAI_SSH_HOST is unreachable." >&2
+    echo "           This is NOT 'cai is down'; the bus row is durable either way." >&2
+  fi
+  exit "$rc"
+fi
 
 # COMPOSER GUARD (2026-07-25, cc-orchestrator's observation). `send-keys -l` APPENDS: if cai has
 # half-typed text staged, this would concatenate the nudge onto it and then submit the hybrid —
