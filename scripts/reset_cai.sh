@@ -24,15 +24,20 @@ _RESET_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 "$TM" has-session -t "=$SESS" 2>/dev/null || { echo "ERROR: tmux session '$SESS' not found on this host." >&2; exit 1; }
 [ -f "$HANDOFF" ] || { echo "ERROR: restore point $HANDOFF missing — refusing to clear." >&2; exit 3; }
 
-# Never clear mid-task: a /clear during a running turn discards work in flight.
+# Never clear a BUSY body: a /clear discards work in flight. The definition of
+# "busy" lives in the shared lib (pane_busy) so this script and reset_orch.sh
+# cannot drift — drift is exactly what let a foreground-only guard miss a body
+# blocked on BACKGROUND AGENTS, which is the state cai was in at 07:00Z with
+# four agents running and 'reset me' staged in its composer.
 # RESET_FORCE=1 is the escape hatch (kept symmetric with reset_orch.sh): it warns
-# loudly and proceeds, so a forced mid-turn clear is never silent.
-if "$TM" capture-pane -t "$PANE" -p | tail -4 | grep -q 'esc to interrupt'; then
+# loudly and proceeds, so a forced clear is never silent.
+pane_busy "$TM" "$PANE"
+if [ "$CC_BUSY" = 1 ]; then
   if [ "${RESET_FORCE:-0}" = "1" ]; then
-    echo "WARNING: cai is MID-TASK ('esc to interrupt') — RESET_FORCE=1 set, clearing ANYWAY." >&2
-    echo "WARNING: in-flight work in that turn will be DISCARDED and is not recoverable." >&2
+    echo "WARNING: cai is BUSY — $CC_BUSY_REASON — RESET_FORCE=1 set, clearing ANYWAY." >&2
+    echo "WARNING: in-flight work will be DISCARDED and is not recoverable." >&2
   else
-    echo "ERROR: cai is mid-task (pane shows 'esc to interrupt') — refusing to clear." >&2
+    echo "ERROR: cai is BUSY — $CC_BUSY_REASON — refusing to clear." >&2
     echo "       Set RESET_FORCE=1 to override if cai is genuinely wedged." >&2
     exit 5
   fi

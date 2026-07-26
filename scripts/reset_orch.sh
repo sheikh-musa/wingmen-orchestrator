@@ -32,17 +32,20 @@ if ! "$TM" has-session -t "$SESS" 2>/dev/null; then
 fi
 [ -f "$HANDOFF" ] || { echo "ERROR: restore point $HANDOFF missing — refusing to clear." >&2; exit 3; }
 
-# Never clear mid-task: a /clear during a running turn discards work in flight.
-# (reset_cai.sh has had this since it was written; the hub — the body with the
+# Never clear a BUSY body: a /clear discards work in flight.
+# (reset_cai.sh has had a guard since it was written; the hub — the body with the
 # most in-flight work to lose — did not. Ported 2026-07-26, same exit code 5.)
-# RESET_FORCE=1 is the escape hatch for a hub that is genuinely wedged mid-turn:
-# it warns loudly and proceeds, so a forced clear is never silent in the log.
-if "$TM" capture-pane -t "$PANE" -p | tail -4 | grep -q 'esc to interrupt'; then
+# The definition of "busy" lives in the shared lib because porting the OLD guard
+# is exactly how it came to miss the background-agent case: see pane_busy().
+# RESET_FORCE=1 is the escape hatch for a body that is genuinely wedged: it warns
+# loudly and proceeds, so a forced clear is never silent in the log.
+pane_busy "$TM" "$PANE"
+if [ "$CC_BUSY" = 1 ]; then
   if [ "${RESET_FORCE:-0}" = "1" ]; then
-    echo "WARNING: '$SESS' is MID-TASK ('esc to interrupt') — RESET_FORCE=1 set, clearing ANYWAY." >&2
-    echo "WARNING: in-flight work in that turn will be DISCARDED and is not recoverable." >&2
+    echo "WARNING: '$SESS' is BUSY — $CC_BUSY_REASON — RESET_FORCE=1 set, clearing ANYWAY." >&2
+    echo "WARNING: in-flight work will be DISCARDED and is not recoverable." >&2
   else
-    echo "ERROR: cc-orchestrator is mid-task (pane shows 'esc to interrupt') — refusing to clear." >&2
+    echo "ERROR: cc-orchestrator is BUSY — $CC_BUSY_REASON — refusing to clear." >&2
     echo "       Set RESET_FORCE=1 to override if the hub is genuinely wedged." >&2
     exit 5
   fi
