@@ -39,6 +39,12 @@ hub on 2026-07-21, now codified; each step gated + re-verified live):
   4. /clear in place via tmux (type -> phantom-guard the text landed -> Enter)
   5. verify after clear: alive, authenticated, fresh prompt (auth broke -> page + stop)
   6. boot from the handoff (read boot_briefing/STATUS/handoff), verify it starts
+  7. PROVE it cleared from cc_session_costs telemetry (a NEW session_id whose
+     latest_context_tokens collapsed). Success is reported ONLY on that proof —
+     send-keys returning 0 is not evidence a session restarted. Three outcomes,
+     kept distinct all the way out to the operator's phone: confirmed-reset /
+     confirmed-NOT-reset / unconfirmed (the writer runs every ~300s, so lag is
+     real and must never be reported as either).
 Never /clear a non-idle, unauthenticated, or handoff-less agent; never kill-session.
 
 Usage:
@@ -61,6 +67,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -83,14 +90,37 @@ load_dotenv(_ORCH_DIR / ".env")
 from scripts.lib import fleet_health_lease, fleet_health_boundaries  # noqa: E402
 
 
+def _logs_dir() -> Path:
+    """Where this module's SIDE-EFFECT logs go.
+
+    WHY THIS EXISTS (2026-07-26 incident, second harm channel): the test suite
+    wrote its fixtures straight into the real audit logs. `logs/pen_gate.log`
+    accumulated `red reset DEFERRED ... 3 unhandled operator message(s)` trios and
+    `logs/context_health_preserved_input.log` accumulated `orch: deploy the fix
+    now` lines — none of which ever happened — interleaved with GENUINE captures
+    (e.g. the operator's real unsent `now do giro` at 2026-07-26T02:13:34Z) with
+    nothing to tell them apart. An audit log that contains fiction is not an audit
+    log; the next person root-causing a reset reads invented evidence.
+
+    Same shape as the paging opt-out in `_in_pytest`: the isolation must NOT depend
+    on every future test remembering to patch a path. CTX_WD_TEST_LOG_DIR lets the
+    conftest point it at a per-run tmp dir; otherwise a throwaway temp dir."""
+    if _in_pytest():
+        d = Path(os.environ.get("CTX_WD_TEST_LOG_DIR")
+                 or (Path(tempfile.gettempdir()) / "ctx_wd_test_logs"))
+    else:
+        d = _ORCH_DIR / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _log_pen_gate(msg: str) -> None:
     """Append a pen-gate decision to the shared gate log (best-effort, mirrors
-    tg_send.sh's pen_gate.log)."""
+    tg_send.sh's pen_gate.log). Test-scoped under pytest — see _logs_dir()."""
     try:
-        (_ORCH_DIR / "logs").mkdir(exist_ok=True)
         from datetime import datetime, timezone
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with open(_ORCH_DIR / "logs" / "pen_gate.log", "a") as fh:
+        with open(_logs_dir() / "pen_gate.log", "a") as fh:
             fh.write(f"{stamp} ctx-watchdog {msg}\n")
     except Exception:
         pass
@@ -157,6 +187,31 @@ _POST_STEP_SETTLE_S = int(os.environ.get("CTX_WD_SETTLE_S", "8"))
 _CHECKPOINT_DEDUP_MIN = int(os.environ.get("CTX_WD_CHECKPOINT_DEDUP_MIN", "45"))
 _RESET_DEDUP_MIN = int(os.environ.get("CTX_WD_RESET_DEDUP_MIN", "30"))
 _EXEC_STATE_FILE = _ORCH_DIR / "logs" / "context_health_exec_state.json"
+
+# --- reset CONFIRMATION (op#6xxx, 2026-07-26) ------------------------------- #
+# How long to wait for cc_session_costs to PROVE the session actually restarted,
+# and how hard the token count must collapse to count as proof. Empirical (a
+# genuine hub reset at 2026-07-26T02:55Z): session adc34035-… @ 802,287 tokens
+# became f58a2fb4-… @ 91,270 — an 11% residue. Half the pre-reset count is a very
+# loose ceiling by that measure, chosen so a slightly-late reading (the body has
+# already begun re-reading its handoff) still confirms, while "nothing happened"
+# (the count barely moves, or only grows) never can.
+_RESET_CONFIRM_WAIT_S = int(os.environ.get("CTX_WD_RESET_CONFIRM_WAIT_S", "90"))
+_RESET_CONFIRM_POLL_S = int(os.environ.get("CTX_WD_RESET_CONFIRM_POLL_S", "10"))
+_RESET_COLLAPSE_FRAC = float(os.environ.get("CTX_WD_RESET_COLLAPSE_FRAC", "0.5"))
+# The cc_session_costs writer's launchd cadence (dev.wingmen.cc-session-costs-writer,
+# StartInterval 300). Confirmation can therefore LEGITIMATELY lag past our window —
+# which is why "could not confirm" is its own outcome and never collapses into
+# either "confirmed" or "confirmed-not".
+_COST_WRITER_INTERVAL_S = int(os.environ.get("CTX_WD_COST_WRITER_INTERVAL_S", "300"))
+
+# The three — and only three — things we are allowed to say about a /clear we
+# submitted. Keeping them as named constants (not ad-hoc strings at each call
+# site) is deliberate: the 2026-07-26 false page happened because "we typed it"
+# and "it happened" were the same value.
+CONFIRM_RESET = "confirmed-reset"        # PROOF: new session_id + collapsed tokens
+CONFIRM_NOT_RESET = "confirmed-not-reset"  # PROOF of failure: post-/clear telemetry, same session
+CONFIRM_UNKNOWN = "unconfirmed"          # no proof either way inside the window
 
 
 @dataclass
@@ -332,6 +387,44 @@ class PaneState:
     input_text: str = ""          # best-effort unsent text in the prompt box
     bg_agents: int = 0            # in-flight background agents (a /clear discards them)
     raw: str = ""
+
+    def __post_init__(self) -> None:
+        """Type-assert every field so a MIS-BOUND argument fails loudly, here.
+
+        WHY THIS EXISTS (2026-07-26 incident, contributing cause): `bg_agents` was
+        inserted into the field order AHEAD of `raw`. Every pre-existing positional
+        construction — `PaneState(True, True, True, "", "reading boot_briefing")` —
+        then silently bound the RAW PANE TEXT to `bg_agents` and left `raw` empty.
+        Nothing errored. A string is truthy, so `if st.bg_agents:` in
+        _verify_capture_before_clear started firing the background-agent probe on
+        every such call (that is where the fabricated `background-agent guard
+        cleared` lines in logs/pen_gate.log came from), while `raw` — which step 4
+        reads to decide whether the body is booting — was silently "".
+        Python 3.9 has no dataclasses.KW_ONLY, so we cannot make mis-binding
+        impossible; we make it IMMEDIATE AND LOUD instead. Field order in a
+        safety-critical struct must never again be a silent-reinterpretation
+        hazard: adding a field can still be done, it just cannot be done quietly.
+        """
+        def _bad(name: str, want: str, got) -> TypeError:
+            return TypeError(
+                f"PaneState.{name} must be {want}, got {type(got).__name__}={got!r}. "
+                f"This is almost certainly a POSITIONAL construction binding to the "
+                f"wrong field after a field-order change — construct PaneState with "
+                f"KEYWORD arguments.")
+        if not isinstance(self.reachable, bool):
+            raise _bad("reachable", "bool", self.reachable)
+        if self.idle is not None and not isinstance(self.idle, bool):
+            raise _bad("idle", "bool or None", self.idle)
+        if self.authenticated is not None and not isinstance(self.authenticated, bool):
+            raise _bad("authenticated", "bool or None", self.authenticated)
+        if not isinstance(self.input_text, str):
+            raise _bad("input_text", "str", self.input_text)
+        # bool is a subclass of int — exclude it explicitly, or PaneState(..., True)
+        # would sail through as "1 background agent".
+        if isinstance(self.bg_agents, bool) or not isinstance(self.bg_agents, int):
+            raise _bad("bg_agents", "int (the COUNT of background agents)", self.bg_agents)
+        if not isinstance(self.raw, str):
+            raise _bad("raw", "str (the captured pane text)", self.raw)
 
 
 def _extract_input_text(pane: str) -> str:
@@ -660,9 +753,10 @@ def _preserve_input_box(reg: dict, st: PaneState) -> str:
     if not txt:
         return ""
     try:
-        _EXEC_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         from datetime import datetime, timezone
-        with (_ORCH_DIR / "logs" / "context_health_preserved_input.log").open("a") as fh:
+        # Test-scoped under pytest (see _logs_dir): the operator's REAL unsent text
+        # is the only thing that may ever land in this file.
+        with (_logs_dir() / "context_health_preserved_input.log").open("a") as fh:
             fh.write(f"{datetime.now(timezone.utc).isoformat()} {reg['tmux']}: {txt}\n")
     except OSError:
         pass
@@ -787,6 +881,128 @@ def _owed_action_in_flight(a: AgentCtx, reg: dict, st: PaneState) -> Optional[st
     return None
 
 
+# --------------------------------------------------------------------------- #
+# RESET CONFIRMATION — the difference between "we typed /clear" and "it cleared".
+#
+# WHY THIS EXISTS (2026-07-26 incident, the harm itself): the operator was paged
+# twice with "cc-orchestrator cleared + boot nudge sent". Nothing had been reset.
+# The claim rested on four observations that are all TRUE of a body that was never
+# touched: send-keys returned 0, the captured pane contained the substring
+# "/clear", Enter returned 0, and afterwards the pane was reachable and not showing
+# a login screen. A reachable, authenticated Claude pane looks IDENTICAL before and
+# after a /clear — so that evidence cannot distinguish "cleared" from "nothing
+# happened" from "typed into the wrong pane". A false ALL-CLEAR is worse than a
+# false alarm: it makes the reader stop looking.
+#
+# The proof already existed in the substrate and was simply never consulted:
+# cc_session_costs carries session_id + latest_context_tokens per identity, and a
+# real reset shows a NEW session_id with the token count collapsed. Verified on the
+# genuine 02:55Z hub reset: adc34035-… @ 802,287 -> f58a2fb4-… @ 91,270.
+# --------------------------------------------------------------------------- #
+
+def _session_fingerprint(agent: str) -> Optional[tuple]:
+    """(session_id, latest_context_tokens, observed_epoch, db_now_epoch) for the
+    FRESHEST cc_session_costs row of `agent`. None = INDETERMINATE (no DSN/driver/
+    row, or the query failed) — never an assertion that the body has no session.
+
+    Times come from the DB, not this host: the reference clock for "did the writer
+    run AFTER the /clear" must be one clock, or clock skew between the Mini and the
+    substrate turns a lag into a refutation (or worse, the reverse).
+    """
+    dsn = _dsn()
+    connect = _pg_connect()
+    if not dsn or connect is None:
+        return None
+    try:
+        with connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT session_id, latest_context_tokens, "
+                "       extract(epoch FROM COALESCE(ended_at, created_at)), "
+                "       extract(epoch FROM now()) "
+                "FROM cc_session_costs "
+                "WHERE cc_identity=%s AND session_id IS NOT NULL "
+                "  AND latest_context_tokens IS NOT NULL "
+                "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT 1",
+                (agent,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return (str(row[0]), int(row[1] or 0), float(row[2]), float(row[3]))
+    except Exception:
+        return None
+
+
+def _confirm_reset(agent: str, before: Optional[tuple],
+                   wait_s: Optional[int] = None,
+                   poll_s: Optional[int] = None) -> tuple[str, str]:
+    """Did the /clear ACTUALLY restart the session? Returns (state, detail) where
+    state is exactly one of:
+
+      CONFIRM_RESET      — PROOF it reset: a NEW session_id whose latest_context_tokens
+                           collapsed to <= _RESET_COLLAPSE_FRAC of the pre-reset count.
+                           ONLY this licenses the word "cleared" to a human.
+      CONFIRM_NOT_RESET  — PROOF it did NOT: the telemetry writer produced a row AFTER
+                           our /clear and it is STILL the same session. The body was
+                           not reset; treat the attempt as failed and look at it.
+      CONFIRM_UNKNOWN    — no proof either way inside the window. The writer runs on a
+                           ~300s interval, so silence here is genuinely ambiguous: it
+                           may have reset and not been measured yet, or not reset at
+                           all. It must NOT be reported as either.
+
+    Keeping UNKNOWN distinct from NOT_RESET is the whole point. Folding it into
+    success recreates the incident; folding it into failure would train the operator
+    to ignore a page that fires on ordinary writer lag. It gets its own wording.
+
+    `before` is the pre-/clear fingerprint from _session_fingerprint(); None means we
+    never had a baseline, and a collapse cannot be measured against nothing -> UNKNOWN.
+    """
+    wait_s = _RESET_CONFIRM_WAIT_S if wait_s is None else wait_s
+    poll_s = _RESET_CONFIRM_POLL_S if poll_s is None else poll_s
+    if not before:
+        return CONFIRM_UNKNOWN, (
+            f"no pre-/clear telemetry baseline for {agent} — a context collapse cannot be "
+            f"measured against nothing")
+    b_sid, b_tok, _b_obs, _b_now = before
+    ceiling = int(b_tok * _RESET_COLLAPSE_FRAC)
+    # DB-clock reading of "just after the /clear", taken on the first readable poll.
+    # A row observed later than this is post-/clear telemetry and can refute.
+    t_clear_db: Optional[float] = None
+    last = "cc_session_costs never became readable"
+    deadline = time.time() + wait_s
+    while True:
+        fp = _session_fingerprint(agent)
+        if fp is None:
+            last = "cc_session_costs unreadable (DB down / no driver / no row)"
+        else:
+            sid, tok, obs, db_now = fp
+            if t_clear_db is None:
+                t_clear_db = db_now
+            if sid != b_sid and tok <= ceiling:
+                pctres = round(100 * tok / max(b_tok, 1))
+                return CONFIRM_RESET, (
+                    f"new session {sid[:8]} at {tok:,} tokens (was {b_sid[:8]} at {b_tok:,}) — "
+                    f"context collapsed to {pctres}% of the pre-reset reading")
+            if sid != b_sid:
+                # A new session that did NOT collapse is not a /clear signature. Do
+                # not claim success off a session_id alone.
+                last = (f"session changed to {sid[:8]} but context did NOT collapse "
+                        f"({tok:,} vs {b_tok:,} — ceiling {ceiling:,})")
+            elif obs > t_clear_db:
+                return CONFIRM_NOT_RESET, (
+                    f"the telemetry writer produced a row {int(obs - t_clear_db)}s AFTER the "
+                    f"/clear and it is STILL session {sid[:8]} at {tok:,} tokens — the session "
+                    f"did not restart")
+            else:
+                last = (f"still session {sid[:8]} at {tok:,} tokens, last written "
+                        f"{int(db_now - obs)}s ago — no post-/clear telemetry yet")
+        if time.time() >= deadline:
+            return CONFIRM_UNKNOWN, (
+                f"{last}; no proof within {wait_s}s. The cc_session_costs writer runs every "
+                f"~{_COST_WRITER_INTERVAL_S}s, so this may be measurement lag rather than a "
+                f"failed reset — it is NOT evidence of either")
+        time.sleep(poll_s)
+
+
 def _verify_capture_before_clear(reg: dict, st: PaneState) -> tuple[bool, str]:
     """CAI-500 condition 2. PROVE that all un-drained input was durably captured
     BEFORE the irreversible /clear. Returns (ok, detail); if capture cannot be
@@ -814,10 +1030,26 @@ def _verify_capture_before_clear(reg: dict, st: PaneState) -> tuple[bool, str]:
     return True, f"capture verified (handoff {fresh}; inbox drained; input box clear)"
 
 
-def _do_reset(a: AgentCtx, reg: dict) -> tuple[bool, str]:
+def _do_reset(a: AgentCtx, reg: dict, outcome: Optional[dict] = None) -> tuple[bool, str]:
     """Full from-Mini reset: gate -> (checkpoint if stale) -> re-verify -> /clear
-    (phantom-guarded, in-place, NEVER kill-session) -> verify -> boot. Any step
-    failure ABORTS and pages loudly, leaving the body in a safe state."""
+    (phantom-guarded, in-place, NEVER kill-session) -> verify -> boot -> PROVE it
+    cleared. Any step failure ABORTS and pages loudly, leaving the body in a safe
+    state.
+
+    Returns (ok, detail). `ok` is True ONLY when the reset was PROVED by telemetry
+    (a new cc_session_costs session_id with a collapsed token count) — never
+    because send-keys returned 0.
+
+    `outcome`: optional dict the caller passes in to COLLECT the structured result
+    (same out-param convention as read_context_gauge's `dropped`), so a caller can
+    branch on the three confirmation states WITHOUT string-sniffing `detail`:
+      outcome["clear_submitted"] -> bool: Enter was pressed on /clear
+      outcome["confirmation"]    -> CONFIRM_RESET | CONFIRM_NOT_RESET | CONFIRM_UNKNOWN
+                                    (absent/None if we never got as far as clearing)
+      outcome["confirm_detail"]  -> the evidence string
+    Callers that pass nothing behave exactly as before."""
+    if outcome is None:
+        outcome = {}
     # CAI-500 condition 4 — NEVER-SELF, at the executor boundary (defense in
     # depth; run_executor already filters non-auto_reset bodies out). A body the
     # registry marks detect-only / self-compacting (orch-console) is refused even
@@ -867,6 +1099,12 @@ def _do_reset(a: AgentCtx, reg: dict) -> tuple[bool, str]:
         _log_pen_gate(f"red reset ABORTED for {a.agent}: capture unverified ({cap_detail})")
         return False, f"ABORT: capture unverified ({cap_detail})"
 
+    # Baseline for the ONLY evidence that can later prove a reset happened: this
+    # body's current (session_id, latest_context_tokens). Taken as late as possible
+    # — after every gate, immediately before the destructive step — so the reading
+    # we compare against is the one the /clear is about to invalidate.
+    before_fp = _session_fingerprint(a.agent)
+
     # 2. /clear in place, phantom-guarded: type it, VERIFY it landed in the box,
     #    only THEN press Enter. Never kill-session.
     if not _send_literal(reg, "/clear"):
@@ -882,31 +1120,65 @@ def _do_reset(a: AgentCtx, reg: dict) -> tuple[bool, str]:
     if not _send_key(reg, "Enter"):
         _page_loud(f"🚨 ctx-watchdog: failed to submit /clear for {a.agent}. Body INTACT (handoff {fresh}).")
         return False, "ABORT: /clear submit failed"
+    outcome["clear_submitted"] = True
     time.sleep(_POST_STEP_SETTLE_S)
 
     # 3. Verify after clear: alive, still authenticated, fresh prompt.
     st3 = _pane_state(reg)
     if not st3.reachable:
-        _page_loud(f"🚨 ctx-watchdog: {a.agent} pane UNREACHABLE after /clear — may need break-glass. "
-                   f"Handoff {fresh} was saved first.")
+        _page_loud(f"🚨 ctx-watchdog: {a.agent} pane UNREACHABLE after a submitted /clear — may need "
+                   f"break-glass. Handoff {fresh} was saved first.")
         return False, "ABORT: unreachable after clear"
     if st3.authenticated is False:
-        _page_loud(f"🚨 ctx-watchdog: {a.agent} auth BROKE after /clear — needs break-glass login. "
-                   f"Handoff {fresh} was saved first.")
+        _page_loud(f"🚨 ctx-watchdog: {a.agent} auth BROKE after a submitted /clear — needs break-glass "
+                   f"login. Handoff {fresh} was saved first.")
         return False, "ABORT: auth broke after clear"
 
-    # 4. Boot from the handoff.
+    # 4. Boot from the handoff. NOTE the wording: at this point we have submitted a
+    #    /clear and observed nothing that PROVES it took effect — so nothing here
+    #    may say "cleared". (The old copy said "cleared OK but the BOOT nudge
+    #    failed", asserting the unverified half as fact.)
     if not _send_literal(reg, _boot_nudge(reg)) or not _send_key(reg, "Enter"):
-        _page_loud(f"🚨 ctx-watchdog: {a.agent} cleared OK but the BOOT nudge failed to send — it is at an "
-                   f"empty prompt, please boot it. Handoff {fresh}.")
+        _page_loud(f"🚨 ctx-watchdog: {a.agent} — /clear was submitted but the BOOT nudge failed to send. "
+                   f"Whether it cleared is UNVERIFIED; it may be sitting at an empty prompt. Check it and "
+                   f"boot it by hand. Handoff {fresh}.")
         return False, "ABORT: boot nudge send failed"
     time.sleep(_POST_STEP_SETTLE_S)
     st4 = _pane_state(reg)
+    # WEAK signal, and treated as one: a pane that looks busy / mentions "boot" is
+    # consistent with a boot but proves nothing about the /clear.
     booting = (st4.idle is False) or ("boot" in (st4.raw or "").lower())
-    if not booting:
-        _page_loud(f"⚠️ ctx-watchdog: {a.agent} cleared + boot nudge sent but no activity yet — verify it "
-                   f"started reading. Handoff {fresh}.")
-    return True, f"reset OK (handoff {fresh}; booting={booting})"
+
+    # 5. PROVE it. Until this returns CONFIRM_RESET, the word "cleared" is not
+    #    available to us — see _confirm_reset's docstring for the 2026-07-26 page
+    #    this replaces.
+    state, why = _confirm_reset(a.agent, before_fp)
+    outcome["confirmation"] = state
+    outcome["confirm_detail"] = why
+
+    if state == CONFIRM_RESET:
+        if not booting:
+            # ASSERT what was observed (the reset is proved; the pane is quiet),
+            # HEDGE nothing that is uncertain — the exact inversion of the old copy,
+            # which asserted the unverified reset and hedged the observed quiet.
+            _page_loud(f"⚠️ ctx-watchdog: {a.agent} reset CONFIRMED ({why}), but the pane shows NO activity "
+                       f"after the boot nudge — check it started reading. Handoff {fresh}.")
+        return True, f"reset CONFIRMED (handoff {fresh}; {why}; booting={booting})"
+
+    if state == CONFIRM_NOT_RESET:
+        _page_loud(f"🚨 ctx-watchdog: {a.agent} was NOT reset. A /clear was typed and submitted, but the "
+                   f"telemetry proves the session never restarted ({why}). Treat {a.agent} as STILL FULL "
+                   f"and reset it by hand. Handoff {fresh} is saved.")
+        _log_pen_gate(f"red reset REFUTED for {a.agent}: {why}")
+        return False, f"NOT RESET: /clear submitted but refuted by telemetry ({why})"
+
+    # CONFIRM_UNKNOWN — the honest third state. Say plainly that it is unproven and
+    # must be treated as NOT reset; do NOT dress lag up as either outcome.
+    _page_loud(f"⚠️ ctx-watchdog: {a.agent} — a /clear was submitted but I could NOT confirm it took "
+               f"effect ({why}). Treat {a.agent} as NOT reset until you have looked: if it is still full, "
+               f"reset it by hand; if it is already fresh, this was only measurement lag. Handoff {fresh}.")
+    _log_pen_gate(f"red reset UNCONFIRMED for {a.agent}: {why}")
+    return False, f"UNCONFIRMED: /clear submitted, reset not provable ({why})"
 
 
 def _run_checkpoint_for(a: AgentCtx, reg: dict, est: dict, now: float) -> tuple[bool, str]:
@@ -973,12 +1245,34 @@ def run_executor(rows: list[AgentCtx], arm_level: str = "red") -> list[str]:
                 if (now - last_rs) < _RESET_DEDUP_MIN * 60:
                     results.append(f"{a.agent}: red — reset deduped (last {int((now - last_rs) / 60)}m ago)")
                     continue
-                ok, detail = _do_reset(a, reg)
+                outcome: dict = {}
+                ok, detail = _do_reset(a, reg, outcome)
+                confirmation = outcome.get("confirmation")
                 if ok:
                     est["reset_at"] = now
                     est["checkpoint_at"] = now
                     state[a.agent] = est
-                results.append(f"{a.agent}: red reset {'OK' if ok else 'SKIP/ABORT'} — {detail}")
+                elif confirmation == CONFIRM_UNKNOWN:
+                    # We submitted a /clear and cannot prove either way. Re-driving
+                    # a second /clear+boot 10 minutes later at a body that DID reset
+                    # would wipe its fresh boot — so hold the dedup timer (safe
+                    # direction) even though this is reported as a FAILURE. The
+                    # operator has been paged; the next cycle's telemetry will be
+                    # unambiguous.
+                    est["reset_at"] = now
+                    state[a.agent] = est
+                # ok is the authority for success (a caller/stub may not populate
+                # `outcome` at all); the confirmation state only refines the FAILURE
+                # wording so "refuted" and "unproven" never read the same.
+                if ok:
+                    label = "CONFIRMED"
+                elif confirmation == CONFIRM_NOT_RESET:
+                    label = "NOT-RESET (refuted by telemetry)"
+                elif confirmation == CONFIRM_UNKNOWN:
+                    label = "UNCONFIRMED (not proven either way)"
+                else:
+                    label = "SKIP/ABORT"
+                results.append(f"{a.agent}: red reset {label} — {detail}")
             else:
                 # amber body (any arm), OR red body under arm=amber -> WRITE-ONLY.
                 touched, line = _run_checkpoint_for(a, reg, est, now)
