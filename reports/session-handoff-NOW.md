@@ -639,6 +639,43 @@ told the wrong thing.**
 **Fix:** make the filename unique (`update_id`/message id). **Deliberately not applied** — live daemon on
 the operator's inbound path, and I am declared saturated.
 
+## 0l. ✅ VIEW-AS DRIVEN LIVE — works; and we can no longer QA the client's own org
+
+**Operator asked (op#7394) whether Gazzabyte's admin and view-as-other-roles work. Answered by driving
+it, not by reading config** — a screen question is not a data question.
+
+**✅ WORKS, all 7 roles** (Cashier, Preparer, Viewer, Teacher, Parent, HR Manager, Supplier), at **375px
+AND 1280px**, on prod sha **`dd72671`**: entry pill renders inside the 375px header (x=220 w=98.6, no
+overflow), dropdown opens fully in-viewport, **content genuinely changes** (52 nav items → 4–24 by role),
+banner reads *"Viewing as ⟨Role⟩ — read only ✕ Exit"* **at both widths**, Exit restores admin.
+**The 2026-07-25 mobile defect is fixed and live.** 38 screenshots; I eyeballed one myself.
+
+**✅ Gazzabyte's admin — MEASURED:** `sales@gazzabyte.sg` holds an **ACTIVE `org_admin`** on the irsyad
+org and **signed in 2026-07-25 22:51:13Z — AFTER the purge below**, so their access was never affected.
+`platform_admins` is empty ⇒ `isSuperAdmin=false` ⇒ the render condition
+`realRole==='org_admin' && !isSuperAdmin && !isViewAs` holds; `PREVIEWABLE_ROLES` is a **static 7-role
+constant**, not derived from org membership. ⚠️ **That last part is inference from code+data, NOT an
+observation of their session** — and I said so to the operator.
+
+### 🔴 THE REAL FINDING: WE CANNOT QA THE CLIENT'S ORG AT ALL
+**Every test account's membership on `madrasah-irsyad-zuhri-al-islamiah` was soft-deleted
+`2026-07-25 11:31:20Z`** (`zz-uat-tester`, `uat-operator`, `uat-cashier/viewer/teacher`,
+`admin/cashier/viewer/parent@irsyad.test`, `zz-verify-preparer`). **So there is no way to exercise their
+screens without logging in as a REAL person — Gazzabyte or Elly — which would put our activity under
+their name in their own audit trail. Refused.**
+**The test therefore ran on a SYNTHETIC org** ("QA Madrasah") in the same DB, same build, same code path.
+✅ **Zero client rows touched — verified after the fact: all 28 `audit_log` rows produced are scoped to
+`qa-madrasah-test`, none to the irsyad org.**
+📌 **This is a gap in HOW WE WORK, not a bug in their system** — and it is the standing "dedicated QA
+tester before the operator" item arriving as a concrete blocker. **A permanent read-only test account
+inside their org needs the client's say-so.** Raised to the operator.
+
+**⚠️ Minor, unfixed:** at 375px the fixed view-as banner **overlaps the "Report Bug" pill and the first
+Quick Action row** (`03-375-viewas-cashier.png`). Legible, Exit works, nothing broken. **Deliberately not
+shipped** — never a blind CSS change to the client's live site, and I am saturated.
+**Not re-tested:** read-only *enforcement* under preview (that is the CAI-535 proof), and view-as against
+irsyad's own module configuration.
+
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
 The token was still live at 04:45Z after six hours. **Do not re-send the commands; do not re-page.**
