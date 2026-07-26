@@ -17,7 +17,7 @@
    🔴 **CAI-615 binds ON TOP of all of these**: no §6.6 grant until the silo's state is measured by **probing objects**. That measurement is now DONE — §0e is the evidence base.
 4. **Elly's bank-import commit is HELD** — four prerequisites (§4).
 5. **AGENT-AS-SIGNATORY GATE (CAI-601):** no approver row beyond `saddam@`/`zuremi@` until the durable service-account property ships. cai's ruling: *a two-person control with a non-human half is a one-person control with extra steps.*
-6. ~~My unsent composer text: `now do giro`~~ — **RESOLVED 2026-07-26.** ⚠️ **NOT the operator's** — he stated 09:21Z he never typed into any terminal (§0f). It was **the hub's OWN staged next step**. Carried out either way: §2 item 4 + `reports/giro-state-of-play-20260726.md`.
+6. ~~My unsent composer text: `now do giro`~~ — **RESOLVED 2026-07-26.** ⚠️ **NOT the operator's** — he stated 09:21Z he never typed into any terminal (§0f). **Authorship UNDETERMINED (CAI-625) — not-him is not the-hub.** Carried out either way: §2 item 4 + `reports/giro-state-of-play-20260726.md`.
 7. **🔴 DO NOT APPLY MIG 122 ON THE ASSUMPTION THE INDEX IS HELD** (set 2026-07-26 03:15Z, verified by reading the SQL at `c440136`). CAI-536 ruled `uq_audit_log_org_prev_hash` stays HELD until the hot writers migrate. **Migration 122 does not implement that** — the index is created at lines 450/458 inside the same `BEGIN`(171)/`COMMIT`(478) as the RPCs, and the DO-block guard keys on **forks**, not on writer migration, so **both arms build it**. goumlyne is fork-clean ⇒ the **full** index arm fires. Escalated to cai as bus #11541 ahead of the 13:19:25Z window. The hold is a sentence in a decision, not a property of the file.
 
 ---
@@ -42,8 +42,8 @@ his criticism is narrowed but **not eliminated**. Do not upgrade this to "livene
 would publish green forever. Filed as CAI-616 §E.
 ⚠️ **`fix the heartbeat to be periodic` was NOT the operator's instruction** — it was found staged in
 cai's composer and we attributed it to him; **he stated 09:21Z he never typed into any terminal (§0f).**
-It was a body's own staged step. **I asked him to rule on it and have since WITHDRAWN the question —
-he owes no answer.** The design stands on its own merits, not on anyone's instruction.
+**Whose it was is UNDETERMINED (CAI-625).** **I asked him to rule on it and have since WITHDRAWN
+the question — he owes no answer.** The design stands on its own merits, not on anyone's instruction.
 Debug with `WINGMEN_HEARTBEAT_DEBUG=1 .venv/bin/python3 scripts/hub_heartbeat.py` (exits 1
 and prints the error; the hook path deliberately stays silent so it can never wedge a turn).
 
@@ -152,8 +152,9 @@ A restore point's currency is MEASURED, never DECLARED** (CAI-619).
 ### 🔴 THE MECHANISM: the composer QUEUES, it does not discard
 `Enter` does not reliably submit in these panes. ⚠️ **The four stranded strings were NOT the
 operator's — see §0f.** `02:13 now do giro` · `~04:0x run the vercel bot-account experiment` ·
-`04:41 fix the heartbeat to be periodic` · `05:21/05:23 reset me` were **the BODIES' OWN staged
-next steps.** The defect is real; **the victim is the agents, not him.**
+`04:41 fix the heartbeat to be periodic` · `05:21/05:23 reset me` are **UNATTRIBUTED (CAI-625)** — not his,
+and not thereby the agents'. The Enter defect is real and independently measured; **the victim class is
+not established.**
 Nazim's correction to cai's model matters: the text **QUEUES and is RECOVERABLE UNTIL RESET**,
 so the fix is **CAPTURE THE QUEUE BEFORE ANY RESET**, not "detect discards".
 **`logs/reset_{orch,cai}_preserved_input.log` is a load-bearing control** (cai's designation).
@@ -252,10 +253,19 @@ to the operator unprompted. *The signal I used was the one signal that happened 
 **His words, op#7378, verbatim:** *"i havent been typing any instructions into terminals. only to you
 and orch via telegram"*
 
-🔴 **Every stranded composer string we attributed to him was a BODY'S OWN staged next step.**
-`now do giro` (hub) · `run the vercel bot-account experiment` (cai) · `fix the heartbeat to be periodic`
-(cai) · `reset me` (both). **Three of us reasoned for hours about a man who was one message away, and
-none of us asked him.** *A claim about a person who CAN be asked should be asked, not inferred.*
+🔴 **The four strings were NOT his.** `now do giro` · `run the vercel bot-account experiment` ·
+`fix the heartbeat to be periodic` · `reset me`. **Three of us reasoned for hours about a man who was
+one message away, and none of us asked him.** *A claim about a person who CAN be asked should be asked.*
+
+🔴🔴 **AND THEY ARE NOT THEREFORE THE AGENTS' — A DENIAL IS NOT AN ATTRIBUTION (CAI-625).**
+I wrote, and told him, that they were *"the bodies' own staged next steps"*. **He said NOT-HIM. He never
+said whose.** A denial removes a hypothesis; it does not supply one. **That is the THIRD attribution
+claim in this chain and the first two were both wrong** — and it passed unchallenged because it is a
+self-blame on behalf of the fleet, *and nobody argues with agents blaming agents* (invariant 19).
+✅ **CORRECT STATE: all four are UNATTRIBUTED — verdict UNDETERMINED — until measured.**
+⚠️ **The original claim was CIRCULAR:** `reset_orch_preserved_input.log:4` records the string as
+*"the operator's 'run the vercel bot-account experiment'"* — **the log we treated as evidence had the
+wrong attribution baked into it**, and we then read it back out as if it were a finding.
 
 **WHAT SURVIVES, and keep the bound tight:** the **Enter defect is real and independently measured** —
 3 lane panes, bare `Enter`, **nothing moved 3/3**; `lane_nudge.sh` verified-submit cleared all three
@@ -514,6 +524,8 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
+- 🔴 **A DENIAL IS NOT AN ATTRIBUTION** (cai, CAI-625). *Not-him* removes a hypothesis; it does not supply one. I turned his denial into agent-authorship and stated it to him as fact — **the third wrong attribution in one chain**, and it slid past because **a self-blame on behalf of the fleet is the claim nobody argues with** (invariant 19).
+- 🔴 **A LOG CAN CARRY A CLAIM'S CONCLUSION INSIDE ITS OWN EVIDENCE.** `reset_orch_preserved_input.log:4` literally reads *"the operator's …"* — we wrote the attribution into the record, then read it back out as a finding. **Check whether your evidence was authored by the belief you are testing.**
 - 🔴 **A NOTE FILED UNDER ONE QUESTION DOES NOT SURFACE WHEN A DIFFERENT QUESTION MEETS THE SAME FACT.** Nazim diagnosed the frozen render at 03:30Z under *"the gauge is unreliable"*, then met the same fact at 07:00Z as *"is cai busy"* and held a reset on it. Not inattention — **the absence of a retrieval path.** Same reason §4's attribution figure sat unquestioned for days.
 - 🔴 **`unprocessed()` TELLS YOU WHAT IS OUTSTANDING, NOT WHAT THE OPERATOR HAS SAID.** A message answered by another body is stamped handled and vanishes from your inbox check *with its contents*. **Thread ownership governs who REPLIES; it must never govern who KNOWS.** Read `recent()` across ALL channels before asserting anything about the operator. §0f.
 - 🔴 **A claim about a person who CAN BE ASKED should be asked, not inferred.** Three bodies spent a night reasoning about the operator's behaviour; he was one message away and settled it in one sentence.
