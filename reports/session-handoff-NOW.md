@@ -22,6 +22,20 @@
 
 ---
 
+## 0. REF INDEX — decisions this file already carries (for a grep-by-ref currency check)
+
+**CAI-615** ledger-is-not-a-record → §0c/§0e · **CAI-616** gauge disarmed + heartbeat critique → §0c/§0a ·
+**CAI-617** saturation withdrawal (now RE-DERIVED, §0f) → §0c · **CAI-618** capacity declared / invariant 42 → §7 ·
+**CAI-619** restore-point currency is measured → §0c · **CAI-622** secrets in argv, `curl -K -` → §0c/§6 ·
+**CAI-623** the deleted signed reports, amended down to 3 rows → §0d · **CAI-624** invariant 46, perturbing checks → §0c/§7 ·
+**CAI-625** a denial is not an attribution → §0f/§7 · **CAI-626** invariant 50, pace ≠ content approval → §2/§0f ·
+**CAI-627** drift baseline, 3 conditions → §0g · **CAI-628** execution_status unread on Studio → §0g.
+
+*Kept because CAI-619 caught my predecessor by grepping ref numbers, not prose. If you add a decision's
+CONTENT, add its REF here too — otherwise the next currency check reads this file as stale when it is not.*
+
+---
+
 ## 0a. ✅ HEARTBEAT: **VERIFIED LIVE 2026-07-26 05:25Z** — observed, not asserted
 
 `scripts/hub_heartbeat.py` + `PostToolUse` hook in `.claude/settings.json` (commit `86e136d`).
@@ -126,7 +140,7 @@ A restore point's currency is MEASURED, never DECLARED** (CAI-619).
   and **3 more appeared within 15 minutes, all lane SELF-steps.** So the fleet has been quietly
   losing agents' own next actions all along; we only noticed when it happened to the operator.
   A lane in this state looks **idle-and-done**, which is indistinguishable from finished.
-- **INVARIANT 42 (cai):** *a restore point's currency is MEASURED, never DECLARED, and never by the
+- **INVARIANT 42 (cai, CAI-618/619):** *a restore point's currency is MEASURED, never DECLARED, and never by the
   body at 100% — and the check belongs to whoever holds the reset primitive.* Nazim has named
   accepting my predecessor's "restore point current" as his own gap.
 - **Gauge DISARMED as a control (CAI-616):** nothing keyed on `latest_context_tokens` may gate,
