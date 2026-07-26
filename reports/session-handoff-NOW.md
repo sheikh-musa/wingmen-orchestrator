@@ -319,6 +319,38 @@ operator's refutation (§0f) that is a **SECOND independent reason** the "strand
 reconstruction is unreliable. `now do giro` demonstrably existed — it was carried out. **For the others
 I would no longer assert presence OR timing.**
 
+## 0g. ✅ CAI-627 BASELINE DONE — and the errand found two things bigger than the ticket
+
+**`21ff090` (main) + `a9f9a32` (worktree).** The two mig-120 tables on goumlyne are baselined under
+cai's three conditions: **exact object names** (no `tabung_*` glob), **CAI-601 + CAI-627 cited in the
+ALLOWLIST entry itself**, scoped to the reason. **Proven with a control rather than asserted:**
+`tabung_report_signatures` still resolves `CRITICAL/expected=False` while the two named objects resolve
+`INFO/expected=True`. *Without that control, "it works" is indistinguishable from a glob that swallowed
+the whole class.*
+
+🔴 **1. THE EDIT WOULD HAVE BEEN A NO-OP AND I WOULD HAVE REPORTED IT DONE.**
+`dev.wingmen.drift-detector`'s **installed** plist has
+`WorkingDirectory=/Users/Musa/wingmen/orchestrator-wt/preventative-gates`. **The TRACKED plist names the
+main checkout.** They disagree and the installed one wins. So editing `nervous_system/drift_detector.py`
+in this repo — the obvious action — changes nothing the daemon executes. **Applied to BOTH copies:** the
+worktree because it runs, the checkout so it survives the merge/repoint.
+**Generalise it: a launchd service whose working directory is a worktree means the tracked file is not
+the running file.** Fixing such a daemon by editing the repo edits a *document*, not a *system*.
+**Unmeasured: how many other services are in this state.**
+
+🔴 **2. THE DETECTOR ALERTS ONLY ON FIRST SIGHTING — 78 CRITICAL ARE ALREADY SILENT.**
+Dry run: goumlyne **116 findings, 78 CRITICAL non-expected**. The daily alert reported **2**. Not a
+contradiction — the alerting baseline is *prior runs*, so a CRITICAL fires **once** and is quiet forever.
+**That is cai's own "a CRITICAL that is always expected is unheard, not silenced" already in force at
+78×, and nobody granted it.** He required three conditions and a written reason to suppress **two**
+objects; seventy-eight are suppressed automatically with no reason recorded.
+⚠️ **NOT claiming danger — I checked before alarming.** The bulk are `*_missing` (32 grant, 18 index, 15
+column, 9 policy) — goumlyne **lacking** what ceayj has, which for the anon grants means the silo is
+**more restrictive, not less**. Several (`donation_categories`) were deliberately triaged and left open
+in op#4493 because converging them would have broken the live silo.
+📌 **But the count jumped 82 → 114 on 07-24 (+32 in one day) and nobody was alerted**, for the same
+reason. **The mechanism makes "seen once" indistinguishable from "blessed".** cai's to rule.
+
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
 The token was still live at 04:45Z after six hours. **Do not re-send the commands; do not re-page.**
@@ -524,6 +556,8 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
+- 🔴 **A LAUNCHD SERVICE WHOSE WorkingDirectory IS A WORKTREE MEANS THE TRACKED FILE IS NOT THE RUNNING FILE.** `dev.wingmen.drift-detector`'s **installed** plist points at `orchestrator-wt/preventative-gates`; the **tracked** plist names the main checkout. Editing the repo copy — the obvious action, the one that passes review — **changes nothing the daemon runs.** How many other services are in this state is **unmeasured**; it is a measurable question. §0g.
+- 🔴 **"SEEN ONCE" IS NOT "BLESSED".** The drift detector alerts only on drift NEW beyond prior runs, so a CRITICAL fires on first sighting and is silent forever after. **78 CRITICAL are already suppressed with no reason recorded** — cai's own *unheard-not-silenced* ruling in force at 78x, ungranted. §0g.
 - 🔴 **A DENIAL IS NOT AN ATTRIBUTION** (cai, CAI-625). *Not-him* removes a hypothesis; it does not supply one. I turned his denial into agent-authorship and stated it to him as fact — **the third wrong attribution in one chain**, and it slid past because **a self-blame on behalf of the fleet is the claim nobody argues with** (invariant 19).
 - 🔴 **A LOG CAN CARRY A CLAIM'S CONCLUSION INSIDE ITS OWN EVIDENCE.** `reset_orch_preserved_input.log:4` literally reads *"the operator's …"* — we wrote the attribution into the record, then read it back out as a finding. **Check whether your evidence was authored by the belief you are testing.**
 - 🔴 **A NOTE FILED UNDER ONE QUESTION DOES NOT SURFACE WHEN A DIFFERENT QUESTION MEETS THE SAME FACT.** Nazim diagnosed the frozen render at 03:30Z under *"the gauge is unreliable"*, then met the same fact at 07:00Z as *"is cai busy"* and held a reset on it. Not inattention — **the absence of a retrieval path.** Same reason §4's attribution figure sat unquestioned for days.
