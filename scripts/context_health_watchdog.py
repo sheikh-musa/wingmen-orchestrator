@@ -100,6 +100,15 @@ _CTX_WINDOW = int(os.environ.get("CONSOLE_CTX_WINDOW", "1000000"))
 _SOFT = float(os.environ.get("CTX_WD_SOFT", "0.60"))   # amber -> checkpoint-nudge
 _HARD = float(os.environ.get("CTX_WD_HARD", "0.80"))   # red   -> reset-eligible
 _HANDOFF_MAX_AGE_MIN = int(os.environ.get("CTX_WD_HANDOFF_MAX_AGE_MIN", "30"))
+# A reading older than this is NOT current state — it is the last thing the
+# writer happened to catch. The gauge computed age_s from the first day and no
+# consumer has ever looked at it, so a 4-day-old row printed as a live green
+# reading indistinguishable from one taken 30 seconds ago (cc-cosem, age
+# 368,939s, shown "green 16%" on 2026-07-26 while the body had not written a
+# transcript line since 21 July). Stale readings are now MARKED, never
+# suppressed — a body that has since blown past its number must not read as
+# healthy, and a silenced alert would be the worse failure.
+_STALE_S = int(os.environ.get("CTX_WD_STALE_MIN", "20")) * 60
 
 # Always-on agents this watchdog governs. Each entry says WHERE the session lives
 # so the (armed) reset can reach it, and where its handoff should be. host=None
@@ -159,17 +168,38 @@ class AgentCtx:
     age_s: Optional[int]
     action: str         # ok | checkpoint-nudge | reset-eligible
     note: str = ""
+    # True when the freshest telemetry row for this body is older than
+    # _STALE_S. The number is then a HISTORICAL reading, not current state.
+    # Appended last, with a default, so existing positional/keyword callers
+    # and tests construct unchanged.
+    stale: bool = False
+
+    @property
+    def age_label(self) -> str:
+        """Human age, with STALE called out. Never presents an old reading as now."""
+        if self.age_s is None:
+            return "age=unknown"
+        if self.stale:
+            return f"age={self.age_s}s STALE(>{_STALE_S // 60}m)"
+        return f"age={self.age_s}s"
 
 
 def _dsn() -> Optional[str]:
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
 
-def read_context_gauge() -> list[AgentCtx]:
+def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
     """Freshest latest_context_tokens per always-on identity -> classification.
 
     Reuses the console's context-bloat query shape (DISTINCT ON, exclude
-    operator-*, drop rows > window as bad data). Detection only; no side effects.
+    operator-*). Detection only; no side effects.
+
+    `dropped`: optional list the caller passes in to COLLECT readings this
+    function refuses to classify, as (identity, ctx_tokens, window, reason)
+    tuples. Over-window rows used to be `continue`d silently — a measurement
+    that hides its own failure, so a body whose window we have wrong simply
+    VANISHES from the gauge and reads as "not monitored" rather than "not
+    measurable". Callers that pass nothing behave exactly as before.
     """
     dsn = _dsn()
     if not dsn:
@@ -200,7 +230,15 @@ def read_context_gauge() -> list[AgentCtx]:
             # bodies, 200K for the Mini), else the global default for transient lanes.
             window = _AGENT_REGISTRY.get(ident, {}).get("window", _CTX_WINDOW)
             if ctx <= 0 or ctx > window:
-                continue  # bad data — a single call cannot exceed the window
+                # NOT silently skipped any more. ctx > window does not mean the
+                # body is fine — it means our window for it is wrong (or the
+                # writer is), and the honest report is "cannot measure", not
+                # absence. Surfaced to the caller; never classified, so a bogus
+                # number can still never trigger a reset.
+                if dropped is not None:
+                    reason = "non-positive reading" if ctx <= 0 else "exceeds assumed window"
+                    dropped.append((ident, ctx, window, reason))
+                continue
             frac = ctx / window
             pct = round(frac * 100)
             if frac >= _HARD:
@@ -209,10 +247,15 @@ def read_context_gauge() -> list[AgentCtx]:
                 level, action = "amber", "checkpoint-nudge"
             else:
                 level, action = "green", "ok"
-            note = ""
+            stale = age_s is not None and age_s > _STALE_S
+            notes = []
             if action != "ok" and ident not in _AGENT_REGISTRY:
-                note = "not in reset registry — detect-only"
-            out.append(AgentCtx(ident, ctx, pct, level, age_s, action, note))
+                notes.append("not in reset registry — detect-only")
+            if stale:
+                notes.append(
+                    f"STALE: last telemetry {age_s // 60}m old — this is the body's LAST KNOWN "
+                    f"reading, not its current one; if it has been working since, it is higher")
+            out.append(AgentCtx(ident, ctx, pct, level, age_s, action, "; ".join(notes), stale))
     out.sort(key=lambda a: a.pct, reverse=True)
     return out
 
@@ -486,6 +529,12 @@ def plan_reset(a: AgentCtx, armed: bool = False, arm_level: Optional[str] = None
         return f"detect-only: {a.agent} red {a.pct}% but not in reset registry"
     if not reg.get("auto_reset"):
         return f"detect-only: {a.agent} red {a.pct}% — self-compacting body, never auto-reset"
+    if a.stale:
+        # A destructive /clear must never be justified by a reading we cannot
+        # vouch for as current. Checkpointing a stale body is still fine (and
+        # still happens under amber) — that only writes a handoff.
+        return (f"detect-only: {a.agent} red {a.pct}% but the reading is STALE ({a.age_s}s) — "
+                f"refusing to justify a /clear on non-current telemetry; checkpoint only")
     if arm_level != "red":
         # off OR amber — the destructive /clear half is UNARMED. Under amber we
         # still checkpoint the red body (write-only, ≥SOFT), but NEVER reset it.
@@ -895,7 +944,10 @@ def run_executor(rows: list[AgentCtx], arm_level: str = "red") -> list[str]:
         try:
             # The ONLY path that reaches _do_reset (/clear): a red body under the
             # explicit red arm. Everything else is the write-only checkpoint half.
-            do_destructive_reset = (a.level == "red" and arm_level == "red")
+            # `not a.stale` is load-bearing, not cosmetic: without it the
+            # /clear decision can rest on a reading taken hours ago. Stale red
+            # falls through to the write-only checkpoint half.
+            do_destructive_reset = (a.level == "red" and arm_level == "red" and not a.stale)
             if do_destructive_reset:
                 last_rs = float(est.get("reset_at", 0) or 0)
                 if (now - last_rs) < _RESET_DEDUP_MIN * 60:
@@ -992,7 +1044,7 @@ def _alert_text(a: AgentCtx, reg: dict) -> str:
                 if a.level == "red" else
                 "Checkpoint if you're mid-thread; I'll page again if it crosses the reset line.")
         return (f"{head}: {label} (~{a.pct}%)\n"
-                f"{label} is at ~{a.pct}% of its 1M window ({a.ctx_tokens:,} tokens, age {a.age_s}s) "
+                f"{label} is at ~{a.pct}% of its 1M window ({a.ctx_tokens:,} tokens, {a.age_label}) "
                 f"and does not auto-compact. {tail}")
     if a.level == "amber":
         return format_alert(
@@ -1000,14 +1052,14 @@ def _alert_text(a: AgentCtx, reg: dict) -> str:
             what=f"{label} is at ~{a.pct}% of its 1M window and does not auto-compact.",
             why="Left unchecked it degrades (gets foggy/slow) instead of resetting cleanly.",
             do="No action yet — I'll page again if it crosses the reset line. Checkpoint if you're mid-thread.",
-            detail=f"{a.agent}: {a.ctx_tokens:,} tokens, age {a.age_s}s. amber≥{_SOFT:.0%}.",
+            detail=f"{a.agent}: {a.ctx_tokens:,} tokens, {a.age_label}. amber≥{_SOFT:.0%}.",
         )
     return format_alert(
         icon="🚨", title=f"{label} near-full (~{a.pct}%) — reset before it fogs",
         what=f"{label} is at ~{a.pct}% of its 1M window — the point where a non-compacting body starts degrading.",
         why="A fogged body gives slow/incoherent answers and can post stale rulings; catching it here beats you noticing it.",
         do="Reset it via the from-Mini playbook (checkpoint handoff -> in-place /clear -> boot). Say the word and I'll drive it.",
-        detail=f"{a.agent}: {a.ctx_tokens:,} tokens, age {a.age_s}s. red≥{_HARD:.0%}.",
+        detail=f"{a.agent}: {a.ctx_tokens:,} tokens, {a.age_label}. red≥{_HARD:.0%}.",
     )
 
 
@@ -1072,11 +1124,18 @@ def main() -> int:
     # armed for it. Fail-closed (loud crash -> the __main__ dead-man page).
     fleet_health_boundaries.assert_no_sre_red_reset(arm_level)
 
-    rows = read_context_gauge()
+    dropped: list = []
+    rows = read_context_gauge(dropped)
     if args.json:
         out = [{**asdict(r), "plan": plan_reset(r, arm_level=arm_level)} for r in rows]
         exec_results = run_executor(rows, arm_level) if arm_level != "off" else []
-        print(json.dumps({"rows": out, "exec": exec_results, "arm_level": arm_level}, indent=2))
+        print(json.dumps({
+            "rows": out, "exec": exec_results, "arm_level": arm_level,
+            "unmeasurable": [
+                {"agent": i, "ctx_tokens": c, "assumed_window": w, "reason": why}
+                for i, c, w, why in dropped
+            ],
+        }, indent=2))
         if args.alert:
             run_alerts(rows)
         return 0
@@ -1093,7 +1152,14 @@ def main() -> int:
         return 0
     for r in rows:
         win = _AGENT_REGISTRY.get(r.agent, {}).get("window", _CTX_WINDOW)
-        print(f"  {r.level:5} {r.agent:16} {r.pct:3}% of {win//1000}K  ({r.ctx_tokens:>9,})  age={r.age_s}s  -> {plan_reset(r, arm_level=arm_level)}")
+        mark = "STALE" if r.stale else "     "
+        print(f"  {r.level:5} {mark} {r.agent:18} {r.pct:3}% of {win//1000}K  ({r.ctx_tokens:>9,})  "
+              f"{r.age_label}  -> {plan_reset(r, arm_level=arm_level)}")
+    # Report what we could NOT classify. Absence used to be indistinguishable
+    # from "not monitored"; a gauge that cannot say "I failed here" is not a gauge.
+    for ident, ctx, win, why in dropped:
+        print(f"  UNMEASURABLE  {ident:18} {ctx:>9,} tokens vs assumed window {win//1000}K — {why} "
+              f"(NOT classified; fix the window or the writer)")
     if arm_level != "off":
         print(f"[ctx-health] ARMED={arm_level}: running executor "
               f"({'checkpoint-only, no /clear' if arm_level == 'amber' else 'checkpoint + reset'}, gated + deduped)...")

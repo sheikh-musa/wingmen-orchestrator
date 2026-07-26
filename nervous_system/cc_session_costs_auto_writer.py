@@ -34,6 +34,49 @@ def _canonical_dir(name: str) -> str:
     return _HOME_PREFIX_RE.sub("-Users-sheikhmusa-", name, count=1)
 
 
+# LANE COVERAGE (op-caught 2026-07-26: "is everyone's context on fleet console
+# accurate?"). _DIR_TO_CC only knows the four original CC families + the
+# operator-session repos. Every lane spun up since then — the four live Mini
+# lanes and the fleet SRE — has a ~/.claude/projects dir that map has never
+# heard of, so `if not cc_identity: continue` DROPPED them silently and they
+# were absent from cc_session_costs entirely. The context gauge therefore
+# reported on 6 bodies while 5 more ran unmeasured; cc-irsyad was measured at
+# 481,207 live tokens (48% of a 1M window) while showing NOWHERE.
+#
+# Deliberately a SEPARATE map rather than new _DIR_TO_CC entries: _DIR_TO_CC
+# also drives autonomous_loop_detector's runaway flagging and watchdog.py's
+# long-caller content-shape/kill pipeline. Widening it would silently enrol
+# five live lanes into a KILL path. Telemetry coverage must not buy itself a
+# blast radius — so this map is read ONLY here, by the cost/context writer.
+#
+# Keys: the Mini's ~/.claude/projects dir names (host-normalised by
+# _canonical_dir, same as _DIR_TO_CC). Values: the lane's canonical bus
+# identity (fleet_lanes.base_agent_id — verified against agent_messages
+# from_agent, NOT the '-1'-suffixed agent_status instance ids).
+_LANE_DIR_TO_CC = {
+    "-Users-sheikhmusa-wingmen-projects-ihsanos-irsyad":     "cc-irsyad",
+    "-Users-sheikhmusa-wingmen-projects-cosem-exams-lane":   "cc-cosem-exams",
+    "-Users-sheikhmusa-wingmen-projects-caai-lane":          "cc-caai",
+    "-Users-sheikhmusa-wingmen-projects-cosem-port-lane":    "cc-cosem-platform",
+    "-Users-sheikhmusa-wingmen-projects-cosem-platform":     "cc-cosem-platform",
+    "-Users-sheikhmusa-wingmen-fleet-health":                "cc-fleet-health",
+}
+
+
+def resolve_cc_identity(dir_name: str) -> Optional[str]:
+    """cc_identity for a ~/.claude/projects dir name, or None if unmapped.
+
+    Order: the ratified _DIR_TO_CC families first (so nothing here can shadow
+    a canonical identity), then the lane map. Both are tried on the raw name
+    and on the host-normalised form.
+    """
+    for table in (_DIR_TO_CC, _LANE_DIR_TO_CC):
+        hit = table.get(dir_name) or table.get(_canonical_dir(dir_name))
+        if hit:
+            return hit
+    return None
+
+
 @dataclass(frozen=True)
 class SessionTokens:
     input_tokens: int
@@ -117,9 +160,7 @@ def sweep_projects_root(
     except OSError:
         return rows
     for repo_dir in repo_dirs:
-        cc_identity = _DIR_TO_CC.get(repo_dir.name) or _DIR_TO_CC.get(
-            _canonical_dir(repo_dir.name)
-        )
+        cc_identity = resolve_cc_identity(repo_dir.name)
         if not cc_identity:
             continue
         # Body-aware relabel: the orchestrator repo dir is SHARED by the hub
