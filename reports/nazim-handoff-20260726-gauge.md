@@ -309,3 +309,21 @@ withdrawals/corrections — me 37, cai 36, hub 16; the four building lanes produ
 pattern, cause unproven, and I refused to attribute it to the model. Two drivers named: instruments
 genuinely were lying (so suspicion kept being rewarded), and **we spend all night praising self-correction,
 which makes correcting the highest-status move available.**
+
+### 🔴 OWED — priority_sla_watchdog IS LIVE ON THE MINI AND ITS C-u CAN FIRE ON A FROZEN PANE
+The hub's inventory recorded this script as untracked/dormant. **That is true of the STUDIO and INVERTED
+on the MINI**, measured 10:53Z with controls: TRACKED (control: 146 files tracked under `scripts/`),
+plist EXISTS, launchctl LOADED, log scanning every ~90s. **It is the source of every SLA escalation
+tonight.**
+`:302` sends **`C-u`** — destroying staged composer text by design — into `orch` and `nazim` **over SSH**,
+gated solely on `"esc to interrupt" in cap` (`:300`). **Freshness/repaint-aware references in the whole
+file: 0.** A frozen pane shows no `esc to interrupt`, reads as idle, and `C-u` fires.
+That is precisely the harm done by hand earlier (≈10 ssh nudges each starting `C-u`, erasing cai's staged
+drafts), now automated on a timer against both governance bodies. Currently not firing (log: 0 nudges —
+dedup + `attended_for` suppressing) — **luck plus dedup, not a control.**
+**FIX (proposed, not done): `C-u` must not fire on a pane whose liveness is unproven.** Also endorse the
+hub's `changed_at`/content-hash column on `coordinator_panes` — `captured_at` is stamped every 10s
+regardless of whether `pane_text` changed, so the console's ">90s stale" guard is structurally unable to
+fire. One column makes freeze queryable fleet-wide.
+Not actioned by me: ~81% context, live daemon, and I had already shipped two fixes today that created the
+next defect's surface.
