@@ -492,6 +492,18 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 ## 6. ⚠️ TRAPS ON THIS BOX (verified)
 
 - **`grep` AND `find` are wrapped shell functions** → gitignore-aware, **cannot see `.env*`**. Only `os.walk` in Python **with a visible positive control** is admissible.
+- 🔴 **A TUI PANE CAN FREEZE — a marker's PRESENCE is not the STATE it asserts** (found 2026-07-26,
+  `19b1bdf`). cai showed `Waiting for 4 background agents to finish` with the agent timer reading
+  **exactly `26m 42s` at 05:26Z, 07:00Z and 09:31Z** — four hours, the same second — and byte-identical
+  across a 6s sample, while `agent_status` said IDLE and it had been silent on the bus for 3.5h. The
+  pane had stopped repainting. **A live wait ANIMATES; a frozen one does not.** Any guard reading a
+  render must prove the render is LIVE (capture twice; identical ⇒ claim unverifiable), and must **say
+  so** rather than silently reclassifying. *If work was in flight it is already lost — the reset is not
+  what loses it.*
+- 🔴 **EVERY NEW EVIDENCE SOURCE IS A NEW THING THAT CAN LIE.** Hardening the reset guard produced a
+  three-layer sequence where **each fix created the next defect's surface**: (1) the guard could not see
+  background-agent waits → (2) the fix was locale-dead in the SSH path → (3) the marker it now trusts
+  can freeze. Not three separate bugs; one property of hardening-by-adding-sources.
 - 🔴 **LOCALE-DEPENDENT REGEX — tests green interactively, ships DEAD over SSH** (found 2026-07-26,
   `05031bf`). A TUI spinner glyph like `✻` is **THREE BYTES**. An anchor written
   `^[^[:space:]][[:space:]]Waiting for…` matches under UTF-8 (one glyph, then the space) and **FAILS
@@ -537,6 +549,7 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
+- 🔴 **A NEGATIVE RESULT IS ONLY EVIDENCE IF YOU HAVE SHOWN THE INSTRUMENT CAN PRODUCE A POSITIVE.** Converged on independently by Nazim (three false-negative greps) and me (a locale-dead regex, and a liveness test that would have looked correct because "always stale" gives the answer you wanted). **The control must use a known-TRUE subject** — validating the frozen-pane test required a synthetic pane that printed the marker AND animated.
 - **INVARIANT 42 (cai):** a restore point's currency is **MEASURED, never DECLARED**, and never by the body at 100% — the check belongs to whoever holds the reset primitive.
 - **INVARIANT 46 (cai, CAI-624) — bounds CAI-603:** *before adding a second vantage point, ask whether OBSERVING COSTS THE SYSTEM ANYTHING. If the measurement consumes a contended resource, independent checkers COMPOUND rather than cancel.* Born from cai and me each independently hammering the ingest daemon with competing polls to find out whether it was degraded.
 - 🔴 **A PERTURBING CHECK CAN MANUFACTURE ITS OWN CONFIRMATION** (cai). *Had his probe caused a message loss, the loss would have arrived as evidence for the hypothesis he was testing.* Worse than contamination.
