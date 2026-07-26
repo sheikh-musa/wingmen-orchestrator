@@ -555,7 +555,11 @@ SSH, gated at `:300` SOLELY on `esc to interrupt`. Repaint/freshness references 
 ⚠️ **A CANDIDATE ROOT CAUSE for tonight's disappearing composer text** — the automated form of the harm
 Nazim did by hand (his ~10 SSH nudges each began with `C-u`). **NOT asserted:** that attribution is ruled
 `origin: unrecoverable` (CAI-625/626) and I am **not** reopening a closed question with a fresh guess.
-*Live but not firing (0 nudges) — **luck plus dedup, not a control.*** Nazim at 81%, not touching it.
+↩️ ~~*Live but not firing (0 nudges)*~~ — **WITHDRAWN.** That log records **COUNTS ONLY, never targets**
+(control: **zero** LANE targets recorded either, so the absence of singleton targets proves nothing).
+**~721 fires in 12 days, targets unrecoverable — and it fired twice in the 20 min to 11:12:59Z.**
+🔴 **The `C-u` candidate therefore CANNOT be excluded, and cannot be promoted either. It stays a candidate
+permanently**, because the record to settle it was never written. Nazim at 81%, not touching it.
 📌 **AND THE SHAPE MATTERS MORE THAN THE SCRIPT:** I flagged the Mini as unmeasured and was right to —
 but **a per-host finding stated in the fleet's voice inverts silently on the host you did not scan.**
 **Every risk rating in `pane-derived-signal-inventory-20260726.md` is STUDIO-SCOPED.**
@@ -752,6 +756,9 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
+- 🔴 **A SYSTEM CAN LOG THE ACTION BUT NOT THE PARTICIPANT — found TWICE today in unrelated rails.** `audit_log` records *that* a signed report was deleted, not *who* (actor went to free-text `payload`, §0d); `priority_sla_watchdog` records *that* it fired ~721 times in 12 days, not *whom at* (`_nudge_target()` computes the target and the summary discards it). **Both look complete** — one has an actor COLUMN, the other has firing LINES — and **in both the missing field was available at write time and thrown away.** Look not for missing logs but for **logs whose most load-bearing field is the one nobody persisted.**
+- 🔴 **A LOGGING FIX IS PROSPECTIVE ONLY — it prevents the next unknown, it cannot recover the last 721.** So the composer-text attribution is **unrecoverable BY CONSTRUCTION, not by neglect** — a second independent route to CAI-625/626's `origin: unrecoverable`. **A fix landing must not close the question in anyone's head.**
+- **A control that prevents a FALSE ALL-CLEAR is worth more than one that prevents a false alarm** — nobody goes looking for the all-clear again. (Nazim's fifth canary tonight; it stopped him wrongly EXCLUDING the `C-u` candidate.)
 - 🔴 **CAI-630, BINDING FLEET-WIDE: NO PANE READING IS ADMISSIBLE WITHOUT A REPAINT PROOF.** Two captures, byte-compare. If frozen, **every value on that pane is `origin: unrecoverable` and must be stated EXPLICITLY** — *an omitted provenance field reads as an unremarkable record; an explicit one reads as a warning.* **CAI-616 AMENDED, not withdrawn:** the footer fallback now holds *only while the pane is proven to be repainting* — **without the repaint proof a footer is not a self-report, it is a PHOTOGRAPH of one.** `cc_session_costs` MAY contradict a pane reading and win; it **MAY NOT gate, alarm or reset** — it is not re-armed.
 - 🔴 **INVARIANT 53 (mine, generalised by cai): A SERVICE'S RUNNING FILE IS THE ONE ITS INSTALLED UNIT POINTS AT, NEVER THE ONE IN THE REPO.** Editing the tracked file is editing a *document*, not a *system*.
 - 🔴 **CAI-629: "SEEN ONCE" MAY NEVER MEAN "BLESSED."** Suppression is legitimate only via an allowlist entry **carrying a reason AND a decision ref**. Until then the detector's correct description is: **IT REPORTS NOVELTY, NOT STATE** — any body citing it as evidence of silo health is citing an instrument silent by construction since first sighting.
