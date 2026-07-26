@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -402,6 +403,60 @@ def build_page(v: dict, nudges: int) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# ESCALATION LADDER (CAI-600, 2026-07-26). A stalled AGENT queue is an
+# agent-coordination problem: the operator cannot clear another body's inbox, and
+# paging him converts coordination into noise. It happened at 00:35Z — cai's queue
+# stalled while cai was deliberately offline mid-wrap-up, and the page went to the
+# operator WHILE HE WAS DRIVING. Factually correct, operationally useless.
+#
+# So: escalate INTERNALLY first. orch-console (Nazim) is the body that can chase a
+# stalled agent, re-route the item, or wake the recipient. The operator is paged
+# ONLY when there is no internal path left — i.e. orch-console itself is the
+# stalled party or is unreachable — or when the item requires HIM specifically.
+#
+# Fails toward paging: if we cannot determine whether the internal path is alive,
+# the operator still gets it. A missed page is worse than an unnecessary one; this
+# only removes pages we can PROVE somebody else can act on.
+def _internal_path_alive(recipient: str) -> bool:
+    """Is orch-console live and NOT itself the stalled recipient?"""
+    if recipient == "orch-console":
+        return False                      # the internal escalator IS the stall
+    tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
+    try:
+        r = subprocess.run([tmux, "has-session", "-t", "=nazim"],
+                           capture_output=True, timeout=5)
+        return r.returncode == 0
+    except Exception:                      # noqa: BLE001 — cannot tell => page
+        return False
+
+
+def escalate_internally(v: dict, nudges: int) -> bool:
+    """File the stall to orch-console instead of paging the operator."""
+    body = (f"SLA stall on an agent queue — routed to you rather than the operator, who cannot "
+            f"clear another body's inbox (CAI-600).\n\n"
+            f"  recipient : {v['agent']}\n  message   : #{v['message_id']} ({v['priority']})\n"
+            f"  stalled   : {v['elapsed_minutes']}m, {nudges} prior re-nudge(s) failed\n"
+            f"  subject   : {(v.get('subject') or '')[:120]!r}\n\n"
+            f"Chase the recipient, re-route the item, or tell me why it is correctly waiting. "
+            f"If this genuinely needs the operator, escalate it yourself with the reason — that "
+            f"judgement is yours, not this watchdog's.")
+    try:
+        import psycopg
+        dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+        with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
+                "priority) VALUES ('sla-watchdog','orch-console','blocker',%s,%s,%s)",
+                (f"SLA stall: {v['agent']} #{v['message_id']} ({v['priority']}, "
+                 f"{v['elapsed_minutes']}m)", body, v["priority"]))
+            conn.commit()
+        return True
+    except Exception as e:                 # noqa: BLE001
+        log(f"internal escalation failed ({e}) — falling through to operator page")
+        return False
+
+
 def send_page(text: str, dry: bool) -> bool:
     if dry:
         return True
@@ -617,6 +672,18 @@ def run(dry: bool, injected: list[dict] | None = None,
                     actions.append(f"SKIP page #{mid} ({pr}) — already paged on bus (dedup)")
                 elif pages_this_run >= MAX_PAGES_PER_RUN:
                     actions.append(f"HOLD page #{mid} ({pr}) — per-run page cap {MAX_PAGES_PER_RUN} reached")
+                elif _internal_path_alive(agent) and (dry or escalate_internally(v, prev_nudges)):
+                    # CAI-600: an agent-queue stall goes to orch-console, not the operator.
+                    # He cannot clear another body's inbox; paging him turns coordination into
+                    # noise (00:35Z: cai's queue paged him WHILE HE WAS DRIVING). Only reached
+                    # when the internal path is provably alive AND the bus write succeeded —
+                    # any doubt falls through to the operator page below.
+                    rec["paged"] = True
+                    rec["paged_ts"] = now
+                    actions.append(
+                        f"{'[DRY] ' if dry else ''}INTERNAL escalation re #{mid} "
+                        f"({pr} {v['violation_type']}, {elapsed}m, agent={agent}) -> orch-console "
+                        f"(operator NOT paged: he cannot clear it)")
                 else:
                     page_text = build_page(v, prev_nudges)
                     ok = send_page(page_text, dry)
