@@ -23,7 +23,10 @@ code=$(curl -s -o /dev/null -w "%{http_code}" \
   "https://api.telegram.org/bot${TOK}/sendPhoto" --max-time 30)
 
 # Durable log (tag=nazim-console) so a rebooted Nazim sees the photo went out.
+# CAI-598/600: log DELIVERY, not intent — operator_log defaults delivered=TRUE, so an
+# unconditional call records a FAILED send as delivered.
 PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
-  outbound "[photo] $(basename "$IMG")${CAP:+ — $CAP}" --chat "$CHAT" --tag nazim-console >/dev/null 2>&1 || true
+  outbound "[photo] $(basename "$IMG")${CAP:+ — $CAP}" --chat "$CHAT" --tag nazim-console \
+  $([ "$code" = "200" ] || echo --undelivered) >/dev/null 2>&1 || true
 
 [ "$code" = "200" ] && { echo "sent $(basename "$IMG")"; exit 0; } || { echo "nazim_send_photo failed (HTTP $code)" >&2; exit 1; }

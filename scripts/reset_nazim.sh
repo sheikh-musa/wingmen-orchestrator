@@ -11,7 +11,7 @@ set -uo pipefail
 TM="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 SESS="nazim"
 PANE="${SESS}:0.0"
-HANDOFF="reports/nazim-handoff-20260716.md"
+HANDOFF="reports/nazim-handoff-20260725-fable-irsyad.md"
 
 if ! "$TM" has-session -t "$SESS" 2>/dev/null; then
   echo "ERROR: tmux session '$SESS' not found on this host. Are you on the Mini?" >&2
@@ -30,7 +30,7 @@ sleep 1
 "$TM" send-keys -t "$PANE" Enter
 sleep 4
 
-BOOT="You are Nazim (orch-console), the operator's CTO console on the Mac Mini, freshly reset after a self-flagged context checkpoint (operator-approved op#4568). FIRST read ${HANDOFF} IN FULL, then CLAUDE.md; run TaskList (12 tasks = your live workstreams); reconcile your inbox — operator_log.unprocessed() AND agent_messages to_agent='orch-console' — answer any unhandled operator message via scripts/nazim_send.sh (NEVER the hub's tg_send), then stamp handled (read + responded_at). Watch for cc-support 'support_draft' bus rows and approve+send via scripts/irsyad_support_send.sh on the ~10-min SLA. Verify-not-assert EVERY 'done' before you tell the operator. Then continue driving the board. Ping the operator that fresh-Nazim is up."
+BOOT="You are Nazim (orch-console), the operator's CTO console on the Mac Mini, freshly reset in-place after a full-context checkpoint (operator-approved op#6976). Confirm your model at the start. FIRST read ${HANDOFF} IN FULL, then CLAUDE.md. YOUR PRIORITY (op#6966/6976): spearhead the irsyad direct-agent build — see the handoff's ★ section. Reconcile BOTH inboxes: operator_log.unprocessed() AND agent_messages to_agent='orch-console' — answer any unhandled operator message via scripts/nazim_send.sh (NEVER the hub's tg_send), stamp handled (read + responded_at). RE-ARM the dev-group monitor (you lost it in the reset — see handoff INTERIM MANNING) or poll the cosem channels; reply in-group via scripts/dev_group_send.sh. Verify-not-assert EVERY 'done'. Then drive irsyad-direct + the board. Ping the operator that fresh-Nazim is up + on which model."
 echo "[reset_nazim] sending boot instruction ..."
 "$TM" send-keys -t "$PANE" -l "$BOOT"
 sleep 1

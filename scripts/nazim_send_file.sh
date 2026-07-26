@@ -25,6 +25,7 @@ code=$(curl -s -o /dev/null -w "%{http_code}" \
 
 # Durable log (tag=nazim-console) so a rebooted Nazim sees the file went out.
 PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
-  outbound "[file] $(basename "$DOC")${CAP:+ — $CAP}" --chat "$CHAT" --tag nazim-console >/dev/null 2>&1 || true
+  outbound "[file] $(basename "$DOC")${CAP:+ — $CAP}" --chat "$CHAT" --tag nazim-console \
+  $([ "$code" = "200" ] || echo --undelivered) >/dev/null 2>&1 || true
 
 [ "$code" = "200" ] && { echo "sent $(basename "$DOC")"; exit 0; } || { echo "nazim_send_file failed (HTTP $code)" >&2; exit 1; }

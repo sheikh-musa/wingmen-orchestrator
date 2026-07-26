@@ -39,12 +39,19 @@ def reconstruct(vision_text: str, name_en: str) -> Optional[str]:
     if not OAUTH:
         return None
     prompt = (
-        "OCR text from a UAE Emirates ID (its Arabic may be incomplete or garbled):\n"
-        f'"""{vision_text[:2000]}"""\n\n'
-        f"The cardholder's English name is: {name_en[:120]}\n\n"
-        "Output ONLY the person's full name in Arabic script, exactly as it should appear on the "
-        "card (reconstruct any Arabic words the OCR dropped, using the English name as the guide). "
-        "Output the Arabic name and nothing else — no quotes, no English, no explanation."
+        "You are transcribing the Arabic name printed on a UAE Emirates ID card. Below is the raw "
+        "OCR text. The OCR sometimes DROPS whole Arabic words, but every Arabic word it DID capture "
+        "is the ground truth — the card, not standard Arabic, is what's correct.\n\n"
+        f'OCR text:\n"""{vision_text[:2000]}"""\n\n'
+        f"English name (a transliteration guide, ONLY for filling words the OCR dropped): {name_en[:120]}\n\n"
+        "Rules — CARD-EXACT:\n"
+        "1. Preserve EVERY Arabic word the OCR captured EXACTLY as written. Do NOT correct, normalise, "
+        "or 'improve' any spelling (e.g. keep على as على — do not change it to علي; keep نورهمان as "
+        "نورهمان — do not expand it to نورالرحمن). Copy the captured letters verbatim.\n"
+        "2. Only ADD an Arabic word if it is ENTIRELY missing from the OCR, inferring it from the "
+        "English name and matching the card's own orthographic style.\n"
+        "3. Keep the original word order.\n"
+        "Output ONLY the resulting full Arabic name — no quotes, no English, no explanation."
     )
     try:
         env = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": OAUTH}

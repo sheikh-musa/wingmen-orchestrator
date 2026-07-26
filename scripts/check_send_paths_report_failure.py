@@ -36,8 +36,30 @@ import sys
 
 ORCH = pathlib.Path(__file__).resolve().parent.parent
 SENDER = ORCH / "scripts" / "_tg_chunked_send.py"
-WRAPPERS = ["tg_send.sh", "cai_send.sh", "irsyad_support_send.sh", "nazim_send.sh",
-            "dev_group_send.sh", "lane_reply.sh"]
+# DISCOVERED, NOT ENUMERATED. The first version of this file carried a hardcoded list of six
+# wrappers — and MISSED tg_send_file.sh and irsyad_support_send_file.sh, the operator and CLIENT
+# file-send paths, both carrying the identical defect. cc-orchestrator found them by sweeping the
+# tree instead of inheriting my list (4c79f3e). The count went 3 -> 4 -> 6, each step someone
+# refusing to inherit the previous one's scope.
+# A checker whose coverage is a literal is a checker that certifies exactly what its author
+# happened to remember. So: find every script that writes to the durable message log, and hold
+# ALL of them to the rule.
+# The rule applies to scripts that SEND *and then* LOG. A script that only writes to the log
+# (log_console_msg, the boot/reset wrappers recording an event) has no send to branch on, and
+# flagging it would make this checker cry wolf on 11 scripts — which is how a checker gets
+# ignored, and then the real one hides among the noise. Precision here IS the safety property.
+_SENDS = ("_tg_chunked_send", "api.telegram.org", "sendMessage", "sendDocument", "sendPhoto")
+
+
+def discover_wrappers() -> list[pathlib.Path]:
+    out = []
+    for p in sorted((ORCH / "scripts").glob("*.sh")):
+        src = p.read_text(errors="ignore")
+        logs = "operator_log" in src or "INSERT INTO operator_messages" in src.upper()
+        sends = any(m in src for m in _SENDS)
+        if logs and sends:
+            out.append(p)
+    return out
 
 
 def behavioural_check() -> tuple[bool, str]:
@@ -57,27 +79,36 @@ def behavioural_check() -> tuple[bool, str]:
 def structural_check() -> tuple[bool, list[str]]:
     """Every wrapper that logs must branch on the send result. Inspection, not behaviour."""
     problems = []
-    for name in WRAPPERS:
-        p = ORCH / "scripts" / name
-        if not p.exists():
-            continue
-        src = p.read_text()
+    wrappers = discover_wrappers()
+    for p in wrappers:
+        name = p.name
+        src = p.read_text(errors="ignore")
         logs = "operator_log" in src or "INSERT INTO operator_messages" in src.upper()
         if not logs:
             continue
-        # a guarded logger either passes --undelivered somewhere, or sets delivered explicitly
-        guarded = ("--undelivered" in src) or re.search(r"delivered\s*[,)]|%s\)?\s*,\s*delivered", src)
+        # A logger is guarded three ways, and all three are legitimate:
+        #   1. it passes --undelivered on the failure path;
+        #   2. it sets `delivered` explicitly in a direct INSERT;
+        #   3. it EXITS on send failure BEFORE reaching the log — control flow, not a flag.
+        # (3) matters: nazim_say.sh does exactly that, and demanding a redundant --undelivered
+        # branch there would have someone "fix" correct code. A checker that cannot tell a real
+        # defect from a different correct shape trains people to ignore it.
+        log_pos = src.find("operator_log")
+        exits_first = bool(re.search(r"\|\|\s*\{[^}]*exit 1", src[:log_pos])) if log_pos > 0 else False
+        guarded = (("--undelivered" in src)
+                   or re.search(r"delivered\s*[,)]|%s\)?\s*,\s*delivered", src)
+                   or exits_first)
         if not guarded:
             problems.append(f"{name}: logs to operator_log with NO failure branch — a failed send "
                             f"will record delivered=true")
-    return (not problems), problems
+    return (not problems), problems, [p.name for p in wrappers]
 
 
 def main() -> int:
     ok_b, detail = behavioural_check()
     print(f"[behavioural] {'PASS' if ok_b else 'FAIL'} — {detail}")
-    ok_s, problems = structural_check()
-    print(f"[structural ] {'PASS' if ok_s else 'FAIL'} — {len(WRAPPERS)} wrappers inspected")
+    ok_s, problems, names = structural_check()
+    print(f"[structural ] {'PASS' if ok_s else 'FAIL'} — {len(names)} log-writing scripts DISCOVERED: {', '.join(names)}")
     for p in problems:
         print(f"    {p}")
     if ok_b and ok_s:
