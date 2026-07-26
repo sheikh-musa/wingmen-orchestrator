@@ -89,6 +89,26 @@ CC_MARKER_NOPROMPT='[PROMPT LINE NOT FOUND — CAPTURE UNRELIABLE, COMPOSER MAY 
 # dies. Not added without measuring that it clears. Revisit with evidence.
 #
 # Sets: CC_BUSY (0|1) and CC_BUSY_REASON (human-readable, '' when idle).
+# 🔴 EXIT CODE IS *MEASUREMENT SUCCEEDED*, NOT *THE PANE IS BUSY*.
+# pane_busy ALWAYS returns 0. The verdict is in $CC_BUSY. This bit a careful
+# body within an hour of shipping (orch-console, #11811), who wrote
+#     if pane_busy "$TM" "$PANE"; then r=BUSY; else r=NOT-BUSY; fi
+# — which reports BUSY for every pane unconditionally, because shell truthiness
+# inverts between the two conventions in play: exit 0 = success = true, while a
+# VARIABLE holding 0 = false. He then recorded that invocation as the standing
+# SLA adjudication whose rule is "if the recipient is BUSY, close the SLA" —
+# turning it into CLOSE EVERY SLA FOREVER. A check that always says yes.
+# That is my API inviting the error, not just his slip: a predicate-shaped name
+# with a non-predicate return is a trap. So use the wrapper below in conditionals
+# and keep pane_busy for when you need CC_BUSY_STALE / CC_BUSY_REASON too.
+#
+# pane_is_busy <tmux-bin> <pane>  -> exit 0 IFF the pane is busy (shell-true).
+# Treats a frozen marker as NOT busy, matching the reset scripts' decision.
+pane_is_busy() {
+  pane_busy "$1" "$2"
+  [ "${CC_BUSY:-0}" = 1 ]
+}
+
 # Sets CC_BUSY_STALE=1 when a busy marker was PRESENT but the render was frozen,
 # so the caller can say "proceeding despite a stale busy marker" out loud rather
 # than silently treating a frozen body as idle.
