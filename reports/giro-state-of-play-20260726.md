@@ -10,10 +10,17 @@ never carried out. Nazim rescued it from the reset script and handed it over.
 
 ## 0. The one-line answer
 
-GIRO has not shipped in 10 days for three reasons, and only one of them is technical:
-we never established WHICH giro, we built it twice without the second build knowing about
-the first, and the live cutover is gated on an audit-lock that is not on the client's
-database and whose central safety bind is not implemented in the artefact.
+**GIRO was never an engineering problem.** The bank statements do not contain donor-level
+GIRO data — collections arrive as lump-sum batches — so audit option (A) is **unachievable
+from these files at any effort** (CAI-RESP-607). We diagnosed this correctly on
+**2026-06-19** ("can't build without a sample GIRO file"), asked three times, never got it,
+and then lost the finding — after which five weeks of status treated giro as a build
+problem behind a gate. See §4.4.
+
+Secondary, all still true: we never established WHICH giro; it was built twice without the
+second build knowing about the first; and the live cutover is gated on an audit-lock that is
+not on the client's database and whose central safety bind is not implemented in the
+artefact (§3.1, upheld as CAI-RESP-605, grant REFUSED).
 
 ---
 
@@ -209,6 +216,44 @@ import (§4: zero bank-sourced donations exist).
 **Latent-only (0 occurrences in these files):** blank rows skipped with no counter
 (`mif-parser.ts:141`, `ocbc-parser.ts:167`); `parseOcbcDate` returning `""` on a non-
 `YYYYMMDD` date (would be caught downstream by `z.string().min(8)` and reported).
+
+---
+
+### 4.3 🔴 CAI-RESP-607 — THE FOOTNOTE WAS THE HEADLINE
+
+cai ruled on §4.2. Three points, all against my framing:
+
+1. **My defect-1 grading was wrong and I withdraw it.** I graded the GIRO RETURN risk
+   "mitigated — human-catchable" in the same message where I reported the parser
+   *"presents them like any other credit."* Both cannot stand. **A human control is only a
+   control if the human receives the discriminating signal**, and my own measurement says
+   the interface removes it. I graded severity down using a mitigation my own evidence had
+   already disproved, one paragraph apart. Same comfortable direction of error as the
+   mig-120 authority misreport.
+2. **The obvious fix is REFUSED. Do NOT exclude on NRTI.** The remedy for a *discarded*
+   discriminator must not rest on an *inferred* one — I had explicitly said the NRTI
+   semantics were unconfirmed with the bank, then reached for them anyway. And silent
+   exclusion **drops real donations**, the worse direction because an omission leaves no
+   trace. **FLAG, DO NOT DROP.**
+3. **The lump-sum finding outranks all three defects: audit option (A) is UNACHIEVABLE from
+   these files.** Reframed from "build harder" to **"obtain a different source."**
+
+All three become **prerequisites #5/#6/#7 on the existing bank-import block** — no new gate.
+
+### 4.4 🔴 THE FIVE-WEEK LOOP — WE KNEW, AND LOST IT
+
+The Irsyad gap-map of **2026-06-19** (op#148) said verbatim: *"GIRO — can't build without a
+sample GIRO file."* That was the **correct diagnosis**. It was re-asked on 06-19 (op#196)
+and 06-21 (op#388), never answered, then dropped out of the record — after which every
+status treated giro as a **build** problem behind a gate.
+
+**Five weeks of treating a data-availability problem as an engineering one.** This is the
+single most important lesson in this file.
+
+**Action taken 03:5xZ:** asked Gazzabyte whether the bank can supply the **itemised GIRO
+collection report** (per-donor breakdown behind each batch credit — often called a direct
+debit collection / returns file). If it cannot be obtained, **(A) is not deliverable at any
+effort**, and the client must hear that before their September audit, not during it.
 
 ---
 
