@@ -474,8 +474,16 @@ objects; seventy-eight are suppressed automatically with no reason recorded.
 column, 9 policy) — goumlyne **lacking** what ceayj has, which for the anon grants means the silo is
 **more restrictive, not less**. Several (`donation_categories`) were deliberately triaged and left open
 in op#4493 because converging them would have broken the live silo.
-📌 **But the count jumped 82 → 114 on 07-24 (+32 in one day) and nobody was alerted**, for the same
-reason. **The mechanism makes "seen once" indistinguishable from "blessed".** cai's to rule.
+↩️ **I WROTE "the count jumped 82 → 114 on 07-24 and nobody was alerted". THAT IS FALSE — measured
+2026-07-26.** The alert **fired and was handled the same day**: `cc-infra` → hub as **#10864** (P1,
+"32 CRITICAL schema drift"), answered **09:22:05Z** by **#10867** — a previous hub body had already
+queried live `role_table_grants`, established it was a **false positive by inversion**, and asked
+`cc-infra` to make the baseline per-silo or invert the class.
+🔴 **THE OPEN ITEM IS NOT AN UNEXAMINED FINDING — IT IS THAT NOBODY ACTED ON THE ANSWER.** `#10867` still
+has **`responded_at = NULL`**; `cc-infra` never fixed the inverted class, so the same 32 have re-fired
+every run since. **The first-sighting contract cost us nothing here. The unclosed loop did.**
+**What the 32 actually are (full detail §0j).** *Stated as plainly as the bad news: the fleet caught this
+on the day and I assumed it had not.*
 
 ## 0h. 🔴 THE PANE IS AN UNRELIABLE NARRATOR — and CAI-616's fallback rests on it
 
@@ -551,6 +559,39 @@ Nazim did by hand (his ~10 SSH nudges each began with `C-u`). **NOT asserted:** 
 📌 **AND THE SHAPE MATTERS MORE THAN THE SCRIPT:** I flagged the Mini as unmeasured and was right to —
 but **a per-host finding stated in the fleet's voice inverts silently on the host you did not scan.**
 **Every risk rating in `pane-derived-signal-inventory-20260726.md` is STUDIO-SCOPED.**
+
+## 0j. ✅ THE +32 DRIFT JUMP, ANSWERED — a HARDENING that the detector reports as damage
+
+**cai owed this question (CAI-629 §3). Answered by measurement 2026-07-26.**
+
+**All 32 are ONE cell:** silo `goumlyne`, dimension `grants`, kind `grant_missing`, severity `CRITICAL`,
+`is_money=true` — **4 objects × 8 privileges**: `donations`, `donation_categories` (money) and `persons`,
+`person_roles` (PII); `anon` × {SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER} plus
+`authenticated` × TRUNCATE. The `grants` dimension had **zero** findings in every run before 07-24.
+
+🔴 **THE DIRECTION IS THE WHOLE STORY: 32 MISSING, 0 EXTRA — THE SILO HAS *LESS* ACCESS, NOT MORE.**
+`grant_missing` = `ref − silo`. **goumlyne has no `anon` row at all on those four tables; ceayj does.**
+So the finding is *"the client silo is HARDENED relative to the reference"* — **and the detector rates it
+CRITICAL purely because `is_money(object)` matches. It has no notion that a MISSING anon grant is good
+news.** *A silo that gets safer registers as damage.*
+
+**CAUSE — measured, not inferred:** `a_harden_goumlyne.py`, applied to goumlyne **2026-07-23 11:38:56Z**,
+inside the window. Its four REVOKEs map **1:1** onto the 32 rows. It was **CAI-RESP-519 pre-condition #1**
+(*"harden the goumlyne anon-surface FIRST"*) ahead of the **S$1.72M tabung load**, verified at the time by
+the hub (#10797) and independently by cai (#10798, *"anon zero-priv, 20/20 denied"*). Ruled out: detector
+code unchanged in the window; both sides' tables are old (low `pg_class` OIDs), so nothing was created.
+
+### 🔴 TWO THINGS THIS TURNED UP THAT NOBODY ASKED FOR
+1. **`ceayj` PROD carries blanket `anon` write + TRUNCATE on `donations`, `persons`, `person_roles`,
+   `donation_categories` — mitigated ONLY by RLS.** **The REFERENCE is the permissive one**, which is
+   exactly why the hardened silo looks like the drift. Same posture I measured on `audit_log` (§0e) and
+   the same thing **migration 124 fixes — still ABSENT**. *Bounded as before: `anon` is NOLOGIN and RLS is
+   on; latent, not reachable. But there is no defence in depth on the main multi-tenant prod DB either.*
+2. ⚠️ **`a_harden_goumlyne.py` EXISTS ONLY IN AN AGENT WORKTREE** —
+   `.claude/worktrees/agent-a361f4ba433d50257/…` — **no copy in the main checkout, no tracked migration
+   file, and no ledger row** (goumlyne's ledger tops out at 118). **A migration that ran against a live
+   client silo, as a money-load precondition, is not committed anywhere.** One `git worktree prune` from
+   being unreproducible. *Provenance gap, not a live fault.*
 
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
