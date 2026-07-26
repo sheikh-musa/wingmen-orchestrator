@@ -143,17 +143,56 @@ def _download_media(token: str, file_id: str, name: str | None = None) -> str:
     return _tg_download_file(token, fp, os.path.join(_MEDIA_DIR, safe))
 
 
-def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
-    """Human-readable content for the log row — text, or a downloaded-media
-    pointer cc-orchestrator can Read, or a last-resort non-text marker. Reply
-    context is preserved so cc-orch knows which message the operator answered."""
-    text = msg.get("text") or msg.get("caption") or ""
+SHAPE_KEYS_MAX = 400       # cap on the key-list in the last-resort marker
+
+
+def _unknown_marker(ch: "Channel", msg: dict, upd_id: int) -> str:
+    """Last-resort marker for an update shape we have no handler for.
+
+    WHY THE KEY LIST (2026-07-26 incident): at 01:36:49Z the operator sent a
+    message on nazim-console that landed as the bare `[non-text update
+    440376558]` — `message.from` was present, so it WAS his message, and its
+    content was lost. The raw update is consumed by getUpdates and gone, so
+    after the fact NOBODY could say what arrived: video? sticker? story? The
+    bare marker is unreconstructable, which is exactly why that incident cannot
+    be explained today. Recording the SHAPE (the message object's own key
+    names) makes the next unknown diagnosable in one look at the row.
+
+    KEYS ONLY, NEVER VALUES: this row is durable and widely read (agents, the
+    console, exports). A value may carry PII or a secret; a key name cannot.
+    That constraint is why this is a marker and not a payload dump — it is a
+    forensic breadcrumb pointing at the handler we still owe, not content.
+    """
+    keys = ",".join(sorted(str(k) for k in msg))[:SHAPE_KEYS_MAX]
+    # WARNING to the ingest log so the next occurrence is visible in
+    # logs/nazim-ingest.log without anyone querying the table first.
+    _log_line(f"{ch.key}: WARNING unhandled message shape on update {upd_id} — "
+              f"keys: {keys} (no handler in message_content — content NOT captured)")
+    return f"[non-text update {upd_id} — keys: {keys}]"
+
+
+def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
+    """The type-dispatch half of message_content. Split out so message_content
+    can guard the WHOLE dispatch: a raise here must degrade to the old marker,
+    never propagate — the durable log write (step 2 of process_update) is the
+    one thing that must always happen."""
     if msg.get("photo"):
         try:
             path = _download_media(ch.token, msg["photo"][-1]["file_id"])
             content = f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             content = f"sent a photo (download failed: {e})" + (f" | {text}" if text else "")
+    # animation (GIF/soundless mp4) BEFORE document: Telegram sets `document`
+    # too on animation messages for backward compatibility, so the document
+    # branch would otherwise swallow every GIF and label it a FILE.
+    elif msg.get("animation"):
+        anim = msg["animation"]
+        try:
+            name = anim.get("file_name") or f"anim_{anim['file_id'][:12]}.mp4"
+            path = _download_media(ch.token, anim["file_id"], name)
+            content = f"sent an ANIMATION/GIF → {path}" + (f"  | caption: {text}" if text else "")
+        except Exception as e:
+            content = f"sent an animation (download failed: {e})" + (f" | {text}" if text else "")
     elif msg.get("document"):
         doc = msg["document"]
         try:
@@ -171,7 +210,88 @@ def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
                        + (f"  | caption: {text}" if text else ""))
         except Exception as e:
             content = f"sent a voice note (download failed: {e})" + (f" | {text}" if text else "")
+    # A video is an ARTIFACT like a photo/doc — download it, or an agent asked
+    # to look at a screen recording has nothing to open (same reasoning that
+    # put the photo download here in the first place).
+    elif msg.get("video"):
+        vid = msg["video"]
+        try:
+            name = vid.get("file_name") or f"video_{vid['file_id'][:12]}.mp4"
+            path = _download_media(ch.token, vid["file_id"], name)
+            dur = vid.get("duration")
+            content = (f"sent a VIDEO ({dur}s) → {path}"
+                       + (f"  | caption: {text}" if text else ""))
+        except Exception as e:
+            content = f"sent a video (download failed: {e})" + (f" | {text}" if text else "")
+    elif msg.get("video_note"):
+        note = msg["video_note"]
+        try:
+            path = _download_media(ch.token, note["file_id"],
+                                   f"videonote_{note['file_id'][:12]}.mp4")
+            dur = note.get("duration")
+            content = (f"sent a VIDEO NOTE ({dur}s) → {path}"
+                       + (f"  | caption: {text}" if text else ""))
+        except Exception as e:
+            content = f"sent a video note (download failed: {e})" + (f" | {text}" if text else "")
+    # Stickers are deliberately NOT downloaded: a .webp/.tgs of a cartoon is not
+    # an artifact any agent will Read, and writing one per sticker just litters
+    # logs/tg_media. The emoji IS the content — it is what the operator meant.
+    elif msg.get("sticker"):
+        st = msg["sticker"]
+        emoji = st.get("emoji") or ""
+        pack = st.get("set_name")
+        content = ("sent a STICKER" + (f" {emoji}" if emoji else "")
+                   + (f" (set: {pack})" if pack else "")
+                   + (f"  | caption: {text}" if text else ""))
+    # A poll's question + options are the operator's own words — same class of
+    # content as message.text, and useless to us as "[non-text update]".
+    elif msg.get("poll"):
+        poll = msg["poll"]
+        q = str(poll.get("question") or "").strip().replace("\n", " ")[:300]
+        opts = " | ".join(str((o or {}).get("text") or "")
+                          for o in (poll.get("options") or []))[:300]
+        content = f'sent a POLL: "{q}"' + (f" — options: {opts}" if opts else "")
+    # venue before location: a venue message carries BOTH, and the title/address
+    # is the part the operator actually cared about.
+    elif msg.get("venue"):
+        ven = msg["venue"]
+        loc = ven.get("location") or {}
+        content = (f"shared a VENUE: {ven.get('title') or ''} — {ven.get('address') or ''}"
+                   f" ({loc.get('latitude')}, {loc.get('longitude')})").strip()
+    elif msg.get("location"):
+        loc = msg["location"]
+        live = loc.get("live_period")
+        content = (f"shared a LOCATION → {loc.get('latitude')}, {loc.get('longitude')}"
+                   + (f" (live, {live}s)" if live else ""))
+    # Contact: logged in full (name + number). A phone number typed as plain
+    # text is already logged verbatim in this same column, so redacting it only
+    # here would lose the message's entire point without changing the posture.
+    elif msg.get("contact"):
+        con = msg["contact"]
+        name = " ".join(p for p in (con.get("first_name"), con.get("last_name")) if p).strip()
+        content = (f"shared a CONTACT: {name or '(no name)'}"
+                   + (f" — {con['phone_number']}" if con.get("phone_number") else ""))
+    elif msg.get("dice"):
+        dice = msg["dice"]
+        content = f"sent a DICE {dice.get('emoji') or ''} → {dice.get('value')}".replace("  ", " ")
     else:
+        content = text or _unknown_marker(ch, msg, upd_id)
+    return content
+
+
+def message_content(ch: "Channel", msg: dict, upd_id: int) -> str:
+    """Human-readable content for the log row — text, or a downloaded-media
+    pointer cc-orchestrator can Read, or a last-resort shape marker. Reply
+    context is preserved so cc-orch knows which message the operator answered."""
+    text = msg.get("text") or msg.get("caption") or ""
+    try:
+        content = _media_content(ch, msg, upd_id, text)
+    except Exception as e:                                          # noqa: BLE001
+        # Dead-man's rule: extraction is best-effort, the LOG is load-bearing
+        # (Option B — the durable row is the truth). A bug in any branch above
+        # degrades to the pre-2026-07-26 marker; it never costs us the row.
+        _log_line(f"{ch.key}: content extraction raised on update {upd_id} "
+                  f"({type(e).__name__}: {e}) — degrading to bare marker")
         content = text or f"[non-text update {upd_id}]"
 
     # Reply-threading: prepend the quoted message so cc-orch knows the referent
