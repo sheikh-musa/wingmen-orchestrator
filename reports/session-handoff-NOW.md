@@ -61,6 +61,19 @@ The deployed `/auth/confirm` consumed `token_hash` on a bare GET (its own docstr
 ## 🔑 TOKEN STATE — hub now authenticates as the OPERATOR
 `.env SUPABASE_ACCESS_TOKEN` swapped to the operator's Owner PAT (`sbp_2180…b069`); old partner token (`sbp_f670…4e34`) removed; backup `.env.bak-token-swap-20260725`. `/v1/profile` → `sheikh.musa@outlook.com`. **⚠️ THE NEW TOKEN WAS PASTED INTO TELEGRAM** → row 7256 **SCRUBBED** (0 `sbp_` tokens remain in the log, verified) but treat it as **BURNED — operator must revoke + reissue.** Owner-scoped: it can read api-keys (hence the service_role key) on BOTH projects.
 
+## 🚗 OPERATOR IS DRIVING — HOLD ALL SENDS (as at 2026-07-26 00:03:40Z)
+His words: **"got all of it. driving now."** He HAS the 4-step token sequence; the preceding hour of silence was driving, **not** an undelivered chain (that was cai's P0 CAI-598, closed by a receipt check Nazim sent at 00:02:17Z — reply in 83s).
+**Nothing in the token sequence is safe to execute while he is at the wheel.** Both hosts still hold compromised credentials until he stops: Studio has the burned Owner PAT, Mini still authenticates as the partner.
+**LESSON:** one short question designed to ELICIT A REPLY closed a P0 that no amount of re-reasoning could. A restatement would have produced nothing testable.
+
+## ⚠️ `delivered=false` IS NOT A DELIVERY HISTORY — READ IT CAREFULLY
+27 rows carry `delivered=false`. **Every one is a `*-draft` / `*-drill` tag** (`gazzabyte-irsyad-draft`, `cosem-caai-drill`, `cosem-exams-drill`) — lane drafts deliberately logged as unsent. **Same column, different mechanism, opposite meaning.** They are NOT evidence that failure detection ever worked. Pre-`25701aa` there is **not one** record of a genuinely attempted send marked failed; the demonstration case (#7288, 23:27:45Z, "read operation timed out") is logged `delivered=TRUE`. I was one inference from citing drafts as proof the paths were sound.
+
+## 🧭 THE HOUSE DEFECT — cai's formulation, adopted
+*"None of them lied. Each reported truthfully on a scope narrower than the claim it supported, and the output was INDISTINGUISHABLE from a correct check. That indistinguishability is the disease — vigilance reads the same green."*
+**Operational corollary (evidenced 3× tonight): the cheapest detector is a SECOND VANTAGE POINT, not a harder look.** cai found my Mini gap · Nazim's "why 3× while delivered=true" found the log defect · the CLIENT closed the session ambiguity. None were available from inside the checking body.
+**Rule: every check states its boundary; every claim declares which side of it it sits on.**
+
 ## 🔴 FLEET DEFECT FIXED — THE MESSAGE LOG ASSERTED DELIVERY IT NEVER CHECKED (25701aa)
 All three send scripts (`tg_send.sh`, `irsyad_support_send.sh`, `cai_send.sh`) ran the `operator_log` line **unconditionally**, and `operator_log` defaults `delivered=TRUE`. So **a FAILED send was recorded as delivered, on every channel, for as long as those scripts have existed.** The `--undelivered` flag already existed and was never passed. Fixed in all three; verified by driving the real path, not by inspection.
 **Caught live:** a client reply failed (`read operation timed out`) yet logged `delivered=True` — so the log could not answer whether the client had our answer. **Corroboration:** the client asked the same question 3× in 6 min while every reply showed delivered, and went silent the instant a send actually succeeded (23:28:48Z).
