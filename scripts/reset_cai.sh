@@ -26,6 +26,26 @@ if "$TM" capture-pane -t "$PANE" -p | tail -4 | grep -q 'esc to interrupt'; then
   exit 5
 fi
 
+# CAPTURE THE COMPOSER BEFORE WIPING IT (2026-07-26, Nazim — same fix as reset_orch.sh).
+# The BSpace below destroys whatever is staged. An idle body's composer holds its
+# OWN staged next step, and on 2026-07-26 the hub's held "now do giro" — an
+# operator instruction unsubmitted for 37 minutes that this pattern would have
+# silently destroyed. Capture it, log it, hand it to the fresh body.
+# NBSP trap: the TUI renders the prompt as '❯' + U+00A0, so a pattern written with
+# an ordinary space matches nothing (this cost us a guard that never fired).
+STAGED="$("$TM" capture-pane -t "$PANE" -p 2>/dev/null | grep '^❯' | tail -1 \
+          | sed 's/^❯//' | LC_ALL=C sed 's/\xc2\xa0/ /g' \
+          | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+if [ -n "$STAGED" ] && [ "$STAGED" != "Press up to edit queued messages" ]; then
+  mkdir -p logs
+  printf '%s cai-reset staged-composer: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$STAGED" \
+    >> logs/reset_cai_preserved_input.log
+  echo "[reset_cai] PRESERVED staged composer text: $STAGED"
+  STAGED_NOTE="NOTE: you had \"${STAGED}\" staged UNSENT in your composer when I cleared you. Captured verbatim first (logs/reset_cai_preserved_input.log) rather than letting it vanish. Judge whether it was your own next step or something typed at your pane and never submitted; if it reads like an instruction, treat it as NOT yet carried out."
+else
+  STAGED_NOTE="NOTE: your composer was EMPTY when I cleared you — nothing staged, nothing lost."
+fi
+
 echo "[reset_cai] clearing composer + sending /clear ..."
 "$TM" send-keys -t "$PANE" -N 120 BSpace   # wipe any staged composer text
 sleep 1
@@ -34,7 +54,7 @@ sleep 1
 "$TM" send-keys -t "$PANE" Enter
 sleep 4
 
-BOOT="You are cai, the fleet's strategic node (agent_id='cai' exactly, singleton — never a sub-tag), freshly reset in-place at your own request (CAI-575, you were ~92% and P0-only). You are on claude-opus-5. FIRST read reports/cai-handoff-NOW.md IN FULL — your own restore point (ref 575, digest 866) — then CLAUDE.md. Reconcile agent_messages where to_agent='cai' and read_at is null; stamp what you process. THREE ITEMS HANDED FORWARD, unfinished: (1) v4 of the client correction to Gazzabyte — v1/v2/v3 each had defects the hub found, so re-derive from audit_chain_boundaries row 1 in the substrate rather than from any prior draft; (2) the ENTITY decision you own — grants + payment-corridor contracting + client-data custody + client-exit are ONE question, assembled once, and nothing gets registered in isolation; (3) the org/client-exit ruling. The Xendit memo is DONE (CAI-565, shipped early) — do not redo it. OPERATOR PERCEPTION, read before you message him: fleet volume to him is DOWN 55% this week, but you went from 0 to 15 direct messages in one day and sent corrections that superseded each other; he called it flip-flopping and he is right. Verify BEFORE the first message rather than correcting after, and send him only what changes what he would DO — the rest is a bus row to Nazim. Verify-not-assert every claim; a name is not an implementation; a measurement whose tooling failed must report 'could not measure', never a finding. Reply to Nazim (agent_messages to 'orch-console') once you are up."
+BOOT="You are cai, the fleet's strategic node (agent_id='cai' exactly, singleton — never a sub-tag), freshly reset in-place by ${RESET_BY:-orch-console/Nazim} at $(date -u +%Y-%m-%dT%H:%MZ). You are on claude-opus-5. ⚠️ THIS BOOT MESSAGE IS NOT AUTHORITATIVE ON YOUR AGENDA — it is a fixed string and it goes stale between resets (it used to hardcode one past reset's provenance and a three-item worklist, and would have handed you a previous reset's world as if it were today's). ${HANDOFF} IS THE AUTHORITY: read it IN FULL FIRST, then CLAUDE.md, and where the two disagree the handoff wins. Reconcile agent_messages where to_agent='cai' and read_at is null; stamp what you process — your inbox, not this message, tells you what is actually live. ${STAGED_NOTE} STANDING, and these do not go stale: verify-not-assert every claim; a name is not an implementation; a measurement whose tooling failed must report 'could not measure', never a finding; when a premise falls, RE-DERIVE the conclusion rather than assuming it falls or stands with it. ON MESSAGING THE OPERATOR: verify BEFORE the first message rather than correcting after, and send him only what changes what he would DO — the rest is a bus row to Nazim. Reply to Nazim (agent_messages to 'orch-console') once you are up."
 echo "[reset_cai] sending boot instruction ..."
 "$TM" send-keys -t "$PANE" -l "$BOOT"
 sleep 1
