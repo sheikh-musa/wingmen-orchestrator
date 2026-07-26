@@ -284,6 +284,31 @@ governs who REPLIES; it must not govern who KNOWS.
 *Also withdrawn to him: I had asked him to rule on `fix the heartbeat to be periodic`. It was never his
 instruction, so there is nothing for him to decide. Question retracted, no answer owed.*
 
+### 🔴 OPEN DEFECT I INTRODUCED AND HAVE NOT FIXED — the composer capture reads pixels too
+**Evidence (Nazim, 09:5xZ):** resetting cai, the script reported `clearing composer (200 BSpace for 0B
+staged)` — **it found NOTHING staged, minutes after two of us had both read `reset me` in that box.**
+And his before/after test **proves the pane was frozen**: two captures 8s apart were byte-identical
+BEFORE the reset and **different AFTER**. A pane that was not repainting now repaints.
+
+🔴 **`composer_parse_pane` inherits that freeze and I built no guard for it.** Everything hardened in
+`6b42b6a` — multi-line capture, placeholder rejection, wipe sizing, the whole preserved-input log —
+rests on `capture-pane`. It fails **BOTH** ways:
+- frozen showing text already submitted → **the log FABRICATES a "staged UNSENT" entry**
+- frozen showing empty while text is real → **the log says "nothing was lost" and it is lost**
+
+Defect 5 protected against fabricating a **placeholder** as staged text. **This fabricates STALE REAL
+TEXT as currently-staged, which is worse** — indistinguishable from a true rescue, and it is precisely
+what a human reads verbatim and trusts. **`pane_busy` samples twice; `composer_parse_pane` does not.
+That inconsistency is the bug.** Fix: same liveness discipline, plus refusing to claim "composer was
+EMPTY" from a frozen render.
+*Deliberately not fixed at hour 5 of a long session — that combination is exactly how the locale bug
+shipped. Left OPEN so it cannot be inherited as done.*
+
+⚠️ **AND IT REACHES BACKWARD.** Every preserved-input entry from tonight is pane-derived. With the
+operator's refutation (§0f) that is a **SECOND independent reason** the "stranded instruction"
+reconstruction is unreliable. `now do giro` demonstrably existed — it was carried out. **For the others
+I would no longer assert presence OR timing.**
+
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
 The token was still live at 04:45Z after six hours. **Do not re-send the commands; do not re-page.**
@@ -489,6 +514,7 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
+- 🔴 **A NOTE FILED UNDER ONE QUESTION DOES NOT SURFACE WHEN A DIFFERENT QUESTION MEETS THE SAME FACT.** Nazim diagnosed the frozen render at 03:30Z under *"the gauge is unreliable"*, then met the same fact at 07:00Z as *"is cai busy"* and held a reset on it. Not inattention — **the absence of a retrieval path.** Same reason §4's attribution figure sat unquestioned for days.
 - 🔴 **`unprocessed()` TELLS YOU WHAT IS OUTSTANDING, NOT WHAT THE OPERATOR HAS SAID.** A message answered by another body is stamped handled and vanishes from your inbox check *with its contents*. **Thread ownership governs who REPLIES; it must never govern who KNOWS.** Read `recent()` across ALL channels before asserting anything about the operator. §0f.
 - 🔴 **A claim about a person who CAN BE ASKED should be asked, not inferred.** Three bodies spent a night reasoning about the operator's behaviour; he was one message away and settled it in one sentence.
 - 🔴 **A NEGATIVE RESULT IS ONLY EVIDENCE IF YOU HAVE SHOWN THE INSTRUMENT CAN PRODUCE A POSITIVE.** Converged on independently by Nazim (three false-negative greps) and me (a locale-dead regex, and a liveness test that would have looked correct because "always stale" gives the answer you wanted). **The control must use a known-TRUE subject** — validating the frozen-pane test required a synthetic pane that printed the marker AND animated.
