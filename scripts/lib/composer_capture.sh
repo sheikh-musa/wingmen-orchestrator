@@ -89,10 +89,13 @@ CC_MARKER_NOPROMPT='[PROMPT LINE NOT FOUND — CAPTURE UNRELIABLE, COMPOSER MAY 
 # dies. Not added without measuring that it clears. Revisit with evidence.
 #
 # Sets: CC_BUSY (0|1) and CC_BUSY_REASON (human-readable, '' when idle).
+# Sets CC_BUSY_STALE=1 when a busy marker was PRESENT but the render was frozen,
+# so the caller can say "proceeding despite a stale busy marker" out loud rather
+# than silently treating a frozen body as idle.
 pane_busy() {   # $1 = tmux bin, $2 = pane
   local txt
   txt="$("$1" capture-pane -t "$2" -p 2>/dev/null)"
-  CC_BUSY=0; CC_BUSY_REASON=''
+  CC_BUSY=0; CC_BUSY_REASON=''; CC_BUSY_STALE=0
   if printf '%s\n' "$txt" | tail -4 | grep -q 'esc to interrupt'; then
     CC_BUSY=1; CC_BUSY_REASON="foreground turn in progress ('esc to interrupt')"
     return 0
@@ -112,7 +115,31 @@ pane_busy() {   # $1 = tmux bin, $2 = pane
   # LC_ALL=C is pinned so behaviour is identical everywhere rather than inherited.
   if printf '%s\n' "$txt" | tail -12 \
        | LC_ALL=C grep -qE '^[^[:space:]].*Waiting for [0-9]+ background agents'; then
-    CC_BUSY=1
+    # 🔴 LIVENESS TEST — a busy marker read from a RENDER is a claim about what was
+    # last PAINTED, not about what is true (found 2026-07-26, cai's pane).
+    # cai sat showing "Waiting for 4 background agents" with the agent timer reading
+    # EXACTLY '26m 42s' at 05:26Z, 07:00Z and 09:31Z — four hours, same second — while
+    # agent_status said IDLE, its own last output said "this is a good place to reset
+    # me", and it had been silent on the bus for 3.5h. The pane had stopped repainting.
+    # Presence of the marker was true; the STATE it asserted was long gone.
+    # A genuinely-waiting pane ANIMATES: the spinner cycles and that timer ticks every
+    # second. So require the render to prove it is alive before believing it. If the
+    # pane is byte-identical across the sample window, the busy claim is UNVERIFIABLE
+    # and we must not report it as busy — otherwise the guard blocks every future reset
+    # of a frozen body forever, and a control that can only be got past with
+    # RESET_FORCE becomes a control nobody respects.
+    # Cost: BUSY_LIVENESS_S seconds on the background-agent path only. The
+    # `esc to interrupt` path above returns early and never pays it.
+    local t2 secs="${BUSY_LIVENESS_S:-3}"
+    sleep "$secs"
+    t2="$("$1" capture-pane -t "$2" -p 2>/dev/null)"
+    if [ "$txt" = "$t2" ]; then
+      CC_BUSY=0
+      CC_BUSY_REASON=''
+      CC_BUSY_STALE=1
+      return 0
+    fi
+    CC_BUSY=1; CC_BUSY_STALE=0
     CC_BUSY_REASON="$(printf '%s\n' "$txt" | tail -12 \
       | LC_ALL=C grep -oE 'Waiting for [0-9]+ background agents[a-z ]*' | tail -1)"
     CC_BUSY_REASON="blocked on background agents — ${CC_BUSY_REASON:-waiting for background agents}"
