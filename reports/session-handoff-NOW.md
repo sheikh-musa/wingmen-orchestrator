@@ -19,6 +19,33 @@
 
 ---
 
+## 0a. ⚠️ HEARTBEAT: BUILT, WIRED, **NOT YET LIVE** — verify on next hub start
+
+`scripts/hub_heartbeat.py` + `PostToolUse` hook in `.claude/settings.json` (commit `86e136d`).
+Unit-verified: heartbeat moved `04:38:10 → 04:44:15Z`, `current_task` preserved, debounce
+holds, both hook paths resolve to existing files.
+
+🔴 **The hook did NOT fire in the session that wrote it** — two tool calls passed with the
+heartbeat unchanged. settings.json changes need a session restart. **It takes effect on the
+NEXT hub start, and nobody has observed it working yet.**
+
+**HOW TO VERIFY (do this, don't assume):** after the next hub boot, run a few tool calls,
+then check `agent_status.last_heartbeat` for `cc-orchestrator` advances **without anyone
+invoking the script manually**. If it does not advance, the hook is not loading and the row
+will silently freeze — the same invisible failure it was built to fix.
+Debug with `WINGMEN_HEARTBEAT_DEBUG=1 .venv/bin/python3 scripts/hub_heartbeat.py` (exits 1
+and prints the error; the hook path deliberately stays silent so it can never wedge a turn).
+
+Deliberately **NOT** a launchd timer: a timer would report the *timer's* liveness, so a dead
+hub would publish green forever. Activity-driven means a dead hub goes **stale**, which is
+detectable.
+
+**Also fixed in `86e136d`:** the `PreCompact` hook pointed at `/Users/sheikhmusa/...` — **that
+user does not exist** (home is `/Users/Musa`). Silently broken since 2026-06-19. *Not* claiming
+a fleet-wide digest gap: `session_digests` has 781 rows, latest today, written by other means.
+
+---
+
 ## 0b. 🆕 BLOCK 2 — fresh hub, 2026-07-26 02:51Z→04:00Z (GIRO)
 
 Full detail: **`reports/giro-state-of-play-20260726.md`** (commits `e773360`, `310e759`, `10dde9a`).
