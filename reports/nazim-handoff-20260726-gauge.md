@@ -327,3 +327,19 @@ regardless of whether `pane_text` changed, so the console's ">90s stale" guard i
 fire. One column makes freeze queryable fleet-wide.
 Not actioned by me: ~81% context, live daemon, and I had already shipped two fixes today that created the
 next defect's surface.
+
+### 🔴 OWED — the SLA watchdog logs THAT it nudged, never WHOM
+Tried to exclude the C-u path as tonight's composer-text destroyer. **My instrument failed its own
+control:** `logs/priority_sla_watchdog.log` records nudge COUNTS ONLY — control proved it records ZERO
+targets of any kind, so "0 singleton targets" is void, not evidence.
+**The void is the finding.** ~721 fires in 12 days (518×1, 99×2, 5×3 across 10,589 scans) by a mechanism
+that sends `C-u` — destroying staged composer text by design — into `orch` and `nazim` over SSH, **with no
+record of whom.** It fired at **10:57:35 and 11:12:59** on 07-26, twice in twenty minutes, targets
+unrecoverable. So the C-u path is a CANDIDATE that **cannot be excluded**, and must not be named as the
+cause either (CAI-625/626: origin unrecoverable; naming a third culprit because it fits the shape is the
+error that produced the first two).
+**FIX, one line, an AUDIT TRAIL not a guard: log the target.** `_nudge_target()` already returns
+`("studio-tmux:<sess>", ok)` / `("lane_nudge.sh:<lane>", ok)` and the scan summary throws it away. A
+destructive automated action whose log says what happened but not to whom cannot be audited afterwards —
+which is exactly why tonight's question is unanswerable.
+Not actioned: ~82%, live daemon, enough shipped today.
