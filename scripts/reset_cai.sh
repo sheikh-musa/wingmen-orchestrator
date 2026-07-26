@@ -32,6 +32,13 @@ _RESET_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # RESET_FORCE=1 is the escape hatch (kept symmetric with reset_orch.sh): it warns
 # loudly and proceeds, so a forced clear is never silent.
 pane_busy "$TM" "$PANE"
+# A busy marker that was PRESENT but frozen: say so rather than silently
+# treating a stalled body as idle. Proceeding is correct (a frozen render
+# means the state it asserts is long gone) but it must never be quiet.
+if [ "${CC_BUSY_STALE:-0}" = 1 ]; then
+  echo "WARNING: cai showed a background-agent marker but the pane is FROZEN (byte-identical across the sample window)." >&2
+  echo "         Treating it as NOT busy: a live wait animates. If work was in flight it is already lost, not lost by this reset." >&2
+fi
 if [ "$CC_BUSY" = 1 ]; then
   if [ "${RESET_FORCE:-0}" = "1" ]; then
     echo "WARNING: cai is BUSY — $CC_BUSY_REASON — RESET_FORCE=1 set, clearing ANYWAY." >&2

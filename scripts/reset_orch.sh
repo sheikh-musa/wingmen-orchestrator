@@ -40,6 +40,13 @@ fi
 # RESET_FORCE=1 is the escape hatch for a body that is genuinely wedged: it warns
 # loudly and proceeds, so a forced clear is never silent in the log.
 pane_busy "$TM" "$PANE"
+# A busy marker that was PRESENT but frozen: say so rather than silently
+# treating a stalled body as idle. Proceeding is correct (a frozen render
+# means the state it asserts is long gone) but it must never be quiet.
+if [ "${CC_BUSY_STALE:-0}" = 1 ]; then
+  echo "WARNING: the hub showed a background-agent marker but the pane is FROZEN (byte-identical across the sample window)." >&2
+  echo "         Treating it as NOT busy: a live wait animates. If work was in flight it is already lost, not lost by this reset." >&2
+fi
 if [ "$CC_BUSY" = 1 ]; then
   if [ "${RESET_FORCE:-0}" = "1" ]; then
     echo "WARNING: '$SESS' is BUSY — $CC_BUSY_REASON — RESET_FORCE=1 set, clearing ANYWAY." >&2
