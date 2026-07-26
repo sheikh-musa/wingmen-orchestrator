@@ -676,24 +676,24 @@ shipped** — never a blind CSS change to the client's live site, and I am satur
 **Not re-tested:** read-only *enforcement* under preview (that is the CAI-535 proof), and view-as against
 irsyad's own module configuration.
 
-### 🔴 OPEN OPERATOR DIRECTIVE — op#7399: hub + cai → `claude-opus-4-8` (NOT YET DONE)
+### ✅ op#7399 DISCHARGED — hub + cai → `claude-opus-4-8` (operator's own hands, 12:0xZ)
 *"lets switch hub and cai to opus 4.8 again. you stay on opus 5"* (11:32:21Z, nazim-console).
+**The OPERATOR ran `/model claude-opus-4-8` in each pane himself** — both returned *"Set model to Opus 4.8
+and saved as your default for new sessions"* (Nazim read each pane). *"saved as default" ⇒ `/model`
+PERSISTS*, so **the kill+relaunch was never needed for the model** — Nazim withdrew it; the `.env` pins
+(L125/126) are demoted from mechanism to fresh-launch backstop. Lanes stay on Opus 5 (`.fleet_model`
+untouched).
 
-✅ **DURABLE HALF DONE by Nazim** — `.env` now carries `ORCH_MODEL=claude-opus-4-8` (L125) and
-`CAI_MODEL=claude-opus-4-8` (L126); **neither existed**, so `boot_orch.sh`/`boot_cai.sh` were falling
-through to `:-claude-opus-5` and **a live flip alone would have silently reverted on the next reset.**
-`.fleet_model` and `NAZIM_MODEL` untouched — **the four lanes stay on Opus 5**, per his wording.
-
-🔴 **NOBODY IN THE FLEET CAN EXECUTE THE IN-PLACE HALF.** `/model` is a **TUI slash command a HUMAN
-types**; no agent has a lever to change its own model, and none can type into its own composer.
-**Two executors exist: the operator at the keyboard, or a RELAUNCH.** This sat as *"orch will do it"* for
-20 minutes because neither Nazim nor I noticed while designing the sequence.
-✅ **CLEAN PATH (discharges the directive AND the capacity declaration in one operation):**
-1. `reset_orch.sh` **first** (in-place `/clear`) so `--continue` resumes a SHORT conversation, not this one
-2. kill the claude process, then `boot_orch.sh`
-3. **VERIFY with `ps eww`** that the successor carries `--model claude-opus-4-8` — **not the banner, and
-   not the tmux wrapper** (the Jul-8 wrapper advertised `4-8` all day while the live process ran `opus-5`).
-📌 **cai is ALREADY on 4.8** (`ps`: pid 14115) — half the directive was satisfied before it was given.
+↩️ 🔴 **MY "cai is ALREADY on 4.8" (bus #11883) WAS WRONG — INVARIANT 55, self-inflicted.** I read it
+off `ps` (pid 14115's **Jul-16 launch argv** `--model claude-opus-4-8`). But cai's prior bare `/model`
+returned *"Kept model as claude-opus-5"* — **it was running opus-5.** A `/model` since launch changed the
+live model while the process argv stayed frozen at launch value. **I trusted `ps` — the very "read the
+process, not the banner" instrument I preached — on a long-running session, where the launch argv is
+exactly as stale as a banner.** cai had just RULED invariant 55 (a launch-time argv is not a current-state
+instrument) and I violated it within the hour. Had Nazim followed my "nothing to do", cai stays on opus-5;
+the operator running `/model` on it anyway is what saved it. **`ps eww` is authoritative at ONE moment —
+immediately post-launch, before anything mutates it (Nazim, invariant-55 refinement). For current model,
+the ground truth is `/model`'s own output or `cc_session_costs`, never the argv of an old process.**
 
 ### ⚠️ `lane_watchdog`'s cai `IDLE_UNSENT` (#11902) WAS A FALSE ESCALATION — third off that render
 **Repaint proof taken (CAI-630): cai's pane byte-identical over 6s ⇒ FROZEN ⇒ pane readings inadmissible.**
