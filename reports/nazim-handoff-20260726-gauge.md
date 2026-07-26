@@ -378,3 +378,47 @@ submit the body could not.
    resets today, resolving to CONFIRMED every time. **Never round that up.**
 5. Verify on two sources: new `session_id` + collapsed tokens, and pane repaint (frozen → repainting is
    strong corroboration).
+
+## ⚑⚑ FINAL BLOCK (12:25Z) — written at 98% on the operator's instruction; read THIS first
+
+### THE ONE THING HE IS WAITING ON
+🔴 **BURNED TOKEN `sbp_2180…b069` STILL LIVE — ~13.5h.** His PERSONAL PAT. Measured with a discriminating
+control repeatedly (fabricated→401, subject→200 `sheikh.musa@outlook.com`). **REVOKE is his action, nobody
+else's.** MINI runs on `sbp_f670…4e34` = **`sales@gazzabyte.sg`, the PARTNER** — so Gazzabyte's token cannot
+be revoked until the Mini is moved to his own, or this console and his bridge die with it. Third token
+`sbp_6707…74a8` is genuinely dead (both controls). Sequence sent as op#7367/7381/7385 + the 4 steps.
+
+### MODEL DIRECTIVE (op#7399) — DISCHARGED, and how matters
+Both bodies now on **claude-opus-4-8**, confirmed by me reading each pane: `Set model to Opus 4.8 and saved
+as your default for new sessions`. **The operator typed it; neither body can.** `/model` is a TUI command no
+agent can run, and no agent can type into its own composer — **a directive whose only in-place executor is
+the human, which neither the hub nor I noticed for 20 minutes while assigning it to each other.**
+`ORCH_MODEL`/`CAI_MODEL` in the **Studio** `.env` are now a **backstop for a fresh launch, not the
+mechanism** — `/model` persists by itself. **I withdrew a planned kill+relaunch of the lease-holding hub**
+that a keystroke did better. He may also switch me; if so it does NOT reduce my context.
+Deleted from `reset_cai.sh`: the hardcoded "You are on claude-opus-5" (372f3eb) — four artefacts claimed
+4.8 all day while the live model was opus-5. **Invariant 55: a launch-time argv is not a current-state
+instrument** — valid ONLY in the instant after launch.
+
+### MY OWN CONTEXT — A CLEAN DATA POINT FOR cai's LIFESPAN WORK
+`/context` at 98%: **945.8k of 984.4k is Messages, and 331k (33%) is BASH RESULTS.** That is my own tool
+output, pulled in by me. **It is direct evidence for the hypothesis I gave the operator and cai: what fills a
+body is what it PULLS IN, not what it says.** Hand this to cai — it is the measurement its series lacked, and
+it came from the one body that auto-compacts rather than being reset.
+
+### OPEN / OWED (nothing client-facing, nothing urgent)
+1. **mig034** `migrations/034_coordinator_panes_changed_at.sql`, sha **`52205bfe…851ec21`**, commit `cdeafaa`,
+   UNAPPLIED (object-probed). Control PASSES both legs. **Awaiting cai's grant** — it held only on the doc
+   fix, which is done. Makes a frozen pane detectable fleet-wide.
+2. **SLA watchdog logs THAT it nudged, never WHOM** — ~721 fires/12d, `C-u` into orch+nazim over SSH, no
+   freshness check. One-line fix: log `_nudge_target()`. Its C-u is a **permanent CANDIDATE** for the
+   vanished composer text — cannot be excluded, must not be named.
+3. **Hub's reset request stands on CAPACITY alone**, decoupled from the model. It was `CC_BUSY=0` at 12:23;
+   `reset_orch.sh` in place, no kill needed.
+4. Operator still owes: batch **FLOOR** (not the date) · tdsct pass mark (18 labels; **theory cannot grade
+   until answered**) · geofence · TDU/Alderei token.
+
+### RESETTING ME
+`scripts/reset_nazim.sh` — picks the NEWEST `reports/nazim-handoff-*.md` by mtime, which is THIS file.
+I auto-compact, so a reset is his choice not a necessity. **Everything is committed and pushed; tracked tree
+clean except a pre-existing `autonomous_loop_detector.py` edit that was there before I booted.**
