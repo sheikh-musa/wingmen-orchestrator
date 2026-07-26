@@ -1,72 +1,79 @@
-# Session handoff — 2026-07-26 01:05Z / 09:05 SGT (cc-orchestrator / hub, Mac-Studio)
+# Session handoff — 2026-07-26 02:15Z / 10:15 SGT (cc-orchestrator / hub, Mac-Studio)
 
-**FRESH FILE at ~65% context.** Supersedes `session-handoff-20260726-0020Z-ARCHIVE.md` (45 min old — **two of its holds went stale**, see §0).
-**Read order: §0 → §1 → §2 → §10.** Nothing applied to any silo. No grant assumed or issued.
-
----
-
-## 0. 🛑 STANDING HOLDS — AND TWO THAT JUST CHANGED
-
-1. ~~**Operator is DRIVING, send him nothing**~~ → **STALE. HE IS ACTIVE.** He asked at `00:33:06Z`: *"give me the commands to run in both machines to settle this token issue once and for all"* and *"keep an eye on the hub while its supporting irsyad"*. **Both already answered by Nazim on my thread** (#7306/#7309/#7310) while I was heads-down on the checkpoint. **DO NOT RE-SEND THE COMMANDS** — he has them.
-2. ~~**Governance queue STALLED**~~ → **STALE.** Alert #7311 fired at 00:35Z; cai has since read #11451. cai is **ALIVE** (PID 14115, tmux `cai`), **idle at 100% context**, 2 unread, nudged 01:03Z.
-3. **Bank-import commit is HELD** (§4). Progress ≠ lifting.
-4. **`feat/audit-chain-version-integration` MUST STAY AT `c440136`** — cai's confirm-match is pinned there.
-5. **NO GRANTS EXIST** for 119/121/122/124 **or 120**. cai issued **zero** this session. Windows close today: CAI-576 `11:24:32Z` · CAI-584 `13:19:25Z` · CAI-586 `14:54:07Z`. **Do not press early.**
-6. **My unsent composer text: `fix the mobile view-as switcher`** — that is task #7. Mine to re-decide; Nazim has since filed a spec (§3).
+**FRESH FILE at ~76% context.** Supersedes `session-handoff-20260726-0105Z-ARCHIVE.md`.
+**Read order: §0 → §1 → §2 → §9.** No grant assumed. Everything applied tonight was granted or explicitly authorised, and §1 records which.
 
 ---
 
-## 1. 🔑 TOKEN REMEDIATION — COMMANDS DELIVERED, NOT YET RUN
+## 0. 🛑 STANDING HOLDS — each with the timestamp that set it
 
-**VERIFIED 01:04Z — nothing has changed on either host:**
+> Holds rot fast. Two in the 00:20Z file were false by 01:05Z. **Re-verify against live state before acting on any of these.**
 
-| Host | Token in `.env` | State |
-|---|---|---|
-| **Studio** | `sbp_2180…b069` | operator's Owner PAT — **BURNED** (pasted into Telegram 22:38:49Z) |
-| **Mini** | `sbp_f670…4e34` | **still the PARTNER's** (Gazzabyte staff account) — no `.env.bak-17*` exists, so the command has NOT been run |
-
-**DECISION REFINED (Nazim → operator, #7306): TWO tokens, one per machine — not one shared value.** A shared token means burning it once takes both hosts offline simultaneously, and no API action is traceable to a machine. Names: `wingmen-studio` and `wingmen-mini`.
-
-**SEQUENCE — ordering IS the ruling (CAI-592/596). Step 4 before step 3 strands the fleet:**
-1. **REVOKE** the burned token at the provider — *replacing is not enough; an unrevoked token in a chat history stays live.*
-2. Operator **places each token himself** at its machine (commands in #7309 read it silently — no echo, no shell history, value never in the command).
-3. **Hub re-verifies the Management-API paths on BOTH hosts** — observed, not assumed. *(My first gate was Studio-only and missed the Mini — cai caught it.)*
-4. **Only then** remove the `sales@gazzabyte.sg` Developer seat.
-
-**Verified:** 7/7 paths 200 as `sheikh.musa@outlook.com` (Studio) · no stored CLI credential (`~/.supabase/access-token` absent; `supabase` CLI not installed on Studio).
-**Attribution bounded:** fleet Management-API actions before `22:40:45Z` logged as `sales@gazzabyte.sg`; after, as the operator.
-**Partner token purged from 9 backup files** across both machines (only the `SUPABASE_ACCESS_TOKEN=` line; all other bytes preserved). It is Gazzabyte's — **not ours to revoke; deleting our copies is the whole remedy.** The Mini's **LIVE** `.env` is deliberately NOT redacted — redacting it breaks the Mini.
-**Stale litter:** `sbp_6707…74a8` in 7 Mini `.env.local` files — **tested, already `Unauthorized`.** Not exposure.
+1. **TOKEN REMEDIATION NOT RUN** — verified 02:13Z: Studio still `sbp_2180…b069` (burned), Mini still the PARTNER's `sbp_f670…4e34`, **0 `.env.bak-17*` on the Mini**. The operator has the commands (Nazim sent them, #7309) — **DO NOT RE-SEND**. Absence of the backup file is the evidence, not absence of a reply.
+2. **`feat/audit-chain-version-integration` MUST STAY AT `c440136`** — cai's confirm-match is pinned there.
+3. **NO GRANTS** for 119 / 121 / 122 / 124. Windows: CAI-576 `11:24:32Z` · CAI-584 `13:19:25Z` · CAI-586 `14:54:07Z` **today**. Do not press early.
+4. **Elly's bank-import commit is HELD** — four prerequisites (§4).
+5. **AGENT-AS-SIGNATORY GATE (CAI-601):** no approver row beyond `saddam@`/`zuremi@` until the durable service-account property ships. cai's ruling: *a two-person control with a non-human half is a one-person control with extra steps.*
+6. **My unsent composer text: `now do giro`** — §2 item 4. Mine to re-decide.
 
 ---
 
-## 2. 📥 MY BUS INBOX — 5 UNREAD AT HANDOFF (not stamped; genuinely open)
+## 1. ✅ SHIPPED THIS BLOCK — Gazzabyte unblocked end to end
 
-| # | From | P | Gist |
-|---|---|---|---|
-| 11465 | orch-console | P2 | 3rd consecutive supersede; lane re-instructed to verify rather than duplicate; mobile view-as needs an owner |
-| 11467 | orch-console | P2 | Deploy constraint adopted as routing note; **task #7 stays MINE** (I own repo + deploy) |
-| 11473 | cai | P1 | CAI-599: P0 closed on the operator's own words; *"my filing was one scr…"* |
-| 11478 | orch-console | P1 | Sent #7315 on my thread (I was silent 24m); approval-email workflow finding |
-| 11480 | orch-console | P2 | **Mobile View-as spec ready — `429c81d`**, carries my auto-deploy constraint + a second (read-only label) finding |
+**`main` `231714a` → `dd72671`.** Both prod deploys READY, `database:ok` on both, `/login` + `/set-password` 200.
+Three client-facing fixes, all found by the client or by verifying their report:
+- **View-as unreachable on a phone** — `view-as-controls.tsx:85` was `relative hidden sm:block`; the ONLY entry point didn't render below 640px while the exit banner was already mobile-aware.
+- **"— read only" label mobile-hidden** (`:41`) — a preview never told the user it was read-only. Server always enforced it; clarity gap.
+- **"Please try again" on an unsatisfiable failure** — `tabung-report-approvers.ts` now distinguishes Postgres **42P01** and says the feature isn't enabled and retrying won't help. cai ruled this separately mandatory.
+- Plus a measured `gap-2 sm:gap-3` on `dashboard-shell.tsx:1205` — the newly visible pill was eating the truncated mobile title (320px showed `Repo…`).
+
+**MIGRATION 120 APPLIED to goumlyne, 01:47Z, under CAI-601** (granted 01:43:46Z).
+⚠️ **My first disclosure said it went on the operator's override ahead of the window. That was WRONG** — cai's grant landed 3 min BEFORE the write. Corrected in #11513. The error direction is worth remembering: it made me look *more* constrained than I was.
+Apply script `scripts/apply_120_tabung_report_approvers.py` — gates enforced at run time: blob sha re-verified `== 45a168d0`, DSN must name the ref, and **residency asserted against the DATA** (refuses unless the irsyad org is present and the org count is single-tenant shaped). *A DSN can be edited; a tenant roster cannot.*
+Raw proof: `silo=goumlynecruxrlmzlntp host=Mac-Studio`, table present, **anon INSERT/SELECT = False/False**.
+
+**cai's condition 2 satisfied BY THE CLIENT, not by us:**
+```
+saddam@irsyad.edu.sg  active=true  added_by=sales@gazzabyte.sg  02:08:22Z
+zuremi@irsyad.edu.sg  active=true  added_by=sales@gazzabyte.sg  02:08:30Z
+```
+I asked them to switch their own approvers on rather than seeding it — the money-control config carries their name, and it discharges the agent-as-signatory gate by construction.
+
+🔴 **NOT CLAIMED: the approval emails have NOT been exercised.** Configuration is complete; the send path fires on **Elly's next weekly-report submission**. The client was told this explicitly and asked to report whether both emails arrive. **Do not let "it's set up" become "it works".**
 
 ---
 
-## 3. ▶️ OPEN THREADS
+## 2. ▶️ OPEN THREADS
 
 | # | Item | State | Owner |
 |---|---|---|---|
-| 1 | **Token sequence** (§1) | commands delivered; **operator has not run them**; both hosts unchanged | operator → then hub gate at step 3 |
-| 2 | **mig 120 → goumlyne** (task #8) | **CLIENT-BLOCKING**; grant requested #11475 | cai |
-| 3 | **Mobile view-as** (task #7) | **mine**; Nazim spec at `429c81d`; must NOT ship blind | hub |
-| 4 | **mig 121+122 grants** | ⛔ no grant; windows close today; awaiting cai confirm-match at file+number+sha | cai |
-| 5 | **mig 124** (CAI-561 rest) | authored-unapplied @ `9e484f3`, own §6.6 grant required | cai |
-| 6 | **Elly's bank import** | **HELD** — 4 prerequisites (§4) | cai |
+| 1 | **Token sequence** (§0.1) | commands delivered, **NOT run**; both hosts unchanged | operator → hub gates step 3 **on BOTH hosts** |
+| 2 | **mig 121+122 grants** | ⛔ no grant; windows close today; awaiting cai confirm-match at file+number+sha | cai |
+| 3 | **mig 124** (CAI-561 rest) | authored-unapplied @ `9e484f3`, own §6.6 grant required | cai |
+| 4 | **GIRO access for Elly** | **NEXT UP** — client raised 2026-07-24 (#6911), also "giro reconciliation" (#7157). **Not scoped, nothing promised.** | hub |
+| 5 | **Elly's bank import** | **HELD** — 4 prerequisites (§4) | cai |
+| 6 | **Agent-as-signatory fix** (task #10) | cai ruled: exclude by **durable service-account property, NEVER a hardcoded address** | hub |
 | 7 | **CAI-586** pre-push smoke → structurally read-only | queued | hub |
 | 8 | **CAI-578 EXIT proof** (a RESTORE, not an export) | not started | hub |
 | 9 | **money/audit shared fate** | cai to rule shape | cai |
-| 10 | **Fleet identity as first-class** (CAI-591 §D) | scope as own work — surfaced at 4 layers in one day | hub |
-| 11 | **GIRO access for Elly** | client raised 2026-07-24; **not started, nothing promised** | hub |
+| 10 | **Fleet identity as first-class** (CAI-591 §D) | surfaced at 5 layers now — scope as its own work | hub |
+| 11 | Verify approval emails actually send | on Elly's next submission | hub + client |
+
+**Bus at handoff: 1 unread** — #11515 (Nazim, P1: our context gauge reads 73% while the TUI says 100%; ours measures nominal not usable).
+
+---
+
+## 3. 🧭 THE HOUSE DEFECT — SIX INSTANCES, AND A NEW LAYER
+
+**A check that silently operates on a SUBSET and reports on the WHOLE.**
+1. `verifyChain` read 1000 of 1623 rows → `valid` · 2. `grep`/`find` wrapped + gitignore-aware → "clean" from **0 files scanned** · 3. token gate on 1 of 2 hosts · 4. message log asserted delivery it never observed · 5. `canonicalPayloadJson` hashed only keys it could see · 6. **"Please try again" asserted a transient failure it never checked.**
+
+**cai:** *"None of them lied. Each reported truthfully on a scope narrower than the claim it supported, and the output was INDISTINGUISHABLE from a correct check. Vigilance reads the same green."*
+**Corollary, evidenced 5×: the cheapest detector is a SECOND VANTAGE POINT, not a harder look.** cai found my Mini gap · Nazim found the log defect · **the CLIENT** found the mobile defect *and* closed the session ambiguity · a **delegate** found my render harness was unfaithful and Playwright's pinned chromium corrupt.
+
+### 🆕 NEW: PROXY vs PROPERTY (from cai's "one script too narrow" thread)
+The send-path count went **3 → 4 → 6 → 9**, each step someone refusing to inherit the previous number. Then I checked the last "unguarded" one, `nazim_say.sh` — **it doesn't have the defect**: it `exit 1`s on a non-200 *before* reaching the log call. Safe by control flow, not by flag.
+**All those counts measure a PROXY (`grep --undelivered`), not the property (`can a failed send REACH the log call?`).** Two correct designs satisfy it; the proxy flags the exit-first one as broken. My first sweep also *missed* that file because its call spans a line continuation and I grepped single-line — the same proxy produced a false negative and a false positive on one file. **Stop quoting a count; audit reachability.**
 
 ---
 
@@ -74,79 +81,68 @@
 
 donations **2,588** · chain **678**.
 (a) hash-version+RPC @ `c440136` authored-unapplied · (b) recursive sorter · (c) **money/audit shared fate — NOT STARTED** · (d) **CAI-587 completeness fix — in CODE, not in PRODUCTION on the silo.**
-**Pre-flight for this file:** **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII**. Blocking count **0** — for sha `e32357d6…` only.
-**⚠️ cai's "NUL byte" was RETRACTED (CAI-588)** — never existed. **The atomicity block SURVIVES** because CAI-574 rested on *"money and audit share a fate"*, not on the NUL byte.
-**Audit chain, two live defects:** (a) COVERAGE — 28 fully / 12 partially / 636 not; the 12 = 9 modules + **2 tax_settings (9% rate, tax reg no)** + 1 org profile. (b) ATTRIBUTION — **660/676 name a TEST account**.
+Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII** — for sha `e32357d6…` only.
+**cai's "NUL byte" was RETRACTED (CAI-588)** — never existed. The atomicity block survives on *"money and audit share a fate"*.
+**Audit chain, two live defects:** COVERAGE 28 fully / 12 partially / 636 not (the 12 = 9 modules + **2 tax_settings incl. tax reg no** + 1 org profile) · ATTRIBUTION **660/676 name a TEST account**.
 
 ---
 
-## 5. 🧾 CLIENT STATE — GAZZABYTE / IRSYAD
+## 5. ↩️ CLAIMS I WITHDREW (do not re-derive)
 
-- **UNBLOCKED.** Confirmed in their own words 23:05:49Z. Account went from **0 sessions in its entire life** to a working login.
-- **Their 4-step tabung workflow (op#6834) is HALF LIVE — verified, not inferred:**
-  - **Steps 1–2 LIVE and in real use:** 9 weekly reports on goumlyne (6 closed, 2 draft, 1 preparer_signed); `deposit_reference` + `deposit_slip_url` present (089/091 applied).
-  - **Steps 3–4 BUILT + DEPLOYED but DEAD:** migration 120, `src/modules/tabung/notifications/*`, admin UI `dashboard/tabung/reports/approvers`, drain cron `*/5` in `vercel.json` — **but `tabung_report_approvers` is ABSENT on goumlyne.** Nothing can send. → task #8 / grant #11475.
-  - Design point flagged to cai: the approver list is a deliberate **allowlist**, NOT `role=org_admin`, because that roster contains UAT/QA accounts that must never receive a client money-report link. No email stored at rest.
-- **Told them:** exactly that split, **no date promised**, and that I'd confirm when applied rather than leave them to chase.
-- **Open client-facing:** mobile view-as (workaround given: Request Desktop Site) · GIRO access.
-
----
-
-## 6. 🧭 THE HOUSE DEFECT — FIVE INSTANCES, ONE SHAPE
-
-**A check that silently operates on a SUBSET and reports on the WHOLE.**
-1. `verifyChain` read 1000 of 1623 rows → `valid` · 2. `grep`/`find` (wrapped shell functions, gitignore-aware) → "clean" from **0 files scanned** · 3. token gate on 1 of 2 hosts · 4. **message log asserted delivery it never observed** · 5. `canonicalPayloadJson` hashed only the keys it could see.
-
-**cai's diagnosis, adopted:** *"None of them lied. Each reported truthfully on a scope narrower than the claim it supported, and the output was INDISTINGUISHABLE from a correct check. That indistinguishability is the disease — vigilance reads the same green."*
-**Corollary, evidenced 4×: the cheapest detector is a SECOND VANTAGE POINT, not a harder look.** cai found my Mini gap · Nazim's *"why 3× while delivered=true"* found the log defect · **the CLIENT** found the mobile defect and closed the session ambiguity · Nazim's lane found the read-only-label finding.
-**Rule: every check states its boundary; every claim declares which side of it it sits on.**
-
-### Comms defect (fixed `25701aa`)
-All three send scripts ran the `operator_log` line **unconditionally**; `operator_log` defaults `delivered=TRUE` ⇒ **a FAILED send was recorded as delivered, on every channel.** Fixed; verified by driving.
-⚠️ **`delivered` is OVERLOADED — read ONLY with `tag`:** `false` + `*-draft`/`*-drill` = **not sent by design**; `false` + any other tag = genuinely failed (only since `25701aa`).
-🔴 **OPEN UNKNOWN:** **ZERO** record of any genuinely failed send before `25701aa`. **Past delivery is unauditable** — the log cannot contradict *"I never got that"* for anything before tonight.
-⚠️ **`nazim_send.sh` had the SAME defect and was NOT in `25701aa`** (cai #11451) — verify before claiming the fix is fleet-complete.
+- "Gazzabyte had already signed in" → the **burned invite** (23s after `invited_at`, 0 sessions). **Never infer acceptance from `last_sign_in_at`.**
+- "They can't be unstuck until templates land" → a working password existed since 13:41Z.
+- "The lane resolved who signed in" → it didn't; **the CLIENT** did.
+- "delivered=false proves failure detection worked" → those 27 rows are **drafts**.
+- "Removing the Gazzabyte seat is safe" → Studio-only evidence; the Mini authenticates as the partner.
+- **"mig 120 was applied on the operator's override"** → **cai had granted 3 minutes earlier.**
+- "nazim_say.sh is unguarded" → it exits before logging. Right conclusion earlier, wrong reasoning.
 
 ---
 
-## 7. ↩️ CLAIMS I WITHDREW (retract-in-place — do not re-derive)
+## 6. ⚠️ TRAPS ON THIS BOX (verified)
 
-- **"Gazzabyte had already signed in"** → the **burned invite**: `last_sign_in_at` 23s after `invited_at`, **0 sessions ever**. **NEVER infer acceptance from `last_sign_in_at`** (migration 123's own comment says so).
-- **"They can't be unstuck until templates land"** → a working password existed since 13:41Z; templates break **self-service reset**.
-- **"The lane resolved who signed in"** → it did **not**; it wrote a reply true either way. **The CLIENT** resolved it.
-- **"delivered=false proves failure detection worked"** → nearly cited **drafts** as evidence.
-- **"Removing the Gazzabyte seat is safe"** → issued on **Studio-only** evidence; the Mini authenticates as the partner.
-
----
-
-## 8. ⚠️ TRAPS ON THIS BOX (verified, not folklore)
-
-- **`grep` AND `find` are wrapped shell functions** → gitignore-aware, **cannot see `.env*`**. My sweeps returned **1** then **0** files while printing "clean". **Only `os.walk` in Python with a visible positive control is admissible.**
-- **A positive control must test COVERAGE, not just sensitivity.** cai and I both planted controls *inside* the search root; both passed; both blind to a **boundary** error — and the root WAS wrong (the Mini).
-- **`| tail` eats the exit code.** Hit it again tonight. **Capture exit codes DIRECTLY.**
+- **`grep` AND `find` are wrapped shell functions** → gitignore-aware, **cannot see `.env*`**. Only `os.walk` in Python **with a visible positive control** is admissible.
+- **A positive control must test COVERAGE, not sensitivity.** Put it where a *boundary* error would put it — outside the assumed root, on the other host.
+- **`| tail` eats the exit code.** Capture exit codes DIRECTLY.
+- **Playwright's pinned `chromium-1217` is a CORRUPT build** (SIGABRT on a missing dylib). Use `chromium_headless_shell-1228` via `executablePath`.
 - `timeout` absent on macOS · `git ls-tree` needs `-r` · **`UID` reserved in zsh** · long inline python needs `<<'PYEOF'`.
-- `agent_messages.message_type` ∈ review_request/question/decision/agreed/challenge/update/blocker/counter. Body column is **`body`**. `session_digests` uses **ARRAY** columns for topics/decisions/open_questions/action_items.
-- **Vercel:** ihsanos prod is under team `team_mYxOkemmlg8a3HnKFAE9di7N` (`wingmen`), NOT the `.env` VERCEL_TEAM_ID.
-- **Pushing `main` auto-deploys BOTH `ihsanos` and `ihsanos-irsyad` to PRODUCTION.**
-- **`check-schema-drift` is red on pristine `origin/main`** — this lane needs `--no-verify`. Not licence to bypass other hooks.
+- `agent_messages.message_type` ∈ review_request/question/decision/agreed/challenge/update/blocker/counter; body col is **`body`**. `session_digests` uses **ARRAY** columns.
+- **Pushing `main` auto-deploys BOTH ihsanos projects to PRODUCTION.**
 - Supabase Management API 403s from `urllib` (Cloudflare `1010`) — **use `curl`**.
+- ihsanos prod is under Vercel team `team_mYxOkemmlg8a3HnKFAE9di7N`, NOT the `.env` VERCEL_TEAM_ID.
 
 ---
 
-## 9. 🤖 FLEET STATE
+## 7. 🧭 DOCTRINE ADDED THIS SESSION
 
-- **cai** — ALIVE (PID 14115), **100% context**, idle, composer empty, 2 unread, nudged 01:03Z. **Do not reset:** background agents in flight. Wrote its handoff earlier at my prompt.
-- **Nazim / orch-console** — ~87% context, **auto-compacts** (Claude Code summarises itself), no action needed. Covering my operator thread when I go quiet; has re-instructed its irsyad lane to **verify** the hub rather than duplicate it.
-- **Hub (me)** — holds `orch_lease`; `fleet_health_lease` is on the Mini with cc-fleet-health.
+- **A handoff is a claim by someone who cannot be asked — it deserves MORE suspicion, not less.**
+- **An acceptance criterion over a growing set must be a PROPERTY, never a frozen count** (cai).
+- **A remediation that produces the outage it was written to prevent is not a remediation** (cai).
+- **Never instruct a secret to travel over a messaging channel** — placed by the operator, at the machine.
+- **A password is NEVER shared; the reason is ATTRIBUTION, not secrecy.**
+- **A two-person control with a non-human half is a one-person control with extra steps** (cai).
+- **"Please try again" must never be the copy on an unsatisfiable failure** (cai).
+- **When a human's behaviour contradicts your instrumentation, believe the human** (Nazim).
+- **A column name is not an implementation** (cai). **A flag's presence is not the property either.**
+- **One message from the body already in the thread beats correct territory** (cai).
+- **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 ---
 
-## 10. ▶️ NEXT ACTIONS (in order)
+## 8. 🤖 FLEET STATE
 
-1. **Drain the 5 unread bus items (§2)** — #11473 (cai P1) and #11478 (Nazim P1) first.
-2. **Verify `nazim_send.sh` for the delivery defect** — cai flagged it was NOT in `25701aa`. Do not claim the comms fix is fleet-complete until checked.
-3. **Wait for the operator to run the token commands**, then gate at step 3 **on BOTH hosts** before the seat removal. Do **not** re-send the commands.
-4. **Task #7 mobile view-as** — mine; review Nazim's spec `429c81d`; real mobile render check before any push.
-5. **After the windows close today** (11:24 / 13:19 / 14:54Z) surface 121/122 to cai. Do **not** press early. Grant #11475 (mig 120) sits behind them.
-6. Then: CAI-586 structural read-only smoke · CAI-578 restore proof · scope fleet identity · GIRO.
+- **cai** — alive, ~100% context, granting and ruling normally. Closed CAI-600's window early **by his own act** and said so rather than implying it elapsed.
+- **Nazim / orch-console** — auto-compacts; covering the operator thread when the hub goes quiet. Has adopted a pre-send check against duplication. Flags our context gauge is wrong (#11515).
+- **Hub (me)** — holds `orch_lease`; `fleet_health_lease` on the Mini.
+
+---
+
+## 9. ▶️ NEXT ACTIONS (in order)
+
+1. **GIRO for Elly** — the unsent composer item. Client raised it 2026-07-24 and it has never been scoped. **Nothing promised to them.** Start by reading #6911/#7157 and establishing what "giro access" and "giro reconciliation" actually mean before touching anything.
+2. **Answer bus #11515** (Nazim, P1 — context gauge nominal vs usable).
+3. **Wait for the operator to run the token commands**; then gate step 3 **on BOTH hosts** before the seat removal. Do **not** re-send the commands.
+4. **After the windows close today** (11:24 / 13:19 / 14:54Z) surface 121/122 to cai. Do not press early.
+5. Task #10 agent-as-signatory: durable service-account property, never a name pattern.
+6. Then CAI-586 · CAI-578 restore proof · money/audit shared fate · fleet identity.
 7. **Every turn:** reconcile `operator_log.unprocessed()` + `agent_messages`; stamp `read_at` AND `responded_at`.
