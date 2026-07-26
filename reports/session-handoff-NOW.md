@@ -385,6 +385,39 @@ messages is pane-derived:
 — reliably separates frozen from live and costs seconds. It is in `pane_busy` today; whether it becomes a
 fleet-wide bind on *any* pane reading is cai's to rule.
 
+## 0i. 📋 PANE-SIGNAL INVENTORY — the deliverable, and two live hazards it found
+
+**Full artefact: `reports/pane-derived-signal-inventory-20260726.md`** (`9996d39`), bus #11843/#11844.
+Nazim named it: *nobody has an inventory of what in this fleet reads panes.* Now there is one.
+
+🔴 **TWO HAZARDS I VERIFIED AT SOURCE MYSELF** (not relayed from the delegate):
+1. **The console's staleness defence CANNOT FIRE.** `coordinator_pane_publisher.py:161` stamps
+   `captured_at = now()` every 10s **regardless of whether `pane_text` changed**; `console/db.py:327`
+   filters **only** on `captured_at`. **Frozen panes are laundered into the substrate as permanently
+   fresh, by construction.** ✅ **Cheapest high-leverage fix in the fleet: a content-hash / `changed_at`
+   column makes freeze detectable FLEET-WIDE for free** — every body already reads that table.
+   **PROPOSED, NOT IMPLEMENTED** (I have shipped a fix that created the next defect's surface twice today).
+2. **`scripts/priority_sla_watchdog.py` is UNTRACKED**, names a launchd label **that does not exist**,
+   is **not loaded** — and would inject `C-u`+type+Enter into **`orch` and `nazim`, over SSH**, off a
+   frozen-able idle check. Dormant; **one `launchctl bootstrap` from being the highest-risk reader we have.**
+
+🔴 **TOP RISK IS THE THING WE ALL TRUSTED:** `lane_nudge.sh:29` — **a verification primitive whose
+success criterion is a freezable string.** It can **certify delivery of a nudge that never landed**, to
+two callers that then stop retrying. *This is the "verified submit" the whole fleet leaned on tonight,
+including inside the Enter-defect measurement itself.*
+Then: `lane_watchdog.py:184/226` (escalates AND keystrokes; **already filed the false #11808**) ·
+`lane_watchdog.py:456` (**types into the live hub**) · `ingest.py:323` (**the operator's inbound path** —
+frozen-busy defers him 600s) · `console/panes.py:192` (**the render on his phone**).
+
+✅ **A DISTINCTION THAT SHRINKS THE PROBLEM — do not let this become a fleet-wide rewrite.**
+`has-session` / `list-sessions` / `list-panes` / `display-message` answer from the **tmux server's state,
+not the render**, so they **cannot freeze**. ~20 call sites need no change.
+**The line is RENDER-derived vs SERVER-derived, not tmux vs not-tmux.**
+
+⚠️ **NAMED LIMITS — it is a ONE-HOST inventory of a TWO-HOST fleet.** The **Mini is UNMEASURED**. And the
+**running** `lane_watchdog.py` is unconfirmed against disk (a hot-applied copy exists) — **which is where
+risks #1 and #2 live.** Static only: no freeze frequency measured.
+
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
 The token was still live at 04:45Z after six hours. **Do not re-send the commands; do not re-page.**
