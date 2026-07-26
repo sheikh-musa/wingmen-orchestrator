@@ -66,6 +66,19 @@ His words: **"got all of it. driving now."** He HAS the 4-step token sequence; t
 **Nothing in the token sequence is safe to execute while he is at the wheel.** Both hosts still hold compromised credentials until he stops: Studio has the burned Owner PAT, Mini still authenticates as the partner.
 **LESSON:** one short question designed to ELICIT A REPLY closed a P0 that no amount of re-reasoning could. A restatement would have produced nothing testable.
 
+## ⚠️ `delivered` IS SEMANTICALLY OVERLOADED — READ IT ONLY WITH `tag`
+The column now carries **two opposite meanings**, and `tag` is the ONLY disambiguator:
+- `delivered=false` + a **`*-draft` / `*-drill`** tag = **NOT SENT BY DESIGN** (lane phase-gate held). All 27 historical false rows are these.
+- `delivered=false` + any other tag = **attempted and genuinely FAILED** (only possible since `25701aa`).
+Read the column alone and you see 27 delivery failures that never happened.
+🔴 **CONSEQUENCE — an open unknown, not an all-clear:** because the column recorded *intent* before `25701aa`, there is **NO record anywhere of a send that genuinely failed**, on any channel, for the life of the log. Not few — **zero**. Past delivery is **unauditable**. If the operator or a client ever says *"I never got that"*, our log **cannot contradict them** for anything before tonight.
+**Portable rule (Nazim):** when a human's behaviour contradicts your instrumentation, **believe the human**. The client asking 3× and going quiet the instant a send landed was better evidence than the column.
+
+## 📱 CLIENT-FOUND PRODUCT DEFECT — view-as unreachable on mobile (task #7)
+`src/app/dashboard/_components/view-as-controls.tsx:85` → `className="relative hidden sm:block"` hides the ViewAsSwitcher below Tailwind `sm` (640px). **On a phone the only entry point to the feature does not render at all**, for a client who works from one. Asymmetry proving oversight not decision: the **banner** (same file, ~:33) IS mobile-aware, so the EXIT path works while the ENTRY path doesn't.
+**DO NOT ship as a one-class fix:** main auto-deploys to production on push, and the mobile top bar already holds dark-mode toggle + role badge + avatar — unhiding a fourth control unseen risks a squashed toolbar on a live client. Needs a real mobile render check first. Client given a Request-Desktop-Site workaround.
+**Who found it: THE CLIENT.** My #7299 sent them hunting a phone top bar; they corrected me 73s later. The `hidden sm:block` line was **in my own grep output** and I read past it — evidence fetched, not read.
+
 ## ⚠️ `delivered=false` IS NOT A DELIVERY HISTORY — READ IT CAREFULLY
 27 rows carry `delivered=false`. **Every one is a `*-draft` / `*-drill` tag** (`gazzabyte-irsyad-draft`, `cosem-caai-drill`, `cosem-exams-drill`) — lane drafts deliberately logged as unsent. **Same column, different mechanism, opposite meaning.** They are NOT evidence that failure detection ever worked. Pre-`25701aa` there is **not one** record of a genuinely attempted send marked failed; the demonstration case (#7288, 23:27:45Z, "read operation timed out") is logged `delivered=TRUE`. I was one inference from citing drafts as proof the paths were sound.
 
