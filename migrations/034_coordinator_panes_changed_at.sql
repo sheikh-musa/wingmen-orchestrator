@@ -100,30 +100,36 @@ COMMIT;
 
 -- ── POSITIVE CONTROL (CAI-632 hard condition) ───────────────────────────────
 -- The condition is NOT "the column exists and populates". It is "a FROZEN pane is DETECTED
--- as frozen". Run BOTH legs; a one-legged test cannot tell this fix from the defect:
+-- as frozen". Run BOTH legs; a one-legged test cannot tell this fix from the defect, because
+-- a trigger that NEVER advanced changed_at would pass leg 1 and be worthless.
 --
---   BEGIN;
---   INSERT INTO coordinator_panes (agent_id, pane_text, captured_at)
---        VALUES ('__control__','AAA', now())
---     ON CONFLICT (agent_id) DO UPDATE
---        SET pane_text = EXCLUDED.pane_text, captured_at = now();
---   SELECT captured_at, changed_at FROM coordinator_panes WHERE agent_id='__control__';
+-- 🔴 YOU CANNOT RUN THIS IN ONE TRANSACTION. `now()` in PostgreSQL is TRANSACTION-scoped, so
+--    inside a single BEGIN/ROLLBACK every timestamp is identical, nothing can advance, and
+--    BOTH LEGS REPORT FAIL AGAINST A CORRECT TRIGGER. I ran it that way first and got exactly
+--    that — a control that cannot produce a PASS proves nothing, and it would have read as
+--    "this migration is broken". Each upsert MUST be its own transaction (or use
+--    clock_timestamp(), which is statement-scoped, in a harness you write yourself).
 --
---   -- LEG 1 (the frozen case — MUST NOT advance changed_at):
---   -- same bytes, exactly as the publisher would rewrite them
---   INSERT INTO coordinator_panes (agent_id, pane_text, captured_at)
---        VALUES ('__control__','AAA', now())
---     ON CONFLICT (agent_id) DO UPDATE
---        SET pane_text = EXCLUDED.pane_text, captured_at = now();
---   -- EXPECT: captured_at ADVANCED, changed_at UNCHANGED  <= freeze is now detectable
+-- The way I actually verified it (passing, 2026-07-26): a SCRATCH table carrying the exact
+-- trigger body above, three upserts in three SEPARATE transactions ~1s apart, then dropped:
 --
---   -- LEG 2 (the live case — MUST advance changed_at):
---   INSERT INTO coordinator_panes (agent_id, pane_text, captured_at)
---        VALUES ('__control__','BBB', now())
---     ON CONFLICT (agent_id) DO UPDATE
---        SET pane_text = EXCLUDED.pane_text, captured_at = now();
---   -- EXPECT: BOTH advanced  <= the instrument can still say "changed"
---   ROLLBACK;
+--   -- tx 1: seed
+--   INSERT INTO scratch (agent_id, pane_text, captured_at) VALUES ('x','AAA', now())
+--     ON CONFLICT (agent_id) DO UPDATE SET pane_text=EXCLUDED.pane_text, captured_at=now();
 --
--- Leg 2 is what makes leg 1 mean anything: a trigger that never advanced changed_at would
--- pass leg 1 and be useless. Both legs, one transaction, rolled back.
+--   -- tx 2: LEG 1, the FROZEN case — identical bytes, exactly as the publisher rewrites them
+--   ...same statement, same 'AAA'...
+--   -- EXPECT: captured_at ADVANCED, changed_at UNCHANGED   <= freeze is now detectable
+--
+--   -- tx 3: LEG 2, the LIVE case — content actually changed
+--   ...same statement with 'BBB'...
+--   -- EXPECT: BOTH advanced                                <= the instrument can still say "changed"
+--
+-- Observed on the run that passed:
+--   seed       captured=11:00:38.19  changed=11:00:38.19
+--   LEG 1      captured=11:00:40.98  changed=11:00:38.19   <- held. PASS
+--   LEG 2      captured=11:00:43.76  changed=11:00:43.76   <- both moved. PASS
+--
+-- Do NOT run either leg against the live `coordinator_panes` row of a real agent: the
+-- publisher is upserting it every 10s and you would be racing it. Use a scratch table with a
+-- distinct name, drop it, and verify zero residue afterwards.
