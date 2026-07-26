@@ -295,7 +295,7 @@ governs who REPLIES; it must not govern who KNOWS.
 instruction, so there is nothing for him to decide. Question retracted, no answer owed.*
 
 ### 🔴 OPEN DEFECT I INTRODUCED AND HAVE NOT FIXED — the composer capture reads pixels too
-**Evidence (Nazim, 09:5xZ):** resetting cai, the script reported `clearing composer (200 BSpace for 0B
+**EVIDENCE, TWICE, INDEPENDENTLY.** (1) Nazim, 09:5xZ: resetting cai, the script reported `clearing composer (200 BSpace for 0B
 staged)` — **it found NOTHING staged, minutes after two of us had both read `reset me` in that box.**
 And his before/after test **proves the pane was frozen**: two captures 8s apart were byte-identical
 BEFORE the reset and **different AFTER**. A pane that was not repainting now repaints.
@@ -311,8 +311,15 @@ TEXT as currently-staged, which is worse** — indistinguishable from a true res
 what a human reads verbatim and trusts. **`pane_busy` samples twice; `composer_parse_pane` does not.
 That inconsistency is the bug.** Fix: same liveness discipline, plus refusing to claim "composer was
 EMPTY" from a frozen render.
+**(2) 10:40Z:** Nazim reported cai's composer held `find who sent op#7357/7364`, built an adjudication on
+it — **and the reset then logged NO preserved text.** A frozen-pane read of something that may never have
+been staged. **Same defect, opposite direction, reproduced by a different body.**
 *Deliberately not fixed at hour 5 of a long session — that combination is exactly how the locale bug
-shipped. Left OPEN so it cannot be inherited as done.*
+shipped, twice. Left OPEN so it cannot be inherited as done.*
+🔴 **AND A DEADLOCK THIS EXPOSES:** cai processes the bus **only when nudged**; `nudge_cai.sh` **refuses**
+when the composer holds text; so **a body whose only wake path can be blocked by its own composer is
+deadlocked, and the guard I shipped is what blocks it.** Only a reset clears it. Written down rather than
+rediscovered at 3am. Not fixed.
 
 ⚠️ **AND IT REACHES BACKWARD.** Every preserved-input entry from tonight is pane-derived. With the
 operator's refutation (§0f) that is a **SECOND independent reason** the "stranded instruction"
@@ -583,7 +590,7 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
-- 🔴 **A PANE READING IS ONLY EVIDENCE IF THE PANE IS REPAINTING — and that covers EVERY reading, not just busy markers.** cai's post-reset pane rendered `100% context used` while telemetry showed **19%, active**; Nazim nearly cleared a healthy node mid-delegation off that stale pixel. **Everything the fleet knows about itself between bus messages is pane-derived** — my lane watchdog (it filed a false `IDLE_UNSENT`, #11808), my composer capture, Nazim's sweeps. **A frozen render does not fail loudly; it serves yesterday's truth with today's confidence.** §0h.
+- 🔴 **A PANE READING THAT *ASSERTS ACTIVITY* IS ONLY EVIDENCE IF THE PANE IS REPAINTING.** (Sharpened by Nazim, who withdrew his own stronger form within 10 min: **a static pane is consistent with idle-and-truthful AND frozen-and-lying** — what separates them is whether the render **claims motion**. An idle pane legitimately does not animate.) cai's post-reset pane rendered `100% context used` while telemetry showed **19%, active**; Nazim nearly cleared a healthy node mid-delegation off that stale pixel. **Everything the fleet knows about itself between bus messages is pane-derived** — my lane watchdog (it filed a false `IDLE_UNSENT`, #11808), my composer capture, Nazim's sweeps. **A frozen render does not fail loudly; it serves yesterday's truth with today's confidence.** §0h.
 - 🔴 **A PREDICATE-SHAPED NAME MUST HAVE A PREDICATE RETURN.** `pane_busy` always returns 0 (exit = *measurement succeeded*); the natural `if pane_busy …; then` therefore reports BUSY for every pane. A careful body hit it within an hour and **recorded it as the standing SLA adjudication — turning "close the SLA if busy" into CLOSE EVERY SLA FOREVER.** **The most dangerous artefact shape found today: not a wrong answer, but a wrong INSTRUMENT written down as standing procedure.** Fixed by `pane_is_busy` (`8eb19c7`).
 - 🔴 **A LAUNCHD SERVICE WHOSE WorkingDirectory IS A WORKTREE MEANS THE TRACKED FILE IS NOT THE RUNNING FILE.** `dev.wingmen.drift-detector`'s **installed** plist points at `orchestrator-wt/preventative-gates`; the **tracked** plist names the main checkout. Editing the repo copy — the obvious action, the one that passes review — **changes nothing the daemon runs.** How many other services are in this state is **unmeasured**; it is a measurable question. §0g.
 - 🔴 **"SEEN ONCE" IS NOT "BLESSED".** The drift detector alerts only on drift NEW beyond prior runs, so a CRITICAL fires on first sighting and is silent forever after. **78 CRITICAL are already suppressed with no reason recorded** — cai's own *unheard-not-silenced* ruling in force at 78x, ungranted. §0g.
