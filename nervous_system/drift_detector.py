@@ -65,6 +65,31 @@ ALLOWLIST = [
     ("goumlyne", "extra", "gl_*", "irsyad-only GL module (enforce_balanced_journal/post_journal_atomic)"),
     ("goumlyne", "extra", "wc_*", "irsyad-only WooCommerce-ingest module"),
     ("goumlyne", "extra", "organizations_fiscal_config", "irsyad-only fiscal config (GL module)"),
+    # ── tabung approval module — baselined 2026-07-26 under CAI-RESP-627, 3 conditions ──
+    # WHY: migration 120 was applied to goumlyne ONLY, under grant CAI-601 (the
+    # client's own two approvers, saddam@/zuremi@, seeded by Gazzabyte). It is
+    # absent from the ceayj reference BY DESIGN — the feature is scoped to one
+    # tenant. The detector is CORRECT and the drift is INTENDED; without this it
+    # fires 2 CRITICAL every daily run, and a CRITICAL that is always expected is
+    # not silenced, it is UNHEARD — which is worse, because it still looks armed.
+    #
+    # 🔴 CONDITION 1 — EXACT OBJECT NAMES, NEVER A `tabung_*` GLOB. A THIRD
+    # table_extra on this silo MUST still fire CRITICAL. Baselining the class would
+    # manufacture a false all-clear for every future unexpected money/PII table on
+    # goumlyne — the remediation becoming the defect it was written to prevent.
+    # 🔴 CONDITION 3 — scoped to the reason: these two objects, this silo, this kind.
+    #
+    # ⚠️ CAI-627 also names a limit that OUTLIVES this entry: the reference is a
+    # SILO, not source control, so a presence diff CANNOT say which side moved. An
+    # object appearing here is equally consistent with "goumlyne gained it" and
+    # "ceayj lost it". This entry asserts the former on migration provenance
+    # (CAI-601 + the object probe), not on the diff.
+    ("goumlyne", "extra", "tabung_report_approvers",
+     "irsyad-only tabung approval module; mig 120 applied to goumlyne ONLY under CAI-601, "
+     "absent from ceayj-ref by design. Baselined per CAI-RESP-627 (objects not class)."),
+    ("goumlyne", "extra", "tabung_report_notifications",
+     "irsyad-only tabung approval module; mig 120 applied to goumlyne ONLY under CAI-601, "
+     "absent from ceayj-ref by design. Baselined per CAI-RESP-627 (objects not class)."),
     # ceayj-only modules (missing on goumlyne) — telegram / consent / platform.
     ("goumlyne", "missing", "telegram_users", "ceayj-only telegram storefront module; irsyad has none"),
     ("goumlyne", "missing", "tg_*", "ceayj-only telegram module"),
