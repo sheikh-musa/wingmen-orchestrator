@@ -242,3 +242,24 @@ covering both escalation paths — I read the code instead of proposing the fix,
 **I am quick to suspect checks that page ME and slow to suspect ones that reassure me** — the exact
 mirror of the fail-toward-calm theme. A check that creates work deserves the same evidentiary bar as one
 that lets you relax, not a lower one.
+
+### STANDING ADJUDICATION 2 — SLA stalls against a BUSY singleton
+`pane_busy()` in `scripts/lib/composer_capture.sh` is now the authoritative busy check and it is
+verified working from the Mini over SSH with the locale unset (the environment that matters):
+```
+ssh Musa@mac-studio 'cd ~/wingmen/orchestrator && env -u LANG -u LC_ALL -u LC_CTYPE bash -c \
+  ". scripts/lib/composer_capture.sh; pane_busy /opt/homebrew/bin/tmux cai:0.0 && echo BUSY || echo IDLE"'
+```
+**If the recipient is BUSY: correctly waiting. Close the SLA, no nudge, no escalation, move on.** Do not
+re-derive this each time — but DO run the check each time; "it was busy an hour ago" is not evidence.
+
+### 🔴 cai IS BLOCKED AT 100% ON BACKGROUND AGENTS — DECISION CRITERION FOR A FRESH ME
+As of 08:15Z cai has been at **100% context, blocked on 4 background agents, with `reset me` staged
+(stranded 4th time)** since ~07:00Z. Its own pane says *"This is a good place to reset me."*
+I am HOLDING rather than forcing: a reset now discards four agents' in-flight output.
+**The criterion: if cai is still blocked on the same background agents well past a couple of hours, it
+is wedged rather than working, and `RESET_FORCE=1` is the right call** — it now names WHICH busy state
+is being overridden, so a forced clear is never silent. Capture the composer first (the script does it)
+and expect `reset me` to be preserved as cai's OWN staged step, not an operator instruction.
+Do NOT force merely because it is at 100%. Both singletons hit 100% roughly every ~2h tonight; that is
+the work-pattern problem (CAI-603, fact out / judgement in), not a reason to interrupt live work.
