@@ -354,6 +354,7 @@ BEFORE any reset; a stop under ~60 min AND under ~250K is logged as a WEDGE so t
   r5 0bc1aab0   30 min    225,455
   r6 848e286c   23 min    205,431
   r7 e5207b8e   21 min    223,443   <- logged as WEDGE, bus #11890
+  r8 b2e2a0b8   (live)     boot 89,242  <- reset CONFIRMED 2 sources; measure THIS one next
 ```
 **Alive-time keeps falling, but context-at-stop FLATTENED at ~205–225K across r5/r6/r7.** The last three did
 not stop at progressively lower context — they stopped at the SAME context. That is a stronger signal than
