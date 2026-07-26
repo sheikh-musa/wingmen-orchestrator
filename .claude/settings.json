@@ -5,7 +5,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3 /Users/sheikhmusa/wingmen/orchestrator/scripts/precompact_digest.py"
+            "command": "/Users/Musa/wingmen/orchestrator/.venv/bin/python3 /Users/Musa/wingmen/orchestrator/scripts/precompact_digest.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/Musa/wingmen/orchestrator/.venv/bin/python3 /Users/Musa/wingmen/orchestrator/scripts/hub_heartbeat.py"
           }
         ]
       }
