@@ -135,6 +135,62 @@ change what he'd do.
 refused to invent one), his interim credential call (cai's #7126), and the TDU group + Alderei
 BotFather token.
 
+
+## ⚑ FINAL STATE (2026-07-26 ~01:30Z) — read this block first, it supersedes conflicts above
+
+**OPERATOR IS DRIVING.** Nothing goes to him until he says he is stationary. He has the 4-step token
+sequence and the two commands (op#7307).
+
+### THE LIVE SECURITY ITEM — token remediation, blocked on him
+- **STUDIO** `/Users/Musa/wingmen/orchestrator/.env` holds the **BURNED Owner token** (sbp_2180…b069,
+  pasted into Telegram 22:38Z, scrubbed from the log by the hub 71s later).
+- **MINI** `/Users/sheikhmusa/wingmen/orchestrator/.env` authenticates as **GAZZABYTE'S** token
+  (sbp_f670…4e34). **SEAT REMOVAL IS BLOCKED** on this — pulling their seat takes the Mini's 4 lanes,
+  this console and the operator's Telegram bridge down together.
+- Order: revoke burned → operator places TWO DISTINCT tokens (`wingmen-studio`, `wingmen-mini`) →
+  hub verifies BOTH hosts and asserts the NEGATIVE ("neither authenticates as the partner") → then
+  seat removal. Gazzabyte should revoke their own token afterwards (operator-gated).
+
+### WHAT SHIPPED TONIGHT (all merged after I re-ran tests myself)
+cosem-platform `origin/main`: PIN no longer printed on the record PDF (239911b) · fail-closed
+demo-project guard on all 7 service-role scripts + Rule A (f6b7d3a) · **B1 org-scoped batches**
+(00b48c7 — an instructor can open an intake without a deploy; this was the literal blocker in
+"before next batch starts").
+
+### THE DEFECT CLASS THAT DEFINED THE NIGHT — measurements that cannot see what they certify
+Six instances, all now closed: nudge_cai's composer guard (matched a dead prompt rendering) · the
+context watchdog's unsent-text precondition (same NBSP defect, different file) · the secrets sweep
+(respects .gitignore ⇒ blind to .env) · `delivered` recording intent not outcome · my send-path
+checker (hardcoded list ⇒ missed 3 of 9) · the background-agent guard (single sample ⇒ would have
+blocked every cai reset forever on a frozen footer).
+**`scripts/check_send_paths_report_failure.py` now DISCOVERS all 9 send paths and both hosts pass.**
+
+### STANDING ARRANGEMENTS I CHANGED TONIGHT
+- **cc-irsyad does NOT draft replies the hub is answering** (it was superseded 3× in a row). It
+  verifies the hub's answer, goes one layer under, files deltas to me. A WRONG hub answer is an
+  immediate P1.
+- **Before sending on the hub's thread: re-read the last outbound row on that tag.** If newer than
+  the draft, the answer landed — convert to a bus note. (It caught a duplicate on its first use.)
+- **SLA watchdog escalates agent-queue stalls to orch-console, not the operator** — and ignores
+  self-addressed notes entirely (a self-note would have paged him while driving).
+- **Intent to write to the operator on another body's topic is a PROPOSAL THAT WAITS.** I broke
+  CAI-547 twice in 20 minutes before this stuck.
+
+### OWED / NEXT
+1. **Seed `tabung_report_approvers`** when mig120 lands (~2026-07-27T01:15Z) — saddam@ (5b250879…)
+   and zuremi@ (06a88681…, ='VPZ'), both verified org_admins. **Applying the migration alone leaves
+   an EMPTY allowlist and the client's emails still silently do not send.** Task #11.
+2. Operator owes: batch start date (port sequencing blocked; do NOT invent one) · interim credential
+   decision (cai #7126, recommends HOLD, I agree) · geofence call · TDU group + Alderei token.
+3. cai owes: ruling on the GIRO spec (4429428 — rule on THAT sha, not 3971032).
+4. Hub owns task #7 (mobile View-as gap, spec 429c81d) — must NOT ship as a one-class fix; main
+   auto-deploys to prod.
+
+### ON RESETTING ME
+I am `auto_reset: False, self_compacts: True` in the watchdog registry and CAI-500 condition 4
+refuses a self-reset even on a direct call. **I cannot clear myself, by design.** The operator (or
+the hub over SSH) runs `scripts/reset_nazim.sh`. A fresh me reads THIS file first.
+
 ## OPEN — pick these up first
 1. **Drill verdicts for exams + caai.** Both were mid-drill at handoff. Review their reports on
    the bus, then advance each to `supervised` (and to `direct` within days — they're low-stakes
