@@ -79,7 +79,24 @@ fi
 # while looking like protection, which is worse than no guard. Strip the marker, then delete NBSP
 # bytes explicitly before the ordinary whitespace squeeze.
 COMPOSER="$("$TMUX_BIN" capture-pane -t '=cai:0.0' -p 2>/dev/null | grep '^❯' | tail -1 | sed 's/^❯//' | LC_ALL=C tr -d '\302\240' | tr -d '[:space:]')"
-if [ -n "$COMPOSER" ] && [ "$COMPOSER" != "Pressuptoeditqueuedmessages" ]; then
+# QUEUE GUARD (2026-07-26, Nazim). The 'Press up to edit queued messages' placeholder was
+# treated as "composer empty, safe to nudge" — correct about STAGED TEXT, and wrong about the
+# thing that matters. That placeholder means the body ALREADY HAS MESSAGES QUEUED AND
+# UNPROCESSED. Nudging then does not deliver a signal; it appends one more item to a queue the
+# body is demonstrably not draining. Observed tonight: cai sat at 100% context with my
+# count-only nudges stacked unconsumed in exactly this state, and I sent ~6 of them.
+# A nudge is signal-only and BEST-EFFORT (Option B: delivery is guaranteed by the durable log
+# and reconciliation, never by the keystroke). So when the body is visibly backed up, the
+# correct action is to send NOTHING and let the log do its job — refusing costs us nothing and
+# stops us adding noise to a saturated body.
+if [ "$COMPOSER" = "Pressuptoeditqueuedmessages" ]; then
+    echo "nudge_cai: SKIPPED — cai already has QUEUED, unprocessed messages ('Press up to edit" >&2
+    echo "           queued messages'). It has been signalled and is not draining; another nudge" >&2
+    echo "           only lengthens the queue. The bus rows are durable — cai reads them at its" >&2
+    echo "           next turn. Chase it with a reset or leave it, but do not keep typing at it." >&2
+    exit 0
+fi
+if [ -n "$COMPOSER" ]; then
     echo "nudge_cai: REFUSED — cai's composer holds unsent text; -l would concatenate onto it and submit the hybrid." >&2
     echo "           The bus row is already durable; cai reads it at its next turn. If this is urgent," >&2
     echo "           surface it another way rather than typing into a staged draft." >&2
