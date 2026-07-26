@@ -58,9 +58,12 @@ the file settled it. A measurement whose tooling failed reports **"could not mea
 read the file. **A correction is an assertion** and carries a heavier burden, because it arrives with "I checked".
 
 ## OPEN / OWED
-1. **Gauge divisor** — the hub's TUI read 100% while our gauge said 73% "no action yet". We divide by the
-   NOMINAL 1M window; a body degrades against the USABLE one. `ed961fa` made the gauge COMPLETE, not
-   correctly SCALED. **Unfixed.**
+1. ~~**Gauge divisor** — we divide by the NOMINAL 1M window; a body degrades against the USABLE one.~~
+   🔴 **RETRACTED — see the LATE BLOCK. That explanation is REFUTED**: the gap was 27 points at 02:00 and
+   76 points at 04:00 on the same body, and no fixed usable-window offset produces both. The real
+   relationship is UNKNOWN. Struck in place rather than deleted, because a handoff that quietly rewrites
+   its own wrong claim is how the next body re-derives it. `ed961fa` made the gauge COMPLETE, not correct.
+   **Do not trust it to detect a full body; use the body's own footer.**
 2. **Authorisation gate** — every arming gate lives OUTSIDE `_do_reset`, so any direct call bypasses all
    of them. **cai RULED (CAI-606): gates INSIDE `_do_reset`, RE-EVALUATED AT CALL TIME — not a token,
    because a token certifies a PAST gate.** Not yet built. This is the next job.
