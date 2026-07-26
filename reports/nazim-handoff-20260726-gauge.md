@@ -274,3 +274,38 @@ is being overridden, so a forced clear is never silent. Capture the composer fir
 and expect `reset me` to be preserved as cai's OWN staged step, not an operator instruction.
 Do NOT force merely because it is at 100%. Both singletons hit 100% roughly every ~2h tonight; that is
 the work-pattern problem (CAI-603, fact out / judgement in), not a reason to interrupt live work.
+
+### ⚑ CLOSING STATE (10:30Z) — audited, with two of my own claims withdrawn
+**Measured from TELEMETRY, never panes:** cai 205,431 · hub 396,968 · me 793,212 (79%).
+All four Mini lanes: `pane_is_busy` NOT-BUSY, `STALE=0`, 0 unread — genuinely idle and drained.
+Both inboxes clear. Everything pushed (`88dd6a9`).
+
+🔴 **cai's PANE IS FROZEN and shows `100% context used`. TELEMETRY SAYS 205,431 (~21%). DO NOT RESET IT
+ON A PANE READING.** Verified: byte-identical captures, `CC_BUSY=0 STALE=1`. It is healthy and active.
+
+### 🔴 TWO OF MY OWN FINDINGS, WITHDRAWN OR NARROWED — do not re-inherit them
+1. **The strand RATE is withdrawn.** "Four panes stranded at 05:20, three more within 15 minutes" was
+   entirely pane READS with no repaint check. **The MECHANISM survives** — bare Enter failed 3/3 and
+   `lane_nudge.sh` submitted 3/3, an INTERVENTIONAL test, not a read. **Mechanism proven, rate unsupported.**
+   I told the operator it was a continuous background loss; that continuity claim rests on the count.
+2. **"A pane reading is only evidence if the pane is repainting" was TOO STRONG.** orch's pane is
+   byte-identical AND truthful, because an idle pane legitimately does not animate. **Corrected: a reading
+   that ASSERTS ACTIVITY needs repaint.** A static pane is consistent with idle-and-truthful AND
+   frozen-and-lying; what separates them is whether the render CLAIMS motion. `composer_capture.sh` already
+   encoded this (STALE raised only where a marker needs liveness proof) before I stated it wrongly.
+
+### THE ITEM NOBODY OWNS YET
+**There is no inventory of which fleet signals are pane-derived** — lane watchdog, composer capture, my
+sweeps, context readings, busy checks, the reset scripts. Each needs a liveness precondition and nobody has
+the list. Same shape as the §6.6 legs: we hardened the one we were looking at.
+
+### OPERATOR — one live item, two queued
+🔴 **The burned token `sbp_2180…b069` is STILL LIVE** (measured with a discriminating control at 09:41Z by
+cai; ~11h). op#7367/7381/7385. **Queued behind it:** the batch FLOOR (not the date — a floor or even
+"don't know" unblocks cosem-port) and the tdsct pass mark (18 labels + acronym + 2 confirmations, and
+**tdsct theory cannot grade until answered** — a live consequence, not theoretical).
+He asked whether we are over-correcting. **Answer, measured: 301 bus messages since 01:30, of which
+withdrawals/corrections — me 37, cai 36, hub 16; the four building lanes produced 5 between them.** Real
+pattern, cause unproven, and I refused to attribute it to the model. Two drivers named: instruments
+genuinely were lying (so suspicion kept being rewarded), and **we spend all night praising self-correction,
+which makes correcting the highest-status move available.**
