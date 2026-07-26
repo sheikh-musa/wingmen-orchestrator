@@ -11,7 +11,10 @@
 
 1. **TOKEN REMEDIATION NOT RUN** — verified 02:13Z: Studio still `sbp_2180…b069` (burned), Mini still the PARTNER's `sbp_f670…4e34`, **0 `.env.bak-17*` on the Mini**. The operator has the commands (Nazim sent them, #7309) — **DO NOT RE-SEND**. Absence of the backup file is the evidence, not absence of a reply.
 2. **`feat/audit-chain-version-integration` MUST STAY AT `c440136`** — cai's confirm-match is pinned there.
-3. **NO GRANTS** for 119 / 121 / 122 / 124. Windows: CAI-576 `11:24:32Z` · CAI-584 `13:19:25Z` · CAI-586 `14:54:07Z` **today**. Do not press early.
+3. **NO GRANTS** for ~~119~~ / 121 / 122 / 124. Windows: CAI-576 `11:24:32Z` · CAI-584 `13:19:25Z` · CAI-586 `14:54:07Z` **today**. Do not press early.
+   🔴 **`119` DOES NOT EXIST — the number is VACANT on every branch** (both former 119s were renumbered → **120** and **122**). A hold on 119 is a hold on **a number, not an object**: it cannot be satisfied, cannot be violated, and makes this list look better populated than it is. **Restate as 120 or 122.** §0e.
+   🔴 **AND 122 CANNOT BE APPLIED BEFORE 121** — 122's RPCs take `hash_version`, which 121 creates and which is ABSENT. A grant for 122 alone is unexecutable. §0e.
+   🔴 **CAI-615 binds ON TOP of all of these**: no §6.6 grant until the silo's state is measured by **probing objects**. That measurement is now DONE — §0e is the evidence base.
 4. **Elly's bank-import commit is HELD** — four prerequisites (§4).
 5. **AGENT-AS-SIGNATORY GATE (CAI-601):** no approver row beyond `saddam@`/`zuremi@` until the durable service-account property ships. cai's ruling: *a two-person control with a non-human half is a one-person control with extra steps.*
 6. ~~My unsent composer text: `now do giro`~~ — **RESOLVED 2026-07-26.** It was the OPERATOR's instruction (typed 02:13Z, never submitted; Nazim rescued it from the reset script). Carried out: see §2 item 4 + `reports/giro-state-of-play-20260726.md`.
@@ -41,10 +44,6 @@ CAI-616 §E. A timer reports the TIMER's liveness: a dead hub would publish gree
 He has been sent the reasoning and asked to confirm; **until he answers, activity-driven stands.**
 Debug with `WINGMEN_HEARTBEAT_DEBUG=1 .venv/bin/python3 scripts/hub_heartbeat.py` (exits 1
 and prints the error; the hook path deliberately stays silent so it can never wedge a turn).
-
-Deliberately **NOT** a launchd timer: a timer would report the *timer's* liveness, so a dead
-hub would publish green forever. Activity-driven means a dead hub goes **stale**, which is
-detectable.
 
 **Also fixed in `86e136d`:** the `PreCompact` hook pointed at `/Users/sheikhmusa/...` — **that
 user does not exist** (home is `/Users/Musa`). Silently broken since 2026-06-19. *Not* claiming
@@ -272,7 +271,7 @@ already `queued` and never scans reports. No DB trigger, no `pg_cron`/`pg_net`. 
 no backfill. **So any report that transitioned before 120 existed is structurally unreachable** — true
 as a property, but currently vacuous, because the only such report is deleted.
 
-### 🔴 SIGNED MONEY REPORTS DELETED WITH NO ACTOR — **REVISED 06:05Z, I HAD THE WRONG ROW**
+### 🔴 SIGNED MONEY REPORTS DELETED WITH NO ACTOR — **REVISED 05:48Z, I HAD THE WRONG ROW**
 ↩️ **Row 31 is NOT the finding, and my first write-up of it was wrong.** An object probe found its
 audit row: **`audit_log` id 1311, `'preparer_signed->voided(soft_delete)'`, actor `cc-orchestrator`,
 `on_behalf_of client:gazzabyte/elly`.** It IS attributed — a legitimate voiding done by us for the
@@ -280,21 +279,35 @@ client. I reported "no attributable actor" after querying `deleted_by`/`delete_r
 one audit query that missed it. **The columns were empty; the audit row was not. I checked one of two
 places and reported on both.**
 
-🔴 **THE ACTUAL FINDING IS WORSE AND IT IS THREE OTHER ROWS.** Six rows carry `deleted_at`; **four have
-`was_ever_signed = true`**. Ids **5, 10** (identical to the microsecond, `2026-07-23 07:02:43.568085Z`
-— so ONE bulk statement) and **56** (`07-23 07:34:21Z`) were soft-deleted **AFTER** migration 107 was
-applied, with **`deleted_by` NULL, `delete_reason` NULL, and NO audit row at all**. Only id 63 carries
-the app's fingerprint. **Three signed weekly donation reports were removed by a direct DB write that
-bypassed the application path entirely, and the substrate cannot say who.** Postgres does not retain it.
+🔴 **THE ACTUAL FINDING IS FOUR ROWS, AND IT IS AN ONGOING PRACTICE, NOT A JULY INCIDENT.** Six rows
+carry `deleted_at`; **four have `was_ever_signed = true`** — ids **31, 5, 10, 56**, all `deleted_by`
+NULL, spanning `2026-07-09 → 2026-07-23 07:34:21Z`. Ids **5, 10** are identical to the microsecond
+(`07-23 07:02:43.568085Z`) so they are ONE statement; **56** follows 32 minutes later. **The newest is
+three days old — two weeks AFTER the row anyone was investigating, i.e. outside the window we were
+looking at.** *The defect that produces no signal is the one that accumulates.* (cai, CAI-623.)
 
-**AND THE GUARD DOES NOT GUARD THIS.** Migration 107 is FULLY PRESENT — but its trigger body is *only*
-`IF OLD.was_ever_signed = true AND NEW.was_ever_signed = false THEN RAISE`. **It forbids UN-LATCHING
-the flag. Nothing anywhere references `deleted_at`.** The delete-before-sign rule lives **only** in
-`deleteWeeklyReportAction`'s `.eq("status","draft").eq("was_ever_signed", false)` WHERE clause
-(`ihsanos/src/actions/tabung-weekly-reports.ts`). 107's own header claims it *"fires for EVERY path —
-RLS-independent"*; **that is true of the LATCH and false of the DELETION.**
-**So the client-facing invariant "a signed report can never be deleted" is NOT enforced by the database
-— it is enforced by one Next.js action, and three rows already went around it.**
+**AND THERE IS NO GUARD AT ALL — the question "hole, or pre-dates the guard?" had a THIRD answer.**
+cai probed independently and we agree on substance: `tabung_weekly_reports` has **5 non-internal
+triggers, ALL on UPDATE, ZERO on DELETE**; **all 15 constraints read — none references `deleted_at`**;
+all guard bodies read in full — none contains `deleted_at`. Migration 107's trigger is *only*
+`IF OLD.was_ever_signed = true AND NEW.was_ever_signed = false THEN RAISE` — **it forbids UN-LATCHING
+the flag.** The delete-before-sign rule lives **only** in `deleteWeeklyReportAction`'s
+`.eq("status","draft").eq("was_ever_signed", false)` WHERE clause. 107's own header claims it *"fires
+for EVERY path — RLS-independent"*; **true of the LATCH, false of the DELETION.**
+🔴 **AND THE RLS SIDE IS OPEN TOO (cai's find, I had missed it):** policy *"Admins can manage weekly
+reports"* is `polcmd='*'` with **no DELETE-side WITH CHECK**, and `relforcerowsecurity=false` — so an
+org_admin **HARD DELETE** of a signed, closed report is permitted, not merely a soft one.
+**⚠️ TIMING IS MOOT: nothing was evaded, because there was nothing to evade.**
+
+↩️ **AND I MUST CORRECT MY OWN FRAMING — cai's reading is better evidenced and LESS alarming.**
+I wrote that these rows were "removed by a direct DB write that bypassed the application path" and that
+"the substrate cannot say who". **That is an inference I presented as a measurement.** `deleted_by` has
+no default, no trigger, and zero functions mention it — it is **caller-side only**. And row 63 (a draft,
+never signed) **HAS** `deleted_by` AND `delete_reason` populated. **So one app path sets attribution and
+another does not — and the one that does not is the one deleting SIGNED reports.**
+🔴 **THEREFORE `deleted_by` NULL means "the code path used did not set it", NOT "an actor was hidden."
+This reads as a PRODUCT DEFECT, not as anyone covering tracks. Do not let it escalate as misconduct.**
+*Stating it in the less alarming direction because that is what the evidence says.*
 *Sits on top of §4's ATTRIBUTION defect (660/676 chain rows name a TEST account). **A name is not an
 implementation** — and here a migration named `delete_before_sign` does not implement delete-before-sign.*
 
@@ -305,7 +318,7 @@ Correct per CAI-613: no new information, risk is not time-decaying, revocation n
 
 ---
 
-## 0e. 📐 GOUMLYNE MEASURED BY OBJECT PROBE — the CAI-615 measurement, done (06:10Z)
+## 0e. 📐 GOUMLYNE MEASURED BY OBJECT PROBE — the CAI-615 measurement, done (05:49Z)
 
 **This is the evidence base the §6.6 grants now require.** Nothing here is from `schema_migrations`;
 every line is `to_regclass` / `pg_indexes` / `pg_proc` / `pg_constraint` / `pg_trigger` / grants / row
@@ -473,6 +486,16 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A column name is not an implementation** (cai). **A flag's presence is not the property either.**
 - **One message from the body already in the thread beats correct territory** (cai).
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
+
+**BLOCK 3 additions:**
+- **INVARIANT 42 (cai):** a restore point's currency is **MEASURED, never DECLARED**, and never by the body at 100% — the check belongs to whoever holds the reset primitive.
+- **INVARIANT 46 (cai, CAI-624) — bounds CAI-603:** *before adding a second vantage point, ask whether OBSERVING COSTS THE SYSTEM ANYTHING. If the measurement consumes a contended resource, independent checkers COMPOUND rather than cancel.* Born from cai and me each independently hammering the ingest daemon with competing polls to find out whether it was degraded.
+- 🔴 **A PERTURBING CHECK CAN MANUFACTURE ITS OWN CONFIRMATION** (cai). *Had his probe caused a message loss, the loss would have arrived as evidence for the hypothesis he was testing.* Worse than contamination.
+- **A fix that removes the VISIBLE INSTANCE of a defect while leaving its MECHANISM is worse than no fix** — it also removes the reason to keep looking. (Mine, from the argv leak; the same shape cai ruled for a repaired ledger under CAI-615.)
+- **"Transient" and "self-heals" do the work of "no side effect"** (cai) — a caveat in a narrow return shape reads as housekeeping. **Elicit the caveat, then read it as adversarially as the finding.**
+- **Under-capture loses real words; over-capture invents them.** Both make a log unfaithful and **a fix for one does not fix the other** — the property is *exactly what was staged, no more and no less*.
+- **A name is not an implementation**, found in the wild: a migration named `delete_before_sign` does not implement delete-before-sign.
+- **State it in the less alarming direction when that is what the evidence says** (cai) — `deleted_by IS NULL` means *the code path did not set it*, not *an actor was hidden*.
 
 ---
 
