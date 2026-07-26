@@ -157,6 +157,61 @@ BOTH sides to source before any word of this reaches the client.
 
 ---
 
+### 4.1 🆕 PARSER FEASIBILITY — EXECUTED against the 6 real statements (03:40Z)
+
+Delegate **ran** `origin/main`'s parsers (pure functions only; `commitBankImportAction`
+never imported; aggregate counts only, no PII reproduced). **7 files = 6 distinct
+statements** — the Jan month is present twice as two export formats (936/936 shared
+idempotency keys).
+
+**Routing unambiguous** (the two sniffs were mutually exclusive on all 7). **Row accounting
+BALANCED on every file** — `parsed + skipped_zero_credit + skipped_malformed == data rows`.
+No row vanishes from the totals. 0 malformed.
+
+| GIRO variant | rows | survive | money side | notes |
+|---|---|---|---|---|
+| GIRO COLLECTION | 21 | **21** | credit-only | **SGD 271,037.45** |
+| GIRO PAYMENT | 182 | **0** | debit-only | correctly excluded |
+| GIRO RETURN | 20 | 6 | 6 cr / 14 db | 🔴 **SGD 7,447.39 of reversals survive** |
+| IBG GIRO | 53 | 45 | 45 cr / 8 db | |
+
+**So option (A) is technically feasible — collections are not discarded.** But:
+
+🔴 **THE STRUCTURAL FACT THAT CONSTRAINS (A):** GIRO COLLECTION rows are **LUMP-SUM BATCH
+credits, not per-donor rows** — 3/month, mean SGD 12,906.55, `paynow_tag` null on all 21.
+The statement does not itemise who gave what inside a batch. **(A) can produce batch totals
+only; it cannot produce donor-attributed giving.** If the client's audit need is
+"who donated", these files cannot answer it and no build changes that. This must be
+established with Gazzabyte before anything is promised.
+
+### 4.2 🔴 THREE DEFECTS IN THE **LIVE** `bank_import` RAIL (filed to cai, bus #11552)
+
+Reachable by the irsyad preparer **today**; latent only because she has never completed an
+import (§4: zero bank-sourced donations exist).
+
+1. **GIRO RETURN credits presented as donation candidates — money OVERSTATEMENT.**
+   6 credit rows, SGD 7,447.39. A reversal is not a gift. **The signal exists and is
+   discarded:** these carry `transaction_type` **NRTI** (vs **NMSC** for
+   COLLECTION/PAYMENT/IBG); `transaction_type` is parsed into `ParsedBankRow` and then
+   **never read** by `matchCategory` or the commit path.
+   *Not overstated:* this is a preview the preparer reviews before commit — human-catchable,
+   not a silent auto-commit. "Reversal" is inferred from label + type code, **not confirmed
+   with the bank.**
+2. **Hash-what-you-store violation.** `bank-import.ts:327` stores
+   `reference_no = reference_raw.slice(0, 100)` while `importRefFor` hashes the **full**
+   string. 4 rows exceed 100 chars. No row lost; the stored row cannot reproduce its own
+   idempotency key. Same shape as the audit-chain defect where only 8% of rows re-verified.
+3. **Conflated counter.** `skipped_zero_credit` lumps debits, true zeros, empty cells and
+   non-numeric amounts into one number surfaced as "zero credit". Decomposed here it is
+   **100% genuine debit rows** — a preparer reading "39 skipped: zero credit" is looking at
+   39 outgoing payments.
+
+**Latent-only (0 occurrences in these files):** blank rows skipped with no counter
+(`mif-parser.ts:141`, `ocbc-parser.ts:167`); `parseOcbcDate` returning `""` on a non-
+`YYYYMMDD` date (would be caught downstream by `z.string().min(8)` and reported).
+
+---
+
 ## 5. OUTSTANDING SIGN-OFFS — 5, none chased for ~30h until today
 
 | # | Who | What | State |
@@ -199,8 +254,30 @@ or simply abandoned is **not established** — it has no deposit reference.
 2. **Await cai on 121/122** (bus #11541) ahead of today's windows: CAI-576 11:24:32Z ·
    CAI-584 13:19:25Z · CAI-586 14:54:07Z. Do not press early.
 3. **Await Nazim** (bus #11540) on giro sequencing + the prototype/spec divergence.
-4. In flight: delegated test of whether the **existing** parsers accept these statements
-   and how each GIRO variant is classified (credit vs debit, kept vs silently dropped).
-   Rows dropped without a count are the specific worry.
+4. ~~Delegated parser feasibility test~~ — **DONE, §4.1/§4.2.** Feasible, with three live
+   defects filed to cai (#11552) and one structural limit on (A) that must reach the client
+   **before** anything is promised: these files cannot yield donor-attributed giving.
 5. Do not merge, delete or renumber anything on the giro or audit-lock branches.
    `feat/audit-chain-version-integration` **MUST STAY AT `c440136`**.
+6. **Do NOT raise the GIRO RETURN / overstatement finding with the client yet.** Nothing has
+   been committed, so no figure they hold is wrong today. Reconcile both sides to source
+   first — the tabung-figure lesson.
+
+---
+
+## 8. WHAT THIS SESSION ACTUALLY CHANGED
+
+- Caught, and cai independently upheld (**CAI-RESP-605**, grant REFUSED), that mig 122 never
+  implemented the index hold cai had been citing for days. cai's sharper reading: the guard
+  is **inverted** — tolerant for the dirty silo, full enforcement for the clean one — and
+  **the apply would have SUCCEEDED**, with breakage arriving later on a money-adjacent
+  write. New binding rule from cai: locate every constraint **in the file, by line**, before
+  any grant. That binds the hub as the body that *asks* for grants, not only cai.
+- Established giro's blocker is a **client scoping answer**, not engineering.
+- Found `bank_import` is live, wired, and has **never committed a row** — after telling the
+  operator the opposite, then correcting it unprompted.
+
+**Corrected/withdrawn this session:** "(A) is close to done because the rail is live" →
+the rail has never run. "Operator owes a storage bucket key" → goumlyne already runs private
+buckets; it is a decision, not a secret. The client's "this week" → came from a **drill**
+message, withdrawn to them explicitly.
