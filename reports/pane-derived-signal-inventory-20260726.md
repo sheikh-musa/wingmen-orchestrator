@@ -47,6 +47,15 @@ from a clean one.
 - 🔴 **`scripts/priority_sla_watchdog.py` is UNTRACKED**, references a launchd label
   (`dev.wingmen.priority-sla-watchdog`) **that does not exist**, and would inject keystrokes into
   `orch`/`nazim` **over SSH** off a frozen-able idle check. **One `launchctl bootstrap` from being risk #1.**
+- 🔴 **THE SHARPER FRAME (Nazim): ask which signals are guarded only INCIDENTALLY.** Not *"which are
+  guarded"* but *"which happen to be guarded as a side effect of something else"* — **those stop being
+  guarded silently when the incidental reason goes away.** `pane_busy`'s repaint check is exactly this:
+  the background-agent branch samples twice because that path *happened to need* a liveness proof, not
+  because busy-markers were decided to require one. **The fleet's ONLY repaint check covers the LESS
+  common marker, by accident, and nothing records that it is load-bearing** — so a refactor that
+  "simplifies" it removes a control nobody knows exists. Generalises past panes: **an incidental guard
+  has no owner, no test, and no comment saying why it must stay, which makes it indistinguishable from
+  redundant code to the next reader.**
 - ⚠️ **Our one repaint check is asymmetric and misses the commonest marker.**
   `composer_capture.sh:117 pane_busy` samples twice — but **only on the background-agent branch**; the
   `esc to interrupt` branch `return 0`s at :121 **before** any liveness test. *Mitigating: on that branch
