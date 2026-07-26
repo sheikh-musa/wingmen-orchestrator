@@ -597,31 +597,47 @@ code unchanged in the window; both sides' tables are old (low `pg_class` OIDs), 
    client silo, as a money-load precondition, is not committed anywhere.** One `git worktree prune` from
    being unreproducible. *Provenance gap, not a live fault.*
 
-## 0k. 🔴 THE OPERATOR'S SCREENSHOTS RESOLVE TO THE WRONG IMAGE (found 11:26Z, NOT FIXED)
+## 0k. ⚠️ MEDIA BASENAME COLLISION — the DEFECT is real; MY P0 OFF IT WAS WRONG
 
-**`nervous_system/ingest.py:139` — `safe = fp.replace("/", "_")`.** The local filename is derived from
-**Telegram's own `file_path`**, and **Telegram REUSES those**. Distinct photos, days apart, collide onto
-one local file.
-**Measured: 275 media messages → 113 distinct basenames → 84 REUSED**, several 4×.
+**THE DEFECT, CONFIRMED AND STILL OPEN.** `nervous_system/ingest.py:139` — `safe = fp.replace("/","_")`
+derives the local media filename from **Telegram's own `file_path`, which Telegram REUSES**. Measured:
+**275 media messages → 113 distinct basenames → 84 REUSED**, several 4×. *Distinct photos, days apart,
+collide onto one local filename — and, because each host downloads independently, **the two machines hold
+DIFFERENT images under the SAME name**.*
 
-**The live instance:** op#7391 (11:24:52Z, *"are these contexts accurate?"*) logged
-`logs/tg_media/photos_file_87.jpg` — **mtime 2026-07-18 09:17, eight days old.** The same basename was
-logged for msg 5280 on 07-18. **Nothing was written to `tg_media` in the preceding 10 minutes**, and
-there is **no error in the ingest log**. So today's download silently did not happen *and* the path we
-recorded resolves to a different photo. **Silent in both directions.**
+### ↩️ MY P0 (#11876) WAS A FALSE ALARM. WITHDRAWN IN FULL.
+I claimed the operator's 11:24Z screenshot *"was never downloaded"* and that its logged path resolved to a
+July-18 image. **Both wrong.** Nazim measured both hosts:
+| host | mtime | bytes |
+|---|---|---|
+| **Mini** `/Users/sheikhmusa/…/photos_file_87.jpg` | **11:24Z TODAY** — the only file written in 15 min | **54,193** |
+| **Studio** `~/…/photos_file_87.jpg` | 2026-07-18 09:17 | 54,106 |
+**The logged path begins `/Users/sheikhmusa/` — that is the MINI, which is where he read it. I measured MY
+host's copy of a colliding filename and inferred a failed download.** The download happened; it happened
+there. *(`/Users/sheikhmusa` not existing is a **Studio** fact — see §0a's PreCompact note, which is
+likewise Studio-scoped.)*
+✅ **And he proved it independently of any timestamp:** the image's 8 context rows matched live telemetry
+to the thousand — including **cai at 223k, a value that has only existed since its 10:45Z reset.** *A
+July-18 image cannot contain today's token counts.* **No correction is owed to the operator; he was never
+told the wrong thing.**
 
-🔴 **CONSEQUENCE: anyone answering him by opening the logged path answers confidently about the wrong
-picture.** The row is present, the path well-formed, the file exists and opens cleanly. **Nothing
-anywhere says "this is not the image he sent."**
-*Same shape as the frozen pane and the log that records the action but not the participant — except here
-the corrupted artefact is **the evidence itself**.*
-⚠️ **REACHES BACKWARD:** 84 reused basenames mean earlier photo-based answers **may** have been given
-against the wrong image. **NOT asserting any were — it is unverifiable now, which is the point.**
+### 🔴 THE LESSON, AND IT IS AGAINST ME TWICE
+1. **My real finding is exactly what made my inference wrong.** The collision I correctly identified is
+   *why* two hosts hold different images under one name — **and I became the wrong-artefact reader while
+   raising the alarm about wrong-artefact readers.** The strongest possible demonstration of the thesis,
+   paid for by me.
+2. 🔴 **I VIOLATED MY OWN LESSON WITHIN THE HOUR.** §0i records: *"a per-host finding stated in the
+   fleet's voice inverts silently on the host you did not scan"* — written after `priority_sla_watchdog`
+   inverted on the Mini. **I then made a single-host measurement and raised a P0 in the fleet's voice.**
+   Knowing the rule did not stop me applying it; **that is capacity, not carelessness.**
+3. ✅ **What protected him was checking CONTENT against an INDEPENDENT SOURCE, not metadata.** mtime, size
+   and path were all consistent with my wrong story. **Verify an artefact by what it CONTAINS against
+   something that could contradict it — not by its metadata.**
 
-**FIX (small, deliberately NOT applied):** make the filename unique — `update_id` / message id — instead
-of trusting Telegram's. `ingest` is a **live daemon on the operator's inbound path** and I am declared
-saturated; editing his message rail at the end of a long session is how the next incident starts.
-**→ P0 #11876 to Nazim, who was mid-answer on that exact screenshot.**
+**STILL OPEN AND UNFIXED:** the collision itself. It is benign when each host reads its own copy and
+**dangerous the moment anyone reads a media path cross-host** — which is precisely what I just did.
+**Fix:** make the filename unique (`update_id`/message id). **Deliberately not applied** — live daemon on
+the operator's inbound path, and I am declared saturated.
 
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
@@ -782,7 +798,8 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
-- 🔴 **AN EXTERNAL SYSTEM'S IDENTIFIER IS NOT A UNIQUE KEY.** Telegram reuses `file_path`; we used it verbatim as a local filename, so **84 of 113 stored basenames collide.** A record can be present, well-formed, and resolve to **the wrong artefact** — with nothing anywhere flagging it. **When the corrupted thing is the EVIDENCE, every downstream answer is confidently wrong.** §0k.
+- 🔴 **AN EXTERNAL SYSTEM'S IDENTIFIER IS NOT A UNIQUE KEY** — and **per-host copies of a collided name differ**, so a media path is only safe to read ON THE HOST THAT LOGGED IT. **Verify an artefact by its CONTENT against an independent source; mtime/size/path were all consistent with my wrong story.**
+ Telegram reuses `file_path`; we used it verbatim as a local filename, so **84 of 113 stored basenames collide.** A record can be present, well-formed, and resolve to **the wrong artefact** — with nothing anywhere flagging it. **When the corrupted thing is the EVIDENCE, every downstream answer is confidently wrong.** §0k.
 - 🔴 **A SYSTEM CAN LOG THE ACTION BUT NOT THE PARTICIPANT — found TWICE today in unrelated rails.** `audit_log` records *that* a signed report was deleted, not *who* (actor went to free-text `payload`, §0d); `priority_sla_watchdog` records *that* it fired ~721 times in 12 days, not *whom at* (`_nudge_target()` computes the target and the summary discards it). **Both look complete** — one has an actor COLUMN, the other has firing LINES — and **in both the missing field was available at write time and thrown away.** Look not for missing logs but for **logs whose most load-bearing field is the one nobody persisted.**
 - 🔴 **A LOGGING FIX IS PROSPECTIVE ONLY — it prevents the next unknown, it cannot recover the last 721.** So the composer-text attribution is **unrecoverable BY CONSTRUCTION, not by neglect** — a second independent route to CAI-625/626's `origin: unrecoverable`. **A fix landing must not close the question in anyone's head.**
 - **A control that prevents a FALSE ALL-CLEAR is worth more than one that prevents a false alarm** — nobody goes looking for the all-clear again. (Nazim's fifth canary tonight; it stopped him wrongly EXCLUDING the `C-u` candidate.)
