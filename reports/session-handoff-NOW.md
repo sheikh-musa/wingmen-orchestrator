@@ -154,6 +154,18 @@ unsent last night** — `02:13 now do giro` · `~04:0x run the vercel bot-accoun
 Nazim's correction to cai's model matters: the text **QUEUES and is RECOVERABLE UNTIL RESET**,
 so the fix is **CAPTURE THE QUEUE BEFORE ANY RESET**, not "detect discards".
 **`logs/reset_{orch,cai}_preserved_input.log` is a load-bearing control** (cai's designation).
+
+🔴 **AND THE GUARD I HARDENED HAD THE SAME DISEASE — caught by Nazim at 07:00Z, fixed in `05031bf`.**
+The exit-5 mid-task guard keyed **only** on `esc to interrupt`, the FOREGROUND-turn marker. cai was at
+100% with **four background agents running** and `reset me` staged, rendering `✻ Waiting for 4
+background agents to finish` and **no `esc to interrupt` at all** — so the guard read it as **idle** and
+a reset would have destroyed four agents' in-flight output silently. **The guard was not wrong; its
+evidence was narrower than its claim** — the night's shape, inside the guard built to prevent the
+night's shape. It survived the hardening because we **PORTED the existing guard instead of asking what
+else "busy" looks like.** The definition now lives in the shared lib (`pane_busy`) so the two scripts
+cannot drift again — **drift is what caused it.** Both markers, `RESET_FORCE=1` overrides both and now
+names WHICH state it is overriding. See §6 for the two traps this uncovered (locale + whole-pane grep),
+both of which would have shipped a guard that looked fixed and was not.
 ⚠️ **Both reset scripts were UNTRACKED as of this block** — a load-bearing control one `git clean`
 from gone. Hardening + tracking delegated at 05:35Z; four defects found by reading them:
 no mid-task guard on `reset_orch.sh` (it will clear the hub mid-turn — `reset_cai.sh` has one),
@@ -480,6 +492,22 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 ## 6. ⚠️ TRAPS ON THIS BOX (verified)
 
 - **`grep` AND `find` are wrapped shell functions** → gitignore-aware, **cannot see `.env*`**. Only `os.walk` in Python **with a visible positive control** is admissible.
+- 🔴 **LOCALE-DEPENDENT REGEX — tests green interactively, ships DEAD over SSH** (found 2026-07-26,
+  `05031bf`). A TUI spinner glyph like `✻` is **THREE BYTES**. An anchor written
+  `^[^[:space:]][[:space:]]Waiting for…` matches under UTF-8 (one glyph, then the space) and **FAILS
+  under C/POSIX**, where `[^[:space:]]` consumes only byte `0xE2` and the next byte `0x9C` is not a
+  space. **It passed in an interactive shell and failed inside a bare `bash`.** The reset scripts are
+  invoked **by Nazim over SSH, where the locale is routinely unset** — so a guard can be silently dead
+  in the only environment that matters *while a passing test says otherwise*.
+  **Never depend on multibyte-aware bracket matching; pin `LC_ALL=C` and write the pattern to be
+  correct under it.** *Caught only by running the function against a pane whose answer was already
+  known — a positive control with a known-TRUE subject. Re-reading the regex would never have found it.*
+- ⚠️ **A whole-pane `grep` for a TUI state marker FALSE-POSITIVES on the transcript.** The scrollback
+  above the composer contains text *about* the markers: measured on the hub's own pane, `esc to
+  interrupt` → **2** (one real footer, one transcript line) and `Waiting for N background agents` → **1**
+  while the body was idle. **Pin each marker to the region where it RENDERS** (footer = last 4 lines;
+  status region = last 12, anchored to a line not starting with whitespace, since the TUI indents
+  transcript output by two spaces). A guard that always fires gets habitually force-overridden.
 - **A positive control must test COVERAGE, not sensitivity.** Put it where a *boundary* error would put it — outside the assumed root, on the other host.
 - **`| tail` eats the exit code.** Capture exit codes DIRECTLY.
 - **Playwright's pinned `chromium-1217` is a CORRUPT build** (SIGABRT on a missing dylib). Use `chromium_headless_shell-1228` via `executablePath`.
