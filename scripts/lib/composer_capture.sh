@@ -51,6 +51,77 @@ CC_MARKER_TEXT='[MULTI-LINE ENTRY — CAPTURE MAY BE PARTIAL]'
 CC_MARKER_NOPROMPT='[PROMPT LINE NOT FOUND — CAPTURE UNRELIABLE, COMPOSER MAY HAVE HELD TEXT]'
 
 # ---------------------------------------------------------------------------
+# IS THE BODY BUSY?  (added 2026-07-26 after orch-console #11719)
+#
+# Lives HERE, in the shared lib, on purpose. The defect it fixes was created by
+# the two reset scripts drifting: reset_cai.sh had a mid-task guard, reset_orch.sh
+# did not, and the hardening pass PORTED the existing guard instead of asking what
+# else "busy" looks like. One definition, both callers, no drift.
+#
+# WHAT WENT WRONG: the guard keyed only on `esc to interrupt`, the FOREGROUND-turn
+# marker. A body blocked on background agents renders
+#     ✻ Waiting for 4 background agents to finish
+# and shows NO `esc to interrupt` at all — so it read as IDLE and a reset would
+# have proceeded and destroyed four agents' in-flight output, silently. Caught by
+# Nazim at the moment he was about to reset cai. The guard was not wrong; ITS
+# EVIDENCE WAS NARROWER THAN ITS CLAIM.
+#
+# 🔴 WHY EACH MARKER IS SCOPED RATHER THAN GREPPED WHOLE-PANE — measured, not
+# theorised. The transcript above the composer is full of text ABOUT these
+# markers; this very investigation printed both strings into the hub's own pane.
+#   orch, whole pane : `esc to interrupt`                 -> 2  (1 real footer, 1 transcript)
+#   orch, whole pane : `Waiting for N background agents`  -> 1  (transcript only, body idle)
+# So the obvious fix — grep the whole pane for either string — would have marked
+# the hub PERMANENTLY BUSY and un-resettable. Each marker is therefore pinned to
+# the region where it actually RENDERS:
+#   * `esc to interrupt`  -> footer, last 4 lines
+#   * `Waiting for N ...` -> status region above the composer box (last 12), AND
+#     anchored to a line that starts with a spinner glyph + space, because the
+#     TUI indents transcript output by two spaces and a quote can never match.
+#
+# ASYMMETRY THAT DECIDES THE DESIGN: a false BUSY costs one exit-5 and an
+# explicit RESET_FORCE=1. A false IDLE destroys work that cannot be recovered.
+# So this fails CLOSED — any evidence of activity wins.
+#
+# DELIBERATELY NOT A MARKER: the `◯ general-purpose (+3) …` agent-list footer.
+# It appears to be persistent chrome rather than a transient state, and a guard
+# that fires forever gets habitually force-overridden, which is how a control
+# dies. Not added without measuring that it clears. Revisit with evidence.
+#
+# Sets: CC_BUSY (0|1) and CC_BUSY_REASON (human-readable, '' when idle).
+pane_busy() {   # $1 = tmux bin, $2 = pane
+  local txt
+  txt="$("$1" capture-pane -t "$2" -p 2>/dev/null)"
+  CC_BUSY=0; CC_BUSY_REASON=''
+  if printf '%s\n' "$txt" | tail -4 | grep -q 'esc to interrupt'; then
+    CC_BUSY=1; CC_BUSY_REASON="foreground turn in progress ('esc to interrupt')"
+    return 0
+  fi
+  # 🔴 LOCALE TRAP, found by testing rather than by reading (2026-07-26).
+  # The spinner glyph is '✻' — THREE BYTES of UTF-8. An anchor written as
+  #     ^[^[:space:]][[:space:]]Waiting for ...
+  # matches under a UTF-8 locale (one glyph, then the space) and FAILS under
+  # C/POSIX, where [^[:space:]] consumes only the FIRST BYTE (0xE2) and the next
+  # byte (0x9C) is not a space. It tested green in an interactive shell and dead
+  # inside a bare `bash` — and these scripts are invoked BY NAZIM OVER SSH, where
+  # the locale is routinely unset. The guard would have been silently dead in the
+  # only environment that matters.
+  # Fix: never depend on multibyte-aware bracket matching. Require only that the
+  # line does NOT start with whitespace (the TUI indents transcript output by two
+  # spaces, so a quoted mention can never match) and let '.*' cover the glyph.
+  # LC_ALL=C is pinned so behaviour is identical everywhere rather than inherited.
+  if printf '%s\n' "$txt" | tail -12 \
+       | LC_ALL=C grep -qE '^[^[:space:]].*Waiting for [0-9]+ background agents'; then
+    CC_BUSY=1
+    CC_BUSY_REASON="$(printf '%s\n' "$txt" | tail -12 \
+      | LC_ALL=C grep -oE 'Waiting for [0-9]+ background agents[a-z ]*' | tail -1)"
+    CC_BUSY_REASON="blocked on background agents — ${CC_BUSY_REASON:-waiting for background agents}"
+    return 0
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # PLACEHOLDER DETECTION — structural, not a string list.
 #
 # The mirror failure of under-capture is OVER-capture: the TUI paints a grey
