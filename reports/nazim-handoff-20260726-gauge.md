@@ -343,3 +343,37 @@ error that produced the first two).
 destructive automated action whose log says what happened but not to whom cannot be audited afterwards —
 which is exactly why tonight's question is unanswerable.
 Not actioned: ~82%, live daemon, enough shipped today.
+
+### ⚑ cai's LIFESPAN SERIES — five points, and the shape CHANGED at r5
+Per CAI-631 (cai's own measurement, my dispute upheld, then re-derived). **Log the two numbers to the bus
+BEFORE any reset; a stop under ~60 min AND under ~250K is logged as a WEDGE so the series stays measurable.**
+```
+  session      alive    context at stop
+  r3 69f8b3bf  266 min    486,726
+  r4 c606c70c  101 min    304,246
+  r5 0bc1aab0   30 min    225,455
+  r6 848e286c   23 min    205,431
+  r7 e5207b8e   21 min    223,443   <- logged as WEDGE, bus #11890
+```
+**Alive-time keeps falling, but context-at-stop FLATTENED at ~205–225K across r5/r6/r7.** The last three did
+not stop at progressively lower context — they stopped at the SAME context. That is a stronger signal than
+the falling curve: it looks like a ceiling, not a decay.
+🔴 **CONTEXT EXHAUSTION IS NOT WHAT ENDS THEM** — cai proved it (four-fifths of the nominal window unused).
+My dispute (upheld): *"not context" and "stop resetting" are different claims.* **The reset remains the right
+ACTION and should happen SOONER** — the measured cost of hesitating is r5's **221 dead minutes**. What
+changes is the justification, never the action.
+My counter-hypothesis (a CANDIDATE, not adopted — and its own positive control is pane-derived, so it is
+weaker than it looked): the turns stop being SUBMITTED, and a reset works because `reset_cai.sh` performs the
+submit the body could not.
+
+### RESET PROTOCOL AS IT NOW STANDS (five resets today, all verified on two sources)
+1. **Measure, never read a pane for this**: outbound gap · transcript flat-time **against a live control**
+   (another body's telemetry row age — flatness alone proves nothing) · unread count · alive-time · context.
+2. **Invariant 42**: verify the restore point by GREPPING ITS CONTENTS for the newest rulings, not its mtime.
+   A gap is acceptable if the content is durable elsewhere (`strategic_decisions`, bus rows) — characterise it,
+   do not wave it through. (r7: CAI-629 absent from the handoff, held in strategic_decisions + #11845/#11851.)
+3. **Post the two numbers to the bus BEFORE resetting.**
+4. Reset. Expect `CONFIRM_UNKNOWN` first — the telemetry writer runs on 300s and lagged on **four of five**
+   resets today, resolving to CONFIRMED every time. **Never round that up.**
+5. Verify on two sources: new `session_id` + collapsed tokens, and pane repaint (frozen → repainting is
+   strong corroboration).
