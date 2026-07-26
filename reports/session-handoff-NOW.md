@@ -22,7 +22,7 @@
 
 ---
 
-## 0. REF INDEX — decisions this file already carries (for a grep-by-ref currency check)
+## 0-INDEX. 🗂 REF INDEX — decisions this file already carries (for a grep-by-ref currency check)
 
 **CAI-615** ledger-is-not-a-record → §0c/§0e · **CAI-616** gauge disarmed + heartbeat critique → §0c/§0a ·
 **CAI-617** saturation withdrawal (now RE-DERIVED, §0f) → §0c · **CAI-618** capacity declared / invariant 42 → §7 ·
@@ -262,6 +262,111 @@ freshly-reset body looks like. cai's own row says `r5 boot 05:23Z` and his bus t
 13-minute hole (05:16→05:29). **Both singletons were reset in the same 05:23Z sweep.** Corrected
 to the operator unprompted. *The signal I used was the one signal that happened to be misleading.*
 
+## 0d. 🔬 THE "STRANDED REPORT" IS REFUTED — AND IT UNCOVERED SOMETHING WORSE
+
+*(Restored 10:55Z: this section's content was destroyed by my own §0f edit and the loss was found only by
+running the currency check instead of declaring it. **Five cross-references pointed at a section that no
+longer existed** — §0 hold list, §0b, §4, §5 and §9.5.)*
+
+**↩️ WITHDRAWN — report `971a84b3…` (row id 31) is NOT stranded-awaiting-approval.** It is **SOFT-DELETED**
+(`deleted_at = 2026-07-09 07:47:44Z`), the app filters `deleted_at IS NULL`, so nobody is waiting on it.
+**It IS attributed**: `audit_log` id 1311, `'preparer_signed->voided(soft_delete)'`, actor
+`cc-orchestrator`, `on_behalf_of client:gazzabyte/elly` — a legitimate voiding we did for the client.
+
+**✅ CONFIRMED over the WHOLE table** (not by looking up the one id): 9 rows; **live** rows are `closed` × 3
+and nothing else — **zero live reports in any pre-approval state**.
+**✅ CONFIRMED — the approval-email path is completely unexercised**: `tabung_report_notifications` = **0
+rows**, every status. *"It is set up" is still not "it works."*
+**✅ CONFIRMED — no backfill exists.** Sends are enqueued **application-side, on the transition itself**
+(`tabung-weekly-reports.ts:653`); the Vercel `*/5` cron is a **pure drainer** that never scans reports.
+
+### 🔴 THREE UNATTRIBUTED ROWS — ids 5, 10, 56 (CAI-623, amended DOWN from four)
+`was_ever_signed = true`, soft-deleted **after** migration 107, `deleted_by` NULL, `delete_reason` NULL,
+**no audit row**. Ids 5 and 10 share a timestamp **to the microsecond** (`07-23 07:02:43.568085Z`); 56
+follows 32 min later.
+🔴 **THE STAKES ARE SMALL AND MUST BE SAID PLAINLY: row 5 = S$15, row 10 = S$15 (an identical duplicate),
+row 56 = EMPTY `{}`.** Thirty dollars and an empty report. **"Signed money reports" unqualified
+materially overstates it** — cai's phrase and mine, both struck.
+⚠️ **CARRY BOTH READINGS, UNRESOLVED:** the same user deleted row 63 **with** full attribution 9 minutes
+earlier (reads as *one cleanup through a path that does not attribute*); but 5 and 10 sharing a
+microsecond **does look bulk**. **Do not collapse to the tidier one.**
+
+**AND THERE IS NO DB GUARD ON DELETION AT ALL.** 107 is fully present, but its trigger only forbids
+**un-latching** `was_ever_signed`; **nothing anywhere references `deleted_at`** — 5 triggers, all UPDATE,
+zero DELETE; 15 constraints, none mentioning it. The rule lives **only** in `deleteWeeklyReportAction`'s
+WHERE clause. 🔴 **RLS is open too:** policy `polcmd='*'`, **no DELETE-side WITH CHECK**,
+`relforcerowsecurity=false` ⇒ an org_admin **HARD** delete of a signed closed report is permitted.
+**⚠️ TIMING IS MOOT — nothing was evaded, because there was nothing to evade.**
+↩️ **AND MY FRAMING WAS WRONG:** I wrote *"a direct DB write that bypassed the app"* — an inference sold as
+a measurement. `deleted_by` is **caller-side only**, and row 63 (a draft) **has** it populated. **So
+`deleted_by IS NULL` means "the code path did not set it", NOT "an actor was hidden." A PRODUCT DEFECT,
+not misconduct. Do not let it escalate.**
+*A migration named `delete_before_sign` does not implement delete-before-sign — **a name is not an
+implementation**, found in the wild.*
+
+### 🔴🔴 WIDEST REACH: `audit_log.actor_id` IS SYSTEMATICALLY UNDER-POPULATED
+Two delegates read **the same row** and reached **opposite conclusions** — *"actor is `cc-orchestrator`"*
+vs *"`actor_id` is NULL"*. **Both were right.** `actor_id` **IS** NULL and the actor **IS** recorded — in
+the free-text **`payload`**. **Even our one properly-attributed void left the column empty.**
+🔴 **ANY ATTRIBUTION AUDIT RUN THE OBVIOUS WAY (`WHERE actor_id IS NULL`) UNDER-REPORTS SYSTEMATICALLY.**
+cai's ruling: **an actor recorded only inside `payload` is UNATTRIBUTED until the column is set.** The
+chain covers `payload`, so **the DATA is intact; the ACCOUNTABILITY is not.**
+⚠️ **This is why §4's `660/676 name a TEST account` is struck DO-NOT-QUOTE** — if it was derived from
+`actor_id` (or any single field) it measures the same under-populated column, and it is a prerequisite on
+Elly's **HELD** bank-import commit.
+
+---
+
+## 0e. 📐 GOUMLYNE MEASURED BY OBJECT PROBE — the CAI-615 measurement, done (05:49Z)
+
+**This is the evidence base the §6.6 grants now require.** Nothing here is from `schema_migrations`;
+every line is `to_regclass` / `pg_indexes` / `pg_proc` / `pg_constraint` / `pg_trigger` / grants / row
+counts. The ledger appears only as a *subject*, never as evidence.
+
+| # | State | Notes |
+|---|---|---|
+| **119** | **DOES NOT EXIST** | 🔴 **The number is VACANT on every branch.** Both former 119s were renumbered — `119_audit_chain_per_org_lock` → **122**, `119_tabung_approval_notifications` → **120**. **Any hold or gate citing "119" is citing a NUMBER, NOT AN OBJECT** and must be restated as 120 or 122. |
+| **120** | **FULLY PRESENT** | Both tables, all 10 indexes, trigger, RLS, org_admin policy, anon revoked, genesis row. **Carries NO ledger row** — an independent 2nd instance of CAI-615. |
+| **121** | **ABSENT (cleanly)** | `hash_version` column, CHECK, the anon REVOKEs, genesis row — none present. No partial. |
+| **122** | **ABSENT (cleanly)** | No `append_audit_log`/`_batch`, no `uq_audit_log_org_prev_hash`, no grants. |
+| **124** | **ABSENT** | No revokes applied; default ACLs untouched. |
+
+**🔴 ORDERING CONSTRAINT NOBODY HAD STATED: 122 depends on `hash_version`, which 121 creates.
+122 CANNOT be applied before 121.** A grant for 122 alone is unexecutable.
+
+**✅ THE AUDIT-LOCK CLAIM IS RE-ESTABLISHED — PROPERLY THIS TIME.** `uq_audit_log_org_prev_hash`
+ABSENT; **zero** functions matching `%audit%`/`%chain%`/`%hash%`/`%verify%` (the app writes `audit_log`
+by direct INSERT); `hash_version` ABSENT. `audit_log` has 782 rows. **So the struck §2 claim was TRUE
+— but note it was true by coincidence of direction, not because the ledger worked**: the same ledger
+simultaneously hides live migration 120. *Being right for an inadmissible reason is still inadmissible.*
+**Bonus, and it settles §0.7/§0b by measurement rather than by reading the SQL:** the chain is
+**currently FORK-FREE** (0 `(org_id, prev_hash)` groups with count>1 outside sentinels) ⇒ **migration
+122 would today build its FULL index arm**, exactly as the earlier read of the file predicted.
+
+### ⚠️ GRANT POSTURE ON THE LIVE CLIENT SILO — a latent defect, NOT a live exploit
+The probe reported `anon` holding **INSERT on 77 public tables, UPDATE 76, DELETE 76, TRUNCATE 77**,
+including `public.audit_log` itself, with default ACLs re-granting to every FUTURE table. That reads
+like a P0. **I verified it myself before escalating, and the escalation is NOT warranted:**
+- ✅ `anon` and `authenticated` are **NOLOGIN** (`rolcanlogin=false`) — **no direct Postgres session is
+  possible as those roles**, and PostgREST does not expose `TRUNCATE`. *TRUNCATE ignores RLS, so the
+  grant would be decisive if it were reachable. It is not.*
+- ✅ **RLS is ENABLED on all 87 public tables (`rls_off = 0`).** `audit_log`'s two policies both require
+  `org_admin`/`cashier` org membership, so an anonymous JWT satisfies neither.
+- ✅ No `pg_net` / `pg_cron` / `http` extensions — no in-DB egress or scheduling path.
+🔴 **What IS true and still matters: there is NO defence in depth.** The only thing between the public
+anon key and the client's money-audit chain is **RLS policy correctness** — one missing or wrong policy
+on one table is a live exposure, because the grant layer offers no backstop. **This is precisely what
+migration 124 exists to fix, which raises 124's value above "hygiene".** And the default-ACL half is
+the known trap: *new tables inherit blanket anon grants.*
+📌 **FLAGGED, UNASSESSED:** 11 `SECURITY DEFINER` functions are EXECUTE-able by `anon`. Nine are auth
+helpers; **`purge_wc_ingest_pii` and `rls_auto_enable` are not**, and a definer-rights function callable
+by an unauthenticated caller over `/rpc/` deserves a read. **I have not read them — not asserting a
+defect, asserting that nobody has looked.**
+
+---
+
+---
+
 ## 0f. 🔴🔴 THE PREMISE WAS FALSE — THE OPERATOR NEVER TYPED INTO ANY TERMINAL (09:21Z)
 
 **His words, op#7378, verbatim:** *"i havent been typing any instructions into terminals. only to you
@@ -438,52 +543,6 @@ The token was still live at 04:45Z after six hours. **Do not re-send the command
 Correct per CAI-613: no new information, risk is not time-decaying, revocation needs his own account.
 
 ---
-
-## 0e. 📐 GOUMLYNE MEASURED BY OBJECT PROBE — the CAI-615 measurement, done (05:49Z)
-
-**This is the evidence base the §6.6 grants now require.** Nothing here is from `schema_migrations`;
-every line is `to_regclass` / `pg_indexes` / `pg_proc` / `pg_constraint` / `pg_trigger` / grants / row
-counts. The ledger appears only as a *subject*, never as evidence.
-
-| # | State | Notes |
-|---|---|---|
-| **119** | **DOES NOT EXIST** | 🔴 **The number is VACANT on every branch.** Both former 119s were renumbered — `119_audit_chain_per_org_lock` → **122**, `119_tabung_approval_notifications` → **120**. **Any hold or gate citing "119" is citing a NUMBER, NOT AN OBJECT** and must be restated as 120 or 122. |
-| **120** | **FULLY PRESENT** | Both tables, all 10 indexes, trigger, RLS, org_admin policy, anon revoked, genesis row. **Carries NO ledger row** — an independent 2nd instance of CAI-615. |
-| **121** | **ABSENT (cleanly)** | `hash_version` column, CHECK, the anon REVOKEs, genesis row — none present. No partial. |
-| **122** | **ABSENT (cleanly)** | No `append_audit_log`/`_batch`, no `uq_audit_log_org_prev_hash`, no grants. |
-| **124** | **ABSENT** | No revokes applied; default ACLs untouched. |
-
-**🔴 ORDERING CONSTRAINT NOBODY HAD STATED: 122 depends on `hash_version`, which 121 creates.
-122 CANNOT be applied before 121.** A grant for 122 alone is unexecutable.
-
-**✅ THE AUDIT-LOCK CLAIM IS RE-ESTABLISHED — PROPERLY THIS TIME.** `uq_audit_log_org_prev_hash`
-ABSENT; **zero** functions matching `%audit%`/`%chain%`/`%hash%`/`%verify%` (the app writes `audit_log`
-by direct INSERT); `hash_version` ABSENT. `audit_log` has 782 rows. **So the struck §2 claim was TRUE
-— but note it was true by coincidence of direction, not because the ledger worked**: the same ledger
-simultaneously hides live migration 120. *Being right for an inadmissible reason is still inadmissible.*
-**Bonus, and it settles §0.7/§0b by measurement rather than by reading the SQL:** the chain is
-**currently FORK-FREE** (0 `(org_id, prev_hash)` groups with count>1 outside sentinels) ⇒ **migration
-122 would today build its FULL index arm**, exactly as the earlier read of the file predicted.
-
-### ⚠️ GRANT POSTURE ON THE LIVE CLIENT SILO — a latent defect, NOT a live exploit
-The probe reported `anon` holding **INSERT on 77 public tables, UPDATE 76, DELETE 76, TRUNCATE 77**,
-including `public.audit_log` itself, with default ACLs re-granting to every FUTURE table. That reads
-like a P0. **I verified it myself before escalating, and the escalation is NOT warranted:**
-- ✅ `anon` and `authenticated` are **NOLOGIN** (`rolcanlogin=false`) — **no direct Postgres session is
-  possible as those roles**, and PostgREST does not expose `TRUNCATE`. *TRUNCATE ignores RLS, so the
-  grant would be decisive if it were reachable. It is not.*
-- ✅ **RLS is ENABLED on all 87 public tables (`rls_off = 0`).** `audit_log`'s two policies both require
-  `org_admin`/`cashier` org membership, so an anonymous JWT satisfies neither.
-- ✅ No `pg_net` / `pg_cron` / `http` extensions — no in-DB egress or scheduling path.
-🔴 **What IS true and still matters: there is NO defence in depth.** The only thing between the public
-anon key and the client's money-audit chain is **RLS policy correctness** — one missing or wrong policy
-on one table is a live exposure, because the grant layer offers no backstop. **This is precisely what
-migration 124 exists to fix, which raises 124's value above "hygiene".** And the default-ACL half is
-the known trap: *new tables inherit blanket anon grants.*
-📌 **FLAGGED, UNASSESSED:** 11 `SECURITY DEFINER` functions are EXECUTE-able by `anon`. Nine are auth
-helpers; **`purge_wc_ingest_pii` and `rls_auto_enable` are not**, and a definer-rights function callable
-by an unauthenticated caller over `/rpc/` deserves a read. **I have not read them — not asserting a
-defect, asserting that nobody has looked.**
 
 ---
 
