@@ -676,6 +676,34 @@ shipped** — never a blind CSS change to the client's live site, and I am satur
 **Not re-tested:** read-only *enforcement* under preview (that is the CAI-535 proof), and view-as against
 irsyad's own module configuration.
 
+### 🔴 OPEN OPERATOR DIRECTIVE — op#7399: hub + cai → `claude-opus-4-8` (NOT YET DONE)
+*"lets switch hub and cai to opus 4.8 again. you stay on opus 5"* (11:32:21Z, nazim-console).
+
+✅ **DURABLE HALF DONE by Nazim** — `.env` now carries `ORCH_MODEL=claude-opus-4-8` (L125) and
+`CAI_MODEL=claude-opus-4-8` (L126); **neither existed**, so `boot_orch.sh`/`boot_cai.sh` were falling
+through to `:-claude-opus-5` and **a live flip alone would have silently reverted on the next reset.**
+`.fleet_model` and `NAZIM_MODEL` untouched — **the four lanes stay on Opus 5**, per his wording.
+
+🔴 **NOBODY IN THE FLEET CAN EXECUTE THE IN-PLACE HALF.** `/model` is a **TUI slash command a HUMAN
+types**; no agent has a lever to change its own model, and none can type into its own composer.
+**Two executors exist: the operator at the keyboard, or a RELAUNCH.** This sat as *"orch will do it"* for
+20 minutes because neither Nazim nor I noticed while designing the sequence.
+✅ **CLEAN PATH (discharges the directive AND the capacity declaration in one operation):**
+1. `reset_orch.sh` **first** (in-place `/clear`) so `--continue` resumes a SHORT conversation, not this one
+2. kill the claude process, then `boot_orch.sh`
+3. **VERIFY with `ps eww`** that the successor carries `--model claude-opus-4-8` — **not the banner, and
+   not the tmux wrapper** (the Jul-8 wrapper advertised `4-8` all day while the live process ran `opus-5`).
+📌 **cai is ALREADY on 4.8** (`ps`: pid 14115) — half the directive was satisfied before it was given.
+
+### ⚠️ `lane_watchdog`'s cai `IDLE_UNSENT` (#11902) WAS A FALSE ESCALATION — third off that render
+**Repaint proof taken (CAI-630): cai's pane byte-identical over 6s ⇒ FROZEN ⇒ pane readings inadmissible.**
+Measured **without** the pane: **bus out 11:58:10Z, heartbeat 162s, working.** A live body.
+**My own watchdog read a frozen render and called it stuck** — after #11808 and my withdrawn P0, that is
+**three false escalations off the same pane today.** Stamped, no action.
+🔴 **And it cuts both ways:** "cai has staged text it cannot submit" must **not** be read off that render
+either — that is the claim Nazim already withdrew once today. **If cai needs a turn, it is alive on the
+bus; message it there.** `lane_watchdog`'s pane dependence is unfixed and queued behind everything else.
+
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
 The token was still live at 04:45Z after six hours. **Do not re-send the commands; do not re-page.**
@@ -835,6 +863,8 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
+- 🔴 **AN INSTRUCTION CAN HAVE NO EXECUTOR IN THE FLEET AND NOBODY NOTICES.** op#7399 asked for a model switch; `/model` is a TUI command **only a human can type**, and no agent can change its own model or type into its own composer. Two bodies designed a sequence around *"orch will do it"*. **When routing a directive, name the EXECUTOR and confirm the lever EXISTS.**
+- 🔴 **INVARIANT 41 AGAIN, COMMITTED BY ME 8 HOURS AFTER QUOTING IT** (cai, CAI-634): I cited a 07-24 hub conclusion AND my own re-derivation as two legs. **Both ran the same query on the same substrate — one method twice, not two sources; they cannot fail differently.** The load-bearing leg is the 1:1 map onto a *named script* — **a different KIND of evidence.**
 - 🔴 **AN EXTERNAL SYSTEM'S IDENTIFIER IS NOT A UNIQUE KEY** — and **per-host copies of a collided name differ**, so a media path is only safe to read ON THE HOST THAT LOGGED IT. **Verify an artefact by its CONTENT against an independent source; mtime/size/path were all consistent with my wrong story.**
  Telegram reuses `file_path`; we used it verbatim as a local filename, so **84 of 113 stored basenames collide.** A record can be present, well-formed, and resolve to **the wrong artefact** — with nothing anywhere flagging it. **When the corrupted thing is the EVIDENCE, every downstream answer is confidently wrong.** §0k.
 - 🔴 **A SYSTEM CAN LOG THE ACTION BUT NOT THE PARTICIPANT — found TWICE today in unrelated rails.** `audit_log` records *that* a signed report was deleted, not *who* (actor went to free-text `payload`, §0d); `priority_sla_watchdog` records *that* it fired ~721 times in 12 days, not *whom at* (`_nudge_target()` computes the target and the summary discards it). **Both look complete** — one has an actor COLUMN, the other has firing LINES — and **in both the missing field was available at write time and thrown away.** Look not for missing logs but for **logs whose most load-bearing field is the one nobody persisted.**
