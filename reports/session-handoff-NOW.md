@@ -14,7 +14,8 @@
 3. **NO GRANTS** for 119 / 121 / 122 / 124. Windows: CAI-576 `11:24:32Z` · CAI-584 `13:19:25Z` · CAI-586 `14:54:07Z` **today**. Do not press early.
 4. **Elly's bank-import commit is HELD** — four prerequisites (§4).
 5. **AGENT-AS-SIGNATORY GATE (CAI-601):** no approver row beyond `saddam@`/`zuremi@` until the durable service-account property ships. cai's ruling: *a two-person control with a non-human half is a one-person control with extra steps.*
-6. **My unsent composer text: `now do giro`** — §2 item 4. Mine to re-decide.
+6. ~~My unsent composer text: `now do giro`~~ — **RESOLVED 2026-07-26.** It was the OPERATOR's instruction (typed 02:13Z, never submitted; Nazim rescued it from the reset script). Carried out: see §2 item 4 + `reports/giro-state-of-play-20260726.md`.
+7. **🔴 DO NOT APPLY MIG 122 ON THE ASSUMPTION THE INDEX IS HELD** (set 2026-07-26 03:15Z, verified by reading the SQL at `c440136`). CAI-536 ruled `uq_audit_log_org_prev_hash` stays HELD until the hot writers migrate. **Migration 122 does not implement that** — the index is created at lines 450/458 inside the same `BEGIN`(171)/`COMMIT`(478) as the RPCs, and the DO-block guard keys on **forks**, not on writer migration, so **both arms build it**. goumlyne is fork-clean ⇒ the **full** index arm fires. Escalated to cai as bus #11541 ahead of the 13:19:25Z window. The hold is a sentence in a decision, not a property of the file.
 
 ---
 
@@ -50,7 +51,7 @@ I asked them to switch their own approvers on rather than seeding it — the mon
 | 1 | **Token sequence** (§0.1) | commands delivered, **NOT run**; both hosts unchanged | operator → hub gates step 3 **on BOTH hosts** |
 | 2 | **mig 121+122 grants** | ⛔ no grant; windows close today; awaiting cai confirm-match at file+number+sha | cai |
 | 3 | **mig 124** (CAI-561 rest) | authored-unapplied @ `9e484f3`, own §6.6 grant required | cai |
-| 4 | **GIRO access for Elly** | **NEXT UP** — client raised 2026-07-24 (#6911), also "giro reconciliation" (#7157). **Not scoped, nothing promised.** | hub |
+| 4 | **GIRO access for Elly** | **SCOPED 2026-07-26 03:20Z → `reports/giro-state-of-play-20260726.md`.** Blocked on the client answering **(A) import GIRO credits as donations** vs **(B) reconcile bank vs tabung** — asked 07-24, never answered, re-asked 07-26. Live cutover gated on the audit-lock, which is **NOT on goumlyne** (max applied migration 118). **Nothing promised on timing; the stray "this week" came from a DRILL message and is withdrawn.** | hub |
 | 5 | **Elly's bank import** | **HELD** — 4 prerequisites (§4) | cai |
 | 6 | **Agent-as-signatory fix** (task #10) | cai ruled: exclude by **durable service-account property, NEVER a hardcoded address** | hub |
 | 7 | **CAI-586** pre-push smoke → structurally read-only | queued | hub |
