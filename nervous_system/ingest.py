@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -414,10 +415,96 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
 
 # ── Per-update processing (sync, called from the channel task) ────────────────
 
+
+# Allowlisted button actions. KEY -> (script, human label). Adding one is a deliberate
+# code change with review; callback data is matched against these keys EXACTLY and is
+# never interpolated into a shell command.
+# Repo root, resolved from this file rather than a cwd assumption — the ingest runs under
+# launchd, where cwd is not the orchestrator directory.
+_ORCH = pathlib.Path(__file__).resolve().parent.parent
+
+BUTTON_ACTIONS = {
+    "reset_nazim": ("scripts/reset_nazim.sh", "clear Nazim (console)"),
+    "reset_cai":   ("scripts/reset_cai.sh",   "clear cai (governance)"),
+    "reset_orch":  ("scripts/reset_orch.sh",  "clear the hub"),
+}
+
+
+def _answer_callback(token: str, cb_id: str, text: str) -> None:
+    """Always answer — an unanswered callback leaves a spinner on the operator's button."""
+    try:
+        tg_call(token, "answerCallbackQuery", {"callback_query_id": cb_id, "text": text[:190]})
+    except Exception:                                              # noqa: BLE001
+        pass
+
+
+def _handle_callback(conn, ch: "Channel", cb: dict, upd_id: int) -> bool:
+    action = (cb.get("data") or "").strip()
+    frm = cb.get("from") or {}
+    presser = str(frm.get("id") or "")
+    operator = (os.environ.get("MUSA_TELEGRAM_ID") or "").strip()
+    label = BUTTON_ACTIONS.get(action, (None, action))[1]
+
+    if presser != operator or not operator:
+        _log_line(f"{ch.key}: REFUSED button '{action}' from {presser!r} (not the operator)")
+        _answer_callback(ch.token, cb.get("id", ""), "Not authorised.")
+        return True
+    if action not in BUTTON_ACTIONS:
+        _log_line(f"{ch.key}: REFUSED unknown button action {action!r}")
+        _answer_callback(ch.token, cb.get("id", ""), "Unknown action.")
+        return True
+
+    script = _ORCH / BUTTON_ACTIONS[action][0]
+    _log_line(f"{ch.key}: operator pressed '{action}' -> {script}")
+    _answer_callback(ch.token, cb.get("id", ""), f"Running: {label}…")
+    try:
+        r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=180)
+        ok = r.returncode == 0
+        tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+        detail = tail[-1][:180] if tail else ""
+    except Exception as e:                                          # noqa: BLE001
+        ok, detail = False, str(e)[:180]
+    _log_line(f"{ch.key}: '{action}' finished ok={ok} {detail}")
+    # Report the OUTCOME, not the attempt — the script's own guards may refuse (mid-task,
+    # missing handoff), and a button that says "done" when the guard refused is the same
+    # decoration defect as delivered=true on a failed send.
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered, "
+                "from_name) VALUES ('outbound','telegram',%s,%s,%s,%s,'ingest-button')",
+                (str((cb.get("message") or {}).get("chat", {}).get("id") or ""), ch.channel_tag,
+                 f"[button] {label}: {'DONE' if ok else 'REFUSED/FAILED'} — {detail}", ok))
+            conn.commit()
+    except Exception:                                               # noqa: BLE001
+        pass
+    tg_call(ch.token, "sendMessage",
+            {"chat_id": presser,
+             "text": (f"{'✅' if ok else '⚠️'} {label}: "
+                      f"{'done' if ok else 'refused or failed'}\n{detail}")})
+    return True
+
+
 def process_update(conn, ch: Channel, upd: dict) -> bool:
     """A1→LOG→GATE→ROUTE for one getUpdates entry. Returns True if this
     process 'won' the dedupe insert (i.e. the update was newly processed)."""
     upd_id = upd["update_id"]
+
+    # ── INLINE BUTTON ACTIONS (op#7326) ──────────────────────────────────────────────
+    # The operator asked for a button he can press in Telegram instead of remoting into
+    # the Mini to clear a body. Deliberately NARROW: an allowlist of named actions, each
+    # mapped to a script — callback data never becomes a command, a path, or an argument.
+    #
+    # WHY THE INGEST AND NOT THE CONSOLE: the console cannot reset ITSELF (CAI-500 cond 4,
+    # and a body that can clear its own context can clear itself out of an instruction).
+    # The ingest is a separate always-on process, so it can act on a body that is mid-turn.
+    #
+    # AUTHORISATION is the same trust model as an operator message: the callback carries
+    # from.id, and only MUSA_TELEGRAM_ID is honoured. Anyone else pressing a forwarded
+    # button gets a refusal and an audit row.
+    if "callback_query" in upd:
+        return _handle_callback(conn, ch, upd["callback_query"], upd_id)
+
     msg = upd.get("message") or upd.get("edited_message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
     # Sender identity (BOT-INGEST-SENDER-001): Telegram carries the individual
@@ -526,7 +613,8 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
             await asyncio.sleep(CONFIG_REFRESH)
             continue
         try:
-            params = {"timeout": POLL_TIMEOUT, "allowed_updates": '["message","edited_message"]'}
+            params = {"timeout": POLL_TIMEOUT,
+                      "allowed_updates": '["message","edited_message","callback_query"]'}
             if ch.poll_offset is not None:
                 params["offset"] = ch.poll_offset + 1
             updates = await asyncio.to_thread(tg_call, ch.token, "getUpdates", params)
