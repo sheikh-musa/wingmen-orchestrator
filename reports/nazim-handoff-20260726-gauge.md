@@ -151,3 +151,62 @@ that fired correctly, unprompted.
   🔴 **DO NOT apply the repo-local identity fix to `ihsanos`** (deliberate override, Vercel premise).
 - **CAI-612** — spec `b0b6910` approved as a spec. Range must be named from the **last approved point**
   (`4429428..b0b6910`), not from main.
+
+---
+
+## ⚑ BLOCK 3 (05:35Z) — THE ROOT CAUSE OF THE WHOLE NIGHT'S SILENT-DROP CLASS
+
+### 🔴 `Enter` DOES NOT RELIABLY SUBMIT. THIS IS THE MECHANISM.
+Swept all 7 panes both hosts at 05:20Z: **FOUR held stranded text.** Pressed a bare `Enter` into three
+lane panes and captured before/after: **nothing moved, 3 of 3.** Ran the same three through
+`scripts/lane_nudge.sh` (verified submit + clear/retype fallback): `submitted + working (try 1)`, all
+composers cleared.
+**`lane_nudge.sh`'s docstring has documented this since 2026-06-20** ("the Enter frequently fails to
+submit… silently stalled lanes ~5x"). **We built verified-submit for AGENTS and left every HUMAN typing
+into the same panes unprotected.**
+**THIS IS WHY THREE OF THE OPERATOR'S INSTRUCTIONS VANISHED TONIGHT** — "now do giro" (02:13),
+"run the vercel bot-account experiment", "fix the heartbeat to be periodic" (04:41). He was NOT
+disengaged; he was answering into a channel that drops on the most ordinary action a person can take,
+and a stranded prompt looks identical to a submitted one in a busy pane. cai withdrew a saturation
+finding it had made about him on this basis (CAI-617).
+**Two of those were the best items of the night; three bodies then spent hours rediscovering them.**
+🔴 **NEVER deliver by bare `Enter`. Use `lane_nudge.sh`.** Told the operator (op#7373).
+
+### DETECTOR SPEC (owed by me, now concrete)
+Watch every pane for **text that persists across samples without the pane entering a working state** —
+that is what a failed Enter looks like, and it separates stranded-and-forgotten from staged-and-deliberate.
+Must ALSO record when staged text DISAPPEARS with no submission ("run the vercel bot-account experiment"
+vanished from two panes with nothing recording whether it ran). Build with the turn-loop heartbeat.
+
+### BOTH SINGLETONS RESET AGAIN — on their own declarations, both CONFIRMED on two sources
+    cai  05:23:18Z  296,557 -> **71,867**  new session `0bc1aab0…`
+    hub  05:23:36Z  301,292 -> **60,340**  new session `131245ce…`
+Minutes before, the gauge called both **27% "green"** while both footers read 100%. Strongest argument
+for CAI-616 anyone produced.
+**A FALSE ALARM I RAISED AND WITHDREW — do not re-raise it:** `reset_orch.sh` logged
+`PRESERVED staged composer text: reset me` 30s after I verified the hub's composer EMPTY. Looked like a
+wrong-pane target. Checked first: both scripts hit their intended panes, no operator input existed, it
+was the hub's OWN staged next step. Recorded because two log lines will look alarming to the next reader.
+
+### GAUGE DISARMED IN PRACTICE (CAI-616 implemented)
+`dev.wingmen.context-health-watchdog.plist` — **`--alert` AND `--arm=amber` both removed**, reloaded,
+verified running as `arm=off reset=DRY-RUN alert=off`. Detects and logs only; gates/alarms/resets nothing.
+Also replaced the plist's own header, which still claimed `ARMED=AMBER` — I nearly left a comment
+asserting a state nobody would re-check, in the file fixing that exact class.
+**cai's single-divisor candidate: CONFIRMED as fact (one 1M window for every body) but REFUTED as the
+explanation** — a wrong divisor is constant per body; our two readings were the same body same day
+(73 then 24). The relationship is NOT a scale factor; it varies within one session.
+
+### QUEUED, NOT DONE — and named as a limit
+**cosem-platform main exports `emirates_id_last4`** (`src/modules/exams/archive-export.ts:45,:351`)
+protected ONLY by a COMMENT at :228 ("SYNTHETIC data only in this build"). **No enforcement of any
+kind** — verified — and reachable from a dashboard button. **Third instance tonight of "the protection is
+a comment"** (GIRO prototype ⛔ header; mig120's inertness claim). cc-cosem-exams authored 4 fixes;
+**only 1 of its 5 commits is merged** (verified per-commit `--is-ancestor`). I declined to review 4 PII
+commits this deep into a session and said so rather than producing a review that reads well.
+
+### MY OWN ERRORS THIS BLOCK
+- Claimed cai "was not draining" from a single snapshot; it drained minutes later. A snapshot is not a state.
+- Said I would stop nudging cai, then sent 3 more by running the script as a "test". Each run is a real nudge.
+- `nudge_cai.sh` now SKIPS when the composer shows `Press up to edit queued messages` (queued+unprocessed
+  = already signalled). Guard is a SINGLE SAMPLE of a racing state — known-weak, not proven.
