@@ -279,12 +279,18 @@ client. I reported "no attributable actor" after querying `deleted_by`/`delete_r
 one audit query that missed it. **The columns were empty; the audit row was not. I checked one of two
 places and reported on both.**
 
-🔴 **THE ACTUAL FINDING IS FOUR ROWS, AND IT IS AN ONGOING PRACTICE, NOT A JULY INCIDENT.** Six rows
-carry `deleted_at`; **four have `was_ever_signed = true`** — ids **31, 5, 10, 56**, all `deleted_by`
-NULL, spanning `2026-07-09 → 2026-07-23 07:34:21Z`. Ids **5, 10** are identical to the microsecond
-(`07-23 07:02:43.568085Z`) so they are ONE statement; **56** follows 32 minutes later. **The newest is
-three days old — two weeks AFTER the row anyone was investigating, i.e. outside the window we were
-looking at.** *The defect that produces no signal is the one that accumulates.* (cai, CAI-623.)
+🔴 **THREE UNATTRIBUTED ROWS — ids 5, 10, 56.** ⚠️ **CAI-623 first said FOUR and "signed money reports";
+cai AMENDED it down at 05:58Z and I had already adopted the inflated version at 05:51Z on his authority.
+Corrected here.** Row **31 was US, legitimately** (audit id 1311, `on_behalf_of client:gazzabyte/elly`,
+*"client-requested cancellation of UAT test report"*).
+🔴 **AND THE STAKES ARE SMALL — SAY SO PLAINLY: row 5 = S$15 (1 donation), row 10 = S$15 (1 donation,
+an IDENTICAL duplicate), row 56 = EMPTY `{}`.** Thirty dollars and an empty report. **"Signed money
+reports" unqualified materially overstates it.** Deleted `07-23`, 9 minutes after the same user deleted
+row 63 *with* full attribution.
+⚠️ **UNRESOLVED, CARRY BOTH READINGS (cai's instruction, and he is right to insist):** the same-user /
+9-minutes-earlier / attributed-row-63 evidence reads as **one person continuing one cleanup through a
+path that does not attribute**; but rows 5 and 10 share a timestamp **to the microsecond**, which is one
+statement touching two rows and does look bulk. **Do not collapse to the tidier one.**
 
 **AND THERE IS NO GUARD AT ALL — the question "hole, or pre-dates the guard?" had a THIRD answer.**
 cai probed independently and we agree on substance: `tabung_weekly_reports` has **5 non-internal
@@ -308,6 +314,21 @@ another does not — and the one that does not is the one deleting SIGNED report
 🔴 **THEREFORE `deleted_by` NULL means "the code path used did not set it", NOT "an actor was hidden."
 This reads as a PRODUCT DEFECT, not as anyone covering tracks. Do not let it escalate as misconduct.**
 *Stating it in the less alarming direction because that is what the evidence says.*
+
+### 🔴🔴 THE FINDING WITH THE WIDEST REACH: `audit_log.actor_id` IS SYSTEMATICALLY UNDER-POPULATED
+cai's delegate and my delegate read **the same row** and reached **opposite conclusions** — "actor is
+`cc-orchestrator`" vs "`actor_id` is NULL". **Both were right.** `actor_id` **IS** NULL and the actor
+**IS** recorded — **in the free-text `payload`**, alongside the reason and `on_behalf_of`.
+🔴 **So `audit_log` HAS an actor column, HAS the actor, and is still UNQUERYABLE for it. Even our ONE
+properly-attributed void did not populate the column.**
+🔴 **ANY ATTRIBUTION AUDIT RUN THE OBVIOUS WAY — `WHERE actor_id IS NULL` — UNDER-REPORTS
+SYSTEMATICALLY.** cai's ruling: **an actor recorded only inside `payload` is treated as UNATTRIBUTED
+until the column is set.** The hash chain covers `payload`, so **the DATA is intact; the
+ACCOUNTABILITY is not.**
+⚠️ **RE-MEASURE §4 BEFORE QUOTING IT.** §4 carries *"ATTRIBUTION 660/676 chain rows name a TEST
+account"*. **If that was derived from `actor_id` (or from any single field), it is measuring the same
+under-populated column and the number is not trustworthy in either direction.** Nobody has checked which
+way it was derived. **Do not repeat 660/676 until someone does.**
 *Sits on top of §4's ATTRIBUTION defect (660/676 chain rows name a TEST account). **A name is not an
 implementation** — and here a migration named `delete_before_sign` does not implement delete-before-sign.*
 
@@ -436,7 +457,7 @@ donations **2,588** · chain **678**.
 (a) hash-version+RPC @ `c440136` authored-unapplied · (b) recursive sorter · (c) **money/audit shared fate — NOT STARTED** · (d) **CAI-587 completeness fix — in CODE, not in PRODUCTION on the silo.**
 Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII** — for sha `e32357d6…` only.
 **cai's "NUL byte" was RETRACTED (CAI-588)** — never existed. The atomicity block survives on *"money and audit share a fate"*.
-**Audit chain, two live defects:** COVERAGE 28 fully / 12 partially / 636 not (the 12 = 9 modules + **2 tax_settings incl. tax reg no** + 1 org profile) · ATTRIBUTION **660/676 name a TEST account**.
+**Audit chain, two live defects:** COVERAGE 28 fully / 12 partially / 636 not (the 12 = 9 modules + **2 tax_settings incl. tax reg no** + 1 org profile) · ATTRIBUTION ~~**660/676 name a TEST account**~~ ⚠️ **DO NOT QUOTE — see §0d. `audit_log.actor_id` is systematically under-populated (the actor goes into free-text `payload`), so any attribution count derived from it is untrustworthy in BOTH directions. Re-measure before repeating this number.**
 
 ---
 
