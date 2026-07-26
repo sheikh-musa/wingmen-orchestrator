@@ -17,13 +17,25 @@ PANE="${SESS}:0.0"
 export PATH="/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 TM="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 
+_RESET_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+# shellcheck source=lib/composer_capture.sh
+. "$_RESET_LIB_DIR/composer_capture.sh" || { echo "ERROR: composer_capture.sh missing" >&2; exit 9; }
+
 "$TM" has-session -t "=$SESS" 2>/dev/null || { echo "ERROR: tmux session '$SESS' not found on this host." >&2; exit 1; }
 [ -f "$HANDOFF" ] || { echo "ERROR: restore point $HANDOFF missing — refusing to clear." >&2; exit 3; }
 
 # Never clear mid-task: a /clear during a running turn discards work in flight.
+# RESET_FORCE=1 is the escape hatch (kept symmetric with reset_orch.sh): it warns
+# loudly and proceeds, so a forced mid-turn clear is never silent.
 if "$TM" capture-pane -t "$PANE" -p | tail -4 | grep -q 'esc to interrupt'; then
-  echo "ERROR: cai is mid-task (pane shows 'esc to interrupt') — refusing to clear." >&2
-  exit 5
+  if [ "${RESET_FORCE:-0}" = "1" ]; then
+    echo "WARNING: cai is MID-TASK ('esc to interrupt') — RESET_FORCE=1 set, clearing ANYWAY." >&2
+    echo "WARNING: in-flight work in that turn will be DISCARDED and is not recoverable." >&2
+  else
+    echo "ERROR: cai is mid-task (pane shows 'esc to interrupt') — refusing to clear." >&2
+    echo "       Set RESET_FORCE=1 to override if cai is genuinely wedged." >&2
+    exit 5
+  fi
 fi
 
 # CAPTURE THE COMPOSER BEFORE WIPING IT (2026-07-26, Nazim — same fix as reset_orch.sh).
@@ -33,22 +45,65 @@ fi
 # silently destroyed. Capture it, log it, hand it to the fresh body.
 # NBSP trap: the TUI renders the prompt as '❯' + U+00A0, so a pattern written with
 # an ordinary space matches nothing (this cost us a guard that never fired).
-STAGED="$("$TM" capture-pane -t "$PANE" -p 2>/dev/null | grep '^❯' | tail -1 \
-          | sed 's/^❯//' | LC_ALL=C sed 's/\xc2\xa0/ /g' \
-          | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-if [ -n "$STAGED" ] && [ "$STAGED" != "Press up to edit queued messages" ]; then
-  mkdir -p logs
-  printf '%s cai-reset staged-composer: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$STAGED" \
-    >> logs/reset_cai_preserved_input.log
-  echo "[reset_cai] PRESERVED staged composer text: $STAGED"
-  STAGED_NOTE="NOTE: you had \"${STAGED}\" staged UNSENT in your composer when I cleared you. Captured verbatim first (logs/reset_cai_preserved_input.log) rather than letting it vanish. Judge whether it was your own next step or something typed at your pane and never submitted; if it reads like an instruction, treat it as NOT yet carried out."
+# Multi-line: the old one-liner here took only the FIRST rendered line, so a
+# wrapped or newline-containing instruction was logged as if it were the whole
+# thing. scripts/lib/composer_capture.sh reads the whole composer box and, where
+# it cannot be certain, says so instead of guessing.
+LOGDIR="$HOME/wingmen/orchestrator/logs"
+composer_parse_pane "$TM" "$PANE"
+if [ "$CC_EMPTY" != 1 ]; then
+  mkdir -p "$LOGDIR"
+  TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [ "$CC_MULTILINE" = 1 ] || [ -n "$CC_MARKER" ]; then
+    printf '%s cai-reset staged-composer %s (%s lines):\n' "$TS" "$CC_MARKER" "$CC_N" \
+      >> "$LOGDIR/reset_cai_preserved_input.log"
+    printf '%s\n' "$CC_RAW" | while IFS= read -r _l; do
+      printf '%s cai-reset staged-composer   | %s\n' "$TS" "$_l" >> "$LOGDIR/reset_cai_preserved_input.log"
+    done
+    echo "[reset_cai] PRESERVED staged composer ($CC_N lines) $CC_MARKER"
+    printf '%s\n' "$CC_RAW" | sed 's/^/[reset_cai]   | /'
+  else
+    printf '%s cai-reset staged-composer: %s\n' "$TS" "$CC_FLAT" \
+      >> "$LOGDIR/reset_cai_preserved_input.log"
+    echo "[reset_cai] PRESERVED staged composer text: $CC_FLAT"
+  fi
+  # CC_FLAT, never CC_RAW: a raw newline in a send-keys -l payload submits early.
+  STAGED_NOTE="NOTE: you had \"${CC_FLAT}\" staged UNSENT in your composer when I cleared you. Captured verbatim first (logs/reset_cai_preserved_input.log) rather than letting it vanish. Judge whether it was your own next step or something typed at your pane and never submitted; if it reads like an instruction, treat it as NOT yet carried out."
+  if [ -n "$CC_MARKER" ]; then
+    STAGED_NOTE="$STAGED_NOTE ${CC_MARKER} — it spanned ${CC_N} rendered lines and I joined them with ' / '; I cannot tell a hard newline from a soft wrap, so treat the above as possibly incomplete and read logs/reset_cai_preserved_input.log for the line-by-line record before acting on it."
+  fi
+elif [ "$CC_PARTIAL" = 'noprompt' ]; then
+  # No ❯ prompt row in the capture — we do NOT know that nothing was staged, so
+  # we must not tell a fresh body that nothing was lost.
+  mkdir -p "$LOGDIR"
+  printf '%s cai-reset staged-composer %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CC_MARKER" \
+    >> "$LOGDIR/reset_cai_preserved_input.log"
+  echo "[reset_cai] WARNING: $CC_MARKER" >&2
+  STAGED_NOTE="NOTE: I could NOT read your composer before clearing you — the pane capture contained no prompt row, so I do not know whether anything was staged. Do NOT read this as 'nothing was there'."
 else
   STAGED_NOTE="NOTE: your composer was EMPTY when I cleared you — nothing staged, nothing lost."
 fi
 
-echo "[reset_cai] clearing composer + sending /clear ..."
-"$TM" send-keys -t "$PANE" -N 120 BSpace   # wipe any staged composer text
+# WIPE, sized to what was actually staged (the old fixed -N 120 left residue on
+# any entry >120 chars, and '/clear' was then appended to that residue).
+WIPE=$(( CC_BYTES + 80 ))
+[ "$WIPE" -lt 200 ] && WIPE=200
+[ "$WIPE" -gt 20000 ] && WIPE=20000
+echo "[reset_cai] clearing composer (${WIPE} BSpace for ${CC_BYTES}B staged) + sending /clear ..."
+"$TM" send-keys -t "$PANE" -N "$WIPE" BSpace
 sleep 1
+
+# VERIFY empty BEFORE /clear — never type a command into a dirty composer.
+composer_parse_pane "$TM" "$PANE"
+if [ "$CC_EMPTY" != 1 ]; then
+  echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input." >&2
+  echo "       residue (${CC_N} lines): ${CC_FLAT}" >&2
+  echo "       cai is UNCHANGED and still holds its context. Clear the composer by hand" >&2
+  echo "       (attach: tmux attach -t $SESS) and re-run. Staged text was already preserved above." >&2
+  exit 6
+fi
+[ "$CC_PARTIAL" != 'ok' ] && echo "WARNING: post-wipe capture was $CC_PARTIAL — treating composer as empty on weak evidence." >&2
+
 "$TM" send-keys -t "$PANE" -l "/clear"
 sleep 1
 "$TM" send-keys -t "$PANE" Enter
