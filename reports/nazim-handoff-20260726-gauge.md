@@ -246,10 +246,21 @@ that lets you relax, not a lower one.
 ### STANDING ADJUDICATION 2 — SLA stalls against a BUSY singleton
 `pane_busy()` in `scripts/lib/composer_capture.sh` is now the authoritative busy check and it is
 verified working from the Mini over SSH with the locale unset (the environment that matters):
+🔴 **THE INVOCATION I ORIGINALLY WROTE HERE WAS WRONG AND WOULD HAVE ALWAYS SAID BUSY.**
+`pane_busy` **ALWAYS `return 0`** — the exit code means "the measurement succeeded", NOT "busy". The
+verdict is in **`CC_BUSY`**. Proved: cai `exit=0 CC_BUSY=0` (not busy) and orch `exit=0 CC_BUSY=1` (busy)
+— same exit code, opposite verdicts. `pane_busy ... && echo BUSY` therefore reports BUSY for every pane,
+always, which under this very adjudication would mean "close every SLA forever". A check that always
+fires, inverted into a check that always reassures. **Read the VARIABLE:**
 ```
 ssh Musa@mac-studio 'cd ~/wingmen/orchestrator && env -u LANG -u LC_ALL -u LC_CTYPE bash -c \
-  ". scripts/lib/composer_capture.sh; pane_busy /opt/homebrew/bin/tmux cai:0.0 && echo BUSY || echo IDLE"'
+  ". scripts/lib/composer_capture.sh; pane_busy /opt/homebrew/bin/tmux cai:0.0; \
+   echo \"CC_BUSY=$CC_BUSY STALE=$CC_BUSY_STALE REASON=$CC_BUSY_REASON\""'
 ```
+Semantics (from the source, lines 95-148): live foreground -> `CC_BUSY=1 STALE=0 REASON="foreground turn
+in progress"` · blocked on background agents -> `CC_BUSY=1 STALE=0 REASON="blocked on background agents…"`
+· **FROZEN pane -> `CC_BUSY=0 STALE=1 REASON=''`** (empty reason is INTENDED: there is no busy state to
+describe, only a stale marker) · idle -> `CC_BUSY=0 STALE=0`.
 **If the recipient is BUSY: correctly waiting. Close the SLA, no nudge, no escalation, move on.** Do not
 re-derive this each time — but DO run the check each time; "it was busy an hour ago" is not evidence.
 
