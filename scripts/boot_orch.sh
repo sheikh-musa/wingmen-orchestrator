@@ -79,7 +79,7 @@ else
     # (the hub's own ongoing session) → an unattended restart returns LIVE with
     # context.
     "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ORCH_DIR" -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
-        -- "$CLAUDE_BIN" --dangerously-skip-permissions --continue --model "${ORCH_MODEL:-claude-opus-5}"
+        -- "$CLAUDE_BIN" --dangerously-skip-permissions --continue --model "${ORCH_MODEL:-claude-opus-4-8}"
 fi
 
 log "session '$SESSION' is live — waiting for it to exit"
