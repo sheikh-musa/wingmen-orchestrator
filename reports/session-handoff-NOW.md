@@ -19,6 +19,45 @@
 
 ---
 
+## 0b. 🆕 BLOCK 2 — fresh hub, 2026-07-26 02:51Z→04:00Z (GIRO)
+
+Full detail: **`reports/giro-state-of-play-20260726.md`** (commits `e773360`, `310e759`, `10dde9a`).
+
+- **GIRO WAS NEVER AN ENGINEERING PROBLEM** (CAI-RESP-607). GIRO COLLECTION rows in the
+  client's statements are **lump-sum batches with no donor itemisation** — ~3/month, mean
+  SGD 12,906.55. **Audit option (A) is unachievable from these files at any effort.**
+  We diagnosed this correctly on **2026-06-19** ("can't build without a sample GIRO file"),
+  asked 3×, never got it, lost it — then spent five weeks calling it a build problem.
+  **Asked Gazzabyte for the itemised GIRO collection report; naming our own error.**
+- **CAI-RESP-605 — mig 122 does NOT implement the "index HELD" bind. GRANT REFUSED.**
+  Index built at L450/458 inside the same `BEGIN`(171)/`COMMIT`(478) as the RPCs; guard keys
+  on **forks**, not writer migration, so **both arms build it**. goumlyne is fork-clean ⇒
+  **full** index arm. cai's sharper read: **the guard is INVERTED** (tolerant for the dirty
+  silo, full enforcement for the clean one) and **the apply SUCCEEDS** — breakage arrives
+  later on a money-adjacent write. New bind: **grants name FILE + REF + SHA**, constraints
+  located **by line**, and that binds the hub as the *asking* body.
+- **PREVIEW DEPLOYS REACH LIVE DATA.** `ihsanos-irsyad`'s five Supabase vars are ONE
+  definition, `target=production,preview`, `gitBranch=null`. **`feat/giro-reconcile-synthetic`
+  was DEPLOYED — READY preview, 2026-07-17, nine days.** What actually protected it is
+  **Vercel SSO** (`ssoProtection=all_except_custom_domains`), *not* unmergedness — an account
+  setting on another system. Found only by paginating **555/905** deployments; the first
+  100-row pass was a false all-clear on a subset.
+- **Agent commits authored as `sheikh-musa` are a DELIBERATE standing practice**, not an
+  accident — we re-author agent branch tips before pushing ihsanos or Vercel blocks the
+  preview and emails the operator a failed deployment. Told cai (#11568): the git history is
+  a record we would hand an auditor. **Needs the operator — it is his identity.** NOT RULED.
+- **3 defects in the LIVE `bank_import` rail** → prerequisites #5/6/7 on the existing block.
+  **My defect-1 grading was WITHDRAWN by me**: I called GIRO RETURN "human-catchable" in the
+  same message that said the parser presents reversals "like any other credit."
+  **FLAG, DO NOT DROP** — cai refused NRTI exclusion (a discarded discriminator must not be
+  fixed with an inferred one; silent exclusion drops real donations).
+
+**Not done / not claimed:** approval emails still **unexercised** (0 notification rows) and
+one report is **stranded** (`971a84b3-…`, `preparer_signed` since 07-09, predates the
+approver table, no backfill scan exists → can never email). Token remediation still NOT run.
+
+---
+
 ## 1. ✅ SHIPPED THIS BLOCK — Gazzabyte unblocked end to end
 
 **`main` `231714a` → `dd72671`.** Both prod deploys READY, `database:ok` on both, `/login` + `/set-password` 200.
