@@ -41,7 +41,17 @@ fi
 
 # Durable log every reply (tag=nazim-console → scopes to the console body and
 # keeps the two-way thread coherent for a rebooted Nazim). Best-effort.
-PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
-  outbound "$TEXT" --chat "$CHAT" --tag nazim-console >/dev/null 2>&1 || true
+# `delivered` MUST reflect what actually happened. operator_log defaults delivered=TRUE, so
+# calling it unconditionally records a FAILED send as delivered — which is what it did here until
+# now, on every message this script has ever sent. Found fleet-wide by cc-orchestrator (25701aa)
+# after a real client asked the same question three times while our log showed every reply
+# delivered; this script was NOT in that fix. `delivered` is evidence or it is decoration.
+if [ "$sent" = 1 ]; then
+  PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
+    outbound "$TEXT" --chat "$CHAT" --tag nazim-console >/dev/null 2>&1 || true
+else
+  PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
+    outbound "$TEXT" --chat "$CHAT" --tag nazim-console --undelivered >/dev/null 2>&1 || true
+fi
 
 [ "$sent" = 1 ] && exit 0 || { echo "nazim_send failed" >&2; exit 1; }
