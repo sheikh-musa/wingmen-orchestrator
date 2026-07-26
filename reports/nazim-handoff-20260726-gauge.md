@@ -217,3 +217,28 @@ commits this deep into a session and said so rather than producing a review that
 - Said I would stop nudging cai, then sent 3 more by running the script as a "test". Each run is a real nudge.
 - `nudge_cai.sh` now SKIPS when the composer shows `Press up to edit queued messages` (queued+unprocessed
   = already signalled). Guard is a SINGLE SAMPLE of a racing state — known-weak, not proven.
+
+### STANDING ADJUDICATION — SLA stalls against DOWN lanes (do not re-litigate each one)
+Messages to a lane with **no live session and no `agent_status` row** generate an SLA escalation to
+orch-console every ~30 min, forever. **Adjudication: CORRECTLY WAITING. No nudge, no escalation, no
+action.** A notification addressed to a down lane is *designed* to be read at its next boot; nobody can
+read it now and no nudge can help. Verify the down-ness on three sources before applying this (Mini
+`tmux has-session`, Studio `tmux ls`, `agent_status` row) — then close it and move on.
+Known recurring: `cc-cosem-tdu` (#11703, tdsct pass-mark notification), `cc-cosem-exams` (#11652,
+stopped by my order).
+🔴 **DO NOT "fix" this by suppressing on `fleet_lanes.desired_state='down'`.** I nearly did. That field
+is an AUTOSTART POLICY, not a pause state — `cc-irsyad`, `cc-fleet-health` and `cc-scholar` are all
+`down` AND currently WORKING, so suppressing on it would permanently and invisibly silence the
+supervised **client-facing irsyad lane**. It would fail toward calm, like everything else tonight.
+**The real gap:** nothing in the substrate expresses "intentionally paused / not running, don't page
+about its queue". Stopping a lane is done by MESSAGE ONLY — socially real, invisible to every automated
+check. Same class as the composer. That is a schema change and it is OWED, not hacked.
+
+### A BIAS OF MINE, NAMED (twice in one hour)
+I twice went looking for a defect in `priority_sla_watchdog.py` and it was **right both times**: once it
+was reporting that I had never stamped `responded_at` on 18 messages (my replies were invisible AS
+replies); once it was a 1-second race on a 33-minute threshold, with the `attended_for` recheck already
+covering both escalation paths — I read the code instead of proposing the fix, and there was no bug.
+**I am quick to suspect checks that page ME and slow to suspect ones that reassure me** — the exact
+mirror of the fail-toward-calm theme. A check that creates work deserves the same evidentiary bar as one
+that lets you relax, not a lower one.
