@@ -601,10 +601,30 @@ def _save_exec_state(state: dict) -> None:
         pass
 
 
+def _in_pytest() -> bool:
+    """True when running under pytest.
+
+    WHY THIS EXISTS (2026-07-26 incident, root-caused): the operator received two
+    real Telegram pages — "cc-orchestrator cleared + boot nudge sent" — asserting a
+    hub reset that never happened. They were not sent by the launchd watchdog
+    (which runs --arm=amber and has never taken the destructive path). They were
+    sent by `tests/test_context_health_watchdog.py::test_do_reset_full_happy_path`,
+    from an ordinary `pytest` run, because that one test does not monkeypatch
+    _page_loud. A false ALL-CLEAR is worse than a false alarm: it makes the reader
+    NOT act. A governance body then repeated it and filed it against itself.
+
+    Opting out of the operator's phone must NOT depend on every future test
+    remembering to patch the right seam — that is the same "safety property that
+    depends on everyone remembering" we removed from nudge_cai.sh. It lives here.
+    CTX_WD_ALERT_STDOUT=1 remains the explicit override for non-pytest callers.
+    """
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
 def _page_loud(text: str) -> None:
     """Dependency-free operator page (does NOT import nervous_system) — the
     dead-man's-switch path. CTX_WD_ALERT_STDOUT=1 prints instead (for tests)."""
-    if os.environ.get("CTX_WD_ALERT_STDOUT") == "1":
+    if os.environ.get("CTX_WD_ALERT_STDOUT") == "1" or _in_pytest():
         print("[PAGE-would-send]\n" + text + "\n")
         return
     try:
@@ -1011,7 +1031,7 @@ def _send_alert(text: str) -> None:
     CTX_WD_ALERT_STDOUT=1 prints instead of sending — for testing the decision
     logic without paging the operator.
     """
-    if os.environ.get("CTX_WD_ALERT_STDOUT") == "1":
+    if os.environ.get("CTX_WD_ALERT_STDOUT") == "1" or _in_pytest():
         print("[ALERT-would-send]\n" + text + "\n")
         return
     try:

@@ -16,7 +16,14 @@
 set -euo pipefail
 ORCH_DIR="$HOME/wingmen/orchestrator"
 TOK=$(grep '^NAZIM_BOT_TOKEN=' "$ORCH_DIR/.env" | cut -d= -f2-)
-CHAT="${TG_CHAT_OVERRIDE:-$(grep '^MUSA_TELEGRAM_ID=' "$ORCH_DIR/.env" | cut -d= -f2-)}"
+# Precedence: TG_CHAT_OVERRIDE, then an EXPLICIT environment MUSA_TELEGRAM_ID,
+# then .env. The env leg is not cosmetic — tests/conftest.py sets
+# MUSA_TELEGRAM_ID=123456 expressly to keep test runs off the operator's phone,
+# and this line used to ignore it by re-reading .env off disk, so that safeguard
+# was decorative. On 2026-07-26 a pytest run duly paged the operator twice with a
+# false "hub cleared" claim. An env var that looks like it disarms something must
+# actually disarm it.
+CHAT="${TG_CHAT_OVERRIDE:-${MUSA_TELEGRAM_ID:-$(grep '^MUSA_TELEGRAM_ID=' "$ORCH_DIR/.env" | cut -d= -f2-)}}"
 [ -n "${TOK:-}" ] || { echo "NAZIM_BOT_TOKEN missing from .env" >&2; exit 1; }
 [ -n "${CHAT:-}" ] || { echo "MUSA_TELEGRAM_ID missing from .env" >&2; exit 1; }
 
