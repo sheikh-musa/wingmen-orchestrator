@@ -92,3 +92,59 @@ search root and it reproduces your boundary error and returns confident corrobor
 the gauge audit refuted my hypothesis AND my search root (paid off); the ingest fix confirmed my diagnosis
 (manufactured corroboration, recorded as such). Verify agents' reports before believing them — I caught a
 lane's false absence-claim and my own error in an agent's brief this way.
+
+---
+
+## ⚑ LATE BLOCK (04:05Z) — read this before acting on anything above
+
+### THE ONLY OPERATOR-FACING ITEM: THE BURNED TOKEN IS STILL LIVE
+cai measured it at 03:50Z **with a discriminating control**: fabricated token → 401, the Studio's
+`sbp_2180…b069` → **HTTP 200 as his own account**. It is his PERSONAL PAT (management-plane access to
+everything he owns) and it has been live in a Telegram log since 22:38:49Z. **Step 1 (revoke) has never
+happened.** Sent as op#7367 — token first and alone, everything else dropped, per cai. **If he has not
+revoked it, this is still the top item.**
+- **The third token `sbp_6707…74a8` (7 Mini `.env.local` files) IS genuinely dead** — but my original
+  finding was UNDER-EVIDENCED. Re-tested with controls both ways: fabricated → 401, **known-live → 200**,
+  subject → 401. **A negative control only proves a test can say no; a positive control proves it can say
+  yes.** Never run a revocation check without both (cai's invariant 38, my correction adopted).
+- cai's first probe said "DEAD" — its script had `if e.code in (401,403): print("DEAD")`, hardcoding an
+  interpretation of a status it had never observed. It would have published a false all-clear.
+
+### THE CONTEXT GAUGE IS NOT MEASURING — I RETRACTED MY OWN EXPLANATION
+Hub footer **100%**; our gauge **24%**, classified **green/"ok"**, seconds apart. Earlier the same pair
+was 100% vs 73%. **27 points then, 76 now — no fixed usable-window offset explains both, so my divisor
+theory (#11515, and what I told the operator) is REFUTED.** I do not know the real relationship.
+Untested candidate: the figure may be one call's context, with sub-agent context uncounted.
+🔴 **Do NOT trust the gauge to detect a full body. Use the body's own footer.** `ed961fa` made it
+COMPLETE, not correct.
+
+### THE HUB REFILLED A FULL WINDOW IN 65 MINUTES
+Reset 02:55 (802,287 → 91,270); at 100% again by 04:00, same session `f58a2fb4`. It pulls 20–30k Explore
+surveys into its own context. **Resetting hourly is a symptom, not a schedule** — CAI-603 (fact out,
+judgement in) is aimed exactly here. I did NOT reset it a second time: mid-task, queued work.
+
+### HUB HEARTBEAT — FIXED ONLY AS FAR AS A HAND-WRITTEN ROW GOES
+`cc-orchestrator` had **NO `agent_status` row at all** (absent, not stale) while alive and working, so
+every liveness check returned nothing rather than DOWN. The hub inserted one and then **refused to call it
+fixed**: nothing refreshes it, so it will freeze and assert liveness it is not proving. Treat that row as
+a REGISTRATION, not evidence it runs. **OWED BY ME: a heartbeat produced by the turn loop.**
+Good news worth recording: the DB REFUSED its first write (`app.current_agent_id` GUC not set) — a guard
+that fired correctly, unprompted.
+
+### RULINGS LANDED TONIGHT
+- **CAI-609 EXECUTED** by the hub, verified three ways (preview deleted; 5 vars production-only, re-read
+  from the API; fresh preview driven to READY; values never read). **Its deviation was right**: cai's
+  ruling was self-contradictory (branch-scoping requires supplying values; reading values was forbidden).
+  Previews now get nothing — safer than the sibling precedent.
+- **CAI-615 — THE MIGRATION LEDGER IS NOT A RECORD.** goumlyne: 0 of 93 rows hold the SQL that ran.
+  Confirmed by me on the live silo: ledger max=118, **no 120 row, yet both mig120 tables LIVE with the
+  client's 2 approvers.** Unreliable in BOTH directions. 🔴 **Never answer "is it applied?" from the
+  ledger — probe the object** (`to_regclass` + row count). **NO BACKFILL** (cai ruled): a repaired-looking
+  ledger removes the reason anyone would probe again; the gap is doing work by being visible.
+- **CAI-611** — the attribution property was never missing: **93.7% of commits already carry a
+  Co-Authored-By trailer**. Mini corroborates independently: 91/98 = 92.9%. My delta: **the trailer names
+  a MODEL, not a BODY** — it answers "was this an agent?", never "which agent?". Local `git merge --squash`
+  PRESERVES the trailer (tested); GitHub's squash button = COULD-NOT-DETERMINE.
+  🔴 **DO NOT apply the repo-local identity fix to `ihsanos`** (deliberate override, Vercel premise).
+- **CAI-612** — spec `b0b6910` approved as a spec. Range must be named from the **last approved point**
+  (`4429428..b0b6910`), not from main.
