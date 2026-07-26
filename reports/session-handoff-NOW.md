@@ -597,6 +597,32 @@ code unchanged in the window; both sides' tables are old (low `pg_class` OIDs), 
    client silo, as a money-load precondition, is not committed anywhere.** One `git worktree prune` from
    being unreproducible. *Provenance gap, not a live fault.*
 
+## 0k. 🔴 THE OPERATOR'S SCREENSHOTS RESOLVE TO THE WRONG IMAGE (found 11:26Z, NOT FIXED)
+
+**`nervous_system/ingest.py:139` — `safe = fp.replace("/", "_")`.** The local filename is derived from
+**Telegram's own `file_path`**, and **Telegram REUSES those**. Distinct photos, days apart, collide onto
+one local file.
+**Measured: 275 media messages → 113 distinct basenames → 84 REUSED**, several 4×.
+
+**The live instance:** op#7391 (11:24:52Z, *"are these contexts accurate?"*) logged
+`logs/tg_media/photos_file_87.jpg` — **mtime 2026-07-18 09:17, eight days old.** The same basename was
+logged for msg 5280 on 07-18. **Nothing was written to `tg_media` in the preceding 10 minutes**, and
+there is **no error in the ingest log**. So today's download silently did not happen *and* the path we
+recorded resolves to a different photo. **Silent in both directions.**
+
+🔴 **CONSEQUENCE: anyone answering him by opening the logged path answers confidently about the wrong
+picture.** The row is present, the path well-formed, the file exists and opens cleanly. **Nothing
+anywhere says "this is not the image he sent."**
+*Same shape as the frozen pane and the log that records the action but not the participant — except here
+the corrupted artefact is **the evidence itself**.*
+⚠️ **REACHES BACKWARD:** 84 reused basenames mean earlier photo-based answers **may** have been given
+against the wrong image. **NOT asserting any were — it is unverifiable now, which is the point.**
+
+**FIX (small, deliberately NOT applied):** make the filename unique — `update_id` / message id — instead
+of trusting Telegram's. `ingest` is a **live daemon on the operator's inbound path** and I am declared
+saturated; editing his message rail at the end of a long session is how the next incident starts.
+**→ P0 #11876 to Nazim, who was mid-answer on that exact screenshot.**
+
 ### ⚠️ Standing: NON-P0 OPERATOR TRAFFIC IS HELD
 Footed on the **live P0 alone** (the burned token), no longer on the withdrawn saturation finding.
 The token was still live at 04:45Z after six hours. **Do not re-send the commands; do not re-page.**
@@ -756,6 +782,7 @@ Byte pre-flight for that file: **0 NUL, 0 lone-surrogate, 0 control, 0 non-ASCII
 - **A grant whose provenance is misrepresented is worse than no rule** (cai) — including when the misrepresentation flatters your own discipline.
 
 **BLOCK 3 additions:**
+- 🔴 **AN EXTERNAL SYSTEM'S IDENTIFIER IS NOT A UNIQUE KEY.** Telegram reuses `file_path`; we used it verbatim as a local filename, so **84 of 113 stored basenames collide.** A record can be present, well-formed, and resolve to **the wrong artefact** — with nothing anywhere flagging it. **When the corrupted thing is the EVIDENCE, every downstream answer is confidently wrong.** §0k.
 - 🔴 **A SYSTEM CAN LOG THE ACTION BUT NOT THE PARTICIPANT — found TWICE today in unrelated rails.** `audit_log` records *that* a signed report was deleted, not *who* (actor went to free-text `payload`, §0d); `priority_sla_watchdog` records *that* it fired ~721 times in 12 days, not *whom at* (`_nudge_target()` computes the target and the summary discards it). **Both look complete** — one has an actor COLUMN, the other has firing LINES — and **in both the missing field was available at write time and thrown away.** Look not for missing logs but for **logs whose most load-bearing field is the one nobody persisted.**
 - 🔴 **A LOGGING FIX IS PROSPECTIVE ONLY — it prevents the next unknown, it cannot recover the last 721.** So the composer-text attribution is **unrecoverable BY CONSTRUCTION, not by neglect** — a second independent route to CAI-625/626's `origin: unrecoverable`. **A fix landing must not close the question in anyone's head.**
 - **A control that prevents a FALSE ALL-CLEAR is worth more than one that prevents a false alarm** — nobody goes looking for the all-clear again. (Nazim's fifth canary tonight; it stopped him wrongly EXCLUDING the `C-u` candidate.)
