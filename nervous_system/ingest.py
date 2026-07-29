@@ -343,9 +343,38 @@ def urgency(text: str) -> str:
     return "default"
 
 
+def already_replied(conn, ch: "Channel") -> bool:
+    """True if a REAL (non-auto-ack) outbound reply on this channel is already
+    newer than the oldest unhandled inbound — i.e. the sender has been answered,
+    so any 'got your message / we'll get back to you' ack is redundant noise.
+
+    Root cause (operator-flagged 2026-07-23, client group): a reply sent via
+    tg_send/irsyad_support_send logs an OUTBOUND row but does NOT stamp the
+    inbound's handled_at, so reassure_if_unhandled still saw handled_at IS NULL
+    past ACK_AFTER_SEC and fired a canned ack ~2 min AFTER a real human reply had
+    already gone out — making the fleet look robotic. Outbound replies carry the
+    same tag, so an outbound (that isn't itself a 'Got your message' auto-ack)
+    newer than the oldest open inbound means: already answered, suppress."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT min(created_at) FROM operator_messages "
+            "WHERE direction='inbound' AND tag=%s AND handled_at IS NULL",
+            (ch.channel_tag,))
+        oldest = cur.fetchone()[0]
+        if not oldest:
+            return True   # nothing open → nothing to ack
+        cur.execute(
+            "SELECT 1 FROM operator_messages WHERE direction='outbound' AND tag=%s "
+            "AND created_at > %s AND text NOT LIKE %s LIMIT 1",
+            (ch.channel_tag, oldest, "%Got your message%"))
+        return cur.fetchone() is not None
+
+
 def throttled_busy_ack(conn, ch: "Channel") -> None:
     """Enqueue ONE 'got it, mid-task' ack per ACK_THROTTLE_SEC per channel (via
     the tg_out queue), so a deferred operator isn't left wondering."""
+    if already_replied(conn, ch):
+        return   # a real reply already went out — no redundant ack
     ack = (
         # client perimeter (log-and-route): no operator-internal phrasing
         "\U0001F4E8 Got your message — we'll get back to you shortly."
@@ -412,6 +441,8 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
     repeats add nothing. drain_stale_deferred still owns waking the target.)"""
     if ch.mode not in ("agent-session", "log-and-route"):
         return
+    if already_replied(conn, ch):
+        return   # a real reply already went out — no redundant "we'll get back to you"
     ack = (
         # client perimeter (log-and-route): no operator-internal phrasing
         "\U0001F4E8 Got your message — we'll get back to you shortly."
@@ -440,6 +471,35 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
     _log_line(f"{ch.key}: {n} unhandled past {ACK_AFTER_SEC}s — reassurance ack (belt+suspenders)")
 
 
+# ── Sender attribution ────────────────────────────────────────────────────────
+
+def extract_sender(msg: dict) -> dict:
+    """Pull the Telegram `from` object into operator_messages sender columns,
+    NULL-SAFELY. Channel posts and service messages carry no `from` — those
+    legitimately return all-None (the durable log stays truthful, never
+    fabricates a sender). Keys map 1:1 to (from_user_id, from_username,
+    from_name)."""
+    frm = msg.get("from") or {}
+    uid = frm.get("id")
+    name = " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x)
+    return {
+        "user_id": str(uid) if uid is not None else None,
+        "username": frm.get("username"),
+        "name": name or None,
+    }
+
+
+# Self-learning roster upsert (best-effort enrichment; see chat_members /
+# migrations/025). known_label is human-curated and NEVER clobbered here.
+ROSTER_UPSERT_SQL = (
+    "INSERT INTO chat_members (chat_id, user_id, username, display_name) "
+    "VALUES (%s,%s,%s,%s) "
+    "ON CONFLICT (chat_id, user_id) DO UPDATE SET "
+    "last_seen_at=now(), msg_count=chat_members.msg_count+1, "
+    "username=EXCLUDED.username, display_name=EXCLUDED.display_name"
+)
+
+
 # ── Per-update processing (sync, called from the channel task) ────────────────
 
 def process_update(conn, ch: Channel, upd: dict) -> bool:
@@ -449,7 +509,8 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
     msg = upd.get("message") or upd.get("edited_message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
     message_id = msg.get("message_id")
-    username = (msg.get("from") or {}).get("username")
+    sender = extract_sender(msg)        # who sent it (NULL-safe); persisted below
+    username = sender["username"]       # gate_allows keys on the @handle
     tag, is_shared_feed = resolve_tag(ch, chat_id)
     # Cross-bot dedup engages only for multi-bot feeds (war-room), and only when
     # the message carries a stable identity (chat_id, message_id). Single-bot feeds
@@ -494,10 +555,13 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         #    Media is downloaded here so the row carries the local path
         #    (screenshot/doc), not a bare non-text marker.
         cur.execute(
-            "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
-            "VALUES ('inbound','telegram',%s,%s,%s,true) RETURNING id",
+            "INSERT INTO operator_messages "
+            "(direction, channel, chat_id, tag, text, delivered, "
+            "from_user_id, from_username, from_name) "
+            "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s) RETURNING id",
             (str(chat_id) if chat_id is not None else None, tag,
-             message_content(ch, msg, upd_id)),
+             message_content(ch, msg, upd_id),
+             sender["user_id"], sender["username"], sender["name"]),
         )
         op_msg_id = cur.fetchone()[0]
         cur.execute(
@@ -511,6 +575,20 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
                 "WHERE chat_id=%s AND message_id=%s",
                 (op_msg_id, chat_id, message_id),
             )
+        # Self-learning roster: record WHO we've seen per chat, so this sender can
+        # be attributed later. Best-effort ONLY — the operator_messages row above
+        # is sacred, so a SAVEPOINT isolates the upsert: if chat_members doesn't
+        # exist yet (migration unapplied) or any DB error fires, we roll back just
+        # this savepoint and warn, leaving the durable log committable.
+        if sender["user_id"] is not None and chat_id is not None:
+            try:
+                with conn.transaction():   # SAVEPOINT inside the open transaction
+                    cur.execute(ROSTER_UPSERT_SQL,
+                                (str(chat_id), sender["user_id"],
+                                 sender["username"], sender["name"]))
+            except psycopg.Error as e:
+                _log_line(f"{ch.key}: chat_members upsert skipped "
+                          f"({type(e).__name__}: {e}) — log unaffected")
         conn.commit()
 
     # 3. GATE — deny-by-default; disallowed stays logged-and-skipped.
