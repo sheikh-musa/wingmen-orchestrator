@@ -12,6 +12,12 @@ set -euo pipefail
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMUX_BIN="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 
+# Shared composer extraction — the fleet's ONE definition of "dim ghost vs real
+# staged text" (reset_lane.sh/reset_cai.sh source the same lib; lane_wedge_watchdog.py
+# mirrors its dim test). Needed by the composer guard below so all three tools agree
+# that a fully-DIM composer line is a ghost/placeholder over an EMPTY buffer, not text.
+. "$ORCH_DIR/scripts/lib/composer_capture.sh" || { echo "nudge_cai: composer_capture.sh missing" >&2; exit 9; }
+
 N="${1:-}"
 if [ -z "$N" ]; then
   set -a; source "$ORCH_DIR/.env"; set +a
@@ -97,10 +103,26 @@ if [ "$COMPOSER" = "Pressuptoeditqueuedmessages" ]; then
     exit 0
 fi
 if [ -n "$COMPOSER" ]; then
-    echo "nudge_cai: REFUSED — cai's composer holds unsent text; -l would concatenate onto it and submit the hybrid." >&2
-    echo "           The bus row is already durable; cai reads it at its next turn. If this is urgent," >&2
-    echo "           surface it another way rather than typing into a staged draft." >&2
-    exit 3
+    # GHOST GUARD (2026-07-29 root cause). The plain `-p` COMPOSER above cannot see
+    # colour: an IDLE Claude-Code lane paints its most-recent history entry as a DIM
+    # (SGR-2) autosuggestion GHOST into an EMPTY input buffer. That ghost read as
+    # "unsent text" and this guard REFUSED to nudge a genuinely-idle cai — leaving it
+    # un-nudgeable with pending bus work (the exact stall this fix addresses). So
+    # before refusing, re-read the SGR-preserving pane and, if the composer content
+    # is ENTIRELY dim, treat it as EMPTY and PROCEED (the buffer really is empty; a
+    # nudge appends to nothing). Only REAL, non-dim typed text still blocks — that is
+    # cai's own draft and -l would concatenate onto it, so we never clobber it.
+    # _cc_dim_only lives in composer_capture.sh (sourced above): 0/true == all-dim.
+    RAW_E="$("$TMUX_BIN" capture-pane -t '=cai:0.0' -p -e 2>/dev/null)"
+    if [ -n "$RAW_E" ] && _cc_dim_only "$RAW_E"; then
+        echo "nudge_cai: composer shows only a DIM ghost/placeholder over an empty buffer — proceeding with the nudge." >&2
+    else
+        # Real non-dim text (or no SGR data to prove otherwise — fail closed, preserve).
+        echo "nudge_cai: REFUSED — cai's composer holds real unsent text; -l would concatenate onto it and submit the hybrid." >&2
+        echo "           The bus row is already durable; cai reads it at its next turn. If this is urgent," >&2
+        echo "           surface it another way rather than typing into a staged draft." >&2
+        exit 3
+    fi
 fi
 
 # '=cai:0.0': tmux 3.7a send-keys can't always resolve a bare '=cai' to a pane
