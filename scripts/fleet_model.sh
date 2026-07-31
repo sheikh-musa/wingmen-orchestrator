@@ -22,7 +22,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORCH_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ORCH_DIR/.fleet_model"
 NUDGE="$SCRIPT_DIR/lane_nudge.sh"
-CORE_LANES="orch cai"
+# Sessions the live-flip must NEVER send /model into: orch (hub) + cai are the
+# strategic core brains (pass --all to include them); nazim (this console body),
+# fleet-health (the SRE), and fleet-console (a Python server, not a claude REPL —
+# a /model nudge would corrupt it) are Mini infrastructure bodies, never engineer
+# lanes. Excluding them keeps --live scoped to the actual engineer lanes.
+CORE_LANES="orch cai nazim fleet-health fleet-console"
 DEFAULT_MODEL="claude-opus-4-8"
 
 resolve() {  # alias|full-id -> full model id
