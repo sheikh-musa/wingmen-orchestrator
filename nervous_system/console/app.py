@@ -159,6 +159,16 @@ def _enrich_lanes_live(rows):
                       or "↑" in spinner or "↓" in spinner or "…" in spinner))
         working = active or any("esc to interrupt" in ln.lower() for ln in lines)
         activity = spinner or (lines[-1] if lines else "")
+        # A "❯ …" line is the COMPOSER (an idle prompt, or a dim autosuggestion
+        # ghost) — NOT what the lane is doing. Surfacing it made every idle card
+        # read as cryptic prompt-noise ("❯ /clear", "❯ go with A") instead of the
+        # lane's real activity, which the card then can't fall back to (operator:
+        # "still no contexts", 2026-08-01). When the lane isn't working, drop a
+        # composer line so live.activity is empty and the card falls back to the
+        # last bus subject (l.activity). The full composer is still visible via
+        # the pane peek + the SRE wedge-watchdog owns staged-input detection.
+        if not working and activity.lstrip().startswith("❯"):
+            activity = ""
         r["live"] = {"running": True,
                      "state": "working" if working else "idle",
                      "activity": activity[:140]}
