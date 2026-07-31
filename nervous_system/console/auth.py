@@ -27,6 +27,7 @@ Stdlib-only.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import logging
 import os
 import pathlib
@@ -43,6 +44,35 @@ _DEFAULT_LOG = (
 def _allowed_ips() -> Set[str]:
     raw = os.environ.get("CONSOLE_ALLOWED_IPS", "") or ""
     return {ip.strip() for ip in raw.split(",") if ip.strip()}
+
+
+def _peer_allowed(peer_ip: str, allowed: Set[str]) -> bool:
+    """True iff *peer_ip* matches an allowlist entry.
+
+    An entry is either an exact address (fast path, original behaviour) or a
+    CIDR network like ``100.64.0.0/10`` (the Tailscale CGNAT range → "any
+    device on the tailnet"). A malformed entry or peer IP never raises — it is
+    treated as no-match, preserving the fail-closed contract. Headers/XFF are
+    still never consulted; *peer_ip* is the real TCP peer from the socket.
+    """
+    if not peer_ip:
+        return False
+    if peer_ip in allowed:  # exact match — unchanged fast path
+        return True
+    try:
+        addr = ipaddress.ip_address(peer_ip)
+    except ValueError:
+        return False
+    for entry in allowed:
+        if "/" not in entry:
+            continue
+        try:
+            net = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            continue  # a bad CIDR entry must not admit anyone, nor crash
+        if addr.version == net.version and addr in net:
+            return True
+    return False
 
 
 def _breakglass_token() -> str:
@@ -75,7 +105,7 @@ def check_access(peer_ip: str, headers: Mapping[str, str]) -> Tuple[bool, str]:
     if not allowed:
         return False, "denied"  # fail-closed: empty allowlist locks EVERYONE out
 
-    if peer_ip and peer_ip in allowed:
+    if _peer_allowed(peer_ip, allowed):
         return True, "ip"
 
     breakglass = _breakglass_token()

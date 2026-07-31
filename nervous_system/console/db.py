@@ -12,11 +12,17 @@ psycopg (v3) is already in the venv; no new dependency.
 """
 from __future__ import annotations
 
+import logging
 import os
+import queue
+import threading
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 import psycopg
 from psycopg.rows import dict_row
+
+logger = logging.getLogger("wingmen.console.db")
 
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 50
@@ -169,7 +175,25 @@ def build_needs_you_query() -> Tuple[str, list]:
       2. unanswered requires_response to the hub (cc-orchestrator) that are P0/P1
          and recent — real decisions the fleet is stuck on, not routine chatter;
       3. blocked lanes / blocked lane_tasks / blocked deploys.
-    Ordered P0-first, then oldest (a stuck item rotting for days must rise)."""
+    Ordered P0-first, then oldest (a stuck item rotting for days must rise).
+
+    AUDIENCE split (operator flag, 2026-07-12): the operator only reaches lanes
+    THROUGH the hub, so a hub-directed decision (a '[D2 RULING NEEDED]' to
+    cc-orchestrator, a blocked lane/task/deploy) is NOT his to answer — showing
+    it in the same hero as a human-addressed ask makes him think he must reply
+    when the HUB owns it. Each row now carries `audience`:
+      • 'operator' — requires_response literally addressed to musa/operator; the
+        only rows that belong in the "Needs you" hero.
+      • 'fleet'    — hub-directed asks + all structural blocks; the client demotes
+        these to a lower-emphasis "Fleet is handling" group (peek-only, not
+        reply). To move a class across the line (e.g. make blocked deploys
+        operator-facing), flip its literal below — nothing else changes.
+
+    STALE filter (operator flag, 2026-07-12): a block resolves by flipping its
+    row's status, with no resolved_at, so a row left at status='blocked' and
+    never flipped (the 19d 'cosem-adcda TASK BLOCKED' zombie) rises forever. A
+    genuinely live block gets touched; one untouched for >7d is resolved-but-
+    not-flipped noise, so structural blocks are capped to updated_at within 7d."""
     # Precision matters more than recall here: agents over-use requires_response
     # for progress FYIs and under-set responded_at, so a naive "unanswered
     # requires_response" list is a flood (one agent posting 8 progress updates
@@ -183,7 +207,8 @@ def build_needs_you_query() -> Tuple[str, list]:
         "  SELECT 'response' AS kind, from_agent AS who, 'needs response' AS tag, "
         "         COALESCE(NULLIF(subject,''), left(body,140)) AS what, "
         "         round(extract(epoch FROM (now()-created_at)))::int AS age_s, "
-        "         COALESCE(priority,'P2') AS priority, id::text AS ref "
+        "         COALESCE(priority,'P2') AS priority, id::text AS ref, "
+        "         'operator' AS audience "
         "  FROM agent_messages "
         "  WHERE requires_response AND responded_at IS NULL AND skipped_at IS NULL "
         "    AND lower(to_agent) IN ('musa','operator') "
@@ -194,7 +219,8 @@ def build_needs_you_query() -> Tuple[str, list]:
         "           'needs response' AS tag, "
         "           COALESCE(NULLIF(subject,''), left(body,140)) AS what, "
         "           round(extract(epoch FROM (now()-created_at)))::int AS age_s, "
-        "           COALESCE(priority,'P2') AS priority, id::text AS ref "
+        "           COALESCE(priority,'P2') AS priority, id::text AS ref, "
+        "           'fleet' AS audience "
         "    FROM agent_messages "
         "    WHERE requires_response AND responded_at IS NULL AND skipped_at IS NULL "
         "      AND to_agent = 'cc-orchestrator' AND priority IN ('P0','P1') "
@@ -204,22 +230,45 @@ def build_needs_you_query() -> Tuple[str, list]:
         "  UNION ALL "
         "  SELECT 'blocked_lane', agent_id, 'lane blocked', "
         "         COALESCE(blocked_on_description, current_task, 'blocked'), "
-        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', agent_id "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', agent_id, 'fleet' "
         "  FROM agent_status WHERE status = 'blocked' "
+        "    AND updated_at > now() - interval '7 days' "
         "  UNION ALL "
         "  SELECT 'blocked_task', lane, 'task blocked', title, "
-        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', id::text "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P1', id::text, 'fleet' "
         "  FROM lane_tasks WHERE status = 'blocked' "
+        "    AND updated_at > now() - interval '7 days' "
         "  UNION ALL "
         "  SELECT 'blocked_deploy', workstream, 'deploy blocked', "
         "         COALESCE(NULLIF(detail,''), workstream), "
-        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P0', workstream "
+        "         round(extract(epoch FROM (now()-updated_at)))::int, 'P0', workstream, 'fleet' "
         "  FROM deploy_status WHERE stage = 'blocked' "
+        "    AND updated_at > now() - interval '7 days' "
         # '%%' not '%': this query is executed with a (bound) params list, so
         # psycopg scans for placeholders — a literal % in the LIKE must be doubled.
-        ") q ORDER BY (kind LIKE 'blocked%%') DESC, priority ASC, age_s ASC LIMIT 12"
+        # operator-audience rows sort to the top so the hero is always his first.
+        ") q ORDER BY (audience = 'operator') DESC, (kind LIKE 'blocked%%') DESC, "
+        "             priority ASC, age_s ASC LIMIT 12"
     )
     return sql, []
+
+
+def warm_pool(n: int = 3) -> None:
+    """Open and stash up to *n* connections so the FIRST /api/fleet after a
+    console restart is already warm (~150ms) instead of paying the ~650ms×N
+    cold-connect on the operator's first tap. Best-effort: a DB blip at boot
+    must not crash the console — the pool just fills lazily on demand instead.
+    Called in a background thread from make_server()."""
+    n = min(n, _POOL_MAX)
+    conns = []
+    try:
+        for _ in range(n):
+            conns.append(_get_conn())
+    except Exception as e:
+        logger.warning("pool pre-warm skipped (fills lazily): %s", e)
+    finally:
+        for c in conns:
+            _return_conn(c)
 
 
 def fetch_needs_you() -> List[dict]:
@@ -227,45 +276,16 @@ def fetch_needs_you() -> List[dict]:
     return _query(sql, params)
 
 
-def _query(sql: str, params: list) -> List[dict]:
-    dsn = resolve_dsn()
-    if not dsn:
-        raise RuntimeError("no read-only DSN configured (set CONSOLE_DB_URL)")
-    # autocommit=True + read-only session: belt-and-suspenders on top of the
-    # SELECT-only role. A console fault structurally cannot write.
-    with psycopg.connect(
-        dsn, connect_timeout=_CONNECT_TIMEOUT, autocommit=True,
-        row_factory=dict_row,
-    ) as conn:
-        conn.read_only = True
-        with conn.cursor() as cur:
-            # Cap this session before the real query so a DB blip fails fast
-            # instead of hanging the panel. Literal int (our own constant, not
-            # user input) — SET doesn't bind a parameter for its value.
-            cur.execute(f"SET statement_timeout = {int(_STATEMENT_TIMEOUT_MS)}")
-            cur.execute(sql, params)
-            return [dict(r) for r in cur.fetchall()]
-
-
-def fetch_messages(
-    limit: int = DEFAULT_LIMIT,
-    thread: Optional[str] = None,
-    agent: Optional[str] = None,
-) -> List[dict]:
-    sql, params = build_messages_query(limit, thread, agent)
-    return _query(sql, params)
-
-
 def build_coordinators_query() -> Tuple[str, list]:
-    """The two ORCHESTRATOR bodies — not lanes, so absent from fleet_lanes and
-    invisible on the console until now (operator #3617, 2026-07-12). They don't
-    self-register in agent_status either, so liveness comes from the freshest
-    thing each one did: the latest bus row it authored OR its latest outbound
-    operator message (coordinators talk to the operator as much as to the bus,
-    so bus-age alone understates them). `activity` = latest bus subject = what
-    it is currently coordinating."""
+    """The two orchestrator bodies (orch hub + Nazim) - not lanes, so absent
+    from fleet_lanes. Liveness = freshest of their latest bus row or outbound
+    operator message; activity = latest bus subject. tmux_session names the
+    body's live pane so the console can peek it like a lane (operator #3672) —
+    'orch' is the hub session on THIS (Studio) host; 'nazim' is Nazim's console
+    session (on the MacBook, so only peekable when that pane is local — the
+    caller marks it peekable only if the session is in local list-sessions)."""
     sql = (
-        "SELECT c.agent_id, c.short, c.role_label, "
+        "SELECT c.agent_id, c.short, c.role_label, c.tmux_session, "
         "  (SELECT subject FROM agent_messages m "
         "     WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1) AS activity, "
         "  (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM agent_messages m "
@@ -277,9 +297,9 @@ def build_coordinators_query() -> Tuple[str, list]:
         "       WHERE o.direction = 'outbound' AND o.tag = c.op_tag ORDER BY o.id DESC LIMIT 1) "
         "  ) AS last_seen_s "
         "FROM (VALUES "
-        "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel'), "
-        "  ('orch-console','Nazim','CTO console · 2nd coordinator','nazim-console') "
-        ") AS c(agent_id, short, role_label, op_tag) "
+        "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel','orch'), "
+        "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console','nazim') "
+        ") AS c(agent_id, short, role_label, op_tag, tmux_session) "
         "ORDER BY c.agent_id"
     )
     return sql, []
@@ -287,6 +307,191 @@ def build_coordinators_query() -> Tuple[str, list]:
 
 def fetch_coordinators() -> List[dict]:
     sql, params = build_coordinators_query()
+    return _query(sql, params)
+
+
+# How many recent bus rows the coordinator activity-feed fallback shows.
+_COORD_PEEK_LIMIT = 16
+# A published pane snapshot older than this is treated as stale (publisher hiccup)
+# and the peek falls back to the bus-activity feed. Publisher writes every ~10s,
+# so this tolerates ~9 missed writes before falling back.
+_COORD_SNAPSHOT_MAX_AGE_S = 90
+
+
+def _fetch_pane_snapshot(agent_id: str, max_age_s: int = _COORD_SNAPSHOT_MAX_AGE_S) -> Optional[str]:
+    """The latest FRESH published tmux-pane snapshot for a cross-host coordinator
+    (Mini-side publisher UPSERTs coordinator_panes; migration 024). None if there's
+    no row or it's staler than max_age_s. No ssh — a plain substrate read."""
+    rows = _query(
+        "SELECT pane_text FROM coordinator_panes "
+        "WHERE agent_id = %s AND captured_at > now() - make_interval(secs => %s)",
+        [agent_id, max_age_s],
+    )
+    return rows[0]["pane_text"] if rows else None
+
+
+def _fetch_bus_activity_feed(agent_id: str, limit: int = _COORD_PEEK_LIMIT) -> str:
+    """A readable activity feed from a coordinator's recent bus posts, newest LAST
+    so it reads top-to-bottom like a pane scrollback. Each line:
+    'Hm ago → to  [type] subject'. The fallback when no fresh pane snapshot exists."""
+    rows = _query(
+        "SELECT created_at, message_type, to_agent, subject "
+        "FROM agent_messages WHERE from_agent = %s ORDER BY id DESC LIMIT %s",
+        [agent_id, limit],
+    )
+    lines = []
+    for r in reversed(rows):
+        ts = r.get("created_at")
+        age = ""
+        if ts is not None:
+            secs = max(0, int((datetime.now(timezone.utc) - ts).total_seconds()))
+            age = ("%dm" % (secs // 60)) if secs < 3600 else ("%dh" % (secs // 3600))
+        to = r.get("to_agent") or ""
+        mtype = r.get("message_type") or ""
+        subject = (r.get("subject") or "").strip()
+        prefix = " ".join(p for p in ((age and age + " ago"), (to and "→ " + to), (mtype and "[" + mtype + "]")) if p)
+        lines.append((prefix + "  " + subject).strip() if prefix else subject)
+    return "\n".join(lines)
+
+
+def fetch_coordinator_peek(agent_id: str, limit: int = _COORD_PEEK_LIMIT) -> str:
+    """The peek text for a cross-host coordinator body (Nazim on the Mini). ONE
+    source switch (operator #3729): PREFER a fresh published tmux-pane snapshot
+    (reflowed exactly like a local pane) and FALL BACK to the recent bus-activity
+    feed when the publisher hasn't landed / is stale. No ssh either way."""
+    snap = _fetch_pane_snapshot(agent_id)
+    if snap:
+        from nervous_system.console import panes  # lazy import: reflow the raw pane
+        return panes._clean_pane_text(snap)
+    return _fetch_bus_activity_feed(agent_id, limit)
+
+
+# --- persistent connection pool ----------------------------------------------
+#
+# WHY: the DSN is the Supabase pooler in ap-southeast-2. A *fresh* connection
+# costs ~650ms (TCP+TLS+auth handshake over that RTT) plus ~100ms for the
+# per-session `SET statement_timeout` round-trip — paid on EVERY _query() call.
+# /api/fleet issues three reads, so a cold-connect-per-query design spent
+# ~2.6s/request almost entirely in handshakes (query bodies are ~100ms each).
+# That slowness is what tripped the phone's client-side timeout -> the hard
+# "Could not connect" screen (2026-07-11 regression). A warm, reused connection
+# pays connect + SET ONCE (at pool fill), so a fleet request drops to ~3×100ms
+# of actual query time — comfortably under the <500ms budget.
+#
+# The pool is a tiny stdlib affair (no psycopg_pool dep, which isn't in the
+# venv): a LIFO of idle connections, bounded by CONSOLE_DB_POOL. Borrow-time
+# health checks + a single transparent reconnect-and-retry make a server-side
+# idle disconnect (the pooler culls idle sessions) invisible to callers: the
+# first request after an idle gap pays one reconnect, the rest stay warm.
+_POOL_MAX = max(1, int(os.environ.get("CONSOLE_DB_POOL", "6")))
+_idle: "queue.LifoQueue[psycopg.Connection]" = queue.LifoQueue()
+_pool_lock = threading.Lock()
+_pool_size = 0  # live connections that exist (idle + checked-out), guarded by lock
+
+
+def _new_conn() -> psycopg.Connection:
+    """Open one warm read-only connection with the statement-timeout already
+    set, so the per-request hot path never pays the connect or the SET."""
+    dsn = resolve_dsn()
+    if not dsn:
+        raise RuntimeError("no read-only DSN configured (set CONSOLE_DB_URL)")
+    # autocommit=True + read-only session: belt-and-suspenders on top of the
+    # SELECT-only role. A console fault structurally cannot write.
+    conn = psycopg.connect(
+        dsn, connect_timeout=_CONNECT_TIMEOUT, autocommit=True,
+        row_factory=dict_row,
+    )
+    conn.read_only = True
+    with conn.cursor() as cur:
+        # Cap every query on this session so a DB blip fails fast instead of
+        # hanging a panel. Literal int (our own constant, not user input) — SET
+        # doesn't bind a parameter for its value. Set once per connection; it
+        # persists for the life of the pooled session (Supavisor session mode
+        # keeps one server backend per client connection).
+        cur.execute(f"SET statement_timeout = {int(_STATEMENT_TIMEOUT_MS)}")
+    return conn
+
+
+def _get_conn() -> psycopg.Connection:
+    """Borrow a warm connection: reuse an idle one, else open a new one up to
+    _POOL_MAX, else block for one to be returned."""
+    global _pool_size
+    try:
+        conn = _idle.get_nowait()
+        if not (conn.closed or conn.broken):
+            return conn
+        # a dead idle connection: drop it, fall through to make a replacement
+        with _pool_lock:
+            _pool_size -= 1
+    except queue.Empty:
+        pass
+
+    with _pool_lock:
+        may_create = _pool_size < _POOL_MAX
+        if may_create:
+            _pool_size += 1
+    if may_create:
+        try:
+            return _new_conn()
+        except Exception:
+            with _pool_lock:
+                _pool_size -= 1
+            raise
+    # at capacity: wait for a peer to return one.
+    return _idle.get()
+
+
+def _return_conn(conn: psycopg.Connection) -> None:
+    """Return a healthy connection to the idle pool (drop it if it went bad)."""
+    global _pool_size
+    if conn.closed or conn.broken:
+        with _pool_lock:
+            _pool_size -= 1
+        return
+    _idle.put(conn)
+
+
+def _discard_conn(conn: psycopg.Connection) -> None:
+    global _pool_size
+    try:
+        conn.close()
+    except Exception:
+        pass
+    with _pool_lock:
+        _pool_size -= 1
+
+
+def _query(sql: str, params: list) -> List[dict]:
+    # Up to two attempts: a pooled connection the server culled while idle only
+    # reveals itself as broken on first use, so on a connection-level failure we
+    # drop it and retry ONCE with a fresh one. A query-level error (bad SQL,
+    # statement timeout) leaves the connection healthy — return it and re-raise.
+    last_err: Optional[Exception] = None
+    for attempt in range(2):
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+            _return_conn(conn)
+            return rows
+        except psycopg.Error as e:
+            if (conn.closed or conn.broken) and attempt == 0:
+                _discard_conn(conn)
+                last_err = e
+                logger.debug("pooled connection died mid-query, reconnecting: %s", e)
+                continue
+            _return_conn(conn)
+            raise
+    raise last_err  # pragma: no cover - loop always returns or raises above
+
+
+def fetch_messages(
+    limit: int = DEFAULT_LIMIT,
+    thread: Optional[str] = None,
+    agent: Optional[str] = None,
+) -> List[dict]:
+    sql, params = build_messages_query(limit, thread, agent)
     return _query(sql, params)
 
 
@@ -302,4 +507,77 @@ def fetch_deploys() -> List[dict]:
 
 def fetch_queue() -> List[dict]:
     sql, params = build_queue_query()
+    return _query(sql, params)
+
+
+def build_bus_drain_query() -> Tuple[str, list]:
+    """The hub's actionable bus backlog — what cc-orchestrator STILL OWES.
+
+    A row is owed when it's addressed to the hub AND either unread OR a
+    requires_response that hasn't been responded/skipped. Test rows are
+    excluded. Alongside the single `owed` count we return an AGE DISTRIBUTION
+    (fresh <1h / 1-6h / 6-24h / >24h) + the oldest age — an honest 'is it
+    draining or rotting?' signal computable from current state (there is no
+    backlog time-series table, so this is the real trend surface: a healthy
+    hub keeps the tail small and the bulk fresh)."""
+    sql = (
+        "SELECT "
+        "  count(*) AS owed, "
+        "  count(*) FILTER (WHERE created_at > now() - interval '1 hour') AS fresh_1h, "
+        "  count(*) FILTER (WHERE created_at <= now() - interval '1 hour' "
+        "    AND created_at > now() - interval '6 hours') AS h1_6, "
+        "  count(*) FILTER (WHERE created_at <= now() - interval '6 hours' "
+        "    AND created_at > now() - interval '24 hours') AS h6_24, "
+        "  count(*) FILTER (WHERE created_at <= now() - interval '24 hours') AS older_24h, "
+        "  round(extract(epoch FROM (now() - min(created_at))))::int AS oldest_age_s "
+        "FROM agent_messages "
+        "WHERE to_agent = 'cc-orchestrator' "
+        "  AND COALESCE(is_test, false) = false "
+        "  AND (read_at IS NULL "
+        "       OR (requires_response AND responded_at IS NULL AND skipped_at IS NULL))"
+    )
+    return sql, []
+
+
+def fetch_bus_drain() -> dict:
+    """One row: the hub's owed-backlog count + age distribution. Always returns a
+    dict (zeros if the bus is clear)."""
+    sql, params = build_bus_drain_query()
+    rows = _query(sql, params)
+    if rows:
+        return rows[0]
+    return {"owed": 0, "fresh_1h": 0, "h1_6": 0, "h6_24": 0, "older_24h": 0, "oldest_age_s": None}
+
+
+def build_context_bloat_query() -> Tuple[str, list]:
+    """Latest current-context size per always-on agent (window fill).
+
+    `latest_context_tokens` on the FRESHEST cc_session_costs row per identity is
+    the LAST assistant turn's actual input context (fresh input + cache-read +
+    cache-creation) = how full that agent's context window is RIGHT NOW. NOTE:
+    `cache_read_input_tokens` is a LIFETIME SUM across every turn (e.g. 98M vs a
+    1M window) and is NOT a current-context signal — using it was the pre-
+    2026-07-16 gauge bug that showed impossible 100% readings. Freshness is by
+    activity time (ended_at = the session jsonl mtime), not DB-insert time.
+    One-off `operator-*` capture sessions are excluded; a 45-day window drops
+    long-dead identities; rows without a current-context value are skipped.
+    `age_s` surfaces a stale reading (writer paused), never shown as live."""
+    sql = (
+        "SELECT DISTINCT ON (cc_identity) "
+        "  cc_identity, "
+        "  latest_context_tokens AS ctx_tokens, "
+        "  input_tokens, "
+        "  round(extract(epoch FROM (now() - COALESCE(ended_at, created_at))))::int AS age_s, "
+        "  COALESCE(ended_at, created_at) AS latest_at "
+        "FROM cc_session_costs "
+        "WHERE cc_identity NOT LIKE 'operator-%%' "
+        "  AND latest_context_tokens IS NOT NULL "
+        "  AND COALESCE(ended_at, created_at) > now() - interval '45 days' "
+        "ORDER BY cc_identity, COALESCE(ended_at, created_at) DESC"
+    )
+    return sql, []
+
+
+def fetch_context_bloat() -> List[dict]:
+    sql, params = build_context_bloat_query()
     return _query(sql, params)

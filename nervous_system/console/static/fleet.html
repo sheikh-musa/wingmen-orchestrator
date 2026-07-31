@@ -8,7 +8,8 @@
 <title>Fleet</title>
 <link rel="manifest" href="/manifest.json" />
 <meta name="theme-color" content="#0b0e14" />
-<link rel="icon" href="/static/icons/icon-192.png" />
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico" />
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Fleet" />
@@ -30,11 +31,26 @@
   .wrap { max-width: 720px; margin: 0 auto; }
   a { color: var(--accent); text-decoration: none; }
 
-  /* pull-to-refresh */
-  #ptr { position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+  /* pull-to-refresh — the WHOLE element is offset BELOW the notch via
+     `top: env(safe-area-inset-top)`, so its band + centered label can never
+     render under the notch. The earlier top:0 + padding-top + content-box
+     trick still clipped on a real iPhone (operator 2026-07-11): the label
+     centered across the padded box drifted back under the inset. Offsetting the
+     element's top removes that whole class of box-sizing ambiguity — on desktop
+     the inset is 0 so top:0 (unchanged); on iOS it starts exactly at the notch
+     edge. A backdrop strip (::before) fills the notch area with the panel bg so
+     the pull still reads as one solid sheet, not a floating band. */
+  #ptr { position: fixed; top: env(safe-area-inset-top); left: 0; right: 0; z-index: 60;
     display: flex; align-items: center; justify-content: center; gap: 8px;
     height: 0; overflow: hidden; pointer-events: none; background: var(--panel);
-    color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px; padding-top: env(safe-area-inset-top); }
+    color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px; white-space: nowrap; }
+  /* fill the notch strip above the band (only while pulling) so the sheet is
+     continuous; height 0 at rest keeps it invisible when not pulling. */
+  #ptr::before { content: ""; position: fixed; top: 0; left: 0; right: 0;
+    height: env(safe-area-inset-top); background: var(--panel); z-index: 60;
+    display: none; }
+  #ptr.pulling::before, #ptr.refreshing::before { display: block; }
+  #ptr #ptrTxt { white-space: nowrap; }
   #ptr .spin { display: inline-block; transition: transform .15s ease; }
   #ptr.armed { color: var(--accent); } #ptr.armed .spin { transform: rotate(180deg); }
   #ptr.snap { transition: height .2s ease; }
@@ -47,6 +63,11 @@
   .pulse .brandrow { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
   .pulse .brand { font-size: 13px; font-weight: 600; letter-spacing:.3px; color: var(--dim); }
   .pulse .brand .live { color: var(--good); } .pulse .brand .live.down { color: var(--bad); }
+  /* build badge — always-visible so the operator can SEE which build his device
+     is running (PWA-cache-loop fix). .stale (a newer build is deployed than the
+     one this cached bundle is) turns it amber until the one-shot reload lands. */
+  .pulse .brand .build { font:10px/1 var(--mono); letter-spacing:.3px; color:var(--dim); font-weight:400; }
+  .pulse .brand .build.stale { color:var(--warn); }
   .pulse .navs { margin-left:auto; display:flex; gap:14px; font:12px var(--mono); }
   .pulse .headline { display:flex; align-items:center; gap:11px; }
   .pulse .orb { width:12px; height:12px; border-radius:50%; flex:none; background: var(--dim); }
@@ -85,14 +106,25 @@
   .need.crit .tag { background: rgba(255,107,107,.16); color:var(--bad); }
   .need .age { margin-left:auto; font:11px var(--mono); color:var(--dim); }
   .need .what { margin-top:4px; font-size:13.5px; color:var(--txt); line-height:1.4; overflow-wrap:anywhere; }
+  /* A needs-you row is tappable ONLY when it maps to a real lane (jump to that
+     lane + open its peek); the chevron/cursor is shown only then, so the
+     affordance never promises a destination that isn't there. */
+  .need.tappable { cursor:pointer; }
+  .need.tappable:active { transform:scale(.995); }
+  /* "peek ›" — the tap opens the lane's live peek (watch), it is NOT a reply
+     affordance; kept small + mono so it reads as an action label, not a chevron. */
+  .need .go { align-self:center; flex:none; margin-left:2px; color:var(--accent);
+    font:11px/1 var(--mono); white-space:nowrap; }
+  /* "Fleet is handling" rows: hub-owned, not the operator's to answer — dimmed
+     and never crit-red so they don't read as demanding his response. */
+  .need.handling { opacity:.72; border-color: var(--line); background: var(--panel-2); }
+  .need.handling .who { color: var(--dim); }
+  .need.handling .what { color: var(--dim); }
 
   /* lanes */
   .lane { padding:12px 14px; margin-bottom:9px; background: var(--panel); border:1px solid var(--line);
     border-radius:13px; border-left:3px solid transparent; }
   .lane.flag { border-left-color: var(--bad); background: linear-gradient(90deg, rgba(255,107,107,.06), var(--panel) 40%); }
-  .lane.coord { border-left:3px solid var(--accent); background: linear-gradient(90deg, rgba(91,140,255,.07), var(--panel) 42%); }
-  .state.coordrole { color: var(--accent); text-transform:none; font-weight:600; }
-  .act.coordidle { color: var(--dim); }
   .lane[data-peek] { cursor: pointer; }
   .lane .top { display:flex; align-items:center; gap:9px; }
   .lane .st-dot { width:9px; height:9px; border-radius:50%; flex:none; }
@@ -108,19 +140,18 @@
   .lane .meta .tap { margin-left:auto; color:var(--accent); }
   .collapsed { display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--panel);
     border:1px dashed var(--line); border-radius:13px; color:var(--dim); font-size:13px; cursor:pointer; }
-  .collapsed b { color:var(--txt); }
+  .collapsed b { color:var(--txt); white-space:nowrap; }
 
   /* readable peek */
   .peek { margin-top:10px; background:#0a0d13; border:1px solid var(--line); border-radius:11px; overflow:hidden; display:none; }
   .peek.open { display:block; }
   .peek .ph { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); font:11px var(--mono); color:var(--dim); }
   .peek .ph .raw { margin-left:auto; color:var(--accent); cursor:pointer; }
-  .peek .body { max-height:46vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
-  .peek .row { display:flex; gap:10px; padding:7px 12px; border-bottom:1px solid rgba(35,42,58,.5); font-size:13px; line-height:1.4; }
-  .peek .row:last-child{border-bottom:0}
-  .peek .row .g { width:16px; flex:none; text-align:center; opacity:.85; color:var(--dim); }
-  .peek .row .tx { min-width:0; overflow-wrap:anywhere; }
-  .peek .row.now { background: rgba(91,140,255,.07); } .peek .row.now .tx { color:#bcd0ff; }
+  .peek .body { max-height:46vh; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:8px 0; }
+  /* Flowing, borderless lines: each pane line wraps as a whole paragraph so a
+     long line stays readable at 430px instead of breaking into boxed shards. */
+  .peek .ln { padding:2px 14px; font-size:13px; line-height:1.5; overflow-wrap:anywhere; white-space:pre-wrap; color:var(--txt); }
+  .peek .ln.now { color:#bcd0ff; box-shadow:inset 3px 0 0 var(--accent); }
   .peek .raw-pre { margin:0; padding:10px 12px; white-space:pre-wrap; word-break:break-word; font:11px/1.5 var(--mono); color:#9fe8b0; }
   .peek .peek-empty { padding:10px 12px; color:var(--dim); font-style:italic; }
 
@@ -133,7 +164,46 @@
   .dep .rp { margin-top:5px; font:11px var(--mono); color:var(--dim); }
   .dep a { display:block; margin-top:4px; font:11px var(--mono); overflow-wrap:anywhere; }
 
+  /* bus-queue drain */
+  .drain { background:var(--panel); border:1px solid var(--line); border-radius:13px; padding:13px 15px; }
+  .drain .dbig { display:flex; align-items:baseline; gap:9px; }
+  .drain .dbig .dn { font-size:26px; font-weight:800; line-height:1; }
+  .drain .dbig.green .dn{color:var(--good)} .drain .dbig.amber .dn{color:var(--warn)} .drain .dbig.red .dn{color:var(--bad)}
+  .drain .dbig .dl { font:12px var(--mono); color:var(--dim); }
+  .drain .dbreak { margin-top:11px; display:flex; gap:8px; flex-wrap:wrap; }
+  .drain .dseg { font:11px/1 var(--mono); color:var(--dim); background:var(--panel-2); border:1px solid var(--line);
+    border-radius:999px; padding:6px 10px; }
+  .drain .dseg b { font-weight:700; margin-right:1px; }
+  .drain .dseg b.good{color:var(--good)} .drain .dseg b.dim{color:var(--txt)} .drain .dseg b.warn{color:var(--warn)} .drain .dseg b.bad{color:var(--bad)}
+  .drain .dseg.oldest { color:var(--dim); }
+
+  /* context bloat */
+  .ctx { padding:10px 14px; margin-bottom:8px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+  .ctx .ctxtop { display:flex; align-items:center; gap:9px; }
+  .ctx .ctxid { font:12.5px var(--mono); font-weight:600; overflow-wrap:anywhere; }
+  .ctx .ctxpct { margin-left:auto; font:12px var(--mono); font-weight:700; }
+  .ctx .ctxpct.green{color:var(--good)} .ctx .ctxpct.amber{color:var(--warn)} .ctx .ctxpct.red{color:var(--bad)}
+  .ctx .bar { margin-top:7px; height:7px; border-radius:999px; background:var(--panel-2); overflow:hidden; }
+  .ctx .bar .fill { height:100%; border-radius:999px; }
+  .ctx .bar .fill.green{background:var(--good)} .ctx .bar .fill.amber{background:var(--warn)} .ctx .bar .fill.red{background:var(--bad)}
+  .ctx .ctxmeta { margin-top:6px; font:11px var(--mono); color:var(--dim); }
+  .ctx .ctxmeta .staler { color:var(--warn); }
+
+  /* token / auth */
+  .tok { display:flex; align-items:center; gap:9px; padding:10px 14px; margin-bottom:7px;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px; flex-wrap:wrap; }
+  .tok .tdot { width:9px; height:9px; border-radius:50%; flex:none; }
+  .tok .tdot.good{background:var(--good); box-shadow:0 0 7px var(--good)} .tok .tdot.bad{background:var(--bad); box-shadow:0 0 7px var(--bad)}
+  .tok .tsess { font:12.5px var(--mono); font-weight:600; overflow-wrap:anywhere; }
+  .tok .tbadge { font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.4px; padding:3px 8px; border-radius:8px; font-weight:700; }
+  .tok .tbadge.good{color:var(--good); background:rgba(62,207,142,.14)} .tok .tbadge.bad{color:var(--bad); background:rgba(255,107,107,.14)}
+  .tok .tacct { margin-left:auto; font:11px var(--mono); color:var(--dim); }
+  #tokenSummary b.good{color:var(--good)} #tokenSummary b.bad{color:var(--bad)}
+
   .feednote { color:var(--dim); font-size:12.5px; padding: 2px 2px 0; }
+  .lane.coord { border-left:3px solid var(--accent); background: linear-gradient(90deg, rgba(91,140,255,.07), var(--panel) 42%); }
+  .state.coordrole { color: var(--accent); text-transform:none; font-weight:600; }
+  .act.coordidle { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -142,7 +212,7 @@
 
   <div id="pulse" class="pulse">
     <div class="brandrow">
-      <span class="brand">Fleet <span id="liveDot" class="live">● live</span></span>
+      <span class="brand">Fleet <span id="liveDot" class="live">● live</span> <span id="build" class="build" title="build running on this device"></span></span>
       <span class="navs"><a href="/classic">Classic</a><a href="/docs">Docs</a><a href="/media">Screens</a></span>
     </div>
     <div class="headline"><span class="orb"></span><span id="pulseBig" class="big">Loading…</span></div>
@@ -157,6 +227,26 @@
   <section>
     <div class="sec-h"><h2>Coordinators</h2><span class="count">hub + console</span></div>
     <div id="coordinators"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Bus queue drain</h2><span class="count">hub still owes</span></div>
+    <div id="busDrain"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Context bloat</h2><span class="count">latest per agent · /2M window</span></div>
+    <div id="ctxBloat"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Token / auth</h2><span id="tokenSummary" class="count"></span></div>
+    <div id="tokenAuth"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section id="handlingSec" style="display:none">
+    <div class="sec-h"><h2>Fleet is handling</h2><span class="count">hub owns these · tap to peek</span><span id="handlingCount" class="count"></span></div>
+    <div id="handling"></div>
   </section>
 
   <section>
@@ -179,9 +269,19 @@
 <script>
   (function () {
     if (!('serviceWorker' in navigator)) return;
-    var refreshing = false;
+    // ONE-SHOT reload when a new SW takes control, so a fresh deploy lands in a
+    // SINGLE reopen (kills the iOS 2-launch update lag). Guarded so it can NEVER
+    // infinite-loop (the exact failure the sw.js header warns about):
+    //   - the guard is in sessionStorage, which SURVIVES the reload — an
+    //     in-memory bool (the old code) resets on the new page and can re-fire;
+    //   - we only reload on a real UPDATE (a controller already existed), never
+    //     on the first-install claim (which would reload every first visit).
+    var hadController = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener('controllerchange', function () {
-      if (refreshing) return; refreshing = true; window.location.reload();
+      if (!hadController) return;                                // first install, not an update
+      if (sessionStorage.getItem('fleet_sw_reloaded')) return;  // already reloaded this session
+      sessionStorage.setItem('fleet_sw_reloaded', '1');
+      window.location.reload();
     });
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
   })();

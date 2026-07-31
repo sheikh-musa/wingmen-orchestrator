@@ -17,10 +17,12 @@ can't break out of its single argv slot.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 _TIMEOUT_S = 5
 _RAW_CAPTURE_LINES = 200  # generous raw window BEFORE chrome-filtering — filter
@@ -45,6 +47,57 @@ _NOISE_RE = re.compile(r"Press up to edit queued|↑ to manage|ctrl\+t to|◯\s+
 # suffix on spinner lines that adds nothing human-readable.
 _LEADING_GLYPHS = "⎿●◯○✻✳✶✷✸✹✺✽❋⚹⏵⎾⌐▶ ·\t"
 _SPINNER_TELEMETRY_RE = re.compile(r"\s*[(·]\s*\d+m?\s*\d*s?\b.*?(tokens|thinking|thought for).*$", re.IGNORECASE)
+
+# Wrap-continuation REFLOW (operator #3729): the Claude-Code TUI word-wraps its
+# output and draws each wrapped row as its OWN physical line, so one sentence
+# arrives split across 2-3 lines and the peek reads as broken mid-sentence prose.
+# Because the TUI word-wraps (breaks at spaces, so a wrapped line ends SHORT of
+# the pane width, not exactly at it) a "line fills the width" test can't tell a
+# wrap from a real newline — so we reflow the Markdown way: collapse the soft
+# newlines WITHIN a run of consecutive prose lines into spaces, and break only on
+# real boundaries. Boundaries = chrome/blank lines AND structure-starts (a line
+# beginning with a bullet, task/tool glyph, or "N." marker) — so intentional
+# lists + blank-separated paragraphs stay separate instead of smearing into one
+# blob, while a wrapped sentence rejoins into flowing prose.
+# structure-start chars: bullets/task-glyphs/tool-glyphs Claude draws each on
+# their own line — a line beginning with one starts a NEW logical line.
+_STRUCTURE_CHARS = set("⎿●◯○✻✳✶✷✸✹✺✽❋⚹⏵▶→◼◻▪✔✅✓✗✘☐☑-*•◦‣❯")
+_NUM_LIST_RE = re.compile(r"^[0-9]+[.)]\s")
+
+
+def _starts_structure(stripped: str) -> bool:
+    """True if a (whitespace-stripped) content line begins a new list item /
+    bulleted or tool row — a hard boundary the reflow must NOT join onto the
+    previous line, so lists stay lists."""
+    if not stripped:
+        return False
+    return stripped[0] in _STRUCTURE_CHARS or bool(_NUM_LIST_RE.match(stripped))
+
+
+def _reflow(raw: str):
+    """Join soft-wrapped continuation lines into flowing logical lines. Returns a
+    list of logical lines: chrome dropped, consecutive prose rejoined with a
+    single space, lists + blank-separated paragraphs kept as their own lines."""
+    out = []
+    buf = None
+    for ln in raw.splitlines():
+        if _is_chrome(ln):                       # box/footer/blank/bare-prompt/noise = boundary
+            if buf is not None:
+                out.append(buf)
+                buf = None
+            continue
+        content = ln.rstrip()
+        stripped = content.lstrip()
+        if buf is not None and _starts_structure(stripped):
+            out.append(buf)                       # a new bullet/list item = its own logical line
+            buf = None
+        if buf is None:
+            buf = content
+        else:
+            buf = buf + " " + stripped            # soft-wrap continuation: rejoin with a single space
+    if buf is not None:
+        out.append(buf)
+    return out
 
 
 def _is_chrome(line: str) -> bool:
@@ -71,13 +124,12 @@ def _is_chrome(line: str) -> bool:
 
 
 def _clean_pane_text(raw: str) -> str:
+    """Chrome-strip + REFLOW the raw pane into readable prose: rejoin soft-wrapped
+    lines into flowing logical lines, then peel each logical line's leading
+    tool/spinner glyphs and drop its trailing token-telemetry."""
     kept = []
-    for ln in raw.splitlines():
-        if _is_chrome(ln):
-            continue
-        # peel leading tool/spinner glyphs + drop the trailing token-telemetry
-        # so each line reads as plain activity, not terminal chrome.
-        s = ln.rstrip().lstrip(_LEADING_GLYPHS)
+    for s in _reflow(raw):
+        s = s.lstrip(_LEADING_GLYPHS)
         s = _SPINNER_TELEMETRY_RE.sub("", s).rstrip()
         if s:
             kept.append(s)
@@ -116,11 +168,86 @@ def live_sessions() -> List[str]:
         return []
 
 
+# Spinner glyphs Claude-Code shows on its ACTIVE status line. Used only for
+# working-detection on RAW text (below); the cleaner peels these off, which is
+# exactly why working-detection can't run on cleaned text.
+_SPINNER_GLYPHS = "✻✳✶✷✸✹✺✽❋⚹"
+
+
+def _raw_capture(session: str) -> Optional[str]:
+    """The unfiltered pane text (last _RAW_CAPTURE_LINES). Callers do the
+    live-session membership check first; this is just the subprocess."""
+    try:
+        r = subprocess.run(
+            [_TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", f"-{_RAW_CAPTURE_LINES}"],
+            capture_output=True, text=True, timeout=_TIMEOUT_S,
+        )
+        if r.returncode != 0:
+            return None
+        return r.stdout
+    except Exception:
+        return None
+
+
+def _is_working(raw: str) -> bool:
+    """True if the RAW pane shows Claude actively generating a turn. The two
+    reliable signals are the 'esc to interrupt' footer (present ONLY while a
+    turn runs) and an active spinner status line ('✻ … N tokens / thinking').
+    Both are TUI chrome that _clean_pane_text STRIPS — so working-detection
+    MUST read raw text, not the cleaned peek text. Reading cleaned text is the
+    '0 working / every lane idle' bug (2026-07-11)."""
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    # Primary, reliable signal: the footer is shown ONLY while a turn runs.
+    if any("esc to interrupt" in ln.lower() for ln in lines):
+        return True
+    # Secondary: an ACTIVE spinner status line. Match only genuinely-in-progress
+    # markers — the '…' ellipsis of a running verb ('Bloviating…'), a live
+    # up/down token counter, or present-tense 'thinking'. Deliberately NOT the
+    # past-tense DONE summaries the same glyph also draws between turns
+    # ('✻ Cooked for 4m', 'Baked for 3m', 'Thought for 5s'), which would
+    # otherwise mis-read an idle-at-prompt lane as working.
+    spinner = next((ln for ln in reversed(lines) if ln.lstrip()[:1] in _SPINNER_GLYPHS), None)
+    if spinner:
+        if "…" in spinner or "↑" in spinner or "↓" in spinner or "thinking" in spinner.lower():
+            return True
+    return False
+
+
+def capture(session: str, live: Optional[set] = None):
+    """One raw capture, BOTH derivations: returns (state, cleaned_text) or
+    (None, None) if the session isn't live. state = {running, state:
+    'working'|'idle', activity}. `live` lets the caller pass a pre-fetched
+    live-session set so an N-lane fleet sweep does one `list-sessions`, not N.
+
+    working/idle comes from the RAW pane (_is_working); the human-readable
+    `activity` and the peek text come from the cleaned pane — the split is why
+    a lane can read 'working' while its card still shows a readable activity
+    line."""
+    sessions = live if live is not None else set(live_sessions())
+    if not session or session not in sessions:
+        return None, None
+    raw = _raw_capture(session)
+    if raw is None:
+        return None, None
+    cleaned = _clean_pane_text(raw)
+    activity = cleaned.splitlines()[-1][:140] if cleaned else ""
+    state = {
+        "running": True,
+        "state": "working" if _is_working(raw) else "idle",
+        "activity": activity,
+    }
+    return state, cleaned
+
+
 def capture_pane(session: str) -> Optional[str]:
     """Return the last ~60 lines of *session*'s pane 0 AFTER stripping TUI
-    chrome, or None if the session isn't live right now (checked against
-    live_sessions(), not trusted from the caller) or the capture otherwise
-    fails.
+    chrome + reflowing, or None if the session isn't live right now (checked
+    against live_sessions(), not trusted from the caller) or the capture fails.
+
+    LOCAL tmux only — the console never reaches off-box. A cross-host coordinator
+    (Nazim on the Mini) is surfaced via a DB read of its bus activity instead
+    (db.fetch_coordinator_peek), NOT ssh, keeping the console's surface local
+    read-only (operator #3729: reverted the ssh peek to a DB-read replacement).
 
     Captures a generous raw window (-S -200, clamped automatically by tmux to
     whatever's actually available — never an error, never padded) and filters
@@ -134,13 +261,157 @@ def capture_pane(session: str) -> Optional[str]:
     """
     if not session or session not in live_sessions():
         return None
+    raw = _raw_capture(session)
+    return _clean_pane_text(raw) if raw is not None else None
+
+
+# --- token / auth per lane (Max vs metered, + which Max account) --------------
+#
+# Each fleet lane is a `claude` CLI process on THIS console host (local-only,
+# same surface as the tmux peek — never reaches off-box). Two signals per lane:
+#
+#   * BILLING: a NON-EMPTY ANTHROPIC_API_KEY in the process env => metered API
+#     (red). Absent OR present-but-empty (the launchers scrub it to run on the
+#     Max subscription) => Max (green). Empty-but-present is why a bare "is the
+#     var set" test is WRONG — orch runs with ANTHROPIC_API_KEY= (scrubbed).
+#   * ACCOUNT: a FINGERPRINT of CLAUDE_CODE_OAUTH_TOKEN (sha256 prefix — the raw
+#     token NEVER leaves this function, is never returned, logged, or displayed)
+#     mapped to an owner label. The console host's OWN .env token (os.environ)
+#     is the operator's, auto-labelled 'operator'; other fingerprints are
+#     labelled via CONSOLE_MAX_ACCT_OWNERS (JSON {fp: label}) or, absent that,
+#     shown as 'Max (unknown acct)' — never nothing.
+#
+# READ-ONLY: only `ps` + tmux `list-panes` are invoked, argv lists, no shell.
+_UNKNOWN_ACCT = "Max (unknown acct)"
+_METERED = "metered"
+
+
+def _fingerprint(token: str) -> str:
+    """A stable, NON-reversible short id for an OAuth token. sha256 prefix — the
+    raw token is never surfaced anywhere."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+
+
+def _owner_map() -> Dict[str, str]:
+    """fingerprint -> owner label. The console host's own .env OAuth token
+    (already loaded into os.environ by __main__) is the operator's, so its
+    fingerprint auto-maps to 'operator' — no config needed for the common case.
+    CONSOLE_MAX_ACCT_OWNERS (JSON) adds/overrides other accounts (e.g. Syed)."""
+    m: Dict[str, str] = {}
+    own = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if own:
+        m[_fingerprint(own)] = "operator"
+    raw = os.environ.get("CONSOLE_MAX_ACCT_OWNERS")
+    if raw:
+        try:
+            extra = json.loads(raw)
+            if isinstance(extra, dict):
+                # explicit config wins over the auto-derived operator label
+                m.update({str(k): str(v) for k, v in extra.items()})
+        except Exception:
+            pass
+    return m
+
+
+def _pid_to_session() -> Dict[int, str]:
+    """Map every live tmux pane's process pid -> its session name, so a claude
+    pid can be walked up its parent chain to the owning lane."""
+    out: Dict[int, str] = {}
     try:
         r = subprocess.run(
-            [_TMUX, "capture-pane", "-t", f"={session}:0.0", "-p", "-S", f"-{_RAW_CAPTURE_LINES}"],
+            [_TMUX, "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
             capture_output=True, text=True, timeout=_TIMEOUT_S,
         )
         if r.returncode != 0:
-            return None
-        return _clean_pane_text(r.stdout)
+            return out
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                out[int(parts[1])] = parts[0]
     except Exception:
-        return None
+        pass
+    return out
+
+
+def _ppid_map() -> Dict[int, int]:
+    """pid -> ppid for every process (so a claude pid can be walked up to a tmux
+    pane pid to resolve its lane)."""
+    out: Dict[int, int] = {}
+    try:
+        r = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid="], capture_output=True, text=True, timeout=_TIMEOUT_S,
+        )
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                out[int(parts[0])] = int(parts[1])
+    except Exception:
+        pass
+    return out
+
+
+def _session_for(pid: int, pane_pids: Dict[int, str], ppid: Dict[int, int]) -> Optional[str]:
+    cur, seen = pid, 0
+    while cur and cur > 1 and seen < 40:
+        if cur in pane_pids:
+            return pane_pids[cur]
+        cur = ppid.get(cur)
+        seen += 1
+    return None
+
+
+def lane_token_auth() -> dict:
+    """Per-lane billing (Max vs metered) + Max-account owner, with a fleet
+    summary. Local `ps eww` on the console host; the raw OAuth token is fingerprinted
+    in-process and never returned. Best-effort: any failure returns an empty set
+    rather than raising into the fleet aggregate.
+
+    Returns {"lanes": [{session, metered, acct, owner}], "summary": {...}}."""
+    owner_map = _owner_map()
+    pane_pids = _pid_to_session()
+    ppid = _ppid_map()
+    lanes: List[dict] = []
+    try:
+        r = subprocess.run(
+            ["ps", "eww", "-o", "pid=,command="],
+            capture_output=True, text=True, timeout=_TIMEOUT_S,
+        )
+        eww = r.stdout
+    except Exception:
+        eww = ""
+
+    for ln in eww.splitlines():
+        low = ln.lower()
+        # A fleet lane = the claude CLI booted with --dangerously-skip-permissions.
+        if "claude" not in low or "--dangerously-skip-permissions" not in ln:
+            continue
+        m = re.match(r"\s*(\d+)\s", ln)
+        if not m:
+            continue
+        pid = int(m.group(1))
+        # NON-EMPTY ANTHROPIC_API_KEY = metered (empty/absent = scrubbed => Max).
+        km = re.search(r"ANTHROPIC_API_KEY=(\S*)", ln)
+        metered = bool(km and km.group(1))
+        tok = re.search(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)", ln)
+        fp = _fingerprint(tok.group(1)) if tok else None
+        if metered:
+            owner = _METERED
+        elif fp is not None:
+            owner = owner_map.get(fp, _UNKNOWN_ACCT)
+        else:
+            owner = _UNKNOWN_ACCT
+        session = _session_for(pid, pane_pids, ppid) or ("pid:%d" % pid)
+        lanes.append({"session": session, "metered": metered, "acct": fp, "owner": owner})
+
+    lanes.sort(key=lambda x: (x["metered"] is False, x["owner"], x["session"]))
+    by_owner: Dict[str, int] = {}
+    metered_n = 0
+    for l in lanes:
+        if l["metered"]:
+            metered_n += 1
+        else:
+            by_owner[l["owner"]] = by_owner.get(l["owner"], 0) + 1
+    return {
+        "lanes": lanes,
+        "summary": {"by_owner": by_owner, "metered": metered_n, "total": len(lanes)},
+    }

@@ -26,8 +26,11 @@ import json
 import logging
 import os
 import pathlib
+import re
 import subprocess
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -37,6 +40,7 @@ from nervous_system.console.feed import Broadcaster, feeder
 logger = logging.getLogger("wingmen.console.app")
 
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8787
 _CONTENT_TYPES = {
@@ -46,6 +50,41 @@ _CONTENT_TYPES = {
     ".png": "image/png",
     ".svg": "image/svg+xml",
 }
+
+def _build_version() -> str:
+    """The build identity shown in the version badge + reported by /api/version.
+    Single source of truth = the VERSION baked into sw.js (the same constant
+    that names the SW cache), read once at startup. So there is exactly ONE
+    place to bump per deploy."""
+    try:
+        sw = (_STATIC_DIR / "sw.js").read_text(encoding="utf-8")
+        m = re.search(r'VERSION\s*=\s*"([^"]+)"', sw)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _build_sha() -> str:
+    """Short git SHA of the DEPLOYED tree, resolved once at process start — so a
+    kickstart after a deploy reports the new commit, and the operator can see on
+    his device exactly which commit he's running."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=str(_REPO_ROOT),
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+_BUILD_VERSION = _build_version()
+_BUILD_SHA = _build_sha()
+
 
 class _QuietThreadingHTTPServer(ThreadingHTTPServer):
     """ThreadingHTTPServer that doesn't dump a full traceback for benign client
@@ -137,73 +176,188 @@ class _FeedLoop:
         self.broadcaster.unsubscribe(q)
 
 
-def _enrich_lanes_live(rows):
+def _enrich_lanes_live(rows, live=None):
     """Fold a LIVE tmux summary into each lane row (shared by /api/lanes and
-    /api/fleet) so a card shows what the lane is ACTUALLY doing now, not the
-    stale boot-string current_task. One read-only capture_pane per lane."""
+    /api/fleet) so a card shows — and is CLASSIFIED by — what the lane is
+    ACTUALLY doing now (working/idle from the live pane), not the stale
+    agent_status.status / boot-string current_task (which reads 'active' +
+    task=None for every lane, the '0 working' bug 2026-07-11).
+
+    The tmux state is the truth: pane running + 'esc to interrupt'/spinner =
+    working; running + idle prompt = idle; no live pane = offline. Two refinements
+    keep the COUNT honest:
+      * one `list-sessions` for the whole sweep (not one per lane); and
+      * each live session is OWNED by the freshest-heartbeat lane targeting it,
+        so two rows sharing a session label (e.g. cc-infra-1 & the stale
+        cc-infra-2, both -> 'infra') don't both count as working — only the
+        live owner does; the stale twin reads offline.
+
+    `live` lets the caller pass a pre-fetched local live-session set (so the
+    whole /api/fleet sweep does ONE list-sessions, shared with the coordinator
+    peekable-check), matching panes.capture's own `live` optimization."""
+    if live is None:
+        live = set(panes.live_sessions())
+
+    # 1) resolve each row's target tmux session (per-instance tmux_session wins;
+    #    the orchestrator doesn't self-register, so target its known 'orch').
     for r in rows:
         sess = r.get("tmux_session") or r.get("lane")
-        # the orchestrator doesn't self-register a tmux session; target its
-        # known 'orch' session so the operator can peek the hub (operator 2637).
         if not r.get("tmux_session") and str(r.get("agent_id", "")).startswith("cc-orchestrator"):
             sess = "orch"
             r["tmux_session"] = "orch"
-        txt = panes.capture_pane(sess) if sess else None
-        if not txt:
+        r["_sess"] = sess
+
+    # 2) ownership: freshest heartbeat wins a contested live session.
+    def _hb(r):
+        h = r.get("heartbeat_age_s")
+        return h if h is not None else 10 ** 9
+    owner = {}
+    for r in sorted(rows, key=_hb):
+        s = r.get("_sess")
+        if s and s in live and s not in owner:
+            owner[s] = r.get("agent_id")
+
+    # 3) capture each owned live session ONCE; non-owners / no pane -> offline.
+    cache = {}
+    for r in rows:
+        s = r.pop("_sess", None)
+        if not s or s not in live or owner.get(s) != r.get("agent_id"):
             r["live"] = {"running": False}
             continue
-        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-        spinner = next((ln for ln in reversed(lines)
-                        if ln[:1] in "✻✳✶✷✸✹✺✽❋⚹"), None)
-        active = bool(spinner and ("token" in spinner.lower()
-                      or "↑" in spinner or "↓" in spinner or "…" in spinner))
-        working = active or any("esc to interrupt" in ln.lower() for ln in lines)
-        activity = spinner or (lines[-1] if lines else "")
-        # A "❯ …" line is the COMPOSER (an idle prompt, or a dim autosuggestion
-        # ghost) — NOT what the lane is doing. Surfacing it made every idle card
-        # read as cryptic prompt-noise ("❯ /clear", "❯ go with A") instead of the
-        # lane's real activity, which the card then can't fall back to (operator:
-        # "still no contexts", 2026-08-01). When the lane isn't working, drop a
-        # composer line so live.activity is empty and the card falls back to the
-        # last bus subject (l.activity). The full composer is still visible via
-        # the pane peek + the SRE wedge-watchdog owns staged-input detection.
-        if not working and activity.lstrip().startswith("❯"):
-            activity = ""
-        r["live"] = {"running": True,
-                     "state": "working" if working else "idle",
-                     "activity": activity[:140]}
+        if s not in cache:
+            state, _txt = panes.capture(s, live=live)
+            cache[s] = state or {"running": False}
+        r["live"] = cache[s]
     return rows
 
 
 def _lane_bucket(l):
-    """working / idle / offline / flagged classification for a lane row, from
-    live tmux state + heartbeat + desired_state (the redesign's exception-first
-    + working-first sort keys). 'flagged' = desired up but heartbeat dead/stale."""
-    hb = l.get("heartbeat_age_s")
+    """working / idle / offline / flagged classification for a lane row. The
+    LIVE tmux pane is authoritative (operator 2026-07-11: agent_status.status
+    reads 'active' + task=None for every lane, so it can't tell working from
+    idle — the '0 working' bug). So: live pane working -> working; live pane
+    idle -> idle; NO live pane -> offline. Heartbeat/desired_state no longer
+    decide the bucket, only whether to FLAG it: a lane the fleet WANTS up
+    (desired_state='up') but that has no live pane is dark and needs attention."""
     desired_up = str(l.get("desired_state") or "").lower() == "up"
     live = l.get("live") or {}
-    dead = hb is None or hb >= 900
-    stale = hb is not None and 120 <= hb < 900
-    flagged = desired_up and (dead or stale)
-    if live.get("running") and live.get("state") == "working":
+    running = bool(live.get("running"))
+    if running and live.get("state") == "working":
         state = "working"
-    elif live.get("running"):
+    elif running:
         state = "idle"
-    elif dead:
-        state = "offline"
     else:
-        state = "idle"
+        state = "offline"
+    flagged = desired_up and state == "offline"  # supposed to be up, but dark
     return state, flagged
+
+
+# Cross-host coordinators (bodies that don't run on THIS console host) are
+# peeked via a DB read of their bus activity, NOT ssh — keeps the console's
+# surface local read-only (operator #3729). Maps peek session -> coordinator
+# from_agent. A session name only ever LOOKS UP here; unknown names fall through.
+_COORD_DB_PEEK = {"nazim": "orch-console"}
+
+
+# Soft budget for the whole /api/fleet aggregate. Over this we log a warning so
+# a slow-query regression is caught in the log before it's caught on the phone
+# (the 2026-07-11 regression showed up as a client-side timeout, not a metric).
+_FLEET_BUDGET_MS = int(os.environ.get("CONSOLE_FLEET_BUDGET_MS", "500"))
+
+# Context-bloat normalization: an always-on agent's CURRENT context size
+# (latest_context_tokens = the last turn's input+cache_read+cache_creation)
+# ÷ the model context window => 0-100%. Opus 4.8 runs a 1M-token window here
+# (verified via /context; the model's max_input_tokens is 1,000,000 — NOT 2M).
+# Overridable via CONSOLE_CTX_WINDOW. Soft/hard thresholds (green→amber→red) at
+# 60% (~600K) / 80% (~800K).
+_CTX_WINDOW = int(os.environ.get("CONSOLE_CTX_WINDOW", "1000000"))
+_CTX_SOFT = 0.60
+_CTX_HARD = 0.80
+
+
+def _context_bloat(rows):
+    """Annotate each latest-per-agent row with CURRENT-context pct (of the model
+    window) + a green/amber/red level, sorted fullest-first. `ctx_tokens` is the
+    live window fill (the last turn's actual input context). Rows whose value is
+    missing, non-positive, or impossibly large (> the window — a single call
+    cannot exceed the context window) are DROPPED as bad data rather than shown.
+    The caller surfaces `age_s` so a stale reading is never mistaken for live."""
+    out = []
+    if _CTX_WINDOW <= 0:
+        return out
+    for r in rows or []:
+        ctx = r.get("ctx_tokens")
+        if ctx is None:
+            continue
+        ctx = int(ctx)
+        if ctx <= 0 or ctx > _CTX_WINDOW:
+            continue  # bad data — cannot be a real current-context reading
+        frac = ctx / _CTX_WINDOW
+        pct = round(min(frac, 1.0) * 100)
+        level = "red" if frac >= _CTX_HARD else ("amber" if frac >= _CTX_SOFT else "green")
+        out.append({
+            "agent": r.get("cc_identity"),
+            "ctx_tokens": ctx,
+            "window": _CTX_WINDOW,
+            "pct": pct,
+            "level": level,
+            "age_s": r.get("age_s"),
+        })
+    out.sort(key=lambda x: x["pct"], reverse=True)
+    return out
 
 
 def _fleet_payload():
     """The single live-derived aggregate behind /api/fleet (redesign #7576):
     pulse counts + needs-you hero + exception-first flagged lanes + working-first
-    lanes + deploys, all from real tables. One round-trip for the phone."""
-    lanes = _enrich_lanes_live(db.fetch_lanes())
-    deploys = db.fetch_deploys()
-    needs = db.fetch_needs_you()
-    coordinators = db.fetch_coordinators()
+    lanes + deploys, all from real tables. One round-trip for the phone.
+
+    The three reads are independent, so they fire CONCURRENTLY on the warm
+    connection pool (db._query reuses connections): wall-clock is one query RTT
+    (~100ms) instead of three serial ones. The tmux pane enrichment runs after
+    the lanes read returns (it needs those rows)."""
+    t0 = time.perf_counter()
+    # ONE list-sessions for the whole aggregate: the lane enrichment and the
+    # coordinator peekable-check share it (a subprocess each would otherwise
+    # cost ~2x). The 4 reads are independent -> fire concurrently.
+    live = set(panes.live_sessions())
+    with ThreadPoolExecutor(max_workers=7) as ex:
+        f_lanes = ex.submit(db.fetch_lanes)
+        f_deploys = ex.submit(db.fetch_deploys)
+        f_needs = ex.submit(db.fetch_needs_you)
+        f_coord = ex.submit(db.fetch_coordinators)
+        # three new operator-visibility signals, fired concurrently:
+        f_drain = ex.submit(db.fetch_bus_drain)          # hub's owed bus backlog
+        f_bloat = ex.submit(db.fetch_context_bloat)      # per-agent context %
+        f_auth = ex.submit(panes.lane_token_auth)        # Max vs metered + acct
+        lanes = _enrich_lanes_live(f_lanes.result(), live=live)
+        deploys = f_deploys.result()
+        needs = f_needs.result()
+        coordinators = f_coord.result()
+        # each guarded: a signal failing must not blank the whole aggregate.
+        try:
+            bus_drain = f_drain.result()
+        except Exception as e:
+            logger.warning("bus_drain failed: %s", e)
+            bus_drain = {"owed": None}
+        try:
+            context_bloat = _context_bloat(f_bloat.result())
+        except Exception as e:
+            logger.warning("context_bloat failed: %s", e)
+            context_bloat = []
+        try:
+            token_auth = f_auth.result()
+        except Exception as e:
+            logger.warning("token_auth failed: %s", e)
+            token_auth = {"lanes": [], "summary": {"by_owner": {}, "metered": 0, "total": 0}}
+
+    # A coordinator card is peekable when its pane is a LOCAL live tmux session
+    # (orch on this Studio host) OR it's a cross-host coordinator we surface via a
+    # DB-read activity feed (Nazim on the Mini — reverted from ssh to a DB read,
+    # operator #3729). The DB source is always available, so no reachability probe.
+    for c in coordinators:
+        sess = c.get("tmux_session")
+        c["peekable"] = bool(sess and (sess in live or sess in _COORD_DB_PEEK))
 
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for l in lanes:
@@ -218,12 +372,22 @@ def _fleet_payload():
     order = {"working": 0, "idle": 1, "offline": 2}
     lanes.sort(key=lambda l: (0 if l["flagged"] else 1, order.get(l["bucket"], 3)))
 
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    if elapsed_ms > _FLEET_BUDGET_MS:
+        logger.warning(
+            "fleet payload over budget: %.0fms > %dms (%d lanes)",
+            elapsed_ms, _FLEET_BUDGET_MS, len(lanes),
+        )
+
     return {
         "pulse": {**counts, "needs_you": len(needs)},
         "needs_you": _jsonable(needs),
         "coordinators": _jsonable(coordinators),
         "lanes": _jsonable(lanes),
         "deploys": _jsonable(deploys),
+        "bus_drain": _jsonable(bus_drain),
+        "context_bloat": _jsonable(context_bloat),
+        "token_auth": _jsonable(token_auth),
     }
 
 
@@ -290,13 +454,23 @@ def _make_handler(feedloop: "_FeedLoop"):
                 auth.audit(self._client(), path, "200")
                 return self._json(200, {"ok": True})
 
-            if path == "/classic" or path == "/index.html":
-                return self._serve_static("index.html", path)
+            # Build identity: OPEN (like /healthz), non-sensitive (version + short
+            # SHA). Open so the version badge renders even off-tailnet / pre-auth
+            # — the operator must always be able to see which build he's on, which
+            # is the whole point of the badge (PWA-cache-loop fix 2026-07-11).
+            if path == "/api/version":
+                auth.audit(self._client(), path, "200")
+                return self._json(200, {"version": _BUILD_VERSION, "sha": _BUILD_SHA})
 
-            # Attention-first Fleet view (redesign #7576) — served alongside the
-            # classic console during review; flips to "/" once the operator OKs.
-            if path == "/" or path == "/fleet" or path == "/fleet/":
+            # Attention-first Fleet view (redesign #7576) is now the DEFAULT
+            # console (operator #3440 — "remove the classic version"). It serves
+            # "/" and "/fleet"; the classic message/deploy console is retained
+            # (its full lists are still reachable) at "/classic".
+            if path in ("/", "/index.html", "/fleet", "/fleet/"):
                 return self._serve_static("fleet.html", path)
+
+            if path in ("/classic", "/classic/"):
+                return self._serve_static("index.html", path)
 
             # DOCS section: /docs and any /docs/<repo>/<path> deep link all serve
             # the same SPA shell (open, like /). The shell reads window.location
@@ -363,12 +537,17 @@ def _make_handler(feedloop: "_FeedLoop"):
 
                 if path.startswith("/api/lanes/") and path.endswith("/pane"):
                     # Live tmux pane peek (read-only) — operator-requested,
-                    # thread f869956c/msg 6156. session is validated against
-                    # the REAL live tmux session list inside capture_pane;
-                    # an unrecognized name (or anything crafted to look like
-                    # one) just 404s, it never reaches a subprocess call.
+                    # thread f869956c/msg 6156. A LOCAL session is validated
+                    # against the real live tmux list inside capture_pane; a
+                    # cross-host coordinator (Nazim on the Mini) is served from a
+                    # DB read of its bus activity instead of ssh (operator #3729).
+                    # An unrecognized name matches neither -> 404, no subprocess.
                     session = unquote(path[len("/api/lanes/"):-len("/pane")])
-                    text = panes.capture_pane(session)
+                    coord_agent = _COORD_DB_PEEK.get(session)
+                    if coord_agent is not None:
+                        text = db.fetch_coordinator_peek(coord_agent) or None
+                    else:
+                        text = panes.capture_pane(session)
                     if text is None:
                         auth.audit(self._client(), path, "404")
                         return self._json(404, {"error": "session not live"})
@@ -523,6 +702,11 @@ def make_server(
 ) -> ThreadingHTTPServer:
     feedloop = _FeedLoop(fetch_since=fetch_since)
     feedloop.start()
+    # Pre-warm the DB connection pool off the main thread so the operator's
+    # first /api/fleet after a restart is already warm (~150ms), not a
+    # ~650ms×N cold connect. Non-blocking + fail-soft: a DB blip at boot just
+    # means the pool fills lazily on first request instead.
+    threading.Thread(target=db.warm_pool, kwargs={"n": 3}, daemon=True).start()
     handler = _make_handler(feedloop)
     httpd = _QuietThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
