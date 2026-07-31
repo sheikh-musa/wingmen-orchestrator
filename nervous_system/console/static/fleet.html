@@ -138,6 +138,13 @@
   .lane .meta { margin-top:8px; display:flex; gap:12px; font:11px var(--mono); color:var(--dim); flex-wrap:wrap; align-items:center; }
   .lane .meta .hb.fresh{color:var(--good)} .lane .meta .hb.stale{color:var(--warn)} .lane .meta .hb.dead{color:var(--bad)}
   .lane .meta .tap { margin-left:auto; color:var(--accent); }
+  .lane .meta .reset-btn { margin-left:auto; font:10px/1 var(--mono); letter-spacing:.3px;
+    color:var(--bad); background:rgba(255,107,107,.10); border:1px solid rgba(255,107,107,.30);
+    padding:4px 8px; border-radius:7px; cursor:pointer; -webkit-appearance:none; transition:background .12s; }
+  .lane .meta .tap + .reset-btn { margin-left:8px; }
+  .lane .meta .reset-btn:hover { background:rgba(255,107,107,.18); }
+  .lane .meta .reset-btn:active { transform:scale(.96); }
+  .lane .meta .reset-btn:disabled { opacity:.6; cursor:default; }
   .collapsed { display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--panel);
     border:1px dashed var(--line); border-radius:13px; color:var(--dim); font-size:13px; cursor:pointer; }
   .collapsed b { color:var(--txt); white-space:nowrap; }

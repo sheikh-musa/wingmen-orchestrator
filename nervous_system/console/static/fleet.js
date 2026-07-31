@@ -9,6 +9,43 @@
   var token = localStorage.getItem("console_token") || "";
   var $ = function (id) { return document.getElementById(id); };
   function authHeaders() { return token ? { Authorization: "Bearer " + token } : {}; }
+  // Map a coordinator/lane agent_id to the reset "body" the console can clear
+  // (POST /api/reset). Only the three singletons that don't self-reset are
+  // resettable; everything else returns "" (no button). Mirrors the Telegram
+  // clear-buttons' allowlist — the backend re-checks, this only hides the affordance.
+  function resetBodyFor(agentId) {
+    if (agentId === "orch-console") return "nazim";
+    if (agentId === "cai") return "cai";
+    if (agentId === "cc-orchestrator") return "hub";
+    return "";
+  }
+  function resetBtnHtml(agentId) {
+    var b = resetBodyFor(agentId);
+    return b ? '<button class="reset-btn" data-reset="' + b + '" title="Reset context: clear + reboot from the latest handoff (refuses if busy)">↻ reset</button>' : "";
+  }
+  function doReset(btn) {
+    var body = btn.getAttribute("data-reset");
+    if (!body) return;
+    if (!window.confirm("Reset " + body + "?\n\nThis clears its context and reboots it from its latest handoff. It refuses if the body is busy, and preserves any staged composer text.")) return;
+    var orig = btn.textContent;
+    btn.disabled = true; btn.textContent = "↻ resetting…";
+    fetch("/api/reset", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ body: body })
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j || {} }; }); })
+      .then(function (res) {
+        btn.textContent = (res.ok && res.j.ok) ? "✓ reset sent" : "✗ " + (res.j.error || "failed");
+        setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 5000);
+      })
+      .catch(function () { btn.textContent = "✗ error"; setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 5000); });
+  }
+  function bindResets() {
+    document.querySelectorAll(".reset-btn").forEach(function (btn) {
+      if (btn._bound) return; btn._bound = true;
+      btn.addEventListener("click", function (ev) { ev.stopPropagation(); doReset(btn); });
+    });
+  }
   function esc(s) {
     return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
@@ -276,6 +313,7 @@
         '<span class="hb ' + hbClass + '">' + esc(hbTxt) + '</span>' +
         (l.desired_state ? '<span>desired: ' + esc(l.desired_state) + '</span>' : '') +
         (peek ? '<span class="tap">peek ›</span>' : '') +
+        resetBtnHtml(l.agent_id) +
       '</div>' +
       (peek ? '<div class="peek" data-peekbox="' + esc(peek) + '"></div>' : '') +
     '</div>';
@@ -309,6 +347,7 @@
                   : '<div class="act coordidle">nothing on the bus recently</div>') +
       '<div class="meta"><span class="hb ' + hbClass + '">' + esc(seenTxt) + '</span>' +
         (peek ? '<span class="tap">peek ›</span>' : '') +
+        resetBtnHtml(c.agent_id) +
       '</div>' +
       (peek ? '<div class="peek" data-peekbox="' + esc(peek) + '"></div>' : '') +
     '</div>';
@@ -318,6 +357,7 @@
     if (!el) return;
     if (!items || !items.length) { el.innerHTML = '<div class="empty">No coordinators.</div>'; return; }
     el.innerHTML = items.map(coordCard).join("");
+    bindResets();
   }
   function renderLanes(lanes) {
     lastLanes = lanes;   // kept so jumpToLane can re-render (expand routine) if needed
@@ -340,8 +380,10 @@
       $("routine").style.display = routineExpanded ? "block" : "none";
       t.firstChild.textContent = (routineExpanded ? "▾" : "▸") + " ";
       bindPeeks();
+      bindResets();
     });
     bindPeeks();
+    bindResets();
   }
 
   var DEP_STAGES = { pending:1, pushed:1, in_review:1, merged:1, live:1, blocked:1 };

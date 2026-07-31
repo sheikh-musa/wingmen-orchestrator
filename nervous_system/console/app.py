@@ -51,6 +51,18 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
 }
 
+# Operator-triggered context reset from the console — the SAME proven scripts the
+# Telegram clear-buttons run (ingest.BUTTON_ACTIONS), exposed as an authenticated
+# POST. Each script is fail-safe on its own: BUSY-refuse, composer-preserve, and a
+# handoff/checkpoint gate, so a mis-tap can't wipe work in flight. Allowlist only —
+# an unknown body id fails closed (400) and never reaches subprocess.
+RESET_ACTIONS = {
+    "nazim": ("scripts/reset_nazim.sh", "clear Nazim (console)"),
+    "cai":   ("scripts/reset_cai.sh",   "clear cai (governance)"),
+    "hub":   ("scripts/reset_hub_remote.sh", "clear the hub (VPS)"),
+}
+
+
 def _build_version() -> str:
     """The build identity shown in the version badge + reported by /api/version.
     Single source of truth = the VERSION baked into sw.js (the same constant
@@ -618,6 +630,55 @@ def _make_handler(feedloop: "_FeedLoop"):
 
             auth.audit(self._client(), path, "404")
             return self._json(404, {"error": "not found"})
+
+        def do_POST(self):  # noqa: N802
+            """The ONLY mutating surface on the console: an operator-triggered
+            context reset (op#8910). POST-only so a GET/prefetch/link can never
+            clear a body; operator-authed (IP-allowlist + breakglass token, same
+            gate as every /api route); allowlist-gated so an unknown body id fails
+            closed. The reset scripts themselves are the safety net (BUSY-refuse,
+            composer-preserve, handoff gate) — this only TRIGGERS the proven path
+            the Telegram clear-buttons already use."""
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if path != "/api/reset":
+                auth.audit(self._client(), path, "404")
+                return self._json(404, {"error": "not found"})
+            if not self._authed():
+                auth.audit(self._client(), path, "401")
+                return self._json(401, {"error": "unauthorized"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                body_id = (json.loads(raw or b"{}").get("body") or "").strip()
+            except Exception:                                        # noqa: BLE001
+                auth.audit(self._client(), path, "400")
+                return self._json(400, {"error": "bad request"})
+            action = RESET_ACTIONS.get(body_id)
+            if not action:
+                auth.audit(self._client(), f"{path}:{body_id}", "400")
+                return self._json(400, {"error": "unknown body",
+                                        "allowed": sorted(RESET_ACTIONS)})
+            script, label = action
+            auth.audit(self._client(), f"{path}:{body_id}", "run")
+            logger.info("console reset requested: %s -> %s", body_id, script)
+            try:
+                r = subprocess.run(
+                    ["bash", str(_REPO_ROOT / script)],
+                    capture_output=True, text=True, timeout=180,
+                )
+                ok = r.returncode == 0
+                tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-6:])
+            except subprocess.TimeoutExpired:
+                auth.audit(self._client(), f"{path}:{body_id}", "timeout")
+                return self._json(504, {"error": "reset timed out", "body": body_id})
+            except Exception as e:                                   # noqa: BLE001
+                logger.warning("console reset failed: %s", e)
+                auth.audit(self._client(), f"{path}:{body_id}", "500")
+                return self._json(500, {"error": "reset failed", "body": body_id})
+            auth.audit(self._client(), f"{path}:{body_id}", "200" if ok else "500")
+            return self._json(200 if ok else 500,
+                              {"ok": ok, "body": body_id, "label": label, "tail": tail})
 
         def _serve_static(self, name: str, path: str, cache_control: str = None) -> None:
             # Prevent path traversal. is_relative_to (not a string-prefix
