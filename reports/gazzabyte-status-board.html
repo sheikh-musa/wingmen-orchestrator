@@ -1,0 +1,222 @@
+<title>Irsyad Build Status</title>
+<style>
+  :root {
+    --ground: #f4f7f9;
+    --surface: #ffffff;
+    --surface-2: #f0f4f6;
+    --ink: #142433;
+    --ink-soft: #4a5a6a;
+    --ink-faint: #7a8a99;
+    --line: #dde5eb;
+    --line-soft: #e8eef2;
+    --accent: #0e8f83;
+    --done: #1f9d57;
+    --progress: #d9871c;
+    --queued: #6d7f90;
+    --shadow: 0 1px 2px rgba(20,36,51,.05), 0 8px 24px rgba(20,36,51,.05);
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0c1420;
+      --surface: #131f2d;
+      --surface-2: #172436;
+      --ink: #e9f0f6;
+      --ink-soft: #a7b7c6;
+      --ink-faint: #6f8091;
+      --line: #24354a;
+      --line-soft: #1d2c3e;
+      --accent: #2fb6a8;
+      --done: #35b56e;
+      --progress: #e8a13e;
+      --queued: #7f92a4;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.28);
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #f4f7f9; --surface: #ffffff; --surface-2: #f0f4f6;
+    --ink: #142433; --ink-soft: #4a5a6a; --ink-faint: #7a8a99;
+    --line: #dde5eb; --line-soft: #e8eef2; --accent: #0e8f83;
+    --done: #1f9d57; --progress: #d9871c; --queued: #6d7f90;
+    --shadow: 0 1px 2px rgba(20,36,51,.05), 0 8px 24px rgba(20,36,51,.05);
+  }
+  :root[data-theme="dark"] {
+    --ground: #0c1420; --surface: #131f2d; --surface-2: #172436;
+    --ink: #e9f0f6; --ink-soft: #a7b7c6; --ink-faint: #6f8091;
+    --line: #24354a; --line-soft: #1d2c3e; --accent: #2fb6a8;
+    --done: #35b56e; --progress: #e8a13e; --queued: #7f92a4;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.28);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: clamp(20px, 4vw, 48px) clamp(16px, 4vw, 40px) 64px; }
+
+  header { margin-bottom: 32px; }
+  .eyebrow {
+    text-transform: uppercase; letter-spacing: .16em; font-size: 12px; font-weight: 600;
+    color: var(--accent); margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(26px, 4vw, 38px); line-height: 1.08; font-weight: 700;
+    letter-spacing: -0.02em; margin: 0 0 10px; text-wrap: balance;
+  }
+  .lede { color: var(--ink-soft); font-size: 16px; max-width: 60ch; margin: 0; }
+  .meta {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px;
+    margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line-soft);
+    font-size: 13px; color: var(--ink-faint);
+  }
+  .meta b { color: var(--ink-soft); font-weight: 600; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-left: auto; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.done { background: var(--done); }
+  .dot.progress { background: var(--progress); }
+  .dot.queued { background: var(--queued); }
+
+  .board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 820px) { .board { grid-template-columns: 1fr; } }
+
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .col-head {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 2px 4px 0;
+  }
+  .col-head h2 {
+    font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em;
+    margin: 0; color: var(--ink-soft);
+  }
+  .count {
+    font-variant-numeric: tabular-nums; font-size: 12px; font-weight: 600;
+    color: var(--ink-faint); background: var(--surface-2); border: 1px solid var(--line-soft);
+    border-radius: 20px; padding: 1px 9px; line-height: 1.7;
+  }
+  .col-rail { height: 3px; border-radius: 3px; margin: 0 4px 4px; }
+  .col.progress .col-rail { background: var(--progress); }
+  .col.queued .col-rail { background: var(--queued); }
+  .col.done .col-rail { background: var(--done); }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 15px 16px; box-shadow: var(--shadow);
+  }
+  .card-top { display: flex; align-items: flex-start; gap: 10px; }
+  .card h3 { font-size: 15px; font-weight: 650; margin: 0; line-height: 1.32; letter-spacing: -0.01em; flex: 1; }
+  .card .dot { margin-top: 6px; }
+  .card p { margin: 8px 0 0; font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; }
+  .tag {
+    display: inline-block; margin-top: 10px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .05em; color: var(--ink-faint);
+  }
+
+  footer { margin-top: 34px; font-size: 12.5px; color: var(--ink-faint); text-align: center; line-height: 1.6; }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Gazzabyte &times; Irsyad</p>
+    <h1>Build status</h1>
+    <p class="lede">A live view of what we're working on for you &mdash; in progress, queued, and done &mdash; so we both have one place to check instead of re-listing it.</p>
+    <div class="meta">
+      <span>Updated <b>31 Jul 2026, 10:25</b> (SGT +8: 18:25)</span>
+      <span class="legend">
+        <span><span class="dot progress"></span> In progress</span>
+        <span><span class="dot queued"></span> Queued</span>
+        <span><span class="dot done"></span> Done</span>
+      </span>
+    </div>
+  </header>
+
+  <div class="board">
+    <!-- IN PROGRESS -->
+    <section class="col progress">
+      <div class="col-head"><h2>In progress</h2><span class="count">4</span></div>
+      <div class="col-rail"></div>
+
+      <article class="card">
+        <div class="card-top"><h3>Edit a tin amount before a report is submitted</h3><span class="dot progress"></span></div>
+        <p>The preparer can correct an amount while a report is still a draft. The change shows old &rarr; new and is recorded. In build &amp; review.</p>
+        <span class="tag">Building</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Preparer-only signing after a report is sent back</h3><span class="dot progress"></span></div>
+        <p>Once a report is sent back, only the preparer can sign it &mdash; an admin can't take that step while a preparer exists. In independent review.</p>
+        <span class="tag">In review</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Extra safeguards on the upload's fund-matching</h3><span class="dot progress"></span></div>
+        <p>Hardening the checks around how bank entries are matched and held, on top of what's already live. In review.</p>
+        <span class="tag">In review</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Documentation set</h3><span class="dot progress"></span></div>
+        <p>Approval-workflow flowchart, platform sitemap, and access &amp; usage SOPs &mdash; for you to present to clients. Drafting; due next week.</p>
+        <span class="tag">Drafting</span>
+      </article>
+    </section>
+
+    <!-- QUEUED -->
+    <section class="col queued">
+      <div class="col-head"><h2>Queued</h2><span class="count">4</span></div>
+      <div class="col-rail"></div>
+
+      <article class="card">
+        <div class="card-top"><h3>Module on/off toggle (Gazzabyte-controlled)</h3><span class="dot queued"></span></div>
+        <p>Turn modules on or off per institution, controlled by Gazzabyte. Most of it already exists; needs a bit of wiring. Access confirmed for sales@gazzabyte.sg.</p>
+        <span class="tag">Queued</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Turn on individual school pages</h3><span class="dot queued"></span></div>
+        <p>Show only the school pages you want (e.g. Students, Fees) and hide the rest. The school area is one switch today, so this needs splitting &mdash; real build.</p>
+        <span class="tag">Queued &middot; new build</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Fees &amp; student-payment reports</h3><span class="dot queued"></span></div>
+        <p>These reports don't exist yet, so they're new work rather than a switch-on. Scoping.</p>
+        <span class="tag">Queued &middot; new build</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>NETS payment gateway</h3><span class="dot queued"></span></div>
+        <p>Payment-gateway integration. Touches money movement, so it goes through proper scoping and review &mdash; best treated together with the eNETS/GIRO ask.</p>
+        <span class="tag">Scoping</span>
+      </article>
+    </section>
+
+    <!-- DONE -->
+    <section class="col done">
+      <div class="col-head"><h2>Done</h2><span class="count">2</span></div>
+      <div class="col-rail"></div>
+
+      <article class="card">
+        <div class="card-top"><h3>Bank-statement upload is open</h3><span class="dot done"></span></div>
+        <p>Entries that clearly match a single fund post automatically. Entries that could match more than one fund are held for a quick review &mdash; nothing files to the wrong fund. Ready to upload.</p>
+        <span class="tag">Live</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Report editing after a send-back</h3><span class="dot done"></span></div>
+        <p>When a report is sent back, reopen it and let the preparer sign &mdash; that unlocks editing. Explained and unblocked.</p>
+        <span class="tag">Resolved</span>
+      </article>
+    </section>
+  </div>
+
+  <footer>
+    Maintained by the Wingmen team &mdash; updated as items move. Private to Gazzabyte.<br>
+    Questions on any item? Reply on the support channel and we'll update it here.
+  </footer>
+</div>
