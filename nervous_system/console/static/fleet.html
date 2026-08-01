@@ -68,7 +68,6 @@
      one this cached bundle is) turns it amber until the one-shot reload lands. */
   .pulse .brand .build { font:10px/1 var(--mono); letter-spacing:.3px; color:var(--dim); font-weight:400; }
   .pulse .brand .build.stale { color:var(--warn); }
-  .pulse .navs { margin-left:auto; display:flex; gap:14px; font:12px var(--mono); }
   .pulse .headline { display:flex; align-items:center; gap:11px; }
   .pulse .orb { width:12px; height:12px; border-radius:50%; flex:none; background: var(--dim); }
   .pulse.attn .orb { background: var(--warn); box-shadow:0 0 0 4px rgba(240,180,41,.16), 0 0 12px var(--warn); animation:breathe 2.4s ease-in-out infinite; }
@@ -171,18 +170,19 @@
   .dep .rp { margin-top:5px; font:11px var(--mono); color:var(--dim); }
   .dep a { display:block; margin-top:4px; font:11px var(--mono); overflow-wrap:anywhere; }
 
-  /* bus-queue drain */
-  .drain { background:var(--panel); border:1px solid var(--line); border-radius:13px; padding:13px 15px; }
-  .drain .dbig { display:flex; align-items:baseline; gap:9px; }
-  .drain .dbig .dn { font-size:26px; font-weight:800; line-height:1; }
-  .drain .dbig.green .dn{color:var(--good)} .drain .dbig.amber .dn{color:var(--warn)} .drain .dbig.red .dn{color:var(--bad)}
-  .drain .dbig .dl { font:12px var(--mono); color:var(--dim); }
-  .drain .dbreak { margin-top:11px; display:flex; gap:8px; flex-wrap:wrap; }
-  .drain .dseg { font:11px/1 var(--mono); color:var(--dim); background:var(--panel-2); border:1px solid var(--line);
-    border-radius:999px; padding:6px 10px; }
-  .drain .dseg b { font-weight:700; margin-right:1px; }
-  .drain .dseg b.good{color:var(--good)} .drain .dseg b.dim{color:var(--txt)} .drain .dseg b.warn{color:var(--warn)} .drain .dseg b.bad{color:var(--bad)}
-  .drain .dseg.oldest { color:var(--dim); }
+  /* backlog — the operator's realtime "Your asks" tracker */
+  .bl { display:flex; gap:10px; align-items:flex-start; padding:11px 13px; margin-bottom:8px;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+  .bl .bltag { flex:none; font:10px/1 var(--mono); font-weight:700; text-transform:uppercase; letter-spacing:.4px;
+    padding:4px 8px; border-radius:8px; white-space:nowrap; margin-top:1px; }
+  .bl .bltag.wait { color:var(--bad); background:rgba(255,107,107,.14); }
+  .bl .bltag.prog { color:var(--warn); background:rgba(240,180,41,.14); }
+  .bl .bltag.done { color:var(--good); background:rgba(62,207,142,.14); }
+  .bl .bltag.park { color:var(--dim); background:rgba(138,147,166,.14); }
+  .bl .blbody { min-width:0; flex:1; }
+  .bl .blask { font-weight:600; font-size:13.5px; overflow-wrap:anywhere; }
+  .bl .blnote { color:var(--dim); font-size:12.5px; margin-top:3px; line-height:1.4; overflow-wrap:anywhere; }
+  .bl .blop { color:var(--dim); font:11px var(--mono); margin-top:4px; }
 
   /* context bloat */
   .ctx { padding:10px 14px; margin-bottom:8px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
@@ -211,6 +211,9 @@
   .lane.coord { border-left:3px solid var(--accent); background: linear-gradient(90deg, rgba(91,140,255,.07), var(--panel) 42%); }
   .state.coordrole { color: var(--accent); text-transform:none; font-weight:600; }
   .act.coordidle { color: var(--dim); }
+  /* per-coordinator context readout (op#9088) — lives in the card's meta row */
+  .lane.coord .meta .cctx { font:11px var(--mono); font-weight:700; }
+  .lane.coord .meta .cctx.green{color:var(--good)} .lane.coord .meta .cctx.amber{color:var(--warn)} .lane.coord .meta .cctx.red{color:var(--bad)}
 </style>
 </head>
 <body>
@@ -220,7 +223,6 @@
   <div id="pulse" class="pulse">
     <div class="brandrow">
       <span class="brand">Fleet <span id="liveDot" class="live">● live</span> <span id="build" class="build" title="build running on this device"></span></span>
-      <span class="navs"><a href="/classic">Classic</a><a href="/docs">Docs</a><a href="/media">Screens</a></span>
     </div>
     <div class="headline"><span class="orb"></span><span id="pulseBig" class="big">Loading…</span></div>
     <div id="strip" class="strip"></div>
@@ -232,17 +234,17 @@
   </section>
 
   <section>
-    <div class="sec-h"><h2>Coordinators</h2><span class="count">hub + console</span></div>
+    <div class="sec-h"><h2>Your asks</h2><span id="backlogCount" class="count"></span></div>
+    <div id="backlog"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Coordinators</h2><span class="count">hub · console · cai</span></div>
     <div id="coordinators"><div class="empty">Loading…</div></div>
   </section>
 
   <section>
-    <div class="sec-h"><h2>Bus queue drain</h2><span class="count">hub still owes</span></div>
-    <div id="busDrain"><div class="empty">Loading…</div></div>
-  </section>
-
-  <section>
-    <div class="sec-h"><h2>Context bloat</h2><span class="count">latest per agent · /1M window</span></div>
+    <div class="sec-h"><h2>Context bloat</h2><span class="count">worker lanes · /1M window</span></div>
     <div id="ctxBloat"><div class="empty">Loading…</div></div>
   </section>
 
@@ -268,7 +270,7 @@
 
   <section>
     <div class="sec-h"><h2>Feed</h2><span class="count">bus · newest first</span></div>
-    <div class="feednote">The full message stream lives in the <a href="/classic">classic console</a> → Messages. The pulse + needs-you above surface anything that actually wants you.</div>
+    <div class="feednote">The pulse, needs-you, and your-asks above surface anything that actually wants you. The raw bus stream stays on the hub.</div>
   </section>
 
 </div>

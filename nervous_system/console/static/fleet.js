@@ -62,6 +62,19 @@
     d.textContent = label || (ok ? "● live" : "● offline");
   }
 
+  // The 🔑 token/auth badge shared by lanes, coordinators, and context-bloat rows
+  // (op#9017/9088). auth_fp = sha256(OAuth token)[:12]; Musa 68142948… (green) vs
+  // Syed 582043088… (amber) vs any other fp (grey). No fp -> no badge (a body that
+  // never self-registered its auth, e.g. the cross-host hub).
+  function tokenBadge(fp) {
+    fp = fp || "";
+    if (fp.indexOf("68142948") === 0)
+      return '<span class="tok" style="color:#4ade80" title="' + esc(fp) + '">🔑 Musa</span>';
+    if (fp.indexOf("582043088") === 0)
+      return '<span class="tok" style="color:#fbbf24" title="' + esc(fp) + '">🔑 Syed</span>';
+    return fp ? '<span class="tok" style="color:#94a3b8" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 8)) + '</span>' : '';
+  }
+
   // Last-good /api/fleet payload, persisted so a cold launch (or a launch on a
   // slow/degraded tailnet) paints real data INSTANTLY from cache and NEVER
   // shows a hard error — the network fetch then quietly refreshes it. This is
@@ -72,7 +85,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = "fc-v12";
+  var APP_BUILD = "fc-v15";
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -303,14 +316,8 @@
     var hbClass = hb == null || hb >= 900 ? "dead" : (hb >= 120 ? "stale" : "fresh");
     var hbTxt = hb == null ? "no hb" : "hb " + fmtAge(hb);
     // Token attribution (op#9017): which OAuth account this lane authenticates as.
-    // auth_fp = sha256(token)[:12]; Musa 68142948… (green) vs Syed 582043088… (amber).
     // A lane re-tokens only on a REAL restart, so this shows the migration state at a glance.
-    var fp = l.auth_fp || "";
-    var tok = fp.indexOf("68142948") === 0
-        ? '<span class="tok" style="color:#4ade80" title="' + esc(fp) + '">🔑 Musa</span>'
-        : fp.indexOf("582043088") === 0
-        ? '<span class="tok" style="color:#fbbf24" title="' + esc(fp) + '">🔑 Syed</span>'
-        : (fp ? '<span class="tok" style="color:#94a3b8" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 8)) + '</span>' : '');
+    var tok = tokenBadge(l.auth_fp);
     return '<div class="lane' + (l.flagged ? ' flag' : '') + '"' + (peek ? ' data-peek="' + esc(peek) + '"' : '') + '>' +
       '<div class="top">' +
         '<span class="st-dot ' + esc(l.bucket) + '"></span>' +
@@ -347,6 +354,10 @@
     // Reuses the exact lane peek machinery (data-peek + .peek box, bound by
     // bindPeeks) so the coordinator peek renders + toggles identically.
     var peek = c.peekable ? (c.tmux_session || "") : "";
+    // Each coordinator card carries its OWN context readout + token badge (op#9088).
+    var cctx = c.ctx_pct != null
+        ? '<span class="cctx ' + esc(c.ctx_level || "") + '">' + c.ctx_pct + '% ctx</span>' : '';
+    var tok = tokenBadge(c.auth_fp);
     return '<div class="lane coord"' + (peek ? ' data-peek="' + esc(peek) + '"' : '') + '>' +
       '<div class="top">' +
         '<span class="st-dot ' + dot + '"></span>' +
@@ -356,6 +367,8 @@
       (c.activity ? '<div class="act">' + esc(c.activity) + esc(age) + '</div>'
                   : '<div class="act coordidle">nothing on the bus recently</div>') +
       '<div class="meta"><span class="hb ' + hbClass + '">' + esc(seenTxt) + '</span>' +
+        cctx +
+        tok +
         (peek ? '<span class="tap">peek ›</span>' : '') +
         resetBtnHtml(c.agent_id) +
       '</div>' +
@@ -411,58 +424,90 @@
     }).join("") + '</div>';
   }
 
-  // ---- bus-queue drain (hub's owed backlog) -------------------------------
+  // ---- backlog (the operator's realtime "Your asks" tracker) --------------
   function fmtTok(n) {
     if (n == null) return "—";
     if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
     if (n >= 1e3) return Math.round(n / 1e3) + "k";
     return String(n);
   }
-  function renderBusDrain(d) {
-    var el = $("busDrain");
+  // status -> [css class, human label]. Group order matches the backend sort
+  // (needs_you first) so the operator's court floats to the top.
+  var BL_STATUS = {
+    needs_you:   ["wait", "needs you"],
+    in_progress: ["prog", "in progress"],
+    done:        ["done", "done"],
+    parked:      ["park", "parked"]
+  };
+  var BL_ORDER = ["needs_you", "in_progress", "done", "parked"];
+  function backlogItem(r) {
+    var meta = BL_STATUS[r.status] || ["park", r.status];
+    return '<div class="bl">' +
+      '<span class="bltag ' + meta[0] + '">' + esc(meta[1]) + '</span>' +
+      '<div class="blbody">' +
+        '<div class="blask">' + esc(r.ask) + '</div>' +
+        (r.note ? '<div class="blnote">' + esc(r.note) + '</div>' : '') +
+        (r.op_ref ? '<div class="blop">' + esc(r.op_ref) + '</div>' : '') +
+      '</div>' +
+    '</div>';
+  }
+  function renderBacklog(rows) {
+    var el = $("backlog");
     if (!el) return;
-    d = d || {};
-    var owed = d.owed;
-    if (owed == null) { el.innerHTML = '<div class="empty">Backlog unavailable.</div>'; return; }
-    var lvl = owed === 0 ? "green" : (owed <= 5 ? "amber" : "red");
-    var seg = function (label, n, cls) {
-      n = n || 0;
-      return '<span class="dseg"><b class="' + cls + '">' + n + '</b> ' + label + '</span>';
-    };
-    // age distribution IS the trend: a healthy hub keeps the tail (>24h) empty
-    // and the bulk fresh; a growing stale tail = the backlog is rotting.
-    el.innerHTML =
-      '<div class="drain">' +
-      '<div class="dbig ' + lvl + '"><span class="dn">' + owed + '</span>' +
-        '<span class="dl">' + (owed === 1 ? "message owed" : "messages owed") + '</span></div>' +
-      '<div class="dbreak">' +
-        seg("&lt;1h", d.fresh_1h, "good") +
-        seg("1–6h", d.h1_6, "dim") +
-        seg("6–24h", d.h6_24, "warn") +
-        seg("&gt;24h", d.older_24h, "bad") +
-        (d.oldest_age_s != null && owed > 0 ? '<span class="dseg oldest">oldest ' + esc(fmtAge(d.oldest_age_s)) + '</span>' : "") +
-      '</div></div>';
+    if (!rows || !rows.length) {
+      el.innerHTML = '<div class="empty">No asks tracked.</div>';
+      $("backlogCount").textContent = "";
+      return;
+    }
+    var byStatus = {};
+    rows.forEach(function (r) { (byStatus[r.status] = byStatus[r.status] || []).push(r); });
+    var needs = (byStatus.needs_you || []).length;
+    $("backlogCount").textContent = needs ? (needs + " need you") : "";
+    var html = "";
+    BL_ORDER.forEach(function (st) {
+      var items = byStatus[st];
+      if (items && items.length) html += items.map(backlogItem).join("");
+    });
+    el.innerHTML = html;
   }
 
-  // ---- context bloat (per always-on agent) --------------------------------
+  // ---- context bloat (worker lanes; coordinators live in their own section) --
+  // Collapsible (collapsed by default): the header summarises count + worst%,
+  // click to expand the per-lane bars. ctxExpanded is a MODULE var (like
+  // routineExpanded) so a background refresh never re-collapses what the operator
+  // opened. Each row carries the same 🔑 token badge as the lane cards (op#9088).
+  var ctxExpanded = false;
+  function ctxRow(r) {
+    var pct = r.pct == null ? 0 : r.pct;
+    var stale = r.age_s != null && r.age_s > 86400;   // >1d old reading -> flag it
+    return '<div class="ctx">' +
+      '<div class="ctxtop">' +
+        '<span class="ctxid">' + esc(r.agent) + '</span>' +
+        tokenBadge(r.auth_fp) +
+        '<span class="ctxpct ' + esc(r.level) + '">' + pct + '%</span>' +
+      '</div>' +
+      '<div class="bar"><div class="fill ' + esc(r.level) + '" style="width:' + pct + '%"></div></div>' +
+      '<div class="ctxmeta">' + fmtTok(r.ctx_tokens) + ' / ' + fmtTok(r.window || 1000000) +
+        (r.age_s != null ? ' · <span class="' + (stale ? "staler" : "") + '">' + esc(fmtAge(r.age_s)) + ' ago</span>' : "") +
+      '</div>' +
+    '</div>';
+  }
   function renderContextBloat(rows) {
     var el = $("ctxBloat");
     if (!el) return;
     if (!rows || !rows.length) { el.innerHTML = '<div class="empty">No context telemetry.</div>'; return; }
-    el.innerHTML = rows.map(function (r) {
-      var pct = r.pct == null ? 0 : r.pct;
-      var stale = r.age_s != null && r.age_s > 86400;   // >1d old reading -> flag it
-      return '<div class="ctx">' +
-        '<div class="ctxtop">' +
-          '<span class="ctxid">' + esc(r.agent) + '</span>' +
-          '<span class="ctxpct ' + esc(r.level) + '">' + pct + '%</span>' +
-        '</div>' +
-        '<div class="bar"><div class="fill ' + esc(r.level) + '" style="width:' + pct + '%"></div></div>' +
-        '<div class="ctxmeta">' + fmtTok(r.ctx_tokens) + ' / ' + fmtTok(r.window || 1000000) +
-          (r.age_s != null ? ' · <span class="' + (stale ? "staler" : "") + '">' + esc(fmtAge(r.age_s)) + ' ago</span>' : "") +
-        '</div>' +
-      '</div>';
-    }).join("");
+    var worst = rows.reduce(function (m, r) { return Math.max(m, r.pct || 0); }, 0);
+    var head = '<div class="collapsed" id="ctxToggle">' + (ctxExpanded ? "▾" : "▸") +
+      ' <b>' + rows.length + ' lane' + (rows.length > 1 ? 's' : '') + '</b> — worst ' + worst + '%</div>';
+    el.innerHTML = head +
+      '<div id="ctxList" style="display:' + (ctxExpanded ? "block" : "none") + '">' +
+      rows.map(ctxRow).join("") + '</div>';
+    var t = $("ctxToggle");
+    if (t) t.addEventListener("click", function () {
+      ctxExpanded = !ctxExpanded;
+      $("ctxList").style.display = ctxExpanded ? "block" : "none";
+      t.firstChild.textContent = (ctxExpanded ? "▾" : "▸") + " ";
+    });
   }
 
   // ---- token / auth per lane (Max vs metered + which account) -------------
@@ -633,8 +678,8 @@
     buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
     renderPulse(d.pulse || {});
     renderNeeds(d.needs_you || []);
+    renderBacklog(d.backlog || []);
     renderCoordinators(d.coordinators || []);
-    renderBusDrain(d.bus_drain || {});
     renderContextBloat(d.context_bloat || []);
     renderTokenAuth(d.token_auth || {});
     renderLanes(lanes);

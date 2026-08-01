@@ -299,34 +299,64 @@ _CTX_WINDOW = int(os.environ.get("CONSOLE_CTX_WINDOW", "1000000"))
 _CTX_SOFT = 0.60
 _CTX_HARD = 0.80
 
+# The three coordinator brains (op#9088). Their context now lives ON their own
+# cards in the Coordinators section, so they are FILTERED OUT of the context-bloat
+# list (which is worker lanes only). Instances (e.g. 'orch-console-2') are caught
+# by the prefix check too, so a re-registered twin can't leak back into the list.
+_COORD_IDENTITIES = ("cai", "cc-orchestrator", "orch-console")
+
+
+def _is_coord_identity(name) -> bool:
+    n = str(name or "")
+    return any(n == k or n.startswith(k + "-") for k in _COORD_IDENTITIES)
+
+
+def _ctx_level(ctx):
+    """(pct, level) of the model window for a current-context token count, or None
+    if the value is missing / non-positive / impossibly large (> the window — a
+    single turn cannot exceed the context window). Shared by the context-bloat
+    list AND the per-coordinator context readout so both use the SAME window +
+    green/amber/red thresholds."""
+    if ctx is None or _CTX_WINDOW <= 0:
+        return None
+    try:
+        ctx = int(ctx)
+    except (TypeError, ValueError):
+        return None
+    if ctx <= 0 or ctx > _CTX_WINDOW:
+        return None
+    frac = ctx / _CTX_WINDOW
+    pct = round(min(frac, 1.0) * 100)
+    level = "red" if frac >= _CTX_HARD else ("amber" if frac >= _CTX_SOFT else "green")
+    return pct, level
+
 
 def _context_bloat(rows):
-    """Annotate each latest-per-agent row with CURRENT-context pct (of the model
-    window) + a green/amber/red level, sorted fullest-first. `ctx_tokens` is the
-    live window fill (the last turn's actual input context). Rows whose value is
-    missing, non-positive, or impossibly large (> the window — a single call
-    cannot exceed the context window) are DROPPED as bad data rather than shown.
-    The caller surfaces `age_s` so a stale reading is never mistaken for live."""
+    """Annotate each latest-per-WORKER-LANE row with CURRENT-context pct (of the
+    model window) + a green/amber/red level, sorted fullest-first. `ctx_tokens` is
+    the live window fill (the last turn's actual input context). Rows whose value
+    is missing, non-positive, or impossibly large are DROPPED as bad data. The
+    three coordinators are EXCLUDED — their context shows on their own coordinator
+    cards now (op#9088). `auth_fp` rides through so each row shows the same 🔑
+    token badge as the lane cards; `age_s` surfaces a stale reading."""
     out = []
     if _CTX_WINDOW <= 0:
         return out
     for r in rows or []:
-        ctx = r.get("ctx_tokens")
-        if ctx is None:
-            continue
-        ctx = int(ctx)
-        if ctx <= 0 or ctx > _CTX_WINDOW:
+        if _is_coord_identity(r.get("cc_identity")):
+            continue  # coordinators live in the Coordinators section
+        lvl = _ctx_level(r.get("ctx_tokens"))
+        if lvl is None:
             continue  # bad data — cannot be a real current-context reading
-        frac = ctx / _CTX_WINDOW
-        pct = round(min(frac, 1.0) * 100)
-        level = "red" if frac >= _CTX_HARD else ("amber" if frac >= _CTX_SOFT else "green")
+        pct, level = lvl
         out.append({
             "agent": r.get("cc_identity"),
-            "ctx_tokens": ctx,
+            "ctx_tokens": int(r.get("ctx_tokens")),
             "window": _CTX_WINDOW,
             "pct": pct,
             "level": level,
             "age_s": r.get("age_s"),
+            "auth_fp": r.get("auth_fp"),
         })
     out.sort(key=lambda x: x["pct"], reverse=True)
     return out
@@ -351,8 +381,8 @@ def _fleet_payload():
         f_deploys = ex.submit(db.fetch_deploys)
         f_needs = ex.submit(db.fetch_needs_you)
         f_coord = ex.submit(db.fetch_coordinators)
-        # three new operator-visibility signals, fired concurrently:
-        f_drain = ex.submit(db.fetch_bus_drain)          # hub's owed bus backlog
+        # operator-visibility signals, fired concurrently:
+        f_backlog = ex.submit(db.fetch_backlog)          # operator's "Your asks" tracker
         f_bloat = ex.submit(db.fetch_context_bloat)      # per-agent context %
         f_auth = ex.submit(panes.lane_token_auth)        # Max vs metered + acct
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
@@ -361,10 +391,10 @@ def _fleet_payload():
         coordinators = f_coord.result()
         # each guarded: a signal failing must not blank the whole aggregate.
         try:
-            bus_drain = f_drain.result()
+            backlog = f_backlog.result()
         except Exception as e:
-            logger.warning("bus_drain failed: %s", e)
-            bus_drain = {"owed": None}
+            logger.warning("backlog failed: %s", e)
+            backlog = []
         try:
             context_bloat = _context_bloat(f_bloat.result())
         except Exception as e:
@@ -383,6 +413,10 @@ def _fleet_payload():
     for c in coordinators:
         sess = c.get("tmux_session")
         c["peekable"] = bool(sess and (sess in live or sess in _COORD_DB_PEEK))
+        # Each coordinator card carries its OWN context readout (op#9088), from
+        # the same source + thresholds as the context-bloat list.
+        lvl = _ctx_level(c.get("ctx_tokens"))
+        c["ctx_pct"], c["ctx_level"] = (lvl if lvl is not None else (None, None))
 
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for l in lanes:
@@ -407,10 +441,10 @@ def _fleet_payload():
     return {
         "pulse": {**counts, "needs_you": len(needs)},
         "needs_you": _jsonable(needs),
+        "backlog": _jsonable(backlog),
         "coordinators": _jsonable(coordinators),
         "lanes": _jsonable(lanes),
         "deploys": _jsonable(deploys),
-        "bus_drain": _jsonable(bus_drain),
         "context_bloat": _jsonable(context_bloat),
         "token_auth": _jsonable(token_auth),
     }

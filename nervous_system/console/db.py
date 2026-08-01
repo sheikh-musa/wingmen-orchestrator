@@ -279,19 +279,43 @@ def fetch_needs_you() -> List[dict]:
 
 
 def build_coordinators_query() -> Tuple[str, list]:
-    """The two orchestrator bodies (orch hub + Nazim) - not lanes, so absent
-    from fleet_lanes. Liveness = freshest of their latest bus row or outbound
-    operator message; activity = latest bus subject. tmux_session names the
-    body's live pane so the console can peek it like a lane (operator #3672) —
+    """The three coordinator brains (orch hub + Nazim + cai) - not lanes, so
+    absent from fleet_lanes. Liveness = freshest of their latest bus row or
+    outbound operator message; activity = latest bus subject. tmux_session names
+    the body's live pane so the console can peek it like a lane (operator #3672) —
     'orch' is the hub session on THIS (Studio) host; 'nazim' is Nazim's console
     session (on the MacBook, so only peekable when that pane is local — the
-    caller marks it peekable only if the session is in local list-sessions)."""
+    caller marks it peekable only if the session is in local list-sessions);
+    'cai' is the governance node.
+
+    Each card also carries its OWN context + token attribution (operator op#9088):
+      * `ctx_tokens`/`ctx_age_s` — the freshest current-context reading from
+        cc_session_costs.latest_context_tokens for this body's cc_identity (the
+        SAME source the context-bloat section uses); the caller turns it into a
+        pct/level with the same window + thresholds.
+      * `auth_fp`/`auth_account` — the freshest non-null OAuth fingerprint this
+        body self-registered in agent_status, so the coordinator card shows the
+        same 🔑 token badge the lane cards do (a body that never self-registers,
+        like the cross-host hub, simply has no fp -> no badge)."""
     sql = (
         "SELECT c.agent_id, c.short, c.role_label, c.tmux_session, "
         "  (SELECT subject FROM agent_messages m "
         "     WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1) AS activity, "
         "  (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM agent_messages m "
         "     WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1) AS activity_age_s, "
+        "  (SELECT cs.latest_context_tokens FROM cc_session_costs cs "
+        "     WHERE cs.cc_identity = c.agent_id AND cs.latest_context_tokens IS NOT NULL "
+        "     ORDER BY COALESCE(cs.ended_at, cs.created_at) DESC LIMIT 1) AS ctx_tokens, "
+        "  (SELECT round(extract(epoch FROM (now()-COALESCE(cs.ended_at, cs.created_at))))::int "
+        "     FROM cc_session_costs cs "
+        "     WHERE cs.cc_identity = c.agent_id AND cs.latest_context_tokens IS NOT NULL "
+        "     ORDER BY COALESCE(cs.ended_at, cs.created_at) DESC LIMIT 1) AS ctx_age_s, "
+        "  (SELECT a.auth_fp FROM agent_status a "
+        "     WHERE a.base_agent_id = c.agent_id AND a.auth_fp IS NOT NULL "
+        "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS auth_fp, "
+        "  (SELECT a.auth_account FROM agent_status a "
+        "     WHERE a.base_agent_id = c.agent_id AND a.auth_fp IS NOT NULL "
+        "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS auth_account, "
         "  LEAST( "
         "    (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM agent_messages m "
         "       WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1), "
@@ -300,7 +324,8 @@ def build_coordinators_query() -> Tuple[str, list]:
         "  ) AS last_seen_s "
         "FROM (VALUES "
         "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel','orch'), "
-        "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console','nazim') "
+        "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console','nazim'), "
+        "  ('cai','cai','governance / strategic node','cai','cai') "
         ") AS c(agent_id, short, role_label, op_tag, tmux_session) "
         "ORDER BY c.agent_id"
     )
@@ -512,43 +537,30 @@ def fetch_queue() -> List[dict]:
     return _query(sql, params)
 
 
-def build_bus_drain_query() -> Tuple[str, list]:
-    """The hub's actionable bus backlog — what cc-orchestrator STILL OWES.
+def build_backlog_query() -> Tuple[str, list]:
+    """The operator's REALTIME "Your asks" tracker (operator op#9088).
 
-    A row is owed when it's addressed to the hub AND either unread OR a
-    requires_response that hasn't been responded/skipped. Test rows are
-    excluded. Alongside the single `owed` count we return an AGE DISTRIBUTION
-    (fresh <1h / 1-6h / 6-24h / >24h) + the oldest age — an honest 'is it
-    draining or rotting?' signal computable from current state (there is no
-    backlog time-series table, so this is the real trend surface: a healthy
-    hub keeps the tail small and the bulk fresh)."""
+    Reads live from the `operator_backlog` substrate table (Nazim maintains the
+    rows; the console just renders them), so the running backlog is one place the
+    operator can always look and it refreshes on the normal /api/fleet poll — no
+    static HTML page to regenerate. Ordered by STATUS priority (needs_you first,
+    then in_progress, done, parked) so what wants the operator floats to the top,
+    then by the curator's explicit `sort_order`, then id as a stable tiebreak."""
     sql = (
-        "SELECT "
-        "  count(*) AS owed, "
-        "  count(*) FILTER (WHERE created_at > now() - interval '1 hour') AS fresh_1h, "
-        "  count(*) FILTER (WHERE created_at <= now() - interval '1 hour' "
-        "    AND created_at > now() - interval '6 hours') AS h1_6, "
-        "  count(*) FILTER (WHERE created_at <= now() - interval '6 hours' "
-        "    AND created_at > now() - interval '24 hours') AS h6_24, "
-        "  count(*) FILTER (WHERE created_at <= now() - interval '24 hours') AS older_24h, "
-        "  round(extract(epoch FROM (now() - min(created_at))))::int AS oldest_age_s "
-        "FROM agent_messages "
-        "WHERE to_agent = 'cc-orchestrator' "
-        "  AND COALESCE(is_test, false) = false "
-        "  AND (read_at IS NULL "
-        "       OR (requires_response AND responded_at IS NULL AND skipped_at IS NULL))"
+        "SELECT id, ask, status, op_ref, note, sort_order, "
+        "  round(extract(epoch FROM (now()-updated_at)))::int AS updated_age_s "
+        "FROM operator_backlog "
+        "ORDER BY CASE status "
+        "    WHEN 'needs_you' THEN 0 WHEN 'in_progress' THEN 1 "
+        "    WHEN 'done' THEN 2 WHEN 'parked' THEN 3 ELSE 4 END, "
+        "  sort_order, id"
     )
     return sql, []
 
 
-def fetch_bus_drain() -> dict:
-    """One row: the hub's owed-backlog count + age distribution. Always returns a
-    dict (zeros if the bus is clear)."""
-    sql, params = build_bus_drain_query()
-    rows = _query(sql, params)
-    if rows:
-        return rows[0]
-    return {"owed": 0, "fresh_1h": 0, "h1_6": 0, "h6_24": 0, "older_24h": 0, "oldest_age_s": None}
+def fetch_backlog() -> List[dict]:
+    sql, params = build_backlog_query()
+    return _query(sql, params)
 
 
 def build_context_bloat_query() -> Tuple[str, list]:
@@ -570,7 +582,13 @@ def build_context_bloat_query() -> Tuple[str, list]:
         "  latest_context_tokens AS ctx_tokens, "
         "  input_tokens, "
         "  round(extract(epoch FROM (now() - COALESCE(ended_at, created_at))))::int AS age_s, "
-        "  COALESCE(ended_at, created_at) AS latest_at "
+        "  COALESCE(ended_at, created_at) AS latest_at, "
+        # Freshest OAuth fingerprint this identity self-registered in agent_status,
+        # so each context-bloat row shows the same 🔑 token badge as the lane cards
+        # (operator op#9088). cc_identity == agent_status.base_agent_id for lanes.
+        "  (SELECT a.auth_fp FROM agent_status a "
+        "     WHERE a.base_agent_id = cc_session_costs.cc_identity AND a.auth_fp IS NOT NULL "
+        "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS auth_fp "
         "FROM cc_session_costs "
         "WHERE cc_identity NOT LIKE 'operator-%%' "
         "  AND latest_context_tokens IS NOT NULL "
