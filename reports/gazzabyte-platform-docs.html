@@ -128,6 +128,8 @@
   .card .ct .badge { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; padding: 2px 8px; border-radius: 20px; }
   .badge.control { background: var(--accent-soft); color: var(--accent); }
   .badge.rule { background: var(--gold-soft); color: var(--gold); }
+  .badge.soon { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent); }
+  .card.soon { border-style: dashed; }
   .card h4 { margin: 0; font-size: 14.5px; font-weight: 650; }
   .card p { font-size: 13.5px; color: var(--ink-soft); }
 
@@ -256,7 +258,7 @@
     <div class="flow">
       <div class="state">
         <div class="sname">DRAFT</div>
-        <div class="sdesc">Amounts entered and corrected. Editable while it stays a draft.</div>
+        <div class="sdesc">Figures are entered here; the report stays editable while it remains a draft.</div>
       </div>
       <div class="arrow">
         <div class="lbl">Preparer signs</div>
@@ -278,7 +280,7 @@
 
     <div class="reopen">
       <span class="rl">↺ REOPEN</span>
-      <div>A signed report can be sent back to <code>draft</code> for a correction. Reopening permanently marks it as <b>having once been signed</b> &mdash; which changes who may re-sign it (see the displacement guard below).</div>
+      <div>Only an <b>org admin</b> can send a <code>preparer_signed</code> report back to <code>draft</code>, and only with a recorded reason. A report that has <b>ever been signed</b> keeps that mark permanently &mdash; reopening cannot clear it &mdash; and that is what enforces preparer-only re-signing (below). A <code>closed</code> report is terminal: it cannot be reopened.</div>
     </div>
 
     <div class="guard-grid">
@@ -297,10 +299,10 @@
         <h4>Tamper-evident trail</h4>
         <p>Each signing writes a link in a hash-chained audit record. Any later alteration to the sequence is detectable &mdash; the trail can't be quietly rewritten.</p>
       </div>
-      <div class="card">
-        <div class="ct"><span class="badge control">Safeguard</span></div>
-        <h4>Atomic amount corrections</h4>
-        <p>A tin amount can be corrected while the report is still a draft; the change records old&nbsp;&rarr;&nbsp;new and applies as a single all-or-nothing step, so a figure can never be left half-updated.</p>
+      <div class="card soon">
+        <div class="ct"><span class="badge soon">Coming next release</span></div>
+        <h4>Correct a banked amount before signing</h4>
+        <p>An upcoming release lets a preparer correct a <b>banked</b> tin's counted amount while the report is still a draft &mdash; with a required reason, the amount and its breakdown written in one all-or-nothing step, and old&nbsp;&rarr;&nbsp;new appended to the audit trail. It freezes the moment the report is signed. <em>Rolling out shortly.</em></p>
       </div>
     </div>
 
