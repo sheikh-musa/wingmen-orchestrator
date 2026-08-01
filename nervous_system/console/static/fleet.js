@@ -302,6 +302,15 @@
     var hb = l.heartbeat_age_s;
     var hbClass = hb == null || hb >= 900 ? "dead" : (hb >= 120 ? "stale" : "fresh");
     var hbTxt = hb == null ? "no hb" : "hb " + fmtAge(hb);
+    // Token attribution (op#9017): which OAuth account this lane authenticates as.
+    // auth_fp = sha256(token)[:12]; Musa 68142948… (green) vs Syed 582043088… (amber).
+    // A lane re-tokens only on a REAL restart, so this shows the migration state at a glance.
+    var fp = l.auth_fp || "";
+    var tok = fp.indexOf("68142948") === 0
+        ? '<span class="tok" style="color:#4ade80" title="' + esc(fp) + '">🔑 Musa</span>'
+        : fp.indexOf("582043088") === 0
+        ? '<span class="tok" style="color:#fbbf24" title="' + esc(fp) + '">🔑 Syed</span>'
+        : (fp ? '<span class="tok" style="color:#94a3b8" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 8)) + '</span>' : '');
     return '<div class="lane' + (l.flagged ? ' flag' : '') + '"' + (peek ? ' data-peek="' + esc(peek) + '"' : '') + '>' +
       '<div class="top">' +
         '<span class="st-dot ' + esc(l.bucket) + '"></span>' +
@@ -311,6 +320,7 @@
       (act ? '<div class="act">' + esc(act) + '</div>' : '') +
       '<div class="meta">' +
         '<span class="hb ' + hbClass + '">' + esc(hbTxt) + '</span>' +
+        tok +
         (l.desired_state ? '<span>desired: ' + esc(l.desired_state) + '</span>' : '') +
         (peek ? '<span class="tap">peek ›</span>' : '') +
         resetBtnHtml(l.agent_id) +

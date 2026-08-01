@@ -114,6 +114,8 @@ def build_lanes_query() -> Tuple[str, list]:
         "  s.status, "
         "  s.current_task, "
         "  s.tmux_session, "
+        "  s.auth_account, "
+        "  s.auth_fp, "
         "  round(extract(epoch FROM (now() - s.last_heartbeat)))::int "
         "    AS heartbeat_age_s, "
         "  l.desired_state, "
