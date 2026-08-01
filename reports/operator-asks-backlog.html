@@ -1,0 +1,52 @@
+<title>Your Asks — Backlog</title>
+<style>
+  :root{--bg:#0c1420;--surface:#141f2e;--edge:#22303f;--txt:#e6edf3;--dim:#94a3b8;--done:#4ade80;--prog:#fbbf24;--wait:#f87171;--park:#8b9bb0}
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--txt);margin:0;line-height:1.5}
+  .wrap{max-width:760px;margin:0 auto;padding:1.5rem 1.25rem 4rem}
+  h1{font-size:1.35rem;margin:0 0 .25rem}
+  .sub{color:var(--dim);font-size:.85rem;margin:0 0 1.5rem}
+  h2{font-size:1rem;margin:1.75rem 0 .6rem;padding-bottom:.35rem;border-bottom:1px solid var(--edge)}
+  .item{background:var(--surface);border:1px solid var(--edge);border-radius:12px;padding:.8rem .9rem;margin:.55rem 0;display:flex;gap:.7rem;align-items:flex-start}
+  .tag{flex:0 0 auto;font-size:.68rem;font-weight:700;letter-spacing:.04em;padding:.2rem .5rem;border-radius:999px;white-space:nowrap;margin-top:.1rem}
+  .t-done{background:rgba(74,222,128,.15);color:var(--done)}
+  .t-prog{background:rgba(251,191,36,.15);color:var(--prog)}
+  .t-wait{background:rgba(248,113,113,.15);color:var(--wait)}
+  .t-park{background:rgba(139,155,176,.15);color:var(--park)}
+  .body{flex:1 1 auto;min-width:0}
+  .ask{font-weight:600;font-size:.92rem}
+  .note{color:var(--dim);font-size:.82rem;margin-top:.15rem}
+  .op{color:var(--dim);font-size:.72rem;font-variant-numeric:tabular-nums}
+  @media (max-width:520px){
+    .wrap{padding:1.1rem .8rem 3rem}
+    h1{font-size:1.2rem}
+    .item{flex-direction:column;gap:.4rem;padding:.75rem .8rem}
+    .tag{margin-top:0}
+  }
+</style>
+<div class="wrap">
+<h1>Your Asks — running backlog</h1>
+<p class="sub">Maintained by Nazim. Everything you've asked for, with status. Updated 2 Aug 2026 (session snapshot). 🔴 needs you · 🟡 in progress · 🟢 done · ⚪ parked.</p>
+
+<h2>🔴 Awaiting your call</h2>
+<div class="item"><span class="tag t-wait">NEEDS YOU</span><div class="body"><div class="ask">Head-of-revenue: two decisions</div><div class="note">(1) dedicated finance-agent vs a console function? (2) where do I pull real billing — which card/dashboard for the Claude Max subs (the biggest line)?</div><div class="op">op#8864</div></div></div>
+<div class="item"><span class="tag t-wait">NEEDS YOU</span><div class="body"><div class="ask">HeartMuLa music on your Abu Dhabi GPU desktop</div><div class="note">You'll add the desktop to the tailnet + SSH key when back tonight → I stand up HeartMuLa (real-orchestra open model on real CUDA).</div><div class="op">op#9046</div></div></div>
+<div class="item"><span class="tag t-wait">NEEDS YOU</span><div class="body"><div class="ask">SRE auto-recycle of lanes — approach</div><div class="note">Answered: capability built but doctrine holds SRE to page-only. Your call: hub-identity red-reset vs a cai carve-out. Rec: arm post-demo.</div><div class="op">op#8995</div></div></div>
+<div class="item"><span class="tag t-wait">YOUR COURT</span><div class="body"><div class="ask">Token remediation (Studio burned Owner token + Mini on Gazzabyte's token)</div><div class="note">Exposure not outage. You have the replace commands; I verify the auth fp after.</div></div></div>
+
+<h2>🟡 In progress</h2>
+<div class="item"><span class="tag t-prog">BUILDING</span><div class="body"><div class="ask">Video pipeline — the big one</div><div class="note">Editor built (comment/trim/dedup/full-library, mobile-fixed). Now reworking the DEFAULT cut for real variety + following the 3 prior batches' storyboards, mined into a reusable template + pipeline runbook, designed so gap-analysis (what to shoot) drops in once ingestion lands.</div><div class="op">op#9024·9040·9050·9074·9076·9078</div></div></div>
+<div class="item"><span class="tag t-prog">BUILDING</span><div class="body"><div class="ask">Sovereign music — Stable Audio Open on the Studio</div><div class="note">Studio reachable + MPS confirmed; env setup underway. HeartMuLa (your desktop) is the better path once access lands tonight.</div><div class="op">op#9046</div></div></div>
+<div class="item"><span class="tag t-prog">AT THE GATE</span><div class="body"><div class="ask">Clear the irsyad backlog — full tilt</div><div class="note">Displacement-guard: DONE + live. Tin-edit relax (mig134): re-proved zero-holes, now at CI → cai grant → apply. Platform toggles (module + school-split): 2nd lane (cc-ihsanos-1) speccing. NETS + sales@ enrollment: authorized, hub tasking.</div><div class="op">op#8999·9029·9042</div></div></div>
+<div class="item"><span class="tag t-prog">DESIGN</span><div class="body"><div class="ask">Payment-agnostic rails, built for irsyad (their store) reusably</div><div class="note">School fees + storefront checkout, payment-agnostic. Building for irsyad's own store first, as reusable substrate. (Noted as a standing principle for everything we build for irsyad.)</div><div class="op">op#16:50–16:57</div></div></div>
+<div class="item"><span class="tag t-prog">BUILDING</span><div class="body"><div class="ask">This backlog</div><div class="note">You're looking at it. I'll keep it current as things clear.</div><div class="op">op#9081</div></div></div>
+
+<h2>🟢 Recently done (this session)</h2>
+<div class="item"><span class="tag t-done">DONE</span><div class="body"><div class="ask">Arm the context-health watchdog alerting</div><div class="note">amber pages + auto-checkpoint; test page proven. Root cause was a live-vs-repo plist drift.</div><div class="op">op#8985</div></div></div>
+<div class="item"><span class="tag t-done">DONE</span><div class="body"><div class="ask">Fix the reset-button double-/clear (all 3 + console)</div><div class="note">Root-caused (callbacks skipped the dedupe gate), fixed + deployed on both hosts, regression test.</div><div class="op">op#8989·8992</div></div></div>
+<div class="item"><span class="tag t-done">DONE</span><div class="body"><div class="ask">Show token attribution on the console + shift all lanes to your token</div><div class="note">🔑 badges live; all worker lanes migrated to your token + Opus 4.8 (per your "4.8 not 5").</div><div class="op">op#9015·9017·9020</div></div></div>
+<div class="item"><span class="tag t-done">DONE</span><div class="body"><div class="ask">More lanes / full-tilt parallelism</div><div class="note">2nd platform lane (cc-ihsanos-1) stood up with its own inbox (caught + avoided a shared-inbox collision).</div><div class="op">op#9029·8973</div></div></div>
+<div class="item"><span class="tag t-done">DONE</span><div class="body"><div class="ask">Mobile-friendly video editor</div><div class="note">Fixed + released the phone-ready link (caught + corrected a false negative in my own check).</div><div class="op">op#9050</div></div></div>
+<div class="item"><span class="tag t-done">DONE</span><div class="body"><div class="ask">Publish platform docs + refresh the client status board</div><div class="note">Both live + verified. A not-yet-live claim was caught + corrected before any client saw it.</div></div></div>
+<div class="item"><span class="tag t-done">ANSWERED</span><div class="body"><div class="ask">Music: are the beds AI? real orchestra? open-source? costs?</div><div class="note">Lyria = synthetic (rejected); real orchestra = Artlist (~$199/yr) or Suno; sovereign = Stable Audio Open / HeartMuLa. Routes chosen.</div><div class="op">op#9040·9046</div></div></div>
+</div>
