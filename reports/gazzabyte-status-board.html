@@ -112,21 +112,55 @@
   .card h3 { font-size: 15px; font-weight: 650; margin: 0; line-height: 1.32; letter-spacing: -0.01em; flex: 1; }
   .card .dot { margin-top: 6px; }
   .card p { margin: 8px 0 0; font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; }
+  .card a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  .card a:hover { text-decoration: underline; }
   .tag {
     display: inline-block; margin-top: 10px; font-size: 11px; font-weight: 600;
     text-transform: uppercase; letter-spacing: .05em; color: var(--ink-faint);
   }
 
   footer { margin-top: 34px; font-size: 12.5px; color: var(--ink-faint); text-align: center; line-height: 1.6; }
+
+  .head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .pdf-btn {
+    flex: none; margin-top: 4px; display: inline-flex; align-items: center; gap: 7px;
+    font: inherit; font-size: 13px; font-weight: 600; color: #fff; background: var(--accent);
+    border: none; border-radius: 9px; padding: 9px 15px; cursor: pointer;
+    box-shadow: var(--shadow); transition: filter .15s ease;
+  }
+  .pdf-btn:hover { filter: brightness(1.06); }
+  .pdf-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .pdf-btn svg { width: 15px; height: 15px; }
+
+  @media print {
+    :root {
+      --ground: #fff; --surface: #fff; --surface-2: #f2f4f6;
+      --ink: #111; --ink-soft: #333; --ink-faint: #555;
+      --line: #ccc; --line-soft: #ddd; --shadow: none;
+    }
+    body { background: #fff; }
+    .wrap { max-width: none; padding: 0; }
+    .pdf-btn { display: none; }
+    .card { break-inside: avoid; box-shadow: none; }
+    .col { break-inside: avoid; }
+  }
 </style>
 
 <div class="wrap">
   <header>
-    <p class="eyebrow">Gazzabyte &times; Irsyad</p>
-    <h1>Build status</h1>
-    <p class="lede">A live view of what we're working on for you &mdash; in progress, queued, and done &mdash; so we both have one place to check instead of re-listing it.</p>
+    <div class="head-row">
+      <div>
+        <p class="eyebrow">Gazzabyte &times; Irsyad</p>
+        <h1>Build status</h1>
+        <p class="lede">A live view of what we're working on for you &mdash; in progress, queued, and done &mdash; so we both have one place to check instead of re-listing it.</p>
+      </div>
+      <button class="pdf-btn" type="button" onclick="window.print()" aria-label="Download this page as PDF">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download PDF
+      </button>
+    </div>
     <div class="meta">
-      <span>Updated <b>31 Jul 2026, 10:25</b> (SGT +8: 18:25)</span>
+      <span>Updated <b>2 Aug 2026, 00:33</b> (SGT)</span>
       <span class="legend">
         <span><span class="dot progress"></span> In progress</span>
         <span><span class="dot queued"></span> Queued</span>
@@ -138,68 +172,68 @@
   <div class="board">
     <!-- IN PROGRESS -->
     <section class="col progress">
-      <div class="col-head"><h2>In progress</h2><span class="count">4</span></div>
+      <div class="col-head"><h2>In progress</h2><span class="count">3</span></div>
       <div class="col-rail"></div>
 
       <article class="card">
         <div class="card-top"><h3>Edit a tin amount before a report is submitted</h3><span class="dot progress"></span></div>
-        <p>The preparer can correct an amount while a report is still a draft. The change shows old &rarr; new and is recorded. In build &amp; review.</p>
-        <span class="tag">Building</span>
+        <p>Design confirmed with you (the preparer corrects the amount on a draft; no toggle). Built and now in final independent review before it goes live &mdash; the change shows old &rarr; new and is recorded. Expected live within the next few days.</p>
+        <span class="tag">In final review</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>Preparer-only signing after a report is sent back</h3><span class="dot progress"></span></div>
-        <p>Once a report is sent back, only the preparer can sign it &mdash; an admin can't take that step while a preparer exists. In independent review.</p>
-        <span class="tag">In review</span>
+        <div class="card-top"><h3>Module on/off toggle (Gazzabyte-controlled)</h3><span class="dot progress"></span></div>
+        <p>Turn modules on or off per institution, controlled by Gazzabyte. Now in active build (most of the plumbing already exists). Access being set up for sales@gazzabyte.sg. Targeting this week.</p>
+        <span class="tag">In build</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>Extra safeguards on the upload's fund-matching</h3><span class="dot progress"></span></div>
-        <p>Hardening the checks around how bank entries are matched and held, on top of what's already live. In review.</p>
-        <span class="tag">In review</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Documentation set</h3><span class="dot progress"></span></div>
-        <p>Approval-workflow flowchart, platform sitemap, and access &amp; usage SOPs &mdash; for you to present to clients. Drafting; due next week.</p>
-        <span class="tag">Drafting</span>
+        <div class="card-top"><h3>Turn on individual school pages</h3><span class="dot progress"></span></div>
+        <p>Show only the school pages you want (e.g. Students, Fees) and hide the rest. The school area was one switch, so we're splitting it into per-page controls &mdash; a real build, now underway.</p>
+        <span class="tag">In build &middot; new build</span>
       </article>
     </section>
 
     <!-- QUEUED -->
     <section class="col queued">
-      <div class="col-head"><h2>Queued</h2><span class="count">4</span></div>
+      <div class="col-head"><h2>Queued</h2><span class="count">2</span></div>
       <div class="col-rail"></div>
 
       <article class="card">
-        <div class="card-top"><h3>Module on/off toggle (Gazzabyte-controlled)</h3><span class="dot queued"></span></div>
-        <p>Turn modules on or off per institution, controlled by Gazzabyte. Most of it already exists; needs a bit of wiring. Access confirmed for sales@gazzabyte.sg.</p>
-        <span class="tag">Queued</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Turn on individual school pages</h3><span class="dot queued"></span></div>
-        <p>Show only the school pages you want (e.g. Students, Fees) and hide the rest. The school area is one switch today, so this needs splitting &mdash; real build.</p>
-        <span class="tag">Queued &middot; new build</span>
-      </article>
-
-      <article class="card">
         <div class="card-top"><h3>Fees &amp; student-payment reports</h3><span class="dot queued"></span></div>
-        <p>These reports don't exist yet, so they're new work rather than a switch-on. Scoping.</p>
-        <span class="tag">Queued &middot; new build</span>
+        <p>These reports don't exist yet, so they're new work rather than a switch-on. Being scoped now &mdash; we'll share an estimate once the shape is set.</p>
+        <span class="tag">Scoping &middot; new build</span>
       </article>
 
       <article class="card">
         <div class="card-top"><h3>NETS payment gateway</h3><span class="dot queued"></span></div>
-        <p>Payment-gateway integration. Touches money movement, so it goes through proper scoping and review &mdash; best treated together with the eNETS/GIRO ask.</p>
-        <span class="tag">Scoping</span>
+        <p>Payment-gateway integration. Because it touches money movement, it's going through a governance review first, then scoping &mdash; best treated together with the eNETS/GIRO ask.</p>
+        <span class="tag">Governance review</span>
       </article>
     </section>
 
     <!-- DONE -->
     <section class="col done">
-      <div class="col-head"><h2>Done</h2><span class="count">2</span></div>
+      <div class="col-head"><h2>Done</h2><span class="count">5</span></div>
       <div class="col-rail"></div>
+
+      <article class="card">
+        <div class="card-top"><h3>Documentation set</h3><span class="dot done"></span></div>
+        <p>Platform sitemap, the tabung approval-workflow, and access &amp; usage SOPs &mdash; for you to present to institutions. Published, with a download-PDF option. <a href="/r/platform-docs">Open the docs &rarr;</a></p>
+        <span class="tag">Live</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Extra safeguards on the upload's fund-matching</h3><span class="dot done"></span></div>
+        <p>The checks around how bank entries are matched and held are now hardened and live: a server-minted provenance check on each upload, rows that could match more than one fund are held for review, and the matched fund is recorded for audit.</p>
+        <span class="tag">Live</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Preparer-only signing after a report is sent back</h3><span class="dot done"></span></div>
+        <p>Once a report is sent back, only the preparer can sign it again &mdash; an admin can't take that step while a preparer exists. Live and in effect.</p>
+        <span class="tag">Live</span>
+      </article>
 
       <article class="card">
         <div class="card-top"><h3>Bank-statement upload is open</h3><span class="dot done"></span></div>
