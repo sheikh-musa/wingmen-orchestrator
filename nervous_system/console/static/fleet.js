@@ -85,7 +85,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = "fc-v16";
+  var APP_BUILD = "fc-v17";
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -451,11 +451,17 @@
       '</div>' +
     '</div>';
   }
+  // Collapsible (op#9102), default EXPANDED — it's the operator's primary plate,
+  // so visible by default but he can collapse it. backlogExpanded is a MODULE var
+  // (like ctxExpanded) so a background refresh never re-collapses his choice.
+  // Done tasks are excluded server-side (build_backlog_query), so this is only
+  // his OPEN plate: needs_you + in_progress (+ parked).
+  var backlogExpanded = true;
   function renderBacklog(rows) {
     var el = $("backlog");
     if (!el) return;
     if (!rows || !rows.length) {
-      el.innerHTML = '<div class="empty">No asks tracked.</div>';
+      el.innerHTML = '<div class="empty">No open asks. ✨</div>';
       $("backlogCount").textContent = "";
       return;
     }
@@ -468,7 +474,16 @@
       var items = byStatus[st];
       if (items && items.length) html += items.map(backlogItem).join("");
     });
-    el.innerHTML = html;
+    var head = '<div class="collapsed" id="blToggle">' + (backlogExpanded ? "▾" : "▸") +
+      ' <b>' + rows.length + ' open</b>' + (needs ? ' — ' + needs + ' need you' : '') + '</div>';
+    el.innerHTML = head +
+      '<div id="blList" style="display:' + (backlogExpanded ? "block" : "none") + '">' + html + '</div>';
+    var t = $("blToggle");
+    if (t) t.addEventListener("click", function () {
+      backlogExpanded = !backlogExpanded;
+      $("blList").style.display = backlogExpanded ? "block" : "none";
+      t.firstChild.textContent = (backlogExpanded ? "▾" : "▸") + " ";
+    });
   }
 
   // ---- context bloat (worker lanes; coordinators live in their own section) --

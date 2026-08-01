@@ -550,6 +550,7 @@ def build_backlog_query() -> Tuple[str, list]:
         "SELECT id, ask, status, op_ref, note, sort_order, "
         "  round(extract(epoch FROM (now()-updated_at)))::int AS updated_age_s "
         "FROM operator_backlog "
+        "WHERE status <> 'done' "          # op#9102: done tasks dropped from the view (kept in-table for history)
         "ORDER BY CASE status "
         "    WHEN 'needs_you' THEN 0 WHEN 'in_progress' THEN 1 "
         "    WHEN 'done' THEN 2 WHEN 'parked' THEN 3 ELSE 4 END, "
