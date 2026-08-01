@@ -77,6 +77,35 @@ def test_redelivered_update_never_double_logs(db, monkeypatch):
         assert cur.fetchone()[0] is not None                      # audit joint set
 
 
+def _cb(update_id, data="reset_nazim", presser=1111):
+    return {"update_id": update_id,
+            "callback_query": {"id": f"cb{update_id}", "data": data,
+                               "from": {"id": presser},
+                               "message": {"chat": {"id": 1111}}}}
+
+
+def test_redelivered_button_never_double_runs(db, monkeypatch):
+    """op#8989: a redelivered reset-button callback must NOT run the destructive
+    script twice (the double-/clear the operator caught 2026-08-01). The callback
+    path claims the update_id in ingest_dedup — only the winner runs the script;
+    a replay is answered and skipped. Covers all three reset buttons (one handler)."""
+    import types
+    monkeypatch.setenv("MUSA_TELEGRAM_ID", "1111")
+    runs = []
+    monkeypatch.setattr(ingest.subprocess, "run",
+                        lambda cmd, **kw: runs.append(cmd) or
+                        types.SimpleNamespace(returncode=0, stdout="[reset] done", stderr=""))
+    monkeypatch.setattr(ingest, "_answer_callback", lambda *a, **k: None)
+    monkeypatch.setattr(ingest, "tg_call", lambda *a, **k: {"ok": True})
+    ch = _channel(db)
+    assert ingest.process_update(db, ch, _cb(9101)) is True     # first press runs it
+    assert ingest.process_update(db, ch, _cb(9101)) is True     # redelivery: handled, no re-run
+    assert len(runs) == 1                                       # script ran EXACTLY once
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM ingest_dedup WHERE telegram_update_id=9101")
+        assert cur.fetchone()[0] == 1
+
+
 # ── Gate: deny-by-default from config ─────────────────────────────────────────
 
 def test_gate_deny_by_default_and_allow_paths(db):

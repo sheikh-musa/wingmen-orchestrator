@@ -62,6 +62,19 @@ RESET_ACTIONS = {
     "hub":   ("scripts/reset_hub_remote.sh", "clear the hub (VPS)"),
 }
 
+# Reset idempotency guard (op#8989 — parity with the Telegram-button fix). The
+# console is a ThreadingHTTPServer, so a double-click or a retried POST fires two
+# near-simultaneous /api/reset calls; without a guard each runs the reset script
+# and re-creates the double-/clear the operator caught. Per-body claim, atomic
+# under _RESET_GUARD_LOCK: (a) an in-flight body rejects a concurrent 2nd call for
+# the whole run (covers a slow reset like the hub SSH); (b) a post-completion
+# cooldown rejects an impatient sequential re-click. A deliberate re-reset after
+# the cooldown still works. In-process is sufficient — single server process.
+_RESET_GUARD_LOCK = threading.Lock()
+_RESET_INFLIGHT: set[str] = set()
+_RESET_LAST_RUN: dict[str, float] = {}
+_RESET_COOLDOWN_S = 60.0
+
 
 def _build_version() -> str:
     """The build identity shown in the version badge + reported by /api/version.
@@ -662,6 +675,22 @@ def _make_handler(feedloop: "_FeedLoop"):
             script, label = action
             auth.audit(self._client(), f"{path}:{body_id}", "run")
             logger.info("console reset requested: %s -> %s", body_id, script)
+            # Idempotency claim (op#8989): atomically reject a concurrent or
+            # too-soon repeat reset of the SAME body so a double-click / retried
+            # POST can't double-run the destructive script.
+            now = time.monotonic()
+            with _RESET_GUARD_LOCK:
+                if body_id in _RESET_INFLIGHT:
+                    auth.audit(self._client(), f"{path}:{body_id}", "409")
+                    return self._json(409, {"error": "reset already in progress",
+                                            "body": body_id})
+                last = _RESET_LAST_RUN.get(body_id, 0.0)
+                if now - last < _RESET_COOLDOWN_S:
+                    auth.audit(self._client(), f"{path}:{body_id}", "429")
+                    return self._json(429, {"error": "reset just ran — wait before retrying",
+                                            "body": body_id,
+                                            "retry_after_s": round(_RESET_COOLDOWN_S - (now - last))})
+                _RESET_INFLIGHT.add(body_id)
             try:
                 r = subprocess.run(
                     ["bash", str(_REPO_ROOT / script)],
@@ -676,6 +705,10 @@ def _make_handler(feedloop: "_FeedLoop"):
                 logger.warning("console reset failed: %s", e)
                 auth.audit(self._client(), f"{path}:{body_id}", "500")
                 return self._json(500, {"error": "reset failed", "body": body_id})
+            finally:
+                with _RESET_GUARD_LOCK:
+                    _RESET_INFLIGHT.discard(body_id)
+                    _RESET_LAST_RUN[body_id] = time.monotonic()
             auth.audit(self._client(), f"{path}:{body_id}", "200" if ok else "500")
             return self._json(200 if ok else 500,
                               {"ok": ok, "body": body_id, "label": label, "tail": tail})

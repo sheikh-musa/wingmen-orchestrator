@@ -546,7 +546,7 @@ _ORCH = pathlib.Path(__file__).resolve().parent.parent
 BUTTON_ACTIONS = {
     "reset_nazim": ("scripts/reset_nazim.sh", "clear Nazim (console)"),
     "reset_cai":   ("scripts/reset_cai.sh",   "clear cai (governance)"),
-    "reset_orch":  ("scripts/reset_orch.sh",  "clear the hub"),
+    "reset_orch":  ("scripts/reset_hub_remote.sh",  "clear the hub (VPS)"),
 }
 
 
@@ -572,6 +572,29 @@ def _handle_callback(conn, ch: "Channel", cb: dict, upd_id: int) -> bool:
     if action not in BUTTON_ACTIONS:
         _log_line(f"{ch.key}: REFUSED unknown button action {action!r}")
         _answer_callback(ch.token, cb.get("id", ""), "Unknown action.")
+        return True
+
+    # Idempotency (op#8989, the double-/clear the operator caught 2026-08-01):
+    # a callback_query can be REDELIVERED — the poll offset is acked only after a
+    # whole batch is durable (see the channel loop), so a restart or transient
+    # error between running this reset and acking the offset makes Telegram resend
+    # the same update. Message updates are absorbed by the A1 ingest_dedup gate,
+    # but this callback path returns BEFORE reaching it — so a redelivered BUTTON
+    # ran the destructive reset script twice. Claim the update_id here too, and
+    # COMMIT before running: only the winning insert runs the script; a replay
+    # just re-answers the callback (clears the spinner) and returns. Covers all
+    # three reset buttons (nazim/cai/hub) — they share this handler.
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO ingest_dedup (channel_key, telegram_update_id) "
+            "VALUES (%s,%s) ON CONFLICT DO NOTHING RETURNING channel_key",
+            (ch.key, upd_id),
+        )
+        won = cur.fetchone() is not None
+    conn.commit()
+    if not won:
+        _log_line(f"{ch.key}: callback '{action}' upd={upd_id} already processed — skip re-run")
+        _answer_callback(ch.token, cb.get("id", ""), f"{label}: already handled")
         return True
 
     script = _ORCH / BUTTON_ACTIONS[action][0]
