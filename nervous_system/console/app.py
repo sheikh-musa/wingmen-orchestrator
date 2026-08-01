@@ -384,7 +384,6 @@ def _fleet_payload():
         # operator-visibility signals, fired concurrently:
         f_backlog = ex.submit(db.fetch_backlog)          # operator's "Your asks" tracker
         f_bloat = ex.submit(db.fetch_context_bloat)      # per-agent context %
-        f_auth = ex.submit(panes.lane_token_auth)        # Max vs metered + acct
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         deploys = f_deploys.result()
         needs = f_needs.result()
@@ -400,11 +399,6 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("context_bloat failed: %s", e)
             context_bloat = []
-        try:
-            token_auth = f_auth.result()
-        except Exception as e:
-            logger.warning("token_auth failed: %s", e)
-            token_auth = {"lanes": [], "summary": {"by_owner": {}, "metered": 0, "total": 0}}
 
     # A coordinator card is peekable when its pane is a LOCAL live tmux session
     # (orch on this Studio host) OR it's a cross-host coordinator we surface via a
@@ -446,7 +440,6 @@ def _fleet_payload():
         "lanes": _jsonable(lanes),
         "deploys": _jsonable(deploys),
         "context_bloat": _jsonable(context_bloat),
-        "token_auth": _jsonable(token_auth),
     }
 
 
