@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.lane-wedge-watchdog</string>
+  <!-- STAGE 2 ARMED: --alert --arm=nudge (op#8807 stage-2, operator GO #13691,
+       2026-07-31). Detect-only proved reliable detection with no false-positives
+       but only LOGGED, so real wedges (cai, cc-irsyad) sat un-recovered 5-7h.
+         --alert     : DETECTS the wedge (Signal A substrate unread-piling+quiet +
+                       Signal B composer) and SURFACES it as an attributable bus row
+                       from cc-fleet-health -> orch-console (Nazim voices the operator).
+                       Deduped once-per-episode. Fires on wedge / repeat / watchdog-down.
+         --arm=nudge : on a CONFIRMED SAFE wedge, ALSO fires the ghost-aware,
+                       count-only, once-per-episode nudge (nudge_cai.sh / lane_nudge.sh /
+                       hub tmux). Lease-gated (fleet_health_lease, CAI-RESP-501: a
+                       non-holder fails CLOSED). STOPS at nudge — reset/escalate is
+                       NOT armed (that is the next `--arm` step).
+       SAFETY still in force: a lane with a REAL staged composer draft is WEDGE-UNSAFE
+       -> alert-only, NEVER nudged (protects a lane mid-work/mid-demo). Singletons
+       cai/hub/SRE are nudge-not-reset (never auto-reset). SRE self-nudge is a no-op.
+       DISARMED history 2026-07-30: an earlier composer-only build's auto-SUBMIT of
+       staged text cascaded on demo lanes; THIS bus-driven build NEVER submits real
+       staged text — the nudge is a count-only line, ghost-guarded.
+       NEXT PROMOTION: swap <string>--arm=nudge</string> -> <string>--arm</string>
+       for the full ladder (nudge -> reset git-clean lanes / PAGE singletons), only
+       after observing no false nudges + confirming the lease-gate is stable. -->
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/nervous_system/lane_wedge_watchdog.py</string>
+    <string>--alert</string>
+    <string>--arm=nudge</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <!-- 60s cadence: a wedge is only declared after WEDGE_MIN_POLLS (4) consecutive
+       stable scans AND WEDGE_GRACE_SEC (300s), so ~5 min of a frozen idle+staged
+       pane before any action. 60s scans reach that floor promptly without being
+       heavy on tmux/DB. -->
+  <key>StartInterval</key><integer>60</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+    <!-- REQUIRED for the scheduled --alert (dry) run: without this the poll_count
+         cannot accumulate across the 60s runs (dry mode defaults persist=off to
+         keep manual --dry-run from polluting state), so the 4-poll wedge threshold
+         would never be reached and it would silently never detect. -->
+    <key>LANE_WEDGE_PERSIST_DRY</key><string>1</string>
+    <!-- adcda TEMPORARILY excluded 2026-07-30: it's under active hub control (HELD
+         from merging, runner-fix in flight, confabulation investigation) — the hub
+         owns it; auto-recovery must not reset a specially-managed lane. Remove adcda
+         once the hub's adcda work settles. -->
+    <key>LANE_WEDGE_EXCLUDE</key><string>nazim,cai,fleet-health,orch,orchestrator,infra,adcda</string>
+    <!-- Thresholds / guards overridable here (defaults shown). Uncomment to change
+         without editing code.
+    <key>LANE_WEDGE_MIN_POLLS</key><string>4</string>
+    <key>LANE_WEDGE_GRACE_SEC</key><string>300</string>
+    <key>LANE_WEDGE_STAGE2_DELAY_SEC</key><string>180</string>
+    <key>LANE_WEDGE_REPEAT_K</key><string>3</string>
+    <key>LANE_WEDGE_REPEAT_WINDOW_SEC</key><string>21600</string>
+    <key>LANE_WEDGE_DEADMAN_GAP_SEC</key><string>240</string>
+    <key>LANE_WEDGE_EXCLUDE</key><string>nazim,cai,fleet-health,orch,orchestrator,infra</string>
+    <key>LANE_WEDGE_TMUX</key><string>/usr/local/bin/tmux</string>
+    -->
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/lane-wedge-watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/lane-wedge-watchdog.out.log</string>
+</dict>
+</plist>

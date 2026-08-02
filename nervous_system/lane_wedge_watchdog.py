@@ -128,6 +128,15 @@ UNREAD_MIN_AGE_SEC = _envint("LANE_WEDGE_UNREAD_MIN_AGE_SEC", 20 * 60)   # 20 mi
 UNREAD_MAX_AGE_SEC = _envint("LANE_WEDGE_UNREAD_MAX_AGE_SEC", 6 * 3600)  # 6 h
 QUIET_SEC = _envint("LANE_WEDGE_QUIET_SEC", 20 * 60)                     # 20 min
 
+# A lane doing SHORT tasks with ~30-min idle gaps (cycling during an incident tail)
+# is not stalled — it drains on each nudge and progresses (Nazim 14413). Only PAGE a
+# wedge that is a GENUINE stall: either fully quiet past this floor, OR sitting on an
+# ACTIONABLE (requires_response) unread — the 2026-07-29 money-grant class. Below the
+# floor + no actionable unread => still nudge (cheap, helps it drain) but do NOT page
+# and do NOT count toward the repeat-wedge breaker. Keeps the real-stall catch, drops
+# the benign-idle chatter.
+ALERT_QUIET_SEC = _envint("LANE_WEDGE_ALERT_QUIET_SEC", 90 * 60)         # 90 min
+
 # A wedge is DECLARED only when the candidate signature is stable across this many
 # consecutive scans AND this many seconds of wall-clock — two independent floors
 # so neither a burst of fast scans nor one delayed scan fires it early. At a 60s
@@ -213,6 +222,18 @@ _SINGLETONS = {
                         "label": "cc-fleet-health (the SRE itself)"},
 }
 
+# A singleton whose tmux pane is LOCALLY readable gets the same 'working'
+# (esc-to-interrupt) suppression as lanes, so a long inference is not misread as a
+# wedge (Nazim 14067/14103). Only read when it's already a candidate + the session
+# exists locally. Omitted => Signal-A-only: the hub 'orch' pane lives on the Studio,
+# and reading it every scan over SSH is too heavy for the scan path.
+SINGLETON_SESSIONS = {
+    kv.split(":")[0].strip(): kv.split(":")[1].strip()
+    for kv in os.environ.get("LANE_WEDGE_SINGLETON_SESSIONS",
+                             "cai:cai,cc-fleet-health:fleet-health").split(",")
+    if ":" in kv
+}
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -287,9 +308,12 @@ def save_state(state: dict) -> None:
 
 @dataclass
 class BusSignal:
-    unread: int              # actionable unread in the [MIN_AGE, MAX_AGE] window
+    unread: int              # unanswered unread in the [MIN_AGE, MAX_AGE] window
     oldest_unread_age: float # seconds since the oldest such row (0 if none)
     last_write_age: float    # seconds since the agent last wrote a bus row (inf = never)
+    actionable: int = 0      # of `unread`, how many require a response (req=True) —
+                             # a stalling req=True row is a REAL stall (the 2026-07-29
+                             # money-grant class), vs a req=False FYI that can idle.
 
     @property
     def piling(self) -> bool:
@@ -316,6 +340,12 @@ COMP_DELEGATED = "delegated"
 class ComposerSignal:
     state: str
     text: str = ""
+    working: bool = False   # pane footer shows a LIVE turn ('esc to interrupt') —
+                            # the agent is mid-inference, not idle-at-prompt. A long
+                            # high-effort turn writes nothing to the bus while it
+                            # thinks, so Signal A (bus-quiet) alone misreads it as a
+                            # wedge. This is the SAME check lane_nudge.pane_working()
+                            # uses. Suppresses the wedge (Nazim 14067/14103/14470).
 
     @property
     def safe_to_nudge(self) -> bool:
@@ -354,7 +384,8 @@ def read_bus_signal(agent: str, conn) -> BusSignal:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*), "
-            "       COALESCE(EXTRACT(epoch FROM now() - min(am.created_at)), 0) "
+            "       COALESCE(EXTRACT(epoch FROM now() - min(am.created_at)), 0), "
+            "       count(*) FILTER (WHERE am.requires_response) "
             "  FROM agent_messages am "
             " WHERE am.to_agent = %s AND am.read_at IS NULL AND am.is_test IS NOT TRUE "
             "   AND am.created_at <= now() - (%s * interval '1 second') "
@@ -363,14 +394,14 @@ def read_bus_signal(agent: str, conn) -> BusSignal:
             "   AND NOT EXISTS (SELECT 1 FROM agent_messages r "
             "                    WHERE r.from_agent = %s AND r.created_at > am.created_at)",
             (agent, UNREAD_MIN_AGE_SEC, UNREAD_MAX_AGE_SEC, agent))
-        unread, oldest = cur.fetchone()
+        unread, oldest, actionable = cur.fetchone()
         cur.execute(
             "SELECT EXTRACT(epoch FROM now() - max(created_at)) "
             "  FROM agent_messages WHERE from_agent = %s",
             (agent,))
         row = cur.fetchone()
         last_write = float(row[0]) if row and row[0] is not None else float("inf")
-    return BusSignal(int(unread or 0), float(oldest or 0), last_write)
+    return BusSignal(int(unread or 0), float(oldest or 0), last_write, int(actionable or 0))
 
 
 def read_composer(session: str) -> ComposerSignal:
@@ -378,10 +409,15 @@ def read_composer(session: str) -> ComposerSignal:
     fleet's ONE dim-ghost-vs-real definition — reused verbatim over shell-out, not
     reimplemented). CC_EMPTY=1 covers empty AND dim-ghost; CC_PARTIAL=noprompt
     means we could NOT read it (never assert empty); CC_N>0 with CC_EMPTY=0 is
-    real staged text."""
+    real staged text. CC_BUSY=1 (pane_busy: footer shows 'esc to interrupt', or a
+    LIVE 'waiting for background agents' render) => the agent is mid-turn => working
+    (never a wedge). pane_busy is called alongside the parse — it fails safe: any
+    read miss leaves working=False, so we only ever SUPPRESS on a positive live
+    read, never hide a real wedge."""
     snippet = (
         '. "$1" || exit 9; composer_parse_pane "$2" "$3" >/dev/null 2>&1; '
-        'printf "RESULT %s %s %s\\n" "${CC_EMPTY:-x}" "${CC_N:-x}" "${CC_PARTIAL:-x}"; '
+        'pane_busy "$2" "$3" >/dev/null 2>&1; '
+        'printf "RESULT %s %s %s %s\\n" "${CC_EMPTY:-x}" "${CC_N:-x}" "${CC_PARTIAL:-x}" "${CC_BUSY:-0}"; '
         'printf "FLAT %s\\n" "${CC_FLAT:-}"'
     )
     try:
@@ -390,24 +426,35 @@ def read_composer(session: str) -> ComposerSignal:
     except Exception:
         return ComposerSignal(COMP_UNREADABLE)
     empty = n = partial = "x"
+    busy = "0"
     flat = ""
     for ln in (r.stdout or "").splitlines():
         if ln.startswith("RESULT "):
             parts = ln.split()
-            if len(parts) >= 4:
-                empty, n, partial = parts[1], parts[2], parts[3]
+            if len(parts) >= 5:
+                empty, n, partial, busy = parts[1], parts[2], parts[3], parts[4]
         elif ln.startswith("FLAT "):
             flat = ln[5:]
+    working = busy == "1"
     if partial == "noprompt":
-        return ComposerSignal(COMP_UNREADABLE)
+        return ComposerSignal(COMP_UNREADABLE, working=working)
     if empty == "1":
-        return ComposerSignal(COMP_EMPTY)
+        return ComposerSignal(COMP_EMPTY, working=working)
     try:
         if int(n) > 0:
-            return ComposerSignal(COMP_REAL, flat)
+            return ComposerSignal(COMP_REAL, flat, working=working)
     except (TypeError, ValueError):
         pass
-    return ComposerSignal(COMP_EMPTY)
+    return ComposerSignal(COMP_EMPTY, working=working)
+
+
+def _pane_working(session: str) -> bool:
+    """True iff the pane shows a live turn — the fleet's ONE definition, via
+    read_composer's CC_BUSY. Fail-safe: a read miss returns False (no suppression)."""
+    try:
+        return read_composer(session).working
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -423,12 +470,25 @@ V_WEDGE_UNSAFE = "wedge-unsafe"  # confirmed wedge but REAL staged draft -> aler
 
 
 _EPISODE_KEYS = ("sig", "first_seen", "poll_count", "nudged_at", "nudge_count",
-                 "escalated_at", "alerted")
+                 "escalated_at", "alerted", "wedge_logged")
 
 
 def _candidate(obs: AgentObs) -> bool:
-    """Signal A holds: fresh unread piling AND the agent has gone quiet."""
-    return obs.bus.piling and obs.bus.quiet
+    """Signal A holds: fresh unread piling AND the agent has gone quiet — AND the
+    pane is not in a live turn. A long high-effort inference emits nothing to the
+    bus while it thinks, so bus-quiet alone misreads it as wedged; a pane showing
+    'esc to interrupt' is WORKING, not stalled (Nazim 14067/14103/14470). Suppress
+    only on a POSITIVE live read (working defaults False) so a real wedge is never
+    hidden by an unreadable pane."""
+    return obs.bus.piling and obs.bus.quiet and not obs.composer.working
+
+
+def _genuine_stall(obs: AgentObs) -> bool:
+    """A confirmed wedge worth PAGING (and counting toward the repeat breaker): it is
+    either fully quiet past ALERT_QUIET_SEC, or holds an ACTIONABLE (requires_response)
+    unread. A lane that wrote to the bus more recently than that and has only FYI-grade
+    unread is benign idle-between-tasks — still nudged, never paged (Nazim 14413)."""
+    return obs.bus.last_write_age >= ALERT_QUIET_SEC or obs.bus.actionable > 0
 
 
 def evaluate(entry: Optional[dict], obs: AgentObs, now: float) -> "tuple[str, dict]":
@@ -462,7 +522,7 @@ def evaluate(entry: Optional[dict], obs: AgentObs, now: float) -> "tuple[str, di
         entry["sig"] = sig
         entry["first_seen"] = now
         entry["poll_count"] = 1
-        for k in ("nudged_at", "nudge_count", "escalated_at", "alerted"):
+        for k in ("nudged_at", "nudge_count", "escalated_at", "alerted", "wedge_logged"):
             entry.pop(k, None)
 
     elapsed = now - float(entry.get("first_seen", now))
@@ -762,19 +822,32 @@ def list_lane_sessions() -> list[str]:
             and n.strip() != HUB_TMUX_SESSION]
 
 
+def _has_local_session(session: str) -> bool:
+    r = _tmux("has-session", "-t", "=" + session)
+    return bool(r and r.returncode == 0)
+
+
 def gather_observations(conn) -> list[AgentObs]:
-    """Build the live observation set. Singletons: Signal A only (composer
-    delegated). Lanes: Signal A (via base_agent_id) + Signal B (local composer)."""
+    """Build the live observation set. Singletons: Signal A (+ a local 'working'
+    read when the pane is here). Lanes: Signal A (via base_agent_id) + Signal B
+    (local composer)."""
     obs: list[AgentObs] = []
-    # Singletons — bus-only, host-agnostic.
+    # Singletons — bus-only + a working-read when the pane is locally present.
     for agent in MONITOR_SINGLETONS:
         try:
             bus = read_bus_signal(agent, conn)
         except Exception as e:
             log(f"bus read failed for singleton {agent}: {e}")
             continue
+        # Suppress the live-inference false page: if it's already a candidate and its
+        # pane is here, treat 'esc to interrupt' as working (not wedged). Composer
+        # stays DELEGATED — the nudge tool keeps its own ghost guard.
+        working = False
+        sess = SINGLETON_SESSIONS.get(agent)
+        if sess and bus.piling and bus.quiet and _has_local_session(sess):
+            working = _pane_working(sess)
         obs.append(AgentObs(agent=agent, kind="singleton", session=None, bus=bus,
-                            composer=ComposerSignal(COMP_DELEGATED)))
+                            composer=ComposerSignal(COMP_DELEGATED, working=working)))
     # Lanes — enumerate the live tmux server, map to bus identity.
     try:
         a2b, _dirs = lane_agent_map(conn)
@@ -994,8 +1067,11 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
         history = state["wedge_history"].setdefault(obs.agent, [])
         recent = [t for t in history if now - t < REPEAT_WINDOW_SEC]
 
-        # Repeat-wedge circuit breaker: stop auto-acting + page once.
-        if len(recent) >= REPEAT_K:
+        # Repeat-wedge circuit breaker: stop auto-acting + page once — but only for a
+        # GENUINE stall. A lane merely cycling between short tasks (wrote recently,
+        # only FYI unread) must not trip the breaker (Nazim 14413/13969/14033); it
+        # falls through to a normal (nudge-only, no-page) wedge below.
+        if len(recent) >= REPEAT_K and _genuine_stall(obs):
             line["action"] = "REPEAT-WEDGE — auto-recovery STOPPED, paging operator"
             if not entry.get("repeat_alerted"):
                 if alert:
@@ -1005,14 +1081,19 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             results.append(line)
             continue
 
-        # First crossing into wedge this episode -> alert once (any mode).
-        if not entry.get("alerted"):
-            if alert:
-                _page(_wedge_alert(obs, elapsed_min, unsafe, armed=not dry))
+        # Log the wedge once per episode (durable record, any mode) — but only PAGE a
+        # GENUINE stall (fully-quiet past ALERT_QUIET_SEC, or an actionable req=True
+        # unread). A benign cycling wedge is still nudged below, just never paged, and
+        # will page later if it does cross into a real stall (alerted set only on page).
+        if not entry.get("wedge_logged"):
+            entry["wedge_logged"] = now
+            log(f"WEDGE{'-UNSAFE' if unsafe else ''} {obs.agent}: {obs.bus.unread} unread "
+                f"({obs.bus.actionable} actionable), idle {elapsed_min}m, "
+                f"composer={obs.composer.state} ({'ARMED:'+mode if not dry else 'DETECT-ONLY'})")
+        if alert and (unsafe or _genuine_stall(obs)) and not entry.get("alerted"):
+            # unsafe (a REAL staged draft) always surfaces — it can't be auto-nudged.
+            _page(_wedge_alert(obs, elapsed_min, unsafe, armed=not dry))
             entry["alerted"] = now
-            log(f"WEDGE{'-UNSAFE' if unsafe else ''} {obs.agent}: {obs.bus.unread} unread, "
-                f"idle {elapsed_min}m, composer={obs.composer.state} "
-                f"({'ARMED:'+mode if not dry else 'DETECT-ONLY'})")
 
         if unsafe:
             # REAL staged draft — NEVER auto-nudge (would clobber). Alert only.
@@ -1025,9 +1106,11 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             results.append(line)
             continue
 
-        # ARMED (mode >= auto-nudge) AND lease held -> recover.
-        if not history or now - history[-1] > WEDGE_GRACE_SEC:
-            history.append(now)  # this episode counts toward repeat detection
+        # ARMED (mode >= auto-nudge) AND lease held -> recover. Count toward the
+        # repeat breaker only for a GENUINE stall, so a cycling lane's benign idles
+        # never accumulate to REPEAT_K (Nazim 14413).
+        if _genuine_stall(obs) and (not history or now - history[-1] > WEDGE_GRACE_SEC):
+            history.append(now)
         _recover(obs, entry, mode, alert, now, lane_dirs, line)
         results.append(line)
 

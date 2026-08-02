@@ -25,10 +25,13 @@ from nervous_system import lane_wedge_watchdog as w
 # --------------------------------------------------------------------------- #
 
 def _obs(agent="cai", kind="singleton", session=None, unread=3, oldest=1800.0,
-         last_write=1800.0, comp=w.COMP_DELEGATED, text="", reachable=True):
+         last_write=6000.0, comp=w.COMP_DELEGATED, text="", reachable=True,
+         actionable=0, working=False):
+    # Default is a GENUINE stall: quiet 100m (> ALERT_QUIET_SEC) so the canonical
+    # test wedge pages. Cycling/actionable/working cases pass those explicitly.
     return w.AgentObs(agent, kind, session,
-                      w.BusSignal(unread, oldest, last_write),
-                      w.ComposerSignal(comp, text), reachable=reachable)
+                      w.BusSignal(unread, oldest, last_write, actionable),
+                      w.ComposerSignal(comp, text, working=working), reachable=reachable)
 
 
 @pytest.fixture
@@ -299,3 +302,94 @@ def test_page_off_hostpath_uses_bus_not_nazim_send(monkeypatch):
     monkeypatch.setattr(w.subprocess, "run", boom)
     w._page("⚠️ test wedge alert")
     assert emitted == ["⚠️ test wedge alert"]
+
+
+# --------------------------------------------------------------------------- #
+# Nazim 14067/14103/14470: a pane in a LIVE turn ('esc to interrupt') is WORKING,
+# not wedged — suppress. This killed the dominant false-positive class.
+# --------------------------------------------------------------------------- #
+
+def _obs_working(agent="cc-irsyad", kind="lane", session="irsyad"):
+    """A would-be wedge (unread piling + quiet) whose pane shows a live turn."""
+    return w.AgentObs(agent, kind, session,
+                      w.BusSignal(3, 1800.0, 1800.0),
+                      w.ComposerSignal(w.COMP_EMPTY, "", working=True))
+
+
+def test_working_pane_is_not_a_candidate():
+    assert w._candidate(_obs_working()) is False
+    # same bus signature but idle-at-prompt IS a candidate
+    idle = w.AgentObs("cc-irsyad", "lane", "irsyad",
+                      w.BusSignal(3, 1800.0, 1800.0), w.ComposerSignal(w.COMP_EMPTY))
+    assert w._candidate(idle) is True
+
+
+def test_working_lane_evaluates_healthy_not_wedge(fast_floor):
+    v, entry = w.evaluate(None, _obs_working(), 1000.0)
+    assert v == w.V_HEALTHY
+    # episode is not opened for a working pane
+    assert "poll_count" not in entry
+
+
+def test_working_singleton_is_not_wedged(fast_floor):
+    obs = w.AgentObs("cai", "singleton", None,
+                     w.BusSignal(3, 1800.0, 1800.0),
+                     w.ComposerSignal(w.COMP_DELEGATED, "", working=True))
+    v, _ = w.evaluate(None, obs, 1000.0)
+    assert v == w.V_HEALTHY
+
+
+def test_working_run_takes_no_action_and_does_not_page(fast_floor, recorder):
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[_obs_working()], lane_dirs={}, persist=False)
+    assert recorder["nudge"] == [] and recorder["reset"] == [] and recorder["page"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Nazim 14413/13969/14033: a lane cycling between short tasks (wrote recently,
+# only FYI unread) is nudged but NOT paged, and never trips the repeat breaker.
+# The real-stall catch (fully-quiet, or an actionable req=True unread) is kept.
+# --------------------------------------------------------------------------- #
+
+def test_genuine_stall_helper():
+    cyc = _obs(kind="lane", session="x", last_write=1800.0, actionable=0)   # 30m, FYI
+    assert w._genuine_stall(cyc) is False
+    quiet = _obs(kind="lane", session="x", last_write=6000.0, actionable=0)  # 100m
+    assert w._genuine_stall(quiet) is True
+    act = _obs(kind="lane", session="x", last_write=1800.0, actionable=1)    # req=True
+    assert w._genuine_stall(act) is True
+
+
+def test_cycling_wedge_is_nudged_but_not_paged(fast_floor, recorder, monkeypatch):
+    monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
+    obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad",
+               last_write=1800.0, actionable=0)   # cycling: wrote 30m ago, FYI unread
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["nudge"] == ["cc-irsyad"]   # still auto-recovered (cheap)
+    assert recorder["page"] == []               # but NOT paged — benign cycling
+
+
+def test_fully_quiet_wedge_is_paged(fast_floor, recorder, monkeypatch):
+    monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
+    obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad",
+               last_write=6000.0, actionable=0)   # fully quiet 100m
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert len(recorder["page"]) == 1
+
+
+def test_actionable_unread_pages_even_when_recently_active(fast_floor, recorder, monkeypatch):
+    monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
+    obs = _obs(agent="cai", kind="singleton", session=None,
+               last_write=1800.0, actionable=1)   # the 2026-07-29 money-grant class
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert len(recorder["page"]) == 1
+
+
+def test_cycling_does_not_accumulate_repeat_breaker(fast_floor, recorder, monkeypatch):
+    monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
+    # Ten cycling episodes must never trip the repeat-wedge breaker (it would if any
+    # counted toward history). Distinct signatures force a fresh episode each time.
+    for i in range(10):
+        obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad",
+                   unread=1 + (i % 3), last_write=1800.0, actionable=0)
+        w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=True)
+    assert not any("re-wedg" in p.lower() for p in recorder["page"])
