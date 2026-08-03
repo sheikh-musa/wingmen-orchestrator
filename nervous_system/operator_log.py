@@ -146,7 +146,15 @@ def _channel_scope_sql() -> str:
         # 'tmux-console') AND his private Telegram DM channel — @nazim_cto_bot,
         # which ingest logs as channel='telegram', tag='nazim-console'. Shared
         # feeds are excluded (a war-room/Hafiz msg is not a personal-DM nudge).
-        return (" AND (channel='tmux-console' OR tag='nazim-console')"
+        # PLUS the cosem/alderei channels his Mini console-ingest already POLLS
+        # (boot_nazim_ingest.sh INGEST_CHANNELS): cosem-caai (Ray), cosem-exams
+        # (Hariz), alderei (Nahar). Align-reconcile-to-ingest-ownership — whoever
+        # polls a channel reconciles it, else the poll-here/reconcile-there split
+        # forces the hub to relay every cosem inbound (2026-08-03, hub+console
+        # co-signed; operator 'cosem = Nazim'). cosem-adcda is NOT here — the hub
+        # ingest polls that one, so the hub keeps reconciling it.
+        return (" AND (channel='tmux-console' OR tag='nazim-console'"
+                " OR tag IN ('cosem-caai','cosem-exams','alderei'))"
                 + _shared_feed_exclusion())
     if role == "hub":
         # Hub owns every operator surface EXCEPT the OTHER bodies' DMs (Nazim's
@@ -155,9 +163,16 @@ def _channel_scope_sql() -> str:
         # a shared-awareness feed as a personal DM. (cai-channel was already
         # carved from mark_handled; carving it from the read scope too closes the
         # leak the operator's 2026-07-10 pipeline test exposed.)
+        # cosem-caai/cosem-exams/alderei carved out too (2026-08-03): the Mini
+        # console-ingest polls them, so the console reconciles them — the hub must
+        # NOT also discover+relay them. IS DISTINCT FROM (not NOT IN) keeps
+        # NULL-tag rows in hub scope.
         return (" AND channel<>'tmux-console'"
                 " AND tag IS DISTINCT FROM 'nazim-console'"
                 " AND tag IS DISTINCT FROM 'cai-channel'"
+                " AND tag IS DISTINCT FROM 'cosem-caai'"
+                " AND tag IS DISTINCT FROM 'cosem-exams'"
+                " AND tag IS DISTINCT FROM 'alderei'"
                 + _shared_feed_exclusion())
     return ""
 
