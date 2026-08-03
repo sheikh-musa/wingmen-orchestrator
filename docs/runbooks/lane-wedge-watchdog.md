@@ -23,8 +23,28 @@ grant stalled, every other gauge read it green).
   misreads it as idle. Applied to lanes and to any singleton with a locally-readable
   pane (`SINGLETON_SESSIONS`). Fail-safe: suppress only on a POSITIVE live read, so
   an unreadable pane never hides a real wedge. (Nazim 14067/14103/14470.)
+- **Menu-trap (stuck, not idle/working):** a pane whose footer shows an interactive
+  selection menu (`up/down to navigate` / `Esc to cancel` / `Enter to select` —
+  AskUserQuestion) is TRAPPED: nobody is at the keyboard to answer, so its turn and
+  its bus freeze indefinitely. Classified `COMP_MENU` -> **always surfaces** (a
+  distinct 🚨 page, even if not otherwise a genuine stall) and is **never
+  auto-nudged** (a nudge types INTO the menu — needs an Esc first, staged
+  separately). This is the ~1-day cc-ihsanos miss. (Nazim 14937/14938.)
 - Confirmed only after `WEDGE_MIN_POLLS` (4) stable scans **and** `WEDGE_GRACE_SEC`
   (300s) — ~5 min of a stable wedge before any action.
+
+**Self (the SRE) is suppressed while its lease is fresh.** `cc-fleet-health` is
+nudge/schedule-driven — idle-between-wakes is its NORMAL state, and its liveness is
+the `fleet_health_lease` heartbeat, not bus activity. A fresh self-lease
+(`holder-current`) suppresses the self-wedge; a STALE lease (`holder-stale-self` —
+the heartbeat stopped) is a real problem, left to surface (+ the hub reclaims). Kills
+the recurring SRE-idle false page.
+
+**Coverage.** A lane is only observed if its LIVE tmux session maps to a
+`base_agent_id` in `fleet_lanes`. A stale/missing mapping (e.g. `cc-ihsanos` recorded
+as `mirror` while live as `ihsanos-platform`) leaves it UNMONITORED — the watchdog
+logs `COVERAGE-GAP: <sessions> UNMAPPED` each scan so the blind spot is visible and
+gets reconciled.
 
 ## Page only a GENUINE stall (nudge is cheaper than a page)
 A confirmed wedge is always **logged** and (when armed) **nudged once per episode**,

@@ -234,6 +234,9 @@ SINGLETON_SESSIONS = {
     if ":" in kv
 }
 
+# This body's own bus identity — its idle is suppressed while its lease is fresh.
+SELF_AGENT = "cc-fleet-health"
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -330,10 +333,17 @@ class BusSignal:
 # genuinely empty). 'real' == real non-dim typed text (the agent's OWN draft —
 # never auto-nudge). 'unreadable' == capture had no prompt row (do NOT assert
 # empty). 'delegated' == not read here; the sanctioned nudge tool guards it.
+# 'menu' == the pane is TRAPPED in an interactive selection menu (AskUserQuestion:
+# footer 'up/down to navigate' / 'Esc to cancel' / 'Enter to select'). For an
+# autonomous agent NObody is at the keyboard to answer, so the menu blocks the
+# turn AND the bus indefinitely — genuinely STUCK, not idle and not working. This
+# is the ~1-day cc-ihsanos trap the watchdog missed (Nazim 14937/14938). Alert-only
+# (a plain nudge lands IN the menu — it needs an Esc first, staged separately).
 COMP_EMPTY = "empty"
 COMP_REAL = "real"
 COMP_UNREADABLE = "unreadable"
 COMP_DELEGATED = "delegated"
+COMP_MENU = "menu"
 
 
 @dataclass
@@ -349,11 +359,12 @@ class ComposerSignal:
 
     @property
     def safe_to_nudge(self) -> bool:
-        """Auto-nudge is safe unless we POSITIVELY read the agent's own draft.
-        A count-only nudge appends to the buffer, so real text would be clobbered
-        (07-04 phantom-injection class) — that case ALERTS instead. empty / dim-
-        ghost / unreadable / delegated all defer to the nudge tool's own guard."""
-        return self.state != COMP_REAL
+        """Auto-nudge is safe unless we POSITIVELY read the agent's own draft, or the
+        pane is trapped in a menu. A count-only nudge appends to the buffer, so real
+        text would be clobbered (07-04 phantom-injection class); and a nudge typed
+        into an open menu just moves the selection (Nazim 13730) — both ALERT instead.
+        empty / dim-ghost / unreadable / delegated defer to the nudge tool's guard."""
+        return self.state not in (COMP_REAL, COMP_MENU)
 
 
 @dataclass
@@ -414,10 +425,16 @@ def read_composer(session: str) -> ComposerSignal:
     (never a wedge). pane_busy is called alongside the parse — it fails safe: any
     read miss leaves working=False, so we only ever SUPPRESS on a positive live
     read, never hide a real wedge."""
+    # menu-trap: an interactive selection menu (AskUserQuestion) shows a NAV footer
+    # ('up/down to navigate' / 'Esc to cancel' / 'Enter to select') — distinct from
+    # the idle footer ('for agents') and the working footer ('esc to interrupt').
+    # For an autonomous agent that footer == STUCK. Grep the last 6 rendered lines.
     snippet = (
         '. "$1" || exit 9; composer_parse_pane "$2" "$3" >/dev/null 2>&1; '
         'pane_busy "$2" "$3" >/dev/null 2>&1; '
-        'printf "RESULT %s %s %s %s\\n" "${CC_EMPTY:-x}" "${CC_N:-x}" "${CC_PARTIAL:-x}" "${CC_BUSY:-0}"; '
+        'menu=0; "$2" capture-pane -t "$3" -p 2>/dev/null | tail -6 | '
+        'LC_ALL=C grep -qiE "to navigate|esc to cancel|enter to select" && menu=1; '
+        'printf "RESULT %s %s %s %s %s\\n" "${CC_EMPTY:-x}" "${CC_N:-x}" "${CC_PARTIAL:-x}" "${CC_BUSY:-0}" "$menu"; '
         'printf "FLAT %s\\n" "${CC_FLAT:-}"'
     )
     try:
@@ -426,16 +443,21 @@ def read_composer(session: str) -> ComposerSignal:
     except Exception:
         return ComposerSignal(COMP_UNREADABLE)
     empty = n = partial = "x"
-    busy = "0"
+    busy = menu = "0"
     flat = ""
     for ln in (r.stdout or "").splitlines():
         if ln.startswith("RESULT "):
             parts = ln.split()
-            if len(parts) >= 5:
-                empty, n, partial, busy = parts[1], parts[2], parts[3], parts[4]
+            if len(parts) >= 6:
+                empty, n, partial, busy, menu = parts[1], parts[2], parts[3], parts[4], parts[5]
         elif ln.startswith("FLAT "):
             flat = ln[5:]
     working = busy == "1"
+    # A menu-trap wins over every other classification: it is a live, non-empty pane
+    # (would otherwise read as REAL/working), but it is STUCK awaiting input nobody
+    # will give. Not 'working' — it is not making progress.
+    if menu == "1":
+        return ComposerSignal(COMP_MENU, working=False)
     if partial == "noprompt":
         return ComposerSignal(COMP_UNREADABLE, working=working)
     if empty == "1":
@@ -759,6 +781,33 @@ def _wedge_alert(obs: AgentObs, elapsed_min: int, unsafe: bool, armed: bool) -> 
                 f"silent {int(obs.bus.last_write_age)//60}m. {do}")
 
 
+def _menu_trap_alert(obs: AgentObs, elapsed_min: int) -> str:
+    label = _label(obs)
+    do = ("Open its pane and press Esc to dismiss the menu, then let it drain / re-answer — "
+          "a plain nudge won't help (it types INTO the menu). Never auto-reset a singleton.")
+    try:
+        from nervous_system.alert_format import format_alert
+        return format_alert(
+            icon="🚨",
+            title=f"{label} is TRAPPED in a menu — stuck, blocking its bus",
+            what=(f"{label}'s pane is sitting in an interactive selection menu (AskUserQuestion — "
+                  f"'up/down to navigate / Esc to cancel'), so its turn AND its bus are frozen: "
+                  f"{obs.bus.unread} unread piling ~{elapsed_min} min, quiet "
+                  f"{int(obs.bus.last_write_age)//60} min."),
+            why=("An autonomous agent has nobody at the keyboard to answer the menu, so it stays "
+                 "stuck indefinitely — a menu-trap silently cost cc-ihsanos ~1 DAY (14 unread incl "
+                 "cai grants piled up) and read as neither idle nor working."),
+            do=do,
+            detail=(f"agent={obs.agent} kind={obs.kind} composer=menu unread={obs.bus.unread} "
+                    f"oldest={int(obs.bus.oldest_unread_age)//60}m quiet={int(obs.bus.last_write_age)//60}m."),
+            ref="LANE-WEDGE-WATCHDOG / MENU-TRAP",
+        )
+    except Exception:
+        return (f"🚨 {label} is TRAPPED in a selection menu (AskUserQuestion) — stuck, "
+                f"{obs.bus.unread} unread piling ~{elapsed_min}m. Press Esc on its pane + let it drain; "
+                f"a plain nudge types into the menu.")
+
+
 def _repeat_alert(obs: AgentObs, n: int) -> str:
     label = _label(obs)
     try:
@@ -839,12 +888,24 @@ def gather_observations(conn) -> list[AgentObs]:
         except Exception as e:
             log(f"bus read failed for singleton {agent}: {e}")
             continue
+        working = False
+        # The SRE (this body) is nudge/schedule-driven: idle-between-wakes is its
+        # NORMAL state, not a wedge. Its liveness is the lease heartbeat, not bus
+        # activity — a FRESH self-lease ('holder-current') proves this body is alive
+        # (renewal is tied to it). Suppress the self-wedge while fresh; a STALE lease
+        # ('holder-stale-self' — heartbeat stopped) is a real problem, left to surface
+        # (and the hub reclaims). This kills the recurring SRE-idle false page.
+        if agent == SELF_AGENT:
+            try:
+                if fleet_health_lease.check()[1] == "holder-current":
+                    working = True
+            except Exception:
+                pass
         # Suppress the live-inference false page: if it's already a candidate and its
         # pane is here, treat 'esc to interrupt' as working (not wedged). Composer
         # stays DELEGATED — the nudge tool keeps its own ghost guard.
-        working = False
         sess = SINGLETON_SESSIONS.get(agent)
-        if sess and bus.piling and bus.quiet and _has_local_session(sess):
+        if not working and sess and bus.piling and bus.quiet and _has_local_session(sess):
             working = _pane_working(sess)
         obs.append(AgentObs(agent=agent, kind="singleton", session=None, bus=bus,
                             composer=ComposerSignal(COMP_DELEGATED, working=working)))
@@ -854,10 +915,16 @@ def gather_observations(conn) -> list[AgentObs]:
     except Exception as e:
         log(f"fleet_lanes map failed ({e}) — no dynamic lanes this scan")
         a2b = {}
+    unmapped: list[str] = []
     for sess in list_lane_sessions():
         base = a2b.get(sess)
         if not base:
-            continue  # unmapped session — no bus identity to read Signal A against
+            # No fleet_lanes(session->base) row — we can't read Signal A for it, so it
+            # is UNMONITORED. A stale/missing mapping is exactly how cc-ihsanos (session
+            # 'mirror' in fleet_lanes, but live as 'ihsanos-platform') went unwatched for
+            # ~1 day. Surface the blind spot so it gets reconciled (Nazim 14937/14938).
+            unmapped.append(sess)
+            continue
         if base in MONITOR_SINGLETONS:
             continue  # already covered by the singleton registry — never double-track
                       # the same bus identity (its episode state is keyed on `base`)
@@ -870,6 +937,9 @@ def gather_observations(conn) -> list[AgentObs]:
         # Signal B just confirms it is SAFE to nudge, so skip it otherwise.
         comp = read_composer(sess) if (bus.piling and bus.quiet) else ComposerSignal(COMP_EMPTY)
         obs.append(AgentObs(agent=base, kind="lane", session=sess, bus=bus, composer=comp))
+    if unmapped:
+        log(f"COVERAGE-GAP: {len(unmapped)} live tmux session(s) UNMAPPED in fleet_lanes "
+            f"-> UNMONITORED (reconcile the mapping): {','.join(sorted(unmapped))}")
     return obs
 
 
@@ -1062,8 +1132,9 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             results.append(line)
             continue
 
-        # verdict is V_WEDGE (safe) or V_WEDGE_UNSAFE (real staged draft) ---------
+        # verdict is V_WEDGE (safe) or V_WEDGE_UNSAFE (real staged draft OR menu) ---
         unsafe = verdict == V_WEDGE_UNSAFE
+        menu = obs.composer.state == COMP_MENU   # trapped in an AskUserQuestion menu
         history = state["wedge_history"].setdefault(obs.agent, [])
         recent = [t for t in history if now - t < REPEAT_WINDOW_SEC]
 
@@ -1087,13 +1158,23 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
         # will page later if it does cross into a real stall (alerted set only on page).
         if not entry.get("wedge_logged"):
             entry["wedge_logged"] = now
-            log(f"WEDGE{'-UNSAFE' if unsafe else ''} {obs.agent}: {obs.bus.unread} unread "
+            kind = "MENU-TRAP" if menu else ("WEDGE-UNSAFE" if unsafe else "WEDGE")
+            log(f"{kind} {obs.agent}: {obs.bus.unread} unread "
                 f"({obs.bus.actionable} actionable), idle {elapsed_min}m, "
                 f"composer={obs.composer.state} ({'ARMED:'+mode if not dry else 'DETECT-ONLY'})")
-        if alert and (unsafe or _genuine_stall(obs)) and not entry.get("alerted"):
-            # unsafe (a REAL staged draft) always surfaces — it can't be auto-nudged.
-            _page(_wedge_alert(obs, elapsed_min, unsafe, armed=not dry))
+        # A menu-trap ALWAYS surfaces (it is definitively stuck — blocks the bus),
+        # like unsafe; a plain safe wedge pages only on a genuine stall.
+        if alert and (menu or unsafe or _genuine_stall(obs)) and not entry.get("alerted"):
+            _page(_menu_trap_alert(obs, elapsed_min) if menu
+                  else _wedge_alert(obs, elapsed_min, unsafe, armed=not dry))
             entry["alerted"] = now
+
+        if menu:
+            # Trapped in a menu — a plain nudge lands IN the menu (needs Esc first,
+            # staged separately). Alert only; never auto-nudge.
+            line["action"] = "MENU-TRAP — pane stuck in a selection menu; alert-only (Esc+drain to recover)"
+            results.append(line)
+            continue
 
         if unsafe:
             # REAL staged draft — NEVER auto-nudge (would clobber). Alert only.

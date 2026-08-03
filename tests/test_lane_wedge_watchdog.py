@@ -393,3 +393,41 @@ def test_cycling_does_not_accumulate_repeat_breaker(fast_floor, recorder, monkey
                    unread=1 + (i % 3), last_write=1800.0, actionable=0)
         w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=True)
     assert not any("re-wedg" in p.lower() for p in recorder["page"])
+
+
+# --------------------------------------------------------------------------- #
+# Nazim 14937/14938: an AskUserQuestion MENU-TRAP is genuinely stuck (blocks the
+# bus) — distinct from idle and from working. It must ALWAYS surface, and is never
+# auto-nudged (a nudge types INTO the menu). This is the ~1-day cc-ihsanos miss.
+# --------------------------------------------------------------------------- #
+
+def test_menu_state_is_not_safe_to_nudge():
+    assert w.ComposerSignal(w.COMP_MENU).safe_to_nudge is False
+
+
+def test_menu_trap_classifies_wedge_unsafe(fast_floor):
+    obs = _obs(agent="cc-ihsanos", kind="lane", session="ihsanos", comp=w.COMP_MENU)
+    v = e = None
+    for dt in (0, 60, 130, 320):
+        v, e = w.evaluate(e, obs, 1000.0 + dt)
+    assert v == w.V_WEDGE_UNSAFE   # menu -> not-safe-to-nudge -> unsafe verdict
+
+
+def test_menu_trap_pages_distinctly_and_never_nudges(fast_floor, recorder, monkeypatch):
+    monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
+    obs = _obs(agent="cc-ihsanos", kind="lane", session="ihsanos", comp=w.COMP_MENU)
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["nudge"] == []          # NEVER typed into a menu
+    assert recorder["reset"] == []
+    assert len(recorder["page"]) == 1
+    assert any(("menu" in p.lower() or "trapped" in p.lower()) for p in recorder["page"])
+
+
+def test_menu_trap_pages_even_when_not_a_genuine_stall(fast_floor, recorder, monkeypatch):
+    # Recent bus write + FYI-only unread would suppress a plain wedge — but a menu
+    # is definitively stuck, so it surfaces regardless.
+    monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
+    obs = _obs(agent="cc-ihsanos", kind="lane", session="ihsanos",
+               comp=w.COMP_MENU, last_write=1800.0, actionable=0)
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert len(recorder["page"]) == 1
