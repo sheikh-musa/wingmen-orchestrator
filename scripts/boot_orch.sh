@@ -56,6 +56,23 @@ fi
 # from the Keychain and needs it for auth.
 unset ANTHROPIC_API_KEY
 
+# Fleet donor-account default (token conservation, op#7994): if a
+# .orch_default_token POINTER file (holding the PATH to a 0600 token file) is
+# present, boot the hub on that account (Syed) instead of the .env default
+# (Musa) — so a launchd/KeepAlive restart STAYS on the account the operator
+# moved the hub to, instead of silently reverting to .env. Fail-open: an
+# unreadable/stale pointer path is skipped -> .env account. Mirrors
+# launch_dangerous_cc.sh's lane-default knob (pointer holds a PATH only, so no
+# secret enters the repo). Applied AFTER the .env source so it wins.
+if [ -r "$ORCH_DIR/.orch_default_token" ]; then
+    _ORCH_DEFAULT_TOKFILE="$(tr -d '[:space:]' < "$ORCH_DIR/.orch_default_token")"
+    if [ -n "$_ORCH_DEFAULT_TOKFILE" ] && [ -r "$_ORCH_DEFAULT_TOKFILE" ]; then
+        CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_ORCH_DEFAULT_TOKFILE")"
+        export CLAUDE_CODE_OAUTH_TOKEN
+        log "hub-default OAuth account applied (pointer .orch_default_token -> $_ORCH_DEFAULT_TOKFILE)"
+    fi
+fi
+
 # ORCH-TOPOLOGY-001: session name is body-scoped. The hub boots as `orch`
 # (bridge exact-matches =orch); the console body (Nazim, operator's MacBook)
 # sets ORCH_TMUX_SESSION=nazim in .env so a non-hub session NEVER claims the
