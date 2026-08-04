@@ -60,11 +60,22 @@ def should_auto_wake(
     priority: str,
     is_test: bool,
 ) -> bool:
-    """CAI-RESP-259 Q1: wake iff recipient is a live CC WORKER lane or cai (NOT
-    cc-orchestrator — it stays operator-attended — and never the operator), not a
-    test, not P3, and (requires_response OR an actionable type OR P0/P1 floor)."""
+    """Wake iff recipient is a live CC WORKER lane, cai, or the hub (never the
+    operator), not a test, not P3. CAI-RESP-259 Q1 set the base trigger
+    (requires_response OR an actionable type OR P0/P1 floor) for worker lanes + cai.
+
+    CAI-RESP-451 (amends 259, operator-greenlit op#4328) INCLUDES cc-orchestrator on
+    a NARROWER floor — only P0/P1 that need a response: 259's premise 'the hub stays
+    operator-attended so needs no wake' was disproven by a live P1 (Hadi /shop bug)
+    that sat unread 35 min. The narrow scope + the storm cap keep it a precise safety
+    net, complementing the SLA watchdog. is_test/P3 excludes + the 5/5min cap
+    unchanged."""
     if is_test or priority == "P3":
         return False
+    # CAI-RESP-451: the hub is woken ONLY for P0/P1-needing-response (narrower than
+    # worker lanes below), so urgent client/money work can no longer sink unseen.
+    if to_agent == "cc-orchestrator":
+        return requires_response and priority in ("P0", "P1")
     is_worker = bool(to_agent) and to_agent.startswith("cc-") and to_agent != "cc-orchestrator"
     if not (is_worker or to_agent == "cai"):
         return False
