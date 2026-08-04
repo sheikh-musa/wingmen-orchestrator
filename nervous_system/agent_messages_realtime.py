@@ -38,7 +38,7 @@ _RECONNECT_BACKOFF_SECONDS = 30  # if subscribe() itself raises, wait this long
 
 
 async def _route_single_message(
-    supabase, bot, musa_chat_id: str | None, msg_id: int
+    supabase, bot, musa_chat_id: str | None, msg_id: int, wake_only: bool = False
 ) -> None:
     """Fetch full row by id and run it through the same pipeline as poll.
 
@@ -98,6 +98,15 @@ async def _route_single_message(
             logger.error(f"realtime: auto-wake failed for #{msg_id}: {e}")
             track_exception("agent_messages_realtime.auto_wake", e)
 
+    # WAKE-ONLY (Gap B): the standalone Mini subscriber (agent_wake_subscriber.py)
+    # does ONLY the #111 doorbell and MUST NOT run the Telegram-forward pipeline
+    # below — with bot=None that path still calls _mark_forwarded, which would mark
+    # routable rows forwarded-without-sending and starve the 5-min belt-and-
+    # suspenders poll. Additive: default False leaves the wingmen_orch full-mode
+    # caller (Telegram push + wake) byte-for-byte unchanged.
+    if wake_only:
+        return
+
     if not agent_messages_poll._is_routable(msg):
         logger.debug(f"realtime: msg #{msg_id} not routable")
         return
@@ -142,7 +151,7 @@ async def _route_single_message(
 
 
 async def subscribe_agent_messages(
-    supabase, bot=None, musa_chat_id: str | None = None
+    supabase, bot=None, musa_chat_id: str | None = None, wake_only: bool = False
 ) -> None:
     """Long-running coroutine: subscribe to agent_messages INSERT events.
 
@@ -172,7 +181,7 @@ async def subscribe_agent_messages(
                 logger.debug(f"realtime: INSERT payload without int id: {payload}")
                 return
             logger.info(f"realtime: _on_insert fired for msg #{msg_id}")
-            await _route_single_message(supabase, bot, musa_chat_id, msg_id)
+            await _route_single_message(supabase, bot, musa_chat_id, msg_id, wake_only)
         except Exception as e:
             logger.error(f"realtime: _on_insert handler failed: {e}")
             track_exception("agent_messages_realtime.callback", e)
