@@ -1000,12 +1000,17 @@ def _make_handler(feedloop: "_FeedLoop"):
             the Telegram clear-buttons already use."""
             parsed = urlparse(self.path)
             path = parsed.path
-            if path not in ("/api/reset", "/api/backlog", "/api/switch-token", "/api/set-pointer"):
+            if path not in ("/api/reset", "/api/backlog", "/api/switch-token",
+                            "/api/set-pointer", "/api/add-token"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
                 auth.audit(self._client(), path, "401")
                 return self._json(401, {"error": "unauthorized"})
+            # R2b add-token: register a new 0600 key file so it's selectable. Raw
+            # token written once, NEVER echoed/logged; only its fp is returned.
+            if path == "/api/add-token":
+                return self._handle_add_token()
             # R2b (op#10706): set/clear a body's token or model POINTER file — the
             # DEFAULT it boots with. Reversible (rm), NO relaunch, NO live billing
             # change. gazzabyte can never be selected (not in LANE_TOKEN_FILES);
@@ -1125,6 +1130,51 @@ def _make_handler(feedloop: "_FeedLoop"):
             return self._json(200 if ok else 500,
                               {"ok": ok, "id": item_id, "action": action,
                                "error": None if ok else (r.stderr or "").strip()[-160:]})
+
+        def _handle_add_token(self):
+            """POST /api/add-token {name, token} — register a NEW 0600 token key file
+            in ~/.wingmen/keys so it becomes selectable (op#10706). The RAW token is
+            written ONCE (0600, O_EXCL — no clobber) and is NEVER echoed or logged;
+            only its fingerprint is returned (the operator wants to SEE the fp).
+            gazzabyte name/basename fail-closed (CAI-729)."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                p = json.loads(raw or b"{}")
+                name = (p.get("name") or "").strip().lower()
+                tok = (p.get("token") or "").strip()
+            except Exception:  # noqa: BLE001
+                auth.audit(self._client(), "/api/add-token", "400")
+                return self._json(400, {"error": "bad request"})
+            if not _TOKEN_NAME_RE.match(name) or name == "gazzabyte":
+                auth.audit(self._client(), "/api/add-token", "400")
+                return self._json(400, {"error": "bad name (a-z 0-9 -, and not 'gazzabyte')"})
+            fname = name + _TOKEN_FILE_SUFFIX
+            if fname in _FORBIDDEN_TOKEN_BASENAMES:
+                auth.audit(self._client(), f"/api/add-token:{name}", "400")
+                return self._json(400, {"error": "forbidden token name"})
+            if not tok or len(tok) < 20:            # presence/length only — never log the value
+                auth.audit(self._client(), f"/api/add-token:{name}", "400")
+                return self._json(400, {"error": "missing or too-short token"})
+            dest = _KEYS_DIR / fname
+            try:
+                _KEYS_DIR.mkdir(parents=True, exist_ok=True)
+                # 0600 BEFORE the secret; O_EXCL so 'add' never clobbers an existing token.
+                fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(tok + "\n")
+                os.chmod(dest, 0o600)
+            except FileExistsError:
+                auth.audit(self._client(), f"/api/add-token:{name}", "409")
+                return self._json(409, {"error": "a token with that name already exists"})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("add-token failed for %s: %s", name, e)   # name only, never the token
+                auth.audit(self._client(), f"/api/add-token:{name}", "500")
+                return self._json(500, {"error": "write failed"})
+            fp = _fp_of_token_file(str(dest))                            # fp is non-secret
+            auth.audit(self._client(), f"/api/add-token:{name}:{fp}", "200")
+            logger.info("add-token: registered %s (fp %s)", name, fp)
+            return self._json(200, {"ok": True, "name": name, "fp": fp})
 
         def _handle_set_pointer(self):
             """POST /api/set-pointer {kind:"token"|"model", session, value?|clear?}

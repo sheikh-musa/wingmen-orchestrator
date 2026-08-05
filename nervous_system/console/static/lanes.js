@@ -114,6 +114,32 @@
       .finally(function () { busy = false; load(); });
   }
 
+  // Add-token: register a new key file. The raw token is POSTed once and cleared
+  // from the field immediately; the server returns ONLY the fingerprint to show.
+  function addToken() {
+    if (busy) return;
+    var name = ($("tokName").value || "").trim().toLowerCase();
+    var tok = ($("tokVal").value || "").trim();
+    if (!name || !tok) { toast("name + token required", true); return; }
+    busy = true; $("tokAdd").disabled = true;
+    fetch("/api/add-token", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ name: name, token: tok }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        $("tokVal").value = "";  // never retain the raw token in the field
+        if (!res.ok) { toast((res.j && res.j.error) || "add failed", true); }
+        else {
+          $("tokName").value = ""; $("addtok").open = false;
+          toast("added " + res.j.name + " · fp " + res.j.fp);
+        }
+      })
+      .catch(function (e) { toast("error: " + (e && e.message), true); })
+      .finally(function () { busy = false; $("tokAdd").disabled = false; load(); });
+  }
+  $("tokAdd").addEventListener("click", addToken);
+
   // Event delegation: any select change writes its pointer.
   $("rows").addEventListener("change", function (e) {
     var el = e.target;
