@@ -65,11 +65,19 @@
       } else {
         ctrls += '<div class="ctlnote">model: env-driven at boot (not pointer-settable)</div>';
       }
-      // Apply PREVIEW buttons (R3): show the dry-run plan for making a default
-      // live. DRY-RUN only — nothing relaunches (the armed apply is R4, gated).
+      // Apply buttons. PREVIEW = R3 dry-run (safe, shows the plan). APPLY = R4
+      // armed relaunch, which the OPERATOR drives — it 503s while disabled and 403s
+      // until the operator arms via the Telegram bridge; a tap asks the operator to
+      // type the body name to confirm. No agent ever drives it.
       var ab = "";
-      if (r.token_settable) ab += '<button class="prevbtn" data-apply="token" data-session="' + s + '">Preview token apply</button>';
-      if (r.model_settable) ab += '<button class="prevbtn" data-apply="model" data-session="' + s + '">Preview model apply</button>';
+      if (r.token_settable) {
+        ab += '<button class="prevbtn" data-apply="token" data-session="' + s + '">Preview token</button>';
+        ab += '<button class="armbtn" data-armapply="token" data-session="' + s + '">Apply token</button>';
+      }
+      if (r.model_settable) {
+        ab += '<button class="prevbtn" data-apply="model" data-session="' + s + '">Preview model</button>';
+        ab += '<button class="armbtn" data-armapply="model" data-session="' + s + '">Apply model</button>';
+      }
       if (ab) ctrls += '<div class="applyrow">' + ab + '</div>';
     }
 
@@ -174,9 +182,34 @@
       .catch(function (e) { toast("error: " + (e && e.message), true); })
       .finally(function () { busy = false; });
   }
+  // R4 ARMED apply — OPERATOR-DRIVEN. Typed body-name confirm, then POST. The
+  // endpoint 503s while disabled and 403s until the operator arms via Telegram;
+  // the toast relays that. No agent path drives this.
+  function applyArmed(session, kind) {
+    if (busy) return;
+    var typed = window.prompt("ARMED " + kind + " apply for '" + session +
+      "'.\nThis RELAUNCHES the body (reversible).\nType the exact body name to confirm:");
+    if (typed == null) return;                 // operator cancelled
+    if (typed.trim() !== session) { toast("name did not match — not applied", true); return; }
+    busy = true;
+    fetch("/api/apply-armed", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ session: session, kind: kind, confirm: typed.trim() }),
+    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (res.status === 503) { toast("Armed apply is DISABLED (pending cai + Nazim)", true); }
+        else if (res.status === 403) { toast((res.j && res.j.error) || "arm via Telegram first", true); }
+        else if (!res.ok) { toast((res.j && res.j.error) || "apply failed", true); }
+        else { toast(kind + " applied to " + session + (res.j && res.j.ok ? "" : " (check output)")); }
+      })
+      .catch(function (e) { toast("error: " + (e && e.message), true); })
+      .finally(function () { busy = false; load(); });
+  }
   $("rows").addEventListener("click", function (e) {
-    var el = e.target;
-    if (el && el.dataset && el.dataset.apply) previewApply(el.dataset.session, el.dataset.apply);
+    var el = e.target; if (!el || !el.dataset) return;
+    if (el.dataset.apply) previewApply(el.dataset.session, el.dataset.apply);
+    else if (el.dataset.armapply) applyArmed(el.dataset.session, el.dataset.armapply);
   });
   $("pvClose").addEventListener("click", function () { $("previewModal").classList.remove("show"); });
 

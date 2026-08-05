@@ -256,6 +256,60 @@ def _token_registry() -> list:
     return out
 
 
+# --- R4 ARMED APPLY (op#10706, CAI-RESP-746/747 tiered arm) — DISABLED/unbuilt-live ---
+# The ONLY path that performs a REAL armed relaunch (re-token / model-apply). It
+# ships DISABLED and is provably inert three ways, ALL required:
+#   1. Feature flag OFF by default: CONSOLE_R4_ENABLED != "1" -> the endpoint 503s.
+#      Turning it on is gated on cai sign-off + Nazim review (NOT mine to flip).
+#   2. A LIVE bridge-verified operator ARM must exist — an INBOUND operator Telegram
+#      approval (require_verified_authorization), scoped + time-bounded. The console
+#      only READS it (read-only DB); it NEVER writes a grant (ops-not-governance).
+#   3. Per-apply: a typed body-name confirm (fat-finger guard) + gazzabyte fail-closed
+#      + routes through the SAME switch script (one rail, cai cond 1) which verifies
+#      auth_fp after + emits the identity-stamped audit/alert (cai conds 2/3/4).
+# I NEVER arm it. This block builds the confirm LAYER only, for cai+Nazim review.
+_R4_ENABLED = os.environ.get("CONSOLE_R4_ENABLED") == "1"
+_R4_ARM_MAX_WINDOW_MIN = 240          # hard cap on an arm's life (auto-disarm)
+_R4_ARM_PHRASE = "ARM LANE APPLY"      # the operator's Telegram approval phrase
+
+
+def _r4_current_arm() -> "dict | None":
+    """The live, bridge-verified operator ARM, or None (fail-closed). READ-ONLY:
+    a real INBOUND operator Telegram approval in operator_messages within a
+    time-bounded window. Scoped to the token account NAMES the approval names
+    (gazzabyte can NEVER be in scope). The console never writes the arm."""
+    try:
+        import sys as _sys, datetime as _dt, re as _re
+        if str(_REPO_ROOT) not in _sys.path:
+            _sys.path.insert(0, str(_REPO_ROOT))
+        from scripts.lib.require_verified_authorization import verified_authorization
+        now = _dt.datetime.now(_dt.timezone.utc)
+        after = now - _dt.timedelta(minutes=_R4_ARM_MAX_WINDOW_MIN)
+        res = verified_authorization(
+            op_id="lane-apply-arm", after=after,
+            approval_phrases=[_R4_ARM_PHRASE], op_tokens=["arm", "lane", "apply"])
+        if not res.ok or not res.row:
+            return None
+        row = res.row
+        text = (row.get("text") or "").lower()
+        m = _re.search(r"(\d{1,4})\s*(?:m|min|mins|minutes)?\b", text)
+        mins = min(int(m.group(1)) if m else 30, _R4_ARM_MAX_WINDOW_MIN)
+        created = row.get("created_at")
+        if isinstance(created, str):
+            created = _dt.datetime.fromisoformat(created.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=_dt.timezone.utc)
+        expires = created + _dt.timedelta(minutes=mins)
+        if now >= expires:
+            return None
+        accounts = [e["name"] for e in _token_registry()
+                    if e["name"] != "gazzabyte" and e["name"] in text]
+        return {"expires_at": expires.isoformat(), "accounts": accounts,
+                "granted_row_id": row.get("id")}
+    except Exception:  # noqa: BLE001 — any uncertainty -> no arm (fail-closed)
+        return None
+
+
 def _current_token_file_for(session: str) -> "pathlib.Path | None":
     """The registry token file whose fp == the body's LIVE account — for a MODEL-
     apply that must relaunch on the SAME account. None if unresolved."""
@@ -1018,7 +1072,8 @@ def _make_handler(feedloop: "_FeedLoop"):
             parsed = urlparse(self.path)
             path = parsed.path
             if path not in ("/api/reset", "/api/backlog", "/api/switch-token",
-                            "/api/set-pointer", "/api/add-token", "/api/apply-dry-run"):
+                            "/api/set-pointer", "/api/add-token", "/api/apply-dry-run",
+                            "/api/apply-armed"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
@@ -1027,6 +1082,10 @@ def _make_handler(feedloop: "_FeedLoop"):
             # R3 apply DRY-RUN: preview making a default live (no relaunch).
             if path == "/api/apply-dry-run":
                 return self._handle_apply_dry_run()
+            # R4 ARMED apply: the REAL relaunch — DISABLED by default (503) unless
+            # cai+Nazim flip CONSOLE_R4_ENABLED AND a live operator arm exists.
+            if path == "/api/apply-armed":
+                return self._handle_apply_armed()
             # R2b add-token: register a new 0600 key file so it's selectable. Raw
             # token written once, NEVER echoed/logged; only its fp is returned.
             if path == "/api/add-token":
@@ -1150,6 +1209,79 @@ def _make_handler(feedloop: "_FeedLoop"):
             return self._json(200 if ok else 500,
                               {"ok": ok, "id": item_id, "action": action,
                                "error": None if ok else (r.stderr or "").strip()[-160:]})
+
+        def _handle_apply_armed(self):
+            """POST /api/apply-armed {session, kind, confirm} — the REAL armed apply.
+            DISABLED/unbuilt-live: 503 unless CONSOLE_R4_ENABLED=1 (cai+Nazim gate that)
+            AND a live bridge-verified operator ARM exists AND `confirm`==session (typed
+            body-name guard). gazzabyte fail-closed; routes through the one switch rail
+            (which verifies auth_fp + audits/alerts). I never arm it."""
+            # (1) Feature flag — DISABLED by default. This alone makes R4 inert.
+            if not _R4_ENABLED:
+                auth.audit(self._client(), "/api/apply-armed", "503")
+                return self._json(503, {"error": "R4 armed apply is DISABLED (unbuilt-live) — pending cai sign-off + Nazim review"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                p = json.loads(raw or b"{}")
+                session = (p.get("session") or "").strip()
+                kind = (p.get("kind") or "").strip().lower()
+                confirm = (p.get("confirm") or "").strip()
+            except Exception:  # noqa: BLE001
+                auth.audit(self._client(), "/api/apply-armed", "400")
+                return self._json(400, {"error": "bad request"})
+            if not _SESSION_RE.match(session) or kind not in ("token", "model"):
+                return self._json(400, {"error": "bad session/kind"})
+            if _is_remote_body(session):
+                return self._json(400, {"error": "remote body — armed apply runs on the VPS (cross-host, later)"})
+            # (2) Live bridge-verified operator ARM (scoped + time-bounded).
+            arm = _r4_current_arm()
+            if not arm:
+                auth.audit(self._client(), f"/api/apply-armed:{session}:no-arm", "403")
+                return self._json(403, {"error": "no live operator ARM — the operator must arm via the Telegram bridge (scoped, time-bounded)"})
+            # (3) Typed body-name confirm (fat-finger guard, not authority).
+            if confirm != session:
+                auth.audit(self._client(), f"/api/apply-armed:{session}:confirm-miss", "400")
+                return self._json(400, {"error": "type the exact body name to confirm"})
+            # Resolve target + enforce scope + gazzabyte fail-closed.
+            SW_LANE = str(_REPO_ROOT / "scripts" / "switch_lane_token.sh")
+            SW_SINGLE = str(_REPO_ROOT / "scripts" / "switch_singleton_token.sh")
+            if kind == "token":
+                ptr = _token_pointer_name(session)
+                target = _read_pointer_target(ptr) if ptr else None
+                if not target or not _fp_of_token_file(target):
+                    return self._json(400, {"error": "no token default set to apply"})
+                if os.path.basename(target) in _FORBIDDEN_TOKEN_BASENAMES:
+                    return self._json(400, {"error": "forbidden token (gazzabyte)"})
+                # SCOPE: the arm must name the target account.
+                tname = next((e["name"] for e in _token_registry()
+                              if e["fp"] == _fp_of_token_file(target)), None)
+                if arm.get("accounts") and tname not in arm["accounts"]:
+                    auth.audit(self._client(), f"/api/apply-armed:{session}:out-of-scope", "403")
+                    return self._json(403, {"error": f"account '{tname}' is not in the current arm scope"})
+                cmd = ["bash", (SW_SINGLE if session == "nazim" else SW_LANE), session, target]
+            else:  # model
+                if session in _MODEL_ENV_BODIES:
+                    return self._json(400, {"error": "model not pointer-settable for this body"})
+                cur = _current_token_file_for(session)
+                if cur is None or cur.name in _FORBIDDEN_TOKEN_BASENAMES:
+                    return self._json(400, {"error": "could not resolve current account (or forbidden)"})
+                cmd = ["bash", SW_LANE, "--model-apply", session, str(cur)]
+            # Execute the REAL apply via the one rail. ARMED marker -> the script
+            # emits the identity-stamped audit + alerts on an fp mismatch (invariants 2/3).
+            auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", "run")
+            try:
+                _env = {**os.environ, "ARMED": "1", "BREAK_GLASS": "0",
+                        "ACTOR": self._client() or "operator"}
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=_env)
+                ok = r.returncode == 0
+                tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-10:])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("apply-armed failed (%s %s): %s", kind, session, e)
+                auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", "500")
+                return self._json(500, {"error": "apply failed"})
+            auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", "200" if ok else "500")
+            return self._json(200 if ok else 500, {"ok": ok, "kind": kind, "session": session, "output": tail})
 
         def _handle_apply_dry_run(self):
             """POST /api/apply-dry-run {session, kind:token|model} — PREVIEW making a

@@ -88,6 +88,10 @@
   .prevbtn { flex:1 1 auto; background:var(--panel-2); color:var(--accent);
     border:1px solid var(--line); border-radius:8px; padding:10px; font:600 12px/1 var(--mono); }
   .prevbtn:active { background:var(--line); }
+  /* Armed APPLY (R4) — amber to mark it as the real, operator-driven action. */
+  .armbtn { flex:1 1 auto; background:rgba(240,180,41,.10); color:var(--warn);
+    border:1px solid rgba(240,180,41,.4); border-radius:8px; padding:10px; font:700 12px/1 var(--mono); }
+  .armbtn:active { background:rgba(240,180,41,.2); }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none;
     align-items:flex-end; justify-content:center; z-index:30; }
   .modal.show { display:flex; }
