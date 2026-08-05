@@ -17,7 +17,7 @@
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { margin:0; background:var(--bg); color:var(--txt);
-    font:14px/1.4 -apple-system, system-ui, sans-serif; }
+    font:14px/1.4 -apple-system, system-ui, sans-serif; overflow-x:hidden; }
   .wrap { max-width:640px; margin:0 auto; padding:14px 12px calc(28px + env(safe-area-inset-bottom)); }
   header { position:sticky; top:0; z-index:5; background:linear-gradient(180deg,#10151f,#0b0e14);
     margin:-14px -12px 12px; padding:14px 14px 12px; border-bottom:1px solid var(--line); }
@@ -29,30 +29,49 @@
   .refresh:active { background:var(--panel-2); }
   .sub { margin-top:9px; color:var(--dim); font:12px/1.35 var(--mono); }
   .sub b.bad { color:var(--bad); } .sub b.good { color:var(--good); }
-  /* One card per body — single column, generous height for phone tapping. */
+  /* One card per body. STACKED lines (each fact on its own wrapped row) so a wide
+     off-account card can NEVER clip at 390px (op#10706 B mobile fix). */
   .row { border:1px solid var(--line); border-left:3px solid var(--line);
-    border-radius:11px; background:var(--panel); padding:12px 13px; margin-bottom:9px; }
-  .row.bad { border-left-color:var(--bad); background:linear-gradient(90deg, rgba(255,107,107,.09), var(--panel) 55%); }
+    border-radius:11px; background:var(--panel); padding:12px 13px; margin-bottom:10px; }
+  .row.bad { border-left-color:var(--bad); background:linear-gradient(90deg, rgba(255,107,107,.09), var(--panel) 60%); }
   .row.unver { border-left-color:var(--dim); opacity:.9; }
-  .r1 { display:flex; align-items:center; gap:9px; }
-  .who { font:700 15px/1.1 var(--mono); color:var(--txt); overflow-wrap:anywhere; }
+  .r1 { display:flex; align-items:center; flex-wrap:wrap; gap:6px 9px; }
+  .who { font:700 15px/1.15 var(--mono); color:var(--txt); overflow-wrap:anywhere; flex:1 1 auto; min-width:0; }
   .badge { margin-left:auto; flex:none; font:700 10px/1 var(--mono); letter-spacing:.5px;
-    padding:4px 8px; border-radius:999px; }
+    padding:4px 8px; border-radius:999px; white-space:nowrap; }
   .badge.ok { color:var(--good); background:rgba(62,207,142,.12); }
   .badge.bad { color:var(--bad); background:rgba(255,107,107,.15); }
   .badge.unver { color:var(--dim); background:var(--panel-2); }
-  .r2 { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin-top:9px;
-    font:12px/1.2 var(--mono); }
-  .acct { font-weight:700; }
+  .line { margin-top:7px; font:12px/1.3 var(--mono); overflow-wrap:anywhere; }
+  .line.meta { display:flex; flex-wrap:wrap; gap:6px 12px; }
+  .line.meta > * { min-width:0; overflow-wrap:anywhere; }
+  .acct { font-weight:700; font-size:13px; }
   .row.ok .acct { color:var(--good); } .row.bad .acct { color:var(--bad); }
   .row.unver .acct { color:var(--dim); }
   .exp { color:var(--bad); }
   .model { color:var(--accent); font-weight:700; }
   .model.none { color:var(--dim); font-weight:400; }
   .kv { color:var(--dim); } .kv b { color:var(--txt); font-weight:600; }
-  .fp { color:var(--dim); font-size:11px; }
+  .fp { color:var(--dim); }
+  /* R2b select controls — one per row, full-width, big tap targets. Stacked (not
+     side-by-side) so a long option can never push a select past 390px. */
+  .controls { display:flex; flex-direction:column; gap:9px; margin-top:11px;
+    padding-top:10px; border-top:1px solid var(--line); }
+  .ctl { display:flex; align-items:center; gap:9px; min-width:0; }
+  .ctl > span { color:var(--dim); font:11px/1.1 var(--mono); flex:0 0 92px; }
+  .ctl select { flex:1 1 auto; width:100%; min-width:0; max-width:100%;
+    background:var(--panel-2); color:var(--txt); border:1px solid var(--line);
+    border-radius:8px; padding:10px 9px; font:13px var(--mono); }
+  .ctlnote { color:var(--dim); font:11px/1.3 var(--mono); }
   .empty { color:var(--dim); text-align:center; padding:40px 0; font:13px var(--mono); }
   .stamp { color:var(--dim); text-align:center; margin-top:14px; font:11px var(--mono); }
+  /* Action toast for pointer writes. */
+  .toast { position:fixed; left:50%; bottom:calc(18px + env(safe-area-inset-bottom));
+    transform:translateX(-50%); max-width:92%; background:var(--panel); color:var(--txt);
+    border:1px solid var(--good); border-radius:10px; padding:11px 15px; font:12px/1.3 var(--mono);
+    opacity:0; pointer-events:none; transition:opacity .18s; z-index:20; text-align:center; }
+  .toast.show { opacity:1; }
+  .toast.bad { border-color:var(--bad); color:var(--bad); }
 </style>
 </head>
 <body>
@@ -68,6 +87,7 @@
   <div id="rows"></div>
   <div id="stamp" class="stamp"></div>
 </div>
+<div id="toast" class="toast"></div>
 <script src="/static/lanes.js"></script>
 </body>
 </html>

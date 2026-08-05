@@ -22,6 +22,7 @@ bridges to it via run_coroutine_threadsafe.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -147,6 +148,103 @@ def _resolve_lane_token_file(token_name: str) -> pathlib.Path | None:
     except Exception:  # noqa: BLE001
         return None
     return path
+
+
+# --- R2b: pointer/registry CRUD (op#10706) — reversible, NO relaunch ----------
+# The /lanes page lets the operator SELECT a token + model per body. These write
+# the per-body POINTER FILES only (the DEFAULT a body boots with) — they DO NOT
+# relaunch anything and DO NOT change any live billing (that's the gated R3/R4
+# apply path). Every write is rm-reversible. gazzabyte stays fail-closed (it is
+# not in LANE_TOKEN_FILES, so it can never be selected). The console DB session
+# is READ-ONLY, so the audit sink here is auth.audit (file log), not a bus row.
+_MODEL_ALLOWLIST = (
+    "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5",
+    "claude-fable-5", "claude-haiku-4-5",
+)
+# Which token-pointer file governs a body's default account. Console + hub own
+# theirs; every worker lane shares .lane_default_token (there is no per-lane token
+# pointer — selecting a token on a lane sets the ALL-LANES default). cai + the SRE
+# boot straight off .env, so their token default is NOT pointer-settable here.
+_TOKEN_POINTER_FOR = {"nazim": ".nazim_default_token", "cc-orchestrator": ".orch_default_token"}
+_NO_TOKEN_POINTER = {"cai", "fleet-health"}   # boot off .env; token not settable via pointer
+_SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _token_pointer_name(session: str) -> "str | None":
+    """The token-pointer FILENAME governing this body's default account, or None
+    when the body has no settable pointer (cai/SRE run off .env)."""
+    if session in _NO_TOKEN_POINTER:
+        return None
+    return _TOKEN_POINTER_FOR.get(session, ".lane_default_token")
+
+
+def _read_pointer_target(name: str) -> "str | None":
+    """The token-file PATH a pointer file currently points at (stripped), or None."""
+    try:
+        p = _REPO_ROOT / name
+        if p.exists():
+            return p.read_text(encoding="utf-8").strip() or None
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _fp_of_token_file(path: str) -> "str | None":
+    """sha256[:12] of the token in a file (raw token stays local), or None."""
+    try:
+        tok = pathlib.Path(os.path.expanduser(path)).read_text(encoding="utf-8").strip()
+        return hashlib.sha256(tok.encode("utf-8")).hexdigest()[:12] if tok else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _token_registry() -> list:
+    """The selectable token accounts (fp + label, NEVER the raw token). gazzabyte
+    is absent by construction (not in LANE_TOKEN_FILES)."""
+    out = []
+    for name in sorted(LANE_TOKEN_FILES):
+        f = _resolve_lane_token_file(name)
+        out.append({"name": name, "fp": (_fp_of_token_file(str(f)) if f else None),
+                    "available": f is not None})
+    return out
+
+
+def _read_model_pointer(session: str) -> "str | None":
+    """The per-body model pointer value (.<session>_model), or None if unset."""
+    if not _SESSION_RE.match(session or ""):
+        return None
+    try:
+        p = _REPO_ROOT / (".%s_model" % session)
+        if p.exists():
+            return p.read_text(encoding="utf-8").strip() or None
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _token_name_for_fp(fp: "str | None") -> "str | None":
+    """Reverse a registry token fp -> its name (so the UI can preselect)."""
+    if not fp:
+        return None
+    for e in _token_registry():
+        if e.get("fp") == fp:
+            return e["name"]
+    return None
+
+
+def _enrich_token_pointers(payload: dict) -> dict:
+    """Fold per-body pointer state into a token_ground_truth payload so /lanes can
+    show + preselect the current token/model defaults. Read-only."""
+    for r in payload.get("rows", []):
+        sess = r.get("session")
+        ptr = _token_pointer_name(sess)
+        r["token_settable"] = ptr is not None
+        r["token_pointer"] = ptr
+        r["token_pointer_name"] = _token_name_for_fp(
+            _fp_of_token_file(_read_pointer_target(ptr)) if ptr and _read_pointer_target(ptr) else None)
+        r["model_pointer"] = _read_model_pointer(sess)
+    payload["registry"] = {"tokens": _token_registry(), "models": list(_MODEL_ALLOWLIST)}
+    return payload
 
 
 def _build_version() -> str:
@@ -749,7 +847,9 @@ def _make_handler(feedloop: "_FeedLoop"):
                     # Process-verified per-body token + model (op#10706/10715/10717),
                     # incl. the remote VPS hub via SSH (op#10706 C). Its own endpoint
                     # (feeds the /lanes page) so the ~SSH latency stays off /api/fleet.
-                    payload = panes.token_ground_truth(include_remote=True)
+                    # Enriched with per-body pointer state + the registry (R2b) so the
+                    # page can show + preselect the current token/model defaults.
+                    payload = _enrich_token_pointers(panes.token_ground_truth(include_remote=True))
                     auth.audit(self._client(), path, "200")
                     return self._json(200, payload)
 
@@ -847,12 +947,18 @@ def _make_handler(feedloop: "_FeedLoop"):
             the Telegram clear-buttons already use."""
             parsed = urlparse(self.path)
             path = parsed.path
-            if path not in ("/api/reset", "/api/backlog", "/api/switch-token"):
+            if path not in ("/api/reset", "/api/backlog", "/api/switch-token", "/api/set-pointer"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
                 auth.audit(self._client(), path, "401")
                 return self._json(401, {"error": "unauthorized"})
+            # R2b (op#10706): set/clear a body's token or model POINTER file — the
+            # DEFAULT it boots with. Reversible (rm), NO relaunch, NO live billing
+            # change. gazzabyte can never be selected (not in LANE_TOKEN_FILES);
+            # model is allowlist-validated BEFORE write.
+            if path == "/api/set-pointer":
+                return self._handle_set_pointer()
             # Operator swipe on a "Your asks" card (op 2026-08-02): drop (left) /
             # prioritise (right). Mutates operator_backlog via the vetted
             # scripts/backlog_swipe.py — the console DB session is read-only, same
@@ -966,6 +1072,77 @@ def _make_handler(feedloop: "_FeedLoop"):
             return self._json(200 if ok else 500,
                               {"ok": ok, "id": item_id, "action": action,
                                "error": None if ok else (r.stderr or "").strip()[-160:]})
+
+        def _handle_set_pointer(self):
+            """POST /api/set-pointer {kind:"token"|"model", session, value?|clear?}
+            Set/clear a body's token or model POINTER (the default it boots with).
+            REVERSIBLE (clear = rm), NO relaunch, NO live billing change. gazzabyte
+            can never be selected (not in LANE_TOKEN_FILES); model is allowlist-
+            validated BEFORE write; session is charset-restricted (no path escape).
+            Audit sink = auth.audit (the console DB session is read-only)."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                p = json.loads(raw or b"{}")
+                kind = (p.get("kind") or "").strip().lower()
+                session = (p.get("session") or "").strip()
+                clear = bool(p.get("clear"))
+                value = (p.get("value") or "").strip()
+            except Exception:  # noqa: BLE001
+                auth.audit(self._client(), "/api/set-pointer", "400")
+                return self._json(400, {"error": "bad request"})
+            if not _SESSION_RE.match(session):
+                auth.audit(self._client(), "/api/set-pointer", "400")
+                return self._json(400, {"error": "bad session"})
+            if kind not in ("token", "model"):
+                auth.audit(self._client(), "/api/set-pointer", "400")
+                return self._json(400, {"error": "bad kind"})
+            try:
+                if kind == "token":
+                    ptr = _token_pointer_name(session)
+                    if ptr is None:
+                        auth.audit(self._client(), f"/api/set-pointer:token:{session}", "400")
+                        return self._json(400, {"error": "token not settable for this body (boots off .env)"})
+                    pfile = _REPO_ROOT / ptr
+                    if clear:
+                        if pfile.exists():
+                            pfile.unlink()
+                        auth.audit(self._client(), f"/api/set-pointer:token:{session}:clear", "200")
+                        logger.info("set-pointer token CLEAR: %s (%s)", session, ptr)
+                    else:
+                        tname = value.lower()
+                        if tname not in LANE_TOKEN_FILES:
+                            auth.audit(self._client(), f"/api/set-pointer:token:{session}", "400")
+                            return self._json(400, {"error": "unknown token", "allowed": sorted(LANE_TOKEN_FILES)})
+                        tokfile = _resolve_lane_token_file(tname)
+                        if tokfile is None or tokfile.name in _FORBIDDEN_TOKEN_BASENAMES:
+                            auth.audit(self._client(), f"/api/set-pointer:token:{session}", "400")
+                            return self._json(400, {"error": "token unavailable"})
+                        pfile.write_text(str(tokfile) + "\n", encoding="utf-8")
+                        auth.audit(self._client(), f"/api/set-pointer:token:{session}:{tname}", "200")
+                        logger.info("set-pointer token: %s -> %s (%s)", session, tname, ptr)
+                else:  # model
+                    mfile = _REPO_ROOT / (".%s_model" % session)
+                    if clear:
+                        if mfile.exists():
+                            mfile.unlink()
+                        auth.audit(self._client(), f"/api/set-pointer:model:{session}:clear", "200")
+                        logger.info("set-pointer model CLEAR: %s", session)
+                    else:
+                        if value not in _MODEL_ALLOWLIST:
+                            auth.audit(self._client(), f"/api/set-pointer:model:{session}", "400")
+                            return self._json(400, {"error": "model not allowlisted", "allowed": list(_MODEL_ALLOWLIST)})
+                        mfile.write_text(value + "\n", encoding="utf-8")
+                        auth.audit(self._client(), f"/api/set-pointer:model:{session}:{value}", "200")
+                        logger.info("set-pointer model: %s -> %s", session, value)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("set-pointer failed: %s", e)
+                auth.audit(self._client(), f"/api/set-pointer:{kind}:{session}", "500")
+                return self._json(500, {"error": "write failed"})
+            return self._json(200, {
+                "ok": True, "kind": kind, "session": session, "cleared": clear,
+                "note": "default set — applies on the body's NEXT relaunch (no relaunch now)",
+            })
 
         def _handle_switch_token(self):
             """POST /api/switch-token {lane, token_name} — re-token a lane onto a

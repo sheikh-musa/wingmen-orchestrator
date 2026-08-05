@@ -663,7 +663,23 @@ if [ -r "$_FLEET_MODEL_FILE" ]; then
     _fm="$(tr -d '[:space:]' < "$_FLEET_MODEL_FILE")"
     [ -n "$_fm" ] && _FLEET_MODEL_DEFAULT="$_fm"
 fi
-RESOLVED_MODEL="${MODEL:-$_FLEET_MODEL_DEFAULT}"
+# PER-BODY model pointer (op#10706 R2, orch-console #16038): .<session>_model holds
+# a model id that overrides the fleet-wide .fleet_model for THIS body ONLY, so an
+# operator's per-lane model choice STICKS across reboots. Precedence (highest last):
+#   MODEL env > .<session>_model > .fleet_model > opus-4-8   (passthrough `-- --model`
+# still wins, appended AFTER on argv). Revert = rm the pointer. Inert until written,
+# so this is a no-op for every body that has no pointer. Read-only trust matches
+# .fleet_model (the gated apply-model path validates against the model allowlist
+# BEFORE writing a pointer, so nothing invalid lands here).
+_BODY_MODEL_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+_BODY_MODEL_DEFAULT=""
+if [ -n "$_BODY_MODEL_SESSION" ] && [ -r "$ORCH_DIR/.${_BODY_MODEL_SESSION}_model" ]; then
+    _bm="$(tr -d '[:space:]' < "$ORCH_DIR/.${_BODY_MODEL_SESSION}_model")"
+    [ -n "$_bm" ] && _BODY_MODEL_DEFAULT="$_bm"
+fi
+# per-body pointer (if any) overrides the fleet default; MODEL env still overrides both.
+_NON_ENV_MODEL="${_BODY_MODEL_DEFAULT:-$_FLEET_MODEL_DEFAULT}"
+RESOLVED_MODEL="${MODEL:-$_NON_ENV_MODEL}"
 echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}"
 if [ "$RESOLVED_MODEL" != "claude-opus-4-8" ]; then
     echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-8)${RESET}"
