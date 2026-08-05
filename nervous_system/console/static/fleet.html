@@ -116,6 +116,29 @@
   .topbloat .dot.green{background:var(--good)} .topbloat .pct.green{color:var(--good)}
   .topbloat .dot.amber{background:var(--warn)} .topbloat .pct.amber{color:var(--warn)}
   .topbloat .dot.red{background:var(--bad)}    .topbloat .pct.red{color:var(--bad)}
+  /* Token ground-truth rows (op#10706/10715): process-verified account per body.
+     mismatch = verified but not on the expected account (nazim-on-Syed) -> red;
+     metered = API-billed -> red; unverified -> dim. */
+  .sec-h.tokens h2 { color: var(--accent); }
+  .tokrow { display:flex; align-items:center; gap:9px; padding:9px 11px; margin-bottom:6px;
+    border-radius:9px; background:var(--panel); border:1px solid var(--line);
+    border-left:3px solid var(--line); font:12px/1.25 var(--mono); }
+  .tokrow.bad { border-left-color:var(--bad); background:linear-gradient(90deg, rgba(255,107,107,.08), var(--panel) 45%); }
+  .tokrow.unver { border-left-color:var(--dim); opacity:.85; }
+  .tokrow .who { color:var(--txt); font-weight:700; flex:none; min-width:118px; }
+  .tokrow .acct { font-weight:700; }
+  .tokrow.ok .acct { color:var(--good); }
+  .tokrow.bad .acct { color:var(--bad); }
+  .tokrow.unver .acct { color:var(--dim); }
+  .tokrow .tags { margin-left:auto; display:flex; gap:6px; align-items:center; flex:none; }
+  .tokrow .vtag { font-size:10px; letter-spacing:.4px; padding:2px 7px; border-radius:999px; }
+  .tokrow .vtag.ok { color:var(--good); background:rgba(62,207,142,.12); }
+  .tokrow .vtag.bad { color:var(--bad); background:rgba(255,107,107,.14); }
+  .tokrow .vtag.unver { color:var(--dim); background:var(--panel-2); }
+  .tokrow .host { color:var(--dim); font-size:11px; }
+  .tokrow .fp { color:var(--dim); font-size:10px; }
+  .tokrow .model { color:var(--accent); font-size:11px; font-weight:700; }
+  .tokrow .model.none { color:var(--dim); font-weight:400; }
   .strip { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
   .chip { display:inline-flex; align-items:center; gap:6px; font:12px/1 var(--mono);
     padding:7px 11px; border-radius:999px; background: var(--panel-2); border:1px solid var(--line); color: var(--dim); }
@@ -302,6 +325,14 @@
     <div id="topBloat" class="topbloat"></div>
     <div id="strip" class="strip"></div>
   </div>
+
+  <!-- Token ground-truth (op#10706/10715): every body's PROCESS-VERIFIED Claude
+       account, read from the live proc env — never a declared value. Placed high
+       because the operator lost trust in token claims. Auto-hidden until data. -->
+  <section id="tokensSec" style="display:none">
+    <div class="sec-h tokens"><h2>Token ground-truth</h2><span id="tokensSummary" class="count"></span></div>
+    <div id="tokens"></div>
+  </section>
 
   <section>
     <div class="sec-h needs"><h2>Needs you</h2><span id="needsCount" class="count"></span></div>

@@ -489,6 +489,7 @@ def _fleet_payload():
         f_bloat = ex.submit(db.fetch_context_bloat)      # per-agent context %
         f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
+        f_tokens = ex.submit(panes.token_ground_truth)   # per-body PROCESS-VERIFIED token (op#10706/10715)
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         deploys = f_deploys.result()
         # Operator-audience needs ONLY. The 'fleet' audience fed a "Fleet is
@@ -520,6 +521,11 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("queue failed: %s", e)
             queue = []
+        try:
+            token_truth = f_tokens.result()
+        except Exception as e:
+            logger.warning("token_ground_truth failed: %s", e)
+            token_truth = {"rows": [], "summary": {}}
     # Mobile payload trim (op#10291): the queue `detail` field was ~11KB of the
     # ~18KB queue section (63%) — the bulk of the /api/fleet payload that the
     # marginal Abu-Dhabi<->Singapore relay drops. It's only needed ON TAP, which
@@ -590,6 +596,7 @@ def _fleet_payload():
         "context_bloat": _jsonable(context_bloat),
         "pool_usage": _jsonable(pool_usage),
         "queue": _jsonable(queue),
+        "token_truth": _jsonable(token_truth),   # process-verified per-body token (op#10706/10715)
     }
 
 

@@ -1056,6 +1056,54 @@
   // Paint a payload with full UI-state preservation (window scroll + open
   // peek's inner scroll). Shared by the live fetch AND the boot-time last-good
   // render, so a cached paint restores exactly what a live paint would.
+  // Token ground-truth (op#10706/10715): one row per body showing the account its
+  // LIVE process is actually on (server-verified from the proc env — never a
+  // declared value). mismatch (verified but off the expected account) and metered
+  // render RED; unverified (e.g. the remote VPS hub, or a proc we couldn't read)
+  // renders dim and NEVER a guessed account. Section auto-hides when there's no data.
+  function renderTokenTruth(t) {
+    var sec = $("tokensSec"), box = $("tokens"), sum = $("tokensSummary");
+    if (!sec || !box) return;
+    var rows = (t && t.rows) || [];
+    if (!rows.length) { sec.style.display = "none"; box.innerHTML = ""; if (sum) sum.textContent = ""; return; }
+    sec.style.display = "";
+    var s = (t && t.summary) || {};
+    if (sum) {
+      var bits = [];
+      if (s.mismatched) bits.push(s.mismatched + " off-account");
+      if (s.metered) bits.push(s.metered + " metered");
+      if (s.unverified) bits.push(s.unverified + " unverified");
+      bits.push((s.verified || 0) + "/" + (s.total || rows.length) + " verified");
+      var bm = s.by_model || {};
+      Object.keys(bm).forEach(function (k) {
+        bits.push(bm[k] + "× " + String(k).replace(/^claude-/, ""));
+      });
+      sum.textContent = bits.join(" · ");
+    }
+    box.innerHTML = rows.map(function (r) {
+      var cls, vtag, vcls, acct;
+      if (r.metered) { cls = "bad"; vtag = "METERED"; vcls = "bad"; acct = r.account || "metered (API)"; }
+      else if (!r.verified) { cls = "unver"; vtag = "UNVERIFIED"; vcls = "unver"; acct = "unverified"; }
+      else if (r.mismatch) { cls = "bad"; vtag = "OFF-ACCOUNT"; vcls = "bad"; acct = r.account; }
+      else { cls = "ok"; vtag = "VERIFIED"; vcls = "ok"; acct = r.account; }
+      var host = r.host ? '<span class="host">' + esc(r.host) + '</span>' : "";
+      var fp = r.fp ? '<span class="fp">' + esc(r.fp) + '</span>' : "";
+      var exp = (r.mismatch && r.expected) ? ' <span class="host">(exp ' + esc(r.expected) + ')</span>' : "";
+      // Verified running model (op#10717): the proc's actual --model, "claude-"
+      // prefix trimmed for width. Unpinned/unverifiable -> "default", dim.
+      var mdl = r.model ? esc(String(r.model).replace(/^claude-/, "")) : "default";
+      var mcls = r.model ? "model" : "model none";
+      return '<div class="tokrow ' + cls + '">' +
+        '<span class="who">' + esc(r.session) + '</span>' +
+        '<span class="acct">' + esc(acct) + '</span>' + exp + fp +
+        '<span class="tags">' +
+          '<span class="' + mcls + '">' + mdl + '</span>' + host +
+          '<span class="vtag ' + vcls + '">' + vtag + '</span>' +
+        '</span>' +
+      '</div>';
+    }).join("");
+  }
+
   function applyData(d) {
     var scrollY = window.scrollY || document.documentElement.scrollTop || 0;
     var pb = currentPeekBox();
@@ -1066,6 +1114,7 @@
     buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
     buildLaneCtxIndex(d.context_bloat || []);   // before renderLanes, so each card can fold in its /1M gauge
     renderPulse(d.pulse || {});
+    renderTokenTruth(d.token_truth || {});  // process-verified per-body token (op#10706/10715)
     renderTopBloat(d.context_bloat || []);  // glance: worst-offender ctx lane up top (operator ask)
     renderPoolUsage(d.pool_usage || []);   // weekly Max-pool % up top (op#9770)
     renderNeeds(d.needs_you || []);

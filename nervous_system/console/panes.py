@@ -288,8 +288,9 @@ _METERED = "metered"
 
 def _fingerprint(token: str) -> str:
     """A stable, NON-reversible short id for an OAuth token. sha256 prefix — the
-    raw token is never surfaced anywhere."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+    raw token is never surfaced anywhere. 12 hex chars to match the operator's
+    canonical account fingerprints (musa=68142948c003, syed=582043088eae, op#10706)."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
 def _owner_map() -> Dict[str, str]:
@@ -415,3 +416,128 @@ def lane_token_auth() -> dict:
         "lanes": lanes,
         "summary": {"by_owner": by_owner, "metered": metered_n, "total": len(lanes)},
     }
+
+
+# ── GROUND-TRUTH token page (op#10706 / op#10715) ────────────────────────────
+# The operator LOST TRUST in declared token values (the console reported Musa
+# while ACTUALLY on Syed). This scan reports ONLY the process-verified account —
+# read from the live claude proc's env — never a declared/agent_status/config
+# value. Anything that can't be process-verified is UNVERIFIED, never a guess.
+#
+# Known Max accounts by token fingerprint (sha256[:12] — NON-secret short ids the
+# operator already uses on the bus, never the raw token). CONSOLE_MAX_ACCT_OWNERS
+# (JSON {fp: label}) extends/overrides. Keyed at the length _fingerprint() emits.
+_KNOWN_ACCOUNTS = {"68142948c003": "Musa", "582043088eae": "Syed"}
+# Current fleet policy: every body belongs on Musa. A verified body on any other
+# account is flagged (this is what surfaces nazim-on-Syed). Override per-body once
+# orch-console gives an authoritative expected-account source (op#10706 blocker).
+_EXPECTED_ACCOUNT = os.environ.get("CONSOLE_EXPECTED_ACCOUNT", "Musa")
+# Bodies the operator wants proven that do NOT run on THIS host: the hub
+# (cc-orchestrator) lives on the VPS, so a Mini-local `ps` cannot read its token.
+# Reported UNVERIFIED (remote) rather than guessed (op#10715). {session: host}.
+_REMOTE_BODIES = {"cc-orchestrator": "VPS"}
+
+
+def _account_labels() -> Dict[str, str]:
+    labels = dict(_KNOWN_ACCOUNTS)
+    raw = os.environ.get("CONSOLE_MAX_ACCT_OWNERS")
+    if raw:
+        try:
+            extra = json.loads(raw)
+            if isinstance(extra, dict):
+                labels.update({str(k): str(v) for k, v in extra.items()})
+        except Exception:
+            pass
+    return labels
+
+
+def token_ground_truth() -> dict:
+    """GROUND-TRUTH per-body Claude account, read from the LIVE process env — the
+    ACTUAL running token, never a declared value (op#10706/10715). For every claude
+    proc on THIS host: tmux pane_pid -> claude pid -> `ps eww` reads
+    CLAUDE_CODE_OAUTH_TOKEN, fingerprinted in-process (raw token NEVER returned,
+    logged, or displayed) -> Max-account label; metered = non-empty ANTHROPIC_API_KEY.
+    Off-box bodies (the VPS hub) are reported UNVERIFIED (remote), never guessed.
+
+    Each row: {session, account, fp, metered, model, host, verified, expected,
+    mismatch}. `model` is the proc's actual --model (op#10717), None if unpinned.
+    READ-ONLY: only `ps` + tmux list-panes, argv lists, no shell."""
+    labels = _account_labels()
+    pane_pids = _pid_to_session()
+    ppid = _ppid_map()
+    try:
+        r = subprocess.run(
+            ["ps", "eww", "-o", "pid=,command="],
+            capture_output=True, text=True, timeout=_TIMEOUT_S,
+        )
+        eww = r.stdout
+    except Exception:
+        eww = ""
+
+    rows: List[dict] = []
+    seen = set()
+    for ln in eww.splitlines():
+        low = ln.lower()
+        # A fleet body = the claude CLI booted with --dangerously-skip-permissions
+        # (workers, singletons, AND the console body all launch this way; bare
+        # sub-process claude helpers do not, so this excludes them cleanly).
+        if "claude" not in low or "--dangerously-skip-permissions" not in ln:
+            continue
+        m = re.match(r"\s*(\d+)\s", ln)
+        if not m:
+            continue
+        pid = int(m.group(1))
+        km = re.search(r"ANTHROPIC_API_KEY=(\S*)", ln)
+        metered = bool(km and km.group(1))
+        tok = re.search(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)", ln)
+        fp = _fingerprint(tok.group(1)) if tok else None
+        # MODEL ground truth (op#10717): the ACTUAL --model the live proc booted
+        # with, read from its argv — never a declared value. Absent => the body is
+        # on the CLI default (not pinned), reported as such, not guessed.
+        mm = re.search(r"--model[= ](\S+)", ln)
+        model = mm.group(1) if mm else None
+        if metered:
+            account = "metered (API)"
+        elif fp is not None:
+            account = labels.get(fp, "Max (unknown acct)")
+        else:
+            account = None  # token unreadable -> UNVERIFIED, never a guess
+        verified = metered or fp is not None
+        session = _session_for(pid, pane_pids, ppid) or ("pid:%d" % pid)
+        seen.add(session)
+        # A verified Max body on any account other than the expected one is a
+        # MISMATCH (this is nazim-on-Syed). Metered is its own alert; unverified
+        # is neither green nor a mismatch — it's simply unproven.
+        mismatch = bool(verified and not metered and account != _EXPECTED_ACCOUNT)
+        rows.append({
+            "session": session, "account": account, "fp": fp, "metered": metered,
+            "model": model, "host": "Mini", "verified": verified,
+            "expected": _EXPECTED_ACCOUNT, "mismatch": mismatch,
+        })
+
+    for sess, host in _REMOTE_BODIES.items():
+        if sess in seen:
+            continue
+        rows.append({
+            "session": sess, "account": None, "fp": None, "metered": False,
+            "model": None, "host": host, "verified": False,
+            "expected": _EXPECTED_ACCOUNT, "mismatch": False,
+        })
+
+    # Loud first: mismatches, then metered, then unverified, then green by session.
+    rows.sort(key=lambda x: (
+        not x["mismatch"], not x["metered"], x["verified"], x["session"]))
+    by_model: Dict[str, int] = {}
+    for x in rows:
+        if x.get("model"):
+            by_model[x["model"]] = by_model.get(x["model"], 0) + 1
+    summary = {
+        "total": len(rows),
+        "verified": sum(1 for x in rows if x["verified"]),
+        "unverified": sum(1 for x in rows if not x["verified"]),
+        "mismatched": sum(1 for x in rows if x["mismatch"]),
+        "metered": sum(1 for x in rows if x["metered"]),
+        "expected": _EXPECTED_ACCOUNT,
+        "by_model": by_model,
+    }
+    return {"rows": rows, "summary": summary}
