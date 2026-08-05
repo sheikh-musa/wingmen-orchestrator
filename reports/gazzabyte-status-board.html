@@ -132,6 +132,43 @@
   .pdf-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .pdf-btn svg { width: 15px; height: 15px; }
 
+  /* Enhancement-list section (the client's numbered 10-item list) */
+  .elist { margin-top: 34px; }
+  .elist > h2 {
+    font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em;
+    margin: 0 0 4px; color: var(--ink-soft);
+  }
+  .elist > .sub { color: var(--ink-faint); font-size: 13px; margin: 0 0 16px; }
+  .elist ol { list-style: none; counter-reset: e; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .elist li {
+    counter-increment: e; display: flex; align-items: flex-start; gap: 13px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 13px 15px; box-shadow: var(--shadow);
+  }
+  .elist li::before {
+    content: counter(e); flex: none; width: 25px; height: 25px; border-radius: 50%;
+    background: var(--surface-2); border: 1px solid var(--line-soft);
+    display: grid; place-items: center; font-size: 12.5px; font-weight: 700;
+    color: var(--ink-soft); font-variant-numeric: tabular-nums; margin-top: 1px;
+  }
+  .elist .body { flex: 1; min-width: 0; }
+  .elist .t { font-size: 14.5px; font-weight: 600; margin: 0; line-height: 1.35; letter-spacing: -0.01em; }
+  .elist .d { font-size: 13px; color: var(--ink-soft); margin: 3px 0 0; line-height: 1.45; }
+  .pill {
+    flex: none; margin-top: 2px; display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    border-radius: 20px; padding: 3px 10px; border: 1px solid var(--line);
+  }
+  .pill .dot { width: 8px; height: 8px; }
+  .pill.done { color: var(--done); }
+  .pill.queued { color: var(--queued); }
+  .pill.hold { color: var(--progress); }
+
+  @media (max-width: 560px) {
+    .elist li { flex-wrap: wrap; }
+    .pill { order: 3; margin-left: 38px; }
+  }
+
   @media print {
     :root {
       --ground: #fff; --surface: #fff; --surface-2: #f2f4f6;
@@ -143,6 +180,7 @@
     .pdf-btn { display: none; }
     .card { break-inside: avoid; box-shadow: none; }
     .col { break-inside: avoid; }
+    .elist li { break-inside: avoid; }
   }
 </style>
 
@@ -160,7 +198,7 @@
       </button>
     </div>
     <div class="meta">
-      <span>Updated <b>2 Aug 2026, 00:33</b> (SGT)</span>
+      <span>Updated <b>4 Aug 2026, 07:25</b> (SGT)</span>
       <span class="legend">
         <span><span class="dot progress"></span> In progress</span>
         <span><span class="dot queued"></span> Queued</span>
@@ -172,50 +210,62 @@
   <div class="board">
     <!-- IN PROGRESS -->
     <section class="col progress">
-      <div class="col-head"><h2>In progress</h2><span class="count">3</span></div>
+      <div class="col-head"><h2>In progress</h2><span class="count">2</span></div>
       <div class="col-rail"></div>
 
       <article class="card">
-        <div class="card-top"><h3>Edit a tin amount before a report is submitted</h3><span class="dot progress"></span></div>
-        <p>Design confirmed with you (the preparer corrects the amount on a draft; no toggle). Built and now in final independent review before it goes live &mdash; the change shows old &rarr; new and is recorded. Expected live within the next few days.</p>
-        <span class="tag">In final review</span>
+        <div class="card-top"><h3>Extra tabung: create manual tins + assign to a student</h3><span class="dot progress"></span></div>
+        <p>Item #5 on your list. The core is <b>built and safety-tested</b> &mdash; creating a tin, assigning it to a student, and linking it to the main tabung, with every money-safety check in place. The screen your staff use to create them is landing <b>today</b>; we're finishing it carefully because it's the part you'll use daily.</p>
+        <span class="tag">In progress &middot; family tins landing today</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>Module on/off toggle (Gazzabyte-controlled)</h3><span class="dot progress"></span></div>
-        <p>Turn modules on or off per institution, controlled by Gazzabyte. Now in active build (most of the plumbing already exists). Access being set up for sales@gazzabyte.sg. Targeting this week.</p>
-        <span class="tag">In build</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Turn on individual school pages</h3><span class="dot progress"></span></div>
-        <p>Show only the school pages you want (e.g. Students, Fees) and hide the rest. The school area was one switch, so we're splitting it into per-page controls &mdash; a real build, now underway.</p>
-        <span class="tag">In build &middot; new build</span>
+        <div class="card-top"><h3>Report a missing tin (with document upload)</h3><span class="dot progress"></span></div>
+        <p>Item #10. The bigger build &mdash; it touches your sealed reports and the admin approval step, so we're building it carefully to keep your records safe. Targeting <b>this Friday</b>.</p>
+        <span class="tag">In progress &middot; targeting Friday</span>
       </article>
     </section>
 
     <!-- QUEUED -->
     <section class="col queued">
-      <div class="col-head"><h2>Queued</h2><span class="count">2</span></div>
+      <div class="col-head"><h2>Next up</h2><span class="count">2</span></div>
       <div class="col-rail"></div>
 
       <article class="card">
         <div class="card-top"><h3>Fees &amp; student-payment reports</h3><span class="dot queued"></span></div>
-        <p>These reports don't exist yet, so they're new work rather than a switch-on. Being scoped now &mdash; we'll share an estimate once the shape is set.</p>
-        <span class="tag">Scoping &middot; new build</span>
+        <p>These reports don't exist yet, so they're new work rather than a switch-on. Scoping next &mdash; we'll share the shape and an estimate.</p>
+        <span class="tag">Scoping next &middot; new build</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>NETS payment gateway</h3><span class="dot queued"></span></div>
-        <p>Payment-gateway integration. Because it touches money movement, it's going through a governance review first, then scoping &mdash; best treated together with the eNETS/GIRO ask.</p>
-        <span class="tag">Governance review</span>
+        <div class="card-top"><h3>eNETS payment for school fees</h3><span class="dot queued"></span></div>
+        <p>Design approved and the plan is ready. To start building the connection, we need a couple of details from your eNETS account (which product, and the credentials via a secure handoff). ⏳ <b>Waiting on your details</b> &mdash; you mentioned next week, no rush.</p>
+        <span class="tag">Waiting on you</span>
       </article>
     </section>
 
     <!-- DONE -->
     <section class="col done">
-      <div class="col-head"><h2>Done</h2><span class="count">5</span></div>
+      <div class="col-head"><h2>Done</h2><span class="count">8</span></div>
       <div class="col-rail"></div>
+
+      <article class="card">
+        <div class="card-top"><h3>Edit a tin amount before a report is submitted</h3><span class="dot done"></span></div>
+        <p>The preparer can now correct a mis-counted tin while a report is still a draft &mdash; the change shows old &rarr; new and is recorded with a full audit trail, across <b>both</b> the Friday/Jumaat and weekly/family collections. Figures lock automatically once a report is signed. Live &mdash; give it a try.</p>
+        <span class="tag">Live</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Turn on individual school pages</h3><span class="dot done"></span></div>
+        <p>You can now show only the school pages you want (e.g. Students, Fees) and hide the rest &mdash; the school area is split into per-page controls. Live.</p>
+        <span class="tag">Live</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Module on/off toggle (Gazzabyte-controlled)</h3><span class="dot done"></span></div>
+        <p>Turn each institution's modules on or off, controlled by Gazzabyte &mdash; now live, and sales@gazzabyte.sg's access is enabled. You can manage Irsyad's modules directly.</p>
+        <span class="tag">Live</span>
+      </article>
 
       <article class="card">
         <div class="card-top"><h3>Documentation set</h3><span class="dot done"></span></div>
@@ -248,6 +298,132 @@
       </article>
     </section>
   </div>
+
+  <section class="elist">
+    <h2>Your enhancement list &mdash; the 10 items you sent</h2>
+    <p class="sub">Every item on your list, in order, with its status. We'll tick each one here as it ships. 3 of 10 done so far, with #5 landing today and #10 by Friday.</p>
+    <ol>
+      <li>
+        <div class="body">
+          <p class="t">Edit bank keywords (not just delete)</p>
+          <p class="d">Edit a keyword's text, category or order inline. Live &mdash; try it now.</p>
+        </div>
+        <span class="pill done"><span class="dot done"></span> Done &middot; live</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Receipt numbers in a TX format with a yearly running sequence</p>
+          <p class="d">e.g. TX26000001, resetting each year (TX27000001 in 2027). Live &mdash; your first receipt under the new format is already numbered.</p>
+        </div>
+        <span class="pill done"><span class="dot done"></span> Done &middot; live</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Thank-you letter to donors, emailed on receipt</p>
+          <p class="d">A thank-you letter sent by email to donors when a receipt is created. Live.</p>
+        </div>
+        <span class="pill done"><span class="dot done"></span> Done &middot; live</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Donor profiles with an email address</p>
+          <p class="d">Customer/donor profiles so an email address can be held per donor.</p>
+        </div>
+        <span class="pill queued"><span class="dot queued"></span> Queued</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Extra tabung: manual numbers + assignment remarks</p>
+          <p class="d">Create tabung numbers manually, with a remark for who an extra tabung is assigned to (tagged to the main tabung owner). Core built + safety-tested; the create screen lands today (family tins first, Ramadan version to follow).</p>
+        </div>
+        <span class="pill hold"><span class="dot progress"></span> In progress &middot; today</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Youngest-child report for parents</p>
+          <p class="d">Report to parents on their youngest child only, since the tabung is issued to the youngest child regardless of the others' levels.</p>
+        </div>
+        <span class="pill queued"><span class="dot queued"></span> Queued</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Archive students after Primary 6 (keep records)</p>
+          <p class="d">Archive post-P6 students while keeping their records (e.g. outstanding fees). You're keeping this in view to deliberate with more info.</p>
+        </div>
+        <span class="pill hold"><span class="dot progress"></span> On hold &middot; your KIV</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">School/Teacher role: edit &amp; realign student records</p>
+          <p class="d">Let a School/Teacher role change and upload student details and realign records across class changes (e.g. P1A &rarr; a different P2 class).</p>
+        </div>
+        <span class="pill queued"><span class="dot queued"></span> Queued</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Import/export student data by class, with edits on upload</p>
+          <p class="d">Import/export student data per class (e.g. P1 Andalusia &rarr; P2 Bukhara) and allow changes on upload. School/Teacher role.</p>
+        </div>
+        <span class="pill queued"><span class="dot queued"></span> Queued</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Report a missing tin, with document upload</p>
+          <p class="d">Report a missing tin with a document attached to the tin number; if found, mark as returned with a reason, approved by an admin (Saddam / VPZ). In progress &mdash; targeting this Friday.</p>
+        </div>
+        <span class="pill hold"><span class="dot progress"></span> In progress &middot; Fri</span>
+      </li>
+    </ol>
+  </section>
+
+  <section class="elist">
+    <h2>This week &mdash; your recent requests</h2>
+    <p class="sub">The newer items you raised this week, and where each stands. We tick them off here as they land.</p>
+    <ol style="counter-reset: none;">
+      <li>
+        <div class="body">
+          <p class="t">Auto-set the keyword Priority</p>
+          <p class="d">When you add a keyword, leave Priority blank and it now sets automatically (more specific keywords rank higher). You can still type a number to override. Live.</p>
+        </div>
+        <span class="pill done"><span class="dot done"></span> Done &middot; live</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Elly can edit &amp; delete keywords</p>
+          <p class="d">A permission was locked to admins only, which blocked preparers. Fixed &mdash; Elly (as a preparer) can now add, edit and delete keywords. Give it a try.</p>
+        </div>
+        <span class="pill done"><span class="dot done"></span> Done &middot; live</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Let preparers manage fund categories</p>
+          <p class="d">Extending category management (add/edit/delete) to the preparer role, scoped to your organisation. Since it changes who can manage funds, we build and check it carefully.</p>
+        </div>
+        <span class="pill hold"><span class="dot progress"></span> In progress</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Auto-file unrecognised deposits to General Donation</p>
+          <p class="d">Bank rows that match no keyword now default to &ldquo;Madrasah Irsyad General Donation&rdquo; instead of waiting, with a safeguard that still holds any row that could match more than one fund. Live.</p>
+        </div>
+        <span class="pill done"><span class="dot done"></span> Done &middot; live</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Tidy your categories to your 8</p>
+          <p class="d">Mapping your current categories against your 8-item reference. Your core Tabung collection (~2,584 recorded donations) is a separate system bucket &mdash; we keep it untouched and only tidy the bank-import categories. We'll confirm the plan before any change.</p>
+        </div>
+        <span class="pill hold"><span class="dot progress"></span> Planning</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Renumber older keywords stuck at the old default</p>
+          <p class="d">A few existing keywords still sit at the old top-priority default. We can renumber them to the same automatic order as the rest &mdash; a careful change since it affects matching, so we'll confirm with you first.</p>
+        </div>
+        <span class="pill queued"><span class="dot queued"></span> Offered</span>
+      </li>
+    </ol>
+  </section>
 
   <footer>
     Maintained by the Wingmen team &mdash; updated as items move. Private to Gazzabyte.<br>
