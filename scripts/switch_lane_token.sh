@@ -317,14 +317,19 @@ try:
     prio = "P1" if loud else "P3"
     # from_agent must be a registered agent (FK) — the SRE tooling (cc-fleet-health)
     # emits the audit; the actual actor is stamped in the body ("by <who>").
+    # Recipients: orch-console (Nazim) always; cai ALSO on ARMED or BREAK-GLASS
+    # switches — the billing-affecting operator/emergency paths the governance node
+    # needs visibility on (cai #16101, soft/non-blocking, requires_response=false).
+    recipients = ["orch-console"] + (["cai"] if (armed or bg) else [])
     with psycopg.connect(dsn) as c, c.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
-            "VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s,false)",
-            (mtype, subj, body, prio))
+        for _to in recipients:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
+                "VALUES ('cc-fleet-health',%s,%s,%s,%s,%s,false)",
+                (_to, mtype, subj, body, prio))
         c.commit()
-    print(f"[switch_lane_token] audit row emitted ({mtype}, {prio}).")
+    print(f"[switch_lane_token] audit row emitted to {recipients} ({mtype}, {prio}).")
 except Exception as e:
     raise SystemExit(f"audit emit error: {e}")
 PYAUDIT
