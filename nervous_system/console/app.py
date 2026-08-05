@@ -292,8 +292,21 @@ def _r4_current_arm() -> "dict | None":
             return None
         row = res.row
         text = (row.get("text") or "").lower()
-        m = _re.search(r"(\d{1,4})\s*(?:m|min|mins|minutes)?\b", text)
-        mins = min(int(m.group(1)) if m else 30, _R4_ARM_MAX_WINDOW_MIN)
+        toks = text.split()
+        # cai CAI-RESP-748 (a) — REJECT-ON-MALFORMED, fail-closed, NEVER default the
+        # scope or TTL. gazzabyte requested (name/basename) anywhere -> whole arm void.
+        if "gazzabyte" in text or "gazzabyte-oauth-token" in text:
+            return None
+        # minutes: a standalone integer token is REQUIRED (missing/unparseable ->
+        # no arm); > the 240m cap -> REJECT (do NOT silently clamp — operator restates).
+        mins = next((int(t) for t in toks if t.isdigit()), None)
+        if mins is None or mins <= 0 or mins > _R4_ARM_MAX_WINDOW_MIN:
+            return None
+        # accounts: >=1 terms-clean allowlisted account named as a token; else no arm.
+        allow = {e["name"] for e in _token_registry() if e["name"] != "gazzabyte"}
+        accounts = sorted(a for a in allow if a in toks)
+        if not accounts:
+            return None
         created = row.get("created_at")
         if isinstance(created, str):
             created = _dt.datetime.fromisoformat(created.replace("Z", "+00:00"))
@@ -302,8 +315,6 @@ def _r4_current_arm() -> "dict | None":
         expires = created + _dt.timedelta(minutes=mins)
         if now >= expires:
             return None
-        accounts = [e["name"] for e in _token_registry()
-                    if e["name"] != "gazzabyte" and e["name"] in text]
         return {"expires_at": expires.isoformat(), "accounts": accounts,
                 "granted_row_id": row.get("id")}
     except Exception:  # noqa: BLE001 — any uncertainty -> no arm (fail-closed)
@@ -1267,6 +1278,20 @@ def _make_handler(feedloop: "_FeedLoop"):
                 if cur is None or cur.name in _FORBIDDEN_TOKEN_BASENAMES:
                     return self._json(400, {"error": "could not resolve current account (or forbidden)"})
                 cmd = ["bash", SW_LANE, "--model-apply", session, str(cur)]
+            # Per-lane cooldown/inflight guard (cai CAI-RESP-748 (b)) — a double-tap
+            # can't fire two relaunches of the SAME body; rapid re-fire gets 429.
+            now_t = time.monotonic()
+            with _RESET_GUARD_LOCK:
+                if session in _SWITCH_INFLIGHT:
+                    auth.audit(self._client(), f"/api/apply-armed:{session}", "409")
+                    return self._json(409, {"error": "apply already in progress", "session": session})
+                last = _SWITCH_LAST_RUN.get(session, 0.0)
+                if now_t - last < _SWITCH_COOLDOWN_S:
+                    retry_after = round(_SWITCH_COOLDOWN_S - (now_t - last))
+                    auth.audit(self._client(), f"/api/apply-armed:{session}", "429")
+                    return self._json(429, {"error": "apply just ran — wait before retrying",
+                                            "session": session, "retry_after_s": retry_after})
+                _SWITCH_INFLIGHT.add(session)
             # Execute the REAL apply via the one rail. ARMED marker -> the script
             # emits the identity-stamped audit + alerts on an fp mismatch (invariants 2/3).
             auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", "run")
@@ -1280,6 +1305,10 @@ def _make_handler(feedloop: "_FeedLoop"):
                 logger.warning("apply-armed failed (%s %s): %s", kind, session, e)
                 auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", "500")
                 return self._json(500, {"error": "apply failed"})
+            finally:
+                with _RESET_GUARD_LOCK:
+                    _SWITCH_INFLIGHT.discard(session)
+                    _SWITCH_LAST_RUN[session] = time.monotonic()
             auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", "200" if ok else "500")
             return self._json(200 if ok else 500, {"ok": ok, "kind": kind, "session": session, "output": tail})
 

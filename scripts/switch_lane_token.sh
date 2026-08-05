@@ -289,7 +289,7 @@ done
 # but never fails an already-completed switch.
 _SWITCH_RESULT="PASS"; [ "$AFTER_FP" = "$NEW_FP" ] || _SWITCH_RESULT="FAIL"
 SWITCH_RESULT="$_SWITCH_RESULT" \
-SWITCH_ACTOR="${ACTOR:-cli}" SWITCH_BREAKGLASS="${BREAK_GLASS:-0}" \
+SWITCH_ACTOR="${ACTOR:-cli}" SWITCH_BREAKGLASS="${BREAK_GLASS:-0}" SWITCH_ARMED="${ARMED:-0}" \
 SWITCH_SESS="$SESS" SWITCH_BEFORE="${BEFORE_FP:-none}" SWITCH_AFTER="${AFTER_FP:-none}" \
 SWITCH_TARGET="$NEW_FP" SWITCH_MODELAPPLY="$MODEL_APPLY" \
 "$VENV_PY" - <<'PYAUDIT' 2>>/dev/stderr || echo "WARNING: switch audit/alert emit FAILED (switch itself already completed above)" >&2
@@ -299,8 +299,9 @@ try:
     # DATABASE_URL is already exported (the script did `set -a; source .env`).
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     bg = os.environ.get("SWITCH_BREAKGLASS") == "1"
+    armed = os.environ.get("SWITCH_ARMED") == "1"
     kind = "MODEL-APPLY" if os.environ.get("SWITCH_MODELAPPLY") == "1" else "TOKEN-SWITCH"
-    tag = "BREAK-GLASS " + kind if bg else kind
+    tag = ("BREAK-GLASS " + kind) if bg else (("ARMED " + kind) if armed else kind)
     who = os.environ.get("SWITCH_ACTOR", "cli")
     sess = os.environ.get("SWITCH_SESS"); before = os.environ.get("SWITCH_BEFORE")
     after = os.environ.get("SWITCH_AFTER"); target = os.environ.get("SWITCH_TARGET")
@@ -308,10 +309,12 @@ try:
     subj = f"[{tag}] {sess}: {before}->{after} ({res}) by {who}"
     body = (f"{tag} on lane '{sess}' by {who}: account {before} -> {after} "
             f"(target {target}), result {res}. break_glass={bg}.")
-    # 'blocker' (P1) makes a break-glass use LOUD + attention-grabbing on the bus;
-    # a routine switch is a quiet 'update' audit row. (message_type is CHECK-constrained.)
-    mtype = "blocker" if bg else "update"
-    prio = "P1" if bg else "P3"
+    # LOUD 'blocker'/P1 for a break-glass use OR any FAIL (cai invariant 2: an
+    # auth_fp mismatch after a switch must alert); a clean routine switch is a quiet
+    # 'update'/P3 audit. (message_type is CHECK-constrained — 'blocker'/'update' valid.)
+    loud = bg or res == "FAIL"
+    mtype = "blocker" if loud else "update"
+    prio = "P1" if loud else "P3"
     # from_agent must be a registered agent (FK) — the SRE tooling (cc-fleet-health)
     # emits the audit; the actual actor is stamped in the body ("by <who>").
     with psycopg.connect(dsn) as c, c.cursor() as cur:
