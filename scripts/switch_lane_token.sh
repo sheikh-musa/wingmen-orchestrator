@@ -57,18 +57,29 @@ LAUNCH_AS="$ORCH_DIR/scripts/launch_lane_as.sh"
 FORBIDDEN_BASENAME="gazzabyte-oauth-token"
 POLL_S="${SWITCH_POLL_S:-60}"
 
-# ── arg parse: [--force] <session> <token-file> ──────────────────────────────
+# ── arg parse: [--force] [--dry-run] <session> <token-file> ──────────────────
+# --dry-run (op#10706 R3): resolve + PRINT the plan (account before->after, the
+# conversation-resume id, busy state), then exit 0 changing NOTHING — the preview
+# the console's gated apply shows before any armed relaunch. Mirrors
+# switch_singleton_token.sh's --dry-run.
 FORCE="${SWITCH_FORCE:-0}"
+DRY="${SWITCH_DRY_RUN:-0}"
+# --model-apply (op#10706 R3, cai-approved option i): a MODEL change takes effect by
+# relaunching the SAME-account lane so it re-reads .<session>_model — so bypass the
+# same-account no-op short-circuit for this intent (keep token, resume conversation).
+MODEL_APPLY="${SWITCH_MODEL_APPLY:-0}"
 SESS=""
 TOKFILE=""
 for a in "$@"; do
   case "$a" in
     --force) FORCE=1 ;;
+    --dry-run) DRY=1 ;;
+    --model-apply) MODEL_APPLY=1 ;;
     *) if [ -z "$SESS" ]; then SESS="$a"; elif [ -z "$TOKFILE" ]; then TOKFILE="$a"; fi ;;
   esac
 done
-[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] <tmux-session> <token-file>" >&2; exit 2; }
-[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] <tmux-session> <token-file>" >&2; exit 2; }
 
 # ── 1. Token-file validation (fail-closed, loud) ─────────────────────────────
 [ -r "$TOKFILE" ] || { echo "ERROR: token file not readable: $TOKFILE" >&2; exit 3; }
@@ -177,8 +188,37 @@ echo "[switch_lane_token] BEFORE auth_fp=${BEFORE_FP:-<none>}  ->  target auth_f
 
 # Idempotent short-circuit: already on the target account. Do NOT restart (that
 # would needlessly wipe the lane's context for a no-op).
-if [ -n "$BEFORE_FP" ] && [ "$BEFORE_FP" = "$NEW_FP" ]; then
+# Same-account short-circuit — SKIP it for an intentional model-apply relaunch.
+if [ "$MODEL_APPLY" != "1" ] && [ -n "$BEFORE_FP" ] && [ "$BEFORE_FP" = "$NEW_FP" ]; then
   echo "[switch_lane_token] lane is ALREADY on target account ($NEW_FP) — no restart. PASS (no-op)."
+  exit 0
+fi
+
+# The model that a relaunch would pick up (op#10706): the per-body .<session>_model
+# pointer, else the fleet default. Shown in the model-apply preview.
+_APPLY_MODEL=""
+if [ -r "$ORCH_DIR/.${SESS}_model" ]; then
+  _APPLY_MODEL="$(tr -d '[:space:]' < "$ORCH_DIR/.${SESS}_model")"
+fi
+
+# ── DRY-RUN (op#10706 R3): print the plan, change NOTHING, exit 0. Proves the
+# resume path so a real apply never comes back blank. ────────────────────────
+if [ "$DRY" = "1" ]; then
+  pane_busy "$TM" "${SESS}:0.0" 2>/dev/null || true
+  echo "[switch_lane_token] DRY-RUN — no kill, no relaunch, nothing changed."
+  if [ "$MODEL_APPLY" = "1" ]; then
+    echo "  would MODEL-APPLY: $SESS   ($WORKTREE)"
+    echo "  account:        SAME ($NEW_FP) — relaunch to pick up model=${_APPLY_MODEL:-<fleet default>}"
+  else
+    echo "  would re-token: $SESS   ($WORKTREE)"
+    echo "  account:        ${BEFORE_FP:-<none>}  ->  $NEW_FP"
+  fi
+  if [ -n "$RESUME_ID" ]; then
+    echo "  would RESUME conversation: $RESUME_ID  (prior turns replay; identity + context preserved)"
+  else
+    echo "  would relaunch FRESH: no prior session found to resume for this worktree"
+  fi
+  echo "  lane currently busy: ${CC_BUSY:-0}  (a real apply refuses a BUSY lane unless --force)"
   exit 0
 fi
 
@@ -238,6 +278,53 @@ while [ "$(date -u +%s)" -lt "$DEADLINE" ]; do
   AFTER_FP="${AFTER_FP//[$'\t\r\n ']/}"
   [ "$AFTER_FP" = "$NEW_FP" ] && break
 done
+
+# ── 6.5 Identity-stamped audit + break-glass alert (cai CAI-RESP-747 conds 2/3) ─
+# The switch SCRIPT is the SINGLE execution rail every armed/break-glass re-token
+# flows through (cai cond 1), and the console DB session is READ-ONLY, so THIS is
+# the one place that can emit a complete, un-bypassable audit row: who / lane /
+# from->to fp / break_glass flag / result / ts. On a BREAK-GLASS use (BREAK_GLASS=1,
+# set by /api/switch-token) it escalates to a P1 ALERT so the exceptional path is
+# never a silent routine bypass. Best-effort: a failed emit warns LOUDLY (stderr)
+# but never fails an already-completed switch.
+_SWITCH_RESULT="PASS"; [ "$AFTER_FP" = "$NEW_FP" ] || _SWITCH_RESULT="FAIL"
+SWITCH_RESULT="$_SWITCH_RESULT" \
+SWITCH_ACTOR="${ACTOR:-cli}" SWITCH_BREAKGLASS="${BREAK_GLASS:-0}" \
+SWITCH_SESS="$SESS" SWITCH_BEFORE="${BEFORE_FP:-none}" SWITCH_AFTER="${AFTER_FP:-none}" \
+SWITCH_TARGET="$NEW_FP" SWITCH_MODELAPPLY="$MODEL_APPLY" \
+"$VENV_PY" - <<'PYAUDIT' 2>>/dev/stderr || echo "WARNING: switch audit/alert emit FAILED (switch itself already completed above)" >&2
+import os
+try:
+    import psycopg
+    # DATABASE_URL is already exported (the script did `set -a; source .env`).
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    bg = os.environ.get("SWITCH_BREAKGLASS") == "1"
+    kind = "MODEL-APPLY" if os.environ.get("SWITCH_MODELAPPLY") == "1" else "TOKEN-SWITCH"
+    tag = "BREAK-GLASS " + kind if bg else kind
+    who = os.environ.get("SWITCH_ACTOR", "cli")
+    sess = os.environ.get("SWITCH_SESS"); before = os.environ.get("SWITCH_BEFORE")
+    after = os.environ.get("SWITCH_AFTER"); target = os.environ.get("SWITCH_TARGET")
+    res = os.environ.get("SWITCH_RESULT")
+    subj = f"[{tag}] {sess}: {before}->{after} ({res}) by {who}"
+    body = (f"{tag} on lane '{sess}' by {who}: account {before} -> {after} "
+            f"(target {target}), result {res}. break_glass={bg}.")
+    # 'blocker' (P1) makes a break-glass use LOUD + attention-grabbing on the bus;
+    # a routine switch is a quiet 'update' audit row. (message_type is CHECK-constrained.)
+    mtype = "blocker" if bg else "update"
+    prio = "P1" if bg else "P3"
+    # from_agent must be a registered agent (FK) — the SRE tooling (cc-fleet-health)
+    # emits the audit; the actual actor is stamped in the body ("by <who>").
+    with psycopg.connect(dsn) as c, c.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+        cur.execute(
+            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
+            "VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s,false)",
+            (mtype, subj, body, prio))
+        c.commit()
+    print(f"[switch_lane_token] audit row emitted ({mtype}, {prio}).")
+except Exception as e:
+    raise SystemExit(f"audit emit error: {e}")
+PYAUDIT
 
 echo "───────────────────────────────────────────────────────────"
 echo "  session:   $SESS"

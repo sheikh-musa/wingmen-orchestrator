@@ -65,6 +65,12 @@
       } else {
         ctrls += '<div class="ctlnote">model: env-driven at boot (not pointer-settable)</div>';
       }
+      // Apply PREVIEW buttons (R3): show the dry-run plan for making a default
+      // live. DRY-RUN only — nothing relaunches (the armed apply is R4, gated).
+      var ab = "";
+      if (r.token_settable) ab += '<button class="prevbtn" data-apply="token" data-session="' + s + '">Preview token apply</button>';
+      if (r.model_settable) ab += '<button class="prevbtn" data-apply="model" data-session="' + s + '">Preview model apply</button>';
+      if (ab) ctrls += '<div class="applyrow">' + ab + '</div>';
     }
 
     return '<div class="row ' + cls + '">' +
@@ -147,6 +153,32 @@
       setPointer(el.dataset.session, el.dataset.kind, el.value);
     }
   });
+
+  // Apply PREVIEW (R3 dry-run): fetch the plan + show it in a modal. No relaunch.
+  function previewApply(session, kind) {
+    if (busy) return;
+    busy = true;
+    fetch("/api/apply-dry-run", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ session: session, kind: kind }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) { toast((res.j && res.j.error) || "preview failed", true); }
+        else {
+          $("pvTitle").textContent = session + " · " + kind + " apply";
+          $("pvText").textContent = res.j.preview || "(no output)";
+          $("previewModal").classList.add("show");
+        }
+      })
+      .catch(function (e) { toast("error: " + (e && e.message), true); })
+      .finally(function () { busy = false; });
+  }
+  $("rows").addEventListener("click", function (e) {
+    var el = e.target;
+    if (el && el.dataset && el.dataset.apply) previewApply(el.dataset.session, el.dataset.apply);
+  });
+  $("pvClose").addEventListener("click", function () { $("previewModal").classList.remove("show"); });
 
   var FETCH_TIMEOUT_MS = 20000;  // the remote-hub SSH scan can take a few seconds
   function load() {

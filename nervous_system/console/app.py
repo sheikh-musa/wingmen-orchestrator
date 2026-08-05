@@ -256,6 +256,23 @@ def _token_registry() -> list:
     return out
 
 
+def _current_token_file_for(session: str) -> "pathlib.Path | None":
+    """The registry token file whose fp == the body's LIVE account — for a MODEL-
+    apply that must relaunch on the SAME account. None if unresolved."""
+    try:
+        rows = panes.token_ground_truth(include_remote=False).get("rows", [])
+        fp = next((r.get("fp") for r in rows
+                   if r.get("session") == session and r.get("fp")), None)
+    except Exception:  # noqa: BLE001
+        fp = None
+    if not fp:
+        return None
+    for _n, f in _discover_tokens().items():
+        if _fp_of_token_file(str(f)) == fp:
+            return f
+    return None
+
+
 def _read_model_pointer(session: str) -> "str | None":
     """The per-body model pointer value (.<session>_model), or None if unset."""
     if not _SESSION_RE.match(session or ""):
@@ -1001,12 +1018,15 @@ def _make_handler(feedloop: "_FeedLoop"):
             parsed = urlparse(self.path)
             path = parsed.path
             if path not in ("/api/reset", "/api/backlog", "/api/switch-token",
-                            "/api/set-pointer", "/api/add-token"):
+                            "/api/set-pointer", "/api/add-token", "/api/apply-dry-run"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
                 auth.audit(self._client(), path, "401")
                 return self._json(401, {"error": "unauthorized"})
+            # R3 apply DRY-RUN: preview making a default live (no relaunch).
+            if path == "/api/apply-dry-run":
+                return self._handle_apply_dry_run()
             # R2b add-token: register a new 0600 key file so it's selectable. Raw
             # token written once, NEVER echoed/logged; only its fp is returned.
             if path == "/api/add-token":
@@ -1130,6 +1150,62 @@ def _make_handler(feedloop: "_FeedLoop"):
             return self._json(200 if ok else 500,
                               {"ok": ok, "id": item_id, "action": action,
                                "error": None if ok else (r.stderr or "").strip()[-160:]})
+
+        def _handle_apply_dry_run(self):
+            """POST /api/apply-dry-run {session, kind:token|model} — PREVIEW making a
+            body's configured default LIVE, by running the switch script in --dry-run.
+            Changes NOTHING (no kill, no relaunch); returns the plan incl. the resume
+            id (op#10706 R3). The armed apply (R4) is separate + cai-gated."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                p = json.loads(raw or b"{}")
+                session = (p.get("session") or "").strip()
+                kind = (p.get("kind") or "").strip().lower()
+            except Exception:  # noqa: BLE001
+                auth.audit(self._client(), "/api/apply-dry-run", "400")
+                return self._json(400, {"error": "bad request"})
+            if not _SESSION_RE.match(session) or kind not in ("token", "model"):
+                auth.audit(self._client(), "/api/apply-dry-run", "400")
+                return self._json(400, {"error": "bad session/kind"})
+            if _is_remote_body(session):
+                auth.audit(self._client(), f"/api/apply-dry-run:{session}:remote", "400")
+                return self._json(400, {"error": "remote body — apply runs on the VPS host (cross-host apply is R3/R4)"})
+            # Resolve the executor + args for a --dry-run (no effect).
+            SW_LANE = str(_REPO_ROOT / "scripts" / "switch_lane_token.sh")
+            SW_SINGLE = str(_REPO_ROOT / "scripts" / "switch_singleton_token.sh")
+            if kind == "token":
+                ptr = _token_pointer_name(session)
+                if ptr is None:
+                    auth.audit(self._client(), f"/api/apply-dry-run:token:{session}", "400")
+                    return self._json(400, {"error": "token not settable for this body"})
+                target = _read_pointer_target(ptr)
+                if not target or not _fp_of_token_file(target):
+                    auth.audit(self._client(), f"/api/apply-dry-run:token:{session}", "400")
+                    return self._json(400, {"error": "no token default set to apply — pick a Token first"})
+                if session == "nazim":
+                    cmd = ["bash", SW_SINGLE, "--dry-run", "nazim", target]
+                else:
+                    cmd = ["bash", SW_LANE, "--dry-run", session, target]
+            else:  # model
+                if session in _MODEL_ENV_BODIES:
+                    auth.audit(self._client(), f"/api/apply-dry-run:model:{session}", "400")
+                    return self._json(400, {"error": "model not pointer-settable for this body"})
+                cur = _current_token_file_for(session)
+                if cur is None:
+                    auth.audit(self._client(), f"/api/apply-dry-run:model:{session}", "400")
+                    return self._json(400, {"error": "could not resolve the body's current account for a model relaunch"})
+                cmd = ["bash", SW_LANE, "--dry-run", "--model-apply", session, str(cur)]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                preview = ((r.stdout or "") + (r.stderr or "")).strip()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("apply-dry-run failed (%s %s): %s", kind, session, e)
+                auth.audit(self._client(), f"/api/apply-dry-run:{kind}:{session}", "500")
+                return self._json(500, {"error": "dry-run failed"})
+            auth.audit(self._client(), f"/api/apply-dry-run:{kind}:{session}", "200")
+            return self._json(200, {"ok": True, "kind": kind, "session": session,
+                                    "dry_run": True, "preview": preview})
 
         def _handle_add_token(self):
             """POST /api/add-token {name, token} — register a NEW 0600 token key file
@@ -1310,10 +1386,14 @@ def _make_handler(feedloop: "_FeedLoop"):
                                             "lane": lane, "retry_after_s": retry_after})
                 _SWITCH_INFLIGHT.add(lane)
             try:
+                # BREAK-GLASS marker + actor (cai CAI-RESP-747 conds 2/3): this is
+                # the emergency re-token path, so the script emits a P1 break-glass
+                # alert + enriched audit row (who/lane/from->to fp) on completion.
+                _env = {**os.environ, "BREAK_GLASS": "1", "ACTOR": self._client() or "operator"}
                 r = subprocess.run(
                     ["bash", str(_REPO_ROOT / "scripts" / "switch_lane_token.sh"),
                      lane, str(tokfile)],
-                    capture_output=True, text=True, timeout=150,
+                    capture_output=True, text=True, timeout=150, env=_env,
                 )
                 ok = r.returncode == 0
                 tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-8:])
