@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Lane manager · Fleet</title>
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<style>
+  /* Mobile-FIRST (op#10706 B): single column, big tap targets, readable at ~390px.
+     Ground-truth token+model per body — process-verified, never declared. */
+  :root {
+    --bg:#0b0e14; --panel:#121722; --panel-2:#0e131c; --line:#222a38;
+    --txt:#d7dce5; --dim:#8a93a6; --accent:#5b8cff; --good:#3ecf8e;
+    --warn:#f0b429; --bad:#ff6b6b; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; background:var(--bg); color:var(--txt);
+    font:14px/1.4 -apple-system, system-ui, sans-serif; }
+  .wrap { max-width:640px; margin:0 auto; padding:14px 12px calc(28px + env(safe-area-inset-bottom)); }
+  header { position:sticky; top:0; z-index:5; background:linear-gradient(180deg,#10151f,#0b0e14);
+    margin:-14px -12px 12px; padding:14px 14px 12px; border-bottom:1px solid var(--line); }
+  .top { display:flex; align-items:center; gap:10px; }
+  .back { color:var(--dim); text-decoration:none; font:600 13px/1 var(--mono); flex:none; }
+  h1 { font-size:16px; margin:0; font-weight:700; letter-spacing:.2px; }
+  .refresh { margin-left:auto; flex:none; border:1px solid var(--line); background:var(--panel);
+    color:var(--accent); font:600 12px/1 var(--mono); padding:9px 12px; border-radius:9px; }
+  .refresh:active { background:var(--panel-2); }
+  .sub { margin-top:9px; color:var(--dim); font:12px/1.35 var(--mono); }
+  .sub b.bad { color:var(--bad); } .sub b.good { color:var(--good); }
+  /* One card per body — single column, generous height for phone tapping. */
+  .row { border:1px solid var(--line); border-left:3px solid var(--line);
+    border-radius:11px; background:var(--panel); padding:12px 13px; margin-bottom:9px; }
+  .row.bad { border-left-color:var(--bad); background:linear-gradient(90deg, rgba(255,107,107,.09), var(--panel) 55%); }
+  .row.unver { border-left-color:var(--dim); opacity:.9; }
+  .r1 { display:flex; align-items:center; gap:9px; }
+  .who { font:700 15px/1.1 var(--mono); color:var(--txt); overflow-wrap:anywhere; }
+  .badge { margin-left:auto; flex:none; font:700 10px/1 var(--mono); letter-spacing:.5px;
+    padding:4px 8px; border-radius:999px; }
+  .badge.ok { color:var(--good); background:rgba(62,207,142,.12); }
+  .badge.bad { color:var(--bad); background:rgba(255,107,107,.15); }
+  .badge.unver { color:var(--dim); background:var(--panel-2); }
+  .r2 { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin-top:9px;
+    font:12px/1.2 var(--mono); }
+  .acct { font-weight:700; }
+  .row.ok .acct { color:var(--good); } .row.bad .acct { color:var(--bad); }
+  .row.unver .acct { color:var(--dim); }
+  .exp { color:var(--bad); }
+  .model { color:var(--accent); font-weight:700; }
+  .model.none { color:var(--dim); font-weight:400; }
+  .kv { color:var(--dim); } .kv b { color:var(--txt); font-weight:600; }
+  .fp { color:var(--dim); font-size:11px; }
+  .empty { color:var(--dim); text-align:center; padding:40px 0; font:13px var(--mono); }
+  .stamp { color:var(--dim); text-align:center; margin-top:14px; font:11px var(--mono); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="top">
+      <a class="back" href="/fleet">← Fleet</a>
+      <h1>Lane manager</h1>
+      <button id="refresh" class="refresh">↻</button>
+    </div>
+    <div id="sub" class="sub">Loading ground-truth…</div>
+  </header>
+  <div id="rows"></div>
+  <div id="stamp" class="stamp"></div>
+</div>
+<script src="/static/lanes.js"></script>
+</body>
+</html>

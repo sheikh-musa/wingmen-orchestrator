@@ -22,6 +22,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from typing import Dict, List, Optional
 
 _TIMEOUT_S = 5
@@ -428,14 +429,61 @@ def lane_token_auth() -> dict:
 # operator already uses on the bus, never the raw token). CONSOLE_MAX_ACCT_OWNERS
 # (JSON {fp: label}) extends/overrides. Keyed at the length _fingerprint() emits.
 _KNOWN_ACCOUNTS = {"68142948c003": "Musa", "582043088eae": "Syed"}
-# Current fleet policy: every body belongs on Musa. A verified body on any other
-# account is flagged (this is what surfaces nazim-on-Syed). Override per-body once
-# orch-console gives an authoritative expected-account source (op#10706 blocker).
+# FINAL fallback label only (op#10706 R1 replaced the flat policy): when a body's
+# expected account can't be resolved from its pointer file NOR the .env default,
+# this is the last-resort expected label.
 _EXPECTED_ACCOUNT = os.environ.get("CONSOLE_EXPECTED_ACCOUNT", "Musa")
 # Bodies the operator wants proven that do NOT run on THIS host: the hub
 # (cc-orchestrator) lives on the VPS, so a Mini-local `ps` cannot read its token.
 # Reported UNVERIFIED (remote) rather than guessed (op#10715). {session: host}.
 _REMOTE_BODIES = {"cc-orchestrator": "VPS"}
+
+# ── Expected-account per body from its POINTER FILE (op#10706 R1) ─────────────
+# orch-console ruling (#16038): a body's EXPECTED account = whatever its per-body
+# token POINTER FILE resolves to (the token file it points at), NOT a hardcoded
+# account. mismatch = live-proc fp != pointer-resolved fp — so the RED flag means
+# "this body is NOT on its OWN configured default" (self-consistent + reversible).
+_ORCH_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Which pointer file governs each body. Console/hub read their own; every worker
+# lane reads .lane_default_token. The Mini singletons cai + the SRE boot straight
+# off .env (no pointer) -> their expected = the .env default account.
+_BODY_POINTER = {"nazim": ".nazim_default_token", "cc-orchestrator": ".orch_default_token"}
+_NO_POINTER_SINGLETONS = {"cai", "fleet-health"}
+
+
+def _read_token_fp(path: str) -> Optional[str]:
+    """Fingerprint the token in a token file (raw token stays local, never
+    returned). None on any read failure."""
+    try:
+        with open(os.path.expanduser(path.strip()), "r") as f:
+            tok = f.read().strip()
+        return _fingerprint(tok) if tok else None
+    except Exception:
+        return None
+
+
+def _env_default_fp() -> Optional[str]:
+    own = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    return _fingerprint(own) if own else None
+
+
+def _expected_fp(session: str) -> Optional[str]:
+    """The account fingerprint a body is CONFIGURED to run on: its pointer file's
+    target token, else the .env default account. None only if nothing resolves."""
+    ptr = _BODY_POINTER.get(session)
+    if ptr is None and session not in _NO_POINTER_SINGLETONS:
+        ptr = ".lane_default_token"          # a worker lane
+    if ptr:
+        try:
+            with open(os.path.join(_ORCH_DIR, ptr), "r") as f:
+                tokfile = f.read().strip()
+            if tokfile:
+                fp = _read_token_fp(tokfile)
+                if fp:
+                    return fp
+        except Exception:
+            pass
+    return _env_default_fp()                  # no/unreadable pointer -> fleet default
 
 
 def _account_labels() -> Dict[str, str]:
@@ -451,16 +499,71 @@ def _account_labels() -> Dict[str, str]:
     return labels
 
 
-def token_ground_truth() -> dict:
+# ── Remote hub scan (op#10706 C) — source of truth REGARDLESS of host ─────────
+# The hub (cc-orchestrator) runs on the VPS, so a Mini-local ps can't read it.
+# The operator wants the tool to be source-of-truth wherever a body runs, so we
+# SSH in and fingerprint the hub's token REMOTE-SIDE (raw token NEVER leaves the
+# VPS — sha256 on the remote box, only the fp returns). Read-only (ps only).
+# Cached (TTL) so /api/token-truth polls don't re-SSH each time; slow/failed SSH
+# => UNVERIFIED (never an error into the aggregate, never a guess).
+_REMOTE_HUB_HOST = os.environ.get("CONSOLE_HUB_SSH", "root@91.107.235.77")
+_REMOTE_HUB_KEY = os.path.expanduser(os.environ.get("CONSOLE_HUB_SSH_KEY", "~/.ssh/wingmen_vps"))
+_REMOTE_CACHE_TTL_S = 45.0
+_remote_hub_cache = {"at": 0.0, "val": None}  # val = {"fp","model"} | None
+# Linux box: sha256sum (not shasum). Fingerprint the token remote-side; print only
+# "<fp> <model>" — the raw token is read into $tok and never echoed.
+_REMOTE_SCAN_SH = (
+    "pid=$(pgrep -f 'claude --dangerously' | head -1); "
+    "[ -n \"$pid\" ] || exit 3; "
+    "cmd=$(ps eww -p \"$pid\" -o command= 2>/dev/null); "
+    "tok=$(printf '%s' \"$cmd\" | grep -oE 'CLAUDE_CODE_OAUTH_TOKEN=[^[:space:]]+' | head -1 | cut -d= -f2); "
+    "[ -n \"$tok\" ] || exit 4; "
+    "fp=$(printf '%s' \"$tok\" | sha256sum | cut -c1-12); "
+    "mdl=$(printf '%s' \"$cmd\" | grep -oE -- '--model[ =][^[:space:]]+' | head -1 | sed -E 's/^--model[ =]//'); "
+    "printf '%s %s\\n' \"$fp\" \"$mdl\""
+)
+
+
+def _remote_hub_scan(force: bool = False) -> Optional[dict]:
+    """SSH the VPS hub, fingerprint its running token REMOTE-SIDE (raw token never
+    leaves the VPS), read its --model. {"fp","model"} or None on any timeout/failure
+    (=> UNVERIFIED). Cached _REMOTE_CACHE_TTL_S (positive AND negative, so a down
+    host isn't hammered)."""
+    now = time.monotonic()
+    if not force and _remote_hub_cache["at"] and (now - _remote_hub_cache["at"]) < _REMOTE_CACHE_TTL_S:
+        return _remote_hub_cache["val"]
+    val = None
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=accept-new", "-i", _REMOTE_HUB_KEY,
+             _REMOTE_HUB_HOST, _REMOTE_SCAN_SH],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            parts = r.stdout.strip().split()
+            if parts and re.fullmatch(r"[0-9a-f]{12}", parts[0]):
+                val = {"fp": parts[0], "model": (parts[1] if len(parts) > 1 and parts[1] else None)}
+    except Exception:
+        val = None
+    _remote_hub_cache["at"] = now
+    _remote_hub_cache["val"] = val
+    return val
+
+
+def token_ground_truth(include_remote: bool = False) -> dict:
     """GROUND-TRUTH per-body Claude account, read from the LIVE process env — the
     ACTUAL running token, never a declared value (op#10706/10715). For every claude
     proc on THIS host: tmux pane_pid -> claude pid -> `ps eww` reads
     CLAUDE_CODE_OAUTH_TOKEN, fingerprinted in-process (raw token NEVER returned,
     logged, or displayed) -> Max-account label; metered = non-empty ANTHROPIC_API_KEY.
-    Off-box bodies (the VPS hub) are reported UNVERIFIED (remote), never guessed.
+    include_remote=True ALSO SSH-fingerprints the off-box VPS hub (op#10706 C) so
+    the tool is source-of-truth regardless of host; unreachable -> UNVERIFIED.
 
     Each row: {session, account, fp, metered, model, host, verified, expected,
-    mismatch}. `model` is the proc's actual --model (op#10717), None if unpinned.
+    expected_fp, mismatch}. `model` is the proc's actual --model (op#10717), None
+    if unpinned. `expected`/`expected_fp` are the body's pointer-configured account
+    (op#10706 R1); mismatch = live fp != expected fp.
     READ-ONLY: only `ps` + tmux list-panes, argv lists, no shell."""
     labels = _account_labels()
     pane_pids = _pid_to_session()
@@ -505,24 +608,43 @@ def token_ground_truth() -> dict:
         verified = metered or fp is not None
         session = _session_for(pid, pane_pids, ppid) or ("pid:%d" % pid)
         seen.add(session)
-        # A verified Max body on any account other than the expected one is a
-        # MISMATCH (this is nazim-on-Syed). Metered is its own alert; unverified
-        # is neither green nor a mismatch — it's simply unproven.
-        mismatch = bool(verified and not metered and account != _EXPECTED_ACCOUNT)
+        # EXPECTED = the body's OWN configured default (its pointer file / .env),
+        # per orch-console #16038 — not a hardcoded account. A verified Max body
+        # whose live fp != its expected fp is a MISMATCH (this is nazim-on-Syed).
+        # Metered is its own alert; unverified is neither green nor a mismatch.
+        exp_fp = _expected_fp(session)
+        exp_account = (labels.get(exp_fp, "Max (unknown acct)")
+                       if exp_fp else _EXPECTED_ACCOUNT)
+        mismatch = bool(verified and not metered and exp_fp is not None and fp != exp_fp)
         rows.append({
             "session": session, "account": account, "fp": fp, "metered": metered,
             "model": model, "host": "Mini", "verified": verified,
-            "expected": _EXPECTED_ACCOUNT, "mismatch": mismatch,
+            "expected": exp_account, "expected_fp": exp_fp, "mismatch": mismatch,
         })
 
     for sess, host in _REMOTE_BODIES.items():
         if sess in seen:
             continue
-        rows.append({
-            "session": sess, "account": None, "fp": None, "metered": False,
-            "model": None, "host": host, "verified": False,
-            "expected": _EXPECTED_ACCOUNT, "mismatch": False,
-        })
+        exp_fp = _expected_fp(sess)
+        exp_account = (labels.get(exp_fp, "Max (unknown acct)") if exp_fp else _EXPECTED_ACCOUNT)
+        # Source-of-truth regardless of host (op#10706 C): SSH-fingerprint the hub.
+        # Reachable -> VERIFIED (and can MISMATCH, e.g. hub-on-Syed vs pointer-Musa,
+        # which we surface, never suppress). Unreachable / not requested -> UNVERIFIED.
+        scan = _remote_hub_scan() if include_remote else None
+        if scan and scan.get("fp"):
+            rfp = scan["fp"]
+            rows.append({
+                "session": sess, "account": labels.get(rfp, "Max (unknown acct)"),
+                "fp": rfp, "metered": False, "model": scan.get("model"), "host": host,
+                "verified": True, "expected": exp_account, "expected_fp": exp_fp,
+                "mismatch": bool(exp_fp is not None and rfp != exp_fp),
+            })
+        else:
+            rows.append({
+                "session": sess, "account": None, "fp": None, "metered": False,
+                "model": None, "host": host, "verified": False,
+                "expected": exp_account, "expected_fp": exp_fp, "mismatch": False,
+            })
 
     # Loud first: mismatches, then metered, then unverified, then green by session.
     rows.sort(key=lambda x: (
@@ -531,13 +653,15 @@ def token_ground_truth() -> dict:
     for x in rows:
         if x.get("model"):
             by_model[x["model"]] = by_model.get(x["model"], 0) + 1
+    _env_fp = _env_default_fp()
     summary = {
         "total": len(rows),
         "verified": sum(1 for x in rows if x["verified"]),
         "unverified": sum(1 for x in rows if not x["verified"]),
         "mismatched": sum(1 for x in rows if x["mismatch"]),
         "metered": sum(1 for x in rows if x["metered"]),
-        "expected": _EXPECTED_ACCOUNT,
+        # the fleet's .env default account, for reference (expected is now per-body)
+        "expected_default": (labels.get(_env_fp, "Max (unknown acct)") if _env_fp else _EXPECTED_ACCOUNT),
         "by_model": by_model,
     }
     return {"rows": rows, "summary": summary}

@@ -489,7 +489,6 @@ def _fleet_payload():
         f_bloat = ex.submit(db.fetch_context_bloat)      # per-agent context %
         f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
-        f_tokens = ex.submit(panes.token_ground_truth)   # per-body PROCESS-VERIFIED token (op#10706/10715)
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         deploys = f_deploys.result()
         # Operator-audience needs ONLY. The 'fleet' audience fed a "Fleet is
@@ -521,11 +520,6 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("queue failed: %s", e)
             queue = []
-        try:
-            token_truth = f_tokens.result()
-        except Exception as e:
-            logger.warning("token_ground_truth failed: %s", e)
-            token_truth = {"rows": [], "summary": {}}
     # Mobile payload trim (op#10291): the queue `detail` field was ~11KB of the
     # ~18KB queue section (63%) — the bulk of the /api/fleet payload that the
     # marginal Abu-Dhabi<->Singapore relay drops. It's only needed ON TAP, which
@@ -596,7 +590,6 @@ def _fleet_payload():
         "context_bloat": _jsonable(context_bloat),
         "pool_usage": _jsonable(pool_usage),
         "queue": _jsonable(queue),
-        "token_truth": _jsonable(token_truth),   # process-verified per-body token (op#10706/10715)
     }
 
 
@@ -681,6 +674,14 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path in ("/classic", "/classic/"):
                 return self._serve_static("index.html", path)
 
+            # Dedicated MOBILE-FIRST lane-management page (op#10706 B): the token+
+            # model ground-truth tool on its OWN route (operator eyeballs on his
+            # phone). Open SPA shell like /fleet; it fetches /api/token-truth with
+            # the stored bearer token. Kept OFF /api/fleet so its remote-hub SSH
+            # scan never slows the main fleet payload.
+            if path in ("/lanes", "/lanes/"):
+                return self._serve_static("lanes.html", path)
+
             # DOCS section: /docs and any /docs/<repo>/<path> deep link all serve
             # the same SPA shell (open, like /). The shell reads window.location
             # + the stored bearer token and fetches /api/docs* with the header,
@@ -741,6 +742,14 @@ def _make_handler(feedloop: "_FeedLoop"):
                     # Single live-derived aggregate for the attention-first Fleet
                     # view (redesign #7576): pulse + needs-you + lanes + deploys.
                     payload = _fleet_payload()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, payload)
+
+                if path == "/api/token-truth":
+                    # Process-verified per-body token + model (op#10706/10715/10717),
+                    # incl. the remote VPS hub via SSH (op#10706 C). Its own endpoint
+                    # (feeds the /lanes page) so the ~SSH latency stays off /api/fleet.
+                    payload = panes.token_ground_truth(include_remote=True)
                     auth.audit(self._client(), path, "200")
                     return self._json(200, payload)
 
