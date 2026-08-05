@@ -448,6 +448,11 @@ def _context_bloat(rows):
         pct, level = lvl
         out.append({
             "agent": r.get("cc_identity"),
+            # obs-1 (op#10550): the instance discriminator within a family
+            # (sub_tag == the instance's tmux_session; NULL for a solo lane). The
+            # client keys laneCtxIndex by (agent, sub_tag) so each perimeter card
+            # folds in ITS OWN gauge instead of a shared one.
+            "sub_tag": r.get("sub_tag"),
             "ctx_tokens": int(r.get("ctx_tokens")),
             "window": _CTX_WINDOW,
             "pct": pct,

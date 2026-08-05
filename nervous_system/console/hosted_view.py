@@ -277,7 +277,20 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
         "    act.subject AS activity, "
         "    round(extract(epoch FROM (now() - act.created_at)))::int AS activity_age_s "
         "  FROM agent_status s "
-        "  LEFT JOIN fleet_lanes l ON l.base_agent_id = s.base_agent_id "
+        # obs-2 (op#10550): PREFER the fleet_lanes row whose `lane` == this
+        # instance's live tmux_session. A multi-lane FAMILY (the irsyad perimeter:
+        # one base_agent_id, distinct sessions irsyad/-prog1/-prog2/-coord) shares
+        # ONE base across several fleet_lanes rows, so joining by base alone let
+        # DISTINCT ON attribute an ARBITRARY perimeter row's desired_state to each
+        # instance (why a live instance showed 'down'/duplicated). lane==tmux_session
+        # gives each instance ITS OWN row; fall back to a base match for a lane whose
+        # session != its fleet_lanes.lane. (Mirrors db.py build_lanes_query exactly.)
+        "  LEFT JOIN LATERAL ( "
+        "    SELECT desired_state, lane FROM fleet_lanes fl "
+        "    WHERE fl.lane = s.tmux_session OR fl.base_agent_id = s.base_agent_id "
+        "    ORDER BY (fl.lane = s.tmux_session) DESC "
+        "    LIMIT 1 "
+        "  ) l ON true "
         "  LEFT JOIN LATERAL ( "
         "    SELECT subject, created_at FROM agent_messages m "
         "    WHERE m.from_agent = s.base_agent_id ORDER BY m.id DESC LIMIT 1 "
@@ -368,7 +381,13 @@ def _clone_coordinators(cur) -> List[Dict[str, Any]]:
 
 def _clone_context_bloat(cur) -> List[Dict[str, Any]]:
     cur.execute(
-        "SELECT DISTINCT ON (cc_identity) cc_identity, latest_context_tokens AS ctx_tokens, "
+        # obs-1 (op#10550): DISTINCT ON (cc_identity, sub_tag) so each FAMILY
+        # instance (irsyad perimeter: one cc_identity, one cc_session_costs row per
+        # sub_tag == tmux_session) gets its OWN current-context row instead of the
+        # four cards folding in one shared gauge. Solo lane = sub_tag NULL = one row,
+        # unchanged. `sub_tag` rides through so fleet.js maps each gauge to its
+        # instance. (Mirrors db.py build_context_bloat_query exactly.)
+        "SELECT DISTINCT ON (cc_identity, sub_tag) cc_identity, sub_tag, latest_context_tokens AS ctx_tokens, "
         "  round(extract(epoch FROM (now() - COALESCE(ended_at, created_at))))::int AS age_s, "
         "  (SELECT a.auth_fp FROM agent_status a "
         "     WHERE a.base_agent_id = cc_session_costs.cc_identity AND a.auth_fp IS NOT NULL "
@@ -380,11 +399,12 @@ def _clone_context_bloat(cur) -> List[Dict[str, Any]]:
         "WHERE cc_identity NOT LIKE 'operator-%%' "
         "  AND latest_context_tokens IS NOT NULL "
         "  AND COALESCE(ended_at, created_at) > now() - interval '45 days' "
-        "ORDER BY cc_identity, COALESCE(ended_at, created_at) DESC"
+        # DISTINCT ON leading exprs must lead ORDER BY; freshest per (identity, sub_tag).
+        "ORDER BY cc_identity, sub_tag, COALESCE(ended_at, created_at) DESC"
     )
     out = []
     for r in cur.fetchall():
-        ident, ctx_tokens, age_s, auth_fp, host = r[0], r[1], r[2], r[3], r[4]
+        ident, sub_tag, ctx_tokens, age_s, auth_fp, host = r[0], r[1], r[2], r[3], r[4], r[5]
         if _is_coord_id(ident):
             continue  # coordinators live on their own cards
         if age_s is not None and age_s > _CTX_STALE_DROP_S:
@@ -393,7 +413,11 @@ def _clone_context_bloat(cur) -> List[Dict[str, Any]]:
         if pct is None:
             continue  # bad data — not a real current-context reading
         out.append(dict(
-            agent=scrub_field(ident), ctx_tokens=int(ctx_tokens), window=_CTX_WINDOW,
+            # sub_tag = the instance discriminator (obs-1, op#10550): fleet.js keys
+            # laneCtxIndex by (agent, sub_tag) so each family card folds in its own
+            # gauge. NULL for a solo lane (client falls back to the base id).
+            agent=scrub_field(ident), sub_tag=scrub_field(sub_tag),
+            ctx_tokens=int(ctx_tokens), window=_CTX_WINDOW,
             pct=pct, level=level, age_s=age_s, auth_fp=auth_fp, host=host,
         ))
     out.sort(key=lambda x: x["pct"], reverse=True)

@@ -677,8 +677,19 @@ def build_context_bloat_query() -> Tuple[str, list]:
     long-dead identities; rows without a current-context value are skipped.
     `age_s` surfaces a stale reading (writer paused), never shown as live."""
     sql = (
-        "SELECT DISTINCT ON (cc_identity) "
+        # DISTINCT ON (cc_identity, sub_tag) — obs-1 (op#10550): a multi-instance
+        # FAMILY (the irsyad perimeter: one cc_identity 'cc-irsyad', distinct
+        # sub_tags irsyad/-coord/-prog1/-prog2 == each instance's tmux_session)
+        # writes ONE cc_session_costs row PER sub_tag. DISTINCT ON (cc_identity)
+        # alone collapsed them to a single row, so all four lane cards folded in
+        # the SAME gauge (operator: "4 identical ctx gauges"). Keying the dedup on
+        # (cc_identity, sub_tag) gives each instance its own current-context row;
+        # a solo lane has sub_tag=NULL -> exactly one row, unchanged. `sub_tag`
+        # rides through so the client maps each gauge to its instance by
+        # tmux_session (== sub_tag), falling back to the base id for solo lanes.
+        "SELECT DISTINCT ON (cc_identity, sub_tag) "
         "  cc_identity, "
+        "  sub_tag, "
         "  latest_context_tokens AS ctx_tokens, "
         "  input_tokens, "
         "  round(extract(epoch FROM (now() - COALESCE(ended_at, created_at))))::int AS age_s, "
@@ -697,7 +708,9 @@ def build_context_bloat_query() -> Tuple[str, list]:
         "WHERE cc_identity NOT LIKE 'operator-%%' "
         "  AND latest_context_tokens IS NOT NULL "
         "  AND COALESCE(ended_at, created_at) > now() - interval '45 days' "
-        "ORDER BY cc_identity, COALESCE(ended_at, created_at) DESC"
+        # DISTINCT ON leading exprs must lead ORDER BY; freshest reading per
+        # (identity, sub_tag) wins that instance's row.
+        "ORDER BY cc_identity, sub_tag, COALESCE(ended_at, created_at) DESC"
     )
     return sql, []
 

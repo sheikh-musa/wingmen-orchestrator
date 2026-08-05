@@ -500,8 +500,15 @@
   // Returns "" when there's no reading for this lane (e.g. a lane that never
   // reported a current-context size) so the card simply omits the gauge.
   function laneCtxHtml(l) {
-    var key = l.base_agent_id || l.agent_id;
-    var cx = key ? laneCtxIndex[key] : null;
+    var base = l.base_agent_id || l.agent_id;
+    // obs-1 (op#10550): a FAMILY instance carries its own current-context row keyed
+    // by (base, sub_tag) where sub_tag == this lane's tmux_session — match that
+    // first so each perimeter card shows ITS OWN gauge, not a shared one. Fall back
+    // to the bare base id for a solo lane (its row has no sub_tag).
+    var sess = l.tmux_session || l.lane;
+    var cx = null;
+    if (base && sess) cx = laneCtxIndex[base + CTX_SEP + sess];
+    if (!cx && base) cx = laneCtxIndex[base];
     if (!cx || cx.pct == null) return "";
     var pct = cx.pct;
     var stale = cx.age_s != null && cx.age_s > 86400;   // >1d old reading -> flag it
@@ -825,10 +832,20 @@
   // laneCtxHtml(), sourced from laneCtxIndex (built in applyData from the same
   // context_bloat payload). Coordinators still carry their own ctx on their
   // cards (coordCard's .cctx chip, op#9088).
+  // obs-1 (op#10550): a multi-instance FAMILY (the irsyad perimeter) emits one
+  // context_bloat row per (agent, sub_tag), where sub_tag == that instance's
+  // tmux_session. Index a tagged row under the composite key agent\x00sub_tag so
+  // each family card folds in ITS OWN gauge (laneCtxHtml matches by tmux_session);
+  // a solo lane's row (sub_tag null/empty) keys under the bare agent id, so the
+  // base-id fallback in laneCtxHtml still finds it. NUL separator can't occur in
+  // an id or session name, so the two key spaces never collide.
+  var CTX_SEP = "\u0000";
   function buildLaneCtxIndex(rows) {
     laneCtxIndex = {};
     (rows || []).forEach(function (r) {
-      if (r && r.agent) laneCtxIndex[r.agent] = r;
+      if (!r || !r.agent) return;
+      if (r.sub_tag) laneCtxIndex[r.agent + CTX_SEP + r.sub_tag] = r;
+      else laneCtxIndex[r.agent] = r;
     });
   }
 
