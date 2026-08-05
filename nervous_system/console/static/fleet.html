@@ -100,19 +100,22 @@
   @keyframes breathe { 0%,100%{opacity:.6} 50%{opacity:1} }
   .pulse .big { font-size: 20px; font-weight: 700; letter-spacing:.2px; }
   .pulse.attn .big { color: #ffd77a; } .pulse.clear .big { color: var(--good); }
-  /* Glance banner: worst-offender context bloat, color-coded by the shared
-     green/amber/red level. Hidden until renderTopBloat adds .show. */
-  .topbloat { display:none; align-items:center; gap:7px; margin-top:10px;
+  /* Glance banner: the top-3 worst-offender context-bloat lanes. Each pct is
+     color-coded by ITS OWN green/amber/red level; the leading dot shows the worst
+     lane's level. Wraps on a narrow phone. Hidden until renderTopBloat adds .show. */
+  .topbloat { display:none; align-items:center; flex-wrap:wrap; gap:4px 7px; margin-top:10px;
     font:12px/1.2 var(--mono); padding:6px 10px; border-radius:8px;
     background: rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.06); }
-  .topbloat.show { display:inline-flex; }
+  .topbloat.show { display:flex; }
   .topbloat .dot { width:8px; height:8px; border-radius:50%; flex:none; }
   .topbloat .lbl { color:var(--dim); }
+  .topbloat .ent { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
   .topbloat .who { color:var(--txt); font-weight:700; }
   .topbloat .pct { font-weight:700; }
-  .topbloat.green .dot{background:var(--good)} .topbloat.green .pct{color:var(--good)}
-  .topbloat.amber .dot{background:var(--warn)} .topbloat.amber .pct{color:var(--warn)}
-  .topbloat.red   .dot{background:var(--bad)}  .topbloat.red   .pct{color:var(--bad)}
+  .topbloat .sep { color:var(--dim); }
+  .topbloat .dot.green{background:var(--good)} .topbloat .pct.green{color:var(--good)}
+  .topbloat .dot.amber{background:var(--warn)} .topbloat .pct.amber{color:var(--warn)}
+  .topbloat .dot.red{background:var(--bad)}    .topbloat .pct.red{color:var(--bad)}
   .strip { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
   .chip { display:inline-flex; align-items:center; gap:6px; font:12px/1 var(--mono);
     padding:7px 11px; border-radius:999px; background: var(--panel-2); border:1px solid var(--line); color: var(--dim); }

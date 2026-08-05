@@ -369,33 +369,53 @@
       (p.offline ? '<span class="chip"><span class="d bad"></span><b>' + p.offline + '</b> offline</span>' : '');
   }
 
-  // Glance banner (operator ask): the single most context-bloated WORKER lane,
-  // rendered at the top of the pulse so the worst offender is visible without
-  // scanning cards. context_bloat is already the per-lane list (coordinators
-  // excluded — they own their cards) sorted fullest-first, but we take the MAX
-  // defensively rather than trust [0]. Label = the instance's sub_tag (== its
-  // tmux_session) or the base id for a solo lane — the same name its card shows.
-  // Hidden when there's no reading. Display-only; no new data.
+  // Glance banner (operator ask, extended to TOP 3): the three most context-
+  // bloated WORKER lanes, rendered at the top of the pulse so the worst offenders
+  // are visible without scanning cards. context_bloat is already the per-lane list
+  // (coordinators excluded — they own their cards), but we sort here defensively
+  // rather than trust payload order, then take the top 3 (fewer if <3, hidden if
+  // 0). Each pct is color-coded by ITS OWN level (so #1 can be amber while #2/#3
+  // are green); the leading dot reflects the worst lane's level as the overall
+  // severity signal. Label = the instance's sub_tag (== its tmux_session) or the
+  // base id for a solo lane — the same name its card shows. Display-only; no new
+  // data. Entries wrap on a narrow phone; each carries a tokens/age tooltip.
   function renderTopBloat(rows) {
     var el = $("topBloat");
     if (!el) return;
-    var top = null;
-    (rows || []).forEach(function (r) {
-      if (!r || r.pct == null) return;
-      if (!top || r.pct > top.pct) top = r;
+    var list = (rows || []).filter(function (r) { return r && r.pct != null; });
+    if (!list.length) { el.className = "topbloat"; el.removeAttribute("title"); el.innerHTML = ""; return; }
+    // Collapse each family (rows sharing one cc_identity `agent`) to a SINGLE entry
+    // so the top-3 shows DISTINCT lanes — otherwise a family's live instance row AND
+    // its legacy base-NULL aggregate row can BOTH place (both irsyad @74% today),
+    // re-creating the op#10550 duplicate-irsyad look. Prefer a real per-instance row
+    // (sub_tag set = a live lane) over the base aggregate; among those, the fullest.
+    var best = {};
+    list.forEach(function (r) {
+      var k = r.agent || r.sub_tag;
+      var cur = best[k];
+      if (!cur) { best[k] = r; return; }
+      var rTag = r.sub_tag ? 1 : 0, cTag = cur.sub_tag ? 1 : 0;
+      if (rTag !== cTag ? rTag > cTag : r.pct > cur.pct) best[k] = r;
     });
-    if (!top) { el.className = "topbloat"; el.removeAttribute("title"); el.innerHTML = ""; return; }
-    var who = top.sub_tag || top.agent || "?";
-    var lvl = top.level || "green";
-    el.className = "topbloat show " + esc(lvl);
-    el.setAttribute("title", "Most context-bloated lane — " +
-      fmtTok(top.ctx_tokens) + " / " + fmtTok(top.window || 1000000) +
-      (top.age_s != null ? " · " + fmtAge(top.age_s) + " ago" : ""));
+    var uniq = Object.keys(best).map(function (k) { return best[k]; });
+    uniq.sort(function (a, b) { return b.pct - a.pct; });   // fullest first
+    var top = uniq.slice(0, 3);
+    var lead = top[0].level || "green";                     // overall severity = worst lane
+    var parts = top.map(function (r) {
+      var who = r.sub_tag || r.agent || "?";
+      var lvl = r.level || "green";
+      var tip = fmtTok(r.ctx_tokens) + " / " + fmtTok(r.window || 1000000) +
+        (r.age_s != null ? " · " + fmtAge(r.age_s) + " ago" : "");
+      return '<span class="ent" title="' + esc(tip) + '">' +
+        '<span class="who">' + esc(who) + '</span> ' +
+        '<span class="pct ' + esc(lvl) + '">' + r.pct + '%</span></span>';
+    });
+    el.className = "topbloat show";
+    el.setAttribute("title", "Top " + top.length + " context-bloated lanes (of " + list.length + ")");
     el.innerHTML =
-      '<span class="dot"></span>' +
+      '<span class="dot ' + esc(lead) + '"></span>' +
       '<span class="lbl">Top bloat</span> ' +
-      '<span class="who">' + esc(who) + '</span> ' +
-      '<span class="pct">' + top.pct + '% ctx</span>';
+      parts.join('<span class="sep">·</span>');
   }
 
   // who -> peek session, so a NEEDS-YOU item can jump to its lane. Keyed by
