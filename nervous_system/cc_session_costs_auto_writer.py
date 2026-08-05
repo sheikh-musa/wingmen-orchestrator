@@ -100,16 +100,58 @@ def lane_dir_map_from_fleet_lanes(dsn: str) -> dict:
     out: dict = {}
     try:
         with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+            # Every worktree row (NOT distinct-on-base): a multi-worktree FAMILY
+            # (the irsyad perimeter) has several worktrees under one base, and ALL
+            # of them must resolve to that base — distinct-on-base dropped the
+            # non-first perimeter worktrees to None (op#10550). The sub_tag map
+            # then distinguishes the instances.
             cur.execute(
-                "SELECT DISTINCT ON (base_agent_id) base_agent_id, worktree_path "
-                "FROM fleet_lanes WHERE worktree_path IS NOT NULL "
-                "  AND base_agent_id NOT IN "
-                "    ('cc-orchestrator','cai','orch-console','cc-fleet-health') "
-                "ORDER BY base_agent_id, lane")
+                "SELECT base_agent_id, worktree_path FROM fleet_lanes "
+                "WHERE worktree_path IS NOT NULL AND base_agent_id NOT IN "
+                "  ('cc-orchestrator','cai','orch-console','cc-fleet-health')")
             for base, wt in cur.fetchall():
-                d = wt.replace("/", "-")
+                d = _mangle_worktree(wt)
                 out[d] = base
                 out[_canonical_dir(d)] = base
+    except Exception:
+        return {}
+    return out
+
+
+def _mangle_worktree(wt: str) -> str:
+    """A worktree abs-path -> its ~/.claude/projects dir name. Claude replaces
+    BOTH '/' AND '.' with '-' (so a `.wt-coord` worktree becomes `-wt-coord`) —
+    replacing only '/' silently dropped every dotted-worktree lane (the irsyad
+    perimeter wt-coord/prog1/prog2), op#10550."""
+    return wt.replace("/", "-").replace(".", "-")
+
+
+def lane_subtag_map_from_fleet_lanes(dsn: str) -> dict:
+    """Build a {claude-projects-dir -> sub_tag} map for MULTI-LANE FAMILIES
+    (op#10550). A perimeter (e.g. cc-irsyad's irsyad / irsyad-prog1 / -prog2 /
+    -coord — ONE base_agent_id, distinct worktrees) collapses to a single
+    cc_identity in cc_session_costs, so all its instances showed the SAME context
+    gauge. Recording each worktree with a distinct sub_tag (= its fleet_lanes.lane)
+    lets the console key the gauge by (cc_identity, sub_tag) and show per-instance
+    context. Only families (base with >1 lane row) get a sub_tag; a solo lane maps
+    to no sub_tag (unchanged). Fail-safe: {} on any DB error."""
+    import psycopg
+    import collections
+    out: dict = {}
+    try:
+        with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT base_agent_id, lane, worktree_path FROM fleet_lanes "
+                "WHERE worktree_path IS NOT NULL AND base_agent_id NOT IN "
+                "  ('cc-orchestrator','cai','orch-console','cc-fleet-health')")
+            rows = cur.fetchall()
+        by_base = collections.Counter(r[0] for r in rows)
+        for base, lane, wt in rows:
+            if by_base[base] <= 1:
+                continue  # solo lane — no sub_tag needed
+            d = _mangle_worktree(wt)
+            out[d] = lane
+            out[_canonical_dir(d)] = lane
     except Exception:
         return {}
     return out
@@ -181,6 +223,7 @@ def sweep_projects_root(
     modified_since: float,
     body_role: Optional[str] = None,
     extra_dir_map: Optional[dict] = None,
+    subtag_map: Optional[dict] = None,
 ) -> list[dict[str, Any]]:
     """Walk projects_root/<mangled-repo>/*.jsonl, parse usage, return upsert rows.
 
@@ -210,6 +253,11 @@ def sweep_projects_root(
         # lands as its own console row instead of commingling with the hub's gauge.
         if cc_identity == "cc-orchestrator" and body_role == "console":
             cc_identity = "orch-console"
+        # sub_tag distinguishes instances of a multi-lane FAMILY (op#10550) so the
+        # console can show per-instance context; None for a solo lane (unchanged).
+        sub_tag = None
+        if subtag_map:
+            sub_tag = subtag_map.get(repo_dir.name) or subtag_map.get(_canonical_dir(repo_dir.name))
         try:
             jsonls = [
                 p for p in repo_dir.iterdir()
@@ -229,6 +277,7 @@ def sweep_projects_root(
             session_id = jsonl.stem  # filename without .jsonl
             rows.append({
                 "cc_identity": cc_identity,
+                "sub_tag": sub_tag,
                 "session_id": session_id,
                 "input_tokens": tokens.input_tokens,
                 "output_tokens": tokens.output_tokens,
@@ -271,6 +320,7 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                       cache_creation_input_tokens = %s,
                       cache_read_input_tokens = %s,
                       latest_context_tokens = %s,
+                      sub_tag = %s,
                       ended_at = %s
                     WHERE id = %s
                     """,
@@ -280,6 +330,7 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                         row["cache_creation_input_tokens"],
                         row["cache_read_input_tokens"],
                         row.get("latest_context_tokens", 0),
+                        row.get("sub_tag"),
                         started_at,
                         existing[0],
                     ),
@@ -288,15 +339,16 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                 cur.execute(
                     """
                     INSERT INTO cc_session_costs
-                      (cc_identity, session_id, started_at, ended_at,
+                      (cc_identity, sub_tag, session_id, started_at, ended_at,
                        input_tokens, output_tokens,
                        cache_creation_input_tokens, cache_read_input_tokens,
                        latest_context_tokens,
                        source, has_per_message_detail)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false)
                     """,
                     (
-                        row["cc_identity"], row["session_id"], started_at, started_at,
+                        row["cc_identity"], row.get("sub_tag"),
+                        row["session_id"], started_at, started_at,
                         row["input_tokens"], row["output_tokens"],
                         row["cache_creation_input_tokens"], row["cache_read_input_tokens"],
                         row.get("latest_context_tokens", 0),

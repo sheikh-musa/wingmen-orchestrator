@@ -35,7 +35,8 @@ load_dotenv(_ORCH_DIR / ".env")
 sys.path.insert(0, str(_ORCH_DIR))
 
 from nervous_system.cc_session_costs_auto_writer import (
-    sweep_projects_root, upsert_rows, lane_dir_map_from_fleet_lanes)
+    sweep_projects_root, upsert_rows, lane_dir_map_from_fleet_lanes,
+    lane_subtag_map_from_fleet_lanes)
 
 _SOURCE = "auto_writer_v1"
 
@@ -60,10 +61,14 @@ def main() -> int:
     # Fail-safe: {} on any DB error (writer still runs with the static map).
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     extra_map = lane_dir_map_from_fleet_lanes(dsn) if dsn else {}
+    # Per-instance sub_tag for multi-lane families (op#10550) so a perimeter's
+    # instances record distinct context readings, not one shared cc_identity row.
+    subtag_map = lane_subtag_map_from_fleet_lanes(dsn) if dsn else {}
     rows = sweep_projects_root(root, modified_since=cutoff, body_role=body_role,
-                               extra_dir_map=extra_map)
+                               extra_dir_map=extra_map, subtag_map=subtag_map)
     print(f"[cc-writer] {len(rows)} session rows from {root} "
-          f"(last {args.lookback_seconds}s; +{len(extra_map)//2} dynamic lane dirs)")
+          f"(last {args.lookback_seconds}s; +{len(extra_map)//2} dynamic lane dirs, "
+          f"{len(subtag_map)//2} family sub_tags)")
     if not rows:
         return 0
     if args.dry_run:

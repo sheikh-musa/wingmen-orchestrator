@@ -54,7 +54,12 @@
          after orch-console cleanly recycled it via the launcher (#15252): fresh
          cc-shipforge-1 self-registered with restored Syed creds -> bus-blind fixed,
          so it's back under normal wedge monitoring. -->
-    <key>LANE_WEDGE_EXCLUDE</key><string>nazim,cai,fleet-health,orch,orchestrator,infra,adcda</string>
+    <!-- cosem-video SUPPRESSED 2026-08-05 (SRE, re orch-console #15674): the
+         operator is LIVE-ATTACHED to its tmux session (ssh, driving the Resolve
+         edit-run loop by hand). It looks idle between his commands — that's
+         expected, NOT a wedge. An auto-recovery send-keys would inject into his
+         live edit. REMOVE when orch-console signals the operator has detached. -->
+    <key>LANE_WEDGE_EXCLUDE</key><string>nazim,cai,fleet-health,orch,orchestrator,infra,adcda,cosem-video</string>
     <!-- Thresholds / guards overridable here (defaults shown). Uncomment to change
          without editing code.
     <key>LANE_WEDGE_MIN_POLLS</key><string>4</string>

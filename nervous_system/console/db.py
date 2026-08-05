@@ -139,7 +139,20 @@ def build_lanes_query() -> Tuple[str, list]:
         "    AS activity_age_s "
         "FROM agent_status s "
         "LEFT JOIN agents a ON a.id = s.base_agent_id "
-        "LEFT JOIN fleet_lanes l ON l.base_agent_id = s.base_agent_id "
+        # fleet_lanes match: PREFER the row whose `lane` == this instance's live
+        # tmux_session (op#10550). A multi-lane FAMILY (the irsyad perimeter:
+        # cc-irsyad-1..4, one base_agent_id, distinct sessions irsyad/-prog1/-prog2/
+        # -coord) shares ONE base across several fleet_lanes rows, so joining by
+        # base alone lets DISTINCT ON attribute an ARBITRARY perimeter row's
+        # desired_state to each instance (why cc-irsyad-2 showed 'down'). Preferring
+        # lane==tmux_session gives each instance ITS OWN row; fall back to a
+        # base_agent_id match for a lane whose session != its fleet_lanes.lane.
+        "LEFT JOIN LATERAL ("
+        "  SELECT desired_state, lane FROM fleet_lanes fl "
+        "  WHERE fl.lane = s.tmux_session OR fl.base_agent_id = s.base_agent_id "
+        "  ORDER BY (fl.lane = s.tmux_session) DESC "
+        "  LIMIT 1"
+        ") l ON true "
         "LEFT JOIN LATERAL ("
         "  SELECT subject, created_at FROM agent_messages m "
         "  WHERE m.from_agent = s.base_agent_id "
