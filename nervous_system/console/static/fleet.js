@@ -26,24 +26,137 @@
   function doReset(btn) {
     var body = btn.getAttribute("data-reset");
     if (!body) return;
-    if (!window.confirm("Reset " + body + "?\n\nThis clears its context and reboots it from its latest handoff. It refuses if the body is busy, and preserves any staged composer text.")) return;
-    var orig = btn.textContent;
+    // Two-tap confirm — NOT window.confirm(): in an iOS standalone (home-screen)
+    // PWA the native confirm() is suppressed and returns false, so the reset
+    // silently never fired (operator 2026-08-02: console reset "nothing
+    // happened", had to use the Telegram button). First tap arms for 3s; a
+    // second tap within the window actually resets. Reset still refuses if the
+    // body is busy and preserves staged composer text — that's the backend.
+    if (!btn._armed) {
+      btn._armed = true;
+      btn.classList.add("arm");
+      btn.textContent = "tap again to reset";
+      btn._disarm = setTimeout(function () {
+        btn._armed = false; btn.classList.remove("arm"); btn.textContent = "↻ reset";
+      }, 3000);
+      return;
+    }
+    clearTimeout(btn._disarm); btn._armed = false; btn.classList.remove("arm");
+    var orig = "↻ reset";
     btn.disabled = true; btn.textContent = "↻ resetting…";
     fetch("/api/reset", {
       method: "POST",
       headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
       body: JSON.stringify({ body: body })
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j || {} }; }); })
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, s: r.status, j: j || {} }; }); })
       .then(function (res) {
-        btn.textContent = (res.ok && res.j.ok) ? "✓ reset sent" : "✗ " + (res.j.error || "failed");
+        // Human message per outcome (op#9262) — a bare "✗ error" read as "nothing
+        // happened" and hid WHY. 409/429 are the guard doing its job, not a fault.
+        var msg;
+        if (res.ok && res.j.ok) { msg = "✓ reset sent"; }
+        else if (res.s === 409) { msg = "⏳ already resetting"; }
+        else if (res.s === 429) { msg = "⏳ just reset — wait " + (res.j.retry_after_s || 60) + "s"; }
+        else { msg = "✗ " + (res.j.error || "failed"); }
+        btn.textContent = msg;
         setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 5000);
       })
-      .catch(function () { btn.textContent = "✗ error"; setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 5000); });
+      .catch(function () {
+        // A dropped RESPONSE (Mini network flake / Errno54) does NOT mean the reset
+        // didn't run — the POST may have reached the server and fired the script
+        // before the reply was lost. Say so honestly rather than a bare "error".
+        btn.textContent = "✗ network dropped — may have run; wait ~60s";
+        setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 6000);
+      });
   }
   function bindResets() {
     document.querySelectorAll(".reset-btn").forEach(function (btn) {
       if (btn._bound) return; btn._bound = true;
       btn.addEventListener("click", function (ev) { ev.stopPropagation(); doReset(btn); });
+    });
+  }
+
+  // ── Lane OAuth-account switch (token-pool conservation) ────────────────────
+  // Per-lane account selector + a confirm-then-switch button (same two-tap guard
+  // as reset — a native confirm() is suppressed in the iOS standalone PWA). The
+  // account list is the terms-clean ALLOWLIST the backend enforces; the FORBIDDEN
+  // gazzabyte consumer token (CAI-729) is never offered here and is refused by
+  // both the endpoint allowlist and switch_lane_token.sh. Only rendered for a
+  // lane with a live tmux_session (the switch targets that session by name).
+  var SWITCH_ACCOUNTS = [
+    { name: "musa", label: "Musa", fp: "68142948" },
+    { name: "syed", label: "Syed", fp: "582043088" }
+  ];
+  function currentAccountName(fp) {
+    fp = fp || "";
+    for (var i = 0; i < SWITCH_ACCOUNTS.length; i++) {
+      if (fp.indexOf(SWITCH_ACCOUNTS[i].fp) === 0) return SWITCH_ACCOUNTS[i].name;
+    }
+    return "";
+  }
+  function switchCtlHtml(session, fp) {
+    if (!session) return "";   // no live session -> nothing to re-token
+    var cur = currentAccountName(fp);
+    var opts = SWITCH_ACCOUNTS.map(function (a) {
+      return '<option value="' + a.name + '"' + (a.name === cur ? " selected" : "") + '>' + esc(a.label) + '</option>';
+    }).join("");
+    return '<span class="switch-ctl" data-switch-session="' + esc(session) + '">' +
+      '<select class="tok-sel" title="Choose the Claude account to run this lane on">' + opts + '</select>' +
+      '<button class="switch-btn" title="Re-token this lane onto the selected account. RESTARTS the lane fresh (context resets); identity is preserved. Refuses if the lane is busy.">⇄ switch</button>' +
+      '</span>';
+  }
+  function doSwitch(btn) {
+    var ctl = btn.closest ? btn.closest(".switch-ctl") : btn.parentNode;
+    if (!ctl) return;
+    var session = ctl.getAttribute("data-switch-session");
+    var sel = ctl.querySelector(".tok-sel");
+    var tokenName = sel ? sel.value : "";
+    if (!session || !tokenName) return;
+    // Two-tap confirm (iOS PWA suppresses window.confirm — see doReset). First
+    // tap arms for 3s; a second tap actually switches. The backend re-tokens
+    // fresh (context resets) and refuses a busy lane, so this only guards a mis-tap.
+    if (!btn._armed) {
+      btn._armed = true;
+      btn.classList.add("arm");
+      btn.textContent = "tap again — restarts lane";
+      btn._disarm = setTimeout(function () {
+        btn._armed = false; btn.classList.remove("arm"); btn.textContent = "⇄ switch";
+      }, 3000);
+      return;
+    }
+    clearTimeout(btn._disarm); btn._armed = false; btn.classList.remove("arm");
+    var orig = "⇄ switch";
+    btn.disabled = true; btn.textContent = "⇄ switching…";
+    fetch("/api/switch-token", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ lane: session, token_name: tokenName })
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, s: r.status, j: j || {} }; }); })
+      .then(function (res) {
+        var msg;
+        if (res.ok && res.j.ok) { msg = "✓ switched"; }
+        else if (res.s === 409) { msg = "⏳ already switching"; }
+        else if (res.s === 429) { msg = "⏳ just switched — wait " + (res.j.retry_after_s || 30) + "s"; }
+        else if (res.s === 504) { msg = "✗ timed out — check the lane"; }
+        else { msg = "✗ " + (res.j.error || "failed"); }
+        btn.textContent = msg;
+        setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 6000);
+      })
+      .catch(function () {
+        // A dropped response does NOT mean the switch didn't run — the kill +
+        // relaunch may have fired before the reply was lost (Mini network flake).
+        btn.textContent = "✗ network dropped — may have run; check lane";
+        setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 7000);
+      });
+  }
+  function bindSwitches() {
+    document.querySelectorAll(".switch-ctl").forEach(function (ctl) {
+      if (ctl._bound) return; ctl._bound = true;
+      // Stop card-level clicks (which open the peek) from firing on the control.
+      ctl.addEventListener("click", function (ev) { ev.stopPropagation(); });
+      var sel = ctl.querySelector(".tok-sel");
+      if (sel) sel.addEventListener("change", function (ev) { ev.stopPropagation(); });
+      var btn = ctl.querySelector(".switch-btn");
+      if (btn) btn.addEventListener("click", function (ev) { ev.stopPropagation(); doSwitch(btn); });
     });
   }
   function esc(s) {
@@ -75,6 +188,46 @@
     return fp ? '<span class="tok" style="color:#94a3b8" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 8)) + '</span>' : '';
   }
 
+  // The 📍 physical-host badge — the twin of tokenBadge, keyed on agent_status.host.
+  // Reuses the .tok chip (distinct blue + a pin so it never reads as the 🔑 token
+  // badge). Raw host maps to a friendly label: Mini / Studio / VPS; empty/null (e.g.
+  // a singleton that never registered a host) -> no badge.
+  function hostBadge(host) {
+    host = host || "";
+    var h = host.toLowerCase();
+    var lbl = "";
+    if (h.indexOf("mini") >= 0) lbl = "Mini";
+    else if (h.indexOf("studio") >= 0) lbl = "Studio";
+    else if (h.indexOf("vps") >= 0 || h.indexOf("core") >= 0) lbl = "VPS";
+    return lbl ? '<span class="tok" style="color:#60a5fa" title="' + esc(host) + '">📍 ' + lbl + '</span>' : '';
+  }
+
+  // Weekly Max-pool usage in the header (op#9770), from pool_usage (the SRE's
+  // weekly_limit_monitor writes it each poll). Colour tracks the same thresholds
+  // the monitor pages on: <75 good, 75-90 warn, >=90 bad. A reading whose
+  // updated_age_s is beyond STALE (the monitor stalled) greys out + flags ⚠ —
+  // never a frozen number shown as live (op#9770's whole point). Tooltip carries
+  // the 5h window + reset + freshness so the chip itself stays compact.
+  var POOL_STALE_S = 1800;   // 30min: the monitor runs well under this
+  function poolChip(p) {
+    var pct = p.pct_7d;
+    if (pct == null) return "";
+    var stale = (p.updated_age_s != null && p.updated_age_s > POOL_STALE_S);
+    var cls = stale ? "stale" : (pct >= 90 ? "bad" : (pct >= 75 ? "warn" : "good"));
+    var title = p.pool + " Max weekly pool: " + Math.round(pct) + "% (7d)"
+      + (p.pct_5h != null ? ", " + Math.round(p.pct_5h) + "% (5h)" : "")
+      + (p.resets_at ? " · resets " + esc(p.resets_at) : "")
+      + (p.updated_age_s != null ? " · read " + fmtAge(p.updated_age_s) + " ago" : "")
+      + (stale ? " · STALE (monitor stalled)" : "");
+    return '<span class="poolchip ' + cls + '" title="' + esc(title) + '">'
+      + esc(p.pool) + ' <b>' + Math.round(pct) + '%</b> wk' + (stale ? " ⚠" : "") + '</span>';
+  }
+  function renderPoolUsage(rows) {
+    var el = document.getElementById("poolUsage");
+    if (!el) return;
+    el.innerHTML = (rows && rows.length) ? rows.map(poolChip).join("") : "";
+  }
+
   // Last-good /api/fleet payload, persisted so a cold launch (or a launch on a
   // slow/degraded tailnet) paints real data INSTANTLY from cache and NEVER
   // shows a hard error — the network fetch then quietly refreshes it. This is
@@ -85,7 +238,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = "fc-v17";
+  var APP_BUILD = "fc-v28";
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -123,20 +276,47 @@
     // the network somehow still serves the old bundle after the reset, we do NOT
     // loop — the target is stamped, so we fall back to the amber "stale" badge.
     var key = "fleet_hardreset_" + target;
-    try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, "1"); } catch (e) {}
-    var finish = function () { window.location.reload(); };
-    var jobs = [];
-    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
-      jobs.push(navigator.serviceWorker.getRegistrations()
-        .then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); })
-        .catch(function () {}));
-    }
-    if (window.caches && caches.keys) {
-      jobs.push(caches.keys()
-        .then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); })
-        .catch(function () {}));
-    }
-    Promise.all(jobs).then(finish, finish);
+    try { if (sessionStorage.getItem(key)) return; } catch (e) {}
+    // CONFIRM-THEN-CLEAR (op#10291 — the "totally dropped" fix). The old path
+    // cleared the SW + ALL caches and THEN reloaded from network; if that reload
+    // dropped on the operator's marginal Abu-Dhabi<->Singapore relay he was left
+    // with cleared-cache + no-shell = a BLANK console (the Aug-3 incident). So:
+    // PRE-FETCH the fresh shell + app bundle and confirm they are ACTUALLY
+    // reachable FIRST; only then clear + reload. If the pre-fetch fails (link
+    // dropped), do NOT clear — keep the WORKING cached shell + the amber "stale"
+    // badge, and leave the key UNSTAMPED so checkVersion retries when the link
+    // recovers. Cache-bust + no-store so a wedged old SW can't pass its own cached
+    // copy off as "reachable".
+    var bust = "?_hr=" + Date.now();
+    var okText = function (r) {
+      if (!r || !r.ok) return Promise.reject(new Error("unreachable"));
+      return r.text();
+    };
+    Promise.all([
+      fetch("/" + bust, { cache: "no-store" }).then(okText),
+      fetch("/static/fleet.js" + bust, { cache: "no-store" }).then(okText)
+    ]).then(function (parts) {
+      if (parts.some(function (t) { return !t || t.length < 200; }))
+        throw new Error("shell incomplete");
+      // Fresh shell + bundle CONFIRMED reachable — now it is safe to clear.
+      try { sessionStorage.setItem(key, "1"); } catch (e) {}
+      var finish = function () { window.location.reload(); };
+      var jobs = [];
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+        jobs.push(navigator.serviceWorker.getRegistrations()
+          .then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); })
+          .catch(function () {}));
+      }
+      if (window.caches && caches.keys) {
+        jobs.push(caches.keys()
+          .then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); })
+          .catch(function () {}));
+      }
+      Promise.all(jobs).then(finish, finish);
+    }).catch(function () {
+      // Link dropped mid-confirm — keep the working cached shell (NEVER blank),
+      // retry on the next checkVersion. Nothing to clean up: we cleared nothing.
+    });
   }
   function checkVersion() {
     // cache-bust so even a mis-behaving old SW doing cache-first on /api/* can't
@@ -318,6 +498,7 @@
     // Token attribution (op#9017): which OAuth account this lane authenticates as.
     // A lane re-tokens only on a REAL restart, so this shows the migration state at a glance.
     var tok = tokenBadge(l.auth_fp);
+    var hostb = hostBadge(l.host);   // 📍 physical host (Mini/Studio/VPS)
     return '<div class="lane' + (l.flagged ? ' flag' : '') + '"' + (peek ? ' data-peek="' + esc(peek) + '"' : '') + '>' +
       '<div class="top">' +
         '<span class="st-dot ' + esc(l.bucket) + '"></span>' +
@@ -328,9 +509,11 @@
       '<div class="meta">' +
         '<span class="hb ' + hbClass + '">' + esc(hbTxt) + '</span>' +
         tok +
+        hostb +
         (l.desired_state ? '<span>desired: ' + esc(l.desired_state) + '</span>' : '') +
         (peek ? '<span class="tap">peek ›</span>' : '') +
         resetBtnHtml(l.agent_id) +
+        switchCtlHtml(l.tmux_session, l.auth_fp) +
       '</div>' +
       (peek ? '<div class="peek" data-peekbox="' + esc(peek) + '"></div>' : '') +
     '</div>';
@@ -358,6 +541,7 @@
     var cctx = c.ctx_pct != null
         ? '<span class="cctx ' + esc(c.ctx_level || "") + '">' + c.ctx_pct + '% ctx</span>' : '';
     var tok = tokenBadge(c.auth_fp);
+    var hostb = hostBadge(c.host);   // 📍 physical host (VPS for the cross-host hub)
     return '<div class="lane coord"' + (peek ? ' data-peek="' + esc(peek) + '"' : '') + '>' +
       '<div class="top">' +
         '<span class="st-dot ' + dot + '"></span>' +
@@ -369,6 +553,7 @@
       '<div class="meta"><span class="hb ' + hbClass + '">' + esc(seenTxt) + '</span>' +
         cctx +
         tok +
+        hostb +
         (peek ? '<span class="tap">peek ›</span>' : '') +
         resetBtnHtml(c.agent_id) +
       '</div>' +
@@ -380,7 +565,9 @@
     if (!el) return;
     if (!items || !items.length) { el.innerHTML = '<div class="empty">No coordinators.</div>'; return; }
     el.innerHTML = items.map(coordCard).join("");
-    bindResets();
+    bindPeeks();   // coord cards reuse the lane peek machinery; bind them here so
+    bindResets();  // peek works regardless of render order (op 2026-08-02).
+    bindSwitches();  // no-op on coord cards (no .switch-ctl); kept for symmetry.
   }
   function renderLanes(lanes) {
     lastLanes = lanes;   // kept so jumpToLane can re-render (expand routine) if needed
@@ -404,13 +591,16 @@
       t.firstChild.textContent = (routineExpanded ? "▾" : "▸") + " ";
       bindPeeks();
       bindResets();
+      bindSwitches();
     });
     bindPeeks();
     bindResets();
+    bindSwitches();
   }
 
   var DEP_STAGES = { pending:1, pushed:1, in_review:1, merged:1, live:1, blocked:1 };
   function renderDeploys(rows) {
+    if (!$("deploys")) return;   // #deploys removed (op#9888); guard like the other render fns so tick() doesn't throw -> stuck "reconnecting"
     if (!rows || !rows.length) { $("deploys").innerHTML = '<div class="empty">No deploys tracked.</div>'; return; }
     $("deploys").innerHTML = '<div class="depstrip">' + rows.map(function (d) {
       var stage = (d.stage || "").toLowerCase();
@@ -422,6 +612,64 @@
         (d.url ? '<a href="' + esc(d.url) + '" target="_blank" rel="noopener">' + esc(d.url) + '</a>' : '') +
       '</div>';
     }).join("") + '</div>';
+  }
+
+  // ---- lane worklists (the per-lane drain view — lane_tasks) ---------------
+  // Renders each lane's queue so the operator can SEE what a lane is working on
+  // and watch items drain. Rows arrive grouped-ready: the backend orders by
+  // (lane, blocked-last, id) = strict FIFO with blockers sunk. A BLOCKED task is
+  // one waiting on the operator/cai to clear a gate, so it reads "⏳ awaiting you"
+  // in amber — the operator's OWN gates stand out from lane-side work in flight.
+  // A lane sets lane_tasks.status once and does NOT refresh it while working, so
+  // 'active' ALONE is not proof of live work — a fossil left 'active' for days
+  // (the pre-drain reality: a task marked active in a past session, never touched)
+  // must NOT read green "working". So an 'active' task only reads "working" if it
+  // was touched recently; a cold one reads "stale · Nd" with its age, honest that
+  // nothing is moving. (Post-drain, the lane's done/heartbeat keeps updated_at
+  // fresh, so genuinely-worked tasks stay green — this heuristic self-corrects.)
+  var STALE_ACTIVE_S = 7200;   // 2h untouched -> not "working", show it cold
+  function queueChip(t) {
+    var st = (t.status || "").toLowerCase();
+    if (st === "blocked")
+      return '<span class="qchip wait">⏳ awaiting you</span>';
+    if (st === "active") {
+      var age = t.updated_age_s;
+      if (age != null && age > STALE_ACTIVE_S)
+        return '<span class="qchip stale">stale · ' + fmtAge(age) + '</span>';
+      var elapsed = (t.elapsed_min != null ? " " + t.elapsed_min + "m" : "");
+      return '<span class="qchip work">working' + elapsed + '</span>' +
+        (t.over_sla ? '<span class="qchip over">⚠ SLA</span>' : "");
+    }
+    return '<span class="qchip queued">queued</span>';
+  }
+  function renderQueue(rows) {
+    var el = document.getElementById("laneQueues");
+    if (!el) return;
+    if (!rows || !rows.length) {
+      el.innerHTML = '<div class="empty">No lane work queued.</div>'; return;
+    }
+    // Group by lane, preserving the backend's within-lane order. Plain object as
+    // a map is fine — lane names are our own controlled labels, not user input.
+    var order = [], byLane = {};
+    rows.forEach(function (t) {
+      var lane = t.lane || "—";
+      if (!byLane[lane]) { byLane[lane] = []; order.push(lane); }
+      byLane[lane].push(t);
+    });
+    el.innerHTML = order.map(function (lane) {
+      var tasks = byLane[lane];
+      var body = tasks.map(function (t) {
+        return '<div class="qrow">' +
+          '<span class="qtitle">' + esc(t.title || "") + '</span>' +
+          queueChip(t) +
+        '</div>';
+      }).join("");
+      return '<div class="qlane">' +
+        '<div class="qlane-h">' + esc(lane) +
+          ' <span class="qn">' + tasks.length + '</span></div>' +
+        body +
+      '</div>';
+    }).join("");
   }
 
   // ---- backlog (the operator's realtime "Your asks" tracker) --------------
@@ -442,14 +690,70 @@
   var BL_ORDER = ["needs_you", "in_progress", "done", "parked"];
   function backlogItem(r) {
     var meta = BL_STATUS[r.status] || ["park", r.status];
-    return '<div class="bl">' +
-      '<span class="bltag ' + meta[0] + '">' + esc(meta[1]) + '</span>' +
-      '<div class="blbody">' +
-        '<div class="blask">' + esc(r.ask) + '</div>' +
-        (r.note ? '<div class="blnote">' + esc(r.note) + '</div>' : '') +
-        (r.op_ref ? '<div class="blop">' + esc(r.op_ref) + '</div>' : '') +
+    // Each card is a swipe row: two action panels revealed underneath, and the
+    // .bl slab (opaque) slides over them. Swipe-left → drop, swipe-right → top.
+    return '<div class="bl-row">' +
+      '<div class="bl-act top">▲ top</div>' +
+      '<div class="bl-act drop">drop ✕</div>' +
+      '<div class="bl" data-id="' + esc(r.id) + '">' +
+        '<span class="bltag ' + meta[0] + '">' + esc(meta[1]) + '</span>' +
+        '<div class="blbody">' +
+          '<div class="blask">' + esc(r.ask) + '</div>' +
+          (r.done_when ? '<div class="bldone">🎯 done when: ' + esc(r.done_when) + '</div>' : '') +
+          (r.note ? '<div class="blnote">' + esc(r.note) + '</div>' : '') +
+          (r.op_ref ? '<div class="blop">' + esc(r.op_ref) + '</div>' : '') +
+        '</div>' +
       '</div>' +
     '</div>';
+  }
+  // Swipe on a "Your asks" card (op 2026-08-02). Pointer Events so it works for
+  // both touch (phone) and mouse (desktop test). Past the threshold: swipe-left
+  // drops the ask (status='dropped', leaves the plate + Nazim's memory), swipe-
+  // right prioritises it to the absolute top — "that ordered set is the backlog
+  // you should work on".
+  var SWIPE_THRESHOLD = 82;
+  function swipeAction(id, action, card, row) {
+    row.classList.remove("armdrop", "armtop");
+    if (action === "drop") { card.style.transform = "translateX(-120%)"; row.classList.add("dropping"); }
+    else { card.style.transform = ""; }
+    fetch("/api/backlog", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ id: id, action: action })
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j || {} }; }); })
+      .then(function (res) {
+        if (res.ok && res.j.ok) { load(); }               // re-render: reordered / removed
+        else { card.style.transform = ""; row.classList.remove("dropping"); }
+      })
+      .catch(function () { card.style.transform = ""; row.classList.remove("dropping"); });
+  }
+  function bindBacklogSwipe() {
+    document.querySelectorAll("#blList .bl[data-id]").forEach(function (card) {
+      if (card._swipeBound) return; card._swipeBound = true;
+      var row = card.parentNode, startX = 0, dx = 0, dragging = false;
+      card.addEventListener("pointerdown", function (e) {
+        dragging = true; startX = e.clientX; dx = 0;
+        card.style.transition = "none";
+        try { card.setPointerCapture(e.pointerId); } catch (err) {}
+      });
+      card.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        dx = e.clientX - startX;
+        card.style.transform = "translateX(" + dx + "px)";
+        row.classList.toggle("armdrop", dx <= -SWIPE_THRESHOLD);
+        row.classList.toggle("armtop", dx >= SWIPE_THRESHOLD);
+      });
+      function end() {
+        if (!dragging) return; dragging = false;
+        card.style.transition = "";
+        var id = parseInt(card.getAttribute("data-id"), 10);
+        if (dx <= -SWIPE_THRESHOLD) swipeAction(id, "drop", card, row);
+        else if (dx >= SWIPE_THRESHOLD) swipeAction(id, "prioritise", card, row);
+        else { card.style.transform = ""; row.classList.remove("armdrop", "armtop"); }
+      }
+      card.addEventListener("pointerup", end);
+      card.addEventListener("pointercancel", end);
+    });
   }
   // Collapsible (op#9102), default EXPANDED — it's the operator's primary plate,
   // so visible by default but he can collapse it. backlogExpanded is a MODULE var
@@ -465,17 +769,15 @@
       $("backlogCount").textContent = "";
       return;
     }
-    var byStatus = {};
-    rows.forEach(function (r) { (byStatus[r.status] = byStatus[r.status] || []).push(r); });
-    var needs = (byStatus.needs_you || []).length;
+    var needs = rows.filter(function (r) { return r.status === "needs_you"; }).length;
     $("backlogCount").textContent = needs ? (needs + " need you") : "";
-    var html = "";
-    BL_ORDER.forEach(function (st) {
-      var items = byStatus[st];
-      if (items && items.length) html += items.map(backlogItem).join("");
-    });
+    // Flat list in the BACKEND's order (sort_order primary), so the operator's
+    // swipe-to-top ordering IS the rendered worklist — no re-grouping by status
+    // (status is a per-card chip now). op 2026-08-02.
+    var html = rows.map(backlogItem).join("");
     var head = '<div class="collapsed" id="blToggle">' + (backlogExpanded ? "▾" : "▸") +
-      ' <b>' + rows.length + ' open</b>' + (needs ? ' — ' + needs + ' need you' : '') + '</div>';
+      ' <b>' + rows.length + ' open</b>' + (needs ? ' — ' + needs + ' need you' : '') +
+      ' <span class="blhint">swipe → top · ← drop</span></div>';
     el.innerHTML = head +
       '<div id="blList" style="display:' + (backlogExpanded ? "block" : "none") + '">' + html + '</div>';
     var t = $("blToggle");
@@ -484,6 +786,7 @@
       $("blList").style.display = backlogExpanded ? "block" : "none";
       t.firstChild.textContent = (backlogExpanded ? "▾" : "▸") + " ";
     });
+    bindBacklogSwipe();
   }
 
   // ---- context bloat (worker lanes; coordinators live in their own section) --
@@ -499,6 +802,7 @@
       '<div class="ctxtop">' +
         '<span class="ctxid">' + esc(r.agent) + '</span>' +
         tokenBadge(r.auth_fp) +
+        hostBadge(r.host) +
         '<span class="ctxpct ' + esc(r.level) + '">' + pct + '%</span>' +
       '</div>' +
       '<div class="bar"><div class="fill ' + esc(r.level) + '" style="width:' + pct + '%"></div></div>' +
@@ -692,11 +996,13 @@
     var lanes = dedupeLanes(d.lanes || []);   // one card per tmux session (no peek DOM collision)
     buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
     renderPulse(d.pulse || {});
+    renderPoolUsage(d.pool_usage || []);   // weekly Max-pool % up top (op#9770)
     renderNeeds(d.needs_you || []);
     renderBacklog(d.backlog || []);
     renderCoordinators(d.coordinators || []);
     renderContextBloat(d.context_bloat || []);
     renderLanes(lanes);
+    renderQueue(d.queue || []);            // per-lane worklists (the drain view)
     renderDeploys(d.deploys || []);
 
     reflectOpenPeek(peekScroll);      // re-open peek + restore its inner scroll

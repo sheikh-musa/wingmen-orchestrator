@@ -21,7 +21,14 @@
 // iPhone kept serving the removed breakglass input after 80bf1a6). v2 also
 // makes app.js network-first (below) so future JS changes propagate without a
 // manual bump — the bump is now only a belt-and-suspenders cache reset.
-const VERSION = "fc-v17";
+//
+// RATE-LIMIT (op#10291 — the Aug-3 incident): BATCH a day's console changes into
+// ONE version bump. Each bump triggers the client's hard-reset (confirm-then-
+// clear); shipping many bumps in a day (v22->v27 in one day stranded the operator)
+// re-churns his PWA cache repeatedly over the marginal AD<->SG relay. So: bump
+// this + fleet.js APP_BUILD ONCE per deploy-day, not per-change. `scripts/
+// check_console_version_cadence.py` warns if you're about to re-bump same-day.
+const VERSION = "fc-v29";
 
 // Network-first with a HARD deadline. The failure this fixes (2026-07-11): the
 // navigation/shell fetch was network-first but had NO timeout, so a slow-but-

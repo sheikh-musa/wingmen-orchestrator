@@ -75,6 +75,79 @@ _RESET_INFLIGHT: set[str] = set()
 _RESET_LAST_RUN: dict[str, float] = {}
 _RESET_COOLDOWN_S = 60.0
 
+# --- Lane OAuth-account switch (token-pool conservation) ----------------------
+# Re-token a lane onto a DIFFERENT terms-clean Claude Max account (Musa/Syed) by
+# killing + relaunching it via scripts/switch_lane_token.sh (kill + relaunch is
+# the ONLY way — a lane's account is fixed at process launch). Same auth gate as
+# /api/reset (this is a mutating POST, IP-allowlist + breakglass), same
+# shell-out-to-a-vetted-script pattern (the console DB session is read-only), and
+# an ALLOWLIST that maps a token NAME -> its 0600 key file.
+#
+# GOVERNANCE (cai ruling CAI-729): the gazzabyte consumer Max token is FORBIDDEN
+# for lane use. It is excluded here at TWO layers (defense in depth): it is not a
+# key in LANE_TOKEN_FILES, and switch_lane_token.sh independently refuses the
+# gazzabyte-oauth-token basename. Never add it to this map.
+#
+# HOSTED CONSOLE: this endpoint is Mini-console / strongly-authed ONLY. The public
+# read-only hosted console (nervous_system/console/hosted_server.py) MUST refuse
+# /api/switch-token (it 403s it alongside /api/reset + /api/backlog) so it can
+# never drive a lane restart.
+_KEYS_DIR = pathlib.Path(os.path.expanduser("~/.wingmen/keys"))
+_MUSA_TOKEN_FILE = _KEYS_DIR / "musa-oauth-token"
+LANE_TOKEN_FILES: dict[str, pathlib.Path] = {
+    # Terms-clean accounts only. gazzabyte deliberately ABSENT (CAI-729).
+    "musa": _MUSA_TOKEN_FILE,
+    "syed": _KEYS_DIR / "syed-oauth-token",
+}
+_FORBIDDEN_TOKEN_BASENAMES = {"gazzabyte-oauth-token"}
+_LANE_SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+# Switch idempotency guard — one re-token per lane at a time (a double-click must
+# never fire two kills). Shares the reset lock; separate in-flight set + cooldown.
+_SWITCH_INFLIGHT: set[str] = set()
+_SWITCH_LAST_RUN: dict[str, float] = {}
+_SWITCH_COOLDOWN_S = 30.0
+
+
+def _resolve_lane_token_file(token_name: str) -> pathlib.Path | None:
+    """Map an allowlisted token NAME -> a readable 0600 key file, or None.
+
+    - Unknown/forbidden name -> None (fail closed; gazzabyte is not a key here).
+    - "musa": the token lives in orchestrator .env (CLAUDE_CODE_OAUTH_TOKEN), not
+      a file yet, so materialize a 0600 key file from the process env on first
+      use (dotenv loaded it at startup). Every other account already has a file.
+    - Refuse a resolved path whose basename is on the forbidden list (belt +
+      suspenders — the shell script checks this too).
+    """
+    path = LANE_TOKEN_FILES.get(token_name)
+    if path is None:
+        return None
+    if path.name in _FORBIDDEN_TOKEN_BASENAMES:
+        return None
+    if token_name == "musa" and not path.exists():
+        tok = (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
+        if not tok:
+            logger.warning("switch-token: cannot materialize musa key file — "
+                           "CLAUDE_CODE_OAUTH_TOKEN absent from console env")
+            return None
+        try:
+            _KEYS_DIR.mkdir(parents=True, exist_ok=True)
+            # 0600 BEFORE writing the secret (open with restrictive mode).
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(tok + "\n")
+            os.chmod(path, 0o600)
+            logger.info("switch-token: materialized musa key file (0600) at %s", path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("switch-token: failed to materialize musa key file: %s", e)
+            return None
+    try:
+        if not os.access(path, os.R_OK):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return path
+
 
 def _build_version() -> str:
     """The build identity shown in the version badge + reported by /api/version.
@@ -281,7 +354,12 @@ def _lane_bucket(l):
 # peeked via a DB read of their bus activity, NOT ssh — keeps the console's
 # surface local read-only (operator #3729). Maps peek session -> coordinator
 # from_agent. A session name only ever LOOKS UP here; unknown names fall through.
-_COORD_DB_PEEK = {"nazim": "orch-console"}
+# The hub ('orch' session) runs on the VPS, so like Nazim it's peeked via the DB:
+# a fresh published pane if the VPS-side coordinator_pane_publisher is up, else a
+# fall-back bus-activity feed (fetch_coordinator_peek handles the switch). Added
+# op 2026-08-02 — "make sure orch's context is displayed. i cant reset what i
+# cant see."
+_COORD_DB_PEEK = {"nazim": "orch-console", "orch": "cc-orchestrator"}
 
 
 # Soft budget for the whole /api/fleet aggregate. Over this we log a warning so
@@ -299,11 +377,27 @@ _CTX_WINDOW = int(os.environ.get("CONSOLE_CTX_WINDOW", "1000000"))
 _CTX_SOFT = 0.60
 _CTX_HARD = 0.80
 
+# Stale-reading drop (op#9770 "never show stale info"): a context-bloat row whose
+# freshest reading is older than this is a DEAD identity's frozen number (e.g. the
+# 'cc-ihsanos hb 10d ago' phantom), not a live window-fill signal — drop it from
+# the list. Generous by design: an always-on body writes session costs continually,
+# so hours-of-silence still shows; only genuinely-gone identities (default >48h)
+# are dropped. Tunable without a redeploy via CONSOLE_CTX_STALE_DROP_S.
+_CTX_STALE_DROP_S = int(os.environ.get("CONSOLE_CTX_STALE_DROP_S", str(48 * 3600)))
+
+# Dead-lane drop (op#9770): after live-pane enrichment, a lane with NO live pane
+# (offline) whose heartbeat is older than this AND that nobody expects up (not
+# flagged) is a dead instance, not an idle one — drop it so it never renders.
+# A working/idle lane (live pane) is ALWAYS kept regardless of heartbeat age, and
+# a flagged lane (desired_state=up but dark) is ALWAYS kept (the operator needs to
+# see it). Tunable via CONSOLE_LANE_STALE_DROP_S.
+_LANE_STALE_DROP_S = int(os.environ.get("CONSOLE_LANE_STALE_DROP_S", str(6 * 3600)))
+
 # The three coordinator brains (op#9088). Their context now lives ON their own
 # cards in the Coordinators section, so they are FILTERED OUT of the context-bloat
 # list (which is worker lanes only). Instances (e.g. 'orch-console-2') are caught
 # by the prefix check too, so a re-registered twin can't leak back into the list.
-_COORD_IDENTITIES = ("cai", "cc-orchestrator", "orch-console")
+_COORD_IDENTITIES = ("cai", "cc-orchestrator", "orch-console", "cc-fleet-health")
 
 
 def _is_coord_identity(name) -> bool:
@@ -345,6 +439,9 @@ def _context_bloat(rows):
     for r in rows or []:
         if _is_coord_identity(r.get("cc_identity")):
             continue  # coordinators live in the Coordinators section
+        age = r.get("age_s")
+        if age is not None and age > _CTX_STALE_DROP_S:
+            continue  # dead identity's frozen reading (op#9770) — never show stale
         lvl = _ctx_level(r.get("ctx_tokens"))
         if lvl is None:
             continue  # bad data — cannot be a real current-context reading
@@ -357,6 +454,7 @@ def _context_bloat(rows):
             "level": level,
             "age_s": r.get("age_s"),
             "auth_fp": r.get("auth_fp"),
+            "host": r.get("host"),
         })
     out.sort(key=lambda x: x["pct"], reverse=True)
     return out
@@ -376,7 +474,7 @@ def _fleet_payload():
     # coordinator peekable-check share it (a subprocess each would otherwise
     # cost ~2x). The 4 reads are independent -> fire concurrently.
     live = set(panes.live_sessions())
-    with ThreadPoolExecutor(max_workers=7) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         f_lanes = ex.submit(db.fetch_lanes)
         f_deploys = ex.submit(db.fetch_deploys)
         f_needs = ex.submit(db.fetch_needs_you)
@@ -384,9 +482,17 @@ def _fleet_payload():
         # operator-visibility signals, fired concurrently:
         f_backlog = ex.submit(db.fetch_backlog)          # operator's "Your asks" tracker
         f_bloat = ex.submit(db.fetch_context_bloat)      # per-agent context %
+        f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
+        f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         deploys = f_deploys.result()
-        needs = f_needs.result()
+        # Operator-audience needs ONLY. The 'fleet' audience fed a "Fleet is
+        # handling" section (hub-owned items the operator can't action) AND was
+        # inflating the "N things need you" pulse while "Needs you" showed
+        # nothing — operator 2026-08-02: "this section seems irrelevant". Dropping
+        # them here hides the section (frontend auto-hides an empty fleet group)
+        # and makes the pulse count match reality. Reversible: delete this filter.
+        needs = [n for n in f_needs.result() if n.get("audience") == "operator"]
         coordinators = f_coord.result()
         # each guarded: a signal failing must not blank the whole aggregate.
         try:
@@ -399,6 +505,27 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("context_bloat failed: %s", e)
             context_bloat = []
+        try:
+            pool_usage = f_pool.result()
+        except Exception as e:
+            logger.warning("pool_usage failed: %s", e)
+            pool_usage = []
+        try:
+            queue = f_queue.result()
+        except Exception as e:
+            logger.warning("queue failed: %s", e)
+            queue = []
+    # Mobile payload trim (op#10291): the queue `detail` field was ~11KB of the
+    # ~18KB queue section (63%) — the bulk of the /api/fleet payload that the
+    # marginal Abu-Dhabi<->Singapore relay drops. It's only needed ON TAP, which
+    # the dedicated /api/queue endpoint serves in full — so truncate it to a short
+    # preview HERE (the overview) only. Cuts the payload ~9KB with no UI loss (the
+    # inline preview still shows; the full text loads from /api/queue when tapped).
+    _qd = int(os.environ.get("CONSOLE_QUEUE_DETAIL_PREVIEW", "80"))
+    for _t in queue:
+        d = _t.get("detail")
+        if isinstance(d, str) and len(d) > _qd:
+            _t["detail"] = d[:_qd].rstrip() + "…"
 
     # A coordinator card is peekable when its pane is a LOCAL live tmux session
     # (orch on this Studio host) OR it's a cross-host coordinator we surface via a
@@ -412,9 +539,25 @@ def _fleet_payload():
         lvl = _ctx_level(c.get("ctx_tokens"))
         c["ctx_pct"], c["ctx_level"] = (lvl if lvl is not None else (None, None))
 
-    counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
+    # Dead-lane drop (op#9770): now that the live pane has classified each row,
+    # drop a lane that is offline (no live pane) AND heartbeat-stale AND not
+    # flagged (nobody expects it up) — a dead instance, never an idle one. Done
+    # HERE (post-enrichment), not in SQL, so a working lane with a stalled
+    # heartbeat writer is kept (the live pane, not the heartbeat, is the truth).
+    kept = []
     for l in lanes:
         state, flagged = _lane_bucket(l)
+        hb = l.get("heartbeat_age_s")
+        if (state == "offline" and not flagged
+                and hb is not None and hb > _LANE_STALE_DROP_S):
+            continue  # dead instance — never render (op#9770)
+        l["_state"], l["_flagged"] = state, flagged
+        kept.append(l)
+    lanes = kept
+
+    counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
+    for l in lanes:
+        state, flagged = l.pop("_state"), l.pop("_flagged")
         l["bucket"] = state
         l["flagged"] = flagged
         counts[state] = counts.get(state, 0) + 1
@@ -440,6 +583,8 @@ def _fleet_payload():
         "lanes": _jsonable(lanes),
         "deploys": _jsonable(deploys),
         "context_bloat": _jsonable(context_bloat),
+        "pool_usage": _jsonable(pool_usage),
+        "queue": _jsonable(queue),
     }
 
 
@@ -681,12 +826,20 @@ def _make_handler(feedloop: "_FeedLoop"):
             the Telegram clear-buttons already use."""
             parsed = urlparse(self.path)
             path = parsed.path
-            if path != "/api/reset":
+            if path not in ("/api/reset", "/api/backlog", "/api/switch-token"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
                 auth.audit(self._client(), path, "401")
                 return self._json(401, {"error": "unauthorized"})
+            # Operator swipe on a "Your asks" card (op 2026-08-02): drop (left) /
+            # prioritise (right). Mutates operator_backlog via the vetted
+            # scripts/backlog_swipe.py — the console DB session is read-only, same
+            # reason /api/reset shells out rather than writing inline.
+            if path == "/api/backlog":
+                return self._handle_backlog()
+            if path == "/api/switch-token":
+                return self._handle_switch_token()
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -708,15 +861,24 @@ def _make_handler(feedloop: "_FeedLoop"):
             now = time.monotonic()
             with _RESET_GUARD_LOCK:
                 if body_id in _RESET_INFLIGHT:
+                    # Log the OUTCOME, not just the request (op#9262): a guard
+                    # rejection used to be invisible in console.log — only auth.audit
+                    # saw it — so when a reset "errored" on the operator's screen there
+                    # was no way to tell a guard-reject from a crash. Now every branch
+                    # logs, so the failure story is legible.
+                    logger.warning("console reset REJECTED (already in progress): %s", body_id)
                     auth.audit(self._client(), f"{path}:{body_id}", "409")
                     return self._json(409, {"error": "reset already in progress",
                                             "body": body_id})
                 last = _RESET_LAST_RUN.get(body_id, 0.0)
                 if now - last < _RESET_COOLDOWN_S:
+                    retry_after = round(_RESET_COOLDOWN_S - (now - last))
+                    logger.warning("console reset REJECTED (cooldown, retry_after=%ss): %s",
+                                   retry_after, body_id)
                     auth.audit(self._client(), f"{path}:{body_id}", "429")
                     return self._json(429, {"error": "reset just ran — wait before retrying",
                                             "body": body_id,
-                                            "retry_after_s": round(_RESET_COOLDOWN_S - (now - last))})
+                                            "retry_after_s": retry_after})
                 _RESET_INFLIGHT.add(body_id)
             try:
                 r = subprocess.run(
@@ -726,6 +888,7 @@ def _make_handler(feedloop: "_FeedLoop"):
                 ok = r.returncode == 0
                 tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-6:])
             except subprocess.TimeoutExpired:
+                logger.warning("console reset TIMED OUT (180s): %s -> %s", body_id, script)
                 auth.audit(self._client(), f"{path}:{body_id}", "timeout")
                 return self._json(504, {"error": "reset timed out", "body": body_id})
             except Exception as e:                                   # noqa: BLE001
@@ -736,11 +899,135 @@ def _make_handler(feedloop: "_FeedLoop"):
                 with _RESET_GUARD_LOCK:
                     _RESET_INFLIGHT.discard(body_id)
                     _RESET_LAST_RUN[body_id] = time.monotonic()
+            logger.info("console reset OUTCOME: %s -> %s (rc=%s)",
+                        body_id, "ok" if ok else "script-failed", r.returncode)
             auth.audit(self._client(), f"{path}:{body_id}", "200" if ok else "500")
             return self._json(200 if ok else 500,
                               {"ok": ok, "body": body_id, "label": label, "tail": tail})
 
-        def _serve_static(self, name: str, path: str, cache_control: str = None) -> None:
+        def _handle_backlog(self):
+            """POST /api/backlog {id, action} — apply an operator swipe. action is
+            'drop' (swipe-left → status='dropped') or 'prioritise' (swipe-right →
+            float to the top). Shells out to scripts/backlog_swipe.py so the write
+            happens in the writable orchestrator env, never on the read-only
+            console session (same pattern as /api/reset)."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                payload = json.loads(raw or b"{}")
+                item_id = payload.get("id")
+                action = (payload.get("action") or "").strip().lower()
+            except Exception:                                        # noqa: BLE001
+                auth.audit(self._client(), "/api/backlog", "400")
+                return self._json(400, {"error": "bad request"})
+            # Validate BEFORE spawning: id must be an int, action allowlisted —
+            # an unknown value never reaches the subprocess.
+            if not isinstance(item_id, int) or action not in ("drop", "prioritise", "prioritize"):
+                auth.audit(self._client(), f"/api/backlog:{action}", "400")
+                return self._json(400, {"error": "bad id/action"})
+            auth.audit(self._client(), f"/api/backlog:{action}:{item_id}", "run")
+            try:
+                # venv python explicitly: launchd's minimal-PATH 'python3' lacks
+                # psycopg/dotenv (same reason the publishers pin an absolute tmux).
+                venv_py = _REPO_ROOT / ".venv" / "bin" / "python3"
+                interp = str(venv_py) if venv_py.is_file() else "python3"
+                r = subprocess.run(
+                    [interp, str(_REPO_ROOT / "scripts" / "backlog_swipe.py"),
+                     str(item_id), action],
+                    capture_output=True, text=True, timeout=30,
+                )
+                ok = r.returncode == 0
+            except Exception as e:                                   # noqa: BLE001
+                logger.warning("backlog swipe failed: %s", e)
+                auth.audit(self._client(), f"/api/backlog:{action}:{item_id}", "500")
+                return self._json(500, {"error": "swipe failed"})
+            auth.audit(self._client(), f"/api/backlog:{action}:{item_id}", "200" if ok else "500")
+            return self._json(200 if ok else 500,
+                              {"ok": ok, "id": item_id, "action": action,
+                               "error": None if ok else (r.stderr or "").strip()[-160:]})
+
+        def _handle_switch_token(self):
+            """POST /api/switch-token {lane, token_name} — re-token a lane onto a
+            different terms-clean Claude Max account. Kills + relaunches the lane's
+            tmux session on the new account via scripts/switch_lane_token.sh (the
+            only way to change a lane's account — it is fixed at process launch).
+
+            Same auth as /api/reset (checked in do_POST before dispatch). The
+            token_name is mapped to a key file via the LANE_TOKEN_FILES allowlist,
+            which EXCLUDES the forbidden gazzabyte consumer token (CAI-729); the
+            script re-checks the basename independently. lane is validated against a
+            strict charset (it is passed as argv, never a shell string, so this is
+            defense in depth, not the only barrier)."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                payload = json.loads(raw or b"{}")
+                lane = (payload.get("lane") or "").strip()
+                token_name = (payload.get("token_name") or "").strip().lower()
+            except Exception:                                        # noqa: BLE001
+                auth.audit(self._client(), "/api/switch-token", "400")
+                return self._json(400, {"error": "bad request"})
+            # Validate BEFORE resolving/spawning: strict session charset + an
+            # allowlisted token name whose key file resolves + is readable.
+            if not _LANE_SESSION_RE.match(lane):
+                auth.audit(self._client(), f"/api/switch-token:{token_name}", "400")
+                return self._json(400, {"error": "bad lane"})
+            if token_name not in LANE_TOKEN_FILES:
+                auth.audit(self._client(), f"/api/switch-token:{token_name}", "400")
+                return self._json(400, {"error": "unknown token",
+                                        "allowed": sorted(LANE_TOKEN_FILES)})
+            tokfile = _resolve_lane_token_file(token_name)
+            if tokfile is None:
+                auth.audit(self._client(), f"/api/switch-token:{token_name}", "400")
+                return self._json(400, {"error": "token key file not available",
+                                        "token_name": token_name})
+            key = f"{lane}:{token_name}"
+            auth.audit(self._client(), f"/api/switch-token:{key}", "run")
+            logger.info("console switch-token requested: lane=%s -> %s", lane, token_name)
+            # Idempotency claim (parity with /api/reset): reject a concurrent or
+            # too-soon repeat switch of the SAME lane so a double-click can't fire
+            # two kills.
+            now = time.monotonic()
+            with _RESET_GUARD_LOCK:
+                if lane in _SWITCH_INFLIGHT:
+                    logger.warning("console switch-token REJECTED (in progress): %s", lane)
+                    auth.audit(self._client(), f"/api/switch-token:{key}", "409")
+                    return self._json(409, {"error": "switch already in progress", "lane": lane})
+                last = _SWITCH_LAST_RUN.get(lane, 0.0)
+                if now - last < _SWITCH_COOLDOWN_S:
+                    retry_after = round(_SWITCH_COOLDOWN_S - (now - last))
+                    logger.warning("console switch-token REJECTED (cooldown %ss): %s", retry_after, lane)
+                    auth.audit(self._client(), f"/api/switch-token:{key}", "429")
+                    return self._json(429, {"error": "switch just ran — wait before retrying",
+                                            "lane": lane, "retry_after_s": retry_after})
+                _SWITCH_INFLIGHT.add(lane)
+            try:
+                r = subprocess.run(
+                    ["bash", str(_REPO_ROOT / "scripts" / "switch_lane_token.sh"),
+                     lane, str(tokfile)],
+                    capture_output=True, text=True, timeout=150,
+                )
+                ok = r.returncode == 0
+                tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-8:])
+            except subprocess.TimeoutExpired:
+                logger.warning("console switch-token TIMED OUT (150s): %s", lane)
+                auth.audit(self._client(), f"/api/switch-token:{key}", "timeout")
+                return self._json(504, {"error": "switch timed out", "lane": lane})
+            except Exception as e:                                   # noqa: BLE001
+                logger.warning("console switch-token failed: %s", e)
+                auth.audit(self._client(), f"/api/switch-token:{key}", "500")
+                return self._json(500, {"error": "switch failed", "lane": lane})
+            finally:
+                with _RESET_GUARD_LOCK:
+                    _SWITCH_INFLIGHT.discard(lane)
+                    _SWITCH_LAST_RUN[lane] = time.monotonic()
+            logger.info("console switch-token OUTCOME: lane=%s -> %s (rc=%s)",
+                        lane, token_name, r.returncode)
+            auth.audit(self._client(), f"/api/switch-token:{key}", "200" if ok else "500")
+            return self._json(200 if ok else 500,
+                              {"ok": ok, "lane": lane, "token_name": token_name, "tail": tail})
+
+        def _serve_static(self, name: str, path: str, cache_control: str = "no-cache") -> None:
             # Prevent path traversal. is_relative_to (not a string-prefix
             # check) so a sibling like static-x/ can't false-accept just
             # because "static-x" starts with "static" (cc-reviewer-4 advisory
