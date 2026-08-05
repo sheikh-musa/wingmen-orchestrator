@@ -369,6 +369,35 @@
       (p.offline ? '<span class="chip"><span class="d bad"></span><b>' + p.offline + '</b> offline</span>' : '');
   }
 
+  // Glance banner (operator ask): the single most context-bloated WORKER lane,
+  // rendered at the top of the pulse so the worst offender is visible without
+  // scanning cards. context_bloat is already the per-lane list (coordinators
+  // excluded — they own their cards) sorted fullest-first, but we take the MAX
+  // defensively rather than trust [0]. Label = the instance's sub_tag (== its
+  // tmux_session) or the base id for a solo lane — the same name its card shows.
+  // Hidden when there's no reading. Display-only; no new data.
+  function renderTopBloat(rows) {
+    var el = $("topBloat");
+    if (!el) return;
+    var top = null;
+    (rows || []).forEach(function (r) {
+      if (!r || r.pct == null) return;
+      if (!top || r.pct > top.pct) top = r;
+    });
+    if (!top) { el.className = "topbloat"; el.removeAttribute("title"); el.innerHTML = ""; return; }
+    var who = top.sub_tag || top.agent || "?";
+    var lvl = top.level || "green";
+    el.className = "topbloat show " + esc(lvl);
+    el.setAttribute("title", "Most context-bloated lane — " +
+      fmtTok(top.ctx_tokens) + " / " + fmtTok(top.window || 1000000) +
+      (top.age_s != null ? " · " + fmtAge(top.age_s) + " ago" : ""));
+    el.innerHTML =
+      '<span class="dot"></span>' +
+      '<span class="lbl">Top bloat</span> ' +
+      '<span class="who">' + esc(who) + '</span> ' +
+      '<span class="pct">' + top.pct + '% ctx</span>';
+  }
+
   // who -> peek session, so a NEEDS-YOU item can jump to its lane. Keyed by
   // every identifier a needs `who` might carry (instance id, base id, lane
   // label, tmux session) since kinds differ: blocked_lane.who is an agent_id,
@@ -1017,6 +1046,7 @@
     buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
     buildLaneCtxIndex(d.context_bloat || []);   // before renderLanes, so each card can fold in its /1M gauge
     renderPulse(d.pulse || {});
+    renderTopBloat(d.context_bloat || []);  // glance: worst-offender ctx lane up top (operator ask)
     renderPoolUsage(d.pool_usage || []);   // weekly Max-pool % up top (op#9770)
     renderNeeds(d.needs_you || []);
     renderBacklog(d.backlog || []);
