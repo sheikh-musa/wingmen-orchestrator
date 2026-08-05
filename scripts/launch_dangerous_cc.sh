@@ -111,6 +111,25 @@ HEARTBEAT_PID=""
 # in .env, not the operator's shell).
 # shellcheck disable=SC1091
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# Fleet lane-default OAuth account (token conservation, op#7985/7987): spread
+# every LANE boot off the operator's personal Max onto a donor account (e.g.
+# Syed) so his weekly pool is reserved for the console. Precedence — highest
+# wins:
+#   1. explicit CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE (launch_lane_as.sh <file>)
+#   2. $ORCH_DIR/.lane_default_token  — a POINTER file holding the PATH to a
+#      0600 token file (never the token itself, so no secret enters the repo)
+#   3. .env CLAUDE_CODE_OAUTH_TOKEN   — the fallback account
+# ONLY launch_dangerous_cc.sh (lanes) reads this. The console (boot_nazim.sh) is
+# a separate launcher that never sources it, so the console STAYS on the .env
+# account by design — exactly the operator's "reserve my 10% for the console".
+# Fail-open: an unreadable/stale pointer path is skipped silently → .env account.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ] && [ -r "$ORCH_DIR/.lane_default_token" ]; then
+    _LANE_DEFAULT_TOKFILE="$(tr -d '[:space:]' < "$ORCH_DIR/.lane_default_token")"
+    if [ -n "$_LANE_DEFAULT_TOKFILE" ] && [ -r "$_LANE_DEFAULT_TOKFILE" ]; then
+        export CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE="$(cat "$_LANE_DEFAULT_TOKFILE")"
+        echo -e "\033[2m  lane-default OAuth account applied (pointer: .lane_default_token → ${_LANE_DEFAULT_TOKFILE})\033[0m" >&2
+    fi
+fi
 # Per-lane OAuth token override (e.g. a donor/loaner account during a cap crunch).
 # Applied AFTER the .env source so it wins; distinct var name so `set -a; . .env`
 # cannot clobber it. Unset for normal lanes → no effect on billing.

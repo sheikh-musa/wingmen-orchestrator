@@ -63,18 +63,56 @@ _LANE_DIR_TO_CC = {
 }
 
 
-def resolve_cc_identity(dir_name: str) -> Optional[str]:
+def resolve_cc_identity(dir_name: str, extra: "Optional[dict]" = None) -> Optional[str]:
     """cc_identity for a ~/.claude/projects dir name, or None if unmapped.
 
     Order: the ratified _DIR_TO_CC families first (so nothing here can shadow
-    a canonical identity), then the lane map. Both are tried on the raw name
-    and on the host-normalised form.
+    a canonical identity), then the static lane map, then any DYNAMIC lane map
+    (`extra`, from fleet_lanes — see lane_dir_map_from_fleet_lanes). Dynamic comes
+    LAST so a verified static entry always wins; the dynamic map only FILLS GAPS.
+    All tables are tried on the raw name and on the host-normalised form.
     """
-    for table in (_DIR_TO_CC, _LANE_DIR_TO_CC):
+    tables = [_DIR_TO_CC, _LANE_DIR_TO_CC]
+    if extra:
+        tables.append(extra)
+    for table in tables:
         hit = table.get(dir_name) or table.get(_canonical_dir(dir_name))
         if hit:
             return hit
     return None
+
+
+def lane_dir_map_from_fleet_lanes(dsn: str) -> dict:
+    """Build a {claude-projects-dir -> cc_identity} map DYNAMICALLY from
+    fleet_lanes.worktree_path, so a newly-registered worker lane is MEASURED
+    without a hand-edit to the static _LANE_DIR_TO_CC (which drifts — the same
+    stale-registry coverage gap that hid 8 worker lanes from the context gauge,
+    op#15406). A claude ~/.claude/projects dir name is the worktree path with
+    '/' -> '-'.
+
+    SAME CONTAINMENT as _LANE_DIR_TO_CC (deliberate): this map is consumed ONLY by
+    this cost/context writer's resolution (passed as `extra` to resolve_cc_identity)
+    — it NEVER widens _DIR_TO_CC, so it can't enrol a lane into the
+    autonomous_loop_detector / watchdog KILL paths. Singletons are excluded (they
+    resolve canonically via _DIR_TO_CC). Fail-safe: any DB error returns {} (no
+    dynamic coverage) rather than crashing the writer."""
+    import psycopg
+    out: dict = {}
+    try:
+        with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT ON (base_agent_id) base_agent_id, worktree_path "
+                "FROM fleet_lanes WHERE worktree_path IS NOT NULL "
+                "  AND base_agent_id NOT IN "
+                "    ('cc-orchestrator','cai','orch-console','cc-fleet-health') "
+                "ORDER BY base_agent_id, lane")
+            for base, wt in cur.fetchall():
+                d = wt.replace("/", "-")
+                out[d] = base
+                out[_canonical_dir(d)] = base
+    except Exception:
+        return {}
+    return out
 
 
 @dataclass(frozen=True)
@@ -142,6 +180,7 @@ def sweep_projects_root(
     projects_root: Path,
     modified_since: float,
     body_role: Optional[str] = None,
+    extra_dir_map: Optional[dict] = None,
 ) -> list[dict[str, Any]]:
     """Walk projects_root/<mangled-repo>/*.jsonl, parse usage, return upsert rows.
 
@@ -160,7 +199,7 @@ def sweep_projects_root(
     except OSError:
         return rows
     for repo_dir in repo_dirs:
-        cc_identity = resolve_cc_identity(repo_dir.name)
+        cc_identity = resolve_cc_identity(repo_dir.name, extra=extra_dir_map)
         if not cc_identity:
             continue
         # Body-aware relabel: the orchestrator repo dir is SHARED by the hub

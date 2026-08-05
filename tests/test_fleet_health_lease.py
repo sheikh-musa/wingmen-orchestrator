@@ -170,3 +170,47 @@ def test_sre_governance_write_blocked():
 
 def test_sre_ops_write_allowed():
     fhb.assert_ops_only("agent_messages", identity=SRE)  # no raise
+
+
+# ── CAI-RESP-681: SRE lanes-only red-reset carve-out (added 2026-08-02) ────────
+ALL_TRUE = {"idle": True, "git_clean": True, "fresh_handoff": True}
+
+
+def test_sre_boundary_self_test_passes():
+    """The module's own exhaustive self-test (26 cases incl. all 5 CAI-681
+    conditions) must pass — CI guard so the safety gates can't silently regress."""
+    assert fhb.self_test() == 0
+
+
+@pytest.mark.parametrize("body", sorted(fhb.SINGLETON_BODIES))
+def test_sre_never_red_resets_a_singleton(body):
+    """cond 3 HARD: SRE red-reset of cai/hub/Nazim refused even armed + all gates true."""
+    with pytest.raises(fhb.BoundaryViolation):
+        fhb.assert_sre_never_targets_singleton(body, identity=SRE)
+    with pytest.raises(fhb.BoundaryViolation):
+        fhb.assert_sre_lane_red_permitted(body, ALL_TRUE, True, identity=SRE)
+
+
+def test_sre_lane_red_permitted_happy_path():
+    """Worker lane + armed + all three gates verified True -> permit (no raise)."""
+    fhb.assert_sre_lane_red_permitted("cc-cosem-video", ALL_TRUE, True, identity=SRE)
+
+
+def test_sre_lane_red_disarmed_refuses():
+    """cond 5: disarmed refuses even with all gates true."""
+    with pytest.raises(fhb.BoundaryViolation):
+        fhb.assert_sre_lane_red_permitted("cc-cosem-video", ALL_TRUE, False, identity=SRE)
+
+
+@pytest.mark.parametrize("bad", [
+    {"idle": False, "git_clean": True, "fresh_handoff": True},
+    {"idle": True, "git_clean": False, "fresh_handoff": True},
+    {"idle": True, "git_clean": True, "fresh_handoff": False},
+    {"idle": None, "git_clean": True, "fresh_handoff": True},
+    {"idle": True, "git_clean": True},              # missing key
+    None,                                            # not a dict
+])
+def test_sre_lane_red_gates_fail_closed(bad):
+    """cond 1/2: any gate not EXPLICITLY True (False/None/missing/non-dict) fails closed."""
+    with pytest.raises(fhb.BoundaryViolation):
+        fhb.assert_sre_lane_red_permitted("cc-cosem-video", bad, True, identity=SRE)

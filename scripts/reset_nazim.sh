@@ -8,7 +8,14 @@
 # what actually frees the context; the boot instruction reloads from the handoff.
 set -uo pipefail
 
-TM="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
+# Resolve tmux robustly. Under launchd (the fleet-console runs the reset) PATH is
+# /usr/bin:/bin:/usr/sbin:/sbin — NO /usr/local/bin — so `command -v tmux` finds
+# nothing and the old bare /opt/homebrew fallback (absent on this Mini) made
+# has-session fail -> the reset silently no-op'd with rc=1 (op#9393, 2026-08-02).
+# Mini singleton sessions live on the /usr/local/bin/tmux socket (see
+# reference_mini_tmux_two_binaries_socket); prefer it, mirror reset_lane.sh.
+TM="${TM:-/usr/local/bin/tmux}"
+[ -x "$TM" ] || TM="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 SESS="nazim"
 PANE="${SESS}:0.0"
 # Newest handoff wins — a hardcoded filename rots the moment a new one is written, and a

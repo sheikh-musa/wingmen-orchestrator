@@ -34,7 +34,8 @@ _ORCH_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(_ORCH_DIR / ".env")
 sys.path.insert(0, str(_ORCH_DIR))
 
-from nervous_system.cc_session_costs_auto_writer import sweep_projects_root, upsert_rows
+from nervous_system.cc_session_costs_auto_writer import (
+    sweep_projects_root, upsert_rows, lane_dir_map_from_fleet_lanes)
 
 _SOURCE = "auto_writer_v1"
 
@@ -53,8 +54,16 @@ def main() -> int:
     # repo dir with the hub — pass ORCH_BODY_ROLE so its sessions land as
     # `orch-console`, not commingled into the hub's `cc-orchestrator` gauge.
     body_role = os.environ.get("ORCH_BODY_ROLE")
-    rows = sweep_projects_root(root, modified_since=cutoff, body_role=body_role)
-    print(f"[cc-writer] {len(rows)} session rows from {root} (last {args.lookback_seconds}s)")
+    # DYNAMIC worker-lane coverage (op#15406 Gap-1): resolve every REGISTERED
+    # worker lane's ~/.claude/projects dir from fleet_lanes.worktree_path, so a
+    # newly-registered lane is measured without a hand-edit to the static map.
+    # Fail-safe: {} on any DB error (writer still runs with the static map).
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    extra_map = lane_dir_map_from_fleet_lanes(dsn) if dsn else {}
+    rows = sweep_projects_root(root, modified_since=cutoff, body_role=body_role,
+                               extra_dir_map=extra_map)
+    print(f"[cc-writer] {len(rows)} session rows from {root} "
+          f"(last {args.lookback_seconds}s; +{len(extra_map)//2} dynamic lane dirs)")
     if not rows:
         return 0
     if args.dry_run:

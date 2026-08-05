@@ -18,6 +18,19 @@ set -a
 source "$ORCH_DIR/.env"
 set +a
 
+# Reversible per-body OAuth override (token-move, e.g. onto Syed at a Musa
+# weekly-limit, op#9920). Pointer file .nazim_default_token holds the PATH to a
+# token file; if readable it overrides the .env CLAUDE_CODE_OAUTH_TOKEN. FAIL-SAFE:
+# an absent/unreadable pointer or token falls through to the .env token — never
+# offline. Revert = `rm .nazim_default_token`. Mirrors the hub's .orch_default_token.
+if [ -r "$ORCH_DIR/.nazim_default_token" ]; then
+    _NZTOKF="$(tr -d '[:space:]' < "$ORCH_DIR/.nazim_default_token" 2>/dev/null || true)"
+    if [ -n "${_NZTOKF:-}" ] && [ -r "$_NZTOKF" ]; then
+        export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_NZTOKF")"
+        echo "[boot_nazim] token override applied (.nazim_default_token -> $_NZTOKF)" >&2
+    fi
+fi
+
 # Max-subscription billing: scrub the metered API key (its mere presence flips
 # `claude` to API billing); keep CLAUDE_CODE_OAUTH_TOKEN (tmux/headless can't read
 # the GUI-login OAuth from the Keychain).

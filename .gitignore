@@ -29,3 +29,26 @@ scratch_state.json
 *storageState*.json
 *.session.json
 playwright/.auth/
+.lane_default_token
+.orch_default_token
+
+# operator-provided credentials (claude.ai session token etc.) — never track
+.secrets/
+
+# session accumulation cleanup (op#10450) — never track:
+.nazim_default_token
+firebase-debug.log
+*.log
+# client-data / PII artifacts — must NOT go to GitHub (residency/PII, TENANT-RESIDENCY-001)
+reports/*.png
+reports/*.jpg
+reports/*.jpeg
+reports/*.pdf
+reports/*.pptx
+reports/*.csv
+reports/cosem-offline-slice/
+reports/demo-qa-seed/
+reports/practical-parity/
+reports/*.md
+reports/*.diff
+reports/*.py

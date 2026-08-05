@@ -105,9 +105,22 @@ def build_lanes_query() -> Tuple[str, list]:
     are live at once (proven live 2026-07-04: 3 simultaneous reviewer
     sessions, one static label). tmux_session is per-instance and always
     correct; the console prefers it and only falls back to `lane` if a lane
-    hasn't self-registered."""
+    hasn't self-registered.
+
+    STALE-INSTANCE DEDUP (op#9770): a lane that restarts leaves its OLD
+    agent_status row behind (a new instance id, same tmux_session) — e.g.
+    cc-finance-1 'offline' hb 2h alongside the LIVE cc-finance-2 on the SAME
+    'finance' session. Both used to render, so a dead instance showed as a
+    phantom card. We DISTINCT ON the session identity, keeping the
+    FRESHEST-heartbeat row per session, so only the live instance survives. The
+    key is COALESCE(tmux_session, agent_id): a lane that never self-registered a
+    session dedups on its own unique id (NULL sessions must NOT collapse into one
+    row). A hard age-drop of a genuinely-dead sole instance is done in app.py
+    AFTER live-pane enrichment (a working lane with a stalled heartbeat writer
+    must NOT be dropped for a stale hb — the live pane is the truth)."""
     sql = (
-        "SELECT "
+        "SELECT * FROM ( "
+        "SELECT DISTINCT ON (COALESCE(s.tmux_session, s.agent_id)) "
         "  s.agent_id, "
         "  s.base_agent_id, "
         "  a.display_name, "
@@ -116,6 +129,7 @@ def build_lanes_query() -> Tuple[str, list]:
         "  s.tmux_session, "
         "  s.auth_account, "
         "  s.auth_fp, "
+        "  s.host, "
         "  round(extract(epoch FROM (now() - s.last_heartbeat)))::int "
         "    AS heartbeat_age_s, "
         "  l.desired_state, "
@@ -131,7 +145,25 @@ def build_lanes_query() -> Tuple[str, list]:
         "  WHERE m.from_agent = s.base_agent_id "
         "  ORDER BY m.id DESC LIMIT 1"
         ") act ON true "
-        "ORDER BY s.base_agent_id, s.agent_id"
+        # The three coordinators (cai, hub, Nazim) have their OWN cards in the
+        # Coordinators section; they self-register a tmux_session in agent_status
+        # too, so without this they ALSO render as worker-lane cards. That is not
+        # just clutter: a coordinator (e.g. cai) rendered as both a coord card AND
+        # a collapsed idle-lane card produces TWO .peek[data-peekbox="cai"] nodes,
+        # and currentPeekBox() grabs the LAST (the hidden lane one) — so tapping
+        # cai's coordinator card opened a peek on an invisible card and looked
+        # dead (operator 2026-08-02: "cant peek on cai"). Excluding them here is
+        # the single fix.
+        # cc-fleet-health joins the coordinator cards (op#9770), so exclude it here
+        # too — else it renders as BOTH a coord card and a lane card (the twin-peek
+        # bug the exclusion above prevents for cai/hub/Nazim).
+        "WHERE s.base_agent_id NOT IN "
+        "  ('cai', 'cc-orchestrator', 'orch-console', 'cc-fleet-health') "
+        # DISTINCT ON needs the dedup key first; freshest heartbeat wins the session.
+        "ORDER BY COALESCE(s.tmux_session, s.agent_id), s.last_heartbeat DESC NULLS LAST "
+        ") d "
+        # Restore the display order after dedup (working-first re-sort happens in app.py).
+        "ORDER BY d.base_agent_id, d.agent_id"
     )
     return sql, []
 
@@ -279,14 +311,17 @@ def fetch_needs_you() -> List[dict]:
 
 
 def build_coordinators_query() -> Tuple[str, list]:
-    """The three coordinator brains (orch hub + Nazim + cai) - not lanes, so
-    absent from fleet_lanes. Liveness = freshest of their latest bus row or
+    """The coordinator/always-on brains (orch hub + Nazim + cai + the SRE
+    cc-fleet-health, op#9770) - not lanes, so absent from fleet_lanes. The SRE is
+    added so its OWN context% + host badge render here (it used to show neither);
+    it is excluded from the lane + context-bloat sections to avoid a double card.
+    Liveness = freshest of their latest bus row or
     outbound operator message; activity = latest bus subject. tmux_session names
     the body's live pane so the console can peek it like a lane (operator #3672) —
-    'orch' is the hub session on THIS (Studio) host; 'nazim' is Nazim's console
-    session (on the MacBook, so only peekable when that pane is local — the
-    caller marks it peekable only if the session is in local list-sessions);
-    'cai' is the governance node.
+    'orch' is the hub session on the VPS; 'nazim' is Nazim's console session (on
+    the Mac Mini, tmux 'nazim' — confirmed by orch-console 2026-08-03 #15049;
+    peekable when that pane is in the local list-sessions); 'cai' is the
+    governance node (Mini).
 
     Each card also carries its OWN context + token attribution (operator op#9088):
       * `ctx_tokens`/`ctx_age_s` — the freshest current-context reading from
@@ -316,17 +351,34 @@ def build_coordinators_query() -> Tuple[str, list]:
         "  (SELECT a.auth_account FROM agent_status a "
         "     WHERE a.base_agent_id = c.agent_id AND a.auth_fp IS NOT NULL "
         "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS auth_account, "
+        # Physical host for the 📍 host badge (mirrors auth_fp): the freshest
+        # self-registered agent_status.host, falling back to the static hint in the
+        # VALUES table for a body with no agent_status row (the cross-host hub is on
+        # the VPS but never self-registers here -> host stays NULL without the hint).
+        "  COALESCE( "
+        "    (SELECT a.host FROM agent_status a "
+        "       WHERE a.base_agent_id = c.agent_id AND a.host IS NOT NULL "
+        "       ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1), "
+        "    c.host_hint) AS host, "
         "  LEAST( "
         "    (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM agent_messages m "
         "       WHERE m.from_agent = c.agent_id ORDER BY m.id DESC LIMIT 1), "
         "    (SELECT round(extract(epoch FROM (now()-created_at)))::int FROM operator_messages o "
         "       WHERE o.direction = 'outbound' AND o.tag = c.op_tag ORDER BY o.id DESC LIMIT 1) "
         "  ) AS last_seen_s "
+        # host_hint: static physical-host fallback for a body with no agent_status
+        # row. Only the cross-host hub (VPS) is asserted; the others self-register
+        # (or are legitimately host-less), so leave them NULL rather than guess.
+        # host_hint per body: the hub is on the VPS; cai, Nazim, and the SRE
+        # (cc-fleet-health) all run on the Mac Mini (op#9770 — Mini hint for the
+        # three Mini bodies, mirroring the hub's VPS hint). Still a FALLBACK only:
+        # a self-registered agent_status.host always wins over the hint.
         "FROM (VALUES "
-        "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel','orch'), "
-        "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console','nazim'), "
-        "  ('cai','cai','governance / strategic node','cai','cai') "
-        ") AS c(agent_id, short, role_label, op_tag, tmux_session) "
+        "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel','orch','VPS'), "
+        "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console','nazim','Mini'), "
+        "  ('cai','cai','governance / strategic node','cai','cai','Mini'), "
+        "  ('cc-fleet-health','SRE','fleet reliability / health','fleet-health','fleet-health','Mini') "
+        ") AS c(agent_id, short, role_label, op_tag, tmux_session, host_hint) "
         "ORDER BY c.agent_id"
     )
     return sql, []
@@ -532,6 +584,26 @@ def fetch_deploys() -> List[dict]:
     return _query(sql, params)
 
 
+def build_pool_usage_query() -> Tuple[str, list]:
+    """Latest Max weekly/5h usage per pool for the console header (op#9770).
+
+    The SRE's weekly_limit_monitor UPSERTs one row per pool (Musa, Syed) into
+    `pool_usage` each poll; the console reads it here and renders `pct_7d` up top.
+    `updated_age_s` is the reading's freshness — if the monitor stalls, the client
+    can grey the number out rather than show a frozen one (never show stale info)."""
+    sql = (
+        "SELECT pool, pct_7d, pct_5h, resets_at, status_7d, "
+        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s "
+        "FROM pool_usage ORDER BY pool"
+    )
+    return sql, []
+
+
+def fetch_pool_usage() -> List[dict]:
+    sql, params = build_pool_usage_query()
+    return _query(sql, params)
+
+
 def fetch_queue() -> List[dict]:
     sql, params = build_queue_query()
     return _query(sql, params)
@@ -547,14 +619,20 @@ def build_backlog_query() -> Tuple[str, list]:
     then in_progress, done, parked) so what wants the operator floats to the top,
     then by the curator's explicit `sort_order`, then id as a stable tiebreak."""
     sql = (
-        "SELECT id, ask, status, op_ref, note, sort_order, "
+        "SELECT id, ask, status, op_ref, note, sort_order, done_when, "
         "  round(extract(epoch FROM (now()-updated_at)))::int AS updated_age_s "
         "FROM operator_backlog "
-        "WHERE status <> 'done' "          # op#9102: done tasks dropped from the view (kept in-table for history)
-        "ORDER BY CASE status "
-        "    WHEN 'needs_you' THEN 0 WHEN 'in_progress' THEN 1 "
-        "    WHEN 'done' THEN 2 WHEN 'parked' THEN 3 ELSE 4 END, "
-        "  sort_order, id"
+        # done = history; dropped = operator swiped it away (op 2026-08-02). Both
+        # stay in-table but leave the live "Your asks" plate.
+        "WHERE status NOT IN ('done', 'dropped') "
+        # sort_order is the PRIMARY key so the operator's swipe-to-prioritise
+        # order IS his worklist (op 2026-08-02: "swipe right ... that is the
+        # backlog you should work on"). A swipe-right sets sort_order below the
+        # current min, floating that ask to the absolute top; status is only a
+        # tiebreak + a per-card chip now, no longer the section grouping.
+        "ORDER BY sort_order, "
+        "  CASE status WHEN 'needs_you' THEN 0 WHEN 'in_progress' THEN 1 "
+        "    WHEN 'parked' THEN 3 ELSE 4 END, id"
     )
     return sql, []
 
@@ -562,6 +640,14 @@ def build_backlog_query() -> Tuple[str, list]:
 def fetch_backlog() -> List[dict]:
     sql, params = build_backlog_query()
     return _query(sql, params)
+
+
+# NOTE on backlog WRITES (operator swipe): the console DB session is read-only by
+# construction (SELECT-only role + conn.read_only) — a fault here structurally
+# cannot write. So swipe-drop / swipe-prioritise do NOT write from here; the POST
+# handler shells out to scripts/backlog_swipe.py (writable orchestrator env),
+# exactly the vetted-script pattern /api/reset already uses. This module stays
+# read-only.
 
 
 def build_context_bloat_query() -> Tuple[str, list]:
@@ -589,7 +675,11 @@ def build_context_bloat_query() -> Tuple[str, list]:
         # (operator op#9088). cc_identity == agent_status.base_agent_id for lanes.
         "  (SELECT a.auth_fp FROM agent_status a "
         "     WHERE a.base_agent_id = cc_session_costs.cc_identity AND a.auth_fp IS NOT NULL "
-        "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS auth_fp "
+        "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS auth_fp, "
+        # Physical host for the 📍 host badge (mirrors auth_fp above).
+        "  (SELECT a.host FROM agent_status a "
+        "     WHERE a.base_agent_id = cc_session_costs.cc_identity AND a.host IS NOT NULL "
+        "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS host "
         "FROM cc_session_costs "
         "WHERE cc_identity NOT LIKE 'operator-%%' "
         "  AND latest_context_tokens IS NOT NULL "

@@ -50,6 +50,10 @@
          from merging, runner-fix in flight, confabulation investigation) — the hub
          owns it; auto-recovery must not reset a specially-managed lane. Remove adcda
          once the hub's adcda work settles. -->
+    <!-- shipforge was muted 2026-08-04 (bus-blind creds wedge) and UNMUTED same day
+         after orch-console cleanly recycled it via the launcher (#15252): fresh
+         cc-shipforge-1 self-registered with restored Syed creds -> bus-blind fixed,
+         so it's back under normal wedge monitoring. -->
     <key>LANE_WEDGE_EXCLUDE</key><string>nazim,cai,fleet-health,orch,orchestrator,infra,adcda</string>
     <!-- Thresholds / guards overridable here (defaults shown). Uncomment to change
          without editing code.

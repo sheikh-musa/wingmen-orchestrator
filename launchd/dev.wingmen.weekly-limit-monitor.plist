@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.weekly-limit-monitor</string>
+  <!-- op#9658: headless Max weekly-usage monitor. ALERT-ONLY — it probes each pool
+       (Musa + Syed) for the unified rate-limit headers, warns the operator on the
+       BUS at ~75% / ~90% of the WEEKLY limit, and takes NO fleet action, so it is
+       ungated (a safety signal is never silenced). Dead-man's-switch: a probe
+       failure or crash PAGES loudly, never silent. Tokens + DATABASE_URL come from
+       the orchestrator .env (loaded by the script), so no secrets live in this
+       plist. Probe cost = a 1-token call per pool per run. -->
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/nervous_system/weekly_limit_monitor.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <!-- Weekly usage moves slowly; 30 min is ample early warning and keeps probe
+       cost trivial (~48 tiny calls/pool/day). -->
+  <key>StartInterval</key><integer>1800</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/weekly-limit-monitor.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/weekly-limit-monitor.out.log</string>
+</dict>
+</plist>
