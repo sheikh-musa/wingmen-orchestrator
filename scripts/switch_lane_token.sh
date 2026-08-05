@@ -10,6 +10,14 @@
 # family from pwd), so relaunching in the same dir keeps the SAME agent
 # (e.g. cc-cosem-exams) — only the OAuth account (auth_fp) changes.
 #
+# CONVERSATION-PRESERVING (op#9742+): the relaunch RESUMES the lane's existing
+# conversation on the new account instead of starting fresh. Before the kill we
+# resolve the lane's ACTIVE claude session-id (the most-recently-modified
+# ~/.claude/projects/<escaped-worktree>/<uuid>.jsonl — the conversation is LOCAL
+# JSONL state, independent of the OAuth token) and relaunch with `-- --resume
+# <id>`, so the prior turns replay while new API calls bill to the new account.
+# If no session file is found we FALL BACK to the old FRESH relaunch (and say so).
+#
 # This is the re-token sibling of reset_lane.sh (which does an in-place /clear and
 # does NOT change the token — you cannot re-token without a fresh process).
 #
@@ -18,8 +26,9 @@
 #
 # Safety (mirrors reset_lane.sh):
 #   * Refuses a BUSY lane unless --force (or SWITCH_FORCE=1) — a re-token restarts
-#     the lane FRESH (context is lost), so we guard against clobbering in-flight
-#     work. --force warns loudly that in-flight work is discarded.
+#     the lane's PROCESS (in-flight work in the live turn is interrupted; the
+#     resumed conversation replays only what was already persisted to the JSONL),
+#     so we guard against clobbering in-flight work. --force warns loudly.
 #   * Fail-CLOSED on the FORBIDDEN gazzabyte consumer token (cai ruling CAI-729):
 #     ~/.wingmen/keys/gazzabyte-oauth-token is a CONSUMER Max token that is NEVER
 #     valid for lane use. Refused by basename here (defense in depth — the console
@@ -99,6 +108,35 @@ if [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
   exit 1
 fi
 
+# ── 2.5 Resolve the lane's ACTIVE claude session-id (for conversation resume) ─
+# Claude Code stores per-project sessions as JSONL under
+#   ~/.claude/projects/<escaped-worktree>/<session-id>.jsonl
+# where the dir name is the ABSOLUTE worktree path with every '/' replaced by '-'
+# (verified on this host — dots and existing dashes are preserved). The lane's
+# ACTIVE session is the most-recently-modified *.jsonl in that dir; its filename
+# stem IS the session-id (a UUID; it also matches the `sessionId` field inside).
+# The conversation is LOCAL state, so resuming under a DIFFERENT OAuth token
+# replays the prior turns while billing new calls to the new account.
+# Resolve this BEFORE the kill. Missing dir / no session files → RESUME_ID empty
+# → we fall back to a FRESH relaunch (logged clearly).
+RESUME_ID=""
+_proj_dir="$HOME/.claude/projects/$(printf '%s' "$WORKTREE" | sed 's#/#-#g')"
+if [ -d "$_proj_dir" ]; then
+  _latest_jsonl="$(ls -t "$_proj_dir"/*.jsonl 2>/dev/null | head -1)"
+  if [ -n "$_latest_jsonl" ] && [ -f "$_latest_jsonl" ]; then
+    _cand="$(basename "$_latest_jsonl" .jsonl)"
+    # Sanity-gate to a UUID so a stray non-session file can't poison --resume.
+    if printf '%s' "$_cand" | grep -Eiq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+      RESUME_ID="$_cand"
+    fi
+  fi
+fi
+if [ -n "$RESUME_ID" ]; then
+  echo "[switch_lane_token] active session resolved: $RESUME_ID (will RESUME on the new account)"
+else
+  echo "[switch_lane_token] no active claude session found under $_proj_dir — will relaunch FRESH"
+fi
+
 # ── 3. Capture BEFORE fingerprint from agent_status ──────────────────────────
 # Freshest auth_fp for this session (a relaunch leaves the old offline row behind
 # with the same tmux_session, so order by updated_at DESC to read the live one).
@@ -159,18 +197,31 @@ if [ "$CC_BUSY" = 1 ]; then
   fi
 fi
 
-echo "⚠ RE-TOKEN RESTARTS THE LANE FRESH: the conversation/context is RESET. Identity ($SESS in"
-echo "  $WORKTREE) is preserved; only the Claude account changes. Staged composer text is NOT preserved."
+if [ -n "$RESUME_ID" ]; then
+  echo "⚠ RE-TOKEN restarts the lane PROCESS but RESUMES the conversation ($RESUME_ID) on the new"
+  echo "  account. Identity ($SESS in $WORKTREE) and the prior turns are preserved; only the Claude"
+  echo "  account changes. The live in-flight turn (if any) is interrupted; staged composer text is NOT preserved."
+else
+  echo "⚠ RE-TOKEN RESTARTS THE LANE FRESH (no prior session found to resume): the conversation/context"
+  echo "  is RESET. Identity ($SESS in $WORKTREE) is preserved; only the Claude account changes."
+fi
 
 # ── 5. kill + relaunch on the new account ────────────────────────────────────
 echo "[switch_lane_token] killing '$SESS' ..."
 "$TM" kill-session -t "$SESS" 2>/dev/null || true
 # Brief settle so the socket releases the session name before we recreate it.
 sleep 1
-# Build the launch command; %q-quote so a path with spaces cannot break the shell
-# tmux runs the command under. Absolute paths (no PATH assumption under SSH/launchd).
-printf -v CMD '%q %q' "$LAUNCH_AS" "$TOKFILE"
-echo "[switch_lane_token] relaunching '$SESS' in $WORKTREE on the new account ..."
+# Build the launch command; %q-quote so a path (or session-id) with spaces cannot
+# break the shell tmux runs the command under. Absolute paths (no PATH assumption
+# under SSH/launchd). With a RESUME_ID we forward `-- --resume <id>` through
+# launch_lane_as.sh → launch_dangerous_cc.sh → claude, so the conversation resumes.
+if [ -n "$RESUME_ID" ]; then
+  printf -v CMD '%q %q -- --resume %q' "$LAUNCH_AS" "$TOKFILE" "$RESUME_ID"
+  echo "[switch_lane_token] relaunching '$SESS' in $WORKTREE on the new account, RESUMING $RESUME_ID ..."
+else
+  printf -v CMD '%q %q' "$LAUNCH_AS" "$TOKFILE"
+  echo "[switch_lane_token] relaunching '$SESS' in $WORKTREE on the new account (FRESH — no session to resume) ..."
+fi
 if ! "$TM" new-session -d -s "$SESS" -c "$WORKTREE" "$CMD"; then
   echo "ERROR: tmux new-session failed for '$SESS'. Lane is DOWN — relaunch manually:" >&2
   echo "       $TM new-session -d -s $SESS -c $WORKTREE \"$CMD\"" >&2
@@ -193,6 +244,11 @@ echo "  session:   $SESS"
 echo "  BEFORE fp: ${BEFORE_FP:-<none>}"
 echo "  AFTER  fp: ${AFTER_FP:-<not-yet-registered>}"
 echo "  target fp: $NEW_FP"
+if [ -n "$RESUME_ID" ]; then
+  echo "  mode:      RESUMED conversation ($RESUME_ID)"
+else
+  echo "  mode:      FRESH (no prior session found to resume)"
+fi
 if [ "$AFTER_FP" = "$NEW_FP" ]; then
   echo "  RESULT:    PASS — lane re-tokened onto the new account."
   echo "───────────────────────────────────────────────────────────"

@@ -101,7 +101,7 @@
     }).join("");
     return '<span class="switch-ctl" data-switch-session="' + esc(session) + '">' +
       '<select class="tok-sel" title="Choose the Claude account to run this lane on">' + opts + '</select>' +
-      '<button class="switch-btn" title="Re-token this lane onto the selected account. RESTARTS the lane fresh (context resets); identity is preserved. Refuses if the lane is busy.">⇄ switch</button>' +
+      '<button class="switch-btn" title="Re-token this lane onto the selected account. Restarts the lane process and RESUMES the conversation on the new account (falls back to fresh if no session is found); identity is preserved. Refuses if the lane is busy.">⇄ switch</button>' +
       '</span>';
   }
   function doSwitch(btn) {
@@ -112,8 +112,9 @@
     var tokenName = sel ? sel.value : "";
     if (!session || !tokenName) return;
     // Two-tap confirm (iOS PWA suppresses window.confirm — see doReset). First
-    // tap arms for 3s; a second tap actually switches. The backend re-tokens
-    // fresh (context resets) and refuses a busy lane, so this only guards a mis-tap.
+    // tap arms for 3s; a second tap actually switches. The backend re-tokens the
+    // lane and RESUMES its conversation on the new account (falls back to fresh if
+    // no session is found) and refuses a busy lane, so this only guards a mis-tap.
     if (!btn._armed) {
       btn._armed = true;
       btn.classList.add("arm");
@@ -238,7 +239,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = "fc-v28";
+  var APP_BUILD = 'fc-v30';
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -374,6 +375,13 @@
   // response.who is a from_agent (base id), blocked_task.who is a lane label.
   var laneIndex = {};
   var lastLanes = [];
+  // Per-lane context readings (the former "Context bloat" section), keyed by the
+  // family id so each lane card can fold in its own /1M window gauge. context_bloat
+  // rows carry `agent` = cc_identity = agent_status.base_agent_id (see db.py
+  // build_context_bloat_query), so a lane looks itself up by base_agent_id (falling
+  // back to agent_id). Rebuilt on every applyData; a module var so a background
+  // refresh + jumpToLane re-render (which reuses lastLanes) still find it.
+  var laneCtxIndex = {};
 
   // A tmux session hosts exactly ONE live lane, so two lane cards carrying the
   // same data-peek/data-peekbox can only mean a stale duplicate row (e.g. a
@@ -486,6 +494,27 @@
     openPeek_(session);
   }
 
+  // The per-lane context gauge, folded into the card (was the standalone
+  // "Context bloat" section). Reads laneCtxIndex by the lane's family id and
+  // renders the same bar + pct + token/window readout the old section did.
+  // Returns "" when there's no reading for this lane (e.g. a lane that never
+  // reported a current-context size) so the card simply omits the gauge.
+  function laneCtxHtml(l) {
+    var key = l.base_agent_id || l.agent_id;
+    var cx = key ? laneCtxIndex[key] : null;
+    if (!cx || cx.pct == null) return "";
+    var pct = cx.pct;
+    var stale = cx.age_s != null && cx.age_s > 86400;   // >1d old reading -> flag it
+    return '<div class="lanectx">' +
+      '<div class="bar"><div class="fill ' + esc(cx.level) + '" style="width:' + pct + '%"></div></div>' +
+      '<div class="ctxmeta">' +
+        '<span class="ctxpct ' + esc(cx.level) + '">' + pct + '% ctx</span> · ' +
+        fmtTok(cx.ctx_tokens) + ' / ' + fmtTok(cx.window || 1000000) +
+        (cx.age_s != null ? ' · <span class="' + (stale ? "staler" : "") + '">' + esc(fmtAge(cx.age_s)) + ' ago</span>' : "") +
+      '</div>' +
+    '</div>';
+  }
+
   function laneCard(l) {
     var peek = l.tmux_session || l.lane || "";
     var badge = (l.flagged && l.bucket === "offline") ? '<span class="badge">dark</span>' : "";
@@ -515,6 +544,7 @@
         resetBtnHtml(l.agent_id) +
         switchCtlHtml(l.tmux_session, l.auth_fp) +
       '</div>' +
+      laneCtxHtml(l) +
       (peek ? '<div class="peek" data-peekbox="' + esc(peek) + '"></div>' : '') +
     '</div>';
   }
@@ -757,7 +787,7 @@
   }
   // Collapsible (op#9102), default EXPANDED — it's the operator's primary plate,
   // so visible by default but he can collapse it. backlogExpanded is a MODULE var
-  // (like ctxExpanded) so a background refresh never re-collapses his choice.
+  // (like routineExpanded) so a background refresh never re-collapses his choice.
   // Done tasks are excluded server-side (build_backlog_query), so this is only
   // his OPEN plate: needs_you + in_progress (+ parked).
   var backlogExpanded = true;
@@ -789,43 +819,16 @@
     bindBacklogSwipe();
   }
 
-  // ---- context bloat (worker lanes; coordinators live in their own section) --
-  // Collapsible (collapsed by default): the header summarises count + worst%,
-  // click to expand the per-lane bars. ctxExpanded is a MODULE var (like
-  // routineExpanded) so a background refresh never re-collapses what the operator
-  // opened. Each row carries the same 🔑 token badge as the lane cards (op#9088).
-  var ctxExpanded = false;
-  function ctxRow(r) {
-    var pct = r.pct == null ? 0 : r.pct;
-    var stale = r.age_s != null && r.age_s > 86400;   // >1d old reading -> flag it
-    return '<div class="ctx">' +
-      '<div class="ctxtop">' +
-        '<span class="ctxid">' + esc(r.agent) + '</span>' +
-        tokenBadge(r.auth_fp) +
-        hostBadge(r.host) +
-        '<span class="ctxpct ' + esc(r.level) + '">' + pct + '%</span>' +
-      '</div>' +
-      '<div class="bar"><div class="fill ' + esc(r.level) + '" style="width:' + pct + '%"></div></div>' +
-      '<div class="ctxmeta">' + fmtTok(r.ctx_tokens) + ' / ' + fmtTok(r.window || 1000000) +
-        (r.age_s != null ? ' · <span class="' + (stale ? "staler" : "") + '">' + esc(fmtAge(r.age_s)) + ' ago</span>' : "") +
-      '</div>' +
-    '</div>';
-  }
-  function renderContextBloat(rows) {
-    var el = $("ctxBloat");
-    if (!el) return;
-    if (!rows || !rows.length) { el.innerHTML = '<div class="empty">No context telemetry.</div>'; return; }
-    var worst = rows.reduce(function (m, r) { return Math.max(m, r.pct || 0); }, 0);
-    var head = '<div class="collapsed" id="ctxToggle">' + (ctxExpanded ? "▾" : "▸") +
-      ' <b>' + rows.length + ' lane' + (rows.length > 1 ? 's' : '') + '</b> — worst ' + worst + '%</div>';
-    el.innerHTML = head +
-      '<div id="ctxList" style="display:' + (ctxExpanded ? "block" : "none") + '">' +
-      rows.map(ctxRow).join("") + '</div>';
-    var t = $("ctxToggle");
-    if (t) t.addEventListener("click", function () {
-      ctxExpanded = !ctxExpanded;
-      $("ctxList").style.display = ctxExpanded ? "block" : "none";
-      t.firstChild.textContent = (ctxExpanded ? "▾" : "▸") + " ";
+  // ---- per-lane context readings --------------------------------------------
+  // The old standalone "Context bloat" section is gone (unified-lanes redesign):
+  // each worker lane's /1M window gauge now renders INSIDE its lane card via
+  // laneCtxHtml(), sourced from laneCtxIndex (built in applyData from the same
+  // context_bloat payload). Coordinators still carry their own ctx on their
+  // cards (coordCard's .cctx chip, op#9088).
+  function buildLaneCtxIndex(rows) {
+    laneCtxIndex = {};
+    (rows || []).forEach(function (r) {
+      if (r && r.agent) laneCtxIndex[r.agent] = r;
     });
   }
 
@@ -995,12 +998,12 @@
 
     var lanes = dedupeLanes(d.lanes || []);   // one card per tmux session (no peek DOM collision)
     buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
+    buildLaneCtxIndex(d.context_bloat || []);   // before renderLanes, so each card can fold in its /1M gauge
     renderPulse(d.pulse || {});
     renderPoolUsage(d.pool_usage || []);   // weekly Max-pool % up top (op#9770)
     renderNeeds(d.needs_you || []);
     renderBacklog(d.backlog || []);
     renderCoordinators(d.coordinators || []);
-    renderContextBloat(d.context_bloat || []);
     renderLanes(lanes);
     renderQueue(d.queue || []);            // per-lane worklists (the drain view)
     renderDeploys(d.deploys || []);

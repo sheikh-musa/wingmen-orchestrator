@@ -9,9 +9,17 @@
 # prefix into the launched command, so the override must be set INSIDE the session. The
 # token is read from the file here — it never appears in argv/ps (only the file PATH does).
 #
-# Usage (as the tmux command):  scripts/launch_lane_as.sh <token-file>
+# Usage (as the tmux command):  scripts/launch_lane_as.sh <token-file> [extra-args...]
+#
+# Any args AFTER the token-file are forwarded VERBATIM to launch_dangerous_cc.sh
+# (whose single-pass parser respects the `--` passthrough boundary). This is how
+# switch_lane_token.sh RESUMES a lane's conversation on the new account:
+#   scripts/launch_lane_as.sh <token-file> -- --resume <session-id>
+# forwards `-- --resume <session-id>` through to `claude`. With no extra args the
+# behaviour is identical to before (fresh launch).
 set -euo pipefail
-TOKFILE="${1:?usage: launch_lane_as.sh <token-file>}"
+TOKFILE="${1:?usage: launch_lane_as.sh <token-file> [extra-args...]}"
+shift
 [ -r "$TOKFILE" ] || { echo "launch_lane_as: token file not readable: $TOKFILE" >&2; exit 1; }
 export CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE="$(cat "$TOKFILE")"
-exec "$HOME/wingmen/orchestrator/scripts/launch_dangerous_cc.sh"
+exec "$HOME/wingmen/orchestrator/scripts/launch_dangerous_cc.sh" "$@"

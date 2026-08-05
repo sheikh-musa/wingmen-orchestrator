@@ -236,17 +236,18 @@
   .bl .blnote { color:var(--dim); font-size:12.5px; margin-top:3px; line-height:1.4; overflow-wrap:anywhere; }
   .bl .blop { color:var(--dim); font:11px var(--mono); margin-top:4px; }
 
-  /* context bloat */
-  .ctx { padding:10px 14px; margin-bottom:8px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
-  .ctx .ctxtop { display:flex; align-items:center; gap:9px; }
-  .ctx .ctxid { font:12.5px var(--mono); font-weight:600; overflow-wrap:anywhere; }
-  .ctx .ctxpct { margin-left:auto; font:12px var(--mono); font-weight:700; }
-  .ctx .ctxpct.green{color:var(--good)} .ctx .ctxpct.amber{color:var(--warn)} .ctx .ctxpct.red{color:var(--bad)}
-  .ctx .bar { margin-top:7px; height:7px; border-radius:999px; background:var(--panel-2); overflow:hidden; }
-  .ctx .bar .fill { height:100%; border-radius:999px; }
-  .ctx .bar .fill.green{background:var(--good)} .ctx .bar .fill.amber{background:var(--warn)} .ctx .bar .fill.red{background:var(--bad)}
-  .ctx .ctxmeta { margin-top:6px; font:11px var(--mono); color:var(--dim); }
-  .ctx .ctxmeta .staler { color:var(--warn); }
+  /* per-lane context gauge — the former "Context bloat" section, now FOLDED
+     into each lane card so a lane's status + its /1M window fill read together
+     in one list (unified-lanes redesign). The classes stay context-neutral
+     (.bar/.fill/.ctxpct/.ctxmeta) so the gauge renders inside .lane cards. */
+  .lanectx { margin-top:9px; }
+  .bar { height:7px; border-radius:999px; background:var(--panel-2); overflow:hidden; }
+  .bar .fill { height:100%; border-radius:999px; }
+  .bar .fill.green{background:var(--good)} .bar .fill.amber{background:var(--warn)} .bar .fill.red{background:var(--bad)}
+  .ctxpct { font:11px var(--mono); font-weight:700; }
+  .ctxpct.green{color:var(--good)} .ctxpct.amber{color:var(--warn)} .ctxpct.red{color:var(--bad)}
+  .ctxmeta { margin-top:6px; font:11px var(--mono); color:var(--dim); }
+  .ctxmeta .staler { color:var(--warn); }
 
   /* token / auth */
   .tok { display:flex; align-items:center; gap:9px; padding:10px 14px; margin-bottom:7px;
@@ -296,10 +297,9 @@
     <div id="coordinators"><div class="empty">Loading…</div></div>
   </section>
 
-  <section>
-    <div class="sec-h"><h2>Context bloat</h2><span class="count">worker lanes · /1M window</span></div>
-    <div id="ctxBloat"><div class="empty">Loading…</div></div>
-  </section>
+  <!-- "Context bloat" section removed (unified-lanes redesign): each worker
+       lane's /1M window gauge now renders INSIDE its own lane card below, so
+       status + context read together in one list. -->
 
   <section id="handlingSec" style="display:none">
     <div class="sec-h"><h2>Fleet is handling</h2><span class="count">hub owns these · tap to peek</span><span id="handlingCount" class="count"></span></div>
@@ -307,7 +307,7 @@
   </section>
 
   <section>
-    <div class="sec-h"><h2>Lanes</h2><span class="count">working first</span></div>
+    <div class="sec-h"><h2>Lanes</h2><span class="count">working first · /1M window fill</span></div>
     <div id="lanes"><div class="empty">Loading…</div></div>
   </section>
 
