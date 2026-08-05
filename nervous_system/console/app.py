@@ -167,7 +167,19 @@ _MODEL_ALLOWLIST = (
 # boot straight off .env, so their token default is NOT pointer-settable here.
 _TOKEN_POINTER_FOR = {"nazim": ".nazim_default_token", "cc-orchestrator": ".orch_default_token"}
 _NO_TOKEN_POINTER = {"cai", "fleet-health"}   # boot off .env; token not settable via pointer
+# MODEL is honored via the .<session>_model pointer ONLY by launch_dangerous_cc.sh
+# (worker lanes). These bodies set their model from an ENV var at boot instead
+# (NAZIM_MODEL / CAI_MODEL / MODEL / ORCH_MODEL), so a model-pointer write would be
+# a SILENT NO-OP for them — the UI must mark model not-settable + the API refuse it
+# (fail loud, op#10706 R2b fix (a)).
+_MODEL_ENV_BODIES = {"nazim", "cai", "fleet-health", "cc-orchestrator"}
 _SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _is_remote_body(session: str) -> bool:
+    """A body whose pointer files live on ANOTHER host (the VPS hub): a local
+    write is a silent no-op, so it is not settable from this console."""
+    return session in getattr(panes, "_REMOTE_BODIES", {})
 
 
 def _token_pointer_name(session: str) -> "str | None":
@@ -198,14 +210,49 @@ def _fp_of_token_file(path: str) -> "str | None":
         return None
 
 
+_TOKEN_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
+_TOKEN_FILE_SUFFIX = "-oauth-token"
+
+
+def _discover_tokens() -> "dict":
+    """{name: path} of all selectable token key files — the built-ins (musa/syed)
+    PLUS any *-oauth-token the operator added to ~/.wingmen/keys (op#10706 add-token),
+    so added tokens persist + appear without a code change. gazzabyte is excluded by
+    basename (CAI-729). Used by the REVERSIBLE R2b pointer/registry path only; the
+    ARMED /api/switch-token keeps its own hardcoded LANE_TOKEN_FILES allowlist."""
+    found = {}
+    m = _resolve_lane_token_file("musa")   # materializes musa from .env if needed
+    if m:
+        found["musa"] = m
+    try:
+        for f in sorted(_KEYS_DIR.glob("*" + _TOKEN_FILE_SUFFIX)):
+            if f.name in _FORBIDDEN_TOKEN_BASENAMES:
+                continue
+            if not os.access(f, os.R_OK):
+                continue
+            name = f.name[: -len(_TOKEN_FILE_SUFFIX)]
+            if _TOKEN_NAME_RE.match(name):
+                found[name] = f
+    except Exception:  # noqa: BLE001
+        pass
+    return found
+
+
+def _resolve_registry_token(name: str) -> "pathlib.Path | None":
+    """Resolve a registry token NAME -> readable key file for the R2b pointer path.
+    gazzabyte / forbidden basenames fail closed."""
+    f = _discover_tokens().get(name)
+    if f is None or f.name in _FORBIDDEN_TOKEN_BASENAMES:
+        return None
+    return f if os.access(f, os.R_OK) else None
+
+
 def _token_registry() -> list:
-    """The selectable token accounts (fp + label, NEVER the raw token). gazzabyte
-    is absent by construction (not in LANE_TOKEN_FILES)."""
+    """The selectable token accounts (name + fp, NEVER the raw token). gazzabyte is
+    excluded by construction. Discovers operator-added tokens too."""
     out = []
-    for name in sorted(LANE_TOKEN_FILES):
-        f = _resolve_lane_token_file(name)
-        out.append({"name": name, "fp": (_fp_of_token_file(str(f)) if f else None),
-                    "available": f is not None})
+    for name, f in sorted(_discover_tokens().items()):
+        out.append({"name": name, "fp": _fp_of_token_file(str(f)), "available": True})
     return out
 
 
@@ -237,11 +284,17 @@ def _enrich_token_pointers(payload: dict) -> dict:
     show + preselect the current token/model defaults. Read-only."""
     for r in payload.get("rows", []):
         sess = r.get("session")
+        remote = _is_remote_body(sess)
         ptr = _token_pointer_name(sess)
-        r["token_settable"] = ptr is not None
+        r["remote"] = remote
+        # Settable HERE only if the write actually takes effect: a local pointer
+        # this host's boot honors, and not a remote (VPS) body. Otherwise the UI
+        # shows a note instead of a select — never a silent no-op (fix (a)).
+        r["token_settable"] = (ptr is not None) and not remote
         r["token_pointer"] = ptr
         r["token_pointer_name"] = _token_name_for_fp(
             _fp_of_token_file(_read_pointer_target(ptr)) if ptr and _read_pointer_target(ptr) else None)
+        r["model_settable"] = (sess not in _MODEL_ENV_BODIES) and not remote
         r["model_pointer"] = _read_model_pointer(sess)
     payload["registry"] = {"tokens": _token_registry(), "models": list(_MODEL_ALLOWLIST)}
     return payload
@@ -1097,6 +1150,15 @@ def _make_handler(feedloop: "_FeedLoop"):
             if kind not in ("token", "model"):
                 auth.audit(self._client(), "/api/set-pointer", "400")
                 return self._json(400, {"error": "bad kind"})
+            # FAIL LOUD, never a silent no-op (fix (a)): refuse a write whose pointer
+            # this host's boot does not honor — a remote (VPS) body, or a model on a
+            # body whose model is env-driven at boot (not .<session>_model).
+            if _is_remote_body(session):
+                auth.audit(self._client(), f"/api/set-pointer:{kind}:{session}:remote", "400")
+                return self._json(400, {"error": "remote body — its default lives on the VPS host, not here; cross-host apply lands in R3/R4"})
+            if kind == "model" and session in _MODEL_ENV_BODIES:
+                auth.audit(self._client(), f"/api/set-pointer:model:{session}:env", "400")
+                return self._json(400, {"error": "model for this body is env-driven at boot (NAZIM_MODEL/CAI_MODEL/…), not a pointer — no-op if written"})
             try:
                 if kind == "token":
                     ptr = _token_pointer_name(session)
@@ -1111,13 +1173,11 @@ def _make_handler(feedloop: "_FeedLoop"):
                         logger.info("set-pointer token CLEAR: %s (%s)", session, ptr)
                     else:
                         tname = value.lower()
-                        if tname not in LANE_TOKEN_FILES:
-                            auth.audit(self._client(), f"/api/set-pointer:token:{session}", "400")
-                            return self._json(400, {"error": "unknown token", "allowed": sorted(LANE_TOKEN_FILES)})
-                        tokfile = _resolve_lane_token_file(tname)
+                        tokfile = _resolve_registry_token(tname)
                         if tokfile is None or tokfile.name in _FORBIDDEN_TOKEN_BASENAMES:
                             auth.audit(self._client(), f"/api/set-pointer:token:{session}", "400")
-                            return self._json(400, {"error": "token unavailable"})
+                            return self._json(400, {"error": "unknown/unavailable token",
+                                                    "allowed": [e["name"] for e in _token_registry()]})
                         pfile.write_text(str(tokfile) + "\n", encoding="utf-8")
                         auth.audit(self._client(), f"/api/set-pointer:token:{session}:{tname}", "200")
                         logger.info("set-pointer token: %s -> %s (%s)", session, tname, ptr)

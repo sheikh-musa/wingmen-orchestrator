@@ -35,28 +35,37 @@
     var host = r.host ? '<span class="kv">host <b>' + esc(r.host) + '</b></span>' : "";
     var fp = r.fp ? '<span class="fp">' + esc(r.fp) + '</span>' : "";
 
-    // Controls (R2b). Token: registry accounts; disabled + noted when the body
-    // boots off .env. Lanes share one pointer, so label it "all lanes".
+    // Controls (R2b). A select is shown ONLY where a local pointer write actually
+    // takes effect (fix (a)) — otherwise a NOTE, never a silent no-op. A remote
+    // (VPS) body is set on its own host; some bodies' token/model are env-driven.
     var s = esc(r.session);
     var ctrls = "";
-    if (r.token_settable) {
-      var tlabel = (r.token_pointer === ".lane_default_token") ? "Token · all lanes" : "Token";
-      var topts = '<option value="">— default —</option>' + registry.tokens.map(function (t) {
-        var sel = (r.token_pointer_name === t.name) ? " selected" : "";
-        var dis = t.available ? "" : " disabled";
-        return '<option value="' + esc(t.name) + '"' + sel + dis + '>' + esc(t.name) + (t.fp ? " (" + esc(t.fp) + ")" : "") + '</option>';
-      }).join("");
-      ctrls += '<label class="ctl"><span>' + tlabel + '</span>' +
-        '<select data-kind="token" data-session="' + s + '">' + topts + '</select></label>';
+    if (r.remote) {
+      ctrls = '<div class="ctlnote">remote (VPS) — set its token/model on the hub host; cross-host apply lands in R3/R4</div>';
     } else {
-      ctrls += '<div class="ctlnote">token: .env default (not pointer-settable)</div>';
+      if (r.token_settable) {
+        var tlabel = (r.token_pointer === ".lane_default_token") ? "Token · all lanes" : "Token";
+        var topts = '<option value="">— default —</option>' + registry.tokens.map(function (t) {
+          var sel = (r.token_pointer_name === t.name) ? " selected" : "";
+          var dis = t.available ? "" : " disabled";
+          return '<option value="' + esc(t.name) + '"' + sel + dis + '>' + esc(t.name) + (t.fp ? " (" + esc(t.fp) + ")" : "") + '</option>';
+        }).join("");
+        ctrls += '<label class="ctl"><span>' + tlabel + '</span>' +
+          '<select data-kind="token" data-session="' + s + '">' + topts + '</select></label>';
+      } else {
+        ctrls += '<div class="ctlnote">token: .env default (not pointer-settable)</div>';
+      }
+      if (r.model_settable) {
+        var mopts = '<option value="">— default —</option>' + registry.models.map(function (m) {
+          var sel = (r.model_pointer === m) ? " selected" : "";
+          return '<option value="' + esc(m) + '"' + sel + '>' + esc(shortModel(m)) + '</option>';
+        }).join("");
+        ctrls += '<label class="ctl"><span>Model</span>' +
+          '<select data-kind="model" data-session="' + s + '">' + mopts + '</select></label>';
+      } else {
+        ctrls += '<div class="ctlnote">model: env-driven at boot (not pointer-settable)</div>';
+      }
     }
-    var mopts = '<option value="">— default —</option>' + registry.models.map(function (m) {
-      var sel = (r.model_pointer === m) ? " selected" : "";
-      return '<option value="' + esc(m) + '"' + sel + '>' + esc(shortModel(m)) + '</option>';
-    }).join("");
-    ctrls += '<label class="ctl"><span>Model</span>' +
-      '<select data-kind="model" data-session="' + s + '">' + mopts + '</select></label>';
 
     return '<div class="row ' + cls + '">' +
         '<div class="r1"><span class="who">' + s + '</span>' +
