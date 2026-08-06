@@ -101,6 +101,13 @@ LANE_TOKEN_FILES: dict[str, pathlib.Path] = {
     "syed": _KEYS_DIR / "syed-oauth-token",
 }
 _FORBIDDEN_TOKEN_BASENAMES = {"gazzabyte-oauth-token"}
+# FINGERPRINT-based forbidden guard (op#10851 f/u): a name-only guard is bypassable
+# by aliasing the forbidden key under another filename (found `gzb-oauth-token` — the
+# SAME forbidden token, fp 13589de86f29 — which slipped past the basename check). So
+# ANY key file whose CONTENT fingerprints to a forbidden fp is refused, whatever it
+# is named. This is the robust CAI-729 fail-closed; keep the basename set too (belt
+# + suspenders / human-legible). Add a fp here to permanently forbid that secret.
+_FORBIDDEN_TOKEN_FPS = {"13589de86f29"}  # gazzabyte consumer Max (CAI-729)
 _LANE_SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 # Switch idempotency guard — one re-token per lane at a time (a double-click must
@@ -146,6 +153,8 @@ def _resolve_lane_token_file(token_name: str) -> pathlib.Path | None:
         if not os.access(path, os.R_OK):
             return None
     except Exception:  # noqa: BLE001
+        return None
+    if _fp_of_token_file(str(path)) in _FORBIDDEN_TOKEN_FPS:  # alias-proof fp guard (op#10851)
         return None
     return path
 
@@ -229,6 +238,8 @@ def _discover_tokens() -> "dict":
             if f.name in _FORBIDDEN_TOKEN_BASENAMES:
                 continue
             if not os.access(f, os.R_OK):
+                continue
+            if _fp_of_token_file(str(f)) in _FORBIDDEN_TOKEN_FPS:  # alias-proof fp guard (op#10851)
                 continue
             name = f.name[: -len(_TOKEN_FILE_SUFFIX)]
             if _TOKEN_NAME_RE.match(name):
