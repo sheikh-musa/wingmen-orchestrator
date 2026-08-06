@@ -91,10 +91,29 @@
       '</div>';
   }
 
+  // Queue-on-busy applies (op#10861): show queued (waiting for idle) + held
+  // (arm expired while waiting) items, each cancellable.
+  function renderQueue(items) {
+    var q = $("queue");
+    if (!q) return;
+    items = items || [];
+    q.innerHTML = items.map(function (it) {
+      var held = it.status !== "queued";
+      var label = (it.status === "queued") ? "queued" : it.status;
+      return '<div class="qitem' + (held ? " held" : "") + '">' +
+        '<span class="qwho">' + esc(it.session) + ' · ' + esc(it.kind) + '</span>' +
+        '<span>' + esc(label) + '</span>' +
+        '<button class="qcancel" data-qcancel="' + esc(it.session) + '" data-qkind="' + esc(it.kind) + '">Cancel</button>' +
+        '<span class="qnote">' + esc(it.note || "") + '</span>' +
+      '</div>';
+    }).join("");
+  }
+
   function render(d) {
     registry = (d && d.registry) || { tokens: [], models: [] };
     var rows = (d && d.rows) || [];
     var s = (d && d.summary) || {};
+    renderQueue(d && d.apply_queue);
     $("rows").innerHTML = rows.length ? rows.map(rowHtml).join("") : '<div class="empty">No bodies found.</div>';
     var bits = [];
     if (s.mismatched) bits.push('<b class="bad">' + s.mismatched + ' off-account</b>');
@@ -200,6 +219,8 @@
       .then(function (res) {
         if (res.status === 503) { toast("Armed apply is DISABLED (pending cai + Nazim)", true); }
         else if (res.status === 403) { toast((res.j && res.j.error) || "arm via Telegram first", true); }
+        else if (res.status === 202) { toast(kind + " QUEUED for " + session + " — fires when idle (arm re-checked)"); }
+        else if (res.status === 409 || res.status === 429) { toast((res.j && res.j.error) || "busy — try again shortly", true); }
         else if (!res.ok) { toast((res.j && res.j.error) || "apply failed", true); }
         else { toast(kind + " applied to " + session + (res.j && res.j.ok ? "" : " (check output)")); }
       })
@@ -212,6 +233,22 @@
     else if (el.dataset.armapply) applyArmed(el.dataset.session, el.dataset.armapply);
   });
   $("pvClose").addEventListener("click", function () { $("previewModal").classList.remove("show"); });
+
+  // Cancel a queued-on-busy apply (op#10861).
+  $("queue").addEventListener("click", function (e) {
+    var el = e.target;
+    if (!el || !el.dataset || !el.dataset.qcancel) return;
+    if (busy) return;
+    busy = true;
+    fetch("/api/apply-queue-cancel", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ session: el.dataset.qcancel, kind: el.dataset.qkind }),
+    }).then(function (r) { return r.json(); })
+      .then(function (j) { toast(j.cancelled ? "cancelled" : "not found"); })
+      .catch(function (e2) { toast("error: " + (e2 && e2.message), true); })
+      .finally(function () { busy = false; load(); });
+  });
 
   var FETCH_TIMEOUT_MS = 20000;  // the remote-hub SSH scan can take a few seconds
   function load() {

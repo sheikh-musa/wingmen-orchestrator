@@ -321,6 +321,122 @@ def _r4_current_arm() -> "dict | None":
         return None
 
 
+def _resolve_armed_apply(session: str, kind: str, arm: "dict | None") -> tuple:
+    """Resolve the switch command + target account for an armed apply, enforcing
+    the SAME scope/gazzabyte/target rules for an immediate AND a queued fire.
+    Returns (cmd_list, account_name, None) or (None, None, error_str)."""
+    if _is_remote_body(session):
+        return None, None, "remote body — armed apply runs on the VPS"
+    SW_LANE = str(_REPO_ROOT / "scripts" / "switch_lane_token.sh")
+    SW_SINGLE = str(_REPO_ROOT / "scripts" / "switch_singleton_token.sh")
+    if kind == "token":
+        ptr = _token_pointer_name(session)
+        target = _read_pointer_target(ptr) if ptr else None
+        if not target or not _fp_of_token_file(target):
+            return None, None, "no token default set to apply"
+        if os.path.basename(target) in _FORBIDDEN_TOKEN_BASENAMES:
+            return None, None, "forbidden token (gazzabyte)"
+        account = next((e["name"] for e in _token_registry()
+                        if e["fp"] == _fp_of_token_file(target)), None)
+        if arm and arm.get("accounts") and account not in arm["accounts"]:
+            return None, account, f"account '{account}' not in arm scope"
+        cmd = ["bash", (SW_SINGLE if session == "nazim" else SW_LANE), session, target]
+        return cmd, account, None
+    if kind == "model":
+        if session in _MODEL_ENV_BODIES:
+            return None, None, "model not pointer-settable for this body"
+        cur = _current_token_file_for(session)
+        if cur is None or cur.name in _FORBIDDEN_TOKEN_BASENAMES:
+            return None, None, "could not resolve current account (or forbidden)"
+        account = next((e["name"] for e in _token_registry()
+                        if e["fp"] == _fp_of_token_file(str(cur))), None)
+        if arm and arm.get("accounts") and account not in arm["accounts"]:
+            return None, account, f"account '{account}' not in arm scope"
+        return ["bash", SW_LANE, "--model-apply", session, str(cur)], account, None
+    return None, None, "bad kind"
+
+
+# --- Queue-on-busy apply (op#10861) ------------------------------------------
+# When an armed apply targets a BUSY lane, QUEUE it instead of refusing; a watcher
+# fires it the moment the lane goes idle. NEVER --force (waits, never clobbers).
+# HARD GUARDRAIL: the R4 arm is RE-VALIDATED AT FIRE TIME — a queued apply NEVER
+# fires on an expired/out-of-scope arm (keeps operator authorization honest for a
+# deferred fire). In-memory (single console process); a queue entry is ephemeral —
+# lost on restart, the operator re-queues. Only meaningful while R4 is enabled +
+# armed. Keyed by "session:kind".
+_APPLY_QUEUE: "dict" = {}
+_APPLY_QUEUE_LOCK = threading.Lock()
+_APPLY_QUEUE_POLL_S = 12.0
+
+
+def _lane_busy(session: str) -> bool:
+    """True if the lane is working (mid-turn). Unknown -> treat as busy (fail-safe:
+    never fire a queued apply on a lane we can't confirm is idle)."""
+    try:
+        state, _ = panes.capture(session)
+        return state != "idle"
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _apply_queue_public() -> list:
+    with _APPLY_QUEUE_LOCK:
+        return [dict(v) for v in _APPLY_QUEUE.values()]
+
+
+def _fire_queued(item: dict, cmd: list) -> None:
+    """Run a queued armed apply (idle + arm re-validated by the caller). ARMED=1 so
+    the switch script verifies auth_fp + audits/alerts. Never --force."""
+    key = f"{item['session']}:{item['kind']}"
+    try:
+        _env = {**os.environ, "ARMED": "1", "BREAK_GLASS": "0", "ACTOR": item.get("actor", "operator")}
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=_env)
+        ok = r.returncode == 0
+        with _APPLY_QUEUE_LOCK:
+            if key in _APPLY_QUEUE:
+                _APPLY_QUEUE[key]["status"] = "applied" if ok else "failed"
+                _APPLY_QUEUE[key]["note"] = ("applied on idle" if ok else "switch failed — see audit")
+        logger.info("queued apply FIRED %s (ok=%s)", key, ok)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("queued apply fire failed %s: %s", key, e)
+        with _APPLY_QUEUE_LOCK:
+            if key in _APPLY_QUEUE:
+                _APPLY_QUEUE[key]["status"] = "failed"
+                _APPLY_QUEUE[key]["note"] = "fire error"
+
+
+def _apply_queue_tick() -> None:
+    """One watcher pass: for each queued apply, RE-VALIDATE the arm (hard guardrail),
+    then fire iff the lane is idle. Fail-closed on an expired/out-of-scope arm."""
+    with _APPLY_QUEUE_LOCK:
+        pending = [dict(v) for v in _APPLY_QUEUE.values() if v.get("status") == "queued"]
+    for item in pending:
+        key = f"{item['session']}:{item['kind']}"
+        arm = _r4_current_arm()                      # RE-VALIDATE at fire time
+        cmd, _account, err = _resolve_armed_apply(item["session"], item["kind"], arm)
+        if not arm or err or cmd is None:
+            reason = ("arm expired while waiting — re-arm to apply" if not arm
+                      else (err or "cannot apply"))
+            with _APPLY_QUEUE_LOCK:
+                if key in _APPLY_QUEUE and _APPLY_QUEUE[key]["status"] == "queued":
+                    _APPLY_QUEUE[key]["status"] = "arm-expired"
+                    _APPLY_QUEUE[key]["note"] = reason
+            logger.info("queued apply HELD %s: %s", key, reason)
+            continue
+        if _lane_busy(item["session"]):
+            continue                                 # still busy — keep waiting
+        _fire_queued(item, cmd)                      # idle + armed + in-scope -> fire
+
+
+def _apply_queue_watcher() -> None:
+    while True:
+        try:
+            _apply_queue_tick()
+        except Exception as e:  # noqa: BLE001 — a watcher must never die
+            logger.warning("apply-queue watcher tick error: %s", e)
+        time.sleep(_APPLY_QUEUE_POLL_S)
+
+
 def _current_token_file_for(session: str) -> "pathlib.Path | None":
     """The registry token file whose fp == the body's LIVE account — for a MODEL-
     apply that must relaunch on the SAME account. None if unresolved."""
@@ -379,6 +495,7 @@ def _enrich_token_pointers(payload: dict) -> dict:
         r["model_settable"] = (sess not in _MODEL_ENV_BODIES) and not remote
         r["model_pointer"] = _read_model_pointer(sess)
     payload["registry"] = {"tokens": _token_registry(), "models": list(_MODEL_ALLOWLIST)}
+    payload["apply_queue"] = _apply_queue_public()   # op#10861 queued/held applies
     return payload
 
 
@@ -1084,7 +1201,7 @@ def _make_handler(feedloop: "_FeedLoop"):
             path = parsed.path
             if path not in ("/api/reset", "/api/backlog", "/api/switch-token",
                             "/api/set-pointer", "/api/add-token", "/api/apply-dry-run",
-                            "/api/apply-armed"):
+                            "/api/apply-armed", "/api/apply-queue-cancel"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
@@ -1097,6 +1214,9 @@ def _make_handler(feedloop: "_FeedLoop"):
             # cai+Nazim flip CONSOLE_R4_ENABLED AND a live operator arm exists.
             if path == "/api/apply-armed":
                 return self._handle_apply_armed()
+            # Cancel a queued-on-busy apply (op#10861).
+            if path == "/api/apply-queue-cancel":
+                return self._handle_apply_queue_cancel()
             # R2b add-token: register a new 0600 key file so it's selectable. Raw
             # token written once, NEVER echoed/logged; only its fp is returned.
             if path == "/api/add-token":
@@ -1221,6 +1341,23 @@ def _make_handler(feedloop: "_FeedLoop"):
                               {"ok": ok, "id": item_id, "action": action,
                                "error": None if ok else (r.stderr or "").strip()[-160:]})
 
+        def _handle_apply_queue_cancel(self):
+            """POST /api/apply-queue-cancel {session, kind} — remove a queued/held
+            apply so it never fires (op#10861)."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                p = json.loads(raw or b"{}")
+                session = (p.get("session") or "").strip()
+                kind = (p.get("kind") or "").strip().lower()
+            except Exception:  # noqa: BLE001
+                return self._json(400, {"error": "bad request"})
+            key = f"{session}:{kind}"
+            with _APPLY_QUEUE_LOCK:
+                existed = _APPLY_QUEUE.pop(key, None) is not None
+            auth.audit(self._client(), f"/api/apply-queue-cancel:{key}", "200" if existed else "404")
+            return self._json(200, {"ok": True, "cancelled": existed, "session": session, "kind": kind})
+
         def _handle_apply_armed(self):
             """POST /api/apply-armed {session, kind, confirm} — the REAL armed apply.
             DISABLED/unbuilt-live: 503 unless CONSOLE_R4_ENABLED=1 (cai+Nazim gate that)
@@ -1254,30 +1391,26 @@ def _make_handler(feedloop: "_FeedLoop"):
             if confirm != session:
                 auth.audit(self._client(), f"/api/apply-armed:{session}:confirm-miss", "400")
                 return self._json(400, {"error": "type the exact body name to confirm"})
-            # Resolve target + enforce scope + gazzabyte fail-closed.
-            SW_LANE = str(_REPO_ROOT / "scripts" / "switch_lane_token.sh")
-            SW_SINGLE = str(_REPO_ROOT / "scripts" / "switch_singleton_token.sh")
-            if kind == "token":
-                ptr = _token_pointer_name(session)
-                target = _read_pointer_target(ptr) if ptr else None
-                if not target or not _fp_of_token_file(target):
-                    return self._json(400, {"error": "no token default set to apply"})
-                if os.path.basename(target) in _FORBIDDEN_TOKEN_BASENAMES:
-                    return self._json(400, {"error": "forbidden token (gazzabyte)"})
-                # SCOPE: the arm must name the target account.
-                tname = next((e["name"] for e in _token_registry()
-                              if e["fp"] == _fp_of_token_file(target)), None)
-                if arm.get("accounts") and tname not in arm["accounts"]:
-                    auth.audit(self._client(), f"/api/apply-armed:{session}:out-of-scope", "403")
-                    return self._json(403, {"error": f"account '{tname}' is not in the current arm scope"})
-                cmd = ["bash", (SW_SINGLE if session == "nazim" else SW_LANE), session, target]
-            else:  # model
-                if session in _MODEL_ENV_BODIES:
-                    return self._json(400, {"error": "model not pointer-settable for this body"})
-                cur = _current_token_file_for(session)
-                if cur is None or cur.name in _FORBIDDEN_TOKEN_BASENAMES:
-                    return self._json(400, {"error": "could not resolve current account (or forbidden)"})
-                cmd = ["bash", SW_LANE, "--model-apply", session, str(cur)]
+            # Resolve the switch command + scope (SHARED with the queued fire path,
+            # so an immediate and a deferred apply enforce identical rules).
+            cmd, _account, err = _resolve_armed_apply(session, kind, arm)
+            if err or cmd is None:
+                code = 403 if (err and "scope" in err) else 400
+                auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", str(code))
+                return self._json(code, {"error": err or "cannot apply"})
+            # QUEUE-ON-BUSY (op#10861): a busy lane is QUEUED, not refused — the
+            # watcher fires it the moment the lane goes idle, RE-VALIDATING the arm at
+            # fire time (never fires on an expired/out-of-scope arm). Never --force.
+            if _lane_busy(session):
+                key = f"{session}:{kind}"
+                with _APPLY_QUEUE_LOCK:
+                    _APPLY_QUEUE[key] = {"session": session, "kind": kind,
+                                         "actor": self._client() or "operator",
+                                         "status": "queued",
+                                         "note": "waiting for lane to go idle"}
+                auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", "202-queued")
+                return self._json(202, {"queued": True, "session": session, "kind": kind,
+                                        "note": "lane busy — apply QUEUED; fires when idle (arm re-checked at fire time). Cancellable."})
             # Per-lane cooldown/inflight guard (cai CAI-RESP-748 (b)) — a double-tap
             # can't fire two relaunches of the SAME body; rapid re-fire gets 429.
             now_t = time.monotonic()
@@ -1664,6 +1797,10 @@ def make_server(
     # ~650ms×N cold connect. Non-blocking + fail-soft: a DB blip at boot just
     # means the pool fills lazily on first request instead.
     threading.Thread(target=db.warm_pool, kwargs={"n": 3}, daemon=True).start()
+    # Queue-on-busy apply watcher (op#10861): fires queued armed applies when their
+    # lane goes idle, re-validating the R4 arm at fire time. Daemon; a no-op while
+    # the queue is empty (which it always is unless R4 is enabled + something queued).
+    threading.Thread(target=_apply_queue_watcher, daemon=True).start()
     handler = _make_handler(feedloop)
     httpd = _QuietThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
