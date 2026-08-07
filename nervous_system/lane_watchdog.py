@@ -331,25 +331,38 @@ def main() -> int:
     return 0
 
 def reap_ghosts() -> None:
-    """Audited periodic reap of stale agent_status ghosts (CAI-RESP-292).
+    """Audited periodic reap of stale agent_status ghosts (CAI-RESP-292/762/765).
 
     Instances that die uncleanly never run their clean-exit trap, so they linger
-    as status='working' forever. This calls the identity-respecting SECURITY
-    DEFINER sweeper to offline any non-offline row whose heartbeat is older than
-    the 8h freshness bound, stamping reaped_by='lane_watchdog' (honest, attributed
-    — never an anonymous forge, never disables the identity trigger, never touches
-    a live lane)."""
+    as status='working' forever. This declares its OWN id 'lane_watchdog' and calls
+    admin_mark_offline's WATCHDOG branch (an allowlisted actor, fleet-wide, past the
+    8h bound) to offline them — offline-only, per-row, refusing protected singletons,
+    writing a truthful audit row. Never forges an identity, never touches a live lane.
+    Per-ghost isolated (autocommit) so one bad ghost neither skips the rest nor aborts."""
     try:
         sys.path.insert(0, str(ORCH))
         from dotenv import load_dotenv
         import psycopg
         load_dotenv(str(ORCH / ".env"))
         dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
-        with psycopg.connect(dsn, connect_timeout=10) as c, c.cursor() as cur:
-            cur.execute("select reaped_agent_id, stale_hours "
-                        "from sweep_stale_agents(interval '8 hours', 'lane_watchdog')")
-            reaped = cur.fetchall()
-            c.commit()
+        reaped = []
+        with psycopg.connect(dsn, connect_timeout=10, autocommit=True) as c, c.cursor() as cur:
+            cur.execute("SELECT set_config('app.current_agent_id', 'lane_watchdog', false)")
+            # fleet-wide stale ghosts, EXCLUDING protected singletons (one source of
+            # truth = protected_agents; the primitive also refuses them)
+            cur.execute("""SELECT agent_id, round(extract(epoch from (now()-last_heartbeat))/3600,1)
+                             FROM agent_status
+                            WHERE status <> 'offline'
+                              AND last_heartbeat < now() - interval '8 hours'
+                              AND agent_id NOT IN (SELECT agent_id FROM protected_agents)""")
+            for aid, hrs in cur.fetchall():
+                try:
+                    cur.execute("SELECT admin_mark_offline(%s, %s)",
+                                (aid, "lane_watchdog reap: stale ghost (>8h)"))
+                    if cur.fetchone()[0]:
+                        reaped.append((aid, hrs))
+                except Exception as ge:
+                    log(f"reap-ghost skip {aid}: {ge}")
         if reaped:
             log("REAPED stale ghosts: " + ", ".join(f"{a}({h}h)" for a, h in reaped))
     except Exception as e:

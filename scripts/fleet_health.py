@@ -37,9 +37,10 @@ SENDER_LIVE_WINDOW_H = 24  # a recipient that SENT within this window is "live" 
 # `claude --continue`, not the launch_dangerous_cc.sh heartbeat loop), so it
 # looks "stale" while fully alive, and its status<>'offline' is load-bearing for
 # wake resolution (resolve_tmux_session; CAI-RESP-451 / hub #16415). Marking a
-# live singleton offline breaks its wake path. Spared from BOTH offline-marking
-# and pruning. (Matches the reaper never-target set: hub/cai/SELF/nazim.)
-NEVER_OFFLINE = {"cc-orchestrator", "cai", "cc-fleet-health", "orch-console", "nazim-console"}
+# live singleton offline breaks its wake path. The protected set is read ONCE per
+# run from the protected_agents table (mig-038 / CAI-762/765) — the SINGLE source
+# of truth also consulted by admin_mark_offline + the launcher/watchdog reapers —
+# and spares them from offline-marking, pruning, AND the drift check.
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -61,6 +62,11 @@ def main():
         # reaper below asserts that lease, so declare our own identity here.
         cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
 
+        # Protected singletons — ONE source of truth (protected_agents, mig-038):
+        # consulted below by offline-marking, prune, AND the drift check.
+        cur.execute("SELECT agent_id FROM protected_agents")
+        protected = {r[0] for r in cur.fetchall()}
+
         # STALE -> offline via the sanctioned reaper admin_mark_offline() (mig-037 /
         # CAI-RESP-761): a lease-gated, offline-only, audited SECDEF primitive called
         # once per agent. Replaces the old batch UPDATE, which the hardened
@@ -72,7 +78,7 @@ def main():
                           AND last_heartbeat < now() - interval '{STALE_MIN} minutes'""")
         marked = []
         for _aid in [r[0] for r in cur.fetchall()]:
-            if _aid in NEVER_OFFLINE:
+            if _aid in protected:
                 continue  # singleton — liveness is lease-tracked, never heartbeat-reaped
             cur.execute("SELECT admin_mark_offline(%s, %s)",
                         (_aid, f"fleet_health sweep: stale heartbeat > {STALE_MIN}m"))
@@ -83,7 +89,7 @@ def main():
                         WHERE status='offline'
                           AND last_heartbeat < now() - interval '{PRUNE_DAYS} days'
                           AND agent_id <> ALL(%s)
-                        RETURNING agent_id""", (list(NEVER_OFFLINE),))
+                        RETURNING agent_id""", (list(protected),))
         pruned = [r[0] for r in cur.fetchall()]
         conn.commit()
 
@@ -122,7 +128,10 @@ def main():
     for aid, status, tmux, m in rows:
         if tmux:
             registered_sessions.add(tmux)
-        if status == "working" and tmux and tmux not in sessions:
+        # Skip singletons: their tmux may live on another host (the hub runs on the
+        # VPS, not this Mini) and their liveness is lease/reclaim-tracked, so a local
+        # `tmux ls` miss is NOT a crash — flagging it manufactures a false alarm.
+        if status == "working" and tmux and tmux not in sessions and aid not in protected:
             drift.append(f"  ! {aid}: 'working' but tmux '{tmux}' is GONE (crashed?)")
     # live CC sessions with no fresh registration (ignore the desktop 'claude' app + helpers)
     for s in sessions:
