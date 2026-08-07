@@ -53,7 +53,10 @@ def test_capture_pane_rejects_empty_session():
 
 
 def test_capture_pane_returns_text_for_a_live_session():
-    lines = "\n".join(f"line{i}" for i in range(50))
+    # Blank-separated: each is its own logical line under the pane reflow, which
+    # otherwise joins a run of consecutive non-blank lines into one soft-wrapped
+    # line. This keeps them 50 distinct lines to exercise the survive-under-cap path.
+    lines = "\n\n".join(f"line{i}" for i in range(50))
     with patch.object(panes, "live_sessions", return_value=["cosem-tdu"]):
         with patch("subprocess.run", return_value=_run(0, lines)) as mock_run:
             result = panes.capture_pane("cosem-tdu")
@@ -70,7 +73,9 @@ def test_capture_pane_caps_at_60_lines_after_filtering():
     # filter-then-cap, not cap-then-filter: raw window is 200 lines, capped
     # to the last 60 only AFTER chrome is stripped (a chrome-dominated raw
     # tail must not leave a near-empty result).
-    lines = "\n".join(f"real activity line {i}" for i in range(100))
+    # Blank-separated so the reflow keeps them as 100 distinct logical lines
+    # (a run of consecutive non-blank lines would otherwise reflow into one).
+    lines = "\n\n".join(f"real activity line {i}" for i in range(100))
     with patch.object(panes, "live_sessions", return_value=["cosem-tdu"]):
         with patch("subprocess.run", return_value=_run(0, lines)):
             result = panes.capture_pane("cosem-tdu")

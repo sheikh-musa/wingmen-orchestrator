@@ -107,33 +107,12 @@ async def test_happy_path_returns_message_id():
     audit.log_tool_call.assert_called_once()
 
 
-async def test_inline_keyboard_has_three_buttons_with_correct_callbacks():
-    audit = MagicMock()
-    audit.log_escalation = MagicMock(return_value=1)
-    audit.log_tool_call = MagicMock(return_value=2)
-
-    captured_markup = []
-    bot = MagicMock()
-    async def fake_send(*a, **kw):
-        captured_markup.append(kw.get("reply_markup"))
-        return MagicMock(message_id=1)
-    bot.send_message = fake_send
-
-    await escalate_to_operator(
-        bot, "chat-id", _mk_msg(id=777), audit,
-        reason="r", category="novel_low_confidence",
-    )
-
-    markup = captured_markup[0]
-    # InlineKeyboardMarkup has inline_keyboard: list[list[Button]]
-    keyboard = markup.inline_keyboard
-    assert len(keyboard) == 1, "expected exactly 1 row"
-    row = keyboard[0]
-    assert len(row) == 3, "expected exactly 3 buttons"
-    cbdatas = [b.callback_data for b in row]
-    assert cbdatas[0] == "approve:777"
-    assert cbdatas[1] == "defer:777"
-    assert cbdatas[2] == "delegate:777"
+# NOTE: the former test_inline_keyboard_has_three_buttons_with_correct_callbacks
+# was removed. The [Approve][Defer][Delegate] inline buttons were deliberately
+# dropped from escalate_to_operator (their callback handler lived on the retired
+# @ihsanosbot; the operator now replies via the @wingmennorchbot bridge instead —
+# see escalator.py). escalate_to_operator no longer passes reply_markup, so a test
+# asserting a three-button keyboard is asserting removed product behavior.
 
 
 async def test_body_includes_category_and_reason():

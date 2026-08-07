@@ -51,7 +51,11 @@ async def test_generate_spec_calls_claude_cli(sample_job, sample_context):
     )
     mock_proc.returncode = 0
 
-    with patch("spec_generator.asyncio.create_subprocess_exec", return_value=mock_proc):
+    # _resolve_base_ref shells out to real git against context["repo_path"]; mock
+    # it so the test is hermetic (no local checkout of that repo required — it does
+    # not exist on CI, only on the author's Mac).
+    with patch("spec_generator.asyncio.create_subprocess_exec", return_value=mock_proc), \
+         patch("spec_generator._resolve_base_ref", return_value=("main", "0" * 40)):
         result = await spec_generator.generate_spec(sample_job, sample_context)
 
     assert "JOB_42_DONE" in result
@@ -65,7 +69,10 @@ async def test_generate_spec_raises_on_empty_output(sample_job, sample_context):
     mock_proc.communicate = AsyncMock(return_value=(b"", b"some error"))
     mock_proc.returncode = 1
 
-    with patch("spec_generator.asyncio.create_subprocess_exec", return_value=mock_proc):
+    # Hermetic: mock the real-git base-ref resolution (see note above) so the CLI
+    # empty-output path — not a missing local checkout — is what raises.
+    with patch("spec_generator.asyncio.create_subprocess_exec", return_value=mock_proc), \
+         patch("spec_generator._resolve_base_ref", return_value=("main", "0" * 40)):
         with pytest.raises(RuntimeError, match="Spec generation failed"):
             await spec_generator.generate_spec(sample_job, sample_context)
 

@@ -76,9 +76,13 @@ class TestCheckAndBlock:
         bot = AsyncMock()
         fake_cfg = {"supabase_project_ref": "tscuymavysscrvoberrr"}
 
+        # Delivery moved off `bot.send_message` to notify_operator() (the
+        # @wingmennorchbot bridge); mock it so the test is hermetic and assert on
+        # the message the gate actually sends.
         with patch("nervous_system.schema_gate.get_repo_config", return_value=fake_cfg), \
              patch("nervous_system.schema_gate.extract_schema_ddl",
                    AsyncMock(return_value=["alter table foo add column bar text;"])), \
+             patch("nervous_system.schema_gate.notify_operator", return_value=True) as notify, \
              patch("nervous_system.schema_gate.get_chat_id", return_value="cto_chat"):
             blocked = await check_and_block(
                 supabase, "/tmp/repo", "wingmen-orchestrator", 42,
@@ -86,8 +90,8 @@ class TestCheckAndBlock:
             )
 
         assert blocked is True
-        bot.send_message.assert_called_once()
-        msg = bot.send_message.call_args.kwargs["text"]
+        notify.assert_called_once()
+        msg = notify.call_args.args[0]
         assert "42" in msg
         assert "alter table foo" in msg
         assert "tscuymavysscrvoberrr" in msg
