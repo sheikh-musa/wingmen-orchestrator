@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.sre-lane-recycle</string>
+
+  <!-- The RED half of fleet auto-recycle-at-80% (operator: hands-off, no babysitting).
+       Runs sre_lane_recycle.py: discovers running worker lanes, computes gates
+       (idle + git_clean + fresh_handoff [CAI-681 floor] + context_bloat>=80% [my
+       trigger]) and, WHEN ARMED, recycles only the genuinely-bloated ones.
+
+       ⚠ STAGED DISARMED — DO NOT arm until the CAI-700 two-task control passes on a
+       real lane AND cc-fleet-health confirms its A+B (canonical per-lane pct +
+       worker-lane content-valid amber checkpoint) is live. As written this is
+       DETECT-ONLY: it logs what it WOULD recycle and touches nothing (no --arm, no
+       CTX_WD_LANE_ARM). Safe to load for visibility as the SRE's telemetry fills in.
+
+       TO ARM (only post-proof): add "--arm" to ProgramArguments below (the boundary
+       + CTX_WD_LANE_ARM still fail-closed independently) and kickstart. Singletons
+       (hub/cai/Nazim/SRE) are structurally excluded in code — never recyclable here.
+
+       Pairs with dev.wingmen.context-health-watchdog (--arm=amber, the WRITE-ONLY
+       checkpoint that PRODUCES the fresh handoffs this half gates on). -->
+
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/sre_lane_recycle.py</string>
+    <!-- DISARMED: no --arm => detect-only. Arm ONLY after the two-task control. -->
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+
+  <!-- Off by default: not RunAtLoad, and left UNLOADED until we intentionally stage
+       it. When enabled, 600s cadence (context grows slowly; a reset is heavy). -->
+  <key>RunAtLoad</key><false/>
+  <key>StartInterval</key><integer>600</integer>
+
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+    <!-- Trigger threshold overridable: CTX_WD_HARD (0.80), CONSOLE_CTX_WINDOW (1M).
+         The ARM switch is CTX_WD_LANE_ARM=1 (or --arm) — deliberately NOT set here. -->
+  </dict>
+
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/sre-lane-recycle.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/sre-lane-recycle.out.log</string>
+</dict>
+</plist>

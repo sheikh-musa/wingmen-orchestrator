@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.context-health-watchdog</string>
+  <!-- ARMED=AMBER (CAI-RESP-500 + operator sign-off 2026-07-22). Runs
+       `--alert --arm=amber`:
+         --alert     : DETECTS + PAGES the operator on nazim-console when a 1M
+                       body (hub/cai) fogs.
+         --arm=amber : the WRITE-ONLY half of the executor — auto-checkpoints
+                       degrade-prone bodies at ≥SOFT (nudges them to write a fresh
+                       handoff). ZERO-RISK: it NEVER runs /clear.
+       The destructive RED half (/clear + boot) stays UNARMED from the scheduler
+       — cai gated it on stricter conditions not yet built. To enable auto-reset
+       later: change --arm=amber -> --arm=red, ONLY after those gates + review. -->
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/context_health_watchdog.py</string>
+    <string>--alert</string>
+    <string>--arm=amber</string>
+    <!-- detect + page + WRITE-ONLY auto-checkpoint; NO /clear (red stays unarmed) -->
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <!-- 10-min cadence when eventually enabled: context grows slowly; a reset is a
+       heavy action, so detection need not be frequent. -->
+  <key>StartInterval</key><integer>600</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+    <!-- Thresholds overridable: CTX_WD_SOFT (0.60), CTX_WD_HARD (0.80),
+         CTX_WD_HANDOFF_MAX_AGE_MIN (30), CONSOLE_CTX_WINDOW (1000000). -->
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/context-health-watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/context-health-watchdog.out.log</string>
+</dict>
+</plist>

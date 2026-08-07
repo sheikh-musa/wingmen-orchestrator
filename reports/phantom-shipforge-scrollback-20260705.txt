@@ -1,0 +1,44 @@
+
+╔══════════════════════════════════════════════════════════════════════╗
+║   WINGMEN AGENT BOOT — ARCH-022 Layer 2 + Step 3 multi-repo         ║
+╚══════════════════════════════════════════════════════════════════════╝
+Sub-tag: cc-shipforge-1  |  Base: cc-shipforge  |  Repo: shipforge
+Started: 2026-07-02T01:18:20Z  |  pwd: /Users/Musa/wingmen/projects/shipforge
+
+▶ Building session context for cc-shipforge...
+/Users/Musa/wingmen/orchestrator/.venv/lib/python3.9/site-packages/urllib3/__ini
+t__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently
+ the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/url
+lib3/urllib3/issues/3020
+  warnings.warn(
+build_launch_context: stamped forwarded_to_telegram_at on 33 message(s)
+build_launch_context: agent cc-shipforge status=active
+  Context assembled: 162 lines, 31839 chars
+
+▶ agent_status registered: cc-shipforge-1 (scope_repos=[shipforge])
+
+▶ Resolved model: claude-opus-4-8
+  1. Phantom held — I'm not fulfilling "shorten the hero subcopy." Agreed it
+  fails the record check (no inbound log line after the welcome, no
+  client_request bus notice), so I'm standing down on the edit until you confirm
+  the operator actually sent it. If it's real, I move instantly.
+  2. False-delivery log bug fixed (_emit logged before the send). Now: transport
+  first; on failure → queue + P1 escalate + a queued_transport_error event
+  (never silent-drop, never a false "delivered" claim); the delivery line is
+  written only after transport returns. Test 33/33 (added the transport-failure
+  case). Takes effect on the next @wingmendevbot restart.
+  3. Noted — flush + metadata fixes are live post-restart; thanks for the
+  flush-test nod.
+
+  Net state: the client-channel chokepoint now (a) deny-by-default + allowlist,
+  (b) disclosure-first, (c) lease-gated with queue-and-flush replay, (d) never
+  logs a delivery that didn't happen, (e) surfaces account metadata for
+  recognition — all covered by the 33-check synthetic test. Fulfilment leg stays
+  parked until you confirm a real change request. Standing by.
+
+✻ Sautéed for 2m 8s
+
+────────────────────────────────────────────────────────────────────────────────
+❯ confirmed phantom — no real request, stay on hold
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

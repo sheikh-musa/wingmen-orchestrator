@@ -42,7 +42,7 @@
       "supabase_project_ref": "FILL_IN",
       "status": "frozen-maintenance",
       "priority": 4,
-      "note": "Per IHSANOS-STOREFRONT-TG-001 (2026-05-28): dookana sunsets — storefront work moves to ihsanos repo (one backend, two surfaces). Frozen-maintenance covers P0 production-breaking + security only. Formal decommission once TG surface reaches parity."
+      "note": "Per IHSANOS-STOREFRONT-TG-001 (2026-05-28): dookana sunsets \u2014 storefront work moves to ihsanos repo (one backend, two surfaces). Frozen-maintenance covers P0 production-breaking + security only. Formal decommission once TG surface reaches parity."
     },
     {
       "name": "fastrans",
@@ -66,7 +66,9 @@
     },
     {
       "name": "hifz-companion",
-      "aliases": ["hifz"],
+      "aliases": [
+        "hifz"
+      ],
       "github": "https://github.com/sheikh-musa/hifz-companion",
       "local_path": "~/wingmen/projects/hifz-companion",
       "vercel_project": "hifz-companion",
@@ -96,6 +98,17 @@
       "priority": 5
     },
     {
+      "name": "wordpress-sites",
+      "github": null,
+      "local_path": "~/wingmen/projects/wordpress-sites",
+      "vercel_project": null,
+      "deploy_url": null,
+      "supabase_project_ref": null,
+      "status": "scaffold",
+      "priority": 4,
+      "note": "Layer-1 WordPress site-clone toolchain (CAI-WEB-CLONE-001/002/003). Owned by cc-ihsanos Lane C (sub_tag=cc-ihsanos-mirror); the mirror lane runs as the ihsanos worktree at ~/.config/superpowers/worktrees/ihsanos/mirror (branch feature/mirror/v0.1) and writes the toolchain into this repo for zero contention. Local-only until first push. Single-writer migrations: mirror requests schema from Lane B, never authors migrations."
+    },
+    {
       "name": "wingmen-orchestrator",
       "github": "https://github.com/sheikh-musa/wingmen-orchestrator",
       "local_path": "~/wingmen/orchestrator",
@@ -104,6 +117,19 @@
       "supabase_project_ref": "tscuymavysscrvoberrr",
       "status": "active",
       "priority": 1
+    },
+    {
+      "name": "cosem-platform",
+      "github": "https://github.com/sheikh-musa/cosem-platform",
+      "local_path": "~/wingmen/projects/cosem-platform",
+      "vercel_project": "cosem-platform-demo",
+      "deploy_url": null,
+      "supabase_project_ref": "ywrpttpxwfcoodovxhsr",
+      "supabase_region": "ap-southeast-1",
+      "supabase_note": "ywrpttpxwfcoodovxhsr is the shared DEMO/DEV DB (synthetic only) — NOT a home for real tenant data. Real ADCDA data needs its own UAE silo; TDU a dedicated SG prod org. See docs/data-store-registry.md (TENANT-RESIDENCY-001).",
+      "status": "active",
+      "priority": 2,
+      "notes": "Multi-tenant training platform (Next.js 16 + Supabase), strangler re-platform of COSEM apps — modules already LIVE (onboarding/people/exams/nfpa/attendance/assets/hr). Lane cc-cosem-platform. vercel_project corrected to cosem-platform-demo (per .vercel/project.json)."
     }
   ]
 }

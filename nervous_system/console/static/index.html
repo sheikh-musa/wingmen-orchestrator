@@ -6,6 +6,14 @@
 <meta name="robots" content="noindex,nofollow" />
 <meta name="color-scheme" content="dark" />
 <title>Fleet Console</title>
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#0b0e14" />
+<link rel="icon" href="/static/icons/icon-192.png" />
+<!-- iOS ignores the manifest for install chrome; these cover Add-to-Home-Screen there. -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Fleet" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
 <style>
   :root {
     --bg: #0b0e14; --panel: #131722; --panel-2: #1a2030; --line: #232a3a;
@@ -31,6 +39,8 @@
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
   header .conn { font: 12px/1 var(--mono); color: var(--dim); }
+  header .navlink { font: 13px/1 var(--mono); color: var(--accent); text-decoration: none; font-weight: 600; }
+  header .navlink:active { opacity: .7; }
   header .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     background: var(--dim); margin-right: 6px; vertical-align: middle; }
   header .dot.live { background: var(--good); box-shadow: 0 0 6px var(--good); }
@@ -67,8 +77,7 @@
   .col { flex: 1; min-width: 0; overflow: auto; -webkit-overflow-scrolling: touch; }
   main[data-tab="conv"]    .col:not(.conv),
   main[data-tab="lanes"]   .col:not(.lanes),
-  main[data-tab="deploys"] .col:not(.deploys),
-  main[data-tab="queue"]   .col:not(.queue) { display: none; }
+  main[data-tab="deploys"] .col:not(.deploys) { display: none; }
 
   .panel-head {
     position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line);
@@ -96,9 +105,18 @@
   .msg .subj { margin-top: 4px; font-weight: 600; line-height: 1.4; }
   .msg .body { margin-top: 3px; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
 
-  .lane { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+  .lane { padding: 12px 14px; border-bottom: 1px solid var(--line); border-left: 3px solid transparent;
+    display: flex; flex-direction: column; gap: 4px; }
+  .lane.flag-dark  { border-left-color: var(--bad); background: rgba(255,107,107,.07); }
+  .lane.flag-stale { border-left-color: var(--warn); background: rgba(240,180,41,.06); }
   .lane .top { display: flex; align-items: center; gap: 8px; }
   .lane .id { font: 13px var(--mono); }
+  .lane .flag {
+    font: 11px/1 var(--mono); font-weight: 700; letter-spacing: .3px; padding: 3px 8px;
+    border-radius: 9px; text-transform: uppercase;
+  }
+  .lane .flag.dark  { color: var(--bad);  background: rgba(255,107,107,.14); border: 1px solid rgba(255,107,107,.5); }
+  .lane .flag.stale { color: var(--warn); background: rgba(240,180,41,.14); border: 1px solid rgba(240,180,41,.5); }
   .lane .st { margin-left: auto; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--panel-2); }
   .lane .st.working { color: var(--good); } .lane .st.idle { color: var(--accent); }
   .lane .st.offline, .lane .st.blocked { color: var(--bad); }
@@ -107,10 +125,24 @@
   .lane .hb { font: 11px var(--mono); }
   .lane .hb.fresh { color: var(--good); } .lane .hb.stale { color: var(--warn); } .lane .hb.dead { color: var(--bad); }
   .lane .desired { font: 11px var(--mono); color: var(--dim); }
+  .lane .peek-toggle {
+    align-self: flex-start; margin-top: 2px; height: 30px; padding: 0 12px;
+    font: 11px var(--mono); font-weight: 600; letter-spacing: .3px; text-transform: uppercase;
+  }
+  .lane .peek-box {
+    display: none; margin-top: 6px; background: #05070c; border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; max-height: 50vh; overflow-y: auto;
+    -webkit-overflow-scrolling: touch; font: 11px/1.5 var(--mono); color: #9fe8b0;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .lane .peek-box.open { display: block; }
+  .lane.peeking { outline: 1px solid var(--accent, #4ade80); outline-offset: -1px; }
+  .lane .peek-box .peek-empty { color: var(--dim); font-style: italic; }
   .empty { padding: 28px 16px; color: var(--dim); font-size: 14px; text-align: center; }
 
   /* ---- deploys panel ---- */
-  .dep { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+  .dep { padding: 12px 14px; border-bottom: 1px solid var(--line); border-left: 3px solid transparent;
+    display: flex; flex-direction: column; gap: 4px; }
   .dep .top { display: flex; align-items: center; gap: 8px; }
   .dep .ws { font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
   .dep .stage {
@@ -124,6 +156,12 @@
   .dep .stage.pushed  { color: var(--accent); border-color: rgba(91,140,255,.55); }
   .dep .stage.pending { color: var(--dim); }
   .dep .stage.blocked { color: var(--bad); border-color: var(--bad); box-shadow: 0 0 6px rgba(255,107,107,.5); }
+  .dep.flag-stalled { border-left: 3px solid var(--warn); background: rgba(240,180,41,.06); }
+  .dep .stalled {
+    font: 11px/1 var(--mono); font-weight: 700; letter-spacing: .3px; text-transform: uppercase;
+    color: var(--warn); background: rgba(240,180,41,.14); border: 1px solid rgba(240,180,41,.5);
+    padding: 3px 8px; border-radius: 9px;
+  }
   .dep .sub { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font: 12px var(--mono); color: var(--dim); }
   .dep .repo { color: var(--txt); }
   .dep .detail { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
@@ -131,7 +169,8 @@
   .dep a.url:active { opacity: .7; }
   .dep .age { margin-left: auto; }
 
-  /* ---- queue panel (per-lane task lists, manual priority order) ---- */
+  /* ---- lane tasks (folded into the Lanes card, was a separate Queue tab) ---- */
+  .lane .tasks { margin: 6px -14px 0; border-top: 1px dashed var(--line); }
   .qlane { padding: 10px 14px 5px; font: 11px var(--mono); font-weight: 700; text-transform: uppercase;
     letter-spacing: .5px; color: var(--accent); border-bottom: 1px solid var(--line);
     position: sticky; top: 0; background: var(--bg); z-index: 1; }
@@ -159,8 +198,9 @@
     .token-row input { width: 240px; flex: none; height: 34px; }
     button { height: 34px; }
     .tabbar { display: none; }
-    /* conv spans both rows on the left; lanes + deploys stack in the right column */
-    .panels { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: 1fr 1fr 1fr; }
+    /* conv (Messages) spans both rows on the left; lanes (now incl. queue +
+       peek, so given more height) + deploys stack in the right column */
+    .panels { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: 3fr 2fr; }
     .col { display: block !important; overflow: auto; }
     .col.conv    { grid-column: 1; grid-row: 1 / 4; border-right: 1px solid var(--line); }
     .col.lanes   { grid-column: 2; grid-row: 1; border-bottom: 1px solid var(--line); }
@@ -168,39 +208,56 @@
     .col.queue   { grid-column: 2; grid-row: 3; }
     .filters input { height: 30px; } .filters button.ghost { height: 30px; }
   }
+
+  /* ---- pull-to-refresh (mobile/PWA: iOS standalone has no native PTR) ---- */
+  #ptr {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    height: 0; overflow: hidden; pointer-events: none;
+    background: var(--panel); color: var(--dim);
+    font: 12px/1 var(--mono); letter-spacing: .3px;
+    padding-top: env(safe-area-inset-top);
+    transition: none; /* JS drives height while dragging; set for the snap-back */
+  }
+  #ptr .spin { display: inline-block; transition: transform .15s ease; }
+  #ptr.armed { color: var(--accent); }
+  #ptr.armed .spin { transform: rotate(180deg); }
+  #ptr.snap { transition: height .2s ease; }
+  #ptr.refreshing .spin { animation: ptrspin .7s linear infinite; }
+  @keyframes ptrspin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
+<div id="ptr"><span class="spin">&darr;</span><span id="ptrTxt">Pull to refresh</span></div>
 <header>
   <h1>Fleet Console</h1>
   <span class="conn"><span id="dot" class="dot"></span><span id="connTxt">offline</span></span>
-  <div class="token-row">
-    <input id="token" type="password" inputmode="text" placeholder="operator token" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
-    <button id="connect">Connect</button>
-  </div>
+  <a class="navlink" href="/" style="color:var(--good)">&#8592; Fleet view</a>
+  <a class="navlink" href="/docs">Docs &rarr;</a>
+  <a class="navlink" href="/media">Screenshots &rarr;</a>
 </header>
 
-<main data-tab="conv">
+<main data-tab="lanes">
   <nav class="tabbar">
-    <button data-go="conv">Convo</button>
     <button data-go="lanes">Lanes</button>
+    <button data-go="conv">Messages</button>
     <button data-go="deploys">Deploys</button>
     <button data-go="queue">Queue</button>
   </nav>
   <div class="panels">
     <section class="col conv">
       <div class="panel-head">
-        <h2>Conversation</h2>
+        <h2>Messages</h2>
         <div class="filters">
           <input id="fThread" placeholder="thread" inputmode="numeric" />
           <input id="fAgent" placeholder="agent" autocapitalize="off" autocorrect="off" spellcheck="false" />
           <button class="ghost" id="applyFilters">Filter</button>
         </div>
       </div>
-      <div id="messages"><div class="empty">Enter the operator token and Connect.</div></div>
+      <div id="messages"><div class="empty">Connecting&hellip;</div></div>
     </section>
     <section class="col lanes">
-      <div class="panel-head"><h2>Lane status</h2>
+      <div class="panel-head"><h2>Lanes</h2>
         <button class="ghost" id="refreshLanes" style="margin-left:auto">Refresh</button></div>
       <div id="lanes"><div class="empty">—</div></div>
     </section>
@@ -224,6 +281,22 @@
     var main = document.querySelector('main');
     document.querySelectorAll('.tabbar button').forEach(function (b) {
       b.addEventListener('click', function () { main.setAttribute('data-tab', b.getAttribute('data-go')); });
+    });
+  })();
+
+  /* PWA service worker: register + reload EXACTLY once when a new worker
+     takes control. The guard prevents a refresh loop (its own blank/thrash
+     failure distinct from, but as bad as, never updating at all). */
+  (function () {
+    if (!('serviceWorker' in navigator)) return;
+    var refreshing = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    });
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function (e) {
+      console.warn('SW registration failed', e);
     });
   })();
 </script>

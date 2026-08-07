@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  D2 composer catch (CAI-RESP-387, due 2026-07-08). Durable so it survives
+  session kills — the previous foreground run was cleaned up with its session.
+  Polls the tmux socket + send-keys commands; logs any writer's PID+parent.
+  KeepAlive restarts it if it dies. Remove once the composer is caught + fixed.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.sendkeys-catcher</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/Musa/wingmen/orchestrator/scripts/sendkeys_catcher.sh</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>/Users/Musa/wingmen/orchestrator/logs/sendkeys_catcher.err</string>
+</dict>
+</plist>

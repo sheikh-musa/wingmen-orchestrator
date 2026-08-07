@@ -69,6 +69,47 @@ def _extract_quoted_strings(text: str) -> list[str]:
     return list(dict.fromkeys(found))[:5]  # dedupe, cap at 5
 
 
+def _resolve_base_ref(repo_path: str) -> tuple[str, str]:
+    """Pin the spec to the repo's current default-branch HEAD (CAI-RESP-358).
+
+    Jobs 185 and 187 both shipped specs with no base ref — the executing agent
+    branched from whatever was checked out, sometimes days stale. Every spec now
+    carries an exact (branch, sha) resolved AT SPEC TIME; unresolvable = raise,
+    never emit an unpinned spec.
+    """
+    import subprocess
+    # Best-effort freshen; a fetch failure must not block pinning (offline dev),
+    # the local origin/<branch> ref is still an honest pin.
+    subprocess.run(["git", "-C", repo_path, "fetch", "origin", "--quiet"],
+                   capture_output=True, timeout=30)
+    head = subprocess.run(
+        ["git", "-C", repo_path, "symbolic-ref", "refs/remotes/origin/HEAD"],
+        capture_output=True, text=True, timeout=10).stdout.strip()
+    branch = head.rsplit("/", 1)[-1] if head else "main"
+    sha = subprocess.run(
+        ["git", "-C", repo_path, "rev-parse", f"origin/{branch}"],
+        capture_output=True, text=True, timeout=10).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise RuntimeError(
+            f"cannot pin base ref for {repo_path} (origin/{branch} unresolvable) — "
+            "refusing to emit an unpinned spec (CAI-RESP-358)")
+    return branch, sha
+
+
+def _base_ref_section(branch: str, sha: str) -> str:
+    return f"""
+
+### Base Ref (pinned — CAI-RESP-358)
+Branch from EXACTLY this commit:
+
+    git fetch origin && git checkout -b <your-job-branch> {sha}
+
+Pinned at spec time: origin/{branch} @ `{sha}`.
+If origin/{branch} has moved past this sha when you execute, re-verify the spec's
+file assumptions against the new HEAD before proceeding — never silently rebase.
+"""
+
+
 def _build_grounding_section(job: dict, context: dict) -> str:
     """Pre-flight grep the repo to inject real file paths into the prompt.
 
@@ -125,6 +166,12 @@ async def generate_spec(job: dict, context: dict) -> str:
     # Pre-flight grep: ground the spec in real file paths before asking Claude to write it.
     # The spec generator has NO filesystem access, so without this it hallucinates paths.
     grounding = _build_grounding_section(job, context)
+
+    # CAI-RESP-358: pin the base ref BEFORE generating — unresolvable raises,
+    # so an unpinned spec can never be emitted (jobs 185/187 proved the gap).
+    repo_path = context.get("repo_path") or repo_config.get("path", "") or os.path.expanduser(
+        repo_config.get("local_path", "").replace("~", "~"))
+    base_branch, base_sha = _resolve_base_ref(os.path.expanduser(repo_path))
 
     # For bug reports, include the original session_prompt as the primary task anchor.
     # The spec generator must not replace it with a hallucinated implementation plan.
@@ -268,7 +315,9 @@ End with: <promise>JOB_{job['id']}_DONE</promise>
     if not result:
         raise RuntimeError(f"Spec generation failed: {stderr.decode(errors='replace')}")
 
-    return result
+    # CAI-RESP-358: append the pinned base ref DETERMINISTICALLY — never trust
+    # the model to echo a sha. Resolved before the CLI call (raises if unpinnable).
+    return result + _base_ref_section(base_branch, base_sha)
 
 
 def validate_spec(spec_text: str, job_id: int) -> tuple[bool, list[str]]:
@@ -286,6 +335,12 @@ def validate_spec(spec_text: str, job_id: int) -> tuple[bool, list[str]]:
     promise = f"<promise>JOB_{job_id}_DONE</promise>"
     if promise not in spec_text:
         errors.append(f"Missing promise tag: {promise}")
+
+    # CAI-RESP-358: a spec without an exact pinned base sha is invalid, full stop.
+    if "### base ref" not in lower:
+        errors.append("Missing section: ### Base Ref (pinned — CAI-RESP-358)")
+    elif not re.search(r"origin/\S+ @ `[0-9a-f]{40}`", spec_text):
+        errors.append("Base Ref section present but no pinned 40-hex sha (CAI-RESP-358)")
 
     return (len(errors) == 0, errors)
 

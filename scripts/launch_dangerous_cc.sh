@@ -111,6 +111,31 @@ HEARTBEAT_PID=""
 # in .env, not the operator's shell).
 # shellcheck disable=SC1091
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# Fleet lane-default OAuth account (token conservation, op#7985/7987): spread
+# every LANE boot off the operator's personal Max onto a donor account (e.g.
+# Syed) so his weekly pool is reserved for the console. Precedence — highest
+# wins:
+#   1. explicit CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE (launch_lane_as.sh <file>)
+#   2. $ORCH_DIR/.lane_default_token  — a POINTER file holding the PATH to a
+#      0600 token file (never the token itself, so no secret enters the repo)
+#   3. .env CLAUDE_CODE_OAUTH_TOKEN   — the fallback account
+# ONLY launch_dangerous_cc.sh (lanes) reads this. The console (boot_nazim.sh) is
+# a separate launcher that never sources it, so the console STAYS on the .env
+# account by design — exactly the operator's "reserve my 10% for the console".
+# Fail-open: an unreadable/stale pointer path is skipped silently → .env account.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ] && [ -r "$ORCH_DIR/.lane_default_token" ]; then
+    _LANE_DEFAULT_TOKFILE="$(tr -d '[:space:]' < "$ORCH_DIR/.lane_default_token")"
+    if [ -n "$_LANE_DEFAULT_TOKFILE" ] && [ -r "$_LANE_DEFAULT_TOKFILE" ]; then
+        export CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE="$(cat "$_LANE_DEFAULT_TOKFILE")"
+        echo -e "\033[2m  lane-default OAuth account applied (pointer: .lane_default_token → ${_LANE_DEFAULT_TOKFILE})\033[0m" >&2
+    fi
+fi
+# Per-lane OAuth token override (e.g. a donor/loaner account during a cap crunch).
+# Applied AFTER the .env source so it wins; distinct var name so `set -a; . .env`
+# cannot clobber it. Unset for normal lanes → no effect on billing.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"
+fi
 # Max-subscription billing for lanes — two parts, both load-bearing:
 #  1. Scrub ANTHROPIC_API_KEY: .env carries it for the orch's own API calls, but
 #     a present ANTHROPIC_API_KEY makes `claude` use metered API-usage billing.
@@ -630,7 +655,31 @@ trap '_handle_exit' EXIT
 # `--model $RESOLVED_MODEL` to the claude call → append "${CLAUDE_PASSTHROUGH[@]}"
 # AFTER it, so a passthrough --model overrides by coming later on argv.
 
-RESOLVED_MODEL="${MODEL:-claude-opus-4-8}"
+# FLEET_MODEL lever (scripts/fleet_model.sh): precedence MODEL env > .fleet_model file > opus default.
+# Lets the operator flip new engineer-lane launches Opus<->Sonnet in one place for token conservation.
+_FLEET_MODEL_FILE="$ORCH_DIR/.fleet_model"
+_FLEET_MODEL_DEFAULT="claude-opus-4-8"
+if [ -r "$_FLEET_MODEL_FILE" ]; then
+    _fm="$(tr -d '[:space:]' < "$_FLEET_MODEL_FILE")"
+    [ -n "$_fm" ] && _FLEET_MODEL_DEFAULT="$_fm"
+fi
+# PER-BODY model pointer (op#10706 R2, orch-console #16038): .<session>_model holds
+# a model id that overrides the fleet-wide .fleet_model for THIS body ONLY, so an
+# operator's per-lane model choice STICKS across reboots. Precedence (highest last):
+#   MODEL env > .<session>_model > .fleet_model > opus-4-8   (passthrough `-- --model`
+# still wins, appended AFTER on argv). Revert = rm the pointer. Inert until written,
+# so this is a no-op for every body that has no pointer. Read-only trust matches
+# .fleet_model (the gated apply-model path validates against the model allowlist
+# BEFORE writing a pointer, so nothing invalid lands here).
+_BODY_MODEL_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+_BODY_MODEL_DEFAULT=""
+if [ -n "$_BODY_MODEL_SESSION" ] && [ -r "$ORCH_DIR/.${_BODY_MODEL_SESSION}_model" ]; then
+    _bm="$(tr -d '[:space:]' < "$ORCH_DIR/.${_BODY_MODEL_SESSION}_model")"
+    [ -n "$_bm" ] && _BODY_MODEL_DEFAULT="$_bm"
+fi
+# per-body pointer (if any) overrides the fleet default; MODEL env still overrides both.
+_NON_ENV_MODEL="${_BODY_MODEL_DEFAULT:-$_FLEET_MODEL_DEFAULT}"
+RESOLVED_MODEL="${MODEL:-$_NON_ENV_MODEL}"
 echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}"
 if [ "$RESOLVED_MODEL" != "claude-opus-4-8" ]; then
     echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-8)${RESET}"
@@ -642,6 +691,22 @@ fi
 # a pure DB read instead of cross-process introspection (sandbox-blocked under
 # launchd). Empty when not launched inside tmux -> stored NULL.
 CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+
+# AUTH ATTRIBUTION (op#7094, migration 033): stamp WHICH MACHINE and WHICH CLAUDE ACCOUNT this
+# session actually authenticated with. The fleet console used to display every lane as the
+# operator's; it never knew — it assumed, and was wrong for months (the Studio ran on a different
+# account entirely, which only surfaced when it hit a session cap the Mini didn't share).
+# CLAUDE_ACCOUNT_LABEL is a human CLAIM from this host's .env; the fingerprint is the FACT.
+# Only sha256(token)[:12] is stored — never the token.
+CC_HOST="$(hostname -s 2>/dev/null || echo unknown)"
+CC_AUTH_LABEL="${CLAUDE_ACCOUNT_LABEL:-unlabelled}"
+CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
+# Two guards, because an empty token hashes to a REAL-LOOKING value. sha256("") starts
+# e3b0c44298fc — identical for every agent that computes it, so an unguarded stamp would show
+# a set of lanes confidently sharing one account. That is strictly worse than blank: blank reads
+# as missing data, e3b0c442 reads as an answer. (Trap spotted by cc-caai, 2026-07-25.)
+[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || CC_AUTH_FP=""
+[ "$CC_AUTH_FP" = "e3b0c44298fc" ] && CC_AUTH_FP=""
 "$VENV_PY" -c "
 import os, sys
 sys.path.insert(0, '$ORCH_DIR')
@@ -659,18 +724,24 @@ try:
         with conn.cursor() as cur:
             cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$CC_AGENT_ID',))
             cur.execute(
-                \"UPDATE agent_status SET current_task = %s, tmux_session = NULLIF(%s, ''), updated_at=now() WHERE agent_id = %s\",
-                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_TMUX_SESSION', '$CC_AGENT_ID'),
+                \"UPDATE agent_status SET current_task = %s, tmux_session = NULLIF(%s, ''), \"
+                \"host = NULLIF(%s,''), auth_account = NULLIF(%s,''), auth_fp = NULLIF(%s,''), \"
+                \"updated_at=now() WHERE agent_id = %s\",
+                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_TMUX_SESSION',
+                 '$CC_HOST', '$CC_AUTH_LABEL', '$CC_AUTH_FP', '$CC_AGENT_ID'),
             )
         conn.commit()
 except Exception:
     pass
 " 2>/dev/null || true
 
+
 # Resolve claude robustly: when a lane is booted over a NON-LOGIN SSH session
 # (Nazim spinning the fan-out from the Mini) or under launchd, PATH is minimal
 # and bare `claude` isn't found — the lane dies at launch. Mirror boot_orch.sh:
 # prefer `command -v`, then fall back through the known per-user/brew locations.
+# (Studio-local fix, 2026-07-25 — recovered from an APFS snapshot after Nazim
+# scp'd over it; folded into the canonical copy so it stops living on one host.)
 CLAUDE_BIN="$(command -v claude || true)"
 if [[ -z "$CLAUDE_BIN" ]]; then
     for _c in "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do

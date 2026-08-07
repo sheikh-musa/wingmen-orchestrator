@@ -55,6 +55,16 @@ def test_lanes_query_is_select_only():
         assert bad not in lowered
 
 
+def test_lanes_query_selects_tmux_session():
+    """Regression: the live-pane peek needs the per-INSTANCE self-registered
+    session name (agent_status.tmux_session, migration 005), not just
+    fleet_lanes.lane — a static label shared by a whole agent family (every
+    cc-reviewer-N row has lane='reviewer') that can't resolve to one specific
+    on-demand session when several are live at once (found live 2026-07-04)."""
+    sql, params = db.build_lanes_query()
+    assert "s.tmux_session" in sql
+
+
 def test_messages_query_limit_clamped():
     # An absurd limit is clamped to MAX_LIMIT (DoS / oversized-read guard).
     sql, params = db.build_messages_query(limit=10_000, thread=None, agent=None)

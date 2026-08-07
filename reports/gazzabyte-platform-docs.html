@@ -1,0 +1,388 @@
+<title>Platform Documentation — Gazzabyte</title>
+<style>
+  :root {
+    --ground: #f4f7f9; --surface: #ffffff; --surface-2: #f0f4f6; --surface-3: #e9eff3;
+    --ink: #142433; --ink-soft: #4a5a6a; --ink-faint: #7a8a99;
+    --line: #dde5eb; --line-soft: #e8eef2;
+    --accent: #0e8f83; --accent-soft: #d6ece9;
+    --gold: #b8862c; --gold-soft: #f2e6cd;
+    --good: #1f9d57; --warn: #d9871c;
+    --shadow: 0 1px 2px rgba(20,36,51,.05), 0 8px 24px rgba(20,36,51,.05);
+    --radius: 14px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0c1420; --surface: #131f2d; --surface-2: #172436; --surface-3: #1d2c3e;
+      --ink: #e9f0f6; --ink-soft: #a7b7c6; --ink-faint: #6f8091;
+      --line: #24354a; --line-soft: #1d2c3e;
+      --accent: #2fb6a8; --accent-soft: #16352f;
+      --gold: #e0b158; --gold-soft: #33280f;
+      --good: #35b56e; --warn: #e8a13e;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.28);
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #f4f7f9; --surface: #ffffff; --surface-2: #f0f4f6; --surface-3: #e9eff3;
+    --ink: #142433; --ink-soft: #4a5a6a; --ink-faint: #7a8a99;
+    --line: #dde5eb; --line-soft: #e8eef2;
+    --accent: #0e8f83; --accent-soft: #d6ece9; --gold: #b8862c; --gold-soft: #f2e6cd;
+    --good: #1f9d57; --warn: #d9871c;
+    --shadow: 0 1px 2px rgba(20,36,51,.05), 0 8px 24px rgba(20,36,51,.05);
+  }
+  :root[data-theme="dark"] {
+    --ground: #0c1420; --surface: #131f2d; --surface-2: #172436; --surface-3: #1d2c3e;
+    --ink: #e9f0f6; --ink-soft: #a7b7c6; --ink-faint: #6f8091;
+    --line: #24354a; --line-soft: #1d2c3e;
+    --accent: #2fb6a8; --accent-soft: #16352f; --gold: #e0b158; --gold-soft: #33280f;
+    --good: #35b56e; --warn: #e8a13e;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.28);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.55; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: clamp(20px, 4vw, 44px) clamp(16px, 4vw, 40px) 72px; }
+
+  /* sticky mini-nav */
+  nav.toc {
+    position: sticky; top: 0; z-index: 20; margin: 0 0 34px;
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  nav.toc .inner { max-width: 940px; margin: 0 auto; padding: 11px clamp(16px, 4vw, 40px);
+    display: flex; align-items: center; gap: 6px 18px; flex-wrap: wrap; }
+  nav.toc .brand { font-size: 13px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink); margin-right: auto; }
+  nav.toc .brand span { color: var(--accent); }
+  nav.toc a {
+    font-size: 12.5px; font-weight: 600; color: var(--ink-soft); text-decoration: none;
+    padding: 4px 2px; border-bottom: 2px solid transparent; white-space: nowrap;
+  }
+  nav.toc a:hover { color: var(--accent); border-color: var(--accent); }
+  nav.toc a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+
+  header.doc { margin-bottom: 40px; }
+  .eyebrow { text-transform: uppercase; letter-spacing: .16em; font-size: 12px; font-weight: 600; color: var(--accent); margin: 0 0 10px; }
+  h1 { font-size: clamp(28px, 5vw, 42px); line-height: 1.06; font-weight: 700; letter-spacing: -0.025em; margin: 0 0 12px; text-wrap: balance; }
+  .lede { color: var(--ink-soft); font-size: 16.5px; max-width: 64ch; margin: 0; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-soft); font-size: 13px; color: var(--ink-faint); }
+  .meta b { color: var(--ink-soft); font-weight: 600; }
+
+  section.part { margin-top: 8px; padding-top: 40px; scroll-margin-top: 72px; }
+  section.part + section.part { border-top: 1px solid var(--line); margin-top: 44px; }
+  .part-num { font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12.5px; font-weight: 600; color: var(--accent); letter-spacing: .04em; }
+  h2 { font-size: clamp(21px, 3.4vw, 27px); font-weight: 700; letter-spacing: -0.02em; margin: 6px 0 8px; text-wrap: balance; }
+  .part-lede { color: var(--ink-soft); font-size: 15px; margin: 0 0 26px; max-width: 66ch; }
+  h3 { font-size: 15.5px; font-weight: 650; letter-spacing: -0.01em; margin: 30px 0 12px; }
+  p { margin: 0 0 12px; }
+  .card p:last-child, .note p:last-child { margin-bottom: 0; }
+  code { font-family: var(--mono); font-size: .86em; background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 5px; padding: 1px 5px; color: var(--ink-soft); }
+
+  /* sitemap tree */
+  .tree { display: grid; gap: 12px; }
+  .branch { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+  .branch-head { display: flex; align-items: center; gap: 11px; padding: 13px 16px; background: var(--surface-2); border-bottom: 1px solid var(--line-soft); }
+  .branch-head .ic { width: 26px; height: 26px; border-radius: 7px; flex: none; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 700; }
+  .branch-head h4 { margin: 0; font-size: 14.5px; font-weight: 650; letter-spacing: -0.01em; }
+  .branch-head .sub { margin-left: auto; font-size: 12px; color: var(--ink-faint); }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; padding: 14px 16px; }
+  .chip { font-size: 12.5px; font-weight: 550; color: var(--ink-soft); background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 4px 10px; }
+  .chip.key { border-color: var(--accent-soft); color: var(--accent); background: var(--accent-soft); }
+  .branch-desc { padding: 0 16px 14px; font-size: 13.5px; color: var(--ink-soft); }
+
+  /* access-model two-layer */
+  .layers { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: stretch; margin: 6px 0 8px; }
+  @media (max-width: 720px) { .layers { grid-template-columns: 1fr; } .layers .amp { transform: rotate(90deg); padding: 4px 0; } }
+  .layer { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 17px; box-shadow: var(--shadow); }
+  .layer .who { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); margin: 0 0 6px; }
+  .layer h4 { margin: 0 0 7px; font-size: 15px; font-weight: 650; }
+  .layer p { font-size: 13.5px; color: var(--ink-soft); margin: 0; }
+  .amp { display: grid; place-items: center; font-size: 22px; font-weight: 700; color: var(--ink-faint); }
+  .verdict { margin-top: 4px; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 10px; padding: 12px 15px; font-size: 13.5px; color: var(--ink); }
+  .verdict b { color: var(--accent); }
+
+  /* workflow flow */
+  .flow { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; margin: 4px 0 6px; }
+  .state { flex: 1 1 150px; min-width: 140px; background: var(--surface); border: 1.5px solid var(--line); border-radius: var(--radius); padding: 14px 15px; box-shadow: var(--shadow); position: relative; }
+  .state .sname { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--accent); letter-spacing: .01em; }
+  .state .sdesc { font-size: 12.5px; color: var(--ink-soft); margin-top: 5px; }
+  .state.terminal { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+  .state.terminal .sname { color: var(--good); }
+  .arrow { flex: 0 0 auto; display: grid; place-items: center; padding: 0 6px; min-width: 118px; }
+  @media (max-width: 700px) { .flow { flex-direction: column; } .arrow { min-width: 0; padding: 10px 0; } .arrow svg { transform: rotate(90deg); } }
+  .arrow .lbl { font-size: 11.5px; font-weight: 600; color: var(--ink-soft); text-align: center; margin-bottom: 4px; line-height: 1.3; }
+  .arrow svg { width: 100%; height: 16px; color: var(--ink-faint); }
+  .reopen { margin-top: 14px; display: flex; align-items: center; gap: 11px; background: var(--surface-2); border: 1px dashed var(--line); border-radius: 10px; padding: 11px 15px; font-size: 13px; color: var(--ink-soft); }
+  .reopen .rl { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--warn); flex: none; }
+
+  .guard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 22px; }
+  @media (max-width: 640px) { .guard-grid { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 15px 16px; box-shadow: var(--shadow); }
+  .card .ct { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+  .card .ct .badge { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; padding: 2px 8px; border-radius: 20px; }
+  .badge.control { background: var(--accent-soft); color: var(--accent); }
+  .badge.rule { background: var(--gold-soft); color: var(--gold); }
+  .badge.soon { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent); }
+  .card.soon { border-style: dashed; }
+  .card h4 { margin: 0; font-size: 14.5px; font-weight: 650; }
+  .card p { font-size: 13.5px; color: var(--ink-soft); }
+
+  /* roles table */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 13.5px; background: var(--surface); }
+  thead th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-faint); font-weight: 700; padding: 12px 15px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+  tbody td { padding: 12px 15px; border-bottom: 1px solid var(--line-soft); color: var(--ink-soft); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td:first-child { color: var(--ink); font-weight: 600; white-space: nowrap; }
+  tbody td code { font-size: 12px; }
+
+  .sop { display: grid; gap: 11px; margin-top: 6px; counter-reset: step; }
+  .sop .step { display: flex; gap: 13px; background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 13px 15px; box-shadow: var(--shadow); }
+  .sop .step::before { counter-increment: step; content: counter(step); flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 700; display: grid; place-items: center; }
+  .sop .step .body { font-size: 13.5px; color: var(--ink-soft); }
+  .sop .step .body b { color: var(--ink); font-weight: 600; }
+
+  .note { display: flex; gap: 12px; background: var(--gold-soft); border: 1px solid color-mix(in srgb, var(--gold) 30%, transparent); border-radius: 11px; padding: 13px 16px; margin-top: 20px; font-size: 13px; color: var(--ink); }
+  .note .ni { flex: none; color: var(--gold); font-weight: 700; }
+
+  footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--ink-faint); line-height: 1.6; }
+
+  .pdf-btn { position: fixed; right: 20px; bottom: 20px; z-index: 30; display: inline-flex; align-items: center; gap: 8px; font: inherit; font-size: 13px; font-weight: 600; color: #fff; background: var(--accent); border: none; border-radius: 10px; padding: 11px 16px; cursor: pointer; box-shadow: 0 6px 20px rgba(14,143,131,.35); transition: filter .15s ease; }
+  .pdf-btn:hover { filter: brightness(1.07); }
+  .pdf-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .pdf-btn svg { width: 15px; height: 15px; }
+
+  @media print {
+    :root { --ground:#fff; --surface:#fff; --surface-2:#f3f5f7; --surface-3:#eef1f4; --ink:#111; --ink-soft:#333; --ink-faint:#555; --line:#ccc; --line-soft:#ddd; --shadow:none; }
+    body { background: #fff; }
+    nav.toc, .pdf-btn { display: none !important; }
+    .wrap { max-width: none; padding: 0; }
+    section.part { break-inside: avoid-page; }
+    .card, .branch, .layer, .state, .step { break-inside: avoid; box-shadow: none; }
+    a { color: inherit; text-decoration: none; }
+  }
+</style>
+
+<nav class="toc">
+  <div class="inner">
+    <span class="brand">Gazzabyte <span>&times;</span> Platform Docs</span>
+    <a href="#sitemap">1 · Sitemap</a>
+    <a href="#workflow">2 · Approval workflow</a>
+    <a href="#access">3 · Access &amp; SOPs</a>
+  </div>
+</nav>
+
+<div class="wrap">
+  <header class="doc">
+    <p class="eyebrow">Reseller documentation set</p>
+    <h1>Platform documentation</h1>
+    <p class="lede">A client-ready reference for the donation-management platform &mdash; the surfaces it offers, how the tabung approval workflow protects every figure, and who can see and do what. Written for you to present to institutions.</p>
+    <div class="meta">
+      <span>Prepared by <b>Wingmen</b> for Gazzabyte</span>
+      <span>Three parts: <b>Sitemap</b> &middot; <b>Approval workflow</b> &middot; <b>Access &amp; SOPs</b></span>
+      <span>Facts drawn from the live platform</span>
+    </div>
+  </header>
+
+  <!-- ============ PART 1: SITEMAP ============ -->
+  <section class="part" id="sitemap">
+    <span class="part-num">PART 01</span>
+    <h2>Platform sitemap</h2>
+    <p class="part-lede">What the platform is made of. The public entry points an institution's visitors and staff land on, the day-to-day dashboard where the work happens, and the administration layer you operate as the reseller.</p>
+
+    <div class="tree">
+      <div class="branch">
+        <div class="branch-head"><span class="ic">◇</span><h4>Public &amp; entry</h4><span class="sub">visitor / staff facing</span></div>
+        <div class="chips">
+          <span class="chip">Storefront / Shop</span>
+          <span class="chip">Point of sale</span>
+          <span class="chip">Onboarding</span>
+          <span class="chip">Sign-in</span>
+          <span class="chip">Invoice</span>
+          <span class="chip">Receipts</span>
+          <span class="chip">Docs</span>
+          <span class="chip">Privacy &amp; Terms</span>
+        </div>
+        <div class="branch-desc">The outward-facing surfaces: a public storefront, an in-person point-of-sale flow, self-serve onboarding, and the sign-in that gates everything below.</div>
+      </div>
+
+      <div class="branch">
+        <div class="branch-head"><span class="ic">▦</span><h4>Dashboard &mdash; the working app</h4><span class="sub">16 modules</span></div>
+        <div class="chips">
+          <span class="chip key">Tabung</span>
+          <span class="chip key">Donations</span>
+          <span class="chip key">Receipts</span>
+          <span class="chip">Reports</span>
+          <span class="chip">Cashier</span>
+          <span class="chip">Point of sale</span>
+          <span class="chip">Orders</span>
+          <span class="chip">Invoicing</span>
+          <span class="chip">Storefront</span>
+          <span class="chip">Qurban</span>
+          <span class="chip">People</span>
+          <span class="chip">HR</span>
+          <span class="chip">School</span>
+          <span class="chip">Audit</span>
+          <span class="chip">Admin</span>
+          <span class="chip">Settings</span>
+        </div>
+        <div class="branch-desc">The signed-in workspace. Each module is a self-contained area &mdash; and each one can be turned on or off per institution, then opened to specific roles (see Part&nbsp;3). Highlighted modules carry the donation &amp; tabung flow.</div>
+      </div>
+
+      <div class="branch">
+        <div class="branch-head"><span class="ic">⚙</span><h4>Administration &mdash; reseller layer</h4><span class="sub">Gazzabyte-operated</span></div>
+        <div class="chips">
+          <span class="chip">Organisation directory</span>
+          <span class="chip">Per-org module control</span>
+          <span class="chip">Platform administrators</span>
+        </div>
+        <div class="branch-desc">The control room you operate: list the institutions on the platform, switch each institution's modules on or off, and manage who holds platform-administrator access.</div>
+      </div>
+    </div>
+
+    <div class="note"><span class="ni">Note</span><div>A module is visible to a user only when it is <b>both</b> enabled for their institution <b>and</b> opened to their role. That two-key rule is the subject of Part&nbsp;3.</div></div>
+  </section>
+
+  <!-- ============ PART 2: WORKFLOW ============ -->
+  <section class="part" id="workflow">
+    <span class="part-num">PART 02</span>
+    <h2>Tabung approval workflow</h2>
+    <p class="part-lede">How a weekly tabung (collection) report moves from a working draft to a closed, dual-signed record &mdash; and the safeguards that make sure no single person can quietly complete it.</p>
+
+    <div class="flow">
+      <div class="state">
+        <div class="sname">DRAFT</div>
+        <div class="sdesc">Figures are entered here; the report stays editable while it remains a draft.</div>
+      </div>
+      <div class="arrow">
+        <div class="lbl">Preparer signs</div>
+        <svg viewBox="0 0 100 16" preserveAspectRatio="none" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="0" y1="8" x2="92" y2="8"/><polyline points="86,3 94,8 86,13"/></svg>
+      </div>
+      <div class="state">
+        <div class="sname">PREPARER_SIGNED</div>
+        <div class="sdesc">Locked from edits. The preparer's signature is recorded in a tamper-evident audit trail.</div>
+      </div>
+      <div class="arrow">
+        <div class="lbl">Endorser closes<br>(must differ)</div>
+        <svg viewBox="0 0 100 16" preserveAspectRatio="none" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="0" y1="8" x2="92" y2="8"/><polyline points="86,3 94,8 86,13"/></svg>
+      </div>
+      <div class="state terminal">
+        <div class="sname">CLOSED</div>
+        <div class="sdesc">Finalised. Signed by a preparer and endorsed by a second person.</div>
+      </div>
+    </div>
+
+    <div class="reopen">
+      <span class="rl">↺ REOPEN</span>
+      <div>Only an <b>org admin</b> can send a <code>preparer_signed</code> report back to <code>draft</code>, and only with a recorded reason. A report that has <b>ever been signed</b> keeps that mark permanently &mdash; reopening cannot clear it &mdash; and that is what enforces preparer-only re-signing (below). A <code>closed</code> report is terminal: it cannot be reopened.</div>
+    </div>
+
+    <div class="guard-grid">
+      <div class="card">
+        <div class="ct"><span class="badge rule">Dual control</span></div>
+        <h4>Two people, always</h4>
+        <p>The person who <b>endorses</b> a report to close it must not be the same person who <b>signed</b> it. Preparing and endorsing are structurally separated &mdash; enforced by the system, not by policy alone.</p>
+      </div>
+      <div class="card">
+        <div class="ct"><span class="badge control">Safeguard</span></div>
+        <h4>Preparer-only re-signing</h4>
+        <p>Once a report has been signed and then sent back, only <b>the preparer</b> can sign it again &mdash; an administrator can't step in and take that action while an active preparer exists. An admin fallback applies only when no preparer is assigned, and it is recorded when it does.</p>
+      </div>
+      <div class="card">
+        <div class="ct"><span class="badge control">Safeguard</span></div>
+        <h4>Tamper-evident trail</h4>
+        <p>Each signing writes a link in a hash-chained audit record. Any later alteration to the sequence is detectable &mdash; the trail can't be quietly rewritten.</p>
+      </div>
+      <div class="card soon">
+        <div class="ct"><span class="badge soon">Coming next release</span></div>
+        <h4>Correct a banked amount before signing</h4>
+        <p>An upcoming release lets a preparer correct a <b>banked</b> tin's counted amount while the report is still a draft &mdash; with a required reason, the amount and its breakdown written in one all-or-nothing step, and old&nbsp;&rarr;&nbsp;new appended to the audit trail. It freezes the moment the report is signed. <em>Rolling out shortly.</em></p>
+      </div>
+    </div>
+
+    <div class="note"><span class="ni">Reading this</span><div>&ldquo;Preparer&rdquo; and &ldquo;endorser&rdquo; are roles, not fixed people &mdash; an institution assigns them. The guarantee is about <b>separation</b>: the platform will not let one person both sign and endorse the same report.</div></div>
+  </section>
+
+  <!-- ============ PART 3: ACCESS & SOPS ============ -->
+  <section class="part" id="access">
+    <span class="part-num">PART 03</span>
+    <h2>Access &amp; usage</h2>
+    <p class="part-lede">Who can see and do what, and the standard procedures for setting it up &mdash; both the reseller controls you hold and the in-institution controls their administrator holds.</p>
+
+    <h3>The two-key access model</h3>
+    <p>Every module a person can reach passes through two independent gates. Turning a module on for an institution does not, by itself, show it to anyone &mdash; a role still has to be given access. Both keys must turn.</p>
+
+    <div class="layers">
+      <div class="layer">
+        <p class="who">Key 1 &middot; You (Gazzabyte)</p>
+        <h4>Module enablement</h4>
+        <p>From the administration layer you switch a module <b>on or off for a whole institution</b>. This is the reseller decision &mdash; what that institution has purchased or is entitled to.</p>
+      </div>
+      <div class="amp">&times;</div>
+      <div class="layer">
+        <p class="who">Key 2 &middot; Their admin</p>
+        <h4>Role permission</h4>
+        <p>Inside the institution, their administrator grants each <b>role</b> access to an enabled module &mdash; full access or none. This is the customer's own internal decision.</p>
+      </div>
+    </div>
+    <div class="verdict">A module is visible to a user only when it is <b>enabled for the institution</b> <b>and</b> <b>opened to that user's role</b>. Either key left unturned keeps it hidden.</div>
+
+    <h3>Roles at a glance</h3>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Role</th><th>Primary area</th><th>What it's for</th></tr></thead>
+        <tbody>
+          <tr><td>Org admin</td><td>Admin, Settings</td><td>Runs the institution's account; grants roles access to modules.</td></tr>
+          <tr><td>Preparer</td><td>Tabung</td><td>Prepares and signs weekly tabung reports (Part&nbsp;2).</td></tr>
+          <tr><td>Endorser</td><td>Tabung</td><td>Endorses a signed report to close it &mdash; the required second person.</td></tr>
+          <tr><td>Cashier</td><td>Cashier, POS</td><td>Records in-person sales and collections at point of sale.</td></tr>
+          <tr><td>Viewer</td><td>Reports</td><td>Read-only visibility &mdash; sees figures without changing them.</td></tr>
+          <tr><td>HR manager</td><td>HR, People</td><td>Manages staff records and people data.</td></tr>
+          <tr><td>Teacher</td><td>School</td><td>School-area access for teaching staff.</td></tr>
+          <tr><td>Parent</td><td>School</td><td>Parent-facing school access.</td></tr>
+          <tr><td>Supplier</td><td>Orders, Invoicing</td><td>Supplier-side order and invoice interaction.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note"><span class="ni">Confirm</span><div>Role&nbsp;&rarr;&nbsp;module pairings above reflect each role's primary use; the exact per-module permission grid is an institution-configurable matrix. We're confirming the finer role/permission mappings with the build team before this table is presented as exhaustive.</div></div>
+
+    <h3>SOP A &mdash; Reseller: turn a module on for an institution</h3>
+    <div class="sop">
+      <div class="step"><div class="body">Open the <b>administration layer</b> and find the institution in the organisation directory.</div></div>
+      <div class="step"><div class="body">In its <b>module control</b>, switch the required module <b>on</b> (or off). This sets what the institution is entitled to &mdash; it does not yet expose it to any user.</div></div>
+      <div class="step"><div class="body">Tell the institution's administrator it's available so they can complete <b>Key&nbsp;2</b> (SOP&nbsp;C).</div></div>
+    </div>
+
+    <h3>SOP B &mdash; Reseller: grant platform-administrator access</h3>
+    <div class="sop">
+      <div class="step"><div class="body">Confirm the person <b>should</b> hold reseller-level access &mdash; platform administration spans the control layer, so grant it deliberately and to as few people as the job needs.</div></div>
+      <div class="step"><div class="body">Add them as a <b>platform administrator</b> from the administration layer.</div></div>
+      <div class="step"><div class="body">Verify they appear in the platform-administrator list and can reach the control layer.</div></div>
+    </div>
+
+    <h3>SOP C &mdash; Institution admin: open a module to a role</h3>
+    <div class="sop">
+      <div class="step"><div class="body">Sign in as the institution's <b>org admin</b> (the module must already be enabled by the reseller &mdash; Key&nbsp;1).</div></div>
+      <div class="step"><div class="body">In role permissions, set the relevant <b>role</b> to <b>full</b> access for that module (or <b>none</b> to withhold it).</div></div>
+      <div class="step"><div class="body">Users in that role now see the module on their dashboard. For tabung, assign <b>preparer</b> and <b>endorser</b> to different people so dual control holds.</div></div>
+    </div>
+
+    <div class="note"><span class="ni">Least privilege</span><div>Both key-holders should grant the narrowest access that does the job &mdash; enable only the modules an institution needs, and open each module only to the roles that use it. It's easier to widen access later than to walk back an over-broad grant.</div></div>
+  </section>
+
+  <footer>
+    Prepared by the Wingmen team for Gazzabyte &mdash; private to Gazzabyte, for presentation to institutions.<br>
+    Content is drawn from the live platform and kept current as the product evolves. Questions on any point? Reply on the support channel.
+  </footer>
+</div>
+
+<button class="pdf-btn" type="button" onclick="window.print()" aria-label="Download as PDF">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+  Download PDF
+</button>

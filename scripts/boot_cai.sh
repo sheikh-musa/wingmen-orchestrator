@@ -15,14 +15,24 @@
 # Usage:  ./boot_cai.sh        # interactive, opus-4-8, perpetual
 set -uo pipefail
 
-CAI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# PINNED (not derived from ${BASH_SOURCE[0]} dirname): running this via the
+# orchestrator's absolute path resolved CAI_DIR to orchestrator/scripts and
+# booted cai with the ORCHESTRATOR's CLAUDE.md = a 2nd cc-orchestrator (silent
+# governance outage 2026-06-20). Pin to cai's home so invocation path can't matter.
+CAI_DIR="$HOME/wingmen/wingmen-cai"
 ORCH_DIR="$HOME/wingmen/orchestrator"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
-MODEL="${MODEL:-claude-opus-4-8}"
+MODEL="${MODEL:-${CAI_MODEL:-claude-opus-4-8}}"
 AGENT_ID="cai"   # exact — singleton strategic node, never a sub-tag
 
 # .env (DSN etc.) lives in the orchestrator; cai shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# Per-lane OAuth token override (e.g. a donor/loaner account during a cap crunch).
+# Applied AFTER the .env source so it wins; distinct var name so `set -a; . .env`
+# cannot clobber it. Unset for normal boots → no effect on billing.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"
+fi
 # Max-subscription billing for cai — two parts, both load-bearing:
 #  1. Scrub ANTHROPIC_API_KEY: .env carries it for the orch's own API calls, but
 #     a present ANTHROPIC_API_KEY makes `claude` use metered API-usage billing.

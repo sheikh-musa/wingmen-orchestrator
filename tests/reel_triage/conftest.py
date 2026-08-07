@@ -12,9 +12,8 @@ from psycopg.rows import dict_row
 PG_BIN = os.environ.get("WINGMEN_PG17_BIN", "/usr/local/opt/postgresql@17/bin")
 PORT = "54330"  # distinct from tests/migrations (54329) to avoid cluster collision
 
-MIGRATION_SQL = pathlib.Path(
-    "/Users/sheikhmusa/wingmen/orchestrator/migrations/001_reel_inbox.sql"
-).read_text()
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+MIGRATION_SQL = (_REPO_ROOT / "migrations" / "001_reel_inbox.sql").read_text()
 
 
 def _bin(name: str) -> str:

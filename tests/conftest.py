@@ -62,6 +62,54 @@ def sample_job():
 
 
 @pytest.fixture(autouse=True)
+def _no_live_context_watchdog_seams(monkeypatch, tmp_path_factory):
+    """Make every side-effecting seam of scripts.context_health_watchdog RAISE.
+
+    WHY THIS EXISTS (2026-07-26 incident): an ordinary `pytest` run sent the
+    operator two real Telegram pages claiming the hub had been cleared. The suite
+    called the destructive reset routine directly and ONE test forgot to
+    monkeypatch the paging seam — the suite was green the whole time, because
+    "paged a human with a fabricated all-clear" was not a thing any assertion could
+    see. `_in_pytest()` now no-ops the pages, but that is the last line of defence;
+    this is the first: a test that reaches ANY live seam fails loudly instead of
+    acting on the world.
+
+    Opting in is explicit and per-test: a test that needs a seam monkeypatches it
+    itself (which overrides the raiser for that test only). There is deliberately
+    no blanket escape hatch — none of these seams has a legitimate un-stubbed use
+    in a unit test, since each one drives tmux on a live singleton agent or the
+    operator's phone.
+
+    Also points the module's side-effect logs (pen_gate.log,
+    context_health_preserved_input.log) at a per-run tmp dir, so test fixtures stop
+    being written into the real audit trail as if they were real captures.
+    """
+    monkeypatch.setenv("CTX_WD_TEST_LOG_DIR",
+                       str(tmp_path_factory.mktemp("ctx_wd_logs", numbered=True)))
+    try:
+        from scripts import context_health_watchdog as _w
+    except Exception:  # pragma: no cover — module absent/unimportable: nothing to guard
+        return
+
+    def _forbid(name):
+        def _raise(*args, **kwargs):
+            raise AssertionError(
+                f"TEST TOUCHED A LIVE SEAM: {name}() was called un-stubbed. This seam "
+                f"acts on the real world (tmux send-keys into a live singleton agent, or "
+                f"a Telegram page to the operator). Monkeypatch it in the test that needs "
+                f"it — see tests/conftest.py::_no_live_context_watchdog_seams.")
+        return _raise
+
+    # _session_fingerprint is not destructive, but it opens a live substrate
+    # connection: left un-stubbed it makes the reset-confirmation poll wait on a
+    # real DB for its whole window (and reads production telemetry to decide a
+    # test's outcome). Same rule — stub it or you do not get it.
+    for seam in ("_page_loud", "_send_alert", "_send_literal", "_send_key",
+                 "_capture_pane", "_tmux_run", "_session_fingerprint"):
+        monkeypatch.setattr(_w, seam, _forbid(seam), raising=True)
+
+
+@pytest.fixture(autouse=True)
 def set_test_env(monkeypatch):
     env_vars = {
         "ANTHROPIC_API_KEY": "test-key",

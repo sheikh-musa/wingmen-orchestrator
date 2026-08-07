@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.cc-session-costs-writer</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/cc_session_costs_writer_run.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <!-- 5-min cadence: keeps each active session's latest_context_tokens (the live
+       context-window fill shown on the fleet console) fresh without hammering the
+       DB. The writer reads DATABASE_URL + ORCH_BODY_ROLE from .env via load_dotenv,
+       so on the Mini (ORCH_BODY_ROLE=console) the orchestrator-repo sessions land
+       as `orch-console` (Nazim), distinct from the Studio hub's `cc-orchestrator`.
+       This is the Mini-side counterpart to the Studio writer job — the fleet
+       console's context gauge previously covered Studio agents only. -->
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/cc-session-costs-writer.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/cc-session-costs-writer.out.log</string>
+</dict>
+</plist>
