@@ -99,6 +99,42 @@ else
         -- "$CLAUDE_BIN" --dangerously-skip-permissions --continue --model "${ORCH_MODEL:-claude-opus-4-8}"
 fi
 
+# Self-register the hub's tmux session in agent_status so the realtime auto-wake
+# path (agent_wake.resolve_tmux_session, DB-first) can deliver a wake to us. The
+# hub boots via `claude --continue` (NOT launch_dangerous_cc.sh), so it was the
+# lone body that never registered — leaving resolve_tmux_session('cc-orchestrator')
+# = None, so every correctly-flagged P1 wake no-oped with 'no live session'
+# (root cause of cc-fleet-health #16412; the fallback cwd-token path also misses
+# because the hub's cwd '.../wingmen/orchestrator' doesn't contain the
+# 'wingmen-orchestrator' repo_scope token). Best-effort: a DB blip must not block
+# the boot. The write goes through the hardened identity trigger, so we SET the
+# app.current_agent_id GUC in-txn (mirrors launch_dangerous_cc.sh).
+if [[ -x "$ORCH_DIR/.venv/bin/python3" ]]; then
+    "$ORCH_DIR/.venv/bin/python3" - "$SESSION" <<'PYREG' || log "agent_status self-register skipped (best-effort)"
+import os, sys, socket, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+sess = (sys.argv[1] if len(sys.argv) > 1 else "orch").strip()
+if not dsn:
+    sys.exit(0)
+conn = psycopg.connect(dsn)
+try:
+    with conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id', %s, true)", ("cc-orchestrator",))
+        cur.execute(
+            "INSERT INTO agent_status "
+            "(agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, host, last_heartbeat, updated_at) "
+            "VALUES ('cc-orchestrator','cc-orchestrator','working','hub — always-on orchestrator', "
+            "ARRAY['wingmen-orchestrator']::text[], NULLIF(%s,''), NULLIF(%s,''), now(), now()) "
+            "ON CONFLICT (agent_id) DO UPDATE SET status='working', "
+            "tmux_session=NULLIF(%s,''), host=NULLIF(%s,''), last_heartbeat=now(), updated_at=now()",
+            (sess, socket.gethostname(), sess, socket.gethostname()))
+    conn.commit()
+finally:
+    conn.close()
+print("agent_status: cc-orchestrator registered on session", sess)
+PYREG
+fi
+
 log "session '$SESSION' is live — waiting for it to exit"
 
 # Block until session ends; launchd's KeepAlive will restart us when we exit
