@@ -253,6 +253,11 @@ def fetch_actionable(conn) -> list[dict]:
     for v in out:
         if v["agent"] in EXCLUDE_AGENTS:
             continue
+        # The watchdog never re-nudges about its OWN rows — incl. the hub bus-wake
+        # rows it posts (#16246). Without this, a requires_response wake row to the
+        # hub would itself read as an unresponded-P1 violation next scan and cascade.
+        if v.get("from_agent") == "sla-watchdog":
+            continue
         seen[(v["message_id"], v["violation_type"])] = v
     return list(seen.values())
 
@@ -309,7 +314,7 @@ def _tmux_countonly(session: str, line: str, host: str | None = None) -> bool:
         return False
 
 
-def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool) -> tuple[str, bool]:
+def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool, conn=None) -> tuple[str, bool]:
     """Route a count-only re-nudge to `agent`. Returns (mechanism, ok).
 
     An attempt is always recorded by the caller regardless of ok — an
@@ -343,12 +348,38 @@ def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool) -> tuple[str, 
                            STUDIO_SSH, remote])
         return ("nudge_cai.sh@studio", ok)
     if agent in HUB_SESSIONS:
-        sess = HUB_SESSIONS[agent]
-        if dry:
-            return (f"studio-tmux:{sess}", True)
-        # try local first (in case the body is on this host), then Studio ssh
-        ok = _tmux_countonly(sess, line) or _tmux_countonly(sess, line, host=STUDIO_SSH)
-        return (f"studio-tmux:{sess}", ok)
+        # The hub relocated to the VPS (Studio stood down), so the old studio-tmux
+        # send-keys are DEAD (#16246). The VPS hub is woken by the DB-driven
+        # agent_wake_subscriber, not tmux — so re-nudge it by POSTING a wake-contract
+        # bus row (CAI-RESP-451 / hub #16415): to_agent=hub, requires_response=true,
+        # priority P0/P1, is_test=false, actionable type -> the subscriber fires and
+        # wakes it (the hub now self-registers agent_status + is protected from the
+        # reaper, so resolve_tmux_session succeeds). from_agent='sla-watchdog' is
+        # excluded from violation detection, so this wake row never cascades.
+        if dry or conn is None:
+            return ("bus-wake:%s" % agent, True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO agent_messages
+                       (from_agent, to_agent, message_type, subject, body,
+                        requires_response, priority, is_test)
+                       VALUES ('sla-watchdog', %s, 'blocker', %s, %s, true, 'P1', false)""",
+                    (agent,
+                     "[sla-watchdog] WAKE: %s has %d over-SLA unread/unresponded high-priority message(s)" % (agent, n),
+                     "You have over-SLA unread or unresponded P0/P1 bus message(s). Please check "
+                     "your inbox and act/respond. (Automated SLA wake — the VPS agent_wake_subscriber "
+                     "fires on this row; the watchdog does not track its own rows, so this will not "
+                     "recur once you drain them.)"))
+            conn.commit()
+            return ("bus-wake:%s" % agent, True)
+        except Exception as e:
+            log("hub bus-wake failed (%s): %s" % (agent, e))
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return ("bus-wake:%s" % agent, False)
     if agent in lanes:
         lane = lanes[agent]
         if dry:
@@ -725,7 +756,7 @@ def run(dry: bool, injected: list[dict] | None = None,
                         f"{elapsed}m) agent={agent} via {mech} (coalesced, no 2nd keystroke) "
                         f"(attempt {rec['nudge_count']})")
                 else:
-                    mech, ok = renudge(agent, by_agent[agent], lanes, dry)
+                    mech, ok = renudge(agent, by_agent[agent], lanes, dry, conn)
                     nudged_this_cycle[agent] = (mech, ok)
                     rec["nudge_count"] += 1
                     rec["last_nudge_ts"] = now
