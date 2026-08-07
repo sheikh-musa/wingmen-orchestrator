@@ -26,6 +26,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+from nervous_system.console import coordinators
+
 # ── scrub configuration ──────────────────────────────────────────────────────
 # Currency / money amounts, always scrubbed. Covers S$1.7M, $1,700, RM500,
 # "1.5k SGD", "2 million ringgit", etc.
@@ -195,7 +197,9 @@ _LANE_STALE_DROP_S = int(os.environ.get("CONSOLE_LANE_STALE_DROP_S", str(6 * 360
 # colour + label and degrades safely.
 _HB_DEAD_S = int(os.environ.get("CONSOLE_HB_DEAD_S", "900"))
 _ACTIVE_RECENT_S = int(os.environ.get("CONSOLE_ACTIVE_RECENT_S", "1800"))
-_COORD_IDS = ("cai", "cc-orchestrator", "orch-console", "cc-fleet-health", "cc-finance")
+# Single canonical coordinator set (coordinators.py) — same ids the Mini console
+# uses; a new coordinator is added there ONCE, not re-typed here.
+_COORD_IDS = coordinators.exclusion_ids()
 
 
 def _ctx_level(ctx) -> tuple:
@@ -295,8 +299,7 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
         "    SELECT subject, created_at FROM agent_messages m "
         "    WHERE m.from_agent = s.base_agent_id ORDER BY m.id DESC LIMIT 1 "
         "  ) act ON true "
-        "  WHERE s.base_agent_id NOT IN "
-        "    ('cai','cc-orchestrator','orch-console','cc-fleet-health','cc-finance') "
+        "  WHERE s.base_agent_id NOT IN " + coordinators.exclusion_sql() + " "
         "  ORDER BY COALESCE(s.tmux_session, s.agent_id), s.last_heartbeat DESC NULLS LAST "
         ") d ORDER BY d.base_agent_id, d.agent_id"
     )
@@ -353,13 +356,12 @@ def _clone_coordinators(cur) -> List[Dict[str, Any]]:
         "    (SELECT a.host FROM agent_status a "
         "       WHERE a.base_agent_id = c.agent_id AND a.host IS NOT NULL "
         "       ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1), c.host_hint) AS host "
-        "FROM (VALUES "
-        "  ('cc-orchestrator','Hub','Orchestrates the fleet','VPS'), "
-        "  ('orch-console','Nazim','CTO console / 2nd coordinator','Mini'), "
-        "  ('cai','cai','governance / strategic node','Mini'), "
-        "  ('cc-fleet-health','SRE','fleet reliability / health','Mini'), "
-        "  ('cc-finance','Finance','Head of Revenue','Mini') "
-        ") AS c(agent_id, short, role_label, host_hint) "
+        # Coordinator rows from the single canonical list (coordinators.py),
+        # projected to the 4 cols the clone needs (no op_tag/tmux_session: the VPS
+        # has no live pane, peek is off).
+        "FROM (" + coordinators.values_sql(
+            ["agent_id", "short", "role_label", "host_hint"]
+        ) + ") AS c(agent_id, short, role_label, host_hint) "
         "ORDER BY c.agent_id"
     )
     out = []
