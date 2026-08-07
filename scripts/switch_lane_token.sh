@@ -43,9 +43,13 @@
 # Mini lanes run on the /usr/local/bin/tmux server (socket tmux-501/default), NOT
 # /opt/homebrew/bin/tmux — see reference_mini_tmux_two_binaries_socket.
 set -uo pipefail
-cd "$HOME/wingmen/orchestrator" || { echo "ERROR: orch dir missing" >&2; exit 9; }
-ORCH_DIR="$(pwd)"
-set -a; source .env; set +a
+# Resolve ORCH_DIR from THIS script's own location (scripts/..), not a hardcoded
+# $HOME path — so the guard/audit rails work from any checkout (the Mini, a
+# worktree, a CI runner). On the Mini this resolves to the same
+# $HOME/wingmen/orchestrator it always did.
+ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || { echo "ERROR: orch dir missing" >&2; exit 9; }
+cd "$ORCH_DIR" || { echo "ERROR: cannot cd to orch dir: $ORCH_DIR" >&2; exit 9; }
+[ -f .env ] && { set -a; source .env; set +a; }
 
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 . "$_LIB/composer_capture.sh" || { echo "ERROR: composer_capture.sh missing" >&2; exit 9; }

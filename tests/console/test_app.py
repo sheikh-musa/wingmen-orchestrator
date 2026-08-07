@@ -180,7 +180,9 @@ def test_pane_endpoint_returns_captured_text_for_a_live_session(server):
     with patch("nervous_system.console.panes.live_sessions", return_value=["cosem-tdu"]), \
          patch("subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
-        mock_run.return_value.stdout = "line1\nline2\n"
+        # Blank-separated so the pane reflow keeps them as two distinct logical
+        # lines (consecutive non-blank lines are reflowed into one soft-wrapped run).
+        mock_run.return_value.stdout = "line1\n\nline2\n"
         r = httpx.get(server + "/api/lanes/cosem-tdu/pane", headers=H(), timeout=5)
     assert r.status_code == 200
     body = r.json()
