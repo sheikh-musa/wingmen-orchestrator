@@ -9,6 +9,17 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3 /Users/sheikhmusa/wingmen/orchestrator/scripts/session_start_reconstitute.py",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }

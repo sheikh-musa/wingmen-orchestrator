@@ -45,6 +45,7 @@ _DIR_TO_CC = {
     "-Users-sheikhmusa-wingmen-projects-ai-scholar":       "cc-scholar",
     "-Users-sheikhmusa-wingmen-projects-cosem-tdu":        "cc-cosem",
     "-Users-sheikhmusa-wingmen-projects-ihsanos":          "cc-ihsanos",
+    "-Users-sheikhmusa-wingmen-wingmen-cai":               "cai",
     # Operator-session pseudo-identities (managed repos per REPOS.json)
     "-Users-sheikhmusa-wingmen-projects-dookana":          "operator-dookana",
     "-Users-sheikhmusa-wingmen-projects-cosem-adcda":      "operator-cosem-adcda",
@@ -60,6 +61,7 @@ _CC_TO_CWD = {
     "cc-scholar":              "/Users/sheikhmusa/wingmen/projects/ai-scholar",
     "cc-cosem":                "/Users/sheikhmusa/wingmen/projects/cosem-tdu",
     "cc-ihsanos":              "/Users/sheikhmusa/wingmen/projects/ihsanos",
+    "cai":                     "/Users/sheikhmusa/wingmen/wingmen-cai",
     "operator-dookana":        "/Users/sheikhmusa/wingmen/projects/dookana",
     "operator-cosem-adcda":    "/Users/sheikhmusa/wingmen/projects/cosem-adcda",
     "operator-hifz-companion": "/Users/sheikhmusa/wingmen/projects/hifz-companion",

@@ -3,7 +3,7 @@
 from spec_generator import validate_spec
 
 
-def _make_spec(job_id=1, sections=None, promise=True):
+def _make_spec(job_id=1, sections=None, promise=True, base_ref=True):
     """Build a spec string with the given sections."""
     if sections is None:
         sections = ["### Role", "### Task", "### Implementation Plan",
@@ -13,6 +13,10 @@ def _make_spec(job_id=1, sections=None, promise=True):
         parts.append(f"{s}\nSome content here.\n")
     if promise:
         parts.append(f"<promise>JOB_{job_id}_DONE</promise>")
+    if base_ref:
+        # CAI-RESP-358: every valid spec carries a pinned base ref
+        parts.append("### Base Ref (pinned — CAI-RESP-358)\n"
+                     f"Pinned at spec time: origin/main @ `{'c' * 40}`.\n")
     return "\n".join(parts)
 
 
@@ -46,7 +50,9 @@ def test_wrong_job_id_in_promise_fails():
 
 
 def test_case_insensitive_headings():
-    spec = "### role\nfoo\n### task\nbar\n### constraints\nbaz\n### acceptance criteria\nqux\n### files to touch\n| f |\n<promise>JOB_5_DONE</promise>"
+    spec = ("### role\nfoo\n### task\nbar\n### constraints\nbaz\n### acceptance criteria\nqux\n"
+            "### files to touch\n| f |\n<promise>JOB_5_DONE</promise>\n"
+            f"### base ref (pinned — cai-resp-358)\npinned at spec time: origin/main @ `{'d' * 40}`.\n")
     ok, errs = validate_spec(spec, 5)
     assert ok
     assert errs == []

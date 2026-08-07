@@ -37,7 +37,7 @@
              To enable: remove this key or set to "0", then reload via
              `launchctl unload <plist> && launchctl load <plist>`. -->
         <key>WINGMEN_CC_CAI_DAEMON_DISABLED</key>
-        <string>1</string>
+        <string>0</string>
     </dict>
 </dict>
 </plist>

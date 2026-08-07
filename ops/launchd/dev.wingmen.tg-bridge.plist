@@ -3,12 +3,12 @@
 <plist version="1.0"><dict>
   <key>Label</key><string>dev.wingmen.tg-bridge</string>
   <key>ProgramArguments</key><array>
-    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/musa/wingmen/orchestrator/.venv/bin/python3</string>
     <string>-m</string><string>nervous_system.tg_bridge</string>
   </array>
-  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>WorkingDirectory</key><string>/Users/musa/wingmen/orchestrator</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/tg_bridge.log</string>
-  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/tg_bridge.log</string>
+  <key>StandardOutPath</key><string>/Users/musa/wingmen/orchestrator/logs/tg_bridge.log</string>
+  <key>StandardErrorPath</key><string>/Users/musa/wingmen/orchestrator/logs/tg_bridge.log</string>
 </dict></plist>

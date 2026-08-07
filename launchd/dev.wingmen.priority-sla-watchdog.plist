@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.priority-sla-watchdog</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/priority_sla_watchdog.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <!-- ~90s cadence: fast enough to catch a fresh P0/P1 within ~2 scans,
+       slow enough to be gentle on the DB + tmux. -->
+  <key>StartInterval</key><integer>90</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <!-- Escalation thresholds / guards are read from these (defaults shown).
+         Uncomment to override without editing code.
+    <key>SLA_MAX_VIOLATION_AGE_MIN</key><string>1440</string>
+    <key>SLA_RENUDGE_BACKOFF_MIN</key><string>15</string>
+    <key>SLA_HARD_ESCALATE_P0_MIN</key><string>10</string>
+    <key>SLA_HARD_ESCALATE_P1_MIN</key><string>20</string>
+    <key>SLA_MAX_PAGES_PER_RUN</key><string>3</string>
+    <key>SLA_CIRCUIT_BREAKER_MAX</key><string>25</string>
+    -->
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/priority-sla-watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/priority-sla-watchdog.out.log</string>
+</dict>
+</plist>

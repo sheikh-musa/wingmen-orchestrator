@@ -1,6 +1,7 @@
+import pathlib
 import subprocess
 
-_ROOT = "/Users/sheikhmusa/wingmen/orchestrator"
+_ROOT = str(pathlib.Path(__file__).resolve().parents[2])
 
 
 def test_no_instagram_credentials_in_repo():

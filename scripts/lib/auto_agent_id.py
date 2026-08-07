@@ -427,6 +427,56 @@ def scan_overlap_siblings(
             return [(r[0], int(r[1])) for r in cur.fetchall()]
 
 
+def reap_stale_family(base: str, dsn: str) -> None:
+    """CAI-RESP-292 launcher reap-on-relaunch: honestly offline this family's
+    stale ghosts at boot.
+
+    Instances that die uncleanly never run their clean-exit trap (the ARCH-035
+    offline UPSERT in launch_dangerous_cc.sh), so they linger as status='working'
+    forever. The launcher, as the family's spawner, is the legitimate actor to
+    offline them — via admin_mark_offline's LAUNCHER branch (CAI-762/765): the
+    launcher declares its OWN id 'launcher:<base>' (no identity spoof) and the
+    SECURITY DEFINER primitive authorizes it to offline ONLY its own base family's
+    stale ghosts, refusing protected singletons and writing a truthful audit row.
+
+    Best-effort + ISOLATED: its own autocommit connection, never inside the
+    allocation transaction, wrapped so a failure can never abort the launch.
+    Scoped to THIS base, at the 8h freshness bound — never touches a live or
+    merely-idle sibling. Per-ghost isolated (autocommit) so one bad ghost neither
+    skips the rest nor aborts anything.
+    """
+    import psycopg
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            # declare our OWN launcher identity for the primitive's launcher branch
+            cur.execute("SELECT set_config('app.current_agent_id', %s, false)", (f"launcher:{base}",))
+            # this family's stale ghosts, EXCLUDING protected singletons (one source
+            # of truth = protected_agents; the primitive also refuses them)
+            cur.execute(
+                """SELECT agent_id FROM agent_status
+                    WHERE base_agent_id = %s AND status <> 'offline'
+                      AND last_heartbeat < now() - interval '8 hours'
+                      AND agent_id NOT IN (SELECT agent_id FROM protected_agents)""",
+                (base,),
+            )
+            ghosts = [r[0] for r in cur.fetchall()]
+            reaped = []
+            for g in ghosts:
+                try:
+                    cur.execute("SELECT admin_mark_offline(%s, %s)",
+                                (g, f"launcher reap-on-relaunch: stale {base} ghost (>8h)"))
+                    if cur.fetchone()[0]:
+                        reaped.append(g)
+                except Exception as ge:
+                    # per-ghost non-fatal
+                    sys.stderr.write(f"reap_stale_family skip {g}: {type(ge).__name__}: {ge}\n")
+        if reaped:
+            sys.stderr.write(f"launcher reaped stale {base} ghosts: {reaped}\n")
+    except Exception as e:
+        # non-fatal: a reap failure must never block a launch
+        sys.stderr.write(f"reap_stale_family non-fatal ({base}): {type(e).__name__}: {e}\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint: emit JSON {sub_tag, base, siblings, overlap_warnings}.
 
@@ -475,6 +525,10 @@ def main(argv: list[str] | None = None) -> int:
         # the real cause, not a misleading 'not registered' message.
         sys.stderr.write(f"DatabaseError: {type(e).__name__}: {e}\n")
         return 1
+
+    # CAI-RESP-292: reap this family's stale ghosts at relaunch (best-effort,
+    # isolated — never blocks the launch). Complements the watchdog global sweep.
+    reap_stale_family(base, args.dsn)
 
     try:
         result = allocate_sub_tag_and_register(

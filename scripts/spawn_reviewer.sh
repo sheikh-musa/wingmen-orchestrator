@@ -57,14 +57,27 @@ printf '%s | spawn target=%s diff=%s session=%s brief=%s scope=%q\n' \
     "$(date -u +%FT%TZ)" "$TARGET_DIR" "$DIFF_REF" "$SESSION" "$BRIEF_FILE" "$SCOPE" >> "$AUDIT_LOG"
 
 # Fresh lane via STANDARD launcher; identity forced to cc-reviewer-N by the override.
-CC_BASE_OVERRIDE="cc-reviewer" \
-    tmux new-session -d -s "$SESSION" -c "$TARGET_DIR" "$LAUNCHER"
+# CC_BASE_OVERRIDE MUST be set INSIDE the pane command, not as a prefix on the tmux
+# client — `tmux new-session` runs the command in the SERVER's env, so a client-side
+# prefix is dropped and the launcher falls back to pwd-resolution (UnknownRepoError
+# when target_dir basename isn't a registered family, e.g. ihsanos-r1). Fixed 2026-06-20.
+tmux new-session -d -s "$SESSION" -c "$TARGET_DIR" "CC_BASE_OVERRIDE=cc-reviewer $LAUNCHER"
 
 # Bare lifecycle pointer only — the brief CONTENT lives in BRIEF_FILE (above).
-sleep 6
-tmux send-keys -t "$SESSION" -l "[reviewer-start] Read your review brief at ${BRIEF_FILE} and execute it. Read-only; post your verdict to the bus."
-sleep 1
-tmux send-keys -t "$SESSION" Enter
+# VERIFIED submit (not a blind send-keys): a blind `sleep 6 + send-keys + Enter`
+# silently fails if the session hasn't finished booting — the start-prompt sits
+# typed-but-unsent and the reviewer NEVER starts (cost the PR#43 reviewer hours,
+# 2026-06-20; reviewer-* sessions aren't watched by lane_watchdog so it went
+# uncaught). lane_nudge.sh clears → types → Enter → VERIFIES the pane reached a
+# working state ("esc to interrupt"), retrying; exit 0 = confirmed started.
+sleep 8
+START_MSG="[reviewer-start] Read your review brief at ${BRIEF_FILE} and execute it. Read-only; post your verdict to the bus."
+if "$ORCH_DIR/scripts/lane_nudge.sh" "$SESSION" "$START_MSG"; then
+    echo "reviewer started (verified working)"
+else
+    echo "WARNING: reviewer $SESSION did NOT enter a working state — start it manually:" >&2
+    echo "  scripts/lane_nudge.sh $SESSION \"$START_MSG\"" >&2
+fi
 
 echo "spawned cc-reviewer in tmux '$SESSION' (target=$TARGET_DIR diff=$DIFF_REF)"
 echo "audit: $AUDIT_LOG"

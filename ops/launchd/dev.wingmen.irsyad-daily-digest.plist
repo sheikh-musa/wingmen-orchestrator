@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Go-live-window daily issue digest for the Irsyad client app. Reads 24h of
+  ui_events (rage-clicks/abandonments) + Sentry (if token) and DMs the operator.
+  Tighter than the Sunday weekly UX job, for the active client-testing period.
+  Fires 08:07 Studio-local (SGT); adjust the hour for the operator's timezone.
+  Remove once go-live settles back to the weekly cadence.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.irsyad-daily-digest</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/Musa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/Musa/wingmen/orchestrator/scripts/irsyad_daily_issue_digest.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/Musa/wingmen/orchestrator</string>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>7</integer></dict>
+  <key>StandardOutPath</key><string>/Users/Musa/wingmen/orchestrator/logs/irsyad_daily_digest.log</string>
+  <key>StandardErrorPath</key><string>/Users/Musa/wingmen/orchestrator/logs/irsyad_daily_digest.log</string>
+</dict>
+</plist>

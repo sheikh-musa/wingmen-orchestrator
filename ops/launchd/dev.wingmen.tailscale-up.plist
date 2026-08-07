@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.wingmen.tailscale-up</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <!-- Open Tailscale app (triggers auto-connect if already authed) then
+         run tailscale up to bring the daemon up if it somehow isn't.
+         Exits 0 regardless — we don't want KeepAlive to loop on failure. -->
+    <string>open -a Tailscale 2>/dev/null; sleep 10; /Applications/Tailscale.app/Contents/MacOS/Tailscale up --accept-routes 2>/dev/null || true</string>
+  </array>
+
+  <!-- Run once at login, ~30s after session opens so Tailscale.app has time to launch -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/tailscale_up.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/tailscale_up.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/sheikhmusa</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/Applications/Tailscale.app/Contents/MacOS</string>
+  </dict>
+</dict>
+</plist>
