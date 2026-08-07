@@ -22,12 +22,16 @@ from nervous_system.jsonl_safe_read import safe_file_stats
 
 
 # Project-dir names are host-specific: the _DIR_TO_CC keys are the Mini's
-# `-Users-sheikhmusa-...` form, but the same repo on another host (e.g. the
-# Studio hub, home /Users/Musa -> `-Users-Musa-...`) has a different dir name.
-# Rewrite the leading `-Users-<user>-` to the canonical Mini form so the sweep
-# resolves cc_identity regardless of which host runs it (the 2026-07-08 topology
-# move to the Studio hub is exactly why the writer silently matched zero dirs).
-_HOME_PREFIX_RE = re.compile(r"^-Users-[^-]+-")
+# `-Users-sheikhmusa-...` form, but the same repo on another host has a different
+# dir name — a macOS Studio home (`/Users/Musa` -> `-Users-Musa-...`) OR a LINUX
+# VPS home (`/home/wingmen` -> `-home-wingmen-...`, the current hub after it moved
+# off the Studio onto the VPS). Rewrite the leading `-Users-<user>-` OR
+# `-home-<user>-` to the canonical Mini form so the sweep resolves cc_identity
+# regardless of which host runs it (a host whose home the regex didn't cover made
+# the writer silently match zero dirs — first the 2026-07-08 Studio move, then the
+# VPS hub whose `-home-wingmen-wingmen-orchestrator` never normalised => the hub
+# read 0/unmeasurable in the context gauge, op#11096 Part-3 gap).
+_HOME_PREFIX_RE = re.compile(r"^-(?:Users|home)-[^-]+-")
 
 
 def _canonical_dir(name: str) -> str:
