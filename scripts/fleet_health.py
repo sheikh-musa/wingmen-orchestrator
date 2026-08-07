@@ -31,6 +31,16 @@ PRUNE_DAYS = 1      # offline rows older than this => delete
 ARCHIVE_MIN_AGE_H = 72   # dead-letter grace: only archive unread older than this
 SENDER_LIVE_WINDOW_H = 24  # a recipient that SENT within this window is "live" -> spared
 
+# Singletons are NEVER auto-reaped by heartbeat-staleness. Their liveness is
+# tracked by lease/reclaim machinery, not agent_status heartbeats — the hub in
+# particular self-registers but does NOT continuously heartbeat (boots via
+# `claude --continue`, not the launch_dangerous_cc.sh heartbeat loop), so it
+# looks "stale" while fully alive, and its status<>'offline' is load-bearing for
+# wake resolution (resolve_tmux_session; CAI-RESP-451 / hub #16415). Marking a
+# live singleton offline breaks its wake path. Spared from BOTH offline-marking
+# and pruning. (Matches the reaper never-target set: hub/cai/SELF/nazim.)
+NEVER_OFFLINE = {"cc-orchestrator", "cai", "cc-fleet-health", "orch-console", "nazim-console"}
+
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
@@ -47,18 +57,33 @@ def main():
     quiet = "--quiet" in sys.argv
     sessions = live_tmux_sessions()
     with psycopg.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+        # This sweep runs as cc-fleet-health (the fleet_health lease holder); the
+        # reaper below asserts that lease, so declare our own identity here.
+        cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
 
-        cur.execute(f"""UPDATE agent_status SET status='offline'
+        # STALE -> offline via the sanctioned reaper admin_mark_offline() (mig-037 /
+        # CAI-RESP-761): a lease-gated, offline-only, audited SECDEF primitive called
+        # once per agent. Replaces the old batch UPDATE, which the hardened
+        # enforce_agent_status_identity trigger rejects (one GUC can't match every
+        # row). Each call writes a truthful admin_offline_audit row. If our lease has
+        # lapsed the call fail-closes and the txn aborts LOUD — the dead-man's switch.
+        cur.execute(f"""SELECT agent_id FROM agent_status
                         WHERE status <> 'offline'
-                          AND last_heartbeat < now() - interval '{STALE_MIN} minutes'
-                        RETURNING agent_id""")
-        marked = [r[0] for r in cur.fetchall()]
+                          AND last_heartbeat < now() - interval '{STALE_MIN} minutes'""")
+        marked = []
+        for _aid in [r[0] for r in cur.fetchall()]:
+            if _aid in NEVER_OFFLINE:
+                continue  # singleton — liveness is lease-tracked, never heartbeat-reaped
+            cur.execute("SELECT admin_mark_offline(%s, %s)",
+                        (_aid, f"fleet_health sweep: stale heartbeat > {STALE_MIN}m"))
+            if cur.fetchone()[0]:
+                marked.append(_aid)
 
         cur.execute(f"""DELETE FROM agent_status
                         WHERE status='offline'
                           AND last_heartbeat < now() - interval '{PRUNE_DAYS} days'
-                        RETURNING agent_id""")
+                          AND agent_id <> ALL(%s)
+                        RETURNING agent_id""", (list(NEVER_OFFLINE),))
         pruned = [r[0] for r in cur.fetchall()]
         conn.commit()
 
