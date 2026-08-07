@@ -195,7 +195,7 @@ _LANE_STALE_DROP_S = int(os.environ.get("CONSOLE_LANE_STALE_DROP_S", str(6 * 360
 # colour + label and degrades safely.
 _HB_DEAD_S = int(os.environ.get("CONSOLE_HB_DEAD_S", "900"))
 _ACTIVE_RECENT_S = int(os.environ.get("CONSOLE_ACTIVE_RECENT_S", "1800"))
-_COORD_IDS = ("cai", "cc-orchestrator", "orch-console", "cc-fleet-health")
+_COORD_IDS = ("cai", "cc-orchestrator", "orch-console", "cc-fleet-health", "cc-finance")
 
 
 def _ctx_level(ctx) -> tuple:
@@ -296,7 +296,7 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
         "    WHERE m.from_agent = s.base_agent_id ORDER BY m.id DESC LIMIT 1 "
         "  ) act ON true "
         "  WHERE s.base_agent_id NOT IN "
-        "    ('cai','cc-orchestrator','orch-console','cc-fleet-health') "
+        "    ('cai','cc-orchestrator','orch-console','cc-fleet-health','cc-finance') "
         "  ORDER BY COALESCE(s.tmux_session, s.agent_id), s.last_heartbeat DESC NULLS LAST "
         ") d ORDER BY d.base_agent_id, d.agent_id"
     )
@@ -357,7 +357,8 @@ def _clone_coordinators(cur) -> List[Dict[str, Any]]:
         "  ('cc-orchestrator','Hub','Orchestrates the fleet','VPS'), "
         "  ('orch-console','Nazim','CTO console / 2nd coordinator','Mini'), "
         "  ('cai','cai','governance / strategic node','Mini'), "
-        "  ('cc-fleet-health','SRE','fleet reliability / health','Mini') "
+        "  ('cc-fleet-health','SRE','fleet reliability / health','Mini'), "
+        "  ('cc-finance','Finance','Head of Revenue','Mini') "
         ") AS c(agent_id, short, role_label, host_hint) "
         "ORDER BY c.agent_id"
     )

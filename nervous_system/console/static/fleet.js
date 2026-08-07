@@ -239,7 +239,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = 'fc-v30';
+  var APP_BUILD = 'fc-v31';
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -611,6 +611,12 @@
   // (operator #3440: "expanded lanes auto contract").
   var routineExpanded = false;
 
+  // Whether the Coordinators section is expanded (operator ask: make it
+  // collapsible). A MODULE var (like routineExpanded/backlogExpanded) so a
+  // background refresh never re-collapses what the operator opened. Default
+  // expanded to preserve the current always-visible behaviour.
+  var coordExpanded = true;
+
   function coordCard(c) {
     var seen = c.last_seen_s;
     var dot = (seen != null && seen < 1800) ? "working" : "idle";
@@ -649,6 +655,20 @@
   function renderCoordinators(items) {
     var el = document.getElementById("coordinators");
     if (!el) return;
+    // Wire the collapsible section header (op: make Coordinators expandable).
+    // onclick (not addEventListener) so the per-tick re-render never stacks
+    // duplicate listeners on the static #coordHead element.
+    var head = $("coordHead");
+    if (head) {
+      var chev = $("coordChevron");
+      el.style.display = coordExpanded ? "block" : "none";
+      if (chev) chev.textContent = coordExpanded ? "▾" : "▸";
+      head.onclick = function () {
+        coordExpanded = !coordExpanded;
+        el.style.display = coordExpanded ? "block" : "none";
+        if (chev) chev.textContent = coordExpanded ? "▾" : "▸";
+      };
+    }
     if (!items || !items.length) { el.innerHTML = '<div class="empty">No coordinators.</div>'; return; }
     el.innerHTML = items.map(coordCard).join("");
     bindPeeks();   // coord cards reuse the lane peek machinery; bind them here so

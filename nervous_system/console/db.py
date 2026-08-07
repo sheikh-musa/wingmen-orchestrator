@@ -170,8 +170,11 @@ def build_lanes_query() -> Tuple[str, list]:
         # cc-fleet-health joins the coordinator cards (op#9770), so exclude it here
         # too — else it renders as BOTH a coord card and a lane card (the twin-peek
         # bug the exclusion above prevents for cai/hub/Nazim).
+        # cc-finance (Head of Revenue) joins the coordinator cards too (see
+        # build_coordinators_query), so exclude it here for the same reason —
+        # else it renders as BOTH a coord card and a lane card (twin-peek bug).
         "WHERE s.base_agent_id NOT IN "
-        "  ('cai', 'cc-orchestrator', 'orch-console', 'cc-fleet-health') "
+        "  ('cai', 'cc-orchestrator', 'orch-console', 'cc-fleet-health', 'cc-finance') "
         # DISTINCT ON needs the dedup key first; freshest heartbeat wins the session.
         "ORDER BY COALESCE(s.tmux_session, s.agent_id), s.last_heartbeat DESC NULLS LAST "
         ") d "
@@ -390,7 +393,8 @@ def build_coordinators_query() -> Tuple[str, list]:
         "  ('cc-orchestrator','Hub','Orchestrates the fleet','orch-channel','orch','VPS'), "
         "  ('orch-console','Nazim','CTO console / 2nd coordinator','nazim-console','nazim','Mini'), "
         "  ('cai','cai','governance / strategic node','cai','cai','Mini'), "
-        "  ('cc-fleet-health','SRE','fleet reliability / health','fleet-health','fleet-health','Mini') "
+        "  ('cc-fleet-health','SRE','fleet reliability / health','fleet-health','fleet-health','Mini'), "
+        "  ('cc-finance','Finance','Head of Revenue','finance','finance','Mini') "
         ") AS c(agent_id, short, role_label, op_tag, tmux_session, host_hint) "
         "ORDER BY c.agent_id"
     )
