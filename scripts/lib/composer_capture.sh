@@ -169,7 +169,7 @@ pane_busy() {   # $1 = tmux bin, $2 = pane
 }
 
 # ---------------------------------------------------------------------------
-# PLACEHOLDER DETECTION — structural, not a string list.
+# PLACEHOLDER DETECTION.
 #
 # The mirror failure of under-capture is OVER-capture: the TUI paints a grey
 # hint into an EMPTY composer ('Try "how does <filepath> work?"', 'Press up to
@@ -178,18 +178,22 @@ pane_busy() {   # $1 = tmux bin, $2 = pane
 # that hint "staged UNSENT". A fabricated line in this log is worse than a missed
 # one, because a human reads it verbatim and trusts it.
 #
-# A deny-list of hint strings rots silently the next time the TUI changes a hint,
-# and rots in the FABRICATING direction. So we use the render instead. Verified
-# empirically (Claude Code v2.1.198, tmux capture-pane -p -e):
-#
+# ORIGINAL DESIGN (Claude Code v2.1.198, tmux capture-pane -p -e): the hint was
+# dimmed and real text was not, so "content is entirely dim" (_cc_dim_only) told
+# them apart without a rotting deny-list —
 #   placeholder : \x1b[39m❯<NBSP>\x1b[2mTry "how does <filepath> work?"\x1b[0m
 #   real input  : \x1b[39m❯<NBSP>Try "how does <filepath> work?"
 #
-# i.e. the hint is wrapped in SGR 2 (dim/faint) and genuinely-typed text — even
-# text byte-identical to a hint — is not. Typing '/cle' (slash-command prefix)
-# produced no dim run either, so autocomplete ghost text is not a false positive
-# on this version; and if a future version DOES dim part of a real entry, the
-# rule below still classifies it as real because non-dim content remains.
+# 🔴 THAT INVARIANT BROKE by v2.1.224 (cc-fleet-health, 2026-08-07, measured
+# against a live lane): the composer now ALSO dims real QUEUED / unfocused staged
+# text, so real input and the hint share identical dim framing —
+#   real queued : \x1b[39m❯<NBSP>\x1b[2mpoll the bus for hub's reply\x1b[0m
+# Keying "empty" on dim therefore DROPPED real staged work on recycle (FIX-1). The
+# decision in composer_parse is now CONTENT-based (the literal hint signature) and
+# fails toward PRESERVATION; see the long note there for the asymmetry. _cc_dim_only
+# survives only to ANNOTATE the log (CC_PH_BASIS '(dim|not-dim)'); it no longer
+# decides emptiness. Do NOT restore dim-ness as an empty-setter without first
+# re-measuring that the current TUI dims hints but not real text.
 #
 # _cc_dim_only: 0 (true) iff the composer content is ENTIRELY dim.
 _cc_dim_only() {   # $1 = raw pane text WITH escape sequences
@@ -289,33 +293,36 @@ composer_parse() {
   [ "$CC_PARTIAL" = 'noprompt' ] && CC_MARKER="$CC_MARKER_NOPROMPT"
   [ "$CC_PARTIAL" = 'noborder' ] && CC_MARKER="$CC_MARKER_TEXT"
 
-  # Placeholder test: structural (dim SGR) when the capture carries escape data,
-  # literal deny-list only when it does not. CC_PH_BASIS records which fired, so
-  # a reader of this log can tell how the "nothing was staged" claim was reached.
+  # Placeholder test. HISTORY: through Claude Code v2.1.198 the composer dimmed
+  # ONLY the grey placeholder hint (SGR 2), so "content is entirely dim"
+  # (_cc_dim_only) was a reliable placeholder discriminator. That INVARIANT BROKE
+  # by v2.1.224 (cc-fleet-health, 2026-08-07, measured against a live lane): the
+  # composer now ALSO dims real QUEUED / unfocused staged text —
+  #   placeholder : ESC[39m ❯ <NBSP> ESC[2m Try "..."        ESC[0m
+  #   real queued : ESC[39m ❯ <NBSP> ESC[2m poll the bus ... ESC[0m   (identical framing)
+  # so dim-ness no longer distinguishes them, and keying "empty" on dim SILENTLY
+  # DROPPED real staged work on recycle (FIX-1). The signal that still separates
+  # them is the CONTENT: placeholder hints are a known, small set of strings; real
+  # staged text is not. So placeholder detection is CONTENT-based, and we FAIL
+  # TOWARD PRESERVATION. The asymmetry that decides this — and it INVERTS the
+  # pre-v2.1.224 note, because dim is no longer trustworthy:
+  #   false STAGED -> a fresh agent sees a preserved line it must judge   (recoverable;
+  #                   the boot note already says "judge whether it is yours")
+  #   false EMPTY  -> staged/queued work is silently DROPPED on recycle   (the defect)
+  # A NEW hint string not yet in the deny-list is therefore preserved rather than
+  # dropped — the acceptable direction. dim-ness is still measured, but only
+  # recorded in CC_PH_BASIS for the log; it never decides empty on its own.
   CC_EMPTY=0; CC_PH_BASIS='n/a'
   if [ "$CC_N" = 0 ]; then
     CC_EMPTY=1; CC_PH_BASIS='no-content'
   elif [ "$CC_N" = 1 ]; then
-    case "${1-}" in
-      *$'\033'*) CC_PH_BASIS='dim-sgr'; _cc_dim_only "${1-}" && CC_EMPTY=1 ;;
-      *)         CC_PH_BASIS='literal-fallback'; _cc_is_placeholder_literal "$CC_FLAT" && CC_EMPTY=1 ;;
-    esac
-    # BELT AND SUSPENDERS (hub review, 2026-07-26). The dim-SGR test is the right
-    # primary discriminator, but it was only verified against the fresh-session
-    # hint; 'Press up to edit queued messages' could not be reproduced without
-    # burning a metered prompt, so ITS dim-ness is inferred, not observed. If the
-    # SGR path says "real text" and the literal list recognises it anyway, believe
-    # the literal list. The two failure modes are NOT symmetric:
-    #   false EMPTY  -> we drop a placeholder that was never typed        (harmless)
-    #   false STAGED -> we FABRICATE a line in a load-bearing log and tell
-    #                   a fresh agent it has an unexecuted instruction    (the defect)
-    # So on disagreement we take the harmless direction. A human typing one of
-    # these strings verbatim loses it — accepted, and recorded in CC_PH_BASIS so
-    # the log says which test decided.
-    if [ "$CC_EMPTY" != 1 ] && _cc_is_placeholder_literal "$CC_FLAT"; then
-      CC_EMPTY=1; CC_PH_BASIS="${CC_PH_BASIS}+literal-override"
+    local _dim='not-dim'
+    case "${1-}" in *$'\033'*) _cc_dim_only "${1-}" && _dim='dim' ;; esac
+    if _cc_is_placeholder_literal "$CC_FLAT"; then
+      CC_EMPTY=1; CC_PH_BASIS="placeholder(content,${_dim})"
+    else
+      CC_PH_BASIS="real-text(${_dim})"
     fi
-    [ "$CC_EMPTY" = 1 ] || CC_PH_BASIS="${CC_PH_BASIS}(real-text)"
   fi
   # (a 'noprompt' capture stays flagged even though it reports no content — we do
   # not know that the composer was empty, only that we could not read it)
