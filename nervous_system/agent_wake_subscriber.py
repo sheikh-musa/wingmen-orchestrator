@@ -31,6 +31,7 @@ scripts/boot_agent_wake_subscriber.sh.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -40,7 +41,7 @@ from dotenv import load_dotenv
 from supabase import acreate_client
 
 from nervous_system import agent_wake
-from nervous_system.agent_messages_realtime import subscribe_agent_messages
+from nervous_system.agent_messages_realtime import _LivenessTracker, subscribe_agent_messages
 
 _ORCH = Path(__file__).resolve().parent.parent
 load_dotenv(_ORCH / ".env")
@@ -57,13 +58,27 @@ logging.basicConfig(
 logger = logging.getLogger("wingmen.agent_wake_subscriber")
 
 
-async def _heartbeat_loop() -> None:
+def _heartbeat_payload(tracker: _LivenessTracker, now_epoch: float) -> str:
+    """The heartbeat body: a wall-clock ts (freshness, as before) PLUS the 5B
+    delivery-lag state, so an external CAI-771 dead-monitor can compare the exposed
+    last_realtime_id against DB max(id) and ALERT LOUD if the in-process exit(1) ever
+    fails to fire. JSON so fields are unambiguous; `ts` stays the freshness signal."""
+    return json.dumps({
+        "ts": now_epoch,
+        "last_realtime_id": tracker.last_realtime_id,
+        "db_max": tracker.last_db_max,
+        "lag": tracker.lag(),
+    })
+
+
+async def _heartbeat_loop(tracker: _LivenessTracker) -> None:
     """Write a heartbeat every _HEARTBEAT_SEC so a watchdog can spot a wedged/dead
-    subscriber (parity with weekly_limit_monitor / weekly_alert_relay)."""
+    subscriber (parity with weekly_limit_monitor / weekly_alert_relay). Now also
+    exposes the delivery-lag state (5B) for the external dead-monitor belt."""
     HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
     while True:
         try:
-            HEARTBEAT_FILE.write_text(str(time.time()))
+            HEARTBEAT_FILE.write_text(_heartbeat_payload(tracker, time.time()))
         except Exception as e:  # noqa: BLE001
             logger.warning("heartbeat write failed: %s", e)
         await asyncio.sleep(_HEARTBEAT_SEC)
@@ -85,10 +100,15 @@ async def main() -> None:
         agent_wake.auto_wake_enabled())
     # subscribe_agent_messages owns its own reconnect/resubscribe loop; we run it
     # alongside the heartbeat. If it ever returns/raises to here, log + let launchd
-    # KeepAlive restart the process.
+    # KeepAlive restart the process. The shared _LivenessTracker (5B) is written by
+    # the subscription's delivery callback and read by the heartbeat loop, so a silent
+    # stall is BOTH self-healed (exit 1 → KeepAlive resubscribe) AND exposed on the
+    # heartbeat for the external belt.
+    tracker = _LivenessTracker()
     await asyncio.gather(
-        subscribe_agent_messages(supabase, bot=None, musa_chat_id=None, wake_only=True),
-        _heartbeat_loop(),
+        subscribe_agent_messages(supabase, bot=None, musa_chat_id=None,
+                                 wake_only=True, liveness=tracker),
+        _heartbeat_loop(tracker),
     )
 
 
