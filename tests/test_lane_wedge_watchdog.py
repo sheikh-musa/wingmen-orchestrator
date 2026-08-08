@@ -26,11 +26,14 @@ from nervous_system import lane_wedge_watchdog as w
 
 def _obs(agent="cai", kind="singleton", session=None, unread=3, oldest=1800.0,
          last_write=6000.0, comp=w.COMP_DELEGATED, text="", reachable=True,
-         actionable=0, working=False):
+         actionable=0, working=False, wake_eligible=None):
     # Default is a GENUINE stall: quiet 100m (> ALERT_QUIET_SEC) so the canonical
     # test wedge pages. Cycling/actionable/working cases pass those explicitly.
+    # wake_eligible defaults to `actionable` unless set (used by the hub-narrow gate).
+    if wake_eligible is None:
+        wake_eligible = actionable
     return w.AgentObs(agent, kind, session,
-                      w.BusSignal(unread, oldest, last_write, actionable),
+                      w.BusSignal(unread, oldest, last_write, actionable, wake_eligible),
                       w.ComposerSignal(comp, text, working=working), reachable=reachable)
 
 
@@ -357,6 +360,32 @@ def test_genuine_stall_helper():
     assert w._genuine_stall(quiet) is True
     act = _obs(kind="lane", session="x", last_write=1800.0, actionable=1)    # req=True
     assert w._genuine_stall(act) is True
+
+
+# --------------------------------------------------------------------------- #
+# Nazim #17117 / the 315.7k-token lesson: the HUB (cc-orchestrator) is cross-host,
+# composer-UNREADABLE and operator-attended, so quiet-alone cannot tell idle-attended
+# from stuck. It pages ONLY on WAKE-ELIGIBLE unread (CAI-451 narrow floor P0/P1+rr)
+# it is failing to drain — never on quiet + benign FYIs. cai/lanes are unchanged.
+# --------------------------------------------------------------------------- #
+
+def test_hub_idle_with_benign_unread_is_not_a_genuine_stall():
+    hub = _obs(agent="cc-orchestrator", kind="singleton", last_write=6000.0,
+               actionable=0, wake_eligible=0)   # quiet 100m, only P2/non-rr FYIs
+    assert w._genuine_stall(hub) is False        # was a FALSE page (#17116)
+
+
+def test_hub_with_wake_eligible_unread_is_a_genuine_stall():
+    hub = _obs(agent="cc-orchestrator", kind="singleton", last_write=6000.0,
+               actionable=1, wake_eligible=1)   # a P0/P1+rr row it is not draining
+    assert w._genuine_stall(hub) is True
+
+
+def test_hub_actionable_but_below_narrow_floor_does_not_page():
+    # a P2 requires_response row: actionable=1 but wake_eligible=0 (below CAI-451 floor)
+    hub = _obs(agent="cc-orchestrator", kind="singleton", last_write=6000.0,
+               actionable=1, wake_eligible=0)
+    assert w._genuine_stall(hub) is False
 
 
 def test_cycling_wedge_is_nudged_but_not_paged(fast_floor, recorder, monkeypatch):

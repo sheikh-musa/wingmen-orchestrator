@@ -99,6 +99,9 @@ load_dotenv(_ORCH_DIR / ".env")
 # fleet_health_lease single-owner lease (default holder cc-fleet-health; hub
 # reclaims on expiry) so the SRE and a reclaiming hub never both act on an agent.
 from scripts.lib import fleet_health_lease  # noqa: E402
+# CAI-786 wake predicate — the ONE source of "would this row wake the recipient",
+# reused here so the hub's page gate applies the exact CAI-451 narrow floor.
+from nervous_system import agent_wake  # noqa: E402
 
 STATE_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog_state.json"
 LOG_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog.log"
@@ -317,6 +320,11 @@ class BusSignal:
     actionable: int = 0      # of `unread`, how many require a response (req=True) —
                              # a stalling req=True row is a REAL stall (the 2026-07-29
                              # money-grant class), vs a req=False FYI that can idle.
+    wake_eligible: int = 0   # of `unread`, how many would WAKE this recipient per the
+                             # CAI-786 predicate (agent_wake.should_auto_wake). For the
+                             # hub that is the CAI-451 narrow floor (P0/P1 + rr); used to
+                             # gate the hub's page so benign P2/FYI unread never false-
+                             # pages a legitimately-idle, cross-host, attended hub.
 
     @property
     def piling(self) -> bool:
@@ -393,10 +401,11 @@ def read_bus_signal(agent: str, conn) -> BusSignal:
     (this watchdog's own cai/cc-irsyad flags were partly that). Only rows that
     arrived AFTER the agent's last activity and were never responded-to count."""
     with conn.cursor() as cur:
+        # Fetch the windowed unread rows (not just counts) so wake-eligibility is decided
+        # by the ONE shared predicate agent_wake.should_auto_wake — never forked into SQL.
         cur.execute(
-            "SELECT count(*), "
-            "       COALESCE(EXTRACT(epoch FROM now() - min(am.created_at)), 0), "
-            "       count(*) FILTER (WHERE am.requires_response) "
+            "SELECT am.priority, am.requires_response, am.message_type, "
+            "       EXTRACT(epoch FROM now() - am.created_at) "
             "  FROM agent_messages am "
             " WHERE am.to_agent = %s AND am.read_at IS NULL AND am.is_test IS NOT TRUE "
             "   AND am.created_at <= now() - (%s * interval '1 second') "
@@ -405,14 +414,21 @@ def read_bus_signal(agent: str, conn) -> BusSignal:
             "   AND NOT EXISTS (SELECT 1 FROM agent_messages r "
             "                    WHERE r.from_agent = %s AND r.created_at > am.created_at)",
             (agent, UNREAD_MIN_AGE_SEC, UNREAD_MAX_AGE_SEC, agent))
-        unread, oldest, actionable = cur.fetchone()
+        rows = cur.fetchall()
+        unread = len(rows)
+        oldest = max((float(r[3]) for r in rows if r[3] is not None), default=0.0)
+        actionable = sum(1 for r in rows if r[1])
+        wake_eligible = sum(
+            1 for p, rr, mt, _ in rows
+            if agent_wake.should_auto_wake(agent, mt or "", bool(rr), p or "P2", False))
         cur.execute(
             "SELECT EXTRACT(epoch FROM now() - max(created_at)) "
             "  FROM agent_messages WHERE from_agent = %s",
             (agent,))
         row = cur.fetchone()
         last_write = float(row[0]) if row and row[0] is not None else float("inf")
-    return BusSignal(int(unread or 0), float(oldest or 0), last_write, int(actionable or 0))
+    return BusSignal(int(unread or 0), float(oldest or 0), last_write,
+                     int(actionable or 0), int(wake_eligible or 0))
 
 
 def read_composer(session: str) -> ComposerSignal:
@@ -506,10 +522,21 @@ def _candidate(obs: AgentObs) -> bool:
 
 
 def _genuine_stall(obs: AgentObs) -> bool:
-    """A confirmed wedge worth PAGING (and counting toward the repeat breaker): it is
-    either fully quiet past ALERT_QUIET_SEC, or holds an ACTIONABLE (requires_response)
-    unread. A lane that wrote to the bus more recently than that and has only FYI-grade
-    unread is benign idle-between-tasks — still nudged, never paged (Nazim 14413)."""
+    """A confirmed wedge worth PAGING (and counting toward the repeat breaker).
+
+    The HUB (cc-orchestrator) is a special case: it is CROSS-HOST (no composer read
+    here), composer='delegated', and operator-attended, so 'fully quiet' cannot tell
+    an idle-attended-done hub from a stuck one (Nazim #17117; the 315.7k-token lesson).
+    Quiet-alone therefore FALSE-paged a legitimately-idle hub sitting on benign P2/FYI
+    unread (#17116). So the hub pages ONLY on WAKE-ELIGIBLE unread it is failing to
+    drain — the CAI-451 narrow floor (P0/P1 + requires_response, via should_auto_wake),
+    the genuine actionable class — never on quiet + FYIs.
+
+    Every other body is unchanged: either fully quiet past ALERT_QUIET_SEC, or holds an
+    ACTIONABLE (requires_response) unread. A body that wrote more recently and has only
+    FYI-grade unread is benign idle-between-tasks — nudged, never paged (Nazim 14413)."""
+    if obs.agent == "cc-orchestrator":
+        return obs.bus.wake_eligible > 0
     return obs.bus.last_write_age >= ALERT_QUIET_SEC or obs.bus.actionable > 0
 
 
