@@ -53,6 +53,7 @@ COORDINATORS: List[Coordinator] = [
     Coordinator("cai", "cai", "governance / strategic node", "cai", "cai", "Mini"),
     Coordinator("cc-fleet-health", "SRE", "fleet reliability / health", "fleet-health", "fleet-health", "Mini"),
     Coordinator("cc-finance", "Finance", "Head of Revenue", "finance", "finance", "Mini"),
+    Coordinator("cc-quality", "Quality", "Head of Quality (on-demand)", "quality", "quality", "Mini"),
 ]
 
 
