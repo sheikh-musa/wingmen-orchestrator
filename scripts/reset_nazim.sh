@@ -29,6 +29,56 @@ if ! "$TM" has-session -t "$SESS" 2>/dev/null; then
   exit 1
 fi
 
+# SELF-FIRE GUARD (op#11269/11271, operator-caught twice): a singleton can only
+# PREP its own recycle (write a handoff, clean its inbox) — it can NEVER fire its
+# own /clear. If this runs from INSIDE the target '$SESS' session (Nazim invoking
+# it in his own live turn via the Bash tool), the send-keys below interleave with
+# that live turn: the /clear stages into the composer but never commits, while the
+# reconstitution/boot injection still lands — the "cleared but didn't reconstitute"
+# boot-before-clear half-state the operator saw. A PEER body must fire the actual
+# /clear: the operator's ↺ reset button, or the hub via
+#   ssh Musa@sheikhs-mac-mini bash ~/wingmen/orchestrator/scripts/reset_nazim.sh
+# Detection: a process launched inside a tmux pane inherits $TMUX_PANE; resolve the
+# session that pane belongs to and refuse if it IS the target. External callers
+# (reset button, ssh, a non-tmux shell, or another session's pane) all pass.
+if [ -n "${TMUX_PANE:-}" ]; then
+  _caller_sess="$("$TM" display-message -p -t "${TMUX_PANE}" '#S' 2>/dev/null || echo)"
+  if [ "$_caller_sess" = "$SESS" ]; then
+    echo "[reset_nazim] SELF-FIRE REFUSED: invoked from INSIDE the '$SESS' session." >&2
+    echo "  A singleton cannot /clear its own live turn — the /clear would stage un-executed" >&2
+    echo "  (boot-before-clear). Fire it EXTERNALLY: the operator's reset button, or the hub via" >&2
+    echo "    ssh Musa@sheikhs-mac-mini bash ~/wingmen/orchestrator/scripts/reset_nazim.sh" >&2
+    if [ "${RESET_ALLOW_SELF:-0}" != 1 ]; then exit 5; fi
+    echo "[reset_nazim] RESET_ALLOW_SELF=1 — proceeding despite self-fire (NOT for a real recycle)." >&2
+  fi
+fi
+
+# HANDOFF-FIRST GATE (op#10967): a recycle must never boot fresh-Nazim from a
+# STALE board (or from nothing). Refuse the /clear unless a FRESH handoff exists
+# — the target is expected to have WRITTEN a current handoff first. RESET_FORCE=1
+# overrides (loud); RESET_DRYRUN=1 runs the gate + reports PASS/FAIL and exits
+# WITHOUT clearing (for verifying the gate).
+FRESH_MAX="${RESET_FRESH_MAX:-1800}"   # 30 min default
+_now="$(date +%s)"
+if [ -z "$HANDOFF" ]; then
+  echo "[reset_nazim] HANDOFF-FIRST GATE: FAIL — no reports/nazim-handoff-*.md found (would boot from nothing). Write a handoff first." >&2
+  if [ "${RESET_FORCE:-0}" != 1 ]; then echo "REFUSING /clear (RESET_FORCE=1 to override)." >&2; exit 3; fi
+  echo "[reset_nazim] RESET_FORCE=1 — proceeding despite no handoff." >&2
+else
+  _mtime="$(stat -f %m "$HANDOFF" 2>/dev/null || stat -c %Y "$HANDOFF" 2>/dev/null || echo 0)"
+  _age=$(( _now - _mtime ))
+  if [ "$_age" -gt "$FRESH_MAX" ]; then
+    echo "[reset_nazim] HANDOFF-FIRST GATE: FAIL — newest handoff $HANDOFF is ${_age}s old (> ${FRESH_MAX}s), STALE. Write a fresh handoff first." >&2
+    if [ "${RESET_FORCE:-0}" != 1 ]; then echo "REFUSING /clear (RESET_FORCE=1 to override)." >&2; exit 4; fi
+    echo "[reset_nazim] RESET_FORCE=1 — proceeding despite stale handoff (${_age}s)." >&2
+  else
+    echo "[reset_nazim] HANDOFF-FIRST GATE: PASS — $HANDOFF is fresh (${_age}s old, <= ${FRESH_MAX}s)."
+  fi
+fi
+if [ "${RESET_DRYRUN:-0}" = 1 ]; then
+  echo "[reset_nazim] RESET_DRYRUN=1 — gate evaluated, NOT clearing. Exiting."; exit 0
+fi
+
 echo "[reset_nazim] clearing composer + sending /clear ..."
 "$TM" send-keys -t "$PANE" -N 80 BSpace   # clear any stray/real composer content (ghost placeholder is harmless)
 sleep 1
