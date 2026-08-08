@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# boot_quality.sh — ON-DEMAND launcher for cc-quality, the fleet's Head of Quality.
+#
+# Distinct from boot_fleet_health.sh (perpetual SRE): cc-quality is ON-DEMAND /
+# scheduled per its charter (cond #1, CAI-RESP-776/777/778) — it is NOT a 24/7
+# heartbeat lane and must not idle a Max seat (the fleet is shrinking consumer-token
+# use, CAI-729->733). So this launcher has NO perpetual heartbeat loop and NO lease:
+# it marks the agent working, launches an interactive claude that reads its charter
+# + bus and does the assigned reviews/sweeps, and marks it offline on exit.
+#
+# Why a dedicated boot and NOT scripts/launch_dangerous_cc.sh (same reasoning as
+# boot_cai.sh / boot_fleet_health.sh): the engineer launcher allocates a SUB-TAG
+# (cc-quality-N) + engineer-lane machinery. cc-quality is a SINGLETON node —
+# agent_id='cc-quality' EXACTLY, no sub-tag, no code-push machinery. Its home
+# (~/wingmen/quality) carries a PINNED CLAUDE.md so an invocation via the
+# orchestrator's absolute path can never resolve identity to the orchestrator's
+# CLAUDE.md (the boot_cai identity-bug failure mode).
+#
+# Usage:  ./boot_quality.sh          # interactive, opus-4-8, on-demand (exits when done)
+# Boot it under tmux on the Mac Mini:
+#   tmux new-session -d -s quality -c ~/wingmen/quality ~/wingmen/orchestrator/scripts/boot_quality.sh
+set -uo pipefail
+
+# PINNED to cc-quality's own home (not derived from ${BASH_SOURCE[0]} dirname) so an
+# invocation via the orchestrator's absolute path can't resolve the home to
+# orchestrator/scripts and boot it with the ORCHESTRATOR's CLAUDE.md = a 2nd
+# cc-orchestrator (the boot_cai identity outage). Pin to the home so path can't matter.
+Q_DIR="$HOME/wingmen/quality"
+ORCH_DIR="$HOME/wingmen/orchestrator"
+VENV_PY="$ORCH_DIR/.venv/bin/python3"
+MODEL="${MODEL:-claude-opus-4-8}"
+AGENT_ID="cc-quality"   # exact — singleton node, never a sub-tag
+
+if [ ! -f "$Q_DIR/CLAUDE.md" ]; then
+    echo "ERROR: $Q_DIR/CLAUDE.md missing — cc-quality identity home not set up." >&2
+    exit 1
+fi
+
+# .env (DSN, OAuth token) lives in the orchestrator; cc-quality shares the substrate.
+set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"
+fi
+# Max-subscription billing (verified pattern, see boot_fleet_health.sh):
+#  1. Scrub ANTHROPIC_API_KEY so `claude` does not fall to metered API billing.
+#  2. Keep CLAUDE_CODE_OAUTH_TOKEN (from .env) — tmux runs outside the GUI login,
+#     so it cannot read the interactive /login OAuth from the Keychain.
+unset ANTHROPIC_API_KEY
+DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
+if [ -z "$DSN" ]; then
+    echo "ERROR: DATABASE_URL not set in $ORCH_DIR/.env — cannot bring cc-quality online" >&2
+    exit 1
+fi
+
+_sql() { "$VENV_PY" - "$@" <<'PY'
+import os, sys, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+sql = sys.argv[1]
+# agent_status identity trigger: app.current_agent_id GUC must == row's agent_id.
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id', 'cc-quality', true)")
+    cur.execute(sql)
+    conn.commit()
+PY
+}
+
+# ── Pre-flight: the agents row (FK target for agent_messages) must exist ──────
+REGISTERED="$("$VENV_PY" - <<'PY'
+import os, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT 1 FROM agents WHERE id='cc-quality'")
+    print("yes" if cur.fetchone() else "no")
+PY
+)"
+if [ "$REGISTERED" != "yes" ]; then
+    echo "ERROR: agents.id='cc-quality' missing — run: (cd $ORCH_DIR && .venv/bin/python3 -m scripts.register_quality)" >&2
+    exit 1
+fi
+
+# ── Bring cc-quality online (agent_status + agents). Exact agent_id. ──────────
+# Self-register the tmux session for launchd-safe wake delivery (read from this pane).
+Q_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+_sql "
+INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, last_heartbeat, updated_at)
+VALUES ('cc-quality','cc-quality','working','cc-quality on-demand review/sweep session', ARRAY['*']::text[], NULLIF('$Q_TMUX_SESSION',''), now(), now())
+ON CONFLICT (agent_id) DO UPDATE
+  SET status='working', current_task='cc-quality on-demand review/sweep session',
+      tmux_session=NULLIF('$Q_TMUX_SESSION',''),
+      last_heartbeat=now(), updated_at=now();
+UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cc-quality';
+"
+echo "▶ cc-quality online (on-demand): agent_status + agents set (model=$MODEL, dir=$Q_DIR)"
+
+# ── Clean exit: mark offline (on-demand — no heartbeat loop to kill) ──────────
+_handle_exit() {
+    "$VENV_PY" - <<'PY' 2>/dev/null || true
+import os, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id', 'cc-quality', true)")
+    cur.execute("UPDATE agent_status SET status='offline', current_task=NULL, last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-quality'")
+    cur.execute("UPDATE agents SET status='idle' WHERE id='cc-quality'")
+    conn.commit()
+PY
+    echo "▶ cc-quality offline (clean exit)."
+}
+trap '_handle_exit' EXIT
+
+# ── Launch. CLAUDE.md in $Q_DIR auto-loads as project instructions; cc-quality
+#    runs its own boot (confirm identity, read charter, reconcile bus, do work). ─
+echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $Q_DIR"
+cd "$Q_DIR"
+claude --dangerously-skip-permissions --model "$MODEL"
