@@ -53,6 +53,16 @@ def auto_wake_enabled() -> bool:
     return os.environ.get("AUTO_WAKE_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 
+def is_wake_eligible_recipient(to_agent: str | None) -> bool:
+    """RECIPIENT policy shared by the realtime doorbell AND the backstop sweep
+    (op#11297): a live CC WORKER lane or cai. NEVER cc-orchestrator (operator-
+    attended) and never the operator. Factored out so realtime and the sweep share
+    ONE recipient invariant — only the TRIGGER differs between them (realtime =
+    urgent-now; sweep = nothing-rots-unread), never who is eligible."""
+    is_worker = bool(to_agent) and to_agent.startswith("cc-") and to_agent != "cc-orchestrator"
+    return is_worker or to_agent == "cai"
+
+
 def should_auto_wake(
     to_agent: str | None,
     message_type: str,
@@ -60,13 +70,15 @@ def should_auto_wake(
     priority: str,
     is_test: bool,
 ) -> bool:
-    """CAI-RESP-259 Q1: wake iff recipient is a live CC WORKER lane or cai (NOT
-    cc-orchestrator — it stays operator-attended — and never the operator), not a
-    test, not P3, and (requires_response OR an actionable type OR P0/P1 floor)."""
+    """CAI-RESP-259 Q1 (REALTIME doorbell trigger): wake iff recipient is eligible
+    (is_wake_eligible_recipient), not a test, not P3, and (requires_response OR an
+    actionable type OR P0/P1 floor). The backstop sweep reuses the SAME recipient
+    gate but a BROADER trigger — see wake_backstop_sweep (op#11297): a passive
+    update/rr=false to an eligible lane is correctly NOT realtime-urgent here, yet
+    must not rot unread, so the sweep re-wakes it after a grace."""
     if is_test or priority == "P3":
         return False
-    is_worker = bool(to_agent) and to_agent.startswith("cc-") and to_agent != "cc-orchestrator"
-    if not (is_worker or to_agent == "cai"):
+    if not is_wake_eligible_recipient(to_agent):
         return False
     return requires_response or message_type in _WAKE_TYPES or priority in ("P0", "P1")
 
