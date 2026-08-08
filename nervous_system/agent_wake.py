@@ -186,26 +186,71 @@ def _live_claude_panes() -> list[dict]:
     return out
 
 
-def resolve_tmux_session(agent_id: str) -> str | None:
-    # DB-FIRST (launchd-safe): each live lane self-registers its tmux session in
-    # agent_status at boot, so the wake resolves with a pure DB read — no
-    # cross-process introspection (which the launchd sandbox blocks).
+def _tmux_bin() -> str:
+    """The lane tmux binary. The Mini runs TWO tmux servers on different sockets —
+    lanes live on /usr/local/bin/tmux (tmux-501/default), NOT /opt/homebrew/bin/tmux
+    — so resolve/has-session must not depend on PATH order (reference_mini_tmux_two
+    _binaries_socket)."""
+    for c in (os.environ.get("TMUX_BIN"), "/usr/local/bin/tmux"):
+        if c and os.path.exists(c):
+            return c
+    return "tmux"
+
+
+def _tmux_has_session(session: str) -> bool:
+    """True iff the named session exists on the lane tmux server (exact match)."""
+    if not session:
+        return False
+    try:
+        return subprocess.run(
+            [_tmux_bin(), "has-session", "-t", f"={session}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except Exception:
+        return False
+
+
+def _candidate_sessions(agent_id: str) -> list[str]:
+    """Registered tmux sessions for the agent's base family, freshest first, with a
+    mild preference for non-offline rows. NOTE (op#11297 #16880): does NOT filter on
+    status — an on-demand body that self-marks offline WHILE its pane is alive still
+    yields its session; liveness is decided by the pane, not the status field."""
     base = _base_family(agent_id)
-    if _DSN:
-        try:
-            with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
-                cur.execute(
-                    "SELECT tmux_session FROM agent_status "
-                    "WHERE base_agent_id=%s AND status<>'offline' AND tmux_session IS NOT NULL "
-                    "ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1",
-                    (base,))
-                row = cur.fetchone()
-                if row and row[0]:
-                    return row[0]
-        except Exception:
-            pass
-    # FALLBACK: process introspection — works from a login shell (e.g. spawn_reviewer,
-    # manual calls); may return None under launchd. Kept for non-launchd callers.
+    if not _DSN:
+        return []
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT tmux_session FROM agent_status "
+                "WHERE base_agent_id=%s AND tmux_session IS NOT NULL "
+                "ORDER BY (status<>'offline') DESC, last_heartbeat DESC NULLS LAST LIMIT 8",
+                (base,))
+            return [r[0] for r in cur.fetchall() if r[0]]
+    except Exception:
+        return []
+
+
+def _first_live_session(candidates, has_session=None) -> str | None:
+    """Pure: the first candidate whose pane is actually live. Injectable has_session
+    for testing."""
+    hs = has_session or _tmux_has_session
+    for s in candidates:
+        if hs(s):
+            return s
+    return None
+
+
+def resolve_tmux_session(agent_id: str) -> str | None:
+    """Resolve on the LIVE-SESSION FACT (op#11297 #16880): a registered tmux_session
+    whose pane is actually live — DECOUPLED from the status field AND from cwd-intro-
+    spection. This closes all three miss-classes at once: offline-while-alive (status
+    filtered the row), {*}-scoped fleet-wide roles (repo_scope={*} -> no cwd tokens ->
+    the old fallback could never resolve them), and brand-new agents. Coverage is a
+    pure function of (registered session AND live pane), never a curated list."""
+    live = _first_live_session(_candidate_sessions(agent_id))
+    if live:
+        return live
+    # FALLBACK: cwd introspection — only helps scoped agents from a login shell (not
+    # {*} roles, not under the launchd sandbox). Kept for non-launchd scoped callers.
     tokens = _expected_cwd_tokens(agent_id)
     if not tokens:
         return None

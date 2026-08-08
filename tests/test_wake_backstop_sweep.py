@@ -105,6 +105,32 @@ def test_sweep_quiesces_when_nothing_rotting():
     assert res["targets"] == [] and res["woke"] == []
 
 
+# ---- resolve on the live-session fact (op#11297 #16880 / acceptance #9,#10) ----
+
+def test_first_live_session_picks_first_live_skips_dead():
+    live = {"quality"}
+    hs = lambda s: s in live
+    assert agent_wake._first_live_session(["dead-1", "quality", "dead-2"], has_session=hs) == "quality"
+    assert agent_wake._first_live_session(["dead-1", "dead-2"], has_session=hs) is None
+    assert agent_wake._first_live_session([], has_session=hs) is None
+
+
+@pytest.mark.skipif(not _DSN, reason="no DATABASE_URL")
+def test_resolve_uses_live_session_not_status_field():
+    """A registered agent with a LIVE pane resolves regardless of its status field
+    (the #16880 fix: offline-while-alive + {*}-scoped roles). Live fixture: cc-quality
+    (offered itself — status=offline, repo_scope={*}, pane 'quality' live). Skips only
+    if the fixture is not currently registered/live."""
+    with psycopg.connect(_DSN) as c, c.cursor() as cur:
+        cur.execute("SELECT status, tmux_session FROM agent_status WHERE agent_id='cc-quality'")
+        row = cur.fetchone()
+    if not row or not row[1] or not agent_wake._tmux_has_session(row[1]):
+        pytest.skip("cc-quality fixture not registered/live")
+    status, sess = row
+    # the invariant: live pane -> resolves to it, decoupled from the status field
+    assert agent_wake.resolve_tmux_session("cc-quality") == sess
+
+
 # ---- SQL predicate (real DB, BEGIN..ROLLBACK) ----
 
 @pytest.mark.skipif(not _DSN, reason="no DATABASE_URL")
