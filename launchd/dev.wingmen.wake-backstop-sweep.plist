@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Mini wake BACKSTOP sweep (op#11297, cc-quality #16827/#16847). Reliability
+     floor under dev.wingmen.agent-wake-subscriber: re-wakes recipients with a
+     directed row rotting unread, independent of the realtime WS. Honors
+     AUTO_WAKE_ENABLED. Peer of dev.wingmen.agent-wake-subscriber. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.wingmen.wake-backstop-sweep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/boot_wake_backstop_sweep.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/wake-backstop-sweep.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/wake-backstop-sweep.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/sheikhmusa</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
