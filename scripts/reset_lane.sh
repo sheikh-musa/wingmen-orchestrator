@@ -32,6 +32,24 @@ if ! "$TM" has-session -t "$SESS" 2>/dev/null; then
   echo "ERROR: tmux session '$SESS' not found on this host ($TM)." >&2; exit 1
 fi
 
+# SELF-FIRE GUARD (CAI-779 Tier-B, mirrors reset_nazim.sh d975d1a — cc-quality-verified).
+# A body may PREP its own recycle but must NEVER fire its own /clear: from INSIDE the
+# target session the send-keys below interleave with the caller's live turn and stage a
+# boot-before-clear half-state (op#11269/11271). A process launched in a tmux pane
+# inherits $TMUX_PANE; resolve its session and refuse if it IS the target. Here $SESS is
+# the PARAMETERIZED lane arg, so the compare is against the resolved lane session (not a
+# constant). External callers (operator reset button, ssh, another session's pane,
+# non-tmux shell) all pass — fail-open (`|| echo` -> empty != $SESS) so a resolver hiccup
+# never blocks a real reset.
+if [ -n "${TMUX_PANE:-}" ]; then
+  _caller_sess="$("$TM" display-message -p -t "${TMUX_PANE}" '#S' 2>/dev/null || echo)"
+  if [ "$_caller_sess" = "$SESS" ]; then
+    echo "[reset_lane] SELF-FIRE REFUSED: invoked from INSIDE the '$SESS' lane session — a lane cannot /clear its own live turn (boot-before-clear). Fire it EXTERNALLY (operator reset button, ssh, or another session's pane)." >&2
+    if [ "${RESET_ALLOW_SELF:-0}" != 1 ]; then exit 5; fi
+    echo "[reset_lane] RESET_ALLOW_SELF=1 — proceeding despite self-fire (NOT for a real recycle)." >&2
+  fi
+fi
+
 pane_busy "$TM" "$PANE"
 if [ "${CC_BUSY_STALE:-0}" = 1 ]; then
   echo "WARNING: '$SESS' shows a background-agent marker but the pane is FROZEN (byte-identical)." >&2
