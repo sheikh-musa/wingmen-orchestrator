@@ -55,6 +55,11 @@ TM="${TM:-/usr/local/bin/tmux}"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
 LAUNCH_AS="$ORCH_DIR/scripts/launch_lane_as.sh"
 FORBIDDEN_BASENAME="gazzabyte-oauth-token"
+# FINGERPRINT-based forbidden set (op#10851 f/u): the basename guard alone missed an
+# ALIAS of the forbidden gazzabyte token ('gzb-oauth-token', same fp). Refuse ANY
+# token whose CONTENT fingerprints to a forbidden fp, whatever its filename — the
+# same alias-proof CAI-729 guard the console now applies (space-separated fps).
+FORBIDDEN_FPS="13589de86f29"
 POLL_S="${SWITCH_POLL_S:-60}"
 
 # ── arg parse: [--force] [--dry-run] <session> <token-file> ──────────────────
@@ -104,6 +109,13 @@ if [ -z "$NEW_FP" ] || [ "$NEW_FP" = "e3b0c44298fc" ]; then
   echo "ERROR: token file is empty or unreadable (fp resolves to the empty-string hash). Refusing." >&2
   exit 4
 fi
+# Alias-proof forbidden-fp guard (op#10851 f/u): refuse the token by its CONTENT
+# fingerprint, whatever its filename (the basename guard alone missed 'gzb-oauth-token').
+case " $FORBIDDEN_FPS " in
+  *" $NEW_FP "*)
+    echo "ERROR: token fingerprint $NEW_FP is a FORBIDDEN consumer token (CAI-729), whatever its filename. Refusing." >&2
+    exit 4 ;;
+esac
 
 # ── 2. Resolve the live session + its worktree on the Mini socket ────────────
 if ! "$TM" has-session -t "$SESS" 2>/dev/null; then

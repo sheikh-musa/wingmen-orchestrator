@@ -70,6 +70,9 @@ if [ -r "$_LIB/composer_capture.sh" ]; then . "$_LIB/composer_capture.sh" && HAV
 TM="${TM:-/usr/local/bin/tmux}"
 [ -x "$TM" ] || TM="$(command -v tmux || echo /usr/local/bin/tmux)"
 FORBIDDEN_BASENAME="gazzabyte-oauth-token"
+# Alias-proof forbidden-fp set (op#10851 f/u): refuse a token by its CONTENT
+# fingerprint even if aliased under an innocent filename (matches the console guard).
+FORBIDDEN_FPS="13589de86f29"
 EMPTY_HASH="e3b0c44298fc"                       # sha256("")[:12] — empty token file
 POLL_S="${SWITCH_POLL_S:-60}"
 CAI_HANDOFF_MAX_AGE_MIN="${CAI_HANDOFF_MAX_AGE_MIN:-45}"  # cai checkpoint freshness
@@ -135,6 +138,12 @@ if [ -z "$TARGET_FP" ] || [ "$TARGET_FP" = "$EMPTY_HASH" ]; then
   echo "ERROR: token file is empty/unreadable (fp resolves to the empty-string hash). Refusing." >&2
   exit 4
 fi
+# Alias-proof forbidden-fp guard (op#10851 f/u): refuse the token by CONTENT fp.
+case " $FORBIDDEN_FPS " in
+  *" $TARGET_FP "*)
+    echo "ERROR: token fingerprint $TARGET_FP is a FORBIDDEN consumer token (CAI-729), whatever its filename. Refusing." >&2
+    exit 4 ;;
+esac
 
 # ── 2. Boot-script sanity + Max-billing (ANTHROPIC_API_KEY) guard ────────────
 [ -r "$BOOT" ] || { echo "ERROR: boot script missing/unreadable: $BOOT" >&2; exit 3; }
