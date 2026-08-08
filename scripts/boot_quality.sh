@@ -38,14 +38,26 @@ fi
 
 # .env (DSN, OAuth token) lives in the orchestrator; cc-quality shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+# OAuth account resolution — precedence: explicit OVERRIDE (live re-token) > durable
+# pointer (.quality_default_token, reversible per-body default; op#11326 fleet flip,
+# revert = `rm .quality_default_token`) > .env. FAIL-SAFE: absent pointer -> .env.
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
     export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"
+elif [ -r "$ORCH_DIR/.quality_default_token" ]; then
+    _QTOKF="$(tr -d '[:space:]' < "$ORCH_DIR/.quality_default_token" 2>/dev/null || true)"
+    if [ -n "${_QTOKF:-}" ] && [ -r "$_QTOKF" ]; then
+        export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_QTOKF")"
+        echo "[boot_quality] durable token override applied (.quality_default_token -> $_QTOKF)" >&2
+    fi
 fi
 # Max-subscription billing (verified pattern, see boot_fleet_health.sh):
 #  1. Scrub ANTHROPIC_API_KEY so `claude` does not fall to metered API billing.
 #  2. Keep CLAUDE_CODE_OAUTH_TOKEN (from .env) — tmux runs outside the GUI login,
 #     so it cannot read the interactive /login OAuth from the Keychain.
 unset ANTHROPIC_API_KEY
+# auth_fp = sha256(effective launch token)[:12] — stable account fingerprint stamped
+# into agent_status below so cc-quality is post-flip verifiable (op#11326).
+AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
 DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
 if [ -z "$DSN" ]; then
     echo "ERROR: DATABASE_URL not set in $ORCH_DIR/.env — cannot bring cc-quality online" >&2
@@ -82,11 +94,12 @@ fi
 # Self-register the tmux session for launchd-safe wake delivery (read from this pane).
 Q_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 _sql "
-INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, last_heartbeat, updated_at)
-VALUES ('cc-quality','cc-quality','working','cc-quality on-demand review/sweep session', ARRAY['*']::text[], NULLIF('$Q_TMUX_SESSION',''), now(), now())
+INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, auth_fp, last_heartbeat, updated_at)
+VALUES ('cc-quality','cc-quality','working','cc-quality on-demand review/sweep session', ARRAY['*']::text[], NULLIF('$Q_TMUX_SESSION',''), NULLIF('$AUTH_FP',''), now(), now())
 ON CONFLICT (agent_id) DO UPDATE
   SET status='working', current_task='cc-quality on-demand review/sweep session',
       tmux_session=NULLIF('$Q_TMUX_SESSION',''),
+      auth_fp=NULLIF('$AUTH_FP',''),
       last_heartbeat=now(), updated_at=now();
 UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cc-quality';
 "

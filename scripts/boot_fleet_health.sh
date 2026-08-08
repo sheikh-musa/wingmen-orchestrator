@@ -36,12 +36,27 @@ AGENT_ID="cc-fleet-health"   # exact — singleton SRE node, never a sub-tag
 
 # .env (DSN, OAuth token) lives in the orchestrator; the SRE shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
-# Per-lane OAuth token override (e.g. a donor/loaner account during a cap crunch).
-# Applied AFTER the .env source so it wins; distinct var name so `set -a; . .env`
-# cannot clobber it. Unset for normal boots -> no effect on billing.
+# OAuth account resolution — precedence: explicit OVERRIDE (a live re-token via
+# switch_singleton_token.sh) > durable pointer (.fleet-health_default_token, the
+# reversible per-body default; op#11326 fleet flip) > .env. Applied AFTER the .env
+# source so it wins; distinct var name so `set -a; . .env` cannot clobber it.
+# FAIL-SAFE: an absent/unreadable pointer or token falls through to the .env token —
+# never offline. Revert the durable default = `rm .fleet-health_default_token`.
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
     export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"
+elif [ -r "$ORCH_DIR/.fleet-health_default_token" ]; then
+    _FHTOKF="$(tr -d '[:space:]' < "$ORCH_DIR/.fleet-health_default_token" 2>/dev/null || true)"
+    if [ -n "${_FHTOKF:-}" ] && [ -r "$_FHTOKF" ]; then
+        export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_FHTOKF")"
+        echo "[boot_fleet_health] durable token override applied (.fleet-health_default_token -> $_FHTOKF)" >&2
+    fi
 fi
+# auth_fp = sha256(effective launch token)[:12] — the STABLE account fingerprint the
+# lane launcher stamps (matches the token FILE fp; claude later rotates its internal
+# access token, but this launch-time fp is the account identifier the fleet verifier
+# reads). Stamped into agent_status below so the SRE singleton is post-flip verifiable
+# (op#11326). Never prints the token.
+AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
 # Max-subscription billing — two parts, both load-bearing (verified 2026-06-17):
 #  1. Scrub ANTHROPIC_API_KEY: .env carries it for the orch's own API calls, but
 #     a present ANTHROPIC_API_KEY makes `claude` use metered API-usage billing.
@@ -91,11 +106,12 @@ fi
 # launchd-safe wake delivery — read from inside this pane.
 FH_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 _sql "
-INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, last_heartbeat, updated_at)
-VALUES ('cc-fleet-health','cc-fleet-health','working','cc-fleet-health SRE perpetual health lane', ARRAY['*']::text[], NULLIF('$FH_TMUX_SESSION',''), now(), now())
+INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, auth_fp, last_heartbeat, updated_at)
+VALUES ('cc-fleet-health','cc-fleet-health','working','cc-fleet-health SRE perpetual health lane', ARRAY['*']::text[], NULLIF('$FH_TMUX_SESSION',''), NULLIF('$AUTH_FP',''), now(), now())
 ON CONFLICT (agent_id) DO UPDATE
   SET status='working', current_task='cc-fleet-health SRE perpetual health lane',
       tmux_session=NULLIF('$FH_TMUX_SESSION',''),
+      auth_fp=NULLIF('$AUTH_FP',''),
       last_heartbeat=now(), updated_at=now();
 UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cc-fleet-health';
 "
