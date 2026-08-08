@@ -83,6 +83,27 @@ def should_auto_wake(
     return requires_response or message_type in _WAKE_TYPES or priority in ("P0", "P1")
 
 
+def should_backstop_wake(
+    to_agent: str | None,
+    message_type: str,
+    requires_response: bool,
+    priority: str,
+    is_test: bool,
+) -> bool:
+    """CANONICAL backstop-sweep trigger (op#11297, cc-quality #16848) — the WIDER
+    of the two wake predicates, and the authoritative per-row gate the sweep applies
+    (the sweep's SQL is only a coarse prefilter; the policy lives HERE, never forked
+    into SQL). Job: 'no directed message rots unread'. Wakes iff the recipient is
+    eligible, not a test, not P3 — it DROPS should_auto_wake's urgent-type / rr /
+    P0-P1 requirement, so a passive update/rr=false to a live lane (the #16838 miss)
+    is still swept. Same recipient invariant as realtime; only the trigger widens.
+    (message_type/requires_response are accepted for a uniform signature but do not
+    gate the backstop; unread + past-grace are the sweep's query concerns.)"""
+    if is_test or priority == "P3":
+        return False
+    return is_wake_eligible_recipient(to_agent)
+
+
 def _base_family(agent_id: str) -> str:
     """cc-ihsanos-1 -> cc-ihsanos; cai -> cai."""
     return _SUBTAG_RE.sub("", agent_id)

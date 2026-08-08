@@ -42,7 +42,7 @@ import psycopg
 # import (not re-encode) the shared policy + wake primitive
 from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.path at runtime)
     auto_wake_enabled,
-    is_wake_eligible_recipient,
+    should_backstop_wake,
     wake_agent,
 )
 
@@ -65,14 +65,21 @@ _SWEEP_SQL = """
 
 
 def eligible_recipients(rows) -> list[str]:
-    """Pure: the deduped, order-stable set of recipients to wake. Rows are already
-    row-filtered by the SQL (unread/un-skipped/non-test/non-P3/past-grace); here we
-    apply only the SHARED recipient policy. Rows may be tuples (id, to_agent, ...)
-    or mappings with a 'to_agent' key."""
+    """Pure: the deduped, order-stable set of recipients to wake. The SQL is a coarse
+    prefilter; the AUTHORITATIVE per-row decision is agent_wake.should_backstop_wake
+    (canonical policy, never forked into SQL — cc-quality #16848), applied here as
+    defense-in-depth (a row is dropped if it fails the canonical gate even if the SQL
+    let it through). Rows are tuples (id, to_agent, message_type, requires_response,
+    priority, is_test) per _SWEEP_SQL, or mappings with those keys."""
     out: list[str] = []
     for r in rows:
-        to_agent = r["to_agent"] if isinstance(r, dict) else r[1]
-        if is_wake_eligible_recipient(to_agent) and to_agent not in out:
+        if isinstance(r, dict):
+            to_agent, mt, rr, prio, istest = (
+                r["to_agent"], r.get("message_type"), r.get("requires_response"),
+                r.get("priority"), r.get("is_test"))
+        else:
+            _id, to_agent, mt, rr, prio, istest = r
+        if should_backstop_wake(to_agent, mt, rr, prio, istest) and to_agent not in out:
             out.append(to_agent)
     return out
 

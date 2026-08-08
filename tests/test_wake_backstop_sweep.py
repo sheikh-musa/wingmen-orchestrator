@@ -49,9 +49,20 @@ def test_should_auto_wake_behavior_unchanged_by_refactor():
 
 # ---- sweep pure logic ----
 
-def _row(to_agent, id=1):
+def _row(to_agent, id=1, priority="P2", is_test=False):
     # SQL SELECT order: id, to_agent, message_type, requires_response, priority, is_test
-    return (id, to_agent, "update", False, "P2", False)
+    return (id, to_agent, "update", False, priority, is_test)
+
+
+def test_should_backstop_wake_is_the_wider_predicate():
+    # the #16838 class: passive update/rr=false/P2 to an eligible lane -> backstop
+    # WAKES it (wider) while realtime should_auto_wake does NOT.
+    assert agent_wake.should_backstop_wake("cc-quality", "update", False, "P2", False) is True
+    assert agent_wake.should_auto_wake("cc-quality", "update", False, "P2", False) is False
+    # still gated: test / P3 / ineligible recipient
+    assert agent_wake.should_backstop_wake("cc-quality", "update", False, "P2", True) is False
+    assert agent_wake.should_backstop_wake("cc-quality", "update", False, "P3", False) is False
+    assert agent_wake.should_backstop_wake("cc-orchestrator", "blocker", True, "P0", False) is False
 
 
 def test_sweep_catches_the_16838_class_and_shares_recipient_policy():
@@ -63,6 +74,13 @@ def test_sweep_catches_the_16838_class_and_shares_recipient_policy():
         _row("orch-console", 5),          # operator console -> NEVER
     ]
     assert wbs.eligible_recipients(rows) == ["cc-quality", "cc-finance-1", "cai"]
+
+
+def test_eligible_recipients_defense_in_depth_drops_test_and_p3():
+    # even if the SQL prefilter let one through, the canonical per-row gate drops it
+    rows = [_row("cc-quality", 1), _row("cc-finance-1", 2, is_test=True),
+            _row("cai", 3, priority="P3")]
+    assert wbs.eligible_recipients(rows) == ["cc-quality"]
 
 
 def test_sweep_dedups_recipients():
