@@ -53,14 +53,34 @@ def auto_wake_enabled() -> bool:
     return os.environ.get("AUTO_WAKE_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 
-def is_wake_eligible_recipient(to_agent: str | None) -> bool:
+def is_wake_eligible_recipient(
+    to_agent: str | None,
+    priority: str = "P2",
+    requires_response: bool = False,
+) -> bool:
     """RECIPIENT policy shared by the realtime doorbell AND the backstop sweep
-    (op#11297): a live CC WORKER lane or cai. NEVER cc-orchestrator (operator-
-    attended) and never the operator. Factored out so realtime and the sweep share
-    ONE recipient invariant — only the TRIGGER differs between them (realtime =
-    urgent-now; sweep = nothing-rots-unread), never who is eligible."""
-    is_worker = bool(to_agent) and to_agent.startswith("cc-") and to_agent != "cc-orchestrator"
-    return is_worker or to_agent == "cai"
+    (op#11297). Factored out so realtime and the sweep enforce ONE recipient
+    invariant — only the TRIGGER differs (realtime = urgent-now; sweep =
+    nothing-rots-unread), never who is eligible.
+
+    Full-eligibility recipients — live CC WORKER lanes, cai, and the console
+    (orch-console, wake-A) — are eligible whenever the caller's trigger fires.
+
+    The HUB (cc-orchestrator) is operator-attended and eligible ONLY on the CAI-451
+    NARROW FLOOR: priority P0/P1 AND requires_response. This is why the predicate
+    takes priority + requires_response — the floor lives HERE so realtime and the
+    sweep apply it identically. A prior op#11297 refactor dropped it ('NEVER
+    cc-orchestrator'); cai ruled that a REGRESSION (CAI-RESP-786), not a policy, and
+    that op#11297's uniform principle itself requires including the hub. The operator
+    is never woken. Recipient-only / default context => the hub is NOT eligible
+    (fail-safe: never wake the hub unless a P0/P1+rr row is proven)."""
+    if not to_agent:
+        return False
+    if to_agent == "cc-orchestrator":
+        # CAI-451 narrow floor — carried forward per CAI-RESP-786.
+        return priority in ("P0", "P1") and bool(requires_response)
+    is_worker = to_agent.startswith("cc-")  # cc-orchestrator already handled above
+    return is_worker or to_agent in ("cai", "orch-console")
 
 
 def should_auto_wake(
@@ -78,7 +98,7 @@ def should_auto_wake(
     must not rot unread, so the sweep re-wakes it after a grace."""
     if is_test or priority == "P3":
         return False
-    if not is_wake_eligible_recipient(to_agent):
+    if not is_wake_eligible_recipient(to_agent, priority, requires_response):
         return False
     return requires_response or message_type in _WAKE_TYPES or priority in ("P0", "P1")
 
@@ -101,7 +121,7 @@ def should_backstop_wake(
     gate the backstop; unread + past-grace are the sweep's query concerns.)"""
     if is_test or priority == "P3":
         return False
-    return is_wake_eligible_recipient(to_agent)
+    return is_wake_eligible_recipient(to_agent, priority, requires_response)
 
 
 def _base_family(agent_id: str) -> str:

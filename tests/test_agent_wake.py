@@ -14,7 +14,14 @@ from nervous_system import agent_wake
     ("cc-ihsanos", "challenge", False, "P2", False, True),   # challenge wakes (window)
     ("cc-ihsanos", "update", False, "P2", False, False),     # plain FYI -> no wake
     ("cai", "decision", False, "P2", False, True),           # cai is wakeable
-    ("cc-orchestrator", "decision", True, "P1", False, False),  # hub stays attended
+    # CAI-451/CAI-RESP-786: the hub IS auto-wake-eligible, but ONLY on the narrow
+    # floor (P0/P1 AND requires_response). "NEVER cc-orchestrator" was a regression.
+    ("cc-orchestrator", "decision", True, "P1", False, True),   # hub: P1 + rr -> wake
+    ("cc-orchestrator", "question", True, "P0", False, True),   # hub: P0 + rr -> wake
+    ("cc-orchestrator", "blocker", False, "P1", False, False),  # hub: P1 but rr=False -> no
+    ("cc-orchestrator", "decision", True, "P2", False, False),  # hub: rr but P2 -> no
+    ("orch-console", "update", True, "P2", False, True),        # console (wake-A): fully eligible + rr
+    ("orch-console", "update", False, "P2", False, False),      # console: plain FYI -> no realtime wake
     ("musa", "question", True, "P0", False, False),          # never wake the operator
     ("cc-ihsanos", "blocker", True, "P1", True, False),      # is_test never
     ("cc-ihsanos", "blocker", True, "P3", False, False),     # P3 never

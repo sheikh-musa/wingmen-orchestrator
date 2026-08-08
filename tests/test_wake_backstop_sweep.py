@@ -27,9 +27,16 @@ def test_is_wake_eligible_recipient_policy():
     assert agent_wake.is_wake_eligible_recipient("cc-quality") is True
     assert agent_wake.is_wake_eligible_recipient("cc-finance-1") is True
     assert agent_wake.is_wake_eligible_recipient("cai") is True
-    # NEVER the hub (operator-attended) or the operator/console/empty
+    # wake-A (op#11297): the console is a full-eligibility recipient now.
+    assert agent_wake.is_wake_eligible_recipient("orch-console") is True
+    # CAI-451/CAI-RESP-786: the hub is eligible ONLY on the narrow floor
+    # (P0/P1 AND requires_response). Recipient-only / default context -> not eligible.
     assert agent_wake.is_wake_eligible_recipient("cc-orchestrator") is False
-    assert agent_wake.is_wake_eligible_recipient("orch-console") is False
+    assert agent_wake.is_wake_eligible_recipient("cc-orchestrator", "P1", True) is True
+    assert agent_wake.is_wake_eligible_recipient("cc-orchestrator", "P0", True) is True
+    assert agent_wake.is_wake_eligible_recipient("cc-orchestrator", "P1", False) is False
+    assert agent_wake.is_wake_eligible_recipient("cc-orchestrator", "P2", True) is False
+    # never the operator / empty
     assert agent_wake.is_wake_eligible_recipient("operator") is False
     assert agent_wake.is_wake_eligible_recipient(None) is False
 
@@ -41,8 +48,10 @@ def test_should_auto_wake_behavior_unchanged_by_refactor():
     assert agent_wake.should_auto_wake("cc-quality", "update", True, "P2", False) is True
     assert agent_wake.should_auto_wake("cc-quality", "review_request", False, "P2", False) is True
     assert agent_wake.should_auto_wake("cc-finance-1", "update", False, "P1", False) is True
+    # CAI-451/786: the hub IS woken on the narrow floor (P0/P1 + rr), NOT excluded.
+    assert agent_wake.should_auto_wake("cc-orchestrator", "blocker", True, "P0", False) is True
+    assert agent_wake.should_auto_wake("cc-orchestrator", "blocker", False, "P0", False) is False  # rr=False
     # recipient + test/P3 gates unchanged
-    assert agent_wake.should_auto_wake("cc-orchestrator", "blocker", True, "P0", False) is False
     assert agent_wake.should_auto_wake("cc-quality", "blocker", True, "P0", True) is False   # is_test
     assert agent_wake.should_auto_wake("cc-quality", "blocker", True, "P3", False) is False  # P3
 
@@ -62,7 +71,10 @@ def test_should_backstop_wake_is_the_wider_predicate():
     # still gated: test / P3 / ineligible recipient
     assert agent_wake.should_backstop_wake("cc-quality", "update", False, "P2", True) is False
     assert agent_wake.should_backstop_wake("cc-quality", "update", False, "P3", False) is False
-    assert agent_wake.should_backstop_wake("cc-orchestrator", "blocker", True, "P0", False) is False
+    # CAI-786: the hub is swept ONLY on the narrow floor (P0/P1 + rr) — the belt for
+    # exactly the hub-dark class. A P2 / rr=false hub row is still NOT swept.
+    assert agent_wake.should_backstop_wake("cc-orchestrator", "blocker", True, "P0", False) is True
+    assert agent_wake.should_backstop_wake("cc-orchestrator", "update", False, "P2", False) is False
 
 
 def test_sweep_catches_the_16838_class_and_shares_recipient_policy():
@@ -70,10 +82,13 @@ def test_sweep_catches_the_16838_class_and_shares_recipient_policy():
         _row("cc-quality", 16838),        # the missed passive update -> MUST be swept
         _row("cc-finance-1", 2),
         _row("cai", 3),
-        _row("cc-orchestrator", 4),       # hub -> NEVER swept (shared recipient policy)
-        _row("orch-console", 5),          # operator console -> NEVER
+        _row("cc-orchestrator", 4),       # hub P2/rr=false -> NOT swept (narrow floor unmet)
+        # hub P0+rr -> swept: the CAI-786 belt for the hub-dark class (SQL order tuple)
+        (7, "cc-orchestrator", "blocker", True, "P0", False),
+        _row("orch-console", 5),          # console (wake-A) -> swept
     ]
-    assert wbs.eligible_recipients(rows) == ["cc-quality", "cc-finance-1", "cai"]
+    assert wbs.eligible_recipients(rows) == [
+        "cc-quality", "cc-finance-1", "cai", "cc-orchestrator", "orch-console"]
 
 
 def test_eligible_recipients_defense_in_depth_drops_test_and_p3():
