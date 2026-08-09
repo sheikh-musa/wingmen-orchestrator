@@ -71,6 +71,60 @@ if [[ -z "$CLAUDE_BIN" ]]; then
 fi
 [[ -n "$CLAUDE_BIN" ]] || { echo "[boot_nazim] claude binary not found" >&2; exit 1; }
 
+# ── Background heartbeat (5-min) + dead-man's-switch (op#11427 f/u, CAI-RESP-791) ─
+# orch-console had NO periodic heartbeat writer (this boot exec'd claude directly),
+# so agent_status.last_heartbeat froze between reboots — a DEAD liveness signal on the
+# operator's lifeline. Mirror boot_cai.sh: a 5-min loop refreshes last_heartbeat as a
+# CHILD of this script, so it dies when the body dies (dead-man's-switch).
+# CRITICAL: the write MUST set the identity GUC in the SAME txn as the UPDATE, or the
+# agent_status identity trigger (BUG-024/ARCH-035) REJECTS it and the heartbeat never
+# lands (a fix that doesn't fix). This REQUIRES foreground claude (NOT exec) below, so
+# this shell survives to own the loop + fire the EXIT trap; an exec'd claude would
+# orphan the loop into a liveness-LIE (heartbeat outliving a dead body).
+VENV_PY="$ORCH_DIR/.venv/bin/python3"
+_console_heartbeat_loop() {
+    while true; do
+        sleep 300
+        "$VENV_PY" - <<'PY' 2>/dev/null || true
+import os, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
+    cur.execute("UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id='orch-console'")
+    cur.execute("UPDATE agents SET last_heartbeat=now() WHERE id='orch-console'")
+    conn.commit()
+PY
+    done
+}
+HB_PID=""
+if [ -x "$VENV_PY" ]; then
+    _console_heartbeat_loop &
+    HB_PID=$!
+else
+    echo "[boot_nazim] WARN: $VENV_PY missing — heartbeat loop NOT started (console hb stays stale)" >&2
+fi
+
+# Clean exit: stop the heartbeat, then mark console offline. NOTE (#17025 interaction):
+# this writes a transient status='offline' during the seconds between this body exiting
+# and the launchd waiter (boot_nazim_session.sh) relaunching it. The watchdog's #17025
+# live-session carve-out still governs PAGING (it gates on a live tmux session, not this
+# row alone), so the blip does not itself page; the fresh boot re-asserts status='working'
+# on restart. See the review note — dropping the offline write entirely is the alternative
+# if we prefer the lifeline row to NEVER read offline across reboots.
+_console_boot_exit() {
+    [ -n "${HB_PID:-}" ] && kill "$HB_PID" 2>/dev/null || true
+    "$VENV_PY" - <<'PY' 2>/dev/null || true
+import os, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
+    cur.execute("UPDATE agent_status SET status='offline', current_task=NULL, last_heartbeat=now(), updated_at=now() WHERE agent_id='orch-console'")
+    cur.execute("UPDATE agents SET status='idle' WHERE id='orch-console'")
+    conn.commit()
+PY
+}
+trap '_console_boot_exit' EXIT
+
 # Model is .env-driven (NAZIM_MODEL) so the launchd KeepAlive waiter's no-arg
 # auto-restart honors the operator's choice too — the old hardcoded flag pinned
 # every auto-restart to 4.8 and left the operator no way in without racing the
@@ -78,4 +132,9 @@ fi
 # --model in "$@" still comes later on argv and wins (claude last-wins parsing).
 NAZIM_MODEL="${NAZIM_MODEL:-claude-opus-4-8}"
 echo "[boot_nazim] $(date '+%H:%M:%S') launching $CLAUDE_BIN as ${ORCH_AGENT_ID:-orch-console} (body=${ORCH_BODY_ROLE:-?}, session=${ORCH_TMUX_SESSION:-?}, model=$NAZIM_MODEL)"
-exec "$CLAUDE_BIN" --dangerously-skip-permissions --model "$NAZIM_MODEL" "$@"
+# FOREGROUND (was `exec`): this shell must survive claude to own the heartbeat loop and
+# fire the EXIT trap (dead-man's-switch). When claude exits, the trap stops the heartbeat
+# + marks offline, this script returns, the pane command ends, the tmux session closes,
+# and the launchd waiter (boot_nazim_session.sh) restarts Nazim — same restart semantics
+# as before, just with a bash parent owning the liveness loop.
+"$CLAUDE_BIN" --dangerously-skip-permissions --model "$NAZIM_MODEL" "$@"
