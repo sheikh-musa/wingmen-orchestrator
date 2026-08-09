@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# switch_singleton_token.sh — RE-TOKEN a SINGLETON fleet node (cc-fleet-health, cai)
-# onto a DIFFERENT Claude OAuth account, SAFELY.
+# switch_singleton_token.sh — RE-TOKEN a SINGLETON fleet node
+# (cc-fleet-health, cai, orch-console, cc-quality) onto a DIFFERENT Claude OAuth
+# account, SAFELY.
 #
 # ── WHY a singleton-specific tool (and NOT switch_lane_token.sh) ──────────────
 # switch_lane_token.sh re-tokens ENGINEER LANES by relaunching through
@@ -50,7 +51,7 @@
 # via launchctl bootout/kickstart with the override in the job env instead.
 #
 # Usage:  scripts/switch_singleton_token.sh [--dry-run] [--force] <node> <token-file>
-#   node ∈ { cc-fleet-health, cai }
+#   node ∈ { cc-fleet-health, cai, orch-console, cc-quality }
 #   e.g.  scripts/switch_singleton_token.sh --dry-run cc-fleet-health ~/.wingmen/keys/musa-oauth-token
 #         scripts/switch_singleton_token.sh cc-fleet-health ~/.wingmen/keys/musa-oauth-token
 #         scripts/switch_singleton_token.sh cai ~/.wingmen/keys/musa-oauth-token
@@ -75,7 +76,10 @@ FORBIDDEN_BASENAME="gazzabyte-oauth-token"
 FORBIDDEN_FPS="13589de86f29"
 EMPTY_HASH="e3b0c44298fc"                       # sha256("")[:12] — empty token file
 POLL_S="${SWITCH_POLL_S:-60}"
-CAI_HANDOFF_MAX_AGE_MIN="${CAI_HANDOFF_MAX_AGE_MIN:-45}"  # cai checkpoint freshness
+# Checkpoint freshness for ANY checkpointed node (cai, orch-console). Renamed from
+# the old cai-specific knob; the fallback keeps any legacy CAI_HANDOFF_MAX_AGE_MIN
+# override working (CAI-RESP-790 Q2).
+NODE_HANDOFF_MAX_AGE_MIN="${NODE_HANDOFF_MAX_AGE_MIN:-${CAI_HANDOFF_MAX_AGE_MIN:-45}}"
 
 # ── arg parse: [--dry-run] [--force] <node> <token-file> ─────────────────────
 DRY=0
@@ -89,7 +93,7 @@ for a in "$@"; do
     *) if [ -z "$NODE" ]; then NODE="$a"; elif [ -z "$TOKFILE" ]; then TOKFILE="$a"; fi ;;
   esac
 done
-_usage() { echo "usage: switch_singleton_token.sh [--dry-run] [--force] <cc-fleet-health|cai> <token-file>" >&2; }
+_usage() { echo "usage: switch_singleton_token.sh [--dry-run] [--force] <cc-fleet-health|cai|orch-console|cc-quality> <token-file>" >&2; }
 [ -n "$NODE" ]    || { _usage; exit 2; }
 [ -n "$TOKFILE" ] || { _usage; exit 2; }
 
@@ -111,8 +115,28 @@ case "$NODE" in
     BOOT="$NODE_DIR/boot_cai.sh"
     CHECKPOINT="$NODE_DIR/reports/cai-handoff-NOW.md"  # context-preserving restore point
     ;;
+  orch-console)
+    # Console = the operator's lifeline body (Nazim). CHECKPOINT-FIRST, extra care:
+    # a fresh reboot loses console context, so the switch REFUSES unless a fresh
+    # nazim-handoff-NOW.md exists (same freshness gate as cai). boot_nazim.sh honours
+    # CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE and unsets ANTHROPIC_API_KEY (verified).
+    SESS="nazim"
+    AGENT_ID="orch-console"
+    NODE_DIR="$HOME/wingmen/orchestrator"
+    BOOT="$NODE_DIR/scripts/boot_nazim.sh"
+    CHECKPOINT="$NODE_DIR/reports/nazim-handoff-NOW.md"  # REVIEW: nazim must maintain this stable path
+    ;;
+  cc-quality)
+    # Stateless reviewer — fresh reboot loses nothing (reconstitutes from charter).
+    # BOOT lives under orchestrator/scripts (verified live), NOT ~/wingmen/quality.
+    SESS="quality"
+    AGENT_ID="cc-quality"
+    NODE_DIR="$HOME/wingmen/quality"
+    BOOT="$HOME/wingmen/orchestrator/scripts/boot_quality.sh"
+    CHECKPOINT=""                                 # stateless — fresh reboot is fine
+    ;;
   *)
-    echo "ERROR: unknown singleton '$NODE' — must be one of: cc-fleet-health, cai" >&2
+    echo "ERROR: unknown singleton '$NODE' — must be one of: cc-fleet-health, cai, orch-console, cc-quality" >&2
     _usage; exit 2 ;;
 esac
 PANE="${SESS}:0.0"
@@ -168,7 +192,14 @@ _env_fp_for_session() {   # echoes sha256(CLAUDE_CODE_OAUTH_TOKEN)[:12] of the n
   [ -n "$ppid" ] || return 0
   for pid in $(_descendants "$ppid"); do
     # -f2- (not -f2) keeps the whole value even if a token ever contains '='.
-    fp="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep '^CLAUDE_CODE_OAUTH_TOKEN=' | head -1 | cut -d= -f2- | shasum -a 256 2>/dev/null | cut -c1-12)"
+    # tr -d '\n' STRIPS the trailing newline the pipe carries, so the live-env fp
+    # is hashed over the BARE token value — matching TARGET_FP, which is computed as
+    # `printf '%s' "$(cat file)"` (newline-stripped). WITHOUT this, the live fp is
+    # sha256(token+"\n") while TARGET is sha256(token): the two NEVER match, so the
+    # post-switch poll (and the idempotent short-circuit) would falsely report FAIL
+    # on a SUCCESSFUL switch (proven 2026-08-09: musa token = 68142948c003 stripped
+    # vs 5ebfdd9b66df with the trailing newline). Fingerprint conventions MUST align.
+    fp="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep '^CLAUDE_CODE_OAUTH_TOKEN=' | head -1 | cut -d= -f2- | tr -d '\n' | shasum -a 256 2>/dev/null | cut -c1-12)"
     if [ -n "$fp" ] && [ "$fp" != "$EMPTY_HASH" ]; then printf '%s\n' "$fp"; return 0; fi
   done
   return 0
@@ -205,28 +236,31 @@ if [ -n "$BEFORE_FP" ] && [ "$BEFORE_FP" = "$TARGET_FP" ]; then
   exit 0
 fi
 
-# ── 5. cai CHECKPOINT-FIRST gate (context preservation) ──────────────────────
+# ── 5. CHECKPOINT-FIRST gate (context preservation, any checkpointed node) ────
+# Applies to every node with a non-empty CHECKPOINT (cai, orch-console): re-tokening
+# spawns a FRESH process which loses live context unless the node checkpointed first.
 CHECKPOINT_NOTE="n/a (stateless node — fresh reboot loses nothing)"
 if [ -n "$CHECKPOINT" ]; then
+  _cpbn="$(basename "$CHECKPOINT")"
   if [ ! -f "$CHECKPOINT" ]; then
     CHECKPOINT_NOTE="MISSING restore point ($CHECKPOINT)"
-    echo "ERROR: cai restore point missing: $CHECKPOINT" >&2
-    echo "       cai holds CONTEXT — re-tokening requires a fresh process, which LOSES it unless" >&2
-    echo "       cai has checkpointed first. Have cai write reports/cai-handoff-NOW.md, THEN re-run." >&2
+    echo "ERROR: $NODE restore point missing: $CHECKPOINT" >&2
+    echo "       $NODE holds CONTEXT — re-tokening requires a fresh process, which LOSES it unless" >&2
+    echo "       $NODE has checkpointed first. Have $NODE write $_cpbn, THEN re-run." >&2
     # In dry-run we PREVIEW (report + continue to the plan); a live run REFUSES here.
     [ "$DRY" = "1" ] || exit 6
   else
     _mtime="$(stat -f %m "$CHECKPOINT" 2>/dev/null || echo 0)"
     _age_min=$(( ( $(date -u +%s) - _mtime ) / 60 ))
-    if [ "$_age_min" -gt "$CAI_HANDOFF_MAX_AGE_MIN" ]; then
+    if [ "$_age_min" -gt "$NODE_HANDOFF_MAX_AGE_MIN" ]; then
       if [ "$FORCE" = "1" ]; then
-        echo "WARNING: cai restore point is STALE (${_age_min}m > ${CAI_HANDOFF_MAX_AGE_MIN}m) — --force set, proceeding." >&2
-        echo "WARNING: fresh-cai will reconstitute from a ${_age_min}m-old handoff; recent context will be LOST." >&2
+        echo "WARNING: $NODE restore point is STALE (${_age_min}m > ${NODE_HANDOFF_MAX_AGE_MIN}m) — --force set, proceeding." >&2
+        echo "WARNING: fresh-$NODE will reconstitute from a ${_age_min}m-old handoff; recent context will be LOST." >&2
         CHECKPOINT_NOTE="STALE handoff (${_age_min}m) — forced"
       else
-        CHECKPOINT_NOTE="STALE handoff (${_age_min}m > ${CAI_HANDOFF_MAX_AGE_MIN}m) — live run WOULD REFUSE (need fresh handoff or --force)"
-        echo "ERROR: cai restore point is STALE — $CHECKPOINT is ${_age_min}m old (> ${CAI_HANDOFF_MAX_AGE_MIN}m)." >&2
-        echo "       Have cai write a FRESH reports/cai-handoff-NOW.md, then re-run (or --force to accept the loss)." >&2
+        CHECKPOINT_NOTE="STALE handoff (${_age_min}m > ${NODE_HANDOFF_MAX_AGE_MIN}m) — live run WOULD REFUSE (need fresh handoff or --force)"
+        echo "ERROR: $NODE restore point is STALE — $CHECKPOINT is ${_age_min}m old (> ${NODE_HANDOFF_MAX_AGE_MIN}m)." >&2
+        echo "       Have $NODE write a FRESH $_cpbn, then re-run (or --force to accept the loss)." >&2
         # In dry-run we PREVIEW (report + continue to the plan); a live run REFUSES here.
         [ "$DRY" = "1" ] || exit 6
       fi
