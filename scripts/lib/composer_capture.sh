@@ -221,6 +221,16 @@ _cc_is_placeholder_literal() {
   case "$1" in
     'Press up to edit queued messages') return 0 ;;
     'Try "'*'"')                        return 0 ;;
+    # Grey autocomplete/hint placeholders CC renders in an EMPTY composer. Under
+    # `capture-pane -p` the dim SGR is stripped, so these fall through to literal
+    # matching and were mis-read as REAL staged text — a false 'non-empty' that
+    # false-wedged the SRE liveness watcher AND could false-trip the reset scripts'
+    # post-wipe empty-verify (found by orch-console, 2026-08-11). MATCH ONLY the
+    # exact known grey strings — deliberately NOT a broad '<*>' pattern, because a
+    # real staged next-step that happens to be bracketed (e.g. '<wake> check inbox')
+    # must still read as REAL content (over-matching here would WIPE live work on
+    # recycle). Add new grey placeholders here explicitly as they are observed.
+    '<no suggestion>' | '<none>')       return 0 ;;
     *)                                  return 1 ;;
   esac
 }
