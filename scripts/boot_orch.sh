@@ -137,9 +137,50 @@ fi
 
 log "session '$SESSION' is live — waiting for it to exit"
 
-# Block until session ends; launchd's KeepAlive will restart us when we exit
+# ── Periodic heartbeat + dead-man's-switch (op#11565 f/u, CAI-RESP-807) ──────
+# The hub had NO periodic heartbeat writer: the registration above stamps
+# last_heartbeat only at (re)start, so a hub running for days shows a chronically
+# stale heartbeat and the 2h agent_watchdog offline-flip never fires — a dead
+# liveness signal on the always-on hub (found ~3.3d stale). This supervisor loop
+# runs ONLY while the session is alive, so refreshing last_heartbeat inside it IS
+# the dead-man's-switch: when the hub dies the loop exits and the ticks stop.
+# The write MUST set the identity GUC in the SAME txn as the UPDATE (hardened
+# identity trigger, BUG-024/ARCH-035) — mirrors the console fix (boot_nazim cdc9131).
+HB_EVERY_SEC="${ORCH_HB_EVERY_SEC:-300}"
+_hub_db() {  # $1 = beat | offline — best-effort, never breaks the boot
+    [[ -x "$ORCH_DIR/.venv/bin/python3" ]] || return 0
+    "$ORCH_DIR/.venv/bin/python3" - "${1:-beat}" <<'PYHB' 2>/dev/null || true
+import os, sys, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+if not dsn:
+    sys.exit(0)
+mode = sys.argv[1] if len(sys.argv) > 1 else "beat"
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+    if mode == "offline":
+        cur.execute("UPDATE agent_status SET status='offline', last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-orchestrator'")
+    else:
+        cur.execute("UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-orchestrator'")
+    conn.commit()
+PYHB
+}
+# Clean-exit offline marker: when the session dies the loop exits and this fires,
+# marking the hub offline until launchd's KeepAlive re-runs boot_orch (which re-
+# registers 'working'). NOTE (#17025): the watchdog's live-session carve-out still
+# governs PAGING (it gates on a live tmux session, not this row), so the transient
+# offline across a restart does not itself page; the fresh boot re-asserts 'working'.
+trap '_hub_db offline' EXIT
+
+# Block until session ends; launchd's KeepAlive will restart us when we exit.
+# Refresh the heartbeat every HB_EVERY_SEC while the session lives (dead-man's-switch).
+_hb_last=$(date -u +%s)
 while "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; do
     sleep "$SLEEP_BETWEEN_RESTARTS"
+    _now=$(date -u +%s)
+    if [ $(( _now - _hb_last )) -ge "$HB_EVERY_SEC" ]; then
+        _hub_db beat
+        _hb_last=$_now
+    fi
 done
 
 log "session '$SESSION' ended — launchd will restart shortly"
