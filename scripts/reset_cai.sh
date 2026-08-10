@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # reset_cai.sh — in-place /clear + reboot-from-handoff of the cai session.
-# MUST run ON THE HOST WHERE tmux 'cai' LIVES (the Studio). Nazim (Mini) invokes it over SSH:
-#   ssh Musa@mac-studio 'bash ~/wingmen/orchestrator/scripts/reset_cai.sh'
+# MUST run ON THE HOST WHERE tmux 'cai' LIVES — currently the Mac Mini (cai moved
+# off the Studio; op#11594 f/u). Run locally on the Mini, or invoke over SSH from a
+# peer, e.g.:  bash ~/wingmen/orchestrator/scripts/reset_cai.sh
 # Mirrors reset_orch.sh / reset_nazim.sh: in-place /clear (NOT kill) frees the context
 # window; the boot instruction reloads cai from its own restore point.
 #
@@ -64,6 +65,44 @@ if [ "$CC_BUSY" = 1 ]; then
     echo "       Set RESET_FORCE=1 to override if cai is genuinely wedged." >&2
     exit 5
   fi
+fi
+
+# LAYER 3 (op#11594) — QUEUED-COMPOSER GATE: refuse if a QUEUED/dim message is
+# present (inert to the BSpace wipe below — the /clear would stage BEHIND it and
+# never run). The post-wipe empty-verify below is a backstop; refuse up front too.
+# RESET_FORCE=1 overrides (loud).
+if "$TM" capture-pane -t "$PANE" -p 2>/dev/null | grep -q "Press up to edit queued messages"; then
+  echo "[reset_cai] QUEUED-COMPOSER GATE: FAIL — '$SESS' has a QUEUED/dim composer message (would jam the /clear, op#11594). Drain it first, then re-fire." >&2
+  if [ "${RESET_FORCE:-0}" != 1 ]; then echo "REFUSING /clear (RESET_FORCE=1 to override)." >&2; exit 7; fi
+  echo "[reset_cai] RESET_FORCE=1 — proceeding despite queued composer." >&2
+else
+  echo "[reset_cai] QUEUED-COMPOSER GATE: PASS — no queued/dim composer message."
+fi
+
+# RESET_DRYRUN (op#11594 — reset_cai previously had NONE; it fired live even with
+# RESET_DRYRUN=1). Evaluate the gates and exit WITHOUT clearing, mirroring
+# reset_nazim.sh, so a caller can verify readiness without firing.
+if [ "${RESET_DRYRUN:-0}" = 1 ]; then
+  echo "[reset_cai] RESET_DRYRUN=1 — gates evaluated (has-session/self-fire/handoff/busy/queued), NOT clearing. Exiting."; exit 0
+fi
+
+# LAYER 1 (op#11594) — QUIESCE THE RACE: pause THIS body's bus-notify for the fire
+# window; RESTORE in a trap/finally so a mid-fire crash can NEVER dangle notify-off.
+# A cai_bus_notify nudge landing between '/clear' and its Enter would queue AHEAD of
+# the /clear (the op#11594 jam that hit console). Proven clean on cai this cycle.
+NOTIFY_LABEL="dev.wingmen.cai-bus-notify"
+_notify_paused=0
+_restore_notify() {
+  [ "$_notify_paused" = 1 ] || return 0
+  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$NOTIFY_LABEL.plist" 2>/dev/null \
+    || launchctl kickstart "gui/$(id -u)/$NOTIFY_LABEL" 2>/dev/null || true
+  echo "[reset_cai] restored $NOTIFY_LABEL"
+}
+trap '_restore_notify' EXIT
+if launchctl bootout "gui/$(id -u)/$NOTIFY_LABEL" 2>/dev/null; then
+  _notify_paused=1; echo "[reset_cai] paused $NOTIFY_LABEL for the fire window"
+else
+  echo "[reset_cai] note: could not pause $NOTIFY_LABEL (may already be stopped / cross-host) — proceeding" >&2
 fi
 
 # CAPTURE THE COMPOSER BEFORE WIPING IT (2026-07-26, Nazim — same fix as reset_orch.sh).
@@ -136,6 +175,62 @@ fi
 sleep 1
 "$TM" send-keys -t "$PANE" Enter
 sleep 4
+
+# LAYER 2 (op#11594) — POST-FIRE DEAD-MAN VERIFY: confirm the /clear ACTUALLY ran
+# before injecting the boot. If a nudge (or anything) left /clear dim-queued, the
+# boot would land on the STILL-BLOATED context (the false 'done' that burned
+# operator trust on console). A real /clear leaves NO staged '❯ /clear' and DROPS
+# context. Poll briefly; if it did NOT take, do NOT boot — FAIL LOUD and ROUTE the
+# failure to the operator via an orch-console bus row (relayed), so a stuck recycle
+# never LOOKS done.
+_cleared=0
+for _i in 1 2 3 4; do
+  _post="$("$TM" capture-pane -t "$PANE" -p 2>/dev/null)"
+  if ! printf '%s\n' "$_post" | grep -q "❯ /clear" \
+     && ! printf '%s\n' "$_post" | grep -qE "[0-9]{2,3}% context used"; then
+    _cleared=1; break
+  fi
+  sleep 2
+done
+if [ "$_cleared" != 1 ]; then
+  echo "[reset_cai] LAYER-2 VERIFY: FAIL — /clear did NOT execute (still staged/high-context). NOT sending boot." >&2
+  printf '%s\n' "$_post" | grep -nE "❯|% context used" | tail -4 >&2
+  # message_type='blocker' (NOT 'alert' — 'alert' violates agent_messages_message_type_check;
+  # cc-quality #17933). The python EXIT CODE gates the 'escalated' claim below: exit 0 only
+  # after the row commits; exit 1 if DSN unset OR the write raises — so we never CLAIM an
+  # operator escalation that didn't land (the very false-'done' Layer 2 exists to kill).
+  _escalated=0
+  if [ -x "$HOME/wingmen/orchestrator/.venv/bin/python3" ]; then
+    if "$HOME/wingmen/orchestrator/.venv/bin/python3" - "$SESS" 2>/dev/null <<'PYESC'
+import os, sys, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+sess = sys.argv[1] if len(sys.argv) > 1 else "cai"
+if not dsn:
+    sys.exit(1)  # could NOT escalate
+body = (f"LOUD: reset_{sess} FIRED but the /clear did NOT execute (dim-queued/jam, op#11594) — the "
+        f"recycle is STUCK, NOT done. The body is still on its bloated context and NO boot instruction "
+        f"was injected. OPERATOR: the last {sess} recycle did not take — please re-fire on a clean composer. "
+        f"(Auto-escalated by the hardened reset; L1 pause + L3 gate should prevent this, so a recurrence "
+        f"warrants investigation.)")
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+    cur.execute(
+        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
+        "VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,'P1',true)",
+        (f"LOUD: reset_{sess} STUCK — /clear did not take, recycle NOT done (relay to operator)", body))
+    conn.commit()
+sys.exit(0)  # escalated OK
+PYESC
+    then _escalated=1; fi
+  fi
+  if [ "$_escalated" = 1 ]; then
+    echo "[reset_cai] escalated LOUD failure to orch-console (operator relay). Exiting non-zero." >&2
+  else
+    echo "[reset_cai] WARNING: could NOT write the operator-relay row (DB unset/unreachable). The recycle STILL FAILED — escalate to the operator MANUALLY." >&2
+  fi
+  exit 8
+fi
+echo "[reset_cai] LAYER-2 VERIFY: PASS — /clear executed (context cleared, no staged /clear)."
 
 BOOT="You are cai, the fleet's strategic node (agent_id='cai' exactly, singleton — never a sub-tag), freshly reset in-place by ${RESET_BY:-orch-console/Nazim} at $(date -u +%Y-%m-%dT%H:%MZ). ⚠️ THIS BOOT MESSAGE MAKES NO CLAIM ABOUT WHICH MODEL YOU ARE RUNNING — it used to assert one, and it was wrong: your process argv, this .env and your live model disagreed while all three were individually truthful. Only YOUR OWN harness knows; if it matters, read it there. THIS BOOT MESSAGE IS ALSO NOT AUTHORITATIVE ON YOUR AGENDA — it is a fixed string and it goes stale between resets (it used to hardcode one past reset's provenance and a three-item worklist, and would have handed you a previous reset's world as if it were today's). ${HANDOFF} IS THE AUTHORITY: read it IN FULL FIRST, then CLAUDE.md, and where the two disagree the handoff wins. Reconcile agent_messages where to_agent='cai' and read_at is null; stamp what you process — your inbox, not this message, tells you what is actually live. ${STAGED_NOTE} STANDING, and these do not go stale: verify-not-assert every claim; a name is not an implementation; a measurement whose tooling failed must report 'could not measure', never a finding; when a premise falls, RE-DERIVE the conclusion rather than assuming it falls or stands with it. ON MESSAGING THE OPERATOR: verify BEFORE the first message rather than correcting after, and send him only what changes what he would DO — the rest is a bus row to Nazim. Reply to Nazim (agent_messages to 'orch-console') once you are up."
 echo "[reset_cai] sending boot instruction ..."
