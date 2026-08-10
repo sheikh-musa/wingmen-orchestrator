@@ -564,7 +564,7 @@ def already_paged_on_bus(conn, mid: int) -> bool:
         return False  # fail-open toward paging (a rare double-page beats a miss)
 
 
-def attended_for(conn, mid: int, violation_type: str) -> bool:
+def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
     """Re-check at PAGE time whether the row has since been attended, in a way
     that matches its violation_type. `fetch_actionable` snapshots violations at
     scan start and the view flags 'unread' purely on read_at; an owner who
@@ -578,8 +578,17 @@ def attended_for(conn, mid: int, violation_type: str) -> bool:
       * violation is 'unread' and read_at set -> the unread condition itself has
         cleared — never page.
       * violation is 'unresponded' and only read_at set (no responded_at) -> NOT
-        suppressed: 'seen but not answered' past the hard threshold is exactly the
-        stall the operator SHOULD hear about.
+        suppressed for a normal lane: 'seen but not answered' past the hard
+        threshold is exactly the stall the operator SHOULD hear about.
+      * EXCEPTION — HUB recipient (op#11565 f/u, orch-console #17569): the hub
+        (cc-orchestrator/cc-infra) self-wakes on a SLOWER cadence than a nudged
+        lane — it READS a requires_response row and actively works it for a while
+        before stamping responded_at. Its VPS auto-wake latency exceeds the P1
+        hard threshold (20m), so 'read + working' hub rows false-paged the operator
+        (#17548/#17559, both drained by check-time). For hub recipients ONLY,
+        read_at set == attending -> suppress. A hub row NOT EVEN READ past the
+        threshold still pages — that's the real 'hub not woken' alarm (#16246),
+        deliberately preserved.
     Fail-OPEN toward paging on error (a rare double-page beats missing a real P0)."""
     try:
         with conn.cursor() as cur:
@@ -595,6 +604,8 @@ def attended_for(conn, mid: int, violation_type: str) -> bool:
             if is_resp:
                 return True
             if violation_type == "unread" and is_read:
+                return True
+            if agent in HUB_SESSIONS and is_read:
                 return True
             return False
     except Exception as e:
@@ -703,7 +714,7 @@ def run(dry: bool, injected: list[dict] | None = None,
             # read_at alone. If the owner has since read OR responded, the row is
             # attended — suppress the operator page. read_at/responded_at are
             # monotonic, so an attended row stays suppressed on later cycles too.
-            if escalate_eligible and attended_for(conn, mid, v["violation_type"]):
+            if escalate_eligible and attended_for(conn, mid, v["violation_type"], agent):
                 actions.append(
                     f"SKIP page #{mid} ({pr}) — attended (read/responded) since scan; suppressing operator page")
                 escalate_eligible = False
