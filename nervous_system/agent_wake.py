@@ -280,6 +280,34 @@ def resolve_tmux_session(agent_id: str) -> str | None:
     return None
 
 
+_LANE_NUDGE = ORCH / "scripts" / "lane_nudge.sh"
+
+
+def _verified_submit(session: str, signal: str) -> int:
+    """Submit `signal` into `session`'s composer via the fleet's ONE verified-submit
+    (scripts/lane_nudge.sh) and return its exit code. lane_nudge does the whole
+    clear->type->Enter->confirm-it-left-the-composer->extra-Enter retry AND the
+    ghost-aware composer guard (never clobbers the lane's own staged next-step).
+
+    Returns lane_nudge's exit code so the caller can report honestly:
+      0 = verified submitted (pane entered a working/queued state)
+      3 = could NOT verify after retries, OR refused to clobber real staged text
+      2 = no such session (raced) / usage
+    A shell-out failure (missing script, exec error) maps to a non-zero rc so the
+    caller treats it as a failed wake — never a silent success (charter #1)."""
+    try:
+        proc = subprocess.run(
+            [str(_LANE_NUDGE), session, signal],
+            check=False, capture_output=True, text=True,
+            timeout=120,  # lane_nudge worst case ~3 tries * ~9s + margin
+        )
+        return proc.returncode
+    except Exception as e:  # noqa: BLE001 — never let a submit failure look like success
+        logging.getLogger("wingmen.agent_wake").error(
+            "verified-submit shell-out failed for %s: %s", session, e)
+        return 1
+
+
 def _pane_busy(session: str) -> bool:
     """True if the lane is mid-turn (don't interrupt; debounce will retry)."""
     try:
@@ -358,10 +386,36 @@ def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False, now: floa
         return {"woke": False, "why": "busy (mid-turn)", "session": session}
     if dry_run:
         return {"woke": False, "why": "dry-run", "session": session, "signal": _SIGNAL}
-    subprocess.run(["tmux", "send-keys", "-t", session, "-l", _SIGNAL], check=False)
-    subprocess.run(["tmux", "send-keys", "-t", session, "Enter"], check=False)
-    _record_wake(agent_id, now)
-    return {"woke": True, "session": session, "reason": reason}
+    # CAI-817: a raw `send-keys -l SIGNAL` + a single unverified `Enter` was the bug —
+    # the lone Enter can fail to commit (TUI focus / dim composer), the wake sits
+    # STAGED-UNSUBMITTED, the body wedges idle, and we used to still return woke=True
+    # (false confidence). Delegate the keystroke submit to the fleet's ONE verified
+    # submit (scripts/lane_nudge.sh: ghost-aware composer guard -> C-u clear -> type
+    # -> Enter -> confirm-it-left-the-composer -> extra-Enter retry) and REPORT the
+    # real outcome. Fail LOUD, never silent (charter #1).
+    rc = _verified_submit(session, _SIGNAL)
+    if rc == 0:
+        _record_wake(agent_id, now)
+        return {"woke": True, "session": session, "reason": reason}
+    # rc 3 = could not verify submission (staged/wedged/at a dialog) OR the ghost-aware
+    # guard REFUSED because the body has its OWN real unsent text (which we must not
+    # clobber). Either way the wake did NOT land: report it honestly + flag it, and
+    # RECORD the attempt so repeated failures trip the 5/5min cap -> alert_due -> the
+    # existing loud telegram escalation (self-wiring dead-man's switch, no policy change).
+    logging.getLogger("wingmen.agent_wake").error(
+        "wake NOT verified for %s (session=%s, lane_nudge rc=%s) — body may be "
+        "staged-unsubmitted or wedged; bus row is durable, escalation path armed.",
+        agent_id, session, rc)
+    if rc == 3:
+        _record_wake(agent_id, now)
+        return {"woke": False, "session": session, "why": "submit-unverified",
+                "submit_failed": True, "rc": rc}
+    # rc 2 = lane_nudge found no such session (raced away after we resolved it); other
+    # rc = unexpected. Nothing was delivered into any live pane, so do NOT burn a cap
+    # slot — just report the failure.
+    return {"woke": False, "session": session,
+            "why": "session-gone (raced)" if rc == 2 else f"submit-error rc={rc}",
+            "submit_failed": True, "rc": rc}
 
 
 if __name__ == "__main__":
