@@ -52,8 +52,10 @@ Gate logic (fail-safe for the hub, fail-closed for known non-holders):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import socket
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -237,8 +239,88 @@ def cmd_status() -> int:
     return 0
 
 
+# ── op#11774 #4b (operator-P1): hub agent_status heartbeat + REAL auth_fp ──────
+# The hub's boot path never wrote auth_fp (and its hb-loop is dead code — the real
+# launcher is orch_supervisor.sh, not boot_orch.sh), so the console showed the hub
+# as auth_fp=NULL + chronically-stale hb — the blind spot that hid the token-
+# exhaustion incident (op#18976). The lease-renew is the PROVEN periodic writer
+# (it renewed straight through the re-token while the boot registration wrote
+# nothing), so we stamp the hub's heartbeat + real token fp HERE. auth_fp source =
+# /proc (GROUND TRUTH: what the process actually runs — a pointer would re-create
+# the blind spot the moment the process drifts). FAIL-SOFT is mandatory: a fp read
+# hiccup must NEVER fail the lease renew (critical infra), and must RETAIN the
+# last-known fp rather than NULL it (COALESCE) — a stale-but-present key beats an
+# invisible one.
+HUB_AGENT = "cc-orchestrator"
+_HUB_HB_SQL = (
+    "UPDATE agent_status SET last_heartbeat=now(), status='working', "
+    "auth_fp=COALESCE(%s, auth_fp), updated_at=now() "
+    "WHERE agent_id=%s"
+)
+
+
+def _hub_auth_fp_from_environ(environ_text):
+    """sha256(CLAUDE_CODE_OAUTH_TOKEN)[:12] from a NUL-separated /proc/<pid>/environ
+    dump — the console badge fp format. None if the var is absent/empty."""
+    if not environ_text:
+        return None
+    for kv in environ_text.split("\x00"):
+        if kv.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
+            tok = kv.split("=", 1)[1]
+            return hashlib.sha256(tok.encode()).hexdigest()[:12] if tok else None
+    return None
+
+
+def _default_find_orch_pid():
+    """The hub's live claude pid — the one that ACTUALLY carries the token in its
+    environ (skips the tmux-wrapper match + any racy/just-exited pid). Fail-soft
+    -> None; NEVER raises."""
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-f", "claude --dangerously-skip-permissions --continue"],
+            text=True, stderr=subprocess.DEVNULL)
+        for p in reversed(out.split()):
+            if not p.strip().isdigit():
+                continue
+            try:
+                with open(f"/proc/{int(p)}/environ", "r") as f:
+                    if "CLAUDE_CODE_OAUTH_TOKEN=" in f.read():
+                        return int(p)
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+
+def _default_read_environ(pid):
+    with open(f"/proc/{pid}/environ", "r") as f:
+        return f.read()
+
+
+def _read_hub_auth_fp(find_pid=None, read_environ=None):
+    """The hub's REAL launch-token fp from /proc. FAIL-SOFT: any failure (no pid,
+    unreadable, no token) -> None; NEVER raises. Seams injectable for tests."""
+    find_pid = find_pid or _default_find_orch_pid
+    read_environ = read_environ or _default_read_environ
+    try:
+        pid = find_pid()
+        if not pid:
+            return None
+        return _hub_auth_fp_from_environ(read_environ(pid))
+    except Exception:
+        return None
+
+
+def _write_hub_heartbeat(cur, fp):
+    """Stamp the hub's agent_status heartbeat + auth_fp (COALESCE-retains a NULL fp).
+    Caller MUST have set the identity GUC in the same txn (hardened identity trigger)."""
+    cur.execute(_HUB_HB_SQL, (fp, HUB_AGENT))
+
+
 def cmd_renew() -> int:
-    """Hub heartbeat. Also self-stamps holder_host on first run (NULL)."""
+    """Hub heartbeat. Renews the lease, then (best-effort) stamps the hub's
+    agent_status heartbeat + real auth_fp (#4b). Also self-stamps holder_host."""
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE orch_lease SET renewed_at=now(), holder_host=COALESCE(holder_host,%s) "
@@ -250,6 +332,18 @@ def cmd_renew() -> int:
     if row is None:
         print(f"renew REFUSED — lease not held by this host ({_me()})")
         return 3
+    # #4b: the lease renewed (we ARE the hub holder) -> stamp the hub's hb + real
+    # auth_fp so the console SHOWS the hub key. BEST-EFFORT, AFTER the renew already
+    # committed above -> a fp/hb hiccup can never fail the renew (console's hard req).
+    try:
+        fp = _read_hub_auth_fp()
+        with psycopg.connect(_dsn()) as c2, c2.cursor() as cur2:
+            cur2.execute("SELECT set_config('app.current_agent_id',%s,true)", (HUB_AGENT,))
+            _write_hub_heartbeat(cur2, fp)
+            c2.commit()
+        print(f"hub-hb stamped: auth_fp={fp or '(retained last-known)'}")
+    except Exception as e:  # never let the hb write break the renew
+        print(f"[orch_lease renew] hub-hb best-effort skipped: {e}")
     print(f"renewed: holder={row[0]} host={row[1]}")
     return 0
 
