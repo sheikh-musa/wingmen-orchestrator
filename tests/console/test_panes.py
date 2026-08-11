@@ -53,12 +53,16 @@ def test_capture_pane_rejects_empty_session():
 
 
 def test_capture_pane_returns_text_for_a_live_session():
-    lines = "\n".join(f"line{i}" for i in range(50))
+    # Blank-line-separated so each survives as its OWN logical line: the soft-wrap
+    # reflow (op#3729) deliberately rejoins a RUN of consecutive prose lines into
+    # one line (see test_reflow_* + test_capture_pane_reflows_* below), so a plain
+    # "line0\nline1\n..." fixture would collapse to a single line. A blank line is
+    # a reflow boundary, so these stay distinct. Under the cap (60), no chrome.
+    lines = "\n\n".join(f"line{i}" for i in range(50))
     with patch.object(panes, "live_sessions", return_value=["cosem-tdu"]):
         with patch("subprocess.run", return_value=_run(0, lines)) as mock_run:
             result = panes.capture_pane("cosem-tdu")
     assert result is not None
-    # under the cap (60) and no chrome to strip -> all 50 lines survive as-is
     assert result.splitlines() == [f"line{i}" for i in range(50)]
     args, kwargs = mock_run.call_args
     assert args[0] == [panes._TMUX, "capture-pane", "-t", "=cosem-tdu:0.0", "-p", "-S", "-200"]
@@ -67,10 +71,11 @@ def test_capture_pane_returns_text_for_a_live_session():
 
 
 def test_capture_pane_caps_at_60_lines_after_filtering():
-    # filter-then-cap, not cap-then-filter: raw window is 200 lines, capped
-    # to the last 60 only AFTER chrome is stripped (a chrome-dominated raw
-    # tail must not leave a near-empty result).
-    lines = "\n".join(f"real activity line {i}" for i in range(100))
+    # filter-then-cap, not cap-then-filter: raw window is 200 lines, capped to the
+    # last 60 only AFTER chrome is stripped + reflowed (a chrome-dominated raw tail
+    # must not leave a near-empty result). Blank-separated so the reflow (op#3729)
+    # keeps each line its own logical line instead of rejoining the prose run.
+    lines = "\n\n".join(f"real activity line {i}" for i in range(100))
     with patch.object(panes, "live_sessions", return_value=["cosem-tdu"]):
         with patch("subprocess.run", return_value=_run(0, lines)):
             result = panes.capture_pane("cosem-tdu")
@@ -143,6 +148,39 @@ def test_is_chrome_keeps_real_activity_lines():
     assert panes._is_chrome("▶ Building session context for cc-cosem-tdu...") is False
     assert panes._is_chrome("✻ Churned for 1m 19s") is False
     assert panes._is_chrome("  Net: the migration plan exists, is executed.") is False
+
+
+# --- soft-wrap REFLOW (op#3729) — root-cause coverage the port never added ---
+# The TUI word-wraps one sentence across physical lines; reflow collapses a run of
+# consecutive non-chrome, non-structure prose lines back into a single flowing
+# line, breaking only on chrome/blank lines and structure-starts (bullets, task/
+# tool glyphs, "N." markers) so lists + blank-separated paragraphs stay separate.
+def test_reflow_rejoins_soft_wrapped_prose_into_one_line():
+    assert panes._reflow("sentence part one\nsentence part two") == [
+        "sentence part one sentence part two"
+    ]
+
+
+def test_reflow_breaks_on_a_structure_start_so_lists_stay_lists():
+    assert panes._reflow("intro prose here\n- bullet a\n- bullet b") == [
+        "intro prose here", "- bullet a", "- bullet b",
+    ]
+
+
+def test_reflow_breaks_on_a_blank_line_between_paragraphs():
+    assert panes._reflow("para one\n\npara two") == ["para one", "para two"]
+
+
+def test_capture_pane_reflows_consecutive_prose_into_one_line():
+    """Integration lock for the intended reflow behavior that collapses a run of
+    consecutive prose lines — the exact case the pre-reflow tests didn't
+    anticipate (op#3729 landed after them). Consecutive prose with no boundary
+    rejoins with single spaces."""
+    lines = "\n".join(f"line{i}" for i in range(5))
+    with patch.object(panes, "live_sessions", return_value=["cosem-tdu"]):
+        with patch("subprocess.run", return_value=_run(0, lines)):
+            result = panes.capture_pane("cosem-tdu")
+    assert result == "line0 line1 line2 line3 line4"
 
 
 def test_capture_pane_target_uses_exact_match_syntax():
