@@ -379,16 +379,17 @@
   // severity signal. Label = the instance's sub_tag (== its tmux_session) or the
   // base id for a solo lane — the same name its card shows. Display-only; no new
   // data. Entries wrap on a narrow phone; each carries a tokens/age tooltip.
-  function renderTopBloat(rows) {
-    var el = $("topBloat");
-    if (!el) return;
+  // Pure worst-offender SELECTION: filter to rows with a real reading, collapse
+  // each family (rows sharing one cc_identity `agent`) to a SINGLE entry so the
+  // top-3 shows DISTINCT lanes — otherwise a family's live instance row AND its
+  // legacy base-NULL aggregate row can BOTH place (both irsyad @74% today),
+  // re-creating the op#10550 duplicate-irsyad look. Prefer a real per-instance row
+  // (sub_tag set = a live lane) over the base aggregate; among those, the fullest;
+  // sort fullest-first, take 3. Extracted from renderTopBloat so it is unit-testable
+  // (node) independently of the DOM. The de-dupe by key also guards against a
+  // coordinator arriving in both feeds (see coordCtxRows / renderTopBloat merge).
+  function pickTopBloat(rows) {
     var list = (rows || []).filter(function (r) { return r && r.pct != null; });
-    if (!list.length) { el.className = "topbloat"; el.removeAttribute("title"); el.innerHTML = ""; return; }
-    // Collapse each family (rows sharing one cc_identity `agent`) to a SINGLE entry
-    // so the top-3 shows DISTINCT lanes — otherwise a family's live instance row AND
-    // its legacy base-NULL aggregate row can BOTH place (both irsyad @74% today),
-    // re-creating the op#10550 duplicate-irsyad look. Prefer a real per-instance row
-    // (sub_tag set = a live lane) over the base aggregate; among those, the fullest.
     var best = {};
     list.forEach(function (r) {
       var k = r.agent || r.sub_tag;
@@ -399,7 +400,37 @@
     });
     var uniq = Object.keys(best).map(function (k) { return best[k]; });
     uniq.sort(function (a, b) { return b.pct - a.pct; });   // fullest first
-    var top = uniq.slice(0, 3);
+    return uniq.slice(0, 3);
+  }
+
+  // Map coordinator cards into the context-bloat ROW shape so the top-bloat GLANCE
+  // spans the WHOLE fleet, coordinators included (op#18542: cc-fleet-health at 88%
+  // was the fleet-worst but the glance showed cc-quality 72% — coordinators are
+  // excluded from context_bloat by op#9088 so they own their own cards, but that
+  // also hid them from the worst-offender glance). GLANCE ONLY: the lane list and
+  // coordinator cards stay coordinator-excluded (server-side). A coordinator with
+  // no current reading (ctx_pct null) is skipped. Coordinators carry their ctx via
+  // build_coordinators_query (same cc_session_costs source + thresholds).
+  function coordCtxRows(coords) {
+    return (coords || []).filter(function (c) { return c && c.ctx_pct != null; })
+      .map(function (c) {
+        return {
+          agent: c.agent_id,
+          sub_tag: null,
+          pct: c.ctx_pct,
+          level: c.ctx_level,
+          ctx_tokens: c.ctx_tokens,
+          age_s: c.ctx_age_s,
+        };
+      });
+  }
+
+  function renderTopBloat(rows) {
+    var el = $("topBloat");
+    if (!el) return;
+    var total = (rows || []).filter(function (r) { return r && r.pct != null; }).length;
+    var top = pickTopBloat(rows);
+    if (!top.length) { el.className = "topbloat"; el.removeAttribute("title"); el.innerHTML = ""; return; }
     var lead = top[0].level || "green";                     // overall severity = worst lane
     var parts = top.map(function (r) {
       var who = r.sub_tag || r.agent || "?";
@@ -411,7 +442,7 @@
         '<span class="pct ' + esc(lvl) + '">' + r.pct + '%</span></span>';
     });
     el.className = "topbloat show";
-    el.setAttribute("title", "Top " + top.length + " context-bloated lanes (of " + list.length + ")");
+    el.setAttribute("title", "Top " + top.length + " context-bloated lanes (of " + total + ")");
     el.innerHTML =
       '<span class="dot ' + esc(lead) + '"></span>' +
       '<span class="lbl">Top bloat</span> ' +
@@ -1088,7 +1119,10 @@
     buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
     buildLaneCtxIndex(d.context_bloat || []);   // before renderLanes, so each card can fold in its /1M gauge
     renderPulse(d.pulse || {});
-    renderTopBloat(d.context_bloat || []);  // glance: worst-offender ctx lane up top (operator ask)
+    // GLANCE spans the whole fleet: worker lanes (context_bloat) PLUS coordinators
+    // (mapped from their cards), so a coordinator can lead the worst-offender glance
+    // (op#18542). Lane list + coordinator cards stay coordinator-excluded elsewhere.
+    renderTopBloat((d.context_bloat || []).concat(coordCtxRows(d.coordinators)));
     renderPoolUsage(d.pool_usage || []);   // weekly Max-pool % up top (op#9770)
     renderNeeds(d.needs_you || []);
     renderBacklog(d.backlog || []);
@@ -1199,6 +1233,13 @@
     document.addEventListener("touchend", end);
     document.addEventListener("touchcancel", function () { pulling = false; ptr.style.height = "0px"; ptr.classList.remove("armed"); ptr.classList.remove("pulling"); });
   })();
+
+  // Node-only: expose the pure top-bloat helpers for unit tests
+  // (tests/console/fleet_topbloat.test.js). `module` is undefined in the browser
+  // (vanilla <script>, no bundler), so this is inert there.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows };
+  }
 
   start();
 })();
