@@ -198,7 +198,7 @@
       </button>
     </div>
     <div class="meta">
-      <span>Updated <b>11 Aug 2026, 04:06</b> (SGT)</span>
+      <span>Updated <b>11 Aug 2026, 20:25</b> (SGT)</span>
       <span class="legend">
         <span><span class="dot progress"></span> In progress</span>
         <span><span class="dot queued"></span> Queued</span>
@@ -349,6 +349,34 @@
           <p class="d">Clearer &ldquo;skip&rdquo; plus a bulk &ldquo;uncheck all / record all&rdquo; toggle, sort by date/amount/counterparty, and jump-to-page. Live &mdash; try it now. The per-row exclude behaviour is unchanged and the money-path was untouched.</p>
         </div>
         <span class="pill done"><span class="dot done"></span> Live</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Work several months at once (bank import)</p>
+          <p class="d">You raised that you couldn&rsquo;t start February while January was still open. Fixed &mdash; the one-at-a-time limit is lifted, so you can now keep multiple months in progress together and switch between them from the &lsquo;Unfinished imports&rsquo; list. A visual tidy-up to make that list more obvious is deploying shortly. Money handling was untouched.</p>
+        </div>
+        <span class="pill done"><span class="dot done"></span> Live</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Merge duplicate people</p>
+          <p class="d">Add, edit and delete people (with IC / address as optional fields) already work today on the People page. The new piece is <b>merging duplicates</b> &mdash; combining records like the multiple &lsquo;Rosnah&rsquo; entries into one while keeping all their donations. It touches money records, so we&rsquo;re designing it carefully: confirm-before-merge, full audit, reversible, nothing lost.</p>
+        </div>
+        <span class="pill queued"><span class="dot queued"></span> New &middot; in design</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Outstanding-tins report + export</p>
+          <p class="d">Already available today &mdash; Tabung &rarr; Keluarga shows the outstanding / unreturned tins (serial, student, date) with a CSV Export button, and a Missing Tins page tracks any reported missing.</p>
+        </div>
+        <span class="pill done"><span class="dot done"></span> Available now</span>
+      </li>
+      <li>
+        <div class="body">
+          <p class="t">Preparer access to the People area</p>
+          <p class="d">Almost there &mdash; the permission is set (full view/add/edit/remove, IC masked for non-admins); we&rsquo;re finishing one menu-config change so &lsquo;People&rsquo; actually appears in the Preparer&rsquo;s menu. Deploying shortly.</p>
+        </div>
+        <span class="pill hold"><span class="dot progress"></span> In build &middot; finishing menu link</span>
       </li>
       <li>
         <div class="body">
