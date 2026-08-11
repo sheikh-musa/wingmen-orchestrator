@@ -115,6 +115,90 @@ def unhandled_count(conn) -> int:
         return cur.fetchone()[0]
 
 
+# ── INTERIM client-facing ghost-bypass auto-guard (op#18375) ──────────────────
+# lane_nudge REFUSES (rc=3) when the composer "holds unsent text" — but that text
+# is often a history-AUTOSUGGESTION GHOST (idle lane, entirely-dim) that BLOCKS the
+# client wake while the lane is actually idle+empty. This guard bypasses the block
+# ONLY for a probe-confirmed ghost on THIS client lane, so client Q&A stops waiting
+# on manual hand-nudges. It does NOT touch the shared lane_nudge/composer_capture
+# classifier the reset kill-switches consume — that clean fix (entirely-dim+idle in
+# composer_capture) is under separate cross-review and SUPERSEDES this scrappy guard.
+# Triple-gated so it can NEVER clobber real staged work: (1) idle, (2) entirely-dim,
+# (3) a definitive self-reversing PROBE (type sentinel -> a ghost is REPLACED by it;
+# real text is APPENDED). Only on all three do we clear+submit.
+TMUX_BIN = next((p for p in ("/usr/local/bin/tmux", "/opt/homebrew/bin/tmux", "/usr/bin/tmux")
+                 if pathlib.Path(p).exists()), "tmux")
+GHOST_SENTINEL = "µ"  # µ — rare; unlikely to collide with staged content
+
+
+def _cc(session: str) -> "tuple[str, str, str]":
+    """(CC_EMPTY, CC_PH_BASIS, CC_FLAT) via the shared composer_capture lib (read-only)."""
+    try:
+        r = subprocess.run(
+            ["bash", "-c",
+             f'. "{ORCH}/scripts/lib/composer_capture.sh"; '
+             f'composer_parse_pane "{TMUX_BIN}" "{session}"; '
+             f'printf "%s\\t%s\\t%s" "$CC_EMPTY" "$CC_PH_BASIS" "$CC_FLAT"'],
+            capture_output=True, text=True, timeout=20)
+        parts = (r.stdout or "").split("\t")
+        return (parts[0], parts[1], parts[2]) if len(parts) >= 3 else ("", "", "")
+    except Exception as exc:                      # noqa: BLE001
+        log(f"_cc error: {exc}")
+        return ("", "", "")
+
+
+def _busy(session: str) -> bool:
+    try:
+        r = subprocess.run([TMUX_BIN, "capture-pane", "-t", session, "-p"],
+                           capture_output=True, text=True, timeout=15)
+        return "esc to interrupt" in "\n".join((r.stdout or "").splitlines()[-3:])
+    except Exception:                             # noqa: BLE001
+        return True   # fail-safe: unknown => treat as busy => do NOT bypass
+
+
+def _probe_confirms_ghost(session: str) -> bool:
+    """Definitive, self-reversing: type a sentinel; a GHOST is replaced by just the
+    sentinel (empty underneath), REAL text has the sentinel APPENDED. Always BSpace back."""
+    _, _, before = _cc(session)
+    subprocess.run([TMUX_BIN, "send-keys", "-t", session, "-l", GHOST_SENTINEL], timeout=15)
+    time.sleep(1.0)
+    _, _, after = _cc(session)
+    subprocess.run([TMUX_BIN, "send-keys", "-t", session, "BSpace"], timeout=15)
+    time.sleep(0.5)
+    return after.strip() == GHOST_SENTINEL and before.strip() != GHOST_SENTINEL
+
+
+def _verified_submit(session: str, line: str) -> bool:
+    """C-u clear -> type -> Enter -> confirm working -> extra-Enter retry (mirrors lane_nudge)."""
+    for _ in range(3):
+        subprocess.run([TMUX_BIN, "send-keys", "-t", session, "C-u"], timeout=15); time.sleep(0.4)
+        subprocess.run([TMUX_BIN, "send-keys", "-t", session, "C-u"], timeout=15); time.sleep(0.4)
+        subprocess.run([TMUX_BIN, "send-keys", "-t", session, "-l", line], timeout=15); time.sleep(1.0)
+        subprocess.run([TMUX_BIN, "send-keys", "-t", session, "Enter"], timeout=15); time.sleep(4.0)
+        if _busy(session):
+            return True
+        subprocess.run([TMUX_BIN, "send-keys", "-t", session, "Enter"], timeout=15); time.sleep(3.0)
+        if _busy(session):
+            return True
+    return False
+
+
+def ghost_bypass(session: str, line: str) -> bool:
+    """Triple-gated bypass of a ghost-blocked wake. Returns True only if it actually
+    submitted after confirming a ghost; False (safe, preserves) on any doubt."""
+    if _busy(session):
+        return False                              # gate 1: only idle
+    _, ph_basis, _ = _cc(session)
+    if "dim" not in ph_basis or "not-dim" in ph_basis:
+        return False                              # gate 2: only entirely-dim (real is not-dim)
+    if not _probe_confirms_ghost(session):        # gate 3: definitive probe
+        log(f"ghost-bypass: probe says REAL staged text on '{session}' — NOT bypassing, preserved")
+        return False
+    ok = _verified_submit(session, line)
+    log(f"ghost-bypass: probe-CONFIRMED ghost on '{session}'; verified-submit {'OK' if ok else 'FAILED'}")
+    return ok
+
+
 def nudge(n_new: int, n_unhandled: int) -> bool:
     """Count-only wake. Carries no message content, ever."""
     line = (f"\U0001F4E5 {n_new} new client message(s) on '{CLIENT_TAG}' "
@@ -125,6 +209,11 @@ def nudge(n_new: int, n_unhandled: int) -> bool:
                            capture_output=True, text=True, timeout=90)
         if r.returncode != 0:
             log(f"nudge failed rc={r.returncode}: {r.stdout.strip()} {r.stderr.strip()}")
+            # rc=3 = refused ("composer holds text"). If it's a probe-confirmed idle GHOST,
+            # bypass the block so the client wake lands (op#18375 interim guard).
+            if r.returncode == 3 and ghost_bypass(LANE_SESSION, line):
+                log("nudge: ghost-bypass succeeded — client wake delivered despite the ghost")
+                return True
         return r.returncode == 0
     except Exception as exc:                      # noqa: BLE001
         log(f"nudge error: {exc}")
