@@ -68,14 +68,30 @@ def test_activity_unsure_when_local_capture_returns_none():
     assert v.state == UNSURE
 
 
-def test_activity_unsure_when_remote_host_unreachable():
-    # cross-host G-b: the hub is on the VPS; if we can't reach it -> UNSURE, never
-    # a guessed verdict.
-    def capture(host, sess):
-        raise oracle.RemoteUnreachable(host)
-    v = oracle.activity("cc-orchestrator", capture=capture,
+def test_activity_returns_fresh_remote_published_verdict():
+    # cross-host G-b (VPS-instance, DB-mediated): a fresh published verdict for the
+    # hub is returned directly (the VPS instance already classified it).
+    v = oracle.activity("cc-orchestrator",
                         resolve_host=lambda a: "vps",
-                        resolve_session=lambda a: "orch")
+                        read_verdict=lambda a: oracle.Verdict(oracle.WORKING, "published"))
+    assert v.state == W
+
+
+def test_activity_unsure_when_remote_verdict_stale_or_missing():
+    # VPS publisher dead / row stale -> read_verdict returns None -> UNSURE, never a
+    # stale coverage-guess. This is the RemoteUnreachable-equivalent fail-safe.
+    v = oracle.activity("cc-orchestrator",
+                        resolve_host=lambda a: "vps",
+                        read_verdict=lambda a: None)
+    assert v.state == UNSURE
+
+
+def test_activity_unsure_on_remote_verdict_read_error():
+    def boom(a):
+        raise RuntimeError("db down")
+    v = oracle.activity("cc-orchestrator",
+                        resolve_host=lambda a: "vps",
+                        read_verdict=boom)
     assert v.state == UNSURE
 
 

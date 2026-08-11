@@ -51,6 +51,10 @@ PROBE_ARMED = False
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _COMPOSER_LIB = os.path.join(_HERE, "..", "scripts", "lib", "composer_capture.sh")
 
+# Freshness gate for a DB-published (cross-host) verdict: older than this -> UNSURE,
+# so a dead VPS publisher fails SAFE rather than serving a stale coverage-guess.
+VERDICT_TTL_S = int(os.environ.get("ORACLE_VERDICT_TTL_S", "180"))
+
 
 class RemoteUnreachable(Exception):
     """Raised by a capture backend when a cross-host body (the VPS hub) cannot be
@@ -103,17 +107,32 @@ def signals_from_cc(env: dict) -> dict:
 
 # ── orchestration: resolve host -> capture -> classify ──────────────────────
 def activity(agent_id: str, *, capture=None, resolve_host=None,
-             resolve_session=None) -> Verdict:
+             resolve_session=None, read_verdict=None) -> Verdict:
     """The verdict for `agent_id`. Seams (`capture`, `resolve_host`,
-    `resolve_session`) are injectable so the logic is unit-testable without tmux/
-    ssh; defaults wire the real backends. Any failure -> UNSURE (fail-safe)."""
+    `resolve_session`, `read_verdict`) are injectable so the logic is unit-testable
+    without tmux/DB; defaults wire the real backends. Any failure -> UNSURE.
+
+    LOCAL host  -> capture the pane + classify (the pane-truth path).
+    REMOTE host -> read the DB-published verdict (G-b: the VPS-instance oracle reads
+      the hub's LOCAL pane and publishes here). Fresh -> that verdict; stale/missing/
+      error -> UNSURE (fail-safe: a dead publisher never yields a stale coverage-
+      guess, and #2 falls back to #5 escalate-a-human). NO ssh in this read path."""
     resolve_host = resolve_host or _default_resolve_host
+    host = resolve_host(agent_id)
+
+    if host != LOCAL_HOST:
+        read_verdict = read_verdict or _default_read_verdict
+        try:
+            v = read_verdict(agent_id)
+        except Exception as e:  # DB error -> UNSURE, never a guess
+            return Verdict(UNSURE, f"verdict-read-error:{type(e).__name__}")
+        return v if v is not None else Verdict(UNSURE, "remote-verdict-stale-or-missing")
+
     resolve_session = resolve_session or _default_resolve_session
     capture = capture or _default_capture
     session = resolve_session(agent_id)
     if not session:
         return Verdict(UNSURE, "no-session")
-    host = resolve_host(agent_id)
     try:
         signals = capture(host, session)
     except RemoteUnreachable:
@@ -178,6 +197,40 @@ def _default_capture(host: str, session: str):
         # fail SAFE — never fabricate the hub's state.
         raise RemoteUnreachable(host)
     return _capture_local(session)
+
+
+def _dsn():
+    return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+
+
+def _default_read_verdict(agent_id: str):
+    """Read the DB-published verdict for a remote body (the VPS hub). Returns a
+    Verdict if fresh (updated_at within VERDICT_TTL_S), else None (stale/missing ->
+    UNSURE upstream). Raises on DB error (-> UNSURE upstream); never fabricates."""
+    import psycopg
+    with psycopg.connect(_dsn(), connect_timeout=10) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT state, reason FROM public.body_activity_verdict "
+            "WHERE agent = %s AND updated_at > now() - make_interval(secs => %s)",
+            (agent_id, VERDICT_TTL_S))
+        row = cur.fetchone()
+    if not row:
+        return None
+    return Verdict(row[0], row[1] or "")
+
+
+def publish_verdict(agent_id: str, verdict: Verdict, host: str) -> None:
+    """UPSERT a verdict to the shared-substrate cache (used by the VPS-instance
+    publisher). Raises on error so the caller fails LOUD; never swallows."""
+    import psycopg
+    with psycopg.connect(_dsn(), connect_timeout=10) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.body_activity_verdict (agent, state, reason, host, updated_at) "
+            "VALUES (%s, %s, %s, %s, now()) "
+            "ON CONFLICT (agent) DO UPDATE SET state=EXCLUDED.state, reason=EXCLUDED.reason, "
+            "  host=EXCLUDED.host, updated_at=now()",
+            (agent_id, verdict.state, verdict.reason, host))
+        conn.commit()
 
 
 def _capture_local(session: str):

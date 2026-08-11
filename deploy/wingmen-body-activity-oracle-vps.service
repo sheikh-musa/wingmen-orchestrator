@@ -1,0 +1,24 @@
+# op#11774 G-b VPS-instance oracle — publishes the hub's body-activity verdict to
+# the shared-substrate cache so the Mini SRE oracle reads it WITHOUT ssh. DETECT-ONLY
+# (reads the hub's local 'orch' pane + UPSERTs a verdict; no send-keys, probe inert).
+# Mirrors wingmen-agent-wake-subscriber. Install on hub-vps:
+#   sudo cp deploy/wingmen-body-activity-oracle-vps.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wingmen-body-activity-oracle-vps
+#   journalctl -u wingmen-body-activity-oracle-vps -f    # verify '[oracle-vps] published cc-orchestrator -> ...'
+[Unit]
+Description=Wingmen body-activity oracle (VPS hub verdict publisher) — detect-only
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wingmen
+WorkingDirectory=/home/wingmen/wingmen/orchestrator
+EnvironmentFile=/home/wingmen/wingmen/orchestrator/.env
+Environment=TMUX_BIN=/usr/bin/tmux
+ExecStart=/home/wingmen/wingmen/orchestrator/.venv/bin/python3 nervous_system/body_activity_oracle_vps.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
