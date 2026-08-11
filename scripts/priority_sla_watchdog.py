@@ -141,6 +141,25 @@ HUB_SESSIONS = {
     "cc-infra": os.environ.get("SLA_HUB_SESSION_INFRA", "infra"),
 }
 
+# op#11774 #5 INTERIM (ship-first, page-only): the read-parked-hub grace. A hub that
+# READS a P0/P1 rr row then PARKS (responded_at NULL) is silenced by attended_for()'s
+# read==attending rule; this net surfaces it after INTERIM_PARK_MIN. Chosen LONGER
+# than legit VPS wake-latency (>20m, why the suppression exists) so a slow-waking-but-
+# working hub isn't false-paged, but WELL short of the hours 18492/18537 actually sat.
+# The Phase-1 oracle version (suppress only if oracle=WORKING) removes the fixed number.
+INTERIM_PARK_MIN = int(os.environ.get("SLA_HUB_PARK_MIN", "60"))
+# Upper bound (CRITICAL — found live 2026-08-11): the hub CHRONICALLY leaves
+# responded_at unstamped even after acting, so an unbounded responded-NULL predicate
+# backfills days-old cruft (a first dry-run flagged 30+ historical rows). This bound
+# keeps it a RECENT-park net: only escalate a park aged between MIN and MAX, never
+# replay history. The oracle version (Phase 1, suppress-only-if-WORKING) removes the
+# reliance on responded_at entirely.
+INTERIM_PARK_MAX = int(os.environ.get("SLA_HUB_PARK_MAX", "360"))
+# Cascade-guard: a hard cap on read-parked escalations per scan so a future misfire
+# can NEVER flood (the op#11774 incident fired ~90 in one scan). Combined with the
+# watermark + dedup, this bounds the blast radius of any bug to N.
+MAX_READ_PARKED_PER_SCAN = int(os.environ.get("SLA_READ_PARKED_MAX_PER_SCAN", "3"))
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -614,6 +633,128 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
 
 
 # ---------------------------------------------------------------------------
+# op#11774 #5 INTERIM — escalate a READ-but-PARKED hub (page-only safety net)
+# ---------------------------------------------------------------------------
+def read_parked_hub_targets(rows, *, interim_min: int = INTERIM_PARK_MIN,
+                            interim_max: int = INTERIM_PARK_MAX,
+                            watermark_id: int = 0):
+    """PURE: hub P0/P1 requires_response rows that are READ, UNRESPONDED, aged
+    BETWEEN interim_min and interim_max, and NEWER than watermark_id. Two guards
+    against the op#11774 flood: (1) the upper bound — responded_at is chronically
+    unstamped so without it this backfills days-old cruft; (2) the BACKFILL WATERMARK
+    — `id > watermark_id` excludes the entire pre-existing backlog by construction
+    (the watermark is pinned to max(id) at enable-time), so un-hiding the suppressed
+    backlog escalates ZERO of it; only stalls that cross the threshold GOING FORWARD
+    page. Rows are dicts with keys id, to_agent, priority, requires_response, read_at,
+    responded_at, elapsed_minutes. A hub row NOT read is the existing 'hub not woken'
+    alarm (#16246); a normal lane is covered by the standard ladder — hub read-parked
+    gap only."""
+    out = []
+    for r in rows:
+        elapsed = r.get("elapsed_minutes") or 0
+        if (r.get("to_agent") in HUB_SESSIONS
+                and r.get("priority") in ("P0", "P1")
+                and r.get("requires_response")
+                and r.get("read_at") is not None
+                and r.get("responded_at") is None
+                and interim_min <= elapsed <= interim_max
+                and (r.get("id") or 0) > watermark_id):
+            out.append(r)
+    return out
+
+
+def _fetch_read_parked_hub(conn):
+    """The read-parked-hub rows from the DB (impure). Bounded to the recent window
+    (created within interim_max) so it never replays history; the pure predicate
+    re-checks both bounds as defense-in-depth."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, to_agent, priority, requires_response, read_at, responded_at, "
+            "  (EXTRACT(epoch FROM (now()-created_at))/60.0)::int AS elapsed_minutes "
+            "FROM agent_messages "
+            "WHERE to_agent = ANY(%s) AND priority IN ('P0','P1') AND requires_response "
+            "  AND read_at IS NOT NULL AND responded_at IS NULL AND is_test IS NOT TRUE "
+            "  AND created_at > now() - make_interval(mins => %s)",
+            (list(HUB_SESSIONS.keys()), INTERIM_PARK_MAX))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def escalate_read_parked(targets, *, dry, already_paged, escalate_internally,
+                         send_page, renudge=None, record=None, max_escalations=None):
+    """For each read-parked hub target, escalate to a SUPERVISOR — internal
+    (orch-console) first, else an operator page — so a human hears. NEVER renudge
+    the parked body: nudging via the same broken wake path is useless (that is the
+    whole point of #5). `renudge` is accepted only to make that invariant explicit;
+    it is intentionally never called. Deduped via `already_paged`; `record(mid,
+    outcome)` marks a fired escalation so a later scan dedups it. `max_escalations`
+    is a hard per-scan cascade-guard — beyond it, targets are HELD (logged), never
+    fired, so a future misfire cannot flood (op#11774). Page-only: no live-body
+    keystroke on any path. Seams injected for testability."""
+    results = []
+    fired = 0
+    for t in targets:
+        mid = t.get("id")
+        if max_escalations is not None and fired >= max_escalations:
+            results.append((mid, "held-rate-limit"))
+            continue
+        if not dry and already_paged(mid):
+            results.append((mid, "deduped"))
+            continue
+        if dry:
+            results.append((mid, "dry"))
+            continue
+        summary = (
+            f"HUB READ-PARKED (op#11774 #5): {t.get('priority')} rr msg #{mid} to "
+            f"{t.get('to_agent')} was READ but is UNRESPONDED {t.get('elapsed_minutes')}m. "
+            f"The body read it and parked — it needs a re-drive/action; nudging the wedged "
+            f"body won't help. Chase/re-drive it, or say why it is correctly waiting.")
+        outcome = "escalated" if escalate_internally(t) else ("paged" if send_page(summary) else "failed")
+        if outcome != "failed":
+            fired += 1
+            if record:
+                record(mid, outcome)
+        results.append((mid, outcome))
+    return results
+
+
+def _v_from_target(t: dict) -> dict:
+    """Shape a read-parked target into the `v` dict escalate_internally expects."""
+    return {"agent": t.get("to_agent"), "message_id": t.get("id"),
+            "priority": t.get("priority"), "elapsed_minutes": t.get("elapsed_minutes"),
+            "subject": "(read-parked route)"}
+
+
+def _max_message_id(conn) -> int:
+    """Current max agent_messages id — the backfill-guard watermark, pinned at
+    enable-time so the entire pre-existing backlog is id <= watermark (excluded)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(max(id), 0) FROM agent_messages")
+            return int(cur.fetchone()[0])
+    except Exception as e:
+        log(f"read-parked-watermark-read-failed: {e}")
+        # Fail SAFE toward NOT escalating: a huge sentinel means nothing is > it, so
+        # a read failure suppresses the net rather than risking a backfill flood.
+        return 1 << 62
+
+
+def _already_escalated_read_parked(conn, mid: int) -> bool:
+    """Dedup: has this read-parked row already been escalated (audit marker)? Fail
+    OPEN toward escalating — a rare double beats missing a real parked P1."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM agent_messages WHERE from_agent='sla-watchdog' "
+                "AND subject LIKE %s LIMIT 1",
+                (f"[sla-watchdog] READ-PARKED escalated #{mid}%",))
+            return cur.fetchone() is not None
+    except Exception as e:
+        log(f"read-parked-dedup-check-failed #{mid}: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Main scan
 # ---------------------------------------------------------------------------
 
@@ -784,6 +925,46 @@ def run(dry: bool, injected: list[dict] | None = None,
                               priority="P3")
 
             state["msgs"][key] = rec
+
+        # op#11774 #5 INTERIM (page-only): surface a READ-but-PARKED hub P0/P1 that
+        # attended_for()'s read==attending rule silences. Independent of the nudge
+        # ladder above (a read-parked hub never accrues nudges). Escalate to a
+        # SUPERVISOR (never renudge the parked body); deduped via an audit marker;
+        # honors the same dry/lease gate as everything else in this block; fail-LOUD
+        # (a crash here must not take down the scan).
+        # OBSERVE-FIRST (fleet doctrine, per-stage sign): the interim ships INERT —
+        # it force-dries (log-only [DRY] READ-PARKED lines, no page) until explicitly
+        # ARMED via SLA_READ_PARKED_ENABLED=1 at go-live. The daemon runs this file
+        # every 90s (StartInterval), so the code lands safe and pages NOBODY until
+        # the env is flipped on an operator/console go-live.
+        rp_dry = dry or os.environ.get("SLA_READ_PARKED_ENABLED", "0") != "1"
+        try:
+            # BACKFILL GUARD: pin the watermark to max(id) the first time the net is
+            # ARMED (not before), so the pre-existing backlog is excluded by
+            # construction — only stalls crossing the threshold GOING FORWARD page.
+            wm = state.get("read_parked_watermark_id")
+            if not rp_dry and wm is None:
+                wm = _max_message_id(conn)
+                state["read_parked_watermark_id"] = wm
+                log(f"read-parked backfill-guard ARMED: watermark id={wm} "
+                    f"(entire pre-existing hub backlog excluded)")
+            parked = read_parked_hub_targets(
+                _fetch_read_parked_hub(conn), watermark_id=(wm or 0))
+            if parked:
+                res = escalate_read_parked(
+                    parked, dry=rp_dry,
+                    already_paged=lambda mid: _already_escalated_read_parked(conn, mid),
+                    escalate_internally=lambda t: escalate_internally(_v_from_target(t), 0),
+                    send_page=lambda text: send_page(text, dry),
+                    record=lambda mid, outcome: audit(
+                        conn, f"[sla-watchdog] READ-PARKED escalated #{mid}",
+                        f"read-parked hub escalation ({outcome}) for msg #{mid}", priority="P1"),
+                    max_escalations=MAX_READ_PARKED_PER_SCAN,
+                )
+                for mid, outcome in res:
+                    actions.append(f"{'[DRY] ' if rp_dry else ''}READ-PARKED #{mid} -> {outcome}")
+        except Exception as e:  # fail LOUD, keep the scan alive (KeepAlive re-runs)
+            log(f"read-parked-escalate ERROR: {e!r}")
 
         if persist:
             save_state(state)
