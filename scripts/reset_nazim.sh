@@ -24,6 +24,13 @@ PANE="${SESS}:0.0"
 # that finished hours earlier. Same trap already fixed in reset_cai.sh and reset_orch.sh.)
 HANDOFF="$(ls -t reports/nazim-handoff-*.md 2>/dev/null | head -1)"
 
+# The fleet's ONE "what is staged in the live composer?" definition (dim-ghost vs
+# real text) — same lib reset_cai.sh + reset_fleet_health.sh source. Used by the
+# Layer-2 post-/clear verify below so it reads the LIVE composer, not scrollback.
+_RESET_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+# shellcheck source=lib/composer_capture.sh
+. "$_RESET_LIB_DIR/composer_capture.sh" || { echo "ERROR: composer_capture.sh missing" >&2; exit 9; }
+
 if ! "$TM" has-session -t "$SESS" 2>/dev/null; then
   echo "ERROR: tmux session '$SESS' not found on this host. Are you on the Mini?" >&2
   exit 1
@@ -112,9 +119,57 @@ else
   echo "[reset_nazim] note: could not pause $NOTIFY_LABEL (may already be stopped) — proceeding" >&2
 fi
 
-echo "[reset_nazim] clearing composer + sending /clear ..."
-"$TM" send-keys -t "$PANE" -N 80 BSpace   # clear any stray/real composer content (ghost placeholder is harmless)
+# CAPTURE THE COMPOSER BEFORE WIPING IT — an idle console can hold its OWN staged next
+# step; preserve it verbatim rather than silently destroying it (parity with reset_cai +
+# reset_fleet_health, per cc-fleet-health 18210; the old raw `-N 80 BSpace` clobbered it).
+# NOTE: this CC_EMPTY read shares the fleet-wide ghost-vs-real exposure (a dim history
+# autosuggestion can read as real staged text) — same as the siblings; central fix is the
+# composer_capture ghost belt (round 2). It fails SAFE here: worst case a false STAGED_NOTE,
+# or the verify-empty below declines to /clear (console keeps its context, operator re-fires).
+LOGDIR="$HOME/wingmen/orchestrator/logs"
+STAGED_NOTE=""
+composer_parse_pane "$TM" "$PANE"
+if [ "$CC_EMPTY" != 1 ]; then
+  mkdir -p "$LOGDIR"
+  TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [ "$CC_MULTILINE" = 1 ] || [ -n "$CC_MARKER" ]; then
+    printf '%s reset_nazim staged-composer %s (%s lines):\n' "$TS" "$CC_MARKER" "$CC_N" >> "$LOGDIR/reset_nazim_preserved_input.log"
+    printf '%s\n' "$CC_RAW" | while IFS= read -r _l; do
+      printf '%s reset_nazim staged-composer   | %s\n' "$TS" "$_l" >> "$LOGDIR/reset_nazim_preserved_input.log"
+    done
+    echo "[reset_nazim] PRESERVED staged composer ($CC_N lines) $CC_MARKER"
+    STAGED_NOTE=" NOTE: you had multi-line text staged UNSENT in your composer when I cleared you (logs/reset_nazim_preserved_input.log, $CC_N lines, joined with ' / '): ${CC_FLAT}. Judge whether it was your own next step or an unsubmitted instruction; read the log before acting."
+  else
+    printf '%s reset_nazim staged-composer: %s\n' "$TS" "$CC_FLAT" >> "$LOGDIR/reset_nazim_preserved_input.log"
+    echo "[reset_nazim] PRESERVED staged composer text: $CC_FLAT"
+    STAGED_NOTE=" NOTE: you had \"${CC_FLAT}\" staged UNSENT in your composer when I cleared you (captured verbatim to logs/reset_nazim_preserved_input.log). Judge whether it was your own next step or something typed and never submitted; if it reads like an instruction, treat it as NOT yet carried out."
+  fi
+elif [ "$CC_PARTIAL" = 'noprompt' ]; then
+  mkdir -p "$LOGDIR"
+  printf '%s reset_nazim staged-composer %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CC_MARKER" >> "$LOGDIR/reset_nazim_preserved_input.log"
+  echo "[reset_nazim] WARNING: $CC_MARKER" >&2
+  STAGED_NOTE=" NOTE: I could NOT read your composer before clearing you (no prompt row in the capture) — do NOT read this as 'nothing was there'."
+fi
+
+# CC_GHOST (op#18467): if the preserved text was auto-classified a history-ghost, MARK the
+# note so fresh-Nazim never reads it as certain staged work (logged above regardless).
+[ "${CC_GHOST:-0}" = 1 ] && STAGED_NOTE="${STAGED_NOTE} (fleet-health auto-classified this as a history-GHOST of a prior submit — most likely NOT real staged work; preserved to the log regardless. Verify it wasn't your real next step.)"
+
+# WIPE, sized to what was staged; verify empty BEFORE typing /clear into it — a dirty
+# composer would make the /clear stage BEHIND the residue and never run.
+WIPE=$(( CC_BYTES + 80 )); [ "$WIPE" -lt 200 ] && WIPE=200; [ "$WIPE" -gt 20000 ] && WIPE=20000
+echo "[reset_nazim] clearing composer (${WIPE} BSpace for ${CC_BYTES}B staged) + sending /clear ..."
+"$TM" send-keys -t "$PANE" -N "$WIPE" BSpace
 sleep 1
+# CC_GHOST (op#18467): a re-appearing history-GHOST reads CC_EMPTY=0 but is empty
+# underneath (the /clear replaces it; its text was preserved+logged pre-wipe) — proceed
+# on a confirmed ghost. A REAL residue (not a ghost) still refuses (unknown -> refuse).
+composer_parse_pane "$TM" "$PANE"
+if [ "$CC_EMPTY" != 1 ] && [ "${CC_GHOST:-0}" != 1 ]; then
+  echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input (residue: ${CC_FLAT}). NAZIM UNCHANGED." >&2
+  exit 6
+fi
+[ "$CC_PARTIAL" != 'ok' ] && echo "WARNING: post-wipe capture was $CC_PARTIAL — treating composer as empty on weak evidence." >&2
 "$TM" send-keys -t "$PANE" -l "/clear"
 sleep 1
 # show what's staged so a human can eyeball before it commits
@@ -133,16 +188,41 @@ sleep 4
 # (console relays), so a stuck recycle never LOOKS done.
 _cleared=0
 for _i in 1 2 3 4; do
-  _post="$("$TM" capture-pane -t "$PANE" -p 2>/dev/null)"
-  if ! printf '%s\n' "$_post" | grep -q "❯ /clear" \
-     && ! printf '%s\n' "$_post" | grep -qE "[0-9]{2,3}% context used"; then
+  # Check the LIVE COMPOSER via composer_capture (the fleet's ONE dim-ghost-vs-real
+  # definition), NOT whole-pane scrollback: a successful /clear EMPTIES the live
+  # composer; a jammed/dim-queued /clear leaves '/clear' staged in it. The old
+  # `grep "❯ /clear"` matched the persistent /clear ECHO in scrollback + the
+  # `% context used` gauge (not rendered at low ctx in this CC version) — both
+  # unreliable, so a REAL clear false-failed (cc-fleet-health 18169).
+  # GATE ON CONFIDENCE: CC_EMPTY=1 alone is NOT enough — a 'noprompt' (unreadable)
+  # capture ALSO reports CC_N=0 -> CC_EMPTY=1 (composer_capture.sh: "we do not know
+  # it was empty, only that we could not read it"). Trusting that as 'cleared' would
+  # re-open the false-'done' door on a transient unreadable pane, so require
+  # CC_PARTIAL='ok'. Weak evidence keeps polling; all-4 unreadable -> FAIL LOUD.
+  # FAST-PATH PASS: a confident-empty live composer = cleared. A real jam leaves
+  # '/clear' staged in the composer (CC_EMPTY=0), so the fast path can NEVER pass a jam.
+  composer_parse_pane "$TM" "$PANE"
+  if [ "$CC_EMPTY" = 1 ] && [ "$CC_PARTIAL" = 'ok' ]; then _cleared=1; break; fi
+  # GHOST-IMMUNE TRANSCRIPT BELT (cc-fleet-health, verified 2026-08-10; bus 18222).
+  # CC_EMPTY=0 is ambiguous: a real jam ('/clear' staged) OR a dim history-autosuggestion
+  # GHOST in an actually-empty composer — composer_capture can't tell them apart
+  # statically ([[composer-ghost-false-positive]]), so keying FAIL on CC_EMPTY alone
+  # re-opens a false-fail door. The TRANSCRIPT disambiguates: a real /clear repaints the
+  # fresh-session banner (the 'Claude Code v<N>' logo line) on the VISIBLE screen, which a
+  # composer-box ghost can NEVER fake; a jam leaves the old conversation tail (no logo).
+  # VERIFIED (throwaway /clear): the visible pane repaints ' ▐▛███▜▌   Claude Code v2.1.226'.
+  # Grep the VISIBLE pane (`capture-pane -p`, current screen) NOT scrollback — a long
+  # pre-clear session may have an OLD logo in history. Sound for the reset use-case:
+  # resets fire on BLOATED bodies whose original banner has long scrolled off, so a
+  # banner on the VISIBLE screen means a real repaint, not stale history.
+  if "$TM" capture-pane -t "$PANE" -p 2>/dev/null | grep -qE 'Claude Code v[0-9]'; then
     _cleared=1; break
   fi
   sleep 2
 done
 if [ "$_cleared" != 1 ]; then
-  echo "[reset_nazim] LAYER-2 VERIFY: FAIL — /clear did NOT execute (still staged/high-context). NOT sending boot." >&2
-  printf '%s\n' "$_post" | grep -nE "❯|% context used" | tail -4 >&2
+  echo "[reset_nazim] LAYER-2 VERIFY: FAIL — /clear did NOT execute (unread/staged/high-context). NOT sending boot." >&2
+  echo "[reset_nazim] live composer at fail: partial=${CC_PARTIAL:-?} empty=${CC_EMPTY:-?} staged=${CC_FLAT:-<none>}" >&2
   # message_type='blocker' (NOT 'alert' — 'alert' violates agent_messages_message_type_check;
   # cc-quality #17933). The python EXIT CODE gates the 'escalated' claim below: exit 0 only
   # after the row commits; exit 1 if DSN unset OR the write raises — so we never CLAIM an
@@ -189,7 +269,7 @@ echo "[reset_nazim] LAYER-2 VERIFY: PASS — /clear executed (context cleared, n
 # and a reset would then inject them as if current. Keep this string free of
 # specifics; put live state in the handoff. If you find yourself wanting to add a
 # named thread here, add it to the handoff instead.
-BOOT="You are Nazim (orch-console), the operator's CTO console on the Mac Mini, freshly reset in-place (operator-requested). Confirm your model at the start. FIRST read ${HANDOFF} IN FULL — its ⚑ FINAL STATE block first, which supersedes anything above it — then CLAUDE.md. That handoff carries ALL live state (open threads, the current LIVE ITEM, lane roster + status, pending operator decisions). This boot string is a fixed doctrine-only scaffold and deliberately names NO specifics, so it can never inject a stale 'live' claim — trust the handoff for what is actually happening now. Reconcile BOTH inboxes: operator_log.unprocessed() AND agent_messages to_agent='orch-console'; answer the operator ONLY via scripts/nazim_send.sh (NEVER the hub's tg_send) and stamp handled. cc-irsyad does NOT draft replies the hub is answering; before sending on the hub's client thread, re-read the last outbound row on that tag. Writing to the operator on another body's topic is a PROPOSAL THAT WAITS. Verify-not-assert EVERY 'done'; a name is not an implementation; a measurement whose tooling failed reports 'could not measure', never a finding. Then drive the board and tell the operator you are up."
+BOOT="You are Nazim (orch-console), the operator's CTO console on the Mac Mini, freshly reset in-place (operator-requested). Confirm your model at the start. FIRST read ${HANDOFF} IN FULL — its ⚑ FINAL STATE block first, which supersedes anything above it — then CLAUDE.md. That handoff carries ALL live state (open threads, the current LIVE ITEM, lane roster + status, pending operator decisions). This boot string is a fixed doctrine-only scaffold and deliberately names NO specifics, so it can never inject a stale 'live' claim — trust the handoff for what is actually happening now. Reconcile BOTH inboxes: operator_log.unprocessed() AND agent_messages to_agent='orch-console'; answer the operator ONLY via scripts/nazim_send.sh (NEVER the hub's tg_send) and stamp handled. cc-irsyad does NOT draft replies the hub is answering; before sending on the hub's client thread, re-read the last outbound row on that tag. Writing to the operator on another body's topic is a PROPOSAL THAT WAITS. Verify-not-assert EVERY 'done'; a name is not an implementation; a measurement whose tooling failed reports 'could not measure', never a finding. Then drive the board and tell the operator you are up.${STAGED_NOTE}"
 echo "[reset_nazim] sending boot instruction ..."
 "$TM" send-keys -t "$PANE" -l "$BOOT"
 sleep 1

@@ -273,6 +273,43 @@ _cc_extract() {
 }
 
 # composer_parse "<pane text>"
+# ── CC_GHOST discriminator (op#18453/CAI-RESP 18467) ─────────────────────────
+# A history-AUTOSUGGESTION ghost (CC recalls a prior input into an EMPTY composer)
+# renders SGR-2 DIM — BYTE-IDENTICAL to real QUEUED/unfocused staged text (the FIX-1
+# case). So dim alone can NOT tell them apart (proven: tests/fixtures/composer/
+# real_dim_queued.e.txt is real dim staged text on an idle lane). The one signal that
+# separates them WITHOUT a mutating probe: a ghost's text is a RECALL, so it also
+# appears as a prior submitted '❯ <text>' line in the transcript; real staged text is
+# (almost always) novel. So: entirely-dim + IDLE + EXACT-whole-line history-match = ghost.
+# Emitted as a DISTINCT signal CC_GHOST (NOT CC_EMPTY) so the reset preserve-log — gated
+# on CC_EMPTY!=1 — STILL runs on a mis-classified re-type (never a silent drop).
+
+# _cc_text_busy <pane-text> : exit 0 (shell-true) if a busy marker is present. Text-only
+# (no liveness re-capture) — enough to GATE ghost-classification: a BUSY lane's dim text
+# is real QUEUED work, never a ghost, so it must never be flagged.
+_cc_text_busy() {
+  printf '%s\n' "${1-}" | tail -4  | LC_ALL=C grep -q 'esc to interrupt' && return 0
+  printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*Waiting for [0-9]+ background agents' && return 0
+  return 1
+}
+
+# _cc_history_match <composer-flat> <pane-text> : exit 0 iff the composer's EXACT text
+# appears as a prior submitted '❯ <text>' line in the VISIBLE transcript (EXACT WHOLE-LINE,
+# formatting-stripped + NBSP-normalised — same strip as _cc_extract). count>=2 = the live
+# composer line PLUS >=1 prior echo. A NOVEL dim line (real staged 'poll the bus...') has
+# count 1 -> no match -> preserved (FIX-1 intact). Bounded to the visible window: a
+# scrolled-off submit -> no match -> preserved (fail-safe, never a false ghost).
+_cc_history_match() {
+  local flat="$1" n
+  [ -n "$flat" ] || return 1
+  n="$(printf '%s\n' "${2-}" \
+       | LC_ALL=C sed -E "s/$(printf '\033')\[[0-9;]*[A-Za-z]//g" \
+       | LC_ALL=C sed 's/\xc2\xa0/ /g' \
+       | LC_ALL=C sed -E 's/[[:space:]]+$//' \
+       | LC_ALL=C grep -cxF "❯ $flat")"
+  [ "${n:-0}" -ge 2 ]
+}
+
 composer_parse() {
   local out status_line
   out="$(_cc_extract <<<"${1-}")"
@@ -322,7 +359,7 @@ composer_parse() {
   # A NEW hint string not yet in the deny-list is therefore preserved rather than
   # dropped — the acceptable direction. dim-ness is still measured, but only
   # recorded in CC_PH_BASIS for the log; it never decides empty on its own.
-  CC_EMPTY=0; CC_PH_BASIS='n/a'
+  CC_EMPTY=0; CC_PH_BASIS='n/a'; CC_GHOST=0
   if [ "$CC_N" = 0 ]; then
     CC_EMPTY=1; CC_PH_BASIS='no-content'
   elif [ "$CC_N" = 1 ]; then
@@ -332,6 +369,13 @@ composer_parse() {
       CC_EMPTY=1; CC_PH_BASIS="placeholder(content,${_dim})"
     else
       CC_PH_BASIS="real-text(${_dim})"
+      # CC_GHOST: entirely-dim + IDLE + exact-whole-line history-match = a recall ghost
+      # (empty underneath), NOT real staged text. DISTINCT signal; CC_EMPTY stays 0 so the
+      # reset preserve-log still runs (Condition 1). Novel dim text has no match -> not a
+      # ghost -> preserved (FIX-1). Multi-line (CC_N>1) is never reached here -> never ghost.
+      if [ "$_dim" = 'dim' ] && ! _cc_text_busy "${1-}" && _cc_history_match "$CC_FLAT" "${1-}"; then
+        CC_GHOST=1; CC_PH_BASIS='real-text(dim,history-ghost)'
+      fi
     fi
   fi
   # (a 'noprompt' capture stays flagged even though it reports no content — we do

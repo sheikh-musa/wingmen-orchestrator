@@ -31,6 +31,15 @@ scratch_state.json
 playwright/.auth/
 .lane_default_token
 .orch_default_token
+# all per-body token-pointers (point at OAuth key files) + their backups — same
+# secret class as the above; never track (op#11761 'always commit and push' safety).
+.cai_default_token
+.fleet-health_default_token
+.quality_default_token
+*_default_token.was.pre
+*_default_token.musa.bak
+*_default_token.pre
+*_default_token.bak
 
 # operator-provided credentials (claude.ai session token etc.) — never track
 .secrets/

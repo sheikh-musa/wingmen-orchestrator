@@ -36,14 +36,14 @@ def parse_fixture(name: str) -> dict:
     snippet = (
         f'. "{LIB}"\n'
         f'composer_parse "$(cat "{fixture}")"\n'
-        r'printf "%s|%s|%s|%s" "$CC_EMPTY" "$CC_N" "$CC_PARTIAL" "$CC_FLAT"'
+        r'printf "%s|%s|%s|%s|%s" "$CC_EMPTY" "$CC_N" "$CC_PARTIAL" "${CC_GHOST:-0}" "$CC_FLAT"'
     )
     out = subprocess.run(
         ["bash", "-c", snippet],
         capture_output=True, text=True, cwd=str(REPO), check=True,
     ).stdout
-    empty, n, partial, flat = out.split("|", 3)
-    return {"empty": empty, "n": n, "partial": partial, "flat": flat}
+    empty, n, partial, ghost, flat = out.split("|", 4)
+    return {"empty": empty, "n": n, "partial": partial, "ghost": ghost, "flat": flat}
 
 
 def test_dim_queued_real_text_is_preserved_not_empty():
@@ -55,6 +55,23 @@ def test_dim_queued_real_text_is_preserved_not_empty():
     """
     r = parse_fixture("real_dim_queued.e.txt")
     assert r["empty"] == "0", f"dim real text falsely reported empty: {r}"
+    assert r["flat"] == "poll the bus for hub's reply"
+    # CC_GHOST (op#18467): this NOVEL dim line (no prior '❯' echo) must NOT be
+    # flagged a history-ghost — else it would be wiped on recycle (FIX-1 regression).
+    assert r["ghost"] == "0", f"novel dim staged text falsely flagged history-ghost: {r}"
+
+
+def test_history_ghost_is_flagged_but_not_empty():
+    """A dim composer whose EXACT text also appears as a prior submitted '❯' line
+    (a history-autosuggestion recall) is flagged CC_GHOST=1 — so the wedge/nudge/
+    reset paths can treat it as empty-underneath. CONDITION 1 (op#18467): it must
+    keep CC_EMPTY=0 so the reset preserve-log (gated on CC_EMPTY!=1) STILL runs on a
+    mis-classified re-type — the ghost signal never silently drops content."""
+    r = parse_fixture("history_ghost.e.txt")
+    assert r["ghost"] == "1", f"history-recall ghost not flagged: {r}"
+    assert r["empty"] == "0", (
+        f"CONDITION-1 VIOLATION: ghost collapsed into CC_EMPTY=1 -> reset preserve-log "
+        f"would be skipped -> silent data-loss on a mis-classified re-type: {r}")
     assert r["flat"] == "poll the bus for hub's reply"
 
 

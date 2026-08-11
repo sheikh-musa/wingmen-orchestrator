@@ -151,6 +151,10 @@ else
   STAGED_NOTE="NOTE: your composer was EMPTY when I cleared you — nothing staged, nothing lost."
 fi
 
+# CC_GHOST (op#18467): if the preserved text was auto-classified a history-ghost, MARK the
+# note so the fresh body never reads it as certain staged work (it was logged above regardless).
+[ "${CC_GHOST:-0}" = 1 ] && STAGED_NOTE="${STAGED_NOTE} (fleet-health auto-classified this as a history-GHOST of a prior submit — most likely NOT real staged work; preserved to the log regardless. Verify it wasn't your real next step.)"
+
 # WIPE, sized to what was actually staged (the old fixed -N 120 left residue on
 # any entry >120 chars, and '/clear' was then appended to that residue).
 WIPE=$(( CC_BYTES + 80 ))
@@ -161,8 +165,12 @@ echo "[reset_cai] clearing composer (${WIPE} BSpace for ${CC_BYTES}B staged) + s
 sleep 1
 
 # VERIFY empty BEFORE /clear — never type a command into a dirty composer.
+# CC_GHOST (op#18467): a re-appearing history-GHOST reads CC_EMPTY=0 but is empty
+# underneath — the /clear replaces it and lands cleanly, and its text was already
+# preserved+logged pre-wipe. So proceed on a confirmed ghost; a REAL residue
+# (CC_EMPTY!=1 AND not a ghost) still refuses (fail-safe: unknown -> refuse).
 composer_parse_pane "$TM" "$PANE"
-if [ "$CC_EMPTY" != 1 ]; then
+if [ "$CC_EMPTY" != 1 ] && [ "${CC_GHOST:-0}" != 1 ]; then
   echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input." >&2
   echo "       residue (${CC_N} lines): ${CC_FLAT}" >&2
   echo "       cai is UNCHANGED and still holds its context. Clear the composer by hand" >&2
@@ -185,16 +193,35 @@ sleep 4
 # never LOOKS done.
 _cleared=0
 for _i in 1 2 3 4; do
-  _post="$("$TM" capture-pane -t "$PANE" -p 2>/dev/null)"
-  if ! printf '%s\n' "$_post" | grep -q "❯ /clear" \
-     && ! printf '%s\n' "$_post" | grep -qE "[0-9]{2,3}% context used"; then
-    _cleared=1; break
-  fi
+  # Check the LIVE COMPOSER via composer_capture (the fleet's ONE dim-ghost-vs-real
+  # definition), NOT the whole-pane scrollback: a successful /clear EMPTIES the live
+  # composer, while a jammed/dim-queued /clear leaves '/clear' staged in it. The old
+  # `grep "❯ /clear"` matched the persistent /clear ECHO in scrollback + the
+  # `% context used` gauge (not rendered at low ctx in this CC version) — both
+  # unreliable, false-failing a REAL clear (cc-fleet-health 18169).
+  # CC_EMPTY=1 alone is NOT enough: an UNREADABLE ('noprompt') capture also yields
+  # CC_N=0 -> CC_EMPTY=1 ("could not read", not "was empty"). Require CC_PARTIAL='ok'
+  # so a transient read-miss after a JAM can't false-'cleared' -> boot onto bloated
+  # context (cc-fleet-health review 18208, Finding A). Weak evidence keeps polling;
+  # all-4-unreadable -> FAIL LOUD (the safe direction for a post-clear verify).
+  composer_parse_pane "$TM" "$PANE"
+  if [ "$CC_EMPTY" = 1 ] && [ "$CC_PARTIAL" = 'ok' ]; then _cleared=1; break; fi
+  # GHOST-IMMUNE TRANSCRIPT BELT (cc-fleet-health, verified 18229): CC_EMPTY=0 is ambiguous
+  # — a real jam ('/clear' staged) OR a dim history-autosuggestion GHOST in an actually-empty
+  # composer (composer_capture can't tell them apart statically). A real /clear repaints the
+  # fresh-session banner (the 'Claude Code v<N>' logo line) on the VISIBLE pane, which a
+  # composer-box ghost can NEVER fake; a jam leaves the old conversation tail (no logo).
+  # Matcher targets the logo line (v[0-9] load-bearing) — NOT the stale 'welcome to claude
+  # code' string, which never renders on CC v2.1.226 and would false-FAIL forever.
+  if "$TM" capture-pane -t "$PANE" -p 2>/dev/null | grep -qE 'Claude Code v[0-9]'; then _cleared=1; break; fi
   sleep 2
 done
 if [ "$_cleared" != 1 ]; then
   echo "[reset_cai] LAYER-2 VERIFY: FAIL — /clear did NOT execute (still staged/high-context). NOT sending boot." >&2
-  printf '%s\n' "$_post" | grep -nE "❯|% context used" | tail -4 >&2
+  # composer-state diagnostic (was `grep "$_post"` — but the live-composer loop no longer
+  # assigns _post, so under `set -u` that line CRASHED on this exact FAIL path, before the
+  # escalation could page the operator — cc-fleet-health review 18208, Finding B).
+  echo "[reset_cai] live composer at fail: partial=${CC_PARTIAL:-?} empty=${CC_EMPTY:-?} staged=${CC_FLAT:-<none>}" >&2
   # message_type='blocker' (NOT 'alert' — 'alert' violates agent_messages_message_type_check;
   # cc-quality #17933). The python EXIT CODE gates the 'escalated' claim below: exit 0 only
   # after the row commits; exit 1 if DSN unset OR the write raises — so we never CLAIM an
