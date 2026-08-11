@@ -122,8 +122,19 @@ sleep 1
 # on a confirmed ghost. A REAL residue (not a ghost) still refuses (unknown -> refuse).
 composer_parse_pane "$TM" "$PANE"
 if [ "$CC_EMPTY" != 1 ] && [ "${CC_GHOST:-0}" != 1 ]; then
-  echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input (residue: ${CC_FLAT}). SRE UNCHANGED." >&2
-  exit 6
+  # RESET_FORCE bypass (op#18548, SRE-authorized + orch-console 18490 fallback): a history-
+  # autosuggestion GHOST whose ORIGINAL SUBMIT is NOT visible in the transcript reads
+  # CC_EMPTY=0 + CC_GHOST=0 — (b') can't history-match an invisible-submit ghost — so verify-empty
+  # FALSE-blocks a body that is EMPTY-underneath. The residue was ALREADY preserved+logged above,
+  # and /clear replaces the dim autosuggestion cleanly (proven: typing a char over it replaces it).
+  # So RESET_FORCE=1 proceeds — LOUD, opt-in, non-lossy (text logged first). USE ONLY when verified
+  # empty-underneath. Stage-1 durable fix = a probe-confirmed-empty ghost bypass (no manual force).
+  if [ "${RESET_FORCE:-0}" = 1 ]; then
+    echo "[reset_fleet_health] RESET_FORCE=1 — proceeding PAST verify-empty despite residue ('${CC_FLAT}'): treating as an invisible-submit history-ghost (empty-underneath); text preserved to the log above. op#18548." >&2
+  else
+    echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input (residue: ${CC_FLAT}). SRE UNCHANGED. (RESET_FORCE=1 to override IFF verified empty-underneath.)" >&2
+    exit 6
+  fi
 fi
 [ "$CC_PARTIAL" != 'ok' ] && echo "WARNING: post-wipe capture was $CC_PARTIAL — treating composer as empty on weak evidence." >&2
 
