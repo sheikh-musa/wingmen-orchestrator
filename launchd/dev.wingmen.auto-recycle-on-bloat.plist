@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- auto-recycle-on-bloat STAGE 0 (DETECT-ONLY). Independent of any agent's heartbeat
+       (the recycler must survive the body it recycles). FIRES NOTHING — it runs the
+       detect-only sweep and logs the decision it WOULD make, to prove the gates (esp.
+       gate-2 self-compact-skip) over several days before Stage-1 is earned.
+       NOT loaded until orch-console signs the diff (observe-first ladder, bus 18526). -->
+  <key>Label</key>
+  <string>dev.wingmen.auto-recycle-on-bloat</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.auto_recycle_on_bloat</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/auto_recycle_stage0.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/auto_recycle_stage0.log</string>
+</dict>
+</plist>
