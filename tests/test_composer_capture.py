@@ -97,3 +97,50 @@ def test_dim_placeholder_hint_is_still_empty():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# --- busy detection: extended-thinking turns (op#11774, found dogfooding a reset) ---
+# _cc_text_busy gated on 'esc to interrupt' + 'Waiting for N background agents' only,
+# MISSING the extended-thinking spinner ('✻ Manifesting… (7m 6s · ↓ 20.9k tokens)')
+# which shows NO 'esc to interrupt'. That false-IDLE would let the oracle re-drive
+# (#2) or a reset clobber a WORKING body. Fail-CLOSED: any active-turn spinner = busy.
+def _text_busy(text: str) -> bool:
+    snippet = f'. "{LIB}"\n_cc_text_busy "$(cat)"\necho $?'
+    r = subprocess.run(["bash", "-c", snippet], input=text, capture_output=True, text=True)
+    return r.stdout.strip().splitlines()[-1] == "0"
+
+
+_FOOTER = "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+_BOX = "─────────────────────────────────────────"
+
+
+def _pane(*status_lines: str) -> str:
+    return "\n".join(["  earlier transcript line", *status_lines, _BOX, "❯ ", _BOX, _FOOTER])
+
+
+def test_busy_thinking_spinner_with_timer_and_tokens():
+    assert _text_busy(_pane("✻ Manifesting… (7m 6s · ↓ 20.9k tokens)")) is True
+
+
+def test_busy_thinking_spinner_high_effort_no_timer():
+    assert _text_busy(_pane("✽ Manifesting… (thinking with high effort)")) is True
+
+
+def test_busy_thinking_spinner_dot_glyph_with_thinking():
+    assert _text_busy(_pane("· Schlepping… (1m 55s · ↓ 18.5k tokens · thinking)")) is True
+
+
+def test_idle_pane_is_not_busy():
+    assert _text_busy(_pane()) is False
+
+
+def test_transcript_mention_of_spinner_is_not_busy():
+    # a col-0 anchor protects against a 2-space-indented transcript MENTION of the
+    # spinner pattern (transcript output is always indented).
+    assert _text_busy(_pane("  discussing ✻ Manifesting… (5s · thinking) here")) is False
+
+
+def test_esc_to_interrupt_still_busy():
+    # regression: the original foreground-turn marker still trips busy.
+    assert _text_busy("\n".join(["  work", _BOX, "❯ ", _BOX,
+                                 "  ⏵⏵ bypass permissions · esc to interrupt · ← for agents"])) is True

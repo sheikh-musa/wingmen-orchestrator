@@ -165,6 +165,24 @@ pane_busy() {   # $1 = tmux bin, $2 = pane
     CC_BUSY_REASON="blocked on background agents — ${CC_BUSY_REASON:-waiting for background agents}"
     return 0
   fi
+  # EXTENDED-THINKING turn (op#11774): a col-0 spinner parenthetical ('(… thinking)'
+  # / '(… tokens)') with NO 'esc to interrupt'. Same LIVENESS discipline as the
+  # background-agents path — a live turn ANIMATES (timer/token counter ticks), a
+  # FROZEN spinner is STALE (not busy), so we never block a reset of a dead pane
+  # forever. Col-0 anchor + '(' guard as in _cc_text_busy.
+  if printf '%s\n' "$txt" | tail -12 \
+       | LC_ALL=C grep -qE '^[^[:space:]].*\(.*(thinking|tokens)'; then
+    local t3 secs2="${BUSY_LIVENESS_S:-3}"
+    sleep "$secs2"
+    t3="$("$1" capture-pane -t "$2" -p 2>/dev/null)"
+    if [ "$txt" = "$t3" ]; then
+      CC_BUSY=0; CC_BUSY_REASON=''; CC_BUSY_STALE=1
+      return 0
+    fi
+    CC_BUSY=1; CC_BUSY_STALE=0
+    CC_BUSY_REASON="foreground turn in progress (thinking spinner)"
+    return 0
+  fi
   return 0
 }
 
@@ -290,6 +308,15 @@ _cc_extract() {
 _cc_text_busy() {
   printf '%s\n' "${1-}" | tail -4  | LC_ALL=C grep -q 'esc to interrupt' && return 0
   printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*Waiting for [0-9]+ background agents' && return 0
+  # EXTENDED-THINKING turn (op#11774, found dogfooding a reset): a col-0 spinner line
+  # with an active-turn parenthetical — '✻ Manifesting… (7m 6s · ↓ 20.9k tokens)' or
+  # '(thinking with high effort)' — shows NO 'esc to interrupt', so the two checks
+  # above miss it and a working body reads IDLE. Same class as the background-agents
+  # gap. Col-0 anchor (transcript is indented 2 spaces, so a MENTION can't match) +
+  # require '(' so the /clear-hint ('…k tokens' w/o paren) and the footer
+  # ('(shift+tab…)' w/o thinking/tokens) don't false-trip. Fail-CLOSED: a false-busy
+  # costs a retry; a false-idle re-drives/clobbers a working body.
+  printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*\(.*(thinking|tokens)' && return 0
   return 1
 }
 
