@@ -60,6 +60,35 @@ if [ -n "${TMUX_PANE:-}" ]; then
   fi
 fi
 
+# BUSY GATE (op#18941 — the gap this reset had that reset_orch/reset_cai did not):
+# a /clear discards whatever turn is in flight, so NEVER clear a BUSY body. The
+# definition of "busy" lives in the shared lib (pane_busy) so this and the sibling
+# resets cannot drift — and pane_busy now also catches EXTENDED-THINKING turns
+# (c0818b6), the exact case op#18941 missed: the oracle caught console WORKING, a
+# single transient-idle sample overrode it, and the reset raced a live turn. This
+# gate structurally refuses a thinking/foreground-busy console. A busy marker that
+# was PRESENT but FROZEN (byte-identical across the sample window) is treated as
+# NOT busy and said so aloud — a live turn animates. RESET_FORCE=1 is the loud
+# escape hatch for a genuinely-wedged body. Evaluated in DRYRUN too. Exit 5 mirrors
+# the siblings' unsafe-body-state code.
+pane_busy "$TM" "$PANE"
+if [ "${CC_BUSY_STALE:-0}" = 1 ]; then
+  echo "WARNING: '$SESS' showed a busy marker but the pane is FROZEN (byte-identical across the sample window)." >&2
+  echo "         Treating it as NOT busy: a live wait animates. If work was in flight it is already lost, not lost by this reset." >&2
+fi
+if [ "$CC_BUSY" = 1 ]; then
+  if [ "${RESET_FORCE:-0}" = "1" ]; then
+    echo "WARNING: '$SESS' is BUSY — $CC_BUSY_REASON — RESET_FORCE=1 set, clearing ANYWAY." >&2
+    echo "WARNING: in-flight work will be DISCARDED and is not recoverable." >&2
+  else
+    echo "[reset_nazim] BUSY GATE: FAIL — '$SESS' is BUSY — $CC_BUSY_REASON — refusing to clear." >&2
+    echo "       Set RESET_FORCE=1 to override if the console is genuinely wedged." >&2
+    exit 5
+  fi
+else
+  echo "[reset_nazim] BUSY GATE: PASS — '$SESS' is not busy."
+fi
+
 # HANDOFF-FIRST GATE (op#10967): a recycle must never boot fresh-Nazim from a
 # STALE board (or from nothing). Refuse the /clear unless a FRESH handoff exists
 # — the target is expected to have WRITTEN a current handoff first. RESET_FORCE=1
