@@ -963,6 +963,12 @@ def run(dry: bool, injected: list[dict] | None = None,
                 )
                 for mid, outcome in res:
                     actions.append(f"{'[DRY] ' if rp_dry else ''}READ-PARKED #{mid} -> {outcome}")
+                # Observe-first observability: the `actions` list only prints under
+                # --dry-run, so surface read-parked outcomes in the LIVE daemon log
+                # too — otherwise the [DRY] observe phase is invisible and can't be
+                # reviewed before go-live. Log-only (no fire; the gate still force-dries).
+                log(f"read-parked [{'DRY/observe' if rp_dry else 'ARMED'}] wm={wm or 0}: "
+                    + ", ".join(f"#{m}->{o}" for m, o in res))
         except Exception as e:  # fail LOUD, keep the scan alive (KeepAlive re-runs)
             log(f"read-parked-escalate ERROR: {e!r}")
 
