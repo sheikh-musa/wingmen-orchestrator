@@ -176,6 +176,12 @@ _MODEL_ALLOWLIST = (
 # boot straight off .env, so their token default is NOT pointer-settable here.
 _TOKEN_POINTER_FOR = {"nazim": ".nazim_default_token", "cc-orchestrator": ".orch_default_token"}
 _NO_TOKEN_POINTER = {"cai", "fleet-health"}   # boot off .env; token not settable via pointer
+# HELD lanes — NEVER bulk-switched by /api/switch-group or /api/switch-all, even
+# if in-family / not in the operator's exclude list. Defense-in-depth beyond the
+# UI's exclude[] (a direct API call can't bypass it either). TRANSIENT: clear an
+# entry once its hold lifts. irsyad-import holds the pending tabung import for Wan
+# (op#12171/op#12198) — switching it would restart the lane + disrupt that import.
+_HELD_LANES = {"irsyad-import"}
 # MODEL is honored via the .<session>_model pointer ONLY by launch_dangerous_cc.sh
 # (worker lanes). These bodies set their model from an ENV var at boot instead
 # (NAZIM_MODEL / CAI_MODEL / MODEL / ORCH_MODEL), so a model-pointer write would be
@@ -189,6 +195,20 @@ def _is_remote_body(session: str) -> bool:
     """A body whose pointer files live on ANOTHER host (the VPS hub): a local
     write is a silent no-op, so it is not settable from this console."""
     return session in getattr(panes, "_REMOTE_BODIES", {})
+
+
+def _is_in_family(session: str, family: str) -> bool:
+    """Does a live tmux session belong to lane-family `family` (e.g. "cosem",
+    "irsyad", "ihsanos")? Reuses the codebase's OWN prefix convention — the exact
+    shape _is_coord_identity uses (`n == k or n.startswith(k + "-")`) — so it is
+    NOT a new scheme. Tolerant of the universal `cc-` body prefix so both a bare
+    `cosem-tdu` and a `cc-cosem-1` match family `cosem`. Segment match ONLY (`k` or
+    `k-...`), never a bare substring, so `cosem` never matches `cosemx`."""
+    if not session or not family:
+        return False
+    fam = family[3:] if family.startswith("cc-") else family
+    cands = {session, session[3:]} if session.startswith("cc-") else {session}
+    return any(s == fam or s.startswith(fam + "-") for s in cands)
 
 
 def _token_pointer_name(session: str) -> "str | None":
@@ -1211,6 +1231,7 @@ def _make_handler(feedloop: "_FeedLoop"):
             parsed = urlparse(self.path)
             path = parsed.path
             if path not in ("/api/reset", "/api/backlog", "/api/switch-token",
+                            "/api/switch-group", "/api/switch-all",
                             "/api/set-pointer", "/api/add-token", "/api/apply-dry-run",
                             "/api/apply-armed", "/api/apply-queue-cancel"):
                 auth.audit(self._client(), path, "404")
@@ -1246,6 +1267,14 @@ def _make_handler(feedloop: "_FeedLoop"):
                 return self._handle_backlog()
             if path == "/api/switch-token":
                 return self._handle_switch_token()
+            # Bulk re-token: /api/switch-group (one lane-family) and /api/switch-all
+            # (every live LOCAL worker lane). Same per-lane switch + guards as
+            # /api/switch-token; dry_run DEFAULTS TRUE (safe by default); singletons
+            # + remote bodies + SELF are NEVER targeted; NEVER passes --force.
+            if path == "/api/switch-group":
+                return self._switch_batch("group")
+            if path == "/api/switch-all":
+                return self._switch_batch("all")
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -1719,6 +1748,187 @@ def _make_handler(feedloop: "_FeedLoop"):
             auth.audit(self._client(), f"/api/switch-token:{key}", "200" if ok else "500")
             return self._json(200 if ok else 500,
                               {"ok": ok, "lane": lane, "token_name": token_name, "tail": tail})
+
+        def _switch_one_lane(self, lane, tokfile, token_name, ep):
+            """Fire ONE lane switch with the SAME guards as /api/switch-token, for
+            the bulk path. Returns (action, detail). Key safety: NEVER passes
+            --force, so switch_lane_token.sh BUSY-refuses (rc 5) rather than
+            clobbering in-flight work -> we record 'skipped:busy' and CONTINUE the
+            batch (a busy lane never fails the whole request). rc 0 = switched (or a
+            no-op if the script already found it on target); any other rc = failed
+            (the failing lane's script tail rides through in `detail`)."""
+            key = f"{lane}:{token_name}"
+            now = time.monotonic()
+            # Per-lane idempotency claim (shared with /api/switch-token): a lane
+            # mid-switch or inside its cooldown is skipped, never double-killed.
+            with _RESET_GUARD_LOCK:
+                if lane in _SWITCH_INFLIGHT:
+                    auth.audit(self._client(), f"{ep}:{key}", "409")
+                    return "skipped:busy", "switch already in progress for this lane"
+                last = _SWITCH_LAST_RUN.get(lane, 0.0)
+                if now - last < _SWITCH_COOLDOWN_S:
+                    retry_after = round(_SWITCH_COOLDOWN_S - (now - last))
+                    auth.audit(self._client(), f"{ep}:{key}", "429")
+                    return "skipped:busy", f"switched moments ago — cooldown {retry_after}s"
+                _SWITCH_INFLIGHT.add(lane)
+            try:
+                # BREAK-GLASS marker + actor (parity with /api/switch-token): the
+                # script emits its P1 break-glass alert + enriched audit per lane.
+                _env = {**os.environ, "BREAK_GLASS": "1", "ACTOR": self._client() or "operator"}
+                r = subprocess.run(
+                    ["bash", str(_REPO_ROOT / "scripts" / "switch_lane_token.sh"),
+                     lane, str(tokfile)],
+                    capture_output=True, text=True, timeout=150, env=_env,
+                )
+                rc = r.returncode
+                tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-8:])
+            except subprocess.TimeoutExpired:
+                logger.warning("console %s TIMED OUT (150s): %s", ep, lane)
+                auth.audit(self._client(), f"{ep}:{key}", "timeout")
+                return "failed", "switch timed out (150s)"
+            except Exception as e:                                   # noqa: BLE001
+                logger.warning("console %s failed: lane=%s err=%s", ep, lane, e)
+                auth.audit(self._client(), f"{ep}:{key}", "500")
+                return "failed", f"switch errored: {e}"
+            finally:
+                with _RESET_GUARD_LOCK:
+                    _SWITCH_INFLIGHT.discard(lane)
+                    _SWITCH_LAST_RUN[lane] = time.monotonic()
+            # rc 5 = switch_lane_token.sh BUSY refusal (we never pass --force) — a
+            # SKIP, never a failure. rc 0 = success, but the script also rc-0 no-ops
+            # a lane already on target, so classify that as skipped:already.
+            if rc == 5:
+                auth.audit(self._client(), f"{ep}:{key}", "busy")
+                return "skipped:busy", tail or "lane BUSY — refused (no --force)"
+            if rc == 0:
+                auth.audit(self._client(), f"{ep}:{key}", "200")
+                if "ALREADY on target" in tail or "no-op" in tail:
+                    return "skipped:already", tail or f"already on {token_name}"
+                return "switch", tail
+            auth.audit(self._client(), f"{ep}:{key}", "500")
+            return "failed", tail or f"switch failed (rc={rc})"
+
+        def _switch_batch(self, scope):
+            """POST /api/switch-group {family, token_name, dry_run?}  OR
+               POST /api/switch-all {token_name, dry_run?, exclude?}
+
+            Bulk re-token LIVE LOCAL WORKER lanes onto ONE terms-clean Max account,
+            reusing the SAME per-lane switch (+ guards) as /api/switch-token. This is
+            safety-critical (it can restart many live sessions), so:
+              * dry_run DEFAULTS TRUE — an absent key NEVER fires a real switch; a
+                dry-run resolves the plan (who WOULD switch / skip + why) and shells
+                out to NOTHING.
+              * HARD EXCLUSIONS, itemised (skipped:excluded), never targeted:
+                singletons that boot off .env (cai, fleet-health == SELF), singleton
+                bodies with their own pointer (nazim, cc-orchestrator), and any
+                remote/off-host body. Enforced fail-closed below.
+              * NEVER passes --force: a BUSY lane is skipped, never clobbered.
+              * unknown/forbidden token_name -> 400 for the WHOLE request (fail closed).
+              * a lane already on the target account -> skipped:already (no restart).
+            Fail-loud + itemised: every considered body gets an outcome row; ok=false
+            if ANY lane failed (partial failure is visible, never swallowed).
+
+            Lane discovery REUSES /api/token-truth's source of truth
+            (panes.token_ground_truth) — the process-verified per-body account — so a
+            lane's current account (and thus 'already on target') is ground truth, not
+            a guess. Local only (include_remote=False): we act on THIS host."""
+            ep = "/api/switch-all" if scope == "all" else "/api/switch-group"
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                payload = json.loads(raw or b"{}")
+                token_name = (payload.get("token_name") or "").strip().lower()
+                # dry_run DEFAULTS TRUE: ONLY a literal JSON false fires for real.
+                dry_run = payload.get("dry_run", True) is not False
+                family = (payload.get("family") or "").strip() if scope == "group" else None
+                exclude_in = payload.get("exclude") or []
+            except Exception:                                        # noqa: BLE001
+                auth.audit(self._client(), ep, "400")
+                return self._json(400, {"error": "bad request"})
+            # Token allowlist FIRST — unknown/forbidden name fails the WHOLE request
+            # closed (gazzabyte is not in LANE_TOKEN_FILES; the script re-checks too).
+            if token_name not in LANE_TOKEN_FILES:
+                auth.audit(self._client(), f"{ep}:{token_name}", "400")
+                return self._json(400, {"error": "unknown token",
+                                        "allowed": sorted(LANE_TOKEN_FILES)})
+            tokfile = _resolve_lane_token_file(token_name)
+            if tokfile is None:
+                auth.audit(self._client(), f"{ep}:{token_name}", "400")
+                return self._json(400, {"error": "token key file not available",
+                                        "token_name": token_name})
+            if scope == "group" and not _LANE_SESSION_RE.match(family or ""):
+                auth.audit(self._client(), f"{ep}:{token_name}", "400")
+                return self._json(400, {"error": "bad family"})
+            # Operator exclude list: well-formed session names only (defensive).
+            exclude_set = {str(s).strip() for s in exclude_in
+                           if isinstance(s, str) and str(s).strip()}
+            target_fp = _fp_of_token_file(str(tokfile))
+            mode = "dry" if dry_run else "fire"
+            auth.audit(self._client(), f"{ep}:{token_name}:{mode}", "run")
+            logger.info("console %s requested: token=%s dry_run=%s family=%s exclude=%s",
+                        ep, token_name, dry_run, family, sorted(exclude_set))
+            # Ground truth of live local bodies + their CURRENT account (same source
+            # /api/token-truth reads). A read failure fails LOUD (500) — never a
+            # silent empty batch.
+            try:
+                rows = panes.token_ground_truth(include_remote=False).get("rows", [])
+            except Exception as e:                                   # noqa: BLE001
+                logger.warning("console %s: token ground-truth read failed: %s", ep, e)
+                auth.audit(self._client(), f"{ep}:{token_name}:{mode}", "500")
+                return self._json(500, {"error": "could not enumerate live lanes"})
+            # PLAN: classify every candidate body into an outcome. Exclusions are
+            # itemised so a DRY-RUN proves the singletons/remotes/SELF are protected.
+            targets = []
+            for r in rows:
+                session = r.get("session") or ""
+                # switch-group: only lanes in the named family are in scope at all.
+                if scope == "group" and not _is_in_family(session, family):
+                    continue
+                # HARD EXCLUSIONS (never target) — itemised, in safety order.
+                reason = None
+                if session in _HELD_LANES:
+                    reason = "HELD lane — must not be switched now (tabung/Wan; see _HELD_LANES)"
+                elif session in _NO_TOKEN_POINTER:
+                    reason = "boots off .env (not switchable; incl. SELF fleet-health)"
+                elif session in _TOKEN_POINTER_FOR:
+                    reason = "singleton body — excluded from a bulk lane switch"
+                elif _is_remote_body(session):
+                    reason = "remote/off-host body — not locally switchable"
+                elif not _LANE_SESSION_RE.match(session):
+                    reason = "unresolved/invalid session name"
+                elif session in exclude_set:
+                    reason = "operator exclude list"
+                if reason is not None:
+                    targets.append({"lane": session, "action": "skipped:excluded",
+                                    "detail": reason})
+                    continue
+                # Already on the target account (verified Max fp match) -> no-op skip.
+                if (r.get("verified") and not r.get("metered")
+                        and r.get("fp") and r.get("fp") == target_fp):
+                    targets.append({"lane": session, "action": "skipped:already",
+                                    "detail": f"already on {token_name} ({target_fp})"})
+                    continue
+                targets.append({"lane": session, "action": "switch",
+                                "detail": "planned (dry-run)" if dry_run else "queued for switch"})
+            # FIRE (only when dry_run explicitly false): shell out per planned lane.
+            if not dry_run:
+                for t in targets:
+                    if t["action"] != "switch":
+                        continue
+                    action, detail = self._switch_one_lane(t["lane"], tokfile, token_name, ep)
+                    t["action"], t["detail"] = action, detail
+            switched = sum(1 for t in targets if t["action"] == "switch")
+            skipped = sum(1 for t in targets if t["action"].startswith("skipped:"))
+            failed = sum(1 for t in targets if t["action"] == "failed")
+            ok = failed == 0
+            auth.audit(self._client(), f"{ep}:{token_name}:{mode}", "200" if ok else "500")
+            logger.info("console %s OUTCOME: token=%s dry=%s switched=%d skipped=%d failed=%d",
+                        ep, token_name, dry_run, switched, skipped, failed)
+            return self._json(200 if ok else 500, {
+                "ok": ok, "dry_run": dry_run, "token_name": token_name,
+                "targets": targets,
+                "summary": {"switched": switched, "skipped": skipped, "failed": failed},
+            })
 
         def _serve_static(self, name: str, path: str, cache_control: str = "no-cache") -> None:
             # Prevent path traversal. is_relative_to (not a string-prefix

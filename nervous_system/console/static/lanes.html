@@ -18,8 +18,13 @@
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { margin:0; background:var(--bg); color:var(--txt);
     font:14px/1.4 -apple-system, system-ui, sans-serif; overflow-x:hidden; }
+  /* push content below the notch/Dynamic Island + fill the island strip so the
+     sticky header never renders under it (operator 2026-08-13, /lanes page). */
+  body { padding-top: env(safe-area-inset-top); }
+  body::before { content:""; position:fixed; top:0; left:0; right:0;
+    height:env(safe-area-inset-top); background:#10151f; z-index:6; pointer-events:none; }
   .wrap { max-width:640px; margin:0 auto; padding:14px 12px calc(28px + env(safe-area-inset-bottom)); }
-  header { position:sticky; top:0; z-index:5; background:linear-gradient(180deg,#10151f,#0b0e14);
+  header { position:sticky; top:env(safe-area-inset-top); z-index:5; background:linear-gradient(180deg,#10151f,#0b0e14);
     margin:-14px -12px 12px; padding:14px 14px 12px; border-bottom:1px solid var(--line); }
   .top { display:flex; align-items:center; gap:10px; }
   .back { color:var(--dim); text-decoration:none; font:600 13px/1 var(--mono); flex:none; }
@@ -114,6 +119,43 @@
     background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:11px; margin:0 0 12px; }
   .pvclose { width:100%; background:var(--accent); color:#06122e; border:none; border-radius:9px;
     padding:12px; font:700 13px/1 var(--mono); }
+  /* Fleet-level bulk account switch toolbar (ported from the / dashboard's
+     .fleetswitch, op#10706). Reuses the per-lane visual language: mono selects +
+     accent/amber buttons, dry-run FIRST then an explicit confirm. Rendered once
+     above the lane list; hidden until it has content so it never shows empty. */
+  .fleetswitch { margin:2px 0 12px; padding:11px 13px; background:var(--panel);
+    border:1px solid var(--line); border-radius:12px; }
+  .fleetswitch:empty { display:none; }
+  .fleetswitch .fs-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .fleetswitch .fs-sel { font:11px/1 var(--mono); color:var(--txt); background:var(--panel-2);
+    border:1px solid var(--line); border-radius:7px; padding:6px 8px; -webkit-appearance:none; cursor:pointer; }
+  .fleetswitch .fs-btn { font:11px/1 var(--mono); letter-spacing:.3px; color:var(--good);
+    background:rgba(62,207,142,.10); border:1px solid rgba(62,207,142,.30);
+    padding:6px 10px; border-radius:7px; cursor:pointer; -webkit-appearance:none; transition:background .12s; }
+  .fleetswitch .fs-btn:hover { background:rgba(62,207,142,.18); }
+  .fleetswitch .fs-btn:active { transform:scale(.97); }
+  .fleetswitch .fs-btn:disabled { opacity:.6; cursor:default; }
+  /* switch-ALL + the confirm button ride amber (the wider-blast, held-lane-aware action). */
+  .fleetswitch .fs-btn.fs-all { color:var(--warn); background:rgba(240,180,41,.10); border-color:rgba(240,180,41,.30); }
+  .fleetswitch .fs-btn.fs-all:hover { background:rgba(240,180,41,.18); }
+  .fleetswitch .fs-btn.fs-confirm { margin-top:8px; color:#fff; background:rgba(240,180,41,.32); border-color:rgba(240,180,41,.6); }
+  /* dry-run plan + itemized results */
+  .fleetswitch .fs-result { margin-top:10px; font:12px/1.5 var(--mono); color:var(--dim); }
+  .fleetswitch .fs-result:empty { display:none; }
+  .fleetswitch .fs-sum { color:var(--txt); font-weight:700; margin-bottom:6px; overflow-wrap:anywhere; }
+  .fleetswitch .fs-lanes { display:flex; flex-direction:column; gap:3px; margin:4px 0 8px; }
+  .fleetswitch .fs-lane { display:flex; align-items:center; gap:7px; color:var(--txt); overflow-wrap:anywhere; }
+  .fleetswitch .fs-lane input { accent-color:var(--good); }
+  .fleetswitch .fs-skip { color:var(--dim); }
+  .fleetswitch .fs-excluded { color:var(--dim); opacity:.6; overflow-wrap:anywhere; }
+  .fleetswitch .fs-item { display:flex; gap:8px; align-items:baseline; padding:2px 0; flex-wrap:wrap; }
+  .fleetswitch .fs-item .fs-lname { color:var(--txt); }
+  .fleetswitch .fs-act { font-weight:700; }
+  .fleetswitch .fs-act.ok { color:var(--good); }
+  .fleetswitch .fs-act.skip { color:var(--dim); }
+  .fleetswitch .fs-act.fail { color:var(--bad); }
+  .fleetswitch .fs-detail { color:var(--dim); overflow-wrap:anywhere; }
+  .fleetswitch .fs-err { color:var(--bad); font-weight:700; overflow-wrap:anywhere; }
 </style>
 </head>
 <body>
@@ -136,6 +178,10 @@
     </div>
   </details>
   <div id="queue"></div>
+  <!-- Fleet-level bulk account switch toolbar (switch-group / switch-all).
+       Rendered ONCE by renderFleetSwitch(); empty (hidden) until bodies load.
+       Every fire is dry-run previewed then explicitly confirmed. -->
+  <div id="fleetSwitch" class="fleetswitch"></div>
   <div id="rows"></div>
   <div id="stamp" class="stamp"></div>
 </div>

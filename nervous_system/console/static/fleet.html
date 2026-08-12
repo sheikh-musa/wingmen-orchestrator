@@ -57,8 +57,14 @@
   #ptr.refreshing .spin { animation: ptrspin .7s linear infinite; }
   @keyframes ptrspin { to { transform: rotate(360deg); } }
 
-  /* PULSE */
-  .pulse { position: sticky; top: 0; z-index: 5; background: linear-gradient(180deg,#10151f,#0b0e14);
+  /* fixed backdrop filling the safe-area (notch/Dynamic Island) strip so the
+     sticky header below it never renders under the island and scrolled content
+     never peeks through above it (operator 2026-08-13: iOS island overlapped the
+     header). Desktop inset=0 -> zero-height, invisible. */
+  body::before { content:""; position: fixed; top:0; left:0; right:0;
+    height: env(safe-area-inset-top); background:#10151f; z-index: 6; pointer-events:none; }
+  /* PULSE — sticks BELOW the island (top offset by the inset), matching #ptr */
+  .pulse { position: sticky; top: env(safe-area-inset-top); z-index: 5; background: linear-gradient(180deg,#10151f,#0b0e14);
     border-bottom: 1px solid var(--line); padding: 13px 16px 12px; }
   .pulse .brandrow { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
   .pulse .brand { font-size: 13px; font-weight: 600; letter-spacing:.3px; color: var(--dim); }
@@ -204,6 +210,44 @@
   .lane .meta .switch-ctl .switch-btn:active { transform:scale(.96); }
   .lane .meta .switch-ctl .switch-btn:disabled { opacity:.6; cursor:default; }
   .lane .meta .switch-ctl .switch-btn.arm { color:#fff; background:rgba(251,191,36,.32); border-color:rgba(251,191,36,.6); }
+
+  /* Fleet-level bulk account switch toolbar (switch-group / switch-all). Reuses
+     the per-lane .switch-ctl visual language: mono selects + accent/amber
+     buttons, dry-run FIRST then an explicit confirm. Rendered once above the
+     lane grid; hidden until it has content so it never shows an empty box. */
+  .fleetswitch { margin:2px 0 10px; padding:11px 13px; background:var(--panel);
+    border:1px solid var(--line); border-radius:12px; }
+  .fleetswitch:empty { display:none; }
+  .fleetswitch .fs-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .fleetswitch .fs-sel { font:11px/1 var(--mono); color:var(--txt); background:var(--panel-2);
+    border:1px solid var(--line); border-radius:7px; padding:6px 8px; -webkit-appearance:none; cursor:pointer; }
+  .fleetswitch .fs-btn { font:11px/1 var(--mono); letter-spacing:.3px; color:var(--good);
+    background:rgba(62,207,142,.10); border:1px solid rgba(62,207,142,.30);
+    padding:6px 10px; border-radius:7px; cursor:pointer; -webkit-appearance:none; transition:background .12s; }
+  .fleetswitch .fs-btn:hover { background:rgba(62,207,142,.18); }
+  .fleetswitch .fs-btn:active { transform:scale(.97); }
+  .fleetswitch .fs-btn:disabled { opacity:.6; cursor:default; }
+  /* switch-ALL + the confirm button ride amber (the wider-blast, held-lane-aware action). */
+  .fleetswitch .fs-btn.fs-all { color:var(--warn); background:rgba(240,180,41,.10); border-color:rgba(240,180,41,.30); }
+  .fleetswitch .fs-btn.fs-all:hover { background:rgba(240,180,41,.18); }
+  .fleetswitch .fs-btn.fs-confirm { margin-top:8px; color:#fff; background:rgba(240,180,41,.32); border-color:rgba(240,180,41,.6); }
+  /* dry-run plan + itemized results */
+  .fleetswitch .fs-result { margin-top:10px; font:12px/1.5 var(--mono); color:var(--dim); }
+  .fleetswitch .fs-result:empty { display:none; }
+  .fleetswitch .fs-sum { color:var(--txt); font-weight:700; margin-bottom:6px; overflow-wrap:anywhere; }
+  .fleetswitch .fs-lanes { display:flex; flex-direction:column; gap:3px; margin:4px 0 8px; }
+  .fleetswitch .fs-lane { display:flex; align-items:center; gap:7px; color:var(--txt); overflow-wrap:anywhere; }
+  .fleetswitch .fs-lane input { accent-color:var(--good); }
+  .fleetswitch .fs-skip { color:var(--dim); }
+  .fleetswitch .fs-excluded { color:var(--dim); opacity:.6; overflow-wrap:anywhere; }
+  .fleetswitch .fs-item { display:flex; gap:8px; align-items:baseline; padding:2px 0; flex-wrap:wrap; }
+  .fleetswitch .fs-item .fs-lname { color:var(--txt); }
+  .fleetswitch .fs-act { font-weight:700; }
+  .fleetswitch .fs-act.ok { color:var(--good); }
+  .fleetswitch .fs-act.skip { color:var(--dim); }
+  .fleetswitch .fs-act.fail { color:var(--bad); }
+  .fleetswitch .fs-detail { color:var(--dim); overflow-wrap:anywhere; }
+  .fleetswitch .fs-err { color:var(--bad); font-weight:700; overflow-wrap:anywhere; }
   .collapsed { display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--panel);
     border:1px dashed var(--line); border-radius:13px; color:var(--dim); font-size:13px; cursor:pointer; }
   .collapsed b { color:var(--txt); white-space:nowrap; }
@@ -338,6 +382,10 @@
 
   <section>
     <div class="sec-h"><h2>Lanes</h2><span class="count">working first · /1M window fill</span></div>
+    <!-- Fleet-level bulk account switch toolbar (switch-group / switch-all).
+         Rendered ONCE by renderFleetSwitch(); empty (hidden) until lanes load.
+         Every fire is dry-run previewed then explicitly confirmed. -->
+    <div id="fleetSwitch" class="fleetswitch"></div>
     <div id="lanes"><div class="empty">Loading…</div></div>
   </section>
 
@@ -368,7 +416,21 @@
       sessionStorage.setItem('fleet_sw_reloaded', '1');
       window.location.reload();
     });
-    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function (reg) {
+      if (!reg) return;
+      // ACTIVELY poll for a new SW so updates LAND on their own — without this,
+      // iOS Safari won't re-check the SW while the PWA is open, so a fresh deploy
+      // gets stuck ("fc-vNN -> fc-vMM" badge) until the operator DELETES + reopens
+      // the app. That manual-delete-every-update is the bug this fixes (operator
+      // 2026-08-13). update() -> new sw.js installs -> skipWaiting -> activate ->
+      // clients.claim -> controllerchange (handler above) -> one-shot reload.
+      var checkUpdate = function () { try { reg.update(); } catch (e) {} };
+      setInterval(checkUpdate, 60000);                                   // periodic while open
+      document.addEventListener('visibilitychange', function () {        // on foreground (iOS resume)
+        if (!document.hidden) checkUpdate();
+      });
+      checkUpdate();                                                     // and immediately on load
+    }).catch(function () {});
   })();
 </script>
 </body>

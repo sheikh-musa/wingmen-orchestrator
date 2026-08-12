@@ -109,6 +109,233 @@
     }).join("");
   }
 
+  // ── Fleet-level bulk account switch (switch-group / switch-all) ─────────────
+  // ONE toolbar above the body list: pick a TARGET account, then either switch a
+  // whole family (the live session prefix up to its first "-") or the WHOLE fleet.
+  // Every fire is DRY-RUN previewed FIRST (the safety surface) then EXPLICITLY
+  // confirmed — NEVER a one-tap bulk switch. Ported verbatim from fleet.js's
+  // renderFleetSwitch/fs* block, adapted to lanes.js's data shapes: the account
+  // list comes from the /api/token-truth registry (registry.tokens), NOT a fleet.js
+  // SWITCH_ACCOUNTS constant, and families are built from row.session (fleet.js used
+  // lane.tmux_session). The held lane `irsyad-import` is pre-excluded for switch-ALL;
+  // the operator can also DESELECT any would-switch lane before the real fire.
+  var FS_HELD = ["irsyad-import"];   // held lanes: pre-excluded from switch-ALL
+  var fsFamKey = null;               // last-rendered family set (skip needless rebuilds)
+  var fsPlan = null;                 // active dry-run context: {kind, token, family}
+  var fsAccounts = [];               // [{name,label}] built from registry.tokens
+
+  // Selectable bulk-switch accounts = the AVAILABLE registry tokens the backend
+  // enforces, minus the forbidden gazzabyte consumer token (CAI-729; the endpoint
+  // also refuses it). No fleet.js-style {fp} needed — the endpoints take token_name.
+  function fsBuildAccounts(reg) {
+    var toks = (reg && reg.tokens) || [];
+    return toks.filter(function (t) {
+      return t && t.name && t.available !== false && !/gazza/i.test(t.name);
+    }).map(function (t) { return { name: t.name, label: t.name }; });
+  }
+  function fsAcctLabel(name) {
+    for (var i = 0; i < fsAccounts.length; i++)
+      if (fsAccounts[i].name === name) return fsAccounts[i].label;
+    return name || "";
+  }
+  // Families = unique session prefix (up to first "-") of the LOCAL bodies (remote
+  // VPS bodies aren't local tmux switch targets), e.g. "cosem-exams" -> "cosem".
+  function familiesFromRows(rows) {
+    var seen = {}, out = [];
+    (rows || []).forEach(function (r) {
+      if (!r || r.remote) return;             // remote (VPS) bodies are set on their own host
+      var s = r.session;
+      if (!s) return;
+      var fam = String(s).split("-")[0];
+      if (fam && !seen[fam]) { seen[fam] = 1; out.push(fam); }
+    });
+    out.sort();
+    return out;
+  }
+  function renderFleetSwitch(rows, reg) {
+    var el = $("fleetSwitch");
+    if (!el) return;
+    fsAccounts = fsBuildAccounts(reg);
+    var fams = familiesFromRows(rows);
+    var key = fams.join(",");
+    if (el._built) {
+      // On a live refresh: update the family list ONLY when it actually changed,
+      // and NEVER clobber a plan the operator is mid-read on (a background tick
+      // must not wipe his dry-run preview).
+      if (key !== fsFamKey && !fsPlan) {
+        var famSel = el.querySelector(".fs-fam");
+        if (famSel && document.activeElement !== famSel) {
+          var cur = famSel.value;
+          famSel.innerHTML = fams.map(function (f) {
+            return '<option value="' + esc(f) + '"' + (f === cur ? " selected" : "") + '>' + esc(f) + '</option>';
+          }).join("");
+          fsFamKey = key;
+        }
+      }
+      return;
+    }
+    // Don't lock in an EMPTY account select on an early/degraded first render — wait
+    // for a registry with at least one selectable token, then build once (fleet.js's
+    // SWITCH_ACCOUNTS was a constant so it never faced this; token-truth is fetched).
+    if (!fsAccounts.length) return;
+    el._built = true; fsFamKey = key;
+    var acctOpts = fsAccounts.map(function (a) {
+      return '<option value="' + esc(a.name) + '">' + esc(a.label) + '</option>';
+    }).join("");
+    var famOpts = fams.map(function (f) {
+      return '<option value="' + esc(f) + '">' + esc(f) + '</option>';
+    }).join("");
+    el.innerHTML =
+      '<div class="fs-row">' +
+        '<select class="fs-sel fs-acct" title="Target Claude account for the bulk switch">' + acctOpts + '</select>' +
+        '<select class="fs-sel fs-fam" title="Family = the live session prefix up to its first dash">' + famOpts + '</select>' +
+        '<button class="fs-btn fs-group" title="Preview then switch every lane in the selected family onto the target account">⇄ switch group</button>' +
+        '<button class="fs-btn fs-all" title="Preview then switch the WHOLE fleet onto the target account (held lanes pre-excluded)">⇄ switch ALL</button>' +
+      '</div>' +
+      '<div class="fs-result" id="fsResult"></div>';
+    var g = el.querySelector(".fs-group"), a = el.querySelector(".fs-all");
+    if (g) g.addEventListener("click", function () { fsDryRun("group"); });
+    if (a) a.addEventListener("click", function () { fsDryRun("all"); });
+  }
+
+  function fsPost(url, body) {
+    return fetch(url, {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(
+        function (j) { return { ok: r.ok, s: r.status, j: j || {} }; },
+        function () { return { ok: r.ok, s: r.status, j: {} }; }   // non-JSON body
+      );
+    });
+  }
+  // A non-200 / non-JSON failure worded like the per-lane switch error handling.
+  function fsErrText(res) {
+    if (res.s === 400) return "✗ " + (res.j.error || "unknown token / bad request");
+    if (res.s === 401) return "✗ not authorized";
+    if (res.s === 429) return "⏳ rate-limited — wait a moment";
+    if (res.s === 500) return "✗ " + (res.j.error || "enumerate failed on the server");
+    if (res.s === 504) return "✗ timed out — check the lanes";
+    return "✗ " + (res.j.error || ("failed (http " + res.s + ")"));
+  }
+
+  function fsDryRun(kind) {
+    var el = $("fleetSwitch"), out = $("fsResult");
+    if (!el || !out) return;
+    var token = el.querySelector(".fs-acct").value;
+    var family = el.querySelector(".fs-fam").value;
+    if (kind === "group" && !family) { out.innerHTML = '<span class="fs-err">No family selected.</span>'; return; }
+    fsPlan = null;   // clear any prior plan while this dry-run is in flight
+    out.innerHTML = '<span class="fs-skip">Previewing…</span>';
+    var url = kind === "group" ? "/api/switch-group" : "/api/switch-all";
+    var body = kind === "group"
+      ? { family: family, token_name: token, dry_run: true }
+      : { token_name: token, dry_run: true, exclude: FS_HELD.slice() };
+    fsPost(url, body).then(function (res) {
+      if (!(res.ok && res.j && res.j.dry_run)) {
+        out.innerHTML = '<span class="fs-err">' + esc(fsErrText(res)) + '</span>'; return;
+      }
+      fsPlan = { kind: kind, token: token, family: family };
+      renderPlan(out, kind, token, res.j);
+    }).catch(function () {
+      // A dropped dry-run RESPONSE is safe (a dry-run changes nothing) — just retry.
+      out.innerHTML = '<span class="fs-err">✗ network dropped during preview — tap again</span>';
+    });
+  }
+
+  // The DRY-RUN plan: summary + the lanes that WOULD switch (by name), skipped
+  // breakdown, excluded lanes shown muted (proves held/SELF are protected). For
+  // switch-ALL each would-switch lane is a checkbox (checked) so the operator can
+  // deselect before firing; switch-group has no exclude on the endpoint so its
+  // list is read-only. Nothing fires until the explicit Confirm button.
+  function renderPlan(out, kind, token, j) {
+    var targets = j.targets || [], sum = j.summary || {};
+    var would = targets.filter(function (t) { return t.action === "switch"; });
+    var excluded = targets.filter(function (t) { return t.action === "skipped:excluded"; });
+    var already = targets.filter(function (t) { return t.action === "skipped:already"; }).length;
+    var busy = targets.filter(function (t) { return t.action === "skipped:busy"; }).length;
+    var lbl = esc(fsAcctLabel(token));
+    var skippedTotal = (sum.skipped != null) ? sum.skipped : (targets.length - would.length);
+    var head = '<div class="fs-sum">Would switch <b>' + would.length + '</b> lane' + (would.length === 1 ? '' : 's') +
+      ' to ' + lbl + ' — skipped ' + skippedTotal +
+      ' (already ' + already + ' / busy ' + busy + ' / excluded ' + excluded.length + ')</div>';
+    var lanesHtml;
+    if (!would.length) {
+      lanesHtml = '<div class="fs-skip">Nothing to switch.</div>';
+    } else if (kind === "all") {
+      lanesHtml = '<div class="fs-lanes">' + would.map(function (t) {
+        return '<label class="fs-lane"><input type="checkbox" class="fs-ck" value="' + esc(t.lane) + '" checked> ' + esc(t.lane) + '</label>';
+      }).join("") + '</div>';
+    } else {
+      lanesHtml = '<div class="fs-lanes">' + would.map(function (t) {
+        return '<div class="fs-lane">' + esc(t.lane) + '</div>';
+      }).join("") + '</div>';
+    }
+    var exclHtml = excluded.length
+      ? '<div class="fs-excluded">excluded: ' + excluded.map(function (t) {
+          return esc(t.lane) + (t.detail ? " (" + esc(t.detail) + ")" : "");
+        }).join(", ") + '</div>'
+      : '';
+    var confirmHtml = would.length
+      ? '<button class="fs-btn fs-confirm" id="fsConfirm">Confirm switch ' + would.length + ' lane' + (would.length === 1 ? '' : 's') + '</button>'
+      : '';
+    out.innerHTML = head + lanesHtml + exclHtml + confirmHtml;
+    var cb = $("fsConfirm");
+    if (cb) cb.addEventListener("click", function () { fsFire(out); });
+  }
+
+  function fsFire(out) {
+    if (!fsPlan) return;
+    var kind = fsPlan.kind, token = fsPlan.token, family = fsPlan.family;
+    var cb = $("fsConfirm");
+    if (cb) { cb.disabled = true; cb.textContent = "⇄ switching…"; }
+    var url, body;
+    if (kind === "group") {
+      url = "/api/switch-group";
+      body = { family: family, token_name: token, dry_run: false };
+    } else {
+      // exclude = held lanes + any lane the operator unchecked in the plan.
+      var excl = FS_HELD.slice();
+      out.querySelectorAll(".fs-ck").forEach(function (ck) {
+        if (!ck.checked && excl.indexOf(ck.value) < 0) excl.push(ck.value);
+      });
+      url = "/api/switch-all";
+      body = { token_name: token, dry_run: false, exclude: excl };
+    }
+    fsPost(url, body).then(function (res) {
+      fsPlan = null;
+      if (res.j && res.j.targets && res.j.targets.length) { renderResults(out, token, res.j); }
+      else { out.innerHTML = '<span class="fs-err">' + esc(fsErrText(res)) + '</span>'; }
+    }).catch(function () {
+      // A dropped RESPONSE on the REAL fire does NOT mean nothing ran — the bulk
+      // kill+relaunch may have fired before the reply was lost.
+      fsPlan = null;
+      out.innerHTML = '<span class="fs-err">✗ network dropped — may have run; check the lanes</span>';
+    });
+  }
+
+  // Itemized results: per-lane action (switch / skipped:* / failed) + detail, with
+  // FAIL-LOUD red on any "failed", plus the summary counts. ok=false (any failure)
+  // still renders the full per-lane breakdown so nothing is hidden.
+  function renderResults(out, token, j) {
+    var targets = j.targets || [], sum = j.summary || {};
+    var lbl = esc(fsAcctLabel(token));
+    var anyFail = (sum.failed || 0) > 0 || j.ok === false;
+    var head = '<div class="fs-sum">' + (anyFail ? '⚠ ' : '✓ ') +
+      'switched ' + (sum.switched || 0) + ' · skipped ' + (sum.skipped || 0) +
+      ' · failed ' + (sum.failed || 0) + ' → ' + lbl + '</div>';
+    var items = targets.map(function (t) {
+      var a = t.action || "";
+      var cls = a === "switch" ? "ok" : (a === "failed" ? "fail" : "skip");
+      return '<div class="fs-item"><span class="fs-lname">' + esc(t.lane) + '</span>' +
+        '<span class="fs-act ' + cls + '">' + esc(a) + '</span>' +
+        (t.detail ? '<span class="fs-detail">' + esc(t.detail) + '</span>' : '') +
+      '</div>';
+    }).join("");
+    out.innerHTML = head + items;
+  }
+
   function render(d) {
     registry = (d && d.registry) || { tokens: [], models: [] };
     var rows = (d && d.rows) || [];
@@ -121,6 +348,7 @@
     if (s.unverified) bits.push(s.unverified + ' unverified');
     bits.push('<b class="good">' + (s.verified || 0) + '/' + (s.total || rows.length) + ' verified</b>');
     $("sub").innerHTML = bits.join(" · ");
+    renderFleetSwitch(rows, registry);   // fleet-level bulk switch toolbar (built once, above the list)
   }
 
   function toast(msg, bad) {

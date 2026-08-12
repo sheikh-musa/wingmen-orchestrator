@@ -3,9 +3,10 @@
 Spins up the real stdlib threaded server on an ephemeral port and drives it with
 httpx. The DB layer is monkeypatched so tests are hermetic (no live Supabase).
 """
+import pathlib
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -228,3 +229,207 @@ def test_icons_served_unauthenticated(server):
     r = httpx.get(server + "/static/icons/icon-192.png", timeout=5)
     assert r.status_code == 200
     assert r.headers.get("content-type") == "image/png"
+
+
+# --- Bulk re-token: /api/switch-group + /api/switch-all -----------------------
+# These re-token MANY live sessions, so the tests pin the safety contract: dry-run
+# default-safe (fires NOTHING), singletons/remote/SELF excluded, unknown token
+# fail-closed, already-on-target skipped, family scoping, and partial-failure
+# surfaced (ok:false, itemised). The token resolve + fingerprint are stubbed so the
+# tests are hermetic (no real key files) and token_ground_truth is mocked so lane
+# discovery is deterministic (no live `ps`).
+_SYED_FP = "582043088eae"   # the target account fp in these tests
+_MUSA_FP = "68142948c003"   # a DIFFERENT account (lanes here start on this)
+
+
+def _row(session, fp=_MUSA_FP, verified=True, metered=False, host="Mini"):
+    return {"session": session, "account": "acct", "fp": fp, "metered": metered,
+            "model": None, "host": host, "verified": verified,
+            "expected": None, "expected_fp": None, "mismatch": False}
+
+
+def _batch_patches(rows):
+    """Patch the three seams the bulk switch reads: token-file resolve, its
+    fingerprint (-> target account), and the live-lane ground truth. gazzabyte
+    stays fail-closed upstream (LANE_TOKEN_FILES), so 'syed' resolves here."""
+    return (
+        patch.object(console_app, "_resolve_lane_token_file",
+                     return_value=pathlib.Path("/fake/syed-oauth-token")),
+        patch.object(console_app, "_fp_of_token_file", return_value=_SYED_FP),
+        patch.object(console_app.panes, "token_ground_truth",
+                     return_value={"rows": rows, "summary": {}}),
+    )
+
+
+def _by_lane(targets):
+    return {t["lane"]: t for t in targets}
+
+
+def test_switch_all_dry_run_plans_and_fires_nothing(server):
+    """DEFAULT dry-run (dry_run key ABSENT): resolves the full plan with exclusions
+    applied and shells out to NOTHING."""
+    rows = [
+        _row("cosem-tdu"), _row("irsyad"),
+        _row("cai"), _row("fleet-health"), _row("nazim"),
+        _row("cc-orchestrator", host="VPS", verified=False, fp=None),
+        _row("ihsanos-1", fp=_SYED_FP),   # already on the syed target
+    ]
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run") as mock_run:
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed"}, timeout=10)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["dry_run"] is True
+    assert body["token_name"] == "syed"
+    tg = _by_lane(body["targets"])
+    assert tg["cosem-tdu"]["action"] == "switch"
+    assert tg["irsyad"]["action"] == "switch"
+    assert tg["ihsanos-1"]["action"] == "skipped:already"
+    # DRY-RUN fires NOTHING.
+    mock_run.assert_not_called()
+
+
+def test_switch_all_excludes_singletons_and_remote(server):
+    """cai, fleet-health (SELF), nazim, cc-orchestrator, and remote bodies are
+    NEVER switch targets — each is itemised skipped:excluded, never 'switch'."""
+    rows = [
+        _row("cosem-tdu"),
+        _row("cai"), _row("fleet-health"), _row("nazim"),
+        _row("cc-orchestrator", host="VPS", verified=False, fp=None),
+    ]
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run"):
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed", "dry_run": True}, timeout=10)
+    tg = _by_lane(r.json()["targets"])
+    for excluded in ("cai", "fleet-health", "nazim", "cc-orchestrator"):
+        assert tg[excluded]["action"] == "skipped:excluded", excluded
+    assert tg["cosem-tdu"]["action"] == "switch"
+
+
+def test_bulk_switch_excludes_held_lane_server_side(server):
+    """A HELD lane (irsyad-import) is NEVER a switch target — the server-side
+    _HELD_LANES guard, independent of the operator exclude[] list, in BOTH
+    switch-all and switch-group (so a direct API call can't hit it either)."""
+    rows = [_row("cosem-tdu"), _row("irsyad"), _row("irsyad-import")]
+    # switch-ALL: held lane excluded WITHOUT any operator exclude
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run"):
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed", "dry_run": True}, timeout=10)
+    tg = _by_lane(r.json()["targets"])
+    assert tg["irsyad-import"]["action"] == "skipped:excluded"
+    assert "HELD" in tg["irsyad-import"]["detail"]
+    # switch-GROUP on family 'irsyad': the held in-family lane is STILL excluded,
+    # its non-held siblings still switch.
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run"):
+        r = httpx.post(server + "/api/switch-group", headers=H(),
+                       json={"family": "irsyad", "token_name": "syed", "dry_run": True}, timeout=10)
+    tg = _by_lane(r.json()["targets"])
+    assert tg["irsyad-import"]["action"] == "skipped:excluded"
+    assert tg["irsyad"]["action"] == "switch"
+
+
+def test_switch_all_operator_exclude_list(server):
+    """A session named in the request `exclude` list is skipped:excluded."""
+    rows = [_row("cosem-tdu"), _row("irsyad")]
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run"):
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed", "exclude": ["irsyad"]}, timeout=10)
+    tg = _by_lane(r.json()["targets"])
+    assert tg["cosem-tdu"]["action"] == "switch"
+    assert tg["irsyad"]["action"] == "skipped:excluded"
+
+
+def test_switch_all_unknown_token_400(server):
+    """Unknown/forbidden token_name fails the WHOLE request closed."""
+    with patch("subprocess.run") as mock_run:
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "gazzabyte"}, timeout=10)
+    assert r.status_code == 400
+    mock_run.assert_not_called()
+
+
+def test_switch_all_already_on_target_skipped(server):
+    """A lane already on the target account -> skipped:already (no restart)."""
+    rows = [_row("cosem-tdu", fp=_SYED_FP)]
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run") as mock_run:
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed", "dry_run": True}, timeout=10)
+    tg = _by_lane(r.json()["targets"])
+    assert tg["cosem-tdu"]["action"] == "skipped:already"
+    mock_run.assert_not_called()
+
+
+def test_switch_group_scopes_to_named_family_only(server):
+    """switch-group targets ONLY the named family; other lanes are not listed."""
+    rows = [_row("cosem-tdu"), _row("cosem-exams"), _row("irsyad"), _row("cai")]
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run"):
+        r = httpx.post(server + "/api/switch-group", headers=H(),
+                       json={"family": "cosem", "token_name": "syed"}, timeout=10)
+    tg = _by_lane(r.json()["targets"])
+    assert set(tg) == {"cosem-tdu", "cosem-exams"}
+    assert tg["cosem-tdu"]["action"] == "switch"
+    assert tg["cosem-exams"]["action"] == "switch"
+
+
+def test_switch_all_partial_failure_is_ok_false_and_itemised(server, monkeypatch):
+    """dry_run=false actually fires; if ANY lane fails, ok=false and the failing
+    lane is itemised with its script tail (never swallowed)."""
+    # Clear + neutralise the shared per-lane guard so these lanes fire. (The
+    # cooldown sentinel is get(lane, 0.0); in a FRESH test process monotonic() is
+    # still < the 30s cooldown, which would false-trip — a non-issue for the
+    # long-lived real console. See report note.)
+    console_app._SWITCH_LAST_RUN.clear()
+    console_app._SWITCH_INFLIGHT.clear()
+    monkeypatch.setattr(console_app, "_SWITCH_COOLDOWN_S", 0.0)
+    rows = [_row("laneA"), _row("laneB")]
+    ok_res = MagicMock(returncode=0, stdout="switched to syed\n", stderr="")
+    bad_res = MagicMock(returncode=1, stdout="", stderr="BOOM relaunch failed\n")
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run", side_effect=[ok_res, bad_res]):
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed", "dry_run": False}, timeout=10)
+    assert r.status_code == 500
+    body = r.json()
+    assert body["ok"] is False and body["dry_run"] is False
+    tg = _by_lane(body["targets"])
+    assert tg["laneA"]["action"] == "switch"
+    assert tg["laneB"]["action"] == "failed"
+    assert "BOOM" in tg["laneB"]["detail"]
+    assert body["summary"] == {"switched": 1, "skipped": 0, "failed": 1}
+
+
+def test_switch_all_busy_lane_skipped_not_forced(server, monkeypatch):
+    """A BUSY lane (script rc 5) is skipped:busy — NEVER --force'd, never a failure
+    of the whole batch. Assert no --force in any argv."""
+    console_app._SWITCH_LAST_RUN.clear()
+    console_app._SWITCH_INFLIGHT.clear()
+    monkeypatch.setattr(console_app, "_SWITCH_COOLDOWN_S", 0.0)
+    rows = [_row("laneBusy"), _row("laneOk")]
+    busy_res = MagicMock(returncode=5, stdout="", stderr="'laneBusy' is BUSY\n")
+    ok_res = MagicMock(returncode=0, stdout="switched to syed\n", stderr="")
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run", side_effect=[busy_res, ok_res]) as mock_run:
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed", "dry_run": False}, timeout=10)
+    body = r.json()
+    assert body["ok"] is True   # a busy skip is not a failure
+    tg = _by_lane(body["targets"])
+    assert tg["laneBusy"]["action"] == "skipped:busy"
+    assert tg["laneOk"]["action"] == "switch"
+    for call in mock_run.call_args_list:
+        assert "--force" not in call[0][0]
+
+
+def test_switch_requires_auth(server):
+    """Same auth gate as /api/reset — no new unauthenticated surface."""
+    r1 = httpx.post(server + "/api/switch-all", json={"token_name": "syed"}, timeout=5)
+    r2 = httpx.post(server + "/api/switch-group",
+                    json={"family": "cosem", "token_name": "syed"}, timeout=5)
+    assert r1.status_code == 401 and r2.status_code == 401
