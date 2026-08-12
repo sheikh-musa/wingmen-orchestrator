@@ -20,8 +20,16 @@ The `7d-utilization` reads 0.89 on the Musa pool — matching the operator's obs
 
 Cost: a 1-token haiku probe per pool per run — negligible against the weekly pool.
 
-We track TWO independent pools: Musa (CLAUDE_CODE_OAUTH_TOKEN in orchestrator .env)
-and Syed (~/.wingmen/keys/syed-oauth-token).
+We track TWO independent pools: Musa (~/.wingmen/keys/musa-oauth-token) and Syed
+(~/.wingmen/keys/syed-oauth-token). BOTH are pinned to their STABLE per-account key
+files — NOT the mutable orchestrator-.env CLAUDE_CODE_OAUTH_TOKEN default. This is
+the op#12030 fix: the "Musa" pool used to read .env's CLAUDE_CODE_OAUTH_TOKEN, but
+that default is flipped between accounts during token-moves (it was flipped Musa->Syed
+in the op#11899 crisis). After that flip the monitor silently probed the SYED token
+under BOTH labels -> "Musa" and "Syed" reported IDENTICAL utilization/reset (falsely
+read as a "unified pool"), masking that Musa was CLEAR while Syed maxed to 100%
+(~2h of lost headroom). Pinning each pool to its own 0600 key file makes a false
+'full' from token-conflation structurally impossible.
 
 DEAD-MAN'S-SWITCH (doctrine: a silent-fail monitor is worse than none): every run
 writes a heartbeat; a probe failure PAGES loudly rather than passing silently; an
@@ -56,8 +64,11 @@ HEARTBEAT_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor_heartbeat"
 LOG_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor.log"
 
 # Pool name -> how to load its OAuth token. Value is (kind, ref).
+# BOTH pinned to stable per-account key files (op#12030): a pool must ALWAYS be
+# probed with its OWN token, never the mutable .env CLAUDE_CODE_OAUTH_TOKEN default
+# (which token-moves flip between accounts -> silent cross-account conflation).
 POOLS = {
-    "Musa": ("env", "CLAUDE_CODE_OAUTH_TOKEN"),
+    "Musa": ("file", str(Path.home() / ".wingmen" / "keys" / "musa-oauth-token")),
     "Syed": ("file", str(Path.home() / ".wingmen" / "keys" / "syed-oauth-token")),
 }
 
