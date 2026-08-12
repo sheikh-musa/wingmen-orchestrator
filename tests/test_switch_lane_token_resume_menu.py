@@ -131,3 +131,30 @@ def test_resolve_legacy_dot_preserved_still_found(tmp_path):
 
 def test_script_uses_resolver():
     assert "resolve_resume_session" in SCRIPT.read_text(), "script must use the robust resolver"
+
+
+# ── UNIT: pane_has_bg_shell (op#12046 flip-all footgun the busy-check misses) ────
+def _shell(text) -> bool:
+    return subprocess.run(["bash", "-c", f'source "{LIB}"; pane_has_bg_shell "$1"', "_", text]).returncode == 0
+
+
+FOOTER_SHELL = "  ⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage"
+FOOTER_SHELLS = "  ⏵⏵ bypass permissions on · 2 shells still running"
+FOOTER_CLEAN = "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+PROSE = "  I ran 3 shell scripts earlier and they finished."
+
+
+def test_pane_has_bg_shell_matrix():
+    assert _shell(FOOTER_SHELL) is True, "footer '· 1 shell · ↓ to manage' = running shell"
+    assert _shell(FOOTER_SHELLS) is True, "'2 shells still running' = running shell"
+    assert _shell(FOOTER_CLEAN) is False, "clean footer, no shell"
+    assert _shell(PROSE) is False, "transcript prose 'shell scripts' must not false-match"
+    assert _shell("") is False
+
+
+# ── STATIC: switch_lane_token wires the shell + draft holds ───────────────────
+def test_script_guards_shell_and_draft():
+    src = SCRIPT.read_text()
+    assert "pane_has_bg_shell" in src, "must refuse a running background shell"
+    assert "UNSUBMITTED COMPOSER DRAFT" in src, "must refuse a non-empty composer draft"
+    assert "CC_GHOST" in src, "draft check must be ghost-guarded (dim history-ghost != real draft)"

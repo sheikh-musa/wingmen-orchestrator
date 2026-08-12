@@ -248,6 +248,32 @@ if [ "$CC_BUSY" = 1 ]; then
     exit 5
   fi
 fi
+# Extended pre-switch guard (op#12046 flip-all footguns the foreground busy-check
+# MISSES): (a) a RUNNING BACKGROUND SHELL — a re-token kills the tmux session and
+# with it the live shell (real risk on a client-data lane like irsyad-import's
+# tabung write); (b) a NON-EMPTY COMPOSER DRAFT — --resume does NOT preserve
+# unsubmitted text, so a bounce silently LOSES it. Refuse (hold, exit 5) unless
+# --force, so a group/flip-all sweep SKIPS these and reports them for retry rather
+# than clobbering. (composer_parse's CC_GHOST guards against a dim history-ghost
+# being mistaken for a real draft.)
+_guard_txt="$("$TM" capture-pane -t "${SESS}:0.0" -p 2>/dev/null)"
+if pane_has_bg_shell "$_guard_txt"; then
+  if [ "$FORCE" = "1" ]; then
+    echo "WARNING: '$SESS' has a RUNNING BACKGROUND SHELL — --force set, re-tokening ANYWAY (the shell WILL be killed)." >&2
+  else
+    echo "ERROR: '$SESS' has a RUNNING BACKGROUND SHELL — a re-token would kill it — refusing (hold). Let it finish or pass --force." >&2
+    exit 5
+  fi
+fi
+composer_parse_pane "$TM" "${SESS}:0.0"
+if [ "${CC_EMPTY:-1}" = 0 ] && [ "${CC_GHOST:-0}" != 1 ]; then
+  if [ "$FORCE" = "1" ]; then
+    echo "WARNING: '$SESS' has an UNSUBMITTED COMPOSER DRAFT ('${CC_FLAT}') — --force set, re-tokening ANYWAY (the draft is LOST)." >&2
+  else
+    echo "ERROR: '$SESS' has an UNSUBMITTED COMPOSER DRAFT ('${CC_FLAT}') — --resume won't preserve it — refusing (hold). Submit or capture it first, or pass --force." >&2
+    exit 5
+  fi
+fi
 
 if [ -n "$RESUME_ID" ]; then
   echo "⚠ RE-TOKEN restarts the lane PROCESS but RESUMES the conversation ($RESUME_ID) on the new"

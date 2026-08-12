@@ -486,3 +486,16 @@ resolve_resume_session() {
   printf '%s' "$cand" | grep -Eiq \
     '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' && printf '%s' "$cand"
 }
+
+# pane_has_bg_shell <pane-text> -> 0 if the CC footer shows a RUNNING background
+# shell (op#12046/flip-all safety). The footer renders e.g.
+#   "⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage"
+# or "N shell still running". A re-token KILLS the tmux session, so a bounce would
+# kill that live shell — on a client-data lane (e.g. irsyad-import's tabung write)
+# that is real data risk. The foreground busy-guard (pane_busy) keys on
+# 'esc to interrupt' ONLY and MISSES a backgrounded shell with an idle composer, so
+# this is a distinct guard. Anchored to footer context (bullet / 'still running' /
+# the '↓ to manage' hint) to avoid matching transcript prose that says 'N shell'.
+pane_has_bg_shell() {
+  printf '%s' "${1:-}" | grep -Eq '·[[:space:]]*[0-9]+[[:space:]]+shell|[0-9]+[[:space:]]+shells?[[:space:]]+still[[:space:]]+running|↓ to manage'
+}
