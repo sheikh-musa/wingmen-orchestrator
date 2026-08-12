@@ -338,6 +338,24 @@ while [ "$(date -u +%s)" -lt "$DEADLINE" ]; do
   fi
 done
 
+# ── 6.4 RESUME-VERIFY belt (op#12030 f/u): if a resume was EXPECTED, prove it TOOK ─
+# The health-verify cannot see a fresh boot (a fresh boot IS healthy) — the exact
+# false-PASS the irsyad-coord incident hit: right auth_fp + healthy pane, but the
+# lane relaunched FRESH with the WRONG (empty) session, silently losing context.
+# claude --resume CONTINUES the same session-id, so after a relaunch the lane's
+# newest session MUST == RESUME_ID; a fresh boot creates a NEW uuid. Only meaningful
+# once the pane is up (claude has written its session) — hence after the loop.
+RESUME_VERIFIED=1
+if [ -n "$RESUME_ID" ] && [ "$AFTER_FP" = "$NEW_FP" ] && [ "$PANE_HEALTHY" = "1" ]; then
+  _RUNNING_SID="$(resolve_resume_session "$WORKTREE")"
+  if session_resumed_ok "$WORKTREE" "$RESUME_ID"; then
+    RESUME_VERIFIED=1
+  else
+    RESUME_VERIFIED=0
+    echo "[switch_lane_token] ⚠ RESUME-VERIFY FAILED: expected session $RESUME_ID but the running session is ${_RUNNING_SID:-<none>} — the lane relaunched FRESH (context LOST, not preserved)." >&2
+  fi
+fi
+
 # ── 6.5 Identity-stamped audit + break-glass alert (cai CAI-RESP-747 conds 2/3) ─
 # The switch SCRIPT is the SINGLE execution rail every armed/break-glass re-token
 # flows through (cai cond 1), and the console DB session is READ-ONLY, so THIS is
@@ -346,10 +364,11 @@ done
 # set by /api/switch-token) it escalates to a P1 ALERT so the exceptional path is
 # never a silent routine bypass. Best-effort: a failed emit warns LOUDLY (stderr)
 # but never fails an already-completed switch.
-# PASS requires BOTH the auth_fp flip AND a healthy pane (op#12030 f/u): a lane
-# parked at the resume menu has the right fp but is soft-wedged, which is a FAIL.
+# PASS requires the auth_fp flip AND a healthy pane AND (if a resume was expected)
+# a VERIFIED resume (op#12030 f/u): a menu-parked lane has the right fp but is
+# soft-wedged; a fresh boot has the right fp + a healthy pane but the wrong session.
 _SWITCH_RESULT="PASS"
-if [ "$AFTER_FP" != "$NEW_FP" ] || [ "$PANE_HEALTHY" != "1" ]; then _SWITCH_RESULT="FAIL"; fi
+if [ "$AFTER_FP" != "$NEW_FP" ] || [ "$PANE_HEALTHY" != "1" ] || [ "$RESUME_VERIFIED" != "1" ]; then _SWITCH_RESULT="FAIL"; fi
 SWITCH_RESULT="$_SWITCH_RESULT" \
 SWITCH_ACTOR="${ACTOR:-cli}" SWITCH_BREAKGLASS="${BREAK_GLASS:-0}" SWITCH_ARMED="${ARMED:-0}" \
 SWITCH_SESS="$SESS" SWITCH_BEFORE="${BEFORE_FP:-none}" SWITCH_AFTER="${AFTER_FP:-none}" \
@@ -407,10 +426,22 @@ else
   echo "  mode:      FRESH (no prior session found to resume)"
 fi
 echo "  pane:      $( [ "$PANE_HEALTHY" = 1 ] && echo 'HEALTHY (composer ready / working)' || echo 'NOT healthy' )"
-if [ "$AFTER_FP" = "$NEW_FP" ] && [ "$PANE_HEALTHY" = 1 ]; then
-  echo "  RESULT:    PASS — lane re-tokened onto the new account AND came up healthy."
+if [ -n "$RESUME_ID" ]; then
+  echo "  resume:    $( [ "$RESUME_VERIFIED" = 1 ] && echo "VERIFIED (running session == $RESUME_ID)" || echo 'NOT VERIFIED (ran FRESH — context lost)' )"
+fi
+if [ "$AFTER_FP" = "$NEW_FP" ] && [ "$PANE_HEALTHY" = 1 ] && [ "$RESUME_VERIFIED" = 1 ]; then
+  echo "  RESULT:    PASS — lane re-tokened onto the new account, came up healthy$( [ -n "$RESUME_ID" ] && echo ', resume VERIFIED' )."
   echo "───────────────────────────────────────────────────────────"
   exit 0
+elif [ "$AFTER_FP" = "$NEW_FP" ] && [ "$PANE_HEALTHY" = 1 ] && [ "$RESUME_VERIFIED" != 1 ]; then
+  # fp flipped + pane healthy, but the EXPECTED resume did NOT take — the lane
+  # relaunched FRESH (new session) and LOST its context. The exact false-PASS the
+  # health-verify can't see (op#12030 f/u / irsyad-coord). LOUD, distinct exit.
+  echo "  RESULT:    FAIL — re-tokened onto the new account and healthy, BUT it ran FRESH:"
+  echo "             expected to RESUME session $RESUME_ID, context was NOT preserved."
+  echo "             Recover: relaunch with an explicit --resume $RESUME_ID. Inspect: $TM attach -t $SESS"
+  echo "───────────────────────────────────────────────────────────"
+  exit 11
 elif [ "$AFTER_FP" = "$NEW_FP" ]; then
   # fp flipped but the pane never reached a healthy state within POLL_S — most
   # likely still PARKED at the resume menu (or crashed on boot). This is the

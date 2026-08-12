@@ -158,3 +158,49 @@ def test_script_guards_shell_and_draft():
     assert "pane_has_bg_shell" in src, "must refuse a running background shell"
     assert "UNSUBMITTED COMPOSER DRAFT" in src, "must refuse a non-empty composer draft"
     assert "CC_GHOST" in src, "draft check must be ghost-guarded (dim history-ghost != real draft)"
+
+
+# ── UNIT: session_resumed_ok — the RESUME-VERIFY belt (op#12030 f/u) ──────────
+def _resumed_ok(worktree, expected, home) -> int:
+    import os
+    env = dict(os.environ); env["HOME"] = home
+    return subprocess.run(
+        ["bash", "-c", f'source "{LIB}"; session_resumed_ok "$1" "$2"', "_", worktree, expected],
+        env=env).returncode
+
+
+def _mk(d, uid, mtime):
+    import os
+    p = d / f"{uid}.jsonl"; p.write_text("{}\n"); os.utime(p, (mtime, mtime))
+
+
+def test_resume_verify_fresh_boot_fails(tmp_path):
+    """Fresh boot: a NEWER uuid than the expected one => newest != expected => FAIL.
+    This is the exact false-PASS the health-verify can't see (irsyad-coord)."""
+    wt = "/Users/x/proj/foo.wt-bar"
+    d = tmp_path / ".claude" / "projects" / "-Users-x-proj-foo-wt-bar"; d.mkdir(parents=True)
+    expected = "aaaaaaaa-1111-2222-3333-444444444444"
+    _mk(d, expected, 1000)
+    _mk(d, "bbbbbbbb-5555-6666-7777-888888888888", 2000)   # fresh boot = newer
+    assert _resumed_ok(wt, expected, str(tmp_path)) != 0
+
+
+def test_resume_verify_resumed_passes(tmp_path):
+    """Resumed: --resume continues the same id, so expected stays NEWEST => PASS."""
+    wt = "/Users/x/proj/foo.wt-bar"
+    d = tmp_path / ".claude" / "projects" / "-Users-x-proj-foo-wt-bar"; d.mkdir(parents=True)
+    expected = "aaaaaaaa-1111-2222-3333-444444444444"
+    _mk(d, "cccccccc-9999-0000-1111-222222222222", 1000)
+    _mk(d, expected, 2000)   # resumed = expected is newest
+    assert _resumed_ok(wt, expected, str(tmp_path)) == 0
+
+
+def test_resume_verify_noop_when_no_expected(tmp_path):
+    assert _resumed_ok("/x/y.wt-z", "", str(tmp_path)) == 2   # nothing to verify (fresh launch)
+
+
+def test_script_wires_resume_verify():
+    src = SCRIPT.read_text()
+    assert "session_resumed_ok" in src, "must run the resume-verify belt"
+    assert "RESUME_VERIFIED" in src, "RESULT must gate on resume-verify"
+    assert "exit 11" in src, "distinct exit for a fresh-boot false-PASS"

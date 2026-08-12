@@ -499,3 +499,18 @@ resolve_resume_session() {
 pane_has_bg_shell() {
   printf '%s' "${1:-}" | grep -Eq '·[[:space:]]*[0-9]+[[:space:]]+shell|[0-9]+[[:space:]]+shells?[[:space:]]+still[[:space:]]+running|↓ to manage'
 }
+
+# session_resumed_ok <abs-worktree> <expected-resume-id> -> 0 if the lane's CURRENT
+# newest session IS the expected one (the resume TOOK), non-zero otherwise
+# (op#12030 f/u RESUME-VERIFY belt). `claude --resume <id>` CONTINUES the same
+# session-id (verified: the resumed jsonl stays newest + grows), so after a
+# relaunch the newest *.jsonl for the worktree must == the expected RESUME_ID.
+# A FRESH boot (failed/absent resume) creates a NEW uuid -> newest != expected ->
+# non-zero. This catches the exact false-PASS the health-verify cannot see: a fresh
+# boot has the right auth_fp AND a healthy pane but the WRONG (empty) session.
+session_resumed_ok() {
+  local wt="$1" expected="$2" got
+  [ -n "$expected" ] || return 2          # nothing to verify (fresh-launch case)
+  got="$(resolve_resume_session "$wt")"
+  [ "$got" = "$expected" ]
+}
