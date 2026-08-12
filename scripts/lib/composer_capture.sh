@@ -425,3 +425,38 @@ composer_parse_pane() {
   [ -n "$_txt" ] || _txt="$("$1" capture-pane -t "$2" -p 2>/dev/null)"
   composer_parse "$_txt"
 }
+
+# ── Re-token resume-menu handling (op#12030 f/u / op#12043) ───────────────────
+# When switch_lane_token relaunches a lane with `--resume` on a LARGE/old claude
+# session, CC shows a "Resume from summary / full / don't-ask" menu and the lane
+# PARKS there until answered. The auth_fp is already stamped (the process is up on
+# the new account), so an fp-only verify would call it "PASS" while the lane is
+# soft-wedged — and a fleet-wide flip-all would park EVERY big lane at once. These
+# pure pane predicates let the switch/flip path detect the menu, answer it, and
+# verify the lane actually reached a HEALTHY pane. (Match on the '❯' prompt glyph
+# itself — NOT '❯ ' — since the prompt uses NBSP, see the header note.)
+
+# resume_menu_present <pane-text> -> 0 if the CC resume menu is showing.
+resume_menu_present() {
+  printf '%s' "${1:-}" | grep -Eq \
+    'Resume from summary|Resume full session as-is|Resuming the full session will consume'
+}
+
+# pane_up_healthy <pane-text> -> 0 if the lane pane is UP/healthy after a re-token:
+# it shows the composer prompt (ready) OR is actively working (foreground turn),
+# and is NOT parked at the resume menu. A blank/booting pane is NOT yet healthy.
+pane_up_healthy() {
+  local txt="${1:-}"
+  resume_menu_present "$txt" && return 1          # parked at menu = NOT healthy
+  printf '%s' "$txt" | grep -Eq 'esc to interrupt|to interrupt' && return 0  # working
+  printf '%s' "$txt" | grep -q '❯' && return 0    # composer prompt present = ready
+  return 1
+}
+
+# resume_menu_keys <mode> -> echo the tmux send-keys tokens to answer the menu.
+# The menu highlights option 1 (summary) by default. FULL (the DEFAULT — non-lossy,
+# per console op#12030/12043) moves Down to option 2 then confirms; SUMMARY confirms
+# the default-highlighted option 1. Anything but 'summary' means full.
+resume_menu_keys() {
+  if [ "${1:-}" = "summary" ]; then echo "Enter"; else echo "Down Enter"; fi
+}

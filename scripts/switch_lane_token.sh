@@ -60,7 +60,9 @@ FORBIDDEN_BASENAME="gazzabyte-oauth-token"
 # token whose CONTENT fingerprints to a forbidden fp, whatever its filename — the
 # same alias-proof CAI-729 guard the console now applies (space-separated fps).
 FORBIDDEN_FPS="13589de86f29"
-POLL_S="${SWITCH_POLL_S:-60}"
+# Verify window: fp flip is quick, but a FULL resume replay of a large session can
+# take >60s to render a healthy pane, so give the healthy-verify headroom (op#12030 f/u).
+POLL_S="${SWITCH_POLL_S:-120}"
 
 # ── arg parse: [--force] [--dry-run] <session> <token-file> ──────────────────
 # --dry-run (op#10706 R3): resolve + PRINT the plan (account before->after, the
@@ -73,6 +75,11 @@ DRY="${SWITCH_DRY_RUN:-0}"
 # relaunching the SAME-account lane so it re-reads .<session>_model — so bypass the
 # same-account no-op short-circuit for this intent (keep token, resume conversation).
 MODEL_APPLY="${SWITCH_MODEL_APPLY:-0}"
+# --summary / --full (op#12030 f/u): how to answer CC's large-session resume menu
+# after a --resume relaunch. DEFAULT = full (non-lossy: preserve the lane's context;
+# Musa is fresh, headroom is not the constraint for this migration — console call).
+# --summary opts into the lighter summary-resume for future/token-pressured use.
+RESUME_MODE="${SWITCH_RESUME_MODE:-full}"
 SESS=""
 TOKFILE=""
 for a in "$@"; do
@@ -80,11 +87,13 @@ for a in "$@"; do
     --force) FORCE=1 ;;
     --dry-run) DRY=1 ;;
     --model-apply) MODEL_APPLY=1 ;;
+    --summary) RESUME_MODE=summary ;;
+    --full) RESUME_MODE=full ;;
     *) if [ -z "$SESS" ]; then SESS="$a"; elif [ -z "$TOKFILE" ]; then TOKFILE="$a"; fi ;;
   esac
 done
-[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] <tmux-session> <token-file>" >&2; exit 2; }
-[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] <tmux-session> <token-file>" >&2; exit 2; }
 
 # ── 1. Token-file validation (fail-closed, loud) ─────────────────────────────
 [ -r "$TOKFILE" ] || { echo "ERROR: token file not readable: $TOKFILE" >&2; exit 3; }
@@ -280,15 +289,36 @@ if ! "$TM" new-session -d -s "$SESS" -c "$WORKTREE" "$CMD"; then
   exit 7
 fi
 
-# ── 6. Poll agent_status.auth_fp until it flips to the new fp (up to POLL_S) ──
-echo "[switch_lane_token] verifying auth_fp flip (polling up to ${POLL_S}s) ..."
+# ── 6. Verify the re-token TOOK: auto-answer the resume menu, then require BOTH
+#       the auth_fp flip AND a HEALTHY pane (op#12030 f/u). auth_fp alone is NOT
+#       enough — a --resume on a large session parks at CC's resume menu with the
+#       fp already stamped, so an fp-only "PASS" would hide a soft-wedged lane (and
+#       a fleet-wide flip-all would park every big lane at once). ──────────────
+echo "[switch_lane_token] verifying re-token (auto-answer resume menu + auth_fp flip + HEALTHY pane, up to ${POLL_S}s) ..."
 DEADLINE=$(( $(date -u +%s) + POLL_S ))
 AFTER_FP=""
+MENU_ANSWERED=0
+PANE_HEALTHY=0
+LAST_PANE=""
 while [ "$(date -u +%s)" -lt "$DEADLINE" ]; do
   sleep 3
+  LAST_PANE="$("$TM" capture-pane -t "${SESS}:0.0" -p 2>/dev/null || true)"
+  # Auto-answer CC's large-session resume menu ONCE so the lane doesn't park there.
+  if [ "$MENU_ANSWERED" = 0 ] && resume_menu_present "$LAST_PANE"; then
+    echo "[switch_lane_token] resume menu detected -> answering ${RESUME_MODE} (non-lossy default is full)"
+    for _k in $(resume_menu_keys "$RESUME_MODE"); do
+      "$TM" send-keys -t "${SESS}:0.0" "$_k"
+      sleep 0.4
+    done
+    MENU_ANSWERED=1
+    continue
+  fi
   AFTER_FP="$(_fp_for_session "$SESS")"
   AFTER_FP="${AFTER_FP//[$'\t\r\n ']/}"
-  [ "$AFTER_FP" = "$NEW_FP" ] && break
+  if [ "$AFTER_FP" = "$NEW_FP" ] && pane_up_healthy "$LAST_PANE"; then
+    PANE_HEALTHY=1
+    break
+  fi
 done
 
 # ── 6.5 Identity-stamped audit + break-glass alert (cai CAI-RESP-747 conds 2/3) ─
@@ -299,7 +329,10 @@ done
 # set by /api/switch-token) it escalates to a P1 ALERT so the exceptional path is
 # never a silent routine bypass. Best-effort: a failed emit warns LOUDLY (stderr)
 # but never fails an already-completed switch.
-_SWITCH_RESULT="PASS"; [ "$AFTER_FP" = "$NEW_FP" ] || _SWITCH_RESULT="FAIL"
+# PASS requires BOTH the auth_fp flip AND a healthy pane (op#12030 f/u): a lane
+# parked at the resume menu has the right fp but is soft-wedged, which is a FAIL.
+_SWITCH_RESULT="PASS"
+if [ "$AFTER_FP" != "$NEW_FP" ] || [ "$PANE_HEALTHY" != "1" ]; then _SWITCH_RESULT="FAIL"; fi
 SWITCH_RESULT="$_SWITCH_RESULT" \
 SWITCH_ACTOR="${ACTOR:-cli}" SWITCH_BREAKGLASS="${BREAK_GLASS:-0}" SWITCH_ARMED="${ARMED:-0}" \
 SWITCH_SESS="$SESS" SWITCH_BEFORE="${BEFORE_FP:-none}" SWITCH_AFTER="${AFTER_FP:-none}" \
@@ -356,10 +389,20 @@ if [ -n "$RESUME_ID" ]; then
 else
   echo "  mode:      FRESH (no prior session found to resume)"
 fi
-if [ "$AFTER_FP" = "$NEW_FP" ]; then
-  echo "  RESULT:    PASS — lane re-tokened onto the new account."
+echo "  pane:      $( [ "$PANE_HEALTHY" = 1 ] && echo 'HEALTHY (composer ready / working)' || echo 'NOT healthy' )"
+if [ "$AFTER_FP" = "$NEW_FP" ] && [ "$PANE_HEALTHY" = 1 ]; then
+  echo "  RESULT:    PASS — lane re-tokened onto the new account AND came up healthy."
   echo "───────────────────────────────────────────────────────────"
   exit 0
+elif [ "$AFTER_FP" = "$NEW_FP" ]; then
+  # fp flipped but the pane never reached a healthy state within POLL_S — most
+  # likely still PARKED at the resume menu (or crashed on boot). This is the
+  # soft-wedge op#12030-f/u closes: LOUD, distinct exit — do NOT report "PASS".
+  echo "  RESULT:    FAIL — re-tokened onto the new account BUT the pane is NOT healthy"
+  echo "             within ${POLL_S}s (parked at the resume menu, or crashed on boot)."
+  echo "             The lane is soft-wedged — inspect: $TM attach -t $SESS"
+  echo "───────────────────────────────────────────────────────────"
+  exit 10
 else
   echo "  RESULT:    FAIL — auth_fp has not flipped within ${POLL_S}s."
   echo "             The relaunch may still be building context (auth_fp is stamped"
