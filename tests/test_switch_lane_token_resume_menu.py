@@ -204,3 +204,29 @@ def test_script_wires_resume_verify():
     assert "session_resumed_ok" in src, "must run the resume-verify belt"
     assert "RESUME_VERIFIED" in src, "RESULT must gate on resume-verify"
     assert "exit 11" in src, "distinct exit for a fresh-boot false-PASS"
+
+
+# ── UNIT: lane_is_drained + STATIC: --drain wiring (op#12114 graceful-drain) ──
+def _drained(text) -> bool:
+    return subprocess.run(["bash", "-c", f'source "{LIB}"; lane_is_drained "$1"', "_", text]).returncode == 0
+
+
+DRAFT_PANE = "────────\n❯ build task 1: the mig170 writer rpc\n────────\n  bypass permissions on"
+AGENTS_PANE = "Waiting for 3 background agents (2m)"
+
+
+def test_lane_is_drained_matrix():
+    assert _drained(PROMPT) is True, "empty idle composer = drained"
+    assert _drained(BUSY) is False, "foreground turn = not drained"
+    assert _drained(FOOTER_SHELL) is False, "running background shell = not drained"
+    assert _drained(DRAFT_PANE) is False, "composer draft = not drained"
+    assert _drained(AGENTS_PANE) is False, "blocked on background agents = not drained"
+
+
+def test_script_wires_drain():
+    src = SCRIPT.read_text()
+    assert "--drain" in src, "must accept --drain"
+    assert "DRAIN REQUEST" in src, "must send a drain request to the lane"
+    assert "lane_is_drained" in src, "drain poll must use lane_is_drained"
+    assert "HARD-REFUSE" in src, "must fall through to hard-refuse if it won't drain in time"
+    assert "DRAIN_TIMEOUT" in src, "drain must be time-bounded"

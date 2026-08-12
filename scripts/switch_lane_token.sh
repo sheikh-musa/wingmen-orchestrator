@@ -80,6 +80,12 @@ MODEL_APPLY="${SWITCH_MODEL_APPLY:-0}"
 # Musa is fresh, headroom is not the constraint for this migration — console call).
 # --summary opts into the lighter summary-resume for future/token-pressured use.
 RESUME_MODE="${SWITCH_RESUME_MODE:-full}"
+# --drain (op#12114): for a switch-UNSAFE lane (busy / running shell / composer
+# draft), instead of an immediate refuse, ask it to reach a safe stopping point
+# (finish its step, write its handoff, go idle) and WAIT up to SWITCH_DRAIN_TIMEOUT,
+# then re-token+resume. HARD-REFUSE fallback if it won't drain in time (never clobber).
+DRAIN="${SWITCH_DRAIN:-0}"
+DRAIN_TIMEOUT="${SWITCH_DRAIN_TIMEOUT:-240}"
 SESS=""
 TOKFILE=""
 for a in "$@"; do
@@ -89,11 +95,12 @@ for a in "$@"; do
     --model-apply) MODEL_APPLY=1 ;;
     --summary) RESUME_MODE=summary ;;
     --full) RESUME_MODE=full ;;
+    --drain) DRAIN=1 ;;
     *) if [ -z "$SESS" ]; then SESS="$a"; elif [ -z "$TOKFILE" ]; then TOKFILE="$a"; fi ;;
   esac
 done
-[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] <tmux-session> <token-file>" >&2; exit 2; }
-[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] <tmux-session> <token-file>" >&2; exit 2; }
 
 # ── 1. Token-file validation (fail-closed, loud) ─────────────────────────────
 [ -r "$TOKFILE" ] || { echo "ERROR: token file not readable: $TOKFILE" >&2; exit 3; }
@@ -232,6 +239,50 @@ if [ "$DRY" = "1" ]; then
   fi
   echo "  lane currently busy: ${CC_BUSY:-0}  (a real apply refuses a BUSY lane unless --force)"
   exit 0
+fi
+
+# ── 3.9 GRACEFUL DRAIN (op#12114) ────────────────────────────────────────────
+# For a switch-UNSAFE lane (busy / running shell / composer draft), if --drain is
+# set, ask it to reach a safe stopping point and WAIT for it to go idle-clean,
+# THEN let the normal guards below pass + the switch resume it. If it will not drain
+# within the timeout, the guards below HARD-REFUSE (the fallback) — we never clobber.
+# --force (which clobbers) and an already-clean lane both skip this.
+_drain_unsafe() {   # 0 (+ echo reason) if a switch would currently be unsafe
+  pane_busy "$TM" "${SESS}:0.0"
+  [ "${CC_BUSY:-0}" = 1 ] && { echo "busy: ${CC_BUSY_REASON}"; return 0; }
+  local _t; _t="$("$TM" capture-pane -t "${SESS}:0.0" -p 2>/dev/null)"
+  pane_has_bg_shell "$_t" && { echo "running background shell"; return 0; }
+  composer_parse_pane "$TM" "${SESS}:0.0"
+  [ "${CC_EMPTY:-1}" = 0 ] && [ "${CC_GHOST:-0}" != 1 ] && { echo "composer draft ('${CC_FLAT}')"; return 0; }
+  return 1
+}
+if [ "$DRAIN" = "1" ] && [ "$FORCE" != "1" ]; then
+  _dreason="$(_drain_unsafe || true)"
+  if [ -n "$_dreason" ]; then
+    echo "[switch_lane_token] --drain: '$SESS' is switch-unsafe ($_dreason). Requesting a graceful drain (up to ${DRAIN_TIMEOUT}s) ..."
+    # Clear any existing composer draft first (captured above in CC_FLAT / logged),
+    # so the drain request is delivered clean rather than appended to a draft.
+    composer_parse_pane "$TM" "${SESS}:0.0"
+    if [ "${CC_EMPTY:-1}" = 0 ] && [ "${CC_BYTES:-0}" -gt 0 ] 2>/dev/null; then
+      echo "[switch_lane_token] --drain: clearing composer draft ('${CC_FLAT}') before the request (captured above)."
+      _i=0; while [ "$_i" -lt "$CC_BYTES" ]; do "$TM" send-keys -t "${SESS}:0.0" BSpace; _i=$((_i+1)); done
+    fi
+    _DRAIN_MSG="⏸ DRAIN REQUEST (cc-fleet-health, op#12114): you are being re-tokened to the operator's Musa account and WILL RESUME with full context. Please reach a SAFE STOPPING POINT now — finish your current step, write/refresh your handoff (note any pending work so you can pick it up on resume), close any background shell, then go idle with an EMPTY composer. I am watching your pane and will re-token you the moment you are idle. If anything in flight is irreversible, note it in your handoff first."
+    "$TM" send-keys -t "${SESS}:0.0" -l "$_DRAIN_MSG"
+    "$TM" send-keys -t "${SESS}:0.0" Enter
+    _ddl=$(( $(date -u +%s) + DRAIN_TIMEOUT ))
+    while [ "$(date -u +%s)" -lt "$_ddl" ]; do
+      sleep 5
+      _pt="$("$TM" capture-pane -t "${SESS}:0.0" -p 2>/dev/null)"
+      if lane_is_drained "$_pt" && ! _drain_unsafe >/dev/null; then
+        echo "[switch_lane_token] --drain: '$SESS' DRAINED (idle-clean) — proceeding to re-token + resume."
+        break
+      fi
+    done
+    if _drain_unsafe >/dev/null; then
+      echo "[switch_lane_token] --drain: '$SESS' did NOT drain within ${DRAIN_TIMEOUT}s — falling through to HARD-REFUSE (no clobber)." >&2
+    fi
+  fi
 fi
 
 # ── 4. Busy guard (reuse reset_lane's composer/busy detection) ───────────────

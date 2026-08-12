@@ -514,3 +514,20 @@ session_resumed_ok() {
   got="$(resolve_resume_session "$wt")"
   [ "$got" = "$expected" ]
 }
+
+# lane_is_drained <pane-text> -> 0 if the lane is at a CLEAN STOPPING POINT ready to
+# re-token (op#12114 graceful-drain): NOT in a foreground turn, NOT blocked on
+# background agents, NO running background shell, and an EMPTY composer (no draft).
+# The observable 'reached a safe stopping point' signal the --drain poll waits for.
+# (Text-based so it's unit-testable; the switch script also re-runs the real
+# pane_busy as a final gate, so a thinking turn this text-check might miss still
+# hard-refuses rather than moving a busy lane.)
+lane_is_drained() {
+  local txt="${1:-}"
+  printf '%s' "$txt" | grep -Eq 'esc to interrupt' && return 1
+  printf '%s' "$txt" | LC_ALL=C grep -qE 'Waiting for [0-9]+ background agents' && return 1
+  pane_has_bg_shell "$txt" && return 1
+  composer_parse "$txt"
+  [ "${CC_EMPTY:-1}" = 1 ] || return 1
+  return 0
+}
