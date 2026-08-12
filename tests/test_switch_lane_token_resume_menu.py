@@ -91,3 +91,43 @@ if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn(); print(f"PASS: {name}")
+
+
+# ── UNIT: resolve_resume_session (op#12030 f/u — the irsyad-coord fresh-boot bug) ─
+def _resolve(worktree, home) -> str:
+    import os
+    env = dict(os.environ)
+    env["HOME"] = home
+    return subprocess.run(
+        ["bash", "-c", f'source "{LIB}"; resolve_resume_session "$1"', "_", worktree],
+        capture_output=True, text=True, env=env,
+    ).stdout.strip()
+
+
+def test_resolve_dotted_worktree(tmp_path):
+    """A DOTTED worktree must resolve via CC's dot->dash escaping (the bug: only
+    '/' was replaced, so a dotted worktree found NO session and went FRESH)."""
+    wt = "/Users/x/wingmen/projects/ihsanos-irsyad.wt-coord"
+    d = tmp_path / ".claude" / "projects" / "-Users-x-wingmen-projects-ihsanos-irsyad-wt-coord"
+    d.mkdir(parents=True)
+    uid = "efbc7c5c-f7e9-4246-a82f-2b9782b694ff"
+    (d / f"{uid}.jsonl").write_text("{}\n")
+    assert _resolve(wt, str(tmp_path)) == uid
+
+
+def test_resolve_none_when_no_session(tmp_path):
+    assert _resolve("/no/such.wt-x", str(tmp_path)) == ""
+
+
+def test_resolve_legacy_dot_preserved_still_found(tmp_path):
+    """Robustness: if only the legacy dot-PRESERVED dir has the session, find it."""
+    wt = "/Users/x/proj/foo.wt-bar"
+    d = tmp_path / ".claude" / "projects" / "-Users-x-proj-foo.wt-bar"
+    d.mkdir(parents=True)
+    uid = "d3f83376-1561-4a80-b594-b9e610e9a3c8"
+    (d / f"{uid}.jsonl").write_text("{}\n")
+    assert _resolve(wt, str(tmp_path)) == uid
+
+
+def test_script_uses_resolver():
+    assert "resolve_resume_session" in SCRIPT.read_text(), "script must use the robust resolver"

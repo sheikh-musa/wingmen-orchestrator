@@ -460,3 +460,29 @@ pane_up_healthy() {
 resume_menu_keys() {
   if [ "${1:-}" = "summary" ]; then echo "Enter"; else echo "Down Enter"; fi
 }
+
+# resolve_resume_session <abs-worktree> -> echo the most-recent claude session-id
+# (a UUID) for that worktree's CC projects dir, or '' if none (op#12030 f/u).
+# CC escapes the ABSOLUTE worktree path into the projects-dir name by replacing
+# BOTH '/' AND '.' with '-' (verified: worktree '.../ihsanos-irsyad.wt-coord' ->
+# dir '...-ihsanos-irsyad-wt-coord'). switch_lane_token ORIGINALLY replaced only
+# '/', so a DOTTED worktree resolved to an EMPTY dot-preserved dir -> no session
+# found -> a silent FRESH relaunch that LOST the lane's live context (the
+# irsyad-coord incident). We search BOTH escapings and take the newest *.jsonl
+# across them, so either CC escaping resolves correctly.
+resolve_resume_session() {
+  local wt="$1" d j latest="" cand esc_dots esc_slash
+  esc_dots="$(printf '%s' "$wt" | sed 's#[/.]#-#g')"     # CC actual: '/' and '.' -> '-'
+  esc_slash="$(printf '%s' "$wt" | sed 's#/#-#g')"       # legacy: only '/' -> '-'
+  for d in "$HOME/.claude/projects/$esc_dots" "$HOME/.claude/projects/$esc_slash"; do
+    [ -d "$d" ] || continue
+    for j in "$d"/*.jsonl; do
+      [ -f "$j" ] || continue
+      if [ -z "$latest" ] || [ "$j" -nt "$latest" ]; then latest="$j"; fi
+    done
+  done
+  [ -n "$latest" ] || return 0
+  cand="$(basename "$latest" .jsonl)"
+  printf '%s' "$cand" | grep -Eiq \
+    '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' && printf '%s' "$cand"
+}

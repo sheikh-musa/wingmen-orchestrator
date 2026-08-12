@@ -143,30 +143,21 @@ fi
 # ── 2.5 Resolve the lane's ACTIVE claude session-id (for conversation resume) ─
 # Claude Code stores per-project sessions as JSONL under
 #   ~/.claude/projects/<escaped-worktree>/<session-id>.jsonl
-# where the dir name is the ABSOLUTE worktree path with every '/' replaced by '-'
-# (verified on this host — dots and existing dashes are preserved). The lane's
-# ACTIVE session is the most-recently-modified *.jsonl in that dir; its filename
-# stem IS the session-id (a UUID; it also matches the `sessionId` field inside).
-# The conversation is LOCAL state, so resuming under a DIFFERENT OAuth token
-# replays the prior turns while billing new calls to the new account.
-# Resolve this BEFORE the kill. Missing dir / no session files → RESUME_ID empty
-# → we fall back to a FRESH relaunch (logged clearly).
-RESUME_ID=""
-_proj_dir="$HOME/.claude/projects/$(printf '%s' "$WORKTREE" | sed 's#/#-#g')"
-if [ -d "$_proj_dir" ]; then
-  _latest_jsonl="$(ls -t "$_proj_dir"/*.jsonl 2>/dev/null | head -1)"
-  if [ -n "$_latest_jsonl" ] && [ -f "$_latest_jsonl" ]; then
-    _cand="$(basename "$_latest_jsonl" .jsonl)"
-    # Sanity-gate to a UUID so a stray non-session file can't poison --resume.
-    if printf '%s' "$_cand" | grep -Eiq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
-      RESUME_ID="$_cand"
-    fi
-  fi
-fi
+# where the dir name is the ABSOLUTE worktree path with every '/' AND '.' replaced
+# by '-' (verified: '.../ihsanos-irsyad.wt-coord' -> '...-ihsanos-irsyad-wt-coord').
+# The lane's ACTIVE session is the most-recently-modified *.jsonl in that dir; its
+# filename stem IS the session-id (a UUID). The conversation is LOCAL state, so
+# resuming under a DIFFERENT OAuth token replays the prior turns while billing new
+# calls to the new account. resolve_resume_session (composer_capture.sh) searches
+# BOTH the dot->dash and legacy dot-preserved escapings — an earlier version
+# replaced only '/', so a DOTTED worktree found NO session and relaunched FRESH,
+# silently LOSING the lane's context (the irsyad-coord incident this fixes).
+# Resolve BEFORE the kill. No session found → RESUME_ID empty → FRESH (logged loud).
+RESUME_ID="$(resolve_resume_session "$WORKTREE")"
 if [ -n "$RESUME_ID" ]; then
   echo "[switch_lane_token] active session resolved: $RESUME_ID (will RESUME on the new account)"
 else
-  echo "[switch_lane_token] no active claude session found under $_proj_dir — will relaunch FRESH"
+  echo "[switch_lane_token] ⚠ no active claude session found for worktree $WORKTREE — will relaunch FRESH (context NOT preserved)"
 fi
 
 # ── 3. Capture BEFORE fingerprint from agent_status ──────────────────────────
