@@ -16,16 +16,28 @@
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
 <style>
   :root {
-    --bg: #0b0e14; --panel: #131722; --panel-2: #1a2030; --line: #232a3a;
-    --txt: #d7dce5; --dim: #8a93a6; --accent: #5b8cff; --good: #3ecf8e;
-    --warn: #f0b429; --bad: #ff6b6b; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    /* Calm Command palette (fc-v38 ihsan redesign). Jade = all-clear; warm tones
+       only where attention is due. SF Pro carries structure; mono is data-only. */
+    --bg: #090b10; --panel: #12161e; --panel-2: #171c26; --panel-3: #1d2430;
+    --line: rgba(255,255,255,.07);
+    --txt: #e8ebf1; --dim: #949cac; --faint: #5c6472;
+    --accent: #8aa6ff; --good: #37d39a; --good-dim: #1f9e77;
+    --warn: #f6c453; --bad: #fb7185;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    --shadow: 0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--txt);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    -webkit-text-size-adjust: 100%; padding-bottom: 40px;
+    margin: 0; color: var(--txt);
+    font: 15px/1.5 var(--sans); letter-spacing: -.01em; -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -6%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 46% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg, #0c0f16, var(--bg) 42%);
+    background-attachment: fixed;
+    -webkit-text-size-adjust: 100%;
     padding-top: env(safe-area-inset-top); padding-bottom: calc(env(safe-area-inset-bottom) + 40px);
   }
   .wrap { max-width: 720px; margin: 0 auto; }
@@ -332,6 +344,39 @@
   /* per-coordinator context readout (op#9088) — lives in the card's meta row */
   .lane.coord .meta .cctx { font:11px var(--mono); font-weight:700; }
   .lane.coord .meta .cctx.green{color:var(--good)} .lane.coord .meta .cctx.amber{color:var(--warn)} .lane.coord .meta .cctx.red{color:var(--bad)}
+
+  /* ── Calm Command refinements (fc-v38). Layered AFTER the base rules so they
+     override by source-order without touching any class the JS depends on.
+     Adds crafted depth: card shadows, status spines, refined header + chips,
+     SF-Pro headings with mono reserved for technical data. ── */
+  .pulse { background: linear-gradient(180deg, rgba(12,15,22,.94), rgba(9,11,16,.74));
+    backdrop-filter: saturate(140%) blur(14px); -webkit-backdrop-filter: saturate(140%) blur(14px);
+    padding: 15px 18px 14px; }
+  .pulse .brand { font-family: var(--sans); font-size: 14px; letter-spacing: -.01em; color: var(--dim); }
+  .pulse .brand .live { color: var(--good); }
+  .pulse .brand .build { padding: 4px 9px; border-radius: 999px; background: var(--panel);
+    border: 1px solid var(--line); color: var(--faint); }
+  .pulse .big { font-family: var(--sans); font-size: 21px; font-weight: 800; letter-spacing: -.02em; }
+  .poolchip { border-radius: 999px; padding: 4px 9px; background: rgba(255,255,255,.04);
+    border: 1px solid var(--line); }
+  .poolchip.bad { background: rgba(251,113,133,.12); border-color: rgba(251,113,133,.3); }
+  .laneslink { border-radius: 12px; padding: 13px 15px; font-family: var(--sans); font-weight: 600;
+    box-shadow: var(--shadow); }
+  .sec-h h2 { font-family: var(--sans); letter-spacing: .14em; color: var(--faint); }
+  .sec-h.needs h2 { color: var(--warn); }
+  .chip { border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); }
+  /* cards: soft depth + a hairline-lit top edge (native "lit from above" feel) */
+  .need, .lane, .tok, .dep, .fleetswitch, .bl { box-shadow: var(--shadow); }
+  .need { border-radius: 14px; }
+  .lane { border-radius: 14px; border-left-width: 3px; border-left-color: rgba(55,211,154,.45); }
+  .lane .id { font-family: var(--sans); font-weight: 700; font-size: 14px; letter-spacing: -.01em; }
+  .lane .badge { border-radius: 8px; }
+  .st-dot.working { box-shadow: 0 0 8px var(--good); }
+  .need .who { font-family: var(--sans); font-weight: 700; font-size: 13.5px; }
+  .need .what { color: var(--dim); }
+  .bl .blask { font-family: var(--sans); }
+  .fleetswitch .fs-btn, .lane .meta .switch-ctl .switch-btn, .lane .meta .reset-btn { border-radius: 9px; }
+  .fleetswitch { border-radius: 14px; }
 </style>
 </head>
 <body>

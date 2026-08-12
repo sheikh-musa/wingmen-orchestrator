@@ -19,26 +19,34 @@
   var registry = { tokens: [], models: [] };
   var busy = false;
 
-  // Stacked layout — each fact on its OWN wrapped line so nothing clips at 390px.
+  // Collapsed-by-default row: a status spine + one-line identity, tap to open the
+  // drawer (token/model controls). Attention rows (metered / unverified /
+  // off-account) render OPEN so the action needing you is already visible.
+  // The control markup + every data-* attribute is unchanged, so the #rows event
+  // delegation (change -> setPointer, click -> preview/armed-apply) still binds.
   function rowHtml(r) {
-    var cls, badge, bcls, acct;
-    if (r.metered) { cls = "bad"; badge = "METERED"; bcls = "bad"; acct = r.account || "metered (API)"; }
-    else if (!r.verified) { cls = "unver"; badge = "UNVERIFIED"; bcls = "unver"; acct = "unverified"; }
-    else if (r.mismatch) { cls = "bad"; badge = "OFF-ACCOUNT"; bcls = "bad"; acct = r.account; }
-    else { cls = "ok"; badge = "VERIFIED"; bcls = "ok"; acct = r.account; }
+    var cls, badge, acct;
+    if (r.metered) { cls = "flag"; badge = "METERED"; acct = r.account || "metered (API)"; }
+    else if (!r.verified) { cls = "unver"; badge = "UNVERIFIED"; acct = "unverified"; }
+    else if (r.mismatch) { cls = "flag"; badge = "OFF-ACCOUNT"; acct = r.account; }
+    else { cls = "ok"; badge = "VERIFIED"; acct = r.account; }
+    if (r.remote) cls += " remote";
+    var attention = r.metered || !r.verified || r.mismatch;
 
-    var expLine = (r.mismatch && r.expected)
-      ? '<div class="line exp">expected ' + esc(r.expected) + '</div>' : "";
-    var model = r.model
-      ? '<span class="model">' + esc(shortModel(r.model)) + '</span>'
-      : '<span class="model none">model: default</span>';
-    var host = r.host ? '<span class="kv">host <b>' + esc(r.host) + '</b></span>' : "";
-    var fp = r.fp ? '<span class="fp">' + esc(r.fp) + '</span>' : "";
-
-    // Controls (R2b). A select is shown ONLY where a local pointer write actually
-    // takes effect (fix (a)) — otherwise a NOTE, never a silent no-op. A remote
-    // (VPS) body is set on its own host; some bodies' token/model are env-driven.
     var s = esc(r.session);
+    // one-line technical sub (mono): host · model · fingerprint
+    var subBits = [];
+    if (r.host) subBits.push("host " + esc(r.host));
+    subBits.push(r.model ? esc(shortModel(r.model)) : "model: default");
+    if (r.fp) subBits.push(esc(r.fp));
+    var sub2 = subBits.join(" · ");
+    var expLine = (r.mismatch && r.expected)
+      ? '<div class="exp">expected ' + esc(r.expected) + '</div>' : "";
+    var roleTag = r.remote ? ' <span class="role">remote</span>' : "";
+
+    // Controls (R2b) — UNCHANGED logic + data-attributes. A select shows ONLY
+    // where a local pointer write takes effect; otherwise a NOTE, never a silent
+    // no-op. A remote (VPS) body is set on its own host; some are env-driven.
     var ctrls = "";
     if (r.remote) {
       ctrls = '<div class="ctlnote">remote (VPS) — set its token/model on the hub host; cross-host apply lands in R3/R4</div>';
@@ -65,10 +73,9 @@
       } else {
         ctrls += '<div class="ctlnote">model: env-driven at boot (not pointer-settable)</div>';
       }
-      // Apply buttons. PREVIEW = R3 dry-run (safe, shows the plan). APPLY = R4
-      // armed relaunch, which the OPERATOR drives — it 503s while disabled and 403s
-      // until the operator arms via the Telegram bridge; a tap asks the operator to
-      // type the body name to confirm. No agent ever drives it.
+      // PREVIEW = R3 dry-run (safe). APPLY = R4 armed relaunch — OPERATOR-driven;
+      // 503s while disabled, 403s until armed via Telegram; taps ask for a typed
+      // body-name confirm. No agent drives it.
       var ab = "";
       if (r.token_settable) {
         ab += '<button class="prevbtn" data-apply="token" data-session="' + s + '">Preview token</button>';
@@ -81,13 +88,20 @@
       if (ab) ctrls += '<div class="applyrow">' + ab + '</div>';
     }
 
-    return '<div class="row ' + cls + '">' +
-        '<div class="r1"><span class="who">' + s + '</span>' +
-          '<span class="badge ' + bcls + '">' + badge + '</span></div>' +
-        '<div class="line"><span class="acct">' + esc(acct) + '</span></div>' +
-        expLine +
-        '<div class="line meta">' + model + host + fp + '</div>' +
-        '<div class="controls">' + ctrls + '</div>' +
+    return '<div class="lane ' + cls + (attention ? " open" : "") + '">' +
+        '<span class="spine"></span>' +
+        '<div class="rowtop">' +
+          '<span class="stdot"></span>' +
+          '<div class="idwrap">' +
+            '<div class="id">' + s + roleTag + '</div>' +
+            '<div class="sub2">' + sub2 + '</div>' +
+          '</div>' +
+          '<span class="acct">' + esc(acct) + '</span>' +
+          '<span class="chev">&#8250;</span>' +
+        '</div>' +
+        '<div class="drawer">' + expLine +
+          '<div class="controls">' + ctrls + '</div>' +
+        '</div>' +
       '</div>';
   }
 
@@ -341,15 +355,32 @@
     var rows = (d && d.rows) || [];
     var s = (d && d.summary) || {};
     renderQueue(d && d.apply_queue);
-    $("rows").innerHTML = rows.length ? rows.map(rowHtml).join("") : '<div class="empty">No bodies found.</div>';
-    var bits = [];
-    if (s.mismatched) bits.push('<b class="bad">' + s.mismatched + ' off-account</b>');
-    if (s.metered) bits.push('<b class="bad">' + s.metered + ' metered</b>');
-    if (s.unverified) bits.push(s.unverified + ' unverified');
-    bits.push('<b class="good">' + (s.verified || 0) + '/' + (s.total || rows.length) + ' verified</b>');
-    $("sub").innerHTML = bits.join(" · ");
+    // Attention-first: metered / unverified / off-account pinned to the top under
+    // "Needs attention"; healthy lanes collapse under "All lanes".
+    function isAttn(r) { return r.metered || !r.verified || r.mismatch; }
+    var attn = rows.filter(isAttn);
+    var rest = rows.filter(function (r) { return !isAttn(r); });
+    var html = "";
+    if (attn.length) html += '<div class="pin attn">Needs attention</div>' + attn.map(rowHtml).join("");
+    if (rest.length) html += '<div class="pin">All lanes · ' + rest.length + '</div>' + rest.map(rowHtml).join("");
+    $("rows").innerHTML = rows.length ? html : '<div class="empty">No bodies found.</div>';
+    var bits = ['<span><b class="good">' + (s.verified || 0) + '/' + (s.total || rows.length) + '</b> verified</span>'];
+    if (s.mismatched) bits.push('<span><b class="bad">' + s.mismatched + '</b> off-account</span>');
+    if (s.metered) bits.push('<span><b class="bad">' + s.metered + '</b> metered</span>');
+    if (s.unverified) bits.push('<span>' + s.unverified + ' unverified</span>');
+    $("sub").innerHTML = bits.join("");
     renderFleetSwitch(rows, registry);   // fleet-level bulk switch toolbar (built once, above the list)
   }
+
+  // Tap a collapsed row's header to open/close its control drawer. The drawer's
+  // selects + buttons are NOT inside .rowtop, so this never fires on a control tap;
+  // their own delegated handlers (change/click below) are unaffected.
+  $("rows").addEventListener("click", function (e) {
+    var rt = e.target.closest ? e.target.closest(".rowtop") : null;
+    if (!rt) return;
+    var lane = rt.parentNode;
+    if (lane && lane.classList && lane.classList.contains("lane")) lane.classList.toggle("open");
+  });
 
   function toast(msg, bad) {
     var t = $("toast");
