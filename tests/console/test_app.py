@@ -653,3 +653,67 @@ def test_enrich_marks_group_pinned_lane(monkeypatch, tmp_path):
     by = {r["session"]: r for r in out["rows"]}
     assert by["irsyad-coord"]["token_group"] == "irsyad"     # pinned family
     assert by["cosem-tdu"]["token_group"] is None            # unpinned family
+
+
+# --- /api/set-pointer: fleet-default clobber guard (operator tripped it TWICE) --
+# A per-LANE token pick on a WORKER lane fell through to the SHARED fleet default
+# .lane_default_token; the write moved ALL other worker lanes off-account. These
+# tests pin: LAYER-1 interim guard (refuse the worker-lane fleet-default write) and
+# LAYER-2 group-aware routing (a worker pick lands in .group_default_token.<family>,
+# the fleet default is UNTOUCHED). Singleton pointers (nazim/hub) stay unchanged.
+
+def test_set_pointer_worker_lane_does_not_clobber_fleet_default(server, repo_root, tmp_path):
+    """OPERATOR REPRO: a per-lane token pick on worker lane irsyad-import must NOT
+    write the SHARED fleet default .lane_default_token. RED before the fix (the pick
+    wrote it -> all lanes off-account); GREEN after (fleet default UNTOUCHED)."""
+    _kf, presolve = _fake_token(tmp_path, "syed")
+    fleet = repo_root / ".lane_default_token"
+    with presolve:
+        r = httpx.post(server + "/api/set-pointer", headers=H(),
+                       json={"kind": "token", "session": "irsyad-import", "value": "syed"},
+                       timeout=10)
+    # The harmful all-lanes clobber never happens (the crux of the operator bug).
+    assert not fleet.exists(), "per-lane pick must NEVER write the fleet default"
+
+
+def test_set_pointer_worker_lane_clear_does_not_touch_fleet_default(server, repo_root):
+    """A per-lane token CLEAR on a worker lane must not rm/rewrite the fleet default
+    either — clearing the all-lanes default from one lane is the same footgun."""
+    fleet = repo_root / ".lane_default_token"
+    fleet.write_text("/fake/musa-oauth-token\n")   # a real fleet default in place
+    r = httpx.post(server + "/api/set-pointer", headers=H(),
+                   json={"kind": "token", "session": "irsyad-import", "clear": True},
+                   timeout=10)
+    # The pre-existing fleet default is left exactly as it was.
+    assert fleet.exists() and fleet.read_text().strip() == "/fake/musa-oauth-token"
+
+
+def test_set_pointer_singleton_token_still_writes_its_own_pointer(server, repo_root, tmp_path):
+    """BACK-COMPAT: the guard/routing is worker-lane only — a singleton with its OWN
+    pointer (nazim -> .nazim_default_token) still writes it, never the fleet default."""
+    kf, presolve = _fake_token(tmp_path, "syed")
+    with presolve:
+        r = httpx.post(server + "/api/set-pointer", headers=H(),
+                       json={"kind": "token", "session": "nazim", "value": "syed"},
+                       timeout=10)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert (repo_root / ".nazim_default_token").read_text().strip() == str(kf)
+    assert not (repo_root / ".lane_default_token").exists()
+
+
+def test_set_pointer_worker_lane_interim_guard_refuses_loudly(server, repo_root, tmp_path):
+    """LAYER-1 interim guard: a worker-lane pick that WOULD hit the fleet default is
+    refused with a 400 + an actionable error naming the group pointer, and the
+    refusal is AUDITED (attributable, never silent). NOTE: LAYER-2 supersedes this
+    with group-aware routing (the pick succeeds into .group_default_token.<family>),
+    at which point this test is replaced by test_set_pointer_worker_lane_routes_to_group."""
+    _kf, presolve = _fake_token(tmp_path, "syed")
+    with patch.object(console_app.auth, "audit") as maudit, presolve:
+        r = httpx.post(server + "/api/set-pointer", headers=H(),
+                       json={"kind": "token", "session": "irsyad-import", "value": "syed"},
+                       timeout=10)
+    assert r.status_code == 400
+    assert ".lane_default_token" in r.json()["error"]
+    assert "group pointer" in r.json()["error"]
+    endpoints = [c.args[1] for c in maudit.call_args_list]
+    assert any("blocked-fleet-default" in e for e in endpoints)

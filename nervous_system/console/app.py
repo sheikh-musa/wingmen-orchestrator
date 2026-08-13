@@ -1669,6 +1669,21 @@ def _make_handler(feedloop: "_FeedLoop"):
                     if ptr is None:
                         auth.audit(self._client(), f"/api/set-pointer:token:{session}", "400")
                         return self._json(400, {"error": "token not settable for this body (boots off .env)"})
+                    # INTERIM GUARD (operator tripped this TWICE): a WORKER lane
+                    # falls through to the SHARED fleet default .lane_default_token.
+                    # A per-lane token pick (or clear) that writes it would rewrite
+                    # the ALL-LANES default and move every OTHER worker lane
+                    # off-account. REFUSE — the operator pins the per-GROUP pointer
+                    # (/api/set-group-pointer for the family) or runs an explicit
+                    # switch-all instead. Fleet-default touch is audited (loud).
+                    if ptr == ".lane_default_token":
+                        auth.audit(self._client(),
+                                   f"/api/set-pointer:token:{session}:blocked-fleet-default", "400")
+                        return self._json(400, {"error": (
+                            "a per-lane token switch on '%s' would rewrite the SHARED "
+                            "fleet default (.lane_default_token) affecting ALL worker "
+                            "lanes — use the group pointer (/api/set-group-pointer for "
+                            "the family) or an explicit switch-all instead." % session)})
                     pfile = _REPO_ROOT / ptr
                     if clear:
                         if pfile.exists():
