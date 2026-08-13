@@ -38,7 +38,10 @@
       linear-gradient(180deg, #0c0f16, var(--bg) 42%);
     background-attachment: fixed;
     -webkit-text-size-adjust: 100%;
-    padding-top: env(safe-area-inset-top); padding-bottom: calc(env(safe-area-inset-bottom) + 40px);
+    /* NO body padding-top: the .pulse header already pins at the inset and
+       body::before fills the island strip — a body offset on TOP of that was a
+       DOUBLE inset (op fc-v39: header sat ~2x too far from the top). */
+    padding-bottom: calc(env(safe-area-inset-bottom) + 40px);
   }
   .wrap { max-width: 720px; margin: 0 auto; }
   a { color: var(--accent); text-decoration: none; }

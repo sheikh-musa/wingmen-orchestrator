@@ -33,19 +33,20 @@
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;overflow-x:hidden}
   body{color:var(--txt); font:15px/1.5 var(--sans); letter-spacing:-.01em;
-    -webkit-font-smoothing:antialiased; padding-top:env(safe-area-inset-top);
+    -webkit-font-smoothing:antialiased;
     background:
       radial-gradient(120% 60% at 50% -8%, rgba(55,211,154,.06), transparent 60%),
       radial-gradient(90% 50% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
       linear-gradient(180deg,var(--bg-2),var(--bg) 40%);
     background-attachment:fixed;}
-  /* fill the notch/Dynamic-Island strip so the sticky header never renders under it */
-  body::before{content:"";position:fixed;top:0;left:0;right:0;
-    height:env(safe-area-inset-top);background:var(--bg-2);z-index:20;pointer-events:none}
   .wrap{max-width:640px;margin:0 auto;padding:0 16px calc(40px + env(safe-area-inset-bottom))}
 
-  header{position:sticky;top:env(safe-area-inset-top);z-index:15;margin:0 -16px 0;
-    padding:14px 18px 13px;
+  /* The header is the ONE thing that owns the safe area: it pins at the very top
+     (top:0), its background fills the Dynamic-Island/notch strip, and its top
+     PADDING (not a body offset) drops its content below the island. No body
+     padding-top + no separate island-fill => no double-inset gap (op fc-v39). */
+  header{position:sticky;top:0;z-index:15;margin:0 -16px 0;
+    padding:calc(11px + env(safe-area-inset-top)) 18px 13px;
     background:linear-gradient(180deg,rgba(12,15,22,.92),rgba(9,11,16,.72));
     backdrop-filter:saturate(140%) blur(14px);-webkit-backdrop-filter:saturate(140%) blur(14px);
     border-bottom:1px solid var(--hair)}
@@ -208,7 +209,7 @@
     <div class="top">
       <a class="back" href="/fleet">‹ Fleet</a>
       <h1>Lane manager</h1>
-      <span id="build" class="build"><span class="d"></span>fc-v38</span>
+      <span id="build" class="build"><span class="d"></span>fc-v39</span>
       <button id="refresh" class="refresh">↻</button>
     </div>
     <div id="sub" class="sub">Loading ground-truth…</div>
