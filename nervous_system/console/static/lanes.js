@@ -154,24 +154,49 @@
   }
   // Families = unique session prefix (up to first "-") of the LOCAL bodies (remote
   // VPS bodies aren't local tmux switch targets), e.g. "cosem-exams" -> "cosem".
+  // Families WITH lane counts. op#12490: the picker listed every family flat, but
+  // most families are a single lane (caai, cai, finance…) so it read as "every
+  // lane" and the ACTUAL multi-lane groups (irsyad/cosem/ihsanos) were lost. Now
+  // each carries {name,count}; real groups (>1) sort first.
   function familiesFromRows(rows) {
-    var seen = {}, out = [];
+    var counts = {};
     (rows || []).forEach(function (r) {
       if (!r || r.remote) return;             // remote (VPS) bodies are set on their own host
       var s = r.session;
       if (!s) return;
       var fam = String(s).split("-")[0];
-      if (fam && !seen[fam]) { seen[fam] = 1; out.push(fam); }
+      if (fam) counts[fam] = (counts[fam] || 0) + 1;
     });
-    out.sort();
+    var out = Object.keys(counts).map(function (f) { return { name: f, count: counts[f] }; });
+    out.sort(function (a, b) {                 // groups (>1 lane) first, then A-Z within each block
+      var ag = a.count > 1, bg = b.count > 1;
+      if (ag !== bg) return ag ? -1 : 1;
+      return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+    });
     return out;
+  }
+  // Build the family <select> body: real GROUPS in their own optgroup (labelled
+  // with the lane count, e.g. "irsyad · 5"), single lanes below. `cur` re-selects.
+  function famOptionsHtml(fams, cur) {
+    function opts(arr) {
+      return arr.map(function (f) {
+        return '<option value="' + esc(f.name) + '"' + (f.name === cur ? " selected" : "") +
+               '>' + esc(f.name) + " · " + f.count + "</option>";
+      }).join("");
+    }
+    var groups = fams.filter(function (f) { return f.count > 1; });
+    var singles = fams.filter(function (f) { return f.count === 1; });
+    var h = "";
+    if (groups.length) h += '<optgroup label="Groups (multi-lane)">' + opts(groups) + "</optgroup>";
+    if (singles.length) h += '<optgroup label="Single lanes">' + opts(singles) + "</optgroup>";
+    return h;
   }
   function renderFleetSwitch(rows, reg) {
     var el = $("fleetSwitch");
     if (!el) return;
     fsAccounts = fsBuildAccounts(reg);
     var fams = familiesFromRows(rows);
-    var key = fams.join(",");
+    var key = fams.map(function (f) { return f.name + ":" + f.count; }).join(",");
     if (el._built) {
       // On a live refresh: update the family list ONLY when it actually changed,
       // and NEVER clobber a plan the operator is mid-read on (a background tick
@@ -180,9 +205,7 @@
         var famSel = el.querySelector(".fs-fam");
         if (famSel && document.activeElement !== famSel) {
           var cur = famSel.value;
-          famSel.innerHTML = fams.map(function (f) {
-            return '<option value="' + esc(f) + '"' + (f === cur ? " selected" : "") + '>' + esc(f) + '</option>';
-          }).join("");
+          famSel.innerHTML = famOptionsHtml(fams, cur);
           fsFamKey = key;
         }
       }
@@ -196,9 +219,7 @@
     var acctOpts = fsAccounts.map(function (a) {
       return '<option value="' + esc(a.name) + '">' + esc(a.label) + '</option>';
     }).join("");
-    var famOpts = fams.map(function (f) {
-      return '<option value="' + esc(f) + '">' + esc(f) + '</option>';
-    }).join("");
+    var famOpts = famOptionsHtml(fams, null);
     el.innerHTML =
       '<div class="fs-row">' +
         '<select class="fs-sel fs-acct" title="Target Claude account for the bulk switch">' + acctOpts + '</select>' +

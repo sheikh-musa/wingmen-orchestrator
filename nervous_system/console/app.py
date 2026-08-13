@@ -117,6 +117,31 @@ _SWITCH_LAST_RUN: dict[str, float] = {}
 _SWITCH_COOLDOWN_S = 30.0
 
 
+def _lane_token_files() -> dict:
+    """The SWITCHABLE-token allowlist: the static terms-clean accounts PLUS any
+    *-oauth-token the operator added via /api/add-token to ~/.wingmen/keys.
+
+    op#12486: the static {musa,syed} dict silently rejected an operator-added
+    token (musa2) as 'unknown token' on switch — even though the registry already
+    scans the dir and offered it in the dropdown. The switch path must match the
+    registry. Forbidden basenames stay excluded here; _resolve_lane_token_file's
+    fp guard still refuses forbidden CONTENT whatever the name, so gazzabyte can
+    never resolve. Dynamic (not cached) so an add is switchable at once + survives
+    a restart.
+    """
+    files = dict(LANE_TOKEN_FILES)  # static base; musa env-materialize special-cased in resolver
+    try:
+        for f in _KEYS_DIR.glob("*-oauth-token"):
+            if f.name in _FORBIDDEN_TOKEN_BASENAMES:
+                continue
+            name = f.name[: -len("-oauth-token")]
+            if name and name not in files and _LANE_SESSION_RE.match(name):
+                files[name] = f
+    except Exception:  # noqa: BLE001
+        pass
+    return files
+
+
 def _resolve_lane_token_file(token_name: str) -> pathlib.Path | None:
     """Map an allowlisted token NAME -> a readable 0600 key file, or None.
 
@@ -127,7 +152,7 @@ def _resolve_lane_token_file(token_name: str) -> pathlib.Path | None:
     - Refuse a resolved path whose basename is on the forbidden list (belt +
       suspenders — the shell script checks this too).
     """
-    path = LANE_TOKEN_FILES.get(token_name)
+    path = _lane_token_files().get(token_name)
     if path is None:
         return None
     if path.name in _FORBIDDEN_TOKEN_BASENAMES:
@@ -1690,10 +1715,11 @@ def _make_handler(feedloop: "_FeedLoop"):
             if not _LANE_SESSION_RE.match(lane):
                 auth.audit(self._client(), f"/api/switch-token:{token_name}", "400")
                 return self._json(400, {"error": "bad lane"})
-            if token_name not in LANE_TOKEN_FILES:
+            _known_tf = _lane_token_files()
+            if token_name not in _known_tf:
                 auth.audit(self._client(), f"/api/switch-token:{token_name}", "400")
                 return self._json(400, {"error": "unknown token",
-                                        "allowed": sorted(LANE_TOKEN_FILES)})
+                                        "allowed": sorted(_known_tf)})
             tokfile = _resolve_lane_token_file(token_name)
             if tokfile is None:
                 auth.audit(self._client(), f"/api/switch-token:{token_name}", "400")
@@ -1847,10 +1873,11 @@ def _make_handler(feedloop: "_FeedLoop"):
                 return self._json(400, {"error": "bad request"})
             # Token allowlist FIRST — unknown/forbidden name fails the WHOLE request
             # closed (gazzabyte is not in LANE_TOKEN_FILES; the script re-checks too).
-            if token_name not in LANE_TOKEN_FILES:
+            _known_tf = _lane_token_files()
+            if token_name not in _known_tf:
                 auth.audit(self._client(), f"{ep}:{token_name}", "400")
                 return self._json(400, {"error": "unknown token",
-                                        "allowed": sorted(LANE_TOKEN_FILES)})
+                                        "allowed": sorted(_known_tf)})
             tokfile = _resolve_lane_token_file(token_name)
             if tokfile is None:
                 auth.audit(self._client(), f"{ep}:{token_name}", "400")
