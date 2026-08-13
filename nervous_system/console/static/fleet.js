@@ -450,7 +450,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = 'fc-v39';
+  var APP_BUILD = 'fc-v40';
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -856,8 +856,9 @@
   // Whether the Coordinators section is expanded (operator ask: make it
   // collapsible). A MODULE var (like routineExpanded/backlogExpanded) so a
   // background refresh never re-collapses what the operator opened. Default
-  // expanded to preserve the current always-visible behaviour.
-  var coordExpanded = true;
+  // COLLAPSED (fc-v40 declutter): first load shows just the header + "hub ·
+  // console · cai" count; a tap on #coordHead expands it.
+  var coordExpanded = false;
 
   function coordCard(c) {
     var seen = c.last_seen_s;
@@ -963,63 +964,10 @@
     }).join("") + '</div>';
   }
 
-  // ---- lane worklists (the per-lane drain view — lane_tasks) ---------------
-  // Renders each lane's queue so the operator can SEE what a lane is working on
-  // and watch items drain. Rows arrive grouped-ready: the backend orders by
-  // (lane, blocked-last, id) = strict FIFO with blockers sunk. A BLOCKED task is
-  // one waiting on the operator/cai to clear a gate, so it reads "⏳ awaiting you"
-  // in amber — the operator's OWN gates stand out from lane-side work in flight.
-  // A lane sets lane_tasks.status once and does NOT refresh it while working, so
-  // 'active' ALONE is not proof of live work — a fossil left 'active' for days
-  // (the pre-drain reality: a task marked active in a past session, never touched)
-  // must NOT read green "working". So an 'active' task only reads "working" if it
-  // was touched recently; a cold one reads "stale · Nd" with its age, honest that
-  // nothing is moving. (Post-drain, the lane's done/heartbeat keeps updated_at
-  // fresh, so genuinely-worked tasks stay green — this heuristic self-corrects.)
-  var STALE_ACTIVE_S = 7200;   // 2h untouched -> not "working", show it cold
-  function queueChip(t) {
-    var st = (t.status || "").toLowerCase();
-    if (st === "blocked")
-      return '<span class="qchip wait">⏳ awaiting you</span>';
-    if (st === "active") {
-      var age = t.updated_age_s;
-      if (age != null && age > STALE_ACTIVE_S)
-        return '<span class="qchip stale">stale · ' + fmtAge(age) + '</span>';
-      var elapsed = (t.elapsed_min != null ? " " + t.elapsed_min + "m" : "");
-      return '<span class="qchip work">working' + elapsed + '</span>' +
-        (t.over_sla ? '<span class="qchip over">⚠ SLA</span>' : "");
-    }
-    return '<span class="qchip queued">queued</span>';
-  }
-  function renderQueue(rows) {
-    var el = document.getElementById("laneQueues");
-    if (!el) return;
-    if (!rows || !rows.length) {
-      el.innerHTML = '<div class="empty">No lane work queued.</div>'; return;
-    }
-    // Group by lane, preserving the backend's within-lane order. Plain object as
-    // a map is fine — lane names are our own controlled labels, not user input.
-    var order = [], byLane = {};
-    rows.forEach(function (t) {
-      var lane = t.lane || "—";
-      if (!byLane[lane]) { byLane[lane] = []; order.push(lane); }
-      byLane[lane].push(t);
-    });
-    el.innerHTML = order.map(function (lane) {
-      var tasks = byLane[lane];
-      var body = tasks.map(function (t) {
-        return '<div class="qrow">' +
-          '<span class="qtitle">' + esc(t.title || "") + '</span>' +
-          queueChip(t) +
-        '</div>';
-      }).join("");
-      return '<div class="qlane">' +
-        '<div class="qlane-h">' + esc(lane) +
-          ' <span class="qn">' + tasks.length + '</span></div>' +
-        body +
-      '</div>';
-    }).join("");
-  }
+  // ---- lane worklists REMOVED (fc-v40 declutter) --------------------------
+  // The per-lane drain view (#laneQueues / lane_tasks) was removed as redundant
+  // with the Lanes list. renderQueue()/queueChip() and their #laneQueues section
+  // are gone; the /api/fleet `queue` payload is simply no longer consumed.
 
   // ---- backlog (the operator's realtime "Your asks" tracker) --------------
   function fmtTok(n) {
@@ -1104,12 +1052,13 @@
       card.addEventListener("pointercancel", end);
     });
   }
-  // Collapsible (op#9102), default EXPANDED — it's the operator's primary plate,
-  // so visible by default but he can collapse it. backlogExpanded is a MODULE var
-  // (like routineExpanded) so a background refresh never re-collapses his choice.
-  // Done tasks are excluded server-side (build_backlog_query), so this is only
-  // his OPEN plate: needs_you + in_progress (+ parked).
-  var backlogExpanded = true;
+  // Collapsible (op#9102), default COLLAPSED (fc-v40 declutter — operator "never
+  // looks at it"): first load shows only the header + "N open" summary row, and a
+  // tap on the header expands it. backlogExpanded is a MODULE var (like
+  // routineExpanded) so a background refresh never re-collapses his choice once
+  // he opens it. Done tasks are excluded server-side (build_backlog_query), so
+  // this is only his OPEN plate: needs_you + in_progress (+ parked).
+  var backlogExpanded = false;
   function renderBacklog(rows) {
     var el = $("backlog");
     if (!el) return;
@@ -1340,7 +1289,8 @@
     renderBacklog(d.backlog || []);
     renderCoordinators(d.coordinators || []);
     renderLanes(lanes);
-    renderQueue(d.queue || []);            // per-lane worklists (the drain view)
+    // "Lane worklists" (#laneQueues) removed (fc-v40 declutter — redundant with the
+    // Lanes list): d.queue is still in the payload, just no longer rendered.
     renderDeploys(d.deploys || []);
 
     reflectOpenPeek(peekScroll);      // re-open peek + restore its inner scroll

@@ -61,3 +61,4 @@ reports/practical-parity/
 reports/*.md
 reports/*.diff
 reports/*.py
+reports/console-deploy/**/*.png

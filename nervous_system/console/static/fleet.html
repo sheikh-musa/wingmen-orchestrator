@@ -137,11 +137,16 @@
   .topbloat .dot.green{background:var(--good)} .topbloat .pct.green{color:var(--good)}
   .topbloat .dot.amber{background:var(--warn)} .topbloat .pct.amber{color:var(--warn)}
   .topbloat .dot.red{background:var(--bad)}    .topbloat .pct.red{color:var(--bad)}
-  /* Link chip to the dedicated /lanes tool (op#10706 B — tool moved off inline). */
-  .laneslink { display:block; margin:2px 0 4px; padding:11px 14px; border-radius:10px;
-    background:var(--panel); border:1px solid var(--line); color:var(--accent);
-    font:600 13px/1 var(--mono); text-decoration:none; }
-  .laneslink:active { background:var(--panel-2); }
+  /* Primary nav button to the dedicated /lanes tool (op#10706 B — tool moved off
+     inline). fc-v40: promoted from a thin text chip to an obviously-tappable
+     primary action (operator: "too subtle") — indigo-lit fill, clear border,
+     centered label + arrow, full-tap-target height. Aligned to the section gutter. */
+  .laneslink { display:flex; align-items:center; justify-content:center; gap:9px;
+    margin:14px 16px 6px; padding:16px 18px; border-radius:14px;
+    background: linear-gradient(180deg, rgba(138,166,255,.18), rgba(138,166,255,.08));
+    border:1px solid rgba(138,166,255,.44); color:var(--accent);
+    font:700 15.5px/1 var(--sans); letter-spacing:-.01em; text-decoration:none; }
+  .laneslink:active { background: rgba(138,166,255,.26); transform:scale(.99); }
   .strip { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
   .chip { display:inline-flex; align-items:center; gap:6px; font:12px/1 var(--mono);
     padding:7px 11px; border-radius:999px; background: var(--panel-2); border:1px solid var(--line); color: var(--dim); }
@@ -363,8 +368,7 @@
   .poolchip { border-radius: 999px; padding: 4px 9px; background: rgba(255,255,255,.04);
     border: 1px solid var(--line); }
   .poolchip.bad { background: rgba(251,113,133,.12); border-color: rgba(251,113,133,.3); }
-  .laneslink { border-radius: 12px; padding: 13px 15px; font-family: var(--sans); font-weight: 600;
-    box-shadow: var(--shadow); }
+  .laneslink { font-family: var(--sans); font-weight: 700; box-shadow: var(--shadow); }
   .sec-h h2 { font-family: var(--sans); letter-spacing: .14em; color: var(--faint); }
   .sec-h.needs h2 { color: var(--warn); }
   .chip { border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); }
@@ -409,14 +413,17 @@
     <div id="needs"></div>
   </section>
 
+  <!-- Coordinators MOVED above "Your asks" (fc-v40) — hub/console/cai come right
+       after "Needs you". Collapsed by default (coordExpanded=false in fleet.js):
+       just the header + "hub · console · cai" count until the operator taps it. -->
   <section>
-    <div class="sec-h"><h2>Your asks</h2><span id="backlogCount" class="count"></span></div>
-    <div id="backlog"><div class="empty">Loading…</div></div>
+    <div class="sec-h" id="coordHead" style="cursor:pointer"><h2><span id="coordChevron">▸</span> Coordinators</h2><span class="count">hub · console · cai</span></div>
+    <div id="coordinators"><div class="empty">Loading…</div></div>
   </section>
 
   <section>
-    <div class="sec-h" id="coordHead" style="cursor:pointer"><h2><span id="coordChevron">▾</span> Coordinators</h2><span class="count">hub · console · cai</span></div>
-    <div id="coordinators"><div class="empty">Loading…</div></div>
+    <div class="sec-h"><h2>Your asks</h2><span id="backlogCount" class="count"></span></div>
+    <div id="backlog"><div class="empty">Loading…</div></div>
   </section>
 
   <!-- "Context bloat" section removed (unified-lanes redesign): each worker
@@ -437,10 +444,9 @@
     <div id="lanes"><div class="empty">Loading…</div></div>
   </section>
 
-  <section>
-    <div class="sec-h"><h2>Lane worklists</h2><span class="count">what each lane is draining</span></div>
-    <div id="laneQueues"><div class="empty">Loading…</div></div>
-  </section>
+  <!-- "Lane worklists" (#laneQueues) removed per operator (fc-v40): redundant with
+       the Lanes list above. The /api/fleet payload still carries `queue`; the
+       dashboard just no longer renders it. -->
 
   <!-- Deploys + Feed sections removed per operator (op#9888): low-signal at the
        bottom; deploy_status + raw bus live on the hub, not this attention-first view. -->
