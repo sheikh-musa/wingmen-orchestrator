@@ -701,19 +701,84 @@ def test_set_pointer_singleton_token_still_writes_its_own_pointer(server, repo_r
     assert not (repo_root / ".lane_default_token").exists()
 
 
-def test_set_pointer_worker_lane_interim_guard_refuses_loudly(server, repo_root, tmp_path):
-    """LAYER-1 interim guard: a worker-lane pick that WOULD hit the fleet default is
-    refused with a 400 + an actionable error naming the group pointer, and the
-    refusal is AUDITED (attributable, never silent). NOTE: LAYER-2 supersedes this
-    with group-aware routing (the pick succeeds into .group_default_token.<family>),
-    at which point this test is replaced by test_set_pointer_worker_lane_routes_to_group."""
+def test_set_pointer_worker_lane_routes_to_group(server, repo_root, tmp_path):
+    """LAYER-2 group-aware routing: a per-lane token pick on a WORKER lane lands in
+    its per-GROUP pointer .group_default_token.<family> — NOT the fleet default. The
+    pick SUCCEEDS (no over-block), the group file gets the token, the fleet default
+    stays absent, and the response reports where it landed. (Supersedes the LAYER-1
+    refusal — routing is the durable fix; the guard remains as defense-in-depth.)"""
+    kf, presolve = _fake_token(tmp_path, "syed")
+    with presolve:
+        r = httpx.post(server + "/api/set-pointer", headers=H(),
+                       json={"kind": "token", "session": "irsyad-coord", "value": "syed"},
+                       timeout=10)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.json()["pointer"] == ".group_default_token.irsyad"
+    grp = repo_root / ".group_default_token.irsyad"
+    assert grp.exists() and grp.read_text().strip() == str(kf)
+    assert not (repo_root / ".lane_default_token").exists()   # fleet default UNTOUCHED
+
+
+def test_set_pointer_worker_lane_clear_targets_group_not_fleet(server, repo_root, tmp_path):
+    """A per-lane CLEAR on a worker lane clears ONLY its group pointer; a pre-existing
+    fleet default is left exactly as it was."""
+    fleet = repo_root / ".lane_default_token"
+    fleet.write_text("/fake/musa-oauth-token\n")
+    grp = repo_root / ".group_default_token.irsyad"
+    grp.write_text(str(tmp_path / "syed-oauth-token") + "\n")
+    r = httpx.post(server + "/api/set-pointer", headers=H(),
+                   json={"kind": "token", "session": "irsyad-coord", "clear": True},
+                   timeout=10)
+    assert r.status_code == 200 and r.json()["cleared"] is True
+    assert not grp.exists()                                    # group pin removed
+    assert fleet.read_text().strip() == "/fake/musa-oauth-token"   # fleet UNTOUCHED
+
+
+def test_set_pointer_held_lane_refused(server, repo_root, tmp_path):
+    """A HELD lane's token default must not be settable from a single-lane click
+    (defense-in-depth beyond the bulk switch's _HELD_LANES guard). irsyad-import is
+    the held lane in _HELD_LANES."""
     _kf, presolve = _fake_token(tmp_path, "syed")
-    with patch.object(console_app.auth, "audit") as maudit, presolve:
+    with patch.object(console_app, "_HELD_LANES", {"irsyad-import"}), presolve:
         r = httpx.post(server + "/api/set-pointer", headers=H(),
                        json={"kind": "token", "session": "irsyad-import", "value": "syed"},
                        timeout=10)
-    assert r.status_code == 400
-    assert ".lane_default_token" in r.json()["error"]
-    assert "group pointer" in r.json()["error"]
-    endpoints = [c.args[1] for c in maudit.call_args_list]
-    assert any("blocked-fleet-default" in e for e in endpoints)
+    assert r.status_code == 400 and "held lane" in r.json()["error"]
+    assert not (repo_root / ".group_default_token.irsyad").exists()
+    assert not (repo_root / ".lane_default_token").exists()
+
+
+def test_enrich_preselects_group_pinned_token(monkeypatch, tmp_path):
+    """display==boot: a group-pinned worker lane's preselected token reflects the
+    GROUP pin (what it will boot on), so a per-lane pick shows as selected."""
+    root = tmp_path / "orch"
+    root.mkdir()
+    kf = root / "syed-oauth-token"
+    kf.write_text("SECRET-syed\n")
+    (root / ".group_default_token.irsyad").write_text(str(kf) + "\n")
+    monkeypatch.setattr(console_app, "_REPO_ROOT", root)
+    fp = console_app._fp_of_token_file(str(kf))
+    monkeypatch.setattr(console_app, "_token_name_for_fp",
+                        lambda f: "syed" if f == fp else None)
+    payload = {"rows": [{"session": "irsyad-coord"}]}
+    out = console_app._enrich_token_pointers(payload)
+    r = out["rows"][0]
+    assert r["token_group"] == "irsyad"
+    assert r["token_pointer_name"] == "syed"   # preselected == the group pin's token
+
+
+def test_set_pointer_guard_does_not_block_bulk_switch_all(server, repo_root, monkeypatch):
+    """DON'T over-block: the per-lane guard/routing lives ONLY in /api/set-pointer.
+    An explicit fleet-wide switch-all still plans + fires unaffected (it re-tokens
+    live lanes; it is the legitimate all-lanes path, never caught by the guard)."""
+    console_app._SWITCH_LAST_RUN.clear()
+    console_app._SWITCH_INFLIGHT.clear()
+    monkeypatch.setattr(console_app, "_SWITCH_COOLDOWN_S", 0.0)
+    rows = [_row("irsyad-coord")]
+    ok_res = MagicMock(returncode=0, stdout="switched\n", stderr="")
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run", return_value=ok_res):
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed", "dry_run": False}, timeout=10)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert _by_lane(r.json()["targets"])["irsyad-coord"]["action"] == "switch"

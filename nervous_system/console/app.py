@@ -240,11 +240,57 @@ def _is_in_family(session: str, family: str) -> bool:
 
 
 def _token_pointer_name(session: str) -> "str | None":
-    """The token-pointer FILENAME governing this body's default account, or None
-    when the body has no settable pointer (cai/SRE run off .env)."""
+    """The token-pointer FILENAME naming a body's FLEET-DEFAULT tier, or None when
+    the body has no settable pointer (cai/SRE run off .env). For a worker lane this
+    is the SHARED fleet default (.lane_default_token) — lane_token_resolver tier 4.
+    Kept for back-compat; it is NOT where a per-lane WRITE lands (see
+    _token_write_pointer_name) nor the EFFECTIVE tier a lane boots on (see
+    _effective_token_pointer_name)."""
     if session in _NO_TOKEN_POINTER:
         return None
     return _TOKEN_POINTER_FOR.get(session, ".lane_default_token")
+
+
+def _token_write_pointer_name(session: str) -> "str | None":
+    """Where a PER-LANE token set-pointer WRITE must land. Same as
+    _token_pointer_name for the pointer-owning singletons (nazim/hub) and the
+    no-pointer singletons (cai/SRE→None), but a WORKER lane — which
+    _token_pointer_name maps to the SHARED fleet default .lane_default_token — is
+    routed to its per-GROUP pointer .group_default_token.<family> instead.
+
+    WHY: a single per-lane console pick must NEVER rewrite the all-lanes default.
+    The operator tripped that TWICE — picking a token on worker lane irsyad-import
+    wrote .lane_default_token, moving ALL other worker lanes off-account. The fleet
+    default is changed ONLY by an explicit fleet action (flip_fleet.sh), never as a
+    side effect of one lane's pick. A worker lane always resolves to a family, so a
+    worker write never lands on the fleet default. Returns None only when the body
+    has no settable pointer (cai/SRE off .env) or the session yields no family."""
+    if session in _NO_TOKEN_POINTER:
+        return None
+    if session in _TOKEN_POINTER_FOR:
+        return _TOKEN_POINTER_FOR[session]
+    fam = _family_of(session)
+    return (".group_default_token.%s" % fam) if fam else None
+
+
+def _effective_token_pointer_name(session: str) -> "str | None":
+    """The pointer file that ACTUALLY governs this body's boot account, honoring the
+    per-GROUP tier ABOVE the fleet default — mirrors lane_token_resolver's tier
+    2 (per-session) → 3 (per-group, IF the group file exists) → 4 (fleet default)
+    precedence. READ paths (the /lanes display, the apply preview, the armed apply)
+    consult this so what the console SHOWS/APPLIES == what the lane will BOOT on
+    (the display==boot invariant the resolver exists to hold). None for a body that
+    boots off .env."""
+    if session in _NO_TOKEN_POINTER:
+        return None
+    if session in _TOKEN_POINTER_FOR:
+        return _TOKEN_POINTER_FOR[session]
+    fam = _family_of(session)
+    if fam:
+        grp = ".group_default_token.%s" % fam
+        if (_REPO_ROOT / grp).exists():
+            return grp
+    return ".lane_default_token"
 
 
 def _read_pointer_target(name: str) -> "str | None":
@@ -389,7 +435,10 @@ def _resolve_armed_apply(session: str, kind: str, arm: "dict | None") -> tuple:
     SW_LANE = str(_REPO_ROOT / "scripts" / "switch_lane_token.sh")
     SW_SINGLE = str(_REPO_ROOT / "scripts" / "switch_singleton_token.sh")
     if kind == "token":
-        ptr = _token_pointer_name(session)
+        # EFFECTIVE tier (per-group pin above the fleet default) so an armed apply
+        # switches to what the lane will actually BOOT on — not a stale fleet default
+        # for a group-pinned worker lane (display==boot invariant).
+        ptr = _effective_token_pointer_name(session)
         target = _read_pointer_target(ptr) if ptr else None
         if not target or not _fp_of_token_file(target):
             return None, None, "no token default set to apply"
@@ -549,8 +598,13 @@ def _enrich_token_pointers(payload: dict) -> dict:
         # shows a note instead of a select — never a silent no-op (fix (a)).
         r["token_settable"] = (ptr is not None) and not remote
         r["token_pointer"] = ptr
+        # The PRESELECTED token reflects the EFFECTIVE tier the lane will boot on
+        # (per-group pin ABOVE the fleet default), NOT the base fleet-default file —
+        # otherwise a per-lane pick (which now lands in the group pointer, not the
+        # fleet default) would not show as selected. display==boot by construction.
+        eff = _effective_token_pointer_name(sess)
         r["token_pointer_name"] = _token_name_for_fp(
-            _fp_of_token_file(_read_pointer_target(ptr)) if ptr and _read_pointer_target(ptr) else None)
+            _fp_of_token_file(_read_pointer_target(eff)) if eff and _read_pointer_target(eff) else None)
         # GAP-B: a worker lane (fleet-default pointer) governed by a per-GROUP pin
         # is surfaced as `token_group` (the family) so /lanes can label its tier
         # "Token · <family> group" instead of "Token · all lanes". Only set when a
@@ -1553,7 +1607,9 @@ def _make_handler(feedloop: "_FeedLoop"):
             SW_LANE = str(_REPO_ROOT / "scripts" / "switch_lane_token.sh")
             SW_SINGLE = str(_REPO_ROOT / "scripts" / "switch_singleton_token.sh")
             if kind == "token":
-                ptr = _token_pointer_name(session)
+                # EFFECTIVE tier (group pin above fleet default) — the preview must
+                # reflect what the lane will BOOT on, matching the armed apply.
+                ptr = _effective_token_pointer_name(session)
                 if ptr is None:
                     auth.audit(self._client(), f"/api/apply-dry-run:token:{session}", "400")
                     return self._json(400, {"error": "token not settable for this body"})
@@ -1663,19 +1719,32 @@ def _make_handler(feedloop: "_FeedLoop"):
             if kind == "model" and session in _MODEL_ENV_BODIES:
                 auth.audit(self._client(), f"/api/set-pointer:model:{session}:env", "400")
                 return self._json(400, {"error": "model for this body is env-driven at boot (NAZIM_MODEL/CAI_MODEL/…), not a pointer — no-op if written"})
+            written_ptr = None   # the pointer file a token write actually landed in
             try:
                 if kind == "token":
-                    ptr = _token_pointer_name(session)
+                    # HELD lane — its default must not be silently settable from a
+                    # single-lane click either (defense-in-depth beyond the bulk
+                    # switch's _HELD_LANES guard; a direct API call can't bypass it).
+                    if session in _HELD_LANES:
+                        auth.audit(self._client(), f"/api/set-pointer:token:{session}:held", "400")
+                        return self._json(400, {"error": (
+                            "held lane — its token default must not be set now "
+                            "(tabung/Wan; see _HELD_LANES)")})
+                    # GROUP-AWARE routing (the fix): a WORKER lane's per-lane pick
+                    # lands in its per-GROUP pointer .group_default_token.<family>,
+                    # NOT the SHARED fleet default .lane_default_token. The operator
+                    # tripped the fleet-default clobber TWICE (a pick on irsyad-import
+                    # rewrote the all-lanes default -> every other worker lane went
+                    # off-account). Singleton bodies keep their own pointer unchanged.
+                    ptr = _token_write_pointer_name(session)
                     if ptr is None:
                         auth.audit(self._client(), f"/api/set-pointer:token:{session}", "400")
                         return self._json(400, {"error": "token not settable for this body (boots off .env)"})
-                    # INTERIM GUARD (operator tripped this TWICE): a WORKER lane
-                    # falls through to the SHARED fleet default .lane_default_token.
-                    # A per-lane token pick (or clear) that writes it would rewrite
-                    # the ALL-LANES default and move every OTHER worker lane
-                    # off-account. REFUSE — the operator pins the per-GROUP pointer
-                    # (/api/set-group-pointer for the family) or runs an explicit
-                    # switch-all instead. Fleet-default touch is audited (loud).
+                    # DEFENSE-IN-DEPTH: routing above never yields the fleet default
+                    # for a worker lane, so reaching it means an unexpected mapping.
+                    # NEVER write the all-lanes default from a per-lane click — refuse
+                    # LOUD + audited so a fleet-default change can never happen here
+                    # unlogged (the ONLY legit fleet-default change is flip_fleet.sh).
                     if ptr == ".lane_default_token":
                         auth.audit(self._client(),
                                    f"/api/set-pointer:token:{session}:blocked-fleet-default", "400")
@@ -1685,6 +1754,7 @@ def _make_handler(feedloop: "_FeedLoop"):
                             "lanes — use the group pointer (/api/set-group-pointer for "
                             "the family) or an explicit switch-all instead." % session)})
                     pfile = _REPO_ROOT / ptr
+                    written_ptr = ptr
                     if clear:
                         if pfile.exists():
                             pfile.unlink()
@@ -1720,6 +1790,7 @@ def _make_handler(feedloop: "_FeedLoop"):
                 return self._json(500, {"error": "write failed"})
             return self._json(200, {
                 "ok": True, "kind": kind, "session": session, "cleared": clear,
+                "pointer": written_ptr,   # WHERE a token write landed (group vs own pointer)
                 "note": "default set — applies on the body's NEXT relaunch (no relaunch now)",
             })
 
