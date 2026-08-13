@@ -610,8 +610,12 @@ def build_pool_usage_query() -> Tuple[str, list]:
     `pool_usage` each poll; the console reads it here and renders `pct_7d` up top.
     `updated_age_s` is the reading's freshness — if the monitor stalls, the client
     can grey the number out rather than show a frozen one (never show stale info)."""
+    # op#12617: pace/projected_pct/runway_days are ADDITIVE (nullable) — the pace
+    # layer's LATEST metrics for the header. Back-compat: older clients ignore the
+    # extra keys; runway NULL == 'not burning / no runway concern'.
     sql = (
         "SELECT pool, pct_7d, pct_5h, resets_at, status_7d, "
+        "  pace, projected_pct, runway_days, "
         "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s "
         "FROM pool_usage ORDER BY pool"
     )

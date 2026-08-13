@@ -143,9 +143,14 @@ def build_minimized_payload(conn) -> Dict[str, Any]:
     connection on the READ-ONLY role. Only the cai-signed-off columns are read."""
     cur = conn.cursor()
 
-    cur.execute("SELECT pool, pct_7d, pct_5h, resets_at, status_7d, updated_at FROM pool_usage ORDER BY pool")
+    cur.execute("SELECT pool, pct_7d, pct_5h, resets_at, status_7d, updated_at, "
+                "pace, projected_pct, runway_days FROM pool_usage ORDER BY pool")
     pools = [dict(pool=r[0], pct_7d=int(r[1]), pct_5h=int(r[2]),
-                  resets_at=str(r[3]), status=r[4], updated_at=str(r[5])) for r in cur.fetchall()]
+                  resets_at=str(r[3]), status=r[4], updated_at=str(r[5]),
+                  pace=(float(r[6]) if r[6] is not None else None),          # op#12617
+                  projected_pct=(float(r[7]) if r[7] is not None else None),
+                  runway_days=(float(r[8]) if r[8] is not None else None))
+             for r in cur.fetchall()]
 
     cur.execute("""SELECT base_agent_id, status, current_task, last_heartbeat, host,
                           last_commit_repo, last_commit_sha
@@ -251,7 +256,8 @@ def _safe(fn, default):
 def _clone_pool_usage(cur) -> List[Dict[str, Any]]:
     cur.execute(
         "SELECT pool, pct_7d, pct_5h, resets_at, status_7d, "
-        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s "
+        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s, "
+        "  pace, projected_pct, runway_days "          # op#12617 (additive)
         "FROM pool_usage ORDER BY pool"
     )
     out = []
@@ -261,6 +267,9 @@ def _clone_pool_usage(cur) -> List[Dict[str, Any]]:
             pct_5h=(int(r[2]) if r[2] is not None else None),
             resets_at=(str(r[3]) if r[3] is not None else None),
             status=r[4], updated_age_s=r[5],
+            pace=(float(r[6]) if r[6] is not None else None),
+            projected_pct=(float(r[7]) if r[7] is not None else None),
+            runway_days=(float(r[8]) if r[8] is not None else None),
         ))
     return out
 

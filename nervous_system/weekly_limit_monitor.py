@@ -39,17 +39,19 @@ takes a fleet action, so it is ungated (a safety signal is never silenced).
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ORCH_DIR))
 from dotenv import load_dotenv  # noqa: E402
 load_dotenv(_ORCH_DIR / ".env")
+from nervous_system.pool_pace import compute_pool_pace  # noqa: E402  (pure PACE math)
 
 API_URL = "https://api.anthropic.com/v1/messages"
 PROBE_BODY = json.dumps(
@@ -70,6 +72,12 @@ LOG_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor.log"
 POOLS = {
     "Musa": ("file", str(Path.home() / ".wingmen" / "keys" / "musa-oauth-token")),
     "Syed": ("file", str(Path.home() / ".wingmen" / "keys" / "syed-oauth-token")),
+    # musa2 (op#12617): a SEPARATE weekly pool from Musa-1 — verified by an
+    # INDEPENDENT unified-7d utilization AND a DIFFERENT reset epoch on a live probe
+    # (Musa-1 44%/reset 08-19 08:00 vs musa2 8%/reset 08-18 21:00, 2026-08-13). It is
+    # a genuine offload valve: work run on musa2 does NOT draw down Musa-1's weekly
+    # pool. Pinned to its own stable key file (fp e1dfa48eec85), same op#12030 rule.
+    "musa2": ("file", str(Path.home() / ".wingmen" / "keys" / "musa2-oauth-token")),
 }
 
 
@@ -197,13 +205,17 @@ def _emit_bus(subject: str, body: str, priority: str,
         c.commit()
 
 
-def _persist_reading(p: dict) -> None:
+def _persist_reading(p: dict, pace: "PaceResult | None" = None) -> None:
     """UPSERT the latest reading for one pool into public.pool_usage — the console's
     read path (op#9770). One row per pool, overwritten in place; `updated_at`
     stamps THIS reading's freshness so the console can grey out a stale one.
     Raises on failure so the caller can surface it LOUD (a silent-fail persist
     would let the console show a frozen number — the exact stale-info bug op#9770
-    is closing). Uses the SERVICE_ROLE via DATABASE_URL, same as the bus alert."""
+    is closing). Uses the SERVICE_ROLE via DATABASE_URL, same as the bus alert.
+
+    op#12617: also writes the ADDITIVE pace columns (pace / projected_pct /
+    runway_days) when a PaceResult is supplied. runway=inf (pool not burning) is
+    stored as NULL — the console renders 'inf' as 'no runway concern'."""
     import psycopg
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     if not dsn:
@@ -212,16 +224,80 @@ def _persist_reading(p: dict) -> None:
     pct5 = round((p.get("u5h") or 0) * 100, 1)
     reset = p.get("reset7d")
     reset_at = datetime.fromtimestamp(reset, tz=timezone.utc) if reset else None
+    pace_val = proj_val = runway_val = None
+    if pace is not None:
+        pace_val = round(pace.pace, 3) if pace.pace is not None else None
+        proj_val = round(pace.projected_pct, 1) if pace.projected_pct is not None else None
+        runway_val = (round(pace.runway_days, 2)
+                      if math.isfinite(pace.runway_days) else None)
     with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
         cur.execute(
-            "INSERT INTO pool_usage (pool, pct_7d, pct_5h, resets_at, status_7d, updated_at) "
-            "VALUES (%s,%s,%s,%s,%s, now()) "
+            "INSERT INTO pool_usage (pool, pct_7d, pct_5h, resets_at, status_7d, "
+            "  pace, projected_pct, runway_days, updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now()) "
             "ON CONFLICT (pool) DO UPDATE SET "
             "  pct_7d=EXCLUDED.pct_7d, pct_5h=EXCLUDED.pct_5h, "
             "  resets_at=EXCLUDED.resets_at, status_7d=EXCLUDED.status_7d, "
-            "  updated_at=now()",
-            (p["pool"], pct7, pct5, reset_at, p.get("status7d")))
+            "  pace=EXCLUDED.pace, projected_pct=EXCLUDED.projected_pct, "
+            "  runway_days=EXCLUDED.runway_days, updated_at=now()",
+            (p["pool"], pct7, pct5, reset_at, p.get("status7d"),
+             pace_val, proj_val, runway_val))
         c.commit()
+
+
+def _persist_history(p: dict) -> None:
+    """APPEND this reading to pool_usage_history (op#12617) — the trail that lets a
+    later poll compute a trailing-24h burn (runway needs two SAME-WINDOW readings;
+    the one-row-per-pool pool_usage table cannot hold history). `resets_at` is
+    stamped so burn is only ever taken within a window. Raises on failure (LOUD)."""
+    import psycopg
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    if not dsn:
+        raise RuntimeError("no DATABASE_URL for pool_usage_history append")
+    pct7 = round(p["u7d"] * 100, 1)
+    pct5 = round((p.get("u5h") or 0) * 100, 1)
+    reset = p.get("reset7d")
+    reset_at = datetime.fromtimestamp(reset, tz=timezone.utc) if reset else None
+    with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO pool_usage_history (pool, pct_7d, pct_5h, resets_at) "
+            "VALUES (%s,%s,%s,%s)",
+            (p["pool"], pct7, pct5, reset_at))
+        c.commit()
+
+
+# Only compute a runway once we have >= this much SAME-WINDOW trailing history.
+# 20h (not a full 24h) tolerates poll jitter while still giving a stable ~daily
+# burn — a shorter span would extrapolate noisily and false-page.
+_MIN_TRAIL_HOURS = 20
+
+
+def _load_prior_same_window(pool: str, reset_at, now) -> "tuple | None":
+    """Newest SAME-WINDOW history reading at least _MIN_TRAIL_HOURS old, for the
+    trailing-24h burn. Returns (pct_prev, recorded_at) or None (not enough history
+    yet -> no runway this poll). Same-window (resets_at match) so a window reset
+    never manufactures a negative burn. Read-only; returns None on any DB error so
+    a history-read blip degrades runway gracefully without blocking the safety
+    threshold path (the caller's absolute-threshold page is unaffected)."""
+    import psycopg
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    if not dsn or reset_at is None:
+        return None
+    cutoff = now - timedelta(hours=_MIN_TRAIL_HOURS)
+    try:
+        with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT pct_7d, recorded_at FROM pool_usage_history "
+                "WHERE pool=%s AND resets_at=%s AND recorded_at <= %s "
+                "ORDER BY recorded_at DESC LIMIT 1",
+                (pool, reset_at, cutoff))
+            row = cur.fetchone()
+    except Exception as e:
+        log(f"prior-history-read-failed {pool}: {e}")
+        return None
+    if not row:
+        return None
+    return (float(row[0]), row[1])
 
 
 def _page(subject: str, body: str, priority: str, dry: bool,
@@ -278,8 +354,52 @@ def _operator_body(p: dict, level: str) -> str:
         f"flip lanes to Sonnet. Nazim has the same alert and is already acting.")
 
 
+def _pace_operator_body(p: dict, pace) -> str:
+    """ELI5 pace warning for the operator's phone (routed like the threshold
+    warnings: to 'musa', subject '⚠️…', picked up by weekly_alert_relay). This is
+    a PACE signal — the pool is not full yet, but at the current rate it is on
+    track to run out BEFORE the weekly window resets."""
+    pct = round(p["u7d"] * 100)
+    proj = f"{pace.projected_pct:.0f}%" if pace.projected_pct is not None else "?"
+    if math.isfinite(pace.runway_days):
+        runway = f"{pace.runway_days:.1f} days (resets in {pace.days_to_reset:.1f})"
+    else:
+        runway = "n/a yet"
+    # Prefer another pool with headroom as the offload; musa2 is a real valve.
+    return (
+        f"⚠️ Pace warning — the {p['pool']} Claude pool is on track to run out "
+        f"before its weekly reset.\n\n"
+        f"WHAT: {p['pool']} is at {pct}% now, but at the current burn it PROJECTS to "
+        f"{proj} by week-end (runway {runway}). {'; '.join(pace.reasons)}.\n"
+        f"WHY: this is the EARLY pace signal (op#12617) — it fires before the 75/90% "
+        f"absolute alarm so you can shift work now rather than stall at 100%.\n"
+        f"WHAT TO DO: move heavy lanes to a pool with headroom (Syed / musa2 are "
+        f"separate weekly pools), and/or flip lanes to Sonnet (separate limit). If "
+        f"you're fine pacing until reset, nothing needed.")
+
+
+def _pace_body(p: dict, pace) -> str:
+    """The fleet-facing (orch-console) pace record — the metrics in full."""
+    pct = round(p["u7d"] * 100)
+    proj = f"{pace.projected_pct:.0f}%" if pace.projected_pct is not None else "?"
+    pace_r = f"{pace.pace:.2f}" if pace.pace is not None else "?"
+    runway = (f"{pace.runway_days:.1f}d" if math.isfinite(pace.runway_days)
+              else "inf (not burning)")
+    return (
+        f"[Max weekly-PACE monitor] {p['pool']} is on track to exhaust before reset.\n\n"
+        f"WHAT: used={pct}% at {pace.elapsed_frac*100:.0f}% into the week -> "
+        f"pace={pace_r} (1.0=on budget), projected end-of-week={proj}, "
+        f"runway={runway} vs {pace.days_to_reset:.1f}d to reset.\n"
+        f"REASONS: {'; '.join(pace.reasons)}.\n"
+        f"WHAT TO DO: offload heavy lanes to a pool with headroom (Syed / musa2 are "
+        f"SEPARATE weekly pools — a genuine valve), flip lanes to Sonnet, or pace "
+        f"until the {_fmt_reset(p.get('reset7d'))} reset.\n"
+        f"(source: unified-7d-utilization + trailing-24h burn from pool_usage_history)")
+
+
 def run(dry: bool = False, as_json: bool = False) -> int:
     state = load_state()
+    now = datetime.now(timezone.utc)
     results = []
     failures = []
     persist_failures = []
@@ -298,12 +418,39 @@ def run(dry: bool = False, as_json: bool = False) -> int:
                 f"last-known reading, no persist/page")
             continue
         results.append(p)
-        # Persist the reading for the console (op#9770). A persist failure does
-        # NOT block alerting (the primary safety function) — but it is surfaced
-        # LOUD below so the console never silently shows a frozen number.
+        # PACE layer (op#12617): compute pace / projected / runway from THIS reading
+        # + the trailing-24h same-window prior. Pure math (pool_pace); read-only
+        # history lookup degrades to None (no runway) on any blip, so it can never
+        # block the absolute-threshold safety path below.
+        reset_epoch = p.get("reset7d")
+        resets_at = (datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
+                     if reset_epoch else None)
+        pace = None
+        if resets_at is not None:
+            prior = _load_prior_same_window(p["pool"], resets_at, now)
+            pace = compute_pool_pace(now, p["u7d"] * 100.0, resets_at, prior=prior)
+            # JSON-safe snapshot for --json (the dataclass itself is not serializable;
+            # keep the live `pace` local var for persist + paging).
+            p["pace"] = {
+                "elapsed_frac": round(pace.elapsed_frac, 4),
+                "pace": (round(pace.pace, 3) if pace.pace is not None else None),
+                "projected_pct": (round(pace.projected_pct, 1)
+                                  if pace.projected_pct is not None else None),
+                "burn_per_day": (round(pace.burn_per_day, 3)
+                                 if pace.burn_per_day is not None else None),
+                "runway_days": (round(pace.runway_days, 2)
+                                if math.isfinite(pace.runway_days) else None),
+                "days_to_reset": round(pace.days_to_reset, 2),
+                "should_page": pace.should_page,
+                "reasons": pace.reasons,
+            }
+        # Persist the reading for the console (op#9770 + op#12617 pace columns). A
+        # persist failure does NOT block alerting (the primary safety function) —
+        # surfaced LOUD below so the console never silently shows a frozen number.
         if not dry:
             try:
-                _persist_reading(p)
+                _persist_reading(p, pace)
+                _persist_history(p)   # append the trail for the next poll's runway
             except Exception as e:
                 persist_failures.append((name, str(e)))
                 log(f"PERSIST-FAILED {name}: {e}")
@@ -311,9 +458,11 @@ def run(dry: bool = False, as_json: bool = False) -> int:
         pkey = state.setdefault(p["pool"], {})
         prev = pkey.get("alerted")           # None | "warn" | "urgent"
         reset = p.get("reset7d")
-        # New weekly window (reset advanced) clears the alert memory.
+        # New weekly window (reset advanced) clears the alert memory (both the
+        # absolute-threshold memory and the pace memory — a fresh window pages afresh).
         if reset and pkey.get("reset") and reset != pkey.get("reset"):
             prev = None
+            pkey["pace_alerted"] = None
         pkey["reset"] = reset
         pkey["u7d"] = p["u7d"]
         if level == "ok":
@@ -340,6 +489,28 @@ def run(dry: bool = False, as_json: bool = False) -> int:
             _page(f"⚠️ URGENT — {p['pool']} Claude pool at {pct}% of its weekly limit",
                   _operator_body(p, "urgent"), "P1", dry, to_agent=OPERATOR_AGENT)
             pkey["alerted"] = "urgent"
+
+        # PACE page (op#12617): the pool is on track to EXHAUST before its weekly
+        # reset (projected>100% past the early-window floor, OR runway<days-to-reset)
+        # — a distinct, earlier signal than the absolute 75/90% alarm. Deduped once
+        # per window (pace_alerted), cleared on a new window above. P2: advisory.
+        if pace is not None and pace.should_page and not pkey.get("pace_alerted"):
+            _page(f"Max weekly PACE — {p['pool']} on track to exhaust before reset",
+                  _pace_body(p, pace), "P2", dry)
+            # Operator-addressed twin (routed by weekly_alert_relay via subject '⚠️').
+            _page(f"⚠️ Pace warning — {p['pool']} Claude pool may run out before reset",
+                  _pace_operator_body(p, pace), "P2", dry, to_agent=OPERATOR_AGENT)
+            pkey["pace_alerted"] = True
+            log(f"{p['pool']}: PACE-PAGE {'; '.join(pace.reasons)}")
+
+        if pace is not None:
+            _pr = (f"pace={pace.pace:.2f}" if pace.pace is not None else "pace=?")
+            _rw = (f"{pace.runway_days:.1f}d" if math.isfinite(pace.runway_days)
+                   else "inf")
+            _pj = (f"{pace.projected_pct:.0f}%" if pace.projected_pct is not None
+                   else "?")
+            log(f"{p['pool']}: elapsed={pace.elapsed_frac*100:.0f}% {_pr} "
+                f"projected={_pj} runway={_rw} dtr={pace.days_to_reset:.1f}d")
         log(f"{p['pool']}: 7d={round(p['u7d']*100)}% 5h={round((p.get('u5h') or 0)*100)}% "
             f"status={p.get('status')} level={level} reset={_fmt_reset(reset)}")
 
