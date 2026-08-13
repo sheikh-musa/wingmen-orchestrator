@@ -25,6 +25,11 @@ import subprocess
 import time
 from typing import Dict, List, Optional
 
+# GAP-B: the ONE canonical lane→token resolver, shared with
+# scripts/launch_dangerous_cc.sh (via its CLI shim). Importing it here is what
+# makes the console's "expected" account == the account a lane actually boots on.
+from scripts.lib.lane_token_resolver import resolve_lane_token_path as _resolve_lane_token_path
+
 _TIMEOUT_S = 5
 _RAW_CAPTURE_LINES = 200  # generous raw window BEFORE chrome-filtering — filter
                           # first then cap to _CAPTURE_LINES, not the reverse,
@@ -468,22 +473,22 @@ def _env_default_fp() -> Optional[str]:
 
 
 def _expected_fp(session: str) -> Optional[str]:
-    """The account fingerprint a body is CONFIGURED to run on: its pointer file's
-    target token, else the .env default account. None only if nothing resolves."""
-    ptr = _BODY_POINTER.get(session)
-    if ptr is None and session not in _NO_POINTER_SINGLETONS:
-        ptr = ".lane_default_token"          # a worker lane
-    if ptr:
-        try:
-            with open(os.path.join(_ORCH_DIR, ptr), "r") as f:
-                tokfile = f.read().strip()
-            if tokfile:
-                fp = _read_token_fp(tokfile)
-                if fp:
-                    return fp
-        except Exception:
-            pass
-    return _env_default_fp()                  # no/unreadable pointer -> fleet default
+    """The account fingerprint a body is CONFIGURED to run on: its resolved token
+    pointer (per-SESSION > per-GROUP > fleet default), else the .env default
+    account. None only if nothing resolves.
+
+    CORRECTNESS CRUX (GAP-B): this consults the SAME canonical resolver
+    (scripts.lib.lane_token_resolver) that scripts/launch_dangerous_cc.sh boots a
+    lane from, so "expected" (this display) == the account the lane actually boots
+    on BY CONSTRUCTION — a per-group pin (.group_default_token.<family>) shows up
+    here exactly as the lane will boot. With NO group file the resolution is
+    byte-identical to the pre-GAP-B pointer logic."""
+    path = _resolve_lane_token_path(session, orch_dir=_ORCH_DIR)
+    if path:
+        fp = _read_token_fp(path)
+        if fp:
+            return fp
+    return _env_default_fp()                  # no/unreadable pointer -> .env default
 
 
 def _account_labels() -> Dict[str, str]:

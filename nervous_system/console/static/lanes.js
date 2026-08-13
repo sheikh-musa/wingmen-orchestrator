@@ -52,7 +52,11 @@
       ctrls = '<div class="ctlnote">remote (VPS) — set its token/model on the hub host; cross-host apply lands in R3/R4</div>';
     } else {
       if (r.token_settable) {
-        var tlabel = (r.token_pointer === ".lane_default_token") ? "Token · all lanes" : "Token";
+        // GAP-B: a lane governed by a per-GROUP pin shows its family tier
+        // ("Token · irsyad group") instead of the fleet-wide "Token · all lanes".
+        var tlabel = r.token_group
+          ? ("Token · " + esc(r.token_group) + " group")
+          : (r.token_pointer === ".lane_default_token") ? "Token · all lanes" : "Token";
         var topts = '<option value="">— default —</option>' + registry.tokens.map(function (t) {
           var sel = (r.token_pointer_name === t.name) ? " selected" : "";
           var dis = t.available ? "" : " disabled";

@@ -433,3 +433,223 @@ def test_switch_requires_auth(server):
     r2 = httpx.post(server + "/api/switch-group",
                     json={"family": "cosem", "token_name": "syed"}, timeout=5)
     assert r1.status_code == 401 and r2.status_code == 401
+
+
+# --- GAP-B: /api/set-group-pointer (pin/unpin a family, NO relaunch) ----------
+# Mirrors the /api/set-pointer contract: reversible pointer write, gazzabyte/
+# forbidden fail-closed, family charset-validated, attributable audit on pin+unpin.
+
+@pytest.fixture
+def repo_root(monkeypatch, tmp_path):
+    """Redirect the console's pointer-file root to a temp dir so pointer writes in
+    these tests NEVER touch the real checkout."""
+    root = tmp_path / "orch"
+    root.mkdir()
+    monkeypatch.setattr(console_app, "_REPO_ROOT", root)
+    return root
+
+
+def _fake_token(tmp_path, name="syed"):
+    """A readable fake key file + a patch making the registry resolve `name` to it
+    (and reject anything else / forbidden)."""
+    kf = tmp_path / (name + "-oauth-token")
+    kf.write_text("SECRET-" + name + "\n")
+
+    def _resolve(n):
+        return kf if n == name else None
+
+    return kf, patch.object(console_app, "_resolve_registry_token", side_effect=_resolve)
+
+
+def test_set_group_pointer_pins_family(server, repo_root, tmp_path):
+    kf, presolve = _fake_token(tmp_path, "syed")
+    with presolve:
+        r = httpx.post(server + "/api/set-group-pointer", headers=H(),
+                       json={"family": "irsyad", "token_name": "syed"}, timeout=10)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    pfile = repo_root / ".group_default_token.irsyad"
+    assert pfile.exists()
+    assert pfile.read_text().strip() == str(kf)
+
+
+def test_set_group_pointer_clear_unpins(server, repo_root, tmp_path):
+    pfile = repo_root / ".group_default_token.irsyad"
+    pfile.write_text(str(tmp_path / "syed-oauth-token") + "\n")
+    r = httpx.post(server + "/api/set-group-pointer", headers=H(),
+                   json={"family": "irsyad", "clear": True}, timeout=10)
+    assert r.status_code == 200 and r.json()["cleared"] is True
+    assert not pfile.exists()
+
+
+def test_set_group_pointer_clear_is_idempotent(server, repo_root):
+    """Clearing an already-absent pin is a clean 200 (rm-reversible, no error)."""
+    r = httpx.post(server + "/api/set-group-pointer", headers=H(),
+                   json={"family": "nope", "clear": True}, timeout=10)
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+
+def test_set_group_pointer_unknown_token_400_fail_closed(server, repo_root, tmp_path):
+    """gazzabyte / any unknown token -> 400, NO pointer written (fail-closed)."""
+    _kf, presolve = _fake_token(tmp_path, "syed")   # only 'syed' resolves
+    with presolve:
+        r = httpx.post(server + "/api/set-group-pointer", headers=H(),
+                       json={"family": "irsyad", "token_name": "gazzabyte"}, timeout=10)
+    assert r.status_code == 400
+    assert not (repo_root / ".group_default_token.irsyad").exists()
+
+
+def test_set_group_pointer_bad_family_400(server, repo_root):
+    """A family with a path separator (or bad charset) is rejected before any write."""
+    r = httpx.post(server + "/api/set-group-pointer", headers=H(),
+                   json={"family": "../evil", "token_name": "syed"}, timeout=10)
+    assert r.status_code == 400
+
+
+def test_set_group_pointer_requires_auth(server):
+    r = httpx.post(server + "/api/set-group-pointer",
+                   json={"family": "irsyad", "token_name": "syed"}, timeout=5)
+    assert r.status_code == 401
+
+
+def test_set_group_pointer_audits_pin_and_unpin(server, repo_root, tmp_path):
+    """Both a pin AND an unpin leave an attributable audit row (mirrors set-pointer)."""
+    kf, presolve = _fake_token(tmp_path, "syed")
+    with patch.object(console_app.auth, "audit") as maudit:
+        with presolve:
+            httpx.post(server + "/api/set-group-pointer", headers=H(),
+                       json={"family": "irsyad", "token_name": "syed"}, timeout=10)
+        httpx.post(server + "/api/set-group-pointer", headers=H(),
+                   json={"family": "irsyad", "clear": True}, timeout=10)
+    endpoints = [c.args[1] for c in maudit.call_args_list]
+    assert any(e.startswith("/api/set-group-pointer:irsyad:syed") for e in endpoints)
+    assert any(e.startswith("/api/set-group-pointer:irsyad:clear") for e in endpoints)
+
+
+# --- GAP-B: /api/switch-group PERSISTS the group pointer ----------------------
+
+def test_switch_group_persists_group_pointer(server, repo_root, monkeypatch):
+    """A REAL (non-dry) group switch ALSO writes .group_default_token.<family> so
+    the family stays pinned across relaunches (the fix for 'ran musa2 but pinned to
+    a musa pointer')."""
+    console_app._SWITCH_LAST_RUN.clear()
+    console_app._SWITCH_INFLIGHT.clear()
+    monkeypatch.setattr(console_app, "_SWITCH_COOLDOWN_S", 0.0)
+    rows = [_row("irsyad-coord"), _row("irsyad-prog1")]
+    ok_res = MagicMock(returncode=0, stdout="switched to syed\n", stderr="")
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run", return_value=ok_res):
+        r = httpx.post(server + "/api/switch-group", headers=H(),
+                       json={"family": "irsyad", "token_name": "syed", "dry_run": False},
+                       timeout=10)
+    assert r.status_code == 200
+    assert r.json()["group_pinned"] == "irsyad"
+    pfile = repo_root / ".group_default_token.irsyad"
+    assert pfile.exists()
+    assert pfile.read_text().strip() == "/fake/syed-oauth-token"
+
+
+def test_switch_group_dry_run_does_not_persist(server, repo_root):
+    """A DRY-RUN group switch NEVER writes the pointer (nothing is real yet)."""
+    rows = [_row("irsyad-coord")]
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run"):
+        r = httpx.post(server + "/api/switch-group", headers=H(),
+                       json={"family": "irsyad", "token_name": "syed"}, timeout=10)
+    assert r.json()["group_pinned"] is None
+    assert not (repo_root / ".group_default_token.irsyad").exists()
+
+
+def test_switch_all_does_not_persist_group_pointer(server, repo_root, monkeypatch):
+    """switch-ALL is fleet-wide, not a family pin — it must NOT write a group file."""
+    console_app._SWITCH_LAST_RUN.clear()
+    console_app._SWITCH_INFLIGHT.clear()
+    monkeypatch.setattr(console_app, "_SWITCH_COOLDOWN_S", 0.0)
+    rows = [_row("irsyad-coord")]
+    ok_res = MagicMock(returncode=0, stdout="switched\n", stderr="")
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run", return_value=ok_res):
+        r = httpx.post(server + "/api/switch-all", headers=H(),
+                       json={"token_name": "syed", "dry_run": False}, timeout=10)
+    assert r.json().get("group_pinned") is None
+    assert not list(repo_root.glob(".group_default_token.*"))
+
+
+# --- GAP-B item 7: BREAK_GLASS only on a genuine gate-bypass (--force) ---------
+
+def _switch_env_of(mock_run):
+    """The env dict passed to switch_lane_token.sh in the (last) subprocess call."""
+    return mock_run.call_args.kwargs["env"]
+
+
+def _switch_argv_of(mock_run):
+    return mock_run.call_args.args[0]
+
+
+def test_switch_token_normal_is_not_break_glass(server, monkeypatch, tmp_path):
+    """A normal single switch stamps BREAK_GLASS=0 (routine, P3 audit) and passes
+    NO --force — it is not a gate-bypass (op#12486 f/u)."""
+    console_app._SWITCH_LAST_RUN.clear()
+    console_app._SWITCH_INFLIGHT.clear()
+    monkeypatch.setattr(console_app, "_SWITCH_COOLDOWN_S", 0.0)
+    kf = tmp_path / "syed-oauth-token"
+    kf.write_text("SECRET\n")
+    ok_res = MagicMock(returncode=0, stdout="switched\n", stderr="")
+    with patch.object(console_app, "_resolve_lane_token_file", return_value=kf), \
+         patch.object(console_app, "_lane_token_files", return_value={"syed": kf}), \
+         patch("subprocess.run", return_value=ok_res) as mock_run:
+        r = httpx.post(server + "/api/switch-token", headers=H(),
+                       json={"lane": "irsyad-coord", "token_name": "syed"}, timeout=10)
+    assert r.status_code == 200
+    assert _switch_env_of(mock_run)["BREAK_GLASS"] == "0"
+    assert "--force" not in _switch_argv_of(mock_run)
+
+
+def test_switch_token_force_is_break_glass(server, monkeypatch, tmp_path):
+    """{force:true} IS a genuine gate-bypass -> BREAK_GLASS=1 AND --force passed."""
+    console_app._SWITCH_LAST_RUN.clear()
+    console_app._SWITCH_INFLIGHT.clear()
+    monkeypatch.setattr(console_app, "_SWITCH_COOLDOWN_S", 0.0)
+    kf = tmp_path / "syed-oauth-token"
+    kf.write_text("SECRET\n")
+    ok_res = MagicMock(returncode=0, stdout="switched\n", stderr="")
+    with patch.object(console_app, "_resolve_lane_token_file", return_value=kf), \
+         patch.object(console_app, "_lane_token_files", return_value={"syed": kf}), \
+         patch("subprocess.run", return_value=ok_res) as mock_run:
+        r = httpx.post(server + "/api/switch-token", headers=H(),
+                       json={"lane": "irsyad-coord", "token_name": "syed", "force": True},
+                       timeout=10)
+    assert r.status_code == 200
+    assert _switch_env_of(mock_run)["BREAK_GLASS"] == "1"
+    assert "--force" in _switch_argv_of(mock_run)
+
+
+def test_bulk_switch_is_never_break_glass(server, monkeypatch):
+    """The bulk path never forces, so it is never a break-glass event -> the env
+    handed to switch_lane_token.sh carries BREAK_GLASS=0."""
+    console_app._SWITCH_LAST_RUN.clear()
+    console_app._SWITCH_INFLIGHT.clear()
+    monkeypatch.setattr(console_app, "_SWITCH_COOLDOWN_S", 0.0)
+    rows = [_row("cosem-tdu")]
+    ok_res = MagicMock(returncode=0, stdout="switched\n", stderr="")
+    p1, p2, p3 = _batch_patches(rows)
+    with p1, p2, p3, patch("subprocess.run", return_value=ok_res) as mock_run:
+        httpx.post(server + "/api/switch-all", headers=H(),
+                   json={"token_name": "syed", "dry_run": False}, timeout=10)
+    assert _switch_env_of(mock_run)["BREAK_GLASS"] == "0"
+
+
+# --- GAP-B item 6 (server side): token_group surfaced for a group-pinned lane --
+
+def test_enrich_marks_group_pinned_lane(monkeypatch, tmp_path):
+    """_enrich_token_pointers sets token_group=<family> for a fleet-default lane
+    whose family has a .group_default_token.<family> file (drives the lanes.js
+    'Token · <family> group' label)."""
+    root = tmp_path / "orch"
+    root.mkdir()
+    (root / ".group_default_token.irsyad").write_text("/fake/syed-oauth-token\n")
+    monkeypatch.setattr(console_app, "_REPO_ROOT", root)
+    payload = {"rows": [{"session": "irsyad-coord"}, {"session": "cosem-tdu"}]}
+    out = console_app._enrich_token_pointers(payload)
+    by = {r["session"]: r for r in out["rows"]}
+    assert by["irsyad-coord"]["token_group"] == "irsyad"     # pinned family
+    assert by["cosem-tdu"]["token_group"] is None            # unpinned family

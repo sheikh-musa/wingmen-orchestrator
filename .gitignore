@@ -36,6 +36,9 @@ playwright/.auth/
 .cai_default_token
 .fleet-health_default_token
 .quality_default_token
+# GAP-B per-GROUP token pointers (.group_default_token.<family>) — same secret
+# class (they point at OAuth key files); never track.
+.group_default_token.*
 *_default_token.was.pre
 *_default_token.musa.bak
 *_default_token.pre

@@ -204,3 +204,49 @@ def test_capture_pane_returns_none_on_exception():
     with patch.object(panes, "live_sessions", return_value=["orch"]):
         with patch("subprocess.run", side_effect=OSError("boom")):
             assert panes.capture_pane("orch") is None
+
+
+# ── GAP-B: expected-fp consults the SHARED per-group resolver ─────────────────
+# Proves the console "expected" account follows a per-group pin exactly as the
+# lane boot will — display==boot by construction.
+
+def _seed_orch(tmp_path):
+    keys = tmp_path / "keys"
+    keys.mkdir()
+
+    def make_key(name, tok):
+        p = keys / name
+        p.write_text(tok + "\n")
+        return str(p)
+
+    def ptr(name, target):
+        (tmp_path / name).write_text(target + "\n")
+
+    return make_key, ptr
+
+
+def _fp(tok):
+    import hashlib
+    return hashlib.sha256(tok.encode("utf-8")).hexdigest()[:12]
+
+
+def test_expected_fp_honors_group_pointer(tmp_path, monkeypatch):
+    make_key, ptr = _seed_orch(tmp_path)
+    fleet = make_key("musa-oauth-token", "MUSA")
+    grp = make_key("musa2-oauth-token", "MUSA2")
+    ptr(".lane_default_token", fleet)
+    ptr(".group_default_token.irsyad", grp)
+    monkeypatch.setattr(panes, "_ORCH_DIR", str(tmp_path))
+    # a lane in the pinned family shows the GROUP account
+    assert panes._expected_fp("irsyad-coord") == _fp("MUSA2")
+    # a lane outside the family shows the fleet default (unaffected)
+    assert panes._expected_fp("cosem-tdu") == _fp("MUSA")
+
+
+def test_expected_fp_backcompat_without_group_file(tmp_path, monkeypatch):
+    make_key, ptr = _seed_orch(tmp_path)
+    fleet = make_key("musa-oauth-token", "MUSA")
+    ptr(".lane_default_token", fleet)
+    monkeypatch.setattr(panes, "_ORCH_DIR", str(tmp_path))
+    assert panes._expected_fp("irsyad-coord") == _fp("MUSA")
+    assert panes._expected_fp("cosem-tdu") == _fp("MUSA")

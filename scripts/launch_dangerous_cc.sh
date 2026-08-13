@@ -116,18 +116,28 @@ set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
 # Syed) so his weekly pool is reserved for the console. Precedence — highest
 # wins:
 #   1. explicit CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE (launch_lane_as.sh <file>)
-#   2. $ORCH_DIR/.lane_default_token  — a POINTER file holding the PATH to a
-#      0600 token file (never the token itself, so no secret enters the repo)
-#   3. .env CLAUDE_CODE_OAUTH_TOKEN   — the fallback account
+#   2. per-GROUP pin  $ORCH_DIR/.group_default_token.<family>  (GAP-B, NEW)
+#   3. fleet default  $ORCH_DIR/.lane_default_token  — a POINTER file holding the
+#      PATH to a 0600 token file (never the token itself, so no secret enters git)
+#   4. .env CLAUDE_CODE_OAUTH_TOKEN   — the fallback account
 # ONLY launch_dangerous_cc.sh (lanes) reads this. The console (boot_nazim.sh) is
 # a separate launcher that never sources it, so the console STAYS on the .env
 # account by design — exactly the operator's "reserve my 10% for the console".
 # Fail-open: an unreadable/stale pointer path is skipped silently → .env account.
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ] && [ -r "$ORCH_DIR/.lane_default_token" ]; then
-    _LANE_DEFAULT_TOKFILE="$(tr -d '[:space:]' < "$ORCH_DIR/.lane_default_token")"
+#
+# GAP-B CORRECTNESS CRUX: tiers 2-3 are resolved by the ONE canonical Python
+# resolver (scripts.lib.lane_token_resolver) that the console's
+# panes._expected_fp ALSO calls — so the account this lane BOOTS on == the account
+# the console shows as "expected", by construction (no display-vs-boot divergence).
+# The tmux session name (e.g. irsyad-coord) selects the family; run outside tmux
+# (empty session) it falls straight to the fleet default — byte-identical to the
+# pre-GAP-B behaviour.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
+    _LANE_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+    _LANE_DEFAULT_TOKFILE="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.lane_token_resolver --session "$_LANE_SESSION" 2>/dev/null || true)"
     if [ -n "$_LANE_DEFAULT_TOKFILE" ] && [ -r "$_LANE_DEFAULT_TOKFILE" ]; then
         export CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE="$(cat "$_LANE_DEFAULT_TOKFILE")"
-        echo -e "\033[2m  lane-default OAuth account applied (pointer: .lane_default_token → ${_LANE_DEFAULT_TOKFILE})\033[0m" >&2
+        echo -e "\033[2m  lane-default OAuth account applied (session: ${_LANE_SESSION:-none}, pointer-resolved → ${_LANE_DEFAULT_TOKFILE})\033[0m" >&2
     fi
 fi
 # Per-lane OAuth token override (e.g. a donor/loaner account during a cap crunch).

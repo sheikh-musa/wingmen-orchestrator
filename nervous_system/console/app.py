@@ -37,6 +37,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from nervous_system.console import auth, db, docs, media, panes, pii
 from nervous_system.console.feed import Broadcaster, feeder
+# GAP-B: the shared family helper — the SAME one the token resolver uses to decide
+# which .group_default_token.<family> governs a lane.
+from scripts.lib.lane_token_resolver import family_of as _family_of
 
 logger = logging.getLogger("wingmen.console.app")
 
@@ -548,6 +551,15 @@ def _enrich_token_pointers(payload: dict) -> dict:
         r["token_pointer"] = ptr
         r["token_pointer_name"] = _token_name_for_fp(
             _fp_of_token_file(_read_pointer_target(ptr)) if ptr and _read_pointer_target(ptr) else None)
+        # GAP-B: a worker lane (fleet-default pointer) governed by a per-GROUP pin
+        # is surfaced as `token_group` (the family) so /lanes can label its tier
+        # "Token · <family> group" instead of "Token · all lanes". Only set when a
+        # .group_default_token.<family> file actually exists for this lane's family.
+        r["token_group"] = None
+        if ptr == ".lane_default_token":
+            fam = _family_of(sess or "")
+            if fam and (_REPO_ROOT / (".group_default_token.%s" % fam)).exists():
+                r["token_group"] = fam
         r["model_settable"] = (sess not in _MODEL_ENV_BODIES) and not remote
         r["model_pointer"] = _read_model_pointer(sess)
     payload["registry"] = {"tokens": _token_registry(), "models": list(_MODEL_ALLOWLIST)}
@@ -1257,7 +1269,8 @@ def _make_handler(feedloop: "_FeedLoop"):
             path = parsed.path
             if path not in ("/api/reset", "/api/backlog", "/api/switch-token",
                             "/api/switch-group", "/api/switch-all",
-                            "/api/set-pointer", "/api/add-token", "/api/apply-dry-run",
+                            "/api/set-pointer", "/api/set-group-pointer",
+                            "/api/add-token", "/api/apply-dry-run",
                             "/api/apply-armed", "/api/apply-queue-cancel"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
@@ -1284,6 +1297,12 @@ def _make_handler(feedloop: "_FeedLoop"):
             # model is allowlist-validated BEFORE write.
             if path == "/api/set-pointer":
                 return self._handle_set_pointer()
+            # GAP-B: pin/unpin a lane-FAMILY's token default (.group_default_token
+            # .<family>) — reversible (clear = rm), NO relaunch, NO live billing
+            # change. Same forbidden-fp/gazzabyte fail-closed guard + attributable
+            # audit as /api/set-pointer.
+            if path == "/api/set-group-pointer":
+                return self._handle_set_group_pointer()
             # Operator swipe on a "Your asks" card (op 2026-08-02): drop (left) /
             # prioritise (right). Mutates operator_backlog via the vetted
             # scripts/backlog_swipe.py — the console DB session is read-only, same
@@ -1689,6 +1708,64 @@ def _make_handler(feedloop: "_FeedLoop"):
                 "note": "default set — applies on the body's NEXT relaunch (no relaunch now)",
             })
 
+        def _handle_set_group_pointer(self):
+            """POST /api/set-group-pointer {family, token_name} | {family, clear:true}
+            Pin/unpin a lane-FAMILY's token default WITHOUT any relaunch (GAP-B).
+            Writes/removes $ORCH_DIR/.group_default_token.<family> — the per-GROUP
+            tier the shared resolver honors ABOVE the fleet default, so every lane in
+            the family boots on the pinned account on its next relaunch (and the
+            console's "expected" reflects it immediately, same resolver).
+
+            REVERSIBLE (clear = rm), NO relaunch, NO live billing change. Carries the
+            SAME fail-closed guards as /api/set-pointer's token branch: gazzabyte /
+            forbidden tokens can never be selected (_resolve_registry_token +
+            _FORBIDDEN_TOKEN_BASENAMES + the fp guard), family is charset-restricted
+            (no path escape). Audit sink = auth.audit (the console DB session is
+            read-only), one row on every pin AND unpin — mirrors _handle_set_pointer."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                p = json.loads(raw or b"{}")
+                family = (p.get("family") or "").strip()
+                clear = bool(p.get("clear"))
+                token_name = (p.get("token_name") or "").strip()
+            except Exception:  # noqa: BLE001
+                auth.audit(self._client(), "/api/set-group-pointer", "400")
+                return self._json(400, {"error": "bad request"})
+            # Validate family against the session-name regex (no path escape: no '/'
+            # in the charset, so the family can only ever name a file in $ORCH_DIR).
+            if not _SESSION_RE.match(family):
+                auth.audit(self._client(), "/api/set-group-pointer", "400")
+                return self._json(400, {"error": "bad family"})
+            pfile = _REPO_ROOT / (".group_default_token.%s" % family)
+            try:
+                if clear:
+                    if pfile.exists():
+                        pfile.unlink()
+                    auth.audit(self._client(), f"/api/set-group-pointer:{family}:clear", "200")
+                    logger.info("set-group-pointer CLEAR: %s (%s)", family, pfile.name)
+                    return self._json(200, {
+                        "ok": True, "family": family, "cleared": True,
+                        "note": "group unpinned — lanes fall back to the fleet default on next relaunch",
+                    })
+                tname = token_name.lower()
+                tokfile = _resolve_registry_token(tname)
+                if tokfile is None or tokfile.name in _FORBIDDEN_TOKEN_BASENAMES:
+                    auth.audit(self._client(), f"/api/set-group-pointer:{family}", "400")
+                    return self._json(400, {"error": "unknown/unavailable token",
+                                            "allowed": [e["name"] for e in _token_registry()]})
+                pfile.write_text(str(tokfile) + "\n", encoding="utf-8")
+                auth.audit(self._client(), f"/api/set-group-pointer:{family}:{tname}", "200")
+                logger.info("set-group-pointer: %s -> %s (%s)", family, tname, pfile.name)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("set-group-pointer failed: %s", e)
+                auth.audit(self._client(), f"/api/set-group-pointer:{family}", "500")
+                return self._json(500, {"error": "write failed"})
+            return self._json(200, {
+                "ok": True, "family": family, "token_name": tname, "cleared": False,
+                "note": "group default set — applies to the family's lanes on their NEXT relaunch (no relaunch now)",
+            })
+
         def _handle_switch_token(self):
             """POST /api/switch-token {lane, token_name} — re-token a lane onto a
             different terms-clean Claude Max account. Kills + relaunches the lane's
@@ -1700,13 +1777,23 @@ def _make_handler(feedloop: "_FeedLoop"):
             which EXCLUDES the forbidden gazzabyte consumer token (CAI-729); the
             script re-checks the basename independently. lane is validated against a
             strict charset (it is passed as argv, never a shell string, so this is
-            defense in depth, not the only barrier)."""
+            defense in depth, not the only barrier).
+
+            BREAK-GLASS (op#12486 f/u): the ONLY thing in switch_lane_token.sh that
+            bypasses a switch-refusal gate (BUSY / running background shell /
+            unsubmitted composer draft) is --force. So BREAK_GLASS — the flag that
+            escalates the audit to a P1 alert to console+cai — is set IFF this call
+            is a genuine gate-bypass, i.e. {force:true} is requested (which passes
+            --force). A normal switch respects the gates (busy-refuses rc5) and is a
+            routine, quietly-audited (P3) operation, NOT a break-glass event."""
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length > 0 else b"{}"
                 payload = json.loads(raw or b"{}")
                 lane = (payload.get("lane") or "").strip()
                 token_name = (payload.get("token_name") or "").strip().lower()
+                # A genuine gate-bypass: force past the BUSY/shell/draft guard.
+                force = payload.get("force") is True
             except Exception:                                        # noqa: BLE001
                 auth.audit(self._client(), "/api/switch-token", "400")
                 return self._json(400, {"error": "bad request"})
@@ -1746,14 +1833,19 @@ def _make_handler(feedloop: "_FeedLoop"):
                                             "lane": lane, "retry_after_s": retry_after})
                 _SWITCH_INFLIGHT.add(lane)
             try:
-                # BREAK-GLASS marker + actor (cai CAI-RESP-747 conds 2/3): this is
-                # the emergency re-token path, so the script emits a P1 break-glass
-                # alert + enriched audit row (who/lane/from->to fp) on completion.
-                _env = {**os.environ, "BREAK_GLASS": "1", "ACTOR": self._client() or "operator"}
+                # BREAK_GLASS is set IFF this is a genuine gate-bypass (--force past
+                # the BUSY/shell/draft guard). A routine switch respects the gates,
+                # so it is a quietly-audited (P3) op, not a P1 break-glass alert
+                # (op#12486 f/u — previously stamped "1" on EVERY switch). ACTOR is
+                # always stamped for attribution regardless.
+                _env = {**os.environ, "BREAK_GLASS": "1" if force else "0",
+                        "ACTOR": self._client() or "operator"}
+                _cmd = ["bash", str(_REPO_ROOT / "scripts" / "switch_lane_token.sh")]
+                if force:
+                    _cmd.append("--force")   # the actual gate-bypass
+                _cmd += [lane, str(tokfile)]
                 r = subprocess.run(
-                    ["bash", str(_REPO_ROOT / "scripts" / "switch_lane_token.sh"),
-                     lane, str(tokfile)],
-                    capture_output=True, text=True, timeout=150, env=_env,
+                    _cmd, capture_output=True, text=True, timeout=150, env=_env,
                 )
                 ok = r.returncode == 0
                 tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-8:])
@@ -1798,9 +1890,12 @@ def _make_handler(feedloop: "_FeedLoop"):
                     return "skipped:busy", f"switched moments ago — cooldown {retry_after}s"
                 _SWITCH_INFLIGHT.add(lane)
             try:
-                # BREAK-GLASS marker + actor (parity with /api/switch-token): the
-                # script emits its P1 break-glass alert + enriched audit per lane.
-                _env = {**os.environ, "BREAK_GLASS": "1", "ACTOR": self._client() or "operator"}
+                # BREAK_GLASS=0: the bulk path NEVER passes --force (a BUSY lane is
+                # SKIPPED, rc5, never clobbered), so it can never be a gate-bypass —
+                # it is routine, quietly-audited (P3) per lane, not a P1 break-glass
+                # alert (op#12486 f/u — previously stamped "1" here too). ACTOR is
+                # still stamped for attribution.
+                _env = {**os.environ, "BREAK_GLASS": "0", "ACTOR": self._client() or "operator"}
                 r = subprocess.run(
                     ["bash", str(_REPO_ROOT / "scripts" / "switch_lane_token.sh"),
                      lane, str(tokfile)],
@@ -1948,12 +2043,32 @@ def _make_handler(feedloop: "_FeedLoop"):
             skipped = sum(1 for t in targets if t["action"].startswith("skipped:"))
             failed = sum(1 for t in targets if t["action"] == "failed")
             ok = failed == 0
+            # GAP-B PERSIST: on a REAL (non-dry) GROUP switch, ALSO write the
+            # per-group pointer (.group_default_token.<family>) so the family STAYS
+            # pinned across relaunches. Without this the switch only re-tokens the
+            # LIVE processes; the next relaunch would fall back to the fleet default
+            # (exactly the bug that left irsyad running musa2 while pinned to a musa
+            # pointer). Reversible (set-group-pointer clear / rm). A persist failure
+            # is LOUD (audit 500 + warn) but never undoes the completed switches.
+            group_pinned = None
+            if scope == "group" and not dry_run:
+                try:
+                    pfile = _REPO_ROOT / (".group_default_token.%s" % family)
+                    pfile.write_text(str(tokfile) + "\n", encoding="utf-8")
+                    group_pinned = family
+                    auth.audit(self._client(), f"{ep}:{token_name}:persist", "200")
+                    logger.info("console %s PERSISTED group pointer: %s -> %s (%s)",
+                                ep, family, token_name, pfile.name)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("console %s: group pointer persist FAILED (switches "
+                                   "already applied): %s", ep, e)
+                    auth.audit(self._client(), f"{ep}:{token_name}:persist", "500")
             auth.audit(self._client(), f"{ep}:{token_name}:{mode}", "200" if ok else "500")
             logger.info("console %s OUTCOME: token=%s dry=%s switched=%d skipped=%d failed=%d",
                         ep, token_name, dry_run, switched, skipped, failed)
             return self._json(200 if ok else 500, {
                 "ok": ok, "dry_run": dry_run, "token_name": token_name,
-                "targets": targets,
+                "targets": targets, "group_pinned": group_pinned,
                 "summary": {"switched": switched, "skipped": skipped, "failed": failed},
             })
 
