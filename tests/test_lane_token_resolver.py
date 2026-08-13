@@ -215,7 +215,7 @@ def test_cli_shim_matches_python_api(orch):
     grp = make_key("musa2-oauth-token", "MUSA2")
     ptr(".lane_default_token", fleet)
     ptr(".group_default_token.irsyad", grp)
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(R.__file__)))
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(R.__file__))))
     for session, expect in [("irsyad-coord", grp), ("cosem-tdu", fleet),
                             ("cai", None)]:
         out = subprocess.run(
@@ -231,7 +231,7 @@ def test_cli_shim_matches_python_api(orch):
 def test_cli_shim_prints_nothing_for_none(orch):
     """A None resolution prints an EMPTY stdout (so `$(...)` is empty in bash)."""
     orch_dir, _make_key, _ptr = orch
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(R.__file__)))
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(R.__file__))))
     out = subprocess.run(
         [sys.executable, "-m", "scripts.lib.lane_token_resolver",
          "--session", "irsyad", "--orch-dir", orch_dir],
