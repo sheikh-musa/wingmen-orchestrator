@@ -69,6 +69,12 @@
     margin:22px 2px 11px;display:flex;align-items:center;gap:9px}
   .pin::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--hair),transparent)}
   .pin.attn{color:var(--amber)}
+  /* group heading (op#12600): family name + the group's current token badge */
+  .pin.grp{color:var(--dim)}
+  .grptok{font:10px/1 var(--mono);font-weight:700;padding:4px 8px;border-radius:999px;
+    background:var(--jade-soft);color:var(--jade);border:1px solid rgba(55,211,154,.25);
+    text-transform:none;letter-spacing:0;white-space:nowrap;flex:none}
+  .grptok.mixed{background:var(--amber-soft);color:var(--amber);border-color:rgba(246,196,83,.3)}
 
   /* ── lane row: collapsed spine + tap-to-open drawer ── */
   .lane{position:relative;margin-bottom:9px;border-radius:var(--r);background:var(--surface);
@@ -209,7 +215,7 @@
     <div class="top">
       <a class="back" href="/fleet">‹ Fleet</a>
       <h1>Lane manager</h1>
-      <span id="build" class="build"><span class="d"></span>fc-v42</span>
+      <span id="build" class="build"><span class="d"></span>fc-v43</span>
       <button id="refresh" class="refresh">↻</button>
     </div>
     <div id="sub" class="sub">Loading ground-truth…</div>

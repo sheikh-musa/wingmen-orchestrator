@@ -371,6 +371,32 @@
     out.innerHTML = head + items;
   }
 
+  // ── Group the main lane list (op#12600) ─────────────────────────────────────
+  // Family = the live session prefix up to its first "-" (same convention as the
+  // switch-group picker's familiesFromRows), so the display groups the way the
+  // operator already switches: irsyad/coord/prog1/prog2/import -> "irsyad".
+  function famKey(r) { return String((r && r.session) || "").split("-")[0] || "?"; }
+
+  // The GROUP's current token, shown at the group level. Consensus across the
+  // family's VERIFIED lanes: one shared account -> that name (e.g. "musa2"); a
+  // split -> "mixed (…)" SURFACED with the per-account counts, never hidden
+  // (op#12600 — the operator explicitly asked that ambiguity be visible, e.g. the
+  // irsyad group with import still on syed reads "mixed (musa2·4, syed·1)").
+  function groupToken(rows) {
+    var accts = {};
+    (rows || []).forEach(function (r) {
+      if (!r || r.remote) return;                 // remote (VPS) bodies are set on their own host
+      if (!r.verified || r.metered) return;       // only a verified lane has a trustworthy account
+      var a = r.account || "";
+      if (a) accts[a] = (accts[a] || 0) + 1;
+    });
+    var names = Object.keys(accts);
+    if (!names.length) return { label: "", mixed: false };
+    if (names.length === 1) return { label: names[0], mixed: false };
+    names.sort(function (a, b) { return accts[b] - accts[a]; });   // dominant account first
+    return { label: "mixed (" + names.map(function (n) { return n + "·" + accts[n]; }).join(", ") + ")", mixed: true };
+  }
+
   function render(d) {
     registry = (d && d.registry) || { tokens: [], models: [] };
     var rows = (d && d.rows) || [];
@@ -382,8 +408,31 @@
     var attn = rows.filter(isAttn);
     var rest = rows.filter(function (r) { return !isAttn(r); });
     var html = "";
+    // Attention-first is preserved: metered / unverified / off-account lanes stay
+    // pinned FLAT at the top so a flagged lane never hides inside a group block.
     if (attn.length) html += '<div class="pin attn">Needs attention</div>' + attn.map(rowHtml).join("");
-    if (rest.length) html += '<div class="pin">All lanes · ' + rest.length + '</div>' + rest.map(rowHtml).join("");
+    // The rest of the fleet, organized BY GROUP (op#12600) mirroring the switch
+    // picker: each multi-lane group heads its own block showing the group's token
+    // (mixed surfaced); single lanes bucket under one heading (each row already
+    // shows its own account in-line).
+    if (rest.length) {
+      var byFam = {};
+      rest.forEach(function (r) { var k = famKey(r); (byFam[k] = byFam[k] || []).push(r); });
+      var keys = Object.keys(byFam);
+      var groupKeys = keys.filter(function (k) { return byFam[k].length > 1; }).sort();
+      var singleKeys = keys.filter(function (k) { return byFam[k].length === 1; }).sort();
+      groupKeys.forEach(function (k) {
+        var gt = groupToken(byFam[k]);
+        var badge = gt.label
+          ? '<span class="grptok' + (gt.mixed ? " mixed" : "") + '">' + esc(gt.label) + '</span>' : '';
+        html += '<div class="pin grp"><span>' + esc(k) + ' · ' + byFam[k].length + '</span>' + badge + '</div>' +
+                byFam[k].map(rowHtml).join("");
+      });
+      if (singleKeys.length) {
+        html += '<div class="pin">Single lanes · ' + singleKeys.length + '</div>' +
+                singleKeys.map(function (k) { return rowHtml(byFam[k][0]); }).join("");
+      }
+    }
     $("rows").innerHTML = rows.length ? html : '<div class="empty">No bodies found.</div>';
     var bits = ['<span><b class="good">' + (s.verified || 0) + '/' + (s.total || rows.length) + '</b> verified</span>'];
     if (s.mismatched) bits.push('<span><b class="bad">' + s.mismatched + '</b> off-account</span>');
