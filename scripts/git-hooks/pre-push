@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# pre-push — blocks pushing console/static changes without a cc-quality review
+# for the CURRENT console content (op#12457, same gate as deploy_console.sh at
+# push time). Belt to the deploy gate: no unreviewed console reaches the repo.
+set -uo pipefail
+ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
+STATIC=nervous_system/console/static
+# Only enforce if the last commit touched console static (the common ship flow).
+if git diff --quiet HEAD~1 HEAD -- "$STATIC" 2>/dev/null; then exit 0; fi
+HASH=$(cat "$STATIC"/fleet.html "$STATIC"/fleet.js "$STATIC"/lanes.html "$STATIC"/lanes.js "$STATIC"/sw.js 2>/dev/null | shasum -a 256 | cut -c1-16)
+REVIEW="reports/console-deploy/$HASH/cc-quality-review.md"
+if [ ! -s "$REVIEW" ]; then
+  echo "" >&2
+  echo "❌ pre-push BLOCKED — console/static changed but no cc-quality review for content $HASH." >&2
+  echo "   The design-verification gate is enforced in code (op#12457). Do:" >&2
+  echo "     scripts/deploy_console.sh   # renders + tells you exactly what to review" >&2
+  echo "   eyeball the renders, save the cc-quality review to $REVIEW, then push." >&2
+  echo "   (Override ONLY in a genuine emergency: git push --no-verify — and say so.)" >&2
+  exit 1
+fi
+exit 0
