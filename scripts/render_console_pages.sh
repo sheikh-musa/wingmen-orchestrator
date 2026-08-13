@@ -46,9 +46,13 @@ html = html.replace(f'<script {localsrc}>', stub + f'<script {localsrc}>')
 print(str(out / f"_{page}-harness.html"))
 PY
   local harness="$OUT/_${page}-harness.html"
-  "$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 \
-    --window-size=474,2400 --virtual-time-budget=4000 \
-    --screenshot="$OUT/${page}.png" "file://$harness" 2>/dev/null
+  # REAL device emulation via Playwright (iPhone 13) — not a desktop shell
+  # (op#12477). Closes the gate blind spot that let the Lane-manager button ship
+  # invisible on a real phone while a --window-size render looked fine.
+  "$HOME/wingmen/orchestrator/.venv/bin/python3" \
+    "$HOME/wingmen/orchestrator/scripts/render_console_playwright.py" \
+    "$harness" "$OUT/${page}.png" "iPhone 13" 2>&1 || {
+      echo "render: playwright render failed for ${page}" >&2; return 1; }
   [ -s "$OUT/${page}.png" ] || { echo "render: ${page}.png not produced" >&2; return 1; }
   echo "  rendered ${page} -> $OUT/${page}.png ($(stat -f%z "$OUT/${page}.png") bytes)"
 }

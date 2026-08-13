@@ -142,7 +142,7 @@
      primary action (operator: "too subtle") — indigo-lit fill, clear border,
      centered label + arrow, full-tap-target height. Aligned to the section gutter. */
   .laneslink { display:flex; align-items:center; justify-content:center; gap:9px;
-    margin:14px 16px 6px; padding:16px 18px; border-radius:14px;
+    margin:12px 0 2px; padding:15px 18px; border-radius:12px;
     background: linear-gradient(180deg, rgba(138,166,255,.18), rgba(138,166,255,.08));
     border:1px solid rgba(138,166,255,.44); color:var(--accent);
     font:700 15.5px/1 var(--sans); letter-spacing:-.01em; text-decoration:none; }
@@ -401,12 +401,11 @@
          when there is no reading. Coordinators are NOT lanes (own cards) so they're
          excluded, same as the per-card gauges. -->
     <div id="topBloat" class="topbloat"></div>
-    <div id="strip" class="strip"></div>
+    <!-- Lane manager: primary nav — kept INSIDE the sticky pulse so it can never
+         scroll under the header and is always visible (op#12475). The status chips
+         (working/idle/flagged/offline) were removed per operator: noise up top. -->
+    <a class="laneslink" href="/lanes">🔑 Lane manager →</a>
   </div>
-
-  <!-- Token/model ground-truth moved to its OWN mobile-first page /lanes (op#10706
-       B). A compact link chip stays here so the operator can jump to the tool. -->
-  <a class="laneslink" href="/lanes">🔑 Lane manager →</a>
 
   <section>
     <div class="sec-h needs"><h2>Needs you</h2><span id="needsCount" class="count"></span></div>

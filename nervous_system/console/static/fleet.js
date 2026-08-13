@@ -450,7 +450,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = 'fc-v40';
+  var APP_BUILD = 'fc-v41';
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -573,11 +573,8 @@
     $("pulseBig").textContent = needs > 0
       ? (needs === 1 ? "1 thing needs you" : needs + " things need you")
       : "All clear";
-    $("strip").innerHTML =
-      '<span class="chip"><span class="d good"></span><b>' + (p.working||0) + '</b> working</span>' +
-      '<span class="chip"><span class="d dim"></span><b>' + (p.idle||0) + '</b> idle</span>' +
-      (p.flagged ? '<span class="chip"><span class="d bad"></span><b>' + p.flagged + '</b> flagged</span>' : '') +
-      (p.offline ? '<span class="chip"><span class="d bad"></span><b>' + p.offline + '</b> offline</span>' : '');
+    // Status chips (working/idle/flagged/offline) removed per operator (op#12475) —
+    // noise up top. The #strip element is gone from fleet.html; guard defensively.
   }
 
   // Glance banner (operator ask, extended to TOP 3): the three most context-
