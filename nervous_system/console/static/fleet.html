@@ -16,10 +16,11 @@
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
 <style>
   :root {
-    /* Calm Command palette (fc-v38 ihsan redesign). Jade = all-clear; warm tones
-       only where attention is due. SF Pro carries structure; mono is data-only. */
+    /* Calm Command palette (fc-v38 ihsan redesign, carried into the fc-v50
+       Command-Surface unification). Jade = all-clear; warm tones only where
+       attention is due. SF Pro carries structure; mono is data-only. */
     --bg: #090b10; --panel: #12161e; --panel-2: #171c26; --panel-3: #1d2430;
-    --line: rgba(255,255,255,.07);
+    --line: rgba(255,255,255,.07); --line-2: rgba(255,255,255,.10);
     --txt: #e8ebf1; --dim: #949cac; --faint: #5c6472;
     --accent: #8aa6ff; --good: #37d39a; --good-dim: #1f9e77;
     --warn: #f6c453; --bad: #fb7185;
@@ -27,10 +28,10 @@
     --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
     --shadow: 0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
   }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; overflow-x: hidden; }
   body {
-    margin: 0; color: var(--txt);
+    color: var(--txt);
     font: 15px/1.5 var(--sans); letter-spacing: -.01em; -webkit-font-smoothing: antialiased;
     background:
       radial-gradient(120% 60% at 50% -6%, rgba(55,211,154,.06), transparent 60%),
@@ -38,32 +39,20 @@
       linear-gradient(180deg, #0c0f16, var(--bg) 42%);
     background-attachment: fixed;
     -webkit-text-size-adjust: 100%;
-    /* NO body padding-top: the .pulse header already pins at the inset and
-       body::before fills the island strip — a body offset on TOP of that was a
-       DOUBLE inset (op fc-v39: header sat ~2x too far from the top). */
-    padding-bottom: calc(env(safe-area-inset-bottom) + 40px);
+    /* leave room for the resting dock so the last lane isn't hidden under it */
+    padding-bottom: calc(env(safe-area-inset-bottom) + 78px);
   }
   .wrap { max-width: 720px; margin: 0 auto; }
   a { color: var(--accent); text-decoration: none; }
 
-  /* pull-to-refresh — the WHOLE element is offset BELOW the notch via
-     `top: env(safe-area-inset-top)`, so its band + centered label can never
-     render under the notch. The earlier top:0 + padding-top + content-box
-     trick still clipped on a real iPhone (operator 2026-07-11): the label
-     centered across the padded box drifted back under the inset. Offsetting the
-     element's top removes that whole class of box-sizing ambiguity — on desktop
-     the inset is 0 so top:0 (unchanged); on iOS it starts exactly at the notch
-     edge. A backdrop strip (::before) fills the notch area with the panel bg so
-     the pull still reads as one solid sheet, not a floating band. */
+  /* pull-to-refresh — offset BELOW the notch via top:env(safe-area-inset-top).
+     Unchanged from the fc-v49 dashboard (operator-verified on a real iPhone). */
   #ptr { position: fixed; top: env(safe-area-inset-top); left: 0; right: 0; z-index: 60;
     display: flex; align-items: center; justify-content: center; gap: 8px;
     height: 0; overflow: hidden; pointer-events: none; background: var(--panel);
     color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px; white-space: nowrap; }
-  /* fill the notch strip above the band (only while pulling) so the sheet is
-     continuous; height 0 at rest keeps it invisible when not pulling. */
   #ptr::before { content: ""; position: fixed; top: 0; left: 0; right: 0;
-    height: env(safe-area-inset-top); background: var(--panel); z-index: 60;
-    display: none; }
+    height: env(safe-area-inset-top); background: var(--panel); z-index: 60; display: none; }
   #ptr.pulling::before, #ptr.refreshing::before { display: block; }
   #ptr #ptrTxt { white-space: nowrap; }
   #ptr .spin { display: inline-block; transition: transform .15s ease; }
@@ -72,397 +61,356 @@
   #ptr.refreshing .spin { animation: ptrspin .7s linear infinite; }
   @keyframes ptrspin { to { transform: rotate(360deg); } }
 
-  /* fixed backdrop filling the safe-area (notch/Dynamic Island) strip so the
-     sticky header below it never renders under the island and scrolled content
-     never peeks through above it (operator 2026-08-13: iOS island overlapped the
-     header). Desktop inset=0 -> zero-height, invisible. */
+  /* island-fill backdrop (unchanged) so the sticky header never renders under the notch. */
   body::before { content:""; position: fixed; top:0; left:0; right:0;
     height: env(safe-area-inset-top); background:#10151f; z-index: 6; pointer-events:none; }
-  /* PULSE — sticks BELOW the island (top offset by the inset), matching #ptr */
-  .pulse { position: sticky; top: env(safe-area-inset-top); z-index: 5; background: linear-gradient(180deg,#10151f,#0b0e14);
-    border-bottom: 1px solid var(--line); padding: 13px 16px 12px; }
-  /* brandrow: "Fleet ● live" on the left, the build badge on the right. The build
-     is a SIBLING of .brand now (not nested inside it) and never wraps, so the
-     'fc-vNN · <sha>' badge can't be squeezed/cut-off by the pool chips anymore
-     (op#12709: the chips moved to their own row below). */
-  .pulse .brandrow { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
-  .pulse .brand { font-size: 13px; font-weight: 600; letter-spacing:.3px; color: var(--dim);
-    white-space:nowrap; min-width:0; overflow:hidden; text-overflow:ellipsis; }
-  .pulse .brand .live { color: var(--good); } .pulse .brand .live.down { color: var(--bad); }
-  /* build badge — always-visible so the operator can SEE which build his device
-     is running (PWA-cache-loop fix). .stale (a newer build is deployed than the
-     one this cached bundle is) turns it amber until the one-shot reload lands. */
-  .pulse .build { margin-left:auto; flex:none; white-space:nowrap;
-    font:10px/1 var(--mono); letter-spacing:.3px; color:var(--dim); font-weight:400; }
-  .pulse .build.stale { color:var(--warn); }
-  /* weekly Max-pool usage (op#9770) — a full-width VERTICAL stack below the brand
-     row, one .poolrow per pool: the weekly-% pill + its pace advisory (op#12617).
-     Stacking (not the old 2+1 wrap) keeps all pools + pace legible on a phone. */
-  .poolusage { display:flex; flex-direction:column; gap:5px; margin-top:8px; }
-  .poolusage:empty { display:none; }
-  .poolrow { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
-    font:10.5px/1.4 var(--mono); letter-spacing:.2px; }
-  .poolchip { flex:none; font:10.5px/1.4 var(--mono); letter-spacing:.2px; padding:2px 7px; border-radius:999px;
-    background:rgba(255,255,255,.05); border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
-  .poolchip b { font-weight:700; }
-  .poolchip.good b { color:var(--good); } .poolchip.warn b { color:var(--warn); } .poolchip.bad b { color:var(--bad); }
-  .poolchip.bad { background:rgba(240,90,90,.12); border-color:rgba(251,113,133,.3); }
-  .poolchip.stale { color:var(--dim); opacity:.6; } .poolchip.stale b { color:var(--dim); }
-  /* pace advisory — MUTED/neutral (never a red alarm): pace + projected only say
-     "burning fast", they never gate. runway is the real risk signal, .warn (amber)
-     ONLY when the runway is shorter than the days left to reset. */
-  .pooladv { color:var(--faint); white-space:nowrap; }
-  .poolrun { color:var(--dim); white-space:nowrap; }
-  .poolrun.warn { color:var(--warn); }
-  /* Lane worklists — the per-lane drain view (lane_tasks) */
-  .qlane { margin-bottom:10px; }
-  .qlane-h { font:11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.6px;
-    color:var(--dim); margin:0 0 4px; }
-  .qlane-h .qn { color:var(--txt); font-weight:700; }
-  .qrow { display:flex; align-items:center; gap:8px; padding:5px 0;
-    border-bottom:1px solid var(--line); }
-  .qrow:last-child { border-bottom:none; }
-  .qtitle { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis;
-    white-space:nowrap; font-size:13px; color:var(--txt); }
-  .qchip { flex:none; font:10px/1.4 var(--mono); letter-spacing:.2px; padding:2px 7px;
-    border-radius:6px; background:rgba(255,255,255,.05); color:var(--dim); white-space:nowrap; }
-  .qchip.queued { color:var(--dim); }
-  .qchip.stale { color:var(--warn); background:rgba(240,180,41,.10); }
-  .qchip.work { color:var(--good); background:rgba(62,207,142,.12); font-weight:700; }
-  .qchip.wait { color:var(--warn); background:rgba(240,180,41,.14); font-weight:700; }
-  .qchip.over { color:var(--bad); background:rgba(255,107,107,.14); font-weight:700; }
-  .pulse .headline { display:flex; align-items:center; gap:11px; }
-  .pulse .orb { width:12px; height:12px; border-radius:50%; flex:none; background: var(--dim); }
-  .pulse.attn .orb { background: var(--warn); box-shadow:0 0 0 4px rgba(240,180,41,.16), 0 0 12px var(--warn); animation:breathe 2.4s ease-in-out infinite; }
-  .pulse.clear .orb { background: var(--good); box-shadow:0 0 0 4px rgba(62,207,142,.14), 0 0 10px var(--good); }
+
+  /* ── compact command strip — the ambient monitoring frame ── */
+  header.pulse { position: sticky; top: env(safe-area-inset-top); z-index: 20;
+    background: linear-gradient(180deg, rgba(16,21,31,.97), rgba(11,14,20,.82));
+    backdrop-filter: saturate(140%) blur(14px); -webkit-backdrop-filter: saturate(140%) blur(14px);
+    border-bottom: 1px solid var(--line); padding: 12px 16px 11px; }
+  .pulse .top { display: flex; align-items: center; gap: 10px; }
+  .pulse .orb { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--dim); }
+  .pulse.attn .orb { background: var(--warn); box-shadow: 0 0 0 4px rgba(240,180,41,.16), 0 0 12px var(--warn); animation: breathe 2.4s ease-in-out infinite; }
+  .pulse.clear .orb { background: var(--good); box-shadow: 0 0 0 4px rgba(62,207,142,.14), 0 0 10px var(--good); }
   @keyframes breathe { 0%,100%{opacity:.6} 50%{opacity:1} }
-  .pulse .big { font-size: 20px; font-weight: 700; letter-spacing:.2px; }
-  .pulse.attn .big { color: #ffd77a; } .pulse.clear .big { color: var(--good); }
-  /* Glance banner: the top-3 worst-offender context-bloat lanes. Each pct is
-     color-coded by ITS OWN green/amber/red level; the leading dot shows the worst
-     lane's level. Wraps on a narrow phone. Hidden until renderTopBloat adds .show. */
-  .topbloat { display:none; align-items:center; flex-wrap:wrap; gap:4px 7px; margin-top:10px;
-    font:12px/1.2 var(--mono); padding:6px 10px; border-radius:8px;
-    background: rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.06); }
-  .topbloat.show { display:flex; }
-  .topbloat .dot { width:8px; height:8px; border-radius:50%; flex:none; }
-  .topbloat .lbl { color:var(--dim); }
-  .topbloat .ent { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
-  .topbloat .who { color:var(--txt); font-weight:700; }
-  .topbloat .pct { font-weight:700; }
-  .topbloat .sep { color:var(--dim); }
+  .pulse .hl { font: 800 17px/1.1 var(--sans); letter-spacing: -.02em; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pulse.attn .hl { color: #ffd77a; } .pulse.clear .hl { color: var(--good); }
+  .pulse .live { flex: none; font: 10px/1 var(--mono); color: var(--good); white-space: nowrap; }
+  .pulse .live.down { color: var(--bad); }
+  /* build badge — always-visible so the operator SEES which build his device runs. */
+  .pulse .build { flex: none; white-space: nowrap; font: 9.5px/1 var(--mono); letter-spacing: .3px;
+    color: var(--faint); padding: 4px 8px; border-radius: 999px; background: var(--panel);
+    border: 1px solid var(--line); }
+  .pulse .build.stale { color: var(--warn); border-color: rgba(246,196,83,.3); }
+
+  /* 4-cell stat row — the whole fleet's shape, always above the fold. */
+  .stat { display: flex; gap: 5px; margin-top: 10px; }
+  .stat .s { flex: 1; min-width: 0; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 7px 6px; text-align: center; }
+  .stat .s .n { font: 800 17px/1 var(--sans); }
+  .stat .s .l { margin-top: 3px; font: 9px/1 var(--mono); color: var(--faint); text-transform: uppercase; letter-spacing: .06em; }
+  .stat .s.work .n { color: var(--good); } .stat .s.idle .n { color: var(--dim); }
+  .stat .s.off .n { color: var(--bad); } .stat .s.bloat .n { color: var(--warn); }
+
+  /* pool-usage chips (op#9770 / op#12617). Compact single-row chips + pace tooltip. */
+  .pools { display: flex; flex-direction: column; gap: 5px; margin-top: 9px; }
+  .pools:empty { display: none; }
+  .poolrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font: 10px/1.4 var(--mono); letter-spacing: .2px; }
+  .poolchip { flex: none; font: 10px/1.3 var(--mono); padding: 3px 8px; border-radius: 999px;
+    background: rgba(255,255,255,.04); border: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
+  .poolchip b { font-weight: 700; }
+  .poolchip.good b { color: var(--good); } .poolchip.warn b { color: var(--warn); } .poolchip.bad b { color: var(--bad); }
+  .poolchip.bad { background: rgba(251,113,133,.1); border-color: rgba(251,113,133,.28); }
+  .poolchip.stale { color: var(--dim); opacity: .6; } .poolchip.stale b { color: var(--dim); }
+  .pooladv { color: var(--faint); white-space: nowrap; }
+  .poolrun { color: var(--dim); white-space: nowrap; } .poolrun.warn { color: var(--warn); }
+
+  /* top-bloat glance (op#18542) — worst offenders across the whole fleet. */
+  .topbloat { display: none; align-items: center; flex-wrap: wrap; gap: 4px 7px; margin-top: 9px;
+    font: 11px/1.2 var(--mono); padding: 6px 10px; border-radius: 8px;
+    background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); }
+  .topbloat.show { display: flex; }
+  .topbloat .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .topbloat .lbl { color: var(--dim); }
+  .topbloat .ent { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .topbloat .who { color: var(--txt); font-weight: 700; } .topbloat .pct { font-weight: 700; }
+  .topbloat .sep { color: var(--dim); }
   .topbloat .dot.green{background:var(--good)} .topbloat .pct.green{color:var(--good)}
   .topbloat .dot.amber{background:var(--warn)} .topbloat .pct.amber{color:var(--warn)}
   .topbloat .dot.red{background:var(--bad)}    .topbloat .pct.red{color:var(--bad)}
-  /* Primary nav button to the dedicated /lanes tool (op#10706 B — tool moved off
-     inline). fc-v40: promoted from a thin text chip to an obviously-tappable
-     primary action (operator: "too subtle") — indigo-lit fill, clear border,
-     centered label + arrow, full-tap-target height. Aligned to the section gutter. */
-  .laneslink { display:flex; align-items:center; justify-content:center; gap:9px;
-    margin:12px 0 2px; padding:15px 18px; border-radius:12px;
-    background: linear-gradient(180deg, rgba(138,166,255,.18), rgba(138,166,255,.08));
-    border:1px solid rgba(138,166,255,.44); color:var(--accent);
-    font:700 15.5px/1 var(--sans); letter-spacing:-.01em; text-decoration:none; }
-  .laneslink:active { background: rgba(138,166,255,.26); transform:scale(.99); }
-  /* op#12838: pair the Lane manager button with an 'irsyad →' peer side-by-side so
-     the sticky area stays compact on mobile; both share the .laneslink style. */
-  .navrow { display:flex; gap:8px; margin:12px 0 2px; }
-  .navrow .laneslink { flex:1; margin:0; min-width:0; padding:15px 12px; gap:7px;
-    font-size:14.5px; white-space:nowrap; }
-  .strip { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
-  .chip { display:inline-flex; align-items:center; gap:6px; font:12px/1 var(--mono);
-    padding:7px 11px; border-radius:999px; background: var(--panel-2); border:1px solid var(--line); color: var(--dim); }
-  .chip b { color: var(--txt); font-weight:700; }
-  .chip .d { width:7px; height:7px; border-radius:50%; }
-  .chip .d.good{background:var(--good)} .chip .d.dim{background:var(--dim)} .chip .d.bad{background:var(--bad)}
 
+  /* ── pinned needs-you callouts (compact) ── */
+  .needstrip { padding: 11px 16px 2px; }
+  .needstrip:empty { display: none; }
+  .need { display: flex; gap: 9px; align-items: center; padding: 10px 12px; margin-bottom: 7px; border-radius: 12px;
+    background: linear-gradient(180deg, rgba(240,180,41,.09), rgba(240,180,41,.03)); border: 1px solid rgba(240,180,41,.34);
+    box-shadow: var(--shadow); }
+  .need.crit { background: linear-gradient(180deg, rgba(255,107,107,.1), rgba(255,107,107,.03)); border-color: rgba(255,107,107,.42); }
+  .need.handling { opacity: .72; border-color: var(--line); background: var(--panel-2); }
+  .need .m { min-width: 0; flex: 1; }
+  .need .who { font: 700 12.5px/1.2 var(--sans); }
+  .need .what { margin-top: 2px; font: 11.5px/1.3 var(--sans); color: var(--dim); overflow-wrap: anywhere; }
+  .need .tag { flex: none; font: 9px/1 var(--mono); font-weight: 700; text-transform: uppercase;
+    padding: 4px 7px; border-radius: 7px; background: rgba(246,196,83,.16); color: var(--warn); }
+  .need.crit .tag { background: rgba(255,107,107,.16); color: var(--bad); }
+  .need .age { flex: none; font: 10px/1 var(--mono); color: var(--faint); }
+  .need.tappable { cursor: pointer; } .need.tappable:active { transform: scale(.995); }
+  .need.handling .who { color: var(--dim); } .need.handling .what { color: var(--dim); }
+
+  /* ── LANE SPINE — the dense grid that IS the page ── */
+  .spinehead { display: flex; align-items: center; gap: 8px; padding: 14px 16px 8px; }
+  .spinehead h2 { font: 800 11px/1 var(--sans); text-transform: uppercase; letter-spacing: .12em; color: var(--dim); margin: 0; }
+  .spinehead .count { font: 10px/1 var(--mono); color: var(--faint); }
+  .spinehead .ms { margin-left: auto; font: 10px/1 var(--mono); color: var(--accent); padding: 7px 11px; border-radius: 999px;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.28); cursor: pointer; -webkit-appearance: none; }
+  .spinehead .ms.on { color: #06231a; background: linear-gradient(160deg, var(--accent), #5a6fd0); border-color: transparent; }
+  .grid { padding: 0 16px; }
+  .tile { display: flex; align-items: center; gap: 11px; padding: 11px 13px; margin-bottom: 7px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 13px; box-shadow: var(--shadow); border-left: 3px solid transparent;
+    cursor: pointer; position: relative; }
+  .tile.working { border-left-color: rgba(55,211,154,.55); }
+  .tile.bloat { border-left-color: var(--bad); background: linear-gradient(90deg, rgba(255,107,107,.05), var(--panel) 44%); }
+  .tile.idle { border-left-color: var(--faint); } .tile.offline { border-left-color: var(--bad); }
+  .tile.sel { border-color: rgba(138,166,255,.6); box-shadow: 0 0 0 1px rgba(138,166,255,.4), var(--shadow); }
+  .tile.picked { border-color: rgba(138,166,255,.75); background: linear-gradient(90deg, rgba(138,166,255,.12), var(--panel) 50%); }
+  /* context ring */
+  .ring { flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; position: relative; }
+  .ring svg { position: absolute; inset: 0; transform: rotate(-90deg); }
+  .ring .rp { font: 9px/1 var(--mono); font-weight: 700; }
+  .ring.green .rp { color: var(--good); } .ring.amber .rp { color: var(--warn); } .ring.red .rp { color: var(--bad); }
+  .ring .ck { position: absolute; inset: 0; display: grid; place-items: center; font: 700 15px/1 var(--sans); color: var(--accent); }
+  .tile .idw { min-width: 0; flex: 1; }
+  .tile .id { font: 700 13.5px/1 var(--sans); display: flex; align-items: center; gap: 7px; overflow-wrap: anywhere; }
+  .stdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .stdot.working { background: var(--good); box-shadow: 0 0 6px var(--good); } .stdot.idle { background: var(--dim); }
+  .stdot.offline { background: var(--bad); }
+  .tile .act { margin-top: 4px; font: 11px/1.25 var(--mono); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tile .badge { flex: none; font: 9px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 3px 6px; border-radius: 7px; color: var(--bad); background: rgba(255,107,107,.14); border: 1px solid rgba(255,107,107,.5); }
+  .tile .tok { flex: none; font: 9px/1 var(--mono); font-weight: 700; padding: 4px 7px; border-radius: 999px; white-space: nowrap; }
+  .tok.musa { color: #4ade80; background: rgba(55,211,154,.1); } .tok.musa2 { color: #7dd3fc; background: rgba(125,211,252,.1); }
+  .tok.syed { color: #fbbf24; background: rgba(246,196,83,.12); } .tok.other { color: #94a3b8; background: rgba(148,163,184,.12); }
+  .tile .chev { flex: none; color: var(--faint); font-size: 12px; }
+
+  .collapsed { display: flex; align-items: center; gap: 10px; padding: 12px 14px; margin: 0 16px 7px; background: var(--panel);
+    border: 1px dashed var(--line); border-radius: 13px; color: var(--dim); font-size: 13px; cursor: pointer; }
+  .collapsed b { color: var(--txt); white-space: nowrap; }
+
+  /* coordinators as a compact chip row (tap → sheet, peek + recycle where allowed) */
+  .coordrow { display: flex; gap: 6px; padding: 2px 16px 4px; flex-wrap: wrap; }
+  .cchip { flex: 1 1 30%; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-left: 2px solid var(--accent);
+    border-radius: 10px; padding: 8px 9px; cursor: pointer; }
+  .cchip .cn { font: 700 11px/1 var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cchip .cc { margin-top: 4px; font: 9px/1 var(--mono); font-weight: 700; color: var(--dim); }
+  .cchip .cc.green { color: var(--good); } .cchip .cc.amber { color: var(--warn); } .cchip .cc.red { color: var(--bad); }
+
+  /* backlog "Your asks" — collapsible + swipe (unchanged behaviour) */
   section { padding: 0 16px; }
-  .sec-h { display:flex; align-items:center; gap:8px; margin: 20px 2px 10px; }
-  .sec-h h2 { font-size: 11px; margin:0; font-weight:700; text-transform:uppercase; letter-spacing:.8px; color: var(--dim); }
-  .sec-h .count { font:11px var(--mono); color:var(--dim); }
-  .sec-h.needs h2 { color: var(--warn); }
+  .sec-h { display: flex; align-items: center; gap: 8px; margin: 18px 2px 10px; }
+  .sec-h h2 { font: 800 11px/1 var(--sans); text-transform: uppercase; letter-spacing: .12em; color: var(--faint); margin: 0; }
+  .sec-h .count { font: 11px var(--mono); color: var(--dim); }
   .empty { color: var(--dim); font-size: 13px; padding: 6px 2px 2px; }
+  .blhint { margin-left: auto; font: 10px/1 var(--mono); color: var(--dim); letter-spacing: .3px; white-space: nowrap; }
+  .bl-row { position: relative; margin-bottom: 8px; border-radius: 12px; overflow: hidden; }
+  .bl-row.dropping { opacity: .35; transition: opacity .18s ease; }
+  .bl-act { position: absolute; top: 0; bottom: 0; display: flex; align-items: center;
+    font: 11px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+  .bl-act.top  { left: 0;  width: 58%; justify-content: flex-start; padding-left: 16px;  color: var(--good); background: rgba(62,207,142,.14); }
+  .bl-act.drop { right: 0; width: 58%; justify-content: flex-end;   padding-right: 16px; color: var(--bad);  background: rgba(255,107,107,.14); }
+  .bl-row.armtop  .bl-act.top  { background: rgba(62,207,142,.32); }
+  .bl-row.armdrop .bl-act.drop { background: rgba(255,107,107,.32); }
+  .bl { position: relative; z-index: 2; display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+    touch-action: pan-y; transition: transform .18s ease; will-change: transform; cursor: grab; }
+  .bl:active { cursor: grabbing; }
+  .bl .bltag { flex: none; font: 10px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 4px 8px; border-radius: 8px; white-space: nowrap; margin-top: 1px; }
+  .bl .bltag.wait { color: var(--bad); background: rgba(255,107,107,.14); }
+  .bl .bltag.prog { color: var(--warn); background: rgba(240,180,41,.14); }
+  .bl .bltag.done { color: var(--good); background: rgba(62,207,142,.14); }
+  .bl .bltag.park { color: var(--dim); background: rgba(138,147,166,.14); }
+  .bl .blbody { min-width: 0; flex: 1; }
+  .bl .blask { font: 600 13.5px/1.35 var(--sans); overflow-wrap: anywhere; }
+  .bl .bldone { color: var(--good); font-size: 12px; margin-top: 4px; line-height: 1.35; overflow-wrap: anywhere;
+    background: rgba(62,207,142,.10); border-left: 2px solid rgba(62,207,142,.5); padding: 3px 8px; border-radius: 5px; }
+  .bl .blnote { color: var(--dim); font-size: 12.5px; margin-top: 3px; line-height: 1.4; overflow-wrap: anywhere; }
+  .bl .blop { color: var(--dim); font: 11px var(--mono); margin-top: 4px; }
 
-  /* NEEDS YOU */
-  .need { display:flex; gap:12px; align-items:flex-start; padding:13px 14px; margin-bottom:9px;
-    background: linear-gradient(180deg, rgba(240,180,41,.08), rgba(240,180,41,.03));
-    border:1px solid rgba(240,180,41,.32); border-radius:14px; }
-  .need.crit { background: linear-gradient(180deg, rgba(255,107,107,.09), rgba(255,107,107,.03)); border-color: rgba(255,107,107,.4); }
-  .need .ico { width:30px; height:30px; border-radius:9px; flex:none; display:flex; align-items:center; justify-content:center;
-    font-size:15px; background: rgba(240,180,41,.16); }
-  .need.crit .ico { background: rgba(255,107,107,.16); }
-  .need .m { min-width:0; flex:1; }
-  .need .k { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .need .who { font:12px var(--mono); color:var(--txt); font-weight:600; }
-  .need .tag { font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.4px; padding:3px 7px; border-radius:8px;
-    background: rgba(240,180,41,.16); color:var(--warn); font-weight:700; }
-  .need.crit .tag { background: rgba(255,107,107,.16); color:var(--bad); }
-  .need .age { margin-left:auto; font:11px var(--mono); color:var(--dim); }
-  .need .what { margin-top:4px; font-size:13.5px; color:var(--txt); line-height:1.4; overflow-wrap:anywhere; }
-  /* A needs-you row is tappable ONLY when it maps to a real lane (jump to that
-     lane + open its peek); the chevron/cursor is shown only then, so the
-     affordance never promises a destination that isn't there. */
-  .need.tappable { cursor:pointer; }
-  .need.tappable:active { transform:scale(.995); }
-  /* "peek ›" — the tap opens the lane's live peek (watch), it is NOT a reply
-     affordance; kept small + mono so it reads as an action label, not a chevron. */
-  .need .go { align-self:center; flex:none; margin-left:2px; color:var(--accent);
-    font:11px/1 var(--mono); white-space:nowrap; }
-  /* "Fleet is handling" rows: hub-owned, not the operator's to answer — dimmed
-     and never crit-red so they don't read as demanding his response. */
-  .need.handling { opacity:.72; border-color: var(--line); background: var(--panel-2); }
-  .need.handling .who { color: var(--dim); }
-  .need.handling .what { color: var(--dim); }
+  /* footer: the full lane manager (add-token, remote bodies) + scoped irsyad stay one tap away */
+  .footlinks { display: flex; gap: 8px; padding: 16px 16px 6px; }
+  .footlinks a { flex: 1; text-align: center; padding: 12px 10px; border-radius: 11px; font: 600 12.5px/1 var(--sans);
+    color: var(--dim); background: var(--panel); border: 1px solid var(--line); white-space: nowrap; }
+  .footlinks a:active { background: var(--panel-2); }
 
-  /* lanes */
-  .lane { padding:12px 14px; margin-bottom:9px; background: var(--panel); border:1px solid var(--line);
-    border-radius:13px; border-left:3px solid transparent; }
-  .lane.flag { border-left-color: var(--bad); background: linear-gradient(90deg, rgba(255,107,107,.06), var(--panel) 40%); }
-  .lane[data-peek] { cursor: pointer; }
-  .lane .top { display:flex; align-items:center; gap:9px; }
-  .lane .st-dot { width:9px; height:9px; border-radius:50%; flex:none; }
-  .st-dot.working{background:var(--good); box-shadow:0 0 7px var(--good)} .st-dot.idle{background:var(--dim)} .st-dot.offline{background:var(--bad)}
-  .lane .id { font:13px var(--mono); font-weight:600; overflow-wrap:anywhere; }
-  .lane .badge { font:10px/1 var(--mono); font-weight:700; text-transform:uppercase; letter-spacing:.4px; padding:3px 8px; border-radius:8px;
-    color:var(--bad); background:rgba(255,107,107,.14); border:1px solid rgba(255,107,107,.5); }
-  .lane .state { margin-left:auto; font:11px var(--mono); flex:none; }
-  .state.working{color:var(--good)} .state.idle{color:var(--dim)} .state.offline{color:var(--bad)}
-  .lane .act { margin-top:7px; font-size:13.5px; line-height:1.4; overflow-wrap:anywhere; color: var(--txt); }
-  .lane .meta { margin-top:8px; display:flex; gap:12px; font:11px var(--mono); color:var(--dim); flex-wrap:wrap; align-items:center; }
-  .lane .meta .hb.fresh{color:var(--good)} .lane .meta .hb.stale{color:var(--warn)} .lane .meta .hb.dead{color:var(--bad)}
-  .lane .meta .tap { margin-left:auto; color:var(--accent); }
-  .lane .meta .reset-btn { margin-left:auto; font:10px/1 var(--mono); letter-spacing:.3px;
-    color:var(--bad); background:rgba(255,107,107,.10); border:1px solid rgba(255,107,107,.30);
-    padding:4px 8px; border-radius:7px; cursor:pointer; -webkit-appearance:none; transition:background .12s; }
-  .lane .meta .tap + .reset-btn { margin-left:8px; }
-  .lane .meta .reset-btn:hover { background:rgba(255,107,107,.18); }
-  .lane .meta .reset-btn:active { transform:scale(.96); }
-  .lane .meta .reset-btn:disabled { opacity:.6; cursor:default; }
-  .lane .meta .reset-btn.arm { color:#fff; background:rgba(255,107,107,.32); border-color:rgba(255,107,107,.6); }
-  .collapsed { display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--panel);
-    border:1px dashed var(--line); border-radius:13px; color:var(--dim); font-size:13px; cursor:pointer; }
-  .collapsed b { color:var(--txt); white-space:nowrap; }
+  /* ── BOTTOM ACTION DOCK — resting state ── */
+  .dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    padding: 11px 16px calc(11px + env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, rgba(16,21,31,.4), rgba(9,11,16,.96) 40%);
+    backdrop-filter: saturate(140%) blur(16px); -webkit-backdrop-filter: saturate(140%) blur(16px);
+    border-top: 1px solid var(--line-2); }
+  .dock .dinner { max-width: 720px; margin: 0 auto; width: 100%; display: flex; align-items: center; gap: 9px; }
+  .dock .dhint { font: 11px/1.3 var(--mono); color: var(--faint); flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dock .dhint b { color: var(--dim); }
+  .dock .dsel { flex: 0 1 auto; min-width: 0; font: 11px/1 var(--mono); color: var(--txt); background: var(--panel-2);
+    border: 1px solid var(--line-2); border-radius: 999px; padding: 8px 10px; -webkit-appearance: none; display: none; }
+  .dock .dbtn { flex: none; font: 11px/1 var(--sans); font-weight: 700; color: var(--accent); padding: 9px 13px; border-radius: 999px;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.3); -webkit-appearance: none; cursor: pointer; }
+  .dock .dbtn:active { transform: scale(.98); }
+  .dock .dbtn.hidden { display: none; }
 
-  /* readable peek */
-  .peek { margin-top:10px; background:#0a0d13; border:1px solid var(--line); border-radius:11px; overflow:hidden; display:none; }
-  .peek.open { display:block; }
-  .peek .ph { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); font:11px var(--mono); color:var(--dim); }
-  .peek .ph .raw { margin-left:auto; color:var(--accent); cursor:pointer; }
-  .peek .body { max-height:46vh; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:8px 0; }
-  /* Flowing, borderless lines: each pane line wraps as a whole paragraph so a
-     long line stays readable at 430px instead of breaking into boxed shards. */
-  .peek .ln { padding:2px 14px; font-size:13px; line-height:1.5; overflow-wrap:anywhere; white-space:pre-wrap; color:var(--txt); }
-  .peek .ln.now { color:#bcd0ff; box-shadow:inset 3px 0 0 var(--accent); }
-  .peek .raw-pre { margin:0; padding:10px 12px; white-space:pre-wrap; word-break:break-word; font:11px/1.5 var(--mono); color:#9fe8b0; }
-  .peek .peek-empty { padding:10px 12px; color:var(--dim); font-style:italic; }
+  /* ── ACTION SHEET ── */
+  .scrim { position: fixed; inset: 0; z-index: 35; background: rgba(4,6,10,.5); opacity: 0; pointer-events: none; transition: opacity .22s; }
+  .scrim.on { opacity: 1; pointer-events: auto; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; transform: translateY(102%);
+    transition: transform .26s cubic-bezier(.3,.9,.3,1);
+    background: var(--panel); border-top: 1px solid var(--line-2); border-radius: 20px 20px 0 0;
+    padding: 8px 16px calc(18px + env(safe-area-inset-bottom)); box-shadow: 0 -20px 50px -20px rgba(0,0,0,.8);
+    max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .sheet.up { transform: translateY(0); }
+  .sheet .sinner { max-width: 720px; margin: 0 auto; }
+  .grab { width: 38px; height: 4px; border-radius: 999px; background: var(--line-2); margin: 2px auto 12px; }
+  .sheet .sh { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+  .sheet .sh .st2 { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 7px var(--good); flex: none; }
+  .sheet .sh .st2.idle { background: var(--dim); box-shadow: none; } .sheet .sh .st2.offline { background: var(--bad); box-shadow: 0 0 7px var(--bad); }
+  .sheet .sh .id { font: 800 15px/1 var(--sans); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sheet .sh .ctxpill { margin-left: auto; flex: none; font: 10px/1 var(--mono); font-weight: 700; padding: 5px 8px; border-radius: 999px;
+    color: var(--dim); background: rgba(255,255,255,.05); }
+  .sheet .sh .ctxpill.green { color: var(--good); background: rgba(55,211,154,.12); }
+  .sheet .sh .ctxpill.amber { color: var(--warn); background: rgba(246,196,83,.13); }
+  .sheet .sh .ctxpill.red { color: var(--bad); background: rgba(251,113,133,.14); }
+  .sheet .sh .x { flex: none; font: 16px/1 var(--dim); padding: 4px 6px; cursor: pointer; }
+  .sheet .subline { font: 11px/1.4 var(--mono); color: var(--faint); margin: 0 0 13px; overflow-wrap: anywhere; }
+  /* full action grid — EVERYTHING one tap */
+  .agrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .agrid button { font: 600 11px/1.15 var(--sans); padding: 12px 4px; border-radius: 12px; border: 1px solid var(--line-2);
+    background: var(--panel-2); color: var(--txt); display: flex; flex-direction: column; align-items: center; gap: 5px;
+    position: relative; cursor: pointer; -webkit-appearance: none; }
+  .agrid button:active { transform: scale(.97); }
+  .agrid button .e { font-size: 18px; }
+  .agrid button.prim { background: rgba(138,166,255,.14); border-color: rgba(138,166,255,.32); color: var(--accent); }
+  .agrid button.warn { color: var(--warn); border-color: rgba(246,196,83,.3); background: rgba(246,196,83,.09); }
+  .agrid button.bad { color: var(--bad); border-color: rgba(251,113,133,.3); background: rgba(251,113,133,.08); }
+  .agrid button.armed { color: #fff; background: rgba(251,113,133,.32); border-color: rgba(251,113,133,.6); }
+  .agrid button.new::after { content: "NEW"; position: absolute; top: 4px; right: 6px; font: 6.5px/1 var(--mono); color: var(--accent); }
+  .agrid button:disabled { opacity: .45; cursor: default; }
+  /* token/model controls inside the sheet (folded in from the Lane manager) */
+  .qctl { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .qctl.wide { grid-template-columns: 1fr; }
+  .qctl label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .qctl label > span { font: 9px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+  .qctl select { width: 100%; min-width: 0; -webkit-appearance: none; appearance: none; font: 12px/1 var(--mono); color: var(--txt);
+    background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 11px 30px 11px 12px;
+    background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%), linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+    background-position: calc(100% - 15px) 17px, calc(100% - 10px) 17px; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+  .qctlnote { font: 11px/1.4 var(--mono); color: var(--faint); margin-top: 10px; }
+  .applyrow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .applyrow .b { font: 600 12px/1 var(--sans); padding: 11px; border-radius: 10px; text-align: center; cursor: pointer; -webkit-appearance: none; }
+  .applyrow .b.prev { color: var(--accent); background: rgba(138,166,255,.13); border: 1px solid rgba(138,166,255,.28); }
+  .applyrow .b.arm { color: var(--warn); background: rgba(246,196,83,.13); border: 1px solid rgba(246,196,83,.32); font-weight: 700; }
+  .applyrow .b:active { transform: scale(.98); }
+  /* inline peek inside the sheet (reuses the fc-v49 peek machinery via data-peekbox) */
+  .peek { margin-top: 12px; background: #0a0d13; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; display: none; }
+  .peek.open { display: block; }
+  .peek .ph { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--dim); }
+  .peek .ph .raw { margin-left: auto; color: var(--accent); cursor: pointer; }
+  .peek .body { max-height: 40vh; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 8px 0; }
+  .peek .ln { padding: 2px 14px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--txt); }
+  .peek .ln.now { color: #bcd0ff; box-shadow: inset 3px 0 0 var(--accent); }
+  .peek .raw-pre { margin: 0; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; font: 11px/1.5 var(--mono); color: #9fe8b0; }
+  .peek .peek-empty { padding: 10px 12px; color: var(--dim); font-style: italic; }
+  /* bulk plan panel inside the sheet */
+  .bulkplan { margin-top: 6px; font: 12px/1.5 var(--mono); color: var(--dim); }
+  .bulkplan .bp-sum { color: var(--txt); font: 700 13px/1.4 var(--sans); margin-bottom: 8px; overflow-wrap: anywhere; }
+  .bulkplan .bp-lane { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; overflow-wrap: anywhere; }
+  .bulkplan .bp-act { font-weight: 700; } .bulkplan .bp-act.ok { color: var(--good); }
+  .bulkplan .bp-act.skip { color: var(--dim); } .bulkplan .bp-act.fail { color: var(--bad); }
+  .bulkplan .bp-err { color: var(--bad); font-weight: 700; overflow-wrap: anywhere; }
+  .bulkconfirm { width: 100%; margin-top: 12px; font: 700 13px/1 var(--sans); color: #2a1e02; padding: 13px;
+    border-radius: 10px; border: none; background: linear-gradient(160deg, var(--warn), #c8993a); cursor: pointer; -webkit-appearance: none; }
+  .bulkconfirm:disabled { opacity: .6; cursor: default; }
 
-  /* deploys */
-  .depstrip { display:flex; gap:8px; overflow-x:auto; padding:2px 0 4px; -webkit-overflow-scrolling:touch; }
-  .dep { flex:none; padding:9px 12px; border-radius:11px; background:var(--panel); border:1px solid var(--line); min-width:150px; }
-  .dep .ws { font-size:12.5px; font-weight:600; overflow-wrap:anywhere; }
-  .dep .stg { margin-top:5px; font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.4px; color:var(--dim); }
-  .dep.live .stg{color:var(--good)} .dep.blocked .stg{color:var(--bad)} .dep.in_review .stg{color:var(--warn)} .dep.merged .stg{color:var(--good)} .dep.pushed .stg{color:var(--accent)}
-  .dep .rp { margin-top:5px; font:11px var(--mono); color:var(--dim); }
-  .dep a { display:block; margin-top:4px; font:11px var(--mono); overflow-wrap:anywhere; }
-
-  /* backlog — the operator's realtime "Your asks" tracker (swipe: → top · ← drop) */
-  .blhint { margin-left:auto; font:10px/1 var(--mono); color:var(--dim); letter-spacing:.3px; white-space:nowrap; }
-  .bl-row { position:relative; margin-bottom:8px; border-radius:12px; overflow:hidden; }
-  .bl-row.dropping { opacity:.35; transition:opacity .18s ease; }
-  .bl-act { position:absolute; top:0; bottom:0; display:flex; align-items:center;
-    font:11px/1 var(--mono); font-weight:700; text-transform:uppercase; letter-spacing:.6px; }
-  .bl-act.top  { left:0;  width:58%; justify-content:flex-start; padding-left:16px;  color:var(--good); background:rgba(62,207,142,.14); }
-  .bl-act.drop { right:0; width:58%; justify-content:flex-end;   padding-right:16px; color:var(--bad);  background:rgba(255,107,107,.14); }
-  .bl-row.armtop  .bl-act.top  { background:rgba(62,207,142,.32); }
-  .bl-row.armdrop .bl-act.drop { background:rgba(255,107,107,.32); }
-  .bl { position:relative; z-index:2; display:flex; gap:10px; align-items:flex-start; padding:11px 13px;
-    background:var(--panel); border:1px solid var(--line); border-radius:12px;
-    touch-action:pan-y; transition:transform .18s ease; will-change:transform; cursor:grab; }
-  .bl:active { cursor:grabbing; }
-  .bl .bltag { flex:none; font:10px/1 var(--mono); font-weight:700; text-transform:uppercase; letter-spacing:.4px;
-    padding:4px 8px; border-radius:8px; white-space:nowrap; margin-top:1px; }
-  .bl .bltag.wait { color:var(--bad); background:rgba(255,107,107,.14); }
-  .bl .bltag.prog { color:var(--warn); background:rgba(240,180,41,.14); }
-  .bl .bltag.done { color:var(--good); background:rgba(62,207,142,.14); }
-  .bl .bltag.park { color:var(--dim); background:rgba(138,147,166,.14); }
-  .bl .blbody { min-width:0; flex:1; }
-  .bl .blask { font-weight:600; font-size:13.5px; overflow-wrap:anywhere; }
-  .bl .bldone { color:var(--good); font-size:12px; margin-top:4px; line-height:1.35; overflow-wrap:anywhere;
-    background:rgba(62,207,142,.10); border-left:2px solid rgba(62,207,142,.5); padding:3px 8px; border-radius:5px; }
-  .bl .blnote { color:var(--dim); font-size:12.5px; margin-top:3px; line-height:1.4; overflow-wrap:anywhere; }
-  .bl .blop { color:var(--dim); font:11px var(--mono); margin-top:4px; }
-
-  /* per-lane context gauge — the former "Context bloat" section, now FOLDED
-     into each lane card so a lane's status + its /1M window fill read together
-     in one list (unified-lanes redesign). The classes stay context-neutral
-     (.bar/.fill/.ctxpct/.ctxmeta) so the gauge renders inside .lane cards. */
-  .lanectx { margin-top:9px; }
-  .bar { height:7px; border-radius:999px; background:var(--panel-2); overflow:hidden; }
-  .bar .fill { height:100%; border-radius:999px; }
-  .bar .fill.green{background:var(--good)} .bar .fill.amber{background:var(--warn)} .bar .fill.red{background:var(--bad)}
-  .ctxpct { font:11px var(--mono); font-weight:700; }
-  .ctxpct.green{color:var(--good)} .ctxpct.amber{color:var(--warn)} .ctxpct.red{color:var(--bad)}
-  .ctxmeta { margin-top:6px; font:11px var(--mono); color:var(--dim); }
-  .ctxmeta .staler { color:var(--warn); }
-
-  /* token / auth */
-  .tok { display:flex; align-items:center; gap:9px; padding:10px 14px; margin-bottom:7px;
-    background:var(--panel); border:1px solid var(--line); border-radius:12px; flex-wrap:wrap; }
-  .tok .tdot { width:9px; height:9px; border-radius:50%; flex:none; }
-  .tok .tdot.good{background:var(--good); box-shadow:0 0 7px var(--good)} .tok .tdot.bad{background:var(--bad); box-shadow:0 0 7px var(--bad)}
-  .tok .tsess { font:12.5px var(--mono); font-weight:600; overflow-wrap:anywhere; }
-  .tok .tbadge { font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.4px; padding:3px 8px; border-radius:8px; font-weight:700; }
-  .tok .tbadge.good{color:var(--good); background:rgba(62,207,142,.14)} .tok .tbadge.bad{color:var(--bad); background:rgba(255,107,107,.14)}
-  .tok .tacct { margin-left:auto; font:11px var(--mono); color:var(--dim); }
-  #tokenSummary b.good{color:var(--good)} #tokenSummary b.bad{color:var(--bad)}
-
-  .feednote { color:var(--dim); font-size:12.5px; padding: 2px 2px 0; }
-  .lane.coord { border-left:3px solid var(--accent); background: linear-gradient(90deg, rgba(91,140,255,.07), var(--panel) 42%); }
-  .state.coordrole { color: var(--accent); text-transform:none; font-weight:600; }
-  .act.coordidle { color: var(--dim); }
-  /* per-coordinator context readout (op#9088) — lives in the card's meta row */
-  .lane.coord .meta .cctx { font:11px var(--mono); font-weight:700; }
-  .lane.coord .meta .cctx.green{color:var(--good)} .lane.coord .meta .cctx.amber{color:var(--warn)} .lane.coord .meta .cctx.red{color:var(--bad)}
-
-  /* ── Calm Command refinements (fc-v38). Layered AFTER the base rules so they
-     override by source-order without touching any class the JS depends on.
-     Adds crafted depth: card shadows, status spines, refined header + chips,
-     SF-Pro headings with mono reserved for technical data. ── */
-  .pulse { background: linear-gradient(180deg, rgba(12,15,22,.94), rgba(9,11,16,.74));
-    backdrop-filter: saturate(140%) blur(14px); -webkit-backdrop-filter: saturate(140%) blur(14px);
-    padding: 15px 18px 14px; }
-  .pulse .brand { font-family: var(--sans); font-size: 14px; letter-spacing: -.01em; color: var(--dim); }
-  .pulse .brand .live { color: var(--good); }
-  .pulse .build { padding: 4px 9px; border-radius: 999px; background: var(--panel);
-    border: 1px solid var(--line); color: var(--faint); }
-  .pulse .big { font-family: var(--sans); font-size: 21px; font-weight: 800; letter-spacing: -.02em; }
-  .poolchip { border-radius: 999px; padding: 4px 9px; background: rgba(255,255,255,.04);
-    border: 1px solid var(--line); }
-  .poolchip.bad { background: rgba(251,113,133,.12); border-color: rgba(251,113,133,.3); }
-  .laneslink { font-family: var(--sans); font-weight: 700; box-shadow: var(--shadow); }
-  .sec-h h2 { font-family: var(--sans); letter-spacing: .14em; color: var(--faint); }
-  .sec-h.needs h2 { color: var(--warn); }
-  .chip { border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); }
-  /* cards: soft depth + a hairline-lit top edge (native "lit from above" feel) */
-  .need, .lane, .tok, .dep, .bl { box-shadow: var(--shadow); }
-  .need { border-radius: 14px; }
-  .lane { border-radius: 14px; border-left-width: 3px; border-left-color: rgba(55,211,154,.45); }
-  .lane .id { font-family: var(--sans); font-weight: 700; font-size: 14px; letter-spacing: -.01em; }
-  .lane .badge { border-radius: 8px; }
-  .st-dot.working { box-shadow: 0 0 8px var(--good); }
-  .need .who { font-family: var(--sans); font-weight: 700; font-size: 13.5px; }
-  .need .what { color: var(--dim); }
-  .bl .blask { font-family: var(--sans); }
-  .lane .meta .reset-btn { border-radius: 9px; }
+  /* toast */
+  .toast { position: fixed; left: 50%; bottom: calc(78px + env(safe-area-inset-bottom)); transform: translateX(-50%); max-width: 92%;
+    background: var(--panel-2); color: var(--txt); border: 1px solid rgba(55,211,154,.4); border-radius: 12px; padding: 11px 15px;
+    font: 12.5px/1.35 var(--sans); opacity: 0; pointer-events: none; transition: opacity .18s; z-index: 55; text-align: center; box-shadow: var(--shadow); }
+  .toast.show { opacity: 1; } .toast.bad { border-color: rgba(251,113,133,.5); color: var(--bad); }
 </style>
 </head>
 <body>
 <div id="ptr"><span class="spin">&darr;</span><span id="ptrTxt">Pull to refresh</span></div>
-<div class="wrap">
 
-  <div id="pulse" class="pulse">
-    <div class="brandrow">
-      <span class="brand">Fleet <span id="liveDot" class="live">● live</span></span>
+<div class="wrap">
+  <header id="pulse" class="pulse clear">
+    <div class="top">
+      <span class="orb"></span>
+      <span id="pulseBig" class="hl">Loading…</span>
+      <span id="liveDot" class="live">● live</span>
       <span id="build" class="build" title="build running on this device"></span>
     </div>
-    <!-- Weekly Max-pool usage (op#9770) — its OWN full-width stacked row below the
-         brand line so the 3 pools read as a clean vertical list (no 2+1 wrap) and
-         each carries its pace advisory (op#12617), instead of being squeezed into
-         the brand row and shoving the build badge off-screen (op#12709 layout fix). -->
-    <div id="poolUsage" class="poolusage" title="Max weekly-pool usage + pace (op#9770/#12617)"></div>
-    <div class="headline"><span class="orb"></span><span id="pulseBig" class="big">Loading…</span></div>
-    <!-- Glance: the single most context-bloated worker lane (operator ask, op#10550
-         follow-up). Display-only, from the existing context_bloat payload; hidden
-         when there is no reading. Coordinators are NOT lanes (own cards) so they're
-         excluded, same as the per-card gauges. -->
+    <div id="statRow" class="stat"></div>
+    <div id="poolUsage" class="pools" title="Max weekly-pool usage + pace (op#9770/#12617)"></div>
     <div id="topBloat" class="topbloat"></div>
-    <!-- Lane manager + irsyad: primary nav — kept INSIDE the sticky pulse so they
-         can never scroll under the header and are always visible (op#12475). The
-         status chips (working/idle/flagged/offline) were removed per operator: noise
-         up top. op#12838: added the 'irsyad →' peer button (routes /irsyad, live
-         since fc-v45 but previously unreachable from the dashboard — operator was
-         typing the URL). Side-by-side so the sticky area stays compact on mobile. -->
-    <div class="navrow">
-      <a class="laneslink" href="/lanes">🔑 Lane manager →</a>
-      <a class="laneslink" href="/irsyad">🧾 irsyad →</a>
-    </div>
+  </header>
+
+  <div id="needstrip" class="needstrip">
+    <div id="needs"></div>
+    <div id="handling"></div>
   </div>
 
-  <section>
-    <div class="sec-h needs"><h2>Needs you</h2><span id="needsCount" class="count"></span></div>
-    <div id="needs"></div>
-  </section>
+  <div class="spinehead">
+    <h2>Lanes</h2><span id="lanesCount" class="count"></span>
+    <button id="multiToggle" class="ms">◎ multi-select</button>
+  </div>
+  <div id="lanes" class="grid"><div class="empty">Loading…</div></div>
 
-  <!-- Coordinators MOVED above "Your asks" (fc-v40) — hub/console/cai come right
-       after "Needs you". Collapsed by default (coordExpanded=false in fleet.js):
-       just the header + "hub · console · cai" count until the operator taps it. -->
-  <section>
-    <div class="sec-h" id="coordHead" style="cursor:pointer"><h2><span id="coordChevron">▸</span> Coordinators</h2><span class="count">hub · console · cai</span></div>
-    <div id="coordinators"><div class="empty">Loading…</div></div>
-  </section>
+  <div class="spinehead"><h2>Coordinators</h2><span class="count">hub · console · cai · tap to act</span></div>
+  <div id="coordinators" class="coordrow"></div>
 
   <section>
     <div class="sec-h"><h2>Your asks</h2><span id="backlogCount" class="count"></span></div>
     <div id="backlog"><div class="empty">Loading…</div></div>
   </section>
 
-  <!-- "Context bloat" section removed (unified-lanes redesign): each worker
-       lane's /1M window gauge now renders INSIDE its own lane card below, so
-       status + context read together in one list. -->
-
-  <section id="handlingSec" style="display:none">
-    <div class="sec-h"><h2>Fleet is handling</h2><span class="count">hub owns these · tap to peek</span><span id="handlingCount" class="count"></span></div>
-    <div id="handling"></div>
-  </section>
-
-  <section>
-    <div class="sec-h"><h2>Lanes</h2><span class="count">working first · /1M window fill</span></div>
-    <!-- Lane account-switching (per-lane + bulk switch-group / switch-ALL) lives
-         ONLY on the /lanes Lane Manager now (op#12709 dashboard declutter): it
-         kept the switch-ALL mis-tap vector off the main attention view. -->
-    <div id="lanes"><div class="empty">Loading…</div></div>
-  </section>
-
-  <!-- "Lane worklists" (#laneQueues) removed per operator (fc-v40): redundant with
-       the Lanes list above. The /api/fleet payload still carries `queue`; the
-       dashboard just no longer renders it. -->
-
-  <!-- Deploys + Feed sections removed per operator (op#9888): low-signal at the
-       bottom; deploy_status + raw bus live on the hub, not this attention-first view. -->
-
+  <div class="footlinks">
+    <a href="/lanes">🔑 Full lane manager</a>
+    <a href="/irsyad">🧾 irsyad</a>
+  </div>
 </div>
+
+<!-- resting dock / bulk bar -->
+<div id="dock" class="dock">
+  <div class="dinner">
+    <div id="dockHint" class="dhint">Tap a lane to act</div>
+    <select id="bulkToken" class="dsel" title="Target account for the bulk switch"></select>
+    <button id="bulkPreview" class="dbtn hidden">Preview ⇄</button>
+    <button id="bulkClear" class="dbtn hidden">Clear</button>
+  </div>
+</div>
+
+<!-- scrim + action sheet -->
+<div id="scrim" class="scrim"></div>
+<div id="sheet" class="sheet">
+  <div class="sinner">
+    <div class="grab"></div>
+    <div class="sh">
+      <span id="shDot" class="st2"></span>
+      <span id="shId" class="id"></span>
+      <span id="shCtx" class="ctxpill"></span>
+      <span id="shClose" class="x">✕</span>
+    </div>
+    <div id="shSub" class="subline"></div>
+    <div id="shActions"></div>
+    <div id="shControls"></div>
+    <div id="shPeekWrap"></div>
+    <div id="shBulk"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
 <script src="/static/fleet.js"></script>
 <script>
   (function () {
     if (!('serviceWorker' in navigator)) return;
-    // ONE-SHOT reload when a new SW takes control, so a fresh deploy lands in a
-    // SINGLE reopen (kills the iOS 2-launch update lag). Guarded so it can NEVER
-    // infinite-loop (the exact failure the sw.js header warns about):
-    //   - the guard is in sessionStorage, which SURVIVES the reload — an
-    //     in-memory bool (the old code) resets on the new page and can re-fire;
-    //   - we only reload on a real UPDATE (a controller already existed), never
-    //     on the first-install claim (which would reload every first visit).
+    // ONE-SHOT reload when a new SW takes control (unchanged from fc-v49; the
+    // guard survives the reload via sessionStorage so it can never loop).
     var hadController = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener('controllerchange', function () {
-      if (!hadController) return;                                // first install, not an update
-      if (sessionStorage.getItem('fleet_sw_reloaded')) return;  // already reloaded this session
+      if (!hadController) return;
+      if (sessionStorage.getItem('fleet_sw_reloaded')) return;
       sessionStorage.setItem('fleet_sw_reloaded', '1');
       window.location.reload();
     });
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function (reg) {
       if (!reg) return;
-      // ACTIVELY poll for a new SW so updates LAND on their own — without this,
-      // iOS Safari won't re-check the SW while the PWA is open, so a fresh deploy
-      // gets stuck ("fc-vNN -> fc-vMM" badge) until the operator DELETES + reopens
-      // the app. That manual-delete-every-update is the bug this fixes (operator
-      // 2026-08-13). update() -> new sw.js installs -> skipWaiting -> activate ->
-      // clients.claim -> controllerchange (handler above) -> one-shot reload.
       var checkUpdate = function () { try { reg.update(); } catch (e) {} };
-      setInterval(checkUpdate, 60000);                                   // periodic while open
-      document.addEventListener('visibilitychange', function () {        // on foreground (iOS resume)
-        if (!document.hidden) checkUpdate();
-      });
-      checkUpdate();                                                     // and immediately on load
+      setInterval(checkUpdate, 60000);
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) checkUpdate(); });
+      checkUpdate();
     }).catch(function () {});
   })();
 </script>

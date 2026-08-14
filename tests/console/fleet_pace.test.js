@@ -132,13 +132,23 @@ ok("keeps runway neutral when it outlasts the reset", function () {
   assert(!/poolrun warn/.test(h), "runway NOT flagged when it outlasts the reset");
 });
 
-// op#12709: the lane-switching UI is removed from the DASHBOARD bundle.
-ok("dashboard no longer ships the lane-switching UI (op#12709)", function () {
+// fc-v50 Command Surface (Approach C, operator-approved) SUPERSEDES op#12709's
+// "no lane-switching UI on the dashboard": the unified page now folds the bulk
+// account switch back in behind MULTI-SELECT (hidden until opted into) + the same
+// dry-run→explicit-confirm safety, which mitigates the switch-ALL mistap op#12709
+// was worried about better than a permanently-visible toolbar did. So the bulk
+// switch IS expected in fleet.js now — but it must stay DRY-RUN-SAFE, and the old
+// op#12709-era identifiers must not sneak back (clean rename, no dead cruft).
+ok("bulk switch is folded in via multi-select and stays dry-run-safe (fc-v50)", function () {
   const src = fs.readFileSync(FLEET_JS, "utf8");
-  ["renderFleetSwitch", "switchCtlHtml", "SWITCH_ACCOUNTS", "fsDryRun", "/api/switch-"]
+  // the OLD lane-manager identifiers stay gone (renamed cleanly, not resurrected)
+  ["renderFleetSwitch", "switchCtlHtml", "SWITCH_ACCOUNTS", "fsDryRun"]
     .forEach(function (needle) {
-      assert(src.indexOf(needle) < 0, "fleet.js must not contain " + needle);
+      assert(src.indexOf(needle) < 0, "fleet.js must not reintroduce " + needle);
     });
+  // the bulk switch exists again, and every path is dry-run-first (never one-tap)
+  assert(src.indexOf("/api/switch-all") >= 0, "fleet.js folds in the bulk switch");
+  assert(/dry_run:\s*true/.test(src), "bulk switch previews with dry_run:true first");
 });
 
 console.log("\n" + passed + " passed");
