@@ -914,3 +914,117 @@ def test_api_irsyad_folds_token_model_and_context(irsyad_server):
     assert imp["expected"] == "Musa"
     # a lane with no context row surfaces null, not a fabricated number.
     assert by["irsyad-prog1"]["ctx_pct"] is None
+
+
+# --- fc-v52: drain board (per-body inbox depth) + /api/assign -----------------
+# The drain board reads each body's UNHANDLED bus inbox (agent_messages
+# read_at IS NULL) + console-assigned items, grouped per body. /api/assign turns
+# an operator ask into a REAL bus row to that body (via the vetted
+# scripts/console_assign.py) so the body actually drains it — same read-only
+# console / shell-out-to-write pattern as /api/reset + /api/backlog.
+
+def test_build_inbox_backlog_query_shape():
+    """The drain-board data source: unhandled (read_at IS NULL), non-test rows,
+    excluding the operator pseudo-inboxes, grouped per to_agent. Flags the two
+    signals the board badges: needs_response and console-assigned."""
+    sql, params = db.build_inbox_backlog_query()
+    assert params == []
+    low = sql.lower()
+    assert "from agent_messages" in low
+    assert "read_at is null" in low
+    assert "is_test is not true" in low
+    assert "to_agent" in low
+    # both badge signals derived in-query
+    assert "responded_at is null" in low
+    assert "orch-console" in low          # the `assigned` flag
+
+
+def test_drain_board_groups_sorts_and_caps():
+    """_drain_board groups flat unread rows per body, counts unread/needs_response/
+    assigned, caps items with a `more` remainder, and floats reply-pending bodies
+    to the top, then by depth."""
+    rows = (
+        [{"id": i, "to_agent": "cc-cosem", "from_agent": "cai",
+          "subject": f"s{i}", "priority": "P2", "age_s": 10,
+          "needs_response": False, "assigned": False} for i in range(7)]
+        + [{"id": 100, "to_agent": "cc-irsyad", "from_agent": "orch-console",
+            "subject": "do the thing", "priority": "P1", "age_s": 5,
+            "needs_response": True, "assigned": True}]
+    )
+    board = console_app._drain_board(rows, max_items=5)
+    by = {g["agent"]: g for g in board}
+    # cosem: 7 unread, 5 items shown + 2 more
+    assert by["cc-cosem"]["unread"] == 7
+    assert len(by["cc-cosem"]["items"]) == 5
+    assert by["cc-cosem"]["more"] == 2
+    # irsyad: the console-assigned + reply-pending item is flagged both ways
+    assert by["cc-irsyad"]["needs_response"] == 1
+    assert by["cc-irsyad"]["assigned"] == 1
+    # reply-pending body sorts FIRST even though it has fewer items
+    assert board[0]["agent"] == "cc-irsyad"
+
+
+def test_drain_board_empty_is_empty_list():
+    assert console_app._drain_board([]) == []
+    assert console_app._drain_board(None) == []
+
+
+def test_api_assign_requires_auth(server):
+    """Same gate as every mutating POST — no new unauthenticated surface."""
+    r = httpx.post(server + "/api/assign",
+                   json={"agent": "cc-irsyad", "ask": "do it"}, timeout=5)
+    assert r.status_code == 401
+
+
+def test_api_assign_bad_agent_400_no_subprocess(server):
+    """A crafted / non-id agent value is rejected BEFORE any subprocess."""
+    with patch("subprocess.run") as mock_run:
+        r = httpx.post(server + "/api/assign", headers=H(),
+                       json={"agent": "; rm -rf /", "ask": "do it"}, timeout=5)
+    assert r.status_code == 400
+    mock_run.assert_not_called()
+
+
+def test_api_assign_empty_ask_400(server):
+    with patch("subprocess.run") as mock_run:
+        r = httpx.post(server + "/api/assign", headers=H(),
+                       json={"agent": "cc-irsyad", "ask": "   "}, timeout=5)
+    assert r.status_code == 400
+    mock_run.assert_not_called()
+
+
+def test_api_assign_inserts_bus_row_via_script(server):
+    """A valid assign shells out to console_assign.py with (agent, ask, --priority)
+    and returns the new bus-row id parsed from stdout."""
+    ok = MagicMock(returncode=0, stdout="assigned agent_messages #4242 to cc-irsyad\n", stderr="")
+    with patch("subprocess.run", return_value=ok) as mock_run:
+        r = httpx.post(server + "/api/assign", headers=H(),
+                       json={"agent": "cc-irsyad", "ask": "ship the thing", "priority": "P1"},
+                       timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["id"] == 4242 and body["agent"] == "cc-irsyad"
+    argv = mock_run.call_args.args[0]
+    assert argv[-4:] == ["cc-irsyad", "ship the thing", "--priority", "P1"]
+    assert argv[-5].endswith("console_assign.py")
+
+
+def test_api_assign_unknown_agent_maps_to_400(server):
+    """The script exits 2 for an agent not in `agents`; the endpoint returns 400
+    so the UI can say 'unknown lane', not a generic 500."""
+    bad = MagicMock(returncode=2, stdout="", stderr="unknown agent 'nope'\n")
+    with patch("subprocess.run", return_value=bad):
+        r = httpx.post(server + "/api/assign", headers=H(),
+                       json={"agent": "nope", "ask": "do it"}, timeout=5)
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
+def test_api_assign_no_service_key_leak(server):
+    """The assign response never leaks the service role / key."""
+    ok = MagicMock(returncode=0, stdout="assigned agent_messages #1 to cc-irsyad\n", stderr="")
+    with patch("subprocess.run", return_value=ok):
+        r = httpx.post(server + "/api/assign", headers=H(),
+                       json={"agent": "cc-irsyad", "ask": "x"}, timeout=5)
+    assert "service_role" not in r.text.lower()
+    assert "SUPABASE_SERVICE_KEY" not in r.text

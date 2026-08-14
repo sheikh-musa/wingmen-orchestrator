@@ -125,7 +125,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v51';
+  var APP_BUILD = 'fc-v52';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -201,11 +201,32 @@
   function statCell(cls, n) {
     return '<div class="s ' + cls + '"><div class="n">' + n + '</div><div class="l">' + cls + '</div></div>';
   }
+  // fc-v52: the BLOAT cell is a tap target that reveals the top-3 offenders
+  // (#topBloat) inline — the resting view stays clean. Only tappable when there's
+  // actually bloat to show.
+  var bloatExpanded = false;
   function renderStat(p, bloatCount) {
     var el = $("statRow");
     if (!el) return;
-    el.innerHTML = statCell("work", p.working || 0) + statCell("bloat", bloatCount || 0) +
+    var bc = bloatCount || 0;
+    var bloatCell = '<div id="bloatCell" class="s bloat' + (bc ? " tapx" : "") + (bc && bloatExpanded ? " on" : "") + '"' +
+      (bc ? ' role="button" tabindex="0" aria-label="show top bloat"' : "") +
+      '><div class="n">' + bc + '</div><div class="l">bloat</div></div>';
+    el.innerHTML = statCell("work", p.working || 0) + bloatCell +
                    statCell("idle", p.idle || 0) + statCell("off", p.offline || 0);
+    syncTopBloat();
+  }
+  function syncTopBloat() {
+    var el = $("topBloat");
+    if (!el) return;
+    var has = el.getAttribute("data-has") === "1";
+    el.classList.toggle("show", !!(has && bloatExpanded));
+  }
+  function toggleBloat() {
+    bloatExpanded = !bloatExpanded;
+    var c = $("bloatCell");
+    if (c) c.classList.toggle("on", bloatExpanded);
+    syncTopBloat();
   }
 
   // ---- top-bloat glance (op#18542) — pure helpers kept for the node tests ----
@@ -234,7 +255,7 @@
     if (!el) return;
     var total = (rows || []).filter(function (r) { return r && r.pct != null; }).length;
     var top = pickTopBloat(rows);
-    if (!top.length) { el.className = "topbloat"; el.removeAttribute("title"); el.innerHTML = ""; return; }
+    if (!top.length) { el.className = "topbloat"; el.removeAttribute("data-has"); el.removeAttribute("title"); el.innerHTML = ""; syncTopBloat(); return; }
     var lead = top[0].level || "green";
     var parts = top.map(function (r) {
       var who = r.sub_tag || r.agent || "?";
@@ -243,10 +264,13 @@
       return '<span class="ent" title="' + esc(tip) + '"><span class="who">' + esc(who) + '</span> ' +
         '<span class="pct ' + esc(lvl) + '">' + r.pct + '%</span></span>';
     });
-    el.className = "topbloat show";
+    // fc-v52: content is populated but visibility is gated by the BLOAT-cell tap
+    // (syncTopBloat) — the resting view stays clean until the operator taps in.
+    el.setAttribute("data-has", "1");
     el.setAttribute("title", "Top " + top.length + " context-bloated lanes (of " + total + ")");
     el.innerHTML = '<span class="dot ' + esc(lead) + '"></span><span class="lbl">Top bloat</span> ' +
       parts.join('<span class="sep">·</span>');
+    syncTopBloat();
   }
 
   // ---- indices --------------------------------------------------------------
@@ -795,66 +819,99 @@
       });
   }
 
-  // ---- backlog ("Your asks") — verbatim from fc-v49 -------------------------
-  var BL_STATUS = { needs_you: ["wait", "needs you"], in_progress: ["prog", "in progress"], done: ["done", "done"], parked: ["park", "parked"] };
-  function backlogItem(r) {
-    var meta = BL_STATUS[r.status] || ["park", r.status];
-    return '<div class="bl-row"><div class="bl-act top">▲ top</div><div class="bl-act drop">drop ✕</div>' +
-      '<div class="bl" data-id="' + esc(r.id) + '"><span class="bltag ' + meta[0] + '">' + esc(meta[1]) + '</span>' +
-        '<div class="blbody"><div class="blask">' + esc(r.ask) + '</div>' +
-          (r.done_when ? '<div class="bldone">🎯 done when: ' + esc(r.done_when) + '</div>' : "") +
-          (r.note ? '<div class="blnote">' + esc(r.note) + '</div>' : "") +
-          (r.op_ref ? '<div class="blop">' + esc(r.op_ref) + '</div>' : "") +
-        '</div></div></div>';
+  // ---- DRAIN BOARD (fc-v52) — per-body live inbox depth ---------------------
+  // Replaces the static "Your asks" backlog. Each body's row is its unhandled bus
+  // inbox (agent_messages read_at IS NULL) + any console-assigned items; the whole
+  // board SHRINKS on the normal /api/fleet poll as bodies drain their mail. The
+  // operator can also ASSIGN a new item to a specific body — that becomes a real
+  // bus row to it (POST /api/assign), so the body actually drains it.
+  function drainItem(it) {
+    var pri = (it.priority && it.priority !== "P2") ? '<span class="amark" style="color:var(--warn);background:rgba(246,196,83,.14)">' + esc(it.priority) + '</span>' : "";
+    var amk = it.assigned ? '<span class="amark">assigned</span>' : "";
+    var rr = it.needs_response ? '<span class="amark" style="color:var(--bad);background:rgba(255,107,107,.14)">reply</span>' : "";
+    return '<div class="di">' +
+      '<div class="dtxt">' + esc(it.subject) +
+        (it.from ? ' <span class="dfrom">· ' + esc(it.from) + '</span>' : "") + '</div>' +
+      pri + amk + rr +
+      '<span class="dage">' + esc(fmtAge(it.age_s)) + '</span>' +
+    '</div>';
   }
-  var SWIPE_THRESHOLD = 82;
-  function swipeAction(id, action, card, row) {
-    row.classList.remove("armdrop", "armtop");
-    if (action === "drop") { card.style.transform = "translateX(-120%)"; row.classList.add("dropping"); } else { card.style.transform = ""; }
-    fetch("/api/backlog", {
-      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()), body: JSON.stringify({ id: id, action: action })
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j || {} }; }); })
-      .then(function (res) { if (res.ok && res.j.ok) load(); else { card.style.transform = ""; row.classList.remove("dropping"); } })
-      .catch(function () { card.style.transform = ""; row.classList.remove("dropping"); });
+  function bodyRow(g) {
+    var items = (g.items || []).map(drainItem).join("");
+    var more = g.more ? '<div class="dmore">+ ' + g.more + ' more pending…</div>' : "";
+    var rr = g.needs_response ? '<span class="drr">' + g.needs_response + ' reply</span>' : "";
+    return '<div class="dbody">' +
+      '<div class="dh"><span class="dn">' + esc(g.agent) + '</span>' + rr +
+        '<span class="dcount' + (g.needs_response ? " pending" : "") + '">' + g.unread + ' pending</span></div>' +
+      (items ? '<div class="ditems">' + items + '</div>' : "") + more +
+    '</div>';
   }
-  function bindBacklogSwipe() {
-    document.querySelectorAll("#blList .bl[data-id]").forEach(function (card) {
-      if (card._swipeBound) return; card._swipeBound = true;
-      var row = card.parentNode, startX = 0, dx = 0, dragging = false;
-      card.addEventListener("pointerdown", function (e) { dragging = true; startX = e.clientX; dx = 0; card.style.transition = "none"; try { card.setPointerCapture(e.pointerId); } catch (err) {} });
-      card.addEventListener("pointermove", function (e) {
-        if (!dragging) return;
-        dx = e.clientX - startX; card.style.transform = "translateX(" + dx + "px)";
-        row.classList.toggle("armdrop", dx <= -SWIPE_THRESHOLD); row.classList.toggle("armtop", dx >= SWIPE_THRESHOLD);
-      });
-      function end() {
-        if (!dragging) return; dragging = false; card.style.transition = "";
-        var id = parseInt(card.getAttribute("data-id"), 10);
-        if (dx <= -SWIPE_THRESHOLD) swipeAction(id, "drop", card, row);
-        else if (dx >= SWIPE_THRESHOLD) swipeAction(id, "prioritise", card, row);
-        else { card.style.transform = ""; row.classList.remove("armdrop", "armtop"); }
-      }
-      card.addEventListener("pointerup", end); card.addEventListener("pointercancel", end);
-    });
-  }
-  var backlogExpanded = false;
-  function renderBacklog(rows) {
-    var el = $("backlog");
+  function renderDrainBoard(rows) {
+    var el = $("drainBoard");
     if (!el) return;
-    if (!rows || !rows.length) { el.innerHTML = '<div class="empty">No open asks. ✨</div>'; $("backlogCount").textContent = ""; return; }
-    var needs = rows.filter(function (r) { return r.status === "needs_you"; }).length;
-    $("backlogCount").textContent = needs ? (needs + " need you") : "";
-    var html = rows.map(backlogItem).join("");
-    var head = '<div class="collapsed" id="blToggle">' + (backlogExpanded ? "▾" : "▸") + ' <b>' + rows.length + ' open</b>' +
-      (needs ? ' — ' + needs + ' need you' : "") + ' <span class="blhint">swipe → top · ← drop</span></div>';
-    el.innerHTML = head + '<div id="blList" style="display:' + (backlogExpanded ? "block" : "none") + '">' + html + '</div>';
-    var t = $("blToggle");
-    if (t) t.addEventListener("click", function () {
-      backlogExpanded = !backlogExpanded;
-      $("blList").style.display = backlogExpanded ? "block" : "none";
-      t.firstChild.textContent = (backlogExpanded ? "▾" : "▸") + " ";
+    var cnt = $("drainCount");
+    if (!rows || !rows.length) {
+      el.innerHTML = '<div class="empty">All inboxes drained. ✨</div>';
+      if (cnt) cnt.textContent = "";
+      return;
+    }
+    var totalPending = rows.reduce(function (a, g) { return a + (g.unread || 0); }, 0);
+    var bodies = rows.length;
+    if (cnt) cnt.textContent = totalPending + " pending · " + bodies + (bodies === 1 ? " body" : " bodies");
+    el.innerHTML = rows.map(bodyRow).join("");
+  }
+
+  // ---- assign affordance -----------------------------------------------------
+  // Build the target list from the live lanes + coordinators: a lane assigns to
+  // its BASE agent id (the family bus address), a coordinator to its own id.
+  var assignTargets = [];
+  function buildAssignTargets(lanes, coords) {
+    var seen = {}, out = [];
+    (lanes || []).forEach(function (l) {
+      var id = l.base_agent_id || l.agent_id;
+      if (!id || seen[id]) return; seen[id] = true;
+      out.push({ id: id, label: id });
     });
-    bindBacklogSwipe();
+    (coords || []).forEach(function (c) {
+      var id = c.agent_id;
+      if (!id || seen[id]) return; seen[id] = true;
+      out.push({ id: id, label: (c.short ? c.short + " (" + id + ")" : id) });
+    });
+    out.sort(function (a, b) { return a.label < b.label ? -1 : (a.label > b.label ? 1 : 0); });
+    assignTargets = out;
+    var sel = $("assignAgent");
+    if (!sel) return;
+    var cur = sel.value;
+    sel.innerHTML = '<option value="">Assign to…</option>' +
+      out.map(function (t) { return '<option value="' + esc(t.id) + '">' + esc(t.label) + '</option>'; }).join("");
+    if (cur) sel.value = cur;
+  }
+  var assignBusy = false;
+  function sendAssign() {
+    if (assignBusy) return;
+    var agent = ($("assignAgent") || {}).value || "";
+    var ask = (($("assignAsk") || {}).value || "").trim();
+    var pri = ($("assignPri") || {}).value || "P2";
+    if (!agent) { toast("pick a lane/coordinator", true); return; }
+    if (!ask) { toast("type what they should do", true); return; }
+    assignBusy = true;
+    var btn = $("assignSend");
+    if (btn) { btn.disabled = true; btn.textContent = "Assigning…"; }
+    fetch("/api/assign", {
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ agent: agent, ask: ask, priority: pri })
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, s: r.status, j: j || {} }; }, function () { return { ok: r.ok, s: r.status, j: {} }; }); })
+      .then(function (res) {
+        if (res.ok && res.j.ok) {
+          toast("✓ assigned to " + agent);
+          if ($("assignAsk")) $("assignAsk").value = "";
+          load();   // refresh the board so the new item appears in that body's queue
+        } else {
+          toast("✗ " + (res.j.error || "assign failed"), true);
+        }
+      })
+      .catch(function () { toast("✗ network dropped — assign may not have run", true); })
+      .finally(function () { assignBusy = false; if (btn) { btn.disabled = false; btn.textContent = "Assign →"; } });
   }
 
   // ---- readable peek — verbatim machinery from fc-v49, box now in the sheet --
@@ -934,7 +991,8 @@
     renderCoordinators(d.coordinators || []);
     buildEntries(lanes, d.coordinators || []);
     renderLanes(lanes);
-    renderBacklog(d.backlog || []);
+    renderDrainBoard(d.drain_board || []);
+    buildAssignTargets(lanes, d.coordinators || []);
     updateDock();
     // Keep an open peek alive across the grid rebuild (the sheet DOM itself is not
     // rebuilt on a tick, so its peek box persists — just re-point the poller).
@@ -977,6 +1035,23 @@
   // ---- static wiring (bound once) -------------------------------------------
   function wire() {
     var mt = $("multiToggle"); if (mt) mt.addEventListener("click", toggleMulti);
+    // fc-v52: BLOAT stat cell taps open the top-3 offenders (delegated on the row).
+    var sr = $("statRow");
+    if (sr) sr.addEventListener("click", function (e) {
+      var cell = e.target.closest ? e.target.closest("#bloatCell.tapx") : null;
+      if (cell) toggleBloat();
+    });
+    // fc-v52: drain-board assign affordance.
+    var at = $("assignToggle");
+    if (at) at.addEventListener("click", function () {
+      var f = $("assignForm");
+      var open = f.classList.toggle("open");
+      at.classList.toggle("on", open);
+      if (open && $("assignAsk")) $("assignAsk").focus();
+    });
+    var asend = $("assignSend"); if (asend) asend.addEventListener("click", sendAssign);
+    var aask = $("assignAsk");
+    if (aask) aask.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); sendAssign(); } });
     var bp = $("bulkPreview"); if (bp) bp.addEventListener("click", bulkPreviewRun);
     var bc = $("bulkClear"); if (bc) bc.addEventListener("click", function () { selected = {}; renderLanes(lastLanes); updateDock(); });
     var sc = $("shClose"); if (sc) sc.addEventListener("click", closeSheet);

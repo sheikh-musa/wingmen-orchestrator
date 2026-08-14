@@ -665,6 +665,44 @@ def fetch_backlog() -> List[dict]:
     return _query(sql, params)
 
 
+def build_inbox_backlog_query() -> Tuple[str, list]:
+    """The DRAIN-BOARD data source (fc-v52): every body's UNHANDLED bus inbox.
+
+    A body drains its mail by stamping `read_at` (and `responded_at` for a
+    requires_response row) — so `read_at IS NULL` is the live "still pending"
+    set. This feeds the per-body work-board that SHRINKS on the normal
+    /api/fleet poll as lanes catch up. Combines BOTH sources the operator asked
+    for in ONE read: (a) organic bus traffic addressed to the body, and (b)
+    console-assigned items (from_agent='orch-console'), which are just real bus
+    rows to that body — so an assignment closes the loop and drains identically.
+
+    Excludes: is_test (drill traffic never counts as real work), and the
+    operator/musa pseudo-inboxes (those are the operator's own thread, not a
+    fleet body's drain queue). Flags `assigned` (console-origin) and
+    `needs_response` (a requires_response row still unanswered) so the board can
+    badge them. Capped so a pathological backlog can't blow the mobile payload;
+    the per-body grouping + trimming happens in app._drain_board."""
+    sql = (
+        "SELECT id, to_agent, from_agent, subject, message_type, priority, "
+        "  requires_response, "
+        "  (requires_response AND responded_at IS NULL) AS needs_response, "
+        "  (from_agent = 'orch-console') AS assigned, "
+        "  round(extract(epoch FROM (now()-created_at)))::int AS age_s "
+        "FROM agent_messages "
+        "WHERE read_at IS NULL "
+        "  AND is_test IS NOT TRUE "
+        "  AND lower(to_agent) NOT IN ('musa', 'operator') "
+        "ORDER BY to_agent, id DESC "
+        "LIMIT 400"
+    )
+    return sql, []
+
+
+def fetch_inbox_backlog() -> List[dict]:
+    sql, params = build_inbox_backlog_query()
+    return _query(sql, params)
+
+
 # NOTE on backlog WRITES (operator swipe): the console DB session is read-only by
 # construction (SELECT-only role + conn.read_only) — a fault here structurally
 # cannot write. So swipe-drop / swipe-prioritise do NOT write from here; the POST

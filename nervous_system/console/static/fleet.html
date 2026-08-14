@@ -118,6 +118,11 @@
   .stat .s .l { margin-top: 3px; font: 9px/1 var(--mono); color: var(--faint); text-transform: uppercase; letter-spacing: .06em; }
   .stat .s.work .n { color: var(--good); } .stat .s.idle .n { color: var(--dim); }
   .stat .s.off .n { color: var(--bad); } .stat .s.bloat .n { color: var(--warn); }
+  /* fc-v52: the BLOAT cell taps open the top-3 offenders (#topBloat) inline. */
+  .stat .s.bloat.tapx { cursor: pointer; border-color: rgba(246,196,83,.28); }
+  .stat .s.bloat.tapx.on { background: rgba(246,196,83,.1); border-color: rgba(246,196,83,.4); }
+  .stat .s.bloat.tapx .l::after { content: " ▸"; color: var(--faint); }
+  .stat .s.bloat.tapx.on .l::after { content: " ▾"; }
 
   /* pool-usage chips (op#9770 / op#12617). Compact single-row chips + pace tooltip. */
   .pools { display: flex; flex-direction: column; gap: 5px; margin-top: 9px; }
@@ -243,6 +248,44 @@
   .bl .blnote { color: var(--dim); font-size: 12.5px; margin-top: 3px; line-height: 1.4; overflow-wrap: anywhere; }
   .bl .blop { color: var(--dim); font: 11px var(--mono); margin-top: 4px; }
 
+  /* ── DRAIN BOARD (fc-v52) — per-body live inbox depth, draining until empty ──
+     Replaces the static "Your asks" backlog. Each body's row shows its unhandled
+     bus inbox (agent_messages read_at IS NULL) + any operator-assigned items,
+     shrinking on the normal /api/fleet poll as the body drains its mail. */
+  .sec-h .asbtn { margin-left: auto; font: 10px/1 var(--mono); color: var(--accent); padding: 7px 11px; border-radius: 999px;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.28); cursor: pointer; -webkit-appearance: none; white-space: nowrap; }
+  .sec-h .asbtn.on { color: #06231a; background: linear-gradient(160deg, var(--accent), #5a6fd0); border-color: transparent; }
+  .assign { display: none; gap: 8px; flex-direction: column; margin: 2px 2px 12px; padding: 12px; border-radius: 13px;
+    background: var(--panel); border: 1px solid var(--line-2); box-shadow: var(--shadow); }
+  .assign.open { display: flex; }
+  .assign .assel, .assign .asinput { width: 100%; min-width: 0; -webkit-appearance: none; appearance: none; font: 13px/1 var(--sans);
+    color: var(--txt); background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 11px 12px; }
+  .assign .assel { font-family: var(--mono); font-size: 12px; }
+  .assign .asrow { display: flex; gap: 8px; }
+  .assign .aspri { flex: 0 0 84px; }
+  .assign .assend { flex: 1; font: 700 12.5px/1 var(--sans); color: var(--accent); padding: 11px; border-radius: 10px;
+    background: rgba(138,166,255,.14); border: 1px solid rgba(138,166,255,.32); cursor: pointer; -webkit-appearance: none; }
+  .assign .assend:active { transform: scale(.98); } .assign .assend:disabled { opacity: .5; }
+
+  .dbody { margin-bottom: 8px; border-radius: 13px; background: var(--panel); border: 1px solid var(--line);
+    box-shadow: var(--shadow); overflow: hidden; }
+  .dbody .dh { display: flex; align-items: center; gap: 9px; padding: 11px 13px; }
+  .dbody .dh .dn { font: 700 13px/1.15 var(--sans); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dbody .dh .dcount { flex: none; margin-left: auto; font: 10px/1 var(--mono); font-weight: 700; padding: 4px 8px; border-radius: 999px;
+    color: var(--dim); background: rgba(255,255,255,.05); }
+  .dbody .dh .dcount.pending { color: var(--warn); background: rgba(246,196,83,.14); }
+  .dbody .dh .drr { flex: none; font: 9px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 4px 7px; border-radius: 7px; color: var(--bad); background: rgba(255,107,107,.14); }
+  .dbody .ditems { padding: 0 13px 9px; }
+  .dbody .di { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; border-top: 1px solid var(--line); }
+  .dbody .di:first-child { border-top: none; }
+  .dbody .di .dtxt { min-width: 0; flex: 1; font: 12.5px/1.4 var(--sans); color: var(--txt); overflow-wrap: anywhere; }
+  .dbody .di .dfrom { color: var(--faint); font: 10px/1.4 var(--mono); }
+  .dbody .di .dage { flex: none; font: 10px/1 var(--mono); color: var(--faint); }
+  .dbody .di .amark { flex: none; font: 8px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 3px 6px; border-radius: 6px; color: var(--accent); background: rgba(138,166,255,.14); }
+  .dbody .dmore { padding: 4px 13px 9px; font: 10px/1 var(--mono); color: var(--faint); }
+
   /* footer: the full lane manager (add-token, remote bodies) + scoped irsyad stay one tap away */
   .footlinks { display: flex; gap: 8px; padding: 16px 16px 6px; }
   .footlinks a { flex: 1; text-align: center; padding: 12px 10px; border-radius: 11px; font: 600 12.5px/1 var(--sans);
@@ -365,18 +408,29 @@
     <div id="handling"></div>
   </div>
 
+  <div class="spinehead"><h2>Coordinators</h2><span class="count">hub · console · cai · tap to act</span></div>
+  <div id="coordinators" class="coordrow"></div>
+
   <div class="spinehead">
     <h2>Lanes</h2><span id="lanesCount" class="count"></span>
     <button id="multiToggle" class="ms">◎ multi-select</button>
   </div>
   <div id="lanes" class="grid"><div class="empty">Loading…</div></div>
 
-  <div class="spinehead"><h2>Coordinators</h2><span class="count">hub · console · cai · tap to act</span></div>
-  <div id="coordinators" class="coordrow"></div>
-
   <section>
-    <div class="sec-h"><h2>Your asks</h2><span id="backlogCount" class="count"></span></div>
-    <div id="backlog"><div class="empty">Loading…</div></div>
+    <div class="sec-h"><h2>Drain board</h2><span id="drainCount" class="count"></span>
+      <button id="assignToggle" class="asbtn">+ assign</button></div>
+    <div id="assignForm" class="assign">
+      <select id="assignAgent" class="assel"><option value="">Assign to…</option></select>
+      <input id="assignAsk" class="asinput" type="text" placeholder="What should they do?" autocomplete="off" />
+      <div class="asrow">
+        <select id="assignPri" class="assel aspri">
+          <option value="P2">P2</option><option value="P1">P1</option><option value="P0">P0</option>
+        </select>
+        <button id="assignSend" class="assend">Assign →</button>
+      </div>
+    </div>
+    <div id="drainBoard"><div class="empty">Loading…</div></div>
   </section>
 
   <div class="footlinks">

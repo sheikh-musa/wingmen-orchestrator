@@ -1024,6 +1024,52 @@ def _pane_header(pane_rows):
     return {"state": "alert" if worst else "clear", "worst": worst}
 
 
+def _drain_board(rows, max_items=5):
+    """Group the flat unhandled-inbox rows (db.fetch_inbox_backlog) into a
+    per-body DRAIN BOARD (fc-v52). Each entry is one fleet body with pending
+    mail; the whole list SHRINKS as bodies drain their inboxes on the live
+    poll. A body with zero pending mail simply isn't in the list (the board is
+    exception-first, like the lane spine).
+
+    Sorted so what most wants attention floats up: bodies with an unanswered
+    requires_response row first, then by raw depth. Per-body `items` are capped
+    (max_items) with a `more` count so a deep backlog can't bloat the payload;
+    each item keeps `assigned` (console-origin) + `needs_response` for badging."""
+    by_agent = {}
+    order = []
+    for r in rows or []:
+        agent = r.get("to_agent")
+        if not agent:
+            continue
+        grp = by_agent.get(agent)
+        if grp is None:
+            grp = {"agent": agent, "unread": 0, "needs_response": 0,
+                   "assigned": 0, "items": []}
+            by_agent[agent] = grp
+            order.append(agent)
+        grp["unread"] += 1
+        if r.get("needs_response"):
+            grp["needs_response"] += 1
+        if r.get("assigned"):
+            grp["assigned"] += 1
+        if len(grp["items"]) < max_items:
+            grp["items"].append({
+                "id": r.get("id"),
+                "from": r.get("from_agent"),
+                "subject": r.get("subject") or (r.get("message_type") or "message"),
+                "priority": r.get("priority"),
+                "age_s": r.get("age_s"),
+                "needs_response": bool(r.get("needs_response")),
+                "assigned": bool(r.get("assigned")),
+            })
+    board = list(by_agent.values())
+    for g in board:
+        more = g["unread"] - len(g["items"])
+        g["more"] = more if more > 0 else 0
+    board.sort(key=lambda g: (0 if g["needs_response"] else 1, -g["unread"], g["agent"]))
+    return board
+
+
 def _fleet_payload():
     """The single live-derived aggregate behind /api/fleet (redesign #7576):
     pulse counts + needs-you hero + exception-first flagged lanes + working-first
@@ -1048,6 +1094,7 @@ def _fleet_payload():
         f_pane = ex.submit(db.fetch_pane_context)        # op#13050-B: FRESH pane-truth bloat feed
         f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
+        f_inbox = ex.submit(db.fetch_inbox_backlog)      # fc-v52: unhandled bus inbox per body (drain board)
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         deploys = f_deploys.result()
         # Operator-audience needs ONLY. The 'fleet' audience fed a "Fleet is
@@ -1086,6 +1133,15 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("queue failed: %s", e)
             queue = []
+        # fc-v52 drain board: unhandled bus inbox per body (guarded — a failure
+        # here must not blank the whole aggregate; an empty board just renders
+        # "all inboxes drained").
+        try:
+            inbox_rows = f_inbox.result()
+        except Exception as e:
+            logger.warning("inbox_backlog failed: %s", e)
+            inbox_rows = []
+        drain_board = _drain_board(inbox_rows)
     # Mobile payload trim (op#10291): the queue `detail` field was ~11KB of the
     # ~18KB queue section (63%) — the bulk of the /api/fleet payload that the
     # marginal Abu-Dhabi<->Singapore relay drops. It's only needed ON TAP, which
@@ -1131,13 +1187,25 @@ def _fleet_payload():
         state, flagged = l.pop("_state"), l.pop("_flagged")
         l["bucket"] = state
         l["flagged"] = flagged
+        # fc-v52: the lane's FAMILY (irsyad / cosem / ihsanos …), via the SAME
+        # helper the token resolver + GAP-B grouping use — so the spine can sort
+        # all of a family's instances together (operator ask). Derived from the
+        # live session, falling back to the base/agent id.
+        l["family"] = _family_of(l.get("tmux_session") or l.get("lane")
+                                 or l.get("base_agent_id") or l.get("agent_id") or "") or "~"
         counts[state] = counts.get(state, 0) + 1
         if flagged:
             counts["flagged"] += 1
 
-    # working first, then idle, then offline; flagged floats up within its group.
+    # fc-v52: GROUP by family first (operator ask — all irsyad-* together, all
+    # cosem-* together …), then working-first / flagged-up WITHIN each family,
+    # then a stable id tiebreak. The frontend keeps its working-vs-idle collapse,
+    # so idle lanes still fold away — but grouped by family, not scattered.
     order = {"working": 0, "idle": 1, "offline": 2}
-    lanes.sort(key=lambda l: (0 if l["flagged"] else 1, order.get(l["bucket"], 3)))
+    lanes.sort(key=lambda l: (l.get("family") or "~",
+                              0 if l["flagged"] else 1,
+                              order.get(l["bucket"], 3),
+                              l.get("agent_id") or ""))
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     if elapsed_ms > _FLEET_BUDGET_MS:
@@ -1162,6 +1230,10 @@ def _fleet_payload():
         "bloat_glance": _jsonable(bloat_glance),
         "pool_usage": _jsonable(pool_usage),
         "queue": _jsonable(queue),
+        # fc-v52: per-body live drain board (unhandled bus inbox + console-assigned
+        # items), replacing the static "Your asks" backlog. `backlog` is retained
+        # above for back-compat but the fc-v52 UI renders `drain_board`.
+        "drain_board": _jsonable(drain_board),
     }
 
 
@@ -1549,7 +1621,8 @@ def _make_handler(feedloop: "_FeedLoop"):
                             "/api/switch-group", "/api/switch-all",
                             "/api/set-pointer", "/api/set-group-pointer",
                             "/api/add-token", "/api/apply-dry-run",
-                            "/api/apply-armed", "/api/apply-queue-cancel"):
+                            "/api/apply-armed", "/api/apply-queue-cancel",
+                            "/api/assign"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
@@ -1587,6 +1660,13 @@ def _make_handler(feedloop: "_FeedLoop"):
             # reason /api/reset shells out rather than writing inline.
             if path == "/api/backlog":
                 return self._handle_backlog()
+            # fc-v52 drain board: assign a work item to a specific lane/coordinator.
+            # Becomes a REAL bus row to that body (agent_messages, from_agent=
+            # 'orch-console'), so the body actually drains it — closing the loop.
+            # Writes via the vetted scripts/console_assign.py (console DB session is
+            # read-only, same reason /api/reset + /api/backlog shell out).
+            if path == "/api/assign":
+                return self._handle_assign()
             if path == "/api/switch-token":
                 return self._handle_switch_token()
             # Bulk re-token: /api/switch-group (one lane-family) and /api/switch-all
@@ -1702,6 +1782,65 @@ def _make_handler(feedloop: "_FeedLoop"):
             return self._json(200 if ok else 500,
                               {"ok": ok, "id": item_id, "action": action,
                                "error": None if ok else (r.stderr or "").strip()[-160:]})
+
+        def _handle_assign(self):
+            """POST /api/assign {agent, ask, priority?} — assign a work item to a
+            lane/coordinator from the console (fc-v52 drain board). The item is
+            inserted as a REAL bus row (agent_messages, from_agent='orch-console',
+            requires_response=true) to that body, so it shows up in the body's
+            drain queue AND the body actually drains it — closing the loop.
+
+            Validates BEFORE spawning: agent must be a plain id token; ask must be
+            non-empty; priority allowlisted. Shells out to scripts/console_assign.py
+            (writable env; that script re-checks the agent exists in `agents`), the
+            same read-only-console pattern as /api/reset + /api/backlog."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                payload = json.loads(raw or b"{}")
+                agent = (payload.get("agent") or "").strip()
+                ask = (payload.get("ask") or "").strip()
+                priority = (payload.get("priority") or "P2").strip().upper()
+            except Exception:                                        # noqa: BLE001
+                auth.audit(self._client(), "/api/assign", "400")
+                return self._json(400, {"error": "bad request"})
+            # agent: a plain bus id (letters/digits/_/-), never a shell metachar —
+            # so even before the script's DB check nothing crafted reaches argv.
+            if not agent or not re.match(r"^[A-Za-z0-9_-]{1,64}$", agent):
+                auth.audit(self._client(), "/api/assign", "400")
+                return self._json(400, {"error": "bad agent id"})
+            if not ask:
+                auth.audit(self._client(), f"/api/assign:{agent}", "400")
+                return self._json(400, {"error": "empty ask"})
+            if priority not in ("P0", "P1", "P2"):
+                priority = "P2"
+            ask = ask[:1000]
+            auth.audit(self._client(), f"/api/assign:{agent}:{priority}", "run")
+            try:
+                venv_py = _REPO_ROOT / ".venv" / "bin" / "python3"
+                interp = str(venv_py) if venv_py.is_file() else "python3"
+                r = subprocess.run(
+                    [interp, str(_REPO_ROOT / "scripts" / "console_assign.py"),
+                     agent, ask, "--priority", priority],
+                    capture_output=True, text=True, timeout=30,
+                )
+                ok = r.returncode == 0
+                out = (r.stdout or "").strip()
+            except Exception as e:                                   # noqa: BLE001
+                logger.warning("assign failed: %s", e)
+                auth.audit(self._client(), f"/api/assign:{agent}", "500")
+                return self._json(500, {"error": "assign failed"})
+            auth.audit(self._client(), f"/api/assign:{agent}", "200" if ok else "500")
+            if not ok:
+                # unknown agent (script exit 2) -> 400 so the UI can say so.
+                code = 400 if r.returncode == 2 else 500
+                return self._json(code, {"ok": False, "agent": agent,
+                                         "error": (r.stderr or "").strip()[-160:] or "assign failed"})
+            new_id = None
+            m = re.search(r"assigned agent_messages #(\d+)", out)
+            if m:
+                new_id = int(m.group(1))
+            return self._json(200, {"ok": True, "agent": agent, "id": new_id})
 
         def _handle_apply_queue_cancel(self):
             """POST /api/apply-queue-cancel {session, kind} — remove a queued/held
