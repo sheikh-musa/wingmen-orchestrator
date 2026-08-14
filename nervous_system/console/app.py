@@ -937,6 +937,69 @@ def _context_bloat(rows):
     return out
 
 
+# ── op#13050-B: pane-truth honesty (fresh /clear-hint feed, NOT the lying gauge) ──
+def _pane_k_to_level(pane_k):
+    """(pct, level) for a pane_k (reclaimable K-tokens) via the SAME window +
+    green/amber/red thresholds as _ctx_level — one vocabulary across the console.
+    None when pane_k is missing (no hint) / non-positive / impossibly large."""
+    if pane_k is None:
+        return None
+    try:
+        return _ctx_level(int(round(float(pane_k) * 1000)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _pane_bloat(pane_rows):
+    """The top-bloat GLANCE list from the FRESH pane feed (op#13050-B), shaped like
+    _context_bloat. WORKER lanes only (coordinators live on their own cards). A row
+    with no hint (pane_k NULL = below CC's nudge bar OR mid-turn) is not bloat. Never
+    gauge-derived — if the pane feed is down the glance is simply empty (honest)."""
+    out = []
+    for r in pane_rows or []:
+        base, session = r.get("base"), r.get("session")
+        if _is_coord_identity(base) or _is_coord_identity(session):
+            continue
+        lvl = _pane_k_to_level(r.get("pane_k"))
+        if lvl is None:
+            continue
+        pct, level = lvl
+        out.append({
+            "agent": base or session,
+            "sub_tag": session,
+            "ctx_tokens": int(round(float(r.get("pane_k")) * 1000)),
+            "window": _CTX_WINDOW,
+            "pct": pct,
+            "level": level,
+            "age_s": r.get("age_s"),
+            "source": "pane",
+        })
+    out.sort(key=lambda x: x["pct"], reverse=True)
+    return out
+
+
+def _pane_header(pane_rows):
+    """The honest fleet-header state from the FRESH pane feed (op#13050-B). THREE
+    states, NEVER a gauge fallback (the gauge IS the bug):
+      unknown — no fresh pane rows (publisher down/stale) => never a false 'All clear'
+      alert   — a fresh Mini-local body is at/above the amber (soft) bloat level
+      clear   — fresh feed present, nothing over the bar
+    Considers ALL fresh Mini-local bodies (workers + Mini singletons cai/SRE/console).
+    The VPS hub is not in this feed (its own watchdog+escalate covers it)."""
+    if not pane_rows:
+        return {"state": "unknown", "worst": None}
+    worst = None
+    for r in pane_rows:
+        lvl = _pane_k_to_level(r.get("pane_k"))
+        if lvl is None:
+            continue
+        pct, level = lvl
+        if level in ("amber", "red") and (worst is None or pct > worst["pct"]):
+            worst = {"label": r.get("base") or r.get("session"),
+                     "session": r.get("session"), "pct": pct, "level": level}
+    return {"state": "alert" if worst else "clear", "worst": worst}
+
+
 def _fleet_payload():
     """The single live-derived aggregate behind /api/fleet (redesign #7576):
     pulse counts + needs-you hero + exception-first flagged lanes + working-first
@@ -958,7 +1021,7 @@ def _fleet_payload():
         f_coord = ex.submit(db.fetch_coordinators)
         # operator-visibility signals, fired concurrently:
         f_backlog = ex.submit(db.fetch_backlog)          # operator's "Your asks" tracker
-        f_bloat = ex.submit(db.fetch_context_bloat)      # per-agent context %
+        f_pane = ex.submit(db.fetch_pane_context)        # op#13050-B: FRESH pane-truth bloat feed
         f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
@@ -977,11 +1040,17 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("backlog failed: %s", e)
             backlog = []
+        # op#13050-B: the top-bloat glance + honest header read the FRESH pane-truth
+        # feed, NEVER the DB context gauge (which lies for idle/mis-mapped workers — the
+        # bug). A pane-feed failure => empty glance + UNKNOWN header (honest), never a
+        # gauge fallback (that re-introduces the false-green).
         try:
-            context_bloat = _context_bloat(f_bloat.result())
+            pane_rows = f_pane.result()
         except Exception as e:
-            logger.warning("context_bloat failed: %s", e)
-            context_bloat = []
+            logger.warning("pane_context failed: %s", e)
+            pane_rows = []
+        context_bloat = _pane_bloat(pane_rows)
+        pane_header = _pane_header(pane_rows)
         try:
             pool_usage = f_pool.result()
         except Exception as e:
@@ -1053,7 +1122,10 @@ def _fleet_payload():
         )
 
     return {
-        "pulse": {**counts, "needs_you": len(needs)},
+        "pulse": {**counts, "needs_you": len(needs),
+                  # op#13050-B: honest bloat header from the fresh pane feed —
+                  # 'clear' | 'alert' | 'unknown' (+ worst offender). NEVER false-green.
+                  "pane_health": pane_header["state"], "pane_worst": pane_header["worst"]},
         "needs_you": _jsonable(needs),
         "backlog": _jsonable(backlog),
         "coordinators": _jsonable(coordinators),

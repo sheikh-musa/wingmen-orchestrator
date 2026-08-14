@@ -728,3 +728,32 @@ def build_context_bloat_query() -> Tuple[str, list]:
 def fetch_context_bloat() -> List[dict]:
     sql, params = build_context_bloat_query()
     return _query(sql, params)
+
+
+# op#13050-B: the FRESH pane-truth feed (CC's live "/clear to save {N}k" hint,
+# published Mini->DB by the auto_recycle pane pass). This is the gauge-INDEPENDENT
+# ground truth for the honest header + top-bloat glance — the DB context gauge lies
+# for idle/mis-mapped workers (that IS the op#13050 bug), so we read pane_context and
+# NEVER fall back to the gauge. A row older than the TTL is treated as absent (UNKNOWN)
+# so a dead publisher fails SAFE, never a stale false-green. TTL tunable without redeploy.
+# MUST exceed the publisher's cadence (the auto_recycle daemon runs every 300s): 660s
+# tolerates one fully-missed cycle + margin, so a healthy feed never flaps to UNKNOWN
+# between refreshes, while a genuinely-down publisher (>2 cycles dark) still trips it.
+PANE_TTL_S = int(os.environ.get("CONSOLE_PANE_TTL_S", "660"))
+
+
+def build_pane_context_query(ttl_s: int = None) -> Tuple[str, list]:
+    ttl = PANE_TTL_S if ttl_s is None else ttl_s
+    sql = (
+        "SELECT session, base, pane_k, idle_verdict, host, "
+        "  round(extract(epoch FROM (now() - updated_at)))::int AS age_s "
+        "FROM pane_context "
+        "WHERE updated_at > now() - make_interval(secs => %s) "
+        "ORDER BY pane_k DESC NULLS LAST"
+    )
+    return sql, [ttl]
+
+
+def fetch_pane_context(ttl_s: int = None) -> List[dict]:
+    sql, params = build_pane_context_query(ttl_s)
+    return _query(sql, params)

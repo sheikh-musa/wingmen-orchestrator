@@ -189,7 +189,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = 'fc-v47';
+  var APP_BUILD = 'fc-v48';
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -307,11 +307,30 @@
   // ---- render -------------------------------------------------------------
   function renderPulse(p) {
     var needs = p.needs_you || 0;
+    // op#13050-B: honest bloat header from the FRESH pane feed — never a false
+    // "All clear" while a body is bloated (the gauge that used to feed this LIED).
+    // Three states: 'clear' (fresh feed, nothing over the bar) / 'alert' (a body at/
+    // over amber) / 'unknown' (pane feed stale/down — surfaced, never silent-green).
+    var health = p.pane_health || "clear";
+    var worst = p.pane_worst;
     var pl = $("pulse");
-    pl.className = "pulse " + (needs > 0 ? "attn" : "clear");
-    $("pulseBig").textContent = needs > 0
-      ? (needs === 1 ? "1 thing needs you" : needs + " things need you")
-      : "All clear";
+    // Attention when something needs you OR bloat is building OR the feed is dark.
+    var attn = needs > 0 || health === "alert" || health === "unknown";
+    pl.className = "pulse " + (attn ? "attn" : "clear");
+    var msg;
+    if (needs > 0) {
+      // An actionable ask is the headline; bloat still shows in the Top-bloat glance.
+      msg = needs === 1 ? "1 thing needs you" : needs + " things need you";
+    } else if (health === "alert") {
+      msg = worst
+        ? (worst.label + " " + worst.pct + "% — context building")
+        : "context building";
+    } else if (health === "unknown") {
+      msg = "bloat feed offline — status unknown";
+    } else {
+      msg = "All clear";
+    }
+    $("pulseBig").textContent = msg;
     // Status chips (working/idle/flagged/offline) removed per operator (op#12475) —
     // noise up top. The #strip element is gone from fleet.html; guard defensively.
   }
