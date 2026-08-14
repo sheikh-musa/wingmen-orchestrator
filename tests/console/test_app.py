@@ -782,3 +782,135 @@ def test_set_pointer_guard_does_not_block_bulk_switch_all(server, repo_root, mon
                        json={"token_name": "syed", "dry_run": False}, timeout=10)
     assert r.status_code == 200 and r.json()["ok"] is True
     assert _by_lane(r.json()["targets"])["irsyad-coord"]["action"] == "switch"
+# --- op#12501: dedicated /irsyad page + /api/irsyad endpoint -----------------
+# The endpoint is scoped to the irsyad lane-FAMILY (via _family_of) + the musa2
+# weekly pool the family runs on. All seams are stubbed so the test is hermetic
+# (no live tmux/ps, no Supabase): fetch_lanes/context_bloat/pool_usage + the
+# panes live-pane + token ground-truth scan.
+_MUSA2_FP = "e1dfa48eec85"   # the musa2 pool's OAuth fingerprint
+
+
+def _irsyad_lane(session, base="cc-irsyad", lane=None):
+    return {"agent_id": base + "-" + session, "base_agent_id": base,
+            "display_name": "irsyad " + session, "status": "working",
+            "current_task": "build", "tmux_session": session,
+            "lane": lane if lane is not None else session,
+            "auth_account": "musa", "auth_fp": _MUSA2_FP, "host": "Sheikhs-Mini",
+            "heartbeat_age_s": 20, "desired_state": "up",
+            "activity": "working on " + session, "activity_age_s": 40}
+
+
+@pytest.fixture
+def irsyad_server(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONSOLE_ALLOWED_IPS", "203.0.113.9")
+    monkeypatch.setenv("CONSOLE_BREAKGLASS_TOKEN", "test-console-token")
+    monkeypatch.setenv("CONSOLE_ACCESS_LOG", str(tmp_path / "console_access.log"))
+    # irsyad family (4 main + the import lane) PLUS a non-irsyad lane that MUST
+    # be filtered out (proves the family scoping).
+    monkeypatch.setattr(db, "fetch_lanes", lambda: [
+        _irsyad_lane("irsyad"),
+        _irsyad_lane("irsyad-coord"),
+        _irsyad_lane("irsyad-prog1"),
+        _irsyad_lane("irsyad-import", base="cc-irsyad-b", lane=None),
+        _irsyad_lane("cosem-tdu", base="cc-cosem-platform"),   # NOT irsyad family
+    ])
+    monkeypatch.setattr(db, "fetch_context_bloat", lambda: [
+        {"cc_identity": "cc-irsyad", "sub_tag": "irsyad-coord",
+         "ctx_tokens": 500000, "input_tokens": 10, "age_s": 60,
+         "auth_fp": _MUSA2_FP, "host": "Sheikhs-Mini"},
+    ])
+    monkeypatch.setattr(db, "fetch_pool_usage", lambda: [
+        {"pool": "Musa", "pct_7d": "47", "pct_5h": "37", "resets_at": None,
+         "status_7d": "allowed", "pace": "2.0", "projected_pct": "200",
+         "runway_days": None, "updated_age_s": 100},
+        {"pool": "musa2", "pct_7d": "9", "pct_5h": "31", "resets_at": None,
+         "status_7d": "allowed", "pace": "0.31", "projected_pct": "31",
+         "runway_days": None, "updated_age_s": 90},
+    ])
+    monkeypatch.setattr(console_app.panes, "live_sessions",
+                        lambda: ["irsyad", "irsyad-coord", "irsyad-prog1",
+                                 "irsyad-import", "cosem-tdu"])
+    # import lane = working; the rest idle — proves live-pane bucketing.
+    def _cap(sess, live=None):
+        if sess == "irsyad-import":
+            return {"running": True, "state": "working"}, ""
+        return {"running": True, "state": "idle"}, ""
+    monkeypatch.setattr(console_app.panes, "capture", _cap)
+    monkeypatch.setattr(console_app.panes, "token_ground_truth", lambda include_remote=False: {
+        "rows": [
+            {"session": "irsyad-coord", "account": "musa2", "fp": _MUSA2_FP,
+             "metered": False, "model": "claude-opus-4-8", "host": "Mini",
+             "verified": True, "expected": "musa2", "expected_fp": _MUSA2_FP,
+             "mismatch": False},
+            {"session": "irsyad-import", "account": "Syed", "fp": _SYED_FP,
+             "metered": False, "model": "claude-opus-4-8", "host": "Mini",
+             "verified": True, "expected": "Musa", "expected_fp": _MUSA_FP,
+             "mismatch": True},
+        ],
+        "summary": {},
+    })
+    srv = console_app.make_server(host="127.0.0.1", port=0)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(50):
+        try:
+            httpx.get(base + "/healthz", timeout=1.0)
+            break
+        except Exception:
+            time.sleep(0.05)
+    yield base
+    srv.shutdown()
+
+
+def test_irsyad_page_served_open(irsyad_server):
+    """The /irsyad SPA shell is served OPEN (pre-auth), like /lanes — the page
+    fetches /api/irsyad with the stored bearer token after it loads."""
+    r = httpx.get(irsyad_server + "/irsyad", timeout=5)
+    assert r.status_code == 200
+    assert "text/html" in r.headers.get("content-type", "")
+    assert "Irsyad" in r.text
+
+
+def test_api_irsyad_requires_auth(irsyad_server):
+    r = httpx.get(irsyad_server + "/api/irsyad", timeout=5)
+    assert r.status_code == 401
+
+
+def test_api_irsyad_scopes_to_family_and_musa2_pool(irsyad_server):
+    r = httpx.get(irsyad_server + "/api/irsyad", headers=H(), timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["family"] == "irsyad"
+    sessions = {l["session"] for l in body["lanes"]}
+    # the 4 irsyad-family lanes are present; the cosem lane is filtered OUT.
+    assert sessions == {"irsyad", "irsyad-coord", "irsyad-prog1", "irsyad-import"}
+    assert "cosem-tdu" not in sessions
+    # the pool shown is musa2 (the pool this family runs on), never Musa.
+    assert body["pool"]["pool"] == "musa2"
+    assert body["pool"]["pct_7d"] == "9"
+    # counts: import lane working, the other three idle.
+    assert body["counts"]["working"] == 1
+    assert body["counts"]["idle"] == 3
+
+
+def test_api_irsyad_folds_token_model_and_context(irsyad_server):
+    r = httpx.get(irsyad_server + "/api/irsyad", headers=H(), timeout=5)
+    by = {l["session"]: l for l in r.json()["lanes"]}
+    # token-truth folded per session: verified account + model.
+    coord = by["irsyad-coord"]
+    assert coord["bucket"] == "idle"
+    assert coord["account"] == "musa2"
+    assert coord["model"] == "claude-opus-4-8"
+    assert coord["verified"] is True and coord["off_account"] is False
+    # context gauge folded by sub_tag == tmux_session (500k / 1M = 50%).
+    assert coord["ctx_pct"] == 50
+    assert coord["ctx_tokens"] == 500000
+    # the import lane is on a DIFFERENT account than expected -> off_account flag.
+    imp = by["irsyad-import"]
+    assert imp["bucket"] == "working"
+    assert imp["off_account"] is True
+    assert imp["expected"] == "Musa"
+    # a lane with no context row surfaces null, not a fabricated number.
+    assert by["irsyad-prog1"]["ctx_pct"] is None

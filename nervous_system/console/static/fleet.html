@@ -81,22 +81,39 @@
   /* PULSE — sticks BELOW the island (top offset by the inset), matching #ptr */
   .pulse { position: sticky; top: env(safe-area-inset-top); z-index: 5; background: linear-gradient(180deg,#10151f,#0b0e14);
     border-bottom: 1px solid var(--line); padding: 13px 16px 12px; }
+  /* brandrow: "Fleet ● live" on the left, the build badge on the right. The build
+     is a SIBLING of .brand now (not nested inside it) and never wraps, so the
+     'fc-vNN · <sha>' badge can't be squeezed/cut-off by the pool chips anymore
+     (op#12709: the chips moved to their own row below). */
   .pulse .brandrow { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
-  .pulse .brand { font-size: 13px; font-weight: 600; letter-spacing:.3px; color: var(--dim); }
+  .pulse .brand { font-size: 13px; font-weight: 600; letter-spacing:.3px; color: var(--dim);
+    white-space:nowrap; min-width:0; overflow:hidden; text-overflow:ellipsis; }
   .pulse .brand .live { color: var(--good); } .pulse .brand .live.down { color: var(--bad); }
   /* build badge — always-visible so the operator can SEE which build his device
      is running (PWA-cache-loop fix). .stale (a newer build is deployed than the
      one this cached bundle is) turns it amber until the one-shot reload lands. */
-  .pulse .brand .build { font:10px/1 var(--mono); letter-spacing:.3px; color:var(--dim); font-weight:400; }
-  .pulse .brand .build.stale { color:var(--warn); }
-  /* weekly Max-pool usage, "up top" in the header (op#9770) */
-  .poolusage { margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
-  .poolchip { font:10px/1.4 var(--mono); letter-spacing:.2px; padding:2px 6px; border-radius:6px;
-    background:rgba(255,255,255,.05); color:var(--dim); white-space:nowrap; }
+  .pulse .build { margin-left:auto; flex:none; white-space:nowrap;
+    font:10px/1 var(--mono); letter-spacing:.3px; color:var(--dim); font-weight:400; }
+  .pulse .build.stale { color:var(--warn); }
+  /* weekly Max-pool usage (op#9770) — a full-width VERTICAL stack below the brand
+     row, one .poolrow per pool: the weekly-% pill + its pace advisory (op#12617).
+     Stacking (not the old 2+1 wrap) keeps all pools + pace legible on a phone. */
+  .poolusage { display:flex; flex-direction:column; gap:5px; margin-top:8px; }
+  .poolusage:empty { display:none; }
+  .poolrow { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    font:10.5px/1.4 var(--mono); letter-spacing:.2px; }
+  .poolchip { flex:none; font:10.5px/1.4 var(--mono); letter-spacing:.2px; padding:2px 7px; border-radius:999px;
+    background:rgba(255,255,255,.05); border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
   .poolchip b { font-weight:700; }
   .poolchip.good b { color:var(--good); } .poolchip.warn b { color:var(--warn); } .poolchip.bad b { color:var(--bad); }
-  .poolchip.bad { background:rgba(240,90,90,.12); }
+  .poolchip.bad { background:rgba(240,90,90,.12); border-color:rgba(251,113,133,.3); }
   .poolchip.stale { color:var(--dim); opacity:.6; } .poolchip.stale b { color:var(--dim); }
+  /* pace advisory — MUTED/neutral (never a red alarm): pace + projected only say
+     "burning fast", they never gate. runway is the real risk signal, .warn (amber)
+     ONLY when the runway is shorter than the days left to reset. */
+  .pooladv { color:var(--faint); white-space:nowrap; }
+  .poolrun { color:var(--dim); white-space:nowrap; }
+  .poolrun.warn { color:var(--warn); }
   /* Lane worklists — the per-lane drain view (lane_tasks) */
   .qlane { margin-bottom:10px; }
   .qlane-h { font:11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.6px;
@@ -217,57 +234,6 @@
   .lane .meta .reset-btn:active { transform:scale(.96); }
   .lane .meta .reset-btn:disabled { opacity:.6; cursor:default; }
   .lane .meta .reset-btn.arm { color:#fff; background:rgba(255,107,107,.32); border-color:rgba(255,107,107,.6); }
-  /* Lane OAuth-account switch control (token-pool conservation) — accent (benign
-     account swap), distinct from the red reset. Sits at the right of the meta row. */
-  .lane .meta .switch-ctl { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
-  .lane .meta .tap + .switch-ctl, .lane .meta .reset-btn + .switch-ctl { margin-left:8px; }
-  .lane .meta .switch-ctl .tok-sel { font:10px/1 var(--mono); color:var(--txt); background:var(--panel);
-    border:1px solid var(--line); border-radius:7px; padding:4px 6px; -webkit-appearance:none; cursor:pointer; }
-  .lane .meta .switch-ctl .switch-btn { font:10px/1 var(--mono); letter-spacing:.3px;
-    color:var(--good); background:rgba(62,207,142,.10); border:1px solid rgba(62,207,142,.30);
-    padding:4px 8px; border-radius:7px; cursor:pointer; -webkit-appearance:none; transition:background .12s; }
-  .lane .meta .switch-ctl .switch-btn:hover { background:rgba(62,207,142,.18); }
-  .lane .meta .switch-ctl .switch-btn:active { transform:scale(.96); }
-  .lane .meta .switch-ctl .switch-btn:disabled { opacity:.6; cursor:default; }
-  .lane .meta .switch-ctl .switch-btn.arm { color:#fff; background:rgba(251,191,36,.32); border-color:rgba(251,191,36,.6); }
-
-  /* Fleet-level bulk account switch toolbar (switch-group / switch-all). Reuses
-     the per-lane .switch-ctl visual language: mono selects + accent/amber
-     buttons, dry-run FIRST then an explicit confirm. Rendered once above the
-     lane grid; hidden until it has content so it never shows an empty box. */
-  .fleetswitch { margin:2px 0 10px; padding:11px 13px; background:var(--panel);
-    border:1px solid var(--line); border-radius:12px; }
-  .fleetswitch:empty { display:none; }
-  .fleetswitch .fs-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  .fleetswitch .fs-sel { font:11px/1 var(--mono); color:var(--txt); background:var(--panel-2);
-    border:1px solid var(--line); border-radius:7px; padding:6px 8px; -webkit-appearance:none; cursor:pointer; }
-  .fleetswitch .fs-btn { font:11px/1 var(--mono); letter-spacing:.3px; color:var(--good);
-    background:rgba(62,207,142,.10); border:1px solid rgba(62,207,142,.30);
-    padding:6px 10px; border-radius:7px; cursor:pointer; -webkit-appearance:none; transition:background .12s; }
-  .fleetswitch .fs-btn:hover { background:rgba(62,207,142,.18); }
-  .fleetswitch .fs-btn:active { transform:scale(.97); }
-  .fleetswitch .fs-btn:disabled { opacity:.6; cursor:default; }
-  /* switch-ALL + the confirm button ride amber (the wider-blast, held-lane-aware action). */
-  .fleetswitch .fs-btn.fs-all { color:var(--warn); background:rgba(240,180,41,.10); border-color:rgba(240,180,41,.30); }
-  .fleetswitch .fs-btn.fs-all:hover { background:rgba(240,180,41,.18); }
-  .fleetswitch .fs-btn.fs-confirm { margin-top:8px; color:#fff; background:rgba(240,180,41,.32); border-color:rgba(240,180,41,.6); }
-  /* dry-run plan + itemized results */
-  .fleetswitch .fs-result { margin-top:10px; font:12px/1.5 var(--mono); color:var(--dim); }
-  .fleetswitch .fs-result:empty { display:none; }
-  .fleetswitch .fs-sum { color:var(--txt); font-weight:700; margin-bottom:6px; overflow-wrap:anywhere; }
-  .fleetswitch .fs-lanes { display:flex; flex-direction:column; gap:3px; margin:4px 0 8px; }
-  .fleetswitch .fs-lane { display:flex; align-items:center; gap:7px; color:var(--txt); overflow-wrap:anywhere; }
-  .fleetswitch .fs-lane input { accent-color:var(--good); }
-  .fleetswitch .fs-skip { color:var(--dim); }
-  .fleetswitch .fs-excluded { color:var(--dim); opacity:.6; overflow-wrap:anywhere; }
-  .fleetswitch .fs-item { display:flex; gap:8px; align-items:baseline; padding:2px 0; flex-wrap:wrap; }
-  .fleetswitch .fs-item .fs-lname { color:var(--txt); }
-  .fleetswitch .fs-act { font-weight:700; }
-  .fleetswitch .fs-act.ok { color:var(--good); }
-  .fleetswitch .fs-act.skip { color:var(--dim); }
-  .fleetswitch .fs-act.fail { color:var(--bad); }
-  .fleetswitch .fs-detail { color:var(--dim); overflow-wrap:anywhere; }
-  .fleetswitch .fs-err { color:var(--bad); font-weight:700; overflow-wrap:anywhere; }
   .collapsed { display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--panel);
     border:1px dashed var(--line); border-radius:13px; color:var(--dim); font-size:13px; cursor:pointer; }
   .collapsed b { color:var(--txt); white-space:nowrap; }
@@ -362,7 +328,7 @@
     padding: 15px 18px 14px; }
   .pulse .brand { font-family: var(--sans); font-size: 14px; letter-spacing: -.01em; color: var(--dim); }
   .pulse .brand .live { color: var(--good); }
-  .pulse .brand .build { padding: 4px 9px; border-radius: 999px; background: var(--panel);
+  .pulse .build { padding: 4px 9px; border-radius: 999px; background: var(--panel);
     border: 1px solid var(--line); color: var(--faint); }
   .pulse .big { font-family: var(--sans); font-size: 21px; font-weight: 800; letter-spacing: -.02em; }
   .poolchip { border-radius: 999px; padding: 4px 9px; background: rgba(255,255,255,.04);
@@ -373,7 +339,7 @@
   .sec-h.needs h2 { color: var(--warn); }
   .chip { border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); }
   /* cards: soft depth + a hairline-lit top edge (native "lit from above" feel) */
-  .need, .lane, .tok, .dep, .fleetswitch, .bl { box-shadow: var(--shadow); }
+  .need, .lane, .tok, .dep, .bl { box-shadow: var(--shadow); }
   .need { border-radius: 14px; }
   .lane { border-radius: 14px; border-left-width: 3px; border-left-color: rgba(55,211,154,.45); }
   .lane .id { font-family: var(--sans); font-weight: 700; font-size: 14px; letter-spacing: -.01em; }
@@ -382,8 +348,7 @@
   .need .who { font-family: var(--sans); font-weight: 700; font-size: 13.5px; }
   .need .what { color: var(--dim); }
   .bl .blask { font-family: var(--sans); }
-  .fleetswitch .fs-btn, .lane .meta .switch-ctl .switch-btn, .lane .meta .reset-btn { border-radius: 9px; }
-  .fleetswitch { border-radius: 14px; }
+  .lane .meta .reset-btn { border-radius: 9px; }
 </style>
 </head>
 <body>
@@ -392,9 +357,14 @@
 
   <div id="pulse" class="pulse">
     <div class="brandrow">
-      <span class="brand">Fleet <span id="liveDot" class="live">● live</span> <span id="build" class="build" title="build running on this device"></span></span>
-      <span id="poolUsage" class="poolusage" title="Max weekly-pool usage (op#9770)"></span>
+      <span class="brand">Fleet <span id="liveDot" class="live">● live</span></span>
+      <span id="build" class="build" title="build running on this device"></span>
     </div>
+    <!-- Weekly Max-pool usage (op#9770) — its OWN full-width stacked row below the
+         brand line so the 3 pools read as a clean vertical list (no 2+1 wrap) and
+         each carries its pace advisory (op#12617), instead of being squeezed into
+         the brand row and shoving the build badge off-screen (op#12709 layout fix). -->
+    <div id="poolUsage" class="poolusage" title="Max weekly-pool usage + pace (op#9770/#12617)"></div>
     <div class="headline"><span class="orb"></span><span id="pulseBig" class="big">Loading…</span></div>
     <!-- Glance: the single most context-bloated worker lane (operator ask, op#10550
          follow-up). Display-only, from the existing context_bloat payload; hidden
@@ -436,10 +406,9 @@
 
   <section>
     <div class="sec-h"><h2>Lanes</h2><span class="count">working first · /1M window fill</span></div>
-    <!-- Fleet-level bulk account switch toolbar (switch-group / switch-all).
-         Rendered ONCE by renderFleetSwitch(); empty (hidden) until lanes load.
-         Every fire is dry-run previewed then explicitly confirmed. -->
-    <div id="fleetSwitch" class="fleetswitch"></div>
+    <!-- Lane account-switching (per-lane + bulk switch-group / switch-ALL) lives
+         ONLY on the /lanes Lane Manager now (op#12709 dashboard declutter): it
+         kept the switch-ALL mis-tap vector off the main attention view. -->
     <div id="lanes"><div class="empty">Loading…</div></div>
   </section>
 

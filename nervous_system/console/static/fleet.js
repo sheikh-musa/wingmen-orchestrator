@@ -75,302 +75,6 @@
     });
   }
 
-  // ── Lane OAuth-account switch (token-pool conservation) ────────────────────
-  // Per-lane account selector + a confirm-then-switch button (same two-tap guard
-  // as reset — a native confirm() is suppressed in the iOS standalone PWA). The
-  // account list is the terms-clean ALLOWLIST the backend enforces; the FORBIDDEN
-  // gazzabyte consumer token (CAI-729) is never offered here and is refused by
-  // both the endpoint allowlist and switch_lane_token.sh. Only rendered for a
-  // lane with a live tmux_session (the switch targets that session by name).
-  var SWITCH_ACCOUNTS = [
-    { name: "musa", label: "Musa", fp: "68142948" },
-    { name: "syed", label: "Syed", fp: "582043088" }
-  ];
-  function currentAccountName(fp) {
-    fp = fp || "";
-    for (var i = 0; i < SWITCH_ACCOUNTS.length; i++) {
-      if (fp.indexOf(SWITCH_ACCOUNTS[i].fp) === 0) return SWITCH_ACCOUNTS[i].name;
-    }
-    return "";
-  }
-  function switchCtlHtml(session, fp) {
-    if (!session) return "";   // no live session -> nothing to re-token
-    var cur = currentAccountName(fp);
-    var opts = SWITCH_ACCOUNTS.map(function (a) {
-      return '<option value="' + a.name + '"' + (a.name === cur ? " selected" : "") + '>' + esc(a.label) + '</option>';
-    }).join("");
-    return '<span class="switch-ctl" data-switch-session="' + esc(session) + '">' +
-      '<select class="tok-sel" title="Choose the Claude account to run this lane on">' + opts + '</select>' +
-      '<button class="switch-btn" title="Re-token this lane onto the selected account. Restarts the lane process and RESUMES the conversation on the new account (falls back to fresh if no session is found); identity is preserved. Refuses if the lane is busy.">⇄ switch</button>' +
-      '</span>';
-  }
-  function doSwitch(btn) {
-    var ctl = btn.closest ? btn.closest(".switch-ctl") : btn.parentNode;
-    if (!ctl) return;
-    var session = ctl.getAttribute("data-switch-session");
-    var sel = ctl.querySelector(".tok-sel");
-    var tokenName = sel ? sel.value : "";
-    if (!session || !tokenName) return;
-    // Two-tap confirm (iOS PWA suppresses window.confirm — see doReset). First
-    // tap arms for 3s; a second tap actually switches. The backend re-tokens the
-    // lane and RESUMES its conversation on the new account (falls back to fresh if
-    // no session is found) and refuses a busy lane, so this only guards a mis-tap.
-    if (!btn._armed) {
-      btn._armed = true;
-      btn.classList.add("arm");
-      btn.textContent = "tap again — restarts lane";
-      btn._disarm = setTimeout(function () {
-        btn._armed = false; btn.classList.remove("arm"); btn.textContent = "⇄ switch";
-      }, 3000);
-      return;
-    }
-    clearTimeout(btn._disarm); btn._armed = false; btn.classList.remove("arm");
-    var orig = "⇄ switch";
-    btn.disabled = true; btn.textContent = "⇄ switching…";
-    fetch("/api/switch-token", {
-      method: "POST",
-      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
-      body: JSON.stringify({ lane: session, token_name: tokenName })
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, s: r.status, j: j || {} }; }); })
-      .then(function (res) {
-        var msg;
-        if (res.ok && res.j.ok) { msg = "✓ switched"; }
-        else if (res.s === 409) { msg = "⏳ already switching"; }
-        else if (res.s === 429) { msg = "⏳ just switched — wait " + (res.j.retry_after_s || 30) + "s"; }
-        else if (res.s === 504) { msg = "✗ timed out — check the lane"; }
-        else { msg = "✗ " + (res.j.error || "failed"); }
-        btn.textContent = msg;
-        setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 6000);
-      })
-      .catch(function () {
-        // A dropped response does NOT mean the switch didn't run — the kill +
-        // relaunch may have fired before the reply was lost (Mini network flake).
-        btn.textContent = "✗ network dropped — may have run; check lane";
-        setTimeout(function () { btn.disabled = false; btn.textContent = orig; }, 7000);
-      });
-  }
-  function bindSwitches() {
-    document.querySelectorAll(".switch-ctl").forEach(function (ctl) {
-      if (ctl._bound) return; ctl._bound = true;
-      // Stop card-level clicks (which open the peek) from firing on the control.
-      ctl.addEventListener("click", function (ev) { ev.stopPropagation(); });
-      var sel = ctl.querySelector(".tok-sel");
-      if (sel) sel.addEventListener("change", function (ev) { ev.stopPropagation(); });
-      var btn = ctl.querySelector(".switch-btn");
-      if (btn) btn.addEventListener("click", function (ev) { ev.stopPropagation(); doSwitch(btn); });
-    });
-  }
-
-  // ── Fleet-level bulk account switch (switch-group / switch-all) ─────────────
-  // ONE toolbar above the lane grid: pick a TARGET account, then either switch a
-  // whole family (the live session prefix up to its first "-") or the WHOLE
-  // fleet. Every fire is DRY-RUN previewed FIRST (the safety surface) and then
-  // EXPLICITLY confirmed — NEVER a one-tap bulk switch. Reuses authHeaders() and
-  // the doSwitch fetch idiom (409/429/504/network-drop wording), and the
-  // .switch-ctl visual language. The held lane `irsyad-import` (must NOT be
-  // switched yet) is pre-excluded for switch-ALL; the operator can also DESELECT
-  // any would-switch lane before the real fire (checkbox → exclude[]).
-  var FS_HELD = ["irsyad-import"];   // held lanes: pre-excluded from switch-ALL
-  var fsFamKey = null;               // last-rendered family set (skip needless rebuilds)
-  var fsPlan = null;                 // active dry-run context: {kind, token, family}
-
-  function fsAcctLabel(name) {
-    for (var i = 0; i < SWITCH_ACCOUNTS.length; i++)
-      if (SWITCH_ACCOUNTS[i].name === name) return SWITCH_ACCOUNTS[i].label;
-    return name || "";
-  }
-  // Families = unique session prefix (up to first "-") of the LIVE-session lanes
-  // currently rendered, e.g. "cosem-exams" -> "cosem", "scholar" -> "scholar".
-  function familiesFromLanes(lanes) {
-    var seen = {}, out = [];
-    (lanes || []).forEach(function (l) {
-      var s = l.tmux_session;                 // only live-session lanes are switchable
-      if (!s) return;
-      var fam = String(s).split("-")[0];
-      if (fam && !seen[fam]) { seen[fam] = 1; out.push(fam); }
-    });
-    out.sort();
-    return out;
-  }
-  function renderFleetSwitch(lanes) {
-    var el = $("fleetSwitch");
-    if (!el) return;
-    var fams = familiesFromLanes(lanes);
-    var key = fams.join(",");
-    if (el._built) {
-      // On a live refresh: update the family list ONLY when it actually changed,
-      // and NEVER clobber a plan the operator is mid-read on (peek/backlog-style
-      // state preservation — a background tick must not wipe his dry-run preview).
-      if (key !== fsFamKey && !fsPlan) {
-        var famSel = el.querySelector(".fs-fam");
-        if (famSel && document.activeElement !== famSel) {
-          var cur = famSel.value;
-          famSel.innerHTML = fams.map(function (f) {
-            return '<option value="' + esc(f) + '"' + (f === cur ? " selected" : "") + '>' + esc(f) + '</option>';
-          }).join("");
-          fsFamKey = key;
-        }
-      }
-      return;
-    }
-    el._built = true; fsFamKey = key;
-    var acctOpts = SWITCH_ACCOUNTS.map(function (a) {
-      return '<option value="' + a.name + '">' + esc(a.label) + '</option>';
-    }).join("");
-    var famOpts = fams.map(function (f) {
-      return '<option value="' + esc(f) + '">' + esc(f) + '</option>';
-    }).join("");
-    el.innerHTML =
-      '<div class="fs-row">' +
-        '<select class="fs-sel fs-acct" title="Target Claude account for the bulk switch">' + acctOpts + '</select>' +
-        '<select class="fs-sel fs-fam" title="Family = the live session prefix up to its first dash">' + famOpts + '</select>' +
-        '<button class="fs-btn fs-group" title="Preview then switch every lane in the selected family onto the target account">⇄ switch group</button>' +
-        '<button class="fs-btn fs-all" title="Preview then switch the WHOLE fleet onto the target account (held lanes pre-excluded)">⇄ switch ALL</button>' +
-      '</div>' +
-      '<div class="fs-result" id="fsResult"></div>';
-    var g = el.querySelector(".fs-group"), a = el.querySelector(".fs-all");
-    if (g) g.addEventListener("click", function () { fsDryRun("group"); });
-    if (a) a.addEventListener("click", function () { fsDryRun("all"); });
-  }
-
-  function fsPost(url, body) {
-    return fetch(url, {
-      method: "POST",
-      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
-      body: JSON.stringify(body)
-    }).then(function (r) {
-      return r.json().then(
-        function (j) { return { ok: r.ok, s: r.status, j: j || {} }; },
-        function () { return { ok: r.ok, s: r.status, j: {} }; }   // non-JSON body
-      );
-    });
-  }
-  // A non-200 / non-JSON failure worded like doSwitch's error handling.
-  function fsErrText(res) {
-    if (res.s === 400) return "✗ " + (res.j.error || "unknown token / bad request");
-    if (res.s === 401) return "✗ not authorized";
-    if (res.s === 429) return "⏳ rate-limited — wait a moment";
-    if (res.s === 500) return "✗ " + (res.j.error || "enumerate failed on the server");
-    if (res.s === 504) return "✗ timed out — check the lanes";
-    return "✗ " + (res.j.error || ("failed (http " + res.s + ")"));
-  }
-
-  function fsDryRun(kind) {
-    var el = $("fleetSwitch"), out = $("fsResult");
-    if (!el || !out) return;
-    var token = el.querySelector(".fs-acct").value;
-    var family = el.querySelector(".fs-fam").value;
-    if (kind === "group" && !family) { out.innerHTML = '<span class="fs-err">No family selected.</span>'; return; }
-    fsPlan = null;   // clear any prior plan while this dry-run is in flight
-    out.innerHTML = '<span class="fs-skip">Previewing…</span>';
-    var url = kind === "group" ? "/api/switch-group" : "/api/switch-all";
-    var body = kind === "group"
-      ? { family: family, token_name: token, dry_run: true }
-      : { token_name: token, dry_run: true, exclude: FS_HELD.slice() };
-    fsPost(url, body).then(function (res) {
-      if (!(res.ok && res.j && res.j.dry_run)) {
-        out.innerHTML = '<span class="fs-err">' + esc(fsErrText(res)) + '</span>'; return;
-      }
-      fsPlan = { kind: kind, token: token, family: family };
-      renderPlan(out, kind, token, res.j);
-    }).catch(function () {
-      // A dropped dry-run RESPONSE is safe (a dry-run changes nothing) — just retry.
-      out.innerHTML = '<span class="fs-err">✗ network dropped during preview — tap again</span>';
-    });
-  }
-
-  // The DRY-RUN plan: summary + the lanes that WOULD switch (by name), skipped
-  // breakdown, excluded lanes shown muted (proves held/SELF are protected). For
-  // switch-ALL each would-switch lane is a checkbox (checked) so the operator can
-  // deselect before firing; switch-group has no exclude on the endpoint so its
-  // list is read-only. Nothing fires until the explicit Confirm button.
-  function renderPlan(out, kind, token, j) {
-    var targets = j.targets || [], sum = j.summary || {};
-    var would = targets.filter(function (t) { return t.action === "switch"; });
-    var excluded = targets.filter(function (t) { return t.action === "skipped:excluded"; });
-    var already = targets.filter(function (t) { return t.action === "skipped:already"; }).length;
-    var busy = targets.filter(function (t) { return t.action === "skipped:busy"; }).length;
-    var lbl = esc(fsAcctLabel(token));
-    var skippedTotal = (sum.skipped != null) ? sum.skipped : (targets.length - would.length);
-    var head = '<div class="fs-sum">Would switch <b>' + would.length + '</b> lane' + (would.length === 1 ? '' : 's') +
-      ' to ' + lbl + ' — skipped ' + skippedTotal +
-      ' (already ' + already + ' / busy ' + busy + ' / excluded ' + excluded.length + ')</div>';
-    var lanesHtml;
-    if (!would.length) {
-      lanesHtml = '<div class="fs-skip">Nothing to switch.</div>';
-    } else if (kind === "all") {
-      lanesHtml = '<div class="fs-lanes">' + would.map(function (t) {
-        return '<label class="fs-lane"><input type="checkbox" class="fs-ck" value="' + esc(t.lane) + '" checked> ' + esc(t.lane) + '</label>';
-      }).join("") + '</div>';
-    } else {
-      lanesHtml = '<div class="fs-lanes">' + would.map(function (t) {
-        return '<div class="fs-lane">' + esc(t.lane) + '</div>';
-      }).join("") + '</div>';
-    }
-    var exclHtml = excluded.length
-      ? '<div class="fs-excluded">excluded: ' + excluded.map(function (t) {
-          return esc(t.lane) + (t.detail ? " (" + esc(t.detail) + ")" : "");
-        }).join(", ") + '</div>'
-      : '';
-    var confirmHtml = would.length
-      ? '<button class="fs-btn fs-confirm" id="fsConfirm">Confirm switch ' + would.length + ' lane' + (would.length === 1 ? '' : 's') + '</button>'
-      : '';
-    out.innerHTML = head + lanesHtml + exclHtml + confirmHtml;
-    var cb = $("fsConfirm");
-    if (cb) cb.addEventListener("click", function () { fsFire(out); });
-  }
-
-  function fsFire(out) {
-    if (!fsPlan) return;
-    var kind = fsPlan.kind, token = fsPlan.token, family = fsPlan.family;
-    var cb = $("fsConfirm");
-    if (cb) { cb.disabled = true; cb.textContent = "⇄ switching…"; }
-    var url, body;
-    if (kind === "group") {
-      url = "/api/switch-group";
-      body = { family: family, token_name: token, dry_run: false };
-    } else {
-      // exclude = held lanes + any lane the operator unchecked in the plan.
-      var excl = FS_HELD.slice();
-      out.querySelectorAll(".fs-ck").forEach(function (ck) {
-        if (!ck.checked && excl.indexOf(ck.value) < 0) excl.push(ck.value);
-      });
-      url = "/api/switch-all";
-      body = { token_name: token, dry_run: false, exclude: excl };
-    }
-    fsPost(url, body).then(function (res) {
-      fsPlan = null;
-      if (res.j && res.j.targets && res.j.targets.length) { renderResults(out, token, res.j); }
-      else { out.innerHTML = '<span class="fs-err">' + esc(fsErrText(res)) + '</span>'; }
-    }).catch(function () {
-      // A dropped RESPONSE on the REAL fire does NOT mean nothing ran — the bulk
-      // kill+relaunch may have fired before the reply was lost (mirror doSwitch).
-      fsPlan = null;
-      out.innerHTML = '<span class="fs-err">✗ network dropped — may have run; check the lanes</span>';
-    });
-  }
-
-  // Itemized results: per-lane action (switch / skipped:* / failed) + detail, with
-  // FAIL-LOUD red on any "failed", plus the summary counts. ok=false (any failure)
-  // still renders the full per-lane breakdown so nothing is hidden.
-  function renderResults(out, token, j) {
-    var targets = j.targets || [], sum = j.summary || {};
-    var lbl = esc(fsAcctLabel(token));
-    var anyFail = (sum.failed || 0) > 0 || j.ok === false;
-    var head = '<div class="fs-sum">' + (anyFail ? '⚠ ' : '✓ ') +
-      'switched ' + (sum.switched || 0) + ' · skipped ' + (sum.skipped || 0) +
-      ' · failed ' + (sum.failed || 0) + ' → ' + lbl + '</div>';
-    var items = targets.map(function (t) {
-      var a = t.action || "";
-      var cls = a === "switch" ? "ok" : (a === "failed" ? "fail" : "skip");
-      return '<div class="fs-item"><span class="fs-lname">' + esc(t.lane) + '</span>' +
-        '<span class="fs-act ' + cls + '">' + esc(a) + '</span>' +
-        (t.detail ? '<span class="fs-detail">' + esc(t.detail) + '</span>' : '') +
-      '</div>';
-    }).join("");
-    out.innerHTML = head + items;
-  }
-
   function esc(s) {
     return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
@@ -421,6 +125,36 @@
   // never a frozen number shown as live (op#9770's whole point). Tooltip carries
   // the 5h window + reset + freshness so the chip itself stays compact.
   var POOL_STALE_S = 1800;   // 30min: the monitor runs well under this
+  // Days until the weekly pool resets, from resets_at (pool_usage jsonifies it as
+  // an ISO ...+00:00 timestamp). Returns null when absent/unparseable/already past
+  // — used only to decide whether runway is the REAL risk (runway < days-to-reset).
+  function daysToReset(resets_at) {
+    if (!resets_at) return null;
+    var t = Date.parse(String(resets_at));
+    if (isNaN(t)) t = Date.parse(String(resets_at).replace(" ", "T"));
+    if (isNaN(t)) return null;
+    var d = (t - Date.now()) / 86400000;
+    return d > 0 ? d : null;
+  }
+  // The PACE advisory (op#12617/#12709) appended to a pool row. pace + projected
+  // are ADVISORY ONLY — muted/neutral, never the red .bad alarm (they say "burning
+  // fast", not "over limit"). runway_days is the real risk signal: HIDDEN when null
+  // (no reading before ~20h history), and flagged .warn ONLY when the runway is
+  // shorter than the days left until the pool resets (i.e. it would run dry first).
+  function paceAdvisory(p) {
+    var bits = [];
+    if (p.pace != null) bits.push(esc(Number(p.pace).toFixed(1)) + "x");
+    if (p.projected_pct != null) bits.push("proj " + Math.round(Number(p.projected_pct)) + "%");
+    var out = "";
+    if (bits.length) out += '<span class="pooladv">' + bits.join(" · ") + '</span>';
+    if (p.runway_days != null) {
+      var rd = Number(p.runway_days);
+      var dtr = daysToReset(p.resets_at);
+      var warn = (dtr != null && rd < dtr);
+      out += '<span class="poolrun' + (warn ? " warn" : "") + '">runway ' + rd.toFixed(1) + "d</span>";
+    }
+    return out;
+  }
   function poolChip(p) {
     var pct = p.pct_7d;
     if (pct == null) return "";
@@ -428,11 +162,16 @@
     var cls = stale ? "stale" : (pct >= 90 ? "bad" : (pct >= 75 ? "warn" : "good"));
     var title = p.pool + " Max weekly pool: " + Math.round(pct) + "% (7d)"
       + (p.pct_5h != null ? ", " + Math.round(p.pct_5h) + "% (5h)" : "")
+      + (p.pace != null ? " · pace " + Number(p.pace).toFixed(2) + "x" : "")
+      + (p.projected_pct != null ? " · projected " + Math.round(Number(p.projected_pct)) + "%" : "")
+      + (p.runway_days != null ? " · runway " + Number(p.runway_days).toFixed(1) + "d" : "")
       + (p.resets_at ? " · resets " + esc(p.resets_at) : "")
       + (p.updated_age_s != null ? " · read " + fmtAge(p.updated_age_s) + " ago" : "")
       + (stale ? " · STALE (monitor stalled)" : "");
-    return '<span class="poolchip ' + cls + '" title="' + esc(title) + '">'
-      + esc(p.pool) + ' <b>' + Math.round(pct) + '%</b> wk' + (stale ? " ⚠" : "") + '</span>';
+    return '<div class="poolrow" title="' + esc(title) + '">'
+      + '<span class="poolchip ' + cls + '">'
+      + esc(p.pool) + ' <b>' + Math.round(pct) + '%</b> wk' + (stale ? " ⚠" : "") + '</span>'
+      + paceAdvisory(p) + '</div>';
   }
   function renderPoolUsage(rows) {
     var el = document.getElementById("poolUsage");
@@ -450,7 +189,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = 'fc-v44';
+  var APP_BUILD = 'fc-v45';
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -837,7 +576,6 @@
         (l.desired_state ? '<span>desired: ' + esc(l.desired_state) + '</span>' : '') +
         (peek ? '<span class="tap">peek ›</span>' : '') +
         resetBtnHtml(l.agent_id) +
-        switchCtlHtml(l.tmux_session, l.auth_fp) +
       '</div>' +
       laneCtxHtml(l) +
       (peek ? '<div class="peek" data-peekbox="' + esc(peek) + '"></div>' : '') +
@@ -913,7 +651,6 @@
     el.innerHTML = items.map(coordCard).join("");
     bindPeeks();   // coord cards reuse the lane peek machinery; bind them here so
     bindResets();  // peek works regardless of render order (op 2026-08-02).
-    bindSwitches();  // no-op on coord cards (no .switch-ctl); kept for symmetry.
   }
   function renderLanes(lanes) {
     lastLanes = lanes;   // kept so jumpToLane can re-render (expand routine) if needed
@@ -937,12 +674,9 @@
       t.firstChild.textContent = (routineExpanded ? "▾" : "▸") + " ";
       bindPeeks();
       bindResets();
-      bindSwitches();
     });
     bindPeeks();
     bindResets();
-    bindSwitches();
-    renderFleetSwitch(lanes);   // fleet-level bulk switch toolbar (built once, above the grid)
   }
 
   var DEP_STAGES = { pending:1, pushed:1, in_review:1, merged:1, live:1, blocked:1 };
@@ -1397,7 +1131,7 @@
   // (tests/console/fleet_topbloat.test.js). `module` is undefined in the browser
   // (vanilla <script>, no bundler), so this is inert there.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows };
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip };
   }
 
   start();

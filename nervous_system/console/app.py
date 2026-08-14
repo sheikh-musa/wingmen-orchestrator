@@ -1065,6 +1065,117 @@ def _fleet_payload():
     }
 
 
+# The operator's dedicated /irsyad page (op#12501): the irsyad lane-family only.
+# Family selection reuses the SAME `_family_of` helper the token resolver + GAP-B
+# grouping use (prefix up to the first '-', after a tolerant `cc-` strip), so both
+# `irsyad`/`irsyad-coord`/`irsyad-prog1`/`irsyad-prog2` (base cc-irsyad) AND
+# `irsyad-import` (base cc-irsyad-b) resolve to family 'irsyad'. The irsyad family
+# runs on the musa2 pool, so the page also shows the musa2 pool_usage row (weekly).
+_IRSYAD_FAMILY = "irsyad"
+
+
+def _irsyad_payload():
+    """The single read behind /api/irsyad (op#12501): the irsyad-family lanes +
+    the musa2 weekly pool. READ-ONLY, no actions. Mirrors the /api/fleet lane
+    derivation exactly (live-pane bucket, context %, token badge) but scoped to
+    ONE family so the operator gets a focused, always-current irsyad view.
+
+    Each lane row carries: session, base_agent_id, bucket (working/idle/offline
+    from the LIVE pane, not the ghost/composer), flagged, token account +
+    auth_fp + verified/off-account (from the process-verified token-truth scan,
+    local-only — the whole family is on the Mini), model, and context % (of the
+    model window, same thresholds as the fleet view). `pool` is the musa2 row
+    (pct_7d/pct_5h/resets_at + the pace/projected_pct/runway_days advisory)."""
+    live = set(panes.live_sessions())
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_lanes = ex.submit(db.fetch_lanes)
+        f_bloat = ex.submit(db.fetch_context_bloat)
+        f_pool = ex.submit(db.fetch_pool_usage)
+        # Process-verified token + model per LOCAL session. include_remote=False:
+        # the irsyad family is entirely on the Mini, so no SSH latency is incurred.
+        f_tt = ex.submit(panes.token_ground_truth, False)
+        lanes = _enrich_lanes_live(f_lanes.result(), live=live)
+        try:
+            bloat = _context_bloat(f_bloat.result())
+        except Exception as e:
+            logger.warning("irsyad context_bloat failed: %s", e)
+            bloat = []
+        try:
+            pool_rows = f_pool.result()
+        except Exception as e:
+            logger.warning("irsyad pool_usage failed: %s", e)
+            pool_rows = []
+        try:
+            _tt = f_tt.result()
+            tt_rows = _tt.get("rows", []) if isinstance(_tt, dict) else []
+        except Exception as e:
+            logger.warning("irsyad token_ground_truth failed: %s", e)
+            tt_rows = []
+
+    # Index the per-session context gauge (keyed by sub_tag == tmux_session for a
+    # multi-instance family) + the process-verified token row (keyed by session).
+    ctx_by_sess = {b.get("sub_tag"): b for b in bloat if b.get("sub_tag")}
+    tt_by_sess = {t.get("session"): t for t in tt_rows if t.get("session")}
+
+    out = []
+    for l in lanes:
+        sess = l.get("tmux_session") or l.get("lane")
+        if _family_of(sess or "") != _IRSYAD_FAMILY:
+            continue
+        state, flagged = _lane_bucket(l)
+        tt = tt_by_sess.get(sess) or {}
+        ctx = ctx_by_sess.get(sess) or {}
+        out.append({
+            "session": sess,
+            "base_agent_id": l.get("base_agent_id"),
+            "display_name": l.get("display_name"),
+            "bucket": state,
+            "flagged": flagged,
+            "activity": l.get("activity"),
+            "activity_age_s": l.get("activity_age_s"),
+            "heartbeat_age_s": l.get("heartbeat_age_s"),
+            "host": l.get("host") or tt.get("host"),
+            # Token account: the process-verified truth when we could read the live
+            # proc (account/verified/mismatch/metered), else the agent_status auth
+            # snapshot (auth_account/auth_fp) as a labelled fallback — never a guess.
+            "account": tt.get("account") or l.get("auth_account"),
+            "auth_fp": tt.get("fp") or l.get("auth_fp"),
+            "verified": bool(tt.get("verified")),
+            "off_account": bool(tt.get("mismatch")),
+            "metered": bool(tt.get("metered")),
+            "expected": tt.get("expected"),
+            "model": tt.get("model"),
+            # Context window fill (of the model window), same green/amber/red as fleet.
+            "ctx_pct": ctx.get("pct"),
+            "ctx_level": ctx.get("level"),
+            "ctx_tokens": ctx.get("ctx_tokens"),
+            "ctx_window": ctx.get("window"),
+            "ctx_age_s": ctx.get("age_s"),
+        })
+
+    # Loud-first ordering: flagged (dark but wanted up) floats up, then working,
+    # then idle, then offline; a stable session sort inside each bucket.
+    order = {"working": 0, "idle": 1, "offline": 2}
+    out.sort(key=lambda r: (0 if r["flagged"] else 1,
+                            order.get(r["bucket"], 3), r["session"] or ""))
+
+    # The irsyad family runs on musa2 — surface THAT pool's weekly usage.
+    pool = next((p for p in pool_rows if str(p.get("pool")) == "musa2"), None)
+
+    counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
+    for r in out:
+        counts[r["bucket"]] = counts.get(r["bucket"], 0) + 1
+        if r["flagged"]:
+            counts["flagged"] += 1
+
+    return {
+        "family": _IRSYAD_FAMILY,
+        "counts": counts,
+        "lanes": _jsonable(out),
+        "pool": _jsonable(pool),
+    }
+
+
 def _fetch_since(last_id):
     """Feeder callback: rows with id > last_id (or baseline when None)."""
     if last_id is None:
@@ -1154,6 +1265,12 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path in ("/lanes", "/lanes/"):
                 return self._serve_static("lanes.html", path)
 
+            # Dedicated operator IRSYAD page (op#12501): the irsyad lane-family on
+            # its OWN route — same open SPA-shell pattern as /lanes; the page reads
+            # /api/irsyad with the stored bearer token. Read-only (no actions).
+            if path in ("/irsyad", "/irsyad/"):
+                return self._serve_static("irsyad.html", path)
+
             # DOCS section: /docs and any /docs/<repo>/<path> deep link all serve
             # the same SPA shell (open, like /). The shell reads window.location
             # + the stored bearer token and fetches /api/docs* with the header,
@@ -1214,6 +1331,13 @@ def _make_handler(feedloop: "_FeedLoop"):
                     # Single live-derived aggregate for the attention-first Fleet
                     # view (redesign #7576): pulse + needs-you + lanes + deploys.
                     payload = _fleet_payload()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, payload)
+
+                if path == "/api/irsyad":
+                    # op#12501: the irsyad-family lanes + musa2 weekly pool, for the
+                    # dedicated /irsyad page. Read-only aggregate (no actions).
+                    payload = _irsyad_payload()
                     auth.audit(self._client(), path, "200")
                     return self._json(200, payload)
 
