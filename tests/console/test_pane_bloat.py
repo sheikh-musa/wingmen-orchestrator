@@ -70,3 +70,31 @@ def test_glance_skips_no_hint_and_sets_pane_source():
 
 def test_glance_empty_when_feed_empty():
     assert console_app._pane_bloat([]) == []
+
+
+# ── header ↔ glance consistency invariant (console 21518) ────────────────────
+def test_glance_includes_coords_with_friendly_label():
+    # include_coords=True => the whole-fleet glance; nazim -> friendly 'orch-console'.
+    rows = [_pane("nazim", 640.0, base=None), _pane("shipforge", 652.4)]
+    out = console_app._pane_bloat(rows, include_coords=True)
+    labels = {r["agent"] for r in out}
+    assert "orch-console" in labels and "cc-shipforge" in labels
+
+
+def test_header_alert_iff_glance_has_amber_body():
+    # The exact contradiction console caught: a coord (orch-console) amber in the glance
+    # MUST make the header alert — header derives from the SAME entries as the glance.
+    rows = [_pane("nazim", 640.0, base=None)]           # orch-console 64% => amber
+    glance = console_app._pane_bloat(rows, include_coords=True)
+    header = console_app._pane_header(rows)
+    assert any(e["level"] in ("amber", "red") for e in glance)
+    assert header["state"] == "alert" and header["worst"]["label"] == "orch-console"
+
+
+def test_true_clear_has_all_green_glance_and_clear_header():
+    # console's rule: an all-GREEN banner (nothing >= amber) <-> 'All clear' header.
+    rows = [_pane("cai", 500.0, base="cai"), _pane("storefront", 480.0)]  # 50%,48% => green
+    glance = console_app._pane_bloat(rows, include_coords=True)
+    header = console_app._pane_header(rows)
+    assert glance and all(e["level"] == "green" for e in glance)
+    assert header["state"] == "clear"

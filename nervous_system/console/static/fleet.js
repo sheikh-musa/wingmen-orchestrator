@@ -189,7 +189,7 @@
   // VERSION on every deploy. Baked in (not fetched) so the badge reflects the
   // build the DEVICE actually loaded — a stale cached page shows its OLD version,
   // exposing staleness instead of a live fetch hiding it (PWA-cache-loop fix).
-  var APP_BUILD = 'fc-v48';
+  var APP_BUILD = 'fc-v49';
   function verNum(v) {                       // "fc-v10" -> 10 ; unparseable -> null
     var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v));
     return m ? parseInt(m[1], 10) : null;
@@ -1030,10 +1030,13 @@
     buildLaneIndex(lanes);            // before renderNeeds, so items know their lane
     buildLaneCtxIndex(d.context_bloat || []);   // before renderLanes, so each card can fold in its /1M gauge
     renderPulse(d.pulse || {});
-    // GLANCE spans the whole fleet: worker lanes (context_bloat) PLUS coordinators
-    // (mapped from their cards), so a coordinator can lead the worst-offender glance
-    // (op#18542). Lane list + coordinator cards stay coordinator-excluded elsewhere.
-    renderTopBloat((d.context_bloat || []).concat(coordCtxRows(d.coordinators)));
+    // GLANCE spans the whole fleet (workers + coordinators, op#18542) from ONE
+    // pane-truth source the SERVER builds (d.bloat_glance) — the header derives from
+    // the SAME entries, so banner and header can NEVER contradict (console 21518).
+    // The old client-side merge of gauge coordCtxRows was the contradiction (a green
+    // 'All clear' header over an amber gauge coord); pane-truth kills it. Fallback to
+    // the legacy merge only if an older server omits bloat_glance.
+    renderTopBloat(d.bloat_glance || (d.context_bloat || []).concat(coordCtxRows(d.coordinators)));
     renderPoolUsage(d.pool_usage || []);   // weekly Max-pool % up top (op#9770)
     renderNeeds(d.needs_you || []);
     renderBacklog(d.backlog || []);

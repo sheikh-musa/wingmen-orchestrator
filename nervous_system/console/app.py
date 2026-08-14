@@ -950,30 +950,57 @@ def _pane_k_to_level(pane_k):
         return None
 
 
-def _pane_bloat(pane_rows):
-    """The top-bloat GLANCE list from the FRESH pane feed (op#13050-B), shaped like
-    _context_bloat. WORKER lanes only (coordinators live on their own cards). A row
-    with no hint (pane_k NULL = below CC's nudge bar OR mid-turn) is not bloat. Never
-    gauge-derived — if the pane feed is down the glance is simply empty (honest)."""
+# A live tmux session -> its canonical coordinator agent_id, so a Mini coordinator's
+# pane row (published by session name) is recognised as a coord + labelled friendly.
+# cai/fleet-health carry a base already; nazim (orch-console) publishes with base=NULL.
+_SESSION_COORD = {"nazim": "orch-console", "cai": "cai", "fleet-health": "cc-fleet-health"}
+
+
+def _pane_canonical(row):
+    """Canonical agent id for a pane_context row (friendly coord id where known)."""
+    return _SESSION_COORD.get(row.get("session")) or row.get("base") or row.get("session")
+
+
+def _pane_entry(row):
+    """One bloat entry (renderTopBloat/_context_bloat shape) from a pane_context row,
+    or None when the row has no /clear hint (pane_k NULL = below CC's nudge bar OR
+    mid-turn). pane_k -> tokens -> the SAME _ctx_level thresholds (one vocabulary)."""
+    lvl = _pane_k_to_level(row.get("pane_k"))
+    if lvl is None:
+        return None
+    pct, level = lvl
+    canon = _pane_canonical(row)
+    is_coord = _is_coord_identity(canon)
+    return {
+        "agent": canon,
+        # Workers display by their instance sub_tag (== tmux session, e.g. 'irsyad');
+        # a coordinator has no sub_tag so it displays by its friendly agent id
+        # ('orch-console'/'cai'), matching how the glance labelled coords before.
+        "sub_tag": None if is_coord else row.get("session"),
+        "ctx_tokens": int(round(float(row.get("pane_k")) * 1000)),
+        "window": _CTX_WINDOW,
+        "pct": pct,
+        "level": level,
+        "age_s": row.get("age_s"),
+        "source": "pane",
+        "is_coord": is_coord,
+    }
+
+
+def _pane_bloat(pane_rows, include_coords=False):
+    """Bloat list from the FRESH pane feed (op#13050-B). include_coords=False =>
+    WORKER lanes only (feeds the per-lane-card gauges; coordinators own their cards,
+    op#9088). include_coords=True => the whole-fleet GLANCE (op#18542) — workers AND
+    coordinators, all on ONE pane-truth source so it can NEVER disagree with the
+    pane-truth header. Never gauge-derived; a down feed => empty (honest)."""
     out = []
     for r in pane_rows or []:
-        base, session = r.get("base"), r.get("session")
-        if _is_coord_identity(base) or _is_coord_identity(session):
+        e = _pane_entry(r)
+        if e is None:
             continue
-        lvl = _pane_k_to_level(r.get("pane_k"))
-        if lvl is None:
+        if not include_coords and e["is_coord"]:
             continue
-        pct, level = lvl
-        out.append({
-            "agent": base or session,
-            "sub_tag": session,
-            "ctx_tokens": int(round(float(r.get("pane_k")) * 1000)),
-            "window": _CTX_WINDOW,
-            "pct": pct,
-            "level": level,
-            "age_s": r.get("age_s"),
-            "source": "pane",
-        })
+        out.append(e)
     out.sort(key=lambda x: x["pct"], reverse=True)
     return out
 
@@ -982,21 +1009,18 @@ def _pane_header(pane_rows):
     """The honest fleet-header state from the FRESH pane feed (op#13050-B). THREE
     states, NEVER a gauge fallback (the gauge IS the bug):
       unknown — no fresh pane rows (publisher down/stale) => never a false 'All clear'
-      alert   — a fresh Mini-local body is at/above the amber (soft) bloat level
+      alert   — a fresh Mini-local body (worker OR coordinator) is at/above amber
       clear   — fresh feed present, nothing over the bar
-    Considers ALL fresh Mini-local bodies (workers + Mini singletons cai/SRE/console).
-    The VPS hub is not in this feed (its own watchdog+escalate covers it)."""
+    Derived from the SAME entries as the GLANCE (_pane_bloat include_coords=True), so
+    header and banner can NEVER contradict (console 21518). The VPS hub is not in this
+    feed (its own watchdog+escalate covers it; it self-publishes as a fast-follow)."""
     if not pane_rows:
         return {"state": "unknown", "worst": None}
     worst = None
-    for r in pane_rows:
-        lvl = _pane_k_to_level(r.get("pane_k"))
-        if lvl is None:
-            continue
-        pct, level = lvl
-        if level in ("amber", "red") and (worst is None or pct > worst["pct"]):
-            worst = {"label": r.get("base") or r.get("session"),
-                     "session": r.get("session"), "pct": pct, "level": level}
+    for e in _pane_bloat(pane_rows, include_coords=True):
+        if e["level"] in ("amber", "red") and (worst is None or e["pct"] > worst["pct"]):
+            worst = {"label": e["agent"], "session": e["sub_tag"],
+                     "pct": e["pct"], "level": e["level"]}
     return {"state": "alert" if worst else "clear", "worst": worst}
 
 
@@ -1049,7 +1073,8 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("pane_context failed: %s", e)
             pane_rows = []
-        context_bloat = _pane_bloat(pane_rows)
+        context_bloat = _pane_bloat(pane_rows)                     # worker-only: per-lane-card gauges
+        bloat_glance = _pane_bloat(pane_rows, include_coords=True)  # whole-fleet glance (workers+coords, ONE source)
         pane_header = _pane_header(pane_rows)
         try:
             pool_usage = f_pool.result()
@@ -1132,6 +1157,9 @@ def _fleet_payload():
         "lanes": _jsonable(lanes),
         "deploys": _jsonable(deploys),
         "context_bloat": _jsonable(context_bloat),
+        # op#13050-B (console 21518): whole-fleet top-bloat GLANCE on ONE pane-truth
+        # source (workers + coords), so the banner can never contradict the header.
+        "bloat_glance": _jsonable(bloat_glance),
         "pool_usage": _jsonable(pool_usage),
         "queue": _jsonable(queue),
     }
