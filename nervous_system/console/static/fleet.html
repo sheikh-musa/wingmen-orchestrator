@@ -164,6 +164,11 @@
     border:1px solid rgba(138,166,255,.44); color:var(--accent);
     font:700 15.5px/1 var(--sans); letter-spacing:-.01em; text-decoration:none; }
   .laneslink:active { background: rgba(138,166,255,.26); transform:scale(.99); }
+  /* op#12838: pair the Lane manager button with an 'irsyad →' peer side-by-side so
+     the sticky area stays compact on mobile; both share the .laneslink style. */
+  .navrow { display:flex; gap:8px; margin:12px 0 2px; }
+  .navrow .laneslink { flex:1; margin:0; min-width:0; padding:15px 12px; gap:7px;
+    font-size:14.5px; white-space:nowrap; }
   .strip { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
   .chip { display:inline-flex; align-items:center; gap:6px; font:12px/1 var(--mono);
     padding:7px 11px; border-radius:999px; background: var(--panel-2); border:1px solid var(--line); color: var(--dim); }
@@ -371,10 +376,16 @@
          when there is no reading. Coordinators are NOT lanes (own cards) so they're
          excluded, same as the per-card gauges. -->
     <div id="topBloat" class="topbloat"></div>
-    <!-- Lane manager: primary nav — kept INSIDE the sticky pulse so it can never
-         scroll under the header and is always visible (op#12475). The status chips
-         (working/idle/flagged/offline) were removed per operator: noise up top. -->
-    <a class="laneslink" href="/lanes">🔑 Lane manager →</a>
+    <!-- Lane manager + irsyad: primary nav — kept INSIDE the sticky pulse so they
+         can never scroll under the header and are always visible (op#12475). The
+         status chips (working/idle/flagged/offline) were removed per operator: noise
+         up top. op#12838: added the 'irsyad →' peer button (routes /irsyad, live
+         since fc-v45 but previously unreachable from the dashboard — operator was
+         typing the URL). Side-by-side so the sticky area stays compact on mobile. -->
+    <div class="navrow">
+      <a class="laneslink" href="/lanes">🔑 Lane manager →</a>
+      <a class="laneslink" href="/irsyad">🧾 irsyad →</a>
+    </div>
   </div>
 
   <section>

@@ -28,7 +28,7 @@
 // re-churns his PWA cache repeatedly over the marginal AD<->SG relay. So: bump
 // this + fleet.js APP_BUILD ONCE per deploy-day, not per-change. `scripts/
 // check_console_version_cadence.py` warns if you're about to re-bump same-day.
-const VERSION = "fc-v45";
+const VERSION = "fc-v47";
 
 // Network-first with a HARD deadline. The failure this fixes (2026-07-11): the
 // navigation/shell fetch was network-first but had NO timeout, so a slow-but-
