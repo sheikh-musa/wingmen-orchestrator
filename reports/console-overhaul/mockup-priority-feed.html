@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Fleet · Priority Feed mockup</title>
+<style>
+  :root{
+    --bg:#090b10; --panel:#12161e; --panel-2:#171c26; --panel-3:#1d2430;
+    --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.10);
+    --txt:#e8ebf1; --dim:#949cac; --faint:#5c6472;
+    --accent:#8aa6ff; --good:#37d39a; --good-dim:#1f9e77;
+    --warn:#f6c453; --bad:#fb7185;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    --shadow:0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0}
+  body{color:var(--txt); font:15px/1.5 var(--sans); letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -6%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 46% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg,#0c0f16,var(--bg) 42%);
+    background-attachment:fixed; }
+  /* PHONE FRAME (mockup only) */
+  .device{width:390px;margin:22px auto;border-radius:38px;padding:10px;
+    background:#000;box-shadow:0 40px 90px -30px rgba(0,0,0,.9),0 0 0 1px #1c1c1e;}
+  .screen{border-radius:30px;overflow:hidden;height:830px;overflow-y:auto;background:var(--bg);position:relative}
+  .screen::-webkit-scrollbar{width:0}
+  .caption{width:390px;margin:0 auto 26px;color:var(--dim);font:12px/1.5 var(--mono);text-align:center;padding:0 20px}
+  .caption b{color:var(--accent)}
+
+  /* ── sticky command header ── */
+  header{position:sticky;top:0;z-index:20;
+    background:linear-gradient(180deg,rgba(16,21,31,.96),rgba(11,14,20,.82));
+    backdrop-filter:saturate(140%) blur(14px);-webkit-backdrop-filter:saturate(140%) blur(14px);
+    border-bottom:1px solid var(--line);padding:14px 16px 12px}
+  .brandrow{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .brand{font:600 13.5px/1 var(--sans);letter-spacing:.2px;color:var(--dim)}
+  .brand .live{color:var(--good)}
+  .build{margin-left:auto;font:10px/1 var(--mono);color:var(--faint);padding:4px 9px;
+    border-radius:999px;background:var(--panel);border:1px solid var(--line)}
+  .headline{display:flex;align-items:center;gap:11px}
+  .orb{width:12px;height:12px;border-radius:50%;flex:none;background:var(--warn);
+    box-shadow:0 0 0 4px rgba(240,180,41,.16),0 0 12px var(--warn);animation:breathe 2.4s ease-in-out infinite}
+  @keyframes breathe{0%,100%{opacity:.6}50%{opacity:1}}
+  .big{font:800 21px/1.1 var(--sans);letter-spacing:-.02em;color:#ffd77a}
+  /* pool micro-strip — always visible, one line */
+  .pools{display:flex;gap:6px;margin-top:11px;flex-wrap:wrap}
+  .poolchip{font:10.5px/1.4 var(--mono);padding:4px 9px;border-radius:999px;
+    background:rgba(255,255,255,.04);border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+  .poolchip b{font-weight:700}
+  .poolchip.good b{color:var(--good)} .poolchip.warn b{color:var(--warn)} .poolchip.bad b{color:var(--bad)}
+  .poolchip.bad{background:rgba(251,113,133,.12);border-color:rgba(251,113,133,.3)}
+  /* segmented filter — the feed's only chrome */
+  .seg{display:flex;gap:6px;margin-top:12px;overflow-x:auto}
+  .seg::-webkit-scrollbar{height:0}
+  .seg button{flex:none;font:11px/1 var(--mono);letter-spacing:.3px;padding:8px 12px;border-radius:999px;
+    background:var(--panel-2);border:1px solid var(--line);color:var(--dim)}
+  .seg button.on{background:rgba(138,166,255,.16);border-color:rgba(138,166,255,.4);color:var(--accent);font-weight:700}
+  .seg button b{color:var(--txt)}
+
+  /* ── the feed ── */
+  .feed{padding:14px 16px calc(40px + env(safe-area-inset-bottom))}
+  .streamlbl{font:10px/1 var(--mono);text-transform:uppercase;letter-spacing:.14em;color:var(--faint);
+    margin:16px 2px 10px;display:flex;align-items:center;gap:9px}
+  .streamlbl:first-child{margin-top:2px}
+  .streamlbl::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line-2),transparent)}
+  .streamlbl.attn{color:var(--warn)}
+
+  /* card base */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);
+    margin-bottom:9px;border-left:3px solid transparent;overflow:hidden}
+
+  /* needs-you card */
+  .need{padding:13px 14px;background:linear-gradient(180deg,rgba(240,180,41,.08),rgba(240,180,41,.03));
+    border:1px solid rgba(240,180,41,.32);border-radius:14px;box-shadow:var(--shadow);margin-bottom:9px}
+  .need.crit{background:linear-gradient(180deg,rgba(255,107,107,.09),rgba(255,107,107,.03));border-color:rgba(255,107,107,.4)}
+  .need .k{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .need .ico{width:28px;height:28px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+    font-size:14px;background:rgba(240,180,41,.16)}
+  .need.crit .ico{background:rgba(255,107,107,.16)}
+  .need .who{font:700 13px/1 var(--sans)}
+  .need .tag{font:10px/1 var(--mono);text-transform:uppercase;letter-spacing:.4px;padding:3px 7px;border-radius:8px;
+    background:rgba(240,180,41,.16);color:var(--warn);font-weight:700}
+  .need.crit .tag{background:rgba(255,107,107,.16);color:var(--bad)}
+  .need .age{margin-left:auto;font:11px/1 var(--mono);color:var(--dim)}
+  .need .what{margin-top:7px;font:13.5px/1.4 var(--sans);color:var(--dim)}
+  .need .qr{display:flex;gap:7px;margin-top:11px}
+  .need .qr button{flex:1;font:600 12px/1 var(--sans);padding:11px 8px;border-radius:10px;
+    border:1px solid var(--line-2);background:var(--panel-2);color:var(--txt)}
+  .need .qr button.go{color:var(--good);background:rgba(55,211,154,.12);border-color:rgba(55,211,154,.32)}
+  .need .qr button.peek{color:var(--accent);background:rgba(138,166,255,.12);border-color:rgba(138,166,255,.3)}
+
+  /* lane card — the workhorse */
+  .lane .row{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer}
+  .lane.working{border-left-color:rgba(55,211,154,.55)}
+  .lane.bloat{border-left-color:var(--bad);background:linear-gradient(90deg,rgba(255,107,107,.06),var(--panel) 42%)}
+  .lane.idle{border-left-color:var(--faint);opacity:.9}
+  .lane.offline{border-left-color:var(--bad)}
+  .st{width:9px;height:9px;border-radius:50%;flex:none}
+  .st.working{background:var(--good);box-shadow:0 0 8px var(--good)}
+  .st.idle{background:var(--dim)} .st.offline{background:var(--bad);box-shadow:0 0 8px var(--bad)}
+  .lane .id{font:700 14px/1 var(--sans);letter-spacing:-.01em}
+  .lane .idw{min-width:0;flex:1}
+  .lane .act{margin-top:4px;font:12.5px/1.35 var(--sans);color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lane .rt{flex:none;text-align:right}
+  .ctxpill{font:10.5px/1 var(--mono);font-weight:700;padding:4px 8px;border-radius:999px}
+  .ctxpill.green{color:var(--good);background:rgba(55,211,154,.12)}
+  .ctxpill.amber{color:var(--warn);background:rgba(246,196,83,.13)}
+  .ctxpill.red{color:var(--bad);background:rgba(251,113,133,.14)}
+  .lane .hb{margin-top:4px;font:10px/1 var(--mono);color:var(--faint)}
+  .lane .bar{height:5px;border-radius:999px;background:var(--panel-3);overflow:hidden;margin:0 14px 12px}
+  .lane .bar i{display:block;height:100%;border-radius:999px}
+  .bar i.green{background:var(--good)} .bar i.amber{background:var(--warn)} .bar i.red{background:var(--bad)}
+  /* per-card action tray (appears on expand) */
+  .tray{display:none;grid-template-columns:repeat(4,1fr);gap:7px;padding:0 12px 13px}
+  .lane.open .tray{display:grid}
+  .tray button{font:600 10.5px/1.2 var(--sans);padding:10px 4px;border-radius:10px;
+    border:1px solid var(--line-2);background:var(--panel-2);color:var(--txt);display:flex;
+    flex-direction:column;align-items:center;gap:4px}
+  .tray button .e{font-size:15px}
+  .tray button.warn{color:var(--warn);border-color:rgba(246,196,83,.3)}
+  .tray button.bad{color:var(--bad);border-color:rgba(251,113,133,.3)}
+  .tray .new{position:relative}
+  .tray .new::after{content:"NEW";position:absolute;top:3px;right:4px;font:6.5px/1 var(--mono);color:var(--accent);letter-spacing:.3px}
+
+  .collapsed{display:flex;align-items:center;gap:9px;padding:11px 14px;background:var(--panel);
+    border:1px dashed var(--line-2);border-radius:13px;color:var(--dim);font:13px/1 var(--sans);margin-bottom:9px}
+  .collapsed b{color:var(--txt)}
+  .collapsed .chev{margin-left:auto;color:var(--faint)}
+  .coordmini{display:flex;gap:7px;flex-wrap:wrap}
+  .cmini{flex:1;min-width:96px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 11px}
+  .cmini .cn{font:700 12px/1 var(--sans)}
+  .cmini .cs{margin-top:5px;font:10px/1 var(--mono);color:var(--dim)}
+  .cmini .cc{margin-top:6px;font:10px/1 var(--mono);font-weight:700}
+  .cmini .cc.green{color:var(--good)} .cmini .cc.amber{color:var(--warn)}
+  .cmini.coord{border-left:3px solid var(--accent)}
+  .hint{color:var(--faint);font:11px/1.5 var(--mono);text-align:center;padding:14px 0 4px}
+</style>
+</head>
+<body>
+<div class="caption">APPROACH A — <b>Priority Feed</b><br/>One ranked stream. Urgency decides order. Tap any lane → 4-up action tray.</div>
+<div class="device"><div class="screen">
+
+  <header>
+    <div class="brandrow">
+      <span class="brand">Fleet <span class="live">● live</span></span>
+      <span class="build">fc-v50 · a1b2c3d</span>
+    </div>
+    <div class="headline"><span class="orb"></span><span class="big">2 things need you</span></div>
+    <div class="pools">
+      <span class="poolchip good">Musa <b>62%</b> · 7d</span>
+      <span class="poolchip bad">Syed <b>88%</b> · runway&lt;reset</span>
+      <span class="poolchip">gazza <b>n/a</b></span>
+    </div>
+    <div class="seg">
+      <button class="on">All</button>
+      <button>Needs <b>2</b></button>
+      <button>Working <b>3</b></button>
+      <button>Idle <b>2</b></button>
+      <button>Your asks <b>4</b></button>
+    </div>
+  </header>
+
+  <div class="feed">
+
+    <div class="streamlbl attn">Needs you now</div>
+
+    <div class="need crit">
+      <div class="k">
+        <span class="ico">🔑</span><span class="who">cc-irsyad</span>
+        <span class="tag">go / no-go</span><span class="age">12m</span>
+      </div>
+      <div class="what">NRIC key rotation — backup at <code>~/.wingmen/keys/</code> confirmed. Proceed with rotate + re-encrypt the silo?</div>
+      <div class="qr">
+        <button class="go">✓ Approve</button>
+        <button class="peek">👁 Peek</button>
+        <button>💬 Reply</button>
+      </div>
+    </div>
+
+    <div class="need">
+      <div class="k">
+        <span class="ico">🚀</span><span class="who">cc-cosem</span>
+        <span class="tag">approval</span><span class="age">34m</span>
+      </div>
+      <div class="what">Director-demo build green. Deploy preview to the cosem SG silo (goumlyne)?</div>
+      <div class="qr">
+        <button class="go">✓ Approve</button>
+        <button class="peek">👁 Peek</button>
+        <button>💬 Reply</button>
+      </div>
+    </div>
+
+    <div class="streamlbl">Attention · context building</div>
+
+    <div class="card lane bloat open">
+      <div class="row">
+        <span class="st working"></span>
+        <div class="idw"><div class="id">cc-cosem</div><div class="act">building namelist PDF ingest flow</div></div>
+        <div class="rt"><span class="ctxpill red">88%</span><div class="hb">Syed · 4s ago</div></div>
+      </div>
+      <div class="bar"><i class="red" style="width:88%"></i></div>
+      <div class="tray">
+        <button><span class="e">👁</span>Peek</button>
+        <button class="new"><span class="e">💬</span>Retask</button>
+        <button class="warn new"><span class="e">♻️</span>Recycle</button>
+        <button class="new"><span class="e">⤢</span>Attach</button>
+        <button><span class="e">🎛</span>Model</button>
+        <button><span class="e">🔑</span>Token</button>
+        <button class="new"><span class="e">▶</span>Boot</button>
+        <button class="bad new"><span class="e">⏹</span>Stand&nbsp;down</button>
+      </div>
+    </div>
+
+    <div class="card lane bloat">
+      <div class="row">
+        <span class="st working"></span>
+        <div class="idw"><div class="id">cc-irsyad</div><div class="act">NRIC import dry-run · awaiting go</div></div>
+        <div class="rt"><span class="ctxpill amber">74%</span><div class="hb">Syed · 9s ago</div></div>
+      </div>
+      <div class="bar"><i class="amber" style="width:74%"></i></div>
+    </div>
+
+    <div class="streamlbl">Working</div>
+
+    <div class="card lane working">
+      <div class="row">
+        <span class="st working"></span>
+        <div class="idw"><div class="id">cc-ihsanos</div><div class="act">wiring storefront checkout webhook</div></div>
+        <div class="rt"><span class="ctxpill green">47%</span><div class="hb">Musa · 2s ago</div></div>
+      </div>
+      <div class="bar"><i class="green" style="width:47%"></i></div>
+    </div>
+
+    <div class="card lane working">
+      <div class="row">
+        <span class="st working"></span>
+        <div class="idw"><div class="id">cc-quality</div><div class="act">reviewing console-deploy content hash</div></div>
+        <div class="rt"><span class="ctxpill amber">72%</span><div class="hb">Musa · 1m ago</div></div>
+      </div>
+      <div class="bar"><i class="amber" style="width:72%"></i></div>
+    </div>
+
+    <div class="streamlbl">Coordinators</div>
+    <div class="coordmini">
+      <div class="cmini coord"><div class="cn">hub</div><div class="cs">coordinating deploy gate</div><div class="cc green">41% ctx</div></div>
+      <div class="cmini coord"><div class="cn">console</div><div class="cs">idle</div><div class="cc green">22% ctx</div></div>
+      <div class="cmini coord"><div class="cn">cai</div><div class="cs">strategic review</div><div class="cc amber">58% ctx</div></div>
+    </div>
+
+    <div class="streamlbl">Resting</div>
+    <div class="collapsed">💤 <b>2 idle &amp; fine</b> — cc-mirror, cc-hifz <span class="chev">▸</span></div>
+
+    <div class="hint">↑ ranked by what needs you · scroll for the rest<br/>tap a lane to open its action tray</div>
+
+  </div>
+
+</div></div>
+
+<script>
+  document.querySelectorAll('.lane .row').forEach(function(r){
+    r.addEventListener('click',function(){ r.closest('.lane').classList.toggle('open'); });
+  });
+</script>
+</body>
+</html>

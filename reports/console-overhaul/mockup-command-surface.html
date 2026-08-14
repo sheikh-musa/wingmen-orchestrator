@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Fleet · Command Surface mockup</title>
+<style>
+  :root{
+    --bg:#090b10; --panel:#12161e; --panel-2:#171c26; --panel-3:#1d2430;
+    --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.10);
+    --txt:#e8ebf1; --dim:#949cac; --faint:#5c6472;
+    --accent:#8aa6ff; --good:#37d39a; --good-dim:#1f9e77;
+    --warn:#f6c453; --bad:#fb7185;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    --shadow:0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0}
+  body{color:var(--txt); font:15px/1.5 var(--sans); letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -6%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 46% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg,#0c0f16,var(--bg) 42%); background-attachment:fixed; }
+  .device{width:390px;margin:22px auto;border-radius:38px;padding:10px;background:#000;
+    box-shadow:0 40px 90px -30px rgba(0,0,0,.9),0 0 0 1px #1c1c1e;}
+  .screen{border-radius:30px;overflow:hidden;height:830px;background:var(--bg);position:relative}
+  .scroll{height:100%;overflow-y:auto;padding-bottom:70px}
+  .scroll::-webkit-scrollbar{width:0}
+  .caption{width:390px;margin:0 auto 26px;color:var(--dim);font:12px/1.5 var(--mono);text-align:center;padding:0 20px}
+  .caption b{color:var(--accent)}
+
+  /* ── compact command strip ── */
+  header{position:sticky;top:0;z-index:20;
+    background:linear-gradient(180deg,rgba(16,21,31,.97),rgba(11,14,20,.85));
+    backdrop-filter:saturate(140%) blur(14px);-webkit-backdrop-filter:saturate(140%) blur(14px);
+    border-bottom:1px solid var(--line);padding:12px 15px 11px}
+  .top{display:flex;align-items:center;gap:9px}
+  .orb{width:11px;height:11px;border-radius:50%;flex:none;background:var(--warn);
+    box-shadow:0 0 0 4px rgba(240,180,41,.16),0 0 10px var(--warn);animation:breathe 2.4s ease-in-out infinite}
+  @keyframes breathe{0%,100%{opacity:.6}50%{opacity:1}}
+  .hl{font:800 16px/1.1 var(--sans);letter-spacing:-.02em;color:#ffd77a}
+  .build{margin-left:auto;font:9.5px/1 var(--mono);color:var(--faint);padding:4px 8px;border-radius:999px;
+    background:var(--panel);border:1px solid var(--line);white-space:nowrap}
+  .stat{display:flex;gap:5px;margin-top:10px}
+  .stat .s{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:7px 8px;text-align:center}
+  .stat .s .n{font:800 16px/1 var(--sans)} .stat .s .l{margin-top:3px;font:9px/1 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+  .stat .s.work .n{color:var(--good)} .stat .s.idle .n{color:var(--dim)} .stat .s.off .n{color:var(--bad)} .stat .s.bloat .n{color:var(--warn)}
+  .pools{display:flex;gap:5px;margin-top:9px}
+  .poolchip{flex:1;font:9.5px/1.3 var(--mono);padding:5px 7px;border-radius:8px;background:rgba(255,255,255,.04);
+    border:1px solid var(--line);color:var(--dim);text-align:center;white-space:nowrap}
+  .poolchip b{font-weight:700} .poolchip.good b{color:var(--good)} .poolchip.bad b{color:var(--bad)}
+  .poolchip.bad{background:rgba(251,113,133,.1);border-color:rgba(251,113,133,.28)}
+
+  /* needs callout — pinned, compact */
+  .needstrip{padding:11px 15px 2px}
+  .need{display:flex;gap:9px;align-items:center;padding:10px 12px;margin-bottom:7px;border-radius:12px;
+    background:linear-gradient(180deg,rgba(240,180,41,.09),rgba(240,180,41,.03));border:1px solid rgba(240,180,41,.34)}
+  .need.crit{background:linear-gradient(180deg,rgba(255,107,107,.1),rgba(255,107,107,.03));border-color:rgba(255,107,107,.42)}
+  .need .who{font:700 12.5px/1.2 var(--sans)} .need .what{margin-top:2px;font:11.5px/1.3 var(--sans);color:var(--dim)}
+  .need .m{min-width:0;flex:1} .need .tag{flex:none;font:9px/1 var(--mono);font-weight:700;text-transform:uppercase;
+    padding:4px 7px;border-radius:7px;background:rgba(255,107,107,.16);color:var(--bad)}
+  .need.warn .tag{background:rgba(246,196,83,.16);color:var(--warn)}
+  .need .age{flex:none;font:10px/1 var(--mono);color:var(--faint)}
+
+  /* ── LANE SPINE — the dense grid that IS the page ── */
+  .spinehead{display:flex;align-items:center;gap:8px;padding:14px 15px 8px}
+  .spinehead h2{font:800 11px/1 var(--sans);text-transform:uppercase;letter-spacing:.12em;color:var(--dim);margin:0}
+  .spinehead .ms{margin-left:auto;font:10px/1 var(--mono);color:var(--accent);padding:6px 10px;border-radius:999px;
+    background:rgba(138,166,255,.12);border:1px solid rgba(138,166,255,.28)}
+  .grid{padding:0 15px}
+  .tile{display:flex;align-items:center;gap:11px;padding:11px 13px;margin-bottom:7px;background:var(--panel);
+    border:1px solid var(--line);border-radius:13px;box-shadow:var(--shadow);border-left:3px solid transparent;cursor:pointer;position:relative}
+  .tile.working{border-left-color:rgba(55,211,154,.55)}
+  .tile.bloat{border-left-color:var(--bad);background:linear-gradient(90deg,rgba(255,107,107,.05),var(--panel) 44%)}
+  .tile.idle{border-left-color:var(--faint)} .tile.offline{border-left-color:var(--bad)}
+  .tile.sel{border-color:rgba(138,166,255,.6);box-shadow:0 0 0 1px rgba(138,166,255,.4),var(--shadow)}
+  /* context ring */
+  .ring{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;position:relative}
+  .ring svg{position:absolute;inset:0;transform:rotate(-90deg)}
+  .ring .rp{font:9px/1 var(--mono);font-weight:700}
+  .ring.green .rp{color:var(--good)} .ring.amber .rp{color:var(--warn)} .ring.red .rp{color:var(--bad)}
+  .tile .idw{min-width:0;flex:1}
+  .tile .id{font:700 13.5px/1 var(--sans);display:flex;align-items:center;gap:7px}
+  .stdot{width:7px;height:7px;border-radius:50%;flex:none}
+  .stdot.working{background:var(--good);box-shadow:0 0 6px var(--good)} .stdot.idle{background:var(--dim)}
+  .stdot.offline{background:var(--bad)}
+  .tile .act{margin-top:4px;font:11px/1.25 var(--mono);color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tile .tok{flex:none;font:9px/1 var(--mono);font-weight:700;padding:4px 7px;border-radius:999px}
+  .tok.musa{color:#4ade80;background:rgba(55,211,154,.1)} .tok.syed{color:#fbbf24;background:rgba(246,196,83,.12)}
+  .tile .chev{flex:none;color:var(--faint);font-size:12px}
+
+  .coordrow{display:flex;gap:6px;padding:6px 15px 4px}
+  .cchip{flex:1;background:var(--panel);border:1px solid var(--line);border-left:2px solid var(--accent);
+    border-radius:10px;padding:8px 9px}
+  .cchip .cn{font:700 11px/1 var(--sans)} .cchip .cc{margin-top:4px;font:9px/1 var(--mono);font-weight:700}
+  .cchip .cc.green{color:var(--good)} .cchip .cc.amber{color:var(--warn)}
+
+  /* ── BOTTOM ACTION DOCK — resting state ── */
+  .dock{position:absolute;left:0;right:0;bottom:0;z-index:30;padding:11px 15px calc(11px + env(safe-area-inset-bottom));
+    background:linear-gradient(180deg,rgba(16,21,31,.4),rgba(9,11,16,.96) 40%);
+    backdrop-filter:saturate(140%) blur(16px);-webkit-backdrop-filter:saturate(140%) blur(16px);
+    border-top:1px solid var(--line-2);display:flex;align-items:center;gap:10px}
+  .dock .dhint{font:11px/1.3 var(--mono);color:var(--faint);flex:1}
+  .dock .dhint b{color:var(--dim)}
+  .dock .msel{font:11px/1 var(--mono);color:var(--accent);padding:9px 13px;border-radius:999px;
+    background:rgba(138,166,255,.12);border:1px solid rgba(138,166,255,.3);flex:none}
+
+  /* ── ACTION SHEET (slides up when a lane is selected) ── */
+  .sheet{position:absolute;left:0;right:0;bottom:0;z-index:40;transform:translateY(102%);transition:transform .26s cubic-bezier(.3,.9,.3,1);
+    background:var(--panel);border-top:1px solid var(--line-2);border-radius:20px 20px 0 0;
+    padding:8px 16px calc(18px + env(safe-area-inset-bottom));box-shadow:0 -20px 50px -20px rgba(0,0,0,.8)}
+  .sheet.up{transform:translateY(0)}
+  .grab{width:38px;height:4px;border-radius:999px;background:var(--line-2);margin:2px auto 12px}
+  .sheet .sh{display:flex;align-items:center;gap:9px;margin-bottom:13px}
+  .sheet .sh .st2{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 7px var(--good)}
+  .sheet .sh .id{font:800 15px/1 var(--sans)}
+  .sheet .sh .ctxpill{margin-left:auto;font:10px/1 var(--mono);font-weight:700;padding:5px 8px;border-radius:999px;
+    color:var(--bad);background:rgba(251,113,133,.14)}
+  .sheet .sh .x{font:16px/1 var(--dim);padding:4px 6px}
+  .sheet .subline{font:11px/1.4 var(--mono);color:var(--faint);margin:-6px 0 13px}
+  /* primary full action grid — EVERYTHING one tap */
+  .agrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .agrid button{font:600 11px/1.15 var(--sans);padding:12px 4px;border-radius:12px;border:1px solid var(--line-2);
+    background:var(--panel-2);color:var(--txt);display:flex;flex-direction:column;align-items:center;gap:5px;position:relative}
+  .agrid button .e{font-size:18px}
+  .agrid button.prim{background:rgba(138,166,255,.14);border-color:rgba(138,166,255,.32);color:var(--accent)}
+  .agrid button.warn{color:var(--warn);border-color:rgba(246,196,83,.3);background:rgba(246,196,83,.09)}
+  .agrid button.bad{color:var(--bad);border-color:rgba(251,113,133,.3);background:rgba(251,113,133,.08)}
+  .agrid button.new::after{content:"NEW";position:absolute;top:4px;right:6px;font:6.5px/1 var(--mono);color:var(--accent)}
+  /* token/model quick row inside sheet */
+  .qctl{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+  .qctl .fake-sel{font:11px/1 var(--mono);color:var(--txt);background:var(--panel-2);border:1px solid var(--line-2);
+    border-radius:10px;padding:11px 12px;display:flex;align-items:center;justify-content:space-between}
+  .qctl .fake-sel small{color:var(--faint)} .qctl .fake-sel::after{content:"▾";color:var(--dim)}
+  .applyrow{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+  .applyrow .b{font:600 12px/1 var(--sans);padding:11px;border-radius:10px;text-align:center}
+  .applyrow .b.prev{color:var(--accent);background:rgba(138,166,255,.13);border:1px solid rgba(138,166,255,.28)}
+  .applyrow .b.arm{color:var(--warn);background:rgba(246,196,83,.13);border:1px solid rgba(246,196,83,.32);font-weight:700}
+  .scrim{position:absolute;inset:0;z-index:35;background:rgba(4,6,10,.5);opacity:0;pointer-events:none;transition:opacity .22s}
+  .scrim.on{opacity:1;pointer-events:auto}
+</style>
+</head>
+<body>
+<div class="caption">APPROACH C — <b>Command Surface</b><br/>Lanes are the spine. Monitoring is ambient up top. Tap a lane → bottom sheet with the FULL action set. Multi-select for bulk.</div>
+<div class="device"><div class="screen">
+  <div class="scroll">
+
+    <header>
+      <div class="top"><span class="orb"></span><span class="hl">2 need you</span>
+        <span class="build">fc-v50 · a1b2c3d</span></div>
+      <div class="stat">
+        <div class="s work"><div class="n">3</div><div class="l">work</div></div>
+        <div class="s bloat"><div class="n">2</div><div class="l">bloat</div></div>
+        <div class="s idle"><div class="n">2</div><div class="l">idle</div></div>
+        <div class="s off"><div class="n">1</div><div class="l">off</div></div>
+      </div>
+      <div class="pools">
+        <div class="poolchip good">Musa <b>62%</b></div>
+        <div class="poolchip bad">Syed <b>88%</b></div>
+        <div class="poolchip">gazza <b>n/a</b></div>
+      </div>
+    </header>
+
+    <div class="needstrip">
+      <div class="need crit">
+        <span class="tag">go/no-go</span>
+        <div class="m"><div class="who">🔑 cc-irsyad</div><div class="what">NRIC rotate + re-encrypt silo — backup confirmed</div></div>
+        <span class="age">12m</span>
+      </div>
+      <div class="need warn">
+        <span class="tag">approve</span>
+        <div class="m"><div class="who">🚀 cc-cosem</div><div class="what">Deploy director demo → SG silo?</div></div>
+        <span class="age">34m</span>
+      </div>
+    </div>
+
+    <div class="spinehead"><h2>Lanes</h2><span class="ms">◎ multi-select</span></div>
+    <div class="grid">
+
+      <div class="tile bloat sel" data-lane="cc-cosem">
+        <div class="ring red"><svg width="34" height="34"><circle cx="17" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="3"/><circle cx="17" cy="17" r="14" fill="none" stroke="#fb7185" stroke-width="3" stroke-dasharray="88" stroke-dashoffset="11" stroke-linecap="round"/></svg><span class="rp">88</span></div>
+        <div class="idw"><div class="id"><span class="stdot working"></span>cc-cosem</div><div class="act">building namelist PDF ingest flow</div></div>
+        <span class="tok syed">Syed</span><span class="chev">›</span>
+      </div>
+
+      <div class="tile bloat" data-lane="cc-irsyad">
+        <div class="ring amber"><svg width="34" height="34"><circle cx="17" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="3"/><circle cx="17" cy="17" r="14" fill="none" stroke="#f6c453" stroke-width="3" stroke-dasharray="88" stroke-dashoffset="23" stroke-linecap="round"/></svg><span class="rp">74</span></div>
+        <div class="idw"><div class="id"><span class="stdot working"></span>cc-irsyad</div><div class="act">NRIC import dry-run · awaiting go</div></div>
+        <span class="tok syed">Syed</span><span class="chev">›</span>
+      </div>
+
+      <div class="tile working" data-lane="cc-ihsanos">
+        <div class="ring green"><svg width="34" height="34"><circle cx="17" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="3"/><circle cx="17" cy="17" r="14" fill="none" stroke="#37d39a" stroke-width="3" stroke-dasharray="88" stroke-dashoffset="47" stroke-linecap="round"/></svg><span class="rp">47</span></div>
+        <div class="idw"><div class="id"><span class="stdot working"></span>cc-ihsanos</div><div class="act">wiring storefront checkout webhook</div></div>
+        <span class="tok musa">Musa</span><span class="chev">›</span>
+      </div>
+
+      <div class="tile working" data-lane="cc-quality">
+        <div class="ring amber"><svg width="34" height="34"><circle cx="17" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="3"/><circle cx="17" cy="17" r="14" fill="none" stroke="#f6c453" stroke-width="3" stroke-dasharray="88" stroke-dashoffset="25" stroke-linecap="round"/></svg><span class="rp">72</span></div>
+        <div class="idw"><div class="id"><span class="stdot working"></span>cc-quality</div><div class="act">reviewing console-deploy hash</div></div>
+        <span class="tok musa">Musa</span><span class="chev">›</span>
+      </div>
+
+      <div class="tile idle" data-lane="cc-mirror">
+        <div class="ring green"><svg width="34" height="34"><circle cx="17" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="3"/><circle cx="17" cy="17" r="14" fill="none" stroke="#37d39a" stroke-width="3" stroke-dasharray="88" stroke-dashoffset="77" stroke-linecap="round"/></svg><span class="rp">12</span></div>
+        <div class="idw"><div class="id"><span class="stdot idle"></span>cc-mirror</div><div class="act">idle · awaiting task · 18m</div></div>
+        <span class="tok musa">Musa</span><span class="chev">›</span>
+      </div>
+
+      <div class="tile offline" data-lane="cc-scholar">
+        <div class="ring green"><svg width="34" height="34"><circle cx="17" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="3"/></svg><span class="rp" style="color:var(--faint)">—</span></div>
+        <div class="idw"><div class="id"><span class="stdot offline"></span>cc-scholar</div><div class="act">offline · heartbeat dead 3h</div></div>
+        <span class="chev">›</span>
+      </div>
+
+      <div class="coordrow">
+        <div class="cchip"><div class="cn">hub</div><div class="cc green">41%</div></div>
+        <div class="cchip"><div class="cn">console</div><div class="cc green">22%</div></div>
+        <div class="cchip"><div class="cn">cai</div><div class="cc amber">58%</div></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- resting dock -->
+  <div class="dock" id="dock">
+    <div class="dhint">Tap a lane to act · <b>cc-cosem</b> selected ↑</div>
+    <div class="msel">Bulk ⇄</div>
+  </div>
+
+  <!-- scrim + action sheet -->
+  <div class="scrim on" id="scrim"></div>
+  <div class="sheet up" id="sheet">
+    <div class="grab"></div>
+    <div class="sh"><span class="st2"></span><span class="id">cc-cosem</span>
+      <span class="ctxpill">88% ctx</span><span class="x" id="close">✕</span></div>
+    <div class="subline">Mini · opus-4-8 · 🔑 Syed 5820… · building namelist PDF ingest flow</div>
+    <div class="agrid">
+      <button class="prim"><span class="e">👁</span>Peek</button>
+      <button class="new"><span class="e">💬</span>Retask</button>
+      <button class="warn new"><span class="e">♻️</span>Recycle</button>
+      <button class="new"><span class="e">⤢</span>Attach</button>
+      <button class="new"><span class="e">▶</span>Boot</button>
+      <button class="bad new"><span class="e">⏹</span>Stand&nbsp;down</button>
+      <button class="new"><span class="e">🔕</span>Mute</button>
+      <button class="new"><span class="e">📌</span>Pin ask</button>
+    </div>
+    <div class="qctl">
+      <div class="fake-sel"><span>🔑 <small>token</small> Syed</span></div>
+      <div class="fake-sel"><span>🎛 <small>model</small> opus-4-8</span></div>
+    </div>
+    <div class="applyrow"><div class="b prev">Preview (dry-run)</div><div class="b arm">Apply · relaunch</div></div>
+  </div>
+
+</div></div>
+
+<script>
+  var sheet=document.getElementById('sheet'),scrim=document.getElementById('scrim'),dock=document.getElementById('dock');
+  function open(name){
+    document.querySelectorAll('.tile').forEach(function(t){t.classList.toggle('sel',t.dataset.lane===name);});
+    sheet.querySelector('.sh .id').textContent=name;
+    sheet.classList.add('up');scrim.classList.add('on');
+  }
+  function close(){sheet.classList.remove('up');scrim.classList.remove('on');}
+  document.querySelectorAll('.tile').forEach(function(t){t.addEventListener('click',function(){open(t.dataset.lane);});});
+  document.getElementById('close').addEventListener('click',close);
+  scrim.addEventListener('click',close);
+</script>
+</body>
+</html>

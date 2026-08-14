@@ -1,3 +1,10 @@
 2026-08-13T11:13:24Z content=b417c6c7ae974170 ver=fc-v40 served={"version": "fc-v40", "sha": "2b80116"}
 2026-08-13T11:59:44Z content=671e6aa4a28ed9db ver=fc-v41 served={"version": "fc-v41", "sha": "468143d"}
 2026-08-13T13:06:40Z content=289385f545154763 ver=fc-v42 served={"version": "fc-v42", "sha": "a91b44c"}
+2026-08-13T16:30:24Z content=f3ced9931eb3747f ver=fc-v43 served={"version": "fc-v43", "sha": "91ac3d7"}
+2026-08-13T21:12:52Z content=0eacc5f7ebdbe158 ver=fc-v44 served={"version": "fc-v44", "sha": "3bf4cd9"}
+2026-08-13T23:31:00Z content=0eacc5f7ebdbe158 ver=fc-v44 served={"version": "fc-v44", "sha": "c463cf0"}
+2026-08-14T06:18:08Z content=2322ed8d3ab23a2a ver=fc-v45 served={"version": "fc-v45", "sha": "986d093"}
+2026-08-14T07:03:38Z content=f215157e3b28581c ver=fc-v47 served={"version": "fc-v47", "sha": "986d093"}
+2026-08-14T18:29:37Z content=74fe39dd828cf075 ver=fc-v49 served={"version": "fc-v49", "sha": "18fc250"}
+2026-08-14T22:08:01Z content=3dbe595448d8c82c ver=fc-v50 served={"version": "fc-v50", "sha": "4c131ec"}
