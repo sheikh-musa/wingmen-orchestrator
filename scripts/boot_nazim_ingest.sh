@@ -8,5 +8,5 @@ set -euo pipefail
 ORCH_DIR="$HOME/wingmen/orchestrator"
 cd "$ORCH_DIR"
 set -a; . ./.env; set +a
-export INGEST_CHANNELS="nazim-console,cosem-exams,cosem-caai,alderei,finance-console"
+export INGEST_CHANNELS="nazim-console,cosem-exams,cosem-caai,alderei,finance-console,hk-editor"
 exec "$ORCH_DIR/.venv/bin/python3" -m nervous_system.ingest
