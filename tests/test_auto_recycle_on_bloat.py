@@ -101,3 +101,46 @@ def test_classify_busy_worker_gated_not_fired():
 def test_classify_would_fire_only_when_worker_stillred_idle():
     d = ar.classify(_ctx("cc-storefront-1", 92), SINGLETONS, WORKERS, fresh_pct=92, idle=True)
     assert d.verdict == "WOULD-FIRE"
+
+
+# ── classify_pane() — the op#13050-A PANE-signal decision (detect-only) ───────
+FIRE_K = ar.PANE_FIRE_K
+
+
+def test_classify_pane_not_bloated_no_hint_is_none_safe():
+    # No pane hint (None) => NOT-BLOATED, fail-closed — never probes idle, never fires.
+    d = ar.classify_pane("storefront", "cc-storefront", SINGLETONS, WORKERS,
+                         bloat_k=None, verdict_state="IDLE_EMPTY")
+    assert d.verdict == "NOT-BLOATED"
+
+
+def test_classify_pane_below_bar_not_bloated():
+    d = ar.classify_pane("irsyad", "cc-irsyad", SINGLETONS, WORKERS,
+                         bloat_k=FIRE_K - 1, verdict_state="IDLE_EMPTY")
+    assert d.verdict == "NOT-BLOATED"
+
+
+def test_classify_pane_singleton_over_bar_escalates_never_fires():
+    d = ar.classify_pane("cai", "cai", SINGLETONS, WORKERS,
+                         bloat_k=FIRE_K + 100, verdict_state="IDLE_EMPTY")
+    assert d.verdict == "SINGLETON-ESCALATE"
+
+
+def test_classify_pane_unregistered_session_fails_closed():
+    # base=None (session not in fleet_lanes) over the bar => escalate, never fire.
+    d = ar.classify_pane("mystery", None, SINGLETONS, WORKERS,
+                         bloat_k=FIRE_K + 50, verdict_state="IDLE_EMPTY")
+    assert d.verdict == "SINGLETON-ESCALATE"
+
+
+@pytest.mark.parametrize("state", ["WORKING", "STAGED", "GHOST_WEDGED", "UNSURE", "UNSURE:X"])
+def test_classify_pane_bloated_worker_not_idle_is_gated(state):
+    d = ar.classify_pane("storefront", "cc-storefront", SINGLETONS, WORKERS,
+                         bloat_k=FIRE_K + 30, verdict_state=state)
+    assert d.verdict == "GATED"
+
+
+def test_classify_pane_would_fire_only_worker_bloated_idle():
+    d = ar.classify_pane("storefront", "cc-storefront", SINGLETONS, WORKERS,
+                         bloat_k=FIRE_K + 30, verdict_state="IDLE_EMPTY")
+    assert d.verdict == "WOULD-FIRE"
