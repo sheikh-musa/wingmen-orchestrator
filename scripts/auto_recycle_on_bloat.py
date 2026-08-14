@@ -51,6 +51,11 @@ HARD_LINE = 95           # shortens G1 idle-patience only; never touches G2 / ne
 # ~85%, before the 98% cliff". Distinct from (and lower than) the legacy 88% gauge bar;
 # console confirms the exact bar at ARMING. Detect-only until then — this fires NOTHING.
 PANE_FIRE_K = 850
+# WATCH_K = the OBSERVE-window verbose bar. Lanes at/above this (but maybe below the fire
+# bar) get their pane signal + idle verdict logged every cycle, so console's Stage-0
+# review sees the VARIED states (busy/staged/sub-tag/idle) being correctly NOT-fired and
+# can watch a lane climb toward the bar. Quiet lanes below it are only counted.
+WATCH_K = 500
 
 
 # ── G4: tier eligibility — PURE + fail-closed (unit-tested) ──────────────────
@@ -209,29 +214,36 @@ def classify_pane(session: str, base: "str | None", singletons, worker_bases,
 
 def run_observe_panes() -> int:
     """DETECT-ONLY sweep over LIVE worker lanes via the PANE signal (op#13050-A).
-    Fires NOTHING. For each live session: read the fresh pane bloat signal; only if it
-    crosses the fire bar do we tier-check + read the pane-truth idle verdict and log the
-    decision we WOULD make. This is the advancement over the gauge pass — a bloated-but-
-    idle worker whose DB gauge is stale/mis-mapped is now VISIBLE (its pane never lies)."""
+    Fires NOTHING. Reads the fresh pane bloat signal for every live session; for any lane
+    at/above WATCH_K it also reads the pane-truth idle verdict and classifies, LOGGING the
+    decision it WOULD make with the pane signal + idle verdict inline (Stage-0 observe
+    record for console's review — proves zero false WOULD-FIRE across the varied states).
+    This is the advancement over the gauge pass: a bloated-but-idle worker whose DB gauge
+    is stale/mis-mapped is now VISIBLE (its pane never lies), and it fires NOTHING."""
     singletons = frozenset(bnd.SINGLETON_BODIES)
     worker_bases = _worker_bases_from_fleet_lanes()
     sessions = _live_worker_sessions()
-    decided = []
+    watched = []   # (session, base, k, verdict_state, Decision) for lanes >= WATCH_K
+    quiet = 0      # lanes below WATCH_K (no hint / low context) — counted only
     for session, base in sessions:
         try:
             k = pbs.pane_bloat_k(session)
         except Exception as e:  # noqa: BLE001 — a capture blip must not crash the sweep
             print(f"[auto-recycle] WARN pane read failed for {session} ({e}) — skip", file=sys.stderr)
             continue
-        if not pbs.is_bloated_k(k, PANE_FIRE_K):
-            continue  # below fire bar (or mid-turn / no hint) — nothing to consider, no idle-probe
+        if k is None or k < WATCH_K:
+            quiet += 1
+            continue
         verdict = _idle_verdict(session, base)
-        decided.append(classify_pane(session, base, singletons, worker_bases, k, verdict))
-    fires = [d for d in decided if d.verdict == "WOULD-FIRE"]
-    print(f"[auto-recycle STAGE-0 PANE detect-only] {len(sessions)} live session(s); "
-          f"{len(decided)} >= {PANE_FIRE_K}k pane fire bar; {len(fires)} WOULD-FIRE; FIRING NOTHING")
-    for d in decided:
-        print(f"  [{d.verdict}] {d.agent}: {d.reason}")
+        d = classify_pane(session, base, singletons, worker_bases, k, verdict)
+        watched.append((session, base, k, verdict, d))
+    fires = [w for w in watched if w[4].verdict == "WOULD-FIRE"]
+    print(f"[auto-recycle STAGE-0 PANE detect-only] {len(sessions)} live session(s) "
+          f"({quiet} quiet <{WATCH_K}k); {len(watched)} watched >={WATCH_K}k; "
+          f"{len(fires)} WOULD-FIRE; FIRING NOTHING")
+    for session, base, k, verdict, d in sorted(watched, key=lambda w: -w[2]):
+        tag = d.verdict if d.verdict != "NOT-BLOATED" else "WATCH"
+        print(f"  [{tag}] {d.agent} (session={session} pane={k:.0f}k idle={verdict}): {d.reason}")
     return 0
 
 
