@@ -1,0 +1,20 @@
+{
+  "op": "op#13183",
+  "conditional": "singleton-coordinator pool-move Musa->Syed",
+  "status": "armed",
+  "threshold": {"pool": "Musa", "metric": "pct_7d", "at_or_above": 90},
+  "targets": ["cc-fleet-health", "orch-console", "cc-orchestrator", "cai"],
+  "mechanism": "checkpoint-first per body -> switch_lane_token->Syed -> flip default pointer (sticky); verify resume-took + auth=syed at source + pointer=syed",
+  "reachability_notes": {
+    "cc-orchestrator": "HUB on VPS (wingmen-core) — NOT switchable from Mini; hub/console execute cross-host",
+    "cc-fleet-health": "SELF — cannot kill+relaunch own body; needs EXTERNAL fire (console), like reset_nazim was routed to SRE",
+    "orch-console": "Mini; SRE external -> SRE drives (checkpoint-first, reset_nazim pattern)",
+    "cai": "Mini/Studio; SRE external -> SRE drives checkpoint->switch (NOT a red /clear; CAI-500 red stays cai's)"
+  },
+  "runbook": "reports/op13183-singleton-move-runbook.md",
+  "armed_at": "2026-08-14T23:44:17Z",
+  "armed_by": "cc-fleet-health",
+  "directive_ref": "agent_messages #21746 (orch-console, op#13183)",
+  "trigger": "weekly_limit_monitor.py autonomous emit at Musa pct_7d>=URGENT (once/window) + SRE boot-pass backstop",
+  "disarm": "set status=executed when all four moved (stops the trigger)"
+}

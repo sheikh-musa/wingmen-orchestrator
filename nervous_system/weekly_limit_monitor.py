@@ -65,6 +65,58 @@ STATE_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor_state.json"
 HEARTBEAT_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor_heartbeat"
 LOG_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor.log"
 
+# op#13183 (operator directive, armed by cc-fleet-health via agent_messages #21746):
+# when Musa 7d crosses URGENT and this conditional is ARMED, the singleton
+# COORDINATORS (SRE/console/hub/cai) move Musa->Syed (checkpoint-first, sticky
+# pointer). This monitor is the AUTONOMOUS TRIGGER — it pages the SRE (+console) to
+# EXECUTE the supervised move; the durable armed-state file is the SSOT (survives an
+# SRE recycle). The emit is DEDUPED once per weekly window and gated on status=armed,
+# so it stops firing once the move is executed (status=executed).
+OP13183_STATE = _ORCH_DIR / "state" / "op13183_singleton_move.json"
+
+
+def _op13183_armed() -> bool:
+    """True if the op#13183 singleton pool-move conditional is ARMED. Missing file =>
+    NOT armed (never page for an unarmed conditional). Present-but-unreadable =>
+    fail-OPEN (page): a spurious page is cheaper than a missed cliff, and the caller
+    logs the ambiguity."""
+    try:
+        return json.loads(OP13183_STATE.read_text()).get("status") == "armed"
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True  # present but unreadable: fail-open, better than a silent miss
+
+
+def _op13183_body(p: dict) -> str:
+    pct = round(p["u7d"] * 100)
+    return (
+        f"[op#13183 TRIGGER] Musa 7d weekly usage = {pct}% (>= URGENT "
+        f"{round(URGENT*100)}%) -> the singleton-coordinator pool-move conditional has "
+        f"FIRED.\n\n"
+        f"WHAT: per operator op#13183, at Musa 90% the singleton coordinators "
+        f"(cc-fleet-health/SRE, orch-console, cc-orchestrator/hub, cai) move "
+        f"Musa->Syed (Syed has ~22d runway). CHECKPOINT-FIRST per body, then "
+        f"switch_lane_token->Syed + flip the default pointer so it sticks.\n"
+        f"WHAT TO DO (SRE executes): follow reports/op13183-singleton-move-runbook.md. "
+        f"Reachability is NOT uniform — the HUB is on the VPS (not switchable from the "
+        f"Mini) and the SRE cannot self-switch; those two need an EXTERNAL fire "
+        f"(console), like reset_nazim was routed to the SRE. Report as each fires; set "
+        f"the armed-state to status=executed when done so this trigger stops.\n"
+        f"(source: weekly_limit_monitor autonomous trigger; dedup: once per weekly "
+        f"window)")
+
+
+def _op13183_page(p: dict, dry: bool) -> None:
+    """Page the SRE (+console) that the op#13183 conditions are met. Both rows so the
+    SRE is woken to execute AND console can fire the hub (VPS) + the SRE's own move."""
+    subj = (f"op#13183 TRIGGER — Musa >= {round(URGENT*100)}%: EXECUTE singleton-"
+            f"coordinator pool-move (checkpoint-first -> Syed)")
+    body = _op13183_body(p)
+    _page(subj, body, "P1", dry, to_agent="cc-fleet-health")
+    _page(subj, body, "P1", dry, to_agent="orch-console")
+    log(f"op#13183 TRIGGER fired (Musa {round(p['u7d']*100)}%)")
+
 # Pool name -> how to load its OAuth token. Value is (kind, ref).
 # BOTH pinned to stable per-account key files (op#12030): a pool must ALWAYS be
 # probed with its OWN token, never the mutable .env CLAUDE_CODE_OAUTH_TOKEN default
@@ -463,6 +515,7 @@ def run(dry: bool = False, as_json: bool = False) -> int:
         if reset and pkey.get("reset") and reset != pkey.get("reset"):
             prev = None
             pkey["pace_alerted"] = None
+            pkey["op13183_fired"] = None   # re-arm the op#13183 trigger for the new window
         pkey["reset"] = reset
         pkey["u7d"] = p["u7d"]
         if level == "ok":
@@ -489,6 +542,23 @@ def run(dry: bool = False, as_json: bool = False) -> int:
             _page(f"⚠️ URGENT — {p['pool']} Claude pool at {pct}% of its weekly limit",
                   _operator_body(p, "urgent"), "P1", dry, to_agent=OPERATOR_AGENT)
             pkey["alerted"] = "urgent"
+
+        # op#13183 AUTONOMOUS TRIGGER: at Musa >= URGENT, if the singleton pool-move
+        # conditional is ARMED, page the SRE (+console) to EXECUTE the supervised move.
+        # A SEPARATE `if` (not the alert transition above) so it fires whenever Musa is
+        # urgent-and-not-yet-fired-this-window, independent of the alert-memory state.
+        # OWN try/except: a fault here must NEVER break the weekly safety pages above
+        # (dead-man's-switch). Deduped once per window (op13183_fired, cleared on a new
+        # window with the other alert memory).
+        if (p["pool"] == "Musa" and level == "urgent"
+                and _op13183_armed() and not pkey.get("op13183_fired")):
+            try:
+                _op13183_page(p, dry)
+                pkey["op13183_fired"] = True
+            except Exception as e:  # noqa: BLE001 — never let this break the core pages
+                log(f"op#13183-TRIGGER-EMIT-FAILED (non-fatal): {e}")
+                print(f"[weekly-limit] op#13183 trigger emit failed: {e}",
+                      file=sys.stderr)
 
         # PACE page (op#12617): the pool is on track to EXHAUST before its weekly
         # reset (projected>100% past the early-window floor, OR runway<days-to-reset)
