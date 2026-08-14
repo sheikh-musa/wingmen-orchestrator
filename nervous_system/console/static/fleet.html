@@ -29,9 +29,26 @@
     --shadow: 0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { height: 100%; margin: 0; overflow-x: hidden; }
+  /* ── ONE scroll container (fc-v51 Command-Surface unification) ──────────────
+     The <html> element is the SINGLE scroller — the whole page (monitoring
+     header + lane spine + asks) scrolls together as one document. overflow-x
+     lives HERE, on <html>, and NOT on <body>: per the CSS overflow spec, when
+     one axis is `hidden` the OTHER axis' used value flips from `visible` to
+     `auto`, so the old `body{overflow-x:hidden}` (+ `body{height:100%}`)
+     silently turned BODY into a nested, viewport-capped scroll container. That
+     inner scroller is what the operator hit on fc-v50: content scrolled INSIDE
+     body while window.scrollY stayed 0, so (a) pull-to-refresh's `scrollY>0`
+     guard never bailed and it misfired, (b) the 8s refresh's scroll-restore
+     (window.scrollTo) was a no-op so the page snapped back to top every tick,
+     and (c) the last sections read as clipped under the fixed dock. Keeping
+     overflow-x on <html> only leaves <body> in normal flow (NOT a scroller);
+     <html> is the document scroller, so window.scrollY is authoritative and
+     everything is one clean vertical scroll. */
+  html { overflow-x: hidden; }
+  html, body { margin: 0; }
   body {
     color: var(--txt);
+    min-height: 100vh;
     font: 15px/1.5 var(--sans); letter-spacing: -.01em; -webkit-font-smoothing: antialiased;
     background:
       radial-gradient(120% 60% at 50% -6%, rgba(55,211,154,.06), transparent 60%),
@@ -39,6 +56,9 @@
       linear-gradient(180deg, #0c0f16, var(--bg) 42%);
     background-attachment: fixed;
     -webkit-text-size-adjust: 100%;
+    /* the header now scrolls in normal flow (no sticky top:inset), so the page
+       body itself starts below the notch */
+    padding-top: env(safe-area-inset-top);
     /* leave room for the resting dock so the last lane isn't hidden under it */
     padding-bottom: calc(env(safe-area-inset-bottom) + 78px);
   }
@@ -61,14 +81,18 @@
   #ptr.refreshing .spin { animation: ptrspin .7s linear infinite; }
   @keyframes ptrspin { to { transform: rotate(360deg); } }
 
-  /* island-fill backdrop (unchanged) so the sticky header never renders under the notch. */
+  /* island-fill backdrop so page content that scrolls up under the notch is
+     masked by the panel colour (the header no longer owns the inset). */
   body::before { content:""; position: fixed; top:0; left:0; right:0;
     height: env(safe-area-inset-top); background:#10151f; z-index: 6; pointer-events:none; }
 
-  /* ── compact command strip — the ambient monitoring frame ── */
-  header.pulse { position: sticky; top: env(safe-area-inset-top); z-index: 20;
-    background: linear-gradient(180deg, rgba(16,21,31,.97), rgba(11,14,20,.82));
-    backdrop-filter: saturate(140%) blur(14px); -webkit-backdrop-filter: saturate(140%) blur(14px);
+  /* ── compact command strip — the ambient monitoring frame ──
+     fc-v51: NORMAL FLOW, not sticky. It is the top of the ONE scroll container
+     and scrolls away with the content (operator's ask: "merge the header with
+     the page so everything sits in one container"). No fixed/sticky block that
+     steals viewport height or fights pull-to-refresh. */
+  header.pulse { position: relative; z-index: 1;
+    background: linear-gradient(180deg, rgba(16,21,31,.85), rgba(11,14,20,.35));
     border-bottom: 1px solid var(--line); padding: 12px 16px 11px; }
   .pulse .top { display: flex; align-items: center; gap: 10px; }
   .pulse .orb { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--dim); }

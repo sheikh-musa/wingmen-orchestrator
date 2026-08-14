@@ -1,4 +1,4 @@
-// Fleet Console — Command Surface (Approach C, fc-v50). ONE page: an ambient
+// Fleet Console — Command Surface (Approach C, fc-v51). ONE page: an ambient
 // monitoring strip up top (pulse headline + stat row + pool chips + needs
 // callouts), the LANES as the dense spine (context-ring tiles), and a bottom
 // ACTION SHEET that raises the FULL per-lane action set on tap — Peek · Retask ·
@@ -125,7 +125,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v50';
+  var APP_BUILD = 'fc-v51';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
