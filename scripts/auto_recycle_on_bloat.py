@@ -32,6 +32,7 @@ G1's idle-patience only — it NEVER bypasses G2 and NEVER fires a busy body.
 from __future__ import annotations
 
 import argparse
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -212,6 +213,56 @@ def classify_pane(session: str, base: "str | None", singletons, worker_bases,
                     f"pane {kdisp} >= fire bar but oracle={verdict_state} (not clean-idle) — wait; never fire a busy/staged/unsure lane (G1)")
 
 
+# ── PANE-TRUTH PUBLISHER (op#13050-B) — Mini panes -> pane_context (console reads) ──
+_PRUNE_STALE_H = 1  # dead-session rows age out after this many hours (console ignores via TTL anyway)
+
+
+def publish_pane_context() -> int:
+    """Publish fresh pane-truth for EVERY live Mini-local session into `pane_context`
+    (op#13050-B, console-signed 21515). One UPSERT per live tmux session: (session, base,
+    pane_k, idle_verdict, host, updated_at=now()); pane_k is NULL when no /clear hint
+    shows (low ctx OR mid-turn — idle_verdict disambiguates). READ-ONLY of the panes;
+    writes only a cache row. The VPS console reads FRESH rows (TTL) for its honest header;
+    a stale/absent row => UNKNOWN (NEVER a gauge fallback — the gauge is the bug). The VPS
+    hub is NOT a Mini tmux session so it is correctly absent here (self-publishes as a
+    fast-follow). FAIL-SAFE: any error is logged + skipped so a publish blip degrades the
+    console to UNKNOWN, never crashes the observe pass or fires anything."""
+    try:
+        host = socket.gethostname()
+    except Exception:  # noqa: BLE001
+        host = None
+    sessions = _live_worker_sessions()   # (session, base) for ALL live tmux sessions
+    rows = []
+    for session, base in sessions:
+        try:
+            k = pbs.pane_bloat_k(session)
+            verdict = _idle_verdict(session, base)
+        except Exception as e:  # noqa: BLE001 — a capture blip must not drop the whole publish
+            print(f"[pane-context] WARN read failed for {session} ({e}) — skip", file=sys.stderr)
+            continue
+        rows.append((session, base, k, verdict, host))
+    if not rows:
+        return 0
+    try:
+        import os, psycopg
+        dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+        with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO pane_context (session, base, pane_k, idle_verdict, host, updated_at)
+                   VALUES (%s,%s,%s,%s,%s, now())
+                   ON CONFLICT (session) DO UPDATE
+                     SET base=EXCLUDED.base, pane_k=EXCLUDED.pane_k,
+                         idle_verdict=EXCLUDED.idle_verdict, host=EXCLUDED.host, updated_at=now()""",
+                rows)
+            cur.execute("DELETE FROM pane_context WHERE updated_at < now() - make_interval(hours => %s)",
+                        (_PRUNE_STALE_H,))
+        print(f"[pane-context] published {len(rows)} live session(s)")
+        return len(rows)
+    except Exception as e:  # noqa: BLE001 — publish is best-effort; console fails safe to UNKNOWN
+        print(f"[pane-context] WARN publish failed ({e}) — console shows UNKNOWN (fail-safe)", file=sys.stderr)
+        return 0
+
+
 def run_observe_panes() -> int:
     """DETECT-ONLY sweep over LIVE worker lanes via the PANE signal (op#13050-A).
     Fires NOTHING. Reads the fresh pane bloat signal for every live session; for any lane
@@ -267,5 +318,13 @@ if __name__ == "__main__":
     ap.add_argument("--dry-run", action="store_true", default=True, help="(Stage-0 is always dry-run)")
     ap.add_argument("--gauge", action="store_true",
                     help="run the LEGACY gauge-based pass instead of the pane pass (A/B compare)")
+    ap.add_argument("--no-publish", action="store_true",
+                    help="skip the op#13050-B pane_context publish (detection only)")
     args = ap.parse_args()
-    raise SystemExit(run_stage0() if args.gauge else run_observe_panes())
+    if args.gauge:
+        raise SystemExit(run_stage0())
+    # Default daemon cycle: publish fresh pane-truth (op#13050-B, for the console's honest
+    # header) THEN run the detect-only observe pass. Publish is best-effort + fail-safe.
+    if not args.no_publish:
+        publish_pane_context()
+    raise SystemExit(run_observe_panes())
