@@ -9,9 +9,9 @@ coordinators are excluded from the GLANCE (own cards) but INCLUDED in the header
 from nervous_system.console import app as console_app
 
 
-def _pane(session, pane_k, base=None, idle="IDLE_EMPTY", age_s=5):
+def _pane(session, pane_k, base=None, idle="IDLE_EMPTY", age_s=5, pct=None):
     return {"session": session, "base": base if base is not None else "cc-" + session,
-            "pane_k": pane_k, "idle_verdict": idle, "age_s": age_s}
+            "pane_k": pane_k, "pct": pct, "idle_verdict": idle, "age_s": age_s}
 
 
 # ── _pane_header: three honest states, NEVER a false 'All clear' ──────────────
@@ -70,6 +70,41 @@ def test_glance_skips_no_hint_and_sets_pane_source():
 
 def test_glance_empty_when_feed_empty():
     assert console_app._pane_bloat([]) == []
+
+
+# ── op#13186: the CLIFF signal — pct wins where the /clear hint has vanished ──
+def test_cliff_lane_pct_only_is_top_bloat_and_red():
+    # THE BUG: cc-ihsanos-1 @100% shows `% context used`, NO /clear hint -> pane_k NULL.
+    # Before op#13186 it read as not-bloated (invisible). Now pct=100 makes it red.
+    out = console_app._pane_bloat([_pane("ihsanos", None, pct=100),
+                                   _pane("shipforge", 652.4)])
+    lead = out[0]  # sorted fullest-first
+    assert lead["agent"] == "cc-ihsanos" and lead["pct"] == 100
+    assert lead["level"] == "red" and lead["src"] == "pct"
+
+
+def test_cliff_lane_trips_header_alert():
+    # A maxed lane with pane_k NULL but pct=100 MUST make the header alert (was false-green).
+    h = console_app._pane_header([_pane("ihsanos", None, pct=100)])
+    assert h["state"] == "alert"
+    assert h["worst"]["session"] == "ihsanos" and h["worst"]["pct"] == 100
+
+
+def test_pct_wins_over_hint_when_both_present():
+    # Both signals present -> pct is authoritative (near the cliff CC can show both briefly).
+    out = console_app._pane_bloat([_pane("ihsanos", 200.0, pct=97)])
+    assert len(out) == 1 and out[0]["pct"] == 97 and out[0]["src"] == "pct"
+
+
+def test_hint_path_marks_src_k_when_no_pct():
+    # Below the cliff (no pct line) the /clear hint still drives the reading, marked 'k'.
+    out = console_app._pane_bloat([_pane("shipforge", 652.4)])
+    assert len(out) == 1 and out[0]["pct"] == 65 and out[0]["src"] == "k"
+
+
+def test_both_signals_absent_is_not_bloat():
+    # No pct AND no hint (below nudge bar OR mid-turn) => dropped, fail-closed (not green).
+    assert console_app._pane_bloat([_pane("finance", None, pct=None)]) == []
 
 
 # ── header ↔ glance consistency invariant (console 21518) ────────────────────

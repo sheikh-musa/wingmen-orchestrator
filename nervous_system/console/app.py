@@ -950,6 +950,25 @@ def _pane_k_to_level(pane_k):
         return None
 
 
+def _pct_to_level(pct):
+    """(pct, level) for a raw current-context percent (0-100) from CC's `{N}% context
+    used` line (op#13186), via the SAME green/amber/red thresholds as _ctx_level — one
+    vocabulary across the console. None when pct is missing / outside 0-100 (bad data,
+    never a false reading). This is the authoritative truth at/near the cliff, where the
+    /clear reclaim hint (pane_k) has vanished and a maxed lane would otherwise read NULL."""
+    if pct is None:
+        return None
+    try:
+        pct = int(pct)
+    except (TypeError, ValueError):
+        return None
+    if pct <= 0 or pct > 100:
+        return None
+    frac = pct / 100.0
+    level = "red" if frac >= _CTX_HARD else ("amber" if frac >= _CTX_SOFT else "green")
+    return pct, level
+
+
 # A live tmux session -> its canonical coordinator agent_id, so a Mini coordinator's
 # pane row (published by session name) is recognised as a coord + labelled friendly.
 # cai/fleet-health carry a base already; nazim (orch-console) publishes with base=NULL.
@@ -962,13 +981,28 @@ def _pane_canonical(row):
 
 
 def _pane_entry(row):
-    """One bloat entry (renderTopBloat/_context_bloat shape) from a pane_context row,
-    or None when the row has no /clear hint (pane_k NULL = below CC's nudge bar OR
-    mid-turn). pane_k -> tokens -> the SAME _ctx_level thresholds (one vocabulary)."""
-    lvl = _pane_k_to_level(row.get("pane_k"))
-    if lvl is None:
-        return None
-    pct, level = lvl
+    """One bloat entry (renderTopBloat/_context_bloat shape) from a pane_context row, or
+    None when the row carries NO readable signal (both pct + pane_k NULL = below CC's
+    nudge bar OR mid-turn). Truth precedence (op#13186): CC's `{N}% context used` pct
+    wins — it is authoritative at/near the CLIFF, exactly where the /clear reclaim hint
+    (pane_k) has vanished and a maxed lane would otherwise publish NULL and read as not-
+    bloated; else derive from the pane_k hint. Both feed the SAME _ctx_level thresholds
+    (one vocabulary). Fail-closed: a row we cannot read as a real % is dropped, NEVER
+    green. `src` marks which signal won ('pct' exact | 'k' hint-approx)."""
+    pct_lvl = _pct_to_level(row.get("pct"))
+    if pct_lvl is not None:
+        pct, level = pct_lvl
+        # Approx window fill for the tooltip only (the pct line is the exact truth; CC
+        # does not print a token count with it). Never used for the level — that is pct.
+        ctx_tokens = int(round(pct / 100.0 * _CTX_WINDOW))
+        src = "pct"
+    else:
+        lvl = _pane_k_to_level(row.get("pane_k"))
+        if lvl is None:
+            return None
+        pct, level = lvl
+        ctx_tokens = int(round(float(row.get("pane_k")) * 1000))
+        src = "k"
     canon = _pane_canonical(row)
     is_coord = _is_coord_identity(canon)
     return {
@@ -977,12 +1011,15 @@ def _pane_entry(row):
         # a coordinator has no sub_tag so it displays by its friendly agent id
         # ('orch-console'/'cai'), matching how the glance labelled coords before.
         "sub_tag": None if is_coord else row.get("session"),
-        "ctx_tokens": int(round(float(row.get("pane_k")) * 1000)),
+        "ctx_tokens": ctx_tokens,
         "window": _CTX_WINDOW,
         "pct": pct,
         "level": level,
         "age_s": row.get("age_s"),
         "source": "pane",
+        # op#13186: which pane signal won — 'pct' (exact `% context used`, authoritative
+        # at the cliff) or 'k' (approx from the `/clear to save {N}k` hint).
+        "src": src,
         "is_coord": is_coord,
     }
 

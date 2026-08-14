@@ -783,11 +783,13 @@ PANE_TTL_S = int(os.environ.get("CONSOLE_PANE_TTL_S", "660"))
 def build_pane_context_query(ttl_s: int = None) -> Tuple[str, list]:
     ttl = PANE_TTL_S if ttl_s is None else ttl_s
     sql = (
-        "SELECT session, base, pane_k, idle_verdict, host, "
+        "SELECT session, base, pane_k, pct, idle_verdict, host, "
         "  round(extract(epoch FROM (now() - updated_at)))::int AS age_s "
         "FROM pane_context "
         "WHERE updated_at > now() - make_interval(secs => %s) "
-        "ORDER BY pane_k DESC NULLS LAST"
+        # op#13186: pct (the cliff truth) leads the raw order so a maxed lane with a NULL
+        # pane_k sorts first; the console re-sorts by computed pct anyway (belt+braces).
+        "ORDER BY pct DESC NULLS LAST, pane_k DESC NULLS LAST"
     )
     return sql, [ttl]
 
