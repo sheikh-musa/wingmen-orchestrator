@@ -103,9 +103,11 @@ _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 # the console reconciles these — the lane agent does, on its own tag, with its own
 # reply path. Excluded from both bodies' scopes so a drill/lane thread can never be
 # mistaken for an operator DM and answered on the wrong voice (2026-07-25, cc-irsyad
-# build). `gazzabyte-irsyad` itself joins this list at cc-irsyad's direct cutover —
-# NOT before: until then the hub still owns and answers the live client thread.
-_LANE_OWNED_TAGS = ("irsyad-drill",)
+# build). `gazzabyte-irsyad` JOINED this list at cc-irsyad-coord's direct cutover
+# (#21399, 2026-08-14 Beat-3): coord now owns+reconciles the live client thread via
+# its own tag-scoped loop (scripts/lane_operator_reconcile.py); the hub/console no
+# longer reconcile it. Reverting this line hands the tag back to the hub scope.
+_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad")
 
 # Suffixes written by the lane phase-gate (scripts/lane_reply.sh): '<tag>-drill' is a reply
 # that never left the building, '<tag>-draft' is one awaiting a reviewer's send. Neither is
