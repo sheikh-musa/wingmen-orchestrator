@@ -337,6 +337,37 @@ _cc_history_match() {
   [ "${n:-0}" -ge 2 ]
 }
 
+# ── GHOST PROBE decision core (op#13355 / bus 22395) — PURE, testable ────────
+# The DEFINITIVE ghost-vs-real separator that the non-mutating history-match cannot
+# be (partial by design). A live wrapper types a single-byte SENTINEL into the
+# composer and re-captures: a GHOST (autosuggestion in an empty composer) is
+# REPLACED by the sentinel (composer content == sentinel alone); REAL staged text
+# has the sentinel APPENDED (content == before + sentinel). These two helpers are
+# the PURE string decisions — no tmux, fully unit-tested — so the mutating wrapper
+# stays a thin, auditable shell. composer_parse (the passive parse) is NEVER changed
+# by this: it must keep preserving real dim staged text.
+
+# _probe_verdict <before-flat> <after-sentinel-flat> <sentinel> -> ghost|real|unsure
+_probe_verdict() {
+  local before="$1" after="$2" sentinel="$3"
+  if [ "$after" = "$sentinel" ]; then
+    echo ghost                       # sentinel replaced the whole composer => ghost
+  elif [ "$after" = "${before}${sentinel}" ]; then
+    echo real                        # sentinel appended to real staged text => real
+  else
+    echo unsure                      # neither: fail toward preserve (caller treats as real)
+  fi
+}
+
+# _probe_revert_ok <before-flat> <after-revert-flat> -> exit 0 IFF byte-identical.
+# Condition #2 (bus 22395): a self-reversing probe that does not check it reversed is
+# just a mutation. The caller MUST call this after the BSpace and, if it returns nonzero,
+# fail LOUD (log + P1 bus) and NEVER submit — a partial revert on a REAL staged step is
+# silent corruption of a lane's next input.
+_probe_revert_ok() {
+  [ "$1" = "$2" ]
+}
+
 composer_parse() {
   local out status_line
   out="$(_cc_extract <<<"${1-}")"
