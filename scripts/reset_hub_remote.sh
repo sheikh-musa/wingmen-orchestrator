@@ -17,5 +17,11 @@ KEY="${WINGMEN_VPS_KEY:-$HOME/.ssh/wingmen_vps}"
 VPS="${WINGMEN_VPS_HOST:-91.107.235.77}"
 [ -f "$KEY" ] || { echo "reset_hub_remote: VPS key $KEY not found" >&2; exit 9; }
 echo "[reset_hub_remote] clearing the hub on the VPS ($VPS) via reset_orch.sh..."
+# RESET_DRYRUN must cross the ssh boundary explicitly: env vars do NOT propagate through
+# ssh, so a caller who set it locally would otherwise get a REAL hub reset from what they
+# believed was a dry run — the silent-safeguard failure this pair was fixed for on
+# 2026-08-15. Forwarded as an explicit assignment on the remote command line.
+_DRY="${RESET_DRYRUN:-0}"
+[ "$_DRY" = 1 ] && echo "[reset_hub_remote] RESET_DRYRUN=1 — forwarding to the VPS; gates evaluated, hub NOT cleared."
 exec ssh -i "$KEY" -o ConnectTimeout=15 -o BatchMode=yes "root@$VPS" \
-  'sudo -u wingmen bash -lc "cd ~/wingmen/orchestrator && exec bash scripts/reset_orch.sh"'
+  "sudo -u wingmen bash -lc \"cd ~/wingmen/orchestrator && exec env RESET_DRYRUN=$_DRY bash scripts/reset_orch.sh\""

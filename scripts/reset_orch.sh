@@ -126,6 +126,18 @@ else
   STAGED_NOTE="NOTE: your composer was EMPTY when I cleared you — nothing was staged and nothing was lost. (Stated so you do not go looking for something that was never there.)"
 fi
 
+# RESET_DRYRUN — evaluate every gate above and exit WITHOUT clearing. reset_cai.sh /
+# reset_fleet_health.sh / reset_nazim.sh have honored this since they were hardened; this
+# script and reset_lane.sh did NOT, and ignored it SILENTLY. orch-console hit that on
+# 2026-08-15 (a "dry run" cleared cc-quality for real). The hub is the worst place for it:
+# a caller checking readiness before recycling the hub would have recycled it instead.
+# An env var that LOOKS like it disarms something must actually disarm it — same class as
+# the MUSA_TELEGRAM_ID leg in nazim_send.sh (2026-07-26, paged the operator from a test).
+if [ "${RESET_DRYRUN:-0}" = 1 ]; then
+  echo "[reset_orch] RESET_DRYRUN=1 — gates evaluated (role/has-session/self-fire/handoff/busy/composer), NOT clearing. Exiting."
+  exit 0
+fi
+
 # WIPE, sized to what was actually staged. The old fixed -N 120 under-wiped any
 # entry longer than 120 chars: the residue survived, the literal '/clear' was
 # appended to it, and the reset then typed the whole boot text into a dirty

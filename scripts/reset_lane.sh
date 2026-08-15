@@ -76,6 +76,22 @@ elif [ "${CC_PARTIAL:-}" = 'noprompt' ]; then
   STAGED_NOTE="NOTE: I could not read your composer before clearing — no prompt row in the capture. Do NOT read this as 'nothing was staged'."
 fi
 
+# RESET_DRYRUN — evaluate every gate above and exit WITHOUT clearing, so readiness can be
+# checked before firing. reset_cai.sh / reset_fleet_health.sh / reset_nazim.sh have honored
+# this since they were hardened; reset_lane.sh, reset_orch.sh and reset_hub_remote.sh did
+# NOT, and ignored it SILENTLY — a dry run on a lane cleared it for real. orch-console hit
+# exactly that on 2026-08-15 recycling cc-quality: the "dry run" wiped the lane, and only
+# the fact that the lane had already confirmed it was safe to clear kept it from being a
+# real loss. Same class as the MUSA_TELEGRAM_ID leg in nazim_send.sh (2026-07-26, which
+# paged the operator from a test run): an env var that LOOKS like it disarms something must
+# actually disarm it, and a safeguard that is silently absent is worse than one that was
+# never offered — the caller believes they are protected. Placed AFTER the gates and BEFORE
+# the first mutation so a dry run exercises exactly what a real run would.
+if [ "${RESET_DRYRUN:-0}" = 1 ]; then
+  echo "[reset_lane] RESET_DRYRUN=1 — gates evaluated (has-session/self-fire/busy/composer) on '$SESS', NOT clearing. Exiting."
+  exit 0
+fi
+
 WIPE=$(( ${CC_BYTES:-0} + 80 )); [ "$WIPE" -lt 200 ] && WIPE=200; [ "$WIPE" -gt 20000 ] && WIPE=20000
 echo "[reset_lane] clearing composer (${WIPE} BSpace) + /clear on '$SESS' ..."
 "$TM" send-keys -t "$PANE" -N "$WIPE" BSpace; sleep 1
