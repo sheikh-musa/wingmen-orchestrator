@@ -45,6 +45,16 @@ READ_LIMIT_BYTES = 24_400
 WARN_BYTES = 17_100
 
 LINK_RE = re.compile(r"\(([A-Za-z0-9_.-]+\.md)\)")
+# Memories cross-reference each other with [[wiki-links]]. Those edges are the substrate's
+# existing knowledge graph — 616 of them across 209 of the orchestrator's 221 memories when
+# first measured — and until this checker existed NOTHING verified they resolved. A broken
+# edge fails exactly like an orphaned file: silently, and only when you needed it.
+WIKI_RE = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]")
+# A [[link]] to a memory that does not exist yet is LEGITIMATE per the memory doctrine — it
+# marks something worth writing later. So a dangling edge is only a DEFECT when the target
+# plainly exists under a different spelling; those are reported (and optionally repaired)
+# separately from the genuine not-yet-written markers.
+_TYPE_PREFIXES = ("feedback_", "reference_", "project_", "user_")
 
 
 def _description(path: pathlib.Path) -> str:
@@ -58,6 +68,87 @@ def _description(path: pathlib.Path) -> str:
     if not m:
         return ""
     return m.group(1).strip().strip('"').strip("'")
+
+
+def _strip_type_prefix(stem: str) -> str:
+    for p in _TYPE_PREFIXES:
+        if stem.startswith(p):
+            return stem[len(p):]
+    return stem
+
+
+def resolve_edge(target: str, stems: set) -> "str | None":
+    """The memory a [[link]] plainly MEANS, or None if it is a genuine not-yet-written marker.
+
+    Only unambiguous repairs are returned — the two spellings that actually occur in practice:
+    a link written with the .md extension, and a link written with the wrong type prefix
+    (reference_ vs feedback_ vs project_). If more than one memory could be meant, we return
+    None and report it rather than guess: a link silently repointed at the wrong memory is
+    worse than a link that is visibly broken."""
+    t = target.strip()
+    if t in stems:
+        return t
+    if t.endswith(".md") and t[:-3] in stems:
+        return t[:-3]
+    bare = _strip_type_prefix(t[:-3] if t.endswith(".md") else t).replace("-", "_")
+    matches = [s for s in stems if _strip_type_prefix(s) == bare]
+    return matches[0] if len(matches) == 1 else None
+
+
+def audit_edges(mem_dir: pathlib.Path) -> dict:
+    """Wiki-link edges: which resolve, which are repairable misspellings, which are genuine
+    markers for memories worth writing."""
+    files = [p for p in mem_dir.glob("*.md") if p.name != INDEX]
+    stems = {p.stem for p in files}
+    repairable, unwritten, total = {}, set(), 0
+    for p in files:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for target in WIKI_RE.findall(text):
+            total += 1
+            if target.strip() in stems:
+                continue
+            fixed = resolve_edge(target, stems)
+            if fixed:
+                repairable.setdefault(target.strip(), fixed)
+            else:
+                unwritten.add(target.strip())
+    return {"edges": total, "repairable": repairable, "unwritten": sorted(unwritten)}
+
+
+def fix_edges(mem_dir: pathlib.Path, repairable: dict) -> int:
+    """Repoint plainly-misspelled [[links]] at the memory they mean. Only the unambiguous
+    ones from resolve_edge ever reach here."""
+    if not repairable:
+        return 0
+    changed = 0
+    for p in mem_dir.glob("*.md"):
+        if p.name == INDEX:
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Rewrite via the SAME regex that found the edge, so the aliased form
+        # [[target|display text]] is repaired too. A literal "[[bad]]" replace missed those
+        # and then reported a repair it had not made — caught 2026-08-16 on an aliased link;
+        # a fix that claims success without effect is the failure class this whole script
+        # exists to catch, so it must not be one.
+        def _sub(m):
+            target = m.group(1).strip()
+            good = repairable.get(target)
+            if not good:
+                return m.group(0)
+            alias = m.group(0)[2:-2].split("|", 1)
+            return f"[[{good}|{alias[1]}]]" if len(alias) == 2 else f"[[{good}]]"
+
+        new = WIKI_RE.sub(_sub, text)
+        if new != text:
+            p.write_text(new, encoding="utf-8")
+            changed += 1
+    return changed
 
 
 def audit(mem_dir: pathlib.Path) -> dict:
@@ -124,10 +215,21 @@ def main() -> int:
             r = audit(mem_dir)  # re-audit so the report reflects reality, not intent
             r["added"] = added
 
+        e = audit_edges(mem_dir)
+        if a.fix and e["repairable"]:
+            n_files = fix_edges(mem_dir, e["repairable"])
+            before = len(e["repairable"])
+            e = audit_edges(mem_dir)
+            # Report what actually CHANGED, not what was attempted. The re-audit is the
+            # evidence; anything still broken stays flagged rather than being counted as done.
+            e["fixed"] = (before - len(e["repairable"]), n_files)
+
         label = mem_dir.parent.name
         flags = []
         if r["missing_index"]:
             flags.append("NO-INDEX")
+        if e["repairable"]:
+            flags.append(f"BROKEN-EDGES={len(e['repairable'])}")
         if r["orphans"]:
             flags.append(f"ORPHANED={len(r['orphans'])}")
         if r["dangling"]:
@@ -139,12 +241,21 @@ def main() -> int:
 
         status = " ".join(flags) if flags else "ok"
         extra = f" (+{r.get('added')} added)" if r.get("added") else ""
-        print(f"{label:<58} files={r['files']:<4} idx={r['size']:<6}B {status}{extra}")
+        if e.get("fixed"):
+            extra += f" ({e['fixed'][0]} edges repaired in {e['fixed'][1]} files)"
+        print(f"{label:<58} files={r['files']:<4} idx={r['size']:<6}B edges={e['edges']:<4} "
+              f"{status}{extra}")
         if r["orphans"]:
             for n in r["orphans"][:10]:
                 print(f"    orphan: {n}")
         for n in r["dangling"]:
             print(f"    dangling: {n}")
+        for bad, good in list(e["repairable"].items())[:10]:
+            print(f"    broken edge: [[{bad}]] -> [[{good}]]")
+        # NOT a defect: the memory doctrine says a link with no target yet marks something
+        # worth writing. Listed so the backlog is visible, never counted as a failure.
+        if e["unwritten"]:
+            print(f"    unwritten targets (worth writing, not errors): {', '.join(e['unwritten'][:6])}")
         if flags:
             problems.append((label, status, r))
 
