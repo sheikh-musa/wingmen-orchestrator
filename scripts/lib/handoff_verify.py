@@ -165,12 +165,43 @@ def verify(
     if len(text.encode("utf-8", "replace")) < min_bytes:
         rep.failures.append(f"too thin ({len(text)}B < {min_bytes}B) to be a restore point")
 
+    # SECTION CHECKS WARN; THEY DO NOT REFUSE — except only_in_context, below.
+    #
+    # This started as a hard failure and was wrong twice in the first hour of real use, both
+    # times on handoffs a human had already read and accepted: coord's section read
+    # "ONLY-IN-MY-CONTEXT" where the pattern wanted a space, and cc-irsyad-4 said "Nothing is
+    # mid-work... Safe to recycle this body" where the pattern wanted the phrase "next step".
+    #
+    # The deeper problem is not the patterns, it is what they measure. "Does this text match my
+    # regex" is a PROXY for "does this handoff answer the question", and tonight's recurring
+    # lesson is that a proxy diverges from the outcome at exactly the wrong moment. Tuning the
+    # regexes against the seven handoffs I happen to have is overfitting to a sample, and each
+    # false refusal blocks a legitimate recycle or teaches someone to bypass the gate — which
+    # costs more than the check is worth.
+    #
+    # The evidence is decisive: NONE of the three genuinely bad restore points on 2026-08-15
+    # would have been caught by a section regex. coord's two did not exist at all; the SRE's was
+    # eighteen hours stale. Those are caught by the objective checks — absent, stale, thin,
+    # reference proven missing — which involve no language judgement and have produced no false
+    # positives. So the objective checks refuse, and the prose checks advise.
+    #
+    # only_in_context stays a hard failure because it is trivially satisfiable by asserting the
+    # negative ("nothing lives only in my head"), and forcing a body to write that sentence
+    # makes it actually check — which is the entire point of the section.
     miss = missing_sections(text)
     if miss:
-        rep.failures.append(
-            "missing required section(s): " + ", ".join(sorted(miss)) +
-            " — the only-in-context section is the one a recycle destroys"
-        )
+        note = ("missing section(s): " + ", ".join(sorted(miss)) +
+                " — expected, but the wording may simply differ from what is matched")
+        if "only_in_context" in miss:
+            rep.failures.append(
+                "no only-in-context section — that is the class a recycle destroys, and a body "
+                "with nothing to declare should say so explicitly rather than omit it"
+            )
+            others = [m for m in miss if m != "only_in_context"]
+            if others:
+                rep.warnings.append("also missing: " + ", ".join(sorted(others)))
+        else:
+            rep.warnings.append(note)
 
     rep.refs = extract_refs(text)
     if resolver is not None:

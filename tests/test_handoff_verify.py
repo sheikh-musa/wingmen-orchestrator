@@ -70,17 +70,35 @@ def test_one_line_all_done_is_refused():
 
 
 def test_missing_only_in_context_section_is_refused():
+    # The one prose check that still REFUSES: it is trivially satisfiable by asserting the
+    # negative, and making a body write "nothing lives only in my head" makes it check.
     text = "## Right now\nNext step: merge PR #309.\n[VERIFIED] I checked it.\n" + "pad " * 300
     r = hv.verify("h.md", text, mtime=2.0, requested_at=1.0, resolver=_resolver_all_ok)
     assert not r.ok
-    assert any("only_in_context" in f for f in r.failures)
+    assert any("only-in-context" in f for f in r.failures)
 
 
-def test_missing_verified_split_is_refused():
-    text = ("## Right now\nNext step: merge it.\n"
-            "## Only-in-my-context\nAn unsent client message.\n" + "pad " * 300)
+def test_other_missing_sections_warn_rather_than_refuse():
+    # Learned the hard way: this refused two GOOD handoffs in its first hour, on wording alone
+    # (coord wrote "ONLY-IN-MY-CONTEXT"; cc-irsyad-4 wrote "Nothing is mid-work... Safe to
+    # recycle"). None of the three genuinely bad restore points that night would have been
+    # caught by a section regex — they were absent or stale. So prose advises, objective checks
+    # refuse.
+    text = ("## Status\nAll wrapped up.\n"
+            "## Only-in-my-context\nNothing lives only in my head.\n" + "pad " * 300)
     r = hv.verify("h.md", text, mtime=2.0, requested_at=1.0, resolver=_resolver_all_ok)
-    assert not r.ok and any("verified_split" in f for f in r.failures)
+    assert r.ok, r.failures
+    assert any("missing section" in w for w in r.warnings)
+
+
+def test_a_real_stand_down_handoff_passes():
+    # cc-irsyad-4's actual shape, which the first version refused.
+    text = ("_Status: **A) DONE**._\n"
+            "Nothing is mid-work. Nothing is queued. Safe to recycle this body.\n"
+            "PENDING-ONLY-IN-MY-CONTEXT: NONE that gate anyone.\n"
+            "What I VERIFIED MYSELF first-hand: git HEAD e8643d1.\n" + "pad " * 300)
+    r = hv.verify("h.md", text, mtime=2.0, requested_at=1.0, resolver=_resolver_all_ok)
+    assert r.ok, r.failures
 
 
 # ── the feature that would have caught coord: references must resolve ────────
