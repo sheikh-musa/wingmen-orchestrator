@@ -473,12 +473,24 @@ resume_menu_present() {
     'Resume from summary|Resume full session as-is|Resuming the full session will consume'
 }
 
+# trust_prompt_present <pane-text> -> 0 if CC's folder-TRUST pre-flight is showing
+# ("Is this a project you trust?" with a '❯ 1. Yes, I trust this folder' option).
+# A re-token relaunch hits this BEFORE --resume takes effect (#34, bus 22565/22582):
+# 5 of 6 swept lanes parked here while reporting PASS, because the '❯' option marker
+# made pane_up_healthy read them as "ready". switch_lane_token must auto-answer it,
+# and it must count as NOT-healthy so a still-parked lane fails LOUD.
+trust_prompt_present() {
+  printf '%s' "${1:-}" | grep -Eq 'Is this a project you trust|Yes, I trust this folder'
+}
+
 # pane_up_healthy <pane-text> -> 0 if the lane pane is UP/healthy after a re-token:
 # it shows the composer prompt (ready) OR is actively working (foreground turn),
-# and is NOT parked at the resume menu. A blank/booting pane is NOT yet healthy.
+# and is NOT parked at the resume menu OR the folder-trust prompt. A blank/booting
+# pane, or one parked at a boot pre-flight prompt, is NOT yet healthy.
 pane_up_healthy() {
   local txt="${1:-}"
-  resume_menu_present "$txt" && return 1          # parked at menu = NOT healthy
+  resume_menu_present "$txt" && return 1          # parked at resume menu = NOT healthy
+  trust_prompt_present "$txt" && return 1         # parked at folder-trust prompt = NOT healthy (#34)
   printf '%s' "$txt" | grep -Eq 'esc to interrupt|to interrupt' && return 0  # working
   printf '%s' "$txt" | grep -q '❯' && return 0    # composer prompt present = ready
   return 1

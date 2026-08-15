@@ -79,7 +79,7 @@ MODEL_APPLY="${SWITCH_MODEL_APPLY:-0}"
 # after a --resume relaunch. DEFAULT = full (non-lossy: preserve the lane's context;
 # Musa is fresh, headroom is not the constraint for this migration — console call).
 # --summary opts into the lighter summary-resume for future/token-pressured use.
-RESUME_MODE="${SWITCH_RESUME_MODE:-full}"
+RESUME_MODE="${SWITCH_RESUME_MODE:-summary}"   # default SUMMARY (#34, bus 22582): a re-token is done UNDER token pressure — never auto-burn full ctx; --full opts back in
 # --drain (op#12114): for a switch-UNSAFE lane (busy / running shell / composer
 # draft), instead of an immediate refuse, ask it to reach a safe stopping point
 # (finish its step, write its handoff, go idle) and WAIT up to SWITCH_DRAIN_TIMEOUT,
@@ -366,11 +366,22 @@ echo "[switch_lane_token] verifying re-token (auto-answer resume menu + auth_fp 
 DEADLINE=$(( $(date -u +%s) + POLL_S ))
 AFTER_FP=""
 MENU_ANSWERED=0
+TRUST_ANSWERED=0
 PANE_HEALTHY=0
 LAST_PANE=""
 while [ "$(date -u +%s)" -lt "$DEADLINE" ]; do
   sleep 3
   LAST_PANE="$("$TM" capture-pane -t "${SESS}:0.0" -p 2>/dev/null || true)"
+  # Auto-answer CC's folder-TRUST pre-flight FIRST (#34, bus 22565/22582): a relaunch
+  # hits "Is this a project you trust?" BEFORE --resume — 5 of 6 swept lanes parked
+  # here under a false PASS. Trust our own worktree (option 1) so it proceeds to resume.
+  if [ "$TRUST_ANSWERED" = 0 ] && trust_prompt_present "$LAST_PANE"; then
+    echo "[switch_lane_token] folder-trust prompt detected -> trusting worktree (auto, #34)"
+    "$TM" send-keys -t "${SESS}:0.0" "1"; sleep 0.4
+    "$TM" send-keys -t "${SESS}:0.0" Enter; sleep 0.4
+    TRUST_ANSWERED=1
+    continue
+  fi
   # Auto-answer CC's large-session resume menu ONCE so the lane doesn't park there.
   if [ "$MENU_ANSWERED" = 0 ] && resume_menu_present "$LAST_PANE"; then
     echo "[switch_lane_token] resume menu detected -> answering ${RESUME_MODE} (non-lossy default is full)"
