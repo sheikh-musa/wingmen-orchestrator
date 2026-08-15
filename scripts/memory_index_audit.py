@@ -37,6 +37,12 @@ import sys
 
 PROJECTS = pathlib.Path.home() / ".claude" / "projects"
 INDEX = "MEMORY.md"
+# Optional overflow index (the core/tail split piloted on orch-console 2026-08-16). Only
+# MEMORY.md is auto-loaded at boot; when an agent's memory outgrows that budget, the long tail
+# of entries moves here and the core keeps a pointer plus the complete TOPIC list, so an agent
+# always knows a subject exists even when the per-file links are one grep away.
+TAIL_INDEX = "MEMORY-INDEX.md"
+INDEX_FILES = (INDEX, TAIL_INDEX)
 
 # The index is read whole at boot under a hard limit; past it the tail truncates silently.
 #
@@ -160,13 +166,24 @@ def fix_edges(mem_dir: pathlib.Path, repairable: dict) -> int:
 
 def audit(mem_dir: pathlib.Path) -> dict:
     index_path = mem_dir / INDEX
-    files = sorted(p for p in mem_dir.glob("*.md") if p.name != INDEX)
+    tail_path = mem_dir / TAIL_INDEX
+    files = sorted(p for p in mem_dir.glob("*.md") if p.name not in INDEX_FILES)
     if not index_path.exists():
         return {"dir": mem_dir, "missing_index": True, "files": len(files),
-                "orphans": [p.name for p in files], "dangling": [], "size": 0}
+                "orphans": [p.name for p in files], "dangling": [], "size": 0,
+                "split": False, "tail_unreachable": False}
 
     index_text = index_path.read_text(encoding="utf-8", errors="replace")
+    split = tail_path.exists()
+    # A memory counts as INDEXED if either index links it — the split is a load-time
+    # optimisation, not a reduction in what is discoverable.
     linked = set(LINK_RE.findall(index_text))
+    if split:
+        linked |= set(LINK_RE.findall(tail_path.read_text(encoding="utf-8", errors="replace")))
+    # The failure mode the split INTRODUCES: if the core stops naming the tail file, every
+    # entry that lives only in the tail becomes unreachable — silently, and exactly like an
+    # orphan. So the pointer is checked, not assumed.
+    tail_unreachable = split and TAIL_INDEX not in index_text
     present = {p.name for p in files}
 
     return {
@@ -177,7 +194,10 @@ def audit(mem_dir: pathlib.Path) -> dict:
         "orphans": sorted(present - linked),
         # Index points at a file that is gone -> a promise the index cannot keep.
         "dangling": sorted(linked - present),
+        # Only MEMORY.md is auto-loaded, so only its size is the boot cost being guarded.
         "size": len(index_text.encode("utf-8")),
+        "split": split,
+        "tail_unreachable": tail_unreachable,
     }
 
 
@@ -235,6 +255,8 @@ def main() -> int:
         flags = []
         if r["missing_index"]:
             flags.append("NO-INDEX")
+        if r.get("tail_unreachable"):
+            flags.append(f"TAIL-UNREACHABLE({TAIL_INDEX} exists but MEMORY.md never names it)")
         if e["repairable"]:
             flags.append(f"BROKEN-EDGES={len(e['repairable'])}")
         if r["orphans"]:
