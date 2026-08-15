@@ -92,15 +92,39 @@ if [ "${RESET_DRYRUN:-0}" = 1 ]; then
   exit 0
 fi
 
+CC_BEFORE_WIPE="$CC_FLAT"
 WIPE=$(( ${CC_BYTES:-0} + 80 )); [ "$WIPE" -lt 200 ] && WIPE=200; [ "$WIPE" -gt 20000 ] && WIPE=20000
 echo "[reset_lane] clearing composer (${WIPE} BSpace) + /clear on '$SESS' ..."
 "$TM" send-keys -t "$PANE" -N "$WIPE" BSpace; sleep 1
 
 composer_parse_pane "$TM" "$PANE"
 if [ "$CC_EMPTY" != 1 ]; then
-  echo "ERROR: composer NOT empty after wipe — refusing to /clear into dirty input. Residue: ${CC_FLAT}" >&2
-  echo "       Lane UNCHANGED, still holds its context. Staged text already preserved above." >&2
-  exit 6
+  # GHOST TEST — the wipe we just did IS the experiment, so read its result instead of
+  # throwing it away. $WIPE backspaces (>= the apparent length + 80, min 200) cannot leave
+  # real staged text byte-identical: ten characters of real input die in ten. So text that
+  # survives the wipe UNCHANGED was never in the composer — it is the dim ghost of a
+  # previous prompt that composer_capture reads as live. Proceed: the composer is empty.
+  #
+  # Found 2026-08-15 recycling irsyad-prog2 at 635k. Its composer showed "stand down",
+  # logged as staged at 19:48Z and still byte-identical ninety minutes and several turns
+  # later; 200 BSpace did not touch it. The lane could not be recycled because of a
+  # phantom. Same root cause as the lane_nudge REFUSE that blocked six Sonnet flips and a
+  # coordinator recycle (P1 #22381) — cc-fleet-health owns the sentinel probe for the nudge
+  # path; this is the reset path, where the wipe already gives the answer for free.
+  #
+  # This does NOT weaken the guard, and the distinction is the whole point: text that
+  # CHANGED but is still non-empty is real residue from a partial wipe — /clear would then
+  # be appended to dirty input, the failure this check was written for — so that still
+  # refuses, loudly. Only the byte-identical case is reclassified, and only after the
+  # original text has already been preserved to logs/reset_lane_preserved_input.log above.
+  if [ "$CC_FLAT" = "$CC_BEFORE_WIPE" ]; then
+    echo "[reset_lane] GHOST: composer byte-identical after ${WIPE} BSpace (\"${CC_FLAT}\") — real text cannot survive that, so the composer is EMPTY and this is a dim previous-prompt ghost. Proceeding."
+  else
+    echo "ERROR: composer NOT empty after wipe — refusing to /clear into dirty input. Residue: ${CC_FLAT}" >&2
+    echo "       (Changed from \"${CC_BEFORE_WIPE}\", so this is a PARTIAL wipe of real text, not a ghost.)" >&2
+    echo "       Lane UNCHANGED, still holds its context. Staged text already preserved above." >&2
+    exit 6
+  fi
 fi
 
 "$TM" send-keys -t "$PANE" -l "/clear"; sleep 1
