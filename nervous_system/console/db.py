@@ -665,6 +665,72 @@ def fetch_backlog() -> List[dict]:
     return _query(sql, params)
 
 
+def build_asks_query() -> Tuple[str, list]:
+    """The operator's LIVE "Your asks" board (op#13250 — replaces the stale
+    operator_backlog "Your asks"). One row per OPEN operator_asks ledger row
+    (migration 044), joined to the LATEST agent_messages on its thread.
+
+    Status is DERIVED LIVE in SQL on every /api/fleet poll — NEVER stored — so it
+    structurally cannot go stale (that staleness IS the bug operator_backlog had):
+
+      on_nazim      thread_id IS NULL         -> captured, not yet delegated
+      needs_you     newest thread msg is a reply BACK to orch-console,
+                    requires_response AND responded_at IS NULL
+                                              -> lane bounced a decision to the operator
+      delegate_done responded_at IS NOT NULL  -> lane replied (REVIEW — not auto-done)
+      in_progress   read_at IS NOT NULL       -> lane opened it, working
+      pending       else                      -> delegated, lane hasn't picked it up
+
+    `updated_age_s` is the age of the REAL last bus movement on the thread (or the
+    ask itself if undelegated) — so a genuinely quiet thread looks quiet honestly,
+    never hidden behind an edited timestamp. `asked_age_s` is the age of the ask.
+
+    Ordered needs_you FIRST (pinned red hero, mirrors the mockup), then on_nazim,
+    then freshest movement. Only OPEN asks (closed_at IS NULL): a delegate reply is
+    NOT done — only the operator's swipe-to-confirm (closed_at) closes an ask."""
+    sql = (
+        "WITH latest AS ("
+        "  SELECT DISTINCT ON (thread_id) "
+        "         thread_id, from_agent, to_agent, requires_response, "
+        "         responded_at, read_at, created_at "
+        "  FROM agent_messages "
+        "  WHERE thread_id IS NOT NULL AND is_test IS NOT TRUE "
+        "  ORDER BY thread_id, id DESC"
+        ") "
+        "SELECT a.id, a.ask, a.delegated_to, "
+        "  CASE "
+        "    WHEN a.thread_id IS NULL                                THEN 'on_nazim' "
+        "    WHEN l.from_agent <> 'orch-console' "
+        "         AND l.to_agent = 'orch-console' "
+        "         AND l.requires_response AND l.responded_at IS NULL THEN 'needs_you' "
+        "    WHEN l.responded_at IS NOT NULL                         THEN 'delegate_done' "
+        "    WHEN l.read_at IS NOT NULL                              THEN 'in_progress' "
+        "    ELSE                                                         'pending' "
+        "  END AS status, "
+        "  round(extract(epoch FROM (now() - COALESCE(l.created_at, a.created_at))))::int AS updated_age_s, "
+        "  round(extract(epoch FROM (now() - a.created_at)))::int AS asked_age_s "
+        "FROM operator_asks a "
+        "LEFT JOIN latest l ON l.thread_id = a.thread_id "
+        "WHERE a.closed_at IS NULL "
+        "ORDER BY "
+        "  CASE "
+        "    WHEN l.from_agent <> 'orch-console' AND l.to_agent = 'orch-console' "
+        "         AND l.requires_response AND l.responded_at IS NULL THEN 0 "
+        "    WHEN a.thread_id IS NULL                                THEN 1 "
+        "    WHEN l.responded_at IS NOT NULL                         THEN 2 "
+        "    ELSE                                                         3 "
+        "  END, "
+        "  COALESCE(l.created_at, a.created_at) DESC "
+        "LIMIT 100"
+    )
+    return sql, []
+
+
+def fetch_asks() -> List[dict]:
+    sql, params = build_asks_query()
+    return _query(sql, params)
+
+
 def build_inbox_backlog_query() -> Tuple[str, list]:
     """The DRAIN-BOARD data source (fc-v52): every body's UNHANDLED bus inbox.
 

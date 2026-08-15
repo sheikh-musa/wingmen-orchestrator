@@ -801,6 +801,73 @@ def _enrich_lanes_live(rows, live=None):
     return rows
 
 
+# This console body's host label (matches agent_status.host, e.g. 'Mini' /
+# 'Mac-Studio'), used as a dedup tiebreak so a same-lane twin resolves to the row
+# this body can actually see. Optional: the primary tiebreak is a live LOCAL pane,
+# which needs no host name; this only refines the no-live-pane case.
+_CONSOLE_HOST_LABEL = os.environ.get("CONSOLE_HOST_LABEL", "").strip().lower()
+
+
+def _dedupe_lanes_by_family(lanes):
+    """Collapse agent_status rows that share the SAME lane label into ONE lane card
+    (fc-v55 — the phantom-dark-twin fix). When a family's base agent is registered
+    on two hosts (e.g. cc-scholar-1 on Mac-Studio + cc-scholar-2 on the Mini, both
+    lane='scholar', both desired_state='up'), the row with no LOCAL tmux pane on THIS
+    console host classifies 'offline' -> flagged DARK (a false alarm), while the live
+    pane binds to the other row. This is a DISPLAY collapse only — it never touches
+    agent_status (the SRE owns reaping the real ghost row).
+
+    Grouping key = the shared `lane` label (fall back to tmux_session / base /
+    agent_id so a row WITHOUT a lane label groups by its per-instance session and is
+    never over-collapsed). Distinct instances (irsyad-prog1 vs irsyad-prog2) carry
+    DISTINCT lane labels, so they never collapse — only genuine same-lane twins do.
+
+    Within a lane group:
+      * if ANY row has a LIVE LOCAL pane (live.running), keep ALL the live rows
+        (distinct live instances are real) and DROP the no-pane twins — so a lane
+        that is live on ANY row is NEVER shown dark;
+      * if NO row is live, keep exactly ONE, preferring the row whose host == this
+        console host, then the freshest heartbeat — a single honest dark card.
+    A kept, running row also inherits its LIVE activity (never a stale stored
+    `activity`, which can be days old)."""
+    def _hb(l):
+        h = l.get("heartbeat_age_s")
+        return h if h is not None else 10 ** 12
+
+    def _host_match(l):
+        return bool(_CONSOLE_HOST_LABEL) and str(l.get("host") or "").strip().lower() == _CONSOLE_HOST_LABEL
+
+    groups = {}
+    order = []
+    for l in lanes:
+        key = (l.get("lane") or l.get("tmux_session")
+               or l.get("base_agent_id") or l.get("agent_id") or id(l))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(l)
+
+    kept_set = set()
+    for key in order:
+        grp = groups[key]
+        live_rows = [l for l in grp if (l.get("live") or {}).get("running")]
+        if live_rows:
+            keep = live_rows                       # distinct live instances are real
+        else:
+            # fully-dark lane -> ONE card: host-match first, then freshest heartbeat.
+            keep = [min(grp, key=lambda l: (0 if _host_match(l) else 1, _hb(l)))]
+        for l in keep:
+            kept_set.add(id(l))
+            live = l.get("live") or {}
+            if live.get("running") and live.get("activity"):
+                # Item 3: the live pane is the truth — never render a stale stored
+                # activity string over a lane that is actually working right now.
+                l["activity"] = live["activity"]
+
+    # Preserve the incoming order; emit only kept rows.
+    return [l for l in lanes if id(l) in kept_set]
+
+
 def _lane_bucket(l):
     """working / idle / offline / flagged classification for a lane row. The
     LIVE tmux pane is authoritative (operator 2026-07-11: agent_status.status
@@ -1132,7 +1199,10 @@ def _fleet_payload():
         f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
         f_inbox = ex.submit(db.fetch_inbox_backlog)      # fc-v52: unhandled bus inbox per body (drain board)
-        lanes = _enrich_lanes_live(f_lanes.result(), live=live)
+        f_asks = ex.submit(db.fetch_asks)                # fc-v55: operator's LIVE "Your asks" (status derived in SQL)
+        # fc-v55: collapse same-lane twins (a family registered on two hosts) into
+        # ONE card, so the no-local-pane twin never renders as a phantom DARK lane.
+        lanes = _dedupe_lanes_by_family(_enrich_lanes_live(f_lanes.result(), live=live))
         deploys = f_deploys.result()
         # Operator-audience needs ONLY. The 'fleet' audience fed a "Fleet is
         # handling" section (hub-owned items the operator can't action) AND was
@@ -1179,6 +1249,14 @@ def _fleet_payload():
             logger.warning("inbox_backlog failed: %s", e)
             inbox_rows = []
         drain_board = _drain_board(inbox_rows)
+        # fc-v55: the operator's LIVE "Your asks" board. Status is derived in SQL
+        # (never stored), so a failure here just empties the board — it must not
+        # blank the whole aggregate (same guard shape as every other signal).
+        try:
+            your_asks = f_asks.result()
+        except Exception as e:
+            logger.warning("your_asks failed: %s", e)
+            your_asks = []
     # Mobile payload trim (op#10291): the queue `detail` field was ~11KB of the
     # ~18KB queue section (63%) — the bulk of the /api/fleet payload that the
     # marginal Abu-Dhabi<->Singapore relay drops. It's only needed ON TAP, which
@@ -1251,11 +1329,23 @@ def _fleet_payload():
             elapsed_ms, _FLEET_BUDGET_MS, len(lanes),
         )
 
+    # fc-v55: how many open asks are in each headline state, for the pulse hero
+    # ("N needs your call") + the "N open · N needs you · N to review" subline.
+    asks_needs = sum(1 for a in your_asks if a.get("status") == "needs_you")
+    asks_review = sum(1 for a in your_asks if a.get("status") == "delegate_done")
+
     return {
         "pulse": {**counts, "needs_you": len(needs),
                   # op#13050-B: honest bloat header from the fresh pane feed —
                   # 'clear' | 'alert' | 'unknown' (+ worst offender). NEVER false-green.
-                  "pane_health": pane_header["state"], "pane_worst": pane_header["worst"]},
+                  "pane_health": pane_header["state"], "pane_worst": pane_header["worst"],
+                  # fc-v55: operator-ask headline counts (the "Your asks" hero).
+                  "asks_open": len(your_asks), "asks_needs": asks_needs,
+                  "asks_review": asks_review},
+        # fc-v55: the operator's LIVE "Your asks" board (status derived in SQL,
+        # never stored). Primary operator surface; the drain board is demoted to
+        # a collapsed "Fleet chatter (SRE view)" below it.
+        "your_asks": _jsonable(your_asks),
         "needs_you": _jsonable(needs),
         "backlog": _jsonable(backlog),
         "coordinators": _jsonable(coordinators),
@@ -1659,7 +1749,7 @@ def _make_handler(feedloop: "_FeedLoop"):
                             "/api/set-pointer", "/api/set-group-pointer",
                             "/api/add-token", "/api/apply-dry-run",
                             "/api/apply-armed", "/api/apply-queue-cancel",
-                            "/api/assign"):
+                            "/api/assign", "/api/ask-close"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
@@ -1704,6 +1794,14 @@ def _make_handler(feedloop: "_FeedLoop"):
             # read-only, same reason /api/reset + /api/backlog shell out).
             if path == "/api/assign":
                 return self._handle_assign()
+            # fc-v55: swipe-to-confirm on a "Your asks" card. 'confirm' = the
+            # operator confirms a delegate-reported-done ask actually landed
+            # (closes it, reason operator_done); 'drop' = the operator dismisses it
+            # (reason dropped). Writes via the vetted scripts/asks_close.py (the
+            # console DB session is read-only — same shell-out pattern as
+            # /api/backlog + /api/assign).
+            if path == "/api/ask-close":
+                return self._handle_ask_close()
             if path == "/api/switch-token":
                 return self._handle_switch_token()
             # Bulk re-token: /api/switch-group (one lane-family) and /api/switch-all
@@ -1878,6 +1976,48 @@ def _make_handler(feedloop: "_FeedLoop"):
             if m:
                 new_id = int(m.group(1))
             return self._json(200, {"ok": True, "agent": agent, "id": new_id})
+
+        def _handle_ask_close(self):
+            """POST /api/ask-close {id, action} — the operator's swipe-to-confirm on
+            a "Your asks" card (fc-v55). action is 'confirm' (the operator confirms a
+            delegate-reported-done ask actually landed → confirmed_at + closed_at,
+            reason operator_done) or 'drop' (dismiss → closed_at, reason dropped).
+
+            A delegate stamping responded_at only moves the card to REVIEW, never to
+            done — the operator's confirm is the ONLY authoritative close (op#13250).
+            Validates BEFORE spawning: id must be an int, action allowlisted. Shells
+            out to scripts/asks_close.py (writable env), the same read-only-console
+            pattern as /api/reset + /api/backlog + /api/assign."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                payload = json.loads(raw or b"{}")
+                item_id = payload.get("id")
+                action = (payload.get("action") or "confirm").strip().lower()
+            except Exception:                                        # noqa: BLE001
+                auth.audit(self._client(), "/api/ask-close", "400")
+                return self._json(400, {"error": "bad request"})
+            if not isinstance(item_id, int) or action not in ("confirm", "drop"):
+                auth.audit(self._client(), f"/api/ask-close:{action}", "400")
+                return self._json(400, {"error": "bad id/action"})
+            auth.audit(self._client(), f"/api/ask-close:{action}:{item_id}", "run")
+            try:
+                venv_py = _REPO_ROOT / ".venv" / "bin" / "python3"
+                interp = str(venv_py) if venv_py.is_file() else "python3"
+                r = subprocess.run(
+                    [interp, str(_REPO_ROOT / "scripts" / "asks_close.py"),
+                     str(item_id), action],
+                    capture_output=True, text=True, timeout=30,
+                )
+                ok = r.returncode == 0
+            except Exception as e:                                   # noqa: BLE001
+                logger.warning("ask-close failed: %s", e)
+                auth.audit(self._client(), f"/api/ask-close:{action}:{item_id}", "500")
+                return self._json(500, {"error": "close failed"})
+            auth.audit(self._client(), f"/api/ask-close:{action}:{item_id}", "200" if ok else "500")
+            return self._json(200 if ok else 500,
+                              {"ok": ok, "id": item_id, "action": action,
+                               "error": None if ok else (r.stderr or "").strip()[-160:]})
 
         def _handle_apply_queue_cancel(self):
             """POST /api/apply-queue-cancel {session, kind} — remove a queued/held

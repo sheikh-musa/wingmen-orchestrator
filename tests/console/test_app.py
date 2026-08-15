@@ -1028,3 +1028,270 @@ def test_api_assign_no_service_key_leak(server):
                        json={"agent": "cc-irsyad", "ask": "x"}, timeout=5)
     assert "service_role" not in r.text.lower()
     assert "SUPABASE_SERVICE_KEY" not in r.text
+
+
+# --- fc-v55: YOUR ASKS board (live-derived status) + assign→link + swipe-close --
+# The "Your asks" board stores ONLY the link (operator_asks.thread_id →
+# agent_messages) and derives status LIVE in SQL each poll, so it can never go
+# stale (op#13250). console_assign.py writes the link row in the SAME transaction
+# as the directive; the operator's swipe-to-confirm closes an ask via the vetted
+# scripts/asks_close.py (read-only-console shell-out, like /api/backlog).
+
+import importlib.util  # noqa: E402
+
+_REPO = pathlib.Path(__file__).resolve().parents[2]
+
+
+def test_build_asks_query_derives_every_status_live_in_sql():
+    """Status is COMPUTED in SQL from the linked bus row — never a stored column.
+    Assert the shipped query encodes ALL FIVE states, the exact needs_you
+    condition (a reply BACK to orch-console, requires_response, unanswered), the
+    open-only filter, and the needs_you-pinned ordering + live freshness ages."""
+    sql, params = db.build_asks_query()
+    assert params == []
+    low = " ".join(sql.lower().split())
+    # links, never stores status:
+    assert "from operator_asks" in low
+    assert "left join latest l on l.thread_id = a.thread_id" in low
+    assert "from agent_messages" in low and "is_test is not true" in low
+    assert "a.closed_at is null" in low            # only OPEN asks (delegate-reply ≠ done)
+    # all five live-derived states present:
+    for state in ("on_nazim", "needs_you", "delegate_done", "in_progress", "pending"):
+        assert "'" + state + "'" in low, f"missing derived state {state}"
+    # the needs_you condition, verbatim shape (bounced back, unanswered):
+    assert "l.from_agent <> 'orch-console'" in low
+    assert "l.to_agent = 'orch-console'" in low
+    assert "l.requires_response and l.responded_at is null" in low
+    # progression thresholds derived from the bus row:
+    assert "l.responded_at is not null" in low     # -> delegate_done (review)
+    assert "l.read_at is not null" in low          # -> in_progress
+    # freshness = age of REAL last bus movement (or the ask if undelegated):
+    assert "coalesce(l.created_at, a.created_at)" in low
+    assert "updated_age_s" in low and "asked_age_s" in low
+    # needs_you pinned to the very top of the order:
+    order = low.split("order by", 1)[1]
+    assert "then 0" in order
+
+
+def test_fetch_asks_passthrough(monkeypatch):
+    seen = {}
+    def _fake_query(sql, params):
+        seen["q"] = (sql, params)
+        return [{"id": 1}]
+    monkeypatch.setattr(db, "_query", _fake_query)
+    rows = db.fetch_asks()
+    assert rows == [{"id": 1}]
+    assert "operator_asks" in seen["q"][0].lower()
+
+
+def _load_console_assign():
+    spec = importlib.util.spec_from_file_location(
+        "console_assign_mod", _REPO / "scripts" / "console_assign.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _FakeCursor:
+    def __init__(self, fetch_queue):
+        self.executed = []
+        self._fetch = list(fetch_queue)
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+    def fetchone(self):
+        return self._fetch.pop(0)
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, cur):
+        self._cur = cur
+        self.committed = False
+    def cursor(self):
+        return self._cur
+    def commit(self):
+        self.committed = True
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+def test_console_assign_stamps_link_row_in_same_transaction(monkeypatch):
+    """A console assign inserts the directive (with a fresh uuid thread_id) AND the
+    operator_asks LINK row in ONE transaction, then commits both — so an assign is
+    a tracked operator ask atomically. Status is NOT written (derive-live only)."""
+    mod = _load_console_assign()
+    # agents-exists check -> truthy; directive INSERT ... RETURNING id, thread_id.
+    cur = _FakeCursor(fetch_queue=[(1,), (4242, "th-uuid-abc")])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(mod, "_dsn", lambda: "postgres://fake")
+    monkeypatch.setattr(mod.psycopg, "connect", lambda dsn: conn)
+
+    new_id = mod.assign("cc-irsyad", "ship the thing", "P1", source_msg_id=99)
+    assert new_id == 4242
+    assert conn.committed is True
+
+    sqls = [e[0] for e in cur.executed]
+    # 1) agents existence guard, 2) directive insert, 3) operator_asks link insert
+    assert len(cur.executed) == 3
+    assert "from agents" in sqls[0].lower()
+    directive = cur.executed[1]
+    assert "insert into agent_messages" in directive[0].lower()
+    assert "thread_id" in directive[0].lower() and "gen_random_uuid()" in directive[0].lower()
+    assert "returning id, thread_id" in directive[0].lower()
+    link = cur.executed[2]
+    assert "insert into operator_asks" in link[0].lower()
+    # the link row stores the SAME thread_id the directive returned, + the origin.
+    assert link[1] == ("ship the thing", 99, "th-uuid-abc", "cc-irsyad")
+    # never writes a status column (the whole point — status is derived live).
+    assert "status" not in link[0].lower()
+
+
+def test_console_assign_unknown_agent_exits_2_before_any_insert(monkeypatch):
+    """An unknown agent aborts BEFORE the directive/link write (exit 2 → 400)."""
+    mod = _load_console_assign()
+    cur = _FakeCursor(fetch_queue=[None])  # agents check returns no row
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(mod, "_dsn", lambda: "postgres://fake")
+    monkeypatch.setattr(mod.psycopg, "connect", lambda dsn: conn)
+    with pytest.raises(SystemExit) as ei:
+        mod.assign("nope", "do it", "P2")
+    assert ei.value.code == 2
+    # only the guard ran; no directive/link insert, no commit.
+    assert len(cur.executed) == 1
+    assert conn.committed is False
+
+
+def test_api_ask_close_requires_auth(server):
+    r = httpx.post(server + "/api/ask-close", json={"id": 1, "action": "confirm"}, timeout=5)
+    assert r.status_code == 401
+
+
+def test_api_ask_close_bad_action_400_no_subprocess(server):
+    with patch("subprocess.run") as mock_run:
+        r = httpx.post(server + "/api/ask-close", headers=H(),
+                       json={"id": 1, "action": "nuke"}, timeout=5)
+    assert r.status_code == 400
+    mock_run.assert_not_called()
+
+
+def test_api_ask_close_bad_id_400_no_subprocess(server):
+    with patch("subprocess.run") as mock_run:
+        r = httpx.post(server + "/api/ask-close", headers=H(),
+                       json={"id": "not-an-int", "action": "confirm"}, timeout=5)
+    assert r.status_code == 400
+    mock_run.assert_not_called()
+
+
+def test_api_ask_close_confirm_shells_out_to_writer(server):
+    """A valid confirm shells out to asks_close.py with (id, 'confirm') — the
+    operator's authoritative done (a delegate reply only shows REVIEW)."""
+    ok = MagicMock(returncode=0, stdout="ok\n", stderr="")
+    with patch("subprocess.run", return_value=ok) as mock_run:
+        r = httpx.post(server + "/api/ask-close", headers=H(),
+                       json={"id": 77, "action": "confirm"}, timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["id"] == 77 and body["action"] == "confirm"
+    argv = mock_run.call_args.args[0]
+    assert argv[-3].endswith("asks_close.py")
+    assert argv[-2:] == ["77", "confirm"]
+
+
+def test_api_ask_close_drop_shells_out_to_writer(server):
+    ok = MagicMock(returncode=0, stdout="ok\n", stderr="")
+    with patch("subprocess.run", return_value=ok) as mock_run:
+        r = httpx.post(server + "/api/ask-close", headers=H(),
+                       json={"id": 5, "action": "drop"}, timeout=5)
+    assert r.status_code == 200
+    assert r.json()["action"] == "drop"
+    assert mock_run.call_args.args[0][-2:] == ["5", "drop"]
+
+
+def test_api_ask_close_writer_failure_maps_500(server):
+    bad = MagicMock(returncode=2, stdout="", stderr="error: id 9 not found or already closed?\n")
+    with patch("subprocess.run", return_value=bad):
+        r = httpx.post(server + "/api/ask-close", headers=H(),
+                       json={"id": 9, "action": "confirm"}, timeout=5)
+    assert r.status_code == 500
+    assert r.json()["ok"] is False
+
+
+# --- fc-v55: lane phantom-dark-twin dedup (console display side) ---------------
+# A family registered on two hosts (e.g. cc-scholar-1 Mac-Studio + cc-scholar-2
+# Mini, both lane='scholar', both desired_state='up') otherwise emits BOTH: the
+# no-local-pane twin classifies offline -> flagged DARK (a false alarm). The fix
+# collapses same-lane rows to ONE card, preferring the live-local-pane row, and
+# never flags a lane dark if ANY row is live.
+
+def test_dedupe_collapses_phantom_dark_twin_to_one_live_lane():
+    rows = [
+        # dark twin: no local pane on THIS console host (remote), desired up.
+        {"agent_id": "cc-scholar-2", "base_agent_id": "cc-scholar", "lane": "scholar",
+         "tmux_session": "scholar", "host": "Mini", "desired_state": "up",
+         "heartbeat_age_s": 40, "activity": "stale — 2 days ago",
+         "live": {"running": False}},
+        # the real live pane binds here (local, working).
+        {"agent_id": "cc-scholar-1", "base_agent_id": "cc-scholar", "lane": "scholar",
+         "tmux_session": None, "host": "Mac-Studio", "desired_state": "up",
+         "heartbeat_age_s": 8, "activity": "stale — 2 days ago",
+         "live": {"running": True, "state": "working", "activity": "Baked for 7m 38s"}},
+    ]
+    out = console_app._dedupe_lanes_by_family(rows)
+    # exactly ONE lane entry for 'scholar', and it is the LIVE one.
+    assert len(out) == 1
+    kept = out[0]
+    assert kept["agent_id"] == "cc-scholar-1"
+    # not dark: the live pane classifies working, never flagged.
+    state, flagged = console_app._lane_bucket(kept)
+    assert state == "working" and flagged is False
+    # item 3: the live activity replaces the days-stale stored string.
+    assert kept["activity"] == "Baked for 7m 38s"
+
+
+def test_dedupe_keeps_distinct_live_instances():
+    """Two GENUINELY live instances that happen to share a lane label are both kept
+    (distinct real workers) — the collapse only kills no-pane twins."""
+    rows = [
+        {"agent_id": "cc-mirror-1", "lane": "mirror", "tmux_session": "mirror-1",
+         "desired_state": "up", "heartbeat_age_s": 5,
+         "live": {"running": True, "state": "working"}},
+        {"agent_id": "cc-mirror-2", "lane": "mirror", "tmux_session": "mirror-2",
+         "desired_state": "up", "heartbeat_age_s": 6,
+         "live": {"running": True, "state": "idle"}},
+    ]
+    out = console_app._dedupe_lanes_by_family(rows)
+    assert {r["agent_id"] for r in out} == {"cc-mirror-1", "cc-mirror-2"}
+
+
+def test_dedupe_fully_dark_lane_collapses_to_one_card():
+    """A lane dark on BOTH rows shows a SINGLE honest dark card, not duplicates."""
+    rows = [
+        {"agent_id": "cc-ghost-1", "lane": "ghost", "tmux_session": None,
+         "host": "Mini", "desired_state": "up", "heartbeat_age_s": 900,
+         "live": {"running": False}},
+        {"agent_id": "cc-ghost-2", "lane": "ghost", "tmux_session": "ghost",
+         "host": "Mac-Studio", "desired_state": "up", "heartbeat_age_s": 200,
+         "live": {"running": False}},
+    ]
+    out = console_app._dedupe_lanes_by_family(rows)
+    assert len(out) == 1
+    state, flagged = console_app._lane_bucket(out[0])
+    # still honestly dark (nothing is live) and still flagged (desired up).
+    assert state == "offline" and flagged is True
+
+
+def test_dedupe_distinct_lanes_untouched():
+    """Distinct lane labels never collapse (no over-dedup of a real family)."""
+    rows = [
+        {"agent_id": "cc-irsyad-prog1", "lane": "irsyad-prog1", "tmux_session": "irsyad-prog1",
+         "heartbeat_age_s": 5, "live": {"running": True, "state": "working"}},
+        {"agent_id": "cc-irsyad-prog2", "lane": "irsyad-prog2", "tmux_session": "irsyad-prog2",
+         "heartbeat_age_s": 6, "live": {"running": True, "state": "idle"}},
+    ]
+    out = console_app._dedupe_lanes_by_family(rows)
+    assert len(out) == 2

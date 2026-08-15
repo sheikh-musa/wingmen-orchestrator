@@ -1,4 +1,4 @@
-// Fleet Console — Command Surface (Approach C, fc-v54). ONE page: an ambient
+// Fleet Console — Command Surface (Approach C, fc-v55). ONE page: an ambient
 // monitoring strip up top (pulse headline + stat row + pool chips + needs
 // callouts), the LANES as the dense spine (context-ring tiles), and a bottom
 // ACTION SHEET that raises the FULL per-lane action set on tap — Peek · Retask ·
@@ -125,7 +125,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v54';
+  var APP_BUILD = 'fc-v55';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -865,6 +865,96 @@
     el.innerHTML = rows.map(bodyRow).join("");
   }
 
+  // ---- YOUR ASKS (fc-v55) — the operator's LIVE ask board -------------------
+  // One card per open operator_asks row. STATUS IS DERIVED LIVE on the bus each
+  // poll (never stored) so it cannot go stale (op#13250). needs_you is pinned red
+  // to the top by the server; review (delegate_done) is NOT auto-done — the
+  // operator swipe-to-confirms it. The card only carries {id, ask, delegated_to,
+  // status, updated_age_s, asked_age_s}; we render the copy per status here.
+  var ASK_TAG = {
+    needs_you:     { cls: "needs", label: "needs you" },
+    delegate_done: { cls: "rev",   label: "review" },
+    in_progress:   { cls: "prog",  label: "in progress" },
+    pending:       { cls: "pend",  label: "pending" },
+    on_nazim:      { cls: "naz",   label: "on me" }
+  };
+  function askMeta(a) {
+    var to = a.delegated_to
+      ? '<span class="ato">→ <b>' + esc(a.delegated_to) + '</b></span>'
+      : '<span class="ato">not yet delegated</span>';
+    var upd = a.updated_age_s, warn = (upd != null && upd >= 3600);
+    var ageCls = warn ? "aage warnage" : "aage";
+    var moved;
+    if (a.status === "needs_you") moved = "bounced back " + fmtAge(upd) + " ago";
+    else if (a.status === "delegate_done") moved = "replied " + fmtAge(upd) + " ago";
+    else if (a.status === "pending") moved = "sent " + fmtAge(upd) + " ago · unopened";
+    else if (a.status === "on_nazim") moved = "asked " + fmtAge(a.asked_age_s) + " ago";
+    else moved = "updated " + fmtAge(upd) + " ago";
+    var parts = [to, '<span class="' + ageCls + '">' + esc(moved) + '</span>'];
+    // Show when it was originally asked too (except on_nazim, where that IS moved).
+    if (a.status !== "on_nazim" && a.asked_age_s != null)
+      parts.push('<span>asked ' + esc(fmtAge(a.asked_age_s)) + ' ago</span>');
+    return '<div class="ameta">' + parts.join('<span class="adot">·</span>') + '</div>';
+  }
+  function askCard(a) {
+    var t = ASK_TAG[a.status] || ASK_TAG.pending;
+    var needs = a.status === "needs_you";
+    var review = a.status === "delegate_done";
+    var cls = "ask" + (needs ? " needs" : "") + (review ? " confirmable" : "");
+    var rev = review
+      ? '<div class="arev" data-confirm="' + a.id + '">✓ delegate reported done — swipe or tap to confirm it landed</div>'
+      : "";
+    return '<div class="' + cls + '" data-ask="' + a.id + '">' +
+      '<span class="atag ' + t.cls + '">' + t.label + '</span>' +
+      '<div class="abody"><div class="atxt">' + esc(a.ask) + '</div>' +
+        rev + askMeta(a) +
+      '</div></div>';
+  }
+  function renderAsks(rows) {
+    var el = $("asks");
+    if (!el) return;
+    var cnt = $("asksCount"), fresh = $("asksFresh");
+    if (!rows || !rows.length) {
+      el.innerHTML = '<div class="empty">No open asks. ✨</div>';
+      if (cnt) cnt.textContent = "";
+      if (fresh) fresh.style.display = "none";
+      return;
+    }
+    var needs = rows.filter(function (a) { return a.status === "needs_you"; }).length;
+    var review = rows.filter(function (a) { return a.status === "delegate_done"; }).length;
+    if (cnt) {
+      var bits = [rows.length + " open"];
+      if (needs) bits.push(needs + " needs you");
+      if (review) bits.push(review + " to review");
+      cnt.textContent = bits.join(" · ");
+    }
+    el.innerHTML = rows.map(askCard).join("");
+    if (fresh) fresh.style.display = "flex";
+  }
+
+  // swipe/tap-to-confirm — the operator's authoritative "done" on a review card.
+  // A delegate stamping responded_at only shows REVIEW; this close (confirm) is the
+  // only thing that clears the ask (POST /api/ask-close). Best-effort optimistic
+  // fade; the next poll is the source of truth.
+  var askBusy = {};
+  function confirmAsk(id, action) {
+    if (!id || askBusy[id]) return;
+    action = action || "confirm";
+    askBusy[id] = true;
+    var card = document.querySelector('.ask[data-ask="' + id + '"]');
+    if (card) card.classList.add("confirming");
+    fetch("/api/ask-close", {
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ id: Number(id), action: action })
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j || {} }; }, function () { return { ok: r.ok, j: {} }; }); })
+      .then(function (res) {
+        if (res.ok && res.j.ok) { toast(action === "drop" ? "✓ dismissed" : "✓ confirmed done"); load(); }
+        else { if (card) card.classList.remove("confirming"); toast("✗ " + (res.j.error || "close failed"), true); }
+      })
+      .catch(function () { if (card) card.classList.remove("confirming"); toast("✗ network dropped — confirm may not have run", true); })
+      .finally(function () { askBusy[id] = false; });
+  }
+
   // ---- assign affordance -----------------------------------------------------
   // Build the target list from the live lanes + coordinators: a lane assigns to
   // its BASE agent id (the family bus address), a coordinator to its own id.
@@ -995,6 +1085,7 @@
     renderCoordinators(d.coordinators || []);
     buildEntries(lanes, d.coordinators || []);
     renderLanes(lanes);
+    renderAsks(d.your_asks || []);
     renderDrainBoard(d.drain_board || []);
     buildAssignTargets(lanes, d.coordinators || []);
     updateDock();
@@ -1054,6 +1145,31 @@
       if (open && $("assignAsk")) $("assignAsk").focus();
     });
     var asend = $("assignSend"); if (asend) asend.addEventListener("click", sendAssign);
+    // fc-v55: swipe/tap-to-confirm on a "Your asks" review card (delegated once).
+    var asks = $("asks");
+    if (asks) {
+      // Tap the review CTA → confirm.
+      asks.addEventListener("click", function (e) {
+        var cta = e.target.closest ? e.target.closest(".arev[data-confirm]") : null;
+        if (cta) confirmAsk(cta.getAttribute("data-confirm"), "confirm");
+      });
+      // Horizontal swipe on a confirmable card → confirm (right) / dismiss (left).
+      var sx = null, sy = null, scard = null;
+      asks.addEventListener("touchstart", function (e) {
+        var c = e.target.closest ? e.target.closest(".ask.confirmable") : null;
+        if (!c) { scard = null; return; }
+        scard = c; sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+      }, { passive: true });
+      asks.addEventListener("touchend", function (e) {
+        if (!scard || sx == null) return;
+        var t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+        if (Math.abs(dx) > 64 && Math.abs(dx) > Math.abs(dy) * 1.6) {
+          var id = scard.getAttribute("data-ask");
+          confirmAsk(id, dx > 0 ? "confirm" : "drop");
+        }
+        scard = null; sx = sy = null;
+      }, { passive: true });
+    }
     var aask = $("assignAsk");
     if (aask) aask.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); sendAssign(); } });
     var bp = $("bulkPreview"); if (bp) bp.addEventListener("click", bulkPreviewRun);
