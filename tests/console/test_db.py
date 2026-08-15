@@ -78,3 +78,21 @@ def test_messages_query_filters_are_parameterized():
     assert "cc-cai" in params
     assert "t-1" not in sql
     assert "cc-cai" not in sql
+
+
+def test_pane_context_query_with_pct_selects_and_orders_by_pct():
+    sql, params = db.build_pane_context_query(60, with_pct=True)
+    assert ", pct," in sql
+    assert "ORDER BY pct DESC NULLS LAST" in sql
+    assert params == [60]
+
+
+def test_pane_context_query_pct_less_degrades_gracefully():
+    # op#13186 / cc-quality GATE-4 blocker 2: mig-043 absent must NOT dark the feed. The
+    # pct-less form selects NULL::smallint AS pct (identical row shape -> downstream fails
+    # closed to pane_k) and drops the pct sort key, so a missing column can't throw.
+    sql, params = db.build_pane_context_query(60, with_pct=False)
+    assert "NULL::smallint AS pct" in sql
+    assert "pct DESC" not in sql
+    assert "ORDER BY pane_k DESC NULLS LAST" in sql
+    assert params == [60]

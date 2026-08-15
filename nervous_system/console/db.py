@@ -780,16 +780,44 @@ def fetch_context_bloat() -> List[dict]:
 PANE_TTL_S = int(os.environ.get("CONSOLE_PANE_TTL_S", "660"))
 
 
-def build_pane_context_query(ttl_s: int = None) -> Tuple[str, list]:
+_HAS_PCT_COL: Optional[bool] = None
+
+
+def _pane_context_has_pct() -> bool:
+    """Feature-detect the pane_context.pct column (op#13186 mig-043), cached once True.
+    If the column is absent (mig-043 not yet applied / rolled back), the console degrades
+    to the pct-less query below — falling back to pane_k, exactly the pre-op#13186
+    behavior — so a migration hiccup can NEVER dark the whole health feed (cc-quality
+    GATE-4 blocker 2). A transient information_schema failure returns False UNcached so
+    the next poll re-checks."""
+    global _HAS_PCT_COL
+    if _HAS_PCT_COL:
+        return True
+    try:
+        r = _query("SELECT 1 FROM information_schema.columns WHERE "
+                   "table_name='pane_context' AND column_name='pct' LIMIT 1", [])
+    except Exception:
+        return False  # transient — do not cache; degrade to pane_k this poll
+    _HAS_PCT_COL = bool(r)
+    return _HAS_PCT_COL
+
+
+def build_pane_context_query(ttl_s: int = None, with_pct: "bool | None" = None) -> Tuple[str, list]:
     ttl = PANE_TTL_S if ttl_s is None else ttl_s
+    if with_pct is None:
+        with_pct = _pane_context_has_pct()
+    # pct-less path selects NULL::smallint AS pct so the row SHAPE is identical (pct key
+    # present but None) -> downstream _pane_entry fails closed to pane_k, feed stays alive.
+    pct_col = "pct" if with_pct else "NULL::smallint AS pct"
+    pct_order = "pct DESC NULLS LAST, " if with_pct else ""
     sql = (
-        "SELECT session, base, pane_k, pct, idle_verdict, host, "
+        f"SELECT session, base, pane_k, {pct_col}, idle_verdict, host, "
         "  round(extract(epoch FROM (now() - updated_at)))::int AS age_s "
         "FROM pane_context "
         "WHERE updated_at > now() - make_interval(secs => %s) "
         # op#13186: pct (the cliff truth) leads the raw order so a maxed lane with a NULL
         # pane_k sorts first; the console re-sorts by computed pct anyway (belt+braces).
-        "ORDER BY pct DESC NULLS LAST, pane_k DESC NULLS LAST"
+        f"ORDER BY {pct_order}pane_k DESC NULLS LAST"
     )
     return sql, [ttl]
 
