@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.wingmen.memory-index-audit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/memory_index_audit.py</string>
+    <string>--fix</string>
+    <string>--alert</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>20</integer></dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/memory_index_audit.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/memory_index_audit.log</string>
+</dict>
+</plist>
