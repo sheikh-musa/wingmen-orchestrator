@@ -32,6 +32,14 @@ import subprocess
 # `new task? /clear to save 795.9k tokens`  ->  795.9   (also "551k", "454k")
 _HINT_RX = re.compile(r"/clear to save\s+([0-9]+(?:\.[0-9]+)?)\s*k\s+tokens")
 
+# `100% context used`, `98% context used`  ->  100, 98. THE CLIFF SIGNAL (op#13186):
+# once context is very high (empirically >=~95%) Claude Code STOPS rendering the
+# `/clear to save {N}k` reclaim hint and instead prints `{N}% context used`. So a lane
+# AT the cliff shows NO hint -> _HINT_RX misses -> the MOST-bloated lane read as
+# not-bloated (fail-closed miss; cc-ihsanos-1 @100% was invisible). This regex reads
+# that pct line directly; it is the authoritative truth near the cliff.
+_PCT_RX = re.compile(r"([0-9]+)%\s+context used")
+
 # Mini lanes live on the /usr/local/bin/tmux server (socket tmux-501/default), NOT
 # /opt/homebrew/bin/tmux — same note as reset_lane.sh / composer_capture.sh.
 DEFAULT_TMUX = "/usr/local/bin/tmux"
@@ -48,6 +56,23 @@ def parse_hint_k(pane_text: "str | None") -> "float | None":
         return None
     try:
         return float(matches[-1])
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_pct(pane_text: "str | None") -> "int | None":
+    """PURE. Current-context percent (int, 0-100) parsed from a pane's `{N}% context
+    used` line, or None when that line is absent. Takes the LAST match — same freshest-
+    render-wins rule as parse_hint_k (an older render can linger up in scrollback).
+    This is the authoritative near-the-cliff signal (op#13186): CC shows it exactly when
+    context is high enough that it has stopped rendering the /clear reclaim hint."""
+    if not pane_text:
+        return None
+    matches = _PCT_RX.findall(pane_text)
+    if not matches:
+        return None
+    try:
+        return int(matches[-1])
     except (TypeError, ValueError):
         return None
 
@@ -72,6 +97,14 @@ def pane_bloat_k(session: str, tmux: str = DEFAULT_TMUX) -> "float | None":
     hint is absent / the capture failed. None ALWAYS means 'do not treat as bloated'
     (fail-closed) — never fire on a signal we could not read."""
     return parse_hint_k(capture_pane(session, tmux))
+
+
+def pane_context_pct(session: str, tmux: str = DEFAULT_TMUX) -> "int | None":
+    """Fresh current-context percent (int 0-100) for a LIVE session's pane from CC's
+    `{N}% context used` line, or None if that line is absent / the capture failed. None
+    ALWAYS means 'no pct signal' (fail-closed) — never a fake 0/green. This is the truth
+    at/near the cliff where pane_bloat_k goes blind (the /clear hint has vanished)."""
+    return parse_pct(capture_pane(session, tmux))
 
 
 def is_bloated_k(k: "float | None", fire_k: float) -> bool:

@@ -220,8 +220,10 @@ _PRUNE_STALE_H = 1  # dead-session rows age out after this many hours (console i
 def publish_pane_context() -> int:
     """Publish fresh pane-truth for EVERY live Mini-local session into `pane_context`
     (op#13050-B, console-signed 21515). One UPSERT per live tmux session: (session, base,
-    pane_k, idle_verdict, host, updated_at=now()); pane_k is NULL when no /clear hint
-    shows (low ctx OR mid-turn — idle_verdict disambiguates). READ-ONLY of the panes;
+    pane_k, pct, idle_verdict, host, updated_at=now()); pane_k is NULL when no /clear hint
+    shows (low ctx OR mid-turn — idle_verdict disambiguates). pct (op#13186) is CC's
+    `{N}% context used` line — the CLIFF truth present exactly when pane_k vanishes at
+    >=~95%, so a maxed lane still publishes its real fill instead of a NULL. READ-ONLY of the panes;
     writes only a cache row. The VPS console reads FRESH rows (TTL) for its honest header;
     a stale/absent row => UNKNOWN (NEVER a gauge fallback — the gauge is the bug). The VPS
     hub is NOT a Mini tmux session so it is correctly absent here (self-publishes as a
@@ -235,12 +237,19 @@ def publish_pane_context() -> int:
     rows = []
     for session, base in sessions:
         try:
-            k = pbs.pane_bloat_k(session)
+            # ONE capture, BOTH signals (op#13186): pct is CC's `{N}% context used` line
+            # (authoritative at/near the cliff), pane_k is the `/clear to save {N}k` hint
+            # (present below the cliff). At >=~95% the hint vanishes so pane_k is NULL but
+            # pct carries the truth; below it pct is NULL and pane_k carries it. Both may
+            # be NULL (low ctx OR mid-turn) — fail-safe UNKNOWN, never a fake 0.
+            pane_text = pbs.capture_pane(session)
+            k = pbs.parse_hint_k(pane_text)
+            pct = pbs.parse_pct(pane_text)
             verdict = _idle_verdict(session, base)
         except Exception as e:  # noqa: BLE001 — a capture blip must not drop the whole publish
             print(f"[pane-context] WARN read failed for {session} ({e}) — skip", file=sys.stderr)
             continue
-        rows.append((session, base, k, verdict, host))
+        rows.append((session, base, k, pct, verdict, host))
     if not rows:
         return 0
     try:
@@ -248,10 +257,10 @@ def publish_pane_context() -> int:
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
             cur.executemany(
-                """INSERT INTO pane_context (session, base, pane_k, idle_verdict, host, updated_at)
-                   VALUES (%s,%s,%s,%s,%s, now())
+                """INSERT INTO pane_context (session, base, pane_k, pct, idle_verdict, host, updated_at)
+                   VALUES (%s,%s,%s,%s,%s,%s, now())
                    ON CONFLICT (session) DO UPDATE
-                     SET base=EXCLUDED.base, pane_k=EXCLUDED.pane_k,
+                     SET base=EXCLUDED.base, pane_k=EXCLUDED.pane_k, pct=EXCLUDED.pct,
                          idle_verdict=EXCLUDED.idle_verdict, host=EXCLUDED.host, updated_at=now()""",
                 rows)
             cur.execute("DELETE FROM pane_context WHERE updated_at < now() - make_interval(hours => %s)",

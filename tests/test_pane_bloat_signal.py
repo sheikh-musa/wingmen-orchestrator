@@ -33,6 +33,17 @@ STOREFRONT_TAIL = """\
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 """
 
+# Real ihsanos-platform tail AT the cliff (op#13186): context so high CC has STOPPED
+# rendering the /clear reclaim hint and prints the pct line instead — NO `/clear to save`.
+IHSANOS_CLIFF_TAIL = """\
+  Landed the drain fix. Standing by for the next task.
+✻ Percolated for 41s
+────────────────────────────────────────────────────────────────────────────────
+❯ [wake] new inbox item — read your agent_messages inbox and act
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · 100% context used · ← for agents
+"""
+
 
 # ── parse_hint_k ─────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("text,expected", [
@@ -61,6 +72,47 @@ def test_parse_hint_k_takes_last_match():
     # An older hint up in scrollback + a fresher one lower down -> freshest wins.
     txt = "old: /clear to save 900k tokens\n...\nnow: /clear to save 120k tokens"
     assert pbs.parse_hint_k(txt) == 120.0
+
+
+# ── parse_pct (op#13186 — the `{N}% context used` cliff signal) ──────────────
+@pytest.mark.parametrize("text,expected", [
+    ("100% context used", 100),
+    ("98% context used", 98),
+    (IHSANOS_CLIFF_TAIL, 100),                    # real cliff tail, NO /clear hint
+    ("  ⏵⏵ bypass permissions on · 96% context used · ← for agents", 96),
+])
+def test_parse_pct_present(text, expected):
+    assert pbs.parse_pct(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    CAAI_TAIL,                 # has the /clear hint but NO `% context used` line
+    STOREFRONT_TAIL,
+    "",
+    None,
+    "context used but no number",
+    "42 percent context used",  # words, not the `N%` pattern
+])
+def test_parse_pct_absent_is_none(text):
+    # No pct line -> None (fail-closed), NEVER 0/green.
+    assert pbs.parse_pct(text) is None
+
+
+def test_parse_pct_takes_last_match():
+    # An older render up in scrollback + a fresher one lower down -> freshest wins.
+    txt = "old: 80% context used\n...\nnow: 99% context used"
+    assert pbs.parse_pct(txt) == 99
+
+
+def test_pct_and_hint_are_independent_signals():
+    # A cliff'd pane shows the pct line but NOT the /clear hint: parse_pct sees the
+    # truth exactly where parse_hint_k (correctly) goes blind. Both parsed from the
+    # same text; the consumer prefers pct when present (authoritative near the cliff).
+    assert pbs.parse_pct(IHSANOS_CLIFF_TAIL) == 100
+    assert pbs.parse_hint_k(IHSANOS_CLIFF_TAIL) is None
+    # And a mid-range pane with only the /clear hint has no pct line.
+    assert pbs.parse_hint_k(CAAI_TAIL) == 551.0
+    assert pbs.parse_pct(CAAI_TAIL) is None
 
 
 # ── is_bloated_k (fail-closed threshold) ─────────────────────────────────────

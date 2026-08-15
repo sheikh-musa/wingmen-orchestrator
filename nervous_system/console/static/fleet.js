@@ -1,4 +1,4 @@
-// Fleet Console — Command Surface (Approach C, fc-v51). ONE page: an ambient
+// Fleet Console — Command Surface (Approach C, fc-v53). ONE page: an ambient
 // monitoring strip up top (pulse headline + stat row + pool chips + needs
 // callouts), the LANES as the dense spine (context-ring tiles), and a bottom
 // ACTION SHEET that raises the FULL per-lane action set on tap — Peek · Retask ·
@@ -125,7 +125,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v52';
+  var APP_BUILD = 'fc-v53';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -260,7 +260,11 @@
     var parts = top.map(function (r) {
       var who = r.sub_tag || r.agent || "?";
       var lvl = r.level || "green";
-      var tip = fmtTok(r.ctx_tokens) + " / " + fmtTok(r.window || 1000000) + (r.age_s != null ? " · " + fmtAge(r.age_s) + " ago" : "");
+      // op#13186: a 'pct'-sourced reading is CC's EXACT `% context used` line (the cliff
+      // truth, ~ token count); a 'k' reading is derived from the /clear hint (approx).
+      var srcNote = r.src === "pct" ? " · exact % (at cliff)" : (r.src === "k" ? " · ~ from hint" : "");
+      var tip = fmtTok(r.ctx_tokens) + " / " + fmtTok(r.window || 1000000) +
+        (r.age_s != null ? " · " + fmtAge(r.age_s) + " ago" : "") + srcNote;
       return '<span class="ent" title="' + esc(tip) + '"><span class="who">' + esc(who) + '</span> ' +
         '<span class="pct ' + esc(lvl) + '">' + r.pct + '%</span></span>';
     });
