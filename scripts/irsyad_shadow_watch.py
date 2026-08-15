@@ -28,6 +28,18 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
+# Cross-host media mirror (pulls hub-downloaded client attachments onto the Mini so
+# cc-irsyad-coord can Read them — see reports/media-download-fix-v2.md). Imported
+# defensively: this is the client-WAKE path, so a broken/absent mirror helper must
+# NEVER stop the watcher from booting or nudging.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+try:
+    import irsyad_media_mirror as _mirror  # noqa: E402
+    MIRROR_OK = True
+except Exception as _mirror_exc:  # noqa: BLE001
+    _mirror = None
+    MIRROR_OK = False
+
 ORCH = pathlib.Path(os.environ.get("ORCH_DIR", pathlib.Path.home() / "wingmen/orchestrator"))
 CLIENT_TAG = "gazzabyte-irsyad"
 LANE_SESSION = "irsyad"
@@ -254,6 +266,14 @@ def main() -> None:
                                 "P1")
                     offset = max_id
                     write_offset(offset)
+                # Cross-host media mirror — best-effort, AFTER the nudge so a slow
+                # scp never delays the client wake. Own offset, self-healing; a
+                # failure here is logged, never fatal (client wake must survive).
+                if MIRROR_OK:
+                    try:
+                        _mirror.run_since_offset(conn)
+                    except Exception as exc:      # noqa: BLE001 — never fatal
+                        log(f"media mirror error (non-fatal): {exc}")
             HEARTBEAT.write_text(datetime.now(timezone.utc).isoformat())
         except Exception:                          # noqa: BLE001
             log("FATAL:\n" + traceback.format_exc())
