@@ -32,6 +32,7 @@ G1's idle-patience only — it NEVER bypasses G2 and NEVER fires a busy body.
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import subprocess
 import sys
@@ -57,6 +58,19 @@ PANE_FIRE_K = 850
 # review sees the VARIED states (busy/staged/sub-tag/idle) being correctly NOT-fired and
 # can watch a lane climb toward the bar. Quiet lanes below it are only counted.
 WATCH_K = 500
+
+# ── STAGE-1 WARN (op#13308, nazim-SIGNED bus 22320) — NON-DESTRUCTIVE ─────────────
+# Fires NO reset. When a worker lane crosses the pane-truth fire bar at a CLEAN IDLE
+# (a WOULD-FIRE verdict), page the console so a human/SRE recycles it BEFORE it hits
+# 100% — the operator stops being the catcher (fleet catches at ~85%). GATED behind
+# AUTO_RECYCLE_STAGE1_WARN=1 (default OFF: this file deploys INERT; the warn only goes
+# live once the env flag is set on the daemon). Deduped per-lane on a cooldown so the
+# 5-min daemon never re-pages the same lane. Fail-safe: any error logs + skips — a warn
+# blip must NEVER crash the observe pass or fire anything. Stage-2 (auto-fire) stays
+# separately gated (audit-commit + self-checkpoint + coverage — nazim re-review).
+STAGE1_WARN_ENABLED = os.environ.get("AUTO_RECYCLE_STAGE1_WARN") == "1"
+STAGE1_WARN_DRY = os.environ.get("AUTO_RECYCLE_WARN_DRY") == "1"   # print instead of insert (test)
+WARN_COOLDOWN_MIN = 90
 
 
 # ── G4: tier eligibility — PURE + fail-closed (unit-tested) ──────────────────
@@ -304,7 +318,54 @@ def run_observe_panes() -> int:
     for session, base, k, verdict, d in sorted(watched, key=lambda w: -w[2]):
         tag = d.verdict if d.verdict != "NOT-BLOATED" else "WATCH"
         print(f"  [{tag}] {d.agent} (session={session} pane={k:.0f}k idle={verdict}): {d.reason}")
+    warn_console(fires)   # Stage-1 (op#13308): NON-destructive deduped console page on WOULD-FIRE
     return 0
+
+
+def warn_console(fires) -> int:
+    """STAGE-1 (op#13308, nazim-signed). NON-DESTRUCTIVE. For each WOULD-FIRE (worker lane
+    >= PANE_FIRE_K at a clean idle), post a DEDUPED WARN to orch-console so a human/SRE
+    recycles it before 100%. Returns count paged. No-op unless AUTO_RECYCLE_STAGE1_WARN=1.
+    Dedup: skip a lane already warned within WARN_COOLDOWN_MIN. Fail-safe: any error logs +
+    skips — a warn blip must never crash the observe pass or (it fires nothing) recycle."""
+    if not STAGE1_WARN_ENABLED or not fires:
+        return 0
+    sent = 0
+    try:
+        import psycopg
+        dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+        with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+            for session, base, k, verdict, d in fires:
+                agent = d.agent
+                cur.execute(
+                    "SELECT 1 FROM agent_messages WHERE from_agent=%s AND to_agent='orch-console' "
+                    "AND subject LIKE %s AND created_at > now() - make_interval(mins => %s) LIMIT 1",
+                    (bnd.SRE_AGENT_ID, f"WARN worker bloat: {agent} %", WARN_COOLDOWN_MIN))
+                if cur.fetchone():
+                    continue   # already warned this lane within cooldown — no re-page
+                subject = f"WARN worker bloat: {agent} ~{k:.0f}k idle — recycle before 100%"
+                body = (
+                    f"TL;DR: worker lane {agent} (session {session}) is at ~{k:.0f}k pane-truth "
+                    f"(>= {PANE_FIRE_K}k fire bar, ~85% of a 1M window) and CLEAN IDLE. Recycle it "
+                    f"BEFORE it hits 100% so the operator does not catch it. Auto-recycle STAGE-1 WARN "
+                    f"(NON-destructive; Stage-2 auto-fire NOT armed yet). Checkpoint-first recycle via "
+                    f"scripts/sre_lane_recycle.py, or ping cc-fleet-health to do it. Deduped {WARN_COOLDOWN_MIN}m/lane.")
+                if STAGE1_WARN_DRY:
+                    print(f"[auto-recycle STAGE-1 WARN DRY] would page console :: {subject}")
+                else:
+                    cur.execute(
+                        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
+                        "VALUES (%s,'orch-console','update',%s,%s,false,'P2')",
+                        (bnd.SRE_AGENT_ID, subject, body))
+                sent += 1
+            if not STAGE1_WARN_DRY:
+                c.commit()
+        if sent:
+            print(f"[auto-recycle STAGE-1 WARN{' DRY' if STAGE1_WARN_DRY else ''}] "
+                  f"paged console for {sent} bloated-idle worker lane(s)")
+    except Exception as e:  # noqa: BLE001 — warn is best-effort; never crash the pass / fire anything
+        print(f"[auto-recycle] WARN stage-1 page failed ({e}) — skipped (fail-safe)", file=sys.stderr)
+    return sent
 
 
 def run_stage0() -> int:

@@ -223,8 +223,8 @@ def audit_before_clear(conn, base_agent_id: str, session: str, gates: dict, reas
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-            "VALUES (%s,'fleet',%s,%s,%s,false,'P2')",
-            [fhb.SRE_AGENT_ID, "update",
+            "VALUES (%s,%s,%s,%s,%s,false,'P2')",
+            [fhb.SRE_AGENT_ID, fhb.SRE_AGENT_ID, "update",
              f"SRE recycled lane {base_agent_id} (gated, CAI-681)", body])
     conn.commit()
 
