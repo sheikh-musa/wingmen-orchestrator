@@ -66,3 +66,9 @@ reports/*.diff
 reports/*.py
 reports/console-deploy/**/*.png
 .venv
+
+# Token POINTER backups written by switch_singleton_token.sh / lane token flips. The live
+# pointers are ignored above; the .bak copies were not, so a `git add -A` would commit them.
+# They contain PATHS (not token material) but still do not belong in the repo.
+*_default_token.bak-*
+.*_default_token.bak-*
