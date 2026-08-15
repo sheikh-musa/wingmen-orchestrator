@@ -71,6 +71,11 @@ WATCH_K = 500
 STAGE1_WARN_ENABLED = os.environ.get("AUTO_RECYCLE_STAGE1_WARN") == "1"
 STAGE1_WARN_DRY = os.environ.get("AUTO_RECYCLE_WARN_DRY") == "1"   # print instead of insert (test)
 WARN_COOLDOWN_MIN = 90
+# op#13308/#13323 (nazim bus 22343): page cc-fleet-health PRIMARY so the SRE closes the
+# recycle loop (self-checkpoint-first → recycle) WITHOUT routing through the operator/Nazim
+# — that IS the mission. orch-console is CC'd for visibility (non-blocking). Stage-1.5:
+# human-in-loop = the SRE, not the operator, until Stage-2 removes the human.
+WARN_RECIPIENTS = ("cc-fleet-health", "orch-console")
 
 
 # ── G4: tier eligibility — PURE + fail-closed (unit-tested) ──────────────────
@@ -337,27 +342,36 @@ def warn_console(fires) -> int:
         with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
             for session, base, k, verdict, d in fires:
                 agent = d.agent
-                cur.execute(
-                    "SELECT 1 FROM agent_messages WHERE from_agent=%s AND to_agent='orch-console' "
-                    "AND subject LIKE %s AND created_at > now() - make_interval(mins => %s) LIMIT 1",
-                    (bnd.SRE_AGENT_ID, f"WARN worker bloat: {agent} %", WARN_COOLDOWN_MIN))
-                if cur.fetchone():
-                    continue   # already warned this lane within cooldown — no re-page
                 subject = f"WARN worker bloat: {agent} ~{k:.0f}k idle — recycle before 100%"
-                body = (
-                    f"TL;DR: worker lane {agent} (session {session}) is at ~{k:.0f}k pane-truth "
-                    f"(>= {PANE_FIRE_K}k fire bar, ~85% of a 1M window) and CLEAN IDLE. Recycle it "
-                    f"BEFORE it hits 100% so the operator does not catch it. Auto-recycle STAGE-1 WARN "
-                    f"(NON-destructive; Stage-2 auto-fire NOT armed yet). Checkpoint-first recycle via "
-                    f"scripts/sre_lane_recycle.py, or ping cc-fleet-health to do it. Deduped {WARN_COOLDOWN_MIN}m/lane.")
-                if STAGE1_WARN_DRY:
-                    print(f"[auto-recycle STAGE-1 WARN DRY] would page console :: {subject}")
-                else:
+                for to_agent in WARN_RECIPIENTS:
                     cur.execute(
-                        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-                        "VALUES (%s,'orch-console','update',%s,%s,false,'P2')",
-                        (bnd.SRE_AGENT_ID, subject, body))
-                sent += 1
+                        "SELECT 1 FROM agent_messages WHERE from_agent=%s AND to_agent=%s "
+                        "AND subject LIKE %s AND created_at > now() - make_interval(mins => %s) LIMIT 1",
+                        (bnd.SRE_AGENT_ID, to_agent, f"WARN worker bloat: {agent} %", WARN_COOLDOWN_MIN))
+                    if cur.fetchone():
+                        continue   # this recipient already warned for this lane within cooldown
+                    if to_agent == "cc-fleet-health":
+                        body = (
+                            f"ACT (Stage-1.5, op#13308): worker lane {agent} (session {session}) is at "
+                            f"~{k:.0f}k pane-truth (>= {PANE_FIRE_K}k, ~85% of 1M) and CLEAN IDLE. Close the "
+                            f"loop at SRE: (1) SELF-CHECKPOINT the lane first — WRITE a fresh handoff yourself, "
+                            f"NEVER trust an on-disk handoff's freshness (the 4-day-stale bug); (2) but FIRST "
+                            f"check op#13323 — if it's idle-with-a-PENDING-PLAN (live monitor / pending bus item), "
+                            f"checkpoint-first or leave-until-unblocked, NEVER blind-recycle; (3) checkpoint-first "
+                            f"recycle via scripts/sre_lane_recycle.py; (4) CC orch-console. Deduped {WARN_COOLDOWN_MIN}m/lane.")
+                    else:
+                        body = (
+                            f"FYI (non-blocking): worker lane {agent} (session {session}) ~{k:.0f}k idle >= fire "
+                            f"bar — cc-fleet-health (SRE) is paged to self-checkpoint + checkpoint-first recycle it "
+                            f"before 100%. Non-destructive Stage-1 WARN; loop closes at SRE, not you/the operator.")
+                    if STAGE1_WARN_DRY:
+                        print(f"[auto-recycle STAGE-1 WARN DRY] would page {to_agent} :: {subject}")
+                    else:
+                        cur.execute(
+                            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
+                            "VALUES (%s,%s,'update',%s,%s,false,'P2')",
+                            (bnd.SRE_AGENT_ID, to_agent, subject, body))
+                    sent += 1
             if not STAGE1_WARN_DRY:
                 c.commit()
         if sent:
