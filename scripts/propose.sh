@@ -29,7 +29,24 @@ set -euo pipefail
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 PROBLEM=""; PROPOSAL=""; EVIDENCE=""; CLASS="unclassified"; COST="agent-caught"
-AGENT="${ORCH_AGENT_ID:-${AGENT_ID:-unknown}}"
+
+# IDENTITY — fail-closed, and the ordering here is load-bearing (fixed 2026-08-15, within an
+# hour of shipping, after cc-fleet-health filed two proposals that landed stamped as
+# 'orch-console'). WHY: .env contains `ORCH_AGENT_ID=orch-console`, and every lane launcher
+# does `set -a; . .env`, so EVERY body inherits the console's id in its environment. Each
+# launcher sets its OWN identity in `AGENT_ID` precisely because that name cannot be
+# clobbered by sourcing .env (see boot_fleet_health.sh:35/42). Preferring ORCH_AGENT_ID —
+# which is what this script did first — therefore attributes the whole fleet's proposals to
+# the console. Attribution is not cosmetic here: a ledger about who noticed what is worthless
+# if it names the wrong noticer.
+AGENT="${AGENT_ID:-${ORCH_AGENT_ID:-}}"
+# Second guard, for a lane whose launcher sets neither: an inherited 'orch-console' is only
+# believable from the console's own tmux session. Anywhere else it is the .env leak above, so
+# refuse and make the caller say who it is rather than silently mis-file.
+if [ -z "${AGENT_ID:-}" ] && [ "${AGENT:-}" = "orch-console" ] \
+   && [ "${TMUX_PANE:-}" != "" ] && [ "$(tmux display-message -p '#S' 2>/dev/null || echo '')" != "nazim" ]; then
+  AGENT=""
+fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,6 +61,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+[ -n "$AGENT" ] || {
+  echo "cannot determine which agent you are — pass --agent <your exact agent_id>." >&2
+  echo "  (AGENT_ID is unset, and any inherited ORCH_AGENT_ID comes from the shared .env," >&2
+  echo "   so trusting it would file this proposal under someone else's name.)" >&2
+  exit 2
+}
 [ -n "$PROBLEM" ]  || { echo "--problem is required" >&2; exit 2; }
 [ -n "$PROPOSAL" ] || { echo "--proposal is required — a finding with no suggested change is a bug report, not a proposal" >&2; exit 2; }
 case "$COST" in
