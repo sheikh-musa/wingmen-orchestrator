@@ -98,23 +98,42 @@ what shipped, what the two ratios did, and any fork that is genuinely his call. 
 see the loop's *output*, never its queue. Handing him a proposal queue would just be a new
 thing for him to catch.
 
-### 3.4 A standing reliability slice
+### 3.4 A protected slice of *existing* capacity — AGREED (operator op#13355)
 
-The strategic half, and the one that needs his decision rather than my build.
+The strategic half. Recorded here in its corrected form, because the correction is the
+useful part.
 
-Every item on today's list was known-but-deferred. Auto-recycle detected bloated lanes for
-*months* without being armed. The reason is not disagreement about value — it is that
-reliability work loses to the next feature every single time it is scheduled against one.
-The loop in §3.1–3.3 will produce good proposals and they will queue behind revenue work
-forever unless capacity is reserved rather than requested.
+**What I first proposed:** a new lane-equivalent of fleet capacity, standing, permanently
+on reliability.
 
-**Proposal: a fixed slice of fleet capacity — one lane-equivalent, continuously — belongs
-to reliability, and its work is drawn from the top of the proposal queue.** Not a sprint,
-not a cleanup week; a standing allocation, so the boring layer stops being the thing we
-get to next.
+**What the operator asked (op#13353):** *"don't we already have that? we have sre and
+quality as dedicated lanes"* — and he was right, so the proposal shrank.
 
-This is the operator's call with cai, because it is a capacity trade against revenue work.
-It is the one item here I am proposing rather than building.
+**The real constraint is not headcount, it is which queue the capacity draws from.** Over a
+sampled 14-hour window, cc-fleet-health produced 27 outputs. Twenty-six were reactive:
+pool-limit alerts, a triggered pool-move, two recycles routed by me, arm-gate data I asked
+for, wedge alerts, token switches. Exactly one was self-initiated — a working-tree hygiene
+flag — and that one was still unactioned, because the next incident arrived. cc-quality is
+the same shape from the other side: it reviews what is put in front of it.
+
+So neither lane is idle and neither is underpowered. Both are fully spent on work that has
+a deadline, and systemic weaknesses do not have one. That is why auto-recycle sat
+detecting-but-unarmed for months while a fully staffed SRE lane was busy every single day.
+
+**Agreed (op#13355): a protected fraction of the SRE capacity that already exists is spent
+on the proposal queue rather than the incident queue.** No new lane. The rule that makes it
+real rather than aspirational:
+
+- When no P1 incident is live, the SRE takes the top of the proposal queue rather than
+  picking up new reactive work.
+- It is allowed to say "not right now" to non-P1 reactive work in order to hold the slice.
+  Without that permission the slice is just a preference, and incidents win every tiebreak.
+- Measured, not promised: proposals *advanced* per week appears in the §3.3 digest
+  alongside the two ratios, so a slice that quietly stopped happening is visible.
+
+The failure mode to watch is the opposite one: a slice defended so rigidly that a real
+incident waits. Hence P1 always pre-empts, and the slice is a floor on systemic work, not a
+ceiling on incident response.
 
 ## 4. Why this would have caught today's failures
 
