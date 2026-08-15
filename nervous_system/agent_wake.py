@@ -229,22 +229,58 @@ def _tmux_has_session(session: str) -> bool:
         return False
 
 
+def rank_candidates(rows, agent_id: str) -> list[str]:
+    """Order candidate sessions for `agent_id`: its OWN row first, then the family.
+
+    Pure, so the ordering that decides WHICH BODY GETS WOKEN is testable without a DB.
+
+    THE BUG THIS FIXES (cc-irsyad-3 reported it from the inside, bus #22646, after being
+    woken 5 consecutive times by traffic addressed to its siblings). The old query threw the
+    exact agent_id away and selected `WHERE base_agent_id=%s`, so a wake for cc-irsyad-2
+    resolved to whichever of the SIX cc-irsyad instances happened to be live first. The
+    per-instance rows exist and are correct — cc-irsyad-3 -> irsyad-prog2, cc-irsyad-4 ->
+    irsyad-prog1 — the resolver simply never looked at them.
+
+    It is not merely a misroute, it is a TOKEN LEAK, and it is the one that undoes recycling:
+    a lane cleared to free 635k gets re-woken by unrelated sibling traffic and re-inflates on
+    messages it will read, find nothing in, and discard. Stood-down lanes are hit hardest
+    because they have nothing else to spend context on. prog2 measured five in a few minutes.
+
+    Family fallback is KEPT and deliberately so: an instance with no row of its own, or whose
+    own pane is dead, must still reach a live sibling — that is the op#11297 coverage
+    property, and narrowing to exact-only would trade this bug for missed wakes. Preference,
+    not restriction.
+    """
+    exact, family = [], []
+    for row in rows or []:
+        rid, sess = (row[0], row[1]) if len(row) > 1 else (None, row[0])
+        if not sess:
+            continue
+        (exact if rid == agent_id else family).append(sess)
+    out, seen = [], set()
+    for s in exact + family:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
 def _candidate_sessions(agent_id: str) -> list[str]:
-    """Registered tmux sessions for the agent's base family, freshest first, with a
-    mild preference for non-offline rows. NOTE (op#11297 #16880): does NOT filter on
-    status — an on-demand body that self-marks offline WHILE its pane is alive still
-    yields its session; liveness is decided by the pane, not the status field."""
+    """Registered tmux sessions for the agent, ITS OWN FIRST then its base family, freshest
+    first, with a mild preference for non-offline rows. NOTE (op#11297 #16880): does NOT
+    filter on status — an on-demand body that self-marks offline WHILE its pane is alive
+    still yields its session; liveness is decided by the pane, not the status field."""
     base = _base_family(agent_id)
     if not _DSN:
         return []
     try:
         with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT tmux_session FROM agent_status "
-                "WHERE base_agent_id=%s AND tmux_session IS NOT NULL "
+                "SELECT agent_id, tmux_session FROM agent_status "
+                "WHERE (agent_id=%s OR base_agent_id=%s) AND tmux_session IS NOT NULL "
                 "ORDER BY (status<>'offline') DESC, last_heartbeat DESC NULLS LAST LIMIT 8",
-                (base,))
-            return [r[0] for r in cur.fetchall() if r[0]]
+                (agent_id, base))
+            return rank_candidates(cur.fetchall(), agent_id)
     except Exception:
         return []
 
