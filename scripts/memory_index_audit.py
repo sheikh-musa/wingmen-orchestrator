@@ -38,11 +38,18 @@ import sys
 PROJECTS = pathlib.Path.home() / ".claude" / "projects"
 INDEX = "MEMORY.md"
 
-# The index is read whole at boot under a hard limit. Warn well below it: an index that is
-# merely UNDER the limit today is one memory away from truncating tomorrow, and the whole
-# point is to not find out by losing something.
+# The index is read whole at boot under a hard limit; past it the tail truncates silently.
+#
+# The warn is HEADROOM-based, not an absolute byte count — corrected 2026-08-16 after the
+# first version used a flat 17.1KB, which was really just "whatever the orchestrator index
+# happened to weigh". cc-ihsanos compacted to 17852B with 6.5KB of headroom, was still
+# flagged, and went hunting for a phantom "something is re-adding bytes" to chase the last
+# 750B. A threshold that makes a healthy agent do pointless work is a bad threshold: it
+# should signal real risk, not set a target. 20% headroom is roughly a dozen more memories
+# of room — enough warning to act, late enough to mean something.
 READ_LIMIT_BYTES = 24_400
-WARN_BYTES = 17_100
+WARN_HEADROOM_FRACTION = 0.20
+WARN_BYTES = int(READ_LIMIT_BYTES * (1 - WARN_HEADROOM_FRACTION))  # 19_520
 
 LINK_RE = re.compile(r"\(([A-Za-z0-9_.-]+\.md)\)")
 # Memories cross-reference each other with [[wiki-links]]. Those edges are the substrate's
@@ -237,7 +244,7 @@ def main() -> int:
         if r["size"] >= READ_LIMIT_BYTES:
             flags.append(f"OVER-READ-LIMIT({r['size']}B)")
         elif r["size"] >= WARN_BYTES:
-            flags.append(f"NEAR-LIMIT({r['size']}B)")
+            flags.append(f"NEAR-LIMIT({r['size']}B, {READ_LIMIT_BYTES - r['size']}B headroom)")
 
         status = " ".join(flags) if flags else "ok"
         extra = f" (+{r.get('added')} added)" if r.get("added") else ""
