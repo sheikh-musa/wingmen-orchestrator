@@ -153,6 +153,24 @@ trap '_handle_exit' EXIT
 
 # ── Launch. CLAUDE.md in $FH_DIR auto-loads as project instructions; the SRE
 #    runs its own boot sequence (charter §Boot) — inbox, charter, health pass. ─
+# ── TOOLING REACHABILITY (op#13650, 2026-08-16). This body runs with cwd=$FH_DIR, which
+#    had no `scripts` entry — so the invocation every doc, handoff and bus row hands it,
+#    `scripts/self_recycle.sh ...`, resolved to nothing from where it stands. Found via
+#    cai: asked why it had never self-recycled, its answer was that the recycler is not
+#    in its own scripts dir, and it refused to improvise a process-reset it could not
+#    locate-and-verify at 452k. That was the right call and the TOOL was at fault.
+#    Verified as a CLASS, not an instance: none of the three singleton cwds
+#    (wingmen-cai, quality, fleet-health) could reach it. Same symlink pattern already
+#    used for boot_cai.sh itself. Idempotent; never clobbers a real directory, so a body
+#    that grows its own scripts/ is left alone. ──
+if [ ! -e "$FH_DIR/scripts" ]; then
+  ln -s "$ORCH_DIR/scripts" "$FH_DIR/scripts" \
+    && echo "▶ linked $FH_DIR/scripts -> $ORCH_DIR/scripts (self_recycle et al now reachable)" \
+    || echo "⚠ could not link $FH_DIR/scripts — self_recycle.sh will need an ABSOLUTE path" >&2
+elif [ ! -e "$FH_DIR/scripts/self_recycle.sh" ]; then
+  echo "⚠ $FH_DIR/scripts exists but has no self_recycle.sh — use an ABSOLUTE path" >&2
+fi
+
 echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $FH_DIR"
 cd "$FH_DIR"
 claude --dangerously-skip-permissions --model "$MODEL"
