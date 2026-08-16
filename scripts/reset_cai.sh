@@ -99,6 +99,16 @@ _restore_notify() {
   echo "[reset_cai] restored $NOTIFY_LABEL"
 }
 trap '_restore_notify' EXIT
+
+# FIRE-WINDOW HOLD (2026-08-16). Bootout-ing this body's bus-notify covers ONE of the
+# keystroke sources on this host; the operator-ingest nudger, the wake subscriber, the
+# wedge/SLA/context watchdogs, backlog_swipe and lane_nudge.sh can all type into the pane
+# this script is midway through clearing, and a pause LIST only ever names the ones
+# someone remembered. The hold is a lock every sender consults, so a sender written later
+# stands off by default. Self-expiring, and released on EXIT — a crashed reset must never
+# leave a body unreachable. See scripts/lib/fire_window.sh.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/fire_window.sh"
+fire_window_hold "$SESS" 180 "reset_cai fire window"
 if launchctl bootout "gui/$(id -u)/$NOTIFY_LABEL" 2>/dev/null; then
   _notify_paused=1; echo "[reset_cai] paused $NOTIFY_LABEL for the fire window"
 else

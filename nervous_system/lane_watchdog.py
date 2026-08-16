@@ -31,6 +31,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 ORCH = Path(os.path.expanduser("~/wingmen/orchestrator"))
+sys.path.insert(0, str(ORCH))
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 STATE_FILE = ORCH / "logs" / "lane_watchdog_state.json"
 LOG_FILE = ORCH / "logs" / "lane_watchdog.log"
 
@@ -157,6 +159,8 @@ def classify(cap: str) -> str:
 def verified_enter(sess: str) -> bool:
     """Bare Enter (for the folder-trust prompt, where the 'Yes' option is
     pre-highlighted). Confirm the pane left the prompt; retry once."""
+    if fire_window.is_held(sess.lstrip("=").split(":")[0]):
+        return False  # a recycle owns this pane; submitting into it would jam the /clear
     for _ in range(2):
         tmux("send-keys", "-t", sess, "Enter")
         time.sleep(4)
@@ -210,6 +214,8 @@ def nudge_orch_escalations(n: int) -> bool:
     try:
         if subprocess.run(["tmux", "has-session", "-t", "=orch"],
                           capture_output=True, timeout=5).returncode != 0:
+            return False
+        if fire_window.is_held("orch"):
             return False
         tmux("send-keys", "-t", "=orch:0.0", "C-u")     # clear any stuck draft
         time.sleep(0.3)

@@ -88,6 +88,7 @@ load_dotenv(_ORCH_DIR / ".env")
 # single-owner lease (default holder = cc-fleet-health; hub reclaims on expiry).
 # Self-contained import (no PYTHONPATH under launchd — see the note above).
 from scripts.lib import fleet_health_lease, fleet_health_boundaries  # noqa: E402
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 
 
 def _logs_dir() -> Path:
@@ -667,14 +668,29 @@ def _sanitize_nudge(s: str) -> str:
     return " ".join(out.split())
 
 
+def _in_fire_window(reg: dict) -> bool:
+    """True when a recycle currently owns this body's pane.
+
+    A keystroke landing between a reset's composer wipe and its /clear Enter jams the
+    clear and the body comes back half-initialised. This watchdog's nudges are signal
+    only — the checkpoint ask is durable — so standing off for the few seconds of a
+    fire window costs nothing and the next poll re-evaluates."""
+    sess = str(reg.get("tmux") or "").lstrip("=").split(":")[0]
+    return bool(sess) and fire_window.is_held(sess)
+
+
 def _send_literal(reg: dict, text: str) -> bool:
     """tmux send-keys -l <text> (literal — no key-name lookup)."""
+    if _in_fire_window(reg):
+        return False
     r = _tmux_run(reg, ["send-keys", "-t", reg["tmux"], "-l", text])
     return bool(r and r.returncode == 0)
 
 
 def _send_key(reg: dict, key: str) -> bool:
     """tmux send-keys <key> (named key: Enter, C-u, ...)."""
+    if _in_fire_window(reg):
+        return False
     r = _tmux_run(reg, ["send-keys", "-t", reg["tmux"], key])
     return bool(r and r.returncode == 0)
 

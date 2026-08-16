@@ -8,7 +8,7 @@ write — the same vetted-script pattern /api/reset and backlog_swipe.py use.
 
 What it does, in ONE transaction:
   (1) inserts ONE real bus row into `agent_messages` addressed to the target body
-      (from_agent='orch-console', message_type='directive', requires_response=true,
+      (from_agent='orch-console', message_type='decision', requires_response=true,
       is_test=false) with a fresh `thread_id` (gen_random_uuid()). Because it's a
       real, non-test inbox row, the target body sees it in its normal inbox
       (`to_agent=<id> AND read_at IS NULL`) and drains it exactly like any other
@@ -81,7 +81,13 @@ def assign(agent: str, ask: str, priority: str, source_msg_id: "int | None" = No
         cur.execute(
             "INSERT INTO agent_messages (from_agent, to_agent, thread_id, message_type, "
             "subject, body, priority, requires_response, is_test) "
-            "VALUES ('orch-console', %s, gen_random_uuid(), 'directive', %s, %s, %s, true, false) "
+            # message_type MUST be one of agent_messages_message_type_check's eight
+            # values. It shipped as 'directive' — which is NOT one of them, so EVERY
+            # console assign has raised CheckViolation since fc-v52 and the operator's
+            # assign button has never once written a row (found 2026-08-16 by using it).
+            # 'decision' is the closest allowed type for an instruction that expects a
+            # reply; do NOT reintroduce a value the constraint does not allow.
+            "VALUES ('orch-console', %s, gen_random_uuid(), 'decision', %s, %s, %s, true, false) "
             "RETURNING id, thread_id",
             (agent, subject, body, priority),
         )
@@ -110,6 +116,13 @@ def main() -> None:
     ask = (args.ask or "").strip()
     if not ask:
         sys.exit("empty ask")
+    # Truncation is capped, but say so — an assignment silently losing its last
+    # paragraph reads to the lane as a complete instruction that was never given.
+    if len(ask) > 1000:
+        sys.stderr.write(
+            f"warning: ask is {len(ask)} chars, truncating to 1000 — "
+            f"dropped tail: {ask[1000:][:200]!r}\n"
+        )
     new_id = assign(args.agent.strip(), ask[:1000], args.priority, args.source_msg_id)
     print(f"assigned agent_messages #{new_id} to {args.agent}")
 

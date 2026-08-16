@@ -21,6 +21,8 @@ Requires: DATABASE_URL in the orch .env; tmux session `nazim` live on this host.
 import os, sys, time, subprocess
 
 ORCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ORCH_DIR)
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle's fire window)
 POLL_SEC = 20
 SESSION = os.environ.get("ORCH_TMUX_SESSION", "nazim")
 TMUX = None
@@ -62,6 +64,12 @@ def _nudge(n_new: int, n_need: int) -> None:
     if subprocess.run([TMUX, "has-session", "-t", f"={SESSION}"],
                       capture_output=True).returncode != 0:
         _log("no live nazim session — skip (bus is durable)")
+        return
+    # A recycle owns this pane for a few seconds; a keystroke landing inside that
+    # window jams the /clear and the body returns half-initialised. Skipping costs
+    # nothing — the bus row is durable and the fresh body reconciles it at boot.
+    if fire_window.is_held(SESSION):
+        _log(f"fire window held on '{SESSION}' ({fire_window.held_reason(SESSION)}) — skip")
         return
     tail = f" ({n_need} need a reply)" if n_need else ""
     line = f"\U0001F4E5 {n_new} new fleet bus msg(s) for you{tail} — reconcile agent_messages (to_agent='orch-console')"

@@ -99,6 +99,9 @@ import re
 import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -499,6 +502,11 @@ def stage1_submit(session: str, tries: int = 3) -> tuple[bool, str]:
     as success. Returns (recovered, detail)."""
     if not _composer_is_real(session):
         return False, "composer empty / dim-ghost — nothing to submit (not a real wedge)"
+    # A recycle owns this pane while it wipes the composer and types /clear. Submitting
+    # into that window jams the clear and the body returns half-initialised, so stand off
+    # — the hold is seconds long and self-expiring, and the wedge will still be here after.
+    if fire_window.is_held(session):
+        return False, "recycle fire window held — standing off (will re-check next poll)"
     for t in range(1, tries + 1):
         _tmux("send-keys", "-t", session, "C-e")  # wake/refocus, content-preserving
         time.sleep(0.4)

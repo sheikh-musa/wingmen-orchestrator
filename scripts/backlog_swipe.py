@@ -26,6 +26,9 @@ import sys
 import psycopg
 from dotenv import load_dotenv
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
+
 
 def _nudge_nazim(action: str) -> None:
     """Push the swipe to Nazim (the console body) so his curation reaches him
@@ -41,6 +44,9 @@ def _nudge_nazim(action: str) -> None:
         return
     tgt = f"={session}:0.0"
     line = f"\U0001F5C2 operator swiped ({action}) — reconcile operator_backlog for the new order"
+    # Never type into a pane a recycle is mid-clear on (see scripts/lib/fire_window.py).
+    if fire_window.is_held(session):
+        return
     try:
         if subprocess.run([tmux, "has-session", "-t", tgt],
                           capture_output=True, timeout=5).returncode != 0:

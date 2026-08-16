@@ -99,6 +99,7 @@ load_dotenv(_ORCH_DIR / ".env")
 # fleet_health_lease single-owner lease (default holder cc-fleet-health; hub
 # reclaims on expiry) so the SRE and a reclaiming hub never both act on an agent.
 from scripts.lib import fleet_health_lease  # noqa: E402
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 # CAI-786 wake predicate — the ONE source of "would this row wake the recipient",
 # reused here so the hub's page gate applies the exact CAI-451 narrow floor.
 from nervous_system import agent_wake  # noqa: E402
@@ -624,6 +625,8 @@ def nudge_hub(n: int) -> "tuple[bool, str]":
         cap = tm("capture-pane", "-t", f"={sess}:0.0", "-p").stdout.lower()
         if "esc to interrupt" in cap:
             return False, "hub busy (esc to interrupt) — not disturbing"
+        if fire_window.is_held(sess):
+            return False, "recycle fire window held — not typing mid-clear"
         tm("send-keys", "-t", f"={sess}:0.0", "C-u")
         time.sleep(0.3)
         tm("send-keys", "-t", f"={sess}:0.0", "-l", line)

@@ -147,6 +147,16 @@ WIPE=$(( CC_BYTES + 80 ))
 [ "$WIPE" -lt 200 ] && WIPE=200
 [ "$WIPE" -gt 20000 ] && WIPE=20000
 echo "[reset_orch] clearing composer (${WIPE} BSpace for ${CC_BYTES}B staged) + sending /clear ..."
+
+# FIRE-WINDOW HOLD (2026-08-16). Bootout-ing this body's bus-notify covers ONE of the
+# keystroke sources on this host; the operator-ingest nudger, the wake subscriber, the
+# wedge/SLA/context watchdogs, backlog_swipe and lane_nudge.sh can all type into the pane
+# this script is midway through clearing, and a pause LIST only ever names the ones
+# someone remembered. The hold is a lock every sender consults, so a sender written later
+# stands off by default. Self-expiring, and released on EXIT — a crashed reset must never
+# leave a body unreachable. See scripts/lib/fire_window.sh.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/fire_window.sh"
+fire_window_hold "$SESS" 180 "reset_orch fire window"
 "$TM" send-keys -t "$PANE" -N "$WIPE" BSpace
 sleep 1
 

@@ -52,6 +52,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from nervous_system import triage  # PASSIVE CoS triage annotation (read-only; no routing)
+from scripts.lib import fire_window  # quiesce keystrokes during a recycle's fire window
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
@@ -143,6 +144,19 @@ def _download_media(token: str, file_id: str, name: str | None = None) -> str:
     return _tg_download_file(token, fp, os.path.join(_MEDIA_DIR, safe))
 
 
+def _log_media_fail(ch: "Channel", kind: str, upd_id: int, e: Exception) -> None:
+    """LOUD failure line for a media download that fell through all retries.
+
+    The durable row still records the failure inline ('download failed: …',
+    Option B — the log is the truth), but that lives in operator_messages and is
+    invisible without a DB query. Emitting a WARNING to the ingest log too makes a
+    getFile 404 / file-CDN reset visible in logs/*-ingest.log at a glance
+    (reference_bridge_media_download_retry: a swallowed media failure is exactly
+    how the operator's DPA + ADCDA photos were lost twice). NEVER silent."""
+    _log_line(f"{ch.key}: MEDIA download FAILED ({kind}) on update {upd_id} "
+              f"— {type(e).__name__}: {e} — row marked, agent CANNOT Read this attachment")
+
+
 SHAPE_KEYS_MAX = 400       # cap on the key-list in the last-resort marker
 
 
@@ -181,6 +195,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
             path = _download_media(ch.token, msg["photo"][-1]["file_id"])
             content = f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
+            _log_media_fail(ch, "photo", upd_id, e)
             content = f"sent a photo (download failed: {e})" + (f" | {text}" if text else "")
     # animation (GIF/soundless mp4) BEFORE document: Telegram sets `document`
     # too on animation messages for backward compatibility, so the document
@@ -192,6 +207,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
             path = _download_media(ch.token, anim["file_id"], name)
             content = f"sent an ANIMATION/GIF → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
+            _log_media_fail(ch, "animation", upd_id, e)
             content = f"sent an animation (download failed: {e})" + (f" | {text}" if text else "")
     elif msg.get("document"):
         doc = msg["document"]
@@ -199,6 +215,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
             path = _download_media(ch.token, doc["file_id"], doc.get("file_name"))
             content = f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
+            _log_media_fail(ch, "document", upd_id, e)
             content = f"sent a file (download failed: {e})" + (f" | {text}" if text else "")
     elif msg.get("voice") or msg.get("audio"):
         media = msg.get("voice") or msg.get("audio")
@@ -209,6 +226,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
             content = (f"sent a VOICE note ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
         except Exception as e:
+            _log_media_fail(ch, "voice/audio", upd_id, e)
             content = f"sent a voice note (download failed: {e})" + (f" | {text}" if text else "")
     # A video is an ARTIFACT like a photo/doc — download it, or an agent asked
     # to look at a screen recording has nothing to open (same reasoning that
@@ -222,6 +240,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
             content = (f"sent a VIDEO ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
         except Exception as e:
+            _log_media_fail(ch, "video", upd_id, e)
             content = f"sent a video (download failed: {e})" + (f" | {text}" if text else "")
     elif msg.get("video_note"):
         note = msg["video_note"]
@@ -232,6 +251,7 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
             content = (f"sent a VIDEO NOTE ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
         except Exception as e:
+            _log_media_fail(ch, "video_note", upd_id, e)
             content = f"sent a video note (download failed: {e})" + (f" | {text}" if text else "")
     # Stickers are deliberately NOT downloaded: a .webp/.tgs of a cartoon is not
     # an artifact any agent will Read, and writing one per sticker just litters
@@ -365,6 +385,12 @@ def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
     tmux = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
     line = (f"\U0001F4E5 {n_unread} unread on '{channel_key}' — "
             f"reconcile operator_log.unprocessed()")
+    # A recycle owns this pane for a few seconds. A keystroke landing between the
+    # composer wipe and the /clear Enter jams the clear and the body comes back
+    # half-initialised. Skipping is free: this nudge is signal only, and the
+    # operator's message is already durable in operator_messages (Option B).
+    if fire_window.is_held(target):
+        return False
     try:
         subprocess.run([tmux, "has-session", "-t", f"={target}"],
                        check=True, capture_output=True, timeout=5)

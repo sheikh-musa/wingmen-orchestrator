@@ -36,6 +36,9 @@ import shutil
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 import urllib.request
 
 from nervous_system import operator_log
@@ -154,6 +157,10 @@ def inject(text: str) -> bool:
     reconciliation, NOT by this keystroke landing (Option B discipline)."""
     pane = _orch_pane()
     if not pane:
+        return False
+    # Never type into a pane a recycle owns (scripts/lib/fire_window.py). Durability is
+    # the operator_messages log, not this keystroke, so a skipped inject loses nothing.
+    if fire_window.is_held("orch"):
         return False
     line = INJECT_PREFIX + " ".join(text.splitlines())
     # robust clear before typing

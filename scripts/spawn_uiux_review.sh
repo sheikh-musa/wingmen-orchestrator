@@ -66,6 +66,12 @@ tmux new-session -d -s "$SESSION" -c "$SHOT_DIR" \
 sleep 20
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   MSG="[uiux-start] Read your brief at ${BRIEF_FILE} and review the screenshots in ${SHOT_DIR}. Read-only; post your SHIP-READY / CHANGES-REQUIRED verdict to cc-orchestrator on the bus."
+  # A recycle owning this session name would be mid-clear; typing into it then jams the
+  # clear (scripts/lib/fire_window.py). Refuse loudly — the brief is on disk, so the
+  # reviewer can be re-briefed by hand rather than silently starting half-initialised.
+  if "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/lib/fire_window.py" check "$SESSION" 2>/dev/null; then
+    echo "[uiux] ERROR: '$SESSION' is inside a recycle fire window — brief NOT sent. Re-run once it clears." >&2; exit 1
+  fi
   tmux send-keys -t "$SESSION" -l "$MSG"; sleep 1; tmux send-keys -t "$SESSION" Enter
   echo "[uiux] cc-uiux reviewing in tmux '$SESSION' ($SHOT_COUNT shots). watch: tmux attach -t $SESSION"
 else

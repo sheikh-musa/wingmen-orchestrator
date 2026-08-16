@@ -55,6 +55,7 @@ sys.path.insert(0, str(ORCH))
 # fleet_health_lease single-owner lease (default holder cc-fleet-health; hub
 # reclaims on expiry) so the SRE and a reclaiming hub never double-nudge/page.
 from scripts.lib import fleet_health_lease  # noqa: E402
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 
 # ---------------------------------------------------------------------------
 # Config — all overridable via environment (launchd EnvironmentVariables).
@@ -317,6 +318,12 @@ def _tmux_countonly(session: str, line: str, host: str | None = None) -> bool:
         else:
             base = ["tmux", *args]
         return subprocess.run(base, capture_output=True, text=True, timeout=25)
+    # A recycle owns this pane for a few seconds; typing inside that window jams the
+    # /clear and the body comes back half-initialised. Skipping is free — the bus row
+    # is durable and the fresh body reconciles it at boot. Local sessions only: the
+    # lock lives on the host that runs the reset.
+    if host is None and fire_window.is_held(session):
+        return False
     try:
         if tm("has-session", "-t", f"={session}").returncode != 0:
             return False  # no such session on that host

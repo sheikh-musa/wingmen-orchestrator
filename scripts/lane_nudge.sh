@@ -32,6 +32,18 @@ MAX_TRIES="${LANE_NUDGE_TRIES:-3}"
 
 tmux has-session -t "$SESSION" 2>/dev/null || { echo "lane_nudge: no tmux session '$SESSION'" >&2; exit 2; }
 
+# FIRE-WINDOW GUARD. A recycle owns this pane for a few seconds while it wipes the
+# composer, types /clear, submits it and types the boot instruction. A nudge landing
+# inside that window jams the clear and the body returns half-initialised, holding
+# neither its old context nor a clean one. Refuse rather than type — the caller's
+# payload is a durable bus/operator row that the fresh body reconciles at boot, so a
+# skipped nudge costs nothing. The hold is self-expiring, so a crashed resetter cannot
+# leave a lane permanently unreachable. See scripts/lib/fire_window.py.
+if "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/lib/fire_window.py" check "$SESSION" 2>/dev/null; then
+  echo "lane_nudge: REFUSED — '$SESSION' is inside a recycle fire window; not typing into a pane mid-clear." >&2
+  exit 4
+fi
+
 # GHOST-AWARE COMPOSER GUARD (2026-07-29). The retry loop below CLEARS the composer
 # (C-u ×2) before retyping — which would DESTROY any genuinely-staged next-step the
 # lane typed for itself (a clobber-real-input violation). An IDLE Claude-Code lane

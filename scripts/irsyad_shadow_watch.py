@@ -24,6 +24,9 @@ import subprocess
 import sys
 import time
 import traceback
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -171,6 +174,11 @@ def _busy(session: str) -> bool:
 def _probe_confirms_ghost(session: str) -> bool:
     """Definitive, self-reversing: type a sentinel; a GHOST is replaced by just the
     sentinel (empty underneath), REAL text has the sentinel APPENDED. Always BSpace back."""
+    # A recycle owns this pane while it wipes and clears; a sentinel typed into that
+    # window jams the /clear. Report "not confirmed" rather than probe — the caller
+    # treats that as inconclusive and re-checks on the next pass.
+    if fire_window.is_held(session):
+        return False
     _, _, before = _cc(session)
     subprocess.run([TMUX_BIN, "send-keys", "-t", session, "-l", GHOST_SENTINEL], timeout=15)
     time.sleep(1.0)
