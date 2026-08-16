@@ -35,7 +35,7 @@ set -uo pipefail
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ORCH_DIR" || { echo "self_recycle: orch dir missing" >&2; exit 9; }
 
-RESET=""; HANDOFF=""; DELAY=60; MAX_AGE=900; DRY=0; SESSION=""; MAX_WAIT=900
+RESET=""; HANDOFF=""; DELAY=60; MAX_AGE=900; DRY=0; SESSION=""; MAX_WAIT=900; BOOTFILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --reset) RESET="$2"; shift 2;;
@@ -43,6 +43,7 @@ while [ $# -gt 0 ]; do
     --delay) DELAY="$2"; shift 2;;
     --max-handoff-age) MAX_AGE="$2"; shift 2;;
     --session) SESSION="$2"; shift 2;;
+    --boot-file) BOOTFILE="$2"; shift 2;;
     --max-wait) MAX_WAIT="$2"; shift 2;;
     --dry-run) DRY=1; shift;;
     *) echo "self_recycle: unknown arg '$1'" >&2; exit 2;;
@@ -52,6 +53,18 @@ done
 # WHICH PANE THIS ACTS ON. Derived from the reset script, because each reset hardcodes its own
 # target — but NEVER guessed: reset_lane.sh takes its session as an argument, so there is nothing
 # to derive and a guess would aim a /clear at whatever happened to match. Refuse instead.
+#
+# PARAMETERIZED resets (reset_lane.sh) additionally need their BOOT INSTRUCTION passed through.
+# This is why worker lanes could not self-recycle at all until 2026-08-16: the fire path invoked
+# the reset BARE (`bash "$RST"`), which is correct for the four singleton bodies that each
+# hardcode their own pane, and silently useless for every one of the ~17 worker lanes, whose only
+# reset is the generic parameterized one. Found by cc-storefront TRYING to use it. The dry-run
+# tests passed the whole time because dry-run returns before the fire path — a gate test is not
+# a shipped-path test.
+PARAMETERIZED=0
+case "$(basename "$RESET")" in
+  reset_lane.sh) PARAMETERIZED=1;;
+esac
 if [ -z "$SESSION" ]; then
   case "$(basename "$RESET")" in
     reset_nazim.sh)        SESSION="${ORCH_TMUX_SESSION:-nazim}";;
@@ -64,6 +77,21 @@ fi
 [ -n "$RESET" ]   || { echo "self_recycle: --reset required" >&2; exit 2; }
 [ -n "$HANDOFF" ] || { echo "self_recycle: --handoff required" >&2; exit 2; }
 [ -x "$RESET" ] || [ -f "$RESET" ] || { echo "self_recycle: reset script not found: $RESET" >&2; exit 2; }
+
+# A PARAMETERIZED RESET WITHOUT ITS BOOT INSTRUCTION IS WORSE THAN NO RECYCLE. reset_lane.sh
+# would refuse at fire time for a missing arg — but that is 60+ seconds later, detached, in a log
+# nobody is reading, and the body would sit bloated believing it had scheduled its own recovery.
+# Fail HERE, where the caller can still fix it. The boot text travels as a FILE, never inline:
+# it is multi-line prose full of quotes and backticks, and the scheduler below is a
+# string-interpolated subshell.
+if [ "$PARAMETERIZED" = 1 ]; then
+  [ -n "$BOOTFILE" ] || { echo "self_recycle: '$(basename "$RESET")' is parameterized — it needs the lane's boot instruction. Pass --boot-file <path>. A lane cleared with no boot instruction comes back not knowing who it is." >&2; exit 2; }
+fi
+if [ -n "$BOOTFILE" ]; then
+  [ -f "$BOOTFILE" ] || { echo "self_recycle: --boot-file not found: $BOOTFILE" >&2; exit 2; }
+  [ -s "$BOOTFILE" ] || { echo "self_recycle: --boot-file is empty: $BOOTFILE" >&2; exit 2; }
+  BOOTFILE="$(cd "$(dirname "$BOOTFILE")" && pwd)/$(basename "$BOOTFILE")"
+fi
 
 # GATE 1 — THE RESTORE POINT MUST BE FRESH. This is the one that matters. Recycling onto a stale
 # handoff does not preserve the work, it launders the loss: the body comes back confident and
@@ -125,6 +153,7 @@ LOG="logs/self_recycle_$(date -u +%Y%m%dT%H%M%SZ).log"
 # quiesced) and released on every exit path, including the timeout.
 nohup bash -c '
   ORCH="'"$ORCH_DIR"'"; SESS="'"$SESSION"'"; RST="'"$RESET"'"; LG="'"$ORCH_DIR/$LOG"'"
+  BOOTF="'"$BOOTFILE"'"
   DELAY='"$DELAY"'; MAX_WAIT='"$MAX_WAIT"'
   PY="$ORCH/.venv/bin/python3"; [ -x "$PY" ] || PY=python3
   FW="$ORCH/scripts/lib/fire_window.py"
@@ -143,7 +172,14 @@ nohup bash -c '
     if ! pane_busy "$SESS"; then
       echo "[self_recycle] $SESS is idle after ${WAITED}s of waiting — firing $RST" >> "$LG"
       free
-      env -u TMUX_PANE bash "$RST" >> "$LG" 2>&1
+      # A parameterized reset (reset_lane.sh) takes <session> "<boot>"; the singleton resets
+      # hardcode their own pane and take nothing. Read the boot text at FIRE time from the file
+      # so it never passes through this subshell'"'"'s string interpolation.
+      if [ -n "$BOOTF" ]; then
+        env -u TMUX_PANE bash "$RST" "$SESS" "$(cat "$BOOTF")" >> "$LG" 2>&1
+      else
+        env -u TMUX_PANE bash "$RST" >> "$LG" 2>&1
+      fi
       exit 0
     fi
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then

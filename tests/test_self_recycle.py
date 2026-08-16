@@ -38,9 +38,63 @@ def handoff(tmp_path):
     return str(p)
 
 
+@pytest.fixture()
+def boot_file(tmp_path):
+    """A worker lane's boot instruction, on disk rather than inline. The boot text is
+    multi-line prose containing quotes and backticks; routing it through a FILE keeps it
+    out of the string-interpolated subshell that schedules the reset."""
+    p = tmp_path / "boot.txt"
+    p.write_text('You are cc-storefront, freshly reset. Read `reports/cc-storefront-handoff-NOW.md`\n'
+                 'IN FULL — the "FINAL STATE" block first — then reconcile your bus inbox.\n')
+    return str(p)
+
+
 def _run(*args, **kw):
     return subprocess.run(["bash", str(_SCRIPT), *args], capture_output=True, text=True,
                           cwd=str(_ROOT), **kw)
+
+
+# --- worker lanes, not just the four singletons ----------------------------- #
+# cc-storefront tried to self-recycle on 2026-08-16 and could not: self_recycle fires the
+# reset with NO arguments (`bash "$RST"`), which is fine for reset_nazim/cai/fleet_health/orch
+# (each hardcodes its own pane) but never works for scripts/reset_lane.sh, whose signature is
+# `reset_lane.sh <session> "<boot>"`. So the tool that exists to stop the operator pushing the
+# button worked for exactly four bodies and no worker lane — found by a lane USING it, which is
+# the same class as the console assign button that was dead for months.
+#
+# The dry-run tests above passed throughout, because dry-run returns before the fire path. A
+# gate test is not a shipped-path test.
+
+def test_a_lane_reset_without_its_boot_instruction_is_refused(handoff):
+    """reset_lane.sh REQUIRES a boot instruction. Scheduling it without one buys a body that
+    gets /clear'd and then comes back with no idea who it is — strictly worse than not
+    recycling. Refuse at schedule time, where the caller can still fix it."""
+    out = _run("--reset", "scripts/reset_lane.sh", "--session", "storefront",
+               "--handoff", handoff, "--dry-run")
+    assert out.returncode != 0, (
+        "a parameterized reset scheduled with no boot instruction must be refused, not queued"
+    )
+    assert "boot" in (out.stdout + out.stderr).lower()
+
+
+def test_boot_file_reaches_the_reset_script_as_an_argument(handoff, boot_file):
+    """The whole gap: the scheduled command must invoke the reset WITH the lane's session and
+    boot text. Asserted against the source of the fire path rather than the dry-run summary,
+    because the dry-run is exactly what failed to catch this."""
+    assert 'bash "$RST" "$SESS"' in _SRC, (
+        "the reset must be invoked WITH the lane's session and boot text; firing it bare is "
+        "exactly what made self_recycle singleton-only"
+    )
+    out = _run("--reset", "scripts/reset_lane.sh", "--session", "storefront",
+               "--boot-file", boot_file, "--handoff", handoff, "--dry-run")
+    assert out.returncode == 0, out.stderr
+
+
+def test_a_missing_boot_file_is_caught_before_anything_is_scheduled(handoff):
+    out = _run("--reset", "scripts/reset_lane.sh", "--session", "storefront",
+               "--boot-file", "/nope/does-not-exist.txt", "--handoff", handoff, "--dry-run")
+    assert out.returncode != 0
+    assert "boot" in (out.stdout + out.stderr).lower()
 
 
 def test_dry_run_reports_the_session_it_would_quiesce_and_wait_on(handoff):
@@ -54,9 +108,9 @@ def test_dry_run_reports_the_session_it_would_quiesce_and_wait_on(handoff):
     )
 
 
-def test_explicit_session_flag_overrides_the_derivation(handoff):
+def test_explicit_session_flag_overrides_the_derivation(handoff, boot_file):
     out = _run("--reset", "scripts/reset_lane.sh", "--session", "irsyad-prog2",
-               "--handoff", handoff, "--dry-run")
+               "--boot-file", boot_file, "--handoff", handoff, "--dry-run")
     assert out.returncode == 0, out.stderr
     assert "irsyad-prog2" in out.stdout + out.stderr
 
