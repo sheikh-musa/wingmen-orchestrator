@@ -368,6 +368,25 @@ _probe_revert_ok() {
   [ "$1" = "$2" ]
 }
 
+# ── MUTATING ghost-probe WRAPPER (bus 22395 + field 22866/22907) — INERT ──────
+# Orchestrates the pure core above against a LIVE pane, obeying Nazim's 4 Stage-2
+# conditions. NOTHING calls this yet (lane_nudge REFUSE-path wiring is the promotion
+# step, gated on Nazim's sign). Sets CC_PROBE ∈ {ghost|real|unsure|busy|revert-fail}
+# — an explicit string, NOT an exit-code predicate (the pane_busy trap above): the
+# caller proceeds to clear ONLY on CC_PROBE=ghost.
+# Single-byte sentinel (cond #3): one BSpace reverts it exactly; a multi-byte glyph
+# could leave residue inside a REAL prompt if the TUI ever deletes by byte.
+GHOST_SENTINEL='~'
+_probe_composer() {   # $1 = tmux bin, $2 = pane
+  local TM="$1" PANE="$2"
+  CC_PROBE=''
+  # Cond #1 + #4: the SHARED pane_is_busy, read FRESH here — never probe a busy pane.
+  if pane_is_busy "$TM" "$PANE"; then
+    CC_PROBE='busy'
+    return 0
+  fi
+}
+
 composer_parse() {
   local out status_line
   out="$(_cc_extract <<<"${1-}")"
