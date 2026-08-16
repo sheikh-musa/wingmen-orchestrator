@@ -89,6 +89,24 @@ def main() -> int:
                     "the label have drifted apart."
                 )
 
+            # (3) cc-quality F5 — every UNEXERCISED row must carry a KIND, and no other row may.
+            #     Before 'DECLARED-SILENT' existed, a measurer that was DECLARED but had never
+            #     written landed in a NULL bucket: still honestly UNEXERCISED, but invisible to
+            #     any GROUP BY used for sequencing — and that is the MOST urgent case, the
+            #     pipeline_clock class (declared, never fired, board reads fine). Asserting the
+            #     equivalence means the NULL bucket cannot silently return under a future edit.
+            cur.execute(
+                "SELECT count(*) FROM invariant_registry_state "
+                "WHERE (exercise_state = 'UNEXERCISED') <> (unexercised_kind IS NOT NULL)"
+            )
+            (kind_gaps,) = cur.fetchone()
+            if kind_gaps:
+                raise SystemExit(
+                    f"post-condition FAILED: {kind_gaps} row(s) where UNEXERCISED and "
+                    "unexercised_kind disagree. Rolling back — an unexercised row with no kind "
+                    "is invisible to sequencing."
+                )
+
             # Informational only — NEVER asserted. The distribution is a transient fact about how
             # much has been wired so far; asserting it is what F2 was.
             cur.execute(
@@ -96,15 +114,17 @@ def main() -> int:
                 "count(*) FILTER (WHERE exercise_state = 'UNEXERCISED'), "
                 "count(*) FILTER (WHERE is_exercised_fresh), "
                 "count(*) FILTER (WHERE unexercised_kind = 'NEVER'), "
-                "count(*) FILTER (WHERE unexercised_kind = 'MANUALLY-ATTESTED') "
+                "count(*) FILTER (WHERE unexercised_kind = 'MANUALLY-ATTESTED'), "
+                "count(*) FILTER (WHERE unexercised_kind = 'DECLARED-SILENT') "
                 "FROM invariant_registry_state"
             )
-            total, unexercised, fresh, never, attested = cur.fetchone()
+            total, unexercised, fresh, never, attested, silent = cur.fetchone()
             print(
                 f"invariant_registry_state: {total} rows, {unexercised} UNEXERCISED "
-                f"({never} NEVER / {attested} MANUALLY-ATTESTED), {fresh} exercised-fresh"
+                f"({never} NEVER / {attested} MANUALLY-ATTESTED / {silent} DECLARED-SILENT), "
+                f"{fresh} exercised-fresh"
             )
-            print("post-conditions OK: no coverage without a live measurer; label and boolean agree")
+            print("post-conditions OK: no coverage without a live measurer; label and boolean agree; every UNEXERCISED row has a kind")
         print("applied 047_invariant_registry_honesty.sql")
         return 0
     finally:

@@ -107,8 +107,17 @@ SELECT
     -- no human has ever attested is a colder start than one someone eyeballed recently.
     -- Deliberately a SEPARATE column rather than new exercise_state values, so that any reader
     -- matching exercise_state = 'UNEXERCISED' keeps working unchanged.
+    -- F5 (cc-quality supplement): 'DECLARED-SILENT' must come FIRST. A measurer that is
+    -- DECLARED but has never written is the single most sequencing-urgent case there is —
+    -- it is the pipeline_clock failure exactly (bug_pipeline_readiness read 10/10 green for
+    -- 39 days because its measurer was never scheduled). Before this arm existed it fell into
+    -- a NULL bucket that was neither NEVER nor MANUALLY-ATTESTED, so a GROUP BY over
+    -- UNEXERCISED rows would silently drop the very rows that most need attention.
     CASE
-        WHEN t.measurer_live THEN NULL  -- live measurer: not an unexercised-kind question at all
+        WHEN t.measurer_live AND r.last_asserted_at IS NULL THEN 'DECLARED-SILENT'
+        -- Live measurer that HAS written: the row is STALE or EXERCISED, so "what kind of
+        -- unexercised" is genuinely not the question being asked.
+        WHEN t.measurer_live THEN NULL
         WHEN r.last_asserted_at IS NULL THEN 'NEVER'
         ELSE 'MANUALLY-ATTESTED'
     END AS unexercised_kind
