@@ -90,6 +90,43 @@ def test_boot_file_reaches_the_reset_script_as_an_argument(handoff, boot_file):
     assert out.returncode == 0, out.stderr
 
 
+# --- paths are resolved from where the CALLER stands ------------------------ #
+# self_recycle cd's to the orchestrator dir before it does anything, so a lane that typed the
+# path that works in ITS shell — `reports/my-handoff-NOW.md`, sitting in its own worktree — got
+# "handoff does not exist". Loud, so not dangerous, but every worker lane keeps its handoff in
+# its worktree and would hit it in turn. A trap that each body has to be individually warned
+# about is a trap; resolve from the caller's cwd, and when it is genuinely missing say BOTH
+# places that were searched rather than just one.
+
+def test_a_handoff_relative_to_the_callers_cwd_is_found(tmp_path):
+    """The lane's own worktree is where its handoff lives, and `cd`-ing away from the caller is
+    an implementation detail of this script, not something the caller should have to know."""
+    p = tmp_path / "reports"
+    p.mkdir()
+    (p / "lane-handoff-NOW.md").write_text("# fresh\n" + ("state line\n" * 200))
+    boot = tmp_path / "boot.txt"
+    boot.write_text("You are cc-lane, freshly reset.\n")
+    out = subprocess.run(
+        ["bash", str(_SCRIPT), "--reset", "scripts/reset_lane.sh", "--session", "somelane",
+         "--boot-file", "boot.txt", "--handoff", "reports/lane-handoff-NOW.md", "--dry-run"],
+        capture_output=True, text=True, cwd=str(tmp_path))
+    assert out.returncode == 0, (out.stdout + out.stderr)
+
+
+def test_a_genuinely_missing_handoff_names_everywhere_it_looked(tmp_path):
+    """A gate that says only 'not found' sends the reader hunting. Print both roots."""
+    out = subprocess.run(
+        ["bash", str(_SCRIPT), "--reset", "scripts/reset_lane.sh", "--session", "somelane",
+         "--boot-file", "nope-boot.txt", "--handoff", "reports/nope-NOW.md", "--dry-run"],
+        capture_output=True, text=True, cwd=str(tmp_path))
+    assert out.returncode != 0
+    blob = out.stdout + out.stderr
+    assert str(tmp_path) in blob and str(_ROOT) in blob, (
+        "the refusal must name BOTH the caller's cwd and the orch dir, so the reader can see "
+        "where it actually searched"
+    )
+
+
 def test_a_missing_boot_file_is_caught_before_anything_is_scheduled(handoff):
     out = _run("--reset", "scripts/reset_lane.sh", "--session", "storefront",
                "--boot-file", "/nope/does-not-exist.txt", "--handoff", handoff, "--dry-run")

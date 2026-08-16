@@ -33,7 +33,25 @@
 #                           [--delay 60] [--max-handoff-age 900] [--dry-run]
 set -uo pipefail
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# WHERE THE CALLER STOOD, captured before we cd away. A worker lane keeps its handoff in its own
+# WORKTREE and types the path that works in ITS shell (`reports/my-handoff-NOW.md`); this script
+# then cd'd to the orch dir and told it the file did not exist. Loud rather than dangerous, but
+# every lane would hit it in turn, and a trap each body has to be warned about individually is
+# still a trap. Resolve caller-relative paths against this.
+CALLER_PWD="$PWD"
 cd "$ORCH_DIR" || { echo "self_recycle: orch dir missing" >&2; exit 9; }
+
+# Resolve a caller-supplied path: absolute wins; then the caller's cwd (what they meant); then
+# the orch dir (so existing callers and the singleton bodies keep working). Echoes the resolved
+# absolute path, or nothing when it exists in neither place — the caller reports where it looked.
+_resolve_path() {
+  case "$1" in
+    /*) [ -e "$1" ] && printf '%s' "$1"; return;;
+  esac
+  if [ -e "$CALLER_PWD/$1" ]; then printf '%s' "$CALLER_PWD/$1"
+  elif [ -e "$ORCH_DIR/$1" ]; then printf '%s' "$ORCH_DIR/$1"
+  fi
+}
 
 RESET=""; HANDOFF=""; DELAY=60; MAX_AGE=900; DRY=0; SESSION=""; MAX_WAIT=900; BOOTFILE=""
 while [ $# -gt 0 ]; do
@@ -88,17 +106,30 @@ if [ "$PARAMETERIZED" = 1 ]; then
   [ -n "$BOOTFILE" ] || { echo "self_recycle: '$(basename "$RESET")' is parameterized — it needs the lane's boot instruction. Pass --boot-file <path>. A lane cleared with no boot instruction comes back not knowing who it is." >&2; exit 2; }
 fi
 if [ -n "$BOOTFILE" ]; then
-  [ -f "$BOOTFILE" ] || { echo "self_recycle: --boot-file not found: $BOOTFILE" >&2; exit 2; }
-  [ -s "$BOOTFILE" ] || { echo "self_recycle: --boot-file is empty: $BOOTFILE" >&2; exit 2; }
-  BOOTFILE="$(cd "$(dirname "$BOOTFILE")" && pwd)/$(basename "$BOOTFILE")"
+  _B="$(_resolve_path "$BOOTFILE")"
+  if [ -z "$_B" ] || [ ! -f "$_B" ]; then
+    echo "self_recycle: --boot-file not found: $BOOTFILE" >&2
+    echo "             looked in your cwd:  $CALLER_PWD" >&2
+    echo "             and in the orch dir: $ORCH_DIR" >&2
+    exit 2
+  fi
+  [ -s "$_B" ] || { echo "self_recycle: --boot-file is empty: $_B" >&2; exit 2; }
+  BOOTFILE="$_B"
 fi
 
 # GATE 1 — THE RESTORE POINT MUST BE FRESH. This is the one that matters. Recycling onto a stale
 # handoff does not preserve the work, it launders the loss: the body comes back confident and
 # wrong and nobody can tell what went. Measured against the clock now, never asserted by a caller.
-if [ ! -f "$HANDOFF" ]; then
-  echo "self_recycle: REFUSED — handoff does not exist: $HANDOFF" >&2; exit 3
+_H="$(_resolve_path "$HANDOFF")"
+if [ -z "$_H" ] || [ ! -f "$_H" ]; then
+  # Name BOTH roots. A refusal that says only "not found" sends the reader hunting, and a gate
+  # people have to work around gets worked around.
+  echo "self_recycle: REFUSED — handoff does not exist: $HANDOFF" >&2
+  echo "             looked in your cwd:  $CALLER_PWD" >&2
+  echo "             and in the orch dir: $ORCH_DIR" >&2
+  exit 3
 fi
+HANDOFF="$_H"
 NOW=$(date +%s)
 MTIME=$(stat -f %m "$HANDOFF" 2>/dev/null || stat -c %Y "$HANDOFF" 2>/dev/null)
 AGE=$(( NOW - MTIME ))
