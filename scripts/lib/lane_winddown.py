@@ -105,9 +105,14 @@ def live_session_exists(session: str) -> bool:
 
 
 def live_is_busy(session: str) -> bool:
-    cap = subprocess.run([_tmux(), "capture-pane", "-t", f"={session}:0.0", "-p"],
-                         capture_output=True, text=True)
-    return "esc to interrupt" in (cap.stdout or "").lower()
+    """Delegates to scripts/lib/pane_busy.sh — the LIVE FOOTER, never the whole pane. Grepping
+    the whole capture makes a stale busy marker in the scrollback read as busy forever, which
+    is the bug that stranded cai's own recycle on 2026-08-16. Unreadable => busy (fail closed)."""
+    script = f'. "{_REPO}/scripts/lib/pane_busy.sh"; TMUX_BIN="{_tmux()}" pane_busy "{session}"'
+    try:
+        return subprocess.run(["bash", "-c", script], capture_output=True, timeout=20).returncode == 0
+    except Exception:
+        return True
 
 
 def _agent_for_session(session: str) -> Optional[str]:

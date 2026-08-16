@@ -128,6 +128,10 @@ nohup bash -c '
   DELAY='"$DELAY"'; MAX_WAIT='"$MAX_WAIT"'
   PY="$ORCH/.venv/bin/python3"; [ -x "$PY" ] || PY=python3
   FW="$ORCH/scripts/lib/fire_window.py"
+  # Read the LIVE FOOTER, never the whole pane: "esc to interrupt" left in the scrollback from
+  # an earlier turn made this loop read busy forever, and it stranded cai at 838k with an idle
+  # composer while holding the lock that suppressed her wakes (2026-08-16, my bug).
+  . "$ORCH/scripts/lib/pane_busy.sh"
   hold() { "$PY" "$FW" hold "$SESS" --ttl 240 --reason "self_recycle waiting for $SESS to go idle" >/dev/null 2>&1; }
   free() { "$PY" "$FW" release "$SESS" >/dev/null 2>&1; }
   trap free EXIT
@@ -136,7 +140,7 @@ nohup bash -c '
   WAITED=0
   while :; do
     hold
-    if ! tmux capture-pane -t "=$SESS:0.0" -p 2>/dev/null | grep -q "esc to interrupt"; then
+    if ! pane_busy "$SESS"; then
       echo "[self_recycle] $SESS is idle after ${WAITED}s of waiting — firing $RST" >> "$LG"
       free
       env -u TMUX_PANE bash "$RST" >> "$LG" 2>&1
