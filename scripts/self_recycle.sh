@@ -35,17 +35,32 @@ set -uo pipefail
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ORCH_DIR" || { echo "self_recycle: orch dir missing" >&2; exit 9; }
 
-RESET=""; HANDOFF=""; DELAY=60; MAX_AGE=900; DRY=0
+RESET=""; HANDOFF=""; DELAY=60; MAX_AGE=900; DRY=0; SESSION=""; MAX_WAIT=900
 while [ $# -gt 0 ]; do
   case "$1" in
     --reset) RESET="$2"; shift 2;;
     --handoff) HANDOFF="$2"; shift 2;;
     --delay) DELAY="$2"; shift 2;;
     --max-handoff-age) MAX_AGE="$2"; shift 2;;
+    --session) SESSION="$2"; shift 2;;
+    --max-wait) MAX_WAIT="$2"; shift 2;;
     --dry-run) DRY=1; shift;;
     *) echo "self_recycle: unknown arg '$1'" >&2; exit 2;;
   esac
 done
+
+# WHICH PANE THIS ACTS ON. Derived from the reset script, because each reset hardcodes its own
+# target — but NEVER guessed: reset_lane.sh takes its session as an argument, so there is nothing
+# to derive and a guess would aim a /clear at whatever happened to match. Refuse instead.
+if [ -z "$SESSION" ]; then
+  case "$(basename "$RESET")" in
+    reset_nazim.sh)        SESSION="${ORCH_TMUX_SESSION:-nazim}";;
+    reset_cai.sh)          SESSION="cai";;
+    reset_fleet_health.sh) SESSION="fleet-health";;
+    reset_orch.sh)         SESSION="${ORCH_TMUX_SESSION:-orch}";;
+    *) echo "self_recycle: cannot derive the target session from '$(basename "$RESET")' — pass --session <tmux-session>." >&2; exit 2;;
+  esac
+fi
 [ -n "$RESET" ]   || { echo "self_recycle: --reset required" >&2; exit 2; }
 [ -n "$HANDOFF" ] || { echo "self_recycle: --handoff required" >&2; exit 2; }
 [ -x "$RESET" ] || [ -f "$RESET" ] || { echo "self_recycle: reset script not found: $RESET" >&2; exit 2; }
@@ -74,7 +89,8 @@ if [ "$BYTES" -lt 800 ]; then
 fi
 
 echo "self_recycle: handoff OK (${BYTES}B, ${AGE}s old)"
-echo "self_recycle: will fire '$RESET' in ${DELAY}s, DETACHED from this turn."
+echo "self_recycle: target session: ${SESSION}"
+echo "self_recycle: will quiesce '${SESSION}', wait for it to go idle (up to ${MAX_WAIT}s), then fire '$RESET' — DETACHED from this turn."
 
 if [ "$DRY" = 1 ]; then
   echo "self_recycle: --dry-run — gates passed, NOTHING scheduled."; exit 0
@@ -90,8 +106,50 @@ mkdir -p logs
 #   setsid/nohup   — survives the calling shell so the reset cannot die with the turn that asked
 #                    for it, which would leave the body bloated and believing it had recycled.
 LOG="logs/self_recycle_$(date -u +%Y%m%dT%H%M%SZ).log"
-nohup bash -c "sleep $DELAY; env -u TMUX_PANE bash '$RESET' >> '$ORCH_DIR/$LOG' 2>&1" \
-  >/dev/null 2>&1 &
+
+# WAIT FOR IDLE, DO NOT FIRE BLIND (2026-08-16, cai's first real attempt). The detach worked and
+# the process survived, but at T+DELAY a `[wake] new inbox item` had put the body mid-turn and the
+# reset's BUSY gate correctly refused. The tool was fine and the gate was right; the SHAPE was
+# wrong. A one-shot assumes the body is idle at exactly T+DELAY, and a body on a live bus is woken
+# precisely BECAUSE it is the kind of body worth recycling. The alternative offered — "recycle me
+# externally from an idle moment" — puts the operator's thumb back on the button, which is the
+# whole thing this line of work exists to remove.
+#
+# The two halves compose and neither alone is enough:
+#   QUIESCE FIRST — take the fire-window hold for the whole wait, so the nudgers stand off and
+#   nothing NEW can start a turn while we wait for the current one to end. reset_*.sh takes its own
+#   hold, but only AFTER its busy gate, which is already too late.
+#   THEN WAIT — poll the pane for the busy marker and fire on the first idle read, bounded by
+#   MAX_WAIT so a genuinely stuck body fails LOUDLY instead of hanging forever.
+# The hold is renewed each iteration (its TTL is deliberately short so a crash cannot leave a body
+# quiesced) and released on every exit path, including the timeout.
+nohup bash -c '
+  ORCH="'"$ORCH_DIR"'"; SESS="'"$SESSION"'"; RST="'"$RESET"'"; LG="'"$ORCH_DIR/$LOG"'"
+  DELAY='"$DELAY"'; MAX_WAIT='"$MAX_WAIT"'
+  PY="$ORCH/.venv/bin/python3"; [ -x "$PY" ] || PY=python3
+  FW="$ORCH/scripts/lib/fire_window.py"
+  hold() { "$PY" "$FW" hold "$SESS" --ttl 240 --reason "self_recycle waiting for $SESS to go idle" >/dev/null 2>&1; }
+  free() { "$PY" "$FW" release "$SESS" >/dev/null 2>&1; }
+  trap free EXIT
+  hold
+  sleep "$DELAY"
+  WAITED=0
+  while :; do
+    hold
+    if ! tmux capture-pane -t "=$SESS:0.0" -p 2>/dev/null | grep -q "esc to interrupt"; then
+      echo "[self_recycle] $SESS is idle after ${WAITED}s of waiting — firing $RST" >> "$LG"
+      free
+      env -u TMUX_PANE bash "$RST" >> "$LG" 2>&1
+      exit 0
+    fi
+    if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+      echo "[self_recycle] GIVING UP: $SESS still busy after ${WAITED}s — NOT clearing a working body. Nothing was changed; re-run when it settles." >> "$LG"
+      "$ORCH/scripts/nazim_send.sh" "⚠️ self_recycle gave up on \`$SESS\` — still mid-turn after ${WAITED}s, so nothing was cleared. The body is fine; it is just busy. Log: $LG" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    sleep 15; WAITED=$(( WAITED + 15 ))
+  done
+' >/dev/null 2>&1 &
 disown 2>/dev/null || true
-echo "self_recycle: SCHEDULED (pid $!) — fires in ${DELAY}s, log: $LOG"
+echo "self_recycle: SCHEDULED (pid $!) — quiescing '${SESSION}', firing on its first idle read after ${DELAY}s (giving up after ${MAX_WAIT}s), log: $LOG"
 echo "self_recycle: stop producing output now; the clear lands after this turn ends."
