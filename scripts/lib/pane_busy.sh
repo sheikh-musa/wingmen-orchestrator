@@ -18,18 +18,29 @@
 #   pane_busy <session>        # exit 0 = BUSY, 1 = idle
 #   <capture> | pane_busy_from_text
 
-# Exit 0 (BUSY) when the last non-blank lines show the interrupt hint and NOT the idle hint.
-# An EMPTY capture is BUSY: fail closed, because a pane we cannot see is not a pane we have
-# proven safe to clear.
+# THREE-COPY COLLAPSE (#23730/#23733). This used to key on 'esc to interrupt' only, so a lane
+# in the EXTENDED-THINKING phase (a col-0 '(… thinking)' spinner, NO 'esc to interrupt') read
+# IDLE — the answer that ENDS a lane (lane_winddown delegates here via live_is_busy). Rather
+# than carry a THIRD copy of the busy patterns, delegate to the ONE hardened definition in
+# composer_capture.sh. Named explicitly so it can never no-op onto another naive copy.
+_PB_CC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/composer_capture.sh"
+
+# Exit 0 (BUSY). An EMPTY capture is BUSY: fail closed, a pane we cannot see is not one we have
+# proven safe to clear. Busy patterns (esc-to-interrupt + background-agents + thinking spinner)
+# come from composer_capture.sh:_cc_text_busy. Pure text — no liveness (that is pane_busy below).
 pane_busy_from_text() {
-  local cap; cap="$(grep -v '^[[:space:]]*$' | tail -3)"
-  [ -n "$cap" ] || return 0
-  printf '%s' "$cap" | grep -q 'esc to interrupt' \
-    && ! printf '%s' "$cap" | grep -q 'for agents'
+  local cap; cap="$(cat)"
+  printf '%s' "$cap" | grep -q '[^[:space:]]' || return 0
+  ( . "$_PB_CC"; _cc_text_busy "$cap" )
 }
 
+# Live check: delegate to composer_capture.sh's hardened pane_busy — thinking + background-agents
+# + the op#11774 LIVENESS gate (a FROZEN spinner is STALE, so a dead 'thinking' pane can still be
+# recycled rather than blocking self_recycle to its MAX_WAIT). Subshell so composer_capture's
+# pane_busy(<tmux> <pane>) shadows this one only inside the delegation (no recursion).
 pane_busy() {
-  local sess="${1:?pane_busy <session>}"
-  local tm="${TMUX_BIN:-tmux}"
-  "$tm" capture-pane -t "=$sess:0.0" -p 2>/dev/null | pane_busy_from_text
+  local sess="${1:?pane_busy <session>}" tm="${TMUX_BIN:-tmux}" cap
+  cap="$("$tm" capture-pane -t "=$sess:0.0" -p 2>/dev/null)"
+  printf '%s' "$cap" | grep -q '[^[:space:]]' || return 0   # empty/unreadable = busy (fail closed)
+  ( . "$_PB_CC"; pane_busy "$tm" "=$sess:0.0"; [ "${CC_BUSY:-0}" = 1 ] )
 }

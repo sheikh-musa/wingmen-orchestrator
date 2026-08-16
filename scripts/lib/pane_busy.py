@@ -29,18 +29,28 @@ from __future__ import annotations
 import os
 import subprocess
 
-_BUSY_HINT = "esc to interrupt"
-_IDLE_HINT = "for agents"
-_FOOTER_LINES = 3
+# THE ONE hardened busy-from-text definition (#23730/#23733 three-copy collapse): this used
+# to key on 'esc to interrupt' only, and so read a lane in the EXTENDED-THINKING phase — which
+# shows a col-0 '(… thinking)' spinner and NO 'esc to interrupt' — as IDLE. That false-idle is
+# the answer that ENDS a lane, and step-4 removes the ghost misclassification that currently
+# shields a thinking lane from it. Rather than carry a THIRD copy of the busy patterns (which
+# is how they drifted), this delegates to composer_capture.sh:_cc_text_busy — the only copy
+# that was hardened for thinking + background-agents (op#11774). One definition, referenced.
+_CC_LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "composer_capture.sh")
 
 
 def is_busy_text(pane_text: str, on_unreadable: bool = True) -> bool:
-    """True when the LIVE footer shows a turn in progress."""
-    lines = [ln for ln in (pane_text or "").splitlines() if ln.strip()]
-    if not lines:
+    """True when the LIVE footer shows a turn in progress (esc-to-interrupt, background-agents,
+    or an extended-thinking spinner). Delegates the busy patterns to the shared shell definition
+    so all copies agree by construction. Pure text: no liveness re-capture (that is the live
+    pane_busy(session) path); a frozen spinner still reads busy here, which fails safe."""
+    if not (pane_text or "").strip():
         return on_unreadable
-    footer = "\n".join(lines[-_FOOTER_LINES:]).lower()
-    return _BUSY_HINT in footer and _IDLE_HINT not in footer
+    r = subprocess.run(
+        ["bash", "-c", 'source "$1"; _cc_text_busy "$2"', "_", _CC_LIB, pane_text],
+        capture_output=True,
+    )
+    return r.returncode == 0
 
 
 def _tmux() -> str:
