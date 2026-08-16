@@ -51,11 +51,20 @@ def main() -> int:
 
             # (1) THE DOCTRINE, executable: nothing may read as done without a real acceptance by
             #     somebody other than the doer.
+            #
+            #     cc-quality's sharpest finding on the first cut was not the bypass itself but
+            #     that THIS GUARD SHARED IT: it re-implemented the normalisation
+            #     (`acceptor_norm IS NOT DISTINCT FROM lane`) and so was blind in exactly the same
+            #     spot -- a guard structurally incapable of catching the bug it exists to catch,
+            #     which passed only because zero rows were accepted. It now CONSUMES the view's
+            #     own `self_accepted` column instead of carrying a second copy of the rule. One
+            #     definition, referenced twice; fixing the rule fixes the guard by construction.
             cur.execute(
                 "SELECT count(*) FROM lane_tasks_state "
                 "WHERE is_truly_done AND (accepted_at IS NULL "
+                "                         OR accepted_by IS NULL "
                 "                         OR status <> 'done' "
-                "                         OR acceptor_norm IS NOT DISTINCT FROM lane)"
+                "                         OR self_accepted)"
             )
             (false_done,) = cur.fetchone()
             if false_done:
@@ -84,7 +93,7 @@ def main() -> int:
                 "SELECT count(*) FROM lane_tasks_state "
                 "WHERE completion_state IS NULL "
                 "   OR (status = 'done' AND completion_state NOT IN "
-                "       ('ACCEPTED','SELF-ACCEPTED','CLAIMED-UNACCEPTED')) "
+                "       ('ACCEPTED','SELF-ACCEPTED','CLAIMED-UNACCEPTED','ACCEPTED-BY-NOBODY')) "
                 "   OR (status <> 'done' AND completion_state <> 'OPEN')"
             )
             (unlabelled,) = cur.fetchone()

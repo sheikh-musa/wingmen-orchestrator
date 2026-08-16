@@ -80,6 +80,10 @@ SELECT
         -- Claimed done, nobody accepted it. The default state of every legacy row, and the
         -- honest reading of "the doer said so".
         WHEN t.accepted_at IS NULL                     THEN 'CLAIMED-UNACCEPTED'
+        -- cc-quality Q3: a timestamp with no acceptor is acceptance by NOBODY. Named rather than
+        -- folded into CLAIMED-UNACCEPTED, because a row that looks acted-on is more misleading
+        -- than one that was never touched.
+        WHEN t.accepted_by IS NULL                     THEN 'ACCEPTED-BY-NOBODY'
         -- Accepted by the body that did it. Recorded, NEVER counted.
         WHEN n.self_accepted                           THEN 'SELF-ACCEPTED'
         ELSE 'ACCEPTED'
@@ -89,13 +93,24 @@ SELECT
     (
         t.status = 'done'
         AND t.accepted_at IS NOT NULL
+        AND t.accepted_by IS NOT NULL
         AND NOT n.self_accepted
     ) AS is_truly_done,
     -- The analogue of 047's DECLARED-SILENT: a task whose "done" was never DEFINED. Surfaced as
     -- its own signal rather than left to be inferred from a NULL, because the tasks nobody wrote
     -- criteria for are exactly the ones whose completion nobody can check.
     (t.acceptance_criteria IS NULL OR btrim(t.acceptance_criteria) = '') AS no_criteria,
-    n.acceptor_norm
+    n.acceptor_norm,
+    -- APPENDED AT THE END DELIBERATELY. `CREATE OR REPLACE VIEW` is append-only: putting this
+    -- new column mid-list threw `cannot change name of view column "no_criteria" to
+    -- "self_accepted"` on re-apply. That is cc-quality's F3 on 047 -- the same constraint, hit
+    -- live while fixing a different finding from the same reviewer.
+    --
+    -- EXPOSED so the apply-script guard CONSUMES this definition instead of RE-IMPLEMENTING it.
+    -- The sharpest half of F-CRIT was not the bypass but that post-condition (1) carried its own
+    -- copy of the normalisation and so shared the identical blind spot: a guard structurally
+    -- incapable of catching the bug it exists to catch. One definition, referenced twice.
+    n.self_accepted
 FROM lane_tasks t
 -- Self-acceptance is decided ONCE here and referenced by every arm above.
 -- Normalisation: agent ids are `cc-<lane>` for lane bodies (cc-quality -> quality), and the
@@ -103,7 +118,28 @@ FROM lane_tasks t
 CROSS JOIN LATERAL (
     SELECT
         norm.v AS acceptor_norm,
-        (norm.v IS NOT NULL AND norm.v = t.lane) AS self_accepted
+        -- cc-quality F-CRIT, and it was the common case rather than an edge: the first cut
+        -- EXACT-matched the bare lane, but EVERY real agent id is SUFFIXED --
+        -- cc-shipforge-1, cc-ihsanos-qa-1, cc-irsyad-coord-1 -- which normalise to
+        -- `<lane>-<suffix>` and therefore never equalled `<lane>`. Measured against the 22 live
+        -- agent ids: 9 real lane-doers could self-accept UNDETECTED, so the gate was effectively
+        -- OFF for every multi-instance lane, failing in the one direction it must never fail
+        -- (the mirror of 047, where EXERCISED was unreachable -- same class, opposite sign).
+        -- COMPONENT match, not exact. It is longest-prefix on a '-' boundary, so cosem-video-1
+        -- can never match lane cosem-adcda, and it fails SAFE: an over-match reads SELF-ACCEPTED
+        -- and BLOCKS, never silently certifies.
+        -- GRANULARITY IS LANE-LEVEL, and that is a decision, not a fallout: cc-quality correctly
+        -- escalated whether an in-lane QA body (cc-ihsanos-qa-1) should be allowed to accept its
+        -- own lane's work. It should NOT. The auditor exists to not share the builder's blind
+        -- spot, and a body inside the same lane shares its context, tooling and worktree. The
+        -- evidence is this very review: cc-quality caught what cc-shipforge could not see about
+        -- its own code, and caught the invented allowlist its author had re-read three times.
+        -- Lane-level over-blocks (costs a message); agent-level would under-block (silently
+        -- certifies unchecked work). Over-blocking is the affordable error.
+        (
+            norm.v IS NOT NULL
+            AND (norm.v = t.lane OR norm.v LIKE t.lane || '-%')
+        ) AS self_accepted
     FROM (
         SELECT CASE
             WHEN t.accepted_by IS NULL THEN NULL
