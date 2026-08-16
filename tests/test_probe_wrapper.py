@@ -115,6 +115,54 @@ def test_pane_goes_busy_between_read_and_type_refuses(tmp_path):
     assert keylog == [], f"wrapper typed after the pane went busy — keys sent: {keylog}"
 
 
+def _after_typed(fixture_flat_text: str, replacement: str) -> str:
+    """Build a FAITHFUL after-sentinel pane from the real dim-queued fixture: same SGR
+    framing (verified to parse), with the composer content swapped. `~` alone models a
+    GHOST (sentinel replaced an empty composer); text+`~` models REAL (sentinel appended)."""
+    real = (FIX / "real_dim_queued.e.txt").read_text()
+    return real.replace(fixture_flat_text, replacement)
+
+
+_IDLE = None  # lazy: the idle before-pane (real_dim_queued, FLAT="poll the bus for hub's reply")
+_FLAT = "poll the bus for hub's reply"
+
+
+def _idle():
+    return (FIX / "real_dim_queued.e.txt").read_text()
+
+
+def test_ghost_verdict_proceeds(tmp_path):
+    # Sentinel typed into a ghost (empty composer + dim autosuggestion) REPLACES it -> after
+    # parses to "~" alone -> _probe_verdict=ghost -> CC_PROBE=ghost (caller clears+delivers).
+    # No revert-verify required: after==sentinel proves the composer held no real text.
+    after = _after_typed(_FLAT, "~")
+    caps = [_idle(), _idle(), _idle(), after, _idle()]  # busy0, before, busy-recheck, after, revert
+    cc_probe, keylog, out = run_probe(tmp_path, captures=caps)
+    assert cc_probe == "ghost", f"expected 'ghost', got {cc_probe!r} (stderr: {out.stderr})"
+    joined = " ".join(keylog)
+    assert "~" in joined, f"sentinel not typed: {keylog}"
+    assert "BSpace" in joined, f"sentinel not reverted (no BSpace): {keylog}"
+
+
+def test_real_staged_text_is_preserved(tmp_path):
+    # Sentinel APPENDS to real staged text -> after parses to "...reply~" -> verdict=real ->
+    # revert restores byte-identical -> CC_PROBE=real (caller must NOT clear).
+    after = _after_typed(_FLAT, _FLAT + "~")
+    caps = [_idle(), _idle(), _idle(), after, _idle()]  # revert (_idle) == before "poll..."
+    cc_probe, keylog, out = run_probe(tmp_path, captures=caps)
+    assert cc_probe == "real", f"expected 'real' (preserve), got {cc_probe!r} (stderr: {out.stderr})"
+
+
+def test_failed_revert_on_real_fails_loud(tmp_path):
+    # verdict=real but the BSpace did NOT restore before (residue / partial revert) ->
+    # cond#2 silent-corruption guard: CC_PROBE=revert-fail, never proceed/submit.
+    after = _after_typed(_FLAT, _FLAT + "~")
+    empty = (FIX / "empty.e.txt").read_text()          # after_revert parses to "" != before
+    caps = [_idle(), _idle(), _idle(), after, empty]
+    cc_probe, keylog, out = run_probe(tmp_path, captures=caps)
+    assert cc_probe == "revert-fail", f"expected 'revert-fail', got {cc_probe!r} (stderr: {out.stderr})"
+
+
 def test_fire_window_held_refuses_without_typing(tmp_path):
     # A recycle owns the pane (fire_window hold). Even at a clean idle, the wrapper must
     # consult fire_window and REFUSE — never type into a pane a reset is mid-wiping

@@ -407,6 +407,35 @@ _probe_composer() {   # $1 = tmux bin, $2 = pane
     CC_PROBE='locked'
     return 0
   fi
+
+  # ── The reversible probe (bus 22395). `before` was captured fresh above. Type ONE
+  # single-byte sentinel, re-read, decide via the pure core, then BSpace it back out.
+  # This is the ONLY mutation, and it is self-reversing + verified below.
+  "$TM" send-keys -t "$PANE" -l "$GHOST_SENTINEL"
+  composer_parse_pane "$TM" "$PANE"
+  local after="$CC_FLAT"
+  local verdict; verdict="$(_probe_verdict "$before" "$after" "$GHOST_SENTINEL")"
+  "$TM" send-keys -t "$PANE" BSpace            # revert the sentinel we typed
+  composer_parse_pane "$TM" "$PANE"
+  local after_revert="$CC_FLAT"
+  case "$verdict" in
+    ghost)
+      # after == sentinel ALONE => the composer held NO real text; `before` was a phantom
+      # (dim autosuggestion / history-recall ghost). Nothing to corrupt, and the caller
+      # clears next, so cond#2 revert-verify is intentionally NOT required here. Proceed.
+      CC_PROBE='ghost' ;;
+    real|unsure)
+      # Real staged step present (or unsure -> fail toward PRESERVE). cond#2: we must not
+      # have corrupted it — the revert MUST restore `before` byte-identical, else FAIL LOUD.
+      if _probe_revert_ok "$before" "$after_revert"; then
+        CC_PROBE="$verdict"                    # real|unsure -> caller PRESERVES (never clears)
+      else
+        CC_PROBE='revert-fail'                 # silent-corruption guard: never proceeds
+        # FAIL LOUD (charter dead-man's-switch): a real staged step may now be corrupted.
+        # Cheap stderr trace here; the caller (lane_nudge) escalates it to a P1 bus row.
+        echo "[_probe_composer] REVERT-FAIL on '$PANE': composer NOT restored byte-identical after BSpace (possible corruption of a real staged step) — REFUSING, caller must log + P1" >&2
+      fi ;;
+  esac
 }
 
 composer_parse() {
