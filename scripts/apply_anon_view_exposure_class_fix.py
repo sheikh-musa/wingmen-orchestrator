@@ -24,22 +24,36 @@ from dotenv import load_dotenv
 ORCH_DIR = Path(__file__).resolve().parent.parent
 SQL_PATH = ORCH_DIR / "migrations" / "054_anon_view_exposure_class_fix.sql"
 
-# The class query. A view is EXPOSED when it runs with the owner's privileges (so base-table RLS
-# does not apply through it) AND a PostgREST role can read it.
+# The class query. A relation is EXPOSED when it runs with the owner's privileges (so base-table
+# RLS does not apply through it) AND a PostgREST role can read it.
+#
+# WIDENED after cc-storefront attacked the predicate (#23795) and its first variant turned out to
+# be live rather than theoretical:
+#   * NOT schema-scoped to `public`. The original missed `extensions`, which is exactly where
+#     pg_stat_statements sat with a PUBLIC grant and 4,935 anon-readable rows of query text.
+#     A check scoped to the schema where you already found a problem cannot find the next one.
+#   * relkind IN ('v','m') -- a MATERIALIZED VIEW has the same owner-run exposure shape and was
+#     invisible to a relkind='v' filter.
+#   * grantee now includes PUBLIC, not just anon/authenticated. PUBLIC is how the live one was
+#     granted, and a check that only looks for the role names it expects will miss the grant that
+#     is actually used.
+# System schemas are excluded because they are not ours to re-grant.
 CLASS_QUERY = """
-SELECT c.relname,
+SELECT n.nspname || '.' || c.relname AS relname,
        COALESCE(array_to_string(c.reloptions, ','), '') AS opts
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
- WHERE c.relkind = 'v'
-   AND n.nspname = 'public'
+ WHERE c.relkind IN ('v', 'm')
+   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+   AND n.nspname NOT LIKE 'pg_%'
    AND COALESCE(array_to_string(c.reloptions, ','), '') NOT ILIKE '%security_invoker=on%'
    AND COALESCE(array_to_string(c.reloptions, ','), '') NOT ILIKE '%security_invoker=true%'
    AND EXISTS (
-        SELECT 1 FROM information_schema.role_table_grants g
-         WHERE g.table_schema = 'public'
-           AND g.table_name = c.relname
-           AND g.grantee IN ('anon', 'authenticated')
+        SELECT 1
+          FROM aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
+          LEFT JOIN pg_roles r ON r.oid = a.grantee
+         WHERE a.privilege_type = 'SELECT'
+           AND (a.grantee = 0 OR r.rolname IN ('anon', 'authenticated'))
    )
  ORDER BY 1
 """
