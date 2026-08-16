@@ -29,6 +29,9 @@ ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SESSION="${1:?usage: lane_nudge.sh <tmux-session> \"<message>\"}"
 MSG="${2:?missing message}"
 MAX_TRIES="${LANE_NUDGE_TRIES:-3}"
+# Where diagnostic logs land. Defaults to the tree's logs/; overridable so a refusal's
+# self-diagnosis can be relocated (and tested) without touching the live log stream.
+LOGDIR="${LANE_NUDGE_LOG_DIR:-$ORCH_DIR/logs}"
 
 tmux has-session -t "$SESSION" 2>/dev/null || { echo "lane_nudge: no tmux session '$SESSION'" >&2; exit 2; }
 
@@ -53,14 +56,39 @@ fi
 # when we POSITIVELY read REAL, non-dim staged text — preserving it — rather than
 # clobber it. Empty / dim-ghost / placeholder / unreadable(noprompt) all PROCEED,
 # exactly as before (so a fresh-boot pane, e.g. spawn_reviewer, is never blocked).
-composer_parse_pane tmux "$SESSION"
+# Capture the composer bytes ONCE and parse THOSE SAME BYTES, so that if we refuse, the
+# capture we log is provably the bytes the verdict was made on — no second capture, no
+# moment-axis gap between "what the parser saw" and "what we logged" (#23648, the same-
+# bytes method that made the shipforge repro definitive). This is byte-for-byte what
+# composer_parse_pane does internally (capture -p -e, then -p fallback); we only keep the
+# raw text around so the refuse branch below can persist it. The verdict is unchanged.
+CC_RAWCAP="$(tmux capture-pane -t "$SESSION" -p -e 2>/dev/null)"
+[ -n "$CC_RAWCAP" ] || CC_RAWCAP="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null)"
+composer_parse "$CC_RAWCAP"
 if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [ "${CC_N:-0}" -gt 0 ] 2>/dev/null; then
-  mkdir -p "$ORCH_DIR/logs" 2>/dev/null || true
-  printf '%s lane_nudge[%s] REFUSED, preserved staged: %s\n' \
+  mkdir -p "$LOGDIR" 2>/dev/null || true
+  # STEP-2 (Nazim #23572 / CAI-978): a refusal must SELF-DIAGNOSE. The old log recorded WHAT
+  # was seen but not WHAT IT LOOKED LIKE, so every refusal was un-diagnosable after the fact —
+  # which is how #23536 (a novel SGR-2 dim autosuggestion read as CC_N>0 real staged text) hid
+  # for a day behind ~89 refusals. So alongside the preserved text, persist the RAW capture-pane
+  # -e bytes (dim/non-dim markers intact), the verdict fields the parser produced, and the pane
+  # geometry — at the instant of the verdict. With ~89 refusals/day, the first wired firing
+  # self-repro's within the hour. This is ADDITIVE: the refuse decision and exit 3 are unchanged.
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  capname="${SESSION}-${stamp}.e.txt"
+  capdir="$LOGDIR/lane_nudge_captures"
+  geom="$(tmux display-message -p -t "$SESSION" '#{pane_width}x#{pane_height}' 2>/dev/null || echo '?x?')"
+  if mkdir -p "$capdir" 2>/dev/null && printf '%s' "$CC_RAWCAP" > "$capdir/$capname" 2>/dev/null && [ -s "$capdir/$capname" ]; then
+    capnote="raw=lane_nudge_captures/$capname"
+  else
+    capnote="raw=CAPTURE-FAILED"   # fail-LOUD, never a silent gap — the miss is visible in the log line
+  fi
+  printf '%s lane_nudge[%s] REFUSED, preserved staged: %s | verdict: CC_N=%s CC_EMPTY=%s CC_PARTIAL=%s CC_GHOST=%s basis=%s geom=%s %s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" "$CC_FLAT" \
-    >> "$ORCH_DIR/logs/lane_nudge_preserved_input.log" 2>/dev/null || true
+    "${CC_N:-?}" "${CC_EMPTY:-?}" "${CC_PARTIAL:-?}" "${CC_GHOST:-?}" "${CC_PH_BASIS:-?}" "$geom" "$capnote" \
+    >> "$LOGDIR/lane_nudge_preserved_input.log" 2>/dev/null || true
   echo "lane_nudge: REFUSED — '$SESSION' composer holds REAL unsent text; clearing+retyping would clobber the lane's own staged step." >&2
-  echo "           Preserved verbatim to logs/lane_nudge_preserved_input.log — submit/escalate it by hand rather than nudging over it." >&2
+  echo "           Preserved verbatim to logs/lane_nudge_preserved_input.log (+ raw capture for diagnosis) — submit/escalate it by hand rather than nudging over it." >&2
   exit 3
 fi
 
