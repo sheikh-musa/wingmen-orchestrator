@@ -1011,3 +1011,113 @@ def test_preserved_input_log_is_test_scoped(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# --------------------------------------------------------------------------- #
+# self-compacting bodies: the alert must not recommend what the operator overruled
+# --------------------------------------------------------------------------- #
+#
+# The operator ruled on 2026-08-15 (op#13418): "im worried about the auto compaction
+# because its not lossless." This alert was telling him the opposite — "no action
+# needed, it auto-compacts" — about the bodies that most need recycling, and it fired
+# on the console all night while it rode from 400k to 822k. Auto-compaction is the
+# WORSE outcome, not the release valve: a body that hands off deliberately keeps what
+# it chooses; a body that compacts keeps what a summarizer chose. Since 6eb9d01 there
+# is a third option that did not exist when this copy was written — the body can
+# recycle ITSELF on its own fresh handoff, with no operator button.
+
+def _self_compacting_reg():
+    return {"label": "cc-fleet-health", "self_compacts": True}
+
+
+def test_self_compacting_alert_does_not_tell_the_operator_no_action_is_needed():
+    text = w._alert_text(_ctx(agent="cc-fleet-health", pct=82, level="red"), _self_compacting_reg())
+    assert "no action needed" not in text.lower(), (
+        "This is the sentence the operator overruled: it reassures him about the body "
+        "that most needs recycling, at exactly the point where it should hand off."
+    )
+
+
+def test_self_compacting_alert_names_deliberate_recycle_as_the_better_option():
+    text = w._alert_text(_ctx(agent="cc-fleet-health", pct=82, level="red"), _self_compacting_reg())
+    assert "self_recycle" in text or "recycle itself" in text.lower(), (
+        "A self-compacting body at this level has a better option than compaction — "
+        "recycling itself on its own fresh handoff (scripts/self_recycle.sh). The alert "
+        "must point at it, not describe compaction as a solution."
+    )
+
+
+def test_self_compacting_alert_says_compaction_is_lossy():
+    text = w._alert_text(_ctx(agent="cc-fleet-health", pct=82, level="red"), _self_compacting_reg())
+    assert "lossy" in text.lower() or "not lossless" in text.lower(), (
+        "The operator's objection is that compaction loses things. The alert must say so "
+        "rather than presenting compaction as a clean release valve."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# trigger inversion: tell the BODY, not only the operator
+# --------------------------------------------------------------------------- #
+#
+# The operator, op#13520: "thats what ive been saying 1000 times and yet here i am
+# telling you youre bloated and having to push a button." The detector has always
+# reported bloat to a HUMAN. Now that a body can recycle itself (6eb9d01) the report
+# should go to the BODY — it is the only party that knows whether it is mid-thought,
+# and it carries the whole cost of being wrong, which is exactly why this needs no
+# arm-sign while a third party clearing it would.
+
+class _FakeCur:
+    def __init__(self, log): self.log = log
+    def execute(self, sql, params=None): self.log.append((sql, params))
+    def fetchone(self): return (1,)
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+class _FakeConn:
+    def __init__(self, log): self.log = log
+    def cursor(self): return _FakeCur(self.log)
+    def commit(self): self.log.append(("COMMIT", None))
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def test_bloat_nudge_is_addressed_to_the_body_not_the_operator():
+    log = []
+    ok = w._bus_nudge_self_recycle("cc-fleet-health", 82, connect=lambda dsn: _FakeConn(log),
+                                   dsn="postgres://fake")
+    assert ok is True
+    sql, params = log[0]
+    assert "agent_messages" in sql and "insert" in sql.lower()
+    assert "cc-fleet-health" in params, "the nudge must be addressed to the bloated body itself"
+
+
+def test_bloat_nudge_tells_the_body_the_decision_is_its_own():
+    log = []
+    w._bus_nudge_self_recycle("cc-fleet-health", 82, connect=lambda dsn: _FakeConn(log),
+                              dsn="postgres://fake")
+    body = " ".join(str(p) for p in log[0][1])
+    assert "self_recycle" in body, "it must name the tool, not just the condition"
+    assert "handoff" in body.lower(), "recycling onto a stale restore point launders the loss"
+    assert "your call" in body.lower() or "you decide" in body.lower(), (
+        "a body clearing itself is not being ordered to — it is the only party that knows "
+        "whether it is finished, and the alert must say so or it becomes an inference again"
+    )
+
+
+def test_bloat_nudge_reports_failure_rather_than_claiming_a_send_it_did_not_make():
+    def _boom(dsn): raise RuntimeError("db down")
+    assert w._bus_nudge_self_recycle("cc-fleet-health", 82, connect=_boom, dsn="x") is False
+
+
+def test_alert_does_not_claim_a_nudge_that_did_not_happen():
+    """no-fake-autopilot: the alert used to say 'Nudging it' unconditionally. An alert
+    that reports an action it did not take is worse than one that stays quiet — the
+    operator stands down believing the body was told."""
+    reg = _self_compacting_reg()
+    a = _ctx(agent="cc-fleet-health", pct=82, level="red")
+    failed = w._alert_text(a, reg, nudged=False)
+    assert "nudging it" not in failed.lower()
+    assert "could not" in failed.lower() or "couldn't" in failed.lower()
+    done = w._alert_text(a, reg, nudged=True)
+    assert "nudged it" in done.lower()

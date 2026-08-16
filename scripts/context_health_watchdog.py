@@ -832,6 +832,56 @@ def _pg_connect():
             return None
 
 
+def _bus_nudge_self_recycle(agent: str, pct: int, connect=None, dsn: Optional[str] = None) -> bool:
+    """Tell the BLOATED BODY it is bloated. Returns True only if the row was written.
+
+    TRIGGER INVERSION (operator op#13520: "here i am telling you youre bloated and
+    having to push a button"). This detector has always reported to a HUMAN, and the
+    executor that would have acted on it needed an arm-sign — because one body clearing
+    ANOTHER is acting on an inference about someone else's state, and three of four such
+    inferences were wrong on 2026-08-15. Since 6eb9d01 the body can recycle ITSELF, which
+    removes the inference entirely: it is the only party that knows whether it is
+    mid-thought, and it bears the whole cost of being wrong.
+
+    So this is a NOTIFICATION, not an action: an ordinary attributable bus row that the
+    body drains like any other work and is free to decline. It writes nothing to the
+    body's pane, so it is not the watchdog pen ACTING and needs no lease — and it
+    deliberately does not tell the body to recycle NOW, only that it is at the line.
+    """
+    connect = connect or _pg_connect()
+    dsn = dsn or _dsn()
+    if not connect or not dsn:
+        return False
+    body = (
+        f"CONTEXT AT ~{pct}% — you are the one who decides what happens next.\n\n"
+        f"You auto-compact rather than fog, so nothing breaks if you ride. But compaction is "
+        f"LOSSY: it keeps what a summarizer picked, not what you would have picked. The operator "
+        f"ruled on that directly (op#13418) — it is the fallback, not the fix.\n\n"
+        f"The better path, and it needs no button from anyone:\n"
+        f"  1. Write a FRESH handoff (self_recycle refuses one older than 900s — recycling onto a "
+        f"stale restore point does not preserve the work, it launders the loss).\n"
+        f"  2. scripts/self_recycle.sh --reset <your reset script> --handoff <your handoff> --dry-run\n"
+        f"  3. Then fire it for real and stop producing output; the clear lands after your turn ends.\n\n"
+        f"THIS IS YOUR CALL, not an order. If you are mid-ruling or mid-build, finish and recycle "
+        f"straight after — say so on the bus so nobody wonders. Nobody else can tell your 'finished' "
+        f"from your 'waiting', which is exactly why the decision is yours."
+    )
+    try:
+        with connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
+                "priority, requires_response, is_test) VALUES (%s, %s, 'update', %s, %s, 'P2', false, false)",
+                ("cc-fleet-health", agent,
+                 f"You are at ~{pct}% — deliberate self-recycle beats letting it auto-compact (your call)",
+                 body),
+            )
+            conn.commit()
+        return True
+    except Exception as e:  # pragma: no cover — a failed nudge must never crash the watchdog
+        print(f"[ctx-health] self-recycle bus nudge failed for {agent}: {e}", file=sys.stderr)
+        return False
+
+
 def _unhandled_operator_count(reg: dict) -> Optional[int]:
     """Count of UNHANDLED inbound operator_messages in this body's channel scope.
     0 = inbox drained (no owed operator action). None = INDETERMINATE (DB down, no
@@ -1353,18 +1403,37 @@ def _send_alert(text: str) -> None:
         print(f"[ctx-health] alert send failed: {e}", file=sys.stderr)
 
 
-def _alert_text(a: AgentCtx, reg: dict) -> str:
+def _alert_text(a: AgentCtx, reg: dict, nudged: bool = False) -> str:
     label = reg.get("label", a.agent)
     if reg.get("self_compacts"):
-        # This body (Claude Code) AUTO-COMPACTS as its release valve — the harness
-        # summarizes its own context before it fogs, so there is nothing to /clear.
-        # The alert is INFORMATIONAL, not a reset alarm (op-caught 2026-07-21: the
-        # generic 'reset before it fogs' copy kept telling the operator to reset a
-        # body that heals itself).
-        return (f"ℹ️ {label} at ~{a.pct}% — no action needed, it auto-compacts.\n"
-                f"{label} is at ~{a.pct}% of its window ({a.ctx_tokens:,} tokens); Claude Code "
-                f"summarizes its own context before it fogs, so there's nothing to reset. "
-                f"Checkpoint a fresh handoff if it's mid-thread so continuity is clean through the compaction.")
+        # This body (Claude Code) AUTO-COMPACTS rather than fogging, so it needs no
+        # OPERATOR reset — that much was right, and it is why this branch exists
+        # (op-caught 2026-07-21: the generic 'reset before it fogs' copy kept telling
+        # him to reset a body that heals itself).
+        #
+        # But the copy went on to call compaction "no action needed", and the operator
+        # OVERRULED exactly that on 2026-08-15 (op#13418): "im worried about the auto
+        # compaction because its not lossless." Compaction is the WORSE outcome, not a
+        # clean valve — a body that hands off deliberately keeps what IT chose to keep;
+        # a compacted body keeps what a summarizer chose. This line told him to relax
+        # about the bodies that most need recycling, and it fired on the console all
+        # night while it rode from 400k to 822k (op#13512: "we gonna wait till you
+        # reach 100%?").
+        #
+        # Since 6eb9d01 there is a third option that did not exist when the old copy was
+        # written: the body can recycle ITSELF, on its own fresh handoff, with no
+        # operator button and no arm-sign. So the alert now names that as the action —
+        # addressed to the BODY, with the operator merely informed.
+        # no-fake-autopilot: say what actually happened. An alert claiming a nudge it did
+        # not send stands the operator down on a body that was never told.
+        tail = ("Nudged it on the bus to recycle itself; tell me if you'd rather it ride."
+                if nudged else
+                "I could NOT reach it on the bus to tell it — so nobody has. Say the word and I'll drive it by hand.")
+        return (f"ℹ️ {label} at ~{a.pct}% — it should recycle itself; compaction is the fallback, not the fix.\n"
+                f"{label} is at ~{a.pct}% of its window ({a.ctx_tokens:,} tokens). It won't fog — Claude Code "
+                f"auto-compacts — but compaction is lossy: it keeps what a summarizer picked, not what the body "
+                f"would have chosen. The better path is a deliberate recycle on its own fresh handoff "
+                f"(scripts/self_recycle.sh), which needs no button from you. {tail}")
     try:
         from nervous_system.alert_format import format_alert
     except Exception:
@@ -1414,7 +1483,12 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
         rose = cur_rank > prev_rank
         renag = cur_rank == _LEVEL_RANK["red"] and (now - prev_ts) >= _RENAG_MIN * 60
         if rose or renag:
-            _send_alert(_alert_text(a, reg))
+            # A self-compacting body has a better option than compaction and can take it
+            # itself — tell IT, then tell the operator what was told (trigger inversion,
+            # op#13520). A body that clears itself is not being acted upon, so this needs
+            # no arm-sign; it is a bus row it can decline.
+            nudged = _bus_nudge_self_recycle(a.agent, a.pct) if reg.get("self_compacts") else False
+            _send_alert(_alert_text(a, reg, nudged=nudged))
             state[a.agent] = {"level": a.level, "alerted_at": now}
             fired.append(a.agent)
         else:
