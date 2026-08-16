@@ -170,6 +170,7 @@ fi
 WIPE=$(( CC_BYTES + 80 ))
 [ "$WIPE" -lt 200 ] && WIPE=200
 [ "$WIPE" -gt 20000 ] && WIPE=20000
+CC_BEFORE_WIPE="$CC_FLAT"   # the wipe below is also the ghost probe — keep its input
 echo "[reset_cai] clearing composer (${WIPE} BSpace for ${CC_BYTES}B staged) + sending /clear ..."
 "$TM" send-keys -t "$PANE" -N "$WIPE" BSpace
 sleep 1
@@ -181,11 +182,28 @@ sleep 1
 # (CC_EMPTY!=1 AND not a ghost) still refuses (fail-safe: unknown -> refuse).
 composer_parse_pane "$TM" "$PANE"
 if [ "$CC_EMPTY" != 1 ] && [ "${CC_GHOST:-0}" != 1 ]; then
-  echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input." >&2
-  echo "       residue (${CC_N} lines): ${CC_FLAT}" >&2
-  echo "       cai is UNCHANGED and still holds its context. Clear the composer by hand" >&2
-  echo "       (attach: tmux attach -t $SESS) and re-run. Staged text was already preserved above." >&2
-  exit 6
+  # PROBE-CONFIRMED-EMPTY BYPASS (orch-console 2026-08-16) — ported from reset_lane.sh
+  # @37c6efb / reset_nazim.sh @1f3f2f2, where the rule is now 5-for-5 on wild ghosts. The wipe
+  # just done IS the probe, so read its answer instead of discarding it: $WIPE backspaces cannot
+  # leave real staged text byte-identical (ten characters of real input die in ten), so text that
+  # survives UNCHANGED was never in the composer — it is the dim autosuggestion/history ghost an
+  # idle pane paints into an EMPTY buffer. Until now that ghost could VETO this body's recycle,
+  # which is how the operator was blocked from clearing his own console at 82% on 2026-08-15.
+  #
+  # The guard is NOT weakened. Residue that CHANGED but is still non-empty is a real PARTIAL wipe
+  # — /clear would stage behind it and never run, the failure this check exists for — and still
+  # refuses, now printing BOTH strings so the next reader can see which case they are in. Only the
+  # byte-identical case is reclassified, and only after the text was preserved to the log above.
+  if [ "$CC_FLAT" = "$CC_BEFORE_WIPE" ]; then
+    echo "[reset_cai] GHOST: composer byte-identical after ${WIPE} BSpace ('${CC_FLAT}') — real text cannot survive that, so it is EMPTY underneath. Proceeding (probe-confirmed, no force needed)." >&2
+  else
+    echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input." >&2
+    echo "       residue (${CC_N} lines): ${CC_FLAT}" >&2
+    echo "       (CHANGED from pre-wipe '${CC_BEFORE_WIPE}' — so this is a PARTIAL wipe of REAL text, not a ghost)" >&2
+    echo "       cai is UNCHANGED and still holds its context. Clear the composer by hand" >&2
+    echo "       (attach: tmux attach -t $SESS) and re-run. Staged text was already preserved above." >&2
+    exit 6
+  fi
 fi
 [ "$CC_PARTIAL" != 'ok' ] && echo "WARNING: post-wipe capture was $CC_PARTIAL — treating composer as empty on weak evidence." >&2
 

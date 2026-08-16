@@ -114,6 +114,7 @@ fi
 
 # WIPE, sized to what was staged; verify empty BEFORE typing /clear into it.
 WIPE=$(( CC_BYTES + 80 )); [ "$WIPE" -lt 200 ] && WIPE=200; [ "$WIPE" -gt 20000 ] && WIPE=20000
+CC_BEFORE_WIPE="$CC_FLAT"   # the wipe below is also the ghost probe — keep its input
 echo "[reset_fleet_health] clearing composer (${WIPE} BSpace for ${CC_BYTES}B staged) + sending /clear ..."
 
 # FIRE-WINDOW HOLD (2026-08-16). Bootout-ing this body's bus-notify covers ONE of the
@@ -139,7 +140,21 @@ if [ "$CC_EMPTY" != 1 ] && [ "${CC_GHOST:-0}" != 1 ]; then
   # and /clear replaces the dim autosuggestion cleanly (proven: typing a char over it replaces it).
   # So RESET_FORCE=1 proceeds — LOUD, opt-in, non-lossy (text logged first). USE ONLY when verified
   # empty-underneath. Stage-1 durable fix = a probe-confirmed-empty ghost bypass (no manual force).
-  if [ "${RESET_FORCE:-0}" = 1 ]; then
+  # PROBE-CONFIRMED-EMPTY BYPASS (orch-console 2026-08-16) — ported from reset_lane.sh
+  # @37c6efb / reset_nazim.sh @1f3f2f2, where the rule is now 5-for-5 on wild ghosts. The wipe
+  # just done IS the probe, so read its answer instead of discarding it: $WIPE backspaces cannot
+  # leave real staged text byte-identical (ten characters of real input die in ten), so text that
+  # survives UNCHANGED was never in the composer — it is the dim autosuggestion/history ghost an
+  # idle pane paints into an EMPTY buffer. Until now that ghost could VETO this body's recycle,
+  # which is how the operator was blocked from clearing his own console at 82% on 2026-08-15.
+  #
+  # The guard is NOT weakened. Residue that CHANGED but is still non-empty is a real PARTIAL wipe
+  # — /clear would stage behind it and never run, the failure this check exists for — and still
+  # refuses, now printing BOTH strings so the next reader can see which case they are in. Only the
+  # byte-identical case is reclassified, and only after the text was preserved to the log above.
+  if [ "$CC_FLAT" = "$CC_BEFORE_WIPE" ]; then
+    echo "[reset_fleet_health] GHOST: composer byte-identical after ${WIPE} BSpace ('${CC_FLAT}') — real text cannot survive that, so it is EMPTY underneath. Proceeding (probe-confirmed, no force needed)." >&2
+  elif [ "${RESET_FORCE:-0}" = 1 ]; then
     echo "[reset_fleet_health] RESET_FORCE=1 — proceeding PAST verify-empty despite residue ('${CC_FLAT}'): treating as an invisible-submit history-ghost (empty-underneath); text preserved to the log above. op#18548." >&2
   else
     echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input (residue: ${CC_FLAT}). SRE UNCHANGED. (RESET_FORCE=1 to override IFF verified empty-underneath.)" >&2
