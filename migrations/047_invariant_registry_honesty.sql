@@ -65,7 +65,21 @@ SELECT
     CASE
         WHEN r.last_asserted_at IS NULL THEN NULL
         ELSE date_trunc('second', now() - r.last_asserted_at)
-    END AS since_last_assertion
+    END AS since_last_assertion,
+    -- CAI-RESP-986 follow-up (cai's optional refinement, taken): a SEQUENCING signal only.
+    -- The green/amber binary above is unchanged and stays strict -- both kinds below are
+    -- correctly NOT green. This exists so that whoever wires sinks can prioritise: an invariant
+    -- no human has ever attested is a colder start than one someone eyeballed recently.
+    -- Deliberately a SEPARATE column rather than new exercise_state values, so that any reader
+    -- matching exercise_state = 'UNEXERCISED' keeps working unchanged.
+    CASE
+        WHEN r.gate_status IS NOT NULL
+         AND upper(r.gate_status) IN ('MEASURED', 'AUTO', 'AUTOMATED')
+            THEN NULL  -- live measurer: not an unexercised-kind question at all
+        WHEN r.last_asserted_at IS NULL
+            THEN 'NEVER'
+        ELSE 'MANUALLY-ATTESTED'
+    END AS unexercised_kind
 FROM invariant_registry r;
 
 COMMENT ON VIEW invariant_registry_state IS
