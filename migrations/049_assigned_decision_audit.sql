@@ -142,6 +142,23 @@ CREATE TABLE IF NOT EXISTS decision_audits (
 CREATE INDEX IF NOT EXISTS decision_audits_decision_ref_idx ON decision_audits (decision_ref);
 CREATE INDEX IF NOT EXISTS decision_audits_open_idx ON decision_audits (decision_ref) WHERE completed_at IS NULL;
 
+-- RLS + grants, mirrored from the peer governance tables rather than invented. CREATE TABLE
+-- inherits Supabase's default privileges, which on this project hand `anon` SELECT and
+-- `authenticated` INSERT/UPDATE/DELETE -- so a freshly created governance table is BOTH readable
+-- by the anon PostgREST role and DELETABLE by any authenticated one. Every peer
+-- (strategic_decisions, lane_tasks) has RLS on, zero anon/authenticated grants, and exactly two
+-- policies. An audit record that a non-owner can quietly DELETE is not an audit record.
+-- Caught by comparing against the peers after apply, not by the migration having thought of it.
+REVOKE ALL ON decision_audits FROM anon, authenticated;
+GRANT SELECT ON decision_audits TO console_readonly;
+ALTER TABLE decision_audits ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS decision_audits_console_ro ON decision_audits;
+CREATE POLICY decision_audits_console_ro ON decision_audits FOR SELECT TO console_readonly USING (true);
+
+DROP POLICY IF EXISTS decision_audits_service_only ON decision_audits;
+CREATE POLICY decision_audits_service_only ON decision_audits TO service_role USING (true) WITH CHECK (true);
+
 COMMENT ON TABLE decision_audits IS
     'CAI-RESP-987: one row per (decision, named auditor). This is the thing that replaces waiting. '
     'An audit is ASSIGNED to a body, and it closes with a verdict that STATES WHAT WAS CHECKED. '
