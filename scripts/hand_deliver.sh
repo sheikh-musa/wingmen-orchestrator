@@ -26,7 +26,8 @@
 # Usage:  scripts/hand_deliver.sh <tmux-session> "<short message>"
 # Exit:   0 delivered · 3 composer not dim (may be REAL — refused) · 4 no fire_window hold
 #         5 old text survived (was REAL — backed out) · 6 composer not a prefix of msg (backed out)
-set -uo pipefailORCH_DIR="$HOME/wingmen/orchestrator"; cd "$ORCH_DIR"
+set -uo pipefail
+ORCH_DIR="$HOME/wingmen/orchestrator"; cd "$ORCH_DIR"
 . "$ORCH_DIR/scripts/lib/fire_window.sh"
 SESS="$1"; MSG="$2"
 PANE="$SESS"
