@@ -53,6 +53,7 @@ from dotenv import load_dotenv
 
 from nervous_system import triage  # PASSIVE CoS triage annotation (read-only; no routing)
 from scripts.lib import fire_window  # quiesce keystrokes during a recycle's fire window
+from scripts.lib import pane_busy  # footer-scoped busy check (one implementation)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
@@ -446,7 +447,10 @@ def pane_working(session: str) -> bool:
     try:
         r = subprocess.run([tmux, "capture-pane", "-t", f"={session}:0.0", "-p"],
                            check=True, capture_output=True, timeout=5, text=True)
-        return "esc to interrupt" in r.stdout.lower()
+        # LIVE FOOTER only. This said "footer" in the docstring and greped the whole pane, so a
+        # body with an old busy marker in its scrollback read busy forever (2026-08-16).
+        # Unreadable => idle, matching this function's existing fail-toward-delivery stance.
+        return pane_busy.is_busy_text(r.stdout, on_unreadable=False)
     except Exception:
         return False   # can't sense → treat as idle (nudge); fail toward delivery
 

@@ -18,6 +18,9 @@ import os
 import pathlib
 import re
 import subprocess
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from scripts.lib import pane_busy  # footer-scoped busy check (one implementation)
 import time
 
 import psycopg
@@ -345,12 +348,22 @@ def _verified_submit(session: str, signal: str) -> int:
 
 
 def _pane_busy(session: str) -> bool:
-    """True if the lane is mid-turn (don't interrupt; debounce will retry)."""
+    """True if the lane is mid-turn (don't interrupt; debounce will retry).
+
+    Reads the LIVE FOOTER via the shared helper. This used to grep the whole capture, so a
+    lane whose SCROLLBACK still held a busy footer from an earlier turn read as busy FOREVER
+    and its wake was debounced away every time — a silent delivery failure on the mechanism
+    the whole fleet uses to reach a lane, presenting as "the lane is busy" (found 2026-08-16
+    after the same bug stranded cai's own recycle).
+
+    Unreadable pane => NOT busy: this path DELIVERS, and a dropped nudge is recoverable
+    (the bus row is durable) while an undelivered one is invisible.
+    """
     try:
         pane = subprocess.check_output(
             ["tmux", "capture-pane", "-t", session, "-p"],
             text=True, stderr=subprocess.DEVNULL)
-        return "esc to interrupt" in pane
+        return pane_busy.is_busy_text(pane, on_unreadable=False)
     except Exception:
         return False
 

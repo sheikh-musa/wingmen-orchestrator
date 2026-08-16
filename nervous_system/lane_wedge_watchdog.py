@@ -100,6 +100,7 @@ load_dotenv(_ORCH_DIR / ".env")
 # reclaims on expiry) so the SRE and a reclaiming hub never both act on an agent.
 from scripts.lib import fleet_health_lease  # noqa: E402
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
+from scripts.lib import pane_busy  # noqa: E402  (footer-scoped busy check)
 # CAI-786 wake predicate — the ONE source of "would this row wake the recipient",
 # reused here so the hub's page gate applies the exact CAI-451 narrow floor.
 from nervous_system import agent_wake  # noqa: E402
@@ -622,9 +623,12 @@ def nudge_hub(n: int) -> "tuple[bool, str]":
     try:
         if tm("has-session", "-t", f"={sess}").returncode != 0:
             return False, f"no hub session '{sess}' on {HUB_SSH}"
-        cap = tm("capture-pane", "-t", f"={sess}:0.0", "-p").stdout.lower()
-        if "esc to interrupt" in cap:
-            return False, "hub busy (esc to interrupt) — not disturbing"
+        cap = tm("capture-pane", "-t", f"={sess}:0.0", "-p").stdout
+        # LIVE FOOTER only (2026-08-16): the whole-pane grep made a hub with an old busy footer
+        # in its scrollback permanently un-nudgeable. Unreadable => not busy (fail toward
+        # delivery); the wedge alert this carries is the safety signal.
+        if pane_busy.is_busy_text(cap, on_unreadable=False):
+            return False, "hub busy (live footer shows a turn in progress) — not disturbing"
         if fire_window.is_held(sess):
             return False, "recycle fire window held — not typing mid-clear"
         tm("send-keys", "-t", f"={sess}:0.0", "C-u")

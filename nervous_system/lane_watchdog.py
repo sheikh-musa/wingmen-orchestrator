@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 ORCH = Path(os.path.expanduser("~/wingmen/orchestrator"))
 sys.path.insert(0, str(ORCH))
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
+from scripts.lib import pane_busy  # noqa: E402  (footer-scoped busy check)
 STATE_FILE = ORCH / "logs" / "lane_watchdog_state.json"
 LOG_FILE = ORCH / "logs" / "lane_watchdog.log"
 
@@ -321,7 +322,9 @@ def main() -> int:
     if _escalation_count > 0 and (time.time() - last_orch_nudge) > ORCH_ESC_NUDGE_THROTTLE:
         try:
             orch_cap = capture("orch")
-            if orch_cap and "esc to interrupt" not in orch_cap.lower():   # orch idle
+            # LIVE FOOTER only (2026-08-16): the whole-pane grep meant a hub whose scrollback
+            # held an old busy footer never looked idle, so escalations were never nudged.
+            if orch_cap and not pane_busy.is_busy_text(orch_cap, on_unreadable=False):   # orch idle
                 if nudge_orch_escalations(_escalation_count):
                     new_state["_orch_esc_nudge_ts"] = time.time()
                     log(f"orch: {_escalation_count} escalation(s) this scan — nudged the 24/7 orch to action")
