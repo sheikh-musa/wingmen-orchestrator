@@ -69,9 +69,27 @@ cmd_up() {
   done < <(lane_dirs)
 }
 
+# WIND A LANE DOWN — the counterpart `up` never had. Until 2026-08-16 this substrate was
+# one-directional: lanes could be spun up and nothing anywhere ended one, which is how ten
+# irsyad-family lanes came to sit parked holding context nobody was reading. The doctrine
+# line calling the manual pen "interim until the autoscaler subsumes it" described code that
+# did not exist.
+#
+# The GATES ARE NOT HERE ON PURPOSE. They live in scripts/lib/lane_winddown.py, unit-tested
+# without a live tmux or DB, and the SRE's idle detector will call the SAME predicate — so a
+# lane can never be ended by one path under rules the other path would have refused. Ending a
+# session is harsher than a recycle (there is no boot afterwards; context that was only in
+# that session is gone), so every gate fails CLOSED: busy, unread bus rows, a stale/missing
+# handoff, real staged text, or an unreadable composer all refuse.
+cmd_down() {
+  local lane="${1:?usage: lanes.sh down <lane> [--kill]}"; shift || true
+  "$HOME/wingmen/orchestrator/.venv/bin/python3" "$HOME/wingmen/orchestrator/scripts/lib/lane_winddown.py" "$lane" "$@"
+}
+
 case "${1:-ls}" in
   ls) cmd_ls ;;
   up) cmd_up "${2:-}" ;;
+  down) shift; cmd_down "$@" ;;
   attach) tmux attach -t "${2:?usage: lanes.sh attach <lane>}" ;;
-  *) echo "usage: lanes.sh {ls|up [lane]|attach <lane>}" >&2; exit 2 ;;
+  *) echo "usage: lanes.sh {ls|up [lane]|down <lane> [--kill]|attach <lane>}" >&2; exit 2 ;;
 esac
