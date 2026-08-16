@@ -186,6 +186,7 @@ fi
 
 # WIPE, sized to what was staged; verify empty BEFORE typing /clear into it — a dirty
 # composer would make the /clear stage BEHIND the residue and never run.
+CC_BEFORE_WIPE="$CC_FLAT"
 WIPE=$(( CC_BYTES + 80 )); [ "$WIPE" -lt 200 ] && WIPE=200; [ "$WIPE" -gt 20000 ] && WIPE=20000
 echo "[reset_nazim] clearing composer (${WIPE} BSpace for ${CC_BYTES}B staged) + sending /clear ..."
 "$TM" send-keys -t "$PANE" -N "$WIPE" BSpace
@@ -202,10 +203,33 @@ if [ "$CC_EMPTY" != 1 ] && [ "${CC_GHOST:-0}" != 1 ]; then
   # cleanly. So RESET_FORCE=1 proceeds — LOUD, opt-in, non-lossy. USE ONLY when verified
   # empty-underneath (type a char over it -> it replaces cleanly). Stage-1 durable fix =
   # probe-confirmed-empty bypass (no manual force).
-  if [ "${RESET_FORCE:-0}" = 1 ]; then
+  # THE "Stage-1 durable fix = probe-confirmed-empty bypass (no manual force)" THIS COMMENT
+  # ASKED FOR, implemented (orch-console 2026-08-16; same rule as reset_lane.sh @37c6efb,
+  # proven live there and on four wild ghosts since).
+  #
+  # The wipe we just did IS the probe, so read its result instead of discarding it. $WIPE
+  # backspaces (>= staged length + 80, min 200) CANNOT leave real staged text byte-identical —
+  # ten characters of real input die in ten. So text that survives the wipe UNCHANGED was never
+  # in the composer: it is the dim autosuggestion/history ghost this block was written to
+  # tolerate, and it is exactly the class the comment above notes reads CC_EMPTY=0 AND
+  # CC_GHOST=0, which is why the classifier cannot catch it and RESET_FORCE existed as a manual
+  # stand-in. Byte-identical => proceed automatically; no human has to assert "verified
+  # empty-underneath" any more.
+  #
+  # This does NOT weaken the guard, and the distinction is the whole point: residue that CHANGED
+  # but is still non-empty is a real PARTIAL WIPE — /clear would stage behind it and never run,
+  # which is the failure this check exists for — so that still refuses. Only the byte-identical
+  # case is reclassified, and only after the text has already been preserved to the log above.
+  #
+  # WHY IT MATTERED ENOUGH TO FIX HERE: this block blocked the OPERATOR from clearing this body
+  # (op#13518, "cant clear you cos of the ghost text in your terminal") while it sat at 82%.
+  # A recycle path that a ghost can veto is not a recycle path.
+  if [ "$CC_FLAT" = "$CC_BEFORE_WIPE" ]; then
+    echo "[reset_nazim] GHOST: composer byte-identical after ${WIPE} BSpace ('${CC_FLAT}') — real text cannot survive that, so it is EMPTY underneath. Proceeding (probe-confirmed, no force needed)." >&2
+  elif [ "${RESET_FORCE:-0}" = 1 ]; then
     echo "[reset_nazim] RESET_FORCE=1 — proceeding PAST verify-empty despite residue ('${CC_FLAT}'): treating as an invisible-submit history-ghost (empty-underneath); text preserved to the log above. op#18548." >&2
   else
-    echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input (residue: ${CC_FLAT}). NAZIM UNCHANGED. (RESET_FORCE=1 to override IFF verified empty-underneath.)" >&2
+    echo "ERROR: composer NOT empty after wipe — refusing to send /clear into dirty input (residue: ${CC_FLAT}, CHANGED from '${CC_BEFORE_WIPE}' so this is a PARTIAL wipe of real text, not a ghost). NAZIM UNCHANGED. (RESET_FORCE=1 to override IFF verified empty-underneath.)" >&2
     exit 6
   fi
 fi
