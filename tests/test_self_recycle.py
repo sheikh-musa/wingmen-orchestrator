@@ -172,6 +172,28 @@ def test_it_holds_the_fire_window_before_waiting_not_only_inside_the_reset():
     assert hold_at < fire_at, "the hold must be taken before the reset is invoked, not after"
 
 
+def test_the_hold_is_kept_ACROSS_the_fire_not_released_just_before_it():
+    """cc-storefront, 2026-08-16 14:08Z: self_recycle logged "storefront is idle after 0s —
+    firing reset_lane", and reset_lane then refused with "'storefront' is BUSY — foreground turn
+    in progress". Both were telling the truth about different instants.
+
+    The wait loop released the fire-window hold and THEN invoked the reset. A wake landing in
+    that gap starts a turn, and the reset's own busy gate — correctly — refuses to clear a
+    working body. The hold exists precisely to stop a new turn starting while we act, so
+    dropping it one line before the act is the one place it must not be dropped.
+
+    Releasing was never necessary: reset_lane.sh TAKES the hold (fire_window_hold), it does not
+    refuse on an existing one, so there is no self-deadlock to avoid. The EXIT trap still
+    releases on every path.
+    """
+    fire_block = _SRC[_SRC.index("is idle after"):_SRC.index("env -u TMUX_PANE bash")]
+    assert not re.search(r"^\s*free\s*$", fire_block, re.M), (
+        "the fire-window hold must NOT be released before invoking the reset — that gap is "
+        "exactly where a wake starts the turn that makes the reset's busy gate refuse"
+    )
+    assert "trap free EXIT" in _SRC, "the hold must still be released on every exit path"
+
+
 def test_it_waits_for_idle_instead_of_firing_once_and_hoping():
     assert re.search(r"esc to interrupt", _SRC), (
         "the scheduled job must re-check the pane for the busy marker and wait, rather than "

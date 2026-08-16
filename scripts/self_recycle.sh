@@ -202,7 +202,15 @@ nohup bash -c '
     hold
     if ! pane_busy "$SESS"; then
       echo "[self_recycle] $SESS is idle after ${WAITED}s of waiting — firing $RST" >> "$LG"
-      free
+      # KEEP THE HOLD ACROSS THE FIRE. It used to be released here, one line before the reset,
+      # and that gap is where cc-storefront died on 2026-08-16: "idle after 0s — firing
+      # reset_lane" followed immediately by reset_lane refusing, "storefront is BUSY —
+      # foreground turn in progress". Both statements were true about different instants. A
+      # wake landed in the gap, started a turn, and the reset'"'"'s busy gate correctly refused to
+      # clear a working body. The hold exists to stop a new turn starting while we act, so the
+      # one place it must not be dropped is immediately before acting.
+      # Releasing was never needed: reset_lane.sh TAKES the hold itself and does not refuse on
+      # an existing one, so there is no self-deadlock to avoid. The EXIT trap still frees it.
       # A parameterized reset (reset_lane.sh) takes <session> "<boot>"; the singleton resets
       # hardcode their own pane and take nothing. Read the boot text at FIRE time from the file
       # so it never passes through this subshell'"'"'s string interpolation.
