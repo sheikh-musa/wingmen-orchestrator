@@ -65,15 +65,14 @@ fi
 CC_RAWCAP="$(tmux capture-pane -t "$SESSION" -p -e 2>/dev/null)"
 [ -n "$CC_RAWCAP" ] || CC_RAWCAP="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null)"
 composer_parse "$CC_RAWCAP"
-if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [ "${CC_N:-0}" -gt 0 ] 2>/dev/null; then
+# SELF-DIAGNOSING capture log (Nazim #23572 / CAI-978), now shared by BOTH the refuse and the
+# step-4 proceed-on-ghost paths: persist the RAW capture-pane -e bytes the verdict was made on
+# (dim/non-dim markers intact), the parser's verdict fields, CC_PROBE, and pane geometry — at
+# the instant of the verdict. $1 = a label (REFUSED / PROCEEDED-ghost / REFUSED-revert-fail).
+# This IS the "first ~10 wired firings" corpus Nazim reads before signing the promotion.
+_log_probe_capture() {
+  local label="$1" stamp capname capdir geom capnote
   mkdir -p "$LOGDIR" 2>/dev/null || true
-  # STEP-2 (Nazim #23572 / CAI-978): a refusal must SELF-DIAGNOSE. The old log recorded WHAT
-  # was seen but not WHAT IT LOOKED LIKE, so every refusal was un-diagnosable after the fact —
-  # which is how #23536 (a novel SGR-2 dim autosuggestion read as CC_N>0 real staged text) hid
-  # for a day behind ~89 refusals. So alongside the preserved text, persist the RAW capture-pane
-  # -e bytes (dim/non-dim markers intact), the verdict fields the parser produced, and the pane
-  # geometry — at the instant of the verdict. With ~89 refusals/day, the first wired firing
-  # self-repro's within the hour. This is ADDITIVE: the refuse decision and exit 3 are unchanged.
   stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   capname="${SESSION}-${stamp}.e.txt"
   capdir="$LOGDIR/lane_nudge_captures"
@@ -83,13 +82,71 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
   else
     capnote="raw=CAPTURE-FAILED"   # fail-LOUD, never a silent gap — the miss is visible in the log line
   fi
-  printf '%s lane_nudge[%s] REFUSED, preserved staged: %s | verdict: CC_N=%s CC_EMPTY=%s CC_PARTIAL=%s CC_GHOST=%s basis=%s geom=%s %s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" "$CC_FLAT" \
-    "${CC_N:-?}" "${CC_EMPTY:-?}" "${CC_PARTIAL:-?}" "${CC_GHOST:-?}" "${CC_PH_BASIS:-?}" "$geom" "$capnote" \
+  printf '%s lane_nudge[%s] %s: %s | verdict: CC_N=%s CC_EMPTY=%s CC_PARTIAL=%s CC_GHOST=%s basis=%s CC_PROBE=%s geom=%s %s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" "$label" "$CC_FLAT" \
+    "${CC_N:-?}" "${CC_EMPTY:-?}" "${CC_PARTIAL:-?}" "${CC_GHOST:-?}" "${CC_PH_BASIS:-?}" "${CC_PROBE:-}" "$geom" "$capnote" \
     >> "$LOGDIR/lane_nudge_preserved_input.log" 2>/dev/null || true
-  echo "lane_nudge: REFUSED — '$SESSION' composer holds REAL unsent text; clearing+retyping would clobber the lane's own staged step." >&2
-  echo "           Preserved verbatim to logs/lane_nudge_preserved_input.log (+ raw capture for diagnosis) — submit/escalate it by hand rather than nudging over it." >&2
-  exit 3
+}
+
+# Best-effort P1 escalation for a probe REVERT-FAIL (cond#2). The REFUSE (exit 3) happens
+# REGARDLESS of whether this lands — safety never depends on the DB being reachable.
+_probe_p1_escalate() {
+  local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
+  [ -n "${DATABASE_URL:-}" ] || return 0
+  "$py" - "$SESSION" "${CC_FLAT:-}" <<'PYEOF' 2>/dev/null || true
+import os, sys
+try:
+    import psycopg2
+    sess, flat = sys.argv[1], sys.argv[2]
+    c = psycopg2.connect(os.environ["DATABASE_URL"]); cur = c.cursor()
+    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+    cur.execute(
+        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response) "
+        "VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,true)",
+        (f"⚠ P1 lane_nudge PROBE REVERT-FAIL on {sess} — composer not restored byte-identical; refused",
+         f"The ghost-probe on '{sess}' typed its 1-byte sentinel but the BSpace did NOT restore the "
+         f"composer byte-identical (before CC_FLAT='{flat}'). A real staged step MAY be corrupted. "
+         f"lane_nudge REFUSED (did not clear+deliver). Inspect the pane."))
+    c.commit()
+except Exception:
+    pass
+PYEOF
+}
+
+if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [ "${CC_N:-0}" -gt 0 ] 2>/dev/null; then
+  # STEP-4 (Nazim promotion, coupled behind the pane_busy collapse b5d82ce). The composer READS
+  # as real staged text — but a dim AUTOSUGGESTION ghost parses identically (#23536), and at
+  # steady state ~11/20 lanes hold one, each REFUSED forever (#23884, the self-poisoning loop).
+  # Content can't tell them apart (the ghosts are plausible next steps) — only the MECHANICAL
+  # probe can: type a 1-byte sentinel and see whether it REPLACED an empty buffer (ghost) or
+  # APPENDED to real text (real). SAFE-FAILURE ASYMMETRY: every non-ghost verdict — real, unsure,
+  # busy, locked, revert-fail, or an unset CC_PROBE — degrades to today's REFUSE. The probe can
+  # only ADD deliveries on proven-empty composers; it can never clobber real staged work.
+  _probe_composer tmux "$SESSION"
+  case "${CC_PROBE:-}" in
+    ghost)
+      # Proven empty: the sentinel REPLACED the composer, so the dim text was a ghost, not content.
+      # PROCEED to clear+deliver; record the decision + the raw before-capture for the promotion read.
+      _log_probe_capture "PROCEEDED-ghost, cleared"
+      echo "lane_nudge: '$SESSION' composer held a dim GHOST (probe: replaced by sentinel) — proceeding to deliver." >&2
+      # fall through past this if-block to the delivery loop
+      ;;
+    revert-fail)
+      # cond#2: the BSpace did NOT restore the composer byte-identical — a real staged step may be
+      # corrupted. FAIL LOUD + escalate P1 + REFUSE. NEVER proceed.
+      _log_probe_capture "REFUSED-revert-fail, preserved staged"
+      _probe_p1_escalate
+      echo "lane_nudge: REVERT-FAIL on '$SESSION' — composer NOT restored byte-identical after the probe; REFUSING + escalated P1 (possible corruption of a real staged step)." >&2
+      exit 3
+      ;;
+    *)
+      # real | unsure | busy | locked | '' (probe error): preserve + refuse, exactly as before step-4.
+      _log_probe_capture "REFUSED, preserved staged"
+      echo "lane_nudge: REFUSED — '$SESSION' composer holds REAL unsent text (probe: ${CC_PROBE:-unknown}); clearing+retyping would clobber the lane's own staged step." >&2
+      echo "           Preserved verbatim to logs/lane_nudge_preserved_input.log (+ raw capture for diagnosis) — submit/escalate it by hand rather than nudging over it." >&2
+      exit 3
+      ;;
+  esac
 fi
 
 pane_working() {
