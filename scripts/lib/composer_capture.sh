@@ -378,9 +378,19 @@ _probe_revert_ok() {
 # could leave residue inside a REAL prompt if the TUI ever deletes by byte.
 GHOST_SENTINEL='~'
 _probe_composer() {   # $1 = tmux bin, $2 = pane
-  local TM="$1" PANE="$2"
+  local TM="$1" PANE="$2" before
   CC_PROBE=''
-  # Cond #1 + #4: the SHARED pane_is_busy, read FRESH here — never probe a busy pane.
+  # Cond #1: the SHARED pane_is_busy (never a narrow local check) — cheap top early-out.
+  if pane_is_busy "$TM" "$PANE"; then
+    CC_PROBE='busy'
+    return 0
+  fi
+  # Read `before` fresh — the composer content immediately preceding the sentinel.
+  composer_parse_pane "$TM" "$PANE"
+  before="$CC_FLAT"
+  # Cond #4 (field near-miss #22907): re-check busy on a FRESH capture IMMEDIATELY
+  # before the mutating step. A read even seconds old is stale; the gap is exactly
+  # where the lane goes busy, and a sentinel typed into an active turn is the harm.
   if pane_is_busy "$TM" "$PANE"; then
     CC_PROBE='busy'
     return 0

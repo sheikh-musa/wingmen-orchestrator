@@ -23,6 +23,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 LIB = REPO / "scripts" / "lib" / "composer_capture.sh"
+FIX = Path(__file__).resolve().parent / "fixtures" / "composer"
 
 # A tmux footer line that pane_is_busy keys on (foreground turn in progress).
 BUSY_FOOTER = "  esc to interrupt"
@@ -85,3 +86,16 @@ def test_busy_pane_refuses_without_typing(tmp_path):
     cc_probe, keylog, out = run_probe(tmp_path, captures=[busy_pane])
     assert cc_probe == "busy", f"expected verdict 'busy', got {cc_probe!r} (stderr: {out.stderr})"
     assert keylog == [], f"wrapper typed into a BUSY pane — keys sent: {keylog}"
+
+
+def test_pane_goes_busy_between_read_and_type_refuses(tmp_path):
+    # Cond #4 (Nazim's live near-miss #22907): the pane read IDLE, then went BUSY
+    # before the mutating step. The wrapper must re-check busy on a FRESH capture
+    # IMMEDIATELY before typing and refuse — never type the sentinel into the now-
+    # active turn. A wrapper that reads busy ONCE at the top and then acts on that
+    # stale read would type here; this test fails that design.
+    ghost = (FIX / "history_ghost.e.txt").read_text()   # idle pane, apparent staged text
+    busy = "transcript line\n❯ \n" + BUSY_FOOTER         # state flipped to busy
+    cc_probe, keylog, out = run_probe(tmp_path, captures=[ghost, ghost, busy])
+    assert cc_probe == "busy", f"expected 'busy' (late transition caught), got {cc_probe!r} (stderr: {out.stderr})"
+    assert keylog == [], f"wrapper typed after the pane went busy — keys sent: {keylog}"
