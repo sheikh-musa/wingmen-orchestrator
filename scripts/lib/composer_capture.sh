@@ -395,6 +395,18 @@ _probe_composer() {   # $1 = tmux bin, $2 = pane
     CC_PROBE='busy'
     return 0
   fi
+  # fire_window (0277d2c / #23290): a RECYCLE may own this pane right now — it is mid-wipe,
+  # typing /clear + boot. Never type a sentinel into that sequence. Consult the shared
+  # per-host lock (the same one every keystroke sender + reset takes). FAIL-OPEN: a missing/
+  # expired/unreadable lock reads as free (a skipped probe is cheap; the nudge is a durable
+  # bus row regardless). Keyed by the target SESSION (== PANE here).
+  local _fw_py _fw_lib
+  _fw_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fire_window.py"
+  _fw_py="${ORCH_DIR:-$HOME/wingmen/orchestrator}/.venv/bin/python3"; [ -x "$_fw_py" ] || _fw_py=python3
+  if [ -f "$_fw_lib" ] && "$_fw_py" "$_fw_lib" check "$PANE" >/dev/null 2>&1; then
+    CC_PROBE='locked'
+    return 0
+  fi
 }
 
 composer_parse() {

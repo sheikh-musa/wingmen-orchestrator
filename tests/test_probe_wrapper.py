@@ -17,7 +17,9 @@ never on the fake. The ghost-vs-real DECISION itself is _probe_verdict, already 
 and field-proven; here we prove the wrapper routes/guards it correctly. The wrapper is INERT
 (nothing calls it from lane_nudge.sh yet) until Nazim signs the promotion.
 """
+import os
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -29,7 +31,8 @@ FIX = Path(__file__).resolve().parent / "fixtures" / "composer"
 BUSY_FOOTER = "  esc to interrupt"
 
 
-def run_probe(tmpdir: Path, captures: list[str], pane: str = "testpane"):
+def run_probe(tmpdir: Path, captures: list[str], pane: str = "testpane",
+              fire_window_held: bool = False):
     """Run `_probe_composer FAKE_TMUX <pane>` with a scripted fake tmux.
 
     `captures` is the ordered list of texts the fake returns for successive
@@ -68,8 +71,19 @@ def run_probe(tmpdir: Path, captures: list[str], pane: str = "testpane"):
     """))
     fake.chmod(0o755)
 
+    # Isolate fire_window to a per-test dir so the wrapper's real check never touches the
+    # host locks; optionally take a real hold to simulate a recycle owning the pane.
+    fw_dir = tmpdir / "fire_window"
+    fw_dir.mkdir(exist_ok=True)
+    env = dict(os.environ, FIRE_WINDOW_DIR=str(fw_dir))
+    if fire_window_held:
+        subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "lib" / "fire_window.py"),
+             "hold", pane, "--ttl", "120", "--reason", "test recycle"],
+            env=env, check=True, capture_output=True)
+
     script = f'. "{LIB}"\n_probe_composer "{fake}" "{pane}"\necho "CC_PROBE=${{CC_PROBE:-UNSET}}"'
-    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
     cc_probe = None
     for line in out.stdout.splitlines():
         if line.startswith("CC_PROBE="):
@@ -99,3 +113,14 @@ def test_pane_goes_busy_between_read_and_type_refuses(tmp_path):
     cc_probe, keylog, out = run_probe(tmp_path, captures=[ghost, ghost, busy])
     assert cc_probe == "busy", f"expected 'busy' (late transition caught), got {cc_probe!r} (stderr: {out.stderr})"
     assert keylog == [], f"wrapper typed after the pane went busy — keys sent: {keylog}"
+
+
+def test_fire_window_held_refuses_without_typing(tmp_path):
+    # A recycle owns the pane (fire_window hold). Even at a clean idle, the wrapper must
+    # consult fire_window and REFUSE — never type into a pane a reset is mid-wiping
+    # (0277d2c / #23290). Verdict 'locked', no keystrokes.
+    ghost = (FIX / "history_ghost.e.txt").read_text()  # idle pane (passes the busy gates)
+    cc_probe, keylog, out = run_probe(tmp_path, captures=[ghost, ghost, ghost],
+                                      fire_window_held=True)
+    assert cc_probe == "locked", f"expected 'locked' (recycle owns pane), got {cc_probe!r} (stderr: {out.stderr})"
+    assert keylog == [], f"wrapper typed into a fire-window-held pane — keys sent: {keylog}"
