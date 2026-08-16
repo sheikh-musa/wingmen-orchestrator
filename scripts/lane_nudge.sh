@@ -78,26 +78,44 @@ _log_probe_capture() {
   capdir="$LOGDIR/lane_nudge_captures"
   geom="$(tmux display-message -p -t "$SESSION" '#{pane_width}x#{pane_height}' 2>/dev/null || echo '?x?')"
   if mkdir -p "$capdir" 2>/dev/null && printf '%s' "$CC_RAWCAP" > "$capdir/$capname" 2>/dev/null && [ -s "$capdir/$capname" ]; then
-    capnote="raw=lane_nudge_captures/$capname"
+    capnote="raw=lane_nudge_captures/$capname"; CC_LAST_CAPFILE="lane_nudge_captures/$capname"
   else
-    capnote="raw=CAPTURE-FAILED"   # fail-LOUD, never a silent gap — the miss is visible in the log line
+    capnote="raw=CAPTURE-FAILED"; CC_LAST_CAPFILE=""   # fail-LOUD, never a silent gap — the miss is visible in the log line
   fi
+  # Report the content the probe SAW (CC_PROBE_BEFORE), not CC_FLAT — the probe overwrites CC_FLAT
+  # with its after/after-revert captures, so on ghost/revert-fail CC_FLAT is the wrong (empty) text.
   printf '%s lane_nudge[%s] %s: %s | verdict: CC_N=%s CC_EMPTY=%s CC_PARTIAL=%s CC_GHOST=%s basis=%s CC_PROBE=%s geom=%s %s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" "$label" "$CC_FLAT" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" "$label" "${CC_PROBE_BEFORE:-$CC_FLAT}" \
     "${CC_N:-?}" "${CC_EMPTY:-?}" "${CC_PARTIAL:-?}" "${CC_GHOST:-?}" "${CC_PH_BASIS:-?}" "${CC_PROBE:-}" "$geom" "$capnote" \
     >> "$LOGDIR/lane_nudge_preserved_input.log" 2>/dev/null || true
 }
 
 # Best-effort P1 escalation for a probe REVERT-FAIL (cond#2). The REFUSE (exit 3) happens
 # REGARDLESS of whether this lands — safety never depends on the DB being reachable.
-_probe_p1_escalate() {
-  local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
+# Guards, each a real defect caught the first night this fired (#23895):
+#   * NO DATABASE_URL -> skip (also keeps tests from ever writing to the live bus).
+#   * pane GONE -> skip: a P1 saying "inspect the pane" is useless if the pane no longer exists
+#     (and a nonexistent session only reaches here via a fake tmux, i.e. a test).
+#   * DEDUPE on the rise (per session, 1h) -> a persistently-failing lane must not storm the bus
+#     (the 2026-07-08 nudge-storm lesson, #23290).
+# It CARRIES its evidence: the raw-capture pointer + the BEFORE content, so the reader can act.
+_probe_p1_escalate() {   # $1 = capfile pointer (may be empty), $2 = before-flat
+  local capref="${1:-}" beforeflat="${2:-}"
   [ -n "${DATABASE_URL:-}" ] || return 0
-  "$py" - "$SESSION" "${CC_FLAT:-}" <<'PYEOF' 2>/dev/null || true
+  tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  local dedupe="$LOGDIR/.probe_revertfail_${SESSION}.stamp"
+  if [ -f "$dedupe" ]; then
+    # skip if we escalated for this session within the last hour
+    find "$dedupe" -mmin -60 2>/dev/null | grep -q . && return 0
+  fi
+  mkdir -p "$LOGDIR" 2>/dev/null && : > "$dedupe" 2>/dev/null || true
+  local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
+  "$py" - "$SESSION" "$beforeflat" "$capref" <<'PYEOF' 2>/dev/null || true
 import os, sys
 try:
     import psycopg2
-    sess, flat = sys.argv[1], sys.argv[2]
+    sess, flat, capref = sys.argv[1], sys.argv[2], sys.argv[3]
+    ev = f"logs/{capref}" if capref else "NONE (capture also failed — inspect the live pane immediately)"
     c = psycopg2.connect(os.environ["DATABASE_URL"]); cur = c.cursor()
     cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
     cur.execute(
@@ -105,8 +123,9 @@ try:
         "VALUES ('cc-fleet-health','orch-console','blocker',%s,%s,true)",
         (f"⚠ P1 lane_nudge PROBE REVERT-FAIL on {sess} — composer not restored byte-identical; refused",
          f"The ghost-probe on '{sess}' typed its 1-byte sentinel but the BSpace did NOT restore the "
-         f"composer byte-identical (before CC_FLAT='{flat}'). A real staged step MAY be corrupted. "
-         f"lane_nudge REFUSED (did not clear+deliver). Inspect the pane."))
+         f"composer byte-identical. The content at risk (before the probe): '{flat}'. A real staged "
+         f"step MAY be corrupted; lane_nudge REFUSED (did not clear+deliver). "
+         f"Raw capture: {ev}. Inspect the pane '{sess}'."))
     c.commit()
 except Exception:
     pass
@@ -135,7 +154,7 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       # cond#2: the BSpace did NOT restore the composer byte-identical — a real staged step may be
       # corrupted. FAIL LOUD + escalate P1 + REFUSE. NEVER proceed.
       _log_probe_capture "REFUSED-revert-fail, preserved staged"
-      _probe_p1_escalate
+      _probe_p1_escalate "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
       echo "lane_nudge: REVERT-FAIL on '$SESSION' — composer NOT restored byte-identical after the probe; REFUSING + escalated P1 (possible corruption of a real staged step)." >&2
       exit 3
       ;;

@@ -388,6 +388,10 @@ _probe_composer() {   # $1 = tmux bin, $2 = pane
   # Read `before` fresh — the composer content immediately preceding the sentinel.
   composer_parse_pane "$TM" "$PANE"
   before="$CC_FLAT"
+  # Expose the BEFORE content to the caller: CC_FLAT gets overwritten by the after/after-revert
+  # captures below, so a caller that logs or escalates post-probe would otherwise report the
+  # wrong (post-revert, often empty) text. This is the content that was actually at risk.
+  CC_PROBE_BEFORE="$before"
   # Cond #4 (field near-miss #22907): re-check busy on a FRESH capture IMMEDIATELY
   # before the mutating step. A read even seconds old is stale; the gap is exactly
   # where the lane goes busy, and a sentinel typed into an active turn is the harm.

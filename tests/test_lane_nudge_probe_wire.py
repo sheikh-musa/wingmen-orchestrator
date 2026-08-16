@@ -74,9 +74,12 @@ def run_nudge(tmp_path: Path, after_pane: str, revert_pane: str = None):
     fake.chmod(0o755)
     logdir = tmp_path / "logs"
     fwdir = tmp_path / "fw"; fwdir.mkdir()
+    # DATABASE_URL="" is load-bearing: it makes _probe_p1_escalate a no-op so a test can NEVER
+    # write to the live bus. On 2026-08-16 this test fired 3 real P1 rows to orch-console because
+    # the run had DATABASE_URL in its env (#23895). A test must not be able to reach production.
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
                LANE_NUDGE_LOG_DIR=str(logdir), FIRE_WINDOW_DIR=str(fwdir),
-               BUSY_LIVENESS_S="0")
+               BUSY_LIVENESS_S="0", DATABASE_URL="")
     out = subprocess.run(["bash", str(NUDGE), "testlane", "a nudge message"],
                          capture_output=True, text=True, env=env)
     return out, logdir
@@ -111,3 +114,6 @@ def test_revert_fail_refuses_loudly_and_never_proceeds(tmp_path):
     assert "REVERT-FAIL" in out.stderr, f"revert-fail must fail LOUD on stderr: {out.stderr!r}"
     log = (logdir / "lane_nudge_preserved_input.log").read_text()
     assert "revert-fail" in log.lower(), f"revert-fail not recorded: {log!r}"
+    # the log must carry the BEFORE content (the text at risk), not the post-revert empty capture
+    # (#23895: the P1 reported CC_FLAT='' because CC_FLAT had been overwritten by the revert read).
+    assert _FLAT in log, f"revert-fail log must record the before-content at risk, got: {log!r}"
