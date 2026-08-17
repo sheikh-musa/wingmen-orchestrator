@@ -35,22 +35,22 @@ import sys
 # (the exact last-ten-feet failure).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.lib.a3_grant_detector import find_untrusted_grants
+from scripts.lib.a3_grant_detector import (
+    find_untrusted_grants, find_isolation_findings, classify_all)
 from scripts.lib.a3_invariant_sink import record_a3_run, PASS, FAIL, ERROR, SRE_AGENT_ID
 
 RESIDENCY_INVARIANT_REF = "RESIDENCY-1"
-SCOPE_DESC = "untrusted grants (relations/sequences/functions/schemas) outside schema shipforge"
+SCOPE_DESC = "(PUBLIC / SECURITY-DEFINER web-EXECUTE / web-role on RLS-off tables) outside schema shipforge [CAI-1024]"
 
 # Trusted-role whitelist for ceayj.
 #   * cai CAI-1019 core: postgres, service_role, console_readonly (shipforge_app EXCLUDED -> A1 folded).
 #   * Supabase PLATFORM-INFRA roles (confirmed against the ceayj dry-run, orch-console #24250):
 #     these legitimately span schemas and are not web-facing; NOT baking them made 297/2173 noise.
-#   * anon / authenticated are DELIBERATELY ABSENT and are the OPEN DESIGN QUESTION (#24250, cai's
-#     ruling): on Supabase, anon/authenticated grants on RLS-protected tables ARE the architecture
-#     (RLS is the control, not the grant), so treating every such grant as a breach fails A3 forever
-#     (81% by-design noise). The real isolation breaches are narrower — PUBLIC, SECURITY DEFINER
-#     functions with web-EXECUTE (they bypass RLS), and grants on RLS-DISABLED tables. Do NOT add
-#     anon/authenticated here to 'make it pass' — that guts the check; await cai's scope ruling.
+#   * anon / authenticated are DELIBERATELY ABSENT — and that is now CORRECT by cai CAI-RESP-1024:
+#     they are NOT whitelisted (so every anon/auth grant is EVALUATED), but the CLASSIFIER
+#     (classify_finding) tiers them — FAIL only when RLS does not cover them (RLS off / no policy),
+#     INFO on RLS-protected tables (the architecture). Whitelisting them would GUT the check; the
+#     classifier is what keeps A3 meaningful AND passable on a correct DB. Do NOT add them here.
 DEFAULT_TRUSTED = [
     "postgres", "service_role", "console_readonly",
     "dashboard_user", "pgbouncer", "authenticator",
@@ -74,8 +74,8 @@ def decide_outcome(findings_count: int, negcontrol_count: int):
         return ERROR, ("D4 negative control returned 0 — the detector's positive path is broken; "
                        "a 'clean' result cannot be trusted (fail-closed)")
     if findings_count > 0:
-        return FAIL, f"{findings_count} untrusted grant(s) found {SCOPE_DESC}"
-    return PASS, f"no untrusted grants found {SCOPE_DESC} (negative control fired: {negcontrol_count})"
+        return FAIL, f"{findings_count} FAIL-tier isolation breach(es) {SCOPE_DESC}"
+    return PASS, f"no FAIL-tier isolation breach {SCOPE_DESC} (negative control fired: {negcontrol_count})"
 
 
 def run_a3_check(*, ceayj_dsn: str, substrate_dsn: str,
@@ -90,25 +90,34 @@ def run_a3_check(*, ceayj_dsn: str, substrate_dsn: str,
     excl = list(exclude_schemas or DEFAULT_EXCLUDE)
     negexcl = list(negcontrol_exclude or NEGCONTROL_EXCLUDE)
 
-    findings = []
+    buckets = {"fail": [], "info": []}
     negcontrol_count = None
     try:
         with psycopg.connect(ceayj_dsn) as cc, cc.cursor() as ccur:
-            findings = find_untrusted_grants(ccur, trusted_roles=trusted, exclude_schemas=excl)
-            negcontrol = find_untrusted_grants(ccur, trusted_roles=trusted, exclude_schemas=negexcl)
-            negcontrol_count = len(negcontrol)
-        outcome, detail = decide_outcome(len(findings), negcontrol_count)
-        finding_count = len(findings) if outcome == FAIL else 0
+            findings = find_isolation_findings(ccur, trusted_roles=trusted, exclude_schemas=excl)
+            buckets = classify_all(findings)
+            # D4: the negative control just needs 'does the detector find grants' in a dirty scope.
+            negcontrol_count = len(find_untrusted_grants(ccur, trusted_roles=trusted, exclude_schemas=negexcl))
+        # CAI-1024: RESIDENCY-1 FAILs iff the FAIL tier is non-empty; INFO is reported, not-failing.
+        outcome, detail = decide_outcome(len(buckets["fail"]), negcontrol_count)
+        finding_count = len(buckets["fail"]) if outcome == FAIL else 0
         evidence = {"detail": detail, "negcontrol_count": negcontrol_count,
                     "trusted": trusted, "excluded": excl,
-                    "findings": findings[:_EVIDENCE_CAP],
-                    "findings_truncated": len(findings) > _EVIDENCE_CAP}
+                    "fail_count": len(buckets["fail"]), "info_count": len(buckets["info"]),
+                    "fail": buckets["fail"][:_EVIDENCE_CAP],
+                    "fail_truncated": len(buckets["fail"]) > _EVIDENCE_CAP,
+                    # never-green-on-absence-of-signal, applied to A3 itself (CAI-1024): a PASS here
+                    # means no FAIL-tier breach — it does NOT certify RLS POLICY correctness (a
+                    # permissive USING(true) is a named fast-follow, unchecked).
+                    "info_caveat": "INFO tier + policy-correctness (permissive USING(true) on money/PII) is a named FAST-FOLLOW, not checked",
+                    "info_sample": buckets["info"][:20]}
     except Exception as e:  # D6 fail-closed: could-not-measure is ERROR, never a green
         outcome, detail, finding_count = ERROR, f"could not measure ceayj: {e!r}", 0
         evidence = {"detail": detail, "error": repr(e), "negcontrol_count": negcontrol_count}
 
-    summary = {"outcome": outcome, "detail": evidence["detail"],
-               "finding_count": finding_count, "negcontrol_count": negcontrol_count}
+    summary = {"outcome": outcome, "detail": evidence["detail"], "finding_count": finding_count,
+               "fail_count": len(buckets["fail"]), "info_count": len(buckets["info"]),
+               "negcontrol_count": negcontrol_count}
     if dry_run:
         summary["dry_run"] = True
         return summary

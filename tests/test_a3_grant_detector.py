@@ -105,3 +105,35 @@ def test_negative_control_same_fn_finds_known_untrusted_grants():
         conn.rollback()
     assert len(rows) > 0, "negative control returned 0 — the detector's positive path is broken (fail-closed)"
     assert any(r["grantee"] == "PUBLIC" for r in rows), "expected PUBLIC grants surfaced in pg_catalog"
+
+
+def test_isolation_findings_classify_end_to_end():
+    # Enriched query + classifier end-to-end (CAI-1024): a SECDEF function anon-EXECUTE and an
+    # RLS-off table with an anon grant land in FAIL; an RLS-on+policied table with an anon grant
+    # lands in INFO. Rolled back.
+    from scripts.lib.a3_grant_detector import find_isolation_findings, classify_all
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA a3test")
+        # (a) SECDEF function, anon EXECUTE (default proacl = PUBLIC EXECUTE; also grant anon explicitly)
+        cur.execute("CREATE FUNCTION a3test.sd() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'")
+        cur.execute("REVOKE EXECUTE ON FUNCTION a3test.sd() FROM PUBLIC")
+        cur.execute("GRANT EXECUTE ON FUNCTION a3test.sd() TO authenticated")
+        # (b) RLS-OFF table with an anon grant -> FAIL (grant without the control)
+        cur.execute("CREATE TABLE a3test.open_t (x int)")
+        cur.execute("GRANT SELECT ON a3test.open_t TO anon")
+        # (c) RLS-ON + policy table with an anon grant -> INFO (the architecture)
+        cur.execute("CREATE TABLE a3test.rls_t (x int)")
+        cur.execute("ALTER TABLE a3test.rls_t ENABLE ROW LEVEL SECURITY")
+        cur.execute("CREATE POLICY p ON a3test.rls_t FOR SELECT TO anon USING (true)")
+        cur.execute("GRANT SELECT ON a3test.rls_t TO anon")
+
+        findings = find_isolation_findings(cur, trusted_roles=TRUSTED, exclude_schemas=SYS_EXCLUDE)
+        buckets = classify_all(findings)
+        conn.rollback()
+
+    fail_objs = {(f["object"], f["grantee"]) for f in buckets["fail"]}
+    info_objs = {(f["object"], f["grantee"]) for f in buckets["info"]}
+    assert ("sd", "authenticated") in fail_objs, f"SECDEF anon-EXECUTE must FAIL; fail={fail_objs}"
+    assert ("open_t", "anon") in fail_objs, f"RLS-off table anon grant must FAIL; fail={fail_objs}"
+    assert ("rls_t", "anon") in info_objs, f"RLS-on+policy table anon grant must be INFO; info={info_objs}"
+    assert ("rls_t", "anon") not in fail_objs, "RLS-protected table must NOT fail (the 81% architecture)"
