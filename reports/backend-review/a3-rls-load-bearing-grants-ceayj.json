@@ -1,0 +1,2386 @@
+{
+ "generated_at_utc": "2026-08-17T04:19:38+00:00",
+ "generated_by": "orch-console (holds IHSANOS_PROD_DATABASE_URL)",
+ "tenant": {
+  "name": "ihsanos multi-tenant DB (money tenant)",
+  "project_ref": "ceayjeamtmcyzzvqflus"
+ },
+ "method": "read-only session against the LIVE database; pg_proc/pg_policies catalog, never a migration file",
+ "purpose": "Evidence for the A3 classifier refinement (cc-fleet-health's pen): a PUBLIC/anon EXECUTE grant that RLS DEPENDS ON is not the same defect as a sloppy grant.",
+ "rule_under_test": "Reclassify a PUBLIC/anon-EXECUTE SECDEF fn out of FAIL only if BOTH hold: (1) it is referenced in an RLS policy expression, AND (2) it is caller-scoped (derives from auth.uid(), returns empty for anon). Condition (1) alone is NOT sufficient.",
+ "caveats": [
+  "policy_refs uses a LIKE substring match on proname; distinctive here, but tighten (word-boundary regex or pg_depend) if this becomes a standing classifier.",
+  "Condition (2) rests on at-source reads of each function body \u2014 see secdef-12-caller-vs-target-assessment.md.",
+  "A verification is true at an instant: this reflects the catalog at generated_at_utc."
+ ],
+ "result_summary": {
+  "total_anon_or_public_execute_secdef": 11,
+  "rls_load_bearing": 8,
+  "not_rls_referenced": 3,
+  "partition": "clean \u2014 the RLS-load-bearing set is exactly the 8 auth_user_*; the unreferenced set is exactly donation_category_in_use + the 2 trigger fns"
+ },
+ "functions": [
+  {
+   "proname": "auth_user_org_ids",
+   "sig": "auth_user_org_ids()",
+   "rettype": "uuid",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 155,
+   "policy_list": [
+    {
+     "table": "storefront_notifications",
+     "policy": "Org admins can view own-org notifications",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "org_admin full access on sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "parent select sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "teacher select sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "persons",
+     "policy": "Admins and cashiers can insert persons",
+     "roles": "{public}"
+    },
+    {
+     "table": "persons",
+     "policy": "Admins can update persons",
+     "roles": "{public}"
+    },
+    {
+     "table": "persons",
+     "policy": "Persons visible to staff, self, own-children and students",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_order_items",
+     "policy": "Admin/cashier can view order items",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Admin/cashier can manage variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Admin/cashier can update variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Public active; admin sees own soft-deleted variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Admin/cashier can manage modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Admin/cashier can update modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Public active; admin sees own soft-deleted modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_coupons",
+     "policy": "Admin can manage coupons",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_coupons",
+     "policy": "Admin can update coupons",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_time_slots",
+     "policy": "Admin can manage time slots",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_time_slots",
+     "policy": "Admin can update time slots",
+     "roles": "{public}"
+    },
+    {
+     "table": "audit_log",
+     "policy": "Admins can read audit log",
+     "roles": "{public}"
+    },
+    {
+     "table": "audit_log",
+     "policy": "Admins, cashiers and preparers can insert audit entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "profiles",
+     "policy": "Users can read profiles of org members",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_members",
+     "policy": "Admins can insert org members",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_members",
+     "policy": "Admins can update org members",
+     "roles": "{public}"
+    },
+    {
+     "table": "person_roles",
+     "policy": "Admins and cashiers can insert person roles",
+     "roles": "{public}"
+    },
+    {
+     "table": "person_roles",
+     "policy": "Admins can update person roles",
+     "roles": "{public}"
+    },
+    {
+     "table": "person_roles",
+     "policy": "Staff see non-beneficiary roles; admins see all",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_categories",
+     "policy": "Admins or category managers can insert categories",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_categories",
+     "policy": "Admins or category managers can update categories",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_categories",
+     "policy": "Users can see categories in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "organizations_admin_settings",
+     "policy": "oas_admin_select",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_batches",
+     "policy": "Admins can manage batches",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_sessions",
+     "policy": "Admins and cashiers can close sessions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_sessions",
+     "policy": "Admins and cashiers can open sessions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transaction_items",
+     "policy": "Admins and cashiers can insert transaction items",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_inventory",
+     "policy": "Admins and cashiers can manage inventory",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_inventory",
+     "policy": "Admins and cashiers can update inventory",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transactions",
+     "policy": "Admins and cashiers can create transactions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transactions",
+     "policy": "Admins can update transactions (void)",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR admin/hr can insert employees",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR admin/hr can update employees",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR data visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Admin can manage payroll runs",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Admin can update payroll runs",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Payroll runs visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Admin can manage payslips",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Admin can update payslips",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Payslips visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Admin/hr can update claims",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Claims visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Employees can submit claims",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Admin/hr can update leaves",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Employees can apply leaves",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Leaves visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Admin/hr can log attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Admin/hr can update attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Attendance visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Admin can insert invoicing customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Admin can update invoicing customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Invoicing customers visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Admin can insert quotations",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Admin can update quotations",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Quotations visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Admin can insert line items",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Admin can update line items",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Line items visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_payments",
+     "policy": "Admin can insert payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_payments",
+     "policy": "Payments visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Admin can insert time entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Admin can update time entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Time entries visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Admin can insert recurring templates",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Admin can update recurring templates",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Recurring templates visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_classes",
+     "policy": "org_admin full access on sch_classes",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_classes",
+     "policy": "teacher select sch_classes",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can delete permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can manage permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can read permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can update permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_products",
+     "policy": "Admins can insert products",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_products",
+     "policy": "Admins can update products",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Org admins can insert delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Org admins can update delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Public active; admin sees own soft-deleted delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Admin can insert invoices",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Admin can update invoices",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Invoices visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_students",
+     "policy": "org_admin full access on sch_students",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_students",
+     "policy": "teacher select sch_students",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_class_subjects",
+     "policy": "org_admin full access on sch_class_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_class_subjects",
+     "policy": "teacher select sch_class_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_student_parents",
+     "policy": "org_admin full access on sch_student_parents",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_student_parents",
+     "policy": "teacher select sch_student_parents",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "org_admin full access on sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher insert sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher select sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher update sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "org_admin full access on sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher insert sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher select sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher update sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_fees",
+     "policy": "org_admin full access on sch_fees",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_fees",
+     "policy": "teacher select sch_fees",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_timetable",
+     "policy": "org_admin full access on sch_timetable",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_timetable",
+     "policy": "teacher select sch_timetable",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_orders",
+     "policy": "Admin/cashier can update orders",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_orders",
+     "policy": "Admin/cashier can view orders",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_animals",
+     "policy": "org_admin full access on qbn_animals",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_suppliers",
+     "policy": "org_admin full access on qbn_suppliers",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_niyyah",
+     "policy": "org_admin full access on qbn_niyyah",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_milestones",
+     "policy": "org_admin full access on qbn_milestones",
+     "roles": "{public}"
+    },
+    {
+     "table": "outlets",
+     "policy": "Org admins can manage outlets",
+     "roles": "{public}"
+    },
+    {
+     "table": "outlets",
+     "policy": "Org members can see their outlets",
+     "roles": "{public}"
+    },
+    {
+     "table": "outlet_sessions",
+     "policy": "Org admins manage sessions for their outlets",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_suppliers",
+     "policy": "Org admins manage suppliers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_supplier_payments",
+     "policy": "Org admins can void their supplier payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_supplier_payments",
+     "policy": "Org admins record supplier payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_supplier_payments",
+     "policy": "Org admins see their supplier payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_bookings",
+     "policy": "org_admin full access on qbn_bookings",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_tawkeel_acknowledgments",
+     "policy": "org_admin can insert tawkeel acknowledgments",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_tawkeel_acknowledgments",
+     "policy": "org_admin can read tawkeel acknowledgments",
+     "roles": "{public}"
+    },
+    {
+     "table": "client_contracts",
+     "policy": "client_contracts_org_admin_read",
+     "roles": "{public}"
+    },
+    {
+     "table": "organization_fee_overrides",
+     "policy": "fee_overrides_org_admin_read",
+     "roles": "{public}"
+    },
+    {
+     "table": "campaigns",
+     "policy": "campaigns: members see own org",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_products",
+     "policy": "donation_products: members see own org",
+     "roles": "{public}"
+    },
+    {
+     "table": "donor_tier",
+     "policy": "donor_tier: members see own org",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_customers",
+     "policy": "Org admins can view own-org storefront customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "donations",
+     "policy": "Admins and cashiers can create donations",
+     "roles": "{public}"
+    },
+    {
+     "table": "donations",
+     "policy": "Admins can update donations",
+     "roles": "{public}"
+    },
+    {
+     "table": "donations",
+     "policy": "Staff can see donations in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_keyword_mappings",
+     "policy": "Admins can insert keyword mappings",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_keyword_mappings",
+     "policy": "Admins can update keyword mappings",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_keyword_mappings",
+     "policy": "Org members can see keyword mappings",
+     "roles": "{public}"
+    },
+    {
+     "table": "parent_consents",
+     "policy": "Parent reads own consent; admin reads org for audit",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_funnel_events",
+     "policy": "Org admins can view own-org funnel events",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_weekly_reports",
+     "policy": "Admins can manage weekly reports",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_weekly_reports",
+     "policy": "Preparer can create draft weekly reports",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_weekly_reports",
+     "policy": "Preparer can sign draft weekly reports",
+     "roles": "{public}"
+    },
+    {
+     "table": "receipts",
+     "policy": "Admins can void receipts",
+     "roles": "{public}"
+    },
+    {
+     "table": "receipts",
+     "policy": "Admins cashiers and granted preparers can create receipts",
+     "roles": "{public}"
+    },
+    {
+     "table": "organizations",
+     "policy": "Users can see their orgs",
+     "roles": "{public}"
+    },
+    {
+     "table": "organization_location",
+     "policy": "Org admins manage their own location row",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_tins",
+     "policy": "Cashier admin preparer can insert kk tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_tins",
+     "policy": "Cashier admin preparer can update kk tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_umum_tins",
+     "policy": "Cashier admin preparer can insert umum tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_umum_tins",
+     "policy": "Cashier admin preparer can update umum tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_tin_missing_reports",
+     "policy": "missing insert staff",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_tin_missing_reports",
+     "policy": "missing select org members",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_tin_missing_reports",
+     "policy": "missing update reported only",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs insert",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs select",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs update",
+     "roles": "{public}"
+    },
+    {
+     "table": "go_live_approvals",
+     "policy": "Go-live approvals visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_coin_deposits",
+     "policy": "Admins can manage coin deposits",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_coin_deposits",
+     "policy": "Org members can see coin deposits in their org",
+     "roles": "{public}"
+    }
+   ]
+  },
+  {
+   "proname": "auth_user_org_ids_with_role",
+   "sig": "auth_user_org_ids_with_role(text)",
+   "rettype": "uuid",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 149,
+   "policy_list": [
+    {
+     "table": "storefront_notifications",
+     "policy": "Org admins can view own-org notifications",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "org_admin full access on sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "parent select sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "teacher select sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "persons",
+     "policy": "Admins and cashiers can insert persons",
+     "roles": "{public}"
+    },
+    {
+     "table": "persons",
+     "policy": "Admins can update persons",
+     "roles": "{public}"
+    },
+    {
+     "table": "persons",
+     "policy": "Persons visible to staff, self, own-children and students",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_order_items",
+     "policy": "Admin/cashier can view order items",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Admin/cashier can manage variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Admin/cashier can update variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Public active; admin sees own soft-deleted variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Admin/cashier can manage modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Admin/cashier can update modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Public active; admin sees own soft-deleted modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_coupons",
+     "policy": "Admin can manage coupons",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_coupons",
+     "policy": "Admin can update coupons",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_time_slots",
+     "policy": "Admin can manage time slots",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_time_slots",
+     "policy": "Admin can update time slots",
+     "roles": "{public}"
+    },
+    {
+     "table": "audit_log",
+     "policy": "Admins can read audit log",
+     "roles": "{public}"
+    },
+    {
+     "table": "audit_log",
+     "policy": "Admins, cashiers and preparers can insert audit entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_members",
+     "policy": "Admins can insert org members",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_members",
+     "policy": "Admins can update org members",
+     "roles": "{public}"
+    },
+    {
+     "table": "person_roles",
+     "policy": "Admins and cashiers can insert person roles",
+     "roles": "{public}"
+    },
+    {
+     "table": "person_roles",
+     "policy": "Admins can update person roles",
+     "roles": "{public}"
+    },
+    {
+     "table": "person_roles",
+     "policy": "Staff see non-beneficiary roles; admins see all",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_categories",
+     "policy": "Admins or category managers can insert categories",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_categories",
+     "policy": "Admins or category managers can update categories",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_categories",
+     "policy": "Users can see categories in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "organizations_admin_settings",
+     "policy": "oas_admin_select",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_batches",
+     "policy": "Admins can manage batches",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_sessions",
+     "policy": "Admins and cashiers can close sessions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_sessions",
+     "policy": "Admins and cashiers can open sessions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transaction_items",
+     "policy": "Admins and cashiers can insert transaction items",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_inventory",
+     "policy": "Admins and cashiers can manage inventory",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_inventory",
+     "policy": "Admins and cashiers can update inventory",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transactions",
+     "policy": "Admins and cashiers can create transactions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transactions",
+     "policy": "Admins can update transactions (void)",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR admin/hr can insert employees",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR admin/hr can update employees",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR data visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Admin can manage payroll runs",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Admin can update payroll runs",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Payroll runs visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Admin can manage payslips",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Admin can update payslips",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Payslips visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Admin/hr can update claims",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Claims visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Admin/hr can update leaves",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Leaves visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Admin/hr can log attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Admin/hr can update attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Attendance visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Admin can insert invoicing customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Admin can update invoicing customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Invoicing customers visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Admin can insert quotations",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Admin can update quotations",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Quotations visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Admin can insert line items",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Admin can update line items",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Line items visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_payments",
+     "policy": "Admin can insert payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_payments",
+     "policy": "Payments visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Admin can insert time entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Admin can update time entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Time entries visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Admin can insert recurring templates",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Admin can update recurring templates",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Recurring templates visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_classes",
+     "policy": "org_admin full access on sch_classes",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_classes",
+     "policy": "teacher select sch_classes",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can delete permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can manage permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can update permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_products",
+     "policy": "Admins can insert products",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_products",
+     "policy": "Admins can update products",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Org admins can insert delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Org admins can update delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Public active; admin sees own soft-deleted delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Admin can insert invoices",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Admin can update invoices",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Invoices visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_students",
+     "policy": "org_admin full access on sch_students",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_students",
+     "policy": "teacher select sch_students",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_class_subjects",
+     "policy": "org_admin full access on sch_class_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_class_subjects",
+     "policy": "teacher select sch_class_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_student_parents",
+     "policy": "org_admin full access on sch_student_parents",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_student_parents",
+     "policy": "teacher select sch_student_parents",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "org_admin full access on sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher insert sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher select sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher update sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "org_admin full access on sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher insert sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher select sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher update sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_fees",
+     "policy": "org_admin full access on sch_fees",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_fees",
+     "policy": "teacher select sch_fees",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_timetable",
+     "policy": "org_admin full access on sch_timetable",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_timetable",
+     "policy": "teacher select sch_timetable",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_orders",
+     "policy": "Admin/cashier can update orders",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_orders",
+     "policy": "Admin/cashier can view orders",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_animals",
+     "policy": "org_admin full access on qbn_animals",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_suppliers",
+     "policy": "org_admin full access on qbn_suppliers",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_niyyah",
+     "policy": "org_admin full access on qbn_niyyah",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_milestones",
+     "policy": "org_admin full access on qbn_milestones",
+     "roles": "{public}"
+    },
+    {
+     "table": "outlets",
+     "policy": "Org admins can manage outlets",
+     "roles": "{public}"
+    },
+    {
+     "table": "outlet_sessions",
+     "policy": "Org admins manage sessions for their outlets",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_suppliers",
+     "policy": "Org admins manage suppliers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_supplier_payments",
+     "policy": "Org admins can void their supplier payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_supplier_payments",
+     "policy": "Org admins record supplier payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_supplier_payments",
+     "policy": "Org admins see their supplier payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_bookings",
+     "policy": "org_admin full access on qbn_bookings",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_tawkeel_acknowledgments",
+     "policy": "org_admin can insert tawkeel acknowledgments",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_tawkeel_acknowledgments",
+     "policy": "org_admin can read tawkeel acknowledgments",
+     "roles": "{public}"
+    },
+    {
+     "table": "client_contracts",
+     "policy": "client_contracts_org_admin_read",
+     "roles": "{public}"
+    },
+    {
+     "table": "organization_fee_overrides",
+     "policy": "fee_overrides_org_admin_read",
+     "roles": "{public}"
+    },
+    {
+     "table": "campaigns",
+     "policy": "campaigns: members see own org",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_products",
+     "policy": "donation_products: members see own org",
+     "roles": "{public}"
+    },
+    {
+     "table": "donor_tier",
+     "policy": "donor_tier: members see own org",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_customers",
+     "policy": "Org admins can view own-org storefront customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "donations",
+     "policy": "Admins and cashiers can create donations",
+     "roles": "{public}"
+    },
+    {
+     "table": "donations",
+     "policy": "Admins can update donations",
+     "roles": "{public}"
+    },
+    {
+     "table": "donations",
+     "policy": "Staff can see donations in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_keyword_mappings",
+     "policy": "Admins can insert keyword mappings",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_keyword_mappings",
+     "policy": "Admins can update keyword mappings",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_keyword_mappings",
+     "policy": "Org members can see keyword mappings",
+     "roles": "{public}"
+    },
+    {
+     "table": "parent_consents",
+     "policy": "Parent reads own consent; admin reads org for audit",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_funnel_events",
+     "policy": "Org admins can view own-org funnel events",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_weekly_reports",
+     "policy": "Admins can manage weekly reports",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_weekly_reports",
+     "policy": "Preparer can create draft weekly reports",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_weekly_reports",
+     "policy": "Preparer can sign draft weekly reports",
+     "roles": "{public}"
+    },
+    {
+     "table": "receipts",
+     "policy": "Admins can void receipts",
+     "roles": "{public}"
+    },
+    {
+     "table": "receipts",
+     "policy": "Admins cashiers and granted preparers can create receipts",
+     "roles": "{public}"
+    },
+    {
+     "table": "organizations",
+     "policy": "Users can see their orgs",
+     "roles": "{public}"
+    },
+    {
+     "table": "organization_location",
+     "policy": "Org admins manage their own location row",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_tins",
+     "policy": "Cashier admin preparer can insert kk tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_tins",
+     "policy": "Cashier admin preparer can update kk tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_umum_tins",
+     "policy": "Cashier admin preparer can insert umum tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_umum_tins",
+     "policy": "Cashier admin preparer can update umum tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_tin_missing_reports",
+     "policy": "missing insert staff",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_tin_missing_reports",
+     "policy": "missing select org members",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_tin_missing_reports",
+     "policy": "missing update reported only",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs insert",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs select",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs update",
+     "roles": "{public}"
+    },
+    {
+     "table": "go_live_approvals",
+     "policy": "Go-live approvals visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_coin_deposits",
+     "policy": "Admins can manage coin deposits",
+     "roles": "{public}"
+    }
+   ]
+  },
+  {
+   "proname": "auth_user_org_ids_with_roles",
+   "sig": "auth_user_org_ids_with_roles(text[])",
+   "rettype": "uuid",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 108,
+   "policy_list": [
+    {
+     "table": "storefront_notifications",
+     "policy": "Org admins can view own-org notifications",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "org_admin full access on sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "parent select sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_subjects",
+     "policy": "teacher select sch_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "persons",
+     "policy": "Admins and cashiers can insert persons",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_order_items",
+     "policy": "Admin/cashier can view order items",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Admin/cashier can manage variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Admin/cashier can update variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_variants",
+     "policy": "Public active; admin sees own soft-deleted variants",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Admin/cashier can manage modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Admin/cashier can update modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_product_modifiers",
+     "policy": "Public active; admin sees own soft-deleted modifiers",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_coupons",
+     "policy": "Admin can manage coupons",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_coupons",
+     "policy": "Admin can update coupons",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_time_slots",
+     "policy": "Admin can manage time slots",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_time_slots",
+     "policy": "Admin can update time slots",
+     "roles": "{public}"
+    },
+    {
+     "table": "audit_log",
+     "policy": "Admins, cashiers and preparers can insert audit entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "person_roles",
+     "policy": "Admins and cashiers can insert person roles",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_sessions",
+     "policy": "Admins and cashiers can close sessions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_sessions",
+     "policy": "Admins and cashiers can open sessions",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transaction_items",
+     "policy": "Admins and cashiers can insert transaction items",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_inventory",
+     "policy": "Admins and cashiers can manage inventory",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_inventory",
+     "policy": "Admins and cashiers can update inventory",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transactions",
+     "policy": "Admins and cashiers can create transactions",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR admin/hr can insert employees",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR admin/hr can update employees",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_employees",
+     "policy": "HR data visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Admin can manage payroll runs",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Admin can update payroll runs",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payroll_runs",
+     "policy": "Payroll runs visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Admin can manage payslips",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Admin can update payslips",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Payslips visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Admin/hr can update claims",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Claims visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Admin/hr can update leaves",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Leaves visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Admin/hr can log attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Admin/hr can update attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Attendance visible to admin/hr",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Admin can insert invoicing customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Admin can update invoicing customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_customers",
+     "policy": "Invoicing customers visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Admin can insert quotations",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Admin can update quotations",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_quotations",
+     "policy": "Quotations visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Admin can insert line items",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Admin can update line items",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_line_items",
+     "policy": "Line items visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_payments",
+     "policy": "Admin can insert payments",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_payments",
+     "policy": "Payments visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Admin can insert time entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Admin can update time entries",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_time_entries",
+     "policy": "Time entries visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Admin can insert recurring templates",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Admin can update recurring templates",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_recurring_templates",
+     "policy": "Recurring templates visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_classes",
+     "policy": "org_admin full access on sch_classes",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_classes",
+     "policy": "teacher select sch_classes",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can delete permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can manage permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_role_permissions",
+     "policy": "Admins can update permissions",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Org admins can insert delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Org admins can update delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_delivery_zones",
+     "policy": "Public active; admin sees own soft-deleted delivery zones",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Admin can insert invoices",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Admin can update invoices",
+     "roles": "{public}"
+    },
+    {
+     "table": "inv_invoices",
+     "policy": "Invoices visible to admin",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_students",
+     "policy": "org_admin full access on sch_students",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_students",
+     "policy": "teacher select sch_students",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_class_subjects",
+     "policy": "org_admin full access on sch_class_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_class_subjects",
+     "policy": "teacher select sch_class_subjects",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_student_parents",
+     "policy": "org_admin full access on sch_student_parents",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_student_parents",
+     "policy": "teacher select sch_student_parents",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "org_admin full access on sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher insert sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher select sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_attendance",
+     "policy": "teacher update sch_attendance",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "org_admin full access on sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher insert sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher select sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_grades",
+     "policy": "teacher update sch_grades",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_fees",
+     "policy": "org_admin full access on sch_fees",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_fees",
+     "policy": "teacher select sch_fees",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_timetable",
+     "policy": "org_admin full access on sch_timetable",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_timetable",
+     "policy": "teacher select sch_timetable",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_orders",
+     "policy": "Admin/cashier can update orders",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_orders",
+     "policy": "Admin/cashier can view orders",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_animals",
+     "policy": "org_admin full access on qbn_animals",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_suppliers",
+     "policy": "org_admin full access on qbn_suppliers",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_niyyah",
+     "policy": "org_admin full access on qbn_niyyah",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_milestones",
+     "policy": "org_admin full access on qbn_milestones",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_bookings",
+     "policy": "org_admin full access on qbn_bookings",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_tawkeel_acknowledgments",
+     "policy": "org_admin can insert tawkeel acknowledgments",
+     "roles": "{public}"
+    },
+    {
+     "table": "qbn_tawkeel_acknowledgments",
+     "policy": "org_admin can read tawkeel acknowledgments",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_customers",
+     "policy": "Org admins can view own-org storefront customers",
+     "roles": "{public}"
+    },
+    {
+     "table": "donations",
+     "policy": "Admins and cashiers can create donations",
+     "roles": "{public}"
+    },
+    {
+     "table": "parent_consents",
+     "policy": "Parent reads own consent; admin reads org for audit",
+     "roles": "{public}"
+    },
+    {
+     "table": "storefront_funnel_events",
+     "policy": "Org admins can view own-org funnel events",
+     "roles": "{public}"
+    },
+    {
+     "table": "receipts",
+     "policy": "Admins cashiers and granted preparers can create receipts",
+     "roles": "{public}"
+    },
+    {
+     "table": "organization_location",
+     "policy": "Org admins manage their own location row",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_tins",
+     "policy": "Cashier admin preparer can insert kk tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_tins",
+     "policy": "Cashier admin preparer can update kk tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_umum_tins",
+     "policy": "Cashier admin preparer can insert umum tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_umum_tins",
+     "policy": "Cashier admin preparer can update umum tins",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_tin_missing_reports",
+     "policy": "missing insert staff",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_tin_missing_reports",
+     "policy": "missing update reported only",
+     "roles": "{public}"
+    },
+    {
+     "table": "go_live_approvals",
+     "policy": "Go-live approvals visible to admin",
+     "roles": "{public}"
+    }
+   ]
+  },
+  {
+   "proname": "auth_user_staff_org_ids",
+   "sig": "auth_user_staff_org_ids()",
+   "rettype": "uuid",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 17,
+   "policy_list": [
+    {
+     "table": "persons",
+     "policy": "Persons visible to staff, self, own-children and students",
+     "roles": "{public}"
+    },
+    {
+     "table": "org_members",
+     "policy": "Staff see members; everyone sees own membership",
+     "roles": "{public}"
+    },
+    {
+     "table": "person_roles",
+     "policy": "Staff see non-beneficiary roles; admins see all",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_batches",
+     "policy": "Staff can see kk batches in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_sessions",
+     "policy": "Staff can see sessions in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transaction_items",
+     "policy": "Staff can see transaction items via transaction org",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_inventory",
+     "policy": "Staff can see inventory in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_transactions",
+     "policy": "Staff can see transactions in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_classes",
+     "policy": "Staff can see classes in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_products",
+     "policy": "Staff can see products in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "sch_students",
+     "policy": "Staff can see students in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "pos_suppliers",
+     "policy": "Staff see their suppliers",
+     "roles": "{public}"
+    },
+    {
+     "table": "donations",
+     "policy": "Staff can see donations in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_weekly_reports",
+     "policy": "Staff can see weekly reports in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "receipts",
+     "policy": "Staff can see receipts in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_kk_tins",
+     "policy": "Staff can see kk tins in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "tabung_umum_tins",
+     "policy": "Staff can see umum tins",
+     "roles": "{public}"
+    }
+   ]
+  },
+  {
+   "proname": "auth_user_hr_employee_id",
+   "sig": "auth_user_hr_employee_id()",
+   "rettype": "uuid",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 7,
+   "policy_list": [
+    {
+     "table": "hr_employees",
+     "policy": "Employees can view own record",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_payslips",
+     "policy": "Employees can view own payslips",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Employees can submit own claims",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_claims",
+     "policy": "Employees can view own claims",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Employees can apply own leave",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_leaves",
+     "policy": "Employees can view own leaves",
+     "roles": "{public}"
+    },
+    {
+     "table": "hr_attendance",
+     "policy": "Employees can view own attendance",
+     "roles": "{public}"
+    }
+   ]
+  },
+  {
+   "proname": "auth_user_org_ids_with_module",
+   "sig": "auth_user_org_ids_with_module(text,text)",
+   "rettype": "uuid",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 6,
+   "policy_list": [
+    {
+     "table": "donation_categories",
+     "policy": "Admins or category managers can insert categories",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_categories",
+     "policy": "Admins or category managers can update categories",
+     "roles": "{public}"
+    },
+    {
+     "table": "donation_categories",
+     "policy": "Users can see categories in their org",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs insert",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs select",
+     "roles": "{public}"
+    },
+    {
+     "table": "bank_import_runs",
+     "policy": "bank_import_runs update",
+     "roles": "{public}"
+    }
+   ]
+  },
+  {
+   "proname": "auth_user_child_person_ids",
+   "sig": "auth_user_child_person_ids()",
+   "rettype": "uuid",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 1,
+   "policy_list": [
+    {
+     "table": "persons",
+     "policy": "Persons visible to staff, self, own-children and students",
+     "roles": "{public}"
+    }
+   ]
+  },
+  {
+   "proname": "auth_user_teacher_student_person_ids",
+   "sig": "auth_user_teacher_student_person_ids()",
+   "rettype": "uuid",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 1,
+   "policy_list": [
+    {
+     "table": "persons",
+     "policy": "Persons visible to staff, self, own-children and students",
+     "roles": "{public}"
+    }
+   ]
+  },
+  {
+   "proname": "donation_category_in_use",
+   "sig": "donation_category_in_use(uuid)",
+   "rettype": "_text",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": [
+    "search_path=public, pg_temp"
+   ],
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 0,
+   "policy_list": []
+  },
+  {
+   "proname": "handle_new_user",
+   "sig": "handle_new_user()",
+   "rettype": "trigger",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 0,
+   "policy_list": []
+  },
+  {
+   "proname": "sync_org_memberships_to_jwt",
+   "sig": "sync_org_memberships_to_jwt()",
+   "rettype": "trigger",
+   "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+   "proconfig": null,
+   "anon_exec": true,
+   "auth_exec": true,
+   "public_exec": true,
+   "policy_refs": 0,
+   "policy_list": []
+  }
+ ]
+}
