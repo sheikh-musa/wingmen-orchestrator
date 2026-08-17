@@ -55,18 +55,19 @@ CREATE TABLE IF NOT EXISTS public.invariant_assertion_runs (
 CREATE INDEX IF NOT EXISTS invariant_assertion_runs_ref_run_at_idx
     ON public.invariant_assertion_runs (invariant_ref, run_at DESC);
 
--- DEFAULT-PRIVILEGE HYGIENE — the exact leak A3 detects, applied to our own new table.
--- Inherit NOTHING for PUBLIC; grant only what invariant_registry itself grants (verified via
--- aclexplode 2026-08-17: console_readonly SELECT; service_role write; postgres owner; NO PUBLIC).
-REVOKE ALL ON public.invariant_assertion_runs FROM PUBLIC;
--- ⚠ Supabase seeds ALTER DEFAULT PRIVILEGES granting anon + authenticated (the PostgREST web
--- roles) on EVERY new public table. That is the D5 'default-privs silently widen a new table'
--- class, and a PUBLIC-only check does NOT catch it (the grantee is a named role, not PUBLIC):
--- on first apply this table came up with anon SELECT + authenticated INSERT/UPDATE/DELETE, i.e.
--- web-readable AND web-writable — exactly the leak we must not seed into the detector's own
--- table. invariant_registry carries NO anon/authenticated grants; mirror it exactly.
-REVOKE ALL ON public.invariant_assertion_runs FROM anon, authenticated;
-GRANT SELECT, INSERT ON public.invariant_assertion_runs TO service_role;   -- append-only writer (no UPDATE/DELETE: runs are immutable facts)
+-- DENY-BY-DEFAULT GRANT HYGIENE (CAI-1018) — the exact leak class A3 detects, applied to our own
+-- table. Supabase seeds ALTER DEFAULT PRIVILEGES granting PUBLIC/anon/authenticated/service_role on
+-- EVERY new public table, so an additive `GRANT SELECT,INSERT` is a NO-OP on top of pre-granted ALL.
+-- Two real holes were found on THIS table before a row was written, both this same class:
+--   * anon SELECT + authenticated INSERT/UPDATE/DELETE  = web-readable AND web-writable (my catch;
+--     a PUBLIC-only check greens on it — the grantee is a named role, not PUBLIC).
+--   * service_role held UPDATE/DELETE/TRUNCATE           = the append-only immutable-log invariant
+--     NOT enforced; a writer-as-service_role could erase FAIL proof-of-run (cc-storefront, CAI-1016).
+-- The robust fix is the general form: REVOKE ALL from every non-owner role, then GRANT BACK exactly
+-- the intended set — so no default-priv survives, present grantee or future role. CAI-1019: the
+-- whitelist governs WHO (service_role belongs), append-only caps WHAT (SELECT+INSERT on this log).
+REVOKE ALL ON public.invariant_assertion_runs FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT, INSERT ON public.invariant_assertion_runs TO service_role;        -- append-only writer: immutable facts, NO UPDATE/DELETE/TRUNCATE (CAI-1016/1019)
 GRANT SELECT           ON public.invariant_assertion_runs TO console_readonly;  -- auditor/console read (D7 substrate-readable)
 
 COMMENT ON TABLE public.invariant_assertion_runs IS
@@ -88,5 +89,8 @@ COMMIT;
 --     LEFT JOIN pg_roles g ON g.oid = a.grantee
 --    WHERE c.relname = 'invariant_assertion_runs'
 --      AND (g.rolname IS NULL OR g.rolname IN ('anon','authenticated'));   -- expect 0 rows
--- The table must mirror invariant_registry's grantee set exactly: console_readonly, postgres,
--- service_role — and NOTHING web-facing.
+-- Effective grantee set must be EXACTLY: console_readonly(SELECT), postgres(owner), service_role
+-- (SELECT,INSERT ONLY — append-only) — nothing web-facing, and service_role must NOT hold
+-- UPDATE/DELETE/TRUNCATE. Exercise it (CAI-1016 re-audit): `SET LOCAL ROLE service_role; UPDATE ...`
+-- must raise 'permission denied' (proof-of-run is immutable). Owner (postgres) can always mutate —
+-- append-only against the owner is app-level discipline (the sink only INSERTs).
