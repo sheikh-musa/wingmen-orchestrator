@@ -29,6 +29,12 @@ from typing import Dict, List, Optional, Tuple
 ORG_ID = "73339164-7c1f-40ba-a093-33f1f292dd4c"  # Madrasah Irsyad Zuhri Al-Islamiah (goumlyne)
 _GOUMLYNE_ENV = "GOUMLYNE_DATABASE_URL"
 
+# Table names, as module constants so the end-to-end "prove-fired" test can point the
+# detector at a synthetic stand-in (never the live silo). Production defaults unchanged.
+_T_STUDENTS = "sch_students"
+_T_PERSONS = "persons"
+_T_PARENTS = "sch_student_parents"
+
 # PII-class name stems (cai/Nazim #24985). The monitored column set is DISCOVERED from
 # the catalog at runtime by matching these stems, NOT hardcoded — so a new variant
 # (nric_hash_v3, a new contact field) is auto-covered instead of silently re-opening
@@ -82,10 +88,10 @@ def count_unclassifiable(cur, org_id: str = ORG_ID) -> Optional[int]:
     stuffed into custom_fields as JSON would sail past the scalar stem filter. Count
     the org's persons with a NON-EMPTY custom_fields OR tags — an unstructured field we
     cannot count-classify. Counts only, never parses a value. None if the query fails."""
-    subq = "SELECT person_id FROM sch_students WHERE org_id = %(o)s AND person_id IS NOT NULL"
+    subq = f"SELECT person_id FROM {_T_STUDENTS} WHERE org_id = %(o)s AND person_id IS NOT NULL"
     return _count(
         cur,
-        f"""SELECT count(*) FROM persons WHERE id IN ({subq})
+        f"""SELECT count(*) FROM {_T_PERSONS} WHERE id IN ({subq})
              AND ( (custom_fields IS NOT NULL AND custom_fields::text NOT IN ('{{}}','null'))
                    OR (tags IS NOT NULL AND cardinality(tags) > 0) )""",
         org_id,
@@ -113,24 +119,24 @@ def run_counts(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
     SCHEMA-DISCOVERED PII column set. Never selects a row value. A per-field query error
     -> None (loud); a coverage shortfall -> a None `_coverage.<table>` label (loud)."""
     counts: Dict[str, Optional[int]] = {}
-    student_cols = discover_pii_columns(cur, "sch_students")
-    person_cols = discover_pii_columns(cur, "persons")
+    student_cols = discover_pii_columns(cur, _T_STUDENTS)
+    person_cols = discover_pii_columns(cur, _T_PERSONS)
     # coverage floor guard (assert-the-total teeth): a shrunk set is could-not-measure
     if coverage_shortfall("sch_students", len(student_cols)):
         counts["_coverage.sch_students"] = None
     if coverage_shortfall("persons", len(person_cols)):
         counts["_coverage.persons"] = None
     person_subq = (
-        "SELECT person_id FROM sch_students WHERE org_id = %(o)s AND person_id IS NOT NULL"
+        f"SELECT person_id FROM {_T_STUDENTS} WHERE org_id = %(o)s AND person_id IS NOT NULL"
     )
     for c in student_cols:
         counts[f"sch_students.{c}"] = _count(
-            cur, f"SELECT count(*) FROM sch_students WHERE org_id = %(o)s AND {c} IS NOT NULL", org_id)
+            cur, f"SELECT count(*) FROM {_T_STUDENTS} WHERE org_id = %(o)s AND {c} IS NOT NULL", org_id)
     for c in person_cols:
         counts[f"persons.{c}"] = _count(
-            cur, f"SELECT count(*) FROM persons WHERE id IN ({person_subq}) AND {c} IS NOT NULL", org_id)
+            cur, f"SELECT count(*) FROM {_T_PERSONS} WHERE id IN ({person_subq}) AND {c} IS NOT NULL", org_id)
     counts[_PARENT_LABEL] = _count(
-        cur, "SELECT count(*) FROM sch_student_parents WHERE org_id = %(o)s", org_id)
+        cur, f"SELECT count(*) FROM {_T_PARENTS} WHERE org_id = %(o)s", org_id)
     return counts
 
 

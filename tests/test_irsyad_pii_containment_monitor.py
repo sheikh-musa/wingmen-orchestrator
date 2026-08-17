@@ -102,3 +102,63 @@ def test_decide_breach_precedes_unclassifiable():
 def test_decide_unclassifiable_none_is_could_not_measure():
     code, pri, kind, _ = M.decide_page({"persons.address": 0}, None)
     assert (code, pri, kind) == (2, "P1", "could-not-measure")
+
+
+# ── PROVE-FIRED: end-to-end synthetic breach on a STAND-IN (never the live silo) ──────
+# Nazim #25011: "a detector nobody has watched fail is untested." This builds a
+# stand-in with the real column shape on the substrate (rolled back), points the
+# detector's table constants at it, and proves run_counts -> decide_page fires P0 on a
+# populated deep field, amber on the custom_fields backdoor, and OK when clean.
+
+_PERSONS_PII = ("date_of_birth date", "address text", "phone text", "phone_encrypted text",
+                "phone_hash text", "phone_hash_v2 text", "email text", "email_encrypted text",
+                "email_hash text", "email_hash_v2 text", "nric_encrypted text", "nric_hash text",
+                "nric_source text", "nric_hash_v2 text")
+
+
+def _standin(cur):
+    import os
+    cols = ", ".join(_PERSONS_PII)
+    cur.execute(f"""CREATE TABLE _sre_persons (id uuid PRIMARY KEY, org_id uuid,
+        display_name text, custom_fields jsonb, tags text[], {cols})""")
+    cur.execute("""CREATE TABLE _sre_students (id uuid PRIMARY KEY, org_id uuid, person_id uuid,
+        student_number text, status text, emergency_contact text, medical_notes text, previous_school text)""")
+    cur.execute("CREATE TABLE _sre_parents (id uuid PRIMARY KEY, org_id uuid)")
+
+
+def _seed_one(cur, org):
+    cur.execute("INSERT INTO _sre_persons (id, org_id, display_name) VALUES (gen_random_uuid(), %s, 'shell') RETURNING id", (org,))
+    pid = cur.fetchone()[0]
+    cur.execute("INSERT INTO _sre_students (id, org_id, person_id) VALUES (gen_random_uuid(), %s, %s)", (org, pid))
+    return pid
+
+
+def test_prove_fired_end_to_end(monkeypatch):
+    import os, psycopg2
+    conn = psycopg2.connect(os.environ["DATABASE_URL"]); conn.autocommit = False
+    cur = conn.cursor()
+    try:
+        _standin(cur)
+        monkeypatch.setattr(M, "_T_PERSONS", "_sre_persons")
+        monkeypatch.setattr(M, "_T_STUDENTS", "_sre_students")
+        monkeypatch.setattr(M, "_T_PARENTS", "_sre_parents")
+        org = "73339164-7c1f-40ba-a093-33f1f292dd4c"
+        pid = _seed_one(cur, org)
+
+        # 1) clean shell record -> OK (containment holds)
+        counts = M.run_counts(cur, org); uncl = M.count_unclassifiable(cur, org)
+        assert M.decide_page(counts, uncl)[:3] == (0, None, "ok"), "clean state must be OK"
+
+        # 2) a deep field populates -> P0 RED breach naming the field
+        cur.execute("UPDATE _sre_persons SET nric_hash = 'SYNTH' WHERE id = %s", (pid,))
+        counts = M.run_counts(cur, org); uncl = M.count_unclassifiable(cur, org)
+        code, pri, kind, items = M.decide_page(counts, uncl)
+        assert (code, pri, kind) == (1, "P0", "breach")
+        assert any(lbl == "persons.nric_hash" for lbl, _ in items), "breach must name the field"
+
+        # 3) revert the scalar, populate the jsonb backdoor -> P1 AMBER could-not-classify
+        cur.execute("UPDATE _sre_persons SET nric_hash = NULL, custom_fields = '{\"dob\":\"x\"}'::jsonb WHERE id = %s", (pid,))
+        counts = M.run_counts(cur, org); uncl = M.count_unclassifiable(cur, org)
+        assert M.decide_page(counts, uncl)[:3] == (2, "P1", "could-not-classify")
+    finally:
+        conn.rollback(); conn.close()
