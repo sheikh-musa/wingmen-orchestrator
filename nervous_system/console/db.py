@@ -364,6 +364,16 @@ def build_coordinators_query() -> Tuple[str, list]:
         "     FROM cc_session_costs cs "
         "     WHERE cs.cc_identity = c.agent_id AND cs.latest_context_tokens IS NOT NULL "
         "     ORDER BY COALESCE(cs.ended_at, cs.created_at) DESC LIMIT 1) AS ctx_age_s, "
+        # #25436: the session behind the ctx_tokens reading above, plus the identity's
+        # ABSOLUTE freshest session (any context). When they differ the coordinator
+        # recycled (e.g. cc-quality/cc-fleet-health reset) -> the reading is a frozen
+        # pre-reset ghost and the card shows OFF. Supersession, not staleness.
+        "  (SELECT cs.session_id FROM cc_session_costs cs "
+        "     WHERE cs.cc_identity = c.agent_id AND cs.latest_context_tokens IS NOT NULL "
+        "     ORDER BY COALESCE(cs.ended_at, cs.created_at) DESC LIMIT 1) AS ctx_session_id, "
+        "  (SELECT cs.session_id FROM cc_session_costs cs "
+        "     WHERE cs.cc_identity = c.agent_id "
+        "     ORDER BY COALESCE(cs.ended_at, cs.created_at) DESC, cs.id DESC LIMIT 1) AS ctx_current_session_id, "
         "  (SELECT a.auth_fp FROM agent_status a "
         "     WHERE a.base_agent_id = c.agent_id AND a.auth_fp IS NOT NULL "
         "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS auth_fp, "
@@ -804,6 +814,17 @@ def build_context_bloat_query() -> Tuple[str, list]:
         "SELECT DISTINCT ON (cc_identity, sub_tag) "
         "  cc_identity, "
         "  sub_tag, "
+        # #25436: the session that produced THIS (freshest-with-context) reading,
+        # plus the identity's ABSOLUTE freshest session (any latest_context_tokens,
+        # so a just-reset session that has not written context yet still counts).
+        # When they differ the body recycled -> this reading is a frozen pre-reset
+        # ghost and the app shows it OFF. Supersession, not staleness, is the signal.
+        "  session_id, "
+        "  (SELECT c2.session_id FROM cc_session_costs c2 "
+        "     WHERE c2.cc_identity = cc_session_costs.cc_identity "
+        "       AND c2.sub_tag IS NOT DISTINCT FROM cc_session_costs.sub_tag "
+        "     ORDER BY COALESCE(c2.ended_at, c2.created_at) DESC, c2.id DESC "
+        "     LIMIT 1) AS current_session_id, "
         "  latest_context_tokens AS ctx_tokens, "
         "  input_tokens, "
         "  round(extract(epoch FROM (now() - COALESCE(ended_at, created_at))))::int AS age_s, "

@@ -964,6 +964,55 @@ def _ctx_level(ctx):
     return pct, level
 
 
+def _ctx_from_session(ctx_tokens, sess_id, current_sess_id):
+    """(pct, level) for a body's freshest-with-context reading, OR None when that
+    reading is a FROZEN pre-reset ghost — i.e. the session that produced it has
+    since been superseded by a NEWER session for the same identity (the body
+    recycled/reset into a fresh session). None => the tile shows OFF/fresh, never
+    the frozen high %.
+
+    Supersession, NOT staleness, is the downed signal (#25436). A just-reset body's
+    old cost row can keep a FRESH `ended_at` (well under the ~48h stale-drop, and
+    fresh even by a ~20-min rule) for a while, so keying OFF on staleness alone
+    MISSES it and keeps drawing the pre-reset %. Live fixture: cc_session_costs
+    id=2193, session 36e398c5 (cc-fleet-health's reset moment) read ~97% while the
+    body was actually fresh (~20%); its session is superseded by the new one, so we
+    show it OFF. When no session ids are available we cannot detect supersession and
+    fall through to the raw level (never a false OFF)."""
+    if sess_id and current_sess_id and sess_id != current_sess_id:
+        return None
+    return _ctx_level(ctx_tokens)
+
+
+def _ctx_index(bloat):
+    """Index context-bloat rows for per-lane lookup. Keyed by `sub_tag` (== the
+    instance's tmux_session) when present; a sub_tag=NULL writer (#25436 —
+    cc-irsyad-coord, orch-console write cost rows with sub_tag=NULL) is keyed by its
+    `agent` (cc_identity / base agent id) instead, so its gauge is NOT dropped.
+    Read-side robustness: never rely on every writer stamping sub_tag. A real
+    instance (sub_tag) reading is authoritative and always wins; a base-keyed entry
+    only ever FILLS a lane that has no instance-specific reading."""
+    idx = {}
+    for b in bloat or []:
+        st = b.get("sub_tag")
+        if st:
+            idx[st] = b
+        else:
+            ident = b.get("agent")
+            if ident:
+                idx.setdefault(ident, b)
+    return idx
+
+
+def _ctx_for_lane(idx, session, base_agent_id):
+    """A lane's context row: its own instance (sub_tag == session) reading first,
+    else the base-agent fallback for a sub_tag=NULL writer (#25436). {} when neither
+    exists (the lane truthfully has no reading -> tile shows '—', never a guess)."""
+    return (idx.get(session)
+            or (idx.get(base_agent_id) if base_agent_id else None)
+            or {})
+
+
 def _context_bloat(rows):
     """Annotate each latest-per-WORKER-LANE row with CURRENT-context pct (of the
     model window) + a green/amber/red level, sorted fullest-first. `ctx_tokens` is
@@ -981,9 +1030,13 @@ def _context_bloat(rows):
         age = r.get("age_s")
         if age is not None and age > _CTX_STALE_DROP_S:
             continue  # dead identity's frozen reading (op#9770) — never show stale
-        lvl = _ctx_level(r.get("ctx_tokens"))
+        # #25436: a recycled/reset body's OLD cost row is a frozen pre-reset ghost.
+        # Detect it by SESSION SUPERSESSION (a newer session row exists for this
+        # identity), NOT staleness — a just-reset body's old row can still be fresh.
+        lvl = _ctx_from_session(r.get("ctx_tokens"),
+                                r.get("session_id"), r.get("current_session_id"))
         if lvl is None:
-            continue  # bad data — cannot be a real current-context reading
+            continue  # bad data OR superseded (reset) — never a real current reading
         pct, level = lvl
         out.append({
             "agent": r.get("cc_identity"),
@@ -1277,8 +1330,12 @@ def _fleet_payload():
         sess = c.get("tmux_session")
         c["peekable"] = bool(sess and (sess in live or sess in _COORD_DB_PEEK))
         # Each coordinator card carries its OWN context readout (op#9088), from
-        # the same source + thresholds as the context-bloat list.
-        lvl = _ctx_level(c.get("ctx_tokens"))
+        # the same source + thresholds as the context-bloat list. #25436: suppress a
+        # frozen pre-reset ghost via SESSION SUPERSESSION (a recycled coordinator —
+        # e.g. cc-quality/cc-fleet-health — has a newer session), so its card reads
+        # OFF/fresh, not the pre-reset high %. Staleness alone would miss it.
+        lvl = _ctx_from_session(c.get("ctx_tokens"),
+                                c.get("ctx_session_id"), c.get("ctx_current_session_id"))
         c["ctx_pct"], c["ctx_level"] = (lvl if lvl is not None else (None, None))
 
     # Dead-lane drop (op#9770): now that the live pane has classified each row,
@@ -1413,7 +1470,9 @@ def _irsyad_payload():
 
     # Index the per-session context gauge (keyed by sub_tag == tmux_session for a
     # multi-instance family) + the process-verified token row (keyed by session).
-    ctx_by_sess = {b.get("sub_tag"): b for b in bloat if b.get("sub_tag")}
+    # #25436: index by sub_tag (instance) with a cc_identity/base fallback for a
+    # sub_tag=NULL writer, so a NULL-sub_tag body's gauge is not dropped as "—".
+    ctx_idx = _ctx_index(bloat)
     tt_by_sess = {t.get("session"): t for t in tt_rows if t.get("session")}
 
     out = []
@@ -1423,7 +1482,7 @@ def _irsyad_payload():
             continue
         state, flagged = _lane_bucket(l)
         tt = tt_by_sess.get(sess) or {}
-        ctx = ctx_by_sess.get(sess) or {}
+        ctx = _ctx_for_lane(ctx_idx, sess, l.get("base_agent_id"))
         out.append({
             "session": sess,
             "base_agent_id": l.get("base_agent_id"),

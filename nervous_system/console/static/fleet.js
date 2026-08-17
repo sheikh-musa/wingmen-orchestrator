@@ -125,7 +125,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v55';
+  var APP_BUILD = 'fc-v56';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -312,11 +312,18 @@
     laneCtxIndex = {};
     (rows || []).forEach(function (r) {
       if (!r || !r.agent) return;
+      // #25436: an instance (sub_tag) reading keys by agent+sub_tag; a sub_tag=NULL
+      // writer keys by agent alone (cc_identity fallback) so its gauge is NOT
+      // dropped. A real sub_tag reading always wins — a NULL-keyed base entry only
+      // fills a lane that has no instance-specific reading (never clobber one).
       if (r.sub_tag) laneCtxIndex[r.agent + CTX_SEP + r.sub_tag] = r;
-      else laneCtxIndex[r.agent] = r;
+      else if (laneCtxIndex[r.agent] == null) laneCtxIndex[r.agent] = r;
     });
   }
   function laneCtx(l) {
+    // #25436: a downed/offline lane reads OFF, never a frozen last gauge — tmux/agent
+    // liveness (the live-pane bucket), not staleness, is the downed signal.
+    if (l.bucket === "offline") return null;
     var base = l.base_agent_id || l.agent_id;
     var sess = l.tmux_session || l.lane;
     var cx = null;

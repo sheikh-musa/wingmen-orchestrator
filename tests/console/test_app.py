@@ -916,6 +916,88 @@ def test_api_irsyad_folds_token_model_and_context(irsyad_server):
     assert by["irsyad-prog1"]["ctx_pct"] is None
 
 
+# --- fc-v56 (#25436): context gauge — sub_tag=NULL fallback + downed→OFF -------
+# Two display bugs made self-recycle look broken: (1) a sub_tag=NULL writer's row
+# was DROPPED so its tile showed "—"; (2) a recycled/reset body kept drawing its
+# FROZEN pre-reset high % because the old cost row lingered. The robust downed
+# signal is SESSION SUPERSESSION (a newer session row exists for the identity),
+# NOT staleness — a just-reset body's old row can still have a fresh ended_at.
+
+def test_ctx_from_session_shows_real_pct_when_not_superseded():
+    # same session (or no session info at all) -> the real reading, never a false OFF.
+    assert console_app._ctx_from_session(900000, "s1", "s1") == (90, "red")
+    assert console_app._ctx_from_session(500000, None, None) == (50, "green")
+
+
+def test_ctx_from_session_off_when_session_superseded():
+    # the id=2193 / session 36e398c5 live fixture: an old ~97% reading whose session
+    # has been superseded by a newer one -> OFF (None), never the frozen 97%.
+    assert console_app._ctx_from_session(970000, "36e398c5", "new-sess") is None
+
+
+def test_ctx_from_session_staleness_alone_is_not_the_signal():
+    # a reading that is FRESH by any staleness rule but from a superseded session is
+    # STILL OFF — proving supersession, not age, is the downed signal.
+    assert console_app._ctx_from_session(960000, "old-sess", "newer-sess") is None
+
+
+def test_context_bloat_drops_superseded_body_keeps_live_high_rider():
+    rows = [
+        # a just-reset worker: old ~97% row, FRESH age (120s), session superseded.
+        {"cc_identity": "cc-worker-a", "sub_tag": "lane-a", "ctx_tokens": 970000,
+         "age_s": 120, "session_id": "36e398c5", "current_session_id": "new-sess"},
+        # a real high-rider on its SAME live session -> kept, shows the real %.
+        {"cc_identity": "cc-worker-b", "sub_tag": "lane-b", "ctx_tokens": 880000,
+         "age_s": 60, "session_id": "s-live", "current_session_id": "s-live"},
+    ]
+    out = console_app._context_bloat(rows)
+    by = {r["agent"]: r for r in out}
+    assert "cc-worker-a" not in by            # superseded (reset) -> OFF, not 97%
+    assert by["cc-worker-b"]["pct"] == 88     # live high-rider -> real %
+
+
+def test_context_bloat_keeps_null_sub_tag_row():
+    # a sub_tag=NULL writer is NOT dropped; it resolves via its cc_identity.
+    rows = [{"cc_identity": "cc-irsyad-coord", "sub_tag": None, "ctx_tokens": 500000,
+             "age_s": 30, "session_id": "s", "current_session_id": "s"}]
+    out = console_app._context_bloat(rows)
+    assert len(out) == 1
+    assert out[0]["agent"] == "cc-irsyad-coord" and out[0]["sub_tag"] is None
+    assert out[0]["pct"] == 50
+
+
+def test_ctx_index_null_sub_tag_resolves_via_cc_identity():
+    # a sub_tag=NULL row is keyed by cc_identity and reachable via the base fallback.
+    idx = console_app._ctx_index([{"agent": "cc-irsyad", "sub_tag": None,
+                                   "pct": 50, "level": "green"}])
+    assert console_app._ctx_for_lane(idx, "irsyad-coord", "cc-irsyad")["pct"] == 50
+
+
+def test_ctx_index_instance_reading_does_not_leak_to_siblings():
+    # an instance (sub_tag) reading keys by session ONLY — a sibling lane with no
+    # reading of its own truthfully gets {} (shows "—"), never the sibling's gauge.
+    idx = console_app._ctx_index([{"agent": "cc-irsyad", "sub_tag": "irsyad-coord",
+                                   "pct": 50, "level": "green"}])
+    assert console_app._ctx_for_lane(idx, "irsyad-coord", "cc-irsyad")["pct"] == 50
+    assert console_app._ctx_for_lane(idx, "irsyad-prog1", "cc-irsyad") == {}
+
+
+def test_context_bloat_query_surfaces_session_supersession_columns():
+    sql, params = db.build_context_bloat_query()
+    assert params == []
+    low = sql.lower()
+    assert "session_id" in low and "current_session_id" in low
+    # peer match must be sub_tag-aware (NULL == NULL) for the absolute-freshest session.
+    assert "is not distinct from" in low
+
+
+def test_coordinators_query_surfaces_session_supersession_columns():
+    sql, params = db.build_coordinators_query()
+    assert params == []
+    low = sql.lower()
+    assert "ctx_session_id" in low and "ctx_current_session_id" in low
+
+
 # --- fc-v52: drain board (per-body inbox depth) + /api/assign -----------------
 # The drain board reads each body's UNHANDLED bus inbox (agent_messages
 # read_at IS NULL) + console-assigned items, grouped per body. /api/assign turns
