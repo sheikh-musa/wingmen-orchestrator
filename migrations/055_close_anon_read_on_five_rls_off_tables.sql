@@ -1,4 +1,9 @@
--- 054 — close anon/authenticated reach on the five RLS-OFF fleet tables.
+-- 055 — close anon/authenticated reach on the five RLS-OFF fleet tables.
+--
+-- NUMBERING NOTE: applied to the substrate while numbered 054, then renumbered to 055.
+-- cc-fleet-health committed its own 054 (b8e19dd, sla observed-recipient-activity) 44s
+-- before this one (12411c5) — two bodies picked the next free number in the same minute.
+-- The DB state is unaffected by the rename; the earlier commit keeps the number.
 --
 -- WHAT WAS WRONG (found 2026-08-17 ~06:45Z, orch-console; PROVEN over the wire by
 -- cc-quality with the anon key, limit=0/Range 0-0, zero rows pulled):

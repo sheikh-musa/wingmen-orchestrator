@@ -1,4 +1,4 @@
-"""Apply migration 054 — close anon/authenticated reach on the five RLS-OFF fleet tables.
+"""Apply migration 055 — close anon/authenticated reach on the five RLS-OFF fleet tables.
 
 CLAUDE.md forbids `supabase db push` against prod (decision-962): the CLI's shadow-diff
 path re-applies historic CREATE OR REPLACE VIEW statements and silently strips later arms.
@@ -13,8 +13,8 @@ owns the transaction boundary. Otherwise the file's COMMIT fires mid-way and a d
 commits anyway.
 
 Usage:
-  python scripts/apply_mig054_anon_read_lockdown.py            # dry-run (rolled back)
-  python scripts/apply_mig054_anon_read_lockdown.py --apply    # commit
+  python scripts/apply_mig055_anon_read_lockdown.py            # dry-run (rolled back)
+  python scripts/apply_mig055_anon_read_lockdown.py --apply    # commit
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ import psycopg
 from dotenv import load_dotenv
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-MIGRATION = ROOT / "migrations" / "054_close_anon_read_on_five_rls_off_tables.sql"
+MIGRATION = ROOT / "migrations" / "055_close_anon_read_on_five_rls_off_tables.sql"
 
 TABLES = [
     "held_commitments",
