@@ -82,59 +82,94 @@ SELECT schema, object, objtype, grantee, privilege_type
 
 WEB_ROLES = ("anon", "authenticated")
 
+# Schemas Supabase EXPOSES through PostgREST — a web role NEEDS USAGE on these to reach the API,
+# so USAGE here is controlled/expected, not a breach (CAI-RESP-1026).
+EXPOSED_SCHEMAS = ("public", "graphql_public")
+
+# SAFE-SECDEF whitelist (CAI-1024 whitelist #2, CAI-994 no-blanket-trust): SECURITY DEFINER functions
+# safe because an RLS policy calls them AND they scope internally — an EXPLICIT, per-function justified
+# list, NOT 'trust auth_*'. Keyed (schema, function_name) -> reason. cai named 'the 8 auth_user_*
+# siblings orch identified' — PENDING those exact identities + per-fn reasons from orch-console's
+# dry-run. Until listed, that SECDEF web-EXECUTE fn FAILS (safe-but-strict; that is how
+# purge_wc_ingest_pii was caught and how the next one will be).
+SAFE_SECDEF_FUNCTIONS = {
+    # ("public", "auth_user_role"): "called only by RLS policy <X>; scopes to auth.uid() internally",
+}
+
 
 def classify_finding(f):
-    """Tier one untrusted grant FAIL vs INFO per cai CAI-RESP-1024 (see test_a3_classify for the
-    rules). `f` carries: grantee, objtype ('relation:<k>'|'sequence'|'function'|'schema'),
-    privilege_type, and (where relevant) is_secdef / rls_enabled / has_policy. Returns (tier, reason).
+    """Tier one untrusted grant FAIL vs INFO per cai CAI-RESP-1024 (+1025 no-policy correction, +1026
+    control-aware schema/sequence). `f` carries: grantee, schema, object, objtype
+    ('relation:<k>'|'sequence'|'function'|'schema'), privilege_type, and where relevant is_secdef /
+    rls_enabled / has_policy / is_security_invoker. Returns (tier, reason).
 
-    RESIDENCY-1 means ISOLATION; on Supabase RLS is the control, not the grant. So a grant is a
-    breach only when it ESCAPES or LACKS RLS. Order matters: PUBLIC and SECDEF-bypass are breaches
-    regardless of RLS; an unexpected non-web grantee is deny-by-default; a web-role table grant is a
-    breach only when RLS does not cover it."""
+    RESIDENCY-1 means ISOLATION; on Supabase RLS is the control, not the grant. So a grant is a breach
+    only where its CONTROL is absent — it ESCAPES RLS (SECDEF fn, definer view, RLS-off table) or
+    reaches a target with no gate (non-exposed schema, sequence off a gated table). PUBLIC always
+    fails; an unexpected non-web grantee is deny-by-default."""
     grantee = f["grantee"]
     objtype = f.get("objtype", "")
     priv = f.get("privilege_type", "")
+    schema = f.get("schema", "")
+    obj = f.get("object", "")
 
-    # 1. PUBLIC is broader than any role — always a breach (incl PUBLIC-EXECUTE functions).
+    # 1. PUBLIC on any app object always fails — RLS narrows it, it never justifies it.
     if grantee == "PUBLIC":
-        return "FAIL", "PUBLIC grant (broader than any role)"
+        return "FAIL", "PUBLIC grant on an app object (PUBLIC is never the right grantee; RLS narrows, does not justify)"
 
-    # 2. A SECURITY DEFINER function runs as its OWNER, bypassing RLS entirely; a web-role EXECUTE on
-    #    it is privileged code anyone can run (the purge_wc_ingest_pii class). FAIL regardless of RLS.
-    if objtype == "function" and f.get("is_secdef") and priv == "EXECUTE" and grantee in WEB_ROLES:
-        return "FAIL", "SECURITY DEFINER function EXECUTE by a web role — bypasses RLS (runs as owner)"
-
-    # 3. Any grantee that is neither PUBLIC nor the known-conditional web roles is unaccounted for —
-    #    deny-by-default (the future-role trap CAI-1018 exists for).
+    # 2. Unexpected non-web grantee (not PUBLIC, not the conditional web roles) — deny-by-default.
     if grantee not in WEB_ROLES:
-        return "FAIL", f"unexpected non-trusted grantee '{grantee}' (deny-by-default)"
+        return "FAIL", f"unexpected non-trusted grantee '{grantee}' (deny-by-default, CAI-1018)"
 
-    # 4. anon/authenticated on a data-holding TABLE (relkind r/p/f — RLS-capable). A grant is a
-    #    breach ONLY when RLS is DISABLED (relrowsecurity=false) — then the grant is live and the
-    #    table is open. RLS-ENABLED with ZERO policies is DEFAULT-DENY — the most CLOSED state, NOT
-    #    open (proven live, Nazim #24275: anon GET on public.platform_admins returned [] despite the
-    #    grant + a real row; independently reproduced). My earlier 'no-policy is still open' sharpening
-    #    was INVERTED. Views/matviews (v/m) have no RLS of their own; their access is governed by the
-    #    underlying tables' RLS, so a view grant is INFO — not a false FAIL from relrowsecurity=false.
+    # --- grantee is anon/authenticated: CONTROL-AWARE test (a grant is a breach only where its
+    #     Supabase control is absent) ---
+
+    # FUNCTION: a SECURITY DEFINER fn runs as OWNER, bypassing RLS -> FAIL unless justified-safe.
+    # A SECURITY INVOKER fn runs as the caller, so RLS applies -> controlled -> INFO.
+    if objtype == "function":
+        if f.get("is_secdef") and priv == "EXECUTE":
+            if (schema, obj) in SAFE_SECDEF_FUNCTIONS:
+                return "INFO", f"SECURITY DEFINER fn on the justified safe-SECDEF list: {SAFE_SECDEF_FUNCTIONS[(schema, obj)]}"
+            return "FAIL", "SECURITY DEFINER function EXECUTE by a web role — bypasses RLS (runs as owner); not on the safe-SECDEF list"
+        return "INFO", "SECURITY INVOKER function EXECUTE (runs as caller; the caller's RLS applies)"
+
+    # RELATIONS: tables, views, matviews.
     if objtype.startswith("relation:"):
         relkind = objtype.split(":", 1)[1]
-        if relkind in ("r", "p", "f"):  # ordinary / partitioned / foreign tables
+        if relkind in ("r", "p", "f"):  # ordinary / partitioned / foreign TABLES
             if not f.get("rls_enabled"):
                 return "FAIL", "web-role grant on an RLS-DISABLED table (RLS off = the table is open)"
             if not f.get("has_policy"):
-                # Inert TODAY under default-deny, but a LATENT TRAP: add a permissive policy later
-                # and it opens with no grant review in the loop (same shape as the net.* future-roles
-                # argument). Report it — review the GRANT, not the policy — do not fail it.
+                # RLS-ENABLED + zero policies is DEFAULT-DENY (most CLOSED; proven live, CAI-1025).
+                # Inert today, a LATENT TRAP if a policy is later added — review the grant, not fail it.
                 return "INFO", "web-role grant inert under default-deny RLS (no policy) — would open silently if a policy is later added; review the grant"
-            # RLS on + a policy exists: the normal architecture. INFO, with the honest caveat that
-            # policy CORRECTNESS (a permissive USING(true)) is a named fast-follow, not checked here.
             return "INFO", "anon/authenticated on an RLS-protected table (policy-correctness unchecked — fast-follow)"
-        return "INFO", "anon/authenticated on a view/matview (underlying-table RLS governs; policy-correctness unchecked)"
+        if relkind == "v":  # VIEW — GAP A (cc-storefront #24276): a DEFINER view reads base tables as
+            # OWNER, bypassing the caller's RLS (the CAI-992 boot_briefing/finance_burn class; proven
+            # live — a definer view over an RLS-closed table returned all rows to authenticated).
+            if not f.get("is_security_invoker"):
+                return "FAIL", "web-role grant on a DEFINER view (not security_invoker) — reads base tables as owner, bypasses caller RLS (boot_briefing class)"
+            return "INFO", "web-role grant on a security_invoker view (runs as caller; the caller's RLS applies)"
+        if relkind == "m":  # MATERIALIZED view — always owner-computed, no per-caller RLS.
+            return "FAIL", "web-role grant on a MATERIALIZED view — exposes owner-computed rows (no per-caller RLS)"
+        return "INFO", f"web-role grant on relation:{relkind} (reported)"
 
-    # 5. web-role EXECUTE on a SECURITY INVOKER function (runs as caller, RLS applies), or USAGE on a
-    #    sequence/schema (access enablers) — not a breach on their own. INFO.
-    return "INFO", f"{grantee} {priv} on {objtype} (reported; RLS/caller-context governs, not a breach on its own)"
+    # SCHEMA USAGE (CAI-1026): INFO on a PostgREST-exposed schema (a web role NEEDS it for the API);
+    # FAIL on a non-exposed/internal schema (a web role has no reason to reach net/internal).
+    if objtype == "schema":
+        if obj in EXPOSED_SCHEMAS:
+            return "INFO", f"web-role USAGE on the PostgREST-exposed schema '{obj}' (required for the API)"
+        return "FAIL", f"web-role USAGE on non-exposed schema '{obj}' (no gate; a web role has no reason to reach it)"
+
+    # SEQUENCE (CAI-1026): approximated by schema exposure — a sequence in an exposed schema backs a
+    # serial column on a (typically gated) table -> INFO; elsewhere -> FAIL. The precise owning-table
+    # RLS linkage (pg_depend -> column -> table.relrowsecurity) is a NAMED FAST-FOLLOW.
+    if objtype == "sequence":
+        if schema in EXPOSED_SCHEMAS:
+            return "INFO", f"web-role grant on a sequence in exposed schema '{schema}' (serial-column backing; owning-table-RLS linkage is a fast-follow)"
+        return "FAIL", f"web-role grant on a sequence in non-exposed schema '{schema}' (no RLS gate)"
+
+    return "INFO", f"{grantee} {priv} on {objtype} (reported)"
 
 
 # Enriched variant of the detector query: same untrusted-grant rows, plus the metadata the CAI-1024
@@ -145,7 +180,11 @@ WITH untrusted AS (
          COALESCE(r.rolname,'PUBLIC') AS grantee, a.privilege_type AS privilege_type,
          NULL::bool AS is_secdef,
          c.relrowsecurity AS rls_enabled,
-         EXISTS(SELECT 1 FROM pg_policy pol WHERE pol.polrelid = c.oid) AS has_policy
+         EXISTS(SELECT 1 FROM pg_policy pol WHERE pol.polrelid = c.oid) AS has_policy,
+         -- security_invoker view (PG15+, WITH (security_invoker=on)) runs as the CALLER, so RLS
+         -- applies; a definer/pre-15 view runs as OWNER and BYPASSES the caller's RLS. Default false.
+         COALESCE((SELECT bool_or(lower(o) IN ('security_invoker=true','security_invoker=on','security_invoker=1'))
+                     FROM unnest(c.reloptions) o), false) AS is_security_invoker
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
@@ -154,7 +193,7 @@ WITH untrusted AS (
      AND n.nspname <> ALL(%(excl)s) AND COALESCE(r.rolname,'PUBLIC') <> ALL(%(trusted)s)
   UNION ALL
   SELECT n.nspname, c.relname, 'sequence', COALESCE(r.rolname,'PUBLIC'), a.privilege_type,
-         NULL::bool, NULL::bool, NULL::bool
+         NULL::bool, NULL::bool, NULL::bool, NULL::bool
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('s', c.relowner))) a
@@ -163,7 +202,7 @@ WITH untrusted AS (
      AND n.nspname <> ALL(%(excl)s) AND COALESCE(r.rolname,'PUBLIC') <> ALL(%(trusted)s)
   UNION ALL
   SELECT n.nspname, p.proname, 'function', COALESCE(r.rolname,'PUBLIC'), a.privilege_type,
-         p.prosecdef AS is_secdef, NULL::bool, NULL::bool
+         p.prosecdef AS is_secdef, NULL::bool, NULL::bool, NULL::bool
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
@@ -172,14 +211,14 @@ WITH untrusted AS (
      AND n.nspname <> ALL(%(excl)s) AND COALESCE(r.rolname,'PUBLIC') <> ALL(%(trusted)s)
   UNION ALL
   SELECT n.nspname, n.nspname, 'schema', COALESCE(r.rolname,'PUBLIC'), a.privilege_type,
-         NULL::bool, NULL::bool, NULL::bool
+         NULL::bool, NULL::bool, NULL::bool, NULL::bool
     FROM pg_namespace n
     CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
     LEFT JOIN pg_roles r ON r.oid = a.grantee
    WHERE a.grantee <> n.nspowner
      AND n.nspname <> ALL(%(excl)s) AND COALESCE(r.rolname,'PUBLIC') <> ALL(%(trusted)s)
 )
-SELECT schema, object, objtype, grantee, privilege_type, is_secdef, rls_enabled, has_policy
+SELECT schema, object, objtype, grantee, privilege_type, is_secdef, rls_enabled, has_policy, is_security_invoker
   FROM untrusted
  ORDER BY schema, object, objtype, grantee, privilege_type
 """
@@ -190,7 +229,7 @@ def find_isolation_findings(cur, *, trusted_roles, exclude_schemas):
     (is_secdef / rls_enabled / has_policy). Pass the rows through classify_all to get FAIL/INFO."""
     cur.execute(_ISOLATION_SQL, {"trusted": list(trusted_roles), "excl": list(exclude_schemas)})
     cols = ("schema", "object", "objtype", "grantee", "privilege_type",
-            "is_secdef", "rls_enabled", "has_policy")
+            "is_secdef", "rls_enabled", "has_policy", "is_security_invoker")
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 

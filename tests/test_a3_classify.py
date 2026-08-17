@@ -17,10 +17,11 @@ from scripts.lib.a3_grant_detector import classify_finding
 
 
 def _f(grantee, objtype="relation:r", privilege_type="SELECT", is_secdef=False,
-       rls_enabled=True, has_policy=True):
-    return {"schema": "s", "object": "o", "objtype": objtype, "grantee": grantee,
+       rls_enabled=True, has_policy=True, is_security_invoker=False, schema="s", object="o"):
+    return {"schema": schema, "object": object, "objtype": objtype, "grantee": grantee,
             "privilege_type": privilege_type, "is_secdef": is_secdef,
-            "rls_enabled": rls_enabled, "has_policy": has_policy}
+            "rls_enabled": rls_enabled, "has_policy": has_policy,
+            "is_security_invoker": is_security_invoker}
 
 
 def test_public_grant_always_fails():
@@ -66,9 +67,45 @@ def test_unexpected_nontrusted_role_fails_deny_by_default():
     assert tier == "FAIL"
 
 
-def test_anon_on_view_is_info_underlying_rls_governs():
-    # a VIEW/matview has no RLS of its own (relrowsecurity is always false); its access is governed
-    # by the underlying tables' RLS (which criterion 3 checks on the base tables). Treat as INFO,
-    # not a false FAIL from the view's inherent rls_enabled=false.
-    tier, reason = classify_finding(_f("anon", objtype="relation:v", rls_enabled=False, has_policy=False))
-    assert tier == "INFO", f"anon on a view must be INFO (underlying-table RLS governs), got {tier}: {reason}"
+def test_anon_on_definer_view_FAILS():
+    # GAP A (cc-storefront #24276, proven live): a DEFINER view (not security_invoker) reads base
+    # tables as OWNER, bypassing the caller's RLS -> FAIL (the boot_briefing class). My earlier
+    # 'all views are INFO' was a material false-green.
+    tier, reason = classify_finding(_f("anon", objtype="relation:v", is_security_invoker=False))
+    assert tier == "FAIL" and "definer" in reason.lower(), f"definer view must FAIL, got {tier}: {reason}"
+
+
+def test_anon_on_security_invoker_view_is_info():
+    tier, _ = classify_finding(_f("anon", objtype="relation:v", is_security_invoker=True))
+    assert tier == "INFO"
+
+
+def test_anon_on_materialized_view_FAILS():
+    tier, _ = classify_finding(_f("anon", objtype="relation:m"))
+    assert tier == "FAIL"  # matview is always owner-computed, no per-caller RLS
+
+
+def test_safe_secdef_function_is_info_when_listed(monkeypatch):
+    import scripts.lib.a3_grant_detector as det
+    monkeypatch.setitem(det.SAFE_SECDEF_FUNCTIONS, ("public", "auth_user_role"),
+                        "called only by RLS policy X; scopes internally")
+    tier, reason = classify_finding(_f("anon", objtype="function", privilege_type="EXECUTE",
+                                       is_secdef=True, schema="public", object="auth_user_role"))
+    assert tier == "INFO" and "safe-secdef" in reason.lower()
+
+
+def test_web_usage_on_exposed_schema_is_info():
+    tier, _ = classify_finding(_f("anon", objtype="schema", privilege_type="USAGE", object="public"))
+    assert tier == "INFO"
+    tier, _ = classify_finding(_f("anon", objtype="schema", privilege_type="USAGE", object="graphql_public"))
+    assert tier == "INFO"
+
+
+def test_web_usage_on_internal_schema_FAILS():
+    tier, reason = classify_finding(_f("anon", objtype="schema", privilege_type="USAGE", object="net"))
+    assert tier == "FAIL" and "net" in reason
+
+
+def test_sequence_in_exposed_schema_is_info_else_fail():
+    assert classify_finding(_f("anon", objtype="sequence", privilege_type="USAGE", schema="public"))[0] == "INFO"
+    assert classify_finding(_f("anon", objtype="sequence", privilege_type="USAGE", schema="internal"))[0] == "FAIL"

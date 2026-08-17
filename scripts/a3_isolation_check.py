@@ -57,8 +57,13 @@ DEFAULT_TRUSTED = [
     "supabase_auth_admin", "supabase_realtime_admin", "supabase_storage_admin",
     "pg_monitor", "pg_read_all_stats",
 ]
-# The A3 scope: everything OUTSIDE shipforge, minus the postgres system schemas.
-DEFAULT_EXCLUDE = ["shipforge", "pg_catalog", "information_schema", "pg_toast"]
+# The A3 scope (CAI-1025): app data OUTSIDE shipforge, minus the postgres system schemas AND the
+# Supabase-MANAGED schemas we cannot remediate (storage/extensions/realtime/auth/graphql — 139 FAILs
+# that would reproduce the original unpassable problem one layer in). graphql_public STAYS in scope
+# (it is the exposed API schema; CAI-1026 treats its web-role USAGE as INFO). A3 fails on `public`
+# and any schema we create.
+DEFAULT_EXCLUDE = ["shipforge", "pg_catalog", "information_schema", "pg_toast",
+                   "storage", "extensions", "realtime", "auth", "graphql"]
 # The D4 negative-control scope: the SAME as the main scan but WITHOUT excluding pg_catalog, which
 # legitimately carries PUBLIC grants — so a working detector MUST return >0 here.
 NEGCONTROL_EXCLUDE = ["shipforge", "information_schema", "pg_toast"]
