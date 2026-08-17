@@ -41,9 +41,22 @@ from scripts.lib.a3_invariant_sink import record_a3_run, PASS, FAIL, ERROR, SRE_
 RESIDENCY_INVARIANT_REF = "RESIDENCY-1"
 SCOPE_DESC = "untrusted grants (relations/sequences/functions/schemas) outside schema shipforge"
 
-# cai CAI-1019 outside-shipforge trusted set (shipforge_app EXCLUDED -> A1 folded into A3).
-# CONFIRM against ceayj's real infra roles with orch-console before firing (see module header).
-DEFAULT_TRUSTED = ["postgres", "service_role", "console_readonly"]
+# Trusted-role whitelist for ceayj.
+#   * cai CAI-1019 core: postgres, service_role, console_readonly (shipforge_app EXCLUDED -> A1 folded).
+#   * Supabase PLATFORM-INFRA roles (confirmed against the ceayj dry-run, orch-console #24250):
+#     these legitimately span schemas and are not web-facing; NOT baking them made 297/2173 noise.
+#   * anon / authenticated are DELIBERATELY ABSENT and are the OPEN DESIGN QUESTION (#24250, cai's
+#     ruling): on Supabase, anon/authenticated grants on RLS-protected tables ARE the architecture
+#     (RLS is the control, not the grant), so treating every such grant as a breach fails A3 forever
+#     (81% by-design noise). The real isolation breaches are narrower — PUBLIC, SECURITY DEFINER
+#     functions with web-EXECUTE (they bypass RLS), and grants on RLS-DISABLED tables. Do NOT add
+#     anon/authenticated here to 'make it pass' — that guts the check; await cai's scope ruling.
+DEFAULT_TRUSTED = [
+    "postgres", "service_role", "console_readonly",
+    "dashboard_user", "pgbouncer", "authenticator",
+    "supabase_auth_admin", "supabase_realtime_admin", "supabase_storage_admin",
+    "pg_monitor", "pg_read_all_stats",
+]
 # The A3 scope: everything OUTSIDE shipforge, minus the postgres system schemas.
 DEFAULT_EXCLUDE = ["shipforge", "pg_catalog", "information_schema", "pg_toast"]
 # The D4 negative-control scope: the SAME as the main scan but WITHOUT excluding pg_catalog, which
