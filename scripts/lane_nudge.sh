@@ -164,10 +164,20 @@ PYEOF
 # idle pane returns 1 -> KEEP the P1 (fail toward PAGING a possible real anomaly — the OPPOSITE of
 # pane_is_busy's own fail-closed-to-busy, because here a MISSED page is the harm, not a stray keystroke).
 _probe_revertfail_is_repaint_race() {
-  local sess="$1" cap
-  cap="$(tmux capture-pane -p -t "$sess" 2>/dev/null)" || return 1
-  printf '%s' "$cap" | grep -q '[^[:space:]]' || return 1   # empty/unreadable -> not a PROVEN race -> keep P1
-  pane_is_busy tmux "$sess"
+  local sess="$1" c1 c2
+  c1="$(tmux capture-pane -p -t "$sess" 2>/dev/null)" || return 1
+  printf '%s' "$c1" | grep -q '[^[:space:]]' || return 1   # empty/unreadable -> not a PROVEN race -> keep P1
+  # Fast path: a mid-turn footer (esc-to-interrupt / thinking spinner).
+  pane_is_busy tmux "$sess" && return 0
+  # INSTABILITY (the general predicate — a busy footer is only ONE cause). The pane is CHANGING
+  # ON ITS OWN — busy, OR receiving a concurrent nudge delivery, OR an on-demand node TEARING
+  # DOWN (quality #25710: pane said 'exiting cleanly', NO busy footer, yet it repainted under the
+  # probe and a P1 fired). pane_is_busy's marker-list can't see those, but an UNSTABLE pane is a
+  # repaint race whatever the cause. Sample twice a beat apart: CHANGED => unstable => down-rank;
+  # BYTE-IDENTICAL => a STABLE pane whose revert genuinely failed => keep the P1 (the real anomaly).
+  sleep "${PROBE_INSTABILITY_SAMPLE_S:-1}"
+  c2="$(tmux capture-pane -p -t "$sess" 2>/dev/null)" || return 1
+  [ "$c1" != "$c2" ]
 }
 
 if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [ "${CC_N:-0}" -gt 0 ] 2>/dev/null; then
@@ -196,12 +206,12 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       # unreadable) pane, a genuine byte anomaly (Nazim #25506/#25619/#25635: the probe kept firing
       # false P1s on healthy busy panes). The REFUSE + preserve is identical on both branches.
       if _probe_revertfail_is_repaint_race "$SESSION"; then
-        _log_probe_capture "REFUSED-revert-fail [MID-TURN pane: repaint race, LOW — no P1], preserved staged"
-        echo "lane_nudge: revert-fail on '$SESSION' but the pane is MID-TURN (busy footer) — expected repaint race, NOT corruption; REFUSING (LOW, no P1)." >&2
+        _log_probe_capture "REFUSED-revert-fail [UNSTABLE pane: repaint race (busy/delivering/exiting), LOW — no P1], preserved staged"
+        echo "lane_nudge: revert-fail on '$SESSION' but the pane is UNSTABLE (busy / mid-delivery / tearing-down) — expected repaint race, NOT corruption; REFUSING (LOW, no P1)." >&2
       else
         _log_probe_capture "REFUSED-revert-fail, preserved staged"
         _probe_p1_escalate "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
-        echo "lane_nudge: REVERT-FAIL on '$SESSION' (idle pane) — composer NOT restored byte-identical after the probe; REFUSING + escalated P1 (possible corruption of a real staged step)." >&2
+        echo "lane_nudge: REVERT-FAIL on '$SESSION' (STABLE pane) — composer NOT restored byte-identical after the probe; REFUSING + escalated P1 (possible corruption of a real staged step)." >&2
       fi
       exit 3
       ;;

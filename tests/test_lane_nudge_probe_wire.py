@@ -34,10 +34,12 @@ REAL_AFTER = _after(_FLAT + "~")     # sentinel appended to real staged text -> 
 WORKING = "some output\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t\n"
 
 
-def run_nudge(tmp_path: Path, after_pane: str, revert_pane: str = None):
+def run_nudge(tmp_path: Path, after_pane: str, revert_pane: str = None, unstable: bool = False):
     """Drive lane_nudge.sh with a state-machine fake tmux. `after_pane` is what the composer
     reads AFTER the sentinel is typed (GHOST_AFTER or REAL_AFTER); `revert_pane` is what it reads
     AFTER the BSpace (defaults to the original `before`, i.e. a clean byte-identical revert).
+    `unstable=True` makes every post-revert capture DIFFER (appends an incrementing tick), i.e.
+    a pane changing on its own (busy / mid-delivery / tearing-down) — the instability signal.
     Returns (completedprocess, logdir)."""
     bindir = tmp_path / "bin"; bindir.mkdir()
     st = tmp_path / "state"; st.mkdir()
@@ -45,6 +47,8 @@ def run_nudge(tmp_path: Path, after_pane: str, revert_pane: str = None):
     (st / "after").write_text(after_pane)
     (st / "revert").write_text(revert_pane if revert_pane is not None else CC_N_POS)
     (st / "working").write_text(WORKING)
+    if unstable:
+        (st / "unstable").write_text("1")
     fake = bindir / "tmux"
     fake.write_text(textwrap.dedent(f"""\
         #!/usr/bin/env bash
@@ -56,7 +60,9 @@ def run_nudge(tmp_path: Path, after_pane: str, revert_pane: str = None):
           capture-pane)
             if [ -f "$S/delivered" ]; then cat "$S/working"
             elif [ -f "$S/sentinel" ] && [ ! -f "$S/reverted" ]; then cat "$S/after"
-            elif [ -f "$S/reverted" ]; then cat "$S/revert"
+            elif [ -f "$S/reverted" ]; then
+              cat "$S/revert"
+              if [ -f "$S/unstable" ]; then n=$(cat "$S/capn" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$S/capn"; echo "__tick_$n"; fi
             else cat "$S/before"; fi ;;
           send-keys)
             # classify what was typed to advance the state machine
@@ -137,14 +143,28 @@ def test_revert_fail_on_busy_pane_is_low_not_p1(tmp_path):
     assert "escalated P1" not in out.stderr, f"busy-pane revert-fail must NOT escalate P1: {out.stderr!r}"
 
 
-def test_revert_fail_on_idle_pane_still_escalates_p1(tmp_path):
-    # The reserved case: a revert-fail on an IDLE pane (no busy footer) keeps the P1 path — a genuine
-    # byte anomaly still surfaces to the operator. empty.e.txt is an idle/empty composer, not busy.
+def test_revert_fail_on_stable_idle_pane_still_escalates_p1(tmp_path):
+    # The reserved case: a revert-fail on a STABLE idle pane (no busy footer, byte-identical across
+    # captures) keeps the P1 path — a genuine byte anomaly still surfaces. empty.e.txt is idle/stable.
     empty = (FIX / "empty.e.txt").read_text()
-    out, logdir = run_nudge(tmp_path, REAL_AFTER, revert_pane=empty)
+    out, logdir = run_nudge(tmp_path, REAL_AFTER, revert_pane=empty)  # unstable=False -> captures identical
     assert out.returncode == 3
     assert "REVERT-FAIL" in out.stderr and "escalated P1" in out.stderr, \
-        f"an idle-pane revert-fail must keep the P1 path, got: {out.stderr!r}"
+        f"a stable-idle-pane revert-fail must keep the P1 path, got: {out.stderr!r}"
+
+
+def test_revert_fail_on_unstable_idle_pane_is_low_not_p1(tmp_path):
+    # quality #25710 (the busy-only fix missed this): an on-demand node TEARING DOWN, or a pane
+    # mid-delivery, has NO busy footer yet REPAINTS under the probe -> a P1 fired. The general
+    # predicate is INSTABILITY: a pane changing on its own across captures. Such a revert-fail must
+    # down-rank to LOW (no P1) even without a busy footer. `unstable=True` makes each capture differ.
+    empty = (FIX / "empty.e.txt").read_text()
+    out, logdir = run_nudge(tmp_path, REAL_AFTER, revert_pane=empty, unstable=True)
+    assert out.returncode == 3, f"unstable-pane revert-fail must STILL refuse (exit 3): {out.stderr!r}"
+    log = (logdir / "lane_nudge_preserved_input.log").read_text()
+    assert ("unstable" in log.lower()) or ("repaint race" in log.lower()), \
+        f"an unstable-pane revert-fail must log LOW/repaint-race, got: {log!r}"
+    assert "escalated P1" not in out.stderr, f"unstable-pane revert-fail must NOT escalate P1: {out.stderr!r}"
 
 
 def test_ghost_log_verdict_fields_are_the_matched_pair_not_postrevert(tmp_path):
