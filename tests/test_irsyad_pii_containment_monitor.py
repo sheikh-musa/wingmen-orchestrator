@@ -69,3 +69,36 @@ def test_coverage_floor_guard_fires_when_discovery_shrinks():
 
 def test_org_id_is_the_verified_madrasah_irsyad_org():
     assert M.ORG_ID == "73339164-7c1f-40ba-a093-33f1f292dd4c"
+
+
+# ── outcome tiering (Nazim #25011: red breach vs amber can't-measure/can't-classify) ──
+
+def test_decide_ok_when_all_zero_and_nothing_unclassifiable():
+    assert M.decide_page({"persons.address": 0}, 0) == (0, None, "ok", [])
+
+
+def test_decide_scalar_breach_is_red_p0():
+    code, pri, kind, _ = M.decide_page({"persons.nric_hash": 3}, 0)
+    assert (code, pri, kind) == (1, "P0", "breach")
+
+
+def test_decide_could_not_measure_is_amber_p1():
+    code, pri, kind, _ = M.decide_page({"persons.address": None}, 0)
+    assert (code, pri, kind) == (2, "P1", "could-not-measure")
+
+
+def test_decide_unclassifiable_customfields_is_amber_p1_not_p0():
+    """custom_fields/tags non-empty = an unstructured field we can't count-classify =
+    potential PII for human eyes (amber), NOT an auto-P0 breach (#25011)."""
+    code, pri, kind, _ = M.decide_page({"persons.address": 0}, 5)
+    assert (code, pri, kind) == (2, "P1", "could-not-classify")
+
+
+def test_decide_breach_precedes_unclassifiable():
+    code, pri, kind, _ = M.decide_page({"persons.nric_hash": 1}, 9)
+    assert (code, pri, kind) == (1, "P0", "breach")
+
+
+def test_decide_unclassifiable_none_is_could_not_measure():
+    code, pri, kind, _ = M.decide_page({"persons.address": 0}, None)
+    assert (code, pri, kind) == (2, "P1", "could-not-measure")

@@ -77,6 +77,37 @@ def classify_could_not_measure(counts: Dict[str, Optional[int]]) -> List[str]:
     return [label for label, n in sorted(counts.items()) if n is None]
 
 
+def count_unclassifiable(cur, org_id: str = ORG_ID) -> Optional[int]:
+    """FAIL-CLOSED check for the jsonb/array backdoor (Nazim #25011): DOB/address
+    stuffed into custom_fields as JSON would sail past the scalar stem filter. Count
+    the org's persons with a NON-EMPTY custom_fields OR tags — an unstructured field we
+    cannot count-classify. Counts only, never parses a value. None if the query fails."""
+    subq = "SELECT person_id FROM sch_students WHERE org_id = %(o)s AND person_id IS NOT NULL"
+    return _count(
+        cur,
+        f"""SELECT count(*) FROM persons WHERE id IN ({subq})
+             AND ( (custom_fields IS NOT NULL AND custom_fields::text NOT IN ('{{}}','null'))
+                   OR (tags IS NOT NULL AND cardinality(tags) > 0) )""",
+        org_id,
+    )
+
+
+def decide_page(counts: Dict[str, Optional[int]], unclassifiable: Optional[int]):
+    """The outcome tier (Nazim #25011: red vs amber distinguishable at a glance).
+    Returns (exit_code, priority, kind, items). A confirmed scalar-field breach is P0
+    (red); a could-not-measure OR a could-not-classify is P1 (amber); else OK."""
+    breaches = classify_breaches(counts)
+    if breaches:
+        return (1, "P0", "breach", breaches)
+    unmeasured = classify_could_not_measure(counts)
+    if unmeasured or unclassifiable is None:
+        items = list(unmeasured) + ([ "persons.custom_fields|tags" ] if unclassifiable is None else [])
+        return (2, "P1", "could-not-measure", items)
+    if unclassifiable > 0:
+        return (2, "P1", "could-not-classify", [("persons.custom_fields|tags", unclassifiable)])
+    return (0, None, "ok", [])
+
+
 def run_counts(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
     """COUNT-ONLY assertion for the org's students across all three tables, over the
     SCHEMA-DISCOVERED PII column set. Never selects a row value. A per-field query error
@@ -134,32 +165,38 @@ def main() -> int:
         pass
     dsn = os.environ.get(_GOUMLYNE_ENV)
     if not dsn:
-        _page("🔴 Irsyad PII monitor CANNOT RUN — missing goumlyne credential",
+        _page("🟠 Irsyad PII monitor CANNOT RUN — missing goumlyne credential",
               f"{_GOUMLYNE_ENV} not set; cannot verify the load-bearing containment zero for org {ORG_ID}. "
-              "Could-not-measure is not green (CAI-1060).")
+              "Could-not-measure is not green (CAI-1060).", priority="P1")
         return 2
     try:
         conn = psycopg2.connect(dsn); conn.autocommit = True
-        counts = run_counts(conn.cursor())
+        cur = conn.cursor()
+        counts = run_counts(cur)
+        unclassifiable = count_unclassifiable(cur)
     except Exception as e:
-        _page("🔴 Irsyad PII monitor CONNECT FAILED — containment UNVERIFIED",
+        _page("🟠 Irsyad PII monitor CONNECT FAILED — containment UNVERIFIED",
               f"Could not read goumlyne to verify org {ORG_ID} deep-field zero: {str(e).splitlines()[0]}. "
-              "Loud-fail, not green (dead-man's-switch).")
+              "Loud-fail, not green (dead-man's-switch).", priority="P1")
         return 2
 
-    unmeasured = classify_could_not_measure(counts)
-    breaches = classify_breaches(counts)
-    if breaches:
-        lines = "\n".join(f"  {label}: {n} non-null" for label, n in breaches)
+    code, priority, kind, items = decide_page(counts, unclassifiable)
+    if kind == "breach":
+        lines = "\n".join(f"  {label}: {n} non-null" for label, n in items)
         _page("🔴🔴 CONTAINMENT BREACH — Irsyad student deep PII POPULATED (CAI-1060 F2)",
               f"The load-bearing zero broke for org {ORG_ID}. Deep fields now non-zero:\n{lines}\n"
-              "Counts only (no rows read). F2 harm has materialised — controller authorisation + gate.")
-        return 1
-    if unmeasured:
-        _page("🟠 Irsyad PII monitor PARTIAL — some fields could not be measured",
-              f"org {ORG_ID}: could-not-measure on {unmeasured}. Not asserting green on absence.")
-        return 2
-    return 0  # all zero, containment holds — page nothing (page-only-on-breach default)
+              "Counts only (no rows read). F2 harm has materialised — controller authorisation + gate.",
+              priority="P0")
+    elif kind == "could-not-classify":
+        n = items[0][1]
+        _page("🟠 Irsyad PII monitor — UNSTRUCTURED field populated (needs human eyes)",
+              f"org {ORG_ID}: {n} persons now have a non-empty custom_fields/tags — an unstructured field "
+              "the monitor cannot count-classify, so it may carry PII. NOT an auto-breach; a human must "
+              "classify it (baseline was 0). Counts only, no values read.", priority="P1")
+    elif kind == "could-not-measure":
+        _page("🟠 Irsyad PII monitor PARTIAL — fields could not be measured",
+              f"org {ORG_ID}: could-not-measure on {items}. Not asserting green on absence.", priority="P1")
+    return code  # 0 = all zero, containment holds — page nothing (page-only default)
 
 
 if __name__ == "__main__":  # pragma: no cover
