@@ -665,35 +665,27 @@ trap '_handle_exit' EXIT
 # `--model $RESOLVED_MODEL` to the claude call → append "${CLAUDE_PASSTHROUGH[@]}"
 # AFTER it, so a passthrough --model overrides by coming later on argv.
 
-# FLEET_MODEL lever (scripts/fleet_model.sh): precedence MODEL env > .fleet_model file > opus default.
-# Lets the operator flip new engineer-lane launches Opus<->Sonnet in one place for token conservation.
+# MODEL precedence — the SHIPPED cascade lives in scripts/lib/model_precedence.sh so
+# it is the TESTED cascade (tests/test_model_precedence.py; gate-test != shipped-path).
+# Highest tier first:
+#   MODEL env > .<session>_model > .group_default_model.<family> > .fleet_model > opus-4-8
+#   (a passthrough `-- --model` still wins, appended AFTER on argv).
+# - .<session>_model (op#10706 R2, #16038): an operator's per-lane pick that STICKS
+#   across reboots; inert until written.
+# - .group_default_model.<family> (#24392): stops a NEW lane with no .<session>_model
+#   from silently falling to the fleet-wide .fleet_model (Sonnet flip) instead of its
+#   FAMILY's model. Family derived by the SAME resolver as the token per-group tier
+#   (scripts/lib/lane_model_resolver reuses lane_token_resolver.family_of — no twin map).
+# - .fleet_model (scripts/fleet_model.sh): the operator's one-place Opus<->Sonnet flip.
+# Read-only trust matches .fleet_model (the gated apply-model path validates against the
+# allowlist before writing any pointer). Fail-open at every tier.
 _FLEET_MODEL_FILE="$ORCH_DIR/.fleet_model"
-_FLEET_MODEL_DEFAULT="claude-opus-4-8"
-if [ -r "$_FLEET_MODEL_FILE" ]; then
-    _fm="$(tr -d '[:space:]' < "$_FLEET_MODEL_FILE")"
-    [ -n "$_fm" ] && _FLEET_MODEL_DEFAULT="$_fm"
-fi
-# PER-BODY model pointer (op#10706 R2, orch-console #16038): .<session>_model holds
-# a model id that overrides the fleet-wide .fleet_model for THIS body ONLY, so an
-# operator's per-lane model choice STICKS across reboots. Precedence (highest last):
-#   MODEL env > .<session>_model > .fleet_model > opus-4-8   (passthrough `-- --model`
-# still wins, appended AFTER on argv). Revert = rm the pointer. Inert until written,
-# so this is a no-op for every body that has no pointer. Read-only trust matches
-# .fleet_model (the gated apply-model path validates against the model allowlist
-# BEFORE writing a pointer, so nothing invalid lands here).
+# shellcheck source=scripts/lib/model_precedence.sh
+source "$ORCH_DIR/scripts/lib/model_precedence.sh"
 _BODY_MODEL_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
-_BODY_MODEL_DEFAULT=""
-if [ -n "$_BODY_MODEL_SESSION" ] && [ -r "$ORCH_DIR/.${_BODY_MODEL_SESSION}_model" ]; then
-    _bm="$(tr -d '[:space:]' < "$ORCH_DIR/.${_BODY_MODEL_SESSION}_model")"
-    [ -n "$_bm" ] && _BODY_MODEL_DEFAULT="$_bm"
-fi
-# per-body pointer (if any) overrides the fleet default; MODEL env still overrides both.
-_NON_ENV_MODEL="${_BODY_MODEL_DEFAULT:-$_FLEET_MODEL_DEFAULT}"
-RESOLVED_MODEL="${MODEL:-$_NON_ENV_MODEL}"
-echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}"
-if [ "$RESOLVED_MODEL" != "claude-opus-4-8" ]; then
-    echo -e "${AMBER}  (override via MODEL env var — default is claude-opus-4-8)${RESET}"
-fi
+IFS=$'\t' read -r RESOLVED_MODEL _MODEL_TIER < <(
+    resolve_lane_model "$_BODY_MODEL_SESSION" "$ORCH_DIR" "$VENV_PY" "$_FLEET_MODEL_FILE" "claude-opus-4-8")
+echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}  ${AMBER}(via ${_MODEL_TIER})${RESET}"
 
 # Stamp resolved model into current_task (CAI observes model drift) AND
 # SELF-REGISTER this lane's tmux session for #111 launchd-safe wake delivery:
@@ -759,6 +751,15 @@ if [[ -z "$CLAUDE_BIN" ]]; then
     done
 fi
 [[ -n "$CLAUDE_BIN" ]] || { echo -e "${RED}FATAL: claude binary not found (PATH=$PATH)${RESET}" >&2; exit 1; }
+
+# Ensure /usr/local/bin (+ brew) is on PATH for the claude process AND the /bin/sh
+# subshells its plugin HOOKS run in. Under launchd / non-login-ssh, PATH is minimal
+# (see the claude-resolution note above), so plugin hooks that call bare `node`
+# (e.g. the vercel-plugin PostToolUse:Bash hook, node at /usr/local/bin/node) flood
+# every pane with 'node: command not found'. Operator-flagged (orch-console 21720).
+# Additive + idempotent-enough; harmless if a dir is absent. Takes effect on the
+# NEXT lane launch/recycle (running lanes keep their PATH until they relaunch).
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
 
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
