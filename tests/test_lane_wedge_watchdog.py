@@ -118,6 +118,28 @@ def test_healthy_run_pages_nothing_and_acts_on_nothing(fast_floor, recorder):
     assert recorder["nudge"] == [] and recorder["reset"] == [] and recorder["page"] == []
 
 
+def test_capped_lane_is_suppressed_not_paged_or_nudged(fast_floor, recorder):
+    """A pool-EXHAUSTED lane reads idle + bus-silent + not-draining — identical to a genuine
+    stall that would PAGE — but its pane shows the weekly-limit banner, so it is benignly
+    WAITING for reset, not wedged. It must NOT page or nudge; a reset/nudge can't help until
+    the pool resets (Nazim #25930). Self-clears when the banner is gone."""
+    stall_bus = w.BusSignal(9, 3600, 100000, 9, 9)   # unread piling, old, long-silent = would page
+    capped = w.AgentObs("cc-irsyad", "lane", "irsyad", stall_bus,
+                        w.ComposerSignal(w.COMP_EMPTY, capped=True))
+    w.run(mode=w.MODE_ESCALATE, alert=True, injected=[capped], lane_dirs={}, persist=False)
+    assert recorder["page"] == [], f"a capped lane must NOT page: {recorder['page']}"
+    assert recorder["nudge"] == [], f"a capped lane must NOT be nudged: {recorder['nudge']}"
+
+
+def test_same_stall_without_cap_still_pages(fast_floor, recorder):
+    """Specificity: the SAME idle+silent stall, but NOT capped, still pages — proving the
+    suppression is exactly the capped flag, not the test setup."""
+    stall_bus = w.BusSignal(9, 3600, 100000, 9, 9)
+    obs = w.AgentObs("cc-irsyad", "lane", "irsyad", stall_bus, w.ComposerSignal(w.COMP_EMPTY))
+    w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["page"], "a genuine (non-capped) stall must still page"
+
+
 # --------------------------------------------------------------------------- #
 # (c) real staged draft -> alert-only, never nudged
 # --------------------------------------------------------------------------- #

@@ -366,6 +366,13 @@ class ComposerSignal:
                             # thinks, so Signal A (bus-quiet) alone misreads it as a
                             # wedge. This is the SAME check lane_nudge.pane_working()
                             # uses. Suppresses the wedge (Nazim 14067/14103/14470).
+    capped: bool = False    # pane shows the CC weekly-limit banner ('hit your weekly
+                            # limit, resets ...') — the lane is POOL-EXHAUSTED and
+                            # correctly WAITING for its weekly reset, NOT wedged. Idle
+                            # + bus-silent + not-draining looks identical to a wedge
+                            # but has a known benign cause; a reset/nudge can't help
+                            # (op#14199 pool-crunch, Nazim #25930). Suppresses the
+                            # wedge page + nudge; self-clears when the banner is gone.
 
     @property
     def safe_to_nudge(self) -> bool:
@@ -450,9 +457,12 @@ def read_composer(session: str) -> ComposerSignal:
     snippet = (
         '. "$1" || exit 9; composer_parse_pane "$2" "$3" >/dev/null 2>&1; '
         'pane_busy "$2" "$3" >/dev/null 2>&1; '
-        'menu=0; "$2" capture-pane -t "$3" -p 2>/dev/null | tail -6 | '
+        'menu=0; _pane="$("$2" capture-pane -t "$3" -p 2>/dev/null)"; '
+        'printf "%s" "$_pane" | tail -6 | '
         'LC_ALL=C grep -qiE "to navigate|esc to cancel|enter to select" && menu=1; '
-        'printf "RESULT %s %s %s %s %s\\n" "${CC_EMPTY:-x}" "${CC_N:-x}" "${CC_PARTIAL:-x}" "${CC_BUSY:-0}" "$menu"; '
+        'cap=0; printf "%s" "$_pane" | '
+        'LC_ALL=C grep -qiE "hit your (weekly|usage|5-hour) limit|weekly limit.*reset" && cap=1; '
+        'printf "RESULT %s %s %s %s %s %s\\n" "${CC_EMPTY:-x}" "${CC_N:-x}" "${CC_PARTIAL:-x}" "${CC_BUSY:-0}" "$menu" "$cap"; '
         'printf "FLAT %s\\n" "${CC_FLAT:-}"'
     )
     try:
@@ -461,16 +471,25 @@ def read_composer(session: str) -> ComposerSignal:
     except Exception:
         return ComposerSignal(COMP_UNREADABLE)
     empty = n = partial = "x"
-    busy = menu = "0"
+    busy = menu = cap = "0"
     flat = ""
     for ln in (r.stdout or "").splitlines():
         if ln.startswith("RESULT "):
             parts = ln.split()
-            if len(parts) >= 6:
+            if len(parts) >= 7:
+                empty, n, partial, busy, menu, cap = parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+            elif len(parts) >= 6:  # tolerate an older RESULT shape (no cap field)
                 empty, n, partial, busy, menu = parts[1], parts[2], parts[3], parts[4], parts[5]
         elif ln.startswith("FLAT "):
             flat = ln[5:]
     working = busy == "1"
+    # A CAPPED lane (pane shows the weekly-limit banner) is pool-exhausted + correctly
+    # WAITING for its reset — NOT wedged. It reads idle+silent+not-draining (identical
+    # to a wedge) but has a known benign cause a reset/nudge cannot fix. Classify it
+    # capped so the decision suppresses the page+nudge; self-clears when the banner is
+    # gone. Checked before menu/empty/real — it dominates (Nazim #25930).
+    if cap == "1":
+        return ComposerSignal(COMP_EMPTY, working=False, capped=True)
     # A menu-trap wins over every other classification: it is a live, non-empty pane
     # (would otherwise read as REAL/working), but it is STUCK awaiting input nobody
     # will give. Not 'working' — it is not making progress.
@@ -1159,6 +1178,17 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
         elapsed_min = int((now - float(entry.get("first_seen", now))) / 60)
         line["polls"] = entry.get("poll_count")
         line["elapsed_min"] = elapsed_min
+
+        # A CAPPED lane is pool-exhausted and correctly WAITING for its weekly reset —
+        # idle+silent+not-draining looks identical to a wedge but is benign; a reset or
+        # nudge cannot help until the pool resets. Suppress the page+nudge (log it, so a
+        # suppressed alert is never silent), self-clears when the banner is gone (#25930).
+        if obs.composer.capped:
+            line["action"] = ("capped — weekly-limit banner; pool-exhausted, benignly WAITING "
+                              "for reset (NOT a wedge; reset/nudge can't help)")
+            log(f"CAPPED {obs.agent}: weekly-limit banner — wedge SUPPRESSED (benign, waiting reset)")
+            results.append(line)
+            continue
 
         if verdict == V_MONITORING:
             line["note"] = (f"candidate, monitoring ({entry['poll_count']}/{WEDGE_MIN_POLLS} polls, "
