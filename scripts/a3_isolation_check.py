@@ -33,7 +33,10 @@ import sys
 # sys.path, not the repo root, so `from scripts.lib...` fails. Put the repo root first (the same
 # bootstrap backlog_swipe.py / context_health_watchdog.py use) — else the job crashes every run
 # (the exact last-ten-feet failure).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
+
+from dotenv import load_dotenv
 
 from scripts.lib.a3_grant_detector import (
     find_untrusted_grants, find_isolation_findings, classify_all)
@@ -147,6 +150,13 @@ def main(argv=None) -> int:
                     help="override the trusted-role whitelist (default: cai CAI-1019 set)")
     ap.add_argument("--dry-run", action="store_true", help="scan + decide but do NOT write the sink")
     args = ap.parse_args(argv)
+
+    # launchd inherits a MINIMAL environment — nothing from the interactive shell that sourced .env.
+    # So load the DSNs from the WorkingDirectory .env HERE (Nazim #24321: 'works by hand, fails under
+    # the scheduler' — same class as the worktree/.venv fire-window fail-open). load_dotenv does NOT
+    # override already-set vars, so a hand run is unaffected. The secret STAYS in the 0600 .env — do
+    # NOT move the ceayj money-tenant DSN into the 0644 plist to satisfy the scheduler.
+    load_dotenv(os.path.join(_REPO_ROOT, ".env"))
 
     ceayj = os.environ.get(args.ceayj_dsn_env)
     substrate = os.environ.get(args.substrate_dsn_env)

@@ -29,3 +29,20 @@ def test_broken_negative_control_dominates_findings_too():
     # if the control is broken we cannot trust ANY output, including a FAIL.
     outcome, _ = decide_outcome(findings_count=5, negcontrol_count=0)
     assert outcome == ERROR
+
+
+def test_main_loads_dotenv_from_workdir_before_reading_dsns(monkeypatch):
+    # Nazim #24321: launchd inherits a minimal env, so the runner MUST load the WorkingDirectory
+    # .env itself (works-by-hand-fails-under-scheduler, the fire-window fail-open class). Guard it.
+    import scripts.a3_isolation_check as runner
+    seen = {}
+    monkeypatch.setattr(runner, "load_dotenv", lambda path=None, *a, **k: seen.setdefault("path", path))
+    monkeypatch.setenv("IHSANOS_PROD_DATABASE_URL", "x")   # present so it proceeds past the DSN gate
+    monkeypatch.setenv("DATABASE_URL", "y")
+    monkeypatch.setattr(runner, "run_a3_check",
+                        lambda **k: {"outcome": PASS, "detail": "", "finding_count": 0,
+                                     "fail_count": 0, "info_count": 0, "negcontrol_count": 1})
+    rc = runner.main(["--dry-run"])
+    assert rc == 0
+    assert str(seen.get("path", "")).endswith(".env"), \
+        f"main must load_dotenv from the workdir .env (else it fails under launchd), got {seen}"
