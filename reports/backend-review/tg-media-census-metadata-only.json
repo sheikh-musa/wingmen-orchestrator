@@ -1,0 +1,473 @@
+{
+ "generated_at": "2026-08-17T06:10:54+00:00",
+ "by": "orch-console",
+ "method": "METADATA ONLY \u2014 os.stat + directory name + operator_messages join. NO FILE WAS OPENED.",
+ "caveat": "Attribution is by containing directory first, durable-log basename join second. 678 of 951 files sit flat at the top level with no directory signal; where the log has no row, the file is reported UNATTRIBUTED rather than guessed.",
+ "total_files": 951,
+ "total_bytes": 609528052,
+ "documents": 73,
+ "client_documents": 42,
+ "unattributed_documents": 18,
+ "by_channel": {
+  "cosem-caai": 1,
+  "cosem-adcda": 23,
+  "irsyad": 6,
+  "gazzabyte-irsyad": 6,
+  "fastrans": 6
+ },
+ "by_ext": {
+  ".xlsx": 4,
+  ".pdf": 33,
+  ".txt": 1,
+  ".csv": 3,
+  ".json": 1
+ },
+ "client_docs": [
+  {
+   "path": "logs/tg_media/ADCDA-answer-form-FILLED.xlsx",
+   "ext": ".xlsx",
+   "size": 17787,
+   "mode": "644",
+   "tag": "cosem-caai",
+   "src": "log"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/adcda_bapt_sample.pdf",
+   "ext": ".pdf",
+   "size": 181125,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/bapt_namelist_G1.pdf",
+   "ext": ".pdf",
+   "size": 280128,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/observation_reminder_email_draft.txt",
+   "ext": ".txt",
+   "size": 490,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/adcda_g1_attendance_test.pdf",
+   "ext": ".pdf",
+   "size": 80434,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/attendance_G1_18-19.pdf",
+   "ext": ".pdf",
+   "size": 253964,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/adcda_orbat_sample.pdf",
+   "ext": ".pdf",
+   "size": 94060,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/adcda_b1819_ocr_diff_20260619_v2_no_ooc.xlsx",
+   "ext": ".xlsx",
+   "size": 19595,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/orbat_G1_board.pdf",
+   "ext": ".pdf",
+   "size": 11191089,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/attendance_G1_v4.pdf",
+   "ext": ".pdf",
+   "size": 252501,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/attendance_G1_v3.pdf",
+   "ext": ".pdf",
+   "size": 252501,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/attendance_G1_v2.pdf",
+   "ext": ".pdf",
+   "size": 253964,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/adcda_attendance_sample.pdf",
+   "ext": ".pdf",
+   "size": 67897,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/attendance_G1_register.pdf",
+   "ext": ".pdf",
+   "size": 303952,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/cosem_users_contact_list.csv",
+   "ext": ".csv",
+   "size": 731,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/Employment_Contracts__ADCDA__-_Sheikh_Musa_Bi.pdf",
+   "ext": ".pdf",
+   "size": 486633,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/adcda_b1819_ocr_diff_20260619.xlsx",
+   "ext": ".xlsx",
+   "size": 20202,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/gtemplates/attendance_template_before.pdf",
+   "ext": ".pdf",
+   "size": 234834,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/gtemplates/namelist_template_before.pdf",
+   "ext": ".pdf",
+   "size": 104690,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/gtemplates/orbat_template_after_v2.pdf",
+   "ext": ".pdf",
+   "size": 119668,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/gtemplates/orbat_template_after.pdf",
+   "ext": ".pdf",
+   "size": 120722,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/gtemplates/orbat_template_before.pdf",
+   "ext": ".pdf",
+   "size": 168982,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/gtemplates/orbat_template_CLEAN.pdf",
+   "ext": ".pdf",
+   "size": 119599,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/cosem-adcda/gtemplates/namelist_template_CLEAN.pdf",
+   "ext": ".pdf",
+   "size": 99373,
+   "mode": "644",
+   "tag": "cosem-adcda",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/irsyad/irsyad_frs_gapmap_full_20260619.pdf",
+   "ext": ".pdf",
+   "size": 1848123,
+   "mode": "644",
+   "tag": "irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/irsyad/irsyad_frs_keluarga_slice_20260619.pdf",
+   "ext": ".pdf",
+   "size": 1059367,
+   "mode": "644",
+   "tag": "irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/irsyad/frs_s39_appreciation_letter_paynow_DRAFT.pdf",
+   "ext": ".pdf",
+   "size": 530828,
+   "mode": "644",
+   "tag": "irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/irsyad/frs_s39_appreciation_letter_DRAFT.pdf",
+   "ext": ".pdf",
+   "size": 530772,
+   "mode": "644",
+   "tag": "irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/irsyad/frs_s39_online_receipt_DRAFT.pdf",
+   "ext": ".pdf",
+   "size": 179794,
+   "mode": "644",
+   "tag": "irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/irsyad/irsyad_frs_gapmap_20260619_assets/manifest.json",
+   "ext": ".json",
+   "size": 14668,
+   "mode": "644",
+   "tag": "irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/gazzabyte-irsyad/12787-donations-export-2026-08-14 _1_.csv",
+   "ext": ".csv",
+   "size": 80892,
+   "mode": "644",
+   "tag": "gazzabyte-irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/gazzabyte-irsyad/13188-Letter-of-Appreciation-Irsyad _1_.pdf",
+   "ext": ".pdf",
+   "size": 530693,
+   "mode": "644",
+   "tag": "gazzabyte-irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/gazzabyte-irsyad/12363-MIF Bank Statement _1-31 Mar 2026_.csv",
+   "ext": ".csv",
+   "size": 487145,
+   "mode": "644",
+   "tag": "gazzabyte-irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/gazzabyte-irsyad/12898-Example 5- Thank you letter -Tabung Fajar.pdf",
+   "ext": ".pdf",
+   "size": 558564,
+   "mode": "644",
+   "tag": "gazzabyte-irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/gazzabyte-irsyad/13189-RCP-000002.pdf",
+   "ext": ".pdf",
+   "size": 20178,
+   "mode": "644",
+   "tag": "gazzabyte-irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/gazzabyte-irsyad/12798-DMS - Dec 2025 _Example_.xlsx",
+   "ext": ".xlsx",
+   "size": 156907,
+   "mode": "644",
+   "tag": "gazzabyte-irsyad",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/fastrans/fastrans_sample_invoice.pdf",
+   "ext": ".pdf",
+   "size": 2382,
+   "mode": "644",
+   "tag": "fastrans",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/fastrans/fastrans_sample_proforma.pdf",
+   "ext": ".pdf",
+   "size": 2599,
+   "mode": "644",
+   "tag": "fastrans",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/fastrans/fastrans_sample_invoice_branded.pdf",
+   "ext": ".pdf",
+   "size": 3710,
+   "mode": "644",
+   "tag": "fastrans",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/fastrans/fastrans_sample_soa.pdf",
+   "ext": ".pdf",
+   "size": 2367,
+   "mode": "644",
+   "tag": "fastrans",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/fastrans/Fastrans Phase 2 Updated Deliverables.pdf",
+   "ext": ".pdf",
+   "size": 190414,
+   "mode": "644",
+   "tag": "fastrans",
+   "src": "dir"
+  },
+  {
+   "path": "logs/tg_media/fastrans/fastrans_sample_consol_manifest.pdf",
+   "ext": ".pdf",
+   "size": 2068,
+   "mode": "644",
+   "tag": "fastrans",
+   "src": "dir"
+  }
+ ],
+ "unattributed_docs": [
+  {
+   "path": "logs/tg_media/COSEM Platform   3-Year Report _draft_ (with evolution v3).docx",
+   "ext": ".docx",
+   "size": 3362727,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/COSEM Platform   3-Year Report _draft_.docx",
+   "ext": ".docx",
+   "size": 3361865,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/ADCDA Expert Track _Updated_.pptx",
+   "ext": ".pptx",
+   "size": 6568452,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/\u0627\u0639\u0627\u062f\u0629 \u0627\u062e\u062a\u0628\u0627\u0631 \u0627\u0644\u062a\u062d\u0645\u0644 13 \u0627\u0644\u0645\u0633\u062a\u062c\u062f.pdf",
+   "ext": ".pdf",
+   "size": 228077,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/irsyad-staged-review-ITEMISED-NOPII-2026-08-10.csv",
+   "ext": ".csv",
+   "size": 318184,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/cosem-seed-record.json",
+   "ext": ".json",
+   "size": 3544,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/Group 3 Bapt 1.pdf",
+   "ext": ".pdf",
+   "size": 619504,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/COSEM Platform   3-Year Report _draft_ (with evolution).docx",
+   "ext": ".docx",
+   "size": 3362385,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/COSEM Platform   3-Year Report _draft_ (with evolution v2).docx",
+   "ext": ".docx",
+   "size": 3362673,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/console-teardown-record.json",
+   "ext": ".json",
+   "size": 1972,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/console-cleanup-record.json",
+   "ext": ".json",
+   "size": 5461,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/Tabung Fajar Issued.xlsx.QUARANTINED.txt",
+   "ext": ".txt",
+   "size": 737,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/bypass_before_AFTER_grep.txt",
+   "ext": ".txt",
+   "size": 615,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/BAPT 4 Namelist - Group 3.pdf",
+   "ext": ".pdf",
+   "size": 41722,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/irsyad-staged-review-NOPII-2026-08-10.csv",
+   "ext": ".csv",
+   "size": 141361,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/ADCFA BATCH 18 _ 19 WEEK 15 SCHEDULE.pdf",
+   "ext": ".pdf",
+   "size": 274291,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/BAPT 4 Namelist - Group 4.pdf",
+   "ext": ".pdf",
+   "size": 42747,
+   "mode": "644"
+  },
+  {
+   "path": "logs/tg_media/BAPT 4 Namelist - Group 7.pdf",
+   "ext": ".pdf",
+   "size": 41939,
+   "mode": "644"
+  }
+ ]
+}
