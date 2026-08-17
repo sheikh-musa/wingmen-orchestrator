@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.wingmen.a3-isolation-check — CAI-985 A3 automation runner (D1: the named scheduled runner).
+  AUTHORED by cc-fleet-health; LOADED + owned by orch-console (FORK1=b: the ceayj credential-holder;
+  cc-fleet-health must NOT load or run it — co-location is not a grant).
+
+  PATHS VERIFIED FOR THIS HOST (Sheikhs-Mini, user sheikhmusa) 2026-08-17: only /Users/sheikhmusa
+  exists here — the residency-sweep precedent's /Users/Musa is DEAD on this host (its python binary
+  does not exist, which is why that job never ran). nazim/orch-console runs on THIS same host+user,
+  so these /Users/sheikhmusa paths are the orch plane here. IF you load it from a different host,
+  re-verify every path first (the residency-sweep failure mode).
+
+  Nazim's last-ten-feet (#24065): you LOAD it, then verify it FIRED (a real invariant_assertion_runs
+  row + RESIDENCY-1 moved), not merely that it loaded — A3 is unshipped until a run record exists.
+
+  ⚠ BEFORE FIRST LOAD, CONFIRM: (1) the trusted whitelist matches ceayj's REAL infra roles — the
+  runner defaults to cai CAI-1019 {postgres,service_role,console_readonly}; a legitimate ceayj infra
+  role not listed will be a false-positive (a review, not a leak), pass --trusted to adjust; (2)
+  .env at the WorkingDirectory carries BOTH IHSANOS_PROD_DATABASE_URL (ceayj) and DATABASE_URL
+  (substrate). A dry run first: `.venv/bin/python3 scripts/a3_isolation_check.py --dry-run`.
+-->
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.wingmen.a3-isolation-check</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/a3_isolation_check.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>0</integer></dict>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/a3-isolation-check.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/a3-isolation-check.out.log</string>
+</dict></plist>

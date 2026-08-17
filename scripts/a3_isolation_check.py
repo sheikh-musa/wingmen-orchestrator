@@ -29,6 +29,12 @@ import json
 import os
 import sys
 
+# Run directly as `python3 scripts/a3_isolation_check.py` (the launchd form) puts scripts/ on
+# sys.path, not the repo root, so `from scripts.lib...` fails. Put the repo root first (the same
+# bootstrap backlog_swipe.py / context_health_watchdog.py use) — else the job crashes every run
+# (the exact last-ten-feet failure).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from scripts.lib.a3_grant_detector import find_untrusted_grants
 from scripts.lib.a3_invariant_sink import record_a3_run, PASS, FAIL, ERROR, SRE_AGENT_ID
 
