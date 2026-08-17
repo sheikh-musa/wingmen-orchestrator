@@ -155,6 +155,21 @@ except Exception:
 PYEOF
 }
 
+# A revert-fail on a pane that is MID-TURN (busy footer: 'esc to interrupt' / a thinking spinner)
+# is the EXPECTED artifact of the pane REPAINTING under the sentinel+BSpace — not corruption of a
+# staged step (Nazim #25506/#25619/#25635: the probe kept firing false P1s on HEALTHY busy panes,
+# each forcing a manual pane inspection). Return 0 (a repaint race -> down-rank to LOW, no P1) ONLY
+# on POSITIVE evidence the pane is busy: a READABLE, NON-EMPTY capture that the SHARED pane_is_busy
+# (the same predicate the probe's cond#1/#4 use — no twin-drift) calls busy. An unreadable / empty /
+# idle pane returns 1 -> KEEP the P1 (fail toward PAGING a possible real anomaly — the OPPOSITE of
+# pane_is_busy's own fail-closed-to-busy, because here a MISSED page is the harm, not a stray keystroke).
+_probe_revertfail_is_repaint_race() {
+  local sess="$1" cap
+  cap="$(tmux capture-pane -p -t "$sess" 2>/dev/null)" || return 1
+  printf '%s' "$cap" | grep -q '[^[:space:]]' || return 1   # empty/unreadable -> not a PROVEN race -> keep P1
+  pane_is_busy tmux "$sess"
+}
+
 if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [ "${CC_N:-0}" -gt 0 ] 2>/dev/null; then
   # STEP-4 (Nazim promotion, coupled behind the pane_busy collapse b5d82ce). The composer READS
   # as real staged text — but a dim AUTOSUGGESTION ghost parses identically (#23536), and at
@@ -174,11 +189,20 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       # fall through past this if-block to the delivery loop
       ;;
     revert-fail)
-      # cond#2: the BSpace did NOT restore the composer byte-identical — a real staged step may be
-      # corrupted. FAIL LOUD + escalate P1 + REFUSE. NEVER proceed.
-      _log_probe_capture "REFUSED-revert-fail, preserved staged"
-      _probe_p1_escalate "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
-      echo "lane_nudge: REVERT-FAIL on '$SESSION' — composer NOT restored byte-identical after the probe; REFUSING + escalated P1 (possible corruption of a real staged step)." >&2
+      # cond#2: the BSpace did NOT restore the composer byte-identical. REFUSE regardless (exit 3,
+      # never clobber a possibly-real staged step). SEVERITY depends on the pane: a MID-TURN pane
+      # repaints under the sentinel+BSpace, so a byte-mismatch there is the EXPECTED busy artifact,
+      # NOT corruption — LOW/log, no operator P1. Reserve the P1 for a revert-fail on an IDLE (or
+      # unreadable) pane, a genuine byte anomaly (Nazim #25506/#25619/#25635: the probe kept firing
+      # false P1s on healthy busy panes). The REFUSE + preserve is identical on both branches.
+      if _probe_revertfail_is_repaint_race "$SESSION"; then
+        _log_probe_capture "REFUSED-revert-fail [MID-TURN pane: repaint race, LOW — no P1], preserved staged"
+        echo "lane_nudge: revert-fail on '$SESSION' but the pane is MID-TURN (busy footer) — expected repaint race, NOT corruption; REFUSING (LOW, no P1)." >&2
+      else
+        _log_probe_capture "REFUSED-revert-fail, preserved staged"
+        _probe_p1_escalate "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
+        echo "lane_nudge: REVERT-FAIL on '$SESSION' (idle pane) — composer NOT restored byte-identical after the probe; REFUSING + escalated P1 (possible corruption of a real staged step)." >&2
+      fi
       exit 3
       ;;
     *)

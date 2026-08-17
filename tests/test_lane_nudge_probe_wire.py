@@ -119,6 +119,34 @@ def test_revert_fail_refuses_loudly_and_never_proceeds(tmp_path):
     assert _FLAT in log, f"revert-fail log must record the before-content at risk, got: {log!r}"
 
 
+def test_revert_fail_on_busy_pane_is_low_not_p1(tmp_path):
+    # Nazim #25506/#25619/#25635: a revert-fail on a MID-TURN pane (busy footer 'esc to interrupt')
+    # is the EXPECTED repaint race, not corruption — the probe kept firing false P1s on HEALTHY busy
+    # panes. It must STILL refuse (exit 3, never clobber) but DOWN-RANK: LOW log + stderr, no P1.
+    # WORKING is a busy footer; as the post-BSpace capture it makes both the revert read (!= before,
+    # so the verdict is revert-fail) and the busy re-check see a mid-turn pane.
+    out, logdir = run_nudge(tmp_path, REAL_AFTER, revert_pane=WORKING)
+    assert out.returncode == 3, f"a busy-pane revert-fail must STILL refuse (exit 3), got {out.returncode} (stderr: {out.stderr})"
+    log = (logdir / "lane_nudge_preserved_input.log").read_text()
+    assert "revert-fail" in log.lower(), f"revert-fail not recorded: {log!r}"
+    assert ("mid-turn" in log.lower()) or ("repaint race" in log.lower()) or ("no p1" in log.lower()), \
+        f"a busy-pane revert-fail must be logged LOW/repaint-race, got: {log!r}"
+    assert ("MID-TURN" in out.stderr) or ("LOW, no P1" in out.stderr), \
+        f"stderr must say the page was down-ranked, got: {out.stderr!r}"
+    # and it must NOT claim it escalated a P1 (the whole point — no operator page on a healthy pane)
+    assert "escalated P1" not in out.stderr, f"busy-pane revert-fail must NOT escalate P1: {out.stderr!r}"
+
+
+def test_revert_fail_on_idle_pane_still_escalates_p1(tmp_path):
+    # The reserved case: a revert-fail on an IDLE pane (no busy footer) keeps the P1 path — a genuine
+    # byte anomaly still surfaces to the operator. empty.e.txt is an idle/empty composer, not busy.
+    empty = (FIX / "empty.e.txt").read_text()
+    out, logdir = run_nudge(tmp_path, REAL_AFTER, revert_pane=empty)
+    assert out.returncode == 3
+    assert "REVERT-FAIL" in out.stderr and "escalated P1" in out.stderr, \
+        f"an idle-pane revert-fail must keep the P1 path, got: {out.stderr!r}"
+
+
 def test_ghost_log_verdict_fields_are_the_matched_pair_not_postrevert(tmp_path):
     # DEFECT-1 (matched-pair, broader than "basis only"): _probe_composer re-parses the pane
     # 3x (before/after-sentinel/after-revert) and composer_parse UNCONDITIONALLY overwrites
