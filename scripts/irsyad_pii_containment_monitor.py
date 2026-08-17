@@ -29,26 +29,40 @@ from typing import Dict, List, Optional, Tuple
 ORG_ID = "73339164-7c1f-40ba-a093-33f1f292dd4c"  # Madrasah Irsyad Zuhri Al-Islamiah (goumlyne)
 _GOUMLYNE_ENV = "GOUMLYNE_DATABASE_URL"
 
-# Deep-field set, verified against the live schema. Any of these going non-null for an
-# org student = a containment breach.
-_STUDENT_DEEP_COLS = ["emergency_contact", "medical_notes", "previous_school"]
-_PERSON_DEEP_COLS = [
-    "date_of_birth", "address",
-    "phone", "phone_encrypted", "phone_hash", "phone_hash_v2",
-    "email", "email_encrypted", "email_hash", "email_hash_v2",
-    "nric_encrypted", "nric_hash", "nric_source", "nric_hash_v2",
-]
+# PII-class name stems (cai/Nazim #24985). The monitored column set is DISCOVERED from
+# the catalog at runtime by matching these stems, NOT hardcoded — so a new variant
+# (nric_hash_v3, a new contact field) is auto-covered instead of silently re-opening
+# the false-green. A populated _hash with no plaintext is still a populated identifier.
+_PII_STEMS = ("date_of_birth", "dob", "address", "phone", "email", "nric",
+              "emergency", "medical", "previous_school")
+# PII CONTENT lives in these types; excludes bool/uuid/timestamp (e.g. an *_verified
+# flag or *_id would over-match a stem but carries no identifier content).
+_CONTENT_TYPES = ("text", "character varying", "character", "date")
+# Pinned coverage floor per table (today's live counts). Discovery finding FEWER than
+# this = a rename/removal that could hide a field -> could-not-measure, LOUD (the
+# "assert the total" teeth: coverage shrinking must surface, never silently drift).
+EXPECTED_MIN = {"persons": 14, "sch_students": 3}
 _PARENT_LABEL = "sch_student_parents.rows"
 
 
-def monitored_labels() -> List[str]:
-    """Every field/table this monitor asserts count-zero on (the false-green guard's
-    subject: this set must stay complete)."""
-    return (
-        [f"sch_students.{c}" for c in _STUDENT_DEEP_COLS]
-        + [f"persons.{c}" for c in _PERSON_DEEP_COLS]
-        + [_PARENT_LABEL]
+def discover_pii_columns(cur, table: str) -> List[str]:
+    """Deep-PII-classed columns on `table`, discovered from the catalog by stem match +
+    content type. Auto-covers new variants; excludes id/org_id/display_name/flags."""
+    stems_sql = " OR ".join(["column_name ILIKE %s"] * len(_PII_STEMS))
+    cur.execute(
+        f"""SELECT column_name FROM information_schema.columns
+             WHERE table_schema='public' AND table_name=%s
+               AND data_type = ANY(%s)
+               AND ({stems_sql})
+             ORDER BY column_name""",
+        [table, list(_CONTENT_TYPES)] + ["%%%s%%" % s for s in _PII_STEMS],
     )
+    return [r[0] for r in cur.fetchall()]
+
+
+def coverage_shortfall(table: str, discovered_count: int) -> bool:
+    """True if discovery covered FEWER columns than the pinned floor for `table`."""
+    return discovered_count < EXPECTED_MIN.get(table, 0)
 
 
 def classify_breaches(counts: Dict[str, Optional[int]]) -> List[Tuple[str, int]]:
@@ -64,16 +78,24 @@ def classify_could_not_measure(counts: Dict[str, Optional[int]]) -> List[str]:
 
 
 def run_counts(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
-    """Run the COUNT-ONLY assertion for the org's students across all three tables.
-    Never selects a row value. A per-field query error -> None for that field (loud)."""
+    """COUNT-ONLY assertion for the org's students across all three tables, over the
+    SCHEMA-DISCOVERED PII column set. Never selects a row value. A per-field query error
+    -> None (loud); a coverage shortfall -> a None `_coverage.<table>` label (loud)."""
     counts: Dict[str, Optional[int]] = {}
+    student_cols = discover_pii_columns(cur, "sch_students")
+    person_cols = discover_pii_columns(cur, "persons")
+    # coverage floor guard (assert-the-total teeth): a shrunk set is could-not-measure
+    if coverage_shortfall("sch_students", len(student_cols)):
+        counts["_coverage.sch_students"] = None
+    if coverage_shortfall("persons", len(person_cols)):
+        counts["_coverage.persons"] = None
     person_subq = (
         "SELECT person_id FROM sch_students WHERE org_id = %(o)s AND person_id IS NOT NULL"
     )
-    for c in _STUDENT_DEEP_COLS:
+    for c in student_cols:
         counts[f"sch_students.{c}"] = _count(
             cur, f"SELECT count(*) FROM sch_students WHERE org_id = %(o)s AND {c} IS NOT NULL", org_id)
-    for c in _PERSON_DEEP_COLS:
+    for c in person_cols:
         counts[f"persons.{c}"] = _count(
             cur, f"SELECT count(*) FROM persons WHERE id IN ({person_subq}) AND {c} IS NOT NULL", org_id)
     counts[_PARENT_LABEL] = _count(
