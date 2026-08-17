@@ -110,16 +110,23 @@ def classify_finding(f):
     if grantee not in WEB_ROLES:
         return "FAIL", f"unexpected non-trusted grantee '{grantee}' (deny-by-default)"
 
-    # 4. anon/authenticated on a data-holding TABLE (relkind r/p/f — RLS-capable) is a breach ONLY
-    #    if RLS does not cover it (disabled OR no policy — an RLS-on table with zero policies is
-    #    still open, cai's sharpening). Views/matviews (v/m) have no RLS of their own; their access
-    #    is governed by the underlying tables' RLS (criterion 3 catches those base tables), so a
-    #    view grant is INFO — not a false FAIL from the view's inherent relrowsecurity=false.
+    # 4. anon/authenticated on a data-holding TABLE (relkind r/p/f — RLS-capable). A grant is a
+    #    breach ONLY when RLS is DISABLED (relrowsecurity=false) — then the grant is live and the
+    #    table is open. RLS-ENABLED with ZERO policies is DEFAULT-DENY — the most CLOSED state, NOT
+    #    open (proven live, Nazim #24275: anon GET on public.platform_admins returned [] despite the
+    #    grant + a real row; independently reproduced). My earlier 'no-policy is still open' sharpening
+    #    was INVERTED. Views/matviews (v/m) have no RLS of their own; their access is governed by the
+    #    underlying tables' RLS, so a view grant is INFO — not a false FAIL from relrowsecurity=false.
     if objtype.startswith("relation:"):
         relkind = objtype.split(":", 1)[1]
         if relkind in ("r", "p", "f"):  # ordinary / partitioned / foreign tables
-            if not f.get("rls_enabled") or not f.get("has_policy"):
-                return "FAIL", "web-role grant on a table with RLS disabled or no policy (grant without the control)"
+            if not f.get("rls_enabled"):
+                return "FAIL", "web-role grant on an RLS-DISABLED table (RLS off = the table is open)"
+            if not f.get("has_policy"):
+                # Inert TODAY under default-deny, but a LATENT TRAP: add a permissive policy later
+                # and it opens with no grant review in the loop (same shape as the net.* future-roles
+                # argument). Report it — review the GRANT, not the policy — do not fail it.
+                return "INFO", "web-role grant inert under default-deny RLS (no policy) — would open silently if a policy is later added; review the grant"
             # RLS on + a policy exists: the normal architecture. INFO, with the honest caveat that
             # policy CORRECTNESS (a permissive USING(true)) is a named fast-follow, not checked here.
             return "INFO", "anon/authenticated on an RLS-protected table (policy-correctness unchecked — fast-follow)"

@@ -44,10 +44,13 @@ def test_anon_grant_on_rls_disabled_table_fails():
     assert tier == "FAIL" and "rls" in reason.lower()
 
 
-def test_anon_grant_on_rls_enabled_but_no_policy_table_fails():
-    # cai's sharpening: RLS on with ZERO policies is still open.
-    tier, _ = classify_finding(_f("authenticated", objtype="relation:r", rls_enabled=True, has_policy=False))
-    assert tier == "FAIL"
+def test_anon_grant_on_rls_enabled_no_policy_is_info_default_deny():
+    # CORRECTED (Nazim #24275, proven live + independently reproduced): RLS-ENABLED + ZERO policies
+    # is DEFAULT-DENY — the most CLOSED state, not open. My earlier 'still open' sharpening was
+    # INVERTED. The grant is inert today (a latent trap if a policy is later added) -> INFO, not FAIL.
+    tier, reason = classify_finding(_f("authenticated", objtype="relation:r", rls_enabled=True, has_policy=False))
+    assert tier == "INFO", f"RLS-on-no-policy is default-deny (closed) -> INFO, got {tier}"
+    assert "inert" in reason.lower() or "default-deny" in reason.lower(), f"reason must name the latent-trap framing: {reason}"
 
 
 def test_anon_grant_on_rls_protected_table_is_info_with_caveat():
