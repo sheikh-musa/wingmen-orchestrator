@@ -104,6 +104,12 @@ MAX_PAGES_PER_RUN = _envint("SLA_MAX_PAGES_PER_RUN", 3)
 # action and emit ONE summary alert instead of a storm.
 CIRCUIT_BREAKER_MAX = _envint("SLA_CIRCUIT_BREAKER_MAX", 25)
 
+# The circuit-breaker page is OPERATOR-FACING (their phone). Without a re-page backoff
+# it fired EVERY ~90s run while tripped -> phone spam (op#13980/2/4: 3 identical pages
+# in 3 min during the Irsyad deadline, #25147). Page ONCE per tripped episode, then stay
+# quiet for this long (the situation is durable — a bounded backlog does not move in 90s).
+CB_REPAGE_MIN = _envint("SLA_CB_REPAGE_MIN", 60)
+
 # P0 supplemental-query surfacing floor (view can't surface P0). A P0 becomes
 # actionable once elapsed exceeds this (defaults to the P0 hard threshold).
 P0_SURFACE_MIN = _envint("SLA_P0_SURFACE_MIN", HARD_ESCALATE_MIN["P0"])
@@ -210,6 +216,15 @@ def save_state(state: dict) -> None:
         STATE_FILE.write_text(json.dumps(state))
     except Exception as e:
         log(f"state-write-failed: {e}")
+
+
+def circuit_breaker_should_page(cb: dict, now: float, backoff_min: int) -> bool:
+    """True if the operator-facing circuit-breaker page is due. The breaker trips on
+    every ~90s run while the volume is high; page only ONCE per episode, then honor a
+    re-page backoff (default 60m) so the operator's phone is not spammed with identical
+    'manual review needed' pages. A first trip (no prior page) always pages."""
+    last = (cb or {}).get("last_paged_ts", 0) or 0
+    return (now - last) >= backoff_min * 60
 
 
 # ---------------------------------------------------------------------------
@@ -808,13 +823,23 @@ def run(dry: bool, injected: list[dict] | None = None,
                        f"(> circuit-breaker {CIRCUIT_BREAKER_MAX}). Auto-action SUPPRESSED "
                        f"— likely misconfig or mass-regression. Manual review needed.")
             log(f"CIRCUIT-BREAKER tripped: {len(violations)} > {CIRCUIT_BREAKER_MAX} — suppressing all action")
+            cb = state.get("circuit_breaker") or {"last_paged_ts": 0}
+            should_page = circuit_breaker_should_page(cb, now, CB_REPAGE_MIN)
+            ago = int((now - (cb.get("last_paged_ts") or 0)) / 60)
             if dry:
-                print("[DRY] CIRCUIT BREAKER — would send ONE summary page and take no per-item action:")
+                print("[DRY] CIRCUIT BREAKER — would " + (
+                    "send ONE summary page" if should_page
+                    else f"SUPPRESS the page (re-page backoff {CB_REPAGE_MIN}m; last paged {ago}m ago)")
+                    + " and take no per-item action:")
                 print("      " + summary)
-            else:
+            elif should_page:
                 send_page(summary, dry=False)
-                audit(conn, "[sla-watchdog] CIRCUIT BREAKER tripped",
-                      summary, priority="P1")
+                audit(conn, "[sla-watchdog] CIRCUIT BREAKER tripped", summary, priority="P1")
+                cb["last_paged_ts"] = now
+                state["circuit_breaker"] = cb
+            else:
+                log(f"CIRCUIT-BREAKER page SUPPRESSED (re-page backoff {CB_REPAGE_MIN}m; last paged {ago}m ago) "
+                    "— operator already notified this episode")
             if persist:
                 save_state(state)
             return 0
