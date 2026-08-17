@@ -1141,28 +1141,193 @@ def test_run_alerts_skips_a_stale_reading(monkeypatch, tmp_path):
     assert sent == [], "no operator page on stale telemetry"
 
 
-def test_run_alerts_pages_a_live_registered_body_on_red_rise(monkeypatch, tmp_path):
-    """The gap-close: a registered alerts:True body with a FRESH (non-stale) red rise
-    DOES page — cc-quality is now watched (was the 95% blind spot)."""
+def test_run_alerts_self_compacts_body_self_nudges_no_operator_page(monkeypatch, tmp_path):
+    """S2 (supersedes the S1 page-on-rise behaviour): cc-quality is now a self_compacts
+    body, so a FRESH red reading SELF-NUDGES it on the bus and does NOT page the operator
+    — the decouple. The operator page is now a BACKSTOP (see backstop tests), not the
+    routine response to a self-recyclable body being bloated."""
     monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "alert_state.json")
-    sent = []
-    monkeypatch.setattr(w, "_send_alert", lambda text: sent.append(text))
-    monkeypatch.setattr(w, "_bus_nudge_self_recycle", lambda *a, **k: False)
-    a = w.AgentCtx(agent="cc-quality", ctx_tokens=950_000, pct=95, level="red",
+    pages = []
+    nudges = []
+    monkeypatch.setattr(w, "_send_alert", lambda text: pages.append(text))
+    monkeypatch.setattr(w, "_bus_nudge_self_recycle",
+                        lambda agent, pct, *a, **k: (nudges.append((agent, pct)) or True))
+    a = w.AgentCtx(agent="cc-quality", ctx_tokens=780_000, pct=78, level="amber",
                    age_s=30, action="reset-eligible", stale=False)
     fired = w.run_alerts([a])
+    assert nudges == [("cc-quality", 78)], "a self_compacts body must be self-nudged"
+    assert pages == [], "requirement (a): ZERO operator page at the nudge threshold"
     assert fired == ["cc-quality"]
-    assert len(sent) == 1
 
 
-def test_cc_quality_registered_alerts_never_autoreset():
-    """#40 gap-close: cc-quality (the heartbeat-less on-demand body that hit 95% silently,
-    falling through both daemons' selection) is now in the registry with alerts:True (so
-    bloat pages) + auto_reset:False (never auto-/clear an on-demand body — CAI-729/501).
-    (cc-fleet-health is deliberately deferred to S2's self-nudge — see the registry note.)"""
-    reg = w._AGENT_REGISTRY.get("cc-quality")
-    assert reg is not None, "cc-quality not in _AGENT_REGISTRY — the unwatched-bloat gap"
-    assert reg.get("alerts") is True
-    assert reg.get("auto_reset") is False
-    # the SRE's own body must NOT be a plain operator-page alert (that is S2's self-nudge)
-    assert "cc-fleet-health" not in w._AGENT_REGISTRY
+def test_registry_s2_flags():
+    """S2: the three self-compacting Claude Code bodies now carry self_compacts:True so the
+    self-recycle nudge (gated on that flag at run_alerts) reaches them, not only orch-console.
+    - cc-quality: self_compacts added, auto_reset stays False (on-demand, never /clear'd).
+    - cai: self_compacts added PURELY ADDITIVELY — auto_reset stays True, the reset path is
+      untouched (Nazim point 2: nudge-path and reset-path strictly separated).
+    - cc-fleet-health (the SRE, self): now registered with self_compacts:True + auto_reset:False
+      + alerts:False -> it self-nudges with NO operator page, and is NEVER executor-/clear'd."""
+    q = w._AGENT_REGISTRY.get("cc-quality")
+    assert q and q.get("self_compacts") is True and q.get("auto_reset") is False
+
+    cai = w._AGENT_REGISTRY.get("cai")
+    assert cai and cai.get("self_compacts") is True
+    assert cai.get("auto_reset") is True, "cai reset path must be UNCHANGED (purely additive)"
+
+    sre = w._AGENT_REGISTRY.get("cc-fleet-health")
+    assert sre is not None, "the SRE must be registered in S2 (self-nudge path)"
+    assert sre.get("self_compacts") is True
+    assert sre.get("auto_reset") is False, "the SRE is NEVER auto-reset (CAI-501 dead-man = lease)"
+    assert not sre.get("alerts"), "the SRE must not take a plain operator page (self-nudge only)"
+
+
+# ── S2: self-recycle NUDGE decouple + operator BACKSTOP ───────────────────────────
+
+def _sc_seams(monkeypatch, tmp_path, nudge_ok=True):
+    """Patch the two side-effect seams and the state file; return (nudges, pages) recorders."""
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "alert_state.json")
+    nudges, pages = [], []
+    monkeypatch.setattr(w, "_bus_nudge_self_recycle",
+                        lambda agent, pct, *a, **k: (nudges.append((agent, pct)) or nudge_ok))
+    monkeypatch.setattr(w, "_send_alert", lambda text: pages.append(text))
+    return nudges, pages
+
+
+def _sc_reg(monkeypatch, agent="sc-body", **extra):
+    reg = {"label": agent, "window": 1_000_000, "self_compacts": True,
+           "alerts": False, "auto_reset": False, **extra}
+    monkeypatch.setitem(w._AGENT_REGISTRY, agent, reg)
+    return reg
+
+
+def test_s2_below_nudge_threshold_does_not_nudge(monkeypatch, tmp_path):
+    """nudge@70% (Nazim #25288): a self_compacts body under 70% is NOT nudged (amber alone
+    is not the nudge line)."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    fired = w.run_alerts([_ctx(agent="sc-body", pct=65, level="amber")])
+    assert nudges == [] and pages == [] and fired == []
+
+
+def test_s2_at_threshold_nudges_no_page(monkeypatch, tmp_path):
+    """requirement (a): at/above 70% the body self-nudges, no operator page."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    fired = w.run_alerts([_ctx(agent="sc-body", pct=71, level="amber")])
+    assert nudges == [("sc-body", 71)]
+    assert pages == []
+
+
+def test_s2_dedup_no_storm_without_a_rise(monkeypatch, tmp_path):
+    """dedup on level-RISE +10% (nudge-storm lesson 2026-07-08): the same body sitting at
+    the same pct across cycles is nudged ONCE, not every poll."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    w.run_alerts([_ctx(agent="sc-body", pct=72, level="amber")])
+    w.run_alerts([_ctx(agent="sc-body", pct=74, level="amber")])  # +2% < 10 -> no re-nudge
+    assert nudges == [("sc-body", 72)], "must not re-nudge without a >=10% rise"
+    assert pages == []
+
+
+def test_s2_renudges_on_a_ten_point_rise(monkeypatch, tmp_path):
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    w.run_alerts([_ctx(agent="sc-body", pct=72, level="amber")])
+    w.run_alerts([_ctx(agent="sc-body", pct=83, level="red")])  # +11% -> re-nudge
+    assert nudges == [("sc-body", 72), ("sc-body", 83)]
+    assert pages == []
+
+
+def test_s2_backstop_pages_after_n_nudges_without_recycle(monkeypatch, tmp_path):
+    """requirement (b): a body that IGNORES the nudge (keeps rising, never recycles) past the
+    persisted N-nudge threshold gets an operator BACKSTOP page — self-recycle has demonstrably
+    failed and silence would mask a stuck body."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_N", 3)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_PCT", 99)  # isolate the count trigger
+    w.run_alerts([_ctx(agent="sc-body", pct=71, level="amber")])   # nudge 1
+    w.run_alerts([_ctx(agent="sc-body", pct=82, level="red")])     # nudge 2
+    assert pages == [], "no backstop before the threshold"
+    w.run_alerts([_ctx(agent="sc-body", pct=93, level="red")])     # nudge 3 -> backstop
+    assert len(pages) == 1, "backstop must page after N nudges without recycle"
+    assert "sc-body" in pages[0]
+
+
+def test_s2_backstop_pages_once_per_episode(monkeypatch, tmp_path):
+    """The backstop is a latch: it pages ONCE per episode, not every cycle (no operator spam)."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_PCT", 90)
+    w.run_alerts([_ctx(agent="sc-body", pct=92, level="red")])
+    w.run_alerts([_ctx(agent="sc-body", pct=94, level="red")])
+    assert len(pages) == 1, "backstop must not re-page every cycle"
+
+
+def test_s2_backstop_pages_when_climbs_dangerously_high(monkeypatch, tmp_path):
+    """The second backstop trigger: a body that has climbed past the danger line pages even if
+    the nudge could not be delivered (nudge_ok=False -> count never advances) — an unreachable,
+    dangerously-high body must still surface."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path, nudge_ok=False)
+    _sc_reg(monkeypatch)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_PCT", 90)
+    w.run_alerts([_ctx(agent="sc-body", pct=93, level="red")])
+    assert nudges == [("sc-body", 93)], "it still tries to nudge"
+    assert len(pages) == 1, "a dangerously-high body backstop-pages even when the nudge failed"
+
+
+def test_s2_failed_nudge_is_not_counted(monkeypatch, tmp_path):
+    """no-fake-autopilot: a nudge that did NOT send must not advance the nudge count toward the
+    backstop (else a persistently-unreachable body would look 'nudged N times')."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path, nudge_ok=False)
+    _sc_reg(monkeypatch)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_N", 2)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_PCT", 99)  # isolate the count path
+    w.run_alerts([_ctx(agent="sc-body", pct=71, level="amber")])
+    w.run_alerts([_ctx(agent="sc-body", pct=82, level="red")])
+    assert pages == [], "failed nudges must not accumulate toward the backstop count"
+
+
+def test_s2_recycle_resets_the_episode(monkeypatch, tmp_path):
+    """When the body recycles (a sharp ctx drop), the episode state clears so a later rise
+    starts a fresh nudge cycle — the whole point of the loop working."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    w.run_alerts([_ctx(agent="sc-body", pct=82, level="red")])          # nudge
+    w.run_alerts([_ctx(agent="sc-body", pct=12, level="green")])        # recycled -> clear
+    w.run_alerts([_ctx(agent="sc-body", pct=80, level="red")])          # fresh episode -> nudge again
+    assert nudges == [("sc-body", 82), ("sc-body", 80)]
+    assert pages == []
+
+
+def test_s2_stale_reading_still_skipped(monkeypatch, tmp_path):
+    """The S1 stale-guard must survive S2: a stale (last-known) reading neither nudges nor
+    pages nor backstops — a downed body reads 95% for hours."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    a = w.AgentCtx(agent="sc-body", ctx_tokens=950_000, pct=95, level="red",
+                   age_s=99_999, action="reset-eligible", stale=True)
+    fired = w.run_alerts([a])
+    assert nudges == [] and pages == [] and fired == []
+
+
+def test_s2_cai_reset_path_untouched_by_self_compacts(monkeypatch, tmp_path):
+    """Nazim point 2 (verify, don't assume): adding self_compacts:True to cai must touch NO
+    branch keyed off auto_reset. run_executor selects bodies by auto_reset and never reads
+    self_compacts, so cai (auto_reset:True, now also self_compacts:True) under --arm=amber
+    still does the write-only checkpoint half and NEVER _do_reset — the reset path is
+    unchanged by S2."""
+    calls = {"checkpoint": 0, "reset": 0}
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    monkeypatch.setattr(w, "_pane_state",
+                        lambda reg: w.PaneState(reachable=True, idle=True, authenticated=True, input_text="", raw=""))
+    monkeypatch.setattr(w, "_fresh_handoff", lambda reg: None)  # force a checkpoint
+    monkeypatch.setattr(w, "_do_checkpoint",
+                        lambda a, reg, st: (calls.__setitem__("checkpoint", calls["checkpoint"] + 1), (True, "fresh handoff x.md"))[1])
+    monkeypatch.setattr(w, "_do_reset",
+                        lambda a, reg, outcome=None: (calls.__setitem__("reset", calls["reset"] + 1), (True, "reset OK"))[1])
+    out = w.run_executor([_ctx(agent="cai", pct=89, level="red", action="reset-eligible")], "amber")
+    assert calls["checkpoint"] == 1, "cai still write-only checkpoints under amber"
+    assert calls["reset"] == 0, "cai is NEVER reset under --arm=amber — self_compacts changed nothing here"
+    assert any("cai" in line for line in out)

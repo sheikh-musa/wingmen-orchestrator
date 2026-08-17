@@ -167,7 +167,12 @@ _STALE_S = int(os.environ.get("CTX_WD_STALE_MIN", "20")) * 60
 #   self-compacting and IS this watchdog's own host — NEVER auto-reset self.
 _AGENT_REGISTRY = {
     "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "inbox_scope": "hub", "label": "The hub (orch, Studio)"},
-    "cai":             {"host": "mac-studio", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "handoff_dir": "~/wingmen/wingmen-cai",  "window": 1_000_000, "alerts": True,  "auto_reset": True,  "inbox_scope": "cai", "label": "cai (Studio)"},
+    # self_compacts added in S2 (PURELY ADDITIVE — Nazim point 2): cai is a Claude Code
+    # body that auto-compacts, so it can self-recycle on a fresh handoff. The flag ONLY
+    # routes the nudge/alert-copy path (run_alerts); it touches NO auto_reset branch —
+    # run_executor selects bodies by auto_reset and never reads self_compacts, so cai's
+    # reset path is unchanged. I NUDGE cai, I NEVER reset it (its Tier-C self-arm only).
+    "cai":             {"host": "mac-studio", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "handoff_dir": "~/wingmen/wingmen-cai",  "window": 1_000_000, "alerts": True,  "auto_reset": True,  "self_compacts": True, "inbox_scope": "cai", "label": "cai (Studio)"},
     # window was hardcoded 200K (stale/wrong — op-caught 2026-07-21: the gauge showed
     # orch-console at 776K live tokens, impossible in a 200K window). Real window is
     # ~1M like the other bodies. Nazim DOES fill toward its limit and must be watched;
@@ -182,12 +187,19 @@ _AGENT_REGISTRY = {
     # NEVER executor-/clear'd — cc-quality is on-demand (CAI-729, no hb loop) and the
     # SRE (self) is NEVER auto-reset (lease renewal is its dead-man's switch, CAI-501).
     # Recovery for both is a SELF-recycle (self_recycle.sh), never a driven /clear.
-    "cc-quality":      {"host": "self",        "tmux": "quality",      "handoff_glob": "reports/quality-handoff-*.md",      "handoff_dir": str(_ORCH_DIR), "window": 1_000_000, "alerts": True, "auto_reset": False, "label": "cc-quality (Mini, on-demand — no hb loop)"},
-    # cc-fleet-health (the SRE, self) is DELIBERATELY not here yet: alerting it would
-    # PAGE THE OPERATOR about the SRE ("reset it"), when the right response is the SRE
-    # SELF-recycling. That belongs to S2 (the self-recycle NUDGE — tell the body, then
-    # tell the operator what was told; trigger-inversion), not a plain operator page.
-    # Added in S2 with self-nudge behavior so the fleet self-manages, unattended.
+    # self_compacts added in S2: cc-quality auto-compacts and can self-recycle, so it now
+    # gets the self-recycle NUDGE (no plain operator page) instead of the S1 page-on-rise.
+    # auto_reset stays False (on-demand body, CAI-729 — NEVER driven /clear).
+    "cc-quality":      {"host": "self",        "tmux": "quality",      "handoff_glob": "reports/quality-handoff-*.md",      "handoff_dir": str(_ORCH_DIR), "window": 1_000_000, "alerts": True, "auto_reset": False, "self_compacts": True, "label": "cc-quality (Mini, on-demand — no hb loop)"},
+    # cc-fleet-health (the SRE, self) — registered in S2 with SELF-NUDGE behaviour. It was
+    # deliberately deferred before because a plain alert would PAGE THE OPERATOR about the
+    # SRE ("reset it"). S2's decouple removes that: self_compacts:True routes it through the
+    # self-recycle NUDGE (tell the body, it decides the seam — trigger inversion) with NO
+    # operator page; alerts:False so it never takes the plain page; auto_reset:False so it is
+    # NEVER executor-/clear'd (assert_no_sre_red_reset + lease-renewal dead-man's switch,
+    # CAI-501). The operator is only paged as the BACKSTOP if the SRE ignores its own nudge
+    # past the persisted threshold (self-recycle demonstrably failed = a stuck SRE).
+    "cc-fleet-health": {"host": "self",        "tmux": "fleet-health", "handoff_glob": "reports/fleet-health-handoff-*.md", "handoff_dir": str(_ORCH_DIR), "window": 1_000_000, "alerts": False, "auto_reset": False, "self_compacts": True, "label": "cc-fleet-health (the SRE, self — self-nudge only)"},
 }
 
 # --- executor tunables (only consulted under --arm) ------------------------- #
@@ -1382,6 +1394,23 @@ _STATE_FILE = _ORCH_DIR / "logs" / "context_health_state.json"
 _RENAG_MIN = int(os.environ.get("CTX_WD_RENAG_MIN", "60"))
 _LEVEL_RANK = {"green": 0, "amber": 1, "red": 2}
 
+# --------------------------------------------------------------------------- #
+# S2 self-recycle NUDGE tunables (autoscaler op#14098; params pinned by Nazim
+# #25288/#25400/#25584). A self_compacts body is NUDGED to recycle ITSELF (an
+# attributable bus row it can decline) with NO operator page — the decouple. The
+# operator page is kept as a BACKSTOP that fires only if self-recycle demonstrably
+# FAILS (the body ignores the nudge past a threshold), so "self-nudge, no page" is
+# safe rather than a silent swallow. Every threshold here is a persisted CONFIG
+# CONSTANT (env-overridable), never a live-memory timer — "a control that needs
+# remembering is a sentence" (Nazim #24189). NOTE: NO pool-headroom gate on the
+# nudge — a body approaching context death must be nudged regardless of pool crunch
+# (Nazim #25584 caveat); the pool gate belongs on the discretionary WINDDOWN path.
+_NUDGE_PCT = float(os.environ.get("CTX_WD_NUDGE_PCT", "0.70"))          # nudge at >=70% of window
+_NUDGE_RISE_DELTA = int(os.environ.get("CTX_WD_NUDGE_RISE_DELTA", "10"))  # re-nudge only on a >=+10% rise (dedup, no storm)
+_NUDGE_BACKSTOP_N = int(os.environ.get("CTX_WD_NUDGE_BACKSTOP_N", "3"))   # nudged N times, still not recycled -> operator backstop
+_NUDGE_BACKSTOP_PCT = int(os.environ.get("CTX_WD_NUDGE_BACKSTOP_PCT", "92"))  # climbed to the danger line despite nudging -> backstop
+_NUDGE_RECYCLE_DROP = int(os.environ.get("CTX_WD_NUDGE_RECYCLE_DROP", "15"))  # a >=15% drop = the body recycled/compacted -> episode over
+
 
 def _load_state() -> dict:
     try:
@@ -1475,27 +1504,96 @@ def _alert_text(a: AgentCtx, reg: dict, nudged: bool = False) -> str:
     )
 
 
+def _backstop_alert_text(a: AgentCtx, reg: dict, count: int) -> str:
+    """The BACKSTOP operator page (S2). Distinct from the soft self_compacts _alert_text:
+    this fires only when self-recycle has demonstrably FAILED — the body was nudged and did
+    not act, so the operator MUST know (a suppressed page that read as 'all healthy' would
+    be the swallow the decouple must avoid)."""
+    label = reg.get("label", a.agent)
+    how = (f"nudged {count}x and it has NOT recycled" if count >= _NUDGE_BACKSTOP_N
+           else f"climbed to ~{a.pct}% despite the self-recycle nudge")
+    return (f"🚨 {label} — SELF-RECYCLE NOT HAPPENING (backstop): {label} is at ~{a.pct}% "
+            f"({a.ctx_tokens:,} tokens); I {how}. A self-compacting body that ignores the nudge "
+            f"past the line is either mid-a-long-commitment or stuck — either way you should know. "
+            f"Check it / decide whether to drive a reset by hand. This is the BACKSTOP; the routine "
+            f"self-recycle nudge is silent by design, so this page means the quiet path did not work.")
+
+
+def _handle_self_recycle(a: AgentCtx, reg: dict, state: dict, now: float) -> Optional[str]:
+    """S2 self-recycle NUDGE path for a self_compacts body. NUDGE the body to recycle ITSELF
+    (an attributable bus row it can decline) with NO operator page — the decouple. Keep the
+    operator page as a BACKSTOP that fires only when self-recycle demonstrably FAILED (nudged
+    N times without recycling, OR climbed to the danger line). Mutates state[a.agent]; returns
+    a short status string for `fired`/logging, or None if nothing happened this cycle."""
+    prev = state.get(a.agent, {})
+    nudge_pct = float(prev.get("nudge_pct", 0) or 0)
+    count = int(prev.get("nudge_count", 0) or 0)
+    backstop_paged = bool(prev.get("backstop_paged", False))
+
+    # Episode over: recovered below the nudge line, OR a sharp ctx drop (recycled/compacted).
+    below = a.pct < _NUDGE_PCT * 100
+    recycled = bool(prev) and (nudge_pct - a.pct) >= _NUDGE_RECYCLE_DROP
+    if below or recycled:
+        state.pop(a.agent, None)
+        return None
+
+    # Nudge on the FIRST crossing and thereafter ONLY on a >=+10% rise (dedup — no nudge-storm,
+    # 2026-07-08 lesson). A failed send neither counts nor advances the mark (no-fake-autopilot):
+    # it is retried next cycle, and the pct-backstop below still surfaces a dangerously-high body.
+    sent = False
+    if (not prev) or (a.pct - nudge_pct) >= _NUDGE_RISE_DELTA:
+        if _bus_nudge_self_recycle(a.agent, a.pct):
+            count += 1
+            nudge_pct = a.pct
+            sent = True
+
+    status: Optional[str] = "self-nudged" if sent else None
+    backstop = count >= _NUDGE_BACKSTOP_N or a.pct >= _NUDGE_BACKSTOP_PCT
+    if backstop and not backstop_paged:
+        _send_alert(_backstop_alert_text(a, reg, count))
+        backstop_paged = True
+        status = f"backstop-paged({count}x,{a.pct}%)"
+        # A suppressed page must never read as 'all healthy' — log the escalation loudly.
+        print(f"[ctx-health] BACKSTOP: {a.agent} self-recycle FAILED — nudged {count}x, "
+              f"now {a.pct}% -> operator paged", file=sys.stderr)
+
+    state[a.agent] = {"level": a.level, "nudge_pct": nudge_pct,
+                      "nudge_count": count, "backstop_paged": backstop_paged}
+    return status
+
+
 def run_alerts(rows: list[AgentCtx]) -> list[str]:
-    """Page the operator for alert-enabled bodies that rose to amber/red. Returns
-    the list of agent names alerted this cycle (for logging)."""
+    """Handle amber/red bodies. A self_compacts body is NUDGED to self-recycle (no operator
+    page) with an operator BACKSTOP if it ignores the nudge (S2). A non-self-compacting
+    alerts body still pages the operator on a level rise/re-nag (e.g. the hub). Returns the
+    list of agent names actioned this cycle (for logging)."""
     import time
     state = _load_state()
     now = time.time()
     fired: list[str] = []
     for a in rows:
         reg = _AGENT_REGISTRY.get(a.agent)
-        if not reg or not reg.get("alerts"):
+        # Processed if it takes a plain operator page OR is a self-recyclable body (which may
+        # have alerts:False, e.g. the SRE — self-nudge only, never a plain page).
+        if not reg or not (reg.get("alerts") or reg.get("self_compacts")):
             continue
         if a.stale:
             # STALE = the body has not written telemetry in > _STALE_S: it is offline,
             # dead, or mid-a-very-long-turn — this ctx% is its LAST-KNOWN, not current
             # (ended_at is a live-updated last-activity stamp, so a LIVE body stays
-            # fresh; only one that STOPPED writing goes stale). Never page the operator
-            # on non-current telemetry (a downed cc-quality still reads 95% for hours) —
+            # fresh; only one that STOPPED writing goes stale). Never page/nudge on
+            # non-current telemetry (a downed cc-quality still reads 95% for hours) —
             # consistent with the reset path, which already refuses a stale body. A
-            # genuinely-bloated LIVE body writes a fresh row and pages then.
+            # genuinely-bloated LIVE body writes a fresh row and is actioned then.
             state.pop(a.agent, None)
             continue
+        if reg.get("self_compacts"):
+            # S2: NUDGE it to recycle itself; page the operator only as the backstop.
+            status = _handle_self_recycle(a, reg, state, now)
+            if status:
+                fired.append(a.agent)
+            continue
+        # --- plain operator-page path: a non-self-compacting alerts body (e.g. the hub) ---
         cur_rank = _LEVEL_RANK.get(a.level, 0)
         prev = state.get(a.agent, {})
         prev_rank = _LEVEL_RANK.get(prev.get("level", "green"), 0)
@@ -1506,12 +1604,7 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
         rose = cur_rank > prev_rank
         renag = cur_rank == _LEVEL_RANK["red"] and (now - prev_ts) >= _RENAG_MIN * 60
         if rose or renag:
-            # A self-compacting body has a better option than compaction and can take it
-            # itself — tell IT, then tell the operator what was told (trigger inversion,
-            # op#13520). A body that clears itself is not being acted upon, so this needs
-            # no arm-sign; it is a bus row it can decline.
-            nudged = _bus_nudge_self_recycle(a.agent, a.pct) if reg.get("self_compacts") else False
-            _send_alert(_alert_text(a, reg, nudged=nudged))
+            _send_alert(_alert_text(a, reg, nudged=False))
             state[a.agent] = {"level": a.level, "alerted_at": now}
             fired.append(a.agent)
         else:
