@@ -42,6 +42,16 @@ tmux has-session -t "$SESSION" 2>/dev/null || { echo "lane_nudge: no tmux sessio
 # payload is a durable bus/operator row that the fresh body reconciles at boot, so a
 # skipped nudge costs nothing. The hold is self-expiring, so a crashed resetter cannot
 # leave a lane permanently unreachable. See scripts/lib/fire_window.py.
+#
+# ⚠ TEST-FIDELITY CAVEAT (cc-fleet-health, 2026-08-17): this guard resolves python via
+# $ORCH_DIR/.venv/bin/python3, and $ORCH_DIR is the SCRIPT'S OWN dir. A git WORKTREE has no
+# .venv, so in a worktree this guard's python does not exist -> the command fails -> the
+# `if` is false -> the guard FAILS OPEN (a held fire window is NOT caught here; it only trips
+# the probe's fallback-python check deeper down, exit 3 not 4). In production (a full checkout
+# with .venv) it HOLDS (exit 4). Consequence: EVERY worktree-based test of anything touching
+# fire_window exercises a MORE PERMISSIVE path than production — the dangerous direction for a
+# guard. Do NOT trust a green worktree run for fire-window behaviour; verify on the live tree
+# (the #23421 gate-test != shipped-path lesson). This bit the step-4 f/u locked-label test.
 if "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/lib/fire_window.py" check "$SESSION" 2>/dev/null; then
   echo "lane_nudge: REFUSED — '$SESSION' is inside a recycle fire window; not typing into a pane mid-clear." >&2
   exit 4

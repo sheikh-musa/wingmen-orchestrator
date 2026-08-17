@@ -13,6 +13,15 @@ someone remembered; the next sender written is not on it.
 So the quiesce is a lock the SENDERS consult, not a list the resetter maintains. A sender
 added tomorrow is blocked by default, and `tests/test_fire_window.py` fails if it isn't.
 
+⚠ WORKTREE TEST-FIDELITY CAVEAT (cc-fleet-health, 2026-08-17). Several senders invoke this
+via "$ORCH_DIR/.venv/bin/python3 fire_window.py check ..." where $ORCH_DIR is the SCRIPT'S
+OWN dir (e.g. lane_nudge.sh:45). A git WORKTREE has no .venv, so that python is absent, the
+check command fails, and the caller's guard FAILS OPEN — a held window is NOT caught. In a
+full checkout (.venv present) the same guard HOLDS. Net: a worktree-based test of any
+fire_window guard exercises a MORE PERMISSIVE path than production (the dangerous direction).
+Do NOT trust a green worktree run for fire-window behaviour — verify on the live tree
+(#23421 gate-test != shipped-path). This bit the step-4 f/u locked-label test.
+
 FAIL-OPEN, DELIBERATELY. A missing, expired, or unreadable lock reads as NOT held, and the
 TTL is clamped hard. A skipped nudge is cheap — the payload is always a durable row that
 survives being missed (Option B: the log is the delivery guarantee, the keystroke is only
