@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -302,6 +303,29 @@ def lane_map(conn) -> dict[str, str]:
     with conn.cursor() as cur:
         cur.execute("SELECT base_agent_id, lane FROM fleet_lanes WHERE base_agent_id IS NOT NULL")
         return {a: l for a, l in cur.fetchall()}
+
+
+_CAP_BANNER_RE = re.compile(r"hit your (weekly|usage|5-hour) limit|weekly limit.*reset", re.I)
+
+
+def _recipient_capped(session: str) -> bool:
+    """True IFF the recipient LOCAL lane's pane shows the CC weekly-limit banner — the lane is
+    pool-EXHAUSTED and correctly WAITING for its weekly reset, so its unread/unresponded is
+    BENIGN: a re-nudge or an operator page cannot help until the pool resets (Nazim #25930,
+    op#14199 pool-crunch). Self-clears when the banner is gone. FAIL-TOWARD-ACTION: any error,
+    a missing/remote session, or no banner returns False -> the normal SLA action proceeds, so a
+    genuine stall is NEVER hidden on a doubt (opposite fail-direction from a page-suppressor)."""
+    if not session:
+        return False
+    try:
+        if subprocess.run(["tmux", "has-session", "-t", f"={session}"],
+                          capture_output=True, timeout=8).returncode != 0:
+            return False
+        cap = subprocess.run(["tmux", "capture-pane", "-t", f"={session}:0.0", "-p"],
+                             capture_output=True, text=True, timeout=8).stdout
+        return bool(_CAP_BANNER_RE.search(cap))
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -861,11 +885,26 @@ def run(dry: bool, injected: list[dict] | None = None,
         # already-nudged agent reuse that result for accounting (no extra keystroke,
         # no duplicate audit row).
         nudged_this_cycle: dict[str, tuple[str, bool]] = {}
+        capped_cache: dict[str, bool] = {}   # per-scan: recipient pool-capped? (one pane read/agent)
 
         for v in violations:
             mid = v["message_id"]
             agent = v["agent"]
             pr = v["priority"]
+
+            # A POOL-CAPPED recipient (pane shows the weekly-limit banner) is exhausted and
+            # correctly WAITING for its reset — its unread/unresponded is benign; a nudge or
+            # operator page can't help until the pool resets. Suppress the SLA action (log it),
+            # self-clears at reset (Nazim #25930). Fail-toward-action: unknown session -> not
+            # skipped, so a real stall is never hidden.
+            sess = lanes.get(agent)
+            if sess is not None:
+                if agent not in capped_cache:
+                    capped_cache[agent] = _recipient_capped(sess)
+                if capped_cache[agent]:
+                    actions.append(f"SKIP #{mid} ({pr}) — recipient '{agent}' POOL-CAPPED "
+                                   f"(weekly-limit banner); benign, waiting reset — no nudge/page")
+                    continue
             elapsed = v["elapsed_minutes"]
             key = f"{mid}:{v['violation_type']}"
             rec = state["msgs"].get(key, {"nudge_count": 0, "last_nudge_ts": 0,
