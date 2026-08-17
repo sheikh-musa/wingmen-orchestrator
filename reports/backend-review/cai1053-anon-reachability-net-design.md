@@ -52,7 +52,19 @@ Chosen because it is **proven to fire in this environment** — Supabase runs on
 With prevention impossible for slots 2–4, detection carries the weight. Two assertions, both outcome-shaped, both spanning **tables, views and functions**:
 
 ### Assertion A — exposure
-> No object in `public` is READ- or EXECUTE-reachable by `anon` or `PUBLIC`, except allowlist entries.
+
+> No object in **any schema PostgREST exposes** is READ- or EXECUTE-reachable by `anon`, `PUBLIC`, **or `authenticated`**, except allowlist entries.
+
+**Corrected after cc-quality's review — my first draft said "in `public`" and that was a live hole.** PostgREST's `db_schema` on this project is `public,graphql_public`, read from the Management API. `graphql_public` exposes zero anon-readable relations but **one anon-EXECUTABLE function** (the GraphQL entrypoint) — a generic query surface the assertion never examined. The API perimeter is two schemas wide and the assertion was one.
+
+⇒ **Scope the assertion to every schema in `db_schema`, read at runtime — never a hardcoded `public`.** If someone adds a schema to that config the assertion widens automatically; hardcode it and adding a schema silently creates an unchecked perimeter. This is doctrine 2 (*a fix inherits the scope of the finding*) applied to the fix itself, which is exactly where it is easiest to miss.
+
+**`authenticated` is in the assertion, and the measurement says it is not a live gap.** cc-quality measured it before raising it: objects in `public` readable by `authenticated` but not by `anon` = **zero**. So this is one clause, not a limb — but `authenticated` is any principal who can sign up, i.e. a stranger with an email address on a multi-tenant app. Omit the role and the day someone grants authenticated-only read on a governance table, the net stays green.
+
+**Composition — allowlisting a door allowlists what is behind it.** Assertion A checks *object* reachability, not *data* reachability through an allowlisted object. An allowlisted definer view or SECDEF function that selects from a protected table is a legitimate front door to data the assertion believes closed, and its allowlist entry will honestly say "waqf, per CAI-1055" while what it exposes is not waqf. Not instantiated today — **but currently held shut by the layer we proved decays**: `held_commitments_due` reads `held_commitments` (anon-denied) and is safe today because it carries `security_invoker=on`. A live dependency on a decaying layer, not a live exposure.
+⇒ An allowlist entry for a view or function **records what it READS**, and the net refuses to allowlist an object whose dependencies are not themselves allowlisted or public.
+
+**Column-level grants.** `has_table_privilege` is table-level and returns FALSE when only column privileges exist, so a column-scoped anon SELECT satisfies the assertion. Obscure, and cheap to close with `has_column_privilege` on the same pass.
 
 ### Assertion B — the mirror hazard (cc-quality's, and it is the half I would have missed)
 > Every object we expect a legitimate consumer to read is still readable by that consumer.
@@ -107,6 +119,10 @@ SELECT n.nspname||'.'||p.proname, pg_get_function_identity_arguments(p.oid),
 
 **The two stores holding client data have no standing anon-exposure check at all.** `ceayj` holds the 405-donor perimeter. This is the single highest-value line in the design and it is a configuration change, not a build.
 
+**cc-quality verified this claim independently and it stands** — `rls_grant_lint.py` takes its DSN from `DATABASE_URL or SUPABASE_DB_URL`, a single env DSN with no silo parameter, and its only harness is `tests/test_rls_grant_lint.py`. It cannot have run against either silo.
+
+**Qualification the next reader needs, or they will find these and assume coverage:** `scripts/a3_isolation_check.py` and `scripts/residency_sweep.py` *do* reach the silos via `IHSANOS_PROD_DATABASE_URL` / `GOUMLYNE_DATABASE_URL`. **Neither is an anon-exposure check** — `residency_sweep` never mentions `anon` and asserts cross-project row isolation; `a3_isolation_check` is the CAI-985 D1–D7 residency runner. The claim survives contact with both. (`residency_sweep` is also still not running — authored 2026-07-02, never loaded, plist hardcoding `/Users/Musa` on a host whose user is `sheikhmusa`.)
+
 Per CAI-RESP-981 the runner executes in the orch plane under `orch-console`, the credential-holder — the work moves to the credential, never the credential to the work.
 
 ⚠ **The last ten feet are how this fails.** `scripts/residency_sweep.py` was authored, committed and its plist written on 2026-07-02 and has never been loaded — six weeks of a standing self-audit not running, with a plist hardcoding `/Users/Musa` on a host whose user is `sheikhmusa`. **This net is not shipped until it has FIRED and posted a run record**, and the plist's paths are checked against this host.
@@ -119,6 +135,23 @@ Same question: *does the substrate match the repo?*
 2. **CI check** — any migration file with no ledger row for a silo it should be applied to is a finding, under Assertion-A discipline: assert the total, allowlist with reasons.
 
 Backfill (item 1) is **done** — 044→056 contiguous, verified at source, 0 unverified, each row's `note` recording what was actually checked and stating that the sha256 attests the file *as of backfill*, not that the applied DDL was byte-identical.
+
+## 6b. CADENCE — the omission cc-quality called the biggest, and it is not a detail
+
+The first draft nowhere said **when** the net runs. That is disqualifying, because:
+
+> **None of tonight's exposures came from a diff.**
+> The ADP granting `anon` EXECUTE on every future function is a Supabase platform default. The five RLS-off tables predated every PR. The 215 CRITICAL sat in a live database while CI was green.
+
+**A PR-time gate structurally cannot see state that no PR introduced** — which is precisely the class the net exists for. A pre-merge assertion catches the *next* bad migration; it would have caught none of tonight.
+
+⇒ **The net runs on a SCHEDULE against LIVE, per store**, with the pre-merge assertion as a second, narrower use of the same code.
+
+⇒ **Vehicle: extend `scripts/a3_isolation_check.py`, which already runs under launchd, on a schedule, against the silo DSNs.** Same argument as not folding the query into `a3_grant_detector`, applied to the runner instead: do not invent a third thing that touches the silos.
+
+**And the net must check itself.** Tonight's root cause was a lint whose test *ran* and asserted the wrong thing — the failure mode was silence, not red. A negative control that is skipped, deleted or marked `xfail` degrades the net to exactly the state `rls_grant_lint` was found in. So the assertion set includes:
+
+> **"the negative control executed and failed as expected IN THIS RUN"** — not "a negative control exists in the file".
 
 ## 7. What this design does NOT cover — stated, not glossed
 
