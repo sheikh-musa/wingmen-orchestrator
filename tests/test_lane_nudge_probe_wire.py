@@ -117,3 +117,43 @@ def test_revert_fail_refuses_loudly_and_never_proceeds(tmp_path):
     # the log must carry the BEFORE content (the text at risk), not the post-revert empty capture
     # (#23895: the P1 reported CC_FLAT='' because CC_FLAT had been overwritten by the revert read).
     assert _FLAT in log, f"revert-fail log must record the before-content at risk, got: {log!r}"
+
+
+def test_ghost_log_verdict_fields_are_the_matched_pair_not_postrevert(tmp_path):
+    # DEFECT-1 (matched-pair, broader than "basis only"): _probe_composer re-parses the pane
+    # 3x (before/after-sentinel/after-revert) and composer_parse UNCONDITIONALLY overwrites
+    # CC_N/CC_EMPTY/CC_PARTIAL/CC_GHOST/CC_PH_BASIS each call. So _log_probe_capture reads the
+    # AFTER-REVERT values, not the bytes the refuse-branch decision was made on. It only LOOKS
+    # right in production because a dim autosuggestion re-renders on the empty buffer. But a
+    # ghost is transient (#23873.4): after the BSpace it may NOT have re-rendered, so the
+    # after-revert capture reads EMPTY (CC_N=0 / no-content) — and the logged verdict fields
+    # then CONTRADICT the raw .e.txt file saved alongside them (which is CC_RAWCAP = the ghost).
+    # The fields must describe CC_RAWCAP (the saved file, the decision), a true matched pair.
+    empty = (FIX / "empty.e.txt").read_text()   # after-revert reads empty (ghost not re-rendered yet)
+    out, logdir = run_nudge(tmp_path, GHOST_AFTER, revert_pane=empty)
+    assert out.returncode == 0, f"ghost still PROCEEDS regardless of the transient revert read, got {out.returncode} (stderr: {out.stderr})"
+    line = (logdir / "lane_nudge_preserved_input.log").read_text()
+    # the fields must match the SAVED raw capture (real_dim_queued: CC_N=1, real-text(dim)),
+    # never the transient post-revert empty capture (CC_N=0 / no-content)
+    assert "CC_N=1" in line, f"CC_N must match the before/raw capture, got: {line!r}"
+    assert "CC_EMPTY=0" in line, f"CC_EMPTY must match the before/raw capture, got: {line!r}"
+    assert "basis=real-text(dim)" in line, f"basis must match the before/raw capture, got: {line!r}"
+    assert "no-content" not in line, f"transient post-revert 'no-content' leaked into the matched-pair log: {line!r}"
+
+
+def test_catchall_refuse_label_carries_probe_class(tmp_path):
+    # #23970.2/.3 observability: the `*)` catch-all logged ONE fixed label "REFUSED, preserved
+    # staged" for real|unsure|busy|locked|'' alike, so a probe SKIP (busy/locked) or ERROR ('')
+    # read in the label EXACTLY like a genuine real-text preserve — a human scanning labels could
+    # not tell "the probe found real text" from "the probe never ran". The label must carry the
+    # CC_PROBE class. This drives the reachable `real` case (a real staged step present); busy /
+    # '' / locked take the IDENTICAL printf template ("REFUSED [probe=<class>: ...]") so they are
+    # distinguished by construction once this proves the label is CC_PROBE-derived, not fixed.
+    # (NOTE: a HELD fire window is caught by the EARLY guard at lane_nudge.sh:45 -> exit 4, before
+    # the probe, so CC_PROBE=locked at this catch-all is only reachable via a narrow race; it is
+    # not worth a moment-aware harness to force here.)
+    out, logdir = run_nudge(tmp_path, REAL_AFTER)
+    assert out.returncode == 3
+    line = (logdir / "lane_nudge_preserved_input.log").read_text()
+    label = line.split("| verdict:")[0]
+    assert "probe=real" in label, f"catch-all LABEL must carry the CC_PROBE class, got label: {label!r}"

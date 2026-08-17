@@ -65,6 +65,16 @@ fi
 CC_RAWCAP="$(tmux capture-pane -t "$SESSION" -p -e 2>/dev/null)"
 [ -n "$CC_RAWCAP" ] || CC_RAWCAP="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null)"
 composer_parse "$CC_RAWCAP"
+# DEFECT-1 matched-pair snapshot (cc-fleet-health, step-4 f/u): this is the ONLY parse whose
+# verdict fields describe $CC_RAWCAP — the exact bytes saved as the raw .e.txt AND the bytes the
+# refuse-branch decision below is made on. The step-4 probe (_probe_composer) re-parses the pane
+# three more times (before/after-sentinel/after-revert) and composer_parse UNCONDITIONALLY
+# overwrites CC_N/CC_EMPTY/CC_PARTIAL/CC_GHOST/CC_PH_BASIS/CC_FLAT each call, so by the time
+# _log_probe_capture runs those globals hold the AFTER-REVERT reading — which for a transient
+# ghost that has not re-rendered is EMPTY (CC_N=0/no-content), contradicting the saved raw file.
+# Snapshot the tuple NOW so the log line is a true matched pair with the capture it saves.
+CC_RAW_FLAT="$CC_FLAT"; CC_RAW_N="$CC_N"; CC_RAW_EMPTY="$CC_EMPTY"
+CC_RAW_PARTIAL="$CC_PARTIAL"; CC_RAW_GHOST="$CC_GHOST"; CC_RAW_PH_BASIS="$CC_PH_BASIS"
 # SELF-DIAGNOSING capture log (Nazim #23572 / CAI-978), now shared by BOTH the refuse and the
 # step-4 proceed-on-ghost paths: persist the RAW capture-pane -e bytes the verdict was made on
 # (dim/non-dim markers intact), the parser's verdict fields, CC_PROBE, and pane geometry — at
@@ -82,11 +92,14 @@ _log_probe_capture() {
   else
     capnote="raw=CAPTURE-FAILED"; CC_LAST_CAPFILE=""   # fail-LOUD, never a silent gap — the miss is visible in the log line
   fi
-  # Report the content the probe SAW (CC_PROBE_BEFORE), not CC_FLAT — the probe overwrites CC_FLAT
-  # with its after/after-revert captures, so on ghost/revert-fail CC_FLAT is the wrong (empty) text.
+  # Report the CC_RAWCAP snapshot (text + every verdict field), NOT the live globals — the probe
+  # overwrites all of them with its after/after-revert captures, so the live values describe the
+  # post-revert pane, not the saved raw file. The CC_RAW_* tuple is the matched pair; fall back to
+  # the live value only if a caller ever logs outside the refuse branch (CC_RAW_* unset).
   printf '%s lane_nudge[%s] %s: %s | verdict: CC_N=%s CC_EMPTY=%s CC_PARTIAL=%s CC_GHOST=%s basis=%s CC_PROBE=%s geom=%s %s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" "$label" "${CC_PROBE_BEFORE:-$CC_FLAT}" \
-    "${CC_N:-?}" "${CC_EMPTY:-?}" "${CC_PARTIAL:-?}" "${CC_GHOST:-?}" "${CC_PH_BASIS:-?}" "${CC_PROBE:-}" "$geom" "$capnote" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" "$label" "${CC_RAW_FLAT:-${CC_PROBE_BEFORE:-$CC_FLAT}}" \
+    "${CC_RAW_N:-${CC_N:-?}}" "${CC_RAW_EMPTY:-${CC_EMPTY:-?}}" "${CC_RAW_PARTIAL:-${CC_PARTIAL:-?}}" \
+    "${CC_RAW_GHOST:-${CC_GHOST:-?}}" "${CC_RAW_PH_BASIS:-${CC_PH_BASIS:-?}}" "${CC_PROBE:-}" "$geom" "$capnote" \
     >> "$LOGDIR/lane_nudge_preserved_input.log" 2>/dev/null || true
 }
 
@@ -159,9 +172,20 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       exit 3
       ;;
     *)
-      # real | unsure | busy | locked | '' (probe error): preserve + refuse, exactly as before step-4.
-      _log_probe_capture "REFUSED, preserved staged"
-      echo "lane_nudge: REFUSED — '$SESSION' composer holds REAL unsent text (probe: ${CC_PROBE:-unknown}); clearing+retyping would clobber the lane's own staged step." >&2
+      # real | unsure | busy | locked | '' : preserve + refuse (as before step-4). But these are
+      # NOT the same event, and the LABEL must say which (#23970.2/.3): real|unsure = the probe
+      # found (or could not rule out) REAL staged text; busy|locked|'' = the probe could NOT run
+      # (lane busy / a recycle owns the pane / probe error), so we never disambiguated and preserve
+      # conservatively. Logging one fixed "preserved staged" for all made a SKIP read exactly like
+      # a protective real-text preserve — a probe error hid as a success.
+      case "${CC_PROBE:-}" in
+        real|unsure) _pr_reason="real staged text present" ;;
+        busy)        _pr_reason="probe SKIPPED — lane busy" ;;
+        locked)      _pr_reason="probe SKIPPED — a recycle owns the pane" ;;
+        *)           _pr_reason="probe ERROR/unset — preserving conservatively" ;;
+      esac
+      _log_probe_capture "REFUSED [probe=${CC_PROBE:-unset}: ${_pr_reason}], preserved staged"
+      echo "lane_nudge: REFUSED — '$SESSION' (probe=${CC_PROBE:-unset}: ${_pr_reason}); not clearing the composer." >&2
       echo "           Preserved verbatim to logs/lane_nudge_preserved_input.log (+ raw capture for diagnosis) — submit/escalate it by hand rather than nudging over it." >&2
       exit 3
       ;;
