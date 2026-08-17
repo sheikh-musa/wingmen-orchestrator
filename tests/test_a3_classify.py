@@ -109,3 +109,22 @@ def test_web_usage_on_internal_schema_FAILS():
 def test_sequence_in_exposed_schema_is_info_else_fail():
     assert classify_finding(_f("anon", objtype="sequence", privilege_type="USAGE", schema="public"))[0] == "INFO"
     assert classify_finding(_f("anon", objtype="sequence", privilege_type="USAGE", schema="internal"))[0] == "FAIL"
+
+
+def test_real_safe_secdef_list_exempts_the_8_auth_user_fns():
+    # the 8 justified-safe public.auth_user_* fns (orch-console #24312) -> INFO
+    from scripts.lib.a3_grant_detector import SAFE_SECDEF_FUNCTIONS
+    assert len(SAFE_SECDEF_FUNCTIONS) == 8, f"expected exactly 8 safe fns, got {len(SAFE_SECDEF_FUNCTIONS)}"
+    for (schema, fn) in SAFE_SECDEF_FUNCTIONS:
+        tier, _ = classify_finding(_f("authenticated", objtype="function", privilege_type="EXECUTE",
+                                      is_secdef=True, schema=schema, object=fn))
+        assert tier == "INFO", f"safe-listed {schema}.{fn} must be INFO"
+
+
+def test_unassessed_mutating_secdef_still_fails():
+    # the 12 unassessed SECDEF fns (merge_persons etc, orch-console #24312) are NOT safe-listed ->
+    # stay FAIL (the purge_wc_ingest_pii class). Whitelisting them would be a false green.
+    for fn in ("merge_persons", "reverse_merge", "write_audit_log_secure", "purge_wc_ingest_pii"):
+        tier, _ = classify_finding(_f("authenticated", objtype="function", privilege_type="EXECUTE",
+                                      is_secdef=True, schema="public", object=fn))
+        assert tier == "FAIL", f"unassessed SECDEF {fn} must FAIL until read for caller-scope"

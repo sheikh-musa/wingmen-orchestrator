@@ -92,9 +92,28 @@ EXPOSED_SCHEMAS = ("public", "graphql_public")
 # siblings orch identified' — PENDING those exact identities + per-fn reasons from orch-console's
 # dry-run. Until listed, that SECDEF web-EXECUTE fn FAILS (safe-but-strict; that is how
 # purge_wc_ingest_pii was caught and how the next one will be).
+# The 8 justified-safe SECDEF fns (orch-console #24312, cai-named, VERIFIED AT SOURCE not by name):
+# the public.auth_user_* family derives everything from auth.uid() + the caller's OWN JWT
+# memberships, takes NO target parameter, and returns empty for anon — so a web role can only ever
+# read its own memberships. They are REQUIRED: RLS policies call them and a policy's caller needs
+# EXECUTE (revoking from authenticated breaks every logged-in user). Read of auth_user_org_ids:
+# `SELECT (elem->>'org_id')::uuid FROM jsonb_array_elements(auth.jwt()->'app_metadata'->'org_memberships')
+#  UNION SELECT org_id FROM public.org_members WHERE user_id = auth.uid() AND deleted_at IS NULL`.
+_AUTH_USER_SAFE_REASON = ("auth.uid()/caller-JWT-scoped, no target parameter, empty for anon; "
+                          "RLS policies require EXECUTE (verified at source, orch-console #24312)")
 SAFE_SECDEF_FUNCTIONS = {
-    # ("public", "auth_user_role"): "called only by RLS policy <X>; scopes to auth.uid() internally",
+    ("public", fn): _AUTH_USER_SAFE_REASON for fn in (
+        "auth_user_org_ids", "auth_user_org_ids_with_role", "auth_user_org_ids_with_roles",
+        "auth_user_org_ids_with_module", "auth_user_staff_org_ids", "auth_user_child_person_ids",
+        "auth_user_teacher_student_person_ids", "auth_user_hr_employee_id",
+    )
 }
+# ⚠ NOT SAFE-LISTED (orch-console #24312, OPEN NAMED SET — assess FIRST after A3, each read for
+# caller-scope-vs-target-parameter, the check purge_wc_ingest_pii FAILED): merge_persons,
+# reverse_merge, update_person_scoped, write_audit_log_secure, tabung_resolve_missing_tin,
+# update_storefront_settings_for_org, mark_ai_editor_proposal, kk_tins_with_student,
+# has_org_role_permission (authenticated), donation_category_in_use (anon+authenticated). Several
+# MUTATE (person records, the audit log, money-adjacent). They stay FAIL — correctly — until read.
 
 
 def classify_finding(f):
