@@ -63,6 +63,11 @@ load_dotenv(ROOT / ".env")
 # dropped.
 ESCALATE_AFTER = _dt.timedelta(minutes=30)
 
+# How stale a heartbeat may be before a body stops counting as able to drain an inbox. Lanes
+# heartbeat every ~5 min, so this is generous — the point is to exclude the DEAD, not to police
+# the slow. See _live_agents for why row-existence alone is not liveness.
+LIVENESS_MAX_STALE_MIN = 20
+
 CONSOLE = "orch-console"
 
 
@@ -71,15 +76,30 @@ def _dsn() -> str | None:
 
 
 def _live_agents(cur) -> set[str]:
-    """Agent ids with an actual agent_status row.
+    """Agent ids that will ACTUALLY drain an inbox.
 
-    The sla-watchdog lesson in one query: an id absent from here owns no inbox, so a message
-    addressed to it is not delivered-and-waiting, it is lost.
+    The sla-watchdog lesson in one query: an id that owns no inbox is not
+    delivered-and-waiting, it is lost — a message to such an address cannot be late, only
+    misaddressed.
+
+    ⚠ ROW-EXISTS IS NOT LIVENESS, and my first version of this got it wrong. A culled lane
+      KEEPS its agent_status row; the launcher's exit trap flips it to 'offline'. Checked an
+      hour after standing three lanes down: cc-irsyad-receipt-1 offline/34m, cc-irsyad-2
+      offline/6m, cc-irsyad-3 offline/5m — all with rows, all with no tmux session. So an
+      existence test would have happily fired a commitment into three dead bodies. Under
+      CAI-RESP-1029 elasticity, lanes are culled routinely and this only gets worse over time.
+      Liveness therefore needs all three: the row exists, it is not 'offline', and its
+      heartbeat is recent.
     """
-    cur.execute("SELECT agent_id FROM agent_status")
+    cur.execute(
+        """SELECT agent_id FROM agent_status
+            WHERE COALESCE(status,'') <> 'offline'
+              AND last_heartbeat IS NOT NULL
+              AND last_heartbeat > now() - interval '%s minutes'""" % LIVENESS_MAX_STALE_MIN)
     live = {r["agent_id"] for r in cur.fetchall()}
     # Sub-tagged bodies (cc-irsyad-coord-1) drain mail addressed to their base family
-    # (cc-irsyad-coord), so a base with any live sub-tag counts as owned.
+    # (cc-irsyad-coord). Roll the base up from LIVE sub-tags only — rolling up from a dead
+    # sub-tag would resurrect exactly the address this function exists to rule out.
     for aid in list(live):
         parts = aid.rsplit("-", 1)
         if len(parts) == 2 and parts[1].isdigit():
