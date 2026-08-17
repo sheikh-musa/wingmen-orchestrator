@@ -175,6 +175,19 @@ _AGENT_REGISTRY = {
     # AUTO-COMPACTS (so alerts=True to warn, but auto_reset=False: recovery is a
     # compaction, not a /clear — and never reset the body the watchdog runs beside).
     "orch-console":    {"host": "self",        "tmux": "nazim", "handoff_glob": "reports/nazim-handoff-*.md",  "handoff_dir": str(_ORCH_DIR),           "window": 1_000_000, "alerts": True,  "auto_reset": False, "self_compacts": True, "label": "Nazim (console, Mini — auto-compacts)"},
+    # #40 gap-close (op-caught: cc-quality hit 95% with ZERO page). These two fell
+    # BETWEEN both daemons' body-selection: auto_recycle_on_bloat enumerates WORKER
+    # panes (excludes them as singleton-ish); this watchdog's registry never listed
+    # them. Now WATCHED here: alerts:True so bloat pages, auto_reset:False so they are
+    # NEVER executor-/clear'd — cc-quality is on-demand (CAI-729, no hb loop) and the
+    # SRE (self) is NEVER auto-reset (lease renewal is its dead-man's switch, CAI-501).
+    # Recovery for both is a SELF-recycle (self_recycle.sh), never a driven /clear.
+    "cc-quality":      {"host": "self",        "tmux": "quality",      "handoff_glob": "reports/quality-handoff-*.md",      "handoff_dir": str(_ORCH_DIR), "window": 1_000_000, "alerts": True, "auto_reset": False, "label": "cc-quality (Mini, on-demand — no hb loop)"},
+    # cc-fleet-health (the SRE, self) is DELIBERATELY not here yet: alerting it would
+    # PAGE THE OPERATOR about the SRE ("reset it"), when the right response is the SRE
+    # SELF-recycling. That belongs to S2 (the self-recycle NUDGE — tell the body, then
+    # tell the operator what was told; trigger-inversion), not a plain operator page.
+    # Added in S2 with self-nudge behavior so the fleet self-manages, unattended.
 }
 
 # --- executor tunables (only consulted under --arm) ------------------------- #
@@ -1472,6 +1485,16 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
     for a in rows:
         reg = _AGENT_REGISTRY.get(a.agent)
         if not reg or not reg.get("alerts"):
+            continue
+        if a.stale:
+            # STALE = the body has not written telemetry in > _STALE_S: it is offline,
+            # dead, or mid-a-very-long-turn — this ctx% is its LAST-KNOWN, not current
+            # (ended_at is a live-updated last-activity stamp, so a LIVE body stays
+            # fresh; only one that STOPPED writing goes stale). Never page the operator
+            # on non-current telemetry (a downed cc-quality still reads 95% for hours) —
+            # consistent with the reset path, which already refuses a stale body. A
+            # genuinely-bloated LIVE body writes a fresh row and pages then.
+            state.pop(a.agent, None)
             continue
         cur_rank = _LEVEL_RANK.get(a.level, 0)
         prev = state.get(a.agent, {})

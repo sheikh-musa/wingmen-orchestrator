@@ -1121,3 +1121,48 @@ def test_alert_does_not_claim_a_nudge_that_did_not_happen():
     assert "could not" in failed.lower() or "couldn't" in failed.lower()
     done = w._alert_text(a, reg, nudged=True)
     assert "nudged it" in done.lower()
+
+
+# ── #40 / autoscaler S1: activity-based alerting + the ended-session guard ─────────
+
+def test_run_alerts_skips_a_stale_reading(monkeypatch, tmp_path):
+    """SAFETY (the whole risk): a STALE reading (body stopped writing telemetry -> offline/
+    dead) must NOT page — it is LAST-KNOWN, not current (a downed cc-quality reads 95% for
+    hours; ended_at is a live-updated activity stamp so a LIVE body stays fresh). A wrong
+    'page' here is a Telegram page claiming an offline body is bloated. Consistent with the
+    reset path, which already refuses a stale body."""
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "alert_state.json")
+    sent = []
+    monkeypatch.setattr(w, "_send_alert", lambda text: sent.append(text))
+    a = w.AgentCtx(agent="cc-quality", ctx_tokens=950_000, pct=95, level="red",
+                   age_s=99_999, action="reset-eligible", stale=True)
+    fired = w.run_alerts([a])
+    assert fired == [], "a stale (last-known) reading must not page"
+    assert sent == [], "no operator page on stale telemetry"
+
+
+def test_run_alerts_pages_a_live_registered_body_on_red_rise(monkeypatch, tmp_path):
+    """The gap-close: a registered alerts:True body with a FRESH (non-stale) red rise
+    DOES page — cc-quality is now watched (was the 95% blind spot)."""
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "alert_state.json")
+    sent = []
+    monkeypatch.setattr(w, "_send_alert", lambda text: sent.append(text))
+    monkeypatch.setattr(w, "_bus_nudge_self_recycle", lambda *a, **k: False)
+    a = w.AgentCtx(agent="cc-quality", ctx_tokens=950_000, pct=95, level="red",
+                   age_s=30, action="reset-eligible", stale=False)
+    fired = w.run_alerts([a])
+    assert fired == ["cc-quality"]
+    assert len(sent) == 1
+
+
+def test_cc_quality_registered_alerts_never_autoreset():
+    """#40 gap-close: cc-quality (the heartbeat-less on-demand body that hit 95% silently,
+    falling through both daemons' selection) is now in the registry with alerts:True (so
+    bloat pages) + auto_reset:False (never auto-/clear an on-demand body — CAI-729/501).
+    (cc-fleet-health is deliberately deferred to S2's self-nudge — see the registry note.)"""
+    reg = w._AGENT_REGISTRY.get("cc-quality")
+    assert reg is not None, "cc-quality not in _AGENT_REGISTRY — the unwatched-bloat gap"
+    assert reg.get("alerts") is True
+    assert reg.get("auto_reset") is False
+    # the SRE's own body must NOT be a plain operator-page alert (that is S2's self-nudge)
+    assert "cc-fleet-health" not in w._AGENT_REGISTRY
