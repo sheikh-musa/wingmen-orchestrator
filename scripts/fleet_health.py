@@ -54,6 +54,29 @@ def live_tmux_sessions():
     return {ln.split(":", 1)[0] for ln in out.splitlines() if ":" in ln}
 
 
+def observed_activity(recent_bus, tmux_session, live_sessions):
+    """OBSERVED-ACTIVITY gate before offline-marking (cc-fleet-health, re-derived from #23952,
+    Nazim #24044). A stale HEARTBEAT is not death: an on-demand body (boot_quality.sh has no
+    heartbeat loop by design, CAI-729→733) goes stale while working. Before flipping such an
+    agent offline, look for OBSERVED activity that proves the identity is alive despite the
+    stale column:
+      * recent_bus  — it posted a bus row (agent_messages.from_agent) within the staleness
+                      window (resolved in SQL against the SAME now() the reaper uses); host-
+                      independent and unambiguous.
+      * live tmux   — its registered tmux_session is live ON THIS HOST (a co-located pane is up).
+    Any observed => (True, reason) -> caller SKIPS the flip. Neither => (False, ...) -> the
+    agent is dead as far as we can observe, flip as before. This is 'observation > the heartbeat
+    column' (same principle as the pane_busy collapse), NOT a skip-list: a genuinely dead body
+    (no hb AND no observed activity) still flips, so this cannot hide a real death — unlike
+    adding it to protected_agents, which would (Nazim #24044). cc_session_costs is intentionally
+    NOT used: it keys on cc_identity/sub_tag and shared-identity workers mis-map (handoff caveat)."""
+    if recent_bus:
+        return True, "recent bus row within staleness window"
+    if tmux_session and tmux_session in live_sessions:
+        return True, f"live tmux session '{tmux_session}' on this host"
+    return False, "no observed activity (no recent bus row, no live co-located session)"
+
+
 def main():
     quiet = "--quiet" in sys.argv
     sessions = live_tmux_sessions()
@@ -73,15 +96,31 @@ def main():
         # enforce_agent_status_identity trigger rejects (one GUC can't match every
         # row). Each call writes a truthful admin_offline_audit row. If our lease has
         # lapsed the call fail-closes and the txn aborts LOUD — the dead-man's switch.
-        cur.execute(f"""SELECT agent_id FROM agent_status
+        cur.execute(f"""SELECT agent_id, tmux_session FROM agent_status
                         WHERE status <> 'offline'
                           AND last_heartbeat < now() - interval '{STALE_MIN} minutes'""")
-        marked = []
-        for _aid in [r[0] for r in cur.fetchall()]:
+        stale_rows = cur.fetchall()
+        marked, kept_alive = [], []
+        for _aid, _sess in stale_rows:
             if _aid in protected:
                 continue  # singleton — liveness is lease-tracked, never heartbeat-reaped
+            # OBSERVED-ACTIVITY gate (re-derived #23952 / Nazim #24044): a stale heartbeat is
+            # not death for an on-demand body (boot_quality.sh runs no hb loop by design). If it
+            # posted a bus row within the staleness window OR has a live co-located pane, it is
+            # alive despite the stale column — DON'T mark it offline (that lie says the fleet's
+            # auditor is down mid-audit). Genuinely dead (no hb AND no observed activity) still
+            # flips: this is observation-over-heartbeat, NOT a skip-list, so it cannot hide a
+            # real death (unlike protected_agents). Window == STALE_MIN, same now() as the reaper.
+            cur.execute(f"""SELECT EXISTS(SELECT 1 FROM agent_messages
+                            WHERE from_agent = %s
+                              AND created_at > now() - interval '{STALE_MIN} minutes')""", (_aid,))
+            recent_bus = cur.fetchone()[0]
+            observed, why = observed_activity(recent_bus, _sess, sessions)
+            if observed:
+                kept_alive.append((_aid, why))
+                continue
             cur.execute("SELECT admin_mark_offline(%s, %s)",
-                        (_aid, f"fleet_health sweep: stale heartbeat > {STALE_MIN}m"))
+                        (_aid, f"fleet_health sweep: stale heartbeat > {STALE_MIN}m, no observed activity"))
             if cur.fetchone()[0]:
                 marked.append(_aid)
 
@@ -148,6 +187,9 @@ def main():
     if not quiet:
         if marked:
             print("marked offline (stale heartbeat):", ", ".join(marked))
+        if kept_alive:
+            print("kept ONLINE despite stale heartbeat (observed activity):",
+                  ", ".join(f"{a} ({why})" for a, why in kept_alive))
         if pruned:
             print("reaped (old offline rows):", ", ".join(pruned))
         print(f"live lanes: {sum(1 for r in rows if r[1]=='working')} working / {len(rows)} rows")
