@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.wingmen.commitment-sweeper — CAI-RESP-1029 build 1/2. Fires durable commitments
+  (held_commitments, migration 051) whose clock has come due.
+
+  AUTHORED + LOADED + OWNED by orch-console (Nazim). This is the trigger whose EXISTENCE
+  CAI-RESP-1029 makes a precondition: no build lane may become ephemeral until its spawn
+  trigger has been built, loaded, and EXERCISED.
+
+  PATHS VERIFIED FOR THIS HOST (Sheikhs-Mini, user sheikhmusa) 2026-08-17 03:36Z. Only
+  /Users/sheikhmusa exists here. The residency_sweep precedent hardcoded /Users/Musa — a path
+  that does not exist on this machine — so that job could not have run even if it had been
+  loaded, and it has now been dead six weeks. IF YOU LOAD THIS FROM A DIFFERENT HOST,
+  RE-VERIFY EVERY PATH FIRST. That is the failure mode, not the SQL.
+
+  WHY StartInterval AND NOT StartCalendarInterval: a commitment's whole value is being fired
+  NEAR its due time. A daily calendar job would make every deadline up to 24h late, which is
+  indistinguishable from the failure this replaces. 300s is a compromise between promptness
+  and noise; the sweeper is idempotent, so a tick with nothing due costs one cheap query.
+
+  ⚠ RunAtLoad is TRUE deliberately: an unexercised trigger is not a trigger. Loading it fires
+  it once immediately, so "it is loaded" and "it has run" are established in the same act
+  rather than left as an assumption someone has to check later.
+
+  ⚠ THE DEFECT THIS RUNNER ALREADY AVOIDS: launchd inherits NOTHING. A3's runner read
+  os.environ only and never called load_dotenv, so it worked by hand (our shells descend from
+  a claude process with .env sourced) and failed under the scheduler on its very first real
+  fire. commitment_sweeper.py calls load_dotenv(ROOT/'.env') at import for exactly that
+  reason. Do NOT "fix" a future MISSING-DSN by putting a DSN in this plist: this file is 0644,
+  .env is 0600, and moving a credential into a world-readable file to satisfy a scheduler is a
+  real regression.
+-->
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.wingmen.commitment-sweeper</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>-m</string>
+    <string>nervous_system.commitment_sweeper</string>
+    <string>--fire</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/commitment-sweeper.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/commitment-sweeper.out.log</string>
+</dict></plist>
