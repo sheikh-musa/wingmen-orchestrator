@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.wingmen.irsyad-pii-containment-monitor — CAI-RESP-1060 standing deep-field-zero
+  monitor for Madrasah Irsyad student PII (org 73339164-7c1f-40ba-a093-33f1f292dd4c on
+  the goumlyne silo goumlynecruxrlmzlntp). The 890 minors are contained BECAUSE their
+  deep fields are all zero; this asserts that zero every run and pages P0 on any breach.
+
+  AUTHORED by cc-fleet-health (monitoring pen). orch-console REVIEWS before load.
+  COUNTS ONLY — the runner never reads a row (Satr; minors' PII). It reads goumlyne
+  (GOUMLYNE_DATABASE_URL, in the WorkingDirectory .env, loaded via load_dotenv in
+  main() — the A3 works-by-hand/fails-under-launchd fix) and writes only a bus page
+  carrying a field LABEL + COUNT, never a value. Could-not-measure pages LOUD, never
+  green (dead-man's-switch).
+
+  PATHS VERIFIED FOR THIS HOST (Sheikhs-Mini, user sheikhmusa) 2026-08-17: only
+  /Users/sheikhmusa exists here. If loaded from a different host, re-verify every path
+  (the residency-sweep /Users/Musa dead-path failure mode).
+
+  LAST-TEN-FEET: after orch-console reviews, LOAD then verify it FIRED (RunAtLoad
+  produces exit 0 + no page on the current all-zero state; a synthetic breach in a
+  rolled-back txn is the way to prove the P0 path without touching the live silo).
+  Pre-load evidence: run_counts smoke returned 18 fields, 0 breaches, 0 could-not-
+  measure (all zero, containment holds).
+-->
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.wingmen.irsyad-pii-containment-monitor</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/irsyad_pii_containment_monitor.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/irsyad-pii-containment-monitor.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/irsyad-pii-containment-monitor.out.log</string>
+</dict></plist>
