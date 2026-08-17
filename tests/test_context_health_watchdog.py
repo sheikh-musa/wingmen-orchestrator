@@ -1260,9 +1260,52 @@ def test_s2_backstop_pages_once_per_episode(monkeypatch, tmp_path):
     nudges, pages = _sc_seams(monkeypatch, tmp_path)
     _sc_reg(monkeypatch)
     monkeypatch.setattr(w, "_NUDGE_BACKSTOP_PCT", 90)
+    w.run_alerts([_ctx(agent="sc-body", pct=92, level="red")])   # first contact -> nudge only
+    w.run_alerts([_ctx(agent="sc-body", pct=94, level="red")])   # prior cycle seen -> backstop
+    w.run_alerts([_ctx(agent="sc-body", pct=95, level="red")])   # already paged -> silent
+    assert len(pages) == 1, "backstop must page once per episode, not re-page every cycle"
+
+
+def test_s2_first_contact_at_danger_pct_reachable_does_not_backstop(monkeypatch, tmp_path):
+    """The danger-pct backstop must NOT fire on FIRST contact with a reachable high body — it was
+    just nudged, it has not ignored anything (cai legitimately rides near 90%; a first-cycle
+    'self-recycle NOT happening, drive a reset' page would be a false alarm about a healthy body)."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_PCT", 90)
+    w.run_alerts([_ctx(agent="sc-body", pct=93, level="red")])
+    assert nudges == [("sc-body", 93)], "it IS nudged on first contact"
+    assert pages == [], "but NOT backstop-paged on first contact when reachable"
+
+
+def test_s2_danger_pct_backstop_fires_on_the_next_cycle(monkeypatch, tmp_path):
+    """A reachable body that stays at the danger line ACROSS cycles (had the nudge, did not
+    recycle) does get the backstop on the subsequent cycle — the 'ignored past the line' case."""
+    nudges, pages = _sc_seams(monkeypatch, tmp_path)
+    _sc_reg(monkeypatch)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_PCT", 90)
+    w.run_alerts([_ctx(agent="sc-body", pct=93, level="red")])   # first contact -> nudge, no page
+    w.run_alerts([_ctx(agent="sc-body", pct=93, level="red")])   # still high a cycle later -> backstop
+    assert len(pages) == 1
+
+
+def test_s2_old_schema_state_does_not_immediately_backstop(monkeypatch, tmp_path):
+    """REGRESSION (cai's exact live case): a pre-existing S1-schema state entry ({level,alerted_at},
+    no nudge fields) must be treated as FIRST contact by the nudge path — so a body already at the
+    danger line is NUDGED, not immediately backstop-paged, on the first new-code cycle."""
+    state_file = tmp_path / "alert_state.json"
+    import json as _json
+    state_file.write_text(_json.dumps({"sc-body": {"level": "red", "alerted_at": 1_700_000_000.0}}))
+    monkeypatch.setattr(w, "_STATE_FILE", state_file)
+    nudges, pages = [], []
+    monkeypatch.setattr(w, "_bus_nudge_self_recycle",
+                        lambda agent, pct, *a, **k: (nudges.append((agent, pct)) or True))
+    monkeypatch.setattr(w, "_send_alert", lambda text: pages.append(text))
+    _sc_reg(monkeypatch)
+    monkeypatch.setattr(w, "_NUDGE_BACKSTOP_PCT", 90)
     w.run_alerts([_ctx(agent="sc-body", pct=92, level="red")])
-    w.run_alerts([_ctx(agent="sc-body", pct=94, level="red")])
-    assert len(pages) == 1, "backstop must not re-page every cycle"
+    assert nudges == [("sc-body", 92)], "old-schema entry -> nudged as first contact"
+    assert pages == [], "old-schema entry must NOT trigger an immediate false backstop page"
 
 
 def test_s2_backstop_pages_when_climbs_dangerously_high(monkeypatch, tmp_path):

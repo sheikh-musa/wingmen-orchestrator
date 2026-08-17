@@ -1408,7 +1408,12 @@ _LEVEL_RANK = {"green": 0, "amber": 1, "red": 2}
 _NUDGE_PCT = float(os.environ.get("CTX_WD_NUDGE_PCT", "0.70"))          # nudge at >=70% of window
 _NUDGE_RISE_DELTA = int(os.environ.get("CTX_WD_NUDGE_RISE_DELTA", "10"))  # re-nudge only on a >=+10% rise (dedup, no storm)
 _NUDGE_BACKSTOP_N = int(os.environ.get("CTX_WD_NUDGE_BACKSTOP_N", "3"))   # nudged N times, still not recycled -> operator backstop
-_NUDGE_BACKSTOP_PCT = int(os.environ.get("CTX_WD_NUDGE_BACKSTOP_PCT", "92"))  # climbed to the danger line despite nudging -> backstop
+_NUDGE_BACKSTOP_PCT = int(os.environ.get("CTX_WD_NUDGE_BACKSTOP_PCT", "95"))  # pinned near the CEILING despite nudging -> backstop
+# NOTE the 95% default is deliberately near the ceiling, not the amber/red line: a self-compacting
+# body (cai) legitimately RIDES high (~89-92%) and auto-compacts, so it is NOT "stuck" there —
+# paging the operator on its normal band would re-create the very spam the autoscaler removes. The
+# backstop is a safety net for a body PINNED at the wall ignoring nudges, not a compaction-policy
+# nag. Env-tunable (CTX_WD_NUDGE_BACKSTOP_PCT) if a body's real ceiling differs.
 _NUDGE_RECYCLE_DROP = int(os.environ.get("CTX_WD_NUDGE_RECYCLE_DROP", "15"))  # a >=15% drop = the body recycled/compacted -> episode over
 
 
@@ -1540,15 +1545,26 @@ def _handle_self_recycle(a: AgentCtx, reg: dict, state: dict, now: float) -> Opt
     # Nudge on the FIRST crossing and thereafter ONLY on a >=+10% rise (dedup — no nudge-storm,
     # 2026-07-08 lesson). A failed send neither counts nor advances the mark (no-fake-autopilot):
     # it is retried next cycle, and the pct-backstop below still surfaces a dangerously-high body.
+    seen_before = "nudge_count" in prev  # processed by THIS path in a prior cycle (not old-schema/first contact)
     sent = False
+    attempted = False
     if (not prev) or (a.pct - nudge_pct) >= _NUDGE_RISE_DELTA:
+        attempted = True
         if _bus_nudge_self_recycle(a.agent, a.pct):
             count += 1
             nudge_pct = a.pct
             sent = True
+    nudge_failed = attempted and not sent
 
+    # BACKSTOP triggers — each means self-recycle has demonstrably FAILED, never "first contact
+    # with a high body" (cai legitimately rides near 90%; nudging it this cycle is NOT a failure).
+    #   (1) count >= N  : we successfully nudged N times and it still has not recycled.
+    #   (2) danger pct   : it is at/above the danger line AND either we saw it (and nudged it) in a
+    #       PRIOR cycle and it did not recycle, OR we cannot even deliver the nudge now (channel
+    #       broken) — a dangerously-high body nobody can reach must surface immediately.
     status: Optional[str] = "self-nudged" if sent else None
-    backstop = count >= _NUDGE_BACKSTOP_N or a.pct >= _NUDGE_BACKSTOP_PCT
+    backstop = (count >= _NUDGE_BACKSTOP_N) or \
+               (a.pct >= _NUDGE_BACKSTOP_PCT and (seen_before or nudge_failed))
     if backstop and not backstop_paged:
         _send_alert(_backstop_alert_text(a, reg, count))
         backstop_paged = True
