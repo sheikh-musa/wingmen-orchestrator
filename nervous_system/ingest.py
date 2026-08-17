@@ -471,7 +471,16 @@ def throttled_busy_ack(conn, ch: "Channel") -> None:
     the tg_out queue), so a deferred operator isn't left wondering."""
     ack = (
         # client perimeter (log-and-route): no operator-internal phrasing
-        "\U0001F4E8 Got your message — we'll get back to you shortly."
+        # "shortly" is BANNED on the client perimeter (orch-console, 2026-08-17).
+        # It failed twice on the gazzabyte/irsyad account, Nazim told Shuk in writing
+        # that it had failed twice — and then this template said it to him a THIRD
+        # time, automatically, 3 minutes after a client-flagged URGENT. A vague time
+        # promise is worse than none: it spends credibility and buys the reader
+        # nothing. State what is TRUE (it is logged and routed) and let the human
+        # who picks it up give a real time. The '📨 Got your message' prefix is
+        # LOAD-BEARING — reassure_if_unhandled dedups on LIKE '%Got your message%'
+        # and tg_out's stale-ack guard startswith()es it. Do not reword the prefix.
+        "\U0001F4E8 Got your message — it's logged and someone will come back to you on it."
         if ch.mode == "log-and-route"
         else "\U0001F4E8 Got your message — I'm mid-task right now, I'll reply at "
              "my next pause. (Reply URGENT to interrupt now.)")
@@ -537,9 +546,18 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
         return
     ack = (
         # client perimeter (log-and-route): no operator-internal phrasing
-        "\U0001F4E8 Got your message — we'll get back to you shortly."
+        # "shortly" is BANNED on the client perimeter (orch-console, 2026-08-17).
+        # It failed twice on the gazzabyte/irsyad account, Nazim told Shuk in writing
+        # that it had failed twice — and then this template said it to him a THIRD
+        # time, automatically, 3 minutes after a client-flagged URGENT. A vague time
+        # promise is worse than none: it spends credibility and buys the reader
+        # nothing. State what is TRUE (it is logged and routed) and let the human
+        # who picks it up give a real time. The '📨 Got your message' prefix is
+        # LOAD-BEARING — reassure_if_unhandled dedups on LIKE '%Got your message%'
+        # and tg_out's stale-ack guard startswith()es it. Do not reword the prefix.
+        "\U0001F4E8 Got your message — it's logged and someone will come back to you on it."
         if ch.mode == "log-and-route"
-        else "\U0001F4E8 Got your message — it's logged and I'll get to it shortly. "
+        else "\U0001F4E8 Got your message — it's logged and I'll pick it up. "
              "(Reply URGENT to bump it now.)")
     with conn.cursor() as cur:
         cur.execute(
