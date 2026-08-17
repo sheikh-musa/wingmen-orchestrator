@@ -63,7 +63,19 @@ Because `DROP VIEW`+`CREATE` resets grants to owner-only, a required consumer **
 
 1. **Assert the TOTAL is empty.** Not `assert [f for f in findings if f.code in KNOWN] == []`. The existing `tests/test_rls_grant_lint.py` asserts three named classes and never `crit_tables == []` — which is why `rls_grant_lint.py` reports **215 CRITICAL** while CI is **green**. Third instance of that shape after CAI-993 and CAI-1027.
 2. **Allowlist entries carry their reason and their ruling ref.** Without this an outcome-shaped gate turns every deliberate design decision into a CRITICAL, and the first person on call deletes the reason to make CI green. The allowlist is not the exception to the control, it is half of it. *Tonight proved the cost from both sides:* cc-quality reported four transparency tables as a finding without knowing CAI-RESP-511 had ruled them deliberate (031, lines 25-26), and they were then revoked.
-3. **Derive the allowlist wherever the derivation is sound.** A SECDEF function referenced by a `pg_policies` expression is RLS-load-bearing → WARN. An unreferenced anon-EXECUTE SECDEF function → CRITICAL. On `ceayjeamtmcyzzvqflus` that rule partitions exactly: the 8 RLS-load-bearing functions are precisely the 8 `auth_user_*`, and the outlier is precisely `donation_category_in_use`. A derived rule cannot go stale the way a hand-list does.
+3. **Derive the allowlist wherever the derivation is sound — but the first derivation I wrote was WRONG, and the outlier it produced is what proved it.**
+
+   My original rule: *SECDEF function referenced by a `pg_policies` expression → WARN (RLS-load-bearing); unreferenced anon-EXECUTE SECDEF → CRITICAL.* On `ceayj` it partitions the 8 `auth_user_*` correctly and leaves exactly one outlier, `donation_category_in_use`. I went to check that outlier before recommending anything, and it is **not** a clean CRITICAL:
+
+   - It is **not** referenced by any policy — so my rule marks it CRITICAL, i.e. revoke.
+   - But it is called by `donation_category_in_use_guard`, a **`SECURITY INVOKER` trigger function** on `donation_categories`. A non-SECDEF trigger executes **as the invoking role**, so every role that can legitimately write that table needs EXECUTE on the function the trigger calls.
+
+   ⇒ **SECOND LOAD-BEARING ARM, which policy-reference does not detect:**
+   > A function is load-bearing for role R if it is called by a **non-SECDEF trigger function** on a table R can write — regardless of whether any policy mentions it.
+
+   Both arms are needed. Policy-reference catches the `auth_user_*` shape; trigger-caller catches this one. **Had the net shipped with only the first arm, `donation_category_in_use` reads as a clean CRITICAL and the fix is a revoke that breaks the category-management write path for `authenticated`** — the same near-outage as revoking `anon` from `auth_user_*`, arriving through a door the rule did not watch.
+
+   The detector must therefore walk `pg_proc.prosrc` for callers and `pg_trigger` for wiring, not just `pg_policies`.
 4. **Record WHICH layer is holding.** "Closed by grant, `security_invoker` decayed" and "closed by both" are identical in a pass/fail and one edit apart in risk.
 5. **Exclude trigger-returning functions.** Proven un-invokable directly; cai ratified.
 6. **Negative control.** A deliberately-bad object CI must REJECT. A detector nobody has watched fail is untested — and with prevention unavailable, an untested detector is the only thing between us and the next one.
