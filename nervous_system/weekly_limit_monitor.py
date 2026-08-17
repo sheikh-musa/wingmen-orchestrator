@@ -221,6 +221,33 @@ def _fmt_reset(epoch) -> str:
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _fmt_5h(epoch) -> str:
+    """The 5-hour window's reset, as an absolute time AND a minutes-from-now.
+
+    WHY THIS EXISTS (orch-console, 2026-08-17, promised to the operator at op#13802):
+    the alert already reported `5h=94%` and gave the reader NO WAY to know whether that
+    meant twenty minutes of pain or four hours. The header was being fetched
+    (`anthropic-ratelimit-unified-5h-reset`, see probe_pool) and then thrown away —
+    only the WEEKLY reset was ever surfaced. On 2026-08-17 the operator asked "when
+    does musa2's 5 hour window reset" and I had to hand-probe the live API to answer a
+    question our own alert had just raised. An alert that states a number without
+    stating when it clears is not actionable.
+
+    The relative form is the load-bearing half: "04:10 UTC" makes a reader do
+    arithmetic against a clock they may not be looking at, and the binding window is
+    usually minutes away, not days. Absolute is kept so the alert stays meaningful when
+    it is read late (a verification is true at an instant — this one is read at another).
+    """
+    if not epoch:
+        return "unknown"
+    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    mins = (dt - datetime.now(timezone.utc)).total_seconds() / 60
+    if mins < -1:
+        return f"{dt:%H:%M UTC} (already passed)"
+    rel = f"~{round(mins)} min" if mins < 90 else f"~{mins/60:.1f} h"
+    return f"{dt:%H:%M UTC} (in {rel})"
+
+
 def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text())
@@ -276,6 +303,12 @@ def _persist_reading(p: dict, pace: "PaceResult | None" = None) -> None:
     pct5 = round((p.get("u5h") or 0) * 100, 1)
     reset = p.get("reset7d")
     reset_at = datetime.fromtimestamp(reset, tz=timezone.utc) if reset else None
+    # The 5-hour window is frequently the BINDING constraint while the weekly figure
+    # still looks comfortable — musa2 stalled the irsyad fleet on 2026-08-17 at 76%
+    # weekly. We already fetch this header; persisting it is what lets anything other
+    # than the alert text reason about the window that actually binds (mig 053).
+    reset5 = p.get("reset5h")
+    reset5_at = datetime.fromtimestamp(reset5, tz=timezone.utc) if reset5 else None
     pace_val = proj_val = runway_val = None
     if pace is not None:
         pace_val = round(pace.pace, 3) if pace.pace is not None else None
@@ -284,15 +317,16 @@ def _persist_reading(p: dict, pace: "PaceResult | None" = None) -> None:
                       if math.isfinite(pace.runway_days) else None)
     with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
         cur.execute(
-            "INSERT INTO pool_usage (pool, pct_7d, pct_5h, resets_at, status_7d, "
-            "  pace, projected_pct, runway_days, updated_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now()) "
+            "INSERT INTO pool_usage (pool, pct_7d, pct_5h, resets_at, resets_5h_at, "
+            "  status_7d, pace, projected_pct, runway_days, updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, now()) "
             "ON CONFLICT (pool) DO UPDATE SET "
             "  pct_7d=EXCLUDED.pct_7d, pct_5h=EXCLUDED.pct_5h, "
-            "  resets_at=EXCLUDED.resets_at, status_7d=EXCLUDED.status_7d, "
+            "  resets_at=EXCLUDED.resets_at, resets_5h_at=EXCLUDED.resets_5h_at, "
+            "  status_7d=EXCLUDED.status_7d, "
             "  pace=EXCLUDED.pace, projected_pct=EXCLUDED.projected_pct, "
             "  runway_days=EXCLUDED.runway_days, updated_at=now()",
-            (p["pool"], pct7, pct5, reset_at, p.get("status7d"),
+            (p["pool"], pct7, pct5, reset_at, reset5_at, p.get("status7d"),
              pace_val, proj_val, runway_val))
         c.commit()
 
@@ -373,8 +407,8 @@ def _alert_body(p: dict, level: str) -> str:
         f"[Max weekly-limit monitor] {p['pool']} pool is at {pct}% of its WEEKLY limit "
         f"({level.upper()}).\n\n"
         f"WHAT: {p['pool']}'s Max weekly usage = {pct}% (5-hour window "
-        f"{round((p.get('u5h') or 0)*100)}%). The weekly window resets "
-        f"{_fmt_reset(p.get('reset7d'))}.\n"
+        f"{round((p.get('u5h') or 0)*100)}%, which tops up {_fmt_5h(p.get('reset5h'))}). "
+        f"The weekly window resets {_fmt_reset(p.get('reset7d'))}.\n"
         f"WHY: at 100% every Claude-Code lane on the {p['pool']} pool stalls at once "
         f"(the 2026-08-03 89%-with-no-warning incident). Warn is {round(WARN*100)}%, "
         f"urgent is {round(URGENT*100)}%.\n"
