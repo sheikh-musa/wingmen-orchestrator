@@ -180,11 +180,21 @@ def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW) -> 
         return None
     try:
         with conn.cursor() as cur:
+            # op#14565: key freshness on the LAST-WRITE time, not the frozen
+            # session-start created_at. The auto-writer UPSERTs a long-lived lane's
+            # row and advances ended_at (= session-file mtime) every cycle while
+            # created_at stays pinned at session start. Filtering on created_at
+            # wrongly excluded a bloated-but-un-recycled lane (created_at hours old,
+            # telemetry fresh) -> None -> gate never fired. COALESCE(ended_at,
+            # created_at) matches what context_health_watchdog already does and
+            # falls back to created_at for rows a non-auto-writer source left
+            # ended_at NULL on. Fail-closed is preserved: no row inside the window
+            # still -> None.
             cur.execute(
                 "SELECT latest_context_tokens FROM cc_session_costs "
                 "WHERE cc_identity = %s AND latest_context_tokens IS NOT NULL "
-                f"  AND created_at > now() - interval '{_CTX_FRESH_MIN} minutes' "
-                "ORDER BY created_at DESC LIMIT 1",
+                f"  AND COALESCE(ended_at, created_at) > now() - interval '{_CTX_FRESH_MIN} minutes' "
+                "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT 1",
                 [base_agent_id])
             row = cur.fetchone()
         if not row or not row[0]:
