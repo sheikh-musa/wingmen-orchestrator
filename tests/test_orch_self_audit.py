@@ -555,3 +555,108 @@ class TestLlmRoutingAudit:
                           side_effect=RuntimeError("scan blew up")):
             # Must not raise
             await orch_self_audit._audit_anthropic_sdk_direct_call_sites(sb, bot, "123")
+
+
+# ----------------------------------------------------------------------------
+# Audit — cc_session_costs writer health (op#14565 dead-man's-switch)
+# ----------------------------------------------------------------------------
+
+class TestCcSessionCostsWriterHealth:
+    """The cc_session_costs feed stalling silently blinds the bloat-detector
+    (latest_context_frac=None for all -> '0 WOULD-RECYCLE'). This audit is the
+    dead-man's-switch that pages instead of letting the feed stall silently."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_no_alert(self):
+        fresh = (_NOW - timedelta(minutes=5)).isoformat()
+        sb = _stub_chain(MagicMock(), [MagicMock(data=[{"created_at": fresh}])])
+        bot = AsyncMock()
+        with patch("nervous_system.orch_self_audit.datetime") as dt_mock:
+            dt_mock.now.return_value = _NOW
+            dt_mock.fromisoformat = datetime.fromisoformat
+            await orch_self_audit._audit_cc_session_costs_writer_health(sb, bot, "123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_alerts_with_remediation(self):
+        stale = (_NOW - timedelta(minutes=90)).isoformat()  # past 25-min threshold
+        sb = _stub_chain(MagicMock(), [
+            MagicMock(data=[{"created_at": stale}]),
+            MagicMock(data=[]),  # dedup empty -> not yet alerted
+            MagicMock(data=[]),  # notif insert
+        ])
+        bot = AsyncMock()
+        sent = MagicMock(); sent.message_id = 42
+        bot.send_message = AsyncMock(return_value=sent)
+        with patch("nervous_system.orch_self_audit.datetime") as dt_mock:
+            dt_mock.now.return_value = _NOW
+            dt_mock.fromisoformat = datetime.fromisoformat
+            await orch_self_audit._audit_cc_session_costs_writer_health(sb, bot, "123")
+        bot.send_message.assert_called_once()
+        text = bot.send_message.call_args[1]["text"].lower()
+        assert "cc_session_costs" in text or "bloat" in text
+        assert "kickstart" in text            # actionable remediation present
+
+    @pytest.mark.asyncio
+    async def test_empty_table_silent(self):
+        sb = _stub_chain(MagicMock(), [MagicMock(data=[])])
+        bot = AsyncMock()
+        await orch_self_audit._audit_cc_session_costs_writer_health(sb, bot, "123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dedup_no_duplicate(self):
+        stale = (_NOW - timedelta(minutes=90)).isoformat()
+        sb = _stub_chain(MagicMock(), [
+            MagicMock(data=[{"created_at": stale}]),
+            MagicMock(data=[{"id": 1}]),  # dedup non-empty -> already alerted this bucket
+        ])
+        bot = AsyncMock()
+        with patch("nervous_system.orch_self_audit.datetime") as dt_mock:
+            dt_mock.now.return_value = _NOW
+            dt_mock.fromisoformat = datetime.fromisoformat
+            await orch_self_audit._audit_cc_session_costs_writer_health(sb, bot, "123")
+        bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_false_alert_when_writer_upserting_but_no_new_session(self):
+        """Writer HEALTHY (upserting existing long-lived sessions -> ended_at fresh) but no
+        NEW session started for 90m -> created_at frozen. Must NOT page: liveness keys on the
+        last WRITE (ended_at, advanced on every upsert), not the newest session's created_at.
+        Keying on created_at false-pages 'writer stalled' in any quiet window — the same
+        frozen-created_at illusion op#14565 fixed in the recycler gate."""
+        old_created = (_NOW - timedelta(minutes=90)).isoformat()  # no new session for 90m
+        fresh_ended = (_NOW - timedelta(minutes=3)).isoformat()   # writer upserted 3m ago
+        sb = _stub_chain(MagicMock(), [
+            MagicMock(data=[{"created_at": old_created, "ended_at": fresh_ended}]),
+        ])
+        bot = AsyncMock()
+        with patch("nervous_system.orch_self_audit.datetime") as dt_mock:
+            dt_mock.now.return_value = _NOW
+            dt_mock.fromisoformat = datetime.fromisoformat
+            await orch_self_audit._audit_cc_session_costs_writer_health(sb, bot, "123")
+        bot.send_message.assert_not_called()
+        # Guard row-SELECTION too: the mock returns fixed data regardless of ordering, so
+        # assert the real query orders by ended_at (else it picks the max-created_at row,
+        # the wrong row, and re-introduces the bug against a live table).
+        order_cols = [c.args[0] for c in sb.table.return_value.order.call_args_list if c.args]
+        assert "ended_at" in order_cols, f"must order by last-write ended_at; ordered by {order_cols}"
+
+    @pytest.mark.asyncio
+    async def test_still_alerts_when_writer_truly_stalled(self):
+        """A REAL stall freezes BOTH created_at and ended_at (nothing upserted). Old ended_at
+        past the threshold must still page — the fix must not silence a genuine stall."""
+        old = (_NOW - timedelta(minutes=90)).isoformat()
+        sb = _stub_chain(MagicMock(), [
+            MagicMock(data=[{"created_at": old, "ended_at": old}]),
+            MagicMock(data=[]),  # dedup empty -> not yet alerted
+            MagicMock(data=[]),  # notif insert
+        ])
+        bot = AsyncMock()
+        sent = MagicMock(); sent.message_id = 7
+        bot.send_message = AsyncMock(return_value=sent)
+        with patch("nervous_system.orch_self_audit.datetime") as dt_mock:
+            dt_mock.now.return_value = _NOW
+            dt_mock.fromisoformat = datetime.fromisoformat
+            await orch_self_audit._audit_cc_session_costs_writer_health(sb, bot, "123")
+        bot.send_message.assert_called_once()

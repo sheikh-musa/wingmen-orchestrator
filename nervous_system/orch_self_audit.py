@@ -45,6 +45,7 @@ logger = logging.getLogger("wingmen.orch_self_audit")
 
 # Threshold knobs — keep in module so test fixture overrides work cleanly.
 _WRITER_STALE_MINUTES = 60         # 4× the 15-min repo_context_writer cadence
+_CC_COSTS_STALE_MINUTES = 25       # >1× the 5-min cc_session_costs writer cadence (op#14565)
 _TIER3_VOLUME_THRESHOLD = 3        # firings per 24h before alert
 _MIGRATIONS_DIR = Path(__file__).parent.parent / "supabase" / "migrations"
 _REPO_ROOT = Path(__file__).parent.parent
@@ -75,6 +76,7 @@ async def run_orch_audit(
     logged + tracked but does not block subsequent checks."""
     for check, name in (
         (_audit_writer_health, "writer_health"),
+        (_audit_cc_session_costs_writer_health, "cc_costs_writer_health"),
         (_audit_bridge_tier3_volume, "bridge_tier3_volume"),
         (_audit_migration_consistency, "migration_consistency"),
         (_audit_scheduled_sweep_drift, "scheduled_sweep_drift"),
@@ -145,6 +147,82 @@ async def _audit_writer_health(
         supabase,
         bot=bot, musa_chat_id=musa_chat_id, msg=msg,
         source="orch_self_audit.writer_stale",
+        decision_ref="ORCH-SELF-AUDIT", dedup_key=dedup_key,
+    )
+
+
+# ----------------------------------------------------------------------------
+# Audit — cc_session_costs writer health (op#14565 dead-man's-switch)
+# ----------------------------------------------------------------------------
+
+async def _audit_cc_session_costs_writer_health(
+    supabase, bot=None, musa_chat_id: str | None = None
+) -> None:
+    """Alert if no cc_session_costs row written in the last _CC_COSTS_STALE_MINUTES.
+
+    The context-cost writer (launchd dev.wingmen.cc-session-costs-writer, 5-min cadence)
+    can silent-fail OR its launchd interval can stall. When it does, latest_context_frac
+    returns None for EVERY lane → the autonomous bloat-detector goes BLIND (sees
+    '0 WOULD-RECYCLE', which reads as 'not idle' when it really means 'cannot measure')
+    and auto-recycle can't fire on genuinely-bloated lanes. This is the dead-man's-switch
+    that makes a stalled feed ANNOUNCE itself instead of silently blinding recycle
+    (op#14565, verified 2026-08-18: the feed stalled 18:23Z for ~2h with zero page —
+    absence-of-signal read as 'no bloat')."""
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=_CC_COSTS_STALE_MINUTES)).isoformat()
+
+    # op#14565: key liveness on the LAST-WRITE time (ended_at, which the auto-writer advances
+    # on EVERY upsert), not the newest session's created_at. In a quiet window — no NEW session
+    # starts, but the writer keeps upserting existing long-lived lanes — max(created_at) ages
+    # past the threshold and FALSE-pages "writer stalled", the same frozen-created_at illusion
+    # op#14565 fixed in sre_lane_recycle.latest_context_frac. nullsfirst=False keeps a
+    # non-auto-writer row with NULL ended_at from sorting to the top; fall back to created_at
+    # when ended_at is absent. A genuine stall freezes BOTH, so it still pages.
+    result = await supabase.table("cc_session_costs").select(
+        "created_at, ended_at"
+    ).order("ended_at", desc=True, nullsfirst=False).limit(1).execute()
+    rows = result.data or []
+    if not rows:
+        # Empty table: writer has never run. Don't alert (mirrors writer_health).
+        return
+
+    most_recent = rows[0].get("ended_at") or rows[0].get("created_at")
+    if not most_recent or most_recent >= cutoff:
+        return  # Fresh — feed is flowing.
+
+    try:
+        last_dt = datetime.fromisoformat(most_recent.replace("Z", "+00:00"))
+        stale_minutes = int((now - last_dt).total_seconds() / 60)
+    except (ValueError, AttributeError):
+        stale_minutes = None
+
+    dedup_key = f"orch_self_audit:cc_costs_stale:{_dedup_bucket(now)}"
+    if await _check_dedup(supabase, dedup_key):
+        return
+
+    msg = format_alert(
+        title="Context-cost telemetry writer stalled — the bloat detector is BLIND",
+        what=(
+            f"cc_session_costs hasn't been written for {stale_minutes or 'unknown'} minutes "
+            f"(the writer runs every 5). While it's stalled, latest_context_frac returns None "
+            f"for every lane, so the autonomous bloat-detector sees '0 WOULD-RECYCLE' — blind, "
+            f"not idle — and auto-recycle cannot fire on genuinely-bloated lanes."
+        ),
+        why=(
+            "A stalled feed makes full lanes look empty: the operator sees bloated lanes that "
+            "won't auto-recycle. Absence-of-signal must PAGE, never read as 'no bloat'."
+        ),
+        do=(
+            "Restore the writer: `launchctl kickstart -k gui/$UID/dev.wingmen.cc-session-costs-writer`, "
+            "then verify fresh cc_session_costs rows + latest_context_frac non-None."
+        ),
+        detail=f"Threshold {_CC_COSTS_STALE_MINUTES} min; most-recent write (ended_at): {most_recent}",
+        ref="op#14565",
+    )
+    await _send_and_log(
+        supabase,
+        bot=bot, musa_chat_id=musa_chat_id, msg=msg,
+        source="orch_self_audit.cc_costs_stale",
         decision_ref="ORCH-SELF-AUDIT", dedup_key=dedup_key,
     )
 
