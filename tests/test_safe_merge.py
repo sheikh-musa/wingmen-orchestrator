@@ -53,9 +53,66 @@ def test_bad_conclusions_fail(concl):
 @pytest.mark.parametrize("concl", ["SKIPPED", "NEUTRAL"])
 def test_skipped_and_neutral_are_not_success_faiclosed(concl):
     # A skipped check has NOT demonstrably succeeded — strict "COMPLETED and
-    # SUCCEEDED" means it must not count as green (a mis-path-filtered unit-tests
-    # job that SKIPPED is exactly a way tests "didn't run").
+    # SUCCEEDED" means it must not count as green by DEFAULT (a mis-path-filtered
+    # unit-tests job that SKIPPED is exactly a way tests "didn't run").
     assert classify_check(_run(conclusion=concl))[0] == "fail"
+
+
+# ── --allow-skipped: skip permitted BY NAME (ruling 2026-08-18) ──────────────
+
+def test_skipped_permitted_when_named():
+    v, label = classify_check(_run(name="e2e-tests", conclusion="SKIPPED"), allow_skipped=["e2e-tests"])
+    assert v == "permitted_skip" and "e2e-tests" in label
+
+
+def test_skipped_refuses_when_not_named():
+    # unit-tests skipping is the #332 failure mode — must still refuse even when a
+    # DIFFERENT check name is allow-listed.
+    assert classify_check(_run(name="unit-tests", conclusion="SKIPPED"), allow_skipped=["e2e-tests"])[0] == "fail"
+
+
+def test_neutral_never_covered_by_allow_skipped():
+    # The flag covers SKIPPED only, never NEUTRAL — even if the name is listed.
+    assert classify_check(_run(name="e2e-tests", conclusion="NEUTRAL"), allow_skipped=["e2e-tests"])[0] == "fail"
+
+
+def test_ihsanos_6of6_shape_merges_with_allow_skipped():
+    # The measured ihsanos rollup: several SUCCESS + one by-design e2e-tests SKIPPED.
+    rollup = [_run(name=f"job{i}") for i in range(6)] + [_run(name="e2e-tests", conclusion="SKIPPED")]
+    d = evaluate_checks(rollup, allow_skipped=["e2e-tests"])
+    assert d.ok is True and d.permitted_skips and "e2e-tests" in " ".join(d.permitted_skips)
+
+
+def test_ihsanos_shape_still_refuses_without_the_flag():
+    rollup = [_run(name=f"job{i}") for i in range(6)] + [_run(name="e2e-tests", conclusion="SKIPPED")]
+    assert evaluate_checks(rollup).ok is False
+
+
+def test_permitted_skip_is_printed_in_render():
+    d = evaluate_checks([_run(name="lint"), _run(name="e2e-tests", conclusion="SKIPPED")],
+                        allow_skipped=["e2e-tests"])
+    assert "ALLOWING SKIPPED" in d.render() and "e2e-tests" in d.render()
+
+
+def test_wrapper_merges_with_permitted_skip():
+    merged = {}
+
+    def do_merge(repo, pr, method):
+        merged["ok"] = True
+        return 0
+
+    r = safe_merge("o/r", 1, allow_skipped=["e2e-tests"],
+                   fetch=_fetch_ok([_run(name="ut"), _run(name="e2e-tests", conclusion="SKIPPED")]),
+                   do_merge=do_merge)
+    assert r.ok is True and merged.get("ok") is True
+
+
+def test_wrapper_refuses_unnamed_skip_and_does_not_merge():
+    called = {"merge": False}
+    r = safe_merge("o/r", 1, allow_skipped=["e2e-tests"],
+                   fetch=_fetch_ok([_run(name="unit-tests", conclusion="SKIPPED")]),
+                   do_merge=lambda *a: called.__setitem__("merge", True))
+    assert r.ok is False and called["merge"] is False
 
 
 def test_completed_no_conclusion_fails():
