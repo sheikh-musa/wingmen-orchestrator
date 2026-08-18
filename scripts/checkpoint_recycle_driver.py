@@ -195,26 +195,35 @@ def drive_checkpoint_recycle(conn, lane_row: dict, *, armed: bool = False,
     if rc != 0:
         return _abort(stage, f"nudge did not verify-submit (rc={rc}) — no recycle", t_nudge=t_nudge, gates=entry_gates)
 
-    # STAGE 4: block-wait for a FRESH, non-stub handoff whose write has SETTLED. A lane writes its
-    #          handoff incrementally, so size>=floor + mtime>=T_nudge can trip while the file is
-    #          STILL being written; reading then gave the #27784 false-negative (content-verify
-    #          saw a file missing the branch line it was about to write). Require the mtime to be
-    #          UNCHANGED across a poll interval (the write has settled) before declaring ready, so
-    #          STAGE 4b always reads a COMPLETE handoff.
+    # STAGE 4: block-wait until the handoff write has SETTLED **and** the lane is IDLE. A lane
+    #          writes its handoff DURING a turn, so two distinct timing hazards apply: (a) size>=floor
+    #          + mtime>=T_nudge can trip while the file is STILL being written — the #27784 partial-read
+    #          false-negative — so require the mtime UNCHANGED across a poll (the write has settled);
+    #          and (b) the lane can still be mid-turn (posting DONE, staging composer) AFTER the file
+    #          settles — the #27822 reverify-idle abort — so require gate_idle True (the turn is DONE)
+    #          before we /clear. Only then do STAGE 4b (content) and STAGE 5 (reverify) see a COMPLETE
+    #          handoff and an IDLE body.
     stage = "wait-handoff"
     deadline = t_nudge + wait_s
     ready = False
     prev_mtime = None
+    saw_settled = False
     while now_fn() <= deadline:
         mt = _handoff_mtime_if_ready(handoff_path_fn(base, notes), t_nudge)
-        if mt is not None and mt == prev_mtime:   # mtime stable across a poll -> write complete
-            ready = True
-            break
+        settled = mt is not None and mt == prev_mtime   # mtime stable across a poll -> write complete
+        if settled:
+            saw_settled = True
+            if slr.gate_idle(session):                   # ...AND the lane finished its turn (idle)
+                ready = True
+                break
         prev_mtime = mt
         sleep_fn(poll_s)
     if not ready:
-        return _abort(stage, f"no fresh SETTLED handoff (mtime>=T_nudge, size>={MIN_HANDOFF_BYTES}B, "
-                             f"mtime stable across a poll) within {wait_s}s — NO recycle (dead-man's-switch)",
+        reason = (f"handoff settled but lane never returned to idle (still working) within {wait_s}s"
+                  if saw_settled else
+                  f"no fresh SETTLED handoff (mtime>=T_nudge, size>={MIN_HANDOFF_BYTES}B, mtime stable "
+                  f"across a poll) within {wait_s}s")
+        return _abort(stage, f"{reason} — NO recycle (dead-man's-switch)",
                       t_nudge=t_nudge, gates=entry_gates)
     p = handoff_path_fn(base, notes)
 

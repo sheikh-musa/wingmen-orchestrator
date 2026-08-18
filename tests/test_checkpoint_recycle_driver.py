@@ -345,6 +345,74 @@ def test_partial_write_not_ready_until_mtime_settles(gates_pass, monkeypatch, tm
     assert len(clock.sleeps) >= 3            # waited through the changing-mtime polls before settling
 
 
+# gate_idle fake: True at the ENTRY check (call 1), then a caller-defined verdict for the
+# wait-loop checks (calls 2+). Structured this way because drive_checkpoint_recycle calls
+# slr.gate_idle once at entry (STAGE 1) and then once per poll ONLY when the handoff has settled
+# (short-circuit `settled and gate_idle`), so counting from call 2 = the loop's idle probes.
+class _IdleGate:
+    def __init__(self, busy_loop_checks):
+        self.calls = 0
+        self.busy = busy_loop_checks
+    def __call__(self, session):
+        self.calls += 1
+        if self.calls == 1:
+            return True                       # entry gate
+        return (self.calls - 1) > self.busy   # loop probes: busy for `busy`, then idle
+
+
+def test_settled_handoff_but_lane_busy_waits_for_idle(monkeypatch, tmp_path):
+    """#27822: a COMPLETE, SETTLED handoff that names the branch must NOT be recycled while the lane
+    is still finishing its handoff-write TURN (gate_idle False). The wait loop must hold until the
+    lane returns to idle, THEN recycle — so STAGE-5 reverify's idle check can't false-abort."""
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
+    monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
+    monkeypatch.setattr(slr, "plan", lambda conn, lr, armed=True, require_bloat=False,
+                        handoff_ref_epoch=None: {
+                            "permitted": True, "reason": "ok",
+                            "gates": {"idle": True, "git_clean": True},
+                            "base": "cc-irsyad", "session": "irsyad"})
+    monkeypatch.setattr(slr, "gate_idle", _IdleGate(busy_loop_checks=3))  # busy for 3 probes, then idle
+    hp = tmp_path / "irsyad-handoff-NOW.md"        # complete + names the branch; stable mtime
+    hp.write_text(f"# handoff\nbranch {_BRANCH}\n" + ("filler\n" * 200))
+    os.utime(hp, (2000.0, 2000.0))
+    clock = Clock(t0=1000.0)
+    recycle = Spy(ret={"recycled": True})
+    out = drv.drive_checkpoint_recycle(
+        None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=clock.sleep,
+        nudge_fn=Spy(ret=0), post_note_fn=Spy(), recycle_fn=recycle,
+        handoff_path_fn=lambda b, n: str(hp), branch_fn=lambda wt: _BRANCH)
+    assert out["outcome"] == "recycled"
+    assert len(recycle.calls) == 1
+    assert len(clock.sleeps) >= 3            # waited through the busy (still-working) polls
+
+
+def test_wait_times_out_if_lane_never_idle(monkeypatch, tmp_path):
+    """A settled, branch-naming handoff whose lane NEVER returns to idle -> timeout -> abort, NO
+    recycle (never /clear a working body). Fail-closed with an idle-specific reason."""
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+    monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
+    monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
+    calls = {"n": 0}
+    def never_idle(session):                 # True at entry, always busy in the loop
+        calls["n"] += 1
+        return calls["n"] == 1
+    monkeypatch.setattr(slr, "gate_idle", never_idle)
+    hp = tmp_path / "irsyad-handoff-NOW.md"
+    hp.write_text(f"# handoff\nbranch {_BRANCH}\n" + ("filler\n" * 200))
+    os.utime(hp, (2000.0, 2000.0))
+    clock = Clock(t0=1000.0)
+    recycle = Spy(ret={"recycled": True})
+    out = drv.drive_checkpoint_recycle(
+        None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=clock.sleep,
+        nudge_fn=Spy(ret=0), post_note_fn=Spy(), recycle_fn=recycle,
+        handoff_path_fn=lambda b, n: str(hp), branch_fn=lambda wt: _BRANCH,
+        wait_s=45, poll_s=15)
+    assert out["outcome"] == "aborted"
+    assert "idle" in out["reason"].lower() or "working" in out["reason"].lower()
+    assert recycle.calls == []
+
+
 # ── 3B: resume verification — context genuinely DROPPED after the /clear ───────
 def test_verify_resume_true_when_context_dropped():
     assert drv.verify_resume("cc-irsyad", lambda base: 0.09, max_frac=0.5) is True
