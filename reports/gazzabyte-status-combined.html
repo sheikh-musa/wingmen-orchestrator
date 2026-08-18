@@ -220,6 +220,35 @@
   .ctx .meter > i { display: block; height: 100%; border-radius: 999px; background: color-mix(in srgb, var(--accent) 55%, var(--resting)); }
   .ctx .v { font-size: 11px; color: var(--ink-soft); flex: none; font-variant-numeric: tabular-nums; }
   .ctx .v.none { color: var(--ink-faint); }
+
+  /* ── merged: greenlit progress-update content (verbatim wording) ── */
+  .doc { margin-top: 8px; }
+  .doc-sec { margin-top: 32px; }
+  .doc-sec > h2 {
+    font-size: 18px; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 6px;
+    display: flex; align-items: center; gap: 9px; line-height: 1.25;
+  }
+  .doc-sec > h2 .em { font-size: 19px; line-height: 1; }
+  .subhead { font-size: 13.5px; font-weight: 700; color: var(--ink-soft); margin: 18px 0 9px; }
+  .doc ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+  .doc ul li {
+    position: relative; padding: 11px 16px 11px 30px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 11px;
+    box-shadow: var(--shadow); font-size: 14px; color: var(--ink-soft); line-height: 1.5;
+  }
+  .doc ul li::before {
+    content: ""; position: absolute; left: 14px; top: 18px;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  }
+  .doc li strong { color: var(--ink); font-weight: 650; }
+  .doc li em, .doc p em, .note em { font-style: italic; }
+  .note { font-size: 13px; color: var(--ink-faint); font-style: italic; margin: 14px 2px 0; line-height: 1.55; max-width: 78ch; }
+  hr.rule { border: none; border-top: 1px solid var(--line); margin: 36px 0 0; }
+  .qbox { margin-top: 32px; }
+  .qbox h3 { font-size: 15.5px; font-weight: 700; margin: 0 0 11px; letter-spacing: -0.01em; }
+  .target { margin-top: 28px; font-size: 14px; font-style: italic; color: var(--ink-soft);
+    background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 11px; padding: 14px 17px; line-height: 1.5; }
+
 </style>
 
 <div class="wrap">
@@ -227,8 +256,8 @@
     <div class="head-row">
       <div>
         <p class="eyebrow">Gazzabyte &times; Irsyad</p>
-        <h1>Irsyad &mdash; Status</h1>
-        <p class="lede">One place for your Irsyad project &mdash; the team working on it right now, and what's in progress, queued, and done.</p>
+        <h1>Madrasah Irsyad DMS &mdash; Progress Update</h1>
+        <p class="lede">Where things stand across everything you've asked for. Grouped by what's done, what we're building, what we need from you, and what's planned next.</p>
       </div>
       <button class="pdf-btn" type="button" onclick="window.print()" aria-label="Download this page as PDF">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -237,203 +266,80 @@
     </div>
     <div class="meta">
       <span>Updated <b><!--WINGMEN:LIVE-UPDATED--></b></span>
-      <span class="legend">
-        <span><span class="dot progress"></span> In progress</span>
-        <span><span class="dot queued"></span> Queued</span>
-        <span><span class="dot done"></span> Done</span>
-      </span>
     </div>
   </header>
 
   <!--WINGMEN:LIVE-TEAM-PANEL-->
 
-  <div class="section-label" style="margin-top:40px">Your open items &mdash; live tracker</div>
-  <p class="lede" style="margin:-4px 2px 16px; font-size:14px;">The items you've raised, and where each one stands. We update this as they move.</p>
+  <div class="doc">
 
+    <section class="doc-sec done">
+      <h2><span class="em">✅</span>Done — delivered</h2>
 
-  <div class="board">
-    <!-- IN PROGRESS -->
-    <section class="col progress">
-      <div class="col-head"><h2>In progress</h2><span class="count">5</span></div>
-      <div class="col-rail"></div>
+      <p class="subhead">Recently fixed (you confirmed these):</p>
+      <ul>
+        <li>Receipt PDFs open properly again (the earlier "failed to generate" error).</li>
+        <li>Preparer receipt-PDF download now works — Elly and any preparer can download receipts (it was only working as admin before).</li>
+        <li>Account menu and dashboard layout fixed on mobile.</li>
+      </ul>
 
-      <article class="card">
-        <div class="card-top"><h3>Receipt PDF download &mdash; 404 error</h3><span class="dot progress"></span></div>
-        <p>Root cause found: a platform-wide bug (a missing column the code was still asking for) that had quietly broken <b>all</b> receipt-PDF downloads since April &mdash; not anything on your side. A code-only fix is deploying now.</p>
-        <span class="tag">Root cause found &middot; fix deploying</span>
-      </article>
+      <p class="subhead">Also delivered:</p>
+      <ul>
+        <li><strong>Automatic receipt email switched OFF</strong> — receipts are still generated, but <em>you</em> choose when to send one (using the Email button). No more sending on its own.</li>
+        <li><strong>Finance report</strong> in the bank-statement format (available to your finance viewer and preparer).</li>
+        <li><strong>New bank-import donations create receipts automatically</strong> on commit.</li>
+        <li><strong>Non-tax-deductible (non-IPC) notice</strong> now shows on receipts.</li>
+        <li><strong>Tabung Umum tins show the issued date</strong> on the tin detail.</li>
+        <li><strong>Admin two-factor login (MFA)</strong> enrolment — <em>final step: scan the QR with an authenticator app once to confirm it works end-to-end.</em></li>
+        <li><strong>Tabung Keluarga report showing $0 / missing totals</strong> — this is <strong>fixed</strong>. Because the fix went in right after you flagged it, please <strong>re-open a weekly report and confirm the totals now show</strong> — once you do, we'll mark it fully closed.</li>
+      </ul>
 
-      <article class="card">
-        <div class="card-top"><h3>Finance report (7 columns + bank-statement remarks + viewer/preparer access)</h3><span class="dot progress"></span></div>
-        <p>The report with your 7 columns, the literal bank-statement remarks, and viewer/preparer access is built and merged &mdash; deploying now.</p>
-        <span class="tag">Merged &middot; deploying</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Profile menu (top-right &ldquo;GA&rdquo;) not clickable</h3><span class="dot progress"></span></div>
-        <p>Looking into why the profile menu in the top-right isn't responding.</p>
-        <span class="tag">Investigating</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Tabung Jumaat &mdash; ready for Friday collection</h3><span class="dot progress"></span></div>
-        <p>The data side is built; we're confirming it's ready end-to-end in time for Friday's collection.</p>
-        <span class="tag">Confirming readiness</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Tabung Fajar view (preparer + admin)</h3><span class="dot progress"></span></div>
-        <p>Confirming the view location and access for preparer and admin.</p>
-        <span class="tag">Confirming</span>
-      </article>
+      <p class="note">(Plus the large base already live: tin scan / count / bank with denomination breakdown, class-completion tracker, two-signature sign-off and locking, OCBC bank-statement import with keyword-matching + review filters + duplicate-skip + multi-month + donor fuzzy-match, staff logins + roles + audit trail, IC masking, the storefront products and hardening.)</p>
     </section>
 
-    <!-- PLANNED / SCOPING -->
-    <section class="col queued">
-      <div class="col-head"><h2>Planned</h2><span class="count">6</span></div>
-      <div class="col-rail"></div>
-
-      <article class="card">
-        <div class="card-top"><h3>Receipt footer &mdash; non-tax-deductible wording</h3><span class="dot queued"></span></div>
-        <p>As you noted, Irsyad isn't an IPC entity, so receipts will <b>not</b> be labelled tax-deductible. The corrected footer (non-tax-deductible notice + Zakat 4-asnaf note) is being finalised for compliance.</p>
-        <span class="tag">Scoping &middot; compliance</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Preparer &mdash; edit a donation's category</h3><span class="dot queued"></span></div>
-        <p>Let preparers correct a donation posted to the wrong fund. Because it touches money attribution, the design gets a careful review first.</p>
-        <span class="tag">Scoping</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Merge duplicate donor records</h3><span class="dot queued"></span></div>
-        <p>Combine two entries that are the same person into one, keeping all their donation history. Admin-only, with a confirm step and an undo. Being designed.</p>
-        <span class="tag">Scoping</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Single sign-in per user</h3><span class="dot queued"></span></div>
-        <p>A new login signs out the older session, so an account is only ever active in one place. Being designed under our auth-security review.</p>
-        <span class="tag">Scoping &middot; security</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Admin session kill-switch</h3><span class="dot queued"></span></div>
-        <p>Let an org admin end any user's active session on demand. Being designed under our auth-security review.</p>
-        <span class="tag">Scoping &middot; security</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>One-time Stripe import</h3><span class="dot queued"></span></div>
-        <p>Bring your Stripe subscription-donations and product purchases into the system as a one-time import. We're scoping it and waiting on your per-transaction export.</p>
-        <span class="tag">Awaiting your file</span>
-      </article>
+    <section class="doc-sec">
+      <h2><span class="em">🔄</span>Building now</h2>
+      <ul>
+        <li><strong>Email / Download button on the receipt at the moment it's issued</strong>, for cashier, preparer and admin — right in their own flow.</li>
+        <li><strong>Tabung Jumaat combined-total</strong> — essentially ready; the final step is a quick walkthrough with you (you record one real entry, we confirm it lands correctly) before Friday's collection.</li>
+        <li><strong>"Who's holding which tins" drill-down</strong> on the Collection-by-type view — we have one quick question for you on how you'd like it (see below).</li>
+        <li><strong>Linking imported/anonymous donors to their profiles</strong> — so receipts on imported bank donations can go out by name (we're scoping this now; it affects a large chunk of the imports).</li>
+      </ul>
     </section>
 
-    <!-- DONE -->
-    <section class="col done">
-      <div class="col-head"><h2>Done</h2><span class="count">15</span></div>
-      <div class="col-rail"></div>
-
-      <article class="card">
-        <div class="card-top"><h3>Data authorisation &mdash; cleared</h3><span class="dot done"></span></div>
-        <p>Your existing agreement already covers the data authorisation &mdash; no new signature needed. This was the blocker on the whole donation and tabung side, and it's now cleared.</p>
-        <span class="tag">Cleared</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>The fee</h3><span class="dot done"></span></div>
-        <p>Closed.</p>
-        <span class="tag">Closed</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Scrolling issue &mdash; fixed</h3><span class="dot done"></span></div>
-        <p>The scrolling issue you reported is fixed &mdash; confirmed by you.</p>
-        <span class="tag">Fixed</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>January bank statement &mdash; reconciled</h3><span class="dot done"></span></div>
-        <p>Your January bank statement is fully reconciled &mdash; 908 transactions totalling S$137,692.13, every line represented, with no double-counting.</p>
-        <span class="tag">Reconciled</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Receipt numbers for the 2026 donations</h3><span class="dot done"></span></div>
-        <p>Your 2026 donations now have their receipt numbers &mdash; 990 issued, in one batch, so they show up on the export.</p>
-        <span class="tag">Done</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Stripe</h3><span class="dot done"></span></div>
-        <p>Stripe is set up &mdash; there's no Irsyad activity on it yet, so nothing to reconcile there for now.</p>
-        <span class="tag">Set up</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>GIRO</h3><span class="dot done"></span></div>
-        <p>GIRO is set up &mdash; no transactions yet, and reconciliation is ready for when you start running GIRO.</p>
-        <span class="tag">Set up</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Donations export in your DMS format</h3><span class="dot done"></span></div>
-        <p>Your donations export in your exact DMS layout &mdash; 7 columns, dates in Singapore time, PayNow and Cheque split out. Live.</p>
-        <span class="tag">Live</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>&ldquo;MIF&rdquo; merged into &ldquo;General Donation&rdquo;</h3><span class="dot done"></span></div>
-        <p>The &ldquo;MIF&rdquo; category has been merged into &ldquo;General Donation&rdquo; &mdash; 85 donations moved over. Fully recorded and reversible if ever needed. Live.</p>
-        <span class="tag">Live</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Change a donation's category after it's saved</h3><span class="dot done"></span></div>
-        <p>Admins can move a committed donation to a different fund with &ldquo;Change fund&rdquo; &mdash; no need to redo anything. Live.</p>
-        <span class="tag">Live</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Preparers can manage fund categories</h3><span class="dot done"></span></div>
-        <p>Preparers can create, edit and delete fund categories themselves. Live.</p>
-        <span class="tag">Live</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Preparers issue receipts; cashiers edit &amp; print</h3><span class="dot done"></span></div>
-        <p>Preparers can create and issue receipts, and cashiers can edit donor records and print receipts. Live.</p>
-        <span class="tag">Live</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Cashiers can add walk-in donors</h3><span class="dot done"></span></div>
-        <p>Cashiers can create a donor record on the spot for walk-in donors. Live.</p>
-        <span class="tag">Live</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>&ldquo;Sent&rdquo; confirmation on receipt emails</h3><span class="dot done"></span></div>
-        <p>When a receipt email goes out, you see an on-screen &ldquo;Sent&rdquo; tag so you know it was delivered. Live.</p>
-        <span class="tag">Live</span>
-      </article>
-
-      <article class="card">
-        <div class="card-top"><h3>Export &ldquo;something went wrong&rdquo; error &mdash; fixed</h3><span class="dot done"></span></div>
-        <p>The error some exports were hitting has been fixed &mdash; exports run cleanly now. Resolved.</p>
-        <span class="tag">Resolved</span>
-      </article>
+    <section class="doc-sec">
+      <h2><span class="em">⏳</span>Waiting on you — files we need to move forward</h2>
+      <ul>
+        <li><strong>GIRO list, January → now</strong> — the GIRO importer is built and ready; it just needs the file.</li>
+        <li><strong>Stripe transactions export</strong> — the per-transaction Payments/Charges list <em>with donor emails</em> (not the payout summary), for the one-time import.</li>
+        <li><strong>Bank statements, February onward</strong> — January is fully reconciled; the tool now handles multiple months.</li>
+        <li><strong>Tabung Fajar migration files</strong> — the old-system tins list plus your Jan–Jul manual sheet — so we can complete the Fajar migration and have the dashboard reflect it.</li>
+      </ul>
     </section>
-  </div>
 
-  <div class="section-label" style="margin-top:36px">Later</div>
-  <div class="board" style="grid-template-columns:1fr;">
-    <article class="card">
-      <div class="card-top"><h3>Website (fr.irsyad.edu.sg) &rarr; DMS migration</h3><span class="dot queued"></span></div>
-      <p>Deferred to a later stage, at your call &mdash; parked for now, not being worked on. We'll pick it back up when you're ready.</p>
-      <span class="tag">Parked</span>
-    </article>
+    <section class="doc-sec">
+      <h2><span class="em">📋</span>Planned / next</h2>
+      <ul>
+        <li><strong>School Fees payment (eNETS)</strong> — a new module. We have your spec; it needs your pricing/category sign-off and the eNETS login before we build.</li>
+        <li><strong>NETS payment at the counter (POS)</strong> — scoping the setup and an on-site trial.</li>
+        <li><strong>Appreciation Letter auto-fill + sending, and thank-you/receipt emails</strong> — we'll build the fill-and-generate side now; the <em>sending</em> side is waiting on your email setup (the DNS records + shared mailbox, with Uzair).</li>
+        <li><strong>Smaller enhancements from your list</strong> — manual tin numbering, a preparer editing a category after posting, the Zakat-allocation note on receipts, and a committed-donation correction flow — all queued.</li>
+      </ul>
+    </section>
+
+    <hr class="rule">
+
+    <section class="qbox">
+      <h3>A few quick questions we'll come to you on</h3>
+      <ul>
+        <li>Tabung Jumaat — the walkthrough timing (a real entry we can verify).</li>
+        <li>The "who's holding which tins" drill-down — should it show everyone holding that tin type, or just currently-issued ones.</li>
+        <li>The "delivered" date on tins — we have your "Delivered On" value (stored as the issued date); do you track a separate later hand-over event, or is that one date what you need?</li>
+      </ul>
+    </section>
+
+    <p class="target">Overall target: full system by October 2026, with your bank / GIRO / audit data finalised end-August / early-September.</p>
+
   </div>
 
   <footer>
