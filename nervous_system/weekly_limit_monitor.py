@@ -214,6 +214,57 @@ def _level(util: float) -> str:
     return "ok"
 
 
+def _fivehr_transition(pkey: dict, u5h, reset5h):
+    """5-HOUR-window threshold dedup (op#14438). Returns 'warn'/'urgent' ONLY on a
+    fresh crossing this 5h window, else None — mirroring the weekly dedup but keyed
+    on reset5h and stored under its OWN memory (`alerted_5h`), independent of the
+    weekly path. WHY THIS EXISTS: the 5h burst window is what stalls a whole pool
+    during a max-velocity push (it stalled the irsyad fleet at 76% on 2026-08-17
+    while the WEEKLY gauge still looked comfortable); the absolute-threshold pages
+    above are weekly-only and blind to it. A missing reading (u5h is None) never
+    pages. Mutates pkey (records the reading + alert memory), same as the weekly
+    block; the returned level drives a page routed to the fleet path (orch-console),
+    NOT the operator's phone — 5h windows spike/recede often, so Nazim decides
+    operator escalation."""
+    if u5h is None:
+        return None
+    # A NEW 5h window (reset advanced) clears the 5h alert memory so a fresh window
+    # pages afresh — independent of the (differently-cadenced) weekly window reset.
+    prev_reset = pkey.get("reset5h")
+    if reset5h is not None and prev_reset is not None and reset5h != prev_reset:
+        pkey["alerted_5h"] = None
+    pkey["reset5h"] = reset5h
+    pkey["u5h"] = u5h
+    level = _level(u5h)
+    prev = pkey.get("alerted_5h")   # None | "warn" | "urgent"
+    if level == "ok":
+        pkey["alerted_5h"] = None
+        return None
+    if level == "warn" and prev is None:
+        pkey["alerted_5h"] = "warn"
+        return "warn"
+    if level == "urgent" and prev != "urgent":
+        pkey["alerted_5h"] = "urgent"
+        return "urgent"
+    return None
+
+
+def _alert_body_5h(p: dict, level: str) -> str:
+    """Fleet-facing (orch-console) body for a 5-HOUR-window threshold page."""
+    pct5 = round((p.get("u5h") or 0) * 100)
+    pct7 = round(p["u7d"] * 100)
+    return (
+        f"[Max 5-HOUR-window monitor] {p['pool']} is at {pct5}% of its 5-HOUR burst "
+        f"limit ({level.upper()}) — tops up {_fmt_5h(p.get('reset5h'))}.\n"
+        f"WHY THIS MATTERS: the 5h window is the BURST constraint during a max-velocity "
+        f"push; it can stall EVERY lane on the pool at ~100% even while the WEEKLY gauge "
+        f"still looks fine (weekly is {pct7}%). This is the exact mode that stalled the "
+        f"irsyad fleet at 76% on 2026-08-17. It is SEPARATE from the weekly 75/90 alarm.\n"
+        f"WHAT TO DO: pace the burst / stagger lane onboarding until the 5h window tops "
+        f"up, or shift some load to a pool with 5h headroom. Weekly headroom is NOT the "
+        f"relevant signal here.")
+
+
 def _fmt_reset(epoch) -> str:
     if not epoch:
         return "unknown"
@@ -593,6 +644,26 @@ def run(dry: bool = False, as_json: bool = False) -> int:
                 log(f"op#13183-TRIGGER-EMIT-FAILED (non-fatal): {e}")
                 print(f"[weekly-limit] op#13183 trigger emit failed: {e}",
                       file=sys.stderr)
+
+        # 5-HOUR-window threshold page (op#14438): the absolute-threshold pages above
+        # are WEEKLY-only (_level(u7d)) and blind to the 5h BURST window — the ceiling
+        # that actually stalls a whole pool during a max-velocity push (it stalled the
+        # irsyad fleet at 76% on 2026-08-17 while the weekly gauge still read green).
+        # Strictly ADDITIVE — the weekly path above is untouched. Own try/except so a
+        # fault here can NEVER break the core weekly safety pages (dead-man's-switch).
+        # Routed to the fleet path (orch-console) only — NOT the operator's phone: 5h
+        # windows spike/recede often, so the SRE/console decides operator escalation.
+        try:
+            lvl5 = _fivehr_transition(pkey, p.get("u5h"), p.get("reset5h"))
+            if lvl5:
+                pct5 = round((p.get("u5h") or 0) * 100)
+                prio5 = "P1" if lvl5 == "urgent" else "P2"
+                _page(f"Max 5-HOUR-window {lvl5.upper()} — {p['pool']} at {pct5}% "
+                      f"(burst limit; weekly {round(p['u7d']*100)}%)",
+                      _alert_body_5h(p, lvl5), prio5, dry)
+        except Exception as e:  # noqa: BLE001 — never let the 5h path break the weekly pages
+            log(f"5h-window-page-EMIT-FAILED (non-fatal): {e}")
+            print(f"[weekly-limit] 5h-window page failed: {e}", file=sys.stderr)
 
         # PACE page (op#12617): the pool is on track to EXHAUST before its weekly
         # reset (projected>100% past the early-window floor, OR runway<days-to-reset)
