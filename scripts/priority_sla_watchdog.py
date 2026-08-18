@@ -342,24 +342,36 @@ def _recipient_capped(session: str) -> bool:
         return False
 
 
-_ACTIVE_TURN_RE = re.compile(r"esc to interrupt", re.I)
+# The fleet's ONE hardened "is this pane mid-turn?" oracle — esc-to-interrupt +
+# background-agents + EXTENDED-THINKING spinner, each with the op#11774 liveness gate
+# (a FROZEN spinner is STALE=idle). REUSED (not re-implemented) so this gate can never
+# drift from the definition the reset/winddown scripts trust.
+_PANE_BUSY_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "pane_busy.sh")
+_TMUX_BIN = "/usr/local/bin/tmux"  # Mini singleton socket; launchd PATH lacks /usr/local/bin (op#9393)
 
 
 def _session_active_turn(session: str) -> bool:
-    """True IFF the LOCAL lane's pane shows an active CC turn ('esc to interrupt') — the lane
-    is heads-down WORKING a long tool/turn, so its unread/unresponded lag is benign. FAIL-
-    TOWARD-ACTION: any error, a missing/remote session, or no marker returns False -> the SLA
-    action proceeds, so a genuinely idle stall is NEVER hidden on a doubt (same fail-direction
-    as _recipient_capped). Mirrors the nudge-path 'esc to interrupt' check (do-not-disturb)."""
+    """True IFF the LOCAL lane's pane is mid-turn, via the canonical pane_busy oracle
+    (scripts/lib/pane_busy.sh -> composer_capture.sh). This catches the EXTENDED-THINKING /
+    'Cogitating' spinner state (NO 'esc to interrupt') that my first cut missed and still
+    false-fired cc-irsyad on (Nazim #26034). FAIL-TOWARD-ACTION for THIS gate: a missing
+    session or any error -> False, so the SLA action proceeds and a genuinely idle stall is
+    NEVER hidden on a doubt (same fail-direction as _recipient_capped). NOTE: pane_busy.sh
+    itself fails CLOSED (empty/unreadable pane = BUSY) for the RESET use-case; we gate that
+    behind a has-session precheck so only a readable, EXISTING session can yield a BUSY
+    verdict here — a gone/offline lane returns False and gets the normal SLA action."""
     if not session:
         return False
     try:
-        if subprocess.run(["tmux", "has-session", "-t", f"={session}"],
+        tmux = _TMUX_BIN if os.path.exists(_TMUX_BIN) else "tmux"
+        if subprocess.run([tmux, "has-session", "-t", f"={session}"],
                           capture_output=True, timeout=8).returncode != 0:
-            return False
-        cap = subprocess.run(["tmux", "capture-pane", "-t", f"={session}:0.0", "-p"],
-                             capture_output=True, text=True, timeout=8).stdout
-        return bool(_ACTIVE_TURN_RE.search(cap))
+            return False  # gone/offline session -> fail-toward-action (fire)
+        # pass the session as $1 (never interpolate into the shell string)
+        r = subprocess.run(
+            ["bash", "-c", f'. "{_PANE_BUSY_SH}" && pane_busy "$1"', "_", session],
+            capture_output=True, timeout=15, env={**os.environ, "TMUX_BIN": tmux})
+        return r.returncode == 0  # pane_busy exit 0 == BUSY == mid-turn
     except Exception:
         return False
 
@@ -966,7 +978,8 @@ def run(dry: bool, injected: list[dict] | None = None,
                     active_turn_cache[agent] = _recipient_active_turn(all_lanes[agent])
                 if active_turn_cache[agent]:
                     actions.append(f"SKIP #{mid} ({pr}) — recipient '{agent}' ACTIVE-TURN "
-                                   f"(a lane shows esc-to-interrupt); heads-down working, not stalled — no nudge/page")
+                                   f"(a lane is mid-turn per pane_busy: esc-to-interrupt / thinking-spinner / "
+                                   f"bg-agents); heads-down working, not stalled — no nudge/page")
                     continue
             elapsed = v["elapsed_minutes"]
             key = f"{mid}:{v['violation_type']}"
@@ -1212,10 +1225,8 @@ def self_test() -> int:
               "_session_active_turn -> False on empty session (fail-toward-action)")
         check(_recipient_active_turn([]) is False,
               "_recipient_active_turn -> False when a base has no lanes (fail-toward-action)")
-        check(bool(_ACTIVE_TURN_RE.search("  ✦ Working... (esc to interrupt)")) is True,
-              "_ACTIVE_TURN_RE matches the active-turn marker")
-        check(bool(_ACTIVE_TURN_RE.search("> idle pane, ready for input")) is False,
-              "_ACTIVE_TURN_RE does not match an idle pane")
+        check(_session_active_turn("nonexistent-session-xyz-000") is False,
+              "delegates to pane_busy oracle but still fails-toward-action on a gone session")
 
     print()
     if failures:
