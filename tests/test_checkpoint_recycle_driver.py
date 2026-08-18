@@ -61,11 +61,25 @@ def gates_pass(monkeypatch):
     monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
 
 
-def _fresh_handoff_file(tmp_path, mtime, size):
+_BRANCH = "feat/merge-people-app-layer"
+
+
+def _fresh_handoff_file(tmp_path, mtime, size=None, text=None):
+    """A handoff fixture. By default names the lane's branch (so the content check passes);
+    pass text= to override (e.g. a stub that omits the branch), or size= for a raw-bytes blob."""
     p = tmp_path / "irsyad-handoff-NOW.md"
-    p.write_text("x" * size)
+    if text is None:
+        if size is not None:
+            text = "x" * size
+        else:
+            text = f"# handoff\nbranch {_BRANCH}\n" + ("state line\n" * 100)
+    p.write_text(text)
     os.utime(p, (mtime, mtime))
     return str(p)
+
+
+def _ok_branch(_wt):
+    return _BRANCH
 
 
 # ── safety floor at entry ───────────────────────────────────────────────────
@@ -124,10 +138,9 @@ def test_armed_happy_path_recycles_with_t_nudge(gates_pass, monkeypatch, tmp_pat
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
     monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
     clock = Clock(t0=1000.0)
-    # handoff_path_fn: absent on 1st poll, present (fresh + big) on 2nd
-    handoff = _fresh_handoff_file(tmp_path, mtime=2000.0, size=1200)
+    # handoff_path_fn: absent on 1st poll, present (fresh + big + names branch) on 2nd
+    handoff = _fresh_handoff_file(tmp_path, mtime=2000.0)
     seq = [None, handoff]
-    hp = Spy()
     def handoff_path_fn(base, notes):
         return seq.pop(0) if seq else handoff
     recycle = Spy(ret={"recycled": True, "resume_verified": True})
@@ -135,7 +148,7 @@ def test_armed_happy_path_recycles_with_t_nudge(gates_pass, monkeypatch, tmp_pat
     out = drv.drive_checkpoint_recycle(
         None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=clock.sleep,
         nudge_fn=nudge, post_note_fn=note, recycle_fn=recycle,
-        handoff_path_fn=handoff_path_fn)
+        handoff_path_fn=handoff_path_fn, branch_fn=_ok_branch)
     assert out["outcome"] == "recycled"
     assert note.calls and nudge.calls               # note + nudge happened
     assert len(recycle.calls) == 1
@@ -150,12 +163,12 @@ def test_done_ack_race_does_not_block_recycle(gates_pass, monkeypatch, tmp_path)
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 1_000.0)   # handoff @1000
     monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 9_999.0)  # late DONE ack
     clock = Clock(t0=999.0)                          # t_nudge=999 < handoff mtime 1000
-    handoff = _fresh_handoff_file(tmp_path, mtime=1000.0, size=1200)
+    handoff = _fresh_handoff_file(tmp_path, mtime=1000.0)   # names the branch
     recycle = Spy(ret={"recycled": True})
     out = drv.drive_checkpoint_recycle(
         None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=clock.sleep,
         nudge_fn=Spy(ret=0), post_note_fn=Spy(), recycle_fn=recycle,
-        handoff_path_fn=lambda b, n: handoff)
+        handoff_path_fn=lambda b, n: handoff, branch_fn=_ok_branch)
     assert out["outcome"] == "recycled"
     assert len(recycle.calls) == 1
 
@@ -214,11 +227,78 @@ def test_recycle_raises_aborts_loud(gates_pass, monkeypatch, tmp_path):
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
     monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
     clock = Clock(t0=1000.0)
-    handoff = _fresh_handoff_file(tmp_path, mtime=2000.0, size=1200)
+    handoff = _fresh_handoff_file(tmp_path, mtime=2000.0)   # names the branch
     recycle = Spy(raises=RuntimeError("reset_lane.sh rc=1"))
     out = drv.drive_checkpoint_recycle(
         None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=clock.sleep,
         nudge_fn=Spy(ret=0), post_note_fn=Spy(), recycle_fn=recycle,
-        handoff_path_fn=lambda b, n: handoff)
+        handoff_path_fn=lambda b, n: handoff, branch_fn=_ok_branch)
     assert out["outcome"] == "aborted"
     assert "reset_lane" in out["reason"] or "rc=1" in out["reason"]
+
+
+# ── 3A: content verification — handoff must NAME the lane's current branch ─────
+def test_content_ok_helper_requires_branch_present():
+    assert drv._handoff_content_ok(f"...on branch {_BRANCH} now", _BRANCH) is True
+    assert drv._handoff_content_ok("no branch named here", _BRANCH) is False
+    assert drv._handoff_content_ok(f"text {_BRANCH}", None) is False     # undeterminable branch
+    assert drv._handoff_content_ok(f"text {_BRANCH}", "") is False       # empty branch
+
+
+def test_armed_aborts_when_handoff_omits_branch(gates_pass, monkeypatch, tmp_path):
+    """A fresh, big-enough handoff that does NOT name the branch is a stub/garbage -> abort."""
+    monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
+    monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
+    clock = Clock(t0=1000.0)
+    stub = _fresh_handoff_file(tmp_path, mtime=2000.0, text="# stub\n" + ("filler\n" * 200))
+    recycle = Spy(ret={"recycled": True})
+    out = drv.drive_checkpoint_recycle(
+        None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=clock.sleep,
+        nudge_fn=Spy(ret=0), post_note_fn=Spy(), recycle_fn=recycle,
+        handoff_path_fn=lambda b, n: stub, branch_fn=_ok_branch)
+    assert out["outcome"] == "aborted"
+    assert "content" in out["reason"].lower() or "branch" in out["reason"].lower()
+    assert recycle.calls == []
+
+
+def test_armed_aborts_when_branch_undeterminable(gates_pass, monkeypatch, tmp_path):
+    """branch_fn can't resolve a branch (detached HEAD / git error) -> can't verify -> abort."""
+    monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
+    monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
+    clock = Clock(t0=1000.0)
+    handoff = _fresh_handoff_file(tmp_path, mtime=2000.0)
+    recycle = Spy(ret={"recycled": True})
+    out = drv.drive_checkpoint_recycle(
+        None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=clock.sleep,
+        nudge_fn=Spy(ret=0), post_note_fn=Spy(), recycle_fn=recycle,
+        handoff_path_fn=lambda b, n: handoff, branch_fn=lambda wt: None)
+    assert out["outcome"] == "aborted"
+    assert recycle.calls == []
+
+
+# ── 3B: resume verification — context genuinely DROPPED after the /clear ───────
+def test_verify_resume_true_when_context_dropped():
+    assert drv.verify_resume("cc-irsyad", lambda base: 0.09, max_frac=0.5) is True
+
+
+def test_verify_resume_false_when_still_high():
+    assert drv.verify_resume("cc-irsyad", lambda base: 0.93, max_frac=0.5) is False
+
+
+def test_verify_resume_false_when_unmeasurable():
+    assert drv.verify_resume("cc-irsyad", lambda base: None, max_frac=0.5) is False
+
+
+# ── 3C: production entrypoint run() — dry-run is DB-free + touches nothing ─────
+def test_run_dry_run_outcome(monkeypatch):
+    """run() in dry-run: discovers the lane, passes entry gates, returns dry-run, and NEVER
+    constructs a real side effect firing (armed=False short-circuits)."""
+    monkeypatch.setattr(slr, "discover_lanes", lambda conn, lane=None: [_worker_row()])
+    monkeypatch.setattr(slr, "gate_idle", lambda session: True)
+    monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
+
+    class Args:
+        lane = "irsyad"; arm = False; wait_s = 240; poll_s = 15
+        reason = "test"
+    out = drv.run(Args(), conn=None)
+    assert out["outcome"] == "dry-run"

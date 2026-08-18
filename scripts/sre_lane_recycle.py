@@ -314,6 +314,38 @@ def _self_test() -> int:
     return 1 if fails else 0
 
 
+def discover_lanes(conn, lane: "str | None" = None) -> list:
+    """Enumerate ACTUALLY-RUNNING worker lanes (OPTION 2, CAI-RESP-705): the freshest live
+    instance per base from agent_status, cross-referenced to fleet_lanes ONLY for
+    worktree_path/branch/notes. Correct-by-construction: no stale-registry blind spot. An
+    unregistered running lane appears but has NO worktree_path -> gate_git_clean fails closed
+    (fail-SAFE, not blind). Singletons AND the SRE itself (fhb.SINGLETON_BODIES) are excluded —
+    defence-in-depth with assert_sre_never_targets_singleton. `lane` restricts to one
+    fleet_lanes.lane. Shared by the CLI and the checkpoint-recycle driver's entrypoint."""
+    singletons = sorted(fhb.SINGLETON_BODIES)
+    ph = ",".join(["%s"] * len(singletons))
+    q = ("SELECT COALESCE(l.lane, s.base_agent_id) AS lane, "
+         "       l.worktree_path, l.branch, s.base_agent_id, l.desired_state, l.notes, "
+         "       s.tmux_session "
+         "FROM (SELECT DISTINCT ON (base_agent_id) base_agent_id, tmux_session "
+         "      FROM agent_status "
+         "      WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
+         f"        AND base_agent_id NOT IN ({ph}) "
+         "        AND last_heartbeat > now() - interval '30 minutes' "
+         "      ORDER BY base_agent_id, last_heartbeat DESC) s "
+         "LEFT JOIN LATERAL (SELECT lane, worktree_path, branch, notes, desired_state "
+         "                   FROM fleet_lanes fl WHERE fl.base_agent_id = s.base_agent_id "
+         "                   ORDER BY (worktree_path IS NOT NULL) DESC, lane LIMIT 1) l ON true")
+    params: list = list(singletons)
+    if lane:
+        q += " WHERE COALESCE(l.lane, s.base_agent_id) = %s"; params.append(lane)
+    q += " ORDER BY s.base_agent_id"
+    with conn.cursor() as cur:
+        cur.execute(q, params)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="SRE lanes-only auto-recycle (CAI-RESP-681)")
     ap.add_argument("--arm", action="store_true",
@@ -344,37 +376,7 @@ def main() -> int:
         print("no DATABASE_URL", file=sys.stderr); return 2
     conn = psycopg.connect(dsn)
 
-    # OPTION 2 discovery (CAI-RESP-705): enumerate ACTUALLY-RUNNING worker lanes
-    # from agent_status (freshest live instance per base) and cross-reference
-    # fleet_lanes ONLY for worktree_path/branch/notes. Correct-by-construction: no
-    # stale-registry blind spot (the desired_state<>'down' filter used to hide 8 of
-    # 12 running lanes). An unregistered running lane still appears but has NO
-    # worktree_path -> gate_git_clean fails closed -> won't recycle (fail-SAFE, not
-    # blind). Singletons AND the SRE ITSELF (fhb.SINGLETON_BODIES, incl.
-    # cc-fleet-health per CAI-705 cond 4) are excluded here — defence-in-depth with
-    # assert_sre_never_targets_singleton, which also refuses them at the gate.
-    singletons = sorted(fhb.SINGLETON_BODIES)
-    ph = ",".join(["%s"] * len(singletons))
-    q = ("SELECT COALESCE(l.lane, s.base_agent_id) AS lane, "
-         "       l.worktree_path, l.branch, s.base_agent_id, l.desired_state, l.notes, "
-         "       s.tmux_session "
-         "FROM (SELECT DISTINCT ON (base_agent_id) base_agent_id, tmux_session "
-         "      FROM agent_status "
-         "      WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
-         f"        AND base_agent_id NOT IN ({ph}) "
-         "        AND last_heartbeat > now() - interval '30 minutes' "
-         "      ORDER BY base_agent_id, last_heartbeat DESC) s "
-         "LEFT JOIN LATERAL (SELECT lane, worktree_path, branch, notes, desired_state "
-         "                   FROM fleet_lanes fl WHERE fl.base_agent_id = s.base_agent_id "
-         "                   ORDER BY (worktree_path IS NOT NULL) DESC, lane LIMIT 1) l ON true")
-    params: list = list(singletons)
-    if args.lane:
-        q += " WHERE COALESCE(l.lane, s.base_agent_id) = %s"; params.append(args.lane)
-    q += " ORDER BY s.base_agent_id"
-    with conn.cursor() as cur:
-        cur.execute(q, params)
-        cols = [d[0] for d in cur.description]
-        lanes = [dict(zip(cols, r)) for r in cur.fetchall()]
+    lanes = discover_lanes(conn, args.lane)
 
     require_bloat = not args.ignore_context
     print(f"SRE lane-recycle — {'ARMED' if armed else 'DETECT-ONLY (disarmed)'} — "

@@ -26,8 +26,12 @@ DESIGN PRINCIPLES (charter §2/§3):
 """
 from __future__ import annotations
 
+import argparse
+import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
@@ -77,6 +81,41 @@ def _handoff_ready(path: str, t_nudge: float) -> bool:
     return st.st_mtime >= t_nudge and st.st_size >= MIN_HANDOFF_BYTES
 
 
+def _git_branch(worktree_path: "str | None") -> "str | None":
+    """The worktree's current branch, or None. Fail-closed: no path, not a dir, git error,
+    or a detached HEAD ('HEAD') -> None, which the content check treats as unverifiable."""
+    if not worktree_path or not os.path.isdir(worktree_path):
+        return None
+    try:
+        r = subprocess.run(["git", "-C", worktree_path, "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    br = r.stdout.strip()
+    return br or None if br != "HEAD" else None
+
+
+def _handoff_content_ok(handoff_text: str, branch: "str | None") -> bool:
+    """A lossless handoff NAMES the lane's current branch (op#14539 Phase 3, Nazim-endorsed
+    content-sanity proxy). True iff branch is determinable AND appears in the handoff text.
+    Fail-closed: a falsy/undeterminable branch -> False (never recycle onto an unverifiable
+    handoff — size+mtime alone would pass an 800B stub)."""
+    return bool(branch) and branch in handoff_text
+
+
+def verify_resume(base: str, read_ctx_frac_fn, *, max_frac: float = 0.5) -> bool:
+    """Confirm the lane genuinely CAME BACK after the /clear — its context fraction DROPPED.
+    True iff a real fresh reading exists AND is < max_frac. Fail-closed: an unmeasurable
+    (None) or still-high reading -> False (resume NOT verified; the caller reports failure)."""
+    try:
+        frac = read_ctx_frac_fn(base)
+    except Exception:
+        return False
+    return frac is not None and frac < max_frac
+
+
 def _abort(stage: str, reason: str, t_nudge=None, gates=None) -> dict:
     return {"stage": stage, "outcome": "aborted", "reason": reason,
             "t_nudge": t_nudge, "gates": gates}
@@ -84,7 +123,7 @@ def _abort(stage: str, reason: str, t_nudge=None, gates=None) -> dict:
 
 def drive_checkpoint_recycle(conn, lane_row: dict, *, armed: bool = False,
                              now_fn, sleep_fn, nudge_fn, post_note_fn, recycle_fn,
-                             handoff_path_fn=slr._newest_handoff_path,
+                             handoff_path_fn=slr._newest_handoff_path, branch_fn=_git_branch,
                              wait_s: int = _WAIT_S, poll_s: int = _POLL_S,
                              reason: str = "SRE hands-off checkpoint-first recycle (op#14539)") -> dict:
     """Drive a worker lane through checkpoint-first recycle. Returns
@@ -154,6 +193,19 @@ def drive_checkpoint_recycle(conn, lane_row: dict, *, armed: bool = False,
                              f"within {wait_s}s — NO recycle (dead-man's-switch)",
                       t_nudge=t_nudge, gates=entry_gates)
 
+    # STAGE 4b: content-verify — the fresh, big-enough handoff must NAME the lane's current
+    #           branch, so a size+mtime-passing STUB/garbage can never become a restore point
+    #           (Nazim #27750). Fail-closed on unreadable file or undeterminable branch.
+    stage = "content-verify"
+    try:
+        handoff_text = Path(p).read_text(errors="replace")
+    except Exception as e:
+        return _abort(stage, f"handoff unreadable — no recycle: {e!r}", t_nudge=t_nudge, gates=entry_gates)
+    branch = branch_fn(lane_row.get("worktree_path"))
+    if not _handoff_content_ok(handoff_text, branch):
+        return _abort(stage, f"handoff does not name the lane's branch (branch={branch!r}) — "
+                             f"content-unverified, NO recycle", t_nudge=t_nudge, gates=entry_gates)
+
     # STAGE 5: re-verify the full floor at the MOMENT of action; freshness vs T_nudge (fix 2).
     stage = "reverify"
     p = slr.plan(conn, lane_row, armed=True, require_bloat=False, handoff_ref_epoch=t_nudge)
@@ -176,3 +228,105 @@ def drive_checkpoint_recycle(conn, lane_row: dict, *, armed: bool = False,
     return {"stage": "done", "outcome": "recycled",
             "reason": "checkpoint-first recycle complete + resume verified",
             "t_nudge": t_nudge, "gates": p["gates"], "result": result}
+
+
+# ── production entrypoint (Phase 3C): thin main() binding the REAL collaborators ──────────────
+_NOTE_SUBJECT = "SRE checkpoint-first recycle incoming — write a fresh handoff first (lossless)"
+_NOTE_BODY = (
+    "TL;DR: the SRE is about to checkpoint-recycle you (hands-off, gated). It is LOSSLESS — write a "
+    "FRESH self-handoff first and you lose nothing. AFTER the recycle: read your fresh handoff IN FULL, "
+    "reconcile your bus inbox, then RESUME YOUR PLAN — do not let inbox-chasing override your in-progress work."
+)
+
+
+def _pick_lane_row(conn, lane: str) -> "dict | None":
+    """The single running worker-lane row for `lane` (via slr.discover_lanes), or None."""
+    rows = slr.discover_lanes(conn, lane)
+    return rows[0] if rows else None
+
+
+def run(args, conn) -> dict:
+    """Bind the REAL collaborators and drive one lane. Dry-run (args.arm False) short-circuits
+    inside the driver after the entry gates, so none of the real side effects below ever fire."""
+    row = _pick_lane_row(conn, args.lane)
+    if row is None:
+        return {"stage": "discover", "outcome": "aborted",
+                "reason": f"lane {args.lane!r} not found among running worker lanes"}
+    base = row.get("base_agent_id") or row.get("lane")
+    try:
+        fhb.assert_sre_never_targets_singleton(base, identity=fhb.SRE_AGENT_ID)
+    except fhb.BoundaryViolation as e:
+        return {"stage": "discover", "outcome": "aborted", "reason": f"singleton refused: {e}"}
+    lane = row.get("lane") or base
+    reason = args.reason
+
+    def nudge_fn(session, msg):
+        r = subprocess.run(["bash", str(_ORCH_DIR / "scripts" / "lane_nudge.sh"), session, msg],
+                           capture_output=True, text=True, timeout=90)
+        return r.returncode
+
+    def post_note_fn(_conn, _base):
+        with _conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.current_agent_id',%s,true)", [fhb.SRE_AGENT_ID])
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                "requires_response,priority) VALUES (%s,%s,'update',%s,%s,true,'P2')",
+                [fhb.SRE_AGENT_ID, _base, _NOTE_SUBJECT, _NOTE_BODY])
+        _conn.commit()
+
+    def recycle_fn(_base, session, t_nudge):
+        r = subprocess.run(
+            [sys.executable, str(_ORCH_DIR / "scripts" / "sre_lane_recycle.py"),
+             "--lane", lane, "--arm", "--ignore-context",
+             "--handoff-after", str(float(t_nudge)), "--reason", reason],
+            capture_output=True, text=True, timeout=220)
+        if r.returncode != 0:
+            return {"recycled": False, "rc": r.returncode, "stderr": (r.stderr or "")[-400:]}
+        # verify came-back at the process level: context fraction DROPPED (bounded poll — telemetry lags).
+        resumed = False
+        for _ in range(8):
+            if verify_resume(_base, lambda b: slr.latest_context_frac(conn, b)):
+                resumed = True
+                break
+            time.sleep(15)
+        return {"recycled": resumed, "rc": 0, "resume_verified": resumed}
+
+    return drive_checkpoint_recycle(
+        conn, row, armed=bool(args.arm),
+        now_fn=time.time, sleep_fn=time.sleep,
+        nudge_fn=nudge_fn, post_note_fn=post_note_fn, recycle_fn=recycle_fn,
+        wait_s=args.wait_s, poll_s=args.poll_s, reason=reason)
+
+
+def _build_args(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Hands-off checkpoint-first recycle of a WORKER lane (op#14539 / #27720 item-1).")
+    ap.add_argument("--lane", required=True, help="fleet_lanes.lane to recycle")
+    ap.add_argument("--arm", action="store_true",
+                    help="ARM the real checkpoint+recycle. DEFAULT: dry-run (touches nothing).")
+    ap.add_argument("--wait-s", type=int, default=_WAIT_S)
+    ap.add_argument("--poll-s", type=int, default=_POLL_S)
+    ap.add_argument("--reason", default="SRE hands-off checkpoint-first recycle (op#14539)")
+    return ap.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = _build_args(argv)
+    import psycopg
+    from dotenv import load_dotenv
+    load_dotenv(_ORCH_DIR / ".env")
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        print("no DATABASE_URL", file=sys.stderr)
+        return 2
+    conn = psycopg.connect(dsn)
+    try:
+        out = run(args, conn)
+    finally:
+        conn.close()
+    print(json.dumps(out, default=str, indent=2))
+    return 0 if out.get("outcome") in ("recycled", "dry-run") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
