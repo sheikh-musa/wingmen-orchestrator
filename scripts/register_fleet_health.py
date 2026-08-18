@@ -55,6 +55,11 @@ ON CONFLICT (id) DO NOTHING;
 """
 
 FLEET_LANES_SQL = """
+-- NOTE: fleet_lanes.branch is a REGISTRATION-TIME SNAPSHOT — informational only, NOT
+-- authoritative and NOT maintained (it drifts freely as lanes switch branches). The real
+-- branch is LIVE state (tmux pane_current_path / git HEAD in the worktree); recycle/discovery
+-- resolves the worktree from live cwd, never from this column (Phase-3.5 wrong-worktree fix).
+-- Never key tooling on it. See COMMENT ON COLUMN fleet_lanes.branch / bus #27924.
 INSERT INTO fleet_lanes (lane, worktree_path, branch, model, launcher, base_agent_id, desired_state, notes)
 VALUES (
     'fleet-health',
