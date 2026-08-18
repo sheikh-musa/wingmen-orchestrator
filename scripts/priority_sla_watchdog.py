@@ -305,6 +305,20 @@ def lane_map(conn) -> dict[str, str]:
         return {a: l for a, l in cur.fetchall()}
 
 
+def all_lane_map(conn) -> dict[str, list[str]]:
+    """base_agent_id -> ALL its tmux lanes (from fleet_lanes). Unlike lane_map (which
+    collapses a multi-lane base to ONE arbitrary session), this keeps every lane —
+    because a shared-base pool (e.g. cc-irsyad's 6 lanes: irsyad + cisco-recon + prog1/2
+    + tabung-jumaat/history) is ATTENDED as long as ANY of its lanes is actively working.
+    See _recipient_active_turn."""
+    out: dict[str, list[str]] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT base_agent_id, lane FROM fleet_lanes WHERE base_agent_id IS NOT NULL")
+        for a, l in cur.fetchall():
+            out.setdefault(a, []).append(l)
+    return out
+
+
 _CAP_BANNER_RE = re.compile(r"hit your (weekly|usage|5-hour) limit|weekly limit.*reset", re.I)
 
 
@@ -326,6 +340,38 @@ def _recipient_capped(session: str) -> bool:
         return bool(_CAP_BANNER_RE.search(cap))
     except Exception:
         return False
+
+
+_ACTIVE_TURN_RE = re.compile(r"esc to interrupt", re.I)
+
+
+def _session_active_turn(session: str) -> bool:
+    """True IFF the LOCAL lane's pane shows an active CC turn ('esc to interrupt') — the lane
+    is heads-down WORKING a long tool/turn, so its unread/unresponded lag is benign. FAIL-
+    TOWARD-ACTION: any error, a missing/remote session, or no marker returns False -> the SLA
+    action proceeds, so a genuinely idle stall is NEVER hidden on a doubt (same fail-direction
+    as _recipient_capped). Mirrors the nudge-path 'esc to interrupt' check (do-not-disturb)."""
+    if not session:
+        return False
+    try:
+        if subprocess.run(["tmux", "has-session", "-t", f"={session}"],
+                          capture_output=True, timeout=8).returncode != 0:
+            return False
+        cap = subprocess.run(["tmux", "capture-pane", "-t", f"={session}:0.0", "-p"],
+                             capture_output=True, text=True, timeout=8).stdout
+        return bool(_ACTIVE_TURN_RE.search(cap))
+    except Exception:
+        return False
+
+
+def _recipient_active_turn(sessions: list[str]) -> bool:
+    """A shared-base recipient is ATTENDED (not stalled) if ANY of its lanes is mid-turn, so
+    the base's unread/unresponded is benign — the ACK drains when that lane's turn ends. Nazim
+    #25999/#26004: cc-irsyad's ~20min data-missing P0 (coord base-addressed) was false-firing
+    the watchdog every ~2min AND waking the whole 6-lane pool (incl. a retired sibling). Un-
+    suppresses automatically once no lane is mid-turn. Fail-toward-action: all-idle/all-error
+    -> False -> normal SLA action, so an idle stall is never hidden."""
+    return any(_session_active_turn(s) for s in sessions)
 
 
 # ---------------------------------------------------------------------------
@@ -839,6 +885,7 @@ def run(dry: bool, injected: list[dict] | None = None,
         if not dry:
             ensure_identity(conn)
         lanes = lane_map(conn)
+        all_lanes = all_lane_map(conn)   # base -> ALL lanes, for the active-turn gate
         violations = injected if injected is not None else fetch_actionable(conn)
 
         # ---- circuit breaker -------------------------------------------------
@@ -886,6 +933,7 @@ def run(dry: bool, injected: list[dict] | None = None,
         # no duplicate audit row).
         nudged_this_cycle: dict[str, tuple[str, bool]] = {}
         capped_cache: dict[str, bool] = {}   # per-scan: recipient pool-capped? (one pane read/agent)
+        active_turn_cache: dict[str, bool] = {}  # per-scan: any of the recipient's lanes mid-turn?
 
         for v in violations:
             mid = v["message_id"]
@@ -904,6 +952,21 @@ def run(dry: bool, injected: list[dict] | None = None,
                 if capped_cache[agent]:
                     actions.append(f"SKIP #{mid} ({pr}) — recipient '{agent}' POOL-CAPPED "
                                    f"(weekly-limit banner); benign, waiting reset — no nudge/page")
+                    continue
+
+            # An ACTIVE-TURN recipient (ANY of its lanes shows 'esc to interrupt') is heads-down
+            # WORKING the item, not stalled — its unread/unresponded lag is benign and its ACK
+            # drains when the turn ends. A re-nudge/page can't help mid-turn and, on a shared-base
+            # pool, each base-addressed re-fire wakes EVERY lane (incl. retired siblings). Suppress
+            # the SLA action (log it); un-suppresses the next scan once no lane is mid-turn (Nazim
+            # #25999/#26004). Fail-toward-action: unknown agent / all-idle -> not skipped, so a
+            # genuine idle stall is never hidden (same fail-direction as the cap-gate above).
+            if agent in all_lanes:
+                if agent not in active_turn_cache:
+                    active_turn_cache[agent] = _recipient_active_turn(all_lanes[agent])
+                if active_turn_cache[agent]:
+                    actions.append(f"SKIP #{mid} ({pr}) — recipient '{agent}' ACTIVE-TURN "
+                                   f"(a lane shows esc-to-interrupt); heads-down working, not stalled — no nudge/page")
                     continue
             elapsed = v["elapsed_minutes"]
             key = f"{mid}:{v['violation_type']}"
@@ -1141,6 +1204,18 @@ def self_test() -> int:
         run(dry=True, injected=[v3], persist=True)
         check(load_state()["msgs"]["777777:unread"]["paged"] is False,
               "P2 never pages regardless of age / nudge count")
+
+        print("Active-turn gate — fail-direction (safety-critical: never hide an idle stall)")
+        check(_session_active_turn("nonexistent-session-xyz-000") is False,
+              "_session_active_turn -> False on a missing session (fail-toward-action)")
+        check(_session_active_turn("") is False,
+              "_session_active_turn -> False on empty session (fail-toward-action)")
+        check(_recipient_active_turn([]) is False,
+              "_recipient_active_turn -> False when a base has no lanes (fail-toward-action)")
+        check(bool(_ACTIVE_TURN_RE.search("  ✦ Working... (esc to interrupt)")) is True,
+              "_ACTIVE_TURN_RE matches the active-turn marker")
+        check(bool(_ACTIVE_TURN_RE.search("> idle pane, ready for input")) is False,
+              "_ACTIVE_TURN_RE does not match an idle pane")
 
     print()
     if failures:
