@@ -1,0 +1,48 @@
+{
+  "_meta": {
+    "purpose": "SSOT registry for the unified reset + key-switch safety contract (op#14474). One row per fleet body: which launcher, dir, tmux session, token pointer, model pointer, singleton flag, resume mode, boot role. Front doors (reset / switch-account) resolve a body -> its row; the shared gate lib (scripts/lib/reset_gates.sh) enforces the same gates for every row. This file is CONFIGURATION, not code — dep-free JSON so both bash (jq/python) and python parse it.",
+    "contract_version": 1,
+    "phase": "0 — registry + gate lib + tests only; NOTHING reads this live yet (zero behaviour change). Wiring is Phase 1+.",
+    "verified": "hosts, launchers, dirs, tmux sessions, token pointers, resume modes confirmed from boot_*.sh + live `tmux ls` + .env on 2026-08-18.",
+    "todo_confirm": "model_pointer for cc-orchestrator and cc-fleet-health (no per-body .*_model pointer exists; they fall back to boot default / .fleet_model) — confirm intended source during Phase 1. token pointers on the hub live on the VPS filesystem, not the Mini.",
+    "pointer_semantics": "token_pointer / model_pointer name the DURABLE on-disk file whose CONTENT is the desired account/model. Desired state = pointer content; running state = live process (fp for account, running model for model). G8 drift = desired != running."
+  },
+  "bodies": {
+    "cai": {
+      "host": "mini", "launcher": "scripts/boot_cai.sh", "dir": "~/wingmen/wingmen-cai",
+      "tmux_session": "cai", "token_pointer": ".cai_default_token", "model_pointer": ".cai_model",
+      "is_singleton": true, "resume_mode": "--resume", "boot_role": "cai",
+      "notes": "agent_id='cai' EXACTLY, no sub-tag (CAI-RESP-254). --resume folds in per CAI-RESP-1147; do NOT route through switch_lane_token."
+    },
+    "cc-orchestrator": {
+      "host": "vps", "launcher": "scripts/boot_orch.sh", "dir": "~/wingmen/orchestrator",
+      "tmux_session": "orch", "token_pointer": ".orch_default_token", "model_pointer": null,
+      "is_singleton": true, "resume_mode": "--continue", "boot_role": "hub",
+      "notes": "VPS-resident (wingmen-core). Token pointer + dir are on the VPS filesystem. --continue (NOT --resume, which parks at an interactive picker). Currently in NEITHER switch tool — made first-class in Phase 3 (GATED on cai lease sign-off)."
+    },
+    "cc-fleet-health": {
+      "host": "mini", "launcher": "scripts/boot_fleet_health.sh", "dir": "~/wingmen/fleet-health",
+      "tmux_session": "fleet-health", "token_pointer": ".fleet-health_default_token", "model_pointer": null,
+      "is_singleton": true, "resume_mode": "--resume", "boot_role": "sre",
+      "notes": "agent_id='cc-fleet-health' EXACTLY, no sub-tag. No per-body model pointer; falls back to boot default."
+    },
+    "orch-console": {
+      "host": "mini", "launcher": "scripts/boot_nazim.sh", "dir": "~/wingmen/orchestrator",
+      "tmux_session": "nazim", "token_pointer": ".nazim_default_token", "model_pointer": "env:NAZIM_MODEL",
+      "is_singleton": true, "resume_mode": "fresh-restart", "boot_role": "console",
+      "notes": "Nazim (console body). Model via NAZIM_MODEL env (.env), not a pointer file. Model switch = set NAZIM_MODEL + kill-session -> waiter fresh-restarts (not in-place /clear)."
+    },
+    "cc-quality": {
+      "host": "mini", "launcher": "scripts/boot_quality.sh", "dir": "~/wingmen/quality",
+      "tmux_session": "quality", "token_pointer": ".quality_default_token", "model_pointer": ".quality_model",
+      "is_singleton": true, "resume_mode": "--resume", "boot_role": "quality",
+      "notes": "agent_id='cc-quality' EXACTLY, no sub-tag."
+    },
+    "_lane_template": {
+      "host": "varies", "launcher": "scripts/launch_lane_as.sh", "dir": "<family worktree>",
+      "tmux_session": "<lane-name>", "token_pointer": ".lane_default_token", "model_pointer": ".<lane>_model | .fleet_model",
+      "is_singleton": false, "resume_mode": "--resume", "boot_role": "lane",
+      "notes": "TEMPLATE, not a body. Lanes need family/sub-tag allocation (auto_agent_id). Default token pointer is per-FAMILY (known gap: can't persist a single-lane move — proposal #30). Model pointer per-session .<lane>_model overrides .fleet_model."
+    }
+  }
+}
