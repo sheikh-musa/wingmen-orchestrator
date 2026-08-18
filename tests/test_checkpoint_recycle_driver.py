@@ -276,6 +276,75 @@ def test_armed_aborts_when_branch_undeterminable(gates_pass, monkeypatch, tmp_pa
     assert recycle.calls == []
 
 
+# ── #27784 race fix: the wait loop must POLL for the branch, not one-shot read ──
+def test_incremental_handoff_waits_for_branch_then_recycles(gates_pass, monkeypatch, tmp_path):
+    """The SUPERVISED run (#27784) aborted because the block-wait declared ready on size+mtime
+    while the lane was still writing, and content-verify read the file BEFORE the branch line
+    landed. A lane writes its handoff incrementally, so the driver must WAIT until the handoff
+    names the branch (or times out), not abort on the first incomplete read."""
+    monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
+    monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
+    monkeypatch.setattr(slr, "plan", lambda conn, lr, armed=True, require_bloat=False,
+                        handoff_ref_epoch=None: {
+                            "permitted": True, "reason": "ok",
+                            "gates": {"idle": True, "git_clean": True},
+                            "base": "cc-irsyad", "session": "irsyad"})
+    # handoff appears fresh + big enough but WITHOUT the branch (mid-write)
+    hp = tmp_path / "irsyad-handoff-NOW.md"
+    hp.write_text("# handoff (writing…)\n" + ("filler line\n" * 200))
+    os.utime(hp, (2000.0, 2000.0))
+    clock = Clock(t0=1000.0)
+    state = {"polls": 0}
+    def sleep_then_complete(s):
+        state["polls"] += 1
+        if state["polls"] == 1:      # after the first poll the lane finishes writing the branch
+            hp.write_text(f"# handoff\nbranch {_BRANCH}\n" + ("filler line\n" * 200))
+            os.utime(hp, (2100.0, 2100.0))
+        clock.sleep(s)
+    recycle = Spy(ret={"recycled": True})
+    out = drv.drive_checkpoint_recycle(
+        None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=sleep_then_complete,
+        nudge_fn=Spy(ret=0), post_note_fn=Spy(), recycle_fn=recycle,
+        handoff_path_fn=lambda b, n: str(hp), branch_fn=_ok_branch)
+    assert out["outcome"] == "recycled"
+    assert len(recycle.calls) == 1           # waited for the branch, then recycled — no false abort
+
+
+def test_partial_write_not_ready_until_mtime_settles(gates_pass, monkeypatch, tmp_path):
+    """Nazim's mechanism (#27784): a handoff that meets size+mtime>=t_nudge but whose MTIME KEEPS
+    CHANGING (still being written) must NOT be declared ready until the mtime is UNCHANGED across a
+    poll interval (write settled). Only then does content-verify read a COMPLETE file. Proven by:
+    the driver must NOT recycle while the mtime is still moving (it slept, waiting), and recycles
+    exactly once after it settles."""
+    monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
+    monkeypatch.setattr(slr, "last_material_action_epoch", lambda conn, base: 900.0)
+    monkeypatch.setattr(slr, "plan", lambda conn, lr, armed=True, require_bloat=False,
+                        handoff_ref_epoch=None: {
+                            "permitted": True, "reason": "ok",
+                            "gates": {"idle": True, "git_clean": True},
+                            "base": "cc-irsyad", "session": "irsyad"})
+    # complete content from the start (names the branch) — ONLY the mtime moves (ongoing writes)
+    hp = tmp_path / "irsyad-handoff-NOW.md"
+    hp.write_text(f"# handoff\nbranch {_BRANCH}\n" + ("filler line\n" * 200))
+    os.utime(hp, (2000.0, 2000.0))
+    clock = Clock(t0=1000.0)
+    state = {"polls": 0, "mt": 2000.0}
+    def sleep_bump(s):
+        state["polls"] += 1
+        if state["polls"] <= 3:      # still being written for the first 3 poll intervals
+            state["mt"] += 50.0
+            os.utime(hp, (state["mt"], state["mt"]))
+        clock.sleep(s)
+    recycle = Spy(ret={"recycled": True})
+    out = drv.drive_checkpoint_recycle(
+        None, _worker_row(), armed=True, now_fn=clock.now, sleep_fn=sleep_bump,
+        nudge_fn=Spy(ret=0), post_note_fn=Spy(), recycle_fn=recycle,
+        handoff_path_fn=lambda b, n: str(hp), branch_fn=_ok_branch)
+    assert out["outcome"] == "recycled"
+    assert len(recycle.calls) == 1
+    assert len(clock.sleeps) >= 3            # waited through the changing-mtime polls before settling
+
+
 # ── 3B: resume verification — context genuinely DROPPED after the /clear ───────
 def test_verify_resume_true_when_context_dropped():
     assert drv.verify_resume("cc-irsyad", lambda base: 0.09, max_frac=0.5) is True

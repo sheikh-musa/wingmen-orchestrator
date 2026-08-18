@@ -81,6 +81,23 @@ def _handoff_ready(path: str, t_nudge: float) -> bool:
     return st.st_mtime >= t_nudge and st.st_size >= MIN_HANDOFF_BYTES
 
 
+def _handoff_mtime_if_ready(path: "str | None", t_nudge: float) -> "float | None":
+    """The handoff's mtime WHEN it is fresh (>=t_nudge) AND big enough (>=floor), else None.
+    The wait loop compares this across consecutive polls: an UNCHANGED mtime means the write has
+    SETTLED (complete), which guards against reading a partially-written handoff — the #27784
+    race, where size+mtime tripped 'ready' mid-write and content-verify then read a file missing
+    the branch line it was about to write. Fail-closed: stat error / stale / sub-floor -> None."""
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except Exception:
+        return None
+    if st.st_mtime >= t_nudge and st.st_size >= MIN_HANDOFF_BYTES:
+        return st.st_mtime
+    return None
+
+
 def _git_branch(worktree_path: "str | None") -> "str | None":
     """The worktree's current branch, or None. Fail-closed: no path, not a dir, git error,
     or a detached HEAD ('HEAD') -> None, which the content check treats as unverifiable."""
@@ -178,20 +195,28 @@ def drive_checkpoint_recycle(conn, lane_row: dict, *, armed: bool = False,
     if rc != 0:
         return _abort(stage, f"nudge did not verify-submit (rc={rc}) — no recycle", t_nudge=t_nudge, gates=entry_gates)
 
-    # STAGE 4: block-wait for a FRESH, non-stub handoff (mtime >= T_nudge, size >= floor).
+    # STAGE 4: block-wait for a FRESH, non-stub handoff whose write has SETTLED. A lane writes its
+    #          handoff incrementally, so size>=floor + mtime>=T_nudge can trip while the file is
+    #          STILL being written; reading then gave the #27784 false-negative (content-verify
+    #          saw a file missing the branch line it was about to write). Require the mtime to be
+    #          UNCHANGED across a poll interval (the write has settled) before declaring ready, so
+    #          STAGE 4b always reads a COMPLETE handoff.
     stage = "wait-handoff"
     deadline = t_nudge + wait_s
     ready = False
+    prev_mtime = None
     while now_fn() <= deadline:
-        p = handoff_path_fn(base, notes)
-        if p and _handoff_ready(p, t_nudge):
+        mt = _handoff_mtime_if_ready(handoff_path_fn(base, notes), t_nudge)
+        if mt is not None and mt == prev_mtime:   # mtime stable across a poll -> write complete
             ready = True
             break
+        prev_mtime = mt
         sleep_fn(poll_s)
     if not ready:
-        return _abort(stage, f"no fresh handoff (mtime>=T_nudge, size>={MIN_HANDOFF_BYTES}B) "
-                             f"within {wait_s}s — NO recycle (dead-man's-switch)",
+        return _abort(stage, f"no fresh SETTLED handoff (mtime>=T_nudge, size>={MIN_HANDOFF_BYTES}B, "
+                             f"mtime stable across a poll) within {wait_s}s — NO recycle (dead-man's-switch)",
                       t_nudge=t_nudge, gates=entry_gates)
+    p = handoff_path_fn(base, notes)
 
     # STAGE 4b: content-verify — the fresh, big-enough handoff must NAME the lane's current
     #           branch, so a size+mtime-passing STUB/garbage can never become a restore point
