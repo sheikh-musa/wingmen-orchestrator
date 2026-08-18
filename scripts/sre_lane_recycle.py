@@ -106,10 +106,12 @@ def gate_git_clean(worktree_path: "str | None") -> bool:
         return False
 
 
-def _newest_handoff_mtime(base_agent_id: str, notes: "str | None") -> "float | None":
-    """mtime (epoch) of the newest handoff file for this lane, or None. Glob is
+def _newest_handoff_path(base_agent_id: str, notes: "str | None") -> "str | None":
+    """ABSOLUTE path of the newest matching handoff file, or None. Glob is
     reports/<base>-handoff-*.md by default; a lane may override via a
-    'handoff_glob=...' token in fleet_lanes.notes."""
+    'handoff_glob=...' token in fleet_lanes.notes. Returned absolute so the boot
+    string can name an EXACT file — a freshly-cleared lane's cwd is its project
+    worktree, so a relative 'reports/' would resolve to the wrong tree (op#14539 fix 1)."""
     pattern = None
     if notes:
         for tok in notes.split():
@@ -123,7 +125,19 @@ def _newest_handoff_mtime(base_agent_id: str, notes: "str | None") -> "float | N
     if not files:
         return None
     try:
-        return max(os.path.getmtime(f) for f in files)
+        newest = max(files, key=os.path.getmtime)
+    except Exception:
+        return None
+    return os.path.abspath(newest)
+
+
+def _newest_handoff_mtime(base_agent_id: str, notes: "str | None") -> "float | None":
+    """mtime (epoch) of the newest handoff file for this lane, or None."""
+    p = _newest_handoff_path(base_agent_id, notes)
+    if p is None:
+        return None
+    try:
+        return os.path.getmtime(p)
     except Exception:
         return None
 
@@ -197,18 +211,34 @@ def gate_context_bloat(conn, base_agent_id: str, hard: float = _CTX_HARD,
     return frac >= hard
 
 
-def compute_gates(conn, lane_row: dict) -> dict:
+def build_boot_instruction(base_agent_id: str, handoff_path: str) -> str:
+    """The boot string a freshly-cleared lane receives. Names the ABSOLUTE handoff path
+    so the lane never resolves a cwd-relative 'reports/' to the wrong tree and read a
+    stale handoff (op#14539 fix 1 — the cc-irsyad #27711 failure mode)."""
+    return (f"You are {base_agent_id}, auto-recycled by the SRE (gated, CAI-681). "
+            f"Read your fresh handoff at {handoff_path} IN FULL (absolute path — not your "
+            f"cwd's reports/), reconcile your bus inbox (agent_messages "
+            f"to_agent='{base_agent_id}'), then resume your PLAN.")
+
+
+def compute_gates(conn, lane_row: dict, handoff_ref_epoch: "float | None" = None) -> dict:
     """All gates for a lane, each mechanically derived + fail-closed. The first
     three are the CAI-681 safety FLOOR (enforced by fleet_health_boundaries);
-    context_bloat is the operator's 'at 80%' TRIGGER, layered on top in plan()."""
+    context_bloat is the operator's 'at 80%' TRIGGER, layered on top in plan().
+
+    handoff_ref_epoch (op#14539 fix 2): the reference the fresh_handoff gate measures the
+    handoff mtime against. Default None -> use last_material_action_epoch (the autonomous
+    detector's 'is an EXISTING handoff current?' question). The DRIVEN checkpoint path passes
+    T_nudge instead, so a 'DONE' ack the lane posts AFTER writing its handoff cannot make a
+    genuinely-fresh handoff read as stale."""
     session = lane_row.get("tmux_session") or lane_row.get("lane")
     base = lane_row.get("base_agent_id") or lane_row.get("lane")
+    ref = handoff_ref_epoch if handoff_ref_epoch is not None \
+        else last_material_action_epoch(conn, base)
     return {
         "idle": gate_idle(session) if session else False,
         "git_clean": gate_git_clean(lane_row.get("worktree_path")),
-        "fresh_handoff": gate_fresh_handoff(
-            base, lane_row.get("notes"),
-            last_material_action_epoch(conn, base)),
+        "fresh_handoff": gate_fresh_handoff(base, lane_row.get("notes"), ref),
         "context_bloat": gate_context_bloat(conn, base),
     }
 
@@ -230,14 +260,17 @@ def audit_before_clear(conn, base_agent_id: str, session: str, gates: dict, reas
 
 
 # ── plan / execute ────────────────────────────────────────────────────────────
-def plan(conn, lane_row: dict, armed: bool, require_bloat: bool = True) -> dict:
+def plan(conn, lane_row: dict, armed: bool, require_bloat: bool = True,
+         handoff_ref_epoch: "float | None" = None) -> dict:
     """Compute gates + ask the boundary whether a red-reset is permitted, THEN apply
     the context-bloat trigger on top. Never mutates. Returns {lane, session, gates,
     permitted, reason}. require_bloat=False is the manual wedged-lane path (--lane X
-    --ignore-context): recycle a stuck-but-not-bloated lane, safety floor still enforced."""
+    --ignore-context): recycle a stuck-but-not-bloated lane, safety floor still enforced.
+    handoff_ref_epoch is passed through to compute_gates (op#14539 fix 2 — the driven
+    checkpoint path measures handoff freshness against T_nudge)."""
     session = lane_row.get("tmux_session") or lane_row.get("lane")
     base = lane_row.get("base_agent_id") or lane_row.get("lane")
-    gates = compute_gates(conn, lane_row)
+    gates = compute_gates(conn, lane_row, handoff_ref_epoch=handoff_ref_epoch)
     permitted, reason = True, "all gates verified; armed" if armed else "DISARMED (detect-only)"
     # 1) CAI-681 safety FLOOR (idle+git_clean+fresh_handoff+armed) — unchanged.
     try:
@@ -292,6 +325,10 @@ def main() -> int:
                          "still applies. Default: only recycle genuinely-bloated lanes.")
     ap.add_argument("--reason", default="SRE auto-recycle: wedged/bloated lane",
                     help="audit reason recorded before any clear")
+    ap.add_argument("--handoff-after", type=float, default=None,
+                    help="epoch (T_nudge) the fresh_handoff gate measures against instead of the "
+                         "lane's last bus message — the DRIVEN checkpoint path (op#14539 fix 2). "
+                         "Ignores a post-handoff DONE ack that would otherwise fail the gate.")
     ap.add_argument("--self-test", action="store_true", help="run offline gate self-test + exit")
     args = ap.parse_args()
 
@@ -345,7 +382,8 @@ def main() -> int:
           f"{len(lanes)} lane(s) · {datetime.now(timezone.utc).isoformat()}")
     acted = 0
     for lr in lanes:
-        p = plan(conn, lr, armed, require_bloat=require_bloat)
+        p = plan(conn, lr, armed, require_bloat=require_bloat,
+                 handoff_ref_epoch=args.handoff_after)
         base = p["base"]
         frac = latest_context_frac(conn, base)
         pct = f"{frac * 100:.0f}%" if frac is not None else "?%"
@@ -359,9 +397,8 @@ def main() -> int:
             continue
         # ARMED + permitted: audit BEFORE clear (cond 4), then reset_lane.sh.
         audit_before_clear(conn, p["base"], p["session"], p["gates"], args.reason)
-        boot = (f"You are {p['base']}, auto-recycled by the SRE (gated, CAI-681). "
-                f"Read your newest handoff in reports/ IN FULL, reconcile your bus "
-                f"inbox (agent_messages to_agent='{p['base']}'), then resume.")
+        handoff_path = _newest_handoff_path(p["base"], lr.get("notes"))
+        boot = build_boot_instruction(p["base"], handoff_path)
         r = subprocess.run(["bash", str(_ORCH_DIR / "scripts" / "reset_lane.sh"), p["session"], boot],
                            capture_output=True, text=True, timeout=180)
         print(f"            reset_lane.sh rc={r.returncode} :: {(r.stdout + r.stderr).strip().splitlines()[-1:] }")
