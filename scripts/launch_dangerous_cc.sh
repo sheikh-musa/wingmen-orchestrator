@@ -155,6 +155,14 @@ fi
 #     API billing. The token bills to the Max subscription. (Verified 2026-06-17:
 #     with the token a lane's banner matches an interactive Max terminal.)
 unset ANTHROPIC_API_KEY
+# Scrub the CONSOLE singleton's identity vars. .env carries ORCH_AGENT_ID / ORCH_BODY_ROLE /
+# ORCH_TMUX_SESSION for the orch-console body, but the `set -a; . .env` above LEAKS them into
+# EVERY lane — so a lane inherits orch-console's identity and can read (and DRAIN, unaudited)
+# the console singleton's inbox (Nazim #26804; cc-authgate self-report #26796). A lane's
+# identity is CC_AGENT_ID / CC_BASE_OVERRIDE ONLY — never ORCH_AGENT_ID. Same fail-closed
+# scrub-after-source pattern as ANTHROPIC_API_KEY above; the launcher uses none of these (only
+# ORCH_DIR, which it sets itself). Enforced here at the launcher, not by per-lane discipline.
+unset ORCH_AGENT_ID ORCH_BODY_ROLE ORCH_TMUX_SESSION
 DSN="${DATABASE_URL:-${SUPABASE_DB_URL:-}}"
 if [ -z "$DSN" ]; then
     echo -e "\033[31mERROR: DATABASE_URL not set — cannot allocate agent identity\033[0m" >&2
