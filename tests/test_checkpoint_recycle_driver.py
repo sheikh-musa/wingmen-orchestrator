@@ -293,12 +293,68 @@ def test_verify_resume_false_when_unmeasurable():
 def test_run_dry_run_outcome(monkeypatch):
     """run() in dry-run: discovers the lane, passes entry gates, returns dry-run, and NEVER
     constructs a real side effect firing (armed=False short-circuits)."""
-    monkeypatch.setattr(slr, "discover_lanes", lambda conn, lane=None: [_worker_row()])
+    monkeypatch.setattr(drv, "discover_session_lane", lambda conn, session, **k: _worker_row())
     monkeypatch.setattr(slr, "gate_idle", lambda session: True)
     monkeypatch.setattr(slr, "gate_git_clean", lambda wt: True)
 
     class Args:
-        lane = "irsyad"; arm = False; wait_s = 240; poll_s = 15
+        session = "irsyad"; arm = False; wait_s = 240; poll_s = 15
         reason = "test"
     out = drv.run(Args(), conn=None)
     assert out["outcome"] == "dry-run"
+
+
+# ── Phase 3.5: per-session discovery with GROUND-TRUTH worktree ───────────────
+# Fixes the DISTINCT-ON-base bug: for a multi-session base (cc-irsyad), discovery must pair
+# a SESSION with ITS OWN live cwd so idle(session) + git_clean(worktree) refer to one lane.
+class _FakeCur:
+    def __init__(self, results):
+        self._results = list(results); self._i = 0; self.executed = []
+    def execute(self, q, params=None):
+        self.executed.append((q, params)); self._cur = self._results[self._i]; self._i += 1
+    def fetchone(self):
+        return self._cur
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+class _FakeConn:
+    def __init__(self, results): self._cur = _FakeCur(results)
+    def cursor(self): return self._cur
+
+
+def test_discover_session_lane_pairs_session_with_its_own_cwd():
+    """lane==session AND worktree==the session's LIVE cwd — so both gates target one lane."""
+    conn = _FakeConn([("cc-irsyad",), None])            # agent_status base; no fleet_lanes row
+    row = drv.discover_session_lane(conn, "irsyad-tabung-jumaat", cwd_fn=lambda s: "/wt/tabung")
+    assert row == {"lane": "irsyad-tabung-jumaat", "base_agent_id": "cc-irsyad",
+                   "tmux_session": "irsyad-tabung-jumaat", "worktree_path": "/wt/tabung", "notes": None}
+
+
+def test_discover_session_lane_singleton_base_refused():
+    sing = sorted(fhb.SINGLETON_BODIES)[0]
+    conn = _FakeConn([(sing,)])
+    assert drv.discover_session_lane(conn, "somesess", cwd_fn=lambda s: "/wt/x") is None
+
+
+def test_discover_session_lane_dead_session_none():
+    assert drv.discover_session_lane(_FakeConn([None]), "gone", cwd_fn=lambda s: "/wt/x") is None
+
+
+def test_discover_session_lane_unreadable_cwd_fails_closed():
+    conn = _FakeConn([("cc-irsyad",)])
+    assert drv.discover_session_lane(conn, "sess", cwd_fn=lambda s: None) is None
+
+
+def test_discover_session_lane_worktree_disagreement_fails_closed():
+    """fleet_lanes names a DIFFERENT worktree than the live cwd -> ambiguous -> None. This is
+    the exact cc-irsyad session/worktree mismatch that would recycle the wrong tree."""
+    conn = _FakeConn([("cc-irsyad",), ("/wt/OTHER", "n")])
+    assert drv.discover_session_lane(conn, "irsyad-tabung-jumaat", cwd_fn=lambda s: "/wt/tabung") is None
+
+
+def test_discover_session_lane_agreement_keeps_notes():
+    conn = _FakeConn([("cc-irsyad",), ("/wt/tabung", "handoff_glob=reports/x-*.md")])
+    row = drv.discover_session_lane(conn, "irsyad-tabung-jumaat", cwd_fn=lambda s: "/wt/tabung")
+    assert row is not None
+    assert row["notes"] == "handoff_glob=reports/x-*.md" and row["worktree_path"] == "/wt/tabung"

@@ -346,6 +346,27 @@ def discover_lanes(conn, lane: "str | None" = None) -> list:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def armed_recycle(conn, lane_row: dict, *, reason: str,
+                  handoff_ref_epoch: "float | None" = None) -> dict:
+    """The armed checkpoint-recycle ACTION on ONE specific lane_row, in-process. Re-verifies the
+    CAI-681 floor at the moment of action (require_bloat=False — the caller already established
+    bloat/wedge), writes the audit row BEFORE the clear, then runs reset_lane.sh with the
+    ABSOLUTE-path boot string. Returns {recycled, ...}. Shared by main()'s armed branch AND the
+    checkpoint-recycle driver — so the driver recycles the EXACT session/worktree it discovered,
+    never a re-discovered (DISTINCT-ON-ambiguous) one. Fail-closed: not-permitted -> no reset."""
+    p = plan(conn, lane_row, armed=True, require_bloat=False, handoff_ref_epoch=handoff_ref_epoch)
+    if not p["permitted"]:
+        return {"recycled": False, "reason": p["reason"], "gates": p["gates"], "session": p["session"]}
+    audit_before_clear(conn, p["base"], p["session"], p["gates"], reason)
+    handoff_path = _newest_handoff_path(p["base"], lane_row.get("notes"))
+    boot = build_boot_instruction(p["base"], handoff_path)
+    r = subprocess.run(["bash", str(_ORCH_DIR / "scripts" / "reset_lane.sh"), p["session"], boot],
+                       capture_output=True, text=True, timeout=180)
+    out = (r.stdout + r.stderr).strip()
+    return {"recycled": r.returncode == 0, "rc": r.returncode, "session": p["session"],
+            "boot": boot, "gates": p["gates"], "output": out}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="SRE lanes-only auto-recycle (CAI-RESP-681)")
     ap.add_argument("--arm", action="store_true",
@@ -397,13 +418,11 @@ def main() -> int:
         if not armed:
             print("            would recycle (disarmed — not touching it)")
             continue
-        # ARMED + permitted: audit BEFORE clear (cond 4), then reset_lane.sh.
-        audit_before_clear(conn, p["base"], p["session"], p["gates"], args.reason)
-        handoff_path = _newest_handoff_path(p["base"], lr.get("notes"))
-        boot = build_boot_instruction(p["base"], handoff_path)
-        r = subprocess.run(["bash", str(_ORCH_DIR / "scripts" / "reset_lane.sh"), p["session"], boot],
-                           capture_output=True, text=True, timeout=180)
-        print(f"            reset_lane.sh rc={r.returncode} :: {(r.stdout + r.stderr).strip().splitlines()[-1:] }")
+        # ARMED + permitted: audit BEFORE clear (cond 4), then reset_lane.sh — via the shared
+        # armed_recycle action (re-verifies the floor at the moment of action).
+        res = armed_recycle(conn, lr, reason=args.reason, handoff_ref_epoch=args.handoff_after)
+        print(f"            reset_lane.sh rc={res.get('rc')} recycled={res.get('recycled')} "
+              f":: {(res.get('output') or '').splitlines()[-1:]}")
         acted += 1
     print(f"done — {acted} recycled, {len(lanes)-acted} left alone.")
     conn.close()

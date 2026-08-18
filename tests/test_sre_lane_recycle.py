@@ -94,3 +94,42 @@ def test_plan_threads_handoff_ref_epoch(monkeypatch):
     monkeypatch.setattr(slr, "_newest_handoff_mtime", lambda base, notes: 5_000.0)
     p = slr.plan(None, _lane_row(), armed=False, require_bloat=False, handoff_ref_epoch=4_000.0)
     assert p["gates"]["fresh_handoff"] is True
+
+
+# ── Phase 3.5 — armed_recycle: recycle a SPECIFIC lane_row in-process ──────────
+# The driver must recycle the EXACT session/worktree it discovered, not a re-discovered
+# (ambiguous) one. armed_recycle is the shared armed action; it re-verifies the floor,
+# audits, then runs reset_lane.sh.
+def test_armed_recycle_not_permitted_does_not_reset(monkeypatch):
+    monkeypatch.setattr(slr, "plan",
+                        lambda conn, lr, armed=True, require_bloat=False, handoff_ref_epoch=None: {
+                            "permitted": False, "reason": "gate refused", "gates": {"idle": False},
+                            "base": "cc-irsyad", "session": "irsyad"})
+    calls = []
+    monkeypatch.setattr(slr.subprocess, "run", lambda *a, **k: calls.append(a))
+    out = slr.armed_recycle(None, _lane_row(), reason="r")
+    assert out["recycled"] is False
+    assert calls == []                      # reset_lane.sh NEVER runs when not permitted
+
+
+def test_armed_recycle_permitted_audits_resets_and_names_abs_handoff(monkeypatch):
+    monkeypatch.setattr(slr, "plan",
+                        lambda conn, lr, armed=True, require_bloat=False, handoff_ref_epoch=None: {
+                            "permitted": True, "reason": "ok", "gates": {"idle": True, "git_clean": True},
+                            "base": "cc-irsyad", "session": "irsyad-tabung-jumaat"})
+    audit = []
+    monkeypatch.setattr(slr, "audit_before_clear", lambda *a, **k: audit.append(a))
+    monkeypatch.setattr(slr, "_newest_handoff_path", lambda base, notes: "/abs/reports/irsyad-handoff-NOW.md")
+
+    class _R:
+        returncode = 0; stdout = "reset ok"; stderr = ""
+    reset_calls = []
+    monkeypatch.setattr(slr.subprocess, "run", lambda *a, **k: (reset_calls.append(a), _R())[1])
+
+    out = slr.armed_recycle(None, _lane_row(), reason="r", handoff_ref_epoch=123.0)
+    assert out["recycled"] is True
+    assert len(audit) == 1 and len(reset_calls) == 1
+    assert out["session"] == "irsyad-tabung-jumaat"
+    assert "/abs/reports/irsyad-handoff-NOW.md" in out["boot"]      # absolute-path boot (Phase 1)
+    # reset_lane.sh was invoked for the SESSION from the plan (the exact discovered lane)
+    assert "irsyad-tabung-jumaat" in reset_calls[0][0]

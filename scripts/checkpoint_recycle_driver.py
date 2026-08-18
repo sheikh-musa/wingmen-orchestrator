@@ -239,25 +239,68 @@ _NOTE_BODY = (
 )
 
 
-def _pick_lane_row(conn, lane: str) -> "dict | None":
-    """The single running worker-lane row for `lane` (via slr.discover_lanes), or None."""
-    rows = slr.discover_lanes(conn, lane)
-    return rows[0] if rows else None
+def _live_session_cwd(session: str) -> "str | None":
+    """The session's ACTUAL live cwd (tmux pane_current_path) — GROUND TRUTH for which worktree
+    this pane is in. The manual cc-irsyad recycle proved the live cwd is authoritative over
+    fleet_lanes' multiple rows per base. Fail-closed: any tmux error / empty -> None."""
+    try:
+        r = subprocess.run([slr.TMUX, "display-message", "-p", "-t", session, "#{pane_current_path}"],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    cwd = r.stdout.strip()
+    return cwd or None
+
+
+def discover_session_lane(conn, session: str, *, cwd_fn=_live_session_cwd) -> "dict | None":
+    """Build a CORRECT lane_row for ONE live tmux session — the fix for the DISTINCT-ON-base
+    bug where a multi-session base (cc-irsyad) collapsed to a row pairing one session with a
+    DIFFERENT lane's worktree. Here lane==session and worktree_path is the session's OWN live
+    cwd, so idle(session) and git_clean(worktree) always refer to the SAME lane.
+
+    Fail-closed at every step: the session must be a live worker (fresh heartbeat, not a
+    singleton); its cwd must be readable; and if fleet_lanes names a worktree for lane==session
+    it MUST resolve to the same directory as the live cwd (disagreement -> None, never guess)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT base_agent_id FROM agent_status WHERE tmux_session=%s "
+                    "AND last_heartbeat > now() - interval '30 minutes' "
+                    "ORDER BY last_heartbeat DESC LIMIT 1", [session])
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        base = row[0]
+        if base in fhb.SINGLETON_BODIES:      # never target a singleton via this path
+            return None
+        worktree = cwd_fn(session)
+        if not worktree:                       # can't verify the tree -> won't recycle it
+            return None
+        cur.execute("SELECT worktree_path, notes FROM fleet_lanes "
+                    "WHERE base_agent_id=%s AND lane=%s LIMIT 1", [base, session])
+        fl = cur.fetchone()
+    notes = None
+    if fl:
+        fl_wt, notes = fl[0], (fl[1] if len(fl) > 1 else None)
+        if fl_wt and os.path.realpath(fl_wt) != os.path.realpath(worktree):
+            return None                        # session<->worktree disagreement -> ambiguous
+    return {"lane": session, "base_agent_id": base, "tmux_session": session,
+            "worktree_path": worktree, "notes": notes}
 
 
 def run(args, conn) -> dict:
     """Bind the REAL collaborators and drive one lane. Dry-run (args.arm False) short-circuits
     inside the driver after the entry gates, so none of the real side effects below ever fire."""
-    row = _pick_lane_row(conn, args.lane)
+    row = discover_session_lane(conn, args.session)
     if row is None:
         return {"stage": "discover", "outcome": "aborted",
-                "reason": f"lane {args.lane!r} not found among running worker lanes"}
+                "reason": f"session {args.session!r} not a discoverable live worker lane "
+                          f"(dead/singleton/unreadable-cwd/worktree-disagreement — fail-closed)"}
     base = row.get("base_agent_id") or row.get("lane")
     try:
         fhb.assert_sre_never_targets_singleton(base, identity=fhb.SRE_AGENT_ID)
     except fhb.BoundaryViolation as e:
         return {"stage": "discover", "outcome": "aborted", "reason": f"singleton refused: {e}"}
-    lane = row.get("lane") or base
     reason = args.reason
 
     def nudge_fn(session, msg):
@@ -274,14 +317,12 @@ def run(args, conn) -> dict:
                 [fhb.SRE_AGENT_ID, _base, _NOTE_SUBJECT, _NOTE_BODY])
         _conn.commit()
 
-    def recycle_fn(_base, session, t_nudge):
-        r = subprocess.run(
-            [sys.executable, str(_ORCH_DIR / "scripts" / "sre_lane_recycle.py"),
-             "--lane", lane, "--arm", "--ignore-context",
-             "--handoff-after", str(float(t_nudge)), "--reason", reason],
-            capture_output=True, text=True, timeout=220)
-        if r.returncode != 0:
-            return {"recycled": False, "rc": r.returncode, "stderr": (r.stderr or "")[-400:]}
+    def recycle_fn(_base, _session, t_nudge):
+        # Recycle the EXACT discovered lane_row IN-PROCESS (no CLI re-discovery, which would
+        # re-hit the DISTINCT-ON-base ambiguity). armed_recycle re-verifies the floor + audits.
+        res = slr.armed_recycle(conn, row, reason=reason, handoff_ref_epoch=t_nudge)
+        if not res.get("recycled"):
+            return {**res, "recycled": False}
         # verify came-back at the process level: context fraction DROPPED (bounded poll — telemetry lags).
         resumed = False
         for _ in range(8):
@@ -289,7 +330,7 @@ def run(args, conn) -> dict:
                 resumed = True
                 break
             time.sleep(15)
-        return {"recycled": resumed, "rc": 0, "resume_verified": resumed}
+        return {**res, "recycled": resumed, "resume_verified": resumed}
 
     return drive_checkpoint_recycle(
         conn, row, armed=bool(args.arm),
@@ -301,7 +342,8 @@ def run(args, conn) -> dict:
 def _build_args(argv=None):
     ap = argparse.ArgumentParser(
         description="Hands-off checkpoint-first recycle of a WORKER lane (op#14539 / #27720 item-1).")
-    ap.add_argument("--lane", required=True, help="fleet_lanes.lane to recycle")
+    ap.add_argument("--session", required=True,
+                    help="the live tmux SESSION to recycle (targeted per-session, ground-truth cwd)")
     ap.add_argument("--arm", action="store_true",
                     help="ARM the real checkpoint+recycle. DEFAULT: dry-run (touches nothing).")
     ap.add_argument("--wait-s", type=int, default=_WAIT_S)
