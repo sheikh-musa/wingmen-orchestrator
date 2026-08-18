@@ -94,7 +94,11 @@ from scripts.lib.require_verified_authorization import (
 # (goumlynecruxrlmzlntp, ceayjeamtmcyzzvqflus, brrgastulcffamlbggyu) and the
 # substrate (tscuymavysscrvoberrr) are deliberately absent. Additions are a
 # reviewed code change — NEVER an env var (a caller-settable allowlist is not a
-# gate). Pending cai ratification of the authoritative auth-QA project set.
+# gate). RATIFIED by cai (CAI-RESP-1124, 2026-08-18): this set is deliberate and
+# complete as-is — there is currently NO irsyad auth-QA target, and one is NOT to
+# be manufactured under incident pressure. Until a proper irsyad-QA project is
+# scoped and built as separate follow-up work, irsyad authenticated repros route
+# through the console (op#14352 Rule 3 amendment), not through an allowlist entry.
 QA_TARGETS: frozenset[str] = frozenset(
     {
         "ywrpttpxwfcoodovxhsr",  # cosem-platform demo/dev — synthetic only
