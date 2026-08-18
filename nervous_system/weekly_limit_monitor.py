@@ -42,6 +42,7 @@ import json
 import math
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
@@ -60,6 +61,14 @@ PROBE_BODY = json.dumps(
 
 WARN = float(os.environ.get("WEEKLY_LIMIT_WARN", "0.75"))    # ~75%
 URGENT = float(os.environ.get("WEEKLY_LIMIT_URGENT", "0.90"))  # ~90%
+
+# Probe retry (Nazim #27655): a single transient read-timeout must NOT blind the
+# watch — a monitor that goes dark on one slow read is itself a gauge-reads-green
+# risk (absence-of-signal treated as OK), and it went blind on Musa at ~98% (the
+# hub's pool). Retry transient network/timeout errors before raising (which pages).
+PROBE_RETRIES = int(os.environ.get("WEEKLY_PROBE_RETRIES", "3"))
+PROBE_BACKOFF = float(os.environ.get("WEEKLY_PROBE_BACKOFF", "2"))   # seconds, ×attempt
+PROBE_TIMEOUT = int(os.environ.get("WEEKLY_PROBE_TIMEOUT", "30"))
 
 STATE_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor_state.json"
 HEARTBEAT_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor_heartbeat"
@@ -166,14 +175,35 @@ def probe_pool(name: str) -> dict:
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     })
-    try:
-        resp = urllib.request.urlopen(req, timeout=30)
-        headers = resp.headers
-        http = resp.status
-    except urllib.error.HTTPError as e:
-        # Over-limit / auth errors still carry the rate-limit headers — use them.
-        headers = e.headers
-        http = e.code
+    # RETRY transient network/timeout errors before giving up. HTTPError (429 /
+    # over-limit / auth) carries the rate-limit headers and is used directly — never
+    # retried. Only a genuine transient (URLError/timeout/OSError) is retried, and
+    # only after PROBE_RETRIES attempts all fail do we raise (dead-man's-switch page).
+    headers = None
+    http = None
+    _last_err = None
+    for _attempt in range(max(1, PROBE_RETRIES)):
+        try:
+            resp = urllib.request.urlopen(req, timeout=PROBE_TIMEOUT)
+            headers = resp.headers
+            http = resp.status
+            _last_err = None
+            break
+        except urllib.error.HTTPError as e:
+            # Over-limit / auth errors still carry the rate-limit headers — use them.
+            headers = e.headers
+            http = e.code
+            _last_err = None
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            # transient: connection reset / DNS / read-timeout. Retry with backoff.
+            _last_err = e
+            if _attempt < PROBE_RETRIES - 1:
+                time.sleep(PROBE_BACKOFF * (_attempt + 1))
+    if _last_err is not None:
+        raise RuntimeError(
+            f"pool {name}: probe failed after {PROBE_RETRIES} attempts "
+            f"(transient network/timeout): {_last_err}")
     def _f(key, default=None):
         v = headers.get(key)
         try:
