@@ -247,67 +247,86 @@
 
   <!--WINGMEN:LIVE-TEAM-PANEL-->
 
-  <div class="section-label" style="margin-top:40px">Build status</div>
+  <div class="section-label" style="margin-top:40px">Your open items &mdash; live tracker</div>
+  <p class="lede" style="margin:-4px 2px 16px; font-size:14px;">The items you've raised, and where each one stands. We update this as they move.</p>
 
 
   <div class="board">
     <!-- IN PROGRESS -->
     <section class="col progress">
-      <div class="col-head"><h2>In progress</h2><span class="count">3</span></div>
+      <div class="col-head"><h2>In progress</h2><span class="count">5</span></div>
       <div class="col-rail"></div>
 
       <article class="card">
-        <div class="card-top"><h3>Tabung Fajar &mdash; out / in tin tracker</h3><span class="dot progress"></span></div>
-        <p>Bringing in your Tabung Fajar records with basic in/out tracking &mdash; within days, after a careful dedupe and check with your sign-off. The full management screen follows in about 1.5&ndash;2 weeks.</p>
-        <span class="tag">In progress</span>
+        <div class="card-top"><h3>Receipt PDF download &mdash; 404 error</h3><span class="dot progress"></span></div>
+        <p>Root cause found: a platform-wide bug (a missing column the code was still asking for) that had quietly broken <b>all</b> receipt-PDF downloads since April &mdash; not anything on your side. A code-only fix is deploying now.</p>
+        <span class="tag">Root cause found &middot; fix deploying</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>Your first live receipt send</h3><span class="dot progress"></span></div>
-        <p>The receipt-and-appreciation-letter email is ready to send to any donor &mdash; the first one just hasn't gone out yet. Send one to a donor and we'll watch it through and confirm it landed.</p>
-        <span class="tag">Ready &middot; awaiting you</span>
+        <div class="card-top"><h3>Finance report (7 columns + bank-statement remarks + viewer/preparer access)</h3><span class="dot progress"></span></div>
+        <p>The report with your 7 columns, the literal bank-statement remarks, and viewer/preparer access is built and merged &mdash; deploying now.</p>
+        <span class="tag">Merged &middot; deploying</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>Bank-statement reconciliation &mdash; the finer detail</h3><span class="dot progress"></span></div>
-        <p>The January statement is fully reconciled (see Done). We're working through the remaining line-by-line detail with you so every payment type ties out cleanly.</p>
-        <span class="tag">In progress</span>
+        <div class="card-top"><h3>Profile menu (top-right &ldquo;GA&rdquo;) not clickable</h3><span class="dot progress"></span></div>
+        <p>Looking into why the profile menu in the top-right isn't responding.</p>
+        <span class="tag">Investigating</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Tabung Jumaat &mdash; ready for Friday collection</h3><span class="dot progress"></span></div>
+        <p>The data side is built; we're confirming it's ready end-to-end in time for Friday's collection.</p>
+        <span class="tag">Confirming readiness</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>Tabung Fajar view (preparer + admin)</h3><span class="dot progress"></span></div>
+        <p>Confirming the view location and access for preparer and admin.</p>
+        <span class="tag">Confirming</span>
       </article>
     </section>
 
-    <!-- QUEUED -->
+    <!-- PLANNED / SCOPING -->
     <section class="col queued">
-      <div class="col-head"><h2>Queued</h2><span class="count">5</span></div>
+      <div class="col-head"><h2>Planned</h2><span class="count">6</span></div>
       <div class="col-rail"></div>
 
       <article class="card">
         <div class="card-top"><h3>Receipt footer &mdash; non-tax-deductible wording</h3><span class="dot queued"></span></div>
-        <p>As you noted, Irsyad isn't an IPC entity, so receipts will <b>not</b> be labelled tax-deductible. The corrected footer &mdash; a non-tax-deductible notice plus the Zakat 4-asnaf note &mdash; is specced and ready to build.</p>
-        <span class="tag">Specced</span>
+        <p>As you noted, Irsyad isn't an IPC entity, so receipts will <b>not</b> be labelled tax-deductible. The corrected footer (non-tax-deductible notice + Zakat 4-asnaf note) is being finalised for compliance.</p>
+        <span class="tag">Scoping &middot; compliance</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>NETS / Debit Card</h3><span class="dot queued"></span></div>
-        <p>Two options for accepting NETS / debit card have been specced &mdash; we'll walk you through them to pick the one that fits.</p>
-        <span class="tag">Specced</span>
+        <div class="card-top"><h3>Preparer &mdash; edit a donation's category</h3><span class="dot queued"></span></div>
+        <p>Let preparers correct a donation posted to the wrong fund. Because it touches money attribution, the design gets a careful review first.</p>
+        <span class="tag">Scoping</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>FR System</h3><span class="dot queued"></span></div>
-        <p>We want to confirm with you what &ldquo;FR System&rdquo; refers to so we scope it correctly before starting.</p>
-        <span class="tag">Queued &middot; confirming scope</span>
+        <div class="card-top"><h3>Merge duplicate donor records</h3><span class="dot queued"></span></div>
+        <p>Combine two entries that are the same person into one, keeping all their donation history. Admin-only, with a confirm step and an undo. Being designed.</p>
+        <span class="tag">Scoping</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>POS settlement &mdash; Cash / Cheque / NETS</h3><span class="dot queued"></span></div>
-        <p>Point-of-sale settlement for cash, cheque and NETS isn't wired up yet. We'll confirm the scope with you before building it.</p>
-        <span class="tag">Queued &middot; confirming scope</span>
+        <div class="card-top"><h3>Single sign-in per user</h3><span class="dot queued"></span></div>
+        <p>A new login signs out the older session, so an account is only ever active in one place. Being designed under our auth-security review.</p>
+        <span class="tag">Scoping &middot; security</span>
       </article>
 
       <article class="card">
-        <div class="card-top"><h3>Student / school management</h3><span class="dot queued"></span></div>
-        <p>This handles students' (minors') school records, which sit behind a <b>separate</b> data-protection clearance &mdash; it isn't a standard toggle we switch on. If it's something you need, we'd scope it properly with that clearance first.</p>
-        <span class="tag">Needs separate clearance</span>
+        <div class="card-top"><h3>Admin session kill-switch</h3><span class="dot queued"></span></div>
+        <p>Let an org admin end any user's active session on demand. Being designed under our auth-security review.</p>
+        <span class="tag">Scoping &middot; security</span>
+      </article>
+
+      <article class="card">
+        <div class="card-top"><h3>One-time Stripe import</h3><span class="dot queued"></span></div>
+        <p>Bring your Stripe subscription-donations and product purchases into the system as a one-time import. We're scoping it and waiting on your per-transaction export.</p>
+        <span class="tag">Awaiting your file</span>
       </article>
     </section>
 
@@ -406,6 +425,15 @@
         <span class="tag">Resolved</span>
       </article>
     </section>
+  </div>
+
+  <div class="section-label" style="margin-top:36px">Later</div>
+  <div class="board" style="grid-template-columns:1fr;">
+    <article class="card">
+      <div class="card-top"><h3>Website (fr.irsyad.edu.sg) &rarr; DMS migration</h3><span class="dot queued"></span></div>
+      <p>Deferred to a later stage, at your call &mdash; parked for now, not being worked on. We'll pick it back up when you're ready.</p>
+      <span class="tag">Parked</span>
+    </article>
   </div>
 
   <footer>
