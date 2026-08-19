@@ -144,3 +144,58 @@ def test_classify_pane_would_fire_only_worker_bloated_idle():
     d = ar.classify_pane("storefront", "cc-storefront", SINGLETONS, WORKERS,
                          bloat_k=FIRE_K + 30, verdict_state="IDLE_EMPTY")
     assert d.verdict == "WOULD-FIRE"
+
+
+# ── select_escalates() — Musa's invisibility gap (op#28437) ──────────────────
+# A SINGLETON-ESCALATE lane (pane >= fire bar but NOT a resolved worker lane — a
+# singleton, or a worker missing from fleet_lanes) is NEVER a WOULD-FIRE, so
+# warn_console never surfaces it and it climbs to 100% invisibly. select_escalates
+# is the PURE picker that pulls exactly those lanes when they are ALSO clean-idle,
+# for a DISTINCT deduped WARN. Idle is required (never nag a body still working) and
+# WOULD-FIRE is excluded (warn_console owns those — no double-page).
+def _w(session, base, k, verdict_state, decision_verdict):
+    """Build one observe-pass `watched` tuple: (session, base, k, verdict_state, Decision)."""
+    return (session, base, k, verdict_state,
+            ar.Decision(base or session, int(k), decision_verdict, ""))
+
+
+def test_select_escalates_picks_singleton_escalate_idle():
+    watched = [_w("s1", None, 900, "IDLE_EMPTY", "SINGLETON-ESCALATE")]
+    got = ar.select_escalates(watched)
+    assert len(got) == 1 and got[0][0] == "s1"
+
+
+@pytest.mark.parametrize("state", ["WORKING", "STAGED", "GHOST_WEDGED", "UNSURE", "UNSURE:X"])
+def test_select_escalates_excludes_singleton_escalate_when_not_idle(state):
+    # Never nag a body that is still working / staged / unsure — idle is required.
+    watched = [_w("s1", None, 900, state, "SINGLETON-ESCALATE")]
+    assert ar.select_escalates(watched) == []
+
+
+def test_select_escalates_excludes_would_fire():
+    # WOULD-FIRE lanes are warn_console's — the escalate path must not double-page them.
+    watched = [_w("s2", "cc-irsyad", 900, "IDLE_EMPTY", "WOULD-FIRE")]
+    assert ar.select_escalates(watched) == []
+
+
+def test_select_escalates_excludes_gated_and_not_bloated():
+    watched = [
+        _w("s3", "cc-irsyad", 900, "STAGED", "GATED"),
+        _w("s4", "cc-irsyad", 400, "IDLE_EMPTY", "NOT-BLOATED"),
+    ]
+    assert ar.select_escalates(watched) == []
+
+
+def test_select_escalates_empty_in_empty_out():
+    assert ar.select_escalates([]) == []
+
+
+def test_select_escalates_mixed_picks_only_idle_escalates():
+    watched = [
+        _w("s1", None, 900, "IDLE_EMPTY", "SINGLETON-ESCALATE"),      # picked
+        _w("s2", None, 950, "WORKING", "SINGLETON-ESCALATE"),        # busy -> excluded
+        _w("s3", "cc-irsyad", 900, "IDLE_EMPTY", "WOULD-FIRE"),      # warn_console's -> excluded
+        _w("s4", "cc-irsyad", 300, "IDLE_EMPTY", "NOT-BLOATED"),     # below bar -> excluded
+    ]
+    got = ar.select_escalates(watched)
+    assert [w[0] for w in got] == ["s1"]

@@ -324,7 +324,88 @@ def run_observe_panes() -> int:
         tag = d.verdict if d.verdict != "NOT-BLOATED" else "WATCH"
         print(f"  [{tag}] {d.agent} (session={session} pane={k:.0f}k idle={verdict}): {d.reason}")
     warn_console(fires)   # Stage-1 (op#13308): NON-destructive deduped console page on WOULD-FIRE
+    escalates = select_escalates(watched)   # op#28437 (Musa's invisibility gap): unresolved bloated-idle lanes
+    if escalates:
+        print(f"[auto-recycle STAGE-0 PANE] {len(escalates)} SINGLETON-ESCALATE lane(s) "
+              f"idle >= fire bar but NOT a resolved worker lane — surfacing (warn_escalate); FIRING NOTHING")
+    warn_escalate(escalates)   # Stage-1 sibling: DISTINCT deduped WARN for the invisible-to-warn_console lanes
     return 0
+
+
+def select_escalates(watched):
+    """PURE (unit-tested). From the observe-pass `watched` tuples
+    (session, base, k, verdict_state, Decision), pick the lanes that are BOTH
+    SINGLETON-ESCALATE (op#28437 / Musa's invisibility gap: pane >= PANE_FIRE_K but NOT a
+    resolved worker lane — a singleton, or a worker MISSING from fleet_lanes; G4 fail-closed)
+    AND at a clean idle (verdict_state == 'IDLE_EMPTY'). These lanes are NEVER a WOULD-FIRE,
+    so warn_console never surfaces them and they climb to 100% unseen. Idle is required (never
+    nag a working/staged/unsure body); WOULD-FIRE is excluded by construction (warn_console
+    owns those — no double-page). Fires NOTHING — pure selection."""
+    return [w for w in watched if w[4].verdict == "SINGLETON-ESCALATE" and w[3] == "IDLE_EMPTY"]
+
+
+def warn_escalate(escalates) -> int:
+    """STAGE-1 (op#28437, Musa's invisibility gap — sibling of warn_console). NON-DESTRUCTIVE.
+    For each SINGLETON-ESCALATE lane at a clean idle (pane >= PANE_FIRE_K but NOT a resolved
+    worker lane), post a DEDUPED WARN so the SRE either REGISTERS it in fleet_lanes (if it is a
+    worker lane the classifier hasn't learned) or manually recycles it (if a genuine singleton)
+    BEFORE it hits 100%. These lanes never reach warn_console (they are not WOULD-FIRE), so
+    without this they are invisible at the detection layer — the exact gap Musa flagged.
+    Returns count paged. No-op unless AUTO_RECYCLE_STAGE1_WARN=1 (deploys INERT, same as
+    warn_console). DISTINCT subject prefix ('WARN unresolved bloat:') so the per-lane dedup key
+    never collides with warn_console's 'WARN worker bloat:'. Same gate/dedup/cooldown/fail-safe
+    shape as warn_console: any error logs + skips — a warn blip must NEVER crash the observe
+    pass or fire anything."""
+    if not STAGE1_WARN_ENABLED or not escalates:
+        return 0
+    sent = 0
+    try:
+        import psycopg
+        dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+        with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+            for session, base, k, verdict, d in escalates:
+                agent = d.agent
+                subject = f"WARN unresolved bloat: {agent} ~{k:.0f}k idle — register in fleet_lanes or manually recycle"
+                for to_agent in WARN_RECIPIENTS:
+                    cur.execute(
+                        "SELECT 1 FROM agent_messages WHERE from_agent=%s AND to_agent=%s "
+                        "AND subject LIKE %s AND created_at > now() - make_interval(mins => %s) LIMIT 1",
+                        (bnd.SRE_AGENT_ID, to_agent, f"WARN unresolved bloat: {agent} %", WARN_COOLDOWN_MIN))
+                    if cur.fetchone():
+                        continue   # this recipient already warned for this lane within cooldown
+                    if to_agent == "cc-fleet-health":
+                        body = (
+                            f"ACT (Stage-1, op#28437 / Musa's invisibility gap): {agent} (session {session}) is at "
+                            f"~{k:.0f}k pane-truth (>= {PANE_FIRE_K}k, ~85% of 1M) and CLEAN IDLE, but it is NOT a "
+                            f"resolved worker lane — a singleton, or a worker MISSING from fleet_lanes (G4 fail-closed "
+                            f"=> SINGLETON-ESCALATE, never a WOULD-FIRE, so warn_console never sees it). Close the loop "
+                            f"at SRE: (1) if it's a WORKER lane missing from fleet_lanes, REGISTER it (base, worktree, "
+                            f"launcher) so it resolves as a worker and normal Stage-1/2 covers it; (2) if it's a genuine "
+                            f"SINGLETON, self-checkpoint-first + checkpoint-first recycle via scripts/sre_lane_recycle.py; "
+                            f"(3) CC orch-console. NEVER blind-recycle a body with a pending plan (op#13323). "
+                            f"Deduped {WARN_COOLDOWN_MIN}m/lane.")
+                    else:
+                        body = (
+                            f"FYI (non-blocking): {agent} (session {session}) ~{k:.0f}k idle >= fire bar but UNRESOLVED "
+                            f"(singleton, or not in fleet_lanes) — invisible to the normal worker-bloat WARN. "
+                            f"cc-fleet-health (SRE) is paged to register-or-recycle it before 100%. Non-destructive "
+                            f"Stage-1 WARN; loop closes at SRE, not you/the operator.")
+                    if STAGE1_WARN_DRY:
+                        print(f"[auto-recycle STAGE-1 ESCALATE-WARN DRY] would page {to_agent} :: {subject}")
+                    else:
+                        cur.execute(
+                            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
+                            "VALUES (%s,%s,'update',%s,%s,false,'P2')",
+                            (bnd.SRE_AGENT_ID, to_agent, subject, body))
+                    sent += 1
+            if not STAGE1_WARN_DRY:
+                c.commit()
+        if sent:
+            print(f"[auto-recycle STAGE-1 ESCALATE-WARN{' DRY' if STAGE1_WARN_DRY else ''}] "
+                  f"paged for {sent} unresolved bloated-idle lane(s)")
+    except Exception as e:  # noqa: BLE001 — warn is best-effort; never crash the pass / fire anything
+        print(f"[auto-recycle] WARN stage-1 escalate-page failed ({e}) — skipped (fail-safe)", file=sys.stderr)
+    return sent
 
 
 def warn_console(fires) -> int:
