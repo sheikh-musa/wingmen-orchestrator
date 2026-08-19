@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- hub-bus-currency-monitor (DETECT-ONLY). Independent of any agent's heartbeat.
+       Closes the detection hole that hid an ~11h hub agent-bus stall on 2026-08-19: the hub's
+       DB-wake (agent_wake_subscriber, VPS) wasn't firing, its orch_lease heartbeat kept
+       renewing (healthy-looking), and the P0/P1-only SLA-watchdog missed the P2/P3 backlog.
+       ANY-PRIORITY check: flags if the hub has an unread older than HUB_BUS_STALE_HOURS (2.5h).
+       FIRES NO reset, NO nudge — pages orch-console + cc-fleet-health only (deduped 150m).
+       Peer of the SLA daemon. HUB_BUS_MONITOR_ENABLED=1 arms the page (else INERT/detect-only).
+       Nazim-approved (#28837); load after the diff is eyeballed. -->
+  <key>Label</key>
+  <string>dev.wingmen.hub-bus-currency-monitor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; export HUB_BUS_MONITOR_ENABLED=1 &amp;&amp; exec .venv/bin/python3 -m scripts.hub_bus_currency_monitor</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/hub_bus_currency_monitor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/hub_bus_currency_monitor.log</string>
+</dict>
+</plist>
