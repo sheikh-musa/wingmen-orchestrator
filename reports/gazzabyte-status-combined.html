@@ -183,7 +183,7 @@
     .elist li { break-inside: avoid; }
   }
 
-  /* status detail styles */
+  /* ── merged: Team live-status section (sanitized; no internal infra) ── */
   :root { --active:#1f9d57; --resting:#8496a6; --track:#e6edf1; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --active:#35b56e; --resting:#7f92a4; --track:#1e2d40; } }
   :root[data-theme="dark"] { --active:#35b56e; --resting:#7f92a4; --track:#1e2d40; }
@@ -221,7 +221,7 @@
   .ctx .v { font-size: 11px; color: var(--ink-soft); flex: none; font-variant-numeric: tabular-nums; }
   .ctx .v.none { color: var(--ink-faint); }
 
-  /* progress-update content */
+  /* ── merged: greenlit progress-update content (verbatim wording) ── */
   .doc { margin-top: 8px; }
   .doc-sec { margin-top: 32px; }
   .doc-sec > h2 {
@@ -243,10 +243,6 @@
   .doc li strong { color: var(--ink); font-weight: 650; }
   .doc li em, .doc p em, .note em { font-style: italic; }
   .note { font-size: 13px; color: var(--ink-faint); font-style: italic; margin: 14px 2px 0; line-height: 1.55; max-width: 78ch; }
-  .figures-note { font-size: 12px; color: var(--ink-faint); font-style: italic; margin: 0 2px 12px; line-height: 1.5; max-width: 78ch; }
-  .pct { display: inline-block; font-size: 11.5px; font-weight: 700; color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
-    border-radius: 20px; padding: 0 8px; margin-left: 2px; line-height: 1.7; font-variant-numeric: tabular-nums; vertical-align: middle; white-space: nowrap; }
   hr.rule { border: none; border-top: 1px solid var(--line); margin: 36px 0 0; }
   .qbox { margin-top: 32px; }
   .qbox h3 { font-size: 15.5px; font-weight: 700; margin: 0 0 11px; letter-spacing: -0.01em; }
@@ -261,7 +257,7 @@
       <div>
         <p class="eyebrow">Gazzabyte &times; Irsyad</p>
         <h1>Madrasah Irsyad DMS &mdash; Complete Progress Picture</h1>
-        <p class="lede">Everything you've asked for since we started, grouped by where each piece stands and the order we're working through it. No fixed dates &mdash; the groups show what's done, what we're building, what we need from you, and what's planned next. If anything you remember isn't here, tell us and we'll add it.</p>
+        <p class="lede">This is everything you've asked for since we started — grouped by where each piece stands and the order we're working through them. No fixed dates: the groups show what's done, what's being built now, what we need from you, and what's designed next. If anything you remember isn't here, tell me and I'll add it straight away.</p>
       </div>
       <button class="pdf-btn" type="button" onclick="window.print()" aria-label="Download this page as PDF">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -273,7 +269,6 @@
     </div>
   </header>
 
-  <!--WINGMEN:LIVE-TEAM-PANEL-->
 
   <div class="doc">
 
@@ -305,16 +300,15 @@
 
     <section class="doc-sec">
       <h2><span class="em">🔄</span>In progress — being built now</h2>
-      <p class="figures-note">Progress figures are a rough guide, updated periodically (not live) &mdash; as of 19 Aug 2026 (SGT). Not delivery estimates.</p>
       <ul>
-        <li><strong>Receipts for the imported tabung donations</strong> <span class="pct">~85%</span> — recorded but bulk-imported without receipts; we're setting up a one-time bulk issue that creates the receipt records (won't auto-email your donors).</li>
-        <li><strong>Receipt PDF in the "View as Preparer" preview</strong> <span class="pct">~95%</span> — the "failed to generate" error appears <strong>only</strong> in that admin preview; downloading receipts normally (real preparer login, or admin) works. Fix in review.</li>
-        <li><strong>Linking imported / anonymous donors to their profiles</strong> <span class="pct">~90%</span> — so receipts on imported bank donations can go out by name.</li>
-        <li><strong>Committed-donation correction flow</strong> <span class="pct">~85%</span> — voiding/correcting a posted donation's category or donor, with audit + admin approval.</li>
-        <li><strong>Tabung Fajar</strong> <span class="pct">~70%</span> — reconciling the loaded historical records against your files (on our side). Your Fajar money is counted in your totals — not missing.</li>
-        <li><strong>Your imports</strong> <span class="pct">~50%</span> — the one-time Stripe import and the bank statements, on our side.</li>
-        <li><strong>A visual workflow reference</strong> <span class="pct">~40%</span> for your users (tin lifecycle + approval steps).</li>
-        <li><strong>Behind-the-scenes hardening</strong> <span class="pct">~60%</span> — ongoing permissions + security improvements.</li>
+        <li><strong>Receipts for the imported tabung donations</strong> — recorded but bulk-imported without receipts; we're setting up a one-time bulk issue that creates the receipt records (won't auto-email your donors).</li>
+        <li><strong>Receipt PDF in the "View as Preparer" preview</strong> — the "failed to generate" error appears <strong>only</strong> in that admin preview; downloading receipts normally (real preparer login, or admin) works. Fix in review.</li>
+        <li><strong>Linking imported / anonymous donors to their profiles</strong> — so receipts on imported bank donations can go out by name.</li>
+        <li><strong>Committed-donation correction flow</strong> — voiding/correcting a posted donation's category or donor, with audit + admin approval.</li>
+        <li><strong>Tabung Fajar</strong> — reconciling the loaded historical records against your files (on our side). Your Fajar money is counted in your totals — not missing.</li>
+        <li><strong>Your imports</strong> — the one-time Stripe import and the bank statements, on our side.</li>
+        <li><strong>A visual workflow reference</strong> for your users (tin lifecycle + approval steps).</li>
+        <li><strong>Behind-the-scenes hardening</strong> — ongoing permissions + security improvements.</li>
       </ul>
     </section>
 
@@ -335,7 +329,7 @@
         <li><strong>Tabung Jumaat, tin-by-tin</strong> — currently a single combined total; you've asked to extend it to a full tin-by-tin dashboard like Tabung Umum (issue, search by number/name), usable + editable by admin <strong>and</strong> preparer — plus <strong>including Tabung Jumaat in the weekly report</strong>. One design piece we're scoping.</li>
         <li><strong>Search across everything</strong> — extending the tin/serial + name search beyond Tabung Umum to all tabung and fees.</li>
         <li><strong>Scan a tin's number when issuing</strong> — quicker, less error-prone.</li>
-        <li><strong>Tabung Fajar count-completion thank-you letter</strong> (with Mudirah's signature) — sends once the report is <strong>checked</strong> (verified), per your call.</li>
+        <li><strong>Tabung Fajar count-completion thank-you letter</strong> (with Mudirah's signature) — including <em>when</em> it sends (see the question below).</li>
         <li><strong>Appreciation Letter</strong> — auto-fill the donor details + send.</li>
         <li><strong>School Fees payment</strong> and <strong>NETS at the counter (POS)</strong> — new modules; need your pricing/category sign-off + the provider setup.</li>
         <li><strong>Smaller enhancements</strong> — manual tin numbering, preparer editing a category after posting, the Zakat-allocation note on receipts.</li>
@@ -343,7 +337,7 @@
     </section>
 
     <section class="doc-sec">
-      <h2><span class="em">🗂️</span>Also tracked — earlier requests + smaller items (nothing forgotten)</h2>
+      <h2><span class="em">🗂️</span>Also tracked (earlier requests + smaller items — nothing forgotten)</h2>
       <ul>
         <li><strong>Bulk retro-receipts for older donations</strong> (Jan → now) — part of the imported-tabung receipts work above.</li>
         <li><strong>"Top donors" ranking report</strong> — a dedicated donor-ranking view, on the list to build.</li>
@@ -352,6 +346,17 @@
         <li><strong>"Misc" fees category</strong> (teacher carpark + student ad-hoc) — a lightweight flexible category, separate from the School Fees module.</li>
         <li><strong>Zakat fund-velocity / asnaf distribution reporting</strong> — later reporting.</li>
         <li><strong>Parked at your call:</strong> retiring the FR website into the DMS; automatic WhatsApp thank-you for no-email donors; the September additions (e.g. Nasi Mandhi welfare option); the school-records remainder (P6 archival, teacher upload role, class-change import); and the SOP / access documentation.</li>
+      </ul>
+    </section>
+
+    <hr class="rule">
+
+    <section class="qbox">
+      <h3>A few quick questions</h3>
+      <ul>
+        <li><strong>Tabung Fajar thank-you letter</strong> — send after a tin is <strong>"counted"</strong>, or after the report is <strong>"checked"</strong> (verified)?</li>
+        <li><strong>Tabung Jumaat</strong> — a walkthrough time to record a real entry together.</li>
+        <li><strong>The "who's holding which tins" drill-down</strong> — show everyone holding that tin type, or just currently-issued ones?</li>
       </ul>
     </section>
 
