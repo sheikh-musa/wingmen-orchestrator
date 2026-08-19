@@ -809,8 +809,10 @@ def _label(obs: AgentObs) -> str:
 
 def _wedge_alert(obs: AgentObs, elapsed_min: int, unsafe: bool, armed: bool) -> str:
     label = _label(obs)
-    do = ("It has its OWN draft in the composer — NOT auto-nudged. Look at it: submit "
-          "its step or clear the inbox." if unsafe else
+    do = ("Its composer holds text read as REAL-per-content — but this is NOT probe-verified, "
+          "so it may be a re-rendered / scrolled-off ghost, not a genuine draft. Run lane_nudge "
+          "to disambiguate (it probes: clears+delivers if ghost, refuses if genuinely staged). "
+          "If it IS its own draft, submit its step or clear the inbox." if unsafe else
           ("Auto-recovery is nudging it to drain; watch for it to pick up." if armed else
            "It self-heals once nudged to drain its inbox — nudge it or arm the watchdog."))
     try:
@@ -1242,7 +1244,8 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
 
         if unsafe:
             # REAL staged draft — NEVER auto-nudge (would clobber). Alert only.
-            line["action"] = "REAL staged draft present — alert-only, never auto-nudged"
+            line["action"] = ("REAL-per-content (NOT probe-verified — may be a re-rendered/scrolled-off ghost) "
+                               "— alert-only, never auto-nudged; run lane_nudge to disambiguate")
             results.append(line)
             continue
 

@@ -215,7 +215,7 @@ def gate_composer_clean(probe: "dict | None") -> "tuple[bool, str]":
         return True, "composer holds only a dim history-ghost (empty underneath)"
     flat = (probe.get("flat") or "").strip()
     snippet = flat[:60] + ("…" if len(flat) > 60 else "")
-    return False, f"real staged draft present -> HOLD: {snippet!r}"
+    return False, f"staged draft present (real-per-content, NOT probe-verified — may be a re-rendered/scrolled-off ghost) -> HOLD: {snippet!r}"
 
 
 # ── checkpointable (Stage-0: REPORT only) ────────────────────────────────────
