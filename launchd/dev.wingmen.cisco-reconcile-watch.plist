@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- cisco-reconcile-watch (DETECT-ONLY, READ-ONLY, NO PII). The durable half of cai
+       CAI-RESP-1191's Cisco money-path go-live condition (Nazim #28958): watch goumlyne
+       public.tabung_coin_deposits for the FIRST status='reconciled' (clean first real use)
+       or a NON-TERMINAL row stuck > CISCO_STUCK_HOURS (2.5h, the wiring-bug case). Pages
+       orch-console + cc-irsyad-coord (status/counts/timestamps ONLY — never a PII value);
+       could-not-measure pages LOUD (dead-man's-switch). No writes, no reset, no nudge.
+       CISCO_WATCH_ENABLED=1 arms the page (else INERT). Peer of the SLA/hub-bus monitors.
+       Retires (unload) after one clean reconcile. Nazim-requested; load after diff eyeball. -->
+  <key>Label</key>
+  <string>dev.wingmen.cisco-reconcile-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; export CISCO_WATCH_ENABLED=1 &amp;&amp; exec .venv/bin/python3 -m scripts.cisco_reconcile_watch</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/cisco_reconcile_watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/cisco_reconcile_watch.log</string>
+</dict>
+</plist>
