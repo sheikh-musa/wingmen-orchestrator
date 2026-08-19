@@ -28,6 +28,15 @@ NUDGE="$SCRIPT_DIR/lane_nudge.sh"
 # a /model nudge would corrupt it) are Mini infrastructure bodies, never engineer
 # lanes. Excluding them keeps --live scoped to the actual engineer lanes.
 CORE_LANES="orch cai nazim fleet-health fleet-console"
+# FULL-tier auditors (cai CAI-RESP-1170): cc-quality + cc-storefront render governance
+# verdicts on money-path / live-tenant work, which requires being PINNED to claude-opus-4-8
+# EXACTLY. A blanket `fleet_model.sh sonnet --live` conservation flip once swept them to
+# sonnet silently and downgraded a live money-path audit (2026-08-19 incident). Carve-out: a
+# --live flip whose target is NOT exactly claude-opus-4-8 SKIPS these lanes — refusing BOTH a
+# downgrade (sonnet/haiku) AND an over-correction drift (opus-5, which op#9020 + cai bar for
+# these lanes: '4.8 not 5'). --all still forces (a deliberate model change updates the pin).
+# Same shape as the CORE_LANES governance carve-out.
+AUDITOR_LANES="quality storefront"
 DEFAULT_MODEL="claude-opus-4-8"
 
 resolve() {  # alias|full-id -> full model id
@@ -81,6 +90,11 @@ if [ "$LIVE" -eq 1 ]; then
     [ -z "$sess" ] && continue
     if [ "$ALL" -eq 0 ] && printf '%s ' $CORE_LANES | grep -qw "$sess"; then
       echo "  · $sess — SKIP (core brain; pass --all to include)"; skipped=$((skipped+1)); continue
+    fi
+    # FULL-auditor carve-out (CAI-RESP-1170): PIN to claude-opus-4-8 exactly. Skip any target
+    # that isn't exactly opus-4-8 — refusing a downgrade (sonnet/haiku) AND an opus-5 drift.
+    if [ "$ALL" -eq 0 ] && printf '%s ' $AUDITOR_LANES | grep -qw "$sess" && [ "$FULL" != "claude-opus-4-8" ]; then
+      echo "  · $sess — SKIP (FULL auditor: pinned to opus-4-8, refusing $FULL; pass --all to force)"; skipped=$((skipped+1)); continue
     fi
     if "$NUDGE" "$sess" "/model $FULL"; then
       echo "  ✔ $sess — flipped"; flipped=$((flipped+1))
