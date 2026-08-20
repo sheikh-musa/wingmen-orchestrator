@@ -108,6 +108,11 @@ from nervous_system import agent_wake  # noqa: E402
 STATE_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog_state.json"
 LOG_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog.log"
 HEARTBEAT_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog_heartbeat"
+# Per-lane page SNOOZE: {lane: until_iso}. A lane here is still detected + LOGGED (durable record),
+# but its PAGE is suppressed until `until_iso` — for a KNOWN-benign recurring ghost pending a recycle
+# (Nazim #29644: stop re-P1-storming storefront's idle 'check-inbox' ghost). Fail-OPEN: any read/parse
+# error ⇒ not snoozed ⇒ a real wedge still pages (a snooze must never silence a genuine stall).
+SNOOZE_FILE = _ORCH_DIR / "logs" / "wedge_snooze.json"
 _COMPOSER_LIB = _ORCH_DIR / "scripts" / "lib" / "composer_capture.sh"
 
 
@@ -784,6 +789,24 @@ def _emit_bus_alert(text: str) -> None:
             pass
 
 
+def _lane_snoozed(session: str) -> bool:
+    """True iff `session` has an unexpired page-snooze in SNOOZE_FILE. Fail-OPEN: any
+    missing/unparseable file or bad timestamp returns False, so a real wedge always pages
+    (a snooze must never silence a genuine stall — dead-man's-switch). Detection + logging
+    are unaffected; only the operator PAGE is suppressed while snoozed."""
+    try:
+        data = json.loads(SNOOZE_FILE.read_text())
+        until = data.get(session)
+        if not until:
+            return False
+        until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+        if until_dt.tzinfo is None:
+            until_dt = until_dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) < until_dt
+    except Exception:
+        return False
+
+
 def _page(text: str) -> None:
     """Surface an operator alert. In tests / manual inspection
     (LANE_WEDGE_ALERT_STDOUT=1 or pytest) print instead — never touch the bus.
@@ -1211,7 +1234,7 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
         if len(recent) >= REPEAT_K and _genuine_stall(obs):
             line["action"] = "REPEAT-WEDGE — auto-recovery STOPPED, paging operator"
             if not entry.get("repeat_alerted"):
-                if alert:
+                if alert and not _lane_snoozed(obs.session):
                     _page(_repeat_alert(obs, len(recent)))
                 entry["repeat_alerted"] = now
             log(f"REPEAT-WEDGE {obs.agent}: {len(recent)} wedges in window — stop + page")
@@ -1230,7 +1253,8 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
                 f"composer={obs.composer.state} ({'ARMED:'+mode if not dry else 'DETECT-ONLY'})")
         # A menu-trap ALWAYS surfaces (it is definitively stuck — blocks the bus),
         # like unsafe; a plain safe wedge pages only on a genuine stall.
-        if alert and (menu or unsafe or _genuine_stall(obs)) and not entry.get("alerted"):
+        if (alert and (menu or unsafe or _genuine_stall(obs)) and not entry.get("alerted")
+                and not _lane_snoozed(obs.session)):
             _page(_menu_trap_alert(obs, elapsed_min) if menu
                   else _wedge_alert(obs, elapsed_min, unsafe, armed=not dry))
             entry["alerted"] = now
