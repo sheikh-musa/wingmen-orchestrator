@@ -438,6 +438,15 @@ ACK_AFTER_SEC = 150      # belt-and-suspenders (ihsan): reassure the operator if
 MAX_DEFER_SEC = 600      # busy-defer CAP: a message unhandled past this nudges
                          # ANYWAY (CAI-RESP-382) — deferral must never strand the
                          # operator, even if the agent stays busy indefinitely.
+# Channels (by channel_tag) where the CLIENT-facing "📨 Got your message" ack is
+# SUPPRESSED — a human hand-responds and the bot ack reads as "no one's looking"
+# (gazzabyte-irsyad: client op#15034 explicitly asked, coord #29009, 2026-08-20).
+# ONLY the client ack is skipped; logging, routing, and the handler-nudge
+# (drain_stale_deferred) stay — so a message is still logged + the handler still
+# woken, it just isn't bot-acked at the sender. Env-overridable (comma-sep tags).
+SUPPRESS_CLIENT_ACK_TAGS = {
+    t.strip() for t in os.environ.get("SUPPRESS_CLIENT_ACK_TAGS", "gazzabyte-irsyad").split(",") if t.strip()
+}
 
 
 def pane_working(session: str) -> bool:
@@ -469,6 +478,8 @@ def urgency(text: str) -> str:
 def throttled_busy_ack(conn, ch: "Channel") -> None:
     """Enqueue ONE 'got it, mid-task' ack per ACK_THROTTLE_SEC per channel (via
     the tg_out queue), so a deferred operator isn't left wondering."""
+    if ch.channel_tag in SUPPRESS_CLIENT_ACK_TAGS:
+        return   # client-ack suppressed for this channel (human hand-responds)
     ack = (
         # client perimeter (log-and-route): no operator-internal phrasing
         # "shortly" is BANNED on the client perimeter (orch-console, 2026-08-17).
@@ -544,6 +555,8 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
     repeats add nothing. drain_stale_deferred still owns waking the target.)"""
     if ch.mode not in ("agent-session", "log-and-route"):
         return
+    if ch.channel_tag in SUPPRESS_CLIENT_ACK_TAGS:
+        return   # client-ack suppressed for this channel (human hand-responds); drain_stale_deferred still nudges the handler
     ack = (
         # client perimeter (log-and-route): no operator-internal phrasing
         # "shortly" is BANNED on the client perimeter (orch-console, 2026-08-17).
