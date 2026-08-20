@@ -66,6 +66,11 @@ _LLM_ROUTE_EXEMPT_REASONS = frozenset({
     # (_shadow_call_ai_gate2) logs to logs/ralph_gate2_shadow.jsonl.
     # Default-flip becomes a ralph resume_gate condition.
     "shadow_ab_primary_pending_resume_gate",
+    # CAI-RESP-1194: manually-invoked, sandboxed script; no fleet-bus/
+    # agent_messages/DB access; no scheduled or production caller;
+    # capability/cost benchmarking or dataset-prep against our own model
+    # outputs, not a live serving path.
+    "offline_eval_no_serving_path",
 })
 
 
