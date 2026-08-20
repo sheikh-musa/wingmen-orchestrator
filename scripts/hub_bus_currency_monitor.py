@@ -26,6 +26,12 @@ import sys
 HUB_AGENT = "cc-orchestrator"
 STALE_HOURS = float(os.environ.get("HUB_BUS_STALE_HOURS", "2.5"))   # unread older than this ⇒ bus-stale
 PAGE_COOLDOWN_MIN = int(os.environ.get("HUB_BUS_PAGE_COOLDOWN_MIN", "150"))  # ~one page per stall
+# Row-aware snooze: once we've paged on a SPECIFIC oldest-unread row, don't re-page on that
+# SAME row for this long (the DB-wake defect can leave a benign row unread for many hours;
+# re-paging every PAGE_COOLDOWN on the identical known row is pure noise — Nazim #29208). A
+# NEW/different oldest-unread row (a genuinely new undrained backlog, possibly urgent) is NOT
+# snoozed — it pages immediately, so detection is preserved.
+SNOOZE_SAME_ROW_MIN = int(os.environ.get("HUB_BUS_SNOOZE_SAME_ROW_MIN", "1440"))  # 24h per known row
 RECIPIENTS = ("orch-console", "cc-fleet-health")  # Nazim relays to operator; SRE owns the loop
 ENABLED = os.environ.get("HUB_BUS_MONITOR_ENABLED") == "1"
 DRY = os.environ.get("HUB_BUS_MONITOR_DRY") == "1"
@@ -57,27 +63,41 @@ def _dsn() -> "str | None":
 
 
 def _read_hub_bus_state(cur):
-    """Return (unread_count, oldest_unread_age_s). Fail-loud to the caller on DB error."""
+    """Return (unread_count, oldest_unread_age_s, oldest_unread_id). Fail-loud on DB error.
+
+    oldest_unread_id is the id of the single oldest-by-created_at unread row (or None if the
+    inbox is drained) — the dedupe key for the row-aware snooze."""
     cur.execute(
-        "SELECT count(*), extract(epoch from (now() - min(created_at))) "
-        "FROM agent_messages WHERE to_agent=%s AND read_at IS NULL", (HUB_AGENT,))
-    n, age = cur.fetchone()
-    return int(n or 0), (float(age) if age is not None else None)
+        "SELECT count(*) OVER (), extract(epoch from (now() - created_at)), id "
+        "FROM agent_messages WHERE to_agent=%s AND read_at IS NULL "
+        "ORDER BY created_at ASC LIMIT 1", (HUB_AGENT,))
+    row = cur.fetchone()
+    if row is None:
+        return 0, None, None
+    n, age, oldest_id = row
+    return int(n or 0), (float(age) if age is not None else None), oldest_id
 
 
-def _already_paged_recent(cur, cooldown_min: int) -> bool:
-    """Dedup: a hub-bus-stale page from us within the cooldown ⇒ skip (one page per stall)."""
+def _already_paged_for_row(cur, oldest_id: int, snooze_min: int) -> bool:
+    """Row-aware dedup: have we already paged on THIS specific oldest-unread row within the
+    snooze window? A same-row page in [now-snooze, now] ⇒ skip (known benign/stuck row). A new
+    oldest_id has no such prior page ⇒ we page (detection of a genuinely new backlog preserved)."""
     cur.execute(
         "SELECT 1 FROM agent_messages WHERE from_agent=%s AND subject LIKE %s "
         "AND created_at > now() - make_interval(mins => %s) LIMIT 1",
-        (SRE_FROM, "HUB BUS-STALE:%", cooldown_min))
+        (SRE_FROM, f"HUB BUS-STALE:%[oldest-id={oldest_id}]%", snooze_min))
     return cur.fetchone() is not None
 
 
-def _page(cur, unread_count: int, oldest_unread_age_s: float, reason: str) -> int:
-    """NON-DESTRUCTIVE page to RECIPIENTS. Returns count sent. Deduped by the caller."""
+def _page(cur, unread_count: int, oldest_unread_age_s: float, reason: str, oldest_id: int) -> int:
+    """NON-DESTRUCTIVE page to RECIPIENTS. Returns count sent. Deduped by the caller.
+
+    The subject carries a stable `[oldest-id={oldest_id}]` marker so the row-aware snooze
+    (_already_paged_for_row) can dedupe re-pages on the SAME stuck row while still firing on a
+    NEW oldest-unread row."""
     hrs = oldest_unread_age_s / 3600.0
-    subject = f"HUB BUS-STALE: cc-orchestrator has {unread_count} unread, oldest {hrs:.1f}h — bus undrained"
+    subject = (f"HUB BUS-STALE: cc-orchestrator has {unread_count} unread, oldest {hrs:.1f}h "
+               f"— bus undrained [oldest-id={oldest_id}]")
     try:
         from nervous_system.alert_format import format_alert
         body = format_alert(
@@ -117,14 +137,16 @@ def run_once() -> int:
         print("[hub-bus-monitor] no DATABASE_URL — cannot run", file=sys.stderr)
         return 2
     with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
-        unread, oldest = _read_hub_bus_state(cur)
+        unread, oldest, oldest_id = _read_hub_bus_state(cur)
         verdict, reason = classify_bus_currency(unread, oldest)
-        print(f"[hub-bus-monitor] {verdict.upper()}: {reason}")
+        print(f"[hub-bus-monitor] {verdict.upper()}: {reason}"
+              + (f" (oldest-id={oldest_id})" if oldest_id is not None else ""))
         if verdict == "stale" and ENABLED:
-            if _already_paged_recent(cur, PAGE_COOLDOWN_MIN):
-                print(f"[hub-bus-monitor] stale but already paged within {PAGE_COOLDOWN_MIN}m — deduped, no page")
+            if _already_paged_for_row(cur, oldest_id, SNOOZE_SAME_ROW_MIN):
+                print(f"[hub-bus-monitor] stale but already paged on row #{oldest_id} within "
+                      f"{SNOOZE_SAME_ROW_MIN}m — row-snoozed, no page (a NEW oldest row still pages)")
             else:
-                sent = _page(cur, unread, oldest, reason)
+                sent = _page(cur, unread, oldest, reason, oldest_id)
                 if not DRY:
                     c.commit()
                 print(f"[hub-bus-monitor{' DRY' if DRY else ''}] paged {sent} recipient(s) on hub bus-stall")
