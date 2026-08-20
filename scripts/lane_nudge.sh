@@ -155,6 +155,46 @@ except Exception:
 PYEOF
 }
 
+# P3 DOWN-RANK of a revert-fail on a STABLE but ENTIRELY-DIM composer (op#29056 / storefront #29048).
+# A dim autosuggestion GHOST and real UNFOCUSED staged text are BYTE-IDENTICAL (the disproven FIX-1
+# ambiguity) — so we must NOT treat dim as not-staged. But the REFUSE already PRESERVED the content, so
+# the alert is not a corruption guard. A dim STABLE revert-fail is very likely a benign ghost repaint
+# (storefront's idle 'check inbox' ghost, 3-4x/session), so keep a RECORD but do not P1-storm the
+# operator. Same guards/shape as _probe_p1_escalate; DISTINCT longer dedupe (6h) so P3 notes stay quiet;
+# requires_response=false, priority P3. The P1 stays RESERVED for a NON-DIM stable revert-fail.
+_probe_revertfail_note() {   # $1 = capfile pointer (may be empty), $2 = before-flat
+  local capref="${1:-}" beforeflat="${2:-}"
+  [ -n "${DATABASE_URL:-}" ] || return 0
+  tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  local dedupe="$LOGDIR/.probe_revertfail_dimnote_${SESSION}.stamp"
+  if [ -f "$dedupe" ]; then
+    find "$dedupe" -mmin -360 2>/dev/null | grep -q . && return 0
+  fi
+  mkdir -p "$LOGDIR" 2>/dev/null && : > "$dedupe" 2>/dev/null || true
+  local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
+  "$py" - "$SESSION" "$beforeflat" "$capref" <<'PYEOF' 2>/dev/null || true
+import os, sys
+try:
+    import psycopg2
+    sess, flat, capref = sys.argv[1], sys.argv[2], sys.argv[3]
+    ev = f"logs/{capref}" if capref else "NONE"
+    c = psycopg2.connect(os.environ["DATABASE_URL"]); cur = c.cursor()
+    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+    cur.execute(
+        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
+        "VALUES ('cc-fleet-health','orch-console','update',%s,%s,false,'P3')",
+        (f"lane_nudge revert-fail on {sess} (DIM-stable) -- down-ranked to P3/log, likely benign ghost",
+         f"The ghost-probe on '{sess}' revert-failed on a STABLE but ENTIRELY-DIM composer. Dim text is "
+         f"FIX-1-ambiguous (a dim ghost and real UNFOCUSED staged text are byte-identical), so this is NOT "
+         f"asserted as a ghost -- but the REFUSE already PRESERVED the content and a dim stable revert-fail "
+         f"is very likely a benign ghost repaint. Recording (P3, no P1). Content before probe: '{flat}'. "
+         f"Raw capture: {ev}. Only inspect if this recurs on a lane you expect to hold REAL staged work."))
+    c.commit()
+except Exception:
+    pass
+PYEOF
+}
+
 # A revert-fail on a pane that is MID-TURN (busy footer: 'esc to interrupt' / a thinking spinner)
 # is the EXPECTED artifact of the pane REPAINTING under the sentinel+BSpace — not corruption of a
 # staged step (Nazim #25506/#25619/#25635: the probe kept firing false P1s on HEALTHY busy panes,
@@ -208,6 +248,14 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       if _probe_revertfail_is_repaint_race "$SESSION"; then
         _log_probe_capture "REFUSED-revert-fail [UNSTABLE pane: repaint race (busy/delivering/exiting), LOW — no P1], preserved staged"
         echo "lane_nudge: revert-fail on '$SESSION' but the pane is UNSTABLE (busy / mid-delivery / tearing-down) — expected repaint race, NOT corruption; REFUSING (LOW, no P1)." >&2
+      elif [ "${CC_RAW_PH_BASIS:-${CC_PH_BASIS:-}}" = "real-text(dim)" ]; then
+        # op#29056 / storefront #29048: a STABLE but ENTIRELY-DIM composer is FIX-1-ambiguous (a dim
+        # ghost and real UNFOCUSED staged text are byte-identical), so we do NOT treat dim as not-staged.
+        # But the REFUSE already PRESERVED the content, so DOWN-RANK to a deduped P3/log instead of a P1
+        # (a dim stable revert-fail is very likely a benign ghost repaint). The P1 stays RESERVED for a
+        # NON-DIM stable revert-fail (high-confidence real). FIX-1-safe (clear-vs-refuse unchanged), not silent.
+        _log_probe_capture "REFUSED-revert-fail [DIM-stable: likely benign ghost repaint, P3/log no P1], preserved staged"
+        _probe_revertfail_note "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
       else
         _log_probe_capture "REFUSED-revert-fail, preserved staged"
         _probe_p1_escalate "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
