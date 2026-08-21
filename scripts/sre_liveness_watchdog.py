@@ -58,10 +58,23 @@ STATE = ORCH / "logs" / "sre_liveness.state"
 SESSION = "fleet-health"
 AGENT = "cc-fleet-health"
 WATCHER_ID = "sre-liveness"
+# agent_messages.from_agent FKs to agents.id, and 'sre-liveness' is NOT a registered
+# agent (unlike sla-watchdog) — so its bus posts used to FK-fail silently, breaking the
+# escalation path (detect worked, act no-op'd). Post under the SRE's own registered id
+# instead; the [sre-liveness] tag in subject/body preserves attribution. Ops-not-governance:
+# no agents-registry write (that stays a cai/operator-gated change). Fix: Nazim op#30671.
+POST_FROM = AGENT  # 'cc-fleet-health' — registered; satisfies the from_agent FK
 TMUX = "/usr/local/bin/tmux" if os.path.exists("/usr/local/bin/tmux") else "tmux"
 
 UNREAD_MIN_AGE_SEC = 20 * 60      # signal (b): work waiting this long = not moving
-GRACE_SCANS = 2                   # same wedge on N consecutive scans before acting
+GRACE_SCANS = 8                   # same wedge on N consecutive scans before acting.
+                                  # TEMP bumped 2->4->8 (2026-08-21): the wedge-staged verdict
+                                  # currently false-positives on cc-fleet-health's own idle
+                                  # OUTPUT text (capture-pane -p strips the dim marker) — see
+                                  # memory sre-liveness-nudge-fk-fail. Extra grace cuts the
+                                  # false self-wake burn without masking a persistent real
+                                  # wedge (the 2026-08-11 case was ~1h). REVERT to 2 once the
+                                  # composer_capture output-vs-staged discrimination is fixed.
 NUDGE_MAX = 2                     # nudges per episode before escalating to a human
 NUDGE_INTERVAL_SEC = 10 * 60      # min gap between nudges (and detection cadence budget)
 ESCALATE_REPAGE_SEC = 60 * 60     # don't re-page the operator more than hourly per episode
@@ -106,7 +119,7 @@ def _observe() -> dict:
         'pane_busy "$2" "$3" >/dev/null 2>&1; '
         'menu=0; "$2" capture-pane -t "$3" -p 2>/dev/null | tail -8 | '
         'LC_ALL=C grep -qiE "press up to edit queued|to navigate|esc to cancel|enter to select" && menu=1; '
-        'printf "RESULT %s %s %s %s %s\\n" "${CC_EMPTY:-x}" "${CC_N:-x}" "${CC_PARTIAL:-x}" "${CC_BUSY:-0}" "$menu"; '
+        'printf "RESULT %s %s %s %s %s %s\\n" "${CC_EMPTY:-x}" "${CC_N:-x}" "${CC_PARTIAL:-x}" "${CC_BUSY:-0}" "$menu" "${CC_PH_BASIS:-x}"; '
         'printf "FLAT %s\\n" "${CC_FLAT:-}"'
     )
     try:
@@ -116,17 +129,20 @@ def _observe() -> dict:
         return {"readable": False, "err": str(e)[:120]}
     empty = n = partial = "x"
     busy = menu = "0"
+    ph_basis = "x"
     flat = ""
     for ln in (r.stdout or "").splitlines():
         if ln.startswith("RESULT "):
             p = ln.split()
             if len(p) >= 6:
                 empty, n, partial, busy, menu = p[1], p[2], p[3], p[4], p[5]
+            if len(p) >= 7:
+                ph_basis = p[6]  # CC_PH_BASIS: no-content|dim-sgr|literal-fallback(+(real-text))
         elif ln.startswith("FLAT "):
             flat = ln[5:]
     return {"readable": partial != "noprompt" and empty != "x",
             "busy": busy == "1", "empty": empty == "1", "menu": menu == "1",
-            "n": n, "partial": partial, "flat": flat}
+            "n": n, "partial": partial, "flat": flat, "ph_basis": ph_basis}
 
 
 def _oldest_unread_age_sec() -> "float | None":
@@ -161,6 +177,20 @@ def _is_placeholder(flat: str) -> bool:
     return f in _PLACEHOLDER_EXACT or bool(_PLACEHOLDER_RE.match(f))
 
 
+def _is_cosmetic_dim_idle(ph_basis: str, piling: bool) -> bool:
+    """Arm-gating (Nazim #31259): a DIM-ghost-suspect composer with NOTHING piling in the
+    inbox is cosmetic idle-with-a-ghost, NOT a wedge worth a self-wake — lane_nudge's ACTIVE
+    probe clears such a ghost on the next real wake. Suppress the self-nudge ONLY on BOTH
+    signals (dim AND no unread piling). A NOT-dim composer (possible real stuck — the ENOSPC
+    composer-corruption class) or a piling inbox is NOT cosmetic and still nudges/escalates.
+    Never trusts dim to mean empty: a real dim wedge that MATTERS surfaces when work piles
+    (-> wedge-inbox). Note CC_PH_BASIS carries 'real-text(dim)' vs 'real-text(not-dim)', so
+    the not-dim marker must be excluded explicitly (a bare 'dim' substring matches both)."""
+    ph = ph_basis or ""
+    is_dim = ("dim" in ph) and ("not-dim" not in ph)
+    return is_dim and not piling
+
+
 def _classify() -> "tuple[str, str]":
     """Return (verdict, detail). verdict in
     {healthy, busy, unreadable, gone, wedge-staged, wedge-inbox}."""
@@ -176,7 +206,15 @@ def _classify() -> "tuple[str, str]":
     if obs["menu"]:
         return "wedge-staged", "queued-message / nav-menu footer, not busy"
     if (not obs["empty"]) and not _is_placeholder(obs.get("flat", "")):
-        return "wedge-staged", f"real staged composer, not busy (flat='{obs['flat'][:80]}')"
+        # Arm-gating: don't self-wake on a cosmetic dim-ghost when nothing is piling.
+        _age = _oldest_unread_age_sec()
+        _piling = _age is not None and _age >= UNREAD_MIN_AGE_SEC
+        if _is_cosmetic_dim_idle(obs.get("ph_basis", ""), _piling):
+            return "healthy", (f"dim-ghost composer + no inbox piling — cosmetic idle-with-ghost, "
+                               f"not a wedge worth a wake (flat='{obs['flat'][:50]}' "
+                               f"ph_basis={obs.get('ph_basis','x')})")
+        return "wedge-staged", (f"real staged composer, not busy (flat='{obs['flat'][:80]}' "
+                                f"ph_basis={obs.get('ph_basis','x')} n={obs.get('n','x')})")
     # (b) composer empty + inbox piling
     age = _oldest_unread_age_sec()
     if age is not None and age >= UNREAD_MIN_AGE_SEC:
@@ -199,7 +237,7 @@ def _nudge(episode: str, verdict: str) -> bool:
             cur.execute(
                 "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response)"
                 " VALUES (%s,%s,'update',%s,%s,'P1',true)",
-                (WATCHER_ID, AGENT, "[sre-liveness] wedge nudge — auto-wake trigger", body))
+                (POST_FROM, AGENT, "[sre-liveness] wedge nudge — auto-wake trigger", body))
             conn.commit()
         _log(f"NUDGE posted to {AGENT} (episode {episode}, verdict {verdict})")
         return True
@@ -222,7 +260,7 @@ def _escalate(episode: str, verdict: str, nudges: int) -> None:
                 cur.execute(
                     "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response)"
                     " VALUES (%s,'orch-console','blocker',%s,%s,'P1',true)",
-                    (WATCHER_ID, "SRE nudge-proof WEDGE — needs human relaunch", human))
+                    (POST_FROM, "SRE nudge-proof WEDGE — needs human relaunch", human))
                 conn.commit()
         except Exception as e:
             _log(f"escalate bus row failed: {e}")
