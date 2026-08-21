@@ -282,12 +282,22 @@
 
       <p class="subhead">Recently live:</p>
       <ul>
+        <li><strong>Bank in any report period, out of order</strong> — on the Reports list each closed period has a "Record deposit" action, so you can bank in any period directly instead of working through them in sequence. <em>Just went live.</em></li>
+        <li><strong>Weekly report → CSV for bank reconciliation</strong> — download any weekly report as a CSV (report reference, period, deposit reference, banked date, notes/coins split, totals) for Excel reconciliation against the bank. <em>Just went live.</em></li>
+        <li><strong>Jumaat reports inside the Reports section</strong> — the Reports page now links across to your Jumaat reports and has a "New Jumaat report" option. <em>Just went live.</em></li>
+        <li><strong>Receipt number on the thank-you letter</strong> — the appreciation letter now shows "Reference: Receipt No. …" wherever a receipt has been issued. <em>Just went live.</em></li>
+        <li><strong>Historical donor report</strong> — the per-donor view of the migrated historical donations, for admins and preparers. <em>Just went live — ready for you to try.</em></li>
+        <li><strong>Duplicate-detection &amp; merge</strong> — the screen that surfaces likely duplicate donor records for review, and merges the ones you confirm. <em>Just went live — ready for you to try.</em></li>
+        <li><strong>Tabung Jumaat dashboard</strong> — a dedicated tin-by-tin view for Tabung Jumaat, separate from the combined total. <em>Just went live.</em></li>
+        <li><strong>Top donors ranking</strong> — a donor-ranking view for admins and preparers (students excluded). <em>Just went live.</em></li>
+        <li><strong>Search by donor name on receipts and Qurban</strong> — find a receipt or a Qurban record by the donor's name. <em>Just went live.</em></li>
+        <li><strong>Appreciation Letter — download</strong> — generate and download a donor's appreciation letter as a PDF. <em>Just went live.</em></li>
         <li><strong>Returned date on Tabung Umum tins</strong> — each tin's detail now shows the date it was returned. <em>Just went live.</em></li>
         <li><strong>Linking imported / anonymous donors to their profiles</strong> — imported and anonymous bank donations can now be linked to a donor, so their receipts go out by name. <em>Just went live.</em></li>
         <li><strong>Receipt PDF in the "View as Preparer" preview</strong> — the "failed to generate" error in that admin preview is fixed; downloading receipts works normally there now.</li>
         <li><strong>Donor thank-you emails</strong> — automatic thank-you now sends when a tin is counted and a donor email is on it, from <em>Madrasah Irsyad Zuhri Al-Islamiah &lt;Fundraising@irsyad.edu.sg&gt;</em> (new counts going forward; past donations aren't mass-emailed — you stay in control of any bulk sending).</li>
         <li><strong>Tin search</strong> — find a Tabung Umum tin by its <strong>number or the donor's name</strong>, in one Search box.</li>
-        <li><strong>Export your donations yourself</strong> — Donations → Download → date range + category → CSV (with a Category column) for your bank-statement work.</li>
+        <li><strong>Export your donations yourself</strong> — Donations → Download → date range + category → CSV (with a Category column <strong>and full receipt numbers</strong>) for your bank-statement work.</li>
         <li><strong>Tabung Keluarga report</strong> showing $0 / missing totals — fixed (you confirmed the totals show).</li>
         <li><strong>Weekly Reports list on mobile</strong> — the "open" button is reachable without desktop mode (you confirmed).</li>
         <li><strong>Account menu + dashboard layout</strong> on mobile — fixed.</li>
@@ -308,7 +318,7 @@
 
     <section class="doc-sec">
       <h2><span class="em">🔄</span>In progress — being built now</h2>
-      <p class="figures-note">Progress figures are a rough guide, updated periodically (not live) &mdash; as of 19 Aug 2026 (SGT). Not delivery estimates.</p>
+      <p class="figures-note">Progress figures are a rough guide, updated periodically (not live) &mdash; as of 20 Aug 2026 (SGT). Not delivery estimates.</p>
       <ul>
         <li><strong>Receipts for the imported tabung donations</strong> <span class="pct">~85%</span> — recorded but bulk-imported without receipts; we're setting up a one-time bulk issue that creates the receipt records (won't auto-email your donors).</li>
         <li><strong>Committed-donation correction flow</strong> <span class="pct">~85%</span> — voiding/correcting a posted donation's category or donor, with audit + admin approval.</li>
@@ -326,6 +336,7 @@
         <li><strong>Bank statements, February onward</strong> — January is done; the tool handles multiple months.</li>
         <li><strong>Which fund the Stripe donations belong to</strong> — to attribute the one-time Stripe import correctly.</li>
         <li><strong>The signed data-processing authorization</strong> (with Saddam / your data-controller) — for the full donor-level reconciliation on the historical records.</li>
+        <li><strong>Confirmation of your Zakat asnaf categories</strong> — the Zakat-allocation line for the thank-you letter is built but switched off; before it goes live we need your leadership’s confirmation of the 4 asnaf (including what Riqab means in your practice).</li>
         <li><strong>Your fee structure</strong> — we capture it with you in the walkthrough (no old-system access needed; just talk us through it).</li>
       </ul>
     </section>
@@ -333,11 +344,10 @@
     <section class="doc-sec">
       <h2><span class="em">📋</span>Planned — designing the approach first (so we build it right)</h2>
       <ul>
-        <li><strong>Tabung Jumaat, tin-by-tin</strong> — currently a single combined total; you've asked to extend it to a full tin-by-tin dashboard like Tabung Umum (issue, search by number/name), usable + editable by admin <strong>and</strong> preparer — plus <strong>including Tabung Jumaat in the weekly report</strong>. One design piece we're scoping.</li>
         <li><strong>Search across everything</strong> — extending the tin/serial + name search beyond Tabung Umum to all tabung and fees.</li>
         <li><strong>Scan a tin's number when issuing</strong> — quicker, less error-prone.</li>
         <li><strong>Tabung Fajar count-completion thank-you letter</strong> (with Mudirah's signature) — sends once the report is <strong>checked</strong> (verified), per your call.</li>
-        <li><strong>Appreciation Letter</strong> — auto-fill the donor details + send.</li>
+        <li><strong>Appreciation Letter — auto-fill &amp; send</strong> — the download is live (above); auto-filling the donor details and sending to the donor is the next step.</li>
         <li><strong>School Fees payment</strong> and <strong>NETS at the counter (POS)</strong> — new modules; need your pricing/category sign-off + the provider setup.</li>
         <li><strong>Smaller enhancements</strong> — manual tin numbering, preparer editing a category after posting, the Zakat-allocation note on receipts.</li>
       </ul>
@@ -347,7 +357,6 @@
       <h2><span class="em">🗂️</span>Also tracked — earlier requests + smaller items (nothing forgotten)</h2>
       <ul>
         <li><strong>Bulk retro-receipts for older donations</strong> (Jan → now) — part of the imported-tabung receipts work above.</li>
-        <li><strong>"Top donors" ranking report</strong> — a dedicated donor-ranking view, on the list to build.</li>
         <li><strong>A single all-streams summary table</strong> (date-range across General / Infaq / Waqaf / Keluarga / Fajar / Kedai / Masjid / Qurban / SWAF / seasonal) — building on the current per-category dashboard.</li>
         <li><strong>GIRO unsuccessful handling</strong> — failed GIRO is recorded separately (not counted as a donation); showing a donor's failed-GIRO history on their profile is the remaining enhancement.</li>
         <li><strong>"Misc" fees category</strong> (teacher carpark + student ad-hoc) — a lightweight flexible category, separate from the School Fees module.</li>
