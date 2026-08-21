@@ -163,6 +163,47 @@ def test_real_composer_is_alerted_but_never_nudged_even_when_armed(fast_floor, r
     assert len(recorder["page"]) == 1       # it is surfaced instead
 
 
+# --------------------------------------------------------------------------- #
+# arm-gating on ACTIONABLE-unread (Nazim #31259 / cc-fleet-health): a CANDIDATE
+# that is not a GENUINE stall (0 actionable + wrote within ALERT_QUIET_SEC) is
+# benign idle-between-tasks — never alert, never nudge. Kills the cosmetic false-
+# arm on a 1-unread-0-actionable lane (ihsanos #31257). A genuine stall (actionable
+# OR long-quiet) is unchanged.
+# --------------------------------------------------------------------------- #
+
+def _cosmetic_kw():
+    # candidate (piling ~25m + quiet ~25m > 20m floors) but NOT a genuine stall
+    # (0 actionable, wrote 25m ago < ALERT_QUIET_SEC=90m).
+    return dict(agent="cc-irsyad", kind="lane", session="irsyad",
+                unread=1, oldest=1500.0, last_write=1500.0, actionable=0)
+
+
+def test_cosmetic_unsafe_wedge_is_not_alerted(fast_floor, recorder):
+    # composer reads 'real' (maybe a re-rendered ghost) => V_WEDGE_UNSAFE, but it is
+    # NOT a genuine stall -> must NOT alert (the cosmetic false-arm) and never nudge.
+    obs = _obs(comp=w.COMP_REAL, text="do a full health pass", **_cosmetic_kw())
+    w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["page"] == []           # cosmetic unsafe wedge: NOT surfaced
+    assert recorder["nudge"] == []
+
+
+def test_cosmetic_safe_wedge_is_not_nudged_when_armed(fast_floor, recorder):
+    # safe (empty/dim-ghost) composer, cosmetic candidate -> armed auto-nudge must
+    # NOT fire (was 'still nudge to help drain'; now gated on a genuine stall).
+    obs = _obs(comp=w.COMP_EMPTY, **_cosmetic_kw())
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["nudge"] == []          # cosmetic safe wedge: not nudged
+    assert recorder["page"] == []
+
+
+def test_actionable_unread_still_acts_even_if_wrote_recently(fast_floor, recorder):
+    # actionable>0 makes it a GENUINE stall even without long-quiet -> still nudged.
+    kw = _cosmetic_kw(); kw["actionable"] = 1
+    obs = _obs(comp=w.COMP_EMPTY, **kw)
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["nudge"] == ["cc-irsyad"]   # actionable -> genuine stall -> acts
+
+
 def test_safe_to_nudge_predicate():
     assert w.ComposerSignal(w.COMP_EMPTY).safe_to_nudge is True
     assert w.ComposerSignal(w.COMP_DELEGATED).safe_to_nudge is True
@@ -410,13 +451,19 @@ def test_hub_actionable_but_below_narrow_floor_does_not_page():
     assert w._genuine_stall(hub) is False
 
 
-def test_cycling_wedge_is_nudged_but_not_paged(fast_floor, recorder, monkeypatch):
+def test_cycling_wedge_is_gated_neither_nudged_nor_paged(fast_floor, recorder, monkeypatch):
+    # BEHAVIOR CHANGE (Nazim #31259 / cc-fleet-health arm-gating): a cycling lane
+    # (wrote 30m ago, only non-actionable FYI unread) is NOT a genuine stall, so it is
+    # now neither nudged nor paged. Previously it was auto-nudged ("cheap, helps it
+    # drain", Nazim 14413) — but that wake was the cosmetic false-arm (ihsanos #31257);
+    # a benign cycling lane self-drains its FYI on its next turn. Long-quiet + actionable
+    # cases (test_fully_quiet_wedge_is_paged / test_actionable_unread_still_acts) still act.
     monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
     obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad",
                last_write=1800.0, actionable=0)   # cycling: wrote 30m ago, FYI unread
     w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
-    assert recorder["nudge"] == ["cc-irsyad"]   # still auto-recovered (cheap)
-    assert recorder["page"] == []               # but NOT paged — benign cycling
+    assert recorder["nudge"] == []              # cosmetic candidate -> not nudged (was: nudged)
+    assert recorder["page"] == []               # and NOT paged — benign cycling
 
 
 def test_fully_quiet_wedge_is_paged(fast_floor, recorder, monkeypatch):

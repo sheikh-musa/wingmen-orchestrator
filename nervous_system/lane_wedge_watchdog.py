@@ -1251,9 +1251,14 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             log(f"{kind} {obs.agent}: {obs.bus.unread} unread "
                 f"({obs.bus.actionable} actionable), idle {elapsed_min}m, "
                 f"composer={obs.composer.state} ({'ARMED:'+mode if not dry else 'DETECT-ONLY'})")
-        # A menu-trap ALWAYS surfaces (it is definitively stuck — blocks the bus),
-        # like unsafe; a plain safe wedge pages only on a genuine stall.
-        if (alert and (menu or unsafe or _genuine_stall(obs)) and not entry.get("alerted")
+        # A menu-trap ALWAYS surfaces (it is definitively stuck — blocks the bus).
+        # Everything else — including an `unsafe` (real-per-content) composer — surfaces
+        # ONLY on a genuine stall (actionable req=True unread, OR fully-quiet past
+        # ALERT_QUIET_SEC). Arm-gating (Nazim #31259 / cc-fleet-health): `unsafe` no longer
+        # alerts on its own — a lane idle on a single non-actionable unread whose composer
+        # merely reads as real (often a re-rendered ghost, not a genuine draft) is the
+        # cosmetic false-arm that pulled the operator in for nothing (ihsanos #31257).
+        if (alert and (menu or _genuine_stall(obs)) and not entry.get("alerted")
                 and not _lane_snoozed(obs.session)):
             _page(_menu_trap_alert(obs, elapsed_min) if menu
                   else _wedge_alert(obs, elapsed_min, unsafe, armed=not dry))
@@ -1273,15 +1278,26 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             results.append(line)
             continue
 
+        # Arm-gating (Nazim #31259 / cc-fleet-health): a COSMETIC safe wedge — a candidate
+        # (idle + unread piling) that is NOT a genuine stall (0 actionable AND wrote within
+        # ALERT_QUIET_SEC) — is benign idle-between-tasks. Do NOT auto-nudge it: waking a
+        # lane to drain a single non-actionable FYI is a wasted wake, not recovery. It self-
+        # drains on its next turn, and if it ever crosses into a real stall the genuine-stall
+        # gate above acts then. Logged already (durable record), just not acted on.
+        if not _genuine_stall(obs):
+            line["action"] = ("cosmetic wedge (candidate but not a genuine stall — 0 actionable, "
+                              "wrote within ALERT_QUIET_SEC) — logged, not nudged")
+            results.append(line)
+            continue
+
         if dry:
             line["action"] = f"[DETECT-ONLY] WOULD auto-nudge {obs.agent} (unarmed)"
             results.append(line)
             continue
 
-        # ARMED (mode >= auto-nudge) AND lease held -> recover. Count toward the
-        # repeat breaker only for a GENUINE stall, so a cycling lane's benign idles
-        # never accumulate to REPEAT_K (Nazim 14413).
-        if _genuine_stall(obs) and (not history or now - history[-1] > WEDGE_GRACE_SEC):
+        # ARMED (mode >= auto-nudge) AND lease held -> recover. genuine_stall is now
+        # guaranteed above, so this is always a real stall counting toward the repeat breaker.
+        if not history or now - history[-1] > WEDGE_GRACE_SEC:
             history.append(now)
         _recover(obs, entry, mode, alert, now, lane_dirs, line)
         results.append(line)
