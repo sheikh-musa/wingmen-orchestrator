@@ -57,7 +57,12 @@ READ_LIMIT_BYTES = 24_400
 WARN_HEADROOM_FRACTION = 0.20
 WARN_BYTES = int(READ_LIMIT_BYTES * (1 - WARN_HEADROOM_FRACTION))  # 19_520
 
-LINK_RE = re.compile(r"\(([A-Za-z0-9_.-]+\.md)\)")
+# Require the markdown-link `](target.md)` close-bracket, not a bare `(x.md)`: without the
+# `\]` this matched parenthetical prose INSIDE a link label — e.g. the entry
+# "[compact a memory index → KEEP (file.md) link syntax](feedback_...md)" reported a phantom
+# DANGLING edge to a non-existent `file.md`. Verified fleet-wide (2026-08-21): the `\]` drops
+# ONLY that one phantom, no real edge anywhere. (cc-fleet-health, per orch-console #31251.)
+LINK_RE = re.compile(r"\]\(([A-Za-z0-9_.-]+\.md)\)")
 # Memories cross-reference each other with [[wiki-links]]. Those edges are the substrate's
 # existing knowledge graph — 616 of them across 209 of the orchestrator's 221 memories when
 # first measured — and until this checker existed NOTHING verified they resolved. A broken
