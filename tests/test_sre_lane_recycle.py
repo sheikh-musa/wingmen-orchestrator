@@ -120,6 +120,7 @@ def test_armed_recycle_permitted_audits_resets_and_names_abs_handoff(monkeypatch
     audit = []
     monkeypatch.setattr(slr, "audit_before_clear", lambda *a, **k: audit.append(a))
     monkeypatch.setattr(slr, "_newest_handoff_path", lambda base, notes: "/abs/reports/irsyad-handoff-NOW.md")
+    monkeypatch.setattr(slr.hcp, "compact_if_enabled", lambda *a, **k: {"wrote": False, "changed": False})
 
     class _R:
         returncode = 0; stdout = "reset ok"; stderr = ""
@@ -133,3 +134,47 @@ def test_armed_recycle_permitted_audits_resets_and_names_abs_handoff(monkeypatch
     assert "/abs/reports/irsyad-handoff-NOW.md" in out["boot"]      # absolute-path boot (Phase 1)
     # reset_lane.sh was invoked for the SESSION from the plan (the exact discovered lane)
     assert "irsyad-tabung-jumaat" in reset_calls[0][0]
+
+
+# ── Item-3 (Nazim #31825): staged handoff compaction is wired into the armed action ───
+def _permitted_plan(monkeypatch):
+    monkeypatch.setattr(slr, "plan",
+                        lambda conn, lr, armed=True, require_bloat=False, handoff_ref_epoch=None: {
+                            "permitted": True, "reason": "ok", "gates": {"idle": True},
+                            "base": "cc-irsyad", "session": "irsyad-tabung-jumaat"})
+    monkeypatch.setattr(slr, "audit_before_clear", lambda *a, **k: None)
+    monkeypatch.setattr(slr, "_newest_handoff_path", lambda base, notes: "/abs/reports/irsyad-handoff-NOW.md")
+
+
+def test_armed_recycle_compacts_handoff_before_reset(monkeypatch):
+    _permitted_plan(monkeypatch)
+    order = []
+    def _cmp(path, **k):
+        order.append(("compact", path, k.get("agent"), k.get("session")))
+        return {"wrote": True, "changed": True, "before_bytes": 120000, "after_bytes": 27000}
+    monkeypatch.setattr(slr.hcp, "compact_if_enabled", _cmp)
+
+    class _R:
+        returncode = 0; stdout = "reset ok"; stderr = ""
+    monkeypatch.setattr(slr.subprocess, "run",
+                        lambda *a, **k: (order.append(("reset",)), _R())[1])
+
+    out = slr.armed_recycle(None, _lane_row(), reason="r")
+    assert out["recycled"] is True
+    # compaction ran with the lane's agent/session/handoff, and BEFORE reset_lane.sh
+    assert order[0] == ("compact", "/abs/reports/irsyad-handoff-NOW.md", "cc-irsyad", "irsyad-tabung-jumaat")
+    assert order[1] == ("reset",)
+
+
+def test_armed_recycle_aborts_when_compaction_raises(monkeypatch):
+    _permitted_plan(monkeypatch)
+    def _boom(*a, **k):
+        raise OSError("disk full mid-write")
+    monkeypatch.setattr(slr.hcp, "compact_if_enabled", _boom)
+    reset_calls = []
+    monkeypatch.setattr(slr.subprocess, "run", lambda *a, **k: reset_calls.append(a))
+
+    out = slr.armed_recycle(None, _lane_row(), reason="r")
+    assert out["recycled"] is False
+    assert "compaction failed" in out["reason"]
+    assert reset_calls == []                 # reset NEVER runs onto an unproven handoff

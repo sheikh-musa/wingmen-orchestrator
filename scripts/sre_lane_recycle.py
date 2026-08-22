@@ -36,6 +36,7 @@ from pathlib import Path
 _ORCH_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ORCH_DIR / "scripts" / "lib"))
 import fleet_health_boundaries as fhb  # noqa: E402
+import handoff_compaction_policy as hcp  # noqa: E402  (SSOT staged handoff compaction)
 
 TMUX = os.environ.get("SRE_TMUX_BIN", "/usr/local/bin/tmux")
 _TMUX_TIMEOUT = 5
@@ -369,6 +370,18 @@ def armed_recycle(conn, lane_row: dict, *, reason: str,
         return {"recycled": False, "reason": p["reason"], "gates": p["gates"], "session": p["session"]}
     audit_before_clear(conn, p["base"], p["session"], p["gates"], reason)
     handoff_path = _newest_handoff_path(p["base"], lane_row.get("notes"))
+    # STAGED handoff compaction (Nazim #31825, item-3): keep the restore point readable-whole
+    # for the fresh lane, enforce-in-code. No-op when <=cap; the policy HOLDS cai. FAIL LOUD:
+    # a compaction exception ABORTS this recycle (dead-man's-switch) — we never reset onto a
+    # possibly half-written handoff. Runs AFTER the audit row, BEFORE the /clear.
+    if handoff_path:
+        try:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            hcp.compact_if_enabled(handoff_path, agent=p["base"],
+                                   session=p["session"], stamp=stamp)
+        except Exception as e:  # noqa: BLE001 — fail loud, abort the recycle
+            return {"recycled": False, "reason": f"handoff compaction failed: {e!r}",
+                    "session": p["session"], "gates": p["gates"]}
     boot = build_boot_instruction(p["base"], handoff_path)
     r = subprocess.run(["bash", str(_ORCH_DIR / "scripts" / "reset_lane.sh"), p["session"], boot],
                        capture_output=True, text=True, timeout=180)

@@ -40,6 +40,7 @@ ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # still a trap. Resolve caller-relative paths against this.
 CALLER_PWD="$PWD"
 cd "$ORCH_DIR" || { echo "self_recycle: orch dir missing" >&2; exit 9; }
+PY="$ORCH_DIR/.venv/bin/python3"; [ -x "$PY" ] || PY="$(command -v python3)"
 
 # Resolve a caller-supplied path: absolute wins; then the caller's cwd (what they meant); then
 # the orch dir (so existing callers and the singleton bodies keep working). Echoes the resolved
@@ -148,6 +149,30 @@ if [ "$BYTES" -lt 800 ]; then
 fi
 
 echo "self_recycle: handoff OK (${BYTES}B, ${AGE}s old)"
+
+# STAGED HANDOFF COMPACTION (Nazim #31825, item-3) — keep the restore point readable-whole
+# for the fresh body. Enforce-in-code so nobody has to REMEMBER to run it. NO-OP when the
+# handoff is already <= cap; the policy (scripts/lib/handoff_compaction_policy.py) HOLDS cai
+# until one clean fleet cycle. Runs in THIS turn, synchronously, BEFORE we schedule the
+# detached reset — so the compacted handoff (and its .bak) is in place well before fire time.
+# DEAD-MAN'S-SWITCH: a real compaction FAILURE aborts the recycle and leaves the world
+# unchanged — we never reset onto a possibly half-written restore point. (The tool itself
+# writes .bak first and fail-closes on an empty/larger result, leaving the original intact;
+# that path is a non-fatal WARN, exit 0.)
+if [ "$DRY" = 1 ]; then
+  "$PY" -m scripts.lib.handoff_compaction_policy apply \
+        --handoff "$HANDOFF" --session "$SESSION" --stamp "dryrun" --dry-run \
+    || echo "self_recycle: (dry-run) compaction preview errored — non-fatal in dry-run" >&2
+else
+  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+  if ! "$PY" -m scripts.lib.handoff_compaction_policy apply \
+             --handoff "$HANDOFF" --session "$SESSION" --stamp "$STAMP"; then
+    echo "self_recycle: REFUSED — handoff compaction FAILED. World UNCHANGED (handoff not rewritten, reset NOT scheduled). Fix and re-run." >&2
+    exit 6
+  fi
+  BYTES=$(wc -c < "$HANDOFF" | tr -d ' ')   # may have shrunk; mtime is fresher (GATE-1 still holds)
+fi
+
 echo "self_recycle: target session: ${SESSION}"
 echo "self_recycle: will quiesce '${SESSION}', wait for it to go idle (up to ${MAX_WAIT}s), then fire '$RESET' — DETACHED from this turn."
 
