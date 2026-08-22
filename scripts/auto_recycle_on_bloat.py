@@ -49,10 +49,13 @@ HARD_LINE = 95           # shortens G1 idle-patience only; never touches G2 / ne
 # on idle) and MIS-MAPS sub-tag instances onto their base row (verified: cc-irsyad gauge
 # 8% while its pane showed 795.9k). So detection moves to the LIVE PANE signal
 # (scripts/lib/pane_bloat_signal) — CC's own `/clear to save {N}k tokens` reclaim hint.
-# PANE_FIRE_K = the fire bar in K-tokens: ~85% of a 1M window, per the handoff "fire at
-# ~85%, before the 98% cliff". Distinct from (and lower than) the legacy 88% gauge bar;
-# console confirms the exact bar at ARMING. Detect-only until then — this fires NOTHING.
-PANE_FIRE_K = 850
+# PANE_FIRE_K = the IDLE-recycle fire bar in K-tokens. LOWERED ~85%(850) -> ~65%(650)
+# per Musa op#15956 / Nazim #31751: "if it has to reach 94% it's broken." Idle-recycle
+# is FREE (no work lost), so recycle an IDLE lane BEFORE the red zone instead of near the
+# cliff (coord riding 94->98% while active was the proof it was set too high). The idle
+# gate still applies — a BUSY/STAGED lane at >=650k is GATED, never fired (never-interrupt
+# stays; only the IDLE bar dropped). Value CONFIRMED by Nazim #31754 (#31751 said ~65%).
+PANE_FIRE_K = 650
 # WATCH_K = the OBSERVE-window verbose bar. Lanes at/above this (but maybe below the fire
 # bar) get their pane signal + idle verdict logged every cycle, so console's Stage-0
 # review sees the VARIED states (busy/staged/sub-tag/idle) being correctly NOT-fired and
@@ -376,7 +379,7 @@ def warn_escalate(escalates) -> int:
                     if to_agent == "cc-fleet-health":
                         body = (
                             f"ACT (Stage-1, op#28437 / Musa's invisibility gap): {agent} (session {session}) is at "
-                            f"~{k:.0f}k pane-truth (>= {PANE_FIRE_K}k, ~85% of 1M) and CLEAN IDLE, but it is NOT a "
+                            f"~{k:.0f}k pane-truth (>= {PANE_FIRE_K}k, ~65% of 1M) and CLEAN IDLE, but it is NOT a "
                             f"resolved worker lane — a singleton, or a worker MISSING from fleet_lanes (G4 fail-closed "
                             f"=> SINGLETON-ESCALATE, never a WOULD-FIRE, so warn_console never sees it). Close the loop "
                             f"at SRE: (1) if it's a WORKER lane missing from fleet_lanes, REGISTER it (base, worktree, "
@@ -434,7 +437,7 @@ def warn_console(fires) -> int:
                     if to_agent == "cc-fleet-health":
                         body = (
                             f"ACT (Stage-1.5, op#13308): worker lane {agent} (session {session}) is at "
-                            f"~{k:.0f}k pane-truth (>= {PANE_FIRE_K}k, ~85% of 1M) and CLEAN IDLE. Close the "
+                            f"~{k:.0f}k pane-truth (>= {PANE_FIRE_K}k, ~65% of 1M) and CLEAN IDLE. Close the "
                             f"loop at SRE: (1) SELF-CHECKPOINT the lane first — WRITE a fresh handoff yourself, "
                             f"NEVER trust an on-disk handoff's freshness (the 4-day-stale bug); (2) but FIRST "
                             f"check op#13323 — if it's idle-with-a-PENDING-PLAN (live monitor / pending bus item), "

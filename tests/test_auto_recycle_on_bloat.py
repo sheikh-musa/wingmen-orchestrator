@@ -146,6 +146,21 @@ def test_classify_pane_would_fire_only_worker_bloated_idle():
     assert d.verdict == "WOULD-FIRE"
 
 
+def test_classify_pane_idle_bar_lowered_to_recycle_before_red_zone():
+    # Musa op#15956 / #31751: idle-recycle is FREE, so recycle BEFORE the red zone —
+    # "if it has to reach 94% it's broken". The IDLE fire bar drops from ~85% (850k)
+    # to ~65% (~650k). Pins the INTENT (absolute, not relative to PANE_FIRE_K):
+    #  - a ~70% idle worker (700k) MUST now WOULD-FIRE (it did NOT at the old 850 bar)
+    #  - a ~50% idle worker (500k) must NOT fire (don't churn a still-healthy lane)
+    # Together these pin PANE_FIRE_K into (500, 700] ~= the ~65% target.
+    hot = ar.classify_pane("irsyad", "cc-irsyad", SINGLETONS, WORKERS,
+                           bloat_k=700, verdict_state="IDLE_EMPTY")
+    assert hot.verdict == "WOULD-FIRE"
+    healthy = ar.classify_pane("irsyad", "cc-irsyad", SINGLETONS, WORKERS,
+                               bloat_k=500, verdict_state="IDLE_EMPTY")
+    assert healthy.verdict == "NOT-BLOATED"
+
+
 # ── select_escalates() — Musa's invisibility gap (op#28437) ──────────────────
 # A SINGLETON-ESCALATE lane (pane >= fire bar but NOT a resolved worker lane — a
 # singleton, or a worker missing from fleet_lanes) is NEVER a WOULD-FIRE, so
