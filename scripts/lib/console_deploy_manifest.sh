@@ -5,52 +5,48 @@
 # sourced seam is deliberate: the review-gate's content-hash and its test must agree by
 # construction, not by two copies that can drift.
 #
-# WHY (item-4b, Nazim #31843). The gate's review is content-hash-keyed so a stale review of a
-# different diff cannot ship. The hash used to cover ONLY the five static frontend files, but the
-# console is run as `python -m nervous_system.console` — the whole backend package. So a
-# backend-only change left the hash unchanged and the backend shipped UNREVIEWED. This seam folds
-# every *.py under the console package into the same hash so any backend change forces a fresh
-# cc-quality review.
+# WHY (item-4b, Nazim #31843/#31865). The gate's review is content-hash-keyed so a stale review of
+# a different diff cannot ship. The hash used to cover ONLY five static frontend files. But the
+# console is run as `python -m nervous_system.console` (the whole backend package) AND app.py
+# serves every file under static/ by route (/, /irsyad, /docs, /media, /static/<file>). So a change
+# to the backend OR to any of the ~12 un-gated served static files (app.js SPA logic, index/irsyad/
+# docs/media pages, manifest.json, icons/*) shipped to users UNREVIEWED. This seam gates ALL of it.
 #
 # COVERAGE BOUNDARY (documented, per Nazim #31843 — a KNOWN written boundary is fine; a SILENT one
-# is the thing we are killing. cc-quality #31859 caught the first cut of this doc overstating
-# coverage; this is the honest version).
+# is the thing we are killing. cc-quality #31859 caught an earlier cut of this doc overstating
+# coverage; this is the honest, now-widened version — Nazim #31865 chose Option 1: gate it all).
 #
-# WHAT THE HASH COVERS:
-#   * BACKEND — every *.py under nervous_system/console/ (recursive, sorted). Complete.
-#   * STATIC  — ONLY these 5 files: fleet.html, fleet.js, lanes.html, lanes.js, sw.js.
+# WHAT THE HASH COVERS (everything the console ships to users, + its deploy artifact):
+#   * BACKEND  — every *.py under nervous_system/console/ (recursive). Complete.
+#   * STATIC   — EVERY file under nervous_system/console/static/ (recursive): all html/js/json/css
+#                and binary assets (icons/*). Complete — no per-file carve-out (a carve-out would
+#                re-introduce exactly the silent-cut blindspot this closes).
+#   * PROVENANCE — nervous_system/console/Dockerfile (defines the VPS-portable container artifact).
 #
-# WHAT IT DOES NOT COVER (the written cuts — NOT silent):
-#   * OTHER SERVED STATIC — app.py serves ~12 more static files by route (/, /irsyad, /docs,
-#     /media, and /static/<file> for ANY asset): index.html, irsyad.html, irsyad.js, docs.html,
-#     docs.js, media.html, media.js, app.js (the SPA logic), manifest.json, icons/*. A change to
-#     any of these currently ships WITHOUT a fresh review — the same class item-4b closed for the
-#     backend. Whether to gate them (and which — html/js certainly; icons/manifest are judgment)
-#     is a WIDEN decision for Nazim (console owner); cc-quality #31859 flagged it, does not
-#     adjudicate. Do NOT widen the static set here unilaterally — escalate, then build on his OK.
+# WHAT IT DOES NOT COVER (the one written cut — NOT silent):
 #   * OUTSIDE-PACKAGE IMPORTS — shared libs the console imports from elsewhere (as of item-4b the
 #     only one is `scripts.lib.lane_token_resolver`, a fleet-wide token util, not console-serving
 #     logic). Left out deliberately (Nazim #31857 confirmed) to avoid over-triggering re-review on
-#     unrelated token changes. Widen only for a console-serving shared module, and escalate.
-#   * Dockerfile — deploy-provenance, not served content; conscious exclusion pending Nazim.
+#     unrelated token changes. Widen only for a console-serving shared module, and escalate first.
 
-# console_deploy_files_rel [root] — print the gate's file set as REPO-RELATIVE paths, in a
-# deterministic order (static frontend in fixed order first, then every backend *.py under the
-# console package, RECURSIVE + sorted, __pycache__ excluded). Relative paths keep the hash
-# portable across checkouts/temp dirs (the hash must depend on CONTENT, not on where the tree
-# lives). Order is fixed so the hash is stable run-to-run.
+# console_deploy_files_rel [root] — print the gate's file set as REPO-RELATIVE paths, globally
+# sorted (deterministic order feeds the content hash). Covers ALL served static + every backend
+# *.py + the Dockerfile; __pycache__ excluded. Relative paths keep the hash portable across
+# checkouts/temp dirs (the hash must depend on CONTENT, not on where the tree lives).
 console_deploy_files_rel() {
   local root="${1:-$PWD}"
-  # static frontend — fixed order (order feeds the content hash)
-  printf '%s\n' \
-    nervous_system/console/static/fleet.html \
-    nervous_system/console/static/fleet.js \
-    nervous_system/console/static/lanes.html \
-    nervous_system/console/static/lanes.js \
-    nervous_system/console/static/sw.js
-  # backend — every *.py under the console package, recursive + sorted, no __pycache__
-  ( cd "$root" && find nervous_system/console -type f -name '*.py' \
-      -not -path '*/__pycache__/*' | LC_ALL=C sort )
+  ( cd "$root" && {
+      # served static — EVERY asset app.py can serve by route, recursive (Nazim #31865 opt-1)
+      find nervous_system/console/static -type f -not -path '*/__pycache__/*'
+      # backend — every *.py under the console package, recursive
+      find nervous_system/console -type f -name '*.py' -not -path '*/__pycache__/*'
+      # deploy provenance — the Dockerfile that defines the deployed artifact. Guarded with an
+      # `if` (NOT `[ -f ] &&`, which would exit non-zero and, under pipefail, fail the whole
+      # function on a checkout that lacks the Dockerfile).
+      if [ -f nervous_system/console/Dockerfile ]; then
+        printf '%s\n' nervous_system/console/Dockerfile
+      fi
+    } | LC_ALL=C sort )
 }
 
 # console_content_hash [root] — 16-char sha256 of the gate's content. The digest is taken over
