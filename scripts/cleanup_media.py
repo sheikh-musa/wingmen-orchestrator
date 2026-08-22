@@ -33,6 +33,13 @@ KEEP_LATEST_N = 12          # always keep the N newest per project
 KEEP_RECENT_DAYS = 30       # always keep anything newer than this
 SUPERSEDED_GRACE_DAYS = 3   # a superseded sibling must be at least this old to retire
 IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+# op#15741 (Nazim #31480): client-sent DOCUMENTS also accumulate in the cache and follow the
+# SAME lifecycle (30d live / ~30d archive / delete@60d-absolute) — same PDPA logic, a doc is
+# client PII/cache no less than an image. Anything to KEEP is copied to a durable location, not
+# left to the cache (his caveat, e.g. the CSOEM spec -> cosem workstream docs). Conservative set:
+# client office docs only; ambiguous code/config/audio/archive types are left out deliberately.
+DOC_EXT = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".csv", ".txt"}
+KEEP_EXT = IMG_EXT | DOC_EXT   # the extension set the retention governs
 
 _STRIP = re.compile(r"(_live|_v\d+|_\d{6,8}|_\d{10,}|_final|_new|_old|_copy)", re.I)
 
@@ -49,7 +56,7 @@ def scan(project_dir: pathlib.Path):
     for dp, _dn, fn in os.walk(project_dir):
         for f in fn:
             p = pathlib.Path(dp) / f
-            if p.suffix.lower() in IMG_EXT:
+            if p.suffix.lower() in KEEP_EXT:
                 files.append(p)
     return files
 
@@ -57,7 +64,7 @@ def scan_flat(d: pathlib.Path):
     # Files DIRECTLY in `d`, NON-recursively — for the tg_media ROOT bucket (op#15741).
     # Media routed to the root instead of a project subdir was never scanned because main()
     # iterated subdirs only. Non-recursive so it never re-touches subdir or _archive files.
-    return [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in IMG_EXT]
+    return [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in KEEP_EXT]
 
 def candidates(files):
     if not files:
