@@ -1100,6 +1100,49 @@ def _pane_canonical(row):
     return _SESSION_COORD.get(row.get("session")) or row.get("base") or row.get("session")
 
 
+# The SRE acts on an IDLE worker lane at/above this fill — aligns with
+# auto_recycle_on_bloat.PANE_FIRE_K = 650k / ~65% (Nazim #31751). Kept as a local
+# constant (documented coupling, not a code import) so the console has no runtime
+# dependency on the recycle daemon; if that bar moves, move this with it.
+_SRE_RECYCLE_PCT = 65
+
+_SRE_DISPOSITION_LABEL = {
+    "healthy": "healthy",
+    "watching": "SRE watching",
+    "recycling": "SRE recycling",
+    "held": "SRE holding (active work)",
+}
+
+
+def _sre_disposition(pct, idle_verdict):
+    """The SRE's live per-lane disposition — DERIVED from pct + idle_verdict, never a
+    separately-stored field that could go stale and show a lie (Nazim #31750, the
+    'am i sre?' fix: a red/amber lane must always render who's on it). States:
+      healthy   — green (< amber): nothing for the SRE to do
+      watching  — amber but below the ~65% idle-recycle bar: SRE monitoring, not yet acting
+      recycling — at/above the recycle bar AND idle: SRE recycles it (Stage-1 acts on the WARN)
+      held      — at/above the bar BUT busy/staged: SRE HOLDS (never-interrupt active work)
+    Fail-safe: an unreadable pct => 'watching' (surface it, never a false 'healthy')."""
+    try:
+        p = int(pct)
+    except (TypeError, ValueError):
+        return {"state": "watching", "label": _SRE_DISPOSITION_LABEL["watching"]}
+    if p >= _SRE_RECYCLE_PCT:
+        if idle_verdict == "IDLE_EMPTY":
+            return {"state": "recycling", "label": _SRE_DISPOSITION_LABEL["recycling"]}
+        # held = not-recycling (never-interrupt), but distinguish WHY: a WORKING/STAGED
+        # lane is genuinely busy ("active work"); a GHOST_WEDGED/UNSURE lane is STUCK
+        # (a separate watchdog recovers it) — don't mislabel a wedged lane as active work.
+        if idle_verdict in ("WORKING", "STAGED"):
+            return {"state": "held", "label": "SRE holding (active work)"}
+        return {"state": "held", "label": "SRE holding (lane stuck?)"}
+    elif p >= round(_CTX_SOFT * 100):    # amber (>=60%) but below the recycle bar
+        state = "watching"
+    else:
+        state = "healthy"
+    return {"state": state, "label": _SRE_DISPOSITION_LABEL[state]}
+
+
 def _pane_entry(row):
     """One bloat entry (renderTopBloat/_context_bloat shape) from a pane_context row, or
     None when the row carries NO readable signal (both pct + pane_k NULL = below CC's
@@ -1141,6 +1184,9 @@ def _pane_entry(row):
         # at the cliff) or 'k' (approx from the `/clear to save {N}k` hint).
         "src": src,
         "is_coord": is_coord,
+        # op#31750: the SRE's live disposition for this lane (healthy/watching/
+        # recycling/held), so a red/amber card always shows "who's on it".
+        "sre_disposition": _sre_disposition(pct, row.get("idle_verdict")),
     }
 
 
@@ -1177,7 +1223,10 @@ def _pane_header(pane_rows):
     for e in _pane_bloat(pane_rows, include_coords=True):
         if e["level"] in ("amber", "red") and (worst is None or e["pct"] > worst["pct"]):
             worst = {"label": e["agent"], "session": e["sub_tag"],
-                     "pct": e["pct"], "level": e["level"]}
+                     "pct": e["pct"], "level": e["level"],
+                     # op#31750: carry the SRE disposition so the resting banner reads
+                     # "<lane> <pct>% — SRE recycling/HELD", not just "context building".
+                     "sre_disposition": e.get("sre_disposition")}
     return {"state": "alert" if worst else "clear", "worst": worst}
 
 
@@ -1445,14 +1494,18 @@ def _irsyad_payload():
     live = set(panes.live_sessions())
     with ThreadPoolExecutor(max_workers=4) as ex:
         f_lanes = ex.submit(db.fetch_lanes)
-        f_bloat = ex.submit(db.fetch_context_bloat)
+        # op#31750/item-4: the irsyad-perimeter per-lane ctx% now reads PANE-TRUTH
+        # (fetch_pane_context + _pane_bloat), NOT the cc_session_costs gauge — the gauge
+        # lies for idle/sub-tag worker lanes (the exact bug item 2 fixed for the main
+        # view). A no-signal lane fails closed to "—" (honest), never a stale gauge %.
+        f_bloat = ex.submit(db.fetch_pane_context)
         f_pool = ex.submit(db.fetch_pool_usage)
         # Process-verified token + model per LOCAL session. include_remote=False:
         # the irsyad family is entirely on the Mini, so no SSH latency is incurred.
         f_tt = ex.submit(panes.token_ground_truth, False)
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         try:
-            bloat = _context_bloat(f_bloat.result())
+            bloat = _pane_bloat(f_bloat.result())   # pane-truth worker entries (item-4)
         except Exception as e:
             logger.warning("irsyad context_bloat failed: %s", e)
             bloat = []

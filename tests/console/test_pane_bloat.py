@@ -133,3 +133,73 @@ def test_true_clear_has_all_green_glance_and_clear_header():
     header = console_app._pane_header(rows)
     assert glance and all(e["level"] == "green" for e in glance)
     assert header["state"] == "clear"
+
+
+# ── SRE disposition per worker lane (item 2, Nazim #31750 — "am i sre?") ──────
+# Each lane entry carries the SRE's current disposition, DERIVED live from pct +
+# idle_verdict (no separate stored field that could go stale). So a red/amber lane
+# ALWAYS renders "and here's who's on it" — the thing that lets Musa look away.
+def test_sre_disposition_healthy_below_amber():
+    # green (< 60%) => SRE has nothing to do.
+    e = console_app._pane_entry(_pane("finance", 400.0))          # 40% green
+    assert e["sre_disposition"]["state"] == "healthy"
+
+
+def test_sre_disposition_watching_amber_below_recycle_bar():
+    # amber but below the ~65% idle-recycle bar => SRE watching, not yet acting.
+    e = console_app._pane_entry(_pane("finance", 620.0))          # 62% amber, < 65 bar
+    assert e["sre_disposition"]["state"] == "watching"
+
+
+def test_sre_disposition_recycling_when_bloated_and_idle():
+    # at/above the recycle bar AND idle => SRE recycles it (Stage-1: SRE acts on the WARN).
+    e = console_app._pane_entry(_pane("irsyad", 700.0, idle="IDLE_EMPTY"))   # 70% idle
+    assert e["sre_disposition"]["state"] == "recycling"
+
+
+def test_sre_disposition_held_when_bloated_but_active():
+    # at/above the bar BUT busy => SRE HOLDS (never-interrupt active work) — the coord lesson.
+    e = console_app._pane_entry(_pane("irsyad", 700.0, idle="WORKING"))      # 70% busy
+    assert e["sre_disposition"]["state"] == "held"
+
+
+def test_sre_recycle_bar_stays_coupled_to_the_daemon_fire_bar():
+    # cc-quality LOW#1: _SRE_RECYCLE_PCT is comment-coupled to the daemon's PANE_FIRE_K.
+    # Guard it: if the daemon bar moves and this doesn't, the console would show a
+    # disposition at a threshold the daemon no longer acts on. (Display-only, but a
+    # silent drift = exactly the lie this whole feature exists to avoid.)
+    from scripts.auto_recycle_on_bloat import PANE_FIRE_K
+    assert console_app._SRE_RECYCLE_PCT == PANE_FIRE_K * 100 // 1000
+
+
+def test_sre_disposition_wedged_lane_not_labeled_active_work():
+    # cc-quality LOW#2: a wedged/unsure lane isn't "active work" (it's stuck; a separate
+    # watchdog recovers it). 'held' is still correct (not-recycling), but the label must
+    # not claim active work for a wedged lane.
+    for v in ("GHOST_WEDGED", "UNSURE", "UNSURE:TimeoutError"):
+        e = console_app._pane_entry(_pane("irsyad", 700.0, idle=v))
+        assert e["sre_disposition"]["state"] == "held"
+        assert "active work" not in e["sre_disposition"]["label"].lower()
+
+
+def test_sre_disposition_busy_lane_still_labeled_active_work():
+    # a genuinely busy lane (WORKING/STAGED) keeps the informative "active work" label.
+    for v in ("WORKING", "STAGED"):
+        e = console_app._pane_entry(_pane("irsyad", 700.0, idle=v))
+        assert e["sre_disposition"]["state"] == "held"
+        assert "active work" in e["sre_disposition"]["label"].lower()
+
+
+def test_header_worst_carries_sre_disposition():
+    # The RESTING banner shows the worst lane; it must carry the SRE disposition so it
+    # reads "irsyad 90% — SRE recycling", not "— context building" (the am-i-sre fix).
+    h = console_app._pane_header([_pane("irsyad", 900.0, idle="IDLE_EMPTY")])   # 90% idle
+    assert h["worst"]["sre_disposition"]["state"] == "recycling"
+    h2 = console_app._pane_header([_pane("irsyad", 900.0, idle="WORKING")])     # 90% busy
+    assert h2["worst"]["sre_disposition"]["state"] == "held"
+
+
+def test_sre_disposition_cliff_idle_is_recycling():
+    # pct-only cliff lane (pane_k NULL, pct=98) idle => still 'recycling' (SRE on it).
+    e = console_app._pane_entry(_pane("irsyad", None, pct=98, idle="IDLE_EMPTY"))
+    assert e["sre_disposition"]["state"] == "recycling"

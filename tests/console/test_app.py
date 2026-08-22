@@ -814,10 +814,14 @@ def irsyad_server(monkeypatch, tmp_path):
         _irsyad_lane("irsyad-import", base="cc-irsyad-b", lane=None),
         _irsyad_lane("cosem-tdu", base="cc-cosem-platform"),   # NOT irsyad family
     ])
-    monkeypatch.setattr(db, "fetch_context_bloat", lambda: [
-        {"cc_identity": "cc-irsyad", "sub_tag": "irsyad-coord",
-         "ctx_tokens": 500000, "input_tokens": 10, "age_s": 60,
-         "auth_fp": _MUSA2_FP, "host": "Sheikhs-Mini"},
+    # item-4 (op#31750): the irsyad view now reads PANE-TRUTH (fetch_pane_context +
+    # _pane_bloat), NOT the cc_session_costs gauge that lies for idle workers. So the
+    # per-lane ctx% comes from CC's `{N}% context used` pane signal: pct=50 -> 500000
+    # tokens (50% of the 1M window), keyed by session==sub_tag for the (non-coord)
+    # irsyad-coord worker lane.
+    monkeypatch.setattr(db, "fetch_pane_context", lambda: [
+        {"session": "irsyad-coord", "base": "cc-irsyad", "pct": 50, "pane_k": None,
+         "age_s": 60, "idle_verdict": "IDLE_EMPTY"},
     ])
     monkeypatch.setattr(db, "fetch_pool_usage", lambda: [
         {"pool": "Musa", "pct_7d": "47", "pct_5h": "37", "resets_at": None,
@@ -904,7 +908,7 @@ def test_api_irsyad_folds_token_model_and_context(irsyad_server):
     assert coord["account"] == "musa2"
     assert coord["model"] == "claude-opus-4-8"
     assert coord["verified"] is True and coord["off_account"] is False
-    # context gauge folded by sub_tag == tmux_session (500k / 1M = 50%).
+    # pane-truth ctx folded by sub_tag == tmux_session (pct=50 -> 500k / 1M = 50%).
     assert coord["ctx_pct"] == 50
     assert coord["ctx_tokens"] == 500000
     # the import lane is on a DIFFERENT account than expected -> off_account flag.
