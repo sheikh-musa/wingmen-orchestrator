@@ -54,6 +54,60 @@ def _run(*args, **kw):
                           cwd=str(_ROOT), **kw)
 
 
+def _write_over_cap_handoff(path):
+    """A structured handoff comfortably OVER the 60KB compaction cap, section[0] first."""
+    title = "# handoff\n\npreamble\n"
+    body = title + "\n".join(f"## SEC-{i} block {i}\n" + ("x" * 3000) + "\n" for i in range(40))
+    Path(path).write_text(body)
+
+
+# ── Item-3 fast-follow (cc-quality F1): the singleton (bash) seam's staged compaction and
+# its DEAD-MAN'S-SWITCH were shipped untested. These cover the abort AND the staging on the
+# path that guards cai/nazim/fleet-health.
+
+def test_bash_seam_enabled_body_previews_compaction_then_proceeds(tmp_path):
+    """An ENABLED singleton (fleet-health) with an over-cap handoff: dry-run PREVIEWS the
+    compaction and PROCEEDS past it (gates passed, nothing scheduled) — proving compaction
+    does not abort the flow on the happy path."""
+    h = tmp_path / "fleet-health-handoff-NOW.md"
+    _write_over_cap_handoff(h)
+    out = _run("--reset", "scripts/reset_fleet_health.sh", "--handoff", str(h), "--dry-run")
+    assert out.returncode == 0, out.stderr
+    # F2: the agent id is now passed + preferred in the label (dual-path parity backstop).
+    assert "WOULD compact for cc-fleet-health" in out.stdout
+    assert "gates passed, NOTHING scheduled" in out.stdout   # proceeded past compaction
+    assert h.read_text().startswith("# handoff")             # dry-run wrote nothing
+
+
+def test_bash_seam_cai_is_held(tmp_path):
+    """cai is tier-3 HELD: even an over-cap handoff is SKIPPED on the bash seam (verified on
+    BOTH derived --session cai AND derived --agent cai)."""
+    h = tmp_path / "cai-handoff-NOW.md"
+    _write_over_cap_handoff(h)
+    out = _run("--reset", "scripts/reset_cai.sh", "--handoff", str(h), "--dry-run")
+    assert out.returncode == 0, out.stderr
+    assert "SKIP (tier held: cai)" in out.stdout
+
+
+def test_bash_seam_compaction_failure_ABORTS_before_scheduling(tmp_path):
+    """DEAD-MAN'S-SWITCH: a REAL compaction I/O failure (here: the .bak write fails because the
+    handoff's directory is read-only) must make self_recycle exit 6 and NOT schedule the reset.
+    No test seam — a genuine PermissionError drives the abort."""
+    d = tmp_path / "ro"
+    d.mkdir()
+    h = d / "fleet-health-handoff-NOW.md"
+    _write_over_cap_handoff(h)          # >60KB so compaction actually fires (not a no-op)
+    d.chmod(0o500)                      # readable+executable, NOT writable -> .bak write fails
+    try:
+        out = _run("--reset", "scripts/reset_fleet_health.sh", "--handoff", str(h))  # NON-dry
+    finally:
+        d.chmod(0o700)                  # restore so pytest can clean up
+    assert out.returncode == 6, (out.returncode, out.stdout, out.stderr)
+    assert "compaction FAILED" in out.stderr
+    assert "SCHEDULED" not in out.stdout          # reset was NEVER scheduled
+    assert h.read_text().startswith("# handoff")  # original restore point untouched
+
+
 # --- worker lanes, not just the four singletons ----------------------------- #
 # cc-storefront tried to self-recycle on 2026-08-16 and could not: self_recycle fires the
 # reset with NO arguments (`bash "$RST"`), which is fine for reset_nazim/cai/fleet_health/orch

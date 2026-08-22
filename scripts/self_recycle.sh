@@ -93,6 +93,20 @@ if [ -z "$SESSION" ]; then
     *) echo "self_recycle: cannot derive the target session from '$(basename "$RESET")' — pass --session <tmux-session>." >&2; exit 2;;
   esac
 fi
+
+# CANONICAL AGENT ID for the compaction hold (cc-quality F2, dual-path parity). The armed
+# worker seam passes both agent + session; this singleton seam had only session, so the cai
+# hold rested on a single name-map. Derive the agent id too from the reset script and pass it
+# as a SECOND backstop. Worker lanes (reset_lane.sh) carry identity in the session, so no agent
+# is derived there — the policy accepts agent=None and holds on the session alone.
+AGENT_ARG=""
+case "$(basename "$RESET")" in
+  reset_nazim.sh)        AGENT_ARG="--agent orch-console";;
+  reset_cai.sh)          AGENT_ARG="--agent cai";;
+  reset_fleet_health.sh) AGENT_ARG="--agent cc-fleet-health";;
+  reset_orch.sh)         AGENT_ARG="--agent cc-orchestrator";;
+esac
+
 [ -n "$RESET" ]   || { echo "self_recycle: --reset required" >&2; exit 2; }
 [ -n "$HANDOFF" ] || { echo "self_recycle: --handoff required" >&2; exit 2; }
 [ -x "$RESET" ] || [ -f "$RESET" ] || { echo "self_recycle: reset script not found: $RESET" >&2; exit 2; }
@@ -161,16 +175,21 @@ echo "self_recycle: handoff OK (${BYTES}B, ${AGE}s old)"
 # that path is a non-fatal WARN, exit 0.)
 if [ "$DRY" = 1 ]; then
   "$PY" -m scripts.lib.handoff_compaction_policy apply \
-        --handoff "$HANDOFF" --session "$SESSION" --stamp "dryrun" --dry-run \
+        --handoff "$HANDOFF" --session "$SESSION" $AGENT_ARG --stamp "dryrun" --dry-run \
     || echo "self_recycle: (dry-run) compaction preview errored — non-fatal in dry-run" >&2
 else
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   if ! "$PY" -m scripts.lib.handoff_compaction_policy apply \
-             --handoff "$HANDOFF" --session "$SESSION" --stamp "$STAMP"; then
+             --handoff "$HANDOFF" --session "$SESSION" $AGENT_ARG --stamp "$STAMP"; then
     echo "self_recycle: REFUSED — handoff compaction FAILED. World UNCHANGED (handoff not rewritten, reset NOT scheduled). Fix and re-run." >&2
     exit 6
   fi
-  BYTES=$(wc -c < "$HANDOFF" | tr -d ' ')   # may have shrunk; mtime is fresher (GATE-1 still holds)
+  # Informational only (cc-quality F4). We deliberately do NOT re-apply the 800B stub floor
+  # here: that floor detects a stub ORIGINAL, but a COMPACTED handoff keeps section[0]
+  # (current-state) verbatim, so a small compacted file is a valid restore point, not a stub
+  # — re-refusing on size would false-reject a legitimately-small current-state. mtime is now
+  # fresher, so GATE-1 freshness still holds.
+  echo "self_recycle: handoff after compaction: $(wc -c < "$HANDOFF" | tr -d ' ')B"
 fi
 
 echo "self_recycle: target session: ${SESSION}"

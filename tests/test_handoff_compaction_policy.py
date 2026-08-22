@@ -43,6 +43,20 @@ def test_held_wins_even_with_enabled_partner():
     assert hcp.should_compact(agent="cai", session="nazim") is False
 
 
+# ---- F2: hold matches on hyphen boundary, never on a bare prefix -------------
+
+def test_is_held_exact_and_hyphen_boundary():
+    assert hcp._is_held("cai") is True
+    assert hcp._is_held("cai-1") is True          # suffixed session of a held base
+    assert hcp._is_held("cai-tabung") is True
+
+def test_is_held_does_not_overmatch_prefix():
+    assert hcp._is_held("cain") is False          # NOT a hyphen boundary
+    assert hcp._is_held("xcai") is False
+    assert hcp._is_held("cc-irsyad-1") is False   # unrelated (cai not held-in-it)
+    assert hcp._is_held(None) is False
+
+
 # ---- compact_if_enabled: the wiring ----------------------------------------
 
 _TITLE = "# handoff\n\npreamble\n"

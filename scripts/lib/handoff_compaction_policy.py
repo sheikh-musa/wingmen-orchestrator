@@ -44,14 +44,26 @@ if str(_SCRIPTS_DIR) not in sys.path:
 COMPACTION_HELD = frozenset({"cai"})
 
 
+def _is_held(ident: "str | None") -> bool:
+    """True iff `ident` is held. Match is exact OR on a HYPHEN BOUNDARY, so a held BASE id
+    also holds its suffixed lane sessions (hold 'cc-irsyad' -> also holds 'cc-irsyad-1',
+    'cc-irsyad-tabung'), without over-matching an unrelated id that merely shares a prefix
+    ('cain' is NOT held by 'cai'; 'cc-irsyad2' is NOT held by 'cc-irsyad'). Same suffix-bypass
+    class cc-quality flagged (F2). For the current sole held name 'cai' (no suffixed variants),
+    this is identical to exact match."""
+    if not ident:
+        return False
+    for held in COMPACTION_HELD:
+        if ident == held or ident.startswith(held + "-"):
+            return True
+    return False
+
+
 def should_compact(*, agent: "str | None" = None, session: "str | None" = None) -> bool:
     """True iff this body's handoff may be auto-compacted at recycle time. Fail-closed on a
     held name (agent OR session held -> held). Unknown/None identifiers default to ENABLED —
-    a no-op under cap makes that safe — but anything in COMPACTION_HELD is always held."""
-    for ident in (agent, session):
-        if ident and ident in COMPACTION_HELD:
-            return False
-    return True
+    a no-op under cap makes that safe — but anything held (see _is_held) is always held."""
+    return not (_is_held(agent) or _is_held(session))
 
 
 def compact_if_enabled(handoff_path: str, *, agent: "str | None" = None,
@@ -64,7 +76,7 @@ def compact_if_enabled(handoff_path: str, *, agent: "str | None" = None,
     changed=False} and does NOT touch the file. No-op when the handoff is already <= cap.
     Propagates I/O exceptions (the caller aborts the recycle)."""
     if not should_compact(agent=agent, session=session):
-        held = agent if (agent and agent in COMPACTION_HELD) else session
+        held = agent if _is_held(agent) else session
         return {"held": held, "path": handoff_path, "wrote": False, "changed": False,
                 "before_bytes": None, "after_bytes": None}
     import compact_handoff  # resolved via _SCRIPTS_DIR on sys.path
