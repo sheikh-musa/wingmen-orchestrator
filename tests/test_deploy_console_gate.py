@@ -147,6 +147,34 @@ def test_unchanged_tree_hash_is_stable(tree):
     assert _hash(tree) == _hash(tree), "identical content must hash identically"
 
 
+def test_cross_file_content_move_changes_the_hash(tmp_path):
+    """cc-quality #31859 LOW: without a per-file boundary, moving content across an adjacent-file
+    seam leaves the manifest AND the back-to-back byte stream identical -> a hash collision that
+    misses a real change. Build two adjacent backend files and move a line from the top of the
+    second to the bottom of the first: the concatenated bytes are byte-identical, so ONLY the
+    per-file delimiter can make the hash move."""
+    root = tmp_path
+    static = root / "nervous_system/console/static"
+    static.mkdir(parents=True)
+    for rel in _STATIC_REL:
+        (root / rel).write_text("")            # empty static — isolate the backend seam
+    pkg = root / "nervous_system/console"
+    a = pkg / "aa_mod.py"                        # sorts immediately before ab_mod.py, nothing between
+    b = pkg / "ab_mod.py"
+    # state 1: the moved line X lives at the BOTTOM of aa_mod
+    a.write_text("AAA\nX\n")
+    b.write_text("BBB\n")
+    before = _hash(root)
+    # state 2: X moved to the TOP of ab_mod — concatenation "AAA\nX\nBBB\n" is byte-identical
+    a.write_text("AAA\n")
+    b.write_text("X\nBBB\n")
+    after = _hash(root)
+    assert before != after, (
+        "cross-file content move was NOT detected — the per-file boundary delimiter is missing "
+        "or ineffective; a real change could ship under a stale review hash"
+    )
+
+
 # ── the gate script actually USES the seam (not a dead parallel copy) ────────
 
 def test_gate_sources_the_manifest_and_uses_the_hash():

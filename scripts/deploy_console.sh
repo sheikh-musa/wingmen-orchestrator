@@ -25,14 +25,14 @@ ART=reports/console-deploy
 
 fail(){ echo "" >&2; echo "❌ deploy_console REFUSED — $1" >&2; exit "${2:-1}"; }
 
-# item-4b (Nazim #31843): the review content-hash covers the console PACKAGE, not just the five
-# static files — because the console is run as `python -m nervous_system.console` and a
-# backend-only change (app.py/db.py/panes.py/...) used to leave the hash unchanged and ship the
-# backend UNREVIEWED. The file set + hash are the SSOT seam scripts/lib/console_deploy_manifest.sh
-# (also unit-tested by tests/test_deploy_console_gate.py). COVERAGE BOUNDARY: the hash covers
-# nervous_system/console/** only; shared libs imported from outside the package (e.g.
-# scripts/lib/lane_token_resolver) are NOT gated here — a documented bounded cut; widen only for a
-# console-serving shared module, and escalate rather than widen unilaterally.
+# item-4b (Nazim #31843): the review content-hash covers the whole console BACKEND (every *.py
+# under nervous_system/console/) — not just the five static files — because the console runs as
+# `python -m nervous_system.console` and a backend-only change (app.py/db.py/panes.py/...) used to
+# leave the hash unchanged and ship the backend UNREVIEWED. The file set + hash are the SSOT seam
+# scripts/lib/console_deploy_manifest.sh (unit-tested by tests/test_deploy_console_gate.py). The
+# EXACT coverage AND the deliberate cuts (only 5 static gated; other served static, outside-package
+# imports, and the Dockerfile are NOT — pending Nazim's widen decisions) are documented in that
+# seam's header — read it there; it is the single source of truth, not restated here.
 MANIFEST="$(dirname "${BASH_SOURCE[0]}")/lib/console_deploy_manifest.sh"
 [ -f "$MANIFEST" ] || fail "console deploy manifest seam missing: $MANIFEST" 2
 source "$MANIFEST"
