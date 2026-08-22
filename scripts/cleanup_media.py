@@ -53,8 +53,13 @@ def scan(project_dir: pathlib.Path):
                 files.append(p)
     return files
 
-def candidates(project_dir: pathlib.Path):
-    files = scan(project_dir)
+def scan_flat(d: pathlib.Path):
+    # Files DIRECTLY in `d`, NON-recursively — for the tg_media ROOT bucket (op#15741).
+    # Media routed to the root instead of a project subdir was never scanned because main()
+    # iterated subdirs only. Non-recursive so it never re-touches subdir or _archive files.
+    return [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in IMG_EXT]
+
+def candidates(files):
     if not files:
         return [], len(files)
     now = _now()
@@ -94,13 +99,32 @@ def main():
     for proj in sorted([d for d in ROOT.iterdir() if d.is_dir()], key=lambda p: p.name.lower()):
         if proj.name in EXCLUDE_PROJECTS:
             continue
-        cands, n = candidates(proj)
+        cands, n = candidates(scan(proj))
         if not cands:
             continue
         b = sum(p.stat().st_size for p in cands)
         total_retire += len(cands); total_bytes += b
         print(f"[{proj.name}] {n} files · retire {len(cands)} ({b//1024} KB)")
         for p in cands:
+            rel = p.relative_to(ROOT)
+            if args.apply:
+                dest = ARCHIVE / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(p), str(dest))
+                print(f"   archived: {rel}")
+            else:
+                print(f"   would archive: {rel}")
+
+    # op#15741: ROOT-level media (routed to tg_media/ directly, not into a project subdir).
+    # main() historically iterated subdirs ONLY, so these files were never reached by
+    # retention. Treat the root's OWN files as a bucket (non-recursive scan_flat), so the same
+    # keep-12/keep-<30d/archive/purge policy governs them. (Nazim #31470: governed retention.)
+    root_cands, root_n = candidates(scan_flat(ROOT))
+    if root_cands:
+        b = sum(p.stat().st_size for p in root_cands)
+        total_retire += len(root_cands); total_bytes += b
+        print(f"[_root] {root_n} files · retire {len(root_cands)} ({b//1024} KB)")
+        for p in root_cands:
             rel = p.relative_to(ROOT)
             if args.apply:
                 dest = ARCHIVE / rel
