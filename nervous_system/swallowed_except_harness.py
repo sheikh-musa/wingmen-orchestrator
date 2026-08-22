@@ -46,7 +46,29 @@ class SwallowedExceptCounter:
             del self._counts[label]
 
 
-counter = SwallowedExceptCounter()
+# Prune window MUST exceed check_interval x threshold, or slow-cadence tasks are
+# structurally un-escalatable. The escalation check runs ~every 30 min
+# (wingmen_orch swallowed_except_counter >= 60, ~30s/poll = 1800s); at the default
+# threshold=3 the floor is 1800*3 = 5400s. Below that floor, a task firing at most
+# once per window (e.g. the ~30-min in-loop feature_health / drift_audit /
+# cc_session_costs tasks) has each failure pruned before the next fires, so the
+# count never exceeds 1 and it never alerts (the feature_health blind spot).
+# 7200s (2h) clears the floor with margin.
+SWALLOWED_PRUNE_WINDOW_S = 7200
+
+counter = SwallowedExceptCounter(window_seconds=SWALLOWED_PRUNE_WINDOW_S)
+
+
+def _alert_text(label: str, cnt: int, window_seconds: int) -> str:
+    """Build the escalation alert. The window is DERIVED from window_seconds so the
+    text can never lie about its own window (the defect that hid in the dead param)."""
+    hours = max(1, window_seconds // 3600)
+    return (
+        f"\U0001f507 Silent exception repeating: {label}\n\n"
+        f"Hit {cnt}x in the last {hours}h\n"
+        f"This except block is swallowing errors silently.\n\n"
+        f"Check logs or grep wingmen_orch.py for this label."
+    )
 
 
 def record_swallowed(label: str, exc: Exception) -> None:
@@ -59,9 +81,13 @@ async def check_swallowed_escalation(
     supabase: SupabaseAsyncClient,
     bot: Bot,
     threshold: int = 3,
-    window_seconds: int = 600,
+    window_seconds: int = SWALLOWED_PRUNE_WINDOW_S,
 ) -> None:
     """Check if any swallowed-exception label has fired repeatedly and escalate."""
+
+    # Make window_seconds actually drive pruning. Previously this param was dead:
+    # _prune/count read the counter's own field, so the visible knob did nothing.
+    counter.window_seconds = window_seconds
 
     cto_id = get_chat_id("cto")
     if not cto_id:
@@ -90,12 +116,7 @@ async def check_swallowed_escalation(
         try:
             await bot.send_message(
                 chat_id=cto_id,
-                text=(
-                    f"\U0001f507 Silent exception repeating: {label}\n\n"
-                    f"Hit {cnt}x in the last hour\n"
-                    f"This except block is swallowing errors silently.\n\n"
-                    f"Check logs or grep wingmen_orch.py for this label."
-                ),
+                text=_alert_text(label, cnt, counter.window_seconds),
             )
         except Exception as e:
             logger.error(f"Swallowed-except alert for {label} failed: {e}")
