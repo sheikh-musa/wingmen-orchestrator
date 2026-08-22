@@ -22,12 +22,27 @@ cd "$HOME/wingmen/orchestrator" || exit 9
 set -a; source .env 2>/dev/null; set +a
 STATIC=nervous_system/console/static
 ART=reports/console-deploy
-FILES=("$STATIC/fleet.html" "$STATIC/fleet.js" "$STATIC/lanes.html" "$STATIC/lanes.js" "$STATIC/sw.js")
-HASH=$(cat "${FILES[@]}" | shasum -a 256 | cut -c1-16)
-DIR="$ART/$HASH"
-mkdir -p "$DIR"
 
 fail(){ echo "" >&2; echo "❌ deploy_console REFUSED — $1" >&2; exit "${2:-1}"; }
+
+# item-4b (Nazim #31843): the review content-hash covers the console PACKAGE, not just the five
+# static files — because the console is run as `python -m nervous_system.console` and a
+# backend-only change (app.py/db.py/panes.py/...) used to leave the hash unchanged and ship the
+# backend UNREVIEWED. The file set + hash are the SSOT seam scripts/lib/console_deploy_manifest.sh
+# (also unit-tested by tests/test_deploy_console_gate.py). COVERAGE BOUNDARY: the hash covers
+# nervous_system/console/** only; shared libs imported from outside the package (e.g.
+# scripts/lib/lane_token_resolver) are NOT gated here — a documented bounded cut; widen only for a
+# console-serving shared module, and escalate rather than widen unilaterally.
+MANIFEST="$(dirname "${BASH_SOURCE[0]}")/lib/console_deploy_manifest.sh"
+[ -f "$MANIFEST" ] || fail "console deploy manifest seam missing: $MANIFEST" 2
+source "$MANIFEST"
+HASH=$(console_content_hash "$PWD")
+[ -n "$HASH" ] || fail "could not compute console content hash (manifest seam)." 2
+# repo-relative pathspec of everything the hash covers — used in the review instruction below so
+# the reviewer diffs the BACKEND too, not just $STATIC.
+GATED_PATHS=$(console_deploy_files_rel "$PWD" | tr '\n' ' ')
+DIR="$ART/$HASH"
+mkdir -p "$DIR"
 
 echo "== deploy_console gate (content $HASH) =="
 
@@ -67,8 +82,11 @@ if [ ! -s "$REVIEW" ]; then
 
    DO THIS:
      1. EYEBALL the renders:  $DIR/fleet.png   $DIR/lanes.png
-     2. Run cc-quality on the console diff (git diff -- $STATIC) and SAVE its
-        review to:            $REVIEW
+     2. Run cc-quality on the FULL console diff — static AND backend:
+           git diff -- $GATED_PATHS
+        (the hash now covers the console backend package, so a backend-only
+         change also lands here — review it, don't just eyeball the renders.)
+        SAVE its review to:   $REVIEW
         (route to the live cc-quality agent — it is the sanctioned reviewer.)
      3. Re-run:               scripts/deploy_console.sh
 
