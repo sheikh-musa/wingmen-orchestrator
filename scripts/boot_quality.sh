@@ -28,7 +28,25 @@ set -uo pipefail
 Q_DIR="$HOME/wingmen/quality"
 ORCH_DIR="$HOME/wingmen/orchestrator"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
-MODEL="${MODEL:-claude-opus-4-8}"
+# MODEL resolution — precedence: MODEL env > durable pointer (.quality_model) > opus-4-8.
+# The durable pointer mirrors .quality_default_token (and boot_nazim's .nazim_default_token):
+# a per-body choice that STICKS across reboots, revert = `rm .quality_model`.
+# WHY THIS EXISTS (op#13633, 2026-08-17): the operator pinned cc-quality to Opus 5 by writing
+# .quality_model, which is the ENGINEER-LANE launcher's mechanism (launch_dangerous_cc.sh).
+# cc-quality is a SINGLETON and boots here, which read MODEL env only — so the pin was INERT and
+# would have silently done nothing. A pointer that looks set but is not read is worse than no
+# pointer: it reports a choice that was never made. Same class as everything else found this
+# session. Fail-safe: an absent/unreadable pointer falls through to the default.
+_MODEL_FROM_ENV="${MODEL:-}"          # capture BEFORE defaulting, or env can never win
+MODEL="claude-opus-4-8"
+if [ -r "$HOME/wingmen/orchestrator/.quality_model" ]; then
+    _QM="$(tr -d '[:space:]' < "$HOME/wingmen/orchestrator/.quality_model" 2>/dev/null || true)"
+    if [ -n "${_QM:-}" ]; then
+        MODEL="$_QM"
+        echo "[boot_quality] durable model pointer applied (.quality_model -> $_QM)" >&2
+    fi
+fi
+[ -n "$_MODEL_FROM_ENV" ] && MODEL="$_MODEL_FROM_ENV"
 AGENT_ID="cc-quality"   # exact — singleton node, never a sub-tag
 
 if [ ! -f "$Q_DIR/CLAUDE.md" ]; then
@@ -55,6 +73,15 @@ fi
 #  2. Keep CLAUDE_CODE_OAUTH_TOKEN (from .env) — tmux runs outside the GUI login,
 #     so it cannot read the interactive /login OAuth from the Keychain.
 unset ANTHROPIC_API_KEY
+# Boot-identity (cc-fleet-health hunk, folds into #29853 boot_identity_env.sh): export the SINGLETON
+# identity so any in-process hook AND the heartbeat loop below resolve 'cc-quality', and SCRUB the
+# leaked ORCH_AGENT_ID=orch-console that boot_quality inherits from its parent env (that leak made
+# every id-consumer either no-op or mis-attribute to orch-console). Singleton => CC_AGENT_ID == CC_BASE_AGENT_ID.
+export CC_AGENT_ID="cc-quality"
+export CC_BASE_AGENT_ID="cc-quality"
+unset ORCH_AGENT_ID
+# (When #29853's scripts/lib/boot_identity_env.sh has landed, prefer sourcing it right after the .env
+#  source — it does the same export+scrub semantically-anchored, version-independent.)
 # auth_fp = sha256(effective launch token)[:12] — stable account fingerprint stamped
 # into agent_status below so cc-quality is post-flip verifiable (op#11326).
 AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
@@ -105,8 +132,38 @@ UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cc-quality';
 "
 echo "▶ cc-quality online (on-demand): agent_status + agents set (model=$MODEL, dir=$Q_DIR)"
 
-# ── Clean exit: mark offline (on-demand — no heartbeat loop to kill) ──────────
+# ── Background heartbeat loop (5-min cadence, cc-fleet-health hunk) — mirrors
+#    launch_dangerous_cc.sh's proven mechanism, trimmed for the singleton. Keeps
+#    agent_status/agents last_heartbeat honest so the console does not badge a LIVE
+#    auditor as dead. Does NOT idle a Max seat: it dies with the session (killed in
+#    _handle_exit) and only reflects a seat already in use. ──
+_quality_heartbeat_loop() {
+    while true; do
+        sleep 300
+        "$VENV_PY" - <<'PY' 2>/dev/null || true
+import os, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+if not dsn:
+    raise SystemExit
+try:
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        # agent_status identity trigger: GUC must == the row's agent_id.
+        cur.execute("SELECT set_config('app.current_agent_id','cc-quality',true)")
+        cur.execute("UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-quality'")
+        cur.execute("UPDATE agents SET last_heartbeat=now() WHERE id='cc-quality'")
+        conn.commit()
+except Exception:
+    pass
+PY
+    done
+}
+_quality_heartbeat_loop &
+HB_PID=$!
+echo "▶ cc-quality heartbeat loop started (pid=$HB_PID, 5-min cadence — auto-killed on exit)"
+
+# ── Clean exit: kill the heartbeat loop + mark offline ────────────────────────
 _handle_exit() {
+    [ -n "${HB_PID:-}" ] && kill "$HB_PID" 2>/dev/null || true   # stop the hb loop first
     "$VENV_PY" - <<'PY' 2>/dev/null || true
 import os, psycopg
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -122,6 +179,22 @@ trap '_handle_exit' EXIT
 
 # ── Launch. CLAUDE.md in $Q_DIR auto-loads as project instructions; cc-quality
 #    runs its own boot (confirm identity, read charter, reconcile bus, do work). ─
+# ── TOOLING REACHABILITY (op#13650, 2026-08-16). This body runs with cwd=$Q_DIR, which
+#    had no `scripts` entry — so the invocation every doc, handoff and bus row hands it,
+#    `scripts/self_recycle.sh ...`, resolved to nothing from where it stands. Found via
+#    cai: asked why it had never self-recycled, its answer was that the recycler is not
+#    in its own scripts dir, and it refused to improvise a process-reset it could not
+#    locate-and-verify. Correct call; the tool was at fault. Verified as a CLASS — none
+#    of the three singleton cwds could reach it. Idempotent; never clobbers a real
+#    directory, so a body that grows its own scripts/ is left alone. ──
+if [ ! -e "$Q_DIR/scripts" ]; then
+  ln -s "$ORCH_DIR/scripts" "$Q_DIR/scripts" \
+    && echo "▶ linked $Q_DIR/scripts -> $ORCH_DIR/scripts (self_recycle et al now reachable)" \
+    || echo "⚠ could not link $Q_DIR/scripts — self_recycle.sh will need an ABSOLUTE path" >&2
+elif [ ! -e "$Q_DIR/scripts/self_recycle.sh" ]; then
+  echo "⚠ $Q_DIR/scripts exists but has no self_recycle.sh — use an ABSOLUTE path" >&2
+fi
+
 echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $Q_DIR"
 cd "$Q_DIR"
 claude --dangerously-skip-permissions --model "$MODEL"
