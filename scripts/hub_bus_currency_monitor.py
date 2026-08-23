@@ -8,11 +8,19 @@ turns. The orch_lease heartbeat kept renewing the whole time, so EVERY gauge rea
 while the bus went undrained — the "healthy-looking trap". The existing priority_sla_watchdog
 only tracks P0/P1, so an 11h backlog of P2/P3 render-coordination slipped past infra entirely.
 
-This monitor closes that detection hole until the VPS wake-subscriber is fixed: a cheap,
-ANY-PRIORITY check — if the hub has an unread agent_messages row older than STALE_HOURS, it
-is not draining its bus → PAGE. Detect-only: it FIRES NO reset and NO nudge (the bus nudge
-doesn't wake the hub anyway — that's the defect). It only surfaces the stall to the SRE +
-console so the operator-channel poke / VPS fix can happen. Peer of the SLA daemon.
+This monitor surfaces a hub bus-drain failure: if a FLOOR-QUALIFYING unread row (CAI-451:
+priority P0/P1 AND requires_response — the ONLY class that auto-wakes the hub) is older than
+STALE_HOURS, the hub failed to wake+drain on a message that SHOULD have woken it → PAGE.
+Detect-only: it FIRES NO reset and NO nudge (a bus nudge doesn't wake the hub — that's the
+defect class). It only surfaces the stall to the SRE + console. Peer of the SLA daemon.
+
+⚠️ CAI-451 FLOOR GATE (Nazim #32411, 2026-08-23): originally this was an ANY-PRIORITY check —
+but the hub auto-wakes ONLY on P0/P1+rr; below-floor rows (P3, or any non-rr) drain solely on
+operator-channel turns BY DESIGN, so a stale P3/non-rr is NOT a wake defect. Alarming on it
+was a false positive (a benign P3 sat 27h and paged, sending the console chasing a non-problem).
+So the query (_read_hub_bus_state) now counts ONLY floor-qualifying unread. A separate, real
+residual (CAI-1303) is the hub-side reconcile-on-wake gap: even a woke:True doorbell may not get
+the hub's turn-logic to read its bus — THAT is the class a stale floor-qualifying row now catches.
 
 Deploys INERT: the live page only goes out under HUB_BUS_MONITOR_ENABLED=1 (set on the
 launchd). HUB_BUS_MONITOR_DRY=1 prints instead of inserting (test). Deduped so the periodic
@@ -43,8 +51,11 @@ def classify_bus_currency(unread_count: int, oldest_unread_age_s: "float | None"
                           stale_hours: float = STALE_HOURS) -> "tuple[str, str]":
     """PURE. Decide whether the hub's agent-bus is STALE (undrained past threshold).
 
-    STALE iff there is at least one UNREAD row whose age exceeds stale_hours — that is an
-    unambiguous 'the hub is not reading its bus' signal, any priority. An empty inbox is OK
+    The caller passes counts/age over FLOOR-QUALIFYING unread only (P0/P1+rr — see
+    _read_hub_bus_state / the CAI-451 gate), so a positive here means a message that SHOULD
+    have auto-woken+drained the hub is stale. STALE iff there is at least one such UNREAD row
+    whose age exceeds stale_hours — an unambiguous 'the hub isn't reading its bus on a wake-
+    eligible row' signal. An empty inbox is OK
     (nothing to drain — 'quiet' is not a stall; this is why we key on oldest-UNREAD age, not
     last-reconcile age, which can't tell quiet from wedged). A None oldest-age (no unread)
     is OK. Returns (verdict, reason), verdict in {'ok','stale'}."""
@@ -63,13 +74,25 @@ def _dsn() -> "str | None":
 
 
 def _read_hub_bus_state(cur):
-    """Return (unread_count, oldest_unread_age_s, oldest_unread_id). Fail-loud on DB error.
+    """Return (unread_count, oldest_unread_age_s, oldest_unread_id) over ONLY the hub's
+    FLOOR-QUALIFYING unread. Fail-loud on DB error.
 
-    oldest_unread_id is the id of the single oldest-by-created_at unread row (or None if the
-    inbox is drained) — the dedupe key for the row-aware snooze."""
+    ⚠️ CAI-451 FLOOR GATE (Nazim #32411, 2026-08-23 — fixes a false-positive): the hub
+    (cc-orchestrator) auto-wakes ONLY on `priority IN ('P0','P1') AND requires_response`
+    (is_wake_eligible_recipient, agent_wake.py). Below-floor rows (P3, or any non-rr) are
+    NOT auto-woken BY DESIGN — they drain only on operator-channel turns. So a stale P3/non-rr
+    unread is NOT a DB-wake defect; alarming on it was the false positive (a benign P3 that sat
+    27h made this monitor page and sent Nazim chasing a non-problem). We therefore count only
+    floor-qualifying unread: a floor-qualifying row that sits past threshold is the REAL signal
+    (it should have auto-woken AND drained — if it didn't, either the doorbell didn't fire or
+    the hub isn't reconciling its bus on wake, the residual reconcile gap).
+
+    oldest_unread_id is the id of the single oldest-by-created_at floor-qualifying unread row
+    (or None if none) — the dedupe key for the row-aware snooze."""
     cur.execute(
         "SELECT count(*) OVER (), extract(epoch from (now() - created_at)), id "
         "FROM agent_messages WHERE to_agent=%s AND read_at IS NULL "
+        "AND priority IN ('P0','P1') AND requires_response = true "  # CAI-451 floor (the only auto-wake class)
         "ORDER BY created_at ASC LIMIT 1", (HUB_AGENT,))
     row = cur.fetchone()
     if row is None:
@@ -103,15 +126,16 @@ def _page(cur, unread_count: int, oldest_unread_age_s: float, reason: str, oldes
         body = format_alert(
             icon="🛰️",
             title="Hub is not draining its agent-bus (DB-wake gap)",
-            what=(f"cc-orchestrator (hub) has {unread_count} unread agent_messages, oldest ~{hrs:.1f}h old, "
-                  f"unreconciled past the {STALE_HOURS:.1f}h threshold."),
-            why=("The hub's DB-driven wake (agent_wake_subscriber, VPS) isn't firing, so it only reconciles "
-                 "on operator-channel turns — its orch_lease heartbeat keeps renewing so every other gauge "
-                 "reads healthy while the bus goes undrained (the trap that hid an ~11h latency on 2026-08-19). "
-                 "SLA-watchdog is P0/P1-only so it misses P2/P3 hub backlog."),
-            do=("Poke the hub via the OPERATOR channel to drain its bus (a bus nudge does NOT wake it — that IS "
-                "the defect). Durable fix = the VPS agent_wake_subscriber path (needs VPS access, operator/cai)."),
-            detail=f"agent={HUB_AGENT} unread={unread_count} oldest={hrs:.1f}h threshold={STALE_HOURS:.1f}h; DETECT-ONLY.",
+            what=(f"cc-orchestrator (hub) has {unread_count} FLOOR-QUALIFYING (P0/P1+rr) unread, oldest ~{hrs:.1f}h "
+                  f"old, past the {STALE_HOURS:.1f}h threshold — a message that SHOULD have auto-woken+drained it."),
+            why=("Only P0/P1+rr auto-wake the hub (CAI-451); one is stale, so either the doorbell didn't fire OR "
+                 "the hub's turn-logic didn't reconcile its bus on wake (the CAI-1303 reconcile-on-wake gap). Its "
+                 "orch_lease heartbeat keeps renewing so every other gauge reads healthy while the bus goes "
+                 "undrained (the trap that hid an ~11h latency on 2026-08-19)."),
+            do=("VERIFY the doorbell fired (agent_wake auto-wake for this row). If it woke:True but the row stayed "
+                "unread past a hub turn = the hub-side reconcile-on-wake gap (hub turn-logic; cai + hub-owner). "
+                "Interim: an operator-channel poke drains it (a bus nudge alone won't wake the hub)."),
+            detail=f"agent={HUB_AGENT} floor-qualifying-unread={unread_count} oldest={hrs:.1f}h threshold={STALE_HOURS:.1f}h; DETECT-ONLY.",
             ref="HUB-BUS-CURRENCY-MONITOR",
         )
     except Exception:  # noqa: BLE001 — alert_format optional; fall back to a plain body
