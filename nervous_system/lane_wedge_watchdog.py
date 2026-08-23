@@ -836,7 +836,9 @@ def _wedge_alert(obs: AgentObs, elapsed_min: int, unsafe: bool, armed: bool) -> 
           "so it may be a re-rendered / scrolled-off ghost, not a genuine draft. Run lane_nudge "
           "to disambiguate (it probes: clears+delivers if ghost, refuses if genuinely staged). "
           "If it IS its own draft, submit its step or clear the inbox." if unsafe else
-          ("Auto-recovery is nudging it to drain; watch for it to pick up." if armed else
+          ("Auto-nudge fired — a SINGLE best-effort nudge, NOT a sustained recovery. "
+           "CONFIRM it actually drained (a nudge can fail / be refused); if it did not, it "
+           "needs a human — a repeat wedge re-pages, but nothing else auto-runs." if armed else
            "It self-heals once nudged to drain its inbox — nudge it or arm the watchdog."))
     try:
         from nervous_system.alert_format import format_alert
