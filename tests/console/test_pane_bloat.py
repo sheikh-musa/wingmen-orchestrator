@@ -9,9 +9,51 @@ coordinators are excluded from the GLANCE (own cards) but INCLUDED in the header
 from nervous_system.console import app as console_app
 
 
-def _pane(session, pane_k, base=None, idle="IDLE_EMPTY", age_s=5, pct=None):
+def _pane(session, pane_k, base=None, idle="IDLE_EMPTY", age_s=5, pct=None, pane_k_age_s=None):
     return {"session": session, "base": base if base is not None else "cc-" + session,
-            "pane_k": pane_k, "pct": pct, "idle_verdict": idle, "age_s": age_s}
+            "pane_k": pane_k, "pct": pct, "idle_verdict": idle, "age_s": age_s,
+            "pane_k_age_s": pane_k_age_s}
+
+
+# ── never-blank lane-context (Musa flag via Nazim #32472; design #32484/#32489) ──────
+# A worker card must NEVER blank to `—`: LIVE % when the hint is fresh, an age-stamped
+# LAST-KNOWN reading while within the cap, else an idle/low/n-a label. The freshness gate
+# (pane_k_age_s = now - pane_k_at) is what keeps the header/glance HONEST — a last-known
+# reading feeds ONLY the per-lane card (allow_stale=True), never a header/glance alert.
+def test_entry_live_when_pane_k_fresh():
+    e = console_app._pane_entry(_pane("irsyad", 400.0, pane_k_age_s=100), allow_stale=True)
+    assert e is not None and e["pct"] == 40 and e["stale"] is False
+
+def test_entry_stale_last_known_within_cap():
+    # pane_k aged past the live window but within the last-known cap => STALE entry, still
+    # carries pct/ctx_tokens, and age_s reports the READING's age (for "· {age}").
+    e = console_app._pane_entry(_pane("irsyad", 400.0, pct=None, pane_k_age_s=1200), allow_stale=True)
+    assert e is not None and e["stale"] is True
+    assert e["pct"] == 40 and e["ctx_tokens"] == 400000 and e["age_s"] == 1200
+
+def test_entry_none_when_aged_out_beyond_cap():
+    # A last-known reading older than the cap is NOT trustworthy => no entry (card shows a
+    # label); this is what stops a recycled lane showing its pre-recycle high %.
+    for allow in (True, False):
+        e = console_app._pane_entry(_pane("irsyad", 900.0, pct=None, pane_k_age_s=4000), allow_stale=allow)
+        assert e is None
+
+def test_glance_excludes_stale_last_known():
+    # The GLANCE (allow_stale defaults False) must NOT surface a last-known reading — else a
+    # mid-turn lane would falsely alert the header on an hour-old number.
+    rows = [_pane("shipforge", 700.0, pct=None, pane_k_age_s=1200)]  # 70% but STALE
+    assert console_app._pane_bloat(rows, include_coords=True) == []
+
+def test_card_feed_includes_stale_last_known():
+    # The per-lane CARD feed (allow_stale=True) DOES surface it, flagged stale.
+    rows = [_pane("shipforge", 700.0, pct=None, pane_k_age_s=1200)]
+    out = console_app._pane_bloat(rows, allow_stale=True)
+    assert len(out) == 1 and out[0]["stale"] is True and out[0]["pct"] == 70
+
+def test_header_honest_on_last_known():
+    # A 90% LAST-KNOWN reading must NOT trip the header alert (only LIVE bloat does).
+    h = console_app._pane_header([_pane("irsyad", 900.0, pct=None, pane_k_age_s=1500)])
+    assert h["state"] == "clear" and h["worst"] is None
 
 
 # ── _pane_header: three honest states, NEVER a false 'All clear' ──────────────

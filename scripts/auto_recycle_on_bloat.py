@@ -239,6 +239,31 @@ def classify_pane(session: str, base: "str | None", singletons, worker_bases,
 _PRUNE_STALE_H = 1  # dead-session rows age out after this many hours (console ignores via TTL anyway)
 
 
+# The never-blank upsert (Musa flag via Nazim #32472; design #32484/#32489). ONE
+# UPSERT per live session. Nazim bake-in (b): a MID-TURN capture (pane_k NULL, hint
+# hidden) must NOT overwrite a good last-known pane_k and must FREEZE pane_k_at — so the
+# console can age-stamp the last-known reading instead of blanking the card. A fresh
+# non-null capture updates BOTH. pct (the >=~95% cliff line) is NOT COALESCE-kept — it is
+# a cliff-only signal, always overwritten (a stale pct would lie about the current fill;
+# the last-known treatment is pane_k's alone). updated_at ALWAYS bumps (row freshness /
+# TTL are unchanged), so a dead publisher still fails the console SAFE to UNKNOWN.
+# Named params (%(k)s appears twice) so ONE row dict drives both the INSERT value and the
+# CASE. Kept as a module constant so the test exercises the SHIPPED SQL, not a copy.
+_PANE_UPSERT_SQL = (
+    "INSERT INTO pane_context (session, base, pane_k, pct, idle_verdict, host, updated_at, pane_k_at) "
+    "VALUES (%(session)s, %(base)s, %(pane_k)s, %(pct)s, %(idle)s, %(host)s, now(), "
+    "        CASE WHEN %(pane_k)s::real IS NOT NULL THEN now() ELSE NULL END) "
+    "ON CONFLICT (session) DO UPDATE SET "
+    "  base=EXCLUDED.base, "
+    "  pane_k=COALESCE(EXCLUDED.pane_k, pane_context.pane_k), "
+    "  pct=EXCLUDED.pct, "
+    "  idle_verdict=EXCLUDED.idle_verdict, "
+    "  host=EXCLUDED.host, "
+    "  updated_at=now(), "
+    "  pane_k_at=CASE WHEN EXCLUDED.pane_k IS NOT NULL THEN now() ELSE pane_context.pane_k_at END"
+)
+
+
 def publish_pane_context() -> int:
     """Publish fresh pane-truth for EVERY live Mini-local session into `pane_context`
     (op#13050-B, console-signed 21515). One UPSERT per live tmux session: (session, base,
@@ -271,20 +296,15 @@ def publish_pane_context() -> int:
         except Exception as e:  # noqa: BLE001 — a capture blip must not drop the whole publish
             print(f"[pane-context] WARN read failed for {session} ({e}) — skip", file=sys.stderr)
             continue
-        rows.append((session, base, k, pct, verdict, host))
+        rows.append({"session": session, "base": base, "pane_k": k,
+                     "pct": pct, "idle": verdict, "host": host})
     if not rows:
         return 0
     try:
         import os, psycopg
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
-            cur.executemany(
-                """INSERT INTO pane_context (session, base, pane_k, pct, idle_verdict, host, updated_at)
-                   VALUES (%s,%s,%s,%s,%s,%s, now())
-                   ON CONFLICT (session) DO UPDATE
-                     SET base=EXCLUDED.base, pane_k=EXCLUDED.pane_k, pct=EXCLUDED.pct,
-                         idle_verdict=EXCLUDED.idle_verdict, host=EXCLUDED.host, updated_at=now()""",
-                rows)
+            cur.executemany(_PANE_UPSERT_SQL, rows)
             cur.execute("DELETE FROM pane_context WHERE updated_at < now() - make_interval(hours => %s)",
                         (_PRUNE_STALE_H,))
         print(f"[pane-context] published {len(rows)} live session(s)")

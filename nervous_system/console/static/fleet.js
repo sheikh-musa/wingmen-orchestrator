@@ -125,7 +125,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v56';
+  var APP_BUILD = 'fc-v58';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -193,7 +193,10 @@
     pl.className = "pulse " + (attn ? "attn" : "clear");
     var msg;
     if (needs > 0) msg = needs === 1 ? "1 thing needs you" : needs + " things need you";
-    else if (health === "alert") msg = worst ? (worst.label + " " + worst.pct + "% — context building") : "context building";
+    // op#31750: a bloated lane in the resting banner ALWAYS shows who's on it (the SRE
+    // disposition), not a bare "context building" — so Musa sees it's handled + looks away.
+    else if (health === "alert") msg = worst ? (worst.label + " " + worst.pct + "% — " +
+      ((worst.sre_disposition && worst.sre_disposition.label) || "context building")) : "context building";
     else if (health === "unknown") msg = "bloat feed offline — status unknown";
     else msg = "All clear";
     $("pulseBig").textContent = msg;
@@ -265,8 +268,12 @@
       var srcNote = r.src === "pct" ? " · exact % (at cliff)" : (r.src === "k" ? " · ~ from hint" : "");
       var tip = fmtTok(r.ctx_tokens) + " / " + fmtTok(r.window || 1000000) +
         (r.age_s != null ? " · " + fmtAge(r.age_s) + " ago" : "") + srcNote;
+      // op#31750: per-lane SRE disposition badge (worker rows carry sre_disposition;
+      // coord glance rows don't — guard). So every bloated lane shows who's on it.
+      var d = r.sre_disposition;
+      var disp = (d && d.label) ? ' <span class="sre ' + esc(d.state) + '">' + esc(d.label) + '</span>' : '';
       return '<span class="ent" title="' + esc(tip) + '"><span class="who">' + esc(who) + '</span> ' +
-        '<span class="pct ' + esc(lvl) + '">' + r.pct + '%</span></span>';
+        '<span class="pct ' + esc(lvl) + '">' + r.pct + '%</span>' + disp + '</span>';
     });
     // fc-v52: content is populated but visibility is gated by the BLOAT-cell tap
     // (syncTopBloat) — the resting view stays clean until the operator taps in.
@@ -331,6 +338,35 @@
     if (!cx && base) cx = laneCtxIndex[base];
     return (cx && cx.pct != null) ? cx : null;
   }
+  // never-blank lane-context (Musa flag via Nazim #32472; design #32484/#32489): map a
+  // pane idle_verdict to an honest one-word label for a lane that has NO usable reading
+  // (never had a /clear hint, or its last-known reading aged out) — so the card shows
+  // "idle"/"low"/"n/a" instead of a bare "—". "low" = working but below the hint bar
+  // (genuinely not near the cliff); "n/a" = we truly can't say.
+  function idleLabel(v) {
+    if (v === "IDLE_EMPTY") return "idle";
+    if (v === "WORKING" || v === "STAGED") return "low";
+    return "n/a";
+  }
+  // The PURE render decision for a lane's context indicator. Four modes, NEVER a blank:
+  //   off   — offline lane (wins even over a stale reading)
+  //   live  — a fresh pane reading -> show {pct}%
+  //   stale — a LAST-KNOWN reading (hint hidden this cycle) -> show "~{k}k · {age}" (age
+  //           VISIBLE, never mistakable for live — Nazim bake-in a)
+  //   label — no usable reading -> the honest idle/low/n-a label from idle_verdict
+  // Kept pure (no module state) so the unit test can exercise it directly.
+  function ctxDisplayFrom(cx, ctxIdle, bucket) {
+    if (bucket === "offline") return { mode: "off" };
+    if (cx && cx.pct != null) {
+      if (cx.stale) {
+        var k = cx.ctx_tokens != null ? Math.round(cx.ctx_tokens / 1000) : null;
+        return { mode: "stale", pct: cx.pct, level: cx.level, k: k, age_s: cx.age_s };
+      }
+      return { mode: "live", pct: cx.pct, level: cx.level };
+    }
+    return { mode: "label", text: idleLabel(ctxIdle) };
+  }
+  function laneCtxDisplay(l) { return ctxDisplayFrom(laneCtx(l), l.ctx_idle, l.bucket); }
 
   // ---- needs-you callouts ----------------------------------------------------
   function needCard(n, handling) {
@@ -367,21 +403,35 @@
   }
 
   // ---- LANE SPINE ------------------------------------------------------------
-  function ringHtml(cx, picked) {
+  // Renders the lane context indicator from the never-blank display object (4 modes). It
+  // is NEVER blank: 'off' shows a faint —, 'label' shows an honest idle/low/n-a word,
+  // 'stale' shows "~{k}k" dimmed (a token count — visibly NOT a live %) with the age in
+  // its tooltip, 'live' shows the colored %-ring as before.
+  function ringHtml(d, picked) {
     if (picked) return '<div class="ring"><div class="ck">✓</div></div>';
-    if (!cx || cx.pct == null) return '<div class="ring"><span class="rp" style="color:var(--faint)">—</span></div>';
-    var pct = Math.max(0, Math.min(100, cx.pct));
+    d = d || { mode: "label", text: "n/a" };
+    if (d.mode === "off") return '<div class="ring"><span class="rp" style="color:var(--faint)">—</span></div>';
+    if (d.mode === "label") return '<div class="ring"><span class="rp lbl">' + esc(d.text) + '</span></div>';
+    if (d.mode === "stale") {
+      var kk = d.k != null ? "~" + d.k + "k" : "~?";
+      return '<div class="ring stale ' + esc(d.level || "") + '" title="last known · ' +
+        esc(fmtAge(d.age_s)) + ' ago (hint hidden this cycle)">' +
+        '<span class="rp k">' + esc(kk) + '</span></div>';
+    }
+    var pct = Math.max(0, Math.min(100, d.pct));
     var off = (88 * (1 - pct / 100)).toFixed(1);
-    var col = cx.level === "red" ? "#fb7185" : (cx.level === "amber" ? "#f6c453" : "#37d39a");
-    return '<div class="ring ' + esc(cx.level || "green") + '">' +
+    var col = d.level === "red" ? "#fb7185" : (d.level === "amber" ? "#f6c453" : "#37d39a");
+    return '<div class="ring ' + esc(d.level || "green") + '">' +
       '<svg width="34" height="34"><circle cx="17" cy="17" r="14" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="3"/>' +
       '<circle cx="17" cy="17" r="14" fill="none" stroke="' + col + '" stroke-width="3" stroke-dasharray="88" stroke-dashoffset="' + off + '" stroke-linecap="round"/></svg>' +
-      '<span class="rp">' + cx.pct + '</span></div>';
+      '<span class="rp">' + d.pct + '</span></div>';
   }
   function tileHtml(l) {
     var sess = l.tmux_session || l.lane || "";
-    var cx = laneCtx(l);
-    var bloat = cx && (cx.level === "red" || cx.level === "amber");
+    var disp = laneCtxDisplay(l);
+    // bloat-highlight the tile only on a LIVE amber/red reading (never a last-known one —
+    // consistent with the header/glance being live-only).
+    var bloat = disp.mode === "live" && (disp.level === "red" || disp.level === "amber");
     var cls = l.flagged && l.bucket !== "offline" ? "bloat" : l.bucket;
     if (bloat && l.bucket === "working") cls = "bloat";
     var live = l.live || {};
@@ -390,7 +440,7 @@
     var badge = (l.flagged && l.bucket === "offline") ? '<span class="badge">dark</span>' : "";
     var tok = tokChip(l.auth_fp);
     return '<div class="tile ' + esc(cls) + (picked ? " picked" : "") + '" data-lane="' + esc(sess) + '">' +
-      ringHtml(cx, picked) +
+      ringHtml(disp, picked) +
       '<div class="idw"><div class="id"><span class="stdot ' + esc(l.bucket) + '"></span>' + esc(l.agent_id) + badge + '</div>' +
         (act ? '<div class="act">' + esc(act) + '</div>' : '<div class="act">' + esc(l.bucket) + '</div>') +
       '</div>' + tok + '<span class="chev">›</span></div>';
@@ -457,7 +507,7 @@
       var live = l.live || {};
       entries[sess] = {
         kind: "lane", session: sess, agentId: l.agent_id, id: l.agent_id,
-        bucket: l.bucket, ctx: laneCtx(l),
+        bucket: l.bucket, ctx: laneCtx(l), ctxIdle: l.ctx_idle,
         activity: (live.running && live.activity) || l.activity || l.current_task || "",
         auth_fp: l.auth_fp, host: l.host, model: null, peekable: true,
         _routine: !(l.bucket === "working" || l.flagged)
@@ -522,10 +572,14 @@
   function renderSheet(e) {
     var dot = $("shDot"); dot.className = "st2 " + (e.bucket || "idle");
     $("shId").textContent = e.id;
-    var ctx = e.ctx;
-    var cp = $("shCtx");
-    if (ctx && ctx.pct != null) { cp.className = "ctxpill " + (ctx.level || ""); cp.textContent = ctx.pct + "% ctx"; cp.style.display = ""; }
-    else { cp.className = "ctxpill"; cp.textContent = "no ctx"; cp.style.display = ""; }
+    // never-blank: the sheet pill mirrors the tile's 4-state display — live %, an
+    // age-stamped last-known "~{k}k · {age} ago", or an honest idle/low/no-ctx label.
+    var d = ctxDisplayFrom(e.ctx, e.ctxIdle, e.bucket);
+    var cp = $("shCtx"); cp.style.display = "";
+    if (d.mode === "live") { cp.className = "ctxpill " + (d.level || ""); cp.textContent = d.pct + "% ctx"; }
+    else if (d.mode === "stale") { cp.className = "ctxpill stale " + (d.level || ""); cp.textContent = "~" + d.k + "k · " + fmtAge(d.age_s) + " ago"; }
+    else if (d.mode === "label") { cp.className = "ctxpill"; cp.textContent = (d.text === "n/a" ? "no ctx" : d.text + " · ctx"); }
+    else { cp.className = "ctxpill"; cp.textContent = "no ctx"; }
     var subBits = [];
     if (e.host) subBits.push(esc(e.host));
     if (e.auth_fp) subBits.push("🔑 " + esc(tokName(e.auth_fp)));
@@ -1246,7 +1300,8 @@
 
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip };
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip,
+      ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel };
   }
 
   start();

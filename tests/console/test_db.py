@@ -96,3 +96,18 @@ def test_pane_context_query_pct_less_degrades_gracefully():
     assert "pct DESC" not in sql
     assert "ORDER BY pane_k DESC NULLS LAST" in sql
     assert params == [60]
+
+
+def test_pane_context_query_selects_pane_k_age_when_present():
+    # never-blank (mig-057): when pane_k_at exists the query returns pane_k_age_s (seconds
+    # since the hint was last seen) so the console can gate live/last-known/aged-out.
+    sql, _ = db.build_pane_context_query(60, with_pane_k_at=True)
+    assert "now() - pane_k_at" in sql and "AS pane_k_age_s" in sql
+
+
+def test_pane_context_query_pane_k_age_degrades_when_absent():
+    # mig-057 absent must NOT dark the feed: NULL::int AS pane_k_age_s keeps the row shape
+    # (key present, None) so downstream treats every reading as LIVE = pre-057 behavior.
+    sql, _ = db.build_pane_context_query(60, with_pane_k_at=False)
+    assert "NULL::int AS pane_k_age_s" in sql
+    assert "now() - pane_k_at" not in sql

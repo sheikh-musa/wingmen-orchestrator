@@ -150,6 +150,13 @@
   .topbloat .dot.green{background:var(--good)} .topbloat .pct.green{color:var(--good)}
   .topbloat .dot.amber{background:var(--warn)} .topbloat .pct.amber{color:var(--warn)}
   .topbloat .dot.red{background:var(--bad)}    .topbloat .pct.red{color:var(--bad)}
+  /* op#31750: SRE-disposition pill — every bloated lane shows who's on it */
+  .topbloat .sre { font: 700 10.5px/1.4 var(--sans); padding: 0 5px; border-radius: 4px;
+                   border: 1px solid currentColor; }
+  .topbloat .sre.recycling { color: var(--good); }
+  .topbloat .sre.held      { color: var(--warn); }
+  .topbloat .sre.watching  { color: var(--dim); }
+  .topbloat .sre.healthy   { display: none; }
 
   /* ── pinned needs-you callouts (compact) ── */
   .needstrip { padding: 11px 16px 2px; }
@@ -190,6 +197,13 @@
   .ring svg { position: absolute; inset: 0; transform: rotate(-90deg); }
   .ring .rp { font: 9px/1 var(--mono); font-weight: 700; }
   .ring.green .rp { color: var(--good); } .ring.amber .rp { color: var(--warn); } .ring.red .rp { color: var(--bad); }
+  /* never-blank last-known/label states: dimmed, and "~{k}k" is a token count (visibly
+     NOT a live %), so a stale reading is never mistakable for a fresh one. */
+  .ring.stale { opacity: .6; }
+  .ring .rp.k { font: 8px/1 var(--mono); font-weight: 700; letter-spacing: -.3px; color: var(--faint); }
+  .ring.stale.amber .rp.k { color: var(--warn); } .ring.stale.red .rp.k { color: var(--bad); }
+  .ring .rp.lbl { font: 8px/1 var(--mono); font-weight: 600; color: var(--faint); }
+  .ctxpill.stale { opacity: .82; }
   .ring .ck { position: absolute; inset: 0; display: grid; place-items: center; font: 700 15px/1 var(--sans); color: var(--accent); }
   .tile .idw { min-width: 0; flex: 1; }
   .tile .id { font: 700 13.5px/1 var(--sans); display: flex; align-items: center; gap: 7px; overflow-wrap: anywhere; }

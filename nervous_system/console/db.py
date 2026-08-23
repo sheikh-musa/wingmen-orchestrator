@@ -889,17 +889,47 @@ def _pane_context_has_pct() -> bool:
     return _HAS_PCT_COL
 
 
-def build_pane_context_query(ttl_s: int = None, with_pct: "bool | None" = None) -> Tuple[str, list]:
+_HAS_PANE_K_AT_COL: Optional[bool] = None
+
+
+def _pane_context_has_pane_k_at() -> bool:
+    """Feature-detect the pane_context.pane_k_at column (mig-057, never-blank fix), cached
+    once True. Same pattern + fail-safe as _pane_context_has_pct: if the column is absent
+    (057 not yet applied / rolled back) the query degrades to a NULL pane_k_age_s so every
+    reading reads as LIVE — i.e. exactly the pre-057 behavior — and a migration hiccup can
+    never dark the feed. A transient information_schema failure returns False UNcached."""
+    global _HAS_PANE_K_AT_COL
+    if _HAS_PANE_K_AT_COL:
+        return True
+    try:
+        r = _query("SELECT 1 FROM information_schema.columns WHERE "
+                   "table_name='pane_context' AND column_name='pane_k_at' LIMIT 1", [])
+    except Exception:
+        return False  # transient — do not cache; degrade to no-age this poll
+    _HAS_PANE_K_AT_COL = bool(r)
+    return _HAS_PANE_K_AT_COL
+
+
+def build_pane_context_query(ttl_s: int = None, with_pct: "bool | None" = None,
+                             with_pane_k_at: "bool | None" = None) -> Tuple[str, list]:
     ttl = PANE_TTL_S if ttl_s is None else ttl_s
     if with_pct is None:
         with_pct = _pane_context_has_pct()
+    if with_pane_k_at is None:
+        with_pane_k_at = _pane_context_has_pane_k_at()
     # pct-less path selects NULL::smallint AS pct so the row SHAPE is identical (pct key
     # present but None) -> downstream _pane_entry fails closed to pane_k, feed stays alive.
     pct_col = "pct" if with_pct else "NULL::smallint AS pct"
     pct_order = "pct DESC NULLS LAST, " if with_pct else ""
+    # never-blank (mig-057): pane_k_age_s = seconds since pane_k was last observed NON-NULL.
+    # Absent column -> NULL::int (every reading reads LIVE = pre-057 behavior). Row shape
+    # is identical either way (key always present).
+    pane_k_age_col = ("round(extract(epoch FROM (now() - pane_k_at)))::int AS pane_k_age_s"
+                      if with_pane_k_at else "NULL::int AS pane_k_age_s")
     sql = (
         f"SELECT session, base, pane_k, {pct_col}, idle_verdict, host, "
-        "  round(extract(epoch FROM (now() - updated_at)))::int AS age_s "
+        "  round(extract(epoch FROM (now() - updated_at)))::int AS age_s, "
+        f"  {pane_k_age_col} "
         "FROM pane_context "
         "WHERE updated_at > now() - make_interval(secs => %s) "
         # op#13186: pct (the cliff truth) leads the raw order so a maxed lane with a NULL

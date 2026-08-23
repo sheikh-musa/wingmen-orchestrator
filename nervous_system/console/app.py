@@ -1058,6 +1058,17 @@ def _context_bloat(rows):
 
 
 # ── op#13050-B: pane-truth honesty (fresh /clear-hint feed, NOT the lying gauge) ──
+# Never-blank lane-context (Musa flag via Nazim #32472; design #32484/#32489). A pane_k
+# reading is LIVE only if freshly observed within one publish window; beyond that it is a
+# LAST-KNOWN reading, usable ONLY for the per-lane card (age-stamped), never for a header/
+# glance alert (that would falsely alert on an hour-old number). Past the cap it is dropped
+# entirely so a recycled lane never shows its pre-recycle high %.
+#   pane_k_age_s = now - pane_k_at (when the /clear hint was last seen NON-NULL).
+_PANE_K_LIVE_S = 660     # the publisher runs every 300s; 660 tolerates one missed cycle so
+                         # a genuinely-live lane (refreshes every cycle) never flaps to stale.
+_LAST_KNOWN_MAX_S = 3600  # ~1h: beyond this the last-known reading ages out to a label.
+
+
 def _pane_k_to_level(pane_k):
     """(pct, level) for a pane_k (reclaimable K-tokens) via the SAME window +
     green/amber/red thresholds as _ctx_level — one vocabulary across the console.
@@ -1143,7 +1154,7 @@ def _sre_disposition(pct, idle_verdict):
     return {"state": state, "label": _SRE_DISPOSITION_LABEL[state]}
 
 
-def _pane_entry(row):
+def _pane_entry(row, allow_stale=False):
     """One bloat entry (renderTopBloat/_context_bloat shape) from a pane_context row, or
     None when the row carries NO readable signal (both pct + pane_k NULL = below CC's
     nudge bar OR mid-turn). Truth precedence (op#13186): CC's `{N}% context used` pct
@@ -1151,7 +1162,17 @@ def _pane_entry(row):
     (pane_k) has vanished and a maxed lane would otherwise publish NULL and read as not-
     bloated; else derive from the pane_k hint. Both feed the SAME _ctx_level thresholds
     (one vocabulary). Fail-closed: a row we cannot read as a real % is dropped, NEVER
-    green. `src` marks which signal won ('pct' exact | 'k' hint-approx)."""
+    green. `src` marks which signal won ('pct' exact | 'k' hint-approx).
+
+    Never-blank (Nazim #32472/#32489): the publisher now KEEPS the last non-null pane_k
+    (COALESCE) so a mid-turn/low-idle lane still carries a value. A pane_k reading is LIVE
+    only while fresh (pane_k_age_s < _PANE_K_LIVE_S); beyond that it is LAST-KNOWN, emitted
+    (with stale=True + age_s=reading-age) ONLY when allow_stale=True — the per-lane card
+    feed. The GLANCE/header (allow_stale=False) drop it so they never alert on an old
+    number. Past _LAST_KNOWN_MAX_S the reading is dropped entirely (a recycled lane must
+    not show its pre-recycle high %). pct (the cliff line) is always current (never
+    COALESCE-kept) so a pct reading is always LIVE."""
+    stale = False
     pct_lvl = _pct_to_level(row.get("pct"))
     if pct_lvl is not None:
         pct, level = pct_lvl
@@ -1159,13 +1180,25 @@ def _pane_entry(row):
         # does not print a token count with it). Never used for the level — that is pct.
         ctx_tokens = int(round(pct / 100.0 * _CTX_WINDOW))
         src = "pct"
+        age = row.get("age_s")
     else:
         lvl = _pane_k_to_level(row.get("pane_k"))
         if lvl is None:
             return None
+        # Freshness of the pane_k reading. None (legacy row / test) => treat as LIVE so
+        # pre-existing behavior is unchanged; a real age gates live/last-known/aged-out.
+        k_age = row.get("pane_k_age_s")
+        if k_age is not None and k_age >= _LAST_KNOWN_MAX_S:
+            return None  # aged out — no trustworthy reading; the card renders a label
+        stale = k_age is not None and k_age >= _PANE_K_LIVE_S
+        if stale and not allow_stale:
+            return None  # header/glance never alert on a LAST-KNOWN reading (stays honest)
         pct, level = lvl
         ctx_tokens = int(round(float(row.get("pane_k")) * 1000))
         src = "k"
+        # A stale entry reports the READING's age (for "· {age}"); a live one keeps the
+        # row-freshness age as before.
+        age = k_age if stale else row.get("age_s")
     canon = _pane_canonical(row)
     is_coord = _is_coord_identity(canon)
     return {
@@ -1178,7 +1211,10 @@ def _pane_entry(row):
         "window": _CTX_WINDOW,
         "pct": pct,
         "level": level,
-        "age_s": row.get("age_s"),
+        "age_s": age,
+        # never-blank: True => this is a LAST-KNOWN reading (hint hidden this cycle); the
+        # card renders "~{k}k · {age}" (age VISIBLE), never mistakable for a live %.
+        "stale": stale,
         "source": "pane",
         # op#13186: which pane signal won — 'pct' (exact `% context used`, authoritative
         # at the cliff) or 'k' (approx from the `/clear to save {N}k` hint).
@@ -1190,15 +1226,20 @@ def _pane_entry(row):
     }
 
 
-def _pane_bloat(pane_rows, include_coords=False):
+def _pane_bloat(pane_rows, include_coords=False, allow_stale=False):
     """Bloat list from the FRESH pane feed (op#13050-B). include_coords=False =>
     WORKER lanes only (feeds the per-lane-card gauges; coordinators own their cards,
     op#9088). include_coords=True => the whole-fleet GLANCE (op#18542) — workers AND
     coordinators, all on ONE pane-truth source so it can NEVER disagree with the
-    pane-truth header. Never gauge-derived; a down feed => empty (honest)."""
+    pane-truth header. Never gauge-derived; a down feed => empty (honest).
+
+    allow_stale (never-blank, Nazim #32489): the per-lane CARD feed passes True so a
+    LAST-KNOWN reading fills the card (age-stamped) instead of blanking to `—`; the GLANCE
+    and header keep the default False so they alert ONLY on LIVE bloat, never an old
+    number."""
     out = []
     for r in pane_rows or []:
-        e = _pane_entry(r)
+        e = _pane_entry(r, allow_stale=allow_stale)
         if e is None:
             continue
         if not include_coords and e["is_coord"]:
@@ -1329,7 +1370,18 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("pane_context failed: %s", e)
             pane_rows = []
-        context_bloat = _pane_bloat(pane_rows)                     # worker-only: per-lane-card gauges
+        # never-blank: attach the pane idle_verdict to each lane so a NO-READING card (no
+        # bloat entry at all — never had a hint, or aged out) can render an honest
+        # idle/low/n-a label instead of a bare "—". Keyed by tmux session (== pane row's
+        # session), which survives recycle.
+        _idle_by_sess = {r.get("session"): r.get("idle_verdict") for r in (pane_rows or [])}
+        for _l in lanes:
+            _sess = _l.get("tmux_session") or _l.get("lane")
+            if _sess in _idle_by_sess:
+                _l["ctx_idle"] = _idle_by_sess[_sess]
+        # never-blank: the per-lane CARD feed allows LAST-KNOWN readings (age-stamped) so a
+        # mid-turn/low-idle worker card never blanks to `—`; the GLANCE stays LIVE-only.
+        context_bloat = _pane_bloat(pane_rows, allow_stale=True)   # worker-only: per-lane-card gauges
         bloat_glance = _pane_bloat(pane_rows, include_coords=True)  # whole-fleet glance (workers+coords, ONE source)
         pane_header = _pane_header(pane_rows)
         try:
