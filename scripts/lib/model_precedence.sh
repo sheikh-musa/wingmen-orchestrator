@@ -21,7 +21,13 @@
 #   won, for the boot banner). Fail-OPEN: a resolver error / unreadable / empty file
 #   at any tier just falls through to the next lower tier.
 
-resolve_lane_model() {
+# Auditor-lane SSOT (CAI-1170) — shared with fleet_model.sh so the carve-out can't
+# drift between the flip tool and the launch path (the gap this closes).
+source "$(dirname "${BASH_SOURCE[0]}")/auditor_lanes.sh"
+
+# _resolve_lane_model_raw — the tiered cascade (unchanged + tested). The PUBLIC entry
+# is resolve_lane_model (below), which wraps this with the CAI-1170 auditor clamp.
+_resolve_lane_model_raw() {
     local session="$1" orch_dir="$2" venv_py="$3" fleet_file="$4" opus_default="$5"
 
     # Tier 1 — explicit MODEL env override (wins over every file tier).
@@ -72,5 +78,30 @@ resolve_lane_model() {
 
     # Tier 5 — hardcoded default.
     printf '%s\t%s\n' "$opus_default" "default (opus-4-8)"
+    return 0
+}
+
+# resolve_lane_model — PUBLIC entry. Runs the tiered cascade, then applies the
+# CAI-1170 FULL-AUDITOR CLAMP: cc-quality / cc-storefront render governance and must
+# NEVER launch on non-opus-4-8, regardless of which tier won (an explicit MODEL env, a
+# .<session>_model pin, a group default, or a fleet-wide Sonnet flip). The flip tool
+# (fleet_model.sh) already refuses to flip an auditor to Sonnet; this makes the LAUNCH
+# path honour the same invariant, so a fresh auditor with no pin can't come up Sonnet.
+# Strictest reading (no launch-time escape hatch): governance integrity > any pin. Same
+# stdout contract (<model>\t<tier>); the clamp warns LOUD on stderr when it fires.
+resolve_lane_model() {
+    local session="$1"
+    local out model tier
+    out="$(_resolve_lane_model_raw "$@")"
+    model="${out%%$'\t'*}"
+    tier="${out#*$'\t'}"
+
+    if is_auditor_lane "$session" && [ "$model" != "claude-opus-4-8" ]; then
+        printf 'model_precedence: CAI-1170 AUDITOR CLAMP — %s resolved "%s" via %s; forcing claude-opus-4-8\n' \
+            "$session" "$model" "$tier" >&2
+        model="claude-opus-4-8"
+        tier="AUDITOR-CLAMP (CAI-1170)"
+    fi
+    printf '%s\t%s\n' "$model" "$tier"
     return 0
 }

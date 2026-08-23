@@ -109,3 +109,51 @@ def test_empty_session_falls_to_fleet(orch):
     orch_dir, write = orch
     write(".fleet_model", "claude-sonnet-5")
     assert _resolve("", orch_dir) == ("claude-sonnet-5", ".fleet_model")
+
+
+# ── CAI-1170 FULL-auditor clamp: an auditor lane NEVER launches on non-opus ────
+# The carve-out (AUDITOR_LANES -> pin opus-4-8) lived ONLY in fleet_model.sh (the
+# --live flip tool); the LAUNCH cascade had no such guard, so a fresh auditor
+# launch with no .<session>_model pin + a Sonnet .fleet_model came up Sonnet
+# (cc-storefront did — a silent CAI-1170 regression). The clamp forces
+# claude-opus-4-8 for AUDITOR_LANES regardless of which tier won.
+
+@pytest.mark.parametrize("sess", ["storefront", "quality", "cc-storefront", "cc-quality"])
+def test_auditor_clamped_to_opus_over_fleet_sonnet(orch, sess):
+    """THE regression: a fresh auditor launch, no pin, .fleet_model=sonnet -> was Sonnet."""
+    orch_dir, write = orch
+    write(".fleet_model", "claude-sonnet-5")
+    model, tier = _resolve(sess, orch_dir)
+    assert model == _OPUS, f"{sess} launched on {model} — CAI-1170 violated"
+    assert "AUDITOR" in tier or "1170" in tier, tier
+
+
+def test_auditor_clamp_overrides_session_pin(orch):
+    """CAI-1170 is 'regardless of pins' — even an errant .<session>_model=sonnet clamps."""
+    orch_dir, write = orch
+    write(".storefront_model", "claude-sonnet-5")
+    model, _ = _resolve("storefront", orch_dir)
+    assert model == _OPUS
+
+
+def test_auditor_clamp_overrides_model_env(orch):
+    """Even an explicit MODEL env cannot launch an auditor on non-opus."""
+    orch_dir, _write = orch
+    model, _ = _resolve("storefront", orch_dir, model_env="claude-sonnet-5")
+    assert model == _OPUS
+
+
+def test_auditor_already_opus_keeps_its_tier(orch):
+    """An auditor resolving to opus via a normal tier keeps that tier — no clamp noise."""
+    orch_dir, write = orch
+    write(".storefront_model", "claude-opus-4-8")
+    model, tier = _resolve("storefront", orch_dir)
+    assert model == _OPUS
+    assert tier == ".storefront_model"
+
+
+def test_non_auditor_still_falls_to_fleet_sonnet(orch):
+    """Regression guard: the clamp must NOT touch non-auditor lanes."""
+    orch_dir, write = orch
+    write(".fleet_model", "claude-sonnet-5")
+    assert _resolve("cosem-tdu", orch_dir) == ("claude-sonnet-5", ".fleet_model")

@@ -36,7 +36,10 @@ CORE_LANES="orch cai nazim fleet-health fleet-console"
 # downgrade (sonnet/haiku) AND an over-correction drift (opus-5, which op#9020 + cai bar for
 # these lanes: '4.8 not 5'). --all still forces (a deliberate model change updates the pin).
 # Same shape as the CORE_LANES governance carve-out.
-AUDITOR_LANES="quality storefront"
+# AUDITOR_LANES is now the SHARED SSOT (scripts/lib/auditor_lanes.sh), sourced by BOTH this
+# flip tool AND scripts/lib/model_precedence.sh (the launch cascade) so the carve-out can't
+# be enforced here but not at launch — the exact gap that let cc-storefront launch on Sonnet.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/auditor_lanes.sh"
 DEFAULT_MODEL="claude-opus-4-8"
 
 resolve() {  # alias|full-id -> full model id
