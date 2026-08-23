@@ -96,7 +96,7 @@ if [ "$LIVE" -eq 1 ]; then
     fi
     # FULL-auditor carve-out (CAI-RESP-1170): PIN to claude-opus-4-8 exactly. Skip any target
     # that isn't exactly opus-4-8 — refusing a downgrade (sonnet/haiku) AND an opus-5 drift.
-    if [ "$ALL" -eq 0 ] && printf '%s ' $AUDITOR_LANES | grep -qw "$sess" && [ "$FULL" != "claude-opus-4-8" ]; then
+    if [ "$ALL" -eq 0 ] && is_auditor_lane "$sess" && [ "$FULL" != "claude-opus-4-8" ]; then
       echo "  · $sess — SKIP (FULL auditor: pinned to opus-4-8, refusing $FULL; pass --all to force)"; skipped=$((skipped+1)); continue
     fi
     if "$NUDGE" "$sess" "/model $FULL"; then
