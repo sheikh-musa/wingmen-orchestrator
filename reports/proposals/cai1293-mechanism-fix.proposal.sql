@@ -67,18 +67,29 @@ GRANT  SELECT          ON decision_tier_changes TO console_readonly;
 CREATE POLICY decision_tier_changes_console_ro   ON decision_tier_changes FOR SELECT TO console_readonly USING (true);           -- F4: console read (RLS-on needs a policy)
 CREATE POLICY decision_tier_changes_service_only ON decision_tier_changes FOR ALL    TO service_role     USING (true) WITH CHECK (true);  -- sibling parity (inert under bypassrls; GRANT is the append-only gate)
 
--- A.1 — BACKFILL the NULLs (⚠️ cai fork; B=LEGACY drafted). Must precede NOT NULL.
---       'LEGACY' = these 1514 predate mandatory tiering; the NOT-NULL + guard bind
+-- ⚠️ ORDERING = DROP-old-CHECK → BACKFILL → ADD-widened-CHECK (provenance reorder, ref CAI-RESP-1301;
+--    Nazim #32298/#32306). The OLD live CHECK is `audit_tier IS NULL OR IN ('FULL','NONE')`; backfilling
+--    NULL→'LEGACY' BEFORE dropping it VIOLATES the old constraint and ABORTS on live. The as-audited
+--    rev4 (23e1970) had backfill-before-drop — the wet-prove missed it because its CTAS scratch copy
+--    carries NO CHECK (CTAS drops constraints = false PASS; same scratch!=prod class as the F3 default-
+--    ACL blindness). cai ruled apply-under-discretion / NO rev5; Nazim applied THIS order (end-state
+--    byte-identical). This file is reordered so the canonical propose draft is verbatim-re-runnable.
+--    As-applied record: reports/backend-review/cai1293-APPLIED-20260823.sql.
+
+-- A.1 — DROP the old CHECK first (it forbids 'LEGACY', which A.2 writes).
+ALTER TABLE strategic_decisions DROP CONSTRAINT IF EXISTS strategic_decisions_audit_tier_check;
+
+-- A.2 — BACKFILL the NULLs, now unconstrained (⚠️ cai fork; B=LEGACY, ruled CAI-RESP-1296). Must precede NOT NULL.
+--       'LEGACY' = these ~1519 predate mandatory tiering; the NOT-NULL + guard bind
 --       going FORWARD without back-asserting a NONE audit-judgment on history.
 UPDATE strategic_decisions SET audit_tier = 'LEGACY' WHERE audit_tier IS NULL;
 
--- A.2 — tighten the CHECK: drop the "IS NULL OR" branch, add 'LEGACY' (fork B).
-ALTER TABLE strategic_decisions DROP CONSTRAINT IF EXISTS strategic_decisions_audit_tier_check;
+-- A.3 — ADD the tightened CHECK: no "IS NULL OR" branch, add 'LEGACY' (fork B).
 ALTER TABLE strategic_decisions ADD  CONSTRAINT strategic_decisions_audit_tier_check
     CHECK (audit_tier = ANY (ARRAY['FULL','NONE','LEGACY']));   -- fork B set; A would be {FULL,NONE}
 
--- A.3 — mandatory at creation (CAI-988/F1: NOT NULL, no default — a decision must be
---       tiered on purpose, never defaulted).
+-- A.3b — mandatory at creation (CAI-988/F1: NOT NULL, no default — a decision must be
+--        tiered on purpose, never defaulted).
 ALTER TABLE strategic_decisions ALTER COLUMN audit_tier SET NOT NULL;
 
 -- A.4 — the guard trigger. BEFORE UPDATE OF audit_tier. BLOCKS the CAI-1009 dodge
