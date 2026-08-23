@@ -1557,10 +1557,16 @@ def _irsyad_payload():
         f_tt = ex.submit(panes.token_ground_truth, False)
         lanes = _enrich_lanes_live(f_lanes.result(), live=live)
         try:
-            bloat = _pane_bloat(f_bloat.result())   # pane-truth worker entries (item-4)
+            _pane_rows = f_bloat.result()
+            # never-blank #2b (Nazim #32534): allow_stale so an idle/mid-turn lane shows its
+            # age-stamped LAST-KNOWN reading instead of blanking to "context —".
+            bloat = _pane_bloat(_pane_rows, allow_stale=True)   # pane-truth worker entries (item-4)
         except Exception as e:
             logger.warning("irsyad context_bloat failed: %s", e)
+            _pane_rows = []
             bloat = []
+        # never-blank #2b: idle_verdict per session -> the honest no-reading label.
+        _idle_by_sess = {r.get("session"): r.get("idle_verdict") for r in _pane_rows}
         try:
             pool_rows = f_pool.result()
         except Exception as e:
@@ -1614,6 +1620,10 @@ def _irsyad_payload():
             "ctx_tokens": ctx.get("ctx_tokens"),
             "ctx_window": ctx.get("window"),
             "ctx_age_s": ctx.get("age_s"),
+            # never-blank #2b: stale => a LAST-KNOWN reading (age-stamped, not live);
+            # ctx_idle => the honest label when there is no reading at all.
+            "ctx_stale": ctx.get("stale"),
+            "ctx_idle": _idle_by_sess.get(sess),
         })
 
     # Loud-first ordering: flagged (dark but wanted up) floats up, then working,

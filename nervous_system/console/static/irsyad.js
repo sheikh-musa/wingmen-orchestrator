@@ -94,6 +94,27 @@
   }
 
   // A lane row: collapsed spine (status colour) + identity + account badge +
+  // never-blank #2b (Nazim decision #32534): the same four render states as the /fleet
+  // fix, ported onto this view's flat r.ctx_* row shape — a lane card must NEVER blank to
+  // "context —" on a live/idle lane. idleLabel maps a pane idle_verdict to an honest word
+  // when there is NO usable reading; irsyadCtxDisplay is the pure render decision.
+  function idleLabel(v) {
+    if (v === "IDLE_EMPTY") return "idle";
+    if (v === "WORKING" || v === "STAGED") return "low";
+    return "n/a";
+  }
+  function irsyadCtxDisplay(r) {
+    if (r.bucket === "offline") return { mode: "off" };
+    if (r.ctx_pct != null) {
+      if (r.ctx_stale) {
+        var k = r.ctx_tokens != null ? Math.round(r.ctx_tokens / 1000) : null;
+        return { mode: "stale", pct: r.ctx_pct, level: r.ctx_level, k: k, age_s: r.ctx_age_s };
+      }
+      return { mode: "live", pct: r.ctx_pct, level: r.ctx_level, tokens: r.ctx_tokens };
+    }
+    return { mode: "label", text: idleLabel(r.ctx_idle) };
+  }
+
   // context meter; tap opens a read-only detail drawer.
   function laneHtml(r) {
     var cls, badge;
@@ -115,15 +136,26 @@
     if (r.host) subBits.push(esc(r.host));
     var sub2 = subBits.join(" · ");
 
-    // context meter (of the model window; same green/amber/red as the fleet view)
+    // context meter (of the model window; same green/amber/red as the fleet view).
+    // never-blank #2b: 4-state, NEVER a bare "context —" on a live/idle lane.
+    var d = irsyadCtxDisplay(r);
     var ctxHtml;
-    if (r.ctx_pct == null) {
+    if (d.mode === "off") {
       ctxHtml = '<div class="ctx"><span class="cnull">context —</span></div>';
+    } else if (d.mode === "label") {
+      ctxHtml = '<div class="ctx"><span class="cnull">context ' + esc(d.text) + '</span></div>';
+    } else if (d.mode === "stale") {
+      // last-known: dimmed meter + "~{k}k · {age}" (age VISIBLE; a token count, not a live %).
+      var slvl = d.level === "red" ? "red" : (d.level === "amber" ? "amber" : "");
+      ctxHtml = '<div class="ctx stale ' + slvl + '" title="last known · ' + esc(fmtAge(d.age_s)) +
+        ' ago (hint hidden this cycle)">' +
+        '<span class="meter"><i style="width:' + Math.min(100, d.pct) + '%"></i></span>' +
+        '<span class="cpct">~' + (d.k != null ? d.k : "?") + 'k · ' + esc(fmtAge(d.age_s)) + '</span></div>';
     } else {
-      var lvl = r.ctx_level === "red" ? "red" : (r.ctx_level === "amber" ? "amber" : "");
+      var lvl = d.level === "red" ? "red" : (d.level === "amber" ? "amber" : "");
       ctxHtml = '<div class="ctx ' + lvl + '">' +
-        '<span class="meter"><i style="width:' + Math.min(100, r.ctx_pct) + '%"></i></span>' +
-        '<span class="cpct">' + r.ctx_pct + '% · ' + fmtTok(r.ctx_tokens) + '</span></div>';
+        '<span class="meter"><i style="width:' + Math.min(100, d.pct) + '%"></i></span>' +
+        '<span class="cpct">' + d.pct + '% · ' + fmtTok(d.tokens) + '</span></div>';
     }
 
     var expLine = (r.off_account && r.expected)
@@ -188,7 +220,7 @@
   });
 
   // ── version badge (matches fleet.js): baked APP_BUILD vs server /api/version ──
-  var APP_BUILD = 'fc-v56';
+  var APP_BUILD = 'fc-v59';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(sv, sha) {
     var el = $("build");
@@ -221,6 +253,11 @@
       .then(function (data) { if (data) render(data); })
       .catch(function () { $("stamp").textContent = "offline — retrying"; })
       .finally(function () { clearTimeout(timer); loading = false; });
+  }
+
+  // Node-only: expose the pure never-blank helpers for the unit test (inert in browser).
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { irsyadCtxDisplay: irsyadCtxDisplay, idleLabel: idleLabel };
   }
 
   $("refresh").addEventListener("click", load);

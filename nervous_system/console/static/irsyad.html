@@ -120,6 +120,9 @@
   .ctx .cpct{font:10px/1 var(--mono);color:var(--dim);flex:none}
   .ctx.amber .cpct{color:var(--amber)} .ctx.red .cpct{color:var(--rose)}
   .ctx .cnull{font:10px/1 var(--mono);color:var(--faint)}
+  /* never-blank #2b: a LAST-KNOWN reading renders a DIMMED meter with "~{k}k · {age}" so
+     it is visibly not a live %, never mistakable for a fresh reading. */
+  .ctx.stale{opacity:.62}
 
   .lane .drawer{display:none;padding:2px 15px 15px 17px}
   .lane.open .drawer{display:block;animation:drop .22s ease}
