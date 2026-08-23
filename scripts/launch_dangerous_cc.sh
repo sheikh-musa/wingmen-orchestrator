@@ -111,6 +111,18 @@ HEARTBEAT_PID=""
 # in .env, not the operator's shell).
 # shellcheck disable=SC1091
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+
+# CAI-RESP-1308: fail-loud, DETECT-ONLY lane-DB residency guard. The line above exported
+# the orchestrator/BUS DATABASE_URL into this lane's env; if this lane's OWN repo declares a
+# DIFFERENT (client) DATABASE_URL it is now SHADOWED — a naive client-lane
+# connect(os.environ['DATABASE_URL']) would write to the BUS DB (TENANT-RESIDENCY-001
+# commingling). The guard WARNS LOUDLY (names the file + doctrine, NEVER the secret values)
+# and NEVER blocks the launch: it always exits 0. The `|| true` only defends the launch
+# against an unexpected guard crash — advisory/no-state-change, NOT a swallowed
+# state-changing failure. Doctrine: bare DATABASE_URL = bus DB only; client access uses an
+# explicit named var.
+( cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.lane_db_residency_guard --repo-dir "$CALLER_DIR" ) || true
+
 # Fleet lane-default OAuth account (token conservation, op#7985/7987): spread
 # every LANE boot off the operator's personal Max onto a donor account (e.g.
 # Syed) so his weekly pool is reserved for the console. Precedence — highest
