@@ -32,6 +32,19 @@ CLOSE_FN      = extract_fn('close_decision_by_audit')
 GUARD_FN = GUARD_FN.replace("SET search_path = pg_catalog, public",
                             "SET search_path = cai1293_wp, pg_catalog, public")
 
+# FIDELITY (F3/F4, rev4): exercise the EXACT shipped CREATE TABLE + A.0b lock-down DDL — never a
+# re-typed copy (the same rule that caught the %%->% RAISE bug). Bare `decision_tier_changes` names
+# resolve to whichever schema is first in search_path, so BOTH arms below run this identical text:
+# the scratch arm under search_path=cai1293_wp (illustrative), the PROD-FIDELITY arm under
+# search_path=public (authoritative — inherits the real pg_default_acl the scratch schema is blind to).
+def extract_block(pat):
+    m = re.search(pat, _SRC, re.DOTALL)
+    if not m:
+        raise SystemExit(f"FIDELITY FAIL: could not extract block /{pat}/ from {_SQL}")
+    return m.group(1).strip()
+CREATE_TBL = extract_block(r'(CREATE TABLE IF NOT EXISTS decision_tier_changes\s*\(.*?\n\);)')
+A0B        = extract_block(r'(ALTER TABLE decision_tier_changes ENABLE ROW LEVEL SECURITY;.*?decision_tier_changes_service_only[^;]*;)')
+
 def expect_error(cur, sql, params=None, label=""):
     cur.execute("SAVEPOINT sp")
     try:
@@ -97,19 +110,17 @@ try:
 
     # ========================= PART A =========================
     log("== PART A — mandatory tier + drop-guard + record ==")
-    cur.execute("""CREATE TABLE cai1293_wp.decision_tier_changes(
-        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, decision_ref text NOT NULL,
-        changed_at timestamptz NOT NULL DEFAULT now(), actor text, old_tier text, new_tier text NOT NULL,
-        reason text, direction text NOT NULL)""")
-    # F1 (cc-storefront #32230): SIMULATE the public default privs a real public table would inherit
-    # (verified via pg_default_acl: anon=SELECT, authenticated=INSERT/SELECT/UPDATE/DELETE) so the .sql
-    # A.0b REVOKE is proven to REMOVE real access — then apply the A.0b lock-down (mirrors the .sql).
+    # A.0 + A.0b — create the log + lock it down, running the EXACT shipped DDL (extracted, bare names
+    # resolve to cai1293_wp via search_path). SIMULATE the pg_default_acl a real public table inherits
+    # (anon=SELECT, authenticated & service_role = full DML) BEFORE the lock-down, so the canonical
+    # REVOKE-incl-service_role is proven to REMOVE inherited access even here. ⚠️ scratch is
+    # STRUCTURALLY BLIND to the real default ACL (cc-storefront #32263 — F3 slipped rev1-3 for exactly
+    # this); this sim is illustrative — the AUTHORITATIVE F3/F4 proof is the PROD-FIDELITY arm below.
+    cur.execute(CREATE_TBL)  # bare -> cai1293_wp (search_path)
     cur.execute("GRANT SELECT ON cai1293_wp.decision_tier_changes TO anon")
-    cur.execute("GRANT INSERT,SELECT,UPDATE,DELETE ON cai1293_wp.decision_tier_changes TO authenticated")
-    cur.execute("ALTER TABLE cai1293_wp.decision_tier_changes ENABLE ROW LEVEL SECURITY")
-    cur.execute("REVOKE ALL ON cai1293_wp.decision_tier_changes FROM PUBLIC, anon, authenticated")
-    cur.execute("GRANT SELECT, INSERT ON cai1293_wp.decision_tier_changes TO service_role")
-    cur.execute("GRANT SELECT ON cai1293_wp.decision_tier_changes TO console_readonly")
+    cur.execute("GRANT SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON cai1293_wp.decision_tier_changes TO authenticated")
+    cur.execute("GRANT SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON cai1293_wp.decision_tier_changes TO service_role")  # simulate the arwdDxtm default
+    cur.execute(A0B)  # the shipped lock-down (bare -> cai1293_wp): REVOKE incl service_role + GRANT SELECT,INSERT + 2 policies
     cur.execute("UPDATE cai1293_wp.strategic_decisions SET audit_tier='LEGACY' WHERE audit_tier IS NULL")
     log(f"  backfilled NULL->LEGACY: {cur.rowcount} rows")
     cur.execute("SELECT count(*) FROM cai1293_wp.strategic_decisions WHERE audit_tier IS NULL")
@@ -175,6 +186,67 @@ try:
     cur.execute("ROLLBACK TO SAVEPOINT f1s")
     log(f"  {'✓' if nlog>0 else '✗'} F1 SECDEF: authenticated (no INSERT on log) did a legit LEGACY->NONE -> SECDEF trigger wrote {nlog} log row(s) as actor={who}")
 
+    # ===================== F3/F4 PROD-FIDELITY =====================
+    # The scratch schema has NO default ACL, so a scratch `GRANT SELECT,INSERT` yields ONLY those privs
+    # and append-only FALSELY appears to hold — F3 slipped rev1-3 for exactly this (cc-storefront #32263
+    # root-cause; Nazim #32267 mandate). Prove F3+F4 on the REAL public schema, where the log table
+    # inherits the substrate pg_default_acl (service_role=arwdDxtm + rolbypassrls). Runs the EXACT
+    # shipped CREATE + A.0b DDL, bare names -> public via search_path. Wrapped in a SAVEPOINT and rolled
+    # back immediately: public.decision_tier_changes did NOT exist (Nazim #32267) and CREATE TABLE locks
+    # ONLY the new table (never the live strategic_decisions money-path table).
+    log("== F3/F4 PROD-FIDELITY — real public schema (inherits pg_default_acl), rolled back ==")
+    _grants_q = """SELECT grantee, string_agg(privilege_type, ',' ORDER BY privilege_type)
+        FROM information_schema.role_table_grants WHERE table_schema='public'
+          AND table_name='decision_tier_changes'
+          AND grantee IN ('anon','authenticated','service_role','console_readonly')
+        GROUP BY grantee ORDER BY grantee"""
+    cur.execute("SAVEPOINT pf")
+    cur.execute("SET LOCAL search_path = public")
+    cur.execute(CREATE_TBL)                                 # inherits the REAL default ACL
+    cur.execute(_grants_q); log(f"  inherited default-privs BEFORE A.0b: {cur.fetchall()}")
+    cur.execute(A0B)                                        # the shipped lock-down
+    cur.execute(_grants_q); log(f"  grants AFTER A.0b: {cur.fetchall()}  (expect service_role=INSERT,SELECT; console_readonly=SELECT; anon/authenticated GONE)")
+    cur.execute("INSERT INTO public.decision_tier_changes(decision_ref,old_tier,new_tier,direction) VALUES('WP-PF',NULL,'FULL','set')")  # owner seed (bypasses RLS) so console_ro has a row to read
+    # this Supabase `postgres` is a member of anon/authenticated/service_role (SET ROLE works) but NOT
+    # console_readonly — grant membership so the session can IMPERSONATE it. Rolled back with pf; the
+    # table GRANT + RLS policy under test are untouched, so the console read remains faithful.
+    cur.execute("GRANT console_readonly TO current_user")
+
+    _pf = []
+    def _chk(cond, label):
+        _pf.append(cond); log(f"  {'✓' if cond else '✗ FAIL'} {label}")
+    def as_role(role, sql, is_select=False):
+        cur.execute("SAVEPOINT r"); cur.execute(f"SET LOCAL ROLE {role}")
+        try:
+            cur.execute(sql)
+            rc = len(cur.fetchall()) if is_select else cur.rowcount
+            cur.execute("ROLLBACK TO SAVEPOINT r")          # revert role + any write
+            return ('OK', rc)
+        except psycopg.Error as e:
+            cur.execute("ROLLBACK TO SAVEPOINT r")
+            return ('DENIED', str(e).splitlines()[0][:75])
+    TBL = "public.decision_tier_changes"
+    # service_role: APPEND-ONLY (INSERT+SELECT OK; UPDATE/DELETE/TRUNCATE DENIED — the F3 teeth)
+    st, rc = as_role('service_role', f"INSERT INTO {TBL}(decision_ref,new_tier,direction) VALUES('x','FULL','set')"); _chk(st=='OK', f"service_role INSERT allowed ({st})")
+    st, rc = as_role('service_role', f"SELECT 1 FROM {TBL}", is_select=True);                                        _chk(st=='OK' and rc>=1, f"service_role SELECT allowed ({st}, rows={rc})")
+    st, rc = as_role('service_role', f"UPDATE {TBL} SET reason='x'");                                                _chk(st=='DENIED', f"service_role UPDATE DENIED ({st}) — F3")
+    st, rc = as_role('service_role', f"DELETE FROM {TBL}");                                                          _chk(st=='DENIED', f"service_role DELETE DENIED ({st}) — F3")
+    st, rc = as_role('service_role', f"TRUNCATE {TBL}");                                                             _chk(st=='DENIED', f"service_role TRUNCATE DENIED ({st}) — F3")
+    # anon + authenticated: DENIED all ops
+    for role in ('anon', 'authenticated'):
+        st, _ = as_role(role, f"SELECT 1 FROM {TBL}", is_select=True); _chk(st=='DENIED', f"{role} SELECT denied ({st})")
+        st, _ = as_role(role, f"INSERT INTO {TBL}(decision_ref,new_tier,direction) VALUES('x','FULL','set')"); _chk(st=='DENIED', f"{role} INSERT denied ({st})")
+        st, _ = as_role(role, f"UPDATE {TBL} SET reason='x'"); _chk(st=='DENIED', f"{role} UPDATE denied ({st})")
+        st, _ = as_role(role, f"DELETE FROM {TBL}"); _chk(st=='DENIED', f"{role} DELETE denied ({st})")
+    # console_readonly: SELECT must RETURN the seeded row (F4 — GRANT is dead without the policy)
+    st, rc = as_role('console_readonly', f"SELECT 1 FROM {TBL}", is_select=True); _chk(st=='OK' and rc>=1, f"console_readonly SELECT returns rows ({st}, rows={rc}) — F4: policy makes the GRANT live")
+    st, _  = as_role('console_readonly', f"INSERT INTO {TBL}(decision_ref,new_tier,direction) VALUES('x','FULL','set')"); _chk(st=='DENIED', f"console_readonly INSERT denied ({st})")
+    cur.execute("ROLLBACK TO SAVEPOINT pf")                 # drop public.decision_tier_changes
+    cur.execute("SET LOCAL search_path = cai1293_wp, public")
+    if not all(_pf):
+        raise SystemExit(f"PROD-FIDELITY role matrix FAILED — {sum(_pf)}/{len(_pf)} passed")
+    log(f"  ✓ PROD-FIDELITY role matrix: {sum(_pf)}/{len(_pf)} assertions passed (F3 append-only + F4 console read, on a target with the REAL default ACL)")
+
     # ========================= PART B =========================
     log("== PART B — nonconforming verdict + coherence ==")
     cur.execute("ALTER TABLE cai1293_wp.decision_audits DROP CONSTRAINT IF EXISTS decision_audits_verdict_check")
@@ -232,8 +304,17 @@ finally:
     conn.rollback()
     conn.close()
 
-# confirm the scratch schema did not persist
+# DEAD-MAN'S-SWITCH: confirm on a FRESH connection that NOTHING persisted — neither the scratch
+# schema nor the live public table the PROD-FIDELITY arm creates (both are rolled back, but this
+# harness touches the live public schema + transiently grants console_readonly membership, so it
+# self-verifies). Fail LOUD if either survived.
 c2 = psycopg.connect(url); cur2=c2.cursor()
 cur2.execute("SELECT count(*) FROM information_schema.schemata WHERE schema_name='cai1293_wp'")
-print(f"\npost-rollback: cai1293_wp schema exists? {cur2.fetchone()[0]} (expect 0)")
+n_schema = cur2.fetchone()[0]
+cur2.execute("SELECT to_regclass('public.decision_tier_changes') IS NOT NULL")
+pub_tbl = cur2.fetchone()[0]
 c2.close()
+print(f"\npost-rollback: cai1293_wp schema exists? {n_schema} (expect 0); public.decision_tier_changes exists? {pub_tbl} (expect False)")
+if n_schema != 0 or pub_tbl:
+    raise SystemExit("DEAD-MAN'S-SWITCH TRIPPED: wet-prove artifact PERSISTED on the live substrate — investigate before trusting this run")
+print("post-rollback: CLEAN — nothing persisted on the live substrate.")

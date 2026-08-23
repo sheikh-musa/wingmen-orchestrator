@@ -42,16 +42,30 @@ CREATE TABLE IF NOT EXISTS decision_tier_changes (
     direction    text        NOT NULL          -- 'raise' | 'drop' | 'set' (derived)
 );
 
--- A.0b — LOCK DOWN the log (cc-storefront #32230 / CAI-1019). A bare CREATE TABLE inherits the
---        substrate default-privs (anon=SELECT, authenticated=INSERT/UPDATE/DELETE, RLS off) — which
---        would make the "never unrecorded again" trail anon-readable AND authenticated-ERASABLE, i.e.
---        the guarantee is hollow. Match the sibling governance tables (decision_audits): RLS on, no
---        anon/authenticated, service_role SELECT+INSERT ONLY (APPEND-ONLY — not even service_role may
---        UPDATE/DELETE a tier-change record), console_readonly SELECT.
+-- A.0b — LOCK DOWN the log (cc-storefront #32230/#32263 F3+F4 / cc-quality #32253 F1-a/F1-b /
+--        CAI-1018/1019 deny-by-default). A bare CREATE TABLE inherits the substrate pg_default_acl —
+--        which on public grants anon=SELECT, authenticated=full DML, AND service_role=arwdDxtm (full
+--        DML) on EVERY new table. So the "never unrecorded again" trail would be anon-readable and
+--        authenticated- AND service_role-ERASABLE, i.e. the guarantee is hollow. Two teeth, both
+--        wet-proven prod-fidelity (a scratch schema has NO default ACL and is BLIND to this — F3 slipped
+--        rev1-3 for exactly that reason):
+--        (1) DENY-BY-DEFAULT incl service_role (F3): REVOKE ALL from PUBLIC,anon,authenticated,service_role
+--            then GRANT SELECT,INSERT to service_role only. service_role has rolbypassrls=true, so RLS
+--            does NOT restrain it — APPEND-ONLY for service_role is enforced by this GRANT (no UPDATE/
+--            DELETE/TRUNCATE), NOT by RLS. Additive GRANT alone would leave the inherited full-DML.
+--        (2) RLS POLICIES (F4): RLS is ON, so a GRANT with NO policy reads 0 rows for a non-bypassrls
+--            role. console_readonly (rolbypassrls=false) needs an explicit SELECT policy or its GRANT is
+--            DEAD; all 65 other RLS'd governance tables carry a *_console_ro policy. Mirror the sibling
+--            decision_audits' policy pair EXACTLY (console_ro SELECT + service_only ALL) — the service
+--            policy is inert (bypassrls) but kept for parity + defense if bypassrls ever flips (the GRANT
+--            still holds append-only either way). NB decision_audits is deliberately MUTABLE (full DML
+--            grant); we intentionally keep the STRICTER SELECT,INSERT grant here.
 ALTER TABLE decision_tier_changes ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON decision_tier_changes FROM PUBLIC, anon, authenticated;
-GRANT  SELECT, INSERT ON decision_tier_changes TO service_role;   -- append-only: NO update/delete
+REVOKE ALL ON decision_tier_changes FROM PUBLIC, anon, authenticated, service_role;  -- F3: deny-by-default incl service_role
+GRANT  SELECT, INSERT ON decision_tier_changes TO service_role;   -- append-only: NO update/delete/truncate
 GRANT  SELECT          ON decision_tier_changes TO console_readonly;
+CREATE POLICY decision_tier_changes_console_ro   ON decision_tier_changes FOR SELECT TO console_readonly USING (true);           -- F4: console read (RLS-on needs a policy)
+CREATE POLICY decision_tier_changes_service_only ON decision_tier_changes FOR ALL    TO service_role     USING (true) WITH CHECK (true);  -- sibling parity (inert under bypassrls; GRANT is the append-only gate)
 
 -- A.1 — BACKFILL the NULLs (⚠️ cai fork; B=LEGACY drafted). Must precede NOT NULL.
 --       'LEGACY' = these 1514 predate mandatory tiering; the NOT-NULL + guard bind
