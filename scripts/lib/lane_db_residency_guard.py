@@ -80,20 +80,23 @@ def detect_shadow(repo_dir: str, inherited_url) -> ShadowResult:
 
 
 def warning_banner(res: ShadowResult) -> str:
-    """The LOUD boot warning. NAMES the file + var + doctrine; NEVER the secret values."""
+    """The LOUD boot warning. NAMES the file + var + doctrine; NEVER the secret values.
+    Left-gutter style (no right border) so variable-width interpolated content — e.g. the
+    env filename — can never make the box read ragged (Nazim #32609 nit)."""
+    rule = "═" * 76
     return (
         "\n"
-        "╔══════════════════════════════════════════════════════════════════════════╗\n"
-        "║  ⚠  RESIDENCY SHADOW — lane DATABASE_URL is being SHADOWED by the BUS DB   ║\n"
-        "╠══════════════════════════════════════════════════════════════════════════╣\n"
-        f"║  This lane's {res.env_file} declares its OWN DATABASE_URL, but the launcher   \n"
-        "║  exported the orchestrator/BUS DATABASE_URL into the env, which SHADOWS it. \n"
-        "║  A client/tenant `connect(os.environ['DATABASE_URL'])` here would write to  \n"
-        "║  the BUS DB = TENANT-RESIDENCY-001 commingling.                             \n"
-        "║  DOCTRINE (CAI-RESP-1308): bare DATABASE_URL = the BUS/coordination DB ONLY.\n"
-        "║  Move this lane's client DB access to an EXPLICIT named var (e.g.           \n"
-        "║  <PROJECT>_DATABASE_URL) and read THAT, never bare DATABASE_URL.            \n"
-        "╚══════════════════════════════════════════════════════════════════════════╝\n"
+        f"╔{rule}\n"
+        "║ ⚠  RESIDENCY SHADOW — lane DATABASE_URL is being SHADOWED by the BUS DB\n"
+        f"╟{'─' * 76}\n"
+        f"║ This lane's {res.env_file} declares its OWN DATABASE_URL, but the launcher exported\n"
+        "║ the orchestrator/BUS DATABASE_URL into the env, which SHADOWS it. A client/tenant\n"
+        "║ connect(os.environ['DATABASE_URL']) here would write to the BUS DB — that is\n"
+        "║ TENANT-RESIDENCY-001 commingling.\n"
+        "║ DOCTRINE (CAI-RESP-1308): bare DATABASE_URL = the BUS/coordination DB ONLY.\n"
+        "║ FIX: move this lane's client DB access to an EXPLICIT named var\n"
+        "║ (<PROJECT>_DATABASE_URL) and read THAT — never bare DATABASE_URL.\n"
+        f"╚{rule}\n"
     )
 
 
