@@ -42,6 +42,17 @@ CREATE TABLE IF NOT EXISTS decision_tier_changes (
     direction    text        NOT NULL          -- 'raise' | 'drop' | 'set' (derived)
 );
 
+-- A.0b — LOCK DOWN the log (cc-storefront #32230 / CAI-1019). A bare CREATE TABLE inherits the
+--        substrate default-privs (anon=SELECT, authenticated=INSERT/UPDATE/DELETE, RLS off) — which
+--        would make the "never unrecorded again" trail anon-readable AND authenticated-ERASABLE, i.e.
+--        the guarantee is hollow. Match the sibling governance tables (decision_audits): RLS on, no
+--        anon/authenticated, service_role SELECT+INSERT ONLY (APPEND-ONLY — not even service_role may
+--        UPDATE/DELETE a tier-change record), console_readonly SELECT.
+ALTER TABLE decision_tier_changes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON decision_tier_changes FROM PUBLIC, anon, authenticated;
+GRANT  SELECT, INSERT ON decision_tier_changes TO service_role;   -- append-only: NO update/delete
+GRANT  SELECT          ON decision_tier_changes TO console_readonly;
+
 -- A.1 — BACKFILL the NULLs (⚠️ cai fork; B=LEGACY drafted). Must precede NOT NULL.
 --       'LEGACY' = these 1514 predate mandatory tiering; the NOT-NULL + guard bind
 --       going FORWARD without back-asserting a NONE audit-judgment on history.
@@ -60,7 +71,11 @@ ALTER TABLE strategic_decisions ALTER COLUMN audit_tier SET NOT NULL;
 --       (FULL -> non-FULL while the decision is still closeable-by-timeout, i.e. in the
 --       challenge window) AND records EVERY actual tier change into decision_tier_changes.
 CREATE OR REPLACE FUNCTION enforce_audit_tier_change_guard()
-RETURNS trigger LANGUAGE plpgsql AS $fn$
+RETURNS trigger LANGUAGE plpgsql
+-- SECURITY DEFINER (cc-storefront #32230): the log is service_role-only INSERT (A.0b), but a legit
+-- tier UPDATE may come from a non-service_role caller; the trigger must be able to write the record
+-- as its OWNER, or the lock-down would break legit tier changes. Pinned search_path (SECDEF hygiene).
+SECURITY DEFINER SET search_path = pg_catalog, public AS $fn$
 DECLARE
     v_actor  text := current_setting('app.current_agent_id', true);
     v_reason text := current_setting('app.tier_change_reason', true);
@@ -152,12 +167,17 @@ $fn$;
 --  regenerate from live `pg_get_viewdef('decision_audit_state', true)` and add exactly:
 --    (1) LATERAL:   count(*) FILTER (WHERE da.verdict = 'nonconforming') AS n_nonconforming
 --    (2) top-level: a.n_nonconforming
---    (3) audit_state CASE — make LEGACY a DISTINCT queryable bucket per CAI-RESP-1296
---        (NOT a silent NONE-equivalent), and surface cai's deferred 839 retro-tier queue:
---          WHEN sd.audit_tier = 'LEGACY' AND decision_audit_tier_candidate(sd.title, sd.decision, sd.reasoning)
---               THEN 'LEGACY-CANDIDATE'   -- the ~839 should-have-been-FULL; cai's deferred queue
+--    (3) audit_state CASE — make LEGACY a DISTINCT queryable bucket per CAI-RESP-1296 (NOT a silent
+--        NONE-equivalent) AND keep cai's deferred retro-tier queue visible to audit_board_digest (F2).
+--        ⚠️ PLACEMENT (wet-prove-caught): the LEGACY-CANDIDATE arm must sit PARALLEL to the
+--        UNTIERED-CANDIDATE arm — i.e. RIGHT AFTER it and BEFORE the `challenge_status='challenge_window'
+--        -> 'WINDOW-OPEN'` arm — with the SAME in-window condition, else an in-window LEGACY candidate
+--        is swallowed by WINDOW-OPEN and never reaches the digest:
+--          WHEN sd.audit_tier = 'LEGACY' AND (sd.challenge_status = ANY (ARRAY['challenge_window','unchallenged']))
+--               AND decision_audit_tier_candidate(sd.title, sd.decision, sd.reasoning)
+--               THEN 'LEGACY-CANDIDATE'   -- cai's deferred retro-tier queue (F2 depends on this)
+--        And a plain closed-LEGACY arm before the 'NONE'->'AUDIT-NOT-REQUIRED' arm:
 --          WHEN sd.audit_tier = 'LEGACY' THEN 'LEGACY'
---        placed BEFORE the ELSE, alongside the 'NONE'->'AUDIT-NOT-REQUIRED' arm.
 --  Kept out of the wet-prove body only to avoid shipping a stale 40-line view; the behavioural
 --  arms (A/B/C) below do NOT depend on the view's new columns (close computes n_nonconforming
 --  + distinct lenses DIRECTLY), and the wet-prove proves LEGACY is already column-queryable.]
@@ -238,5 +258,24 @@ BEGIN
     RETURN 'closed';
 END;
 $fn$;
+
+-- ---------------------------------------------------------------------------
+-- PART D — keep audit_board_digest's untiered-candidate watch alive across the backfill
+--          (cc-storefront #32230 / cai CAI-RESP-1298). The daily digest (pg_cron 0 8 * * *)
+--          counts open should-be-tiered decisions via `audit_state = 'UNTIERED-CANDIDATE'`
+--          (and `untiered` = audit_tier IS NULL). The NULL->LEGACY backfill takes both to 0,
+--          so the ~20 in-window retro-tier candidates CAI-1296 wants VISIBLE would silently
+--          drop off = a false all-clear. Fix: also count the new LEGACY-CANDIDATE bucket.
+--
+-- APPLY-TIME EDIT (Nazim byte-verifies at apply, like the view re-decl): regenerate
+-- audit_board_digest from live `pg_get_functiondef`, then in its section-4 count change EXACTLY:
+--     count(*) FILTER (WHERE audit_state = 'UNTIERED-CANDIDATE')
+--   ->
+--     count(*) FILTER (WHERE audit_state IN ('UNTIERED-CANDIDATE','LEGACY-CANDIDATE'))
+-- (No other line changes.) This is LOAD-BEARING on the view's new LEGACY-CANDIDATE arm (B.3) —
+-- both must land together. Proven in the wet-prove (post-backfill the digest still counts ~20).
+--
+-- NOTE re B.3: the view re-declaration's LEGACY-CANDIDATE arm is now LOAD-BEARING (the digest
+-- reads it), not observability-only — regen the view WITH the arm before/with this digest edit.
 
 ROLLBACK;  -- wet-prove only. Nazim replaces with COMMIT at apply time, after grant.
