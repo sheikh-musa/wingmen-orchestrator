@@ -5,68 +5,26 @@ NULL->LEGACY backfill is exercised against the actual distribution; (2) prove al
 drop scratch after. Safety: reads public with ACCESS SHARE only (copy); ALL fix DDL hits
 cai1293_wp tables (no ACCESS EXCLUSIVE on live strategic_decisions); the close-fn's
 agent_messages insert + everything else roll back. Nothing persists."""
-import os, psycopg
+import os, re, psycopg
 
 url = os.environ["DATABASE_URL"]
 T = []  # transcript lines
 def log(s): T.append(s); print(s)
 
-GUARD_FN = r'''
-CREATE FUNCTION enforce_audit_tier_change_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
-DECLARE v_actor text := current_setting('app.current_agent_id', true);
-        v_reason text := current_setting('app.tier_change_reason', true);
-        v_dir text;
-BEGIN
-    IF NEW.audit_tier IS NOT DISTINCT FROM OLD.audit_tier THEN RETURN NEW; END IF;
-    IF NEW.audit_tier IS NULL THEN RETURN NEW; END IF;  -- let the column NOT NULL reject a NULL cleanly
-    IF OLD.audit_tier = 'FULL' AND NEW.audit_tier <> 'FULL'
-       AND NEW.challenge_status = ANY (ARRAY['challenge_window','unchallenged']) THEN
-        RAISE EXCEPTION 'CAI-1009: refusing to drop audit_tier FULL->% on % while still closeable by timeout',
-            NEW.audit_tier, NEW.decision_ref
-            USING HINT = 'A FULL decision in its challenge window must be AUDITED, not silently un-tiered.';
-    END IF;
-    v_dir := CASE WHEN OLD.audit_tier='FULL' AND NEW.audit_tier<>'FULL' THEN 'drop'
-                  WHEN NEW.audit_tier='FULL' AND OLD.audit_tier<>'FULL' THEN 'raise' ELSE 'set' END;
-    INSERT INTO decision_tier_changes (decision_ref, actor, old_tier, new_tier, reason, direction)
-    VALUES (NEW.decision_ref, v_actor, OLD.audit_tier, NEW.audit_tier, NULLIF(v_reason,''), v_dir);
-    RETURN NEW;
-END; $fn$;'''
-
-UNRESOLVED_FN = r'''
-CREATE OR REPLACE FUNCTION decision_audit_unresolved(p_verdict text, p_completed_at timestamptz, p_resolved_at timestamptz)
-RETURNS boolean LANGUAGE sql IMMUTABLE AS $fn$
-    SELECT CASE WHEN p_completed_at IS NULL THEN true
-                WHEN p_verdict IN ('could_not_verify','rejected','nonconforming') AND p_resolved_at IS NULL THEN true
-                ELSE false END $fn$;'''
-
-CLOSE_FN = r'''
-CREATE FUNCTION close_decision_by_audit(p_decision_ref text, p_closed_by text) RETURNS text LANGUAGE plpgsql AS $fn$
-DECLARE v RECORD; v_distinct_accepted_lenses int; v_n_nonconforming int;
-BEGIN
-    SELECT * INTO v FROM decision_audit_state WHERE decision_ref = p_decision_ref;
-    IF NOT FOUND THEN RAISE EXCEPTION 'no such decision: %', p_decision_ref; END IF;
-    IF v.n_accepted = 0 THEN RAISE EXCEPTION 'cannot close %: no accepted audit', p_decision_ref; END IF;
-    IF v.n_open > 0 THEN RAISE EXCEPTION 'cannot close %: audit(s) in flight', p_decision_ref; END IF;
-    IF v.n_rejected > 0 THEN RAISE EXCEPTION 'cannot close %: an auditor REJECTED it', p_decision_ref; END IF;
-    IF v.n_could_not_verify > 0 THEN RAISE EXCEPTION 'cannot close %: could NOT VERIFY', p_decision_ref; END IF;
-    SELECT count(*) INTO v_n_nonconforming FROM decision_audits WHERE decision_ref=p_decision_ref AND verdict='nonconforming';
-    IF v_n_nonconforming > 0 THEN RAISE EXCEPTION 'cannot close %: NONCONFORMING (CAI-991)', p_decision_ref; END IF;
-    IF v.audit_tier = 'FULL' THEN
-        SELECT count(DISTINCT lens) INTO v_distinct_accepted_lenses FROM decision_audits
-         WHERE decision_ref=p_decision_ref AND completed_at IS NOT NULL AND verdict='accepted' AND lens IS NOT NULL;
-        IF v_distinct_accepted_lenses < 2 THEN
-            RAISE EXCEPTION 'cannot close %: FULL needs >=2 distinct completed accepted lenses (have %) CAI-996',
-                p_decision_ref, v_distinct_accepted_lenses;
-        END IF;
-    END IF;
-    UPDATE strategic_decisions SET challenge_status='accepted_by_audit', updated_at=now()
-     WHERE decision_ref=p_decision_ref AND challenge_status IN ('challenge_window','unchallenged');
-    IF NOT FOUND THEN RETURN 'skipped_not_open'; END IF;
-    INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response)
-    VALUES (COALESCE(p_closed_by,'substrate'),'cai','decision', p_decision_ref||': CLOSED accepted_by_audit',
-            'wetprove', false);
-    RETURN 'closed';
-END; $fn$;'''
+# FIDELITY (cc-quality #32207): exercise the EXACT function bodies from the shipping .sql, never a
+# re-typed copy — the %%->% divergence that hid the RAISE bug is exactly what that prevents. Extract
+# each CREATE FUNCTION block from the proposal and strip the `public.` schema so it lands in scratch.
+_SQL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cai1293-mechanism-fix.proposal.sql")
+_SRC = open(_SQL).read()
+def extract_fn(name):
+    m = re.search(r'CREATE\s+(?:OR REPLACE\s+)?FUNCTION\s+(?:public\.)?' + re.escape(name)
+                  + r'\b.*?\$fn\$.*?\$fn\$\s*;', _SRC, re.DOTALL)
+    if not m:
+        raise SystemExit(f"FIDELITY FAIL: could not extract {name}() from {_SQL}")
+    return m.group(0).replace('FUNCTION public.', 'FUNCTION ')  # create in scratch, not public
+GUARD_FN      = extract_fn('enforce_audit_tier_change_guard')
+UNRESOLVED_FN = extract_fn('decision_audit_unresolved')
+CLOSE_FN      = extract_fn('close_decision_by_audit')
 
 def expect_error(cur, sql, params=None, label=""):
     cur.execute("SAVEPOINT sp")

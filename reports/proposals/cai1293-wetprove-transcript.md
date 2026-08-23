@@ -1,55 +1,57 @@
-# CAI-1293 mechanism-fix — WET-PROVE transcript
+# CAI-1293 mechanism-fix — WET-PROVE transcript (rev 2)
 
-**Run:** 2026-08-23, cc-fleet-health. **Method:** isolated scratch schema `cai1293_wp`,
-**REAL data** copied from live (Nazim #32172 fidelity condition), single **ROLLED-BACK** txn.
-**Safety:** `public` read with ACCESS SHARE only (the `CREATE TABLE … AS SELECT` copy); every
-fix DDL (`ADD CONSTRAINT` / `SET NOT NULL` / trigger) hits `cai1293_wp` tables — **zero ACCESS
-EXCLUSIVE on live `strategic_decisions`**; the close-fn's `agent_messages` insert + all else roll
-back. **Post-run: `cai1293_wp` schema exists? 0** — nothing persisted. Harness:
-`scratchpad/cai1293_wetprove.py`.
+**Rev 2 (2026-08-23):** applies cc-quality #32207 CHANGES — (1) MUST-FIX `%%`→`%` in the guard RAISE
+(the as-written `.sql` would have raised "too many parameters" instead of the CAI-1009 message on the
+block path); (2) HINT reworded (dropped the non-existent "governed path"); (3) re-window RESIDUAL
+documented in the `.sql` for cai. **Fidelity fix (cc-quality's key point):** the harness now
+EXTRACTS the guard/close/unresolved function bodies DIRECTLY from `cai1293-mechanism-fix.proposal.sql`
+(`extract_fn`), so the transcript can never again exercise a re-typed copy that diverges from what
+ships — the divergence that hid the RAISE bug in rev 1.
+
+**Method:** isolated scratch schema `cai1293_wp`, **REAL data** copied from live (Nazim #32172
+fidelity condition), single **ROLLED-BACK** txn. **Safety:** `public` read with ACCESS SHARE only;
+every fix DDL hits `cai1293_wp` tables — **zero ACCESS EXCLUSIVE on live `strategic_decisions`**;
+the close-fn's `agent_messages` insert + all else roll back. **Post-run: `cai1293_wp` exists? 0.**
+Harness: `reports/proposals/cai1293_wetprove.py` (re-runnable).
 
 ## FIDELITY baseline (real, non-test)
-`NULL=1517  FULL=135  NONE=10  total=1662` — matches the cai1272 sweep distribution (NULLs have
-grown from 1514 as decisions accumulate; the point stands).
+`NULL=1517  FULL=135  NONE=10  total=1662`
 
 ## PART A — mandatory tier + drop-guard + record  (CAI-988/F1 + CAI-1009)
 ```
-backfilled NULL->LEGACY: 1517 rows
-post-backfill NULL audit_tier count = 0        (NOT NULL now satisfiable)
-LEGACY bucket queryable, count = 1517          (distinct, not a silent NONE — CAI-RESP-1296)
-LEGACY-CANDIDATE (cai's deferred retro-tier queue), count = 1022   (queryable: audit_tier='LEGACY' AND tier_candidate)
+backfilled NULL->LEGACY: 1517 rows;  post-backfill NULL count = 0
+LEGACY bucket queryable = 1517;  LEGACY-CANDIDATE (cai's deferred retro-tier queue) = 1022
 CHECK{FULL,NONE,LEGACY} + NOT NULL applied
-✓ (a) CAI-1009 dodge FULL->NONE in-window on REAL CAI-RESP-1111 -> RAISE (refused)
-✓ (a) junk tier ('JUNK')                        -> refused
-✓ (a) NULL tier                                 -> refused by the column NOT NULL (clean; null-guard added)
-✓ (a) legit LEGACY->FULL                        -> RECORDED in decision_tier_changes
-       actor=wetprove-cc-fleet-health  LEGACY->FULL  reason='wetprove: legit re-tier'  direction=raise
+✓ (a) CAI-1009 dodge FULL->NONE in-window on REAL CAI-RESP-1111
+      -> "CAI-1009: refusing to drop audit_tier FULL->NONE on CAI-RESP-1111 while it is still closeable by timeout"
+      (rev 2: the CORRECT message now fires — rev 1's %% would have raised "too many parameters")
+✓ (a) junk tier ('JUNK')  -> refused    ✓ (a) NULL tier -> refused by the column NOT NULL (clean)
+✓ (a) legit LEGACY->FULL  -> RECORDED: actor=wetprove-cc-fleet-health LEGACY->FULL reason set direction=raise
 ```
-Note for auditors: on CAI-RESP-1111 (a FULL-in-window row) the junk-tier UPDATE is caught by the
-DODGE guard (FULL->non-FULL-in-window) *before* the domain CHECK — both reject it; the CHECK domain
-{FULL,NONE,LEGACY} is independently proven by the 1517-row LEGACY backfill succeeding under it and
-the guard's own record path. (A dedicated CHECK-only junk test on a non-FULL row would make this
-unambiguous — cheap to add if you want it.)
+(As in rev 1: on a FULL-in-window row the junk UPDATE is caught by the DODGE guard before the domain
+CHECK; the CHECK domain {FULL,NONE,LEGACY} is independently proven by the 1517-row LEGACY backfill.)
 
-## PART B — 'nonconforming' verdict + coherence  (CAI-991 / 987-F4)
+## PART B — 'nonconforming' verdict + coherence  (CAI-991)
 ```
-✓ (b) verdict='nonconforming'                   -> ACCEPTED by the widened CHECK
-✓ (b) verdict='garbage'                         -> refused by the CHECK
-✓ (b) decision_audit_unresolved('nonconforming', completed, unresolved) = True   (a negative, like rejected/cnv)
-      decision_audit_unresolved('nonconforming', completed, resolved)   = False  (resolves like the others)
+✓ (b) verdict='nonconforming' -> ACCEPTED by the widened CHECK;  verdict='garbage' -> refused
+✓ (b) decision_audit_unresolved('nonconforming',done,unresolved)=True;  (…,resolved)=False
 ```
 
 ## PART C — close_decision_by_audit  (CAI-991 block + CAI-996 >=2 lenses)
 ```
-✓ (c) FULL decision, 1 accepted lens            -> REFUSED: "FULL needs >=2 distinct completed accepted lenses (have 1) CAI-996"
-✓ (c) FULL decision, 2 DISTINCT accepted lenses -> 'closed'
-✓ (b/c) a 'nonconforming' verdict present        -> REFUSED: "NONCONFORMING (CAI-991)"
+✓ (c) FULL, 1 accepted lens  -> REFUSED: "FULL tier requires >=2 distinct completed accepted lenses (have 1) — CAI-996"
+✓ (c) FULL, 2 DISTINCT accepted lenses -> 'closed'
+✓ (b/c) a 'nonconforming' verdict present -> REFUSED: "an auditor found it NONCONFORMING"
 ```
-(Non-FULL tiers keep the single-accepted-lens close — the >=2-lens arm is gated on `audit_tier='FULL'`.)
 
-## Not exercised in scratch (apply-time / observability — flagged for the audit)
-- **decision_audit_state view re-declaration** (add `n_nonconforming` + the LEGACY/LEGACY-CANDIDATE
-  audit_state arms): specified as an APPLY-TIME regen from live `pg_get_viewdef` (against drift). The
-  close-fn does NOT depend on the view's new columns (it computes `n_nonconforming` + distinct-lens
-  DIRECTLY — defence in depth, proven above), so behaviour is fully covered; the view change is
-  observability only. Auditors: confirm the regen spec in the .sql is faithful at apply time.
+## RESIDUAL (cc-quality #32207; cai's call — documented in the .sql, NOT fixed here)
+Multi-step re-window escape (move FULL out of window → drop tier → re-open window → 0-audit closes by
+timeout). Needs raw `challenge_status` UPDATEs and NO new capability; a challenge_status-LIFECYCLE gap
+orthogonal to the tier axis; the drop now leaves a trail in `decision_tier_changes`. Options for cai:
+(a) accept + lean on the log [shipped default]; (b) a challenge_status transition guard [separate];
+(c) block FULL→non-FULL at 0 completed audits regardless of window. cc-quality leans (a)+(b-later).
+
+## Apply-time (not in scratch)
+`decision_audit_state` view re-declaration (add `n_nonconforming` + LEGACY/LEGACY-CANDIDATE arms) is
+an APPLY-TIME regen from live `pg_get_viewdef` (against drift). Close computes n_nonconforming +
+distinct-lens DIRECTLY, so behaviour is fully covered; the view change is observability only.

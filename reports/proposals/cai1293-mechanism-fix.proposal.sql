@@ -82,10 +82,10 @@ BEGIN
        AND NEW.audit_tier <> 'FULL'
        AND NEW.challenge_status = ANY (ARRAY['challenge_window','unchallenged']) THEN
         RAISE EXCEPTION
-          'CAI-1009: refusing to drop audit_tier FULL->%% on % while it is still closeable by timeout',
+          'CAI-1009: refusing to drop audit_tier FULL->% on % while it is still closeable by timeout',
           NEW.audit_tier, NEW.decision_ref
           USING HINT = 'A FULL decision in its challenge window must be AUDITED, not silently un-tiered. '
-                       'Resolve/close the audit first, or route a deliberate re-tier through a governed path.';
+                       'Resolve or close its audit first, then re-tier.';
     END IF;
 
     v_dir := CASE
@@ -104,6 +104,22 @@ DROP TRIGGER IF EXISTS trg_audit_tier_change_guard ON strategic_decisions;
 CREATE TRIGGER trg_audit_tier_change_guard
     BEFORE UPDATE OF audit_tier ON strategic_decisions
     FOR EACH ROW EXECUTE FUNCTION enforce_audit_tier_change_guard();
+
+-- ⚠️ DOCUMENTED RESIDUAL (cc-quality #32207, wet-proven; cai's call — NOT fixed here):
+-- This guard closes the DIRECT single-UPDATE dodge. A multi-step RE-WINDOW path still reaches
+-- the harm: (1) move a FULL decision OUT of window (challenge_status='accepted_by_audit'), then
+-- drop audit_tier FULL->NONE — ALLOWED (out of window) and now RECORDED; (2) re-set
+-- challenge_status='challenge_window' (this tier trigger does not fire on a challenge_status
+-- change, and no challenge_status-lifecycle guard exists); (3) decision_audit_required()=FALSE
+-- => a 0-audit was-FULL decision closes accepted_by_timeout. It needs raw challenge_status
+-- UPDATEs and NO NEW capability (an actor who can set 'accepted_by_audit' has already closed it),
+-- and unlike original CAI-1009 the FULL->NONE drop now leaves a trail in decision_tier_changes.
+-- It is a challenge_status-LIFECYCLE gap, ORTHOGONAL to the tier axis. Options for cai:
+--   (a) accept as a documented residual; lean on the decision_tier_changes log for detection.
+--   (b) add a challenge_status transition guard (no re-entry to 'challenge_window' from a closed
+--       state) — cleaner, a SEPARATE change on the lifecycle axis.
+--   (c) block FULL->non-FULL when 0 completed audits REGARDLESS of window (tightens THIS guard).
+-- cc-quality leans (a)+(b-later). Surfaced to cai; this proposal ships (a) unless cai directs (c).
 
 -- ---------------------------------------------------------------------------
 -- PART B — add the 'nonconforming' verdict (CAI-991 / 987-F4) + make the whole
