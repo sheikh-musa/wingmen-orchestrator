@@ -154,13 +154,45 @@ def test_real_composer_classifies_wedge_unsafe():
     assert v == w.V_WEDGE_UNSAFE
 
 
-def test_real_composer_is_alerted_but_never_nudged_even_when_armed(fast_floor, recorder):
-    obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad",
+def test_singleton_real_composer_is_alerted_but_never_nudged(fast_floor, recorder):
+    # A SINGLETON with a real-per-content composer is still passively alert-only (unchanged
+    # by the lane active-probe refinement) — singletons are not lane-nudged.
+    obs = _obs(agent="cai", kind="singleton",
                comp=w.COMP_REAL, text="apply the money migration now")
     w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs], lane_dirs={}, persist=False)
     assert recorder["nudge"] == []          # a real draft is NEVER clobbered
     assert recorder["reset"] == []
     assert len(recorder["page"]) == 1       # it is surfaced instead
+
+
+def test_nonding_lane_passive_real_is_probed_not_alerted(fast_floor, recorder):
+    # cc-quality #34258/#34178: an idle read-not-write lane whose ONLY unread is non-ding,
+    # composer PASSIVELY reads real (an idle-status line 'Idle -- inbox clear') -- but
+    # lane_nudge's ACTIVE probe confirms it a ghost. Do NOT trust the passive real read to
+    # fire a stuck-mid-task P1: ACTIVE-PROBE (lane_nudge self-guards), don't passively alert.
+    bus = w.BusSignal(1, 1800.0, 100000.0, actionable=0, wake_eligible=0)
+    obs = w.AgentObs("cc-quality", "lane", "quality", bus,
+                     w.ComposerSignal(w.COMP_REAL, "Idle -- inbox clear, no work pending."))
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["page"] == []               # passive-real on a non-ding lane: NO alert
+    assert recorder["nudge"] == ["cc-quality"]  # it is ACTIVE-PROBED instead
+
+
+def test_nonding_lane_probe_refusal_alerts_but_never_resets(fast_floor, recorder, monkeypatch):
+    # If the probe REFUSES (lane_nudge won't clobber a GENUINE staged draft), that IS a real
+    # stuck-mid-task -> alert-only. NEVER reset -- a reset would clobber the very draft the
+    # probe just protected.
+    monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
+    monkeypatch.setattr(w, "do_nudge",
+                        lambda o: (recorder["nudge"].append(o.agent),
+                                   (False, "lane_nudge REFUSED: genuine staged draft"))[1])
+    bus = w.BusSignal(1, 1800.0, 100000.0, actionable=0, wake_eligible=0)
+    obs = w.AgentObs("cc-irsyad", "lane", "irsyad", bus,
+                     w.ComposerSignal(w.COMP_REAL, "apply the money migration now"))
+    w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs], lane_dirs={"irsyad": "/x"}, persist=True)
+    assert recorder["nudge"] == ["cc-irsyad"]   # probed
+    assert len(recorder["page"]) == 1           # refusal -> genuine draft -> alert
+    assert recorder["reset"] == []              # NEVER reset over a real draft
 
 
 # --------------------------------------------------------------------------- #
@@ -450,10 +482,17 @@ def test_genuine_stall_helper():
     quiet_lane = _obs(kind="lane", session="x", comp=w.COMP_EMPTY,
                       last_write=6000.0, actionable=0, wake_eligible=0)   # 100m, FYI-only
     assert w._genuine_stall(quiet_lane) is False
-    # Boundary preserved: a long-quiet lane holding a REAL staged draft is stuck mid-task.
+    # Post-#34261: a long-quiet lane whose composer PASSIVELY reads real (unreliable -- an
+    # idle-status line reads as real) with only non-ding unread is NOT a passive genuine
+    # stall -- it is routed to the active-probe instead (was True). A definitive MENU-trap
+    # (below) still stalls.
     quiet_lane_draft = _obs(kind="lane", session="x", comp=w.COMP_REAL, text="apply mig",
                             last_write=6000.0, actionable=0, wake_eligible=0)
-    assert w._genuine_stall(quiet_lane_draft) is True
+    assert w._genuine_stall(quiet_lane_draft) is False
+    # A MENU-trap is DEFINITIVELY stuck (nav footer) -> still a genuine stall, non-ding or not.
+    quiet_lane_menu = _obs(kind="lane", session="x", comp=w.COMP_MENU,
+                           last_write=6000.0, actionable=0, wake_eligible=0)
+    assert w._genuine_stall(quiet_lane_menu) is True
     # Boundary preserved: a long-quiet lane ignoring a wake-eligible DING still stalls.
     quiet_lane_ding = _obs(kind="lane", session="x", comp=w.COMP_EMPTY,
                            last_write=6000.0, actionable=0, wake_eligible=1)
