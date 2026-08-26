@@ -163,6 +163,69 @@ def test_real_composer_is_alerted_but_never_nudged_even_when_armed(fast_floor, r
     assert len(recorder["page"]) == 1       # it is surfaced instead
 
 
+# --------------------------------------------------------------------------- #
+# arm-gating on ACTIONABLE-unread (Nazim #31259 / cc-fleet-health): a CANDIDATE
+# that is not a GENUINE stall (0 actionable + wrote within ALERT_QUIET_SEC) is
+# benign idle-between-tasks — never alert, never nudge. Kills the cosmetic false-
+# arm on a 1-unread-0-actionable lane (ihsanos #31257). A genuine stall (actionable
+# OR long-quiet) is unchanged.
+# --------------------------------------------------------------------------- #
+
+def _cosmetic_kw():
+    # candidate (piling ~25m + quiet ~25m > 20m floors) but NOT a genuine stall
+    # (0 actionable, wrote 25m ago < ALERT_QUIET_SEC=90m).
+    return dict(agent="cc-irsyad", kind="lane", session="irsyad",
+                unread=1, oldest=1500.0, last_write=1500.0, actionable=0)
+
+
+def test_cosmetic_unsafe_wedge_is_not_alerted(fast_floor, recorder):
+    # composer reads 'real' (maybe a re-rendered ghost) => V_WEDGE_UNSAFE, but it is
+    # NOT a genuine stall -> must NOT alert (the cosmetic false-arm) and never nudge.
+    obs = _obs(comp=w.COMP_REAL, text="do a full health pass", **_cosmetic_kw())
+    w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["page"] == []           # cosmetic unsafe wedge: NOT surfaced
+    assert recorder["nudge"] == []
+
+
+def test_cosmetic_safe_wedge_is_not_nudged_when_armed(fast_floor, recorder):
+    # safe (empty/dim-ghost) composer, cosmetic candidate -> armed auto-nudge must
+    # NOT fire (was 'still nudge to help drain'; now gated on a genuine stall).
+    obs = _obs(comp=w.COMP_EMPTY, **_cosmetic_kw())
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["nudge"] == []          # cosmetic safe wedge: not nudged
+    assert recorder["page"] == []
+
+
+def test_actionable_unread_still_acts_even_if_wrote_recently(fast_floor, recorder):
+    # actionable>0 makes it a GENUINE stall even without long-quiet -> still nudged.
+    kw = _cosmetic_kw(); kw["actionable"] = 1
+    obs = _obs(comp=w.COMP_EMPTY, **kw)
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["nudge"] == ["cc-irsyad"]   # actionable -> genuine stall -> acts
+
+
+def test_long_quiet_lane_with_only_nonding_fyi_unread_is_not_alerted(fast_floor, recorder):
+    # cc-quality class (console 34175): an idle auditor that reads-but-rarely-WRITES the
+    # bus reads as 'long-quiet', and a NON-DING FYI pointer (0 requires_response, not
+    # wake-eligible — e.g. #34144) sits unread. That is expected-unread on a benignly-idle
+    # lane, NOT a wedge — it must NOT alert console (the 34170 false-positive). A safe
+    # (empty/dim-ghost) composer + no ding/actionable unread is the exact signature.
+    bus = w.BusSignal(1, 1800.0, 100000.0, actionable=0, wake_eligible=0)
+    obs = w.AgentObs("cc-quality", "lane", "quality", bus, w.ComposerSignal(w.COMP_EMPTY))
+    w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert recorder["page"] == []           # non-ding FYI on an idle lane must NOT alert
+    assert recorder["nudge"] == []
+
+
+def test_long_quiet_lane_with_a_ding_unread_STILL_alerts(fast_floor, recorder):
+    # Boundary (console (a)): the SAME long-quiet safe-composer lane, but the unread is
+    # wake-eligible (a real DING it is ignoring) -> still a genuine stall -> still alerts.
+    bus = w.BusSignal(1, 1800.0, 100000.0, actionable=1, wake_eligible=1)
+    obs = w.AgentObs("cc-quality", "lane", "quality", bus, w.ComposerSignal(w.COMP_EMPTY))
+    w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=False)
+    assert len(recorder["page"]) == 1       # an ignored actionable/ding unread still surfaces
+
+
 def test_safe_to_nudge_predicate():
     assert w.ComposerSignal(w.COMP_EMPTY).safe_to_nudge is True
     assert w.ComposerSignal(w.COMP_DELEGATED).safe_to_nudge is True
@@ -211,7 +274,10 @@ def test_singleton_is_paged_never_reset_on_escalation(fast_floor, recorder, monk
 def test_lane_escalation_reaches_guarded_reset(fast_floor, recorder, monkeypatch):
     monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
     monkeypatch.setattr(w, "STAGE2_DELAY_SEC", 0)
-    obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad", comp=w.COMP_EMPTY)
+    # A GENUINE stall (actionable/ding unread it is ignoring) — post-34175 the escalation
+    # ladder no longer fires on quiet + non-ding FYI alone.
+    obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad", comp=w.COMP_EMPTY,
+               actionable=1, wake_eligible=1)
     w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs],
           lane_dirs={"irsyad": "/x"}, persist=True)
     w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs],
@@ -224,7 +290,8 @@ def test_dirty_worktree_blocks_reset_and_alerts(fast_floor, recorder, monkeypatc
     monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
     monkeypatch.setattr(w, "STAGE2_DELAY_SEC", 0)
     monkeypatch.setattr(w, "_worktree_clean", lambda s, d: (False, "3 uncommitted change(s)"))
-    obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad", comp=w.COMP_EMPTY)
+    obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad", comp=w.COMP_EMPTY,
+               actionable=1, wake_eligible=1)   # a GENUINE stall (post-34175)
     w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs], lane_dirs={"irsyad": "/x"}, persist=True)
     w.run(mode=w.MODE_ESCALATE, alert=True, injected=[obs], lane_dirs={"irsyad": "/x"}, persist=True)
     assert recorder["reset"] == []          # never reset over uncommitted work
@@ -378,8 +445,22 @@ def test_working_run_takes_no_action_and_does_not_page(fast_floor, recorder):
 def test_genuine_stall_helper():
     cyc = _obs(kind="lane", session="x", last_write=1800.0, actionable=0)   # 30m, FYI
     assert w._genuine_stall(cyc) is False
-    quiet = _obs(kind="lane", session="x", last_write=6000.0, actionable=0)  # 100m
-    assert w._genuine_stall(quiet) is True
+    # NON-DING exclusion (console 34175): a long-quiet LANE with a SAFE composer and only
+    # non-ding / non-actionable unread is benign expected-unread, NOT a stall (was True).
+    quiet_lane = _obs(kind="lane", session="x", comp=w.COMP_EMPTY,
+                      last_write=6000.0, actionable=0, wake_eligible=0)   # 100m, FYI-only
+    assert w._genuine_stall(quiet_lane) is False
+    # Boundary preserved: a long-quiet lane holding a REAL staged draft is stuck mid-task.
+    quiet_lane_draft = _obs(kind="lane", session="x", comp=w.COMP_REAL, text="apply mig",
+                            last_write=6000.0, actionable=0, wake_eligible=0)
+    assert w._genuine_stall(quiet_lane_draft) is True
+    # Boundary preserved: a long-quiet lane ignoring a wake-eligible DING still stalls.
+    quiet_lane_ding = _obs(kind="lane", session="x", comp=w.COMP_EMPTY,
+                           last_write=6000.0, actionable=0, wake_eligible=1)
+    assert w._genuine_stall(quiet_lane_ding) is True
+    # UNCHANGED: a SINGLETON keeps the quiet-alone stall (the cai-incident class).
+    quiet_singleton = _obs(kind="singleton", last_write=6000.0, actionable=0, wake_eligible=0)
+    assert w._genuine_stall(quiet_singleton) is True
     act = _obs(kind="lane", session="x", last_write=1800.0, actionable=1)    # req=True
     assert w._genuine_stall(act) is True
 
@@ -410,19 +491,29 @@ def test_hub_actionable_but_below_narrow_floor_does_not_page():
     assert w._genuine_stall(hub) is False
 
 
-def test_cycling_wedge_is_nudged_but_not_paged(fast_floor, recorder, monkeypatch):
+def test_cycling_wedge_is_gated_neither_nudged_nor_paged(fast_floor, recorder, monkeypatch):
+    # BEHAVIOR CHANGE (Nazim #31259 / cc-fleet-health arm-gating): a cycling lane
+    # (wrote 30m ago, only non-actionable FYI unread) is NOT a genuine stall, so it is
+    # now neither nudged nor paged. Previously it was auto-nudged ("cheap, helps it
+    # drain", Nazim 14413) — but that wake was the cosmetic false-arm (ihsanos #31257);
+    # a benign cycling lane self-drains its FYI on its next turn. Long-quiet + actionable
+    # cases (test_fully_quiet_wedge_is_paged / test_actionable_unread_still_acts) still act.
     monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
     obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad",
                last_write=1800.0, actionable=0)   # cycling: wrote 30m ago, FYI unread
     w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
-    assert recorder["nudge"] == ["cc-irsyad"]   # still auto-recovered (cheap)
-    assert recorder["page"] == []               # but NOT paged — benign cycling
+    assert recorder["nudge"] == []              # cosmetic candidate -> not nudged (was: nudged)
+    assert recorder["page"] == []               # and NOT paged — benign cycling
 
 
-def test_fully_quiet_wedge_is_paged(fast_floor, recorder, monkeypatch):
+def test_fully_quiet_lane_ignoring_a_ding_is_paged(fast_floor, recorder, monkeypatch):
+    # Post-34175: a fully-quiet LANE pages when it is ignoring a wake-eligible DING (an
+    # actionable unread), not on quiet + non-ding FYI alone (that's benign — covered by
+    # test_long_quiet_lane_with_only_nonding_fyi_unread_is_not_alerted). Singletons keep
+    # the quiet-alone page (test_actionable_unread_pages_even_when_recently_active + helper).
     monkeypatch.setattr(w.fleet_health_lease, "gate", lambda: (True, "holder-current"))
     obs = _obs(agent="cc-irsyad", kind="lane", session="irsyad",
-               last_write=6000.0, actionable=0)   # fully quiet 100m
+               last_write=6000.0, actionable=1, wake_eligible=1)   # fully quiet 100m + a DING
     w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
     assert len(recorder["page"]) == 1
 

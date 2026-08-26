@@ -108,6 +108,11 @@ from nervous_system import agent_wake  # noqa: E402
 STATE_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog_state.json"
 LOG_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog.log"
 HEARTBEAT_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog_heartbeat"
+# Per-lane page SNOOZE: {lane: until_iso}. A lane here is still detected + LOGGED (durable record),
+# but its PAGE is suppressed until `until_iso` — for a KNOWN-benign recurring ghost pending a recycle
+# (Nazim #29644: stop re-P1-storming storefront's idle 'check-inbox' ghost). Fail-OPEN: any read/parse
+# error ⇒ not snoozed ⇒ a real wedge still pages (a snooze must never silence a genuine stall).
+SNOOZE_FILE = _ORCH_DIR / "logs" / "wedge_snooze.json"
 _COMPOSER_LIB = _ORCH_DIR / "scripts" / "lib" / "composer_capture.sh"
 
 
@@ -558,7 +563,20 @@ def _genuine_stall(obs: AgentObs) -> bool:
     FYI-grade unread is benign idle-between-tasks — nudged, never paged (Nazim 14413)."""
     if obs.agent == "cc-orchestrator":
         return obs.bus.wake_eligible > 0
-    return obs.bus.last_write_age >= ALERT_QUIET_SEC or obs.bus.actionable > 0
+    long_quiet = obs.bus.last_write_age >= ALERT_QUIET_SEC
+    # NON-DING exclusion (console 34175): a LANE that only reads 'stalled' because it is
+    # long-quiet — with a SAFE (empty/dim-ghost) composer and NO ding/actionable unread —
+    # is benign expected-unread, NOT a wedge. The class: a NON-DING FYI pointer to an idle
+    # auditor that reads-but-rarely-WRITES the bus (cc-quality #34144 -> the 34170 false
+    # alert). Drop the quiet-alone stall THERE only. UNCHANGED and still stall: singletons
+    # (the cai-incident quiet-alone case), a lane holding a REAL staged draft / menu (stuck
+    # mid-task -> not safe_to_nudge), and any wake-eligible OR requires_response unread (the
+    # genuinely-ignored actionable class — DING). Matches Nazim's boundary: keep (a) an
+    # ignored DING/requires_response unread and (b) stuck-mid-task; drop only expected-unread.
+    if (obs.kind == "lane" and obs.composer.safe_to_nudge
+            and obs.bus.wake_eligible == 0 and obs.bus.actionable == 0):
+        long_quiet = False
+    return long_quiet or obs.bus.actionable > 0
 
 
 def evaluate(entry: Optional[dict], obs: AgentObs, now: float) -> "tuple[str, dict]":
@@ -784,6 +802,24 @@ def _emit_bus_alert(text: str) -> None:
             pass
 
 
+def _lane_snoozed(session: str) -> bool:
+    """True iff `session` has an unexpired page-snooze in SNOOZE_FILE. Fail-OPEN: any
+    missing/unparseable file or bad timestamp returns False, so a real wedge always pages
+    (a snooze must never silence a genuine stall — dead-man's-switch). Detection + logging
+    are unaffected; only the operator PAGE is suppressed while snoozed."""
+    try:
+        data = json.loads(SNOOZE_FILE.read_text())
+        until = data.get(session)
+        if not until:
+            return False
+        until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+        if until_dt.tzinfo is None:
+            until_dt = until_dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) < until_dt
+    except Exception:
+        return False
+
+
 def _page(text: str) -> None:
     """Surface an operator alert. In tests / manual inspection
     (LANE_WEDGE_ALERT_STDOUT=1 or pytest) print instead — never touch the bus.
@@ -813,7 +849,9 @@ def _wedge_alert(obs: AgentObs, elapsed_min: int, unsafe: bool, armed: bool) -> 
           "so it may be a re-rendered / scrolled-off ghost, not a genuine draft. Run lane_nudge "
           "to disambiguate (it probes: clears+delivers if ghost, refuses if genuinely staged). "
           "If it IS its own draft, submit its step or clear the inbox." if unsafe else
-          ("Auto-recovery is nudging it to drain; watch for it to pick up." if armed else
+          ("Auto-nudge fired — a SINGLE best-effort nudge, NOT a sustained recovery. "
+           "CONFIRM it actually drained (a nudge can fail / be refused); if it did not, it "
+           "needs a human — a repeat wedge re-pages, but nothing else auto-runs." if armed else
            "It self-heals once nudged to drain its inbox — nudge it or arm the watchdog."))
     try:
         from nervous_system.alert_format import format_alert
@@ -1211,7 +1249,7 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
         if len(recent) >= REPEAT_K and _genuine_stall(obs):
             line["action"] = "REPEAT-WEDGE — auto-recovery STOPPED, paging operator"
             if not entry.get("repeat_alerted"):
-                if alert:
+                if alert and not _lane_snoozed(obs.session):
                     _page(_repeat_alert(obs, len(recent)))
                 entry["repeat_alerted"] = now
             log(f"REPEAT-WEDGE {obs.agent}: {len(recent)} wedges in window — stop + page")
@@ -1228,9 +1266,15 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             log(f"{kind} {obs.agent}: {obs.bus.unread} unread "
                 f"({obs.bus.actionable} actionable), idle {elapsed_min}m, "
                 f"composer={obs.composer.state} ({'ARMED:'+mode if not dry else 'DETECT-ONLY'})")
-        # A menu-trap ALWAYS surfaces (it is definitively stuck — blocks the bus),
-        # like unsafe; a plain safe wedge pages only on a genuine stall.
-        if alert and (menu or unsafe or _genuine_stall(obs)) and not entry.get("alerted"):
+        # A menu-trap ALWAYS surfaces (it is definitively stuck — blocks the bus).
+        # Everything else — including an `unsafe` (real-per-content) composer — surfaces
+        # ONLY on a genuine stall (actionable req=True unread, OR fully-quiet past
+        # ALERT_QUIET_SEC). Arm-gating (Nazim #31259 / cc-fleet-health): `unsafe` no longer
+        # alerts on its own — a lane idle on a single non-actionable unread whose composer
+        # merely reads as real (often a re-rendered ghost, not a genuine draft) is the
+        # cosmetic false-arm that pulled the operator in for nothing (ihsanos #31257).
+        if (alert and (menu or _genuine_stall(obs)) and not entry.get("alerted")
+                and not _lane_snoozed(obs.session)):
             _page(_menu_trap_alert(obs, elapsed_min) if menu
                   else _wedge_alert(obs, elapsed_min, unsafe, armed=not dry))
             entry["alerted"] = now
@@ -1249,15 +1293,26 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             results.append(line)
             continue
 
+        # Arm-gating (Nazim #31259 / cc-fleet-health): a COSMETIC safe wedge — a candidate
+        # (idle + unread piling) that is NOT a genuine stall (0 actionable AND wrote within
+        # ALERT_QUIET_SEC) — is benign idle-between-tasks. Do NOT auto-nudge it: waking a
+        # lane to drain a single non-actionable FYI is a wasted wake, not recovery. It self-
+        # drains on its next turn, and if it ever crosses into a real stall the genuine-stall
+        # gate above acts then. Logged already (durable record), just not acted on.
+        if not _genuine_stall(obs):
+            line["action"] = ("cosmetic wedge (candidate but not a genuine stall — 0 actionable, "
+                              "wrote within ALERT_QUIET_SEC) — logged, not nudged")
+            results.append(line)
+            continue
+
         if dry:
             line["action"] = f"[DETECT-ONLY] WOULD auto-nudge {obs.agent} (unarmed)"
             results.append(line)
             continue
 
-        # ARMED (mode >= auto-nudge) AND lease held -> recover. Count toward the
-        # repeat breaker only for a GENUINE stall, so a cycling lane's benign idles
-        # never accumulate to REPEAT_K (Nazim 14413).
-        if _genuine_stall(obs) and (not history or now - history[-1] > WEDGE_GRACE_SEC):
+        # ARMED (mode >= auto-nudge) AND lease held -> recover. genuine_stall is now
+        # guaranteed above, so this is always a real stall counting toward the repeat breaker.
+        if not history or now - history[-1] > WEDGE_GRACE_SEC:
             history.append(now)
         _recover(obs, entry, mode, alert, now, lane_dirs, line)
         results.append(line)
