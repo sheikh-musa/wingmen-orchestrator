@@ -344,11 +344,22 @@ sleep 1
 # break the shell tmux runs the command under. Absolute paths (no PATH assumption
 # under SSH/launchd). With a RESUME_ID we forward `-- --resume <id>` through
 # launch_lane_as.sh → launch_dangerous_cc.sh → claude, so the conversation resumes.
+#
+# CAI-1225 L2 SCRUB: this tool often runs FROM a console/cai env that LEGITIMATELY holds
+# the live-WRITE client DSNs (GOUMLYNE_DATABASE_URL / IHSANOS_PROD_DATABASE_URL, from the
+# restricted store). `tmux new-session` inherits the caller env into the LANE, where
+# launch_dangerous_cc.sh's L2 guard CORRECTLY refuses to boot a lane/auditor holding a
+# write-DSN → the relaunch FAILs and the lane is left DOWN. Fix at the CALLER: unset the
+# two write-DSNs in the relaunch command so the lane boots clean. RO vars
+# (GOUMLYNE_RO_DATABASE_URL / IHSANOS_PROD_RO_DATABASE_URL) are FINE and are NOT scrubbed.
+# We do NOT weaken the guard — it stays a crash so a genuine .env write-DSN regression is
+# still caught. Only lane re-tokens hit this (singletons boot via boot_*.sh, not this path).
+DSN_SCRUB='unset GOUMLYNE_DATABASE_URL IHSANOS_PROD_DATABASE_URL; '
 if [ -n "$RESUME_ID" ]; then
-  printf -v CMD '%q %q -- --resume %q' "$LAUNCH_AS" "$TOKFILE" "$RESUME_ID"
+  printf -v CMD '%s%q %q -- --resume %q' "$DSN_SCRUB" "$LAUNCH_AS" "$TOKFILE" "$RESUME_ID"
   echo "[switch_lane_token] relaunching '$SESS' in $WORKTREE on the new account, RESUMING $RESUME_ID ..."
 else
-  printf -v CMD '%q %q' "$LAUNCH_AS" "$TOKFILE"
+  printf -v CMD '%s%q %q' "$DSN_SCRUB" "$LAUNCH_AS" "$TOKFILE"
   echo "[switch_lane_token] relaunching '$SESS' in $WORKTREE on the new account (FRESH — no session to resume) ..."
 fi
 if ! "$TM" new-session -d -s "$SESS" -c "$WORKTREE" "$CMD"; then
