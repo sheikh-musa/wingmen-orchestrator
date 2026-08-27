@@ -563,7 +563,26 @@ def _genuine_stall(obs: AgentObs) -> bool:
     FYI-grade unread is benign idle-between-tasks — nudged, never paged (Nazim 14413)."""
     if obs.agent == "cc-orchestrator":
         return obs.bus.wake_eligible > 0
-    return obs.bus.last_write_age >= ALERT_QUIET_SEC or obs.bus.actionable > 0
+    long_quiet = obs.bus.last_write_age >= ALERT_QUIET_SEC
+    # NON-DING exclusion (console 34175): a LANE that only reads 'stalled' because it is
+    # long-quiet — with a SAFE (empty/dim-ghost) composer and NO ding/actionable unread —
+    # is benign expected-unread, NOT a wedge. The class: a NON-DING FYI pointer to an idle
+    # auditor that reads-but-rarely-WRITES the bus (cc-quality #34144 -> the 34170 false
+    # alert). Drop the quiet-alone stall THERE only. UNCHANGED and still stall: singletons
+    # (the cai-incident quiet-alone case), a lane holding a REAL staged draft / menu (stuck
+    # mid-task -> not safe_to_nudge), and any wake-eligible OR requires_response unread (the
+    # genuinely-ignored actionable class — DING). Matches Nazim's boundary: keep (a) an
+    # ignored DING/requires_response unread and (b) stuck-mid-task; drop only expected-unread.
+    # (#34261 refinement) precondition is state != COMP_MENU, NOT safe_to_nudge: a passive
+    # composer=real is UNRELIABLE for a non-ding idle lane (an idle-status line 'Idle --
+    # inbox clear' reads as real, cc-quality #34258) — so it must not defeat this benign
+    # classification and fire a passive stuck-mid-task P1. Such a lane is ACTIVE-PROBED
+    # (lane_nudge) at the unsafe branch instead. Only a definitive MENU-trap (which cannot
+    # be nudged — a plain nudge types into the menu) stays a genuine stall here.
+    if (obs.kind == "lane" and obs.composer.state != COMP_MENU
+            and obs.bus.wake_eligible == 0 and obs.bus.actionable == 0):
+        long_quiet = False
+    return long_quiet or obs.bus.actionable > 0
 
 
 def evaluate(entry: Optional[dict], obs: AgentObs, now: float) -> "tuple[str, dict]":
@@ -1274,6 +1293,44 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             continue
 
         if unsafe:
+            # ACTIVE-PROBE (console #34261): a non-ding idle LANE's passive composer=real is
+            # UNRELIABLE — an idle-status line ('Idle -- inbox clear') reads as real, yet
+            # lane_nudge's ACTIVE probe confirms it a GHOST (cc-quality #34258/#34178, 3rd
+            # false-P1). When armed+lease-held, probe ONCE via lane_nudge (it self-guards:
+            # delivers if ghost/idle-status, REFUSES a genuine draft). DELIVER -> the lane
+            # drains its benign FYI -> benign, no alert. REFUSE -> a genuine staged draft IS
+            # a real stuck-mid-task -> alert-only; NEVER reset (a reset would clobber the very
+            # draft this branch protects). Singletons / ding-unread / detect-only fall through
+            # to the passive alert-only below (the passive 1276 alert was already gated off for
+            # a non-ding lane by _genuine_stall).
+            # Gate the probe on LONG-QUIET: a RECENTLY-active cycling lane (wrote within
+            # ALERT_QUIET_SEC) self-drains its FYI on its next turn — waking it to probe is
+            # the #31259 wasted-wake we already suppress. Only a LONG-QUIET non-ding lane
+            # (won't self-drain, and whose composer=real is the suspicious cc-quality case)
+            # is worth the active probe.
+            nonding_lane = (obs.kind == "lane" and obs.bus.wake_eligible == 0
+                            and obs.bus.actionable == 0
+                            and obs.bus.last_write_age >= ALERT_QUIET_SEC)
+            if nonding_lane and not dry:
+                if not entry.get("nudged_at"):
+                    ok, mech = do_nudge(obs)
+                    entry["nudged_at"] = now
+                    entry["nudge_count"] = int(entry.get("nudge_count", 0)) + 1
+                    if ok:
+                        line["action"] = (f"non-ding + passive-real -> ACTIVE-PROBED, lane_nudge "
+                                          f"DELIVERED ({mech}) -> benign (lane drains, re-idles)")
+                    else:
+                        if alert and not entry.get("alerted") and not _lane_snoozed(obs.session):
+                            _page(_wedge_alert(obs, elapsed_min, unsafe, armed=True))
+                            entry["alerted"] = now
+                        line["action"] = (f"non-ding + REAL draft confirmed by probe refusal ({mech}) "
+                                          f"-> alert-only (draft protected, NOT reset)")
+                    log(line["action"])
+                else:
+                    line["action"] = (f"non-ding + passive-real -> already active-probed "
+                                      f"{int(now - float(entry['nudged_at']))}s ago (holding)")
+                results.append(line)
+                continue
             # REAL staged draft — NEVER auto-nudge (would clobber). Alert only.
             line["action"] = ("REAL-per-content (NOT probe-verified — may be a re-rendered/scrolled-off ghost) "
                                "— alert-only, never auto-nudged; run lane_nudge to disambiguate")
