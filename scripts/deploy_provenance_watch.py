@@ -37,6 +37,11 @@ SILOS = ["ihsanos", "ihsanos-irsyad"]      # both link github sheikh-musa/ihsano
 STATE_DIR = os.path.expanduser("~/.wingmen/state")
 STATE_FILE = os.path.join(STATE_DIR, "deploy_provenance_watch_state.json")
 ALERT_TO = "cc-fleet-health"               # I triage, then escalate genuine forks to console
+SETTLE_RUNS = 2                            # only alert once a silo's NO-GIT/drift state PERSISTS
+                                           # across N runs (~30min at 30-min cadence) — the
+                                           # signal is naturally transient during a normal
+                                           # cli-deploy -> promote-to-git window, so an
+                                           # instantaneous alert would cry wolf on routine deploys.
 
 
 def _die(msg):
@@ -85,6 +90,37 @@ def evaluate(silo, live_sha, ready_state, expected_head):
         alerts.append({"silo": silo, "sev": "WARN", "code": "PROD_NOT_READY",
                        "detail": "live-prod deploy readyState=%s" % ready_state})
     return alerts
+
+
+def _silo_sig(r):
+    """Signature of a silo's alert state — sorted codes + the offending sha."""
+    return "|".join(sorted(a["code"] for a in r["alerts"])) + "@" + (r["live_sha"] or "none")
+
+
+def decide_alerts(results, prev_state):
+    """Pure settle-count + dedup decision (unit-testable, no I/O).
+
+    Returns (to_post, new_state). A silo is POSTED only once its SAME alert signature
+    has persisted across SETTLE_RUNS consecutive runs (settle) AND it has not already
+    been posted for that signature (dedup). A silo that goes clean drops from state so a
+    future regression settles+pages afresh.
+    """
+    new_state, to_post = {}, []
+    for r in results:
+        if not r["alerts"]:
+            continue  # clean → not carried in state
+        sig = _silo_sig(r)
+        prev = prev_state.get(r["silo"]) or {}
+        if prev.get("sig") == sig:
+            count = int(prev.get("count", 1)) + 1
+            alerted = bool(prev.get("alerted", False))
+        else:
+            count, alerted = 1, False
+        if count >= SETTLE_RUNS and not alerted:
+            to_post.append(r)
+            alerted = True
+        new_state[r["silo"]] = {"sig": sig, "count": count, "alerted": alerted}
+    return to_post, new_state
 
 
 def collect():
@@ -162,6 +198,27 @@ def _selftest():
         got = (expect in codes) if expect else (len(alerts) == 0)
         print("  [%s] %-9s -> %s  %s" % ("PASS" if got else "FAIL", name, codes or "clean", "" if got else "(expected %s)" % expect))
         ok = ok and got
+
+    # settle-count + dedup (decide_alerts) — a synthetic silo carrying a NO-GIT alert
+    def _res(has_alert, sha=""):
+        return [{"silo": "s", "url": "u", "live_sha": sha, "expected_head": "abc123",
+                 "ready_state": "READY", "creator": "x",
+                 "alerts": ([{"silo": "s", "sev": "ALERT", "code": "NO_GIT_PROVENANCE", "detail": "d"}] if has_alert else [])}]
+    st = {}
+    steps = []
+    tp, st = decide_alerts(_res(True), st); steps.append(("run1-firing", len(tp) == 0))       # not settled yet
+    tp, st = decide_alerts(_res(True), st); steps.append(("run2-settled-post", len(tp) == 1))  # settles -> post
+    tp, st = decide_alerts(_res(True), st); steps.append(("run3-dedup", len(tp) == 0))          # already paged
+    tp, st = decide_alerts(_res(False), st); steps.append(("run4-clean-drops", "s" not in st))  # clean drops state
+    # a pure transient (fires once, clean next) must NEVER post
+    st2 = {}
+    tp, st2 = decide_alerts(_res(True), st2)
+    tp, st2 = decide_alerts(_res(False), st2)
+    steps.append(("transient-never-posts", len(tp) == 0 and "s" not in st2))
+    for name, good in steps:
+        print("  [%s] %s" % ("PASS" if good else "FAIL", name))
+        ok = ok and good
+
     print("SELFTEST", "PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
 
@@ -185,34 +242,22 @@ def main():
                 print("     %s %s: %s" % (a["sev"], a["code"], a["detail"]))
         print("\n%d alert(s) firing." % len(firing))
 
-    if "--alert" in args and firing and "--dry-run" not in args:
-        # dedup: signature per silo = sorted alert codes + live_sha
-        st = _load_state()
-        changed = []
-        for r in results:
-            if not r["alerts"]:
-                st.pop(r["silo"], None)
-                continue
-            sig = "|".join(sorted(a["code"] for a in r["alerts"])) + "@" + (r["live_sha"] or "none")
-            if st.get(r["silo"]) != sig:
-                changed.append(r)
-                st[r["silo"]] = sig
-        if changed:
-            lines = ["TL;DR: deploy-provenance watch fired — a silo's live prod is not machine-verifiable. Detect-only; no deploy action taken.\n"]
-            for r in changed:
+    if "--alert" in args and "--dry-run" not in args:
+        to_post, new_state = decide_alerts(results, _load_state())
+        if to_post:
+            lines = ["TL;DR: deploy-provenance watch fired — a silo's live prod has been NOT machine-verifiable "
+                     "across %d+ runs (not a transient deploy window). Detect-only; no deploy action taken.\n" % SETTLE_RUNS]
+            for r in to_post:
                 lines.append("%s: prod=%s sha=%s head=%s ready=%s by=%s" % (
                     r["silo"], r["url"], (r["live_sha"] or "NO-GIT")[:8], r["expected_head"][:8], r["ready_state"], r["creator"]))
                 for a in r["alerts"]:
                     lines.append("  %s %s: %s" % (a["sev"], a["code"], a["detail"]))
             lines.append("\nFix: promote the git-integration (sha-bearing) deploy of the intended commit, or sha-stamp the cli deploy.")
-            mid = _post_bus("deploy-provenance watch: %d silo(s) on unverifiable/drifted prod" % len(changed), "\n".join(lines))
-            print("posted bus alert id=%s (deduped: %d changed of %d firing)" % (mid, len(changed), len(firing)))
-            _save_state(st)
-        else:
-            print("alerts firing but unchanged since last run — deduped, no re-page.")
-            _save_state(st)
-    elif "--alert" in args:
-        _save_state({})  # all clean: clear dedup state so a future regression re-pages
+            mid = _post_bus("deploy-provenance watch: %d silo(s) on unverifiable/drifted prod" % len(to_post), "\n".join(lines))
+            print("posted bus alert id=%s (%d settled of %d firing)" % (mid, len(to_post), len(firing)))
+        elif firing:
+            print("%d alert(s) firing but not yet settled/already-paged — no re-page." % len(firing))
+        _save_state(new_state)
 
     sys.exit(1 if firing else 0)
 
