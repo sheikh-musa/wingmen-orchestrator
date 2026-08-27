@@ -1,0 +1,5 @@
+Quick heads-up so nothing looks unexplained on your side: our build capacity for your work runs against a rolling allowance that tops up at 12:10 PM your time, and we're close to the ceiling right now.
+
+If we hit it, you may see a short quiet patch where things stop moving. Nothing is broken and nothing is lost — anything in progress just picks up again from 12:10 PM.
+
+I'll tell you either way rather than leave you guessing.

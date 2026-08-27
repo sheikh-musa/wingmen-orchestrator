@@ -1,0 +1,3 @@
+Understood — Madrasah Irsyad isn't tax-deductible, so that IRAS wording shouldn't be there at all. I'll get it dropped so it's just a receipt you email to the donor.
+
+One thing in the meantime: when you send that first receipt, leave the "Tax-deductible" box unticked. That's what puts the IRAS line on the PDF, and it shouldn't be on yours.

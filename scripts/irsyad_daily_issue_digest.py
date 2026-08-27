@@ -24,7 +24,7 @@ def _q(cur, sql, args=()):
 
 
 def build_digest() -> str:
-    dsn = os.environ["GOUMLYNE_DATABASE_URL"]
+    dsn = os.environ["GOUMLYNE_RO_DATABASE_URL"]  # CAI-1225 RO-move: read-only auditor_ro (was write-DSN); digest is SELECT-only
     lines = []
     with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
         # scope to irsyad-org users (ui_events has no org_id; join via org_members)

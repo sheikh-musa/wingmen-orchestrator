@@ -1,0 +1,3 @@
+Got it — that screen shouldn't need side-scrolling on your phone, and we'll make it fit properly. It's a code change and a deploy rather than a setting, so it isn't instant, but someone's on it now and I'll tell you the moment it's live.
+
+It shouldn't stop you in the meantime: everything on the page still works if you scroll across. So if you want to record that donation and send the first receipt now, go ahead — this fix is about making it comfortable, not about it being broken.

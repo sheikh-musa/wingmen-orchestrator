@@ -72,3 +72,47 @@ reports/console-deploy/**/*.png
 # They contain PATHS (not token material) but still do not belong in the repo.
 *_default_token.bak-*
 .*_default_token.bak-*
+
+# ============================================================================
+# VPS-migration gate half (b) — keep runtime state & session junk out of git so
+# the orch->gzb host move (op17195/17198) drops nothing real and sweeps in no
+# secrets. (Nazim/console, 2026-08-27.)
+# ============================================================================
+# Per-lane/body MODEL pointers (which model each lane runs) — runtime state set
+# at boot by scripts/fleet_model.sh; machine-local, never versioned. .fleet_model
+# was historically tracked; untracked (git rm --cached) in this same change.
+.*_model
+.*_model.bak*
+# Secret token-pointer variants not already covered above (e.g. the
+# .nazim_default_token.was.<...> preswitch snapshot). SECRET — handle by name only.
+.*_default_token*
+*_default_token*
+# Handoff/backup snapshots under reports/ — transient, regenerated each session.
+reports/*.bak
+reports/*.bak-*
+# Session scratchpad (bus_send.py etc. — recreated per session, handoff pattern).
+scratchpad/
+# Runtime watchdog/probe/dashboard state (regenerated at boot; host-local).
+state/ci_orphan_watchdog.json
+state/opus_reprobe_storefront.json
+state/cosem_dashboard_msg_id
+# Broaden the PII/residency block to ALL depths under reports/ (the top-level-only
+# reports/*.png globs missed subdir artifacts — screenshots, client namelists,
+# result spreadsheets). Client PII/media must NEVER reach git, and MUST NOT ride a
+# git-borne host move onto gzb (cross-client isolation). (gate half b, 2026-08-27.)
+reports/**/*.png
+reports/**/*.jpg
+reports/**/*.jpeg
+reports/**/*.gif
+reports/**/*.webp
+reports/**/*.pdf
+reports/**/*.pptx
+reports/**/*.ppt
+reports/**/*.csv
+reports/**/*.xlsx
+reports/**/*.xls
+reports/**/*.docx
+reports/**/*.doc
+reports/**/*.zip
+reports/**/*.db
+reports/**/*.sqlite

@@ -18,6 +18,14 @@ set -a
 source "$ORCH_DIR/.env"
 set +a
 
+# CAI-1225: source the RESTRICTED write-DSN store (the live-write GOUMLYNE/ceayj DSNs are
+# NOT in the shared .env — lanes/auditors never see them). Only console/cai boots + the 2
+# named writer tools may read it; the store's L3 tripwire refuses (return-based, non-fatal to
+# this sourced boot) unless WRITE_DSN_ALLOWED=1 is set here first. Loud-but-non-fatal: no set -e.
+export WRITE_DSN_ALLOWED=1
+set -a; . "$HOME/.wingmen/private/write_dsn.env"; set +a
+unset WRITE_DSN_ALLOWED
+
 # OAuth account resolution — precedence: explicit OVERRIDE (a live re-token) >
 # durable pointer (.nazim_default_token, reversible per-body default; op#9920/#11326,
 # revert = `rm .nazim_default_token`, mirrors the hub's .orch_default_token) > .env.
@@ -90,14 +98,32 @@ import os, psycopg
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
-    cur.execute("UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id='orch-console'")
-    cur.execute("UPDATE agents SET last_heartbeat=now() WHERE id='orch-console'")
+    # Re-assert status='working' every beat (self-healing): the exit trap stamps
+    # 'offline' on recycle, and nothing else clears it — without this the fresh
+    # body's lifeline row reads 'offline' for its whole life (SRE #30204).
+    cur.execute("UPDATE agent_status SET status='working', last_heartbeat=now(), updated_at=now() WHERE agent_id='orch-console'")
+    cur.execute("UPDATE agents SET status='active', last_heartbeat=now() WHERE id='orch-console'")
     conn.commit()
 PY
     done
 }
+
+# Immediate boot re-assert to 'working' — clears the exit-trap 'offline' NOW rather
+# than waiting up to one heartbeat interval (~300s) with the lifeline reading dead.
+_console_assert_alive() {
+    "$VENV_PY" - <<'PY' 2>/dev/null || true
+import os, psycopg
+dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
+    cur.execute("UPDATE agent_status SET status='working', current_task='orch-console CTO console (Mac Mini, tmux nazim)', last_heartbeat=now(), updated_at=now() WHERE agent_id='orch-console'")
+    cur.execute("UPDATE agents SET status='active', last_heartbeat=now() WHERE id='orch-console'")
+    conn.commit()
+PY
+}
 HB_PID=""
 if [ -x "$VENV_PY" ]; then
+    _console_assert_alive
     _console_heartbeat_loop &
     HB_PID=$!
 else
@@ -108,9 +134,11 @@ fi
 # this writes a transient status='offline' during the seconds between this body exiting
 # and the launchd waiter (boot_nazim_session.sh) relaunching it. The watchdog's #17025
 # live-session carve-out still governs PAGING (it gates on a live tmux session, not this
-# row alone), so the blip does not itself page; the fresh boot re-asserts status='working'
-# on restart. See the review note — dropping the offline write entirely is the alternative
-# if we prefer the lifeline row to NEVER read offline across reboots.
+# row alone), so the blip does not itself page. The fresh boot NOW genuinely re-asserts
+# status='working' — immediately via _console_assert_alive and every beat in the hb loop
+# (SRE #30204: the prior claim of a re-assert was false, so the row stayed 'offline' for
+# the whole life of the fresh body). The offline write is kept so a clean recycle reads
+# honestly-offline in the relaunch gap; real death is caught by heartbeat staleness.
 _console_boot_exit() {
     [ -n "${HB_PID:-}" ] && kill "$HB_PID" 2>/dev/null || true
     "$VENV_PY" - <<'PY' 2>/dev/null || true

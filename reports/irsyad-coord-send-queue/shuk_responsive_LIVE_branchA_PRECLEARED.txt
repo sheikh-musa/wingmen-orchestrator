@@ -1,0 +1,1 @@
+That's fixed and live now — the New Donation button was getting pushed off the edge on narrower screens, so the buttons now wrap instead of running off. Have a look and tell me if you still see it anywhere.

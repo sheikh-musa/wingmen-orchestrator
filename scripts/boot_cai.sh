@@ -22,11 +22,36 @@ set -uo pipefail
 CAI_DIR="$HOME/wingmen/wingmen-cai"
 ORCH_DIR="$HOME/wingmen/orchestrator"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
-MODEL="${MODEL:-${CAI_MODEL:-claude-opus-4-8}}"
+# MODEL resolution — precedence: MODEL env > CAI_MODEL env > durable pointer (.cai_model)
+# > opus-4-8. The durable pointer mirrors .cai_default_token: a per-body choice that STICKS
+# across reboots, revert = `rm .cai_model`.
+# WHY (op#13633, 2026-08-17): the operator pinned cai to Opus 5 by writing .cai_model, which is
+# the ENGINEER-LANE launcher's mechanism (launch_dangerous_cc.sh). cai is a SINGLETON and boots
+# here, which read env vars only — so the pin was INERT and would have silently done nothing at
+# her next boot. A pointer that looks set but is never read is worse than no pointer: it reports
+# a choice that was never made. Fail-safe: absent/unreadable pointer falls through to the default.
+_MODEL_FROM_ENV="${MODEL:-${CAI_MODEL:-}}"   # capture BEFORE defaulting, or env can never win
+MODEL="claude-opus-4-8"
+if [ -r "$ORCH_DIR/.cai_model" ]; then
+    _CM="$(tr -d '[:space:]' < "$ORCH_DIR/.cai_model" 2>/dev/null || true)"
+    if [ -n "${_CM:-}" ]; then
+        MODEL="$_CM"
+        echo "[boot_cai] durable model pointer applied (.cai_model -> $_CM)" >&2
+    fi
+fi
+[ -n "$_MODEL_FROM_ENV" ] && MODEL="$_MODEL_FROM_ENV"
 AGENT_ID="cai"   # exact — singleton strategic node, never a sub-tag
 
 # .env (DSN etc.) lives in the orchestrator; cai shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
+
+# CAI-1225: source the RESTRICTED write-DSN store (the live-write GOUMLYNE/ceayj DSNs are
+# NOT in the shared .env — lanes/auditors never see them). Only console/cai boots + the 2
+# named writer tools may read it; the store's L3 tripwire refuses (return-based, non-fatal to
+# this sourced boot) unless WRITE_DSN_ALLOWED=1 is set here first. Loud-but-non-fatal: no set -e.
+export WRITE_DSN_ALLOWED=1
+set -a; . "$HOME/.wingmen/private/write_dsn.env"; set +a
+unset WRITE_DSN_ALLOWED
 # OAuth account resolution — precedence: explicit OVERRIDE (a live re-token via
 # switch_singleton_token.sh) > durable pointer (.cai_default_token, the reversible
 # per-body default; op#11326 fleet flip, revert = `rm .cai_default_token`) > .env.
@@ -122,6 +147,24 @@ PY
     echo "▶ cai offline (clean exit)."
 }
 trap '_handle_exit' EXIT
+
+# ── TOOLING REACHABILITY (op#13650, 2026-08-16). cai runs with cwd=$CAI_DIR, which
+#    had no `scripts` entry — so the invocation every doc, handoff and bus row hands
+#    it, `scripts/self_recycle.sh ...`, resolved to nothing from where cai stands.
+#    Asked why it never self-recycled, cai's answer was exactly that: the recycler is
+#    "NOT in ~/wingmen/wingmen-cai/scripts this session", and it refused to improvise
+#    a process-reset it could not locate-and-verify at 452k. That was the correct call
+#    and the tool was the thing at fault. Verified as a CLASS, not an instance: none of
+#    the three singleton cwds (wingmen-cai, quality, fleet-health) could reach it.
+#    Same symlink pattern already used for boot_cai.sh itself. Idempotent; never
+#    clobbers a real directory, so a body that grows its own scripts/ is left alone. ──
+if [ ! -e "$CAI_DIR/scripts" ]; then
+  ln -s "$ORCH_DIR/scripts" "$CAI_DIR/scripts" \
+    && echo "▶ linked $CAI_DIR/scripts -> $ORCH_DIR/scripts (self_recycle et al now reachable)" \
+    || echo "⚠ could not link $CAI_DIR/scripts — self_recycle.sh will need an ABSOLUTE path" >&2
+elif [ ! -e "$CAI_DIR/scripts/self_recycle.sh" ]; then
+  echo "⚠ $CAI_DIR/scripts exists but has no self_recycle.sh — cai must use an ABSOLUTE path" >&2
+fi
 
 # ── Launch. CLAUDE.md in $CAI_DIR auto-loads as project instructions; cai runs
 #    its own boot SQL (CLAUDE.md §6.1) — boot_briefing, open windows, inbox. ──

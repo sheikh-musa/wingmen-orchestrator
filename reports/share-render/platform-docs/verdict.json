@@ -1,0 +1,21 @@
+{
+  "slug": "platform-docs",
+  "fragment": "reports/gazzabyte-platform-docs.html",
+  "checks": {
+    "mobile": {
+      "clientWidth": 390,
+      "compatMode": "CSS1Compat",
+      "scrollWidth": 390,
+      "responsive": true,
+      "standards": true,
+      "noOverflow": true
+    }
+  },
+  "pngs": {
+    "mobileTop": "/Users/sheikhmusa/wingmen/orchestrator/reports/share-render/platform-docs/mobile-top.png",
+    "mobileMid": "/Users/sheikhmusa/wingmen/orchestrator/reports/share-render/platform-docs/mobile-mid.png",
+    "desktop": "/Users/sheikhmusa/wingmen/orchestrator/reports/share-render/platform-docs/desktop.png"
+  },
+  "pass": true,
+  "notes": []
+}

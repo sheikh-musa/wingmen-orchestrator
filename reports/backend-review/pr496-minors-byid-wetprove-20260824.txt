@@ -1,0 +1,13 @@
+
+============================================================
+=== #496 WET-PROVE goumlyne (GOUMLYNE_DATABASE_URL) ===
+  target student-person is sch_students-linked: True (minor)
+  [positive control] org_admin sees student person: 1  (OK - visible)
+  [FLOOR] subadmin sees student person: 0  (OK - DENIED)
+  [control] subadmin sees adult donor: 1  (OK - visible)
+  [cross-org] subadmin sees other-org person: 0  (OK - DENIED)
+  ==> #496 WET-PROVE goumlyne: PASS
+
+============================================================
+#496 minors wet-prove (goumlyne, the irsyad silo): PASS
+ceayj persons policy: identical subadmin-excludes-students branch confirmed (both silos)

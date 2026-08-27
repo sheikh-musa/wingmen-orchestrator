@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Lane manager · Fleet</title>
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<style>
+  /* ── Calm Command — Lane manager (fc-v38 ihsan redesign). SF Pro carries all
+     structure; mono is reserved for technical data (fingerprints, ids, models).
+     Jade = the fleet's all-clear; warm tones only where attention is due.
+     Collapsed-by-default rows expand on tap. Preserves every id/handler. ── */
+  :root{
+    --bg:#090b10; --bg-2:#0c0f16;
+    --surface:#12161e; --surface-2:#171c26; --surface-3:#1d2430;
+    --hair:rgba(255,255,255,.06); --hair-2:rgba(255,255,255,.10);
+    --txt:#e8ebf1; --dim:#949cac; --faint:#5c6472;
+    --jade:#37d39a; --jade-dim:#1f9e77; --jade-soft:rgba(55,211,154,.13);
+    --rose:#fb7185; --rose-soft:rgba(251,113,133,.13);
+    --amber:#f6c453; --amber-soft:rgba(246,196,83,.13);
+    --indigo:#8aa6ff; --indigo-soft:rgba(138,166,255,.14);
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    --r-lg:18px; --r:14px; --r-sm:10px;
+    --shadow:0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+    /* legacy aliases kept so any un-migrated selector still resolves a colour */
+    --panel:var(--surface); --panel-2:var(--surface-2); --line:var(--hair-2);
+    --accent:var(--indigo); --good:var(--jade); --warn:var(--amber); --bad:var(--rose);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;overflow-x:hidden}
+  body{color:var(--txt); font:15px/1.5 var(--sans); letter-spacing:-.01em;
+    -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -8%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 50% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg,var(--bg-2),var(--bg) 40%);
+    background-attachment:fixed;}
+  .wrap{max-width:640px;margin:0 auto;padding:0 16px calc(40px + env(safe-area-inset-bottom))}
+
+  /* The header is the ONE thing that owns the safe area: it pins at the very top
+     (top:0), its background fills the Dynamic-Island/notch strip, and its top
+     PADDING (not a body offset) drops its content below the island. No body
+     padding-top + no separate island-fill => no double-inset gap (op fc-v39). */
+  header{position:sticky;top:0;z-index:15;margin:0 -16px 0;
+    padding:calc(11px + env(safe-area-inset-top)) 18px 13px;
+    background:linear-gradient(180deg,rgba(12,15,22,.92),rgba(9,11,16,.72));
+    backdrop-filter:saturate(140%) blur(14px);-webkit-backdrop-filter:saturate(140%) blur(14px);
+    border-bottom:1px solid var(--hair)}
+  .top{display:flex;align-items:center;gap:10px}
+  .back{color:var(--dim);text-decoration:none;font-size:15px;font-weight:600;flex:none}
+  h1{font-size:19px;margin:0;font-weight:700;letter-spacing:-.02em}
+  .build{margin-left:auto;font:11px/1 var(--mono);color:var(--faint);
+    padding:5px 9px;border-radius:999px;background:var(--surface);border:1px solid var(--hair);white-space:nowrap}
+  .build .d{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--jade);
+    margin-right:5px;box-shadow:0 0 6px var(--jade);vertical-align:middle}
+  .refresh{flex:none;border:1px solid var(--hair);background:var(--surface);
+    color:var(--dim);font-size:15px;padding:0;width:34px;height:34px;border-radius:11px;
+    display:inline-flex;align-items:center;justify-content:center;margin-left:8px}
+  .refresh:active{background:var(--surface-2)}
+  .sub{margin-top:12px;color:var(--dim);font:12px/1.4 var(--mono);
+    display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+  .sub b.bad{color:var(--rose)} .sub b.good{color:var(--jade)}
+
+  .pin{font:10px/1 var(--mono);text-transform:uppercase;letter-spacing:.12em;color:var(--faint);
+    margin:22px 2px 11px;display:flex;align-items:center;gap:9px}
+  .pin::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--hair),transparent)}
+  .pin.attn{color:var(--amber)}
+  /* group heading (op#12600): family name + the group's current token badge */
+  .pin.grp{color:var(--dim)}
+  .grptok{font:10px/1 var(--mono);font-weight:700;padding:4px 8px;border-radius:999px;
+    background:var(--jade-soft);color:var(--jade);border:1px solid rgba(55,211,154,.25);
+    text-transform:none;letter-spacing:0;white-space:nowrap;flex:none}
+  .grptok.mixed{background:var(--amber-soft);color:var(--amber);border-color:rgba(246,196,83,.3)}
+
+  /* ── lane row: collapsed spine + tap-to-open drawer ── */
+  .lane{position:relative;margin-bottom:9px;border-radius:var(--r);background:var(--surface);
+    border:1px solid var(--hair);box-shadow:var(--shadow);overflow:hidden}
+  .lane .spine{position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--faint);opacity:.5}
+  .lane.ok .spine{background:linear-gradient(180deg,var(--jade),var(--jade-dim))}
+  .lane.flag .spine{background:linear-gradient(180deg,var(--rose),#c04a5a);box-shadow:0 0 10px var(--rose);opacity:1}
+  .lane.unver .spine{background:linear-gradient(180deg,var(--amber),#b9862a);opacity:.9}
+  .lane.remote .spine{background:linear-gradient(180deg,var(--indigo),#5a6fd0);opacity:1}
+  .lane .rowtop{display:flex;align-items:center;gap:11px;padding:13px 15px 13px 17px;cursor:pointer}
+  .lane .stdot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint)}
+  .lane.ok .stdot{background:var(--jade);box-shadow:0 0 8px var(--jade)}
+  .lane.flag .stdot{background:var(--rose);box-shadow:0 0 8px var(--rose)}
+  .lane.unver .stdot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+  .lane.remote .stdot{background:var(--indigo);box-shadow:0 0 8px var(--indigo)}
+  .lane .idwrap{min-width:0;flex:1}
+  .lane .id{font-size:14.5px;font-weight:700;letter-spacing:-.01em;overflow-wrap:anywhere;
+    display:flex;align-items:center;gap:8px}
+  .lane .id .role{font:10px/1 var(--mono);color:var(--indigo);font-weight:600}
+  .lane .sub2{margin-top:3px;font:11px/1.3 var(--mono);color:var(--faint);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lane .acct{flex:none;font:10px/1 var(--mono);font-weight:700;padding:5px 9px;border-radius:999px;
+    background:var(--jade-soft);color:var(--jade);border:1px solid rgba(55,211,154,.25);white-space:nowrap}
+  .lane.flag .acct{background:var(--rose-soft);color:var(--rose);border-color:rgba(251,113,133,.3)}
+  .lane.unver .acct{background:var(--amber-soft);color:var(--amber);border-color:rgba(246,196,83,.3)}
+  .lane .chev{flex:none;color:var(--faint);font-size:12px;transition:transform .22s ease}
+  .lane.open .chev{transform:rotate(90deg)}
+
+  .lane .drawer{display:none;padding:2px 15px 15px 17px}
+  .lane.open .drawer{display:block;animation:drop .22s ease}
+  @keyframes drop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .exp{color:var(--rose);font:11px/1.3 var(--mono);margin-bottom:6px}
+
+  /* control block */
+  .controls{display:grid;gap:10px}
+  .ctl{display:grid;grid-template-columns:84px 1fr;align-items:center;gap:12px;min-width:0}
+  .ctl > span{font:10px/1.2 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}
+  .ctl select{width:100%;min-width:0;-webkit-appearance:none;appearance:none;
+    font:13px/1 var(--mono);color:var(--txt);background:var(--surface-2);
+    border:1px solid var(--hair-2);border-radius:var(--r-sm);padding:11px 32px 11px 12px;
+    background-image:linear-gradient(45deg,transparent 50%,var(--dim) 50%),linear-gradient(135deg,var(--dim) 50%,transparent 50%);
+    background-position:calc(100% - 16px) 17px,calc(100% - 11px) 17px;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+  .ctlnote{font:11px/1.4 var(--mono);color:var(--faint)}
+  .applyrow{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:2px}
+  .prevbtn,.armbtn{font:12.5px/1 var(--sans);font-weight:600;padding:12px 8px;border-radius:var(--r-sm);
+    text-align:center;cursor:pointer}
+  .prevbtn{color:var(--indigo);border:1px solid rgba(138,166,255,.28);background:var(--indigo-soft)}
+  .prevbtn:active{transform:scale(.98)}
+  .armbtn{color:var(--amber);border:1px solid rgba(246,196,83,.32);background:var(--amber-soft);font-weight:700}
+  .armbtn:active{transform:scale(.98)}
+
+  .empty{color:var(--faint);text-align:center;padding:40px 0;font:13px var(--mono)}
+  .stamp{color:var(--faint);text-align:center;margin-top:18px;font:11px var(--mono)}
+
+  /* queue-on-busy applies */
+  .qitem{display:flex;flex-wrap:wrap;align-items:center;gap:6px 9px;padding:11px 13px;margin-bottom:8px;
+    border-radius:var(--r-sm);border:1px solid rgba(246,196,83,.3);background:var(--amber-soft);font:12px/1.3 var(--mono)}
+  .qitem.held{border-color:rgba(251,113,133,.4);background:var(--rose-soft)}
+  .qitem .qwho{color:var(--txt);font-weight:700}
+  .qitem .qnote{color:var(--dim);flex:1 1 100%}
+  .qitem.held .qnote{color:var(--rose)}
+  .qcancel{margin-left:auto;background:var(--surface-2);color:var(--txt);border:1px solid var(--hair-2);
+    border-radius:8px;padding:8px 12px;font:600 11px/1 var(--sans)}
+
+  /* add-token */
+  .addtok{margin:18px 0 0;border:1px solid var(--hair);border-radius:var(--r);background:var(--surface);overflow:hidden}
+  .addtok > summary{padding:13px 15px;color:var(--indigo);font:600 13px/1 var(--sans);cursor:pointer;list-style:none}
+  .addtok > summary::-webkit-details-marker{display:none}
+  .addtok-body{display:flex;flex-direction:column;gap:9px;padding:0 15px 14px}
+  .addtok-body input{width:100%;background:var(--surface-2);color:var(--txt);
+    border:1px solid var(--hair-2);border-radius:var(--r-sm);padding:12px 11px;font:13px var(--mono)}
+  .tokadd{background:linear-gradient(160deg,var(--jade),var(--jade-dim));color:#06231a;border:none;
+    border-radius:var(--r-sm);padding:13px;font:700 13px/1 var(--sans)}
+  .tokadd:disabled{opacity:.5}
+  .addtok-note{color:var(--faint);font:11px/1.4 var(--mono)}
+
+  /* toast */
+  .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));
+    transform:translateX(-50%);max-width:92%;background:var(--surface-2);color:var(--txt);
+    border:1px solid rgba(55,211,154,.4);border-radius:var(--r);padding:12px 16px;font:12.5px/1.35 var(--sans);
+    opacity:0;pointer-events:none;transition:opacity .18s;z-index:40;text-align:center;box-shadow:var(--shadow)}
+  .toast.show{opacity:1}
+  .toast.bad{border-color:rgba(251,113,133,.5);color:var(--rose)}
+
+  /* preview modal */
+  .modal{position:fixed;inset:0;background:rgba(4,6,10,.66);display:none;
+    align-items:flex-end;justify-content:center;z-index:50}
+  .modal.show{display:flex}
+  .modal-box{width:100%;max-width:640px;max-height:80vh;overflow:auto;background:var(--surface);
+    border:1px solid var(--hair-2);border-radius:var(--r-lg) var(--r-lg) 0 0;
+    padding:18px 16px calc(20px + env(safe-area-inset-bottom));box-shadow:var(--shadow)}
+  .modal-h{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;font:13px var(--sans);font-weight:700}
+  .modal-h b{color:var(--txt)}
+  .dryflag{margin-left:auto;color:var(--jade);font:700 9px/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;
+    background:var(--jade-soft);padding:5px 8px;border-radius:999px}
+  #pvText{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--txt);font:12px/1.5 var(--mono);
+    background:var(--bg-2);border:1px solid var(--hair-2);border-radius:var(--r-sm);padding:12px;margin:0 0 12px}
+  .pvclose{width:100%;background:var(--surface-2);color:var(--txt);border:1px solid var(--hair-2);
+    border-radius:var(--r-sm);padding:13px;font:700 13px/1 var(--sans)}
+
+  /* ── fleet bulk-switch toolbar ── */
+  .fleetswitch{margin:16px 0 0;padding:15px 16px;border-radius:var(--r);
+    background:linear-gradient(180deg,var(--surface-2),var(--surface));
+    border:1px solid var(--hair-2);box-shadow:var(--shadow)}
+  .fleetswitch:empty{display:none}
+  .fleetswitch .fs-row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+  .fleetswitch .fs-sel{flex:1 1 40%;font:12px/1 var(--mono);color:var(--txt);background:var(--surface-2);
+    border:1px solid var(--hair-2);border-radius:var(--r-sm);padding:11px 10px;-webkit-appearance:none;cursor:pointer}
+  .fleetswitch .fs-btn{flex:1 1 40%;font:12.5px/1 var(--sans);font-weight:700;color:var(--jade);
+    background:var(--jade-soft);border:1px solid rgba(55,211,154,.3);
+    padding:12px 8px;border-radius:var(--r-sm);cursor:pointer;-webkit-appearance:none;transition:background .12s}
+  .fleetswitch .fs-btn:active{transform:scale(.98)}
+  .fleetswitch .fs-btn:disabled{opacity:.6;cursor:default}
+  .fleetswitch .fs-btn.fs-all{color:var(--amber);background:var(--amber-soft);border-color:rgba(246,196,83,.32)}
+  .fleetswitch .fs-btn.fs-confirm{flex:1 1 100%;margin-top:9px;color:#2a1e02;
+    background:linear-gradient(160deg,var(--amber),#c8993a);border-color:transparent}
+  .fleetswitch .fs-result{margin-top:12px;font:12px/1.5 var(--mono);color:var(--dim)}
+  .fleetswitch .fs-result:empty{display:none}
+  .fleetswitch .fs-sum{color:var(--txt);font-weight:700;margin-bottom:6px;overflow-wrap:anywhere;font-family:var(--sans);font-size:13px}
+  .fleetswitch .fs-lanes{display:flex;flex-direction:column;gap:4px;margin:6px 0 8px}
+  .fleetswitch .fs-lane{display:flex;align-items:center;gap:7px;color:var(--txt);overflow-wrap:anywhere}
+  .fleetswitch .fs-lane input{accent-color:var(--jade)}
+  .fleetswitch .fs-skip{color:var(--dim)}
+  .fleetswitch .fs-excluded{color:var(--faint);overflow-wrap:anywhere}
+  .fleetswitch .fs-item{display:flex;gap:8px;align-items:baseline;padding:2px 0;flex-wrap:wrap}
+  .fleetswitch .fs-item .fs-lname{color:var(--txt)}
+  .fleetswitch .fs-act{font-weight:700}
+  .fleetswitch .fs-act.ok{color:var(--jade)}
+  .fleetswitch .fs-act.skip{color:var(--dim)}
+  .fleetswitch .fs-act.fail{color:var(--rose)}
+  .fleetswitch .fs-detail{color:var(--faint);overflow-wrap:anywhere}
+  .fleetswitch .fs-err{color:var(--rose);font-weight:700;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="top">
+      <a class="back" href="/fleet">‹ Fleet</a>
+      <h1>Lane manager</h1>
+      <span id="build" class="build"><span class="d"></span>fc-v58</span>
+      <button id="refresh" class="refresh">↻</button>
+    </div>
+    <div id="sub" class="sub">Loading ground-truth…</div>
+  </header>
+  <div id="fleetSwitch" class="fleetswitch"></div>
+  <details id="addtok" class="addtok">
+    <summary>+ Add token</summary>
+    <div class="addtok-body">
+      <input id="tokName" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="name (a-z 0-9 -, e.g. musa2)" />
+      <input id="tokVal" type="password" autocomplete="off" placeholder="paste OAuth token (written once)" />
+      <button id="tokAdd" class="tokadd">Add token</button>
+      <div class="addtok-note">Stored 0600 on this host, never shown again — only its fingerprint. gazzabyte is refused.</div>
+    </div>
+  </details>
+  <div id="queue"></div>
+  <div id="rows"></div>
+  <div id="stamp" class="stamp"></div>
+</div>
+<div id="toast" class="toast"></div>
+<div id="previewModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-h"><b id="pvTitle"></b><span class="dryflag">DRY-RUN — nothing relaunches</span></div>
+    <pre id="pvText"></pre>
+    <button id="pvClose" class="pvclose">Close</button>
+  </div>
+</div>
+<script>localStorage.setItem("console_token","render");var __D={"rows": [{"session": "cc-orchestrator", "account": "Max (unknown acct)", "fp": "d8518d915d56", "metered": false, "model": null, "host": "VPS", "verified": true, "expected": "Musa", "expected_fp": "68142948c003", "mismatch": true, "remote": true, "token_settable": false, "token_pointer": ".orch_default_token", "token_pointer_name": null, "token_group": null, "model_settable": false, "model_pointer": null}, {"session": "ihsanos-platform", "account": "musa2", "fp": "e1dfa48eec85", "metered": false, "model": "claude-sonnet-5", "host": "Mini", "verified": true, "expected": "Syed", "expected_fp": "582043088eae", "mismatch": true, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "syed", "token_group": "ihsanos", "model_settable": true, "model_pointer": null}, {"session": "nazim", "account": "Musa", "fp": "68142948c003", "metered": false, "model": "claude-opus-4-8", "host": "Mini", "verified": true, "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": true, "remote": false, "token_settable": true, "token_pointer": ".nazim_default_token", "token_pointer_name": "musa2", "token_group": null, "model_settable": false, "model_pointer": null}, {"session": "cai", "account": "Musa", "fp": "68142948c003", "metered": false, "model": "claude-sonnet-5", "host": "Mini", "verified": true, "expected": "Musa", "expected_fp": "68142948c003", "mismatch": false, "remote": false, "token_settable": false, "token_pointer": null, "token_pointer_name": null, "token_group": null, "model_settable": false, "model_pointer": "claude-sonnet-5"}, {"session": "exams", "account": "Musa", "fp": "68142948c003", "metered": false, "model": "claude-sonnet-5", "host": "Mini", "verified": true, "expected": "Musa", "expected_fp": "68142948c003", "mismatch": false, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "musa", "token_group": null, "model_settable": true, "model_pointer": null}, {"session": "fleet-health", "account": "Musa", "fp": "68142948c003", "metered": false, "model": "claude-opus-4-8", "host": "Mini", "verified": true, "expected": "Musa", "expected_fp": "68142948c003", "mismatch": false, "remote": false, "token_settable": false, "token_pointer": null, "token_pointer_name": null, "token_group": null, "model_settable": false, "model_pointer": null}, {"session": "irsyad", "account": "musa2", "fp": "e1dfa48eec85", "metered": false, "model": "claude-opus-4-8", "host": "Mini", "verified": true, "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": false, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "musa2", "token_group": "irsyad", "model_settable": true, "model_pointer": "claude-opus-4-8"}, {"session": "irsyad-coord", "account": "musa2", "fp": "e1dfa48eec85", "metered": false, "model": "claude-opus-4-8", "host": "Mini", "verified": true, "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": false, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "musa2", "token_group": "irsyad", "model_settable": true, "model_pointer": "claude-opus-4-8"}, {"session": "irsyad-payments", "account": "musa2", "fp": "e1dfa48eec85", "metered": false, "model": "claude-opus-4-8", "host": "Mini", "verified": true, "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": false, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "musa2", "token_group": "irsyad", "model_settable": true, "model_pointer": "claude-opus-4-8"}, {"session": "irsyad-receipts-followup", "account": "musa2", "fp": "e1dfa48eec85", "metered": false, "model": "claude-opus-4-8", "host": "Mini", "verified": true, "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": false, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "musa2", "token_group": "irsyad", "model_settable": true, "model_pointer": "claude-opus-4-8"}, {"session": "irsyad-tabung-jumaat", "account": "musa2", "fp": "e1dfa48eec85", "metered": false, "model": "claude-opus-4-8", "host": "Mini", "verified": true, "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": false, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "musa2", "token_group": "irsyad", "model_settable": true, "model_pointer": "claude-opus-4-8"}, {"session": "quality", "account": "Musa", "fp": "68142948c003", "metered": false, "model": "claude-opus-4-8", "host": "Mini", "verified": true, "expected": "Musa", "expected_fp": "68142948c003", "mismatch": false, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "musa", "token_group": null, "model_settable": true, "model_pointer": "claude-opus-4-8"}, {"session": "storefront", "account": "musa2", "fp": "e1dfa48eec85", "metered": false, "model": "claude-sonnet-5", "host": "Mini", "verified": true, "expected": "musa2", "expected_fp": "e1dfa48eec85", "mismatch": false, "remote": false, "token_settable": true, "token_pointer": ".lane_default_token", "token_pointer_name": "musa2", "token_group": "storefront", "model_settable": true, "model_pointer": "claude-opus-4-8"}], "summary": {"total": 13, "verified": 13, "unverified": 0, "mismatched": 3, "metered": 0, "expected_default": "Musa", "by_model": {"claude-sonnet-5": 4, "claude-opus-4-8": 8}}, "registry": {"tokens": [{"name": "musa", "fp": "68142948c003", "available": true}, {"name": "musa2", "fp": "e1dfa48eec85", "available": true}, {"name": "syed", "fp": "582043088eae", "available": true}], "models": ["claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-haiku-4-5"]}, "apply_queue": []};var __V={"version": "fc-v58", "sha": "render"};window.fetch=function(u,o){u=String(u);var d=u.indexOf("/api/version")>=0?__V:(u.indexOf("/api/backlog")>=0?(__D.backlog||[]):__D);return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(d);},text:function(){return Promise.resolve(JSON.stringify(d));}});};if(window.EventSource){window.EventSource=function(){return{addEventListener:function(){},close:function(){}};};}</script><script src="file:///Users/sheikhmusa/wingmen/orchestrator/nervous_system/console/static/lanes.js"></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+
+
+  - [1mCAI-907 tripwire (goumlyne):[0m [38;5;153mscc=0[39m — clean, as expected.
+  - [1mC5 final-gate watch (ceayj):[0m [38;5;153mfolds=2[39m — still just the two known synthetic
+  order rows, no real order yet. Nothing to escalate.
+
+  Inbox: 0 unread. Repo is clean on [38;5;153mfeat/cai858-c5-bprime-numbering[39m, pushed.
+
+  On the staged unsent input ("check on the self-recycle") — that predates this
+  recycle and was a note-to-self about verifying the mechanism worked. It's moot
+  now: this self-recycle demonstrably succeeded (fresh session, same
+  worktree/branch, handoff loaded, inbox and both watch queries ran clean), and
+  the handoff already documents the capability as proven for 2026-08-16/17. No
+  action needed on it.
+
+  [1mStatus:[0m everything is passive watch — CAI-858/C5 final gate (waiting on the
+  first real order on the live path) and the CAI-907 tripwire (every-wake,
+  clean). No open threads need action right now.
+
+[38;5;246m✻[39m [38;5;246mChurned for 1m 12s[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ [2mupdate STATUS.md and stop[0m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · ← for agents[39m

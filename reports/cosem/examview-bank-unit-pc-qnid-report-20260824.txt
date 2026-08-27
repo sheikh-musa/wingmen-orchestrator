@@ -1,0 +1,120 @@
+TOTAL QUESTIONS PARSED: 279
+RAW TABLE ROWS: 280   SKIPPED ROWS: 1
+UNITS PRESENT: 1, 2, 3, 4, 5, 6, 9
+
+===== UNIT / SUB-PC -> QUESTION IDs =====
+
+--- UNIT 1  (distinct sub-PCs: 12, questions: 36) ---
+  Unit 1-1.1  [5 Q]:  FF1002, FF1003, FF1004, FF1005, FF1006
+  Unit 1-1.2  [1 Q]:  FF1001
+  Unit 1-1.3  [1 Q]:  FF1007
+  Unit 1-1.4  [4 Q]:  FF1009, FF1010, FF1011, FF1012
+  Unit 1-1.5  [2 Q]:  FF1008, FF1013
+  Unit 1-1.6  [2 Q]:  FF1014, FF1044
+  Unit 1-2.1  [2 Q]:  FF1045, FF1046
+  Unit 1-2.2  [1 Q]:  FF1047
+  Unit 1-2.3  [7 Q]:  FF1048, FF1049, FF1050, FF1051, FF1052, FF1053, FF1054
+  Unit 1-3.1  [4 Q]:  FF1055, FF1056, FF1057, FF1059
+  Unit 1-3.3  [1 Q]:  FF1058
+  Unit 1-4.1  [6 Q]:  FF1260, FF1261, FF1262, FF1263, FF1264, FF1265
+
+--- UNIT 2  (distinct sub-PCs: 3, questions: 13) ---
+  Unit 2-1.1  [5 Q]:  FF1015, FF1016, FF1017, FF1018, FF1019
+  Unit 2-2.1  [4 Q]:  FF1020, FF1021, FF1022, FF1023
+  Unit 2-3.1  [4 Q]:  FF1026, FF1027, FF1028, FF1029
+
+--- UNIT 3  (distinct sub-PCs: 24, questions: 91) ---
+  Unit 3-1.1  [5 Q]:  FF1060, FF1061, FF1062, FF1063, FF1064
+  Unit 3-1.2  [4 Q]:  FF1065, FF1066, FF1067, FF1068
+  Unit 3-1.3  [3 Q]:  FF1106, FF1107, FF1108
+  Unit 3-2.1  [2 Q]:  FF1075, FF1076
+  Unit 3-2.2  [1 Q]:  FF1079
+  Unit 3-2.3  [2 Q]:  FF1080, FF1081
+  Unit 3-2.4  [4 Q]:  FF1077, FF1078, FF1082, FF1083
+  Unit 3-3.1  [7 Q]:  FF1157, FF1158, FF1159, FF1160, FF1161, FF1162, FF1163
+  Unit 3-3.2  [3 Q]:  FF1164, FF1165, FF1166
+  Unit 3-3.3  [6 Q]:  FF1137, FF1138, FF1167, FF1168, FF1170, FF1171
+  Unit 3-3.4  [7 Q]:  FF1141, FF1142, FF1145, FF1146, FF1172, FF1173, FF1174
+  Unit 3-3.6  [1 Q]:  FF1143
+  Unit 3-4.1  [5 Q]:  FF1175, FF1176, FF1177, FF1178, FF1179
+  Unit 3-4.2  [2 Q]:  FF1139, FF1169
+  Unit 3-4.3  [3 Q]:  FF1183, FF1184, FF1185
+  Unit 3-4.4  [1 Q]:  FF1186
+  Unit 3-4.5  [5 Q]:  FF1180, FF1181, FF1182, FF1187, FF1188
+  Unit 3-5.1  [4 Q]:  FF1214, FF1215, FF1216, FF1217
+  Unit 3-5.2  [9 Q]:  FF1218, FF1219, FF1220, FF1221, FF1222, FF1223, FF1224, FF1225, FF1226
+  Unit 3-5.3  [1 Q]:  FF1227
+  Unit 3-6.1  [2 Q]:  FF1228, FF1229
+  Unit 3-6.2  [3 Q]:  FF1230, FF1231, FF1232
+  Unit 3-7.2  [9 Q]:  FF1249, FF1250, FF1252, FF1254, FF1255, FF1256, FF1257, FF1258, FF1259
+  Unit 3-7.3  [2 Q]:  FF1251, FF1253
+
+--- UNIT 4  (distinct sub-PCs: 14, questions: 30) ---
+  Unit 4-1.1  [3 Q]:  FF1084, FF1085, FF1087
+  Unit 4-1.2  [3 Q]:  FF1086, FF1092, FF1093
+  Unit 4-1.3  [4 Q]:  FF1088, FF1089, FF1090, FF1091
+  Unit 4-1.8  [1 Q]:  FF1094
+  Unit 4-2.1  [4 Q]:  FF1095, FF1096, FF1101, FF1102
+  Unit 4-2.2  [1 Q]:  FF1097
+  Unit 4-2.3  [1 Q]:  FF1098
+  Unit 4-2.4  [1 Q]:  FF1099
+  Unit 4-2.5  [1 Q]:  FF1100
+  Unit 4-2.6  [1 Q]:  FF1103
+  Unit 4-3.1  [3 Q]:  FF1244, FF1245, FF1246
+  Unit 4-3.2  [1 Q]:  FF1247
+  Unit 4-3.3  [1 Q]:  FF1248
+  Unit 4-4.1  [5 Q]:  FF1209, FF1210, FF1211, FF1212, FF1213
+
+--- UNIT 5  (distinct sub-PCs: 16, questions: 60) ---
+  Unit 5-1.1  [10 Q]:  FF1033, FF1034, FF1035, FF1036, FF1037, FF1038, FF1039, FF1040, FF1041, FF1042
+  Unit 5-1.2  [3 Q]:  FF1030, FF1031, FF1032
+  Unit 5-1.4  [2 Q]:  FF1043, FF1072
+  Unit 5-2.2  [3 Q]:  FF1024, FF1025, FF1069
+  Unit 5-2.3  [1 Q]:  FF1070
+  Unit 5-2.4  [1 Q]:  FF1071
+  Unit 5-2.5  [1 Q]:  FF1074
+  Unit 5-3.1  [2 Q]:  FF1110, FF1111
+  Unit 5-3.2  [4 Q]:  FF1114, FF1115, FF1116, FF1117
+  Unit 5-3.3  [6 Q]:  FF1113, FF1118, FF1119, FF1120, FF1121, FF1122
+  Unit 5-3.4  [5 Q]:  FF1109, FF1123, FF1124, FF1125, FF1126
+  Unit 5-4.1  [11 Q]:  FF1127, FF1128, FF1129, FF1136, FF1147, FF1148, FF1149, FF1150, FF1151, FF1152, FF1153
+  Unit 5-4.2  [2 Q]:  FF1130, FF1131
+  Unit 5-4.3  [7 Q]:  FF1073, FF1112, FF1132, FF1133, FF1134, FF1135, FF1154
+  Unit 5-4.4  [1 Q]:  FF1140
+  Unit 5-4.6  [1 Q]:  FF1144
+
+--- UNIT 6  (distinct sub-PCs: 15, questions: 35) ---
+  Unit 6-1.1  [1 Q]:  FF1190
+  Unit 6-1.2  [1 Q]:  FF1191
+  Unit 6-1.3  [4 Q]:  FF1155, FF1156, FF1192, FF1193
+  Unit 6-1.4  [2 Q]:  FF1189, FF1194
+  Unit 6-1.5  [4 Q]:  FF1104, FF1105, FF1195, FF1196
+  Unit 6-1.6  [1 Q]:  FF1197
+  Unit 6-2.1  [1 Q]:  FF1198
+  Unit 6-2.2  [3 Q]:  FF1199, FF1200, FF1203
+  Unit 6-2.3  [1 Q]:  FF1201
+  Unit 6-2.4  [1 Q]:  FF1206
+  Unit 6-2.5  [2 Q]:  FF1207, FF1208
+  Unit 6-3.1  [4 Q]:  FF1233, FF1235, FF1236, FF1241
+  Unit 6-3.2  [5 Q]:  FF1234, FF1237, FF1238, FF1239, FF1240
+  Unit 6-3.3  [2 Q]:  FF1242, FF1243
+  Unit 6-3.4  [3 Q]:  FF1202, FF1204, FF1205
+
+--- UNIT 9  (distinct sub-PCs: 4, questions: 14) ---
+  Unit 9-1.1  [5 Q]:  FF1266, FF1267, FF1268, FF1269, FF1270
+  Unit 9-1.2  [3 Q]:  FF1271, FF1272, FF1273
+  Unit 9-2.1  [1 Q]:  FF1274
+  Unit 9-2.2  [5 Q]:  FF1275, FF1276, FF1277, FF1278, FF1279
+
+===== PER-UNIT SUMMARY (distinct sub-PC count) =====
+  Unit 1: 12 distinct sub-PCs, 36 questions
+  Unit 2: 3 distinct sub-PCs, 13 questions
+  Unit 3: 24 distinct sub-PCs, 91 questions
+  Unit 4: 14 distinct sub-PCs, 30 questions
+  Unit 5: 16 distinct sub-PCs, 60 questions
+  Unit 6: 15 distinct sub-PCs, 35 questions
+  Unit 9: 4 distinct sub-PCs, 14 questions
+
+===== SKIPPED ROWS (reconciliation) =====
+  row 0: missing-ref-id-or-unit-tag  | preview: # | REF/ID
+

@@ -1,0 +1,3 @@
+Got it, Shuk — clear. Fields for Cisco charges and Bank charges, keyed in manually; the system deducts those from the collected amount and shows the net final figure for the second approval. That's with the team on the counting screen.
+
+And to answer your earlier point properly: manual key-in is how that screen is designed to work — there's no automated feed from Certis, so the figures are entered by hand by design. You're covered on that.

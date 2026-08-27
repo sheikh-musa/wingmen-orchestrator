@@ -1,0 +1,11 @@
+Got all of these — running through them:
+
+• The tabung serial numbers (the collection list): not imported yet. That donor tabung data is the import waiting on the signed authorisation document — the moment that's signed, it goes in.
+
+• Receipt footer — the zakat allocation to the 4 asnaf, and the non-IPC / non-tax-deductible notice: yes, we'll add both. It fits exactly with the tax-deductible change already going in.
+
+• The "couldn't discard this import" error: that's a real bug — we'll fix it.
+
+• The bank-statement reconciliation (Stripe / GIRO / POS settlement / the January statement you committed), who-uploaded / who-can-resume, and the Elly-preparer + admin visibility: these are all the bank-import side. I'm pulling the exact status on each rather than guess, and I'll come straight back with specifics.
+
+(And on that capacity heads-up earlier — no pause needed, you're clear.)

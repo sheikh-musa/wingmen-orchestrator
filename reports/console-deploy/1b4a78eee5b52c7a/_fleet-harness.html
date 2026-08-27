@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex,nofollow" />
+<meta name="color-scheme" content="dark" />
+<title>Fleet</title>
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#0b0e14" />
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico" />
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Fleet" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<style>
+  :root {
+    /* Calm Command palette (fc-v38 ihsan redesign, carried into the fc-v50
+       Command-Surface unification). Jade = all-clear; warm tones only where
+       attention is due. SF Pro carries structure; mono is data-only. */
+    --bg: #090b10; --panel: #12161e; --panel-2: #171c26; --panel-3: #1d2430;
+    --line: rgba(255,255,255,.07); --line-2: rgba(255,255,255,.10);
+    --txt: #e8ebf1; --dim: #949cac; --faint: #5c6472;
+    --accent: #8aa6ff; --good: #37d39a; --good-dim: #1f9e77;
+    --warn: #f6c453; --bad: #fb7185;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    --shadow: 0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* ── ONE scroll container (fc-v51 Command-Surface unification) ──────────────
+     The <html> element is the SINGLE scroller — the whole page (monitoring
+     header + lane spine + asks) scrolls together as one document. overflow-x
+     lives HERE, on <html>, and NOT on <body>: per the CSS overflow spec, when
+     one axis is `hidden` the OTHER axis' used value flips from `visible` to
+     `auto`, so the old `body{overflow-x:hidden}` (+ `body{height:100%}`)
+     silently turned BODY into a nested, viewport-capped scroll container. That
+     inner scroller is what the operator hit on fc-v50: content scrolled INSIDE
+     body while window.scrollY stayed 0, so (a) pull-to-refresh's `scrollY>0`
+     guard never bailed and it misfired, (b) the 8s refresh's scroll-restore
+     (window.scrollTo) was a no-op so the page snapped back to top every tick,
+     and (c) the last sections read as clipped under the fixed dock. Keeping
+     overflow-x on <html> only leaves <body> in normal flow (NOT a scroller);
+     <html> is the document scroller, so window.scrollY is authoritative and
+     everything is one clean vertical scroll. */
+  html { overflow-x: hidden; }
+  html, body { margin: 0; }
+  body {
+    color: var(--txt);
+    min-height: 100vh;
+    font: 15px/1.5 var(--sans); letter-spacing: -.01em; -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -6%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 46% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg, #0c0f16, var(--bg) 42%);
+    background-attachment: fixed;
+    -webkit-text-size-adjust: 100%;
+    /* the header now scrolls in normal flow (no sticky top:inset), so the page
+       body itself starts below the notch */
+    padding-top: env(safe-area-inset-top);
+    /* leave room for the resting dock so the last lane isn't hidden under it */
+    padding-bottom: calc(env(safe-area-inset-bottom) + 78px);
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* pull-to-refresh — offset BELOW the notch via top:env(safe-area-inset-top).
+     Unchanged from the fc-v49 dashboard (operator-verified on a real iPhone). */
+  #ptr { position: fixed; top: env(safe-area-inset-top); left: 0; right: 0; z-index: 60;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    height: 0; overflow: hidden; pointer-events: none; background: var(--panel);
+    color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px; white-space: nowrap; }
+  #ptr::before { content: ""; position: fixed; top: 0; left: 0; right: 0;
+    height: env(safe-area-inset-top); background: var(--panel); z-index: 60; display: none; }
+  #ptr.pulling::before, #ptr.refreshing::before { display: block; }
+  #ptr #ptrTxt { white-space: nowrap; }
+  #ptr .spin { display: inline-block; transition: transform .15s ease; }
+  #ptr.armed { color: var(--accent); } #ptr.armed .spin { transform: rotate(180deg); }
+  #ptr.snap { transition: height .2s ease; }
+  #ptr.refreshing .spin { animation: ptrspin .7s linear infinite; }
+  @keyframes ptrspin { to { transform: rotate(360deg); } }
+
+  /* island-fill backdrop so page content that scrolls up under the notch is
+     masked by the panel colour (the header no longer owns the inset). */
+  body::before { content:""; position: fixed; top:0; left:0; right:0;
+    height: env(safe-area-inset-top); background:#10151f; z-index: 6; pointer-events:none; }
+
+  /* ── compact command strip — the ambient monitoring frame ──
+     fc-v51: NORMAL FLOW, not sticky. It is the top of the ONE scroll container
+     and scrolls away with the content (operator's ask: "merge the header with
+     the page so everything sits in one container"). No fixed/sticky block that
+     steals viewport height or fights pull-to-refresh. */
+  header.pulse { position: relative; z-index: 1;
+    background: linear-gradient(180deg, rgba(16,21,31,.85), rgba(11,14,20,.35));
+    border-bottom: 1px solid var(--line); padding: 12px 16px 11px; }
+  .pulse .top { display: flex; align-items: center; gap: 10px; }
+  .pulse .orb { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--dim); }
+  .pulse.attn .orb { background: var(--warn); box-shadow: 0 0 0 4px rgba(240,180,41,.16), 0 0 12px var(--warn); animation: breathe 2.4s ease-in-out infinite; }
+  .pulse.clear .orb { background: var(--good); box-shadow: 0 0 0 4px rgba(62,207,142,.14), 0 0 10px var(--good); }
+  @keyframes breathe { 0%,100%{opacity:.6} 50%{opacity:1} }
+  .pulse .hl { font: 800 17px/1.1 var(--sans); letter-spacing: -.02em; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pulse.attn .hl { color: #ffd77a; } .pulse.clear .hl { color: var(--good); }
+  .pulse .live { flex: none; font: 10px/1 var(--mono); color: var(--good); white-space: nowrap; }
+  .pulse .live.down { color: var(--bad); }
+  /* build badge — always-visible so the operator SEES which build his device runs. */
+  .pulse .build { flex: none; white-space: nowrap; font: 9.5px/1 var(--mono); letter-spacing: .3px;
+    color: var(--faint); padding: 4px 8px; border-radius: 999px; background: var(--panel);
+    border: 1px solid var(--line); }
+  .pulse .build.stale { color: var(--warn); border-color: rgba(246,196,83,.3); }
+
+  /* 4-cell stat row — the whole fleet's shape, always above the fold. */
+  .stat { display: flex; gap: 5px; margin-top: 10px; }
+  .stat .s { flex: 1; min-width: 0; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 7px 6px; text-align: center; }
+  .stat .s .n { font: 800 17px/1 var(--sans); }
+  .stat .s .l { margin-top: 3px; font: 9px/1 var(--mono); color: var(--faint); text-transform: uppercase; letter-spacing: .06em; }
+  .stat .s.work .n { color: var(--good); } .stat .s.idle .n { color: var(--dim); }
+  .stat .s.off .n { color: var(--bad); } .stat .s.bloat .n { color: var(--warn); }
+  /* fc-v52: the BLOAT cell taps open the top-3 offenders (#topBloat) inline. */
+  .stat .s.bloat.tapx { cursor: pointer; border-color: rgba(246,196,83,.28); }
+  .stat .s.bloat.tapx.on { background: rgba(246,196,83,.1); border-color: rgba(246,196,83,.4); }
+  .stat .s.bloat.tapx .l::after { content: " ▸"; color: var(--faint); }
+  .stat .s.bloat.tapx.on .l::after { content: " ▾"; }
+
+  /* pool-usage chips (op#9770 / op#12617). Compact single-row chips + pace tooltip. */
+  .pools { display: flex; flex-direction: column; gap: 5px; margin-top: 9px; }
+  .pools:empty { display: none; }
+  .poolrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font: 10px/1.4 var(--mono); letter-spacing: .2px; }
+  .poolchip { flex: none; font: 10px/1.3 var(--mono); padding: 3px 8px; border-radius: 999px;
+    background: rgba(255,255,255,.04); border: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
+  .poolchip b { font-weight: 700; }
+  .poolchip.good b { color: var(--good); } .poolchip.warn b { color: var(--warn); } .poolchip.bad b { color: var(--bad); }
+  .poolchip.bad { background: rgba(251,113,133,.1); border-color: rgba(251,113,133,.28); }
+  .poolchip.stale { color: var(--dim); opacity: .6; } .poolchip.stale b { color: var(--dim); }
+  .pooladv { color: var(--faint); white-space: nowrap; }
+  .poolrun { color: var(--dim); white-space: nowrap; } .poolrun.warn { color: var(--warn); }
+
+  /* top-bloat glance (op#18542) — worst offenders across the whole fleet. */
+  .topbloat { display: none; align-items: center; flex-wrap: wrap; gap: 4px 7px; margin-top: 9px;
+    font: 11px/1.2 var(--mono); padding: 6px 10px; border-radius: 8px;
+    background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); }
+  .topbloat.show { display: flex; }
+  .topbloat .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .topbloat .lbl { color: var(--dim); }
+  .topbloat .ent { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .topbloat .who { color: var(--txt); font-weight: 700; } .topbloat .pct { font-weight: 700; }
+  .topbloat .sep { color: var(--dim); }
+  .topbloat .dot.green{background:var(--good)} .topbloat .pct.green{color:var(--good)}
+  .topbloat .dot.amber{background:var(--warn)} .topbloat .pct.amber{color:var(--warn)}
+  .topbloat .dot.red{background:var(--bad)}    .topbloat .pct.red{color:var(--bad)}
+  /* op#31750: SRE-disposition pill — every bloated lane shows who's on it */
+  .topbloat .sre { font: 700 10.5px/1.4 var(--sans); padding: 0 5px; border-radius: 4px;
+                   border: 1px solid currentColor; }
+  .topbloat .sre.recycling { color: var(--good); }
+  .topbloat .sre.held      { color: var(--warn); }
+  .topbloat .sre.watching  { color: var(--dim); }
+  .topbloat .sre.healthy   { display: none; }
+
+  /* ── pinned needs-you callouts (compact) ── */
+  .needstrip { padding: 11px 16px 2px; }
+  .needstrip:empty { display: none; }
+  .need { display: flex; gap: 9px; align-items: center; padding: 10px 12px; margin-bottom: 7px; border-radius: 12px;
+    background: linear-gradient(180deg, rgba(240,180,41,.09), rgba(240,180,41,.03)); border: 1px solid rgba(240,180,41,.34);
+    box-shadow: var(--shadow); }
+  .need.crit { background: linear-gradient(180deg, rgba(255,107,107,.1), rgba(255,107,107,.03)); border-color: rgba(255,107,107,.42); }
+  .need.handling { opacity: .72; border-color: var(--line); background: var(--panel-2); }
+  .need .m { min-width: 0; flex: 1; }
+  .need .who { font: 700 12.5px/1.2 var(--sans); }
+  .need .what { margin-top: 2px; font: 11.5px/1.3 var(--sans); color: var(--dim); overflow-wrap: anywhere; }
+  .need .tag { flex: none; font: 9px/1 var(--mono); font-weight: 700; text-transform: uppercase;
+    padding: 4px 7px; border-radius: 7px; background: rgba(246,196,83,.16); color: var(--warn); }
+  .need.crit .tag { background: rgba(255,107,107,.16); color: var(--bad); }
+  .need .age { flex: none; font: 10px/1 var(--mono); color: var(--faint); }
+  .need.tappable { cursor: pointer; } .need.tappable:active { transform: scale(.995); }
+  .need.handling .who { color: var(--dim); } .need.handling .what { color: var(--dim); }
+
+  /* ── LANE SPINE — the dense grid that IS the page ── */
+  .spinehead { display: flex; align-items: center; gap: 8px; padding: 14px 16px 8px; }
+  .spinehead h2 { font: 800 11px/1 var(--sans); text-transform: uppercase; letter-spacing: .12em; color: var(--dim); margin: 0; }
+  .spinehead .count { font: 10px/1 var(--mono); color: var(--faint); }
+  .spinehead .ms { margin-left: auto; font: 10px/1 var(--mono); color: var(--accent); padding: 7px 11px; border-radius: 999px;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.28); cursor: pointer; -webkit-appearance: none; }
+  .spinehead .ms.on { color: #06231a; background: linear-gradient(160deg, var(--accent), #5a6fd0); border-color: transparent; }
+  .grid { padding: 0 16px; }
+  .tile { display: flex; align-items: center; gap: 11px; padding: 11px 13px; margin-bottom: 7px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 13px; box-shadow: var(--shadow); border-left: 3px solid transparent;
+    cursor: pointer; position: relative; }
+  .tile.working { border-left-color: rgba(55,211,154,.55); }
+  .tile.bloat { border-left-color: var(--bad); background: linear-gradient(90deg, rgba(255,107,107,.05), var(--panel) 44%); }
+  .tile.idle { border-left-color: var(--faint); } .tile.offline { border-left-color: var(--bad); }
+  .tile.sel { border-color: rgba(138,166,255,.6); box-shadow: 0 0 0 1px rgba(138,166,255,.4), var(--shadow); }
+  .tile.picked { border-color: rgba(138,166,255,.75); background: linear-gradient(90deg, rgba(138,166,255,.12), var(--panel) 50%); }
+  /* context ring */
+  .ring { flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; position: relative; }
+  .ring svg { position: absolute; inset: 0; transform: rotate(-90deg); }
+  .ring .rp { font: 9px/1 var(--mono); font-weight: 700; }
+  .ring.green .rp { color: var(--good); } .ring.amber .rp { color: var(--warn); } .ring.red .rp { color: var(--bad); }
+  /* never-blank last-known/label states: dimmed, and "~{k}k" is a token count (visibly
+     NOT a live %), so a stale reading is never mistakable for a fresh one. */
+  .ring.stale { opacity: .6; }
+  .ring .rp.k { font: 8px/1 var(--mono); font-weight: 700; letter-spacing: -.3px; color: var(--faint); }
+  .ring.stale.amber .rp.k { color: var(--warn); } .ring.stale.red .rp.k { color: var(--bad); }
+  .ring .rp.lbl { font: 8px/1 var(--mono); font-weight: 600; color: var(--faint); }
+  .ctxpill.stale { opacity: .82; }
+  .ring .ck { position: absolute; inset: 0; display: grid; place-items: center; font: 700 15px/1 var(--sans); color: var(--accent); }
+  .tile .idw { min-width: 0; flex: 1; }
+  .tile .id { font: 700 13.5px/1 var(--sans); display: flex; align-items: center; gap: 7px; overflow-wrap: anywhere; }
+  .stdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .stdot.working { background: var(--good); box-shadow: 0 0 6px var(--good); } .stdot.idle { background: var(--dim); }
+  .stdot.offline { background: var(--bad); }
+  .tile .act { margin-top: 4px; font: 11px/1.25 var(--mono); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tile .badge { flex: none; font: 9px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 3px 6px; border-radius: 7px; color: var(--bad); background: rgba(255,107,107,.14); border: 1px solid rgba(255,107,107,.5); }
+  .tile .tok { flex: none; font: 9px/1 var(--mono); font-weight: 700; padding: 4px 7px; border-radius: 999px; white-space: nowrap; }
+  .tok.musa { color: #4ade80; background: rgba(55,211,154,.1); } .tok.musa2 { color: #7dd3fc; background: rgba(125,211,252,.1); }
+  .tok.syed { color: #fbbf24; background: rgba(246,196,83,.12); } .tok.other { color: #94a3b8; background: rgba(148,163,184,.12); }
+  .tile .chev { flex: none; color: var(--faint); font-size: 12px; }
+
+  .collapsed { display: flex; align-items: center; gap: 10px; padding: 12px 14px; margin: 0 16px 7px; background: var(--panel);
+    border: 1px dashed var(--line); border-radius: 13px; color: var(--dim); font-size: 13px; cursor: pointer; }
+  .collapsed b { color: var(--txt); white-space: nowrap; }
+
+  /* coordinators as a compact chip row (tap → sheet, peek + recycle where allowed) */
+  .coordrow { display: flex; gap: 6px; padding: 2px 16px 4px; flex-wrap: wrap; }
+  .cchip { flex: 1 1 30%; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-left: 2px solid var(--accent);
+    border-radius: 10px; padding: 8px 9px; cursor: pointer; }
+  .cchip .cn { font: 700 11px/1 var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cchip .cc { margin-top: 4px; font: 9px/1 var(--mono); font-weight: 700; color: var(--dim); }
+  .cchip .cc.green { color: var(--good); } .cchip .cc.amber { color: var(--warn); } .cchip .cc.red { color: var(--bad); }
+
+  /* backlog "Your asks" — collapsible + swipe (unchanged behaviour) */
+  section { padding: 0 16px; }
+  .sec-h { display: flex; align-items: center; gap: 8px; margin: 18px 2px 10px; }
+  .sec-h h2 { font: 800 11px/1 var(--sans); text-transform: uppercase; letter-spacing: .12em; color: var(--faint); margin: 0; }
+  .sec-h .count { font: 11px var(--mono); color: var(--dim); }
+  .empty { color: var(--dim); font-size: 13px; padding: 6px 2px 2px; }
+  .blhint { margin-left: auto; font: 10px/1 var(--mono); color: var(--dim); letter-spacing: .3px; white-space: nowrap; }
+  .bl-row { position: relative; margin-bottom: 8px; border-radius: 12px; overflow: hidden; }
+  .bl-row.dropping { opacity: .35; transition: opacity .18s ease; }
+  .bl-act { position: absolute; top: 0; bottom: 0; display: flex; align-items: center;
+    font: 11px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+  .bl-act.top  { left: 0;  width: 58%; justify-content: flex-start; padding-left: 16px;  color: var(--good); background: rgba(62,207,142,.14); }
+  .bl-act.drop { right: 0; width: 58%; justify-content: flex-end;   padding-right: 16px; color: var(--bad);  background: rgba(255,107,107,.14); }
+  .bl-row.armtop  .bl-act.top  { background: rgba(62,207,142,.32); }
+  .bl-row.armdrop .bl-act.drop { background: rgba(255,107,107,.32); }
+  .bl { position: relative; z-index: 2; display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+    touch-action: pan-y; transition: transform .18s ease; will-change: transform; cursor: grab; }
+  .bl:active { cursor: grabbing; }
+  .bl .bltag { flex: none; font: 10px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 4px 8px; border-radius: 8px; white-space: nowrap; margin-top: 1px; }
+  .bl .bltag.wait { color: var(--bad); background: rgba(255,107,107,.14); }
+  .bl .bltag.prog { color: var(--warn); background: rgba(240,180,41,.14); }
+  .bl .bltag.done { color: var(--good); background: rgba(62,207,142,.14); }
+  .bl .bltag.park { color: var(--dim); background: rgba(138,147,166,.14); }
+  .bl .blbody { min-width: 0; flex: 1; }
+  .bl .blask { font: 600 13.5px/1.35 var(--sans); overflow-wrap: anywhere; }
+  .bl .bldone { color: var(--good); font-size: 12px; margin-top: 4px; line-height: 1.35; overflow-wrap: anywhere;
+    background: rgba(62,207,142,.10); border-left: 2px solid rgba(62,207,142,.5); padding: 3px 8px; border-radius: 5px; }
+  .bl .blnote { color: var(--dim); font-size: 12.5px; margin-top: 3px; line-height: 1.4; overflow-wrap: anywhere; }
+  .bl .blop { color: var(--dim); font: 11px var(--mono); margin-top: 4px; }
+
+  /* ── YOUR ASKS (fc-v55) — the operator's LIVE ask board. Status is derived on
+     the bus each poll (never stored) so it cannot go stale; needs-you is pinned
+     red to the top. Cards borrow the .bl / .dbody structure. ── */
+  .ask { position: relative; margin-bottom: 8px; display: flex; gap: 11px; align-items: flex-start;
+    padding: 12px 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 13px; box-shadow: var(--shadow);
+    touch-action: pan-y; transition: transform .18s ease; will-change: transform; }
+  .ask.needs { border-color: rgba(251,113,133,.45); background: linear-gradient(180deg, rgba(251,113,133,.06), var(--panel) 60%); }
+  .ask.confirmable { cursor: grab; } .ask.confirmable:active { cursor: grabbing; }
+  .ask.confirming { opacity: .4; transition: opacity .18s ease; }
+  .ask .atag { flex: none; font: 10px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 5px 8px; border-radius: 8px; white-space: nowrap; margin-top: 1px; }
+  .atag.needs { color: var(--bad);   background: rgba(251,113,133,.16); }
+  .atag.prog  { color: var(--warn);  background: rgba(240,180,41,.14); }
+  .atag.pend  { color: var(--dim);   background: rgba(148,156,172,.14); }
+  .atag.rev   { color: var(--good);  background: rgba(55,211,154,.14); }
+  .atag.naz   { color: var(--accent);background: rgba(138,166,255,.14); }
+  .ask .abody { min-width: 0; flex: 1; }
+  .ask .atxt { font: 600 13.5px/1.35 var(--sans); overflow-wrap: anywhere; }
+  .ask .ameta { margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font: 10.5px/1.3 var(--mono); color: var(--faint); }
+  .ask .ameta .ato { color: var(--dim); } .ask .ameta .ato b { color: var(--accent); font-weight: 700; }
+  .ask .ameta .adot { color: var(--faint); }
+  .ask .ameta .aage.warnage { color: var(--warn); }
+  .ask .arev { margin-top: 6px; font: 11px/1.4 var(--sans); color: var(--good);
+    background: rgba(55,211,154,.08); border-left: 2px solid rgba(55,211,154,.5); padding: 4px 8px; border-radius: 5px; cursor: pointer; }
+  .freshbar { display: flex; align-items: center; gap: 7px; padding: 2px 4px 0; margin-bottom: 14px;
+    font: 9.5px/1.35 var(--mono); color: var(--faint); }
+  .freshbar .g { width: 6px; height: 6px; border-radius: 50%; background: var(--good); box-shadow: 0 0 8px var(--good); flex: none; }
+
+  /* ── Fleet chatter — the DRAIN BOARD (fc-v52), demoted to a collapsed affordance
+     under YOUR ASKS (fc-v55). Still the per-body unread-inbox SRE glance, one tap
+     away. Each body's row shows its unhandled bus inbox (agent_messages read_at IS
+     NULL) + any operator-assigned items, shrinking on the normal /api/fleet poll. */
+  details.chatter { margin: 4px 0 8px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); overflow: hidden; }
+  details.chatter > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; align-items: center; gap: 9px;
+    font: 700 12px/1 var(--sans); color: var(--dim); -webkit-tap-highlight-color: transparent; }
+  details.chatter > summary::-webkit-details-marker { display: none; }
+  details.chatter > summary .csub { font: 10px/1 var(--mono); color: var(--faint); }
+  details.chatter > summary .ccount { margin-left: auto; font: 10px/1 var(--mono); font-weight: 700; padding: 3px 7px; border-radius: 999px;
+    color: var(--dim); background: rgba(255,255,255,.05); }
+  details.chatter > summary .chev { color: var(--faint); font: 11px var(--mono); transition: transform .15s; }
+  details.chatter[open] > summary .chev { transform: rotate(90deg); }
+  .chatter .cinner { padding: 2px 12px 10px; border-top: 1px solid var(--line); }
+
+  .sec-h .asbtn { margin-left: auto; font: 10px/1 var(--mono); color: var(--accent); padding: 7px 11px; border-radius: 999px;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.28); cursor: pointer; -webkit-appearance: none; white-space: nowrap; }
+  .sec-h .asbtn.on { color: #06231a; background: linear-gradient(160deg, var(--accent), #5a6fd0); border-color: transparent; }
+  .assign { display: none; gap: 8px; flex-direction: column; margin: 2px 2px 12px; padding: 12px; border-radius: 13px;
+    background: var(--panel); border: 1px solid var(--line-2); box-shadow: var(--shadow); }
+  .assign.open { display: flex; }
+  .assign .assel, .assign .asinput { width: 100%; min-width: 0; -webkit-appearance: none; appearance: none; font: 13px/1 var(--sans);
+    color: var(--txt); background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 11px 12px; }
+  .assign .assel { font-family: var(--mono); font-size: 12px; }
+  .assign .asrow { display: flex; gap: 8px; }
+  .assign .aspri { flex: 0 0 84px; }
+  .assign .assend { flex: 1; font: 700 12.5px/1 var(--sans); color: var(--accent); padding: 11px; border-radius: 10px;
+    background: rgba(138,166,255,.14); border: 1px solid rgba(138,166,255,.32); cursor: pointer; -webkit-appearance: none; }
+  .assign .assend:active { transform: scale(.98); } .assign .assend:disabled { opacity: .5; }
+
+  .dbody { margin-bottom: 8px; border-radius: 13px; background: var(--panel); border: 1px solid var(--line);
+    box-shadow: var(--shadow); overflow: hidden; }
+  .dbody .dh { display: flex; align-items: center; gap: 9px; padding: 11px 13px; }
+  .dbody .dh .dn { font: 700 13px/1.15 var(--sans); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dbody .dh .dcount { flex: none; margin-left: auto; font: 10px/1 var(--mono); font-weight: 700; padding: 4px 8px; border-radius: 999px;
+    color: var(--dim); background: rgba(255,255,255,.05); }
+  .dbody .dh .dcount.pending { color: var(--warn); background: rgba(246,196,83,.14); }
+  .dbody .dh .drr { flex: none; font: 9px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 4px 7px; border-radius: 7px; color: var(--bad); background: rgba(255,107,107,.14); }
+  .dbody .ditems { padding: 0 13px 9px; }
+  .dbody .di { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; border-top: 1px solid var(--line); }
+  .dbody .di:first-child { border-top: none; }
+  .dbody .di .dtxt { min-width: 0; flex: 1; font: 12.5px/1.4 var(--sans); color: var(--txt); overflow-wrap: anywhere; }
+  .dbody .di .dfrom { color: var(--faint); font: 10px/1.4 var(--mono); }
+  .dbody .di .dage { flex: none; font: 10px/1 var(--mono); color: var(--faint); }
+  .dbody .di .amark { flex: none; font: 8px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 3px 6px; border-radius: 6px; color: var(--accent); background: rgba(138,166,255,.14); }
+  .dbody .dmore { padding: 4px 13px 9px; font: 10px/1 var(--mono); color: var(--faint); }
+
+  /* footer: the full lane manager (add-token, remote bodies) + scoped irsyad stay one tap away */
+  .footlinks { display: flex; gap: 8px; padding: 16px 16px 6px; }
+  .footlinks a { flex: 1; text-align: center; padding: 12px 10px; border-radius: 11px; font: 600 12.5px/1 var(--sans);
+    color: var(--dim); background: var(--panel); border: 1px solid var(--line); white-space: nowrap; }
+  .footlinks a:active { background: var(--panel-2); }
+
+  /* ── BOTTOM ACTION DOCK — resting state ── */
+  .dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    padding: 11px 16px calc(11px + env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, rgba(16,21,31,.4), rgba(9,11,16,.96) 40%);
+    backdrop-filter: saturate(140%) blur(16px); -webkit-backdrop-filter: saturate(140%) blur(16px);
+    border-top: 1px solid var(--line-2); }
+  .dock .dinner { max-width: 720px; margin: 0 auto; width: 100%; display: flex; align-items: center; gap: 9px; }
+  .dock .dhint { font: 11px/1.3 var(--mono); color: var(--faint); flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dock .dhint b { color: var(--dim); }
+  .dock .dsel { flex: 0 1 auto; min-width: 0; font: 11px/1 var(--mono); color: var(--txt); background: var(--panel-2);
+    border: 1px solid var(--line-2); border-radius: 999px; padding: 8px 10px; -webkit-appearance: none; display: none; }
+  .dock .dbtn { flex: none; font: 11px/1 var(--sans); font-weight: 700; color: var(--accent); padding: 9px 13px; border-radius: 999px;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.3); -webkit-appearance: none; cursor: pointer; }
+  .dock .dbtn:active { transform: scale(.98); }
+  .dock .dbtn.hidden { display: none; }
+
+  /* ── ACTION SHEET ── */
+  .scrim { position: fixed; inset: 0; z-index: 35; background: rgba(4,6,10,.5); opacity: 0; pointer-events: none; transition: opacity .22s; }
+  .scrim.on { opacity: 1; pointer-events: auto; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; transform: translateY(102%);
+    transition: transform .26s cubic-bezier(.3,.9,.3,1);
+    background: var(--panel); border-top: 1px solid var(--line-2); border-radius: 20px 20px 0 0;
+    padding: 8px 16px calc(18px + env(safe-area-inset-bottom)); box-shadow: 0 -20px 50px -20px rgba(0,0,0,.8);
+    max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .sheet.up { transform: translateY(0); }
+  .sheet .sinner { max-width: 720px; margin: 0 auto; }
+  .grab { width: 38px; height: 4px; border-radius: 999px; background: var(--line-2); margin: 2px auto 12px; }
+  .sheet .sh { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+  .sheet .sh .st2 { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 7px var(--good); flex: none; }
+  .sheet .sh .st2.idle { background: var(--dim); box-shadow: none; } .sheet .sh .st2.offline { background: var(--bad); box-shadow: 0 0 7px var(--bad); }
+  .sheet .sh .id { font: 800 15px/1 var(--sans); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sheet .sh .ctxpill { margin-left: auto; flex: none; font: 10px/1 var(--mono); font-weight: 700; padding: 5px 8px; border-radius: 999px;
+    color: var(--dim); background: rgba(255,255,255,.05); }
+  .sheet .sh .ctxpill.green { color: var(--good); background: rgba(55,211,154,.12); }
+  .sheet .sh .ctxpill.amber { color: var(--warn); background: rgba(246,196,83,.13); }
+  .sheet .sh .ctxpill.red { color: var(--bad); background: rgba(251,113,133,.14); }
+  .sheet .sh .x { flex: none; font: 16px/1 var(--dim); padding: 4px 6px; cursor: pointer; }
+  .sheet .subline { font: 11px/1.4 var(--mono); color: var(--faint); margin: 0 0 13px; overflow-wrap: anywhere; }
+  /* full action grid — EVERYTHING one tap */
+  .agrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .agrid button { font: 600 11px/1.15 var(--sans); padding: 12px 4px; border-radius: 12px; border: 1px solid var(--line-2);
+    background: var(--panel-2); color: var(--txt); display: flex; flex-direction: column; align-items: center; gap: 5px;
+    position: relative; cursor: pointer; -webkit-appearance: none; }
+  .agrid button:active { transform: scale(.97); }
+  .agrid button .e { font-size: 18px; }
+  .agrid button.prim { background: rgba(138,166,255,.14); border-color: rgba(138,166,255,.32); color: var(--accent); }
+  .agrid button.warn { color: var(--warn); border-color: rgba(246,196,83,.3); background: rgba(246,196,83,.09); }
+  .agrid button.bad { color: var(--bad); border-color: rgba(251,113,133,.3); background: rgba(251,113,133,.08); }
+  .agrid button.armed { color: #fff; background: rgba(251,113,133,.32); border-color: rgba(251,113,133,.6); }
+  .agrid button.new::after { content: "NEW"; position: absolute; top: 4px; right: 6px; font: 6.5px/1 var(--mono); color: var(--accent); }
+  .agrid button:disabled { opacity: .45; cursor: default; }
+  /* token/model controls inside the sheet (folded in from the Lane manager) */
+  .qctl { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .qctl.wide { grid-template-columns: 1fr; }
+  .qctl label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .qctl label > span { font: 9px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+  .qctl select { width: 100%; min-width: 0; -webkit-appearance: none; appearance: none; font: 12px/1 var(--mono); color: var(--txt);
+    background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 11px 30px 11px 12px;
+    background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%), linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+    background-position: calc(100% - 15px) 17px, calc(100% - 10px) 17px; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+  .qctlnote { font: 11px/1.4 var(--mono); color: var(--faint); margin-top: 10px; }
+  .applyrow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .applyrow .b { font: 600 12px/1 var(--sans); padding: 11px; border-radius: 10px; text-align: center; cursor: pointer; -webkit-appearance: none; }
+  .applyrow .b.prev { color: var(--accent); background: rgba(138,166,255,.13); border: 1px solid rgba(138,166,255,.28); }
+  .applyrow .b.arm { color: var(--warn); background: rgba(246,196,83,.13); border: 1px solid rgba(246,196,83,.32); font-weight: 700; }
+  .applyrow .b:active { transform: scale(.98); }
+  /* inline peek inside the sheet (reuses the fc-v49 peek machinery via data-peekbox) */
+  .peek { margin-top: 12px; background: #0a0d13; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; display: none; }
+  .peek.open { display: block; }
+  .peek .ph { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--dim); }
+  .peek .ph .raw { margin-left: auto; color: var(--accent); cursor: pointer; }
+  .peek .body { max-height: 40vh; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 8px 0; }
+  .peek .ln { padding: 2px 14px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--txt); }
+  .peek .ln.now { color: #bcd0ff; box-shadow: inset 3px 0 0 var(--accent); }
+  .peek .raw-pre { margin: 0; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; font: 11px/1.5 var(--mono); color: #9fe8b0; }
+  .peek .peek-empty { padding: 10px 12px; color: var(--dim); font-style: italic; }
+  /* bulk plan panel inside the sheet */
+  .bulkplan { margin-top: 6px; font: 12px/1.5 var(--mono); color: var(--dim); }
+  .bulkplan .bp-sum { color: var(--txt); font: 700 13px/1.4 var(--sans); margin-bottom: 8px; overflow-wrap: anywhere; }
+  .bulkplan .bp-lane { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; overflow-wrap: anywhere; }
+  .bulkplan .bp-act { font-weight: 700; } .bulkplan .bp-act.ok { color: var(--good); }
+  .bulkplan .bp-act.skip { color: var(--dim); } .bulkplan .bp-act.fail { color: var(--bad); }
+  .bulkplan .bp-err { color: var(--bad); font-weight: 700; overflow-wrap: anywhere; }
+  .bulkconfirm { width: 100%; margin-top: 12px; font: 700 13px/1 var(--sans); color: #2a1e02; padding: 13px;
+    border-radius: 10px; border: none; background: linear-gradient(160deg, var(--warn), #c8993a); cursor: pointer; -webkit-appearance: none; }
+  .bulkconfirm:disabled { opacity: .6; cursor: default; }
+
+  /* toast */
+  .toast { position: fixed; left: 50%; bottom: calc(78px + env(safe-area-inset-bottom)); transform: translateX(-50%); max-width: 92%;
+    background: var(--panel-2); color: var(--txt); border: 1px solid rgba(55,211,154,.4); border-radius: 12px; padding: 11px 15px;
+    font: 12.5px/1.35 var(--sans); opacity: 0; pointer-events: none; transition: opacity .18s; z-index: 55; text-align: center; box-shadow: var(--shadow); }
+  .toast.show { opacity: 1; } .toast.bad { border-color: rgba(251,113,133,.5); color: var(--bad); }
+</style>
+</head>
+<body>
+<div id="ptr"><span class="spin">&darr;</span><span id="ptrTxt">Pull to refresh</span></div>
+
+<div class="wrap">
+  <header id="pulse" class="pulse clear">
+    <div class="top">
+      <span class="orb"></span>
+      <span id="pulseBig" class="hl">Loading…</span>
+      <span id="liveDot" class="live">● live</span>
+      <span id="build" class="build" title="build running on this device"></span>
+    </div>
+    <div id="statRow" class="stat"></div>
+    <div id="poolUsage" class="pools" title="Max weekly-pool usage + pace (op#9770/#12617)"></div>
+    <div id="topBloat" class="topbloat"></div>
+  </header>
+
+  <div id="needstrip" class="needstrip">
+    <div id="needs"></div>
+    <div id="handling"></div>
+  </div>
+
+  <div class="spinehead"><h2>Coordinators</h2><span class="count">hub · console · cai · tap to act</span></div>
+  <div id="coordinators" class="coordrow"></div>
+
+  <div class="spinehead">
+    <h2>Lanes</h2><span id="lanesCount" class="count"></span>
+    <button id="multiToggle" class="ms">◎ multi-select</button>
+  </div>
+  <div id="lanes" class="grid"><div class="empty">Loading…</div></div>
+
+  <!-- YOUR ASKS (fc-v55): the operator's live ask board. Status derived on the
+       bus each poll — never a stored snapshot. Assign here to delegate a new ask. -->
+  <section>
+    <div class="sec-h"><h2>Your asks</h2><span id="asksCount" class="count"></span>
+      <button id="assignToggle" class="asbtn">+ ask</button></div>
+    <div id="assignForm" class="assign">
+      <select id="assignAgent" class="assel"><option value="">Delegate to…</option></select>
+      <input id="assignAsk" class="asinput" type="text" placeholder="What should they do?" autocomplete="off" />
+      <div class="asrow">
+        <select id="assignPri" class="assel aspri">
+          <option value="P2">P2</option><option value="P1">P1</option><option value="P0">P0</option>
+        </select>
+        <button id="assignSend" class="assend">Delegate →</button>
+      </div>
+    </div>
+    <div id="asks"><div class="empty">Loading…</div></div>
+    <div class="freshbar" id="asksFresh" style="display:none">
+      <span class="g"></span>
+      <span>status derived live from the bus on every refresh · never cached · pull to refresh</span>
+    </div>
+  </section>
+
+  <!-- Fleet chatter: the old DRAIN BOARD, demoted to a collapsed SRE glance. -->
+  <section>
+    <details class="chatter" id="chatter">
+      <summary>
+        <span>Fleet chatter</span>
+        <span class="csub">(raw bus · SRE view)</span>
+        <span id="drainCount" class="ccount"></span>
+        <span class="chev">▸</span>
+      </summary>
+      <div class="cinner">
+        <div id="drainBoard"><div class="empty">Loading…</div></div>
+      </div>
+    </details>
+  </section>
+
+  <div class="footlinks">
+    <a href="/lanes">🔑 Full lane manager</a>
+    <a href="/irsyad">🧾 irsyad</a>
+  </div>
+</div>
+
+<!-- resting dock / bulk bar -->
+<div id="dock" class="dock">
+  <div class="dinner">
+    <div id="dockHint" class="dhint">Tap a lane to act</div>
+    <select id="bulkToken" class="dsel" title="Target account for the bulk switch"></select>
+    <button id="bulkPreview" class="dbtn hidden">Preview ⇄</button>
+    <button id="bulkClear" class="dbtn hidden">Clear</button>
+  </div>
+</div>
+
+<!-- scrim + action sheet -->
+<div id="scrim" class="scrim"></div>
+<div id="sheet" class="sheet">
+  <div class="sinner">
+    <div class="grab"></div>
+    <div class="sh">
+      <span id="shDot" class="st2"></span>
+      <span id="shId" class="id"></span>
+      <span id="shCtx" class="ctxpill"></span>
+      <span id="shClose" class="x">✕</span>
+    </div>
+    <div id="shSub" class="subline"></div>
+    <div id="shActions"></div>
+    <div id="shControls"></div>
+    <div id="shPeekWrap"></div>
+    <div id="shBulk"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>localStorage.setItem("console_token","render");var __D={"pulse": {"working": 1, "idle": 7, "offline": 0, "flagged": 0, "needs_you": 0, "pane_health": "clear", "pane_worst": null, "asks_open": 3, "asks_needs": 0, "asks_review": 3}, "your_asks": [{"id": 5, "ask": "OPERATOR op#14190 \u2014 clear the errors Gazzabyte reported recently. Own + drive to resolution: (1) ENUMERATE the client's recently-reported errors from your thread record (known: receipt-PDF 404 recurring, discard bug, bank-recon line-detail \u2014 confirm the full current list, don't assume it's only these). (2) SCOPE each: repro at source, owning lane, fix-vs-access-gate. (3) DECOMPOSE + PARALLELIZE \u2014 one worker per error, spin ephemeral workers as the work justifies (op#14186/14189). (4) SAFETY CONSTANT \u2014 money/PII/cai/prod-write gates hold regardless of throughput; e.g. receipt:print is an access-control grant \u2192 route via cai, never self-apply, and it still awaits the client role-ID the operator is pulling (op#14156). Report a CONSOLIDATED status to me (orch-console) for the operator: each error = done / in-flight / blocked-on-what.", "delegated_to": "cc-irsyad-coord", "status": "delegate_done", "updated_age_s": 507106, "asked_age_s": 513016}, {"id": 6, "ask": "OPERATOR op#14187 \u2014 the Gazzabyte client board should show ACTIVE agents only; hide resting/dormant lanes so the client doesn't see a wall of idle workers. WHERE: the team panel is rendered LIVE per-request by the wingmen-share dynamic route (app/r/gazzabyte-status) \u2014 the filter change lives THERE, not in the orchestrator board file (reports/gazzabyte-status-combined.html only carries the <!--WINGMEN:LIVE-TEAM-PANEL--> marker). Own the outcome; scope + delegate the share-route change to a worker who knows wingmen-share (per memory cc-storefront owns share infra) \u2014 or escalate to me to identify the share-app owner if you can't place it. Filter = drop the 'resting' cards, keep 'active'. VERIFY on the live board (share.wingmen.dev/r/gazzabyte-status) that resting cards are gone. Report done to me for the operator.", "delegated_to": "cc-irsyad-coord", "status": "delegate_done", "updated_age_s": 511932, "asked_age_s": 513006}, {"id": 4, "ask": "BACKLOG-33 OWNERSHIP (unassigned 31 days): UAE->SEA Shariah-compliant fintech rails \u2014 the declared north star, run by Hafiz. This is NOT a build assignment and you must not start one. Return to orch-console a SCOPED entry-point proposal, for routing to cai: where we would actually win (ERP/orchestration, ujrah not riba, spot FX, riding licensed rails rather than becoming one), what the smallest revenue-bearing first slice is, what licensing/regulatory facts we would have to confirm before touching money, and what Hafiz owns versus what the fleet owns. Be explicit about what you do NOT know rather than filling gaps plausibly \u2014 a fintech proposal that reads confident on unverified regulatory facts is worse than a short one. LOWEST priority of the four assigned tonight: do not displace the recurring-billing rail (lane_tasks #49), which is greenlit and revenue-bearing. No money path is built or promised on this until cai rules.", "delegated_to": "cc-finance", "status": "delegate_done", "updated_age_s": 624232, "asked_age_s": 624409}], "needs_you": [], "backlog": [{"id": 48, "ask": "Anthropic API credit top-up \u2014 account behind key ...SjtAAA is $0", "status": "parked", "op_ref": "op#11111 thread", "note": "Operator deferred (personal budget). NO LONGER a hard blocker for internal/pitch runs \u2014 plan is to route generation in-lane on Max ($0). Commercial key still needed ONLY to bring the PUBLIC self-serve worker back up; revisit when budget allows.", "sort_order": -30, "done_when": null, "updated_age_s": 1372142}, {"id": 61, "ask": "Stand up cc-hadramawt \u2014 dedicated HK client agent + Telegram channel (concierge edits on Max; graduates to self-edit on commercial key)", "status": "in_progress", "op_ref": "op#11155", "note": "Operator approved dedicated agent. Interim concierge (free on Max). Need from operator: Afifah TG + billing terms confirm (S$99+S$49/mo?). Nazim scaffolding agent/bot/channel.", "sort_order": -28, "done_when": null, "updated_age_s": 1369098}, {"id": 62, "ask": "HK recurring-billing dogfood \u2014 full SaaS pipeline (Stripe/HitPay auto-collect, recurring, grace-suspend, monthly/annual)", "status": "in_progress", "op_ref": "op#11153", "note": "cc-finance DRIVING (head of revenue); cc-storefront owns pipeline code; Nazim coordinating. BUILD freely; actual CHARGING = operator arms. HK=first paying anchor -> funds commercial key.", "sort_order": -27, "done_when": null, "updated_age_s": 1369098}, {"id": 60, "ask": "Rewire shipforge rebuild generation to run in-lane on Max (no API credit) for internal/pitch runs", "status": "in_progress", "op_ref": "op#11123", "note": "cc-shipforge scoping now (#16611). Unblocks HK previews free. Public self-serve stays on commercial-key path.", "sort_order": -26, "done_when": null, "updated_age_s": 1372142}, {"id": 49, "ask": "Shipforge \u2192 Hadramawt Kitchen: beautiful ecom site + chat-to-edit + full browser/TG flow", "status": "in_progress", "op_ref": "op#11046-11111", "note": "Capture done (36 real imgs, brief staged, A/B both passes + food-hover hero). BLOCKED on credit top-up above. chat-to-edit not yet tested. Runs instant credit restored.", "sort_order": -25, "done_when": null, "updated_age_s": 1374343}, {"id": 50, "ask": "Idle-lane boot-down + SRE/singleton auto-recycle (token-burn conservation)", "status": "in_progress", "op_ref": "op#11049/11096", "note": "cai BLESSED CAI-RESP-768 today; SRE arming observe-first (Part3 done, Part1+2 observe-only next). Hub excluded until cron freshness proven.", "sort_order": -24, "done_when": null, "updated_age_s": 1374343}, {"id": 51, "ask": "Fleet console: live operator-backlog + blocked/waiting-on-operator visibility", "status": "in_progress", "op_ref": "op#11113/11115", "note": "Nazim owns. Reconstructed backlog populated (this row set). Next: wire to console UI so nothing is handled-but-invisible.", "sort_order": -23, "done_when": null, "updated_age_s": 1374343}, {"id": 52, "ask": "Fleet console: context % not visible for some lanes", "status": "in_progress", "op_ref": "op#11 (08-07)", "note": "Hub fixed (5fce944). Active workers (storefront/irsyad/finance/etc) DO show correctly \u2014 earlier 'can't measure' was an id-mapping bug in an ad-hoc query, NOT a broken writer (verified). Residual: ~6 lanes genuinely unswept (cosem-adcda, ihsanos-qa, cosem-video, irsyad-b + stale exams/platform/scholar) \u2014 SRE owns writer-coverage + offline-reap.", "sort_order": -22, "done_when": null, "updated_age_s": 1371473}, {"id": 53, "ask": "Irsyad import: \"Student Matters\" category not appearing + edit-category-after-commit + extract categorized data", "status": "parked", "op_ref": "op# (08-06/07)", "note": "Client-reported as late as 08-07. RECONSTRUCTED from op msgs \u2014 confirming current status with irsyad lane.", "sort_order": -15, "done_when": null, "updated_age_s": 1374343}, {"id": 54, "ask": "Irsyad import: auto-differentiate Stripe vs bank statements (one upload, pattern-learn)", "status": "parked", "op_ref": "op# (08-06)", "note": "Discuss-thread; build not confirmed. Confirming with irsyad lane.", "sort_order": -14, "done_when": null, "updated_age_s": 1374343}, {"id": 55, "ask": "Irsyad: GIRO/eGIRO/DDA + parent payment portal (partial payments, OCBC)", "status": "parked", "op_ref": "op# (08-05)", "note": "Scoped, not built; client had not set up GIRO yet.", "sort_order": -13, "done_when": null, "updated_age_s": 1374343}, {"id": 56, "ask": "Bank-import save-and-exit persistence bug: unticked/grey rows revert on return", "status": "parked", "op_ref": "op# (08-06)", "note": "Reported defect. Confirming fix status with irsyad lane.", "sort_order": -12, "done_when": null, "updated_age_s": 1374343}, {"id": 57, "ask": "DMS captured 828 vs manual count 832 \u2014 investigate 4-row gap", "status": "parked", "op_ref": "op# (08-06 23:38)", "note": "Raised late, unresolved in-thread. Confirming with irsyad lane.", "sort_order": -11, "done_when": null, "updated_age_s": 1374343}, {"id": 58, "ask": "VPS hub git-tree reconciliation (deployed != committed sha)", "status": "parked", "op_ref": "SRE #16598 / CAI #16596", "note": "Nazim owns. Live hub on fable/substrate-safe-fixes + 14 tracked/13 untracked mods. Non-urgent; reconcile in hub-quiet window onto clean main sha.", "sort_order": 5, "done_when": null, "updated_age_s": 1374343}, {"id": 59, "ask": "Confirm status of other-repo asks (Qwen A/B cost, Qwen SFT pipeline, cosem video, cosem retest PDF, Ray/CAAI verify-console, fr.irsyad WooCommerce import, dedicated irsyad autonomy, gauntlet/graph technique eval)", "status": "parked", "op_ref": "op# (08-04/06)", "note": "UNCLEAR from orch repo \u2014 poll owning lanes to confirm done/open.", "sort_order": 10, "done_when": null, "updated_age_s": 1374343}, {"id": 63, "ask": "AI TUTOR AGENT (side project, operator-parked op#13629): an agent that builds interactive lessons at the learner's own pace. Three phases from the Eero Alvar approach the operator sent: PROBE (quiz to map what they actually know, not what the syllabus assumes) -> PLAN (structured path, rendered as a Mermaid graph, fact-checked by sub-agents) -> TEACH (small digestible steps with periodic quizzes), plus a persistent log so the learner's state survives sessions.", "status": "parked", "op_ref": "op#13629", "note": "PARKED BY THE OPERATOR \u2014 'side project (park this)'. NOT a build assignment; do not start one. TWO THINGS WORTH KEEPING so future-us does not relearn them: (1) THE INTERESTING HALF IS THE PROBE, not the tutoring. Models already tutor well; what nobody ships is an accurate, continuously-updated model of what the learner already knows -- that is what makes plan and teach worth anything. (2) It is the SAME THREE-ROLE SHAPE as the substrate's planner/builder/auditor (lane_tasks acceptance, 048) and the assigned-audit mechanism (049/050): something plans, something does, something checks. Different domain, same skeleton -- so if it thaws, steal the shape rather than reinvent it.", "sort_order": 100, "done_when": "Not applicable while parked. If it thaws: DONE means a learner completed one lesson whose plan came from a probe of their ACTUAL prior knowledge, and the probe was re-run and changed the plan at least once. Anything less is a chatbot with a syllabus.", "updated_age_s": 592048}], "coordinators": [{"agent_id": "cai", "short": "cai", "role_label": "governance / strategic node", "tmux_session": "cai", "activity": "CAI-RESP-1307: RULED, all 3 admin-only, 2 cleared items confirmed -- independently re-derived, not rubber-stamped", "activity_age_s": 868, "ctx_tokens": 919785, "ctx_age_s": 645, "ctx_session_id": "00bbd2b6-a5eb-4502-a950-e5505f849070", "ctx_current_session_id": "00bbd2b6-a5eb-4502-a950-e5505f849070", "auth_fp": "68142948c003", "auth_account": null, "host": "Mini", "last_seen_s": 868, "peekable": true, "ctx_pct": 92, "ctx_level": "red"}, {"agent_id": "cc-finance", "short": "Finance", "role_label": "Head of Revenue", "tmux_session": "finance", "activity": "CORRECTION re #49: not dormant - BUILT+STAGED and operator-PAUSED (HK payment-last, Irsyad hooked-first); my real next steps are narrow", "activity_age_s": 621771, "ctx_tokens": 200714, "ctx_age_s": 454554, "ctx_session_id": "474439e7-b2b8-46bf-a061-28b4a1c7d7db", "ctx_current_session_id": "474439e7-b2b8-46bf-a061-28b4a1c7d7db", "auth_fp": null, "auth_account": null, "host": "Mini", "last_seen_s": 621771, "peekable": false, "ctx_pct": 20, "ctx_level": "green"}, {"agent_id": "cc-fleet-health", "short": "SRE", "role_label": "fleet reliability / health", "tmux_session": "fleet-health", "activity": "#2b /irsyad never-blank PASSED (fcd71f1) - DEPLOY-READY whenever (low-pri)", "activity_age_s": 98, "ctx_tokens": 295373, "ctx_age_s": 64, "ctx_session_id": "d9340ba6-ddd2-44a4-b637-f72bcd4e6457", "ctx_current_session_id": "d9340ba6-ddd2-44a4-b637-f72bcd4e6457", "auth_fp": "68142948c003", "auth_account": null, "host": "Mini", "last_seen_s": 98, "peekable": true, "ctx_pct": 30, "ctx_level": "green"}, {"agent_id": "cc-orchestrator", "short": "Hub", "role_label": "Orchestrates the fleet", "tmux_session": "orch", "activity": "[WAKE-CONFIRM] hub awake+drained (CAI-RESP-1303 OK) + #31504 feature_health root-caused", "activity_age_s": 7800, "ctx_tokens": 68477, "ctx_age_s": 2534, "ctx_session_id": "8ca20757-ec90-448f-8834-05bb45481561", "ctx_current_session_id": "8ca20757-ec90-448f-8834-05bb45481561", "auth_fp": "68142948c003", "auth_account": null, "host": "wingmen-core", "last_seen_s": 7800, "peekable": true, "ctx_pct": 7, "ctx_level": "green"}, {"agent_id": "cc-quality", "short": "Quality", "role_label": "Head of Quality (on-demand)", "tmux_session": "quality", "activity": "Gate-4 CLEAR: console fcd71f1 (/irsyad never-blank #2b) PASS \u2014 review at hash 1b4a78eee5b52c7a", "activity_age_s": 131, "ctx_tokens": 528324, "ctx_age_s": 105, "ctx_session_id": "42ddc575-41e8-494d-8e56-ecea2aeb74a9", "ctx_current_session_id": "42ddc575-41e8-494d-8e56-ecea2aeb74a9", "auth_fp": null, "auth_account": null, "host": "Mini", "last_seen_s": 131, "peekable": true, "ctx_pct": 53, "ctx_level": "green"}, {"agent_id": "orch-console", "short": "Nazim", "role_label": "CTO console / 2nd coordinator", "tmux_session": "nazim", "activity": "GROUPED cadence AGREED \u2014 batch the thin inert-until-flip widens into meaningful checkpoints, not one-per-PR. Right call: per-PR pings are invisible/noisy to Wan since nothing changes for him until the flip. Keep the BIG signals distinct: #4 role-wired-and-ready + #5 the flip. weekly_reports compound-gate build accepted, sequenced after jumaat.", "activity_age_s": 73, "ctx_tokens": 638776, "ctx_age_s": 63, "ctx_session_id": "071d13f4-96c1-4e58-967e-fe516fa658d7", "ctx_current_session_id": "071d13f4-96c1-4e58-967e-fe516fa658d7", "auth_fp": "68142948c003", "auth_account": null, "host": "Sheikhs-Mini", "last_seen_s": 73, "peekable": true, "ctx_pct": 64, "ctx_level": "amber"}], "lanes": [{"agent_id": "cc-cosem-exams-1", "base_agent_id": "cc-cosem-exams", "display_name": "cc-cosem-exams \u2014 Exams module dev agent (SME: Hariz)", "status": "working", "current_task": "session-launch model=claude-sonnet-5 repo=cosem-exams-lane", "tmux_session": "exams", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 153, "desired_state": "down", "lane": "cosem-exams", "activity": "\u276f\u00a0stop pinging me until there's something new", "activity_age_s": 5642, "live": {"running": true, "state": "idle", "activity": "\u276f\u00a0stop pinging me until there's something new"}, "ctx_idle": "WORKING", "bucket": "idle", "flagged": false, "family": "exams"}, {"agent_id": "cc-ihsanos-1", "base_agent_id": "cc-ihsanos", "display_name": "CC IhsanOPS Engineer", "status": "working", "current_task": "session-launch model=claude-sonnet-5 repo=ihsanos-platform", "tmux_session": "ihsanos-platform", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 25, "desired_state": "up", "lane": "ihsanos-platform", "activity": "Brewed for 35s", "activity_age_s": 160944, "live": {"running": true, "state": "idle", "activity": "Brewed for 35s"}, "ctx_idle": "IDLE_EMPTY", "bucket": "idle", "flagged": false, "family": "ihsanos"}, {"agent_id": "cc-irsyad-6", "base_agent_id": "cc-irsyad", "display_name": "cc-irsyad \u2014 irsyad silo client agent (Gazzabyte/Elly direct)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad.wt-tabung-jumaat", "tmux_session": "irsyad-tabung-jumaat", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 70, "desired_state": "up", "lane": "irsyad-tabung-jumaat", "activity": "\u29c9  signature-review", "activity_age_s": 72408, "live": {"running": true, "state": "working", "activity": "\u29c9  signature-review"}, "ctx_idle": "WORKING", "bucket": "working", "flagged": false, "family": "irsyad"}, {"agent_id": "cc-irsyad-1", "base_agent_id": "cc-irsyad", "display_name": "cc-irsyad \u2014 irsyad silo client agent (Gazzabyte/Elly direct)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad", "tmux_session": "irsyad", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 26, "desired_state": "up", "lane": "irsyad", "activity": "Saut\u00e9ed for 10s", "activity_age_s": 72408, "live": {"running": true, "state": "idle", "activity": "Saut\u00e9ed for 10s"}, "ctx_idle": "WORKING", "bucket": "idle", "flagged": false, "family": "irsyad"}, {"agent_id": "cc-irsyad-coord-1", "base_agent_id": "cc-irsyad-coord", "display_name": "cc-irsyad-coord \u2014 irsyad coordinator (CAI-887/890, distinct base)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad.wt-coord", "tmux_session": "irsyad-coord", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 25, "desired_state": "up", "lane": "irsyad-coord", "activity": "Churned for 2m 30s", "activity_age_s": 121, "live": {"running": true, "state": "idle", "activity": "Churned for 2m 30s"}, "ctx_idle": "WORKING", "bucket": "idle", "flagged": false, "family": "irsyad"}, {"agent_id": "cc-irsyad-payments-2", "base_agent_id": "cc-irsyad-payments", "display_name": "irsyad payments lane \u2014 NETS/Debit POS tender, GIRO/Stripe status (op#14282)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad.wt-payments", "tmux_session": "irsyad-payments", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 72, "desired_state": "up", "lane": "irsyad-payments", "activity": "\u276f\u00a0check inbox", "activity_age_s": 45860, "live": {"running": true, "state": "idle", "activity": "\u276f\u00a0check inbox"}, "ctx_idle": "STAGED", "bucket": "idle", "flagged": false, "family": "irsyad"}, {"agent_id": "cc-irsyad-receipts-followup-2", "base_agent_id": "cc-irsyad-receipts-followup", "display_name": "irsyad receipts follow-up lane \u2014 email-receipt button (op#14282)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad.wt-receipts-followup", "tmux_session": "irsyad-receipts-followup", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 70, "desired_state": "up", "lane": "irsyad-receipts-followup", "activity": "Set model to Sonnet 5 and saved as your default for new sessions", "activity_age_s": 381832, "live": {"running": true, "state": "idle", "activity": "Set model to Sonnet 5 and saved as your default for new sessions"}, "ctx_idle": "IDLE_EMPTY", "bucket": "idle", "flagged": false, "family": "irsyad"}, {"agent_id": "cc-storefront-1", "base_agent_id": "cc-storefront", "display_name": "CC Storefront Engineer", "status": "working", "current_task": "session-launch model=claude-sonnet-5 repo=ihsanos-storefront", "tmux_session": "storefront", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 277, "desired_state": "up", "lane": "storefront", "activity": "Cooked for 4m 9s \u00b7 2 shells still running", "activity_age_s": 26587, "live": {"running": true, "state": "idle", "activity": "Cooked for 4m 9s \u00b7 2 shells still running"}, "ctx_idle": "IDLE_EMPTY", "bucket": "idle", "flagged": false, "family": "storefront"}], "deploys": [{"workstream": "ihsanos \u00b7 WP-C NETS/cheque #35 (money)", "repo": "ihsanos", "stage": "live", "detail": "NETS+Cheque POS tenders LIVE (main 14f5684, ihsanos.com+health 200, verified). Migration 071 decoupled/held on cai gate per drift finding.", "url": "https://ihsanos.com", "updated_age_s": 3223071, "updated_by": "orch-console"}, {"workstream": "cosem-tdu \u00b7 admin attendance", "repo": "cosem-tdu", "stage": "in_review", "detail": "Admin Attendance Records view PR #49 \u2014 perf-first, self-verified @390px; awaiting cc-reviewer DESIGN+PERF", "url": "https://github.com/sheikh-musa/cosem-tdu/pull/49", "updated_age_s": 5701012, "updated_by": "cc-cosem-2"}, {"workstream": "fleet-console \u00b7 Deploys panel", "repo": "orchestrator", "stage": "live", "detail": "Deploys tab live: /api/deploys + 3rd tab, mobile+desktop verified; under cc-reviewer design pass", "url": "http://100.123.243.38:8787/", "updated_age_s": 5714299, "updated_by": "cc-orchestrator"}, {"workstream": "ihsanos \u00b7 WP-D receipting #34", "repo": "ihsanos", "stage": "merged", "detail": "on main", "url": null, "updated_age_s": 5716454, "updated_by": "cc-orchestrator"}, {"workstream": "ihsanos \u00b7 FRS bug fixes #38", "repo": "ihsanos", "stage": "merged", "detail": "keluarga hydration+overflow fixed", "url": null, "updated_age_s": 5716454, "updated_by": "cc-orchestrator"}, {"workstream": "cosem-tdu \u00b7 staff flows", "repo": "cosem-tdu", "stage": "live", "detail": "self-attendance ihsan redesign deployed", "url": "https://tdu-tools-prod.web.app", "updated_age_s": 5716454, "updated_by": "cc-orchestrator"}, {"workstream": "mizan bot", "repo": "ai-scholar", "stage": "live", "detail": "level-button re-answer fix deployed", "url": null, "updated_age_s": 5716454, "updated_by": "cc-orchestrator"}, {"workstream": "fleet-console", "repo": "orchestrator", "stage": "live", "detail": "read-only viewer via Tailscale (tailnet-only)", "url": "http://sheikhs-mac-mini.tail623d72.ts.net:8787", "updated_age_s": 5716454, "updated_by": "cc-orchestrator"}, {"workstream": "cosem-adcda \u00b7 edit-OCR + photo-quality fix", "repo": "cosem-adcda", "stage": "in_review", "detail": "reconcile 0f290cf + length-sanity + higher photo caps \u2192 PR \u2192 cc-reviewer \u2192 functions deploy", "url": null, "updated_age_s": 5716454, "updated_by": "cc-orchestrator"}, {"workstream": "ihsanos \u00b7 WP-A keyword #33", "repo": "ihsanos", "stage": "merged", "detail": "on main", "url": null, "updated_age_s": 5716454, "updated_by": "cc-orchestrator"}], "context_bloat": [{"agent": "cc-ihsanos", "sub_tag": "ihsanos-platform", "ctx_tokens": 538200, "window": 1000000, "pct": 54, "level": "green", "age_s": 1352, "stale": true, "source": "pane", "src": "k", "is_coord": false, "sre_disposition": {"state": "healthy", "label": "healthy"}}, {"agent": "cc-quality", "sub_tag": "quality", "ctx_tokens": 461700, "window": 1000000, "pct": 46, "level": "green", "age_s": 2280, "stale": true, "source": "pane", "src": "k", "is_coord": false, "sre_disposition": {"state": "healthy", "label": "healthy"}}, {"agent": "cc-irsyad", "sub_tag": "irsyad-payments", "ctx_tokens": 400600, "window": 1000000, "pct": 40, "level": "green", "age_s": 117, "stale": false, "source": "pane", "src": "k", "is_coord": false, "sre_disposition": {"state": "healthy", "label": "healthy"}}, {"agent": "cc-storefront", "sub_tag": "storefront", "ctx_tokens": 326600, "window": 1000000, "pct": 33, "level": "green", "age_s": 117, "stale": false, "source": "pane", "src": "k", "is_coord": false, "sre_disposition": {"state": "healthy", "label": "healthy"}}, {"agent": "cc-irsyad", "sub_tag": "irsyad-receipts-followup", "ctx_tokens": 123100, "window": 1000000, "pct": 12, "level": "green", "age_s": 117, "stale": false, "source": "pane", "src": "k", "is_coord": false, "sre_disposition": {"state": "healthy", "label": "healthy"}}], "bloat_glance": [{"agent": "cc-irsyad", "sub_tag": "irsyad-payments", "ctx_tokens": 400600, "window": 1000000, "pct": 40, "level": "green", "age_s": 117, "stale": false, "source": "pane", "src": "k", "is_coord": false, "sre_disposition": {"state": "healthy", "label": "healthy"}}, {"agent": "cc-storefront", "sub_tag": "storefront", "ctx_tokens": 326600, "window": 1000000, "pct": 33, "level": "green", "age_s": 117, "stale": false, "source": "pane", "src": "k", "is_coord": false, "sre_disposition": {"state": "healthy", "label": "healthy"}}, {"agent": "cc-irsyad", "sub_tag": "irsyad-receipts-followup", "ctx_tokens": 123100, "window": 1000000, "pct": 12, "level": "green", "age_s": 117, "stale": false, "source": "pane", "src": "k", "is_coord": false, "sre_disposition": {"state": "healthy", "label": "healthy"}}], "pool_usage": [{"pool": "Musa", "pct_7d": "70", "pct_5h": "21", "resets_at": "2026-08-26 08:00:00+00:00", "status_7d": "allowed", "pace": "1.116", "projected_pct": "111.6", "runway_days": "1.32", "updated_age_s": 1737}, {"pool": "musa2", "pct_7d": "80", "pct_5h": "3", "resets_at": "2026-08-25 21:00:00+00:00", "status_7d": "allowed_warning", "pace": "1.155", "projected_pct": "115.5", "runway_days": "2.1", "updated_age_s": 1730}, {"pool": "Syed", "pct_7d": "1", "pct_5h": "0", "resets_at": "2026-08-26 10:00:00+00:00", "status_7d": "allowed", "pace": "0.016", "projected_pct": "1.6", "runway_days": null, "updated_age_s": 1733}], "queue": [{"lane": "backlog", "title": "tarbiyah \u2014 Quran for Zahidah's boys", "detail": "Omar(10)+Anwar(8), parent-led. v1 on hifz-companion stack; v2 Minecraft memory-p\u2026", "priority_rank": 10, "status": "blocked", "updated_age_s": 622150, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "backlog", "title": "voice-journal -> life-graph", "detail": "Whisper transcription LIVE (Nazim-only). graph-write BLOCKED on personal DB cred\u2026", "priority_rank": 50, "status": "blocked", "updated_age_s": 622150, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-adcda", "title": "Permissions overhaul (granular CRUD RBAC)", "detail": "2 LIVE security gaps CLOSED+deployed prod (PR#146: SEV-1 admin-self-escalation +\u2026", "priority_rank": 18, "status": "queued", "updated_age_s": 1735229, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-adcda", "title": "BAPT offline-queue fast-follow", "detail": "BAPT results-capture is LIVE (web.app/bapt, verified). Offline-queue = approved\u2026", "priority_rank": 20, "status": "queued", "updated_age_s": 1976271, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-adcda", "title": "alderei \u2014 invoice-tracker PWA", "detail": "Nahar's ADCDA ask: SCDF invoice paid/outstanding visibility. UAE gov+financial -\u2026", "priority_rank": 20, "status": "blocked", "updated_age_s": 622150, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-video", "title": "v3 re-render: awaiting operator clip/music picks", "detail": "Review page delivered (adcda-v3-review.html); operator marks unusable clips + pi\u2026", "priority_rank": 10, "status": "active", "updated_age_s": 1976272, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-video", "title": "Visual editor \u2014 Option A (self-contained page)", "detail": "RATIFIED; building. Cut/reorder/swap/pick-music \u2192 Export EDL \u2192 lane renders. Shi\u2026", "priority_rank": 20, "status": "active", "updated_age_s": 1976272, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-video", "title": "Visual editor \u2014 Option B (in-tenant Cloud Run app)", "detail": "Full-tilt op#8889. Real Render button. HUB owns infra seq + IAM grants (cloudbui\u2026", "priority_rank": 25, "status": "active", "updated_age_s": 1976272, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-video", "title": "Face-safety QA gate before ADCDA delivery", "detail": "HARD gate: human eyes on face-safety (no prior-cohort identifiable faces) before\u2026", "priority_rank": 30, "status": "queued", "updated_age_s": 1976271, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "finance", "title": "\ud83d\udcb0 SHIP: recurring-billing rail (Shipforge + Storefront long pole)", "detail": "GREENLIT by operator (op#9250 proceed). Rails-agnostic payment-adapter layer + H\u2026", "priority_rank": 1, "status": "active", "updated_age_s": 621886, "elapsed_min": 10365, "sla_minutes": null, "over_sla": false}, {"lane": "finance", "title": "UAE->SEA Shariah-compliant fintech rails", "detail": "north star. ihsan-native Gulf<->SEA rails; win on ERP/orchestration (ujrah not r\u2026", "priority_rank": 70, "status": "blocked", "updated_age_s": 622150, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "fleet-health", "title": "Duplication census: enumerate every concept implemented twice, propose collapses (operator op#13641)", "detail": "OPERATOR op#13637/13641: \"sounds like you are always finding something broken...\u2026", "priority_rank": 2, "status": "queued", "updated_age_s": 590084, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "fix ui_events telemetry CORS (dead client-side analytics, tabung+storefront)", "detail": " [2026-08-03 stale-review: KEEP (verify-then-likely-close, low-pri non-user-faci\u2026", "priority_rank": 45, "status": "queued", "updated_age_s": 1735018, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "durable atomic confirm audit \u2014 single-txn SECDEF RPC (POS-RECORD-ATOMIC-1 hardening)", "detail": "cai CAI-490/495: the confirm flip+audit atomicity is currently COMPENSATION (rev\u2026", "priority_rank": 30, "status": "queued", "updated_age_s": 2943357, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "Audit chain durable fix: per-org advisory lock + tip-read+insert RPC txn for writeAuditLog + writeAuditLogBatch (CAI-528 owed)", "detail": "CAI-528 (#10853/#10857): the audit_log hash chain is per-org and has NO unique i\u2026", "priority_rank": 40, "status": "queued", "updated_age_s": 2642641, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "Fix check-hydration-safety false-positive: reads inside nested function bodies (event handlers) flagged as render-path", "detail": "check-hydration-safety.mjs (merged to main @15c41eb) FALSE-POSITIVES on browser\u2026", "priority_rank": 45, "status": "queued", "updated_age_s": 2567597, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "irsyad", "title": "CAI-669 HMAC-provenance (PR #215) \u2014 awaiting cai grant", "detail": "Prover PASS (mutation-tested). Routed to cai for the \u00a76.6 grant. Defense-in-dept\u2026", "priority_rank": 15, "status": "blocked", "updated_age_s": 1976271, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "irsyad", "title": "\ud83d\udcb0 SHIP: irsyad client-facing SUPPORT agent (beyond-DMS upsell)", "detail": "Operator GO. Client-facing support agent for irsyad end-users (augments Shuq+Wan\u2026", "priority_rank": 2, "status": "blocked", "updated_age_s": 1738758, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "Substrate-as-product roadmap (for cai ruling)", "detail": "Co-develop ONE consolidated proposal: monetizable verticals + reusable pipeline\u2026", "priority_rank": 50, "status": "queued", "updated_age_s": 1735309, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "model partner->client->silo in the substrate + load into boot context (stop mis-attributing Gazzabyte/irsyad)", "detail": "Operator (op#5582, frustrated \u2014 repeated multiple times) corrected: Gazzabyte=PA\u2026", "priority_rank": 20, "status": "queued", "updated_age_s": 1735309, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "CAI-987: replace the passive challenge WINDOW with an ASSIGNED AUDIT (one tier first)", "detail": "CAI-RESP-987 (adopted 2026-08-16, supersedes CAI-970): replace the passive chall\u2026", "priority_rank": 3, "status": "active", "updated_age_s": 591650, "elapsed_min": 9901, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "Lane SELF-DRIVE with three-role gating \u2014 cai must rule the mechanism first (operator op#13642)", "detail": "OPERATOR op#13638/13642: \"why does sre like to idle and wait for nudging?\" then\u2026", "priority_rank": 2, "status": "queued", "updated_age_s": 590084, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "CAI-1029 build 1/2: spawn-on-event trigger for ephemeral build lanes \u2014 EXERCISE-PROVEN before any lane goes ephemeral", "detail": "CAI-RESP-1029 (2026-08-17), operator op#13770/13776. Precondition BINDS per-lane\u2026", "priority_rank": 1, "status": "queued", "updated_age_s": 570237, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "CAI-1029 build 2/2: persist held commitments (deadlines/clocks/open threads) to the substrate as re-hydratable due-time rows", "detail": "CAI-RESP-1029. Root cause: cc-irsyad-coord's background alarm holding Shuk's doc\u2026", "priority_rank": 1, "status": "active", "updated_age_s": 566903, "elapsed_min": 9448, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "CAI-978 board hygiene: a self-skipped deny-control must render UNEXERCISED, never green", "detail": "OWNER: orch-console (Nazim). Source: CAI-RESP-978 (2026-08-16), the generalised\u2026", "priority_rank": 3, "status": "blocked", "updated_age_s": 601962, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "shipforge", "title": "shipforge <-> storefront wiring", "detail": "4-build integration sprint: seam is stubbed (diff DBs), chat-mgmt unbuilt, deplo\u2026", "priority_rank": 30, "status": "queued", "updated_age_s": 623026, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "shipforge", "title": "\ud83d\udcb0 SHIP: un-stub Shipforge money path (cai-gated)", "detail": "From cc-finance ship-list (operator-approved pricing). Sequenced by Nazim; money\u2026", "priority_rank": 1, "status": "blocked", "updated_age_s": 1738758, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "shipforge", "title": "\ud83d\udcb0 SHIP: Shipforge prod onboarding + watermark gate + paid Vercel", "detail": "From cc-finance ship-list (operator-approved pricing). Sequenced by Nazim; money\u2026", "priority_rank": 1, "status": "blocked", "updated_age_s": 1738758, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "storefront", "title": "\ud83d\udcb0 SHIP: Storefront flat-SaaS ujrah billing (food merchants)", "detail": "From cc-finance ship-list (operator-approved pricing). Sequenced by Nazim; money\u2026", "priority_rank": 1, "status": "queued", "updated_age_s": 1738758, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "storefront", "title": "\ud83d\udcb0 B1: storefront entitlement primitive + scoped check/place surface + transactional charge+grant (shipforge seam)", "detail": "CAI-RESP-743 unblock (boundary CAI-RESP-423=Option B). Money-writer side of ship\u2026", "priority_rank": 1, "status": "active", "updated_age_s": 1558346, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "storefront", "title": "SushiTei \u2014 F&B full-suite vertical", "detail": "Gazzabyte's multi-outlet chain. roadmap drafted; forces the shipforge<->storefro\u2026", "priority_rank": 40, "status": "blocked", "updated_age_s": 622150, "elapsed_min": null, "sla_minutes": null, "over_sla": false}], "drain_board": [{"agent": "cc-irsyad", "unread": 3, "needs_response": 3, "assigned": 2, "items": [{"id": 31771, "from": "orch-console", "subject": "ROUTE runner fix to cc-irsyad-6: pin tabung-synthtest job runs-on to the Linux runner (studio-MACs hang on the heavy suite) \u2014 unblocks #419 + future tabung runs", "priority": "P2", "age_s": 72062, "needs_response": true, "assigned": true}, {"id": 31758, "from": "orch-console", "subject": "STANDING no-idle: every irsyad builder on-work OR named-blocker (never parked) \u2014 give me the per-lane map + put idle ones on backlog", "priority": "P1", "age_s": 72809, "needs_response": true, "assigned": true}, {"id": 31756, "from": "cc-irsyad-6", "subject": "NEW runner-infra finding: PR #419 keeps landing on a DIFFERENT bad macOS runner (actions-runner-ihsanos-2) where Playwright hangs on launch. 3/3 timeouts, not random contention. Holding retries, routing to you/SRE before a 4th.", "priority": "P1", "age_s": 74548, "needs_response": true, "assigned": false}], "more": 0}, {"agent": "cc-irsyad-2", "unread": 1, "needs_response": 1, "assigned": 0, "items": [{"id": 30710, "from": "cc-irsyad-coord", "subject": "cai RULED CAI-RESP-1246 on a defect in your tabung-history import: created ~1522-1614 brand-new person records instead of linking existing donor profiles (cai confirmed source-tag split, ~1614 tagged/1555 addressed-sibling). SEQUENCE (PROPOSE-ONLY): (1) root-cause fix to the import person-MATCHING logic first (else future re-imports incl the gated ~2643 CAI-928 batch re-duplicate); (2) THEN cleanup of the ~1522/1614 existing dups via the EXISTING CAI-1219 merge mechanism (reuse, no new tool). \ud83d\udd34 LINKAGE: that merge mechanism is CURRENTLY CRASHING for org_admin (separate live P1, Sentry-blocked) -- cleanup is gated on that fix landing, do not execute before confirmed working. \ud83d\udd34 NEVER-OVER-MERGE hard: same-name finds candidates, WRONG to execute on name alone (Muslim naming = shared names common) -- need hash-tier confidence (email/phone/nric-hash), prefer under-merge over over-merge, attribution integrity matters as much as dedup. AUDITORS: FULL cc-quality+cc-storefront, lens=no-wrong-merge-and-attribution-integrity, cai materialised decision_audits already. PROPOSE-ONLY -- scope + bring cai exact names once ready, do not execute. Route proposal to me. Flag if unavailable.", "priority": "P1", "age_s": 199812, "needs_response": true, "assigned": false}], "more": 0}, {"agent": "substrate", "unread": 60, "needs_response": 0, "assigned": 0, "items": [{"id": 32187, "from": "cai", "subject": "Ack -- within the active batch-pass (CAI-1294), no new ruling", "priority": "P2", "age_s": 31740, "needs_response": false, "assigned": false}, {"id": 31489, "from": "cai", "subject": "Batch ack (4 stale-audit alerts, CAI-1246/1247/1249): same known backlog per CAI-1272, no new ruling", "priority": "P2", "age_s": 110978, "needs_response": false, "assigned": false}, {"id": 31462, "from": "cai", "subject": "Batch ack (7 stale-audit alerts, CAI-1231/1232/1233/1234/1242 x cc-quality/cc-storefront): known, already-dispositioned per CAI-1272, no new ruling", "priority": "P2", "age_s": 114486, "needs_response": false, "assigned": false}, {"id": 29633, "from": "cai", "subject": "CAI-RESP-1108 CLOSED accepted_by_audit", "priority": "P3", "age_s": 290877, "needs_response": false, "assigned": false}, {"id": 29632, "from": "cai", "subject": "Dispatched to cc-storefront (recurring CAI-RESP-1182 gap), no urgency", "priority": "P3", "age_s": 290877, "needs_response": false, "assigned": false}], "more": 55}, {"agent": "cc-cosem-exams", "unread": 2, "needs_response": 0, "assigned": 2, "items": [{"id": 32473, "from": "orch-console", "subject": "PR #5 received \u2014 good work + excellent judgment blocking (b). Full floor-review coming; (a/c/d) look sound (1105 green, OMR unmodified). (b) sub-PC shortfall = a HARIZ question (I'll route), NOT needed for the 26-Aug dry run. HOLD for my review. (You're back on musa \u2014 housekeeping, ignore.)", "priority": "P2", "age_s": 5242, "needs_response": false, "assigned": true}, {"id": 32465, "from": "orch-console", "subject": "F2 per-commit ruling: MERGE-UP 2/3/4/8 (real fixes + op#9837 privacy) as ONE reviewed PR off main; #6 cherry-pick BUT show me the journey-gate.mjs diff explicitly; 1/5/7/9 lane-local. PRIORITY: LOW/after F1+Phase-1, but land the PR before the 8-Sep real exam.", "priority": "P3", "age_s": 6945, "needs_response": false, "assigned": true}], "more": 0}, {"agent": "sla-watchdog", "unread": 2, "needs_response": 0, "assigned": 2, "items": [{"id": 31802, "from": "orch-console", "subject": "Re: #31758 SLA \u2014 resolved, mis-routed", "priority": "P2", "age_s": 70591, "needs_response": false, "assigned": true}, {"id": 30930, "from": "orch-console", "subject": "Disposition #30905: CORRECTLY resolved-in-substance \u2014 not an operator matter", "priority": "P2", "age_s": 187135, "needs_response": false, "assigned": true}], "more": 0}, {"agent": "cc-irsyad-coord", "unread": 1, "needs_response": 0, "assigned": 1, "items": [{"id": 32556, "from": "orch-console", "subject": "GROUPED cadence AGREED \u2014 batch the thin inert-until-flip widens into meaningful checkpoints, not one-per-PR. Right call: per-PR pings are invisible/noisy to Wan since nothing changes for him until the flip. Keep the BIG signals distinct: #4 role-wired-and-ready + #5 the flip. weekly_reports compound-gate build accepted, sequenced after jumaat.", "priority": "P2", "age_s": 73, "needs_response": false, "assigned": true}], "more": 0}, {"agent": "cc-orchestrator", "unread": 1, "needs_response": 0, "assigned": 1, "items": [{"id": 32459, "from": "orch-console", "subject": "2 LOW-PRI hub-body items w/ my sign-off (non-blocking): (1) prompt-reconcile agent_messages at start of a doorbell-triggered turn (CAI-1303 hardening); (2) feature_health RE-HOME (still consumed) \u2014 schedule the existing feature_health_signal.py as a discrete daemon, do NOT decommission", "priority": "P3", "age_s": 7327, "needs_response": false, "assigned": true}], "more": 0}, {"agent": "orch-console", "unread": 1, "needs_response": 0, "assigned": 0, "items": [{"id": 32555, "from": "cc-fleet-health", "subject": "#2b /irsyad never-blank PASSED (fcd71f1) - DEPLOY-READY whenever (low-pri)", "priority": "P3", "age_s": 98, "needs_response": false, "assigned": false}], "more": 0}]};var __V={"version": "fc-v59", "sha": "render"};window.fetch=function(u,o){u=String(u);var d=u.indexOf("/api/version")>=0?__V:(u.indexOf("/api/backlog")>=0?(__D.backlog||[]):__D);return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(d);},text:function(){return Promise.resolve(JSON.stringify(d));}});};if(window.EventSource){window.EventSource=function(){return{addEventListener:function(){},close:function(){}};};}</script><script src="file:///Users/sheikhmusa/wingmen/orchestrator/nervous_system/console/static/fleet.js"></script>
+<script>
+  (function () {
+    if (!('serviceWorker' in navigator)) return;
+    // ONE-SHOT reload when a new SW takes control (unchanged from fc-v49; the
+    // guard survives the reload via sessionStorage so it can never loop).
+    var hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (!hadController) return;
+      if (sessionStorage.getItem('fleet_sw_reloaded')) return;
+      sessionStorage.setItem('fleet_sw_reloaded', '1');
+      window.location.reload();
+    });
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function (reg) {
+      if (!reg) return;
+      var checkUpdate = function () { try { reg.update(); } catch (e) {} };
+      setInterval(checkUpdate, 60000);
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) checkUpdate(); });
+      checkUpdate();
+    }).catch(function () {});
+  })();
+</script>
+</body>
+</html>

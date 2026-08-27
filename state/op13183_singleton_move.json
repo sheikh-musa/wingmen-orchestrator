@@ -1,7 +1,10 @@
 {
   "op": "op#13183",
   "conditional": "singleton-coordinator pool-move Musa->Syed",
-  "status": "armed",
+  "status": "executed",
+  "executed_at": "2026-08-15T02:49:11Z",
+  "executed_by": "orch-console",
+  "executed_note": "4/4 singletons on Syed (582043088eae Mini / fece64624739 VPS-hub, same Syed acct): cai + orch-console + cc-fleet-health via switch_singleton_token; cc-orchestrator(hub) via VPS pointer-flip+relaunch. SRE fired LAST (stateless, PASS). Pointers sticky. Reverts in reports/op13183-singleton-move-runbook.md.",
   "threshold": {"pool": "Musa", "metric": "pct_7d", "at_or_above": 90},
   "targets": ["cc-fleet-health", "orch-console", "cc-orchestrator", "cai"],
   "mechanism": "checkpoint-first per body -> switch_lane_token->Syed -> flip default pointer (sticky); verify resume-took + auth=syed at source + pointer=syed",

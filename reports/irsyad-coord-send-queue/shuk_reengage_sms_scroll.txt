@@ -1,0 +1,7 @@
+Ha — I'm here 🙂 back on it.
+
+The student system: good news is most of it's already built into the platform — student records, classes, attendance, report cards, a parent view. So the dedicated agent isn't starting from zero — it switches that on, fits it for the madrasah, and adds Quran-memorisation tracking, which is the genuinely new bit. Weeks, not months.
+
+Two quick things and I can give you a firm date: does the hifz tracking need to go down to surah level or juz level, and do parents get their own logins?
+
+And the sideways-scrolling you flagged is fixed and live now, phone and desktop. I'm just tidying how the big total figure shows on the narrow phone view — then it's fully clean.

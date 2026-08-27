@@ -1,0 +1,17 @@
+Assalamualaikum Shuk. Here's the full, honest picture.
+
+Delivered:
+- Donor-email report — sent to you yesterday (the secure link).
+- 990 past receipts — generated and stored as official records, numbered gaplessly, total S$174,623.50. These are records on file; they have not been emailed out to donors.
+- Automatic donor-receipt emails — switched on, and proven on our own test sends. The first real donor email hasn't gone out yet; I'm watching for it and will confirm to you once a live one is delivered.
+
+In progress:
+- Cisco coins reconciliation — the first phase is done. The counting-and-reconciliation screen is a few working days of build away; it then goes live once you confirm the fee question below.
+- Tabung Jumaat combined-total — built and in final sign-off.
+- Tabung donation-history import — blocked on one authorisation from your side before we can run it (below).
+
+Two things I need from you:
+1. Cisco fee structure: how is the coin/cash-processing charge calculated — a flat or per-service fee, or a percentage of the balance over time? Your answer decides how we handle it on our side.
+2. History-import authorisation: to import the roughly 2,600 historical donor records, I need a short written authorisation from Irsyad as the data controller — stating the purpose and confirming it's covered by your donor data policy. I can send a one-paragraph template for you to sign.
+
+I'll close the quick items as they land and give the bigger money items the time they need to be correct.

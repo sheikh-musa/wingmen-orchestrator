@@ -1,0 +1,10 @@
+
+============================================================
+=== #498 WET-PROVE goumlyne (GOUMLYNE_DATABASE_URL) ===
+  [positive control] org_admin student-filter -> 889 rows  (OK - surfaces students (functionality restored))
+  [FLOOR] subadmin student-filter -> 0 rows  (OK - DENIED (floor holds))
+  ==> #498 WET-PROVE goumlyne: PASS
+
+============================================================
+#498 student-filter floor (goumlyne): org_admin=889 subadmin=0 -> PASS
+ceayj sch_students SELECT policy: no subadmin branch (floor parity confirmed)

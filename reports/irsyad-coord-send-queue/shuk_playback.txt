@@ -1,0 +1,5 @@
+Got it — let me play it back so you can correct me if I've got any of it wrong.
+
+You count the coins internally first; that figure goes into the submitted report and gets endorsed. Then Cisco collects and recounts, and issues their own figure — which may come out higher, lower or the same as yours — along with their fees, and the bank has its charges too. Cisco's receipt shows those fees and the amount after deduction. The system needs to take that receipt, let you key in the fees and charges, record the new amount, and put it up for a second approval alongside your original count.
+
+That's a fuller picture than what I described to you earlier — I had it as a single count with fees deducted, and you've got two counts that have to reconcile. That's a change in how the money is modelled rather than a screen adjustment, so I've put it to the team to work through properly before I tell you anything about timing. I'll come back with a straight answer.

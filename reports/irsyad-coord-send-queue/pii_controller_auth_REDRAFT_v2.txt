@@ -1,0 +1,32 @@
+DONOR DATA IMPORT AUTHORISATION
+
+Controller (R2): [IRSYAD — full registered organisation name] ("the Controller"), registered in Singapore [UEN __________].
+Processor (R1): [GAZZABYTE — registered legal entity name, incl. Pte Ltd / suffix] ("the Processor"), operator of the IhsanOS platform ("the Platform").
+  [entity names: OPERATOR-pending, do not guess. Platform name "IhsanOS" = code-derived (F4), owner-confirm recommended.]
+
+1. Authorisation. The Controller, being the data controller of the donor records described in clause 4, authorises the Processor to import those records into the Platform and to process them solely on the Controller's behalf and documented instructions, for the Purpose in clause 2 only.
+
+2. Purpose (R8). The Processor shall process the records only to: (a) maintain the Controller's donor records and donation history; and (b) generate donation receipts. No other purpose is authorised.
+
+3. Dataset — definite set (R3). The records are the donor records held by the Controller as at [SNAPSHOT DATE], being [N] records provided by the Controller as the file [EXPORT NAME/REF + DATE]. (An exact count fixed at the snapshot, not an approximate figure.)
+   [SNAPSHOT DATE + N + file ref = fixed when the Controller provides the actual export; the source layout is 8 columns: id, name, street, contact, email, type, calculated_on, collected_amt.]
+
+4. Data categories (R4). The records comprise, per donor:
+   (a) full name;
+   (b) postal / residential address;
+   (c) email address (stored encrypted);
+   (d) contact telephone number (stored encrypted);
+   (e) historical donation record — lifetime donation totals by fund type, imported as historical figures, not live transactions; and
+   (f) WHERE the source record's donor identifier is a Singapore NRIC/FIN number, that NRIC/FIN (stored encrypted, marked self-declared).  [see NRIC note below — cai/DPO decision]
+   The records do NOT include date of birth, gender, or any special-category data.
+
+5. Hosting (R7). The records are hosted and stored in Singapore (Supabase, ap-southeast-1). No transfer outside Singapore is authorised under this authorisation; any later cross-border transfer requires the Controller's further written instruction and PDPA s.26 comparable-protection safeguards.  [F2: SG-only established]
+
+6. Retention & termination (R5). The Processor shall retain the records only as long as necessary for the Purpose. On termination of the Controller's use of the Platform, the Processor shall, at the Controller's election, return the records to the Controller and/or securely delete them, and confirm the deletion in writing.
+
+7. Processor obligations (R6 — inline; no separate DPA on record per F1). The Processor shall: process only on the Controller's documented instructions; keep the records confidential and protected by appropriate technical and organisational security measures; not engage any sub-processor without the Controller's authorisation; assist the Controller with data-subject access/correction requests and with breach notification; and make available the information necessary to demonstrate compliance with this authorisation.
+
+8. Lawful basis. The Controller confirms that this import and processing are covered by the Controller's donor personal-data policy and its lawful basis for processing under the Singapore Personal Data Protection Act (PDPA).
+
+Signed for and on behalf of the Controller (warranty of authority, R2):
+Name: __________________   Designation: __________________   Signature: __________________   Date: __________

@@ -18,9 +18,16 @@ THE SIGNAL: Claude Code renders its own reclaim hint above the composer once con
 is substantial:  `new task? /clear to save {N}k tokens`  — where N is the reclaimable
 context in thousands of tokens. It is LIVE (read straight off the pane), PER-SESSION
 (no base-vs-instance confusion), and present exactly when a lane is at/near an idle
-composer with meaningful context (empirically from ~440k up; by the ~850k fire bar it
-is reliably present). ABSENT hint => context below CC's nudge bar OR mid-turn =>
-NOT-bloated for our purposes. Fail-CLOSED: a missing/failed signal is NEVER a fire.
+composer with meaningful context (empirically from ~440k up). CAVEAT (op#13050,
+verified 2026-08-15): the hint is NOT reliably present at high fill — it VANISHES in a
+BLIND BAND below the ~95% pct-line cliff (observed ABSENT at 939.9k/94%: the `/clear`
+hint already gone, the `{N}% context used` line not yet shown; the lower edge is
+UNMEASURED — hint still seen at 79%). So an ABSENT hint means one of THREE things:
+context below CC's nudge bar, mid-turn, OR blind-band-bloated-but-invisible — it does
+NOT prove NOT-bloated. Fail-CLOSED keeps this safe for the FIRE path (a missing/failed
+signal is NEVER a fire), but callers must NOT read absent-hint as proof of low context:
+the blind band is a DETECTION gap, covered by the DB gauge / session-identity resolver
+(context_truth), not by this pane signal alone.
 
 This module is READ-ONLY (tmux capture-pane). It fires nothing and changes no state.
 """

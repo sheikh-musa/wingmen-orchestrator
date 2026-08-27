@@ -1,0 +1,5 @@
+Not a repo mix-up — I checked the ihsanos codebase directly just now. The school side is genuinely built: students, classes, attendance, grades and report cards are all there (there's even an Irsyad class-list import script in the repo). It's a per-org module — the code exists, it just gets switched on and configured for your org.
+
+You're both right that there's no hifz/tahfiz tracking — nothing memorisation-related exists today. That's exactly the new piece we'd add on top.
+
+So the job is: switch on what's built, fit it to the madrasah, add the hifz tracking — weeks, not a from-scratch build.

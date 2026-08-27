@@ -1,0 +1,473 @@
+{
+ "purpose": "Verified authoritative tin-serial->donation links for the Wan Tabung Fajar/Kedai import (op#16378). Execute via link_tin_donation as SERVICE admin orchestrator@ihsanos.com (ca2a4a9c-f745-40c3-9536-7a021fd42bb9) on goumlyne, AFTER the reworked mig253 (active-receipt block removed) is re-applied. p_expected_existing_link=NULL (fresh), import_source='wan-tabung-return-fajar-kedai-20260824', match_method='amount_date_exact', match_confidence='high'.",
+ "regenerated_deterministically": "amount+date match (SG-or-UTC date) on Fajar+Kedai tabs of ~/.wingmen/quarantine/report_donor_1.xlsx; reproduced the dryrun exactly (69 exactly-1-match - 5 name-mismatch = 64 rows = these 114 serial links; 10/10 samples matched).",
+ "count": 114,
+ "held_not_linked": [
+  {
+   "item": "serial 25266",
+   "reason": "appears on TWO Zarina Sidik rows 2026-02-01 ($281.85 e87dd14b + $457.66 fadda47c) - ambiguous; needs Wan to pick which donation"
+  },
+  {
+   "item": "row71 Puan Siami $467.00 2026-02-20",
+   "reason": "serial cell='Own Tabung' - no Irsyad serial to link"
+  }
+ ],
+ "links": [
+  {
+   "donation_id": "1c3b390d-2b38-4234-94a4-672f6b4fd497",
+   "serial": "25287"
+  },
+  {
+   "donation_id": "1c3b390d-2b38-4234-94a4-672f6b4fd497",
+   "serial": "25436"
+  },
+  {
+   "donation_id": "abb4ba02-f6eb-42a0-b476-40540e0bb957",
+   "serial": "25286"
+  },
+  {
+   "donation_id": "abb4ba02-f6eb-42a0-b476-40540e0bb957",
+   "serial": "25441"
+  },
+  {
+   "donation_id": "625632fb-6ad8-4f17-bc6d-e20f7f9eb10d",
+   "serial": "2300054"
+  },
+  {
+   "donation_id": "e8c7e3b8-f052-4b63-b270-0505b57d4c6d",
+   "serial": "25144"
+  },
+  {
+   "donation_id": "e8c7e3b8-f052-4b63-b270-0505b57d4c6d",
+   "serial": "25359"
+  },
+  {
+   "donation_id": "b5c17409-9a40-4d98-b20a-44a6711147a4",
+   "serial": "25145"
+  },
+  {
+   "donation_id": "b5c17409-9a40-4d98-b20a-44a6711147a4",
+   "serial": "25360"
+  },
+  {
+   "donation_id": "55bc14c5-0dcb-4216-a069-f7dd65ae17be",
+   "serial": "25259"
+  },
+  {
+   "donation_id": "55bc14c5-0dcb-4216-a069-f7dd65ae17be",
+   "serial": "250889"
+  },
+  {
+   "donation_id": "dc02810a-81ba-4966-8021-f0025db42a83",
+   "serial": "2400118"
+  },
+  {
+   "donation_id": "dc02810a-81ba-4966-8021-f0025db42a83",
+   "serial": "240937"
+  },
+  {
+   "donation_id": "74578214-c5ef-4990-a876-3a0c87ec0c91",
+   "serial": "2400119"
+  },
+  {
+   "donation_id": "74578214-c5ef-4990-a876-3a0c87ec0c91",
+   "serial": "25437"
+  },
+  {
+   "donation_id": "5bd195fa-5cab-4a91-a024-a2dfcb247521",
+   "serial": "25077"
+  },
+  {
+   "donation_id": "5bd195fa-5cab-4a91-a024-a2dfcb247521",
+   "serial": "25352"
+  },
+  {
+   "donation_id": "fb105989-39d1-4502-9037-8f6ab1a551ac",
+   "serial": "25188"
+  },
+  {
+   "donation_id": "fb105989-39d1-4502-9037-8f6ab1a551ac",
+   "serial": "25353"
+  },
+  {
+   "donation_id": "4e43ae91-dd00-4833-ac3a-5b317cf22d3d",
+   "serial": "25078"
+  },
+  {
+   "donation_id": "4e43ae91-dd00-4833-ac3a-5b317cf22d3d",
+   "serial": "25354"
+  },
+  {
+   "donation_id": "d7aef848-9f6e-4d39-8223-e0c3ee11bfc3",
+   "serial": "25220"
+  },
+  {
+   "donation_id": "f0396750-eb3e-4bc3-b63d-13f93601bb2c",
+   "serial": "25089"
+  },
+  {
+   "donation_id": "f0396750-eb3e-4bc3-b63d-13f93601bb2c",
+   "serial": "250995"
+  },
+  {
+   "donation_id": "840f58a1-ce5e-4af9-956c-a6204eb8a344",
+   "serial": "25088"
+  },
+  {
+   "donation_id": "840f58a1-ce5e-4af9-956c-a6204eb8a344",
+   "serial": "250886"
+  },
+  {
+   "donation_id": "427ca075-eb4f-41c4-95dd-5b264daa5bd7",
+   "serial": "25378"
+  },
+  {
+   "donation_id": "427ca075-eb4f-41c4-95dd-5b264daa5bd7",
+   "serial": "250938"
+  },
+  {
+   "donation_id": "b9010617-fb39-4e76-818d-0124a3b28b40",
+   "serial": "25379"
+  },
+  {
+   "donation_id": "b9010617-fb39-4e76-818d-0124a3b28b40",
+   "serial": "250939"
+  },
+  {
+   "donation_id": "2ff15cb2-e726-4421-9b62-e5cfc4eff272",
+   "serial": "2400308"
+  },
+  {
+   "donation_id": "2ff15cb2-e726-4421-9b62-e5cfc4eff272",
+   "serial": "25469"
+  },
+  {
+   "donation_id": "afe31348-3797-4c1b-8fb5-8aaa91f8efc5",
+   "serial": "2400307"
+  },
+  {
+   "donation_id": "dd3c5801-4486-45b6-a78e-09f2014b4458",
+   "serial": "25304"
+  },
+  {
+   "donation_id": "dd3c5801-4486-45b6-a78e-09f2014b4458",
+   "serial": "25470"
+  },
+  {
+   "donation_id": "e5aaa186-2b56-4fdb-80a9-5b9ad5344d43",
+   "serial": "25301"
+  },
+  {
+   "donation_id": "e5aaa186-2b56-4fdb-80a9-5b9ad5344d43",
+   "serial": "25471"
+  },
+  {
+   "donation_id": "5a4e915f-4e17-4388-ab5e-0859dbeaacbb",
+   "serial": "25302"
+  },
+  {
+   "donation_id": "5a4e915f-4e17-4388-ab5e-0859dbeaacbb",
+   "serial": "25472"
+  },
+  {
+   "donation_id": "d195208a-66af-4aab-84b7-9a894368fce0",
+   "serial": "25303"
+  },
+  {
+   "donation_id": "75e96f6e-350e-41b9-baec-831b5242fc4b",
+   "serial": "25323"
+  },
+  {
+   "donation_id": "a18693f4-dc73-4da4-a32c-3acbe84854e2",
+   "serial": "25146"
+  },
+  {
+   "donation_id": "a18693f4-dc73-4da4-a32c-3acbe84854e2",
+   "serial": "25467"
+  },
+  {
+   "donation_id": "9c8f19d1-2d07-4986-a0e1-85867bd496a5",
+   "serial": "25147"
+  },
+  {
+   "donation_id": "9c8f19d1-2d07-4986-a0e1-85867bd496a5",
+   "serial": "25468"
+  },
+  {
+   "donation_id": "a0580052-7a05-48ef-9e9b-428e048433ed",
+   "serial": "25341"
+  },
+  {
+   "donation_id": "a0580052-7a05-48ef-9e9b-428e048433ed",
+   "serial": "250890"
+  },
+  {
+   "donation_id": "49558131-de1a-402a-8577-1029eeecb920",
+   "serial": "25342"
+  },
+  {
+   "donation_id": "49558131-de1a-402a-8577-1029eeecb920",
+   "serial": "250887"
+  },
+  {
+   "donation_id": "cda8dcd0-2d1e-491e-87d8-bab9d6f1d645",
+   "serial": "25233"
+  },
+  {
+   "donation_id": "cda8dcd0-2d1e-491e-87d8-bab9d6f1d645",
+   "serial": "240934"
+  },
+  {
+   "donation_id": "e87dd14b-3832-4bed-9748-241a946a9aee",
+   "serial": "26301"
+  },
+  {
+   "donation_id": "e87dd14b-3832-4bed-9748-241a946a9aee",
+   "serial": "26302"
+  },
+  {
+   "donation_id": "fadda47c-d341-4a62-ba81-7e4a1b4c8170",
+   "serial": "26303"
+  },
+  {
+   "donation_id": "3430aee2-e8ce-4a81-ad88-756c16fbc65d",
+   "serial": "25320"
+  },
+  {
+   "donation_id": "3430aee2-e8ce-4a81-ad88-756c16fbc65d",
+   "serial": "25477"
+  },
+  {
+   "donation_id": "b999e042-b0c1-4b65-ab53-939fdefb8955",
+   "serial": "25317"
+  },
+  {
+   "donation_id": "b999e042-b0c1-4b65-ab53-939fdefb8955",
+   "serial": "25478"
+  },
+  {
+   "donation_id": "206da307-85ed-416b-9ce5-3b2abdaa9d3b",
+   "serial": "25239"
+  },
+  {
+   "donation_id": "206da307-85ed-416b-9ce5-3b2abdaa9d3b",
+   "serial": "26406"
+  },
+  {
+   "donation_id": "5f107e37-252e-4b51-9752-99036425f117",
+   "serial": "25195"
+  },
+  {
+   "donation_id": "cbb9d585-0a65-4660-b973-ed98120b6150",
+   "serial": "25280"
+  },
+  {
+   "donation_id": "cbb9d585-0a65-4660-b973-ed98120b6150",
+   "serial": "25445"
+  },
+  {
+   "donation_id": "e41234c7-54e7-43a0-b36c-85df169e4154",
+   "serial": "25281"
+  },
+  {
+   "donation_id": "e41234c7-54e7-43a0-b36c-85df169e4154",
+   "serial": "25446"
+  },
+  {
+   "donation_id": "531e672a-4d48-4af6-85fe-951b291864ad",
+   "serial": "25126"
+  },
+  {
+   "donation_id": "531e672a-4d48-4af6-85fe-951b291864ad",
+   "serial": "25475"
+  },
+  {
+   "donation_id": "89c92cb7-eb71-4c53-9748-f310c7fe5f69",
+   "serial": "25127"
+  },
+  {
+   "donation_id": "89c92cb7-eb71-4c53-9748-f310c7fe5f69",
+   "serial": "25476"
+  },
+  {
+   "donation_id": "b71bf656-813d-4cf7-9ae9-4310c4070a68",
+   "serial": "25322"
+  },
+  {
+   "donation_id": "841e13d4-49c8-4f50-b81e-b756693e300d",
+   "serial": "25386"
+  },
+  {
+   "donation_id": "841e13d4-49c8-4f50-b81e-b756693e300d",
+   "serial": "25473"
+  },
+  {
+   "donation_id": "ab968eaa-4084-4d9f-9822-2958378d0087",
+   "serial": "25387"
+  },
+  {
+   "donation_id": "ab968eaa-4084-4d9f-9822-2958378d0087",
+   "serial": "25474"
+  },
+  {
+   "donation_id": "9b2853fb-2898-48d6-b581-ba4b260772d3",
+   "serial": "25461"
+  },
+  {
+   "donation_id": "9b2853fb-2898-48d6-b581-ba4b260772d3",
+   "serial": "26457"
+  },
+  {
+   "donation_id": "af620ed1-b824-4bf9-bfe5-da1dc3d25643",
+   "serial": "25462"
+  },
+  {
+   "donation_id": "af620ed1-b824-4bf9-bfe5-da1dc3d25643",
+   "serial": "26458"
+  },
+  {
+   "donation_id": "ebb46efb-49be-4dd2-a6de-cd159bb12618",
+   "serial": "2400321"
+  },
+  {
+   "donation_id": "8fcba5e4-0a8a-41b4-98aa-8b4f7c6d42d2",
+   "serial": "25247"
+  },
+  {
+   "donation_id": "8fcba5e4-0a8a-41b4-98aa-8b4f7c6d42d2",
+   "serial": "26462"
+  },
+  {
+   "donation_id": "512cd524-72c6-4fc2-ab55-d16416becfcd",
+   "serial": "25246"
+  },
+  {
+   "donation_id": "512cd524-72c6-4fc2-ab55-d16416becfcd",
+   "serial": "26463"
+  },
+  {
+   "donation_id": "58e660f6-2fc9-4877-98e1-bf76675759f8",
+   "serial": "25457"
+  },
+  {
+   "donation_id": "58e660f6-2fc9-4877-98e1-bf76675759f8",
+   "serial": "26453"
+  },
+  {
+   "donation_id": "d80b0958-2229-485e-9010-9fb2eeb1bc6b",
+   "serial": "25090"
+  },
+  {
+   "donation_id": "d80b0958-2229-485e-9010-9fb2eeb1bc6b",
+   "serial": "26451"
+  },
+  {
+   "donation_id": "d80b0958-2229-485e-9010-9fb2eeb1bc6b",
+   "serial": "26465"
+  },
+  {
+   "donation_id": "bfe1fc40-8c5e-45b2-aced-cb284136fda8",
+   "serial": "25329"
+  },
+  {
+   "donation_id": "bfe1fc40-8c5e-45b2-aced-cb284136fda8",
+   "serial": "26456"
+  },
+  {
+   "donation_id": "86391865-2f93-4a82-acb8-0a3f805a2b1e",
+   "serial": "25327"
+  },
+  {
+   "donation_id": "86391865-2f93-4a82-acb8-0a3f805a2b1e",
+   "serial": "26461"
+  },
+  {
+   "donation_id": "5cc80fc7-2cd7-4dd2-9a4c-280b8f6c1a85",
+   "serial": "25500"
+  },
+  {
+   "donation_id": "5cc80fc7-2cd7-4dd2-9a4c-280b8f6c1a85",
+   "serial": "26459"
+  },
+  {
+   "donation_id": "29fe93eb-38c9-4c62-bccf-62417145491a",
+   "serial": "25498"
+  },
+  {
+   "donation_id": "29fe93eb-38c9-4c62-bccf-62417145491a",
+   "serial": "26452"
+  },
+  {
+   "donation_id": "bd39eb17-d4ad-47cb-9173-02a8702c180b",
+   "serial": "25101"
+  },
+  {
+   "donation_id": "374c93a7-d94d-449f-bdc3-37a4b2fc698c",
+   "serial": "25102"
+  },
+  {
+   "donation_id": "c3fc8826-f21c-46c1-86e7-8a24a38419fc",
+   "serial": "25100"
+  },
+  {
+   "donation_id": "a8fbd8d8-499a-4db7-abd8-888c0a7a701d",
+   "serial": "25099"
+  },
+  {
+   "donation_id": "034f1dba-f261-416b-802a-84524193c6e0",
+   "serial": "25389"
+  },
+  {
+   "donation_id": "034f1dba-f261-416b-802a-84524193c6e0",
+   "serial": "26420"
+  },
+  {
+   "donation_id": "01ee8c0a-81ef-4fe0-afec-6c3c2eb0bade",
+   "serial": "25215"
+  },
+  {
+   "donation_id": "01ee8c0a-81ef-4fe0-afec-6c3c2eb0bade",
+   "serial": "26414"
+  },
+  {
+   "donation_id": "82a84ef6-5a8e-4356-8c65-dc7595c5deb0",
+   "serial": "25216"
+  },
+  {
+   "donation_id": "82a84ef6-5a8e-4356-8c65-dc7595c5deb0",
+   "serial": "26418"
+  },
+  {
+   "donation_id": "fd62a87b-8eff-4834-874b-49a386c9919c",
+   "serial": "25132"
+  },
+  {
+   "donation_id": "fd62a87b-8eff-4834-874b-49a386c9919c",
+   "serial": "25152"
+  },
+  {
+   "donation_id": "fa16ac9d-2e04-453e-9e6b-b2eebd13d093",
+   "serial": "25363"
+  },
+  {
+   "donation_id": "fa16ac9d-2e04-453e-9e6b-b2eebd13d093",
+   "serial": "25151"
+  },
+  {
+   "donation_id": "09990223-395a-4c3c-8bce-5199d73ca184",
+   "serial": "25407"
+  },
+  {
+   "donation_id": "09990223-395a-4c3c-8bce-5199d73ca184",
+   "serial": "26416"
+  },
+  {
+   "donation_id": "114a7a4b-561b-429d-a1a2-9cdc2eab07ce",
+   "serial": "25409"
+  },
+  {
+   "donation_id": "114a7a4b-561b-429d-a1a2-9cdc2eab07ce",
+   "serial": "26464"
+  }
+ ]
+}

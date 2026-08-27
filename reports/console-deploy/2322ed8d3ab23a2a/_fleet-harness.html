@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex,nofollow" />
+<meta name="color-scheme" content="dark" />
+<title>Fleet</title>
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#0b0e14" />
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico" />
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Fleet" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<style>
+  :root {
+    /* Calm Command palette (fc-v38 ihsan redesign). Jade = all-clear; warm tones
+       only where attention is due. SF Pro carries structure; mono is data-only. */
+    --bg: #090b10; --panel: #12161e; --panel-2: #171c26; --panel-3: #1d2430;
+    --line: rgba(255,255,255,.07);
+    --txt: #e8ebf1; --dim: #949cac; --faint: #5c6472;
+    --accent: #8aa6ff; --good: #37d39a; --good-dim: #1f9e77;
+    --warn: #f6c453; --bad: #fb7185;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    --shadow: 0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; color: var(--txt);
+    font: 15px/1.5 var(--sans); letter-spacing: -.01em; -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -6%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 46% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg, #0c0f16, var(--bg) 42%);
+    background-attachment: fixed;
+    -webkit-text-size-adjust: 100%;
+    /* NO body padding-top: the .pulse header already pins at the inset and
+       body::before fills the island strip — a body offset on TOP of that was a
+       DOUBLE inset (op fc-v39: header sat ~2x too far from the top). */
+    padding-bottom: calc(env(safe-area-inset-bottom) + 40px);
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* pull-to-refresh — the WHOLE element is offset BELOW the notch via
+     `top: env(safe-area-inset-top)`, so its band + centered label can never
+     render under the notch. The earlier top:0 + padding-top + content-box
+     trick still clipped on a real iPhone (operator 2026-07-11): the label
+     centered across the padded box drifted back under the inset. Offsetting the
+     element's top removes that whole class of box-sizing ambiguity — on desktop
+     the inset is 0 so top:0 (unchanged); on iOS it starts exactly at the notch
+     edge. A backdrop strip (::before) fills the notch area with the panel bg so
+     the pull still reads as one solid sheet, not a floating band. */
+  #ptr { position: fixed; top: env(safe-area-inset-top); left: 0; right: 0; z-index: 60;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    height: 0; overflow: hidden; pointer-events: none; background: var(--panel);
+    color: var(--dim); font: 12px/1 var(--mono); letter-spacing: .3px; white-space: nowrap; }
+  /* fill the notch strip above the band (only while pulling) so the sheet is
+     continuous; height 0 at rest keeps it invisible when not pulling. */
+  #ptr::before { content: ""; position: fixed; top: 0; left: 0; right: 0;
+    height: env(safe-area-inset-top); background: var(--panel); z-index: 60;
+    display: none; }
+  #ptr.pulling::before, #ptr.refreshing::before { display: block; }
+  #ptr #ptrTxt { white-space: nowrap; }
+  #ptr .spin { display: inline-block; transition: transform .15s ease; }
+  #ptr.armed { color: var(--accent); } #ptr.armed .spin { transform: rotate(180deg); }
+  #ptr.snap { transition: height .2s ease; }
+  #ptr.refreshing .spin { animation: ptrspin .7s linear infinite; }
+  @keyframes ptrspin { to { transform: rotate(360deg); } }
+
+  /* fixed backdrop filling the safe-area (notch/Dynamic Island) strip so the
+     sticky header below it never renders under the island and scrolled content
+     never peeks through above it (operator 2026-08-13: iOS island overlapped the
+     header). Desktop inset=0 -> zero-height, invisible. */
+  body::before { content:""; position: fixed; top:0; left:0; right:0;
+    height: env(safe-area-inset-top); background:#10151f; z-index: 6; pointer-events:none; }
+  /* PULSE — sticks BELOW the island (top offset by the inset), matching #ptr */
+  .pulse { position: sticky; top: env(safe-area-inset-top); z-index: 5; background: linear-gradient(180deg,#10151f,#0b0e14);
+    border-bottom: 1px solid var(--line); padding: 13px 16px 12px; }
+  /* brandrow: "Fleet ● live" on the left, the build badge on the right. The build
+     is a SIBLING of .brand now (not nested inside it) and never wraps, so the
+     'fc-vNN · <sha>' badge can't be squeezed/cut-off by the pool chips anymore
+     (op#12709: the chips moved to their own row below). */
+  .pulse .brandrow { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .pulse .brand { font-size: 13px; font-weight: 600; letter-spacing:.3px; color: var(--dim);
+    white-space:nowrap; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .pulse .brand .live { color: var(--good); } .pulse .brand .live.down { color: var(--bad); }
+  /* build badge — always-visible so the operator can SEE which build his device
+     is running (PWA-cache-loop fix). .stale (a newer build is deployed than the
+     one this cached bundle is) turns it amber until the one-shot reload lands. */
+  .pulse .build { margin-left:auto; flex:none; white-space:nowrap;
+    font:10px/1 var(--mono); letter-spacing:.3px; color:var(--dim); font-weight:400; }
+  .pulse .build.stale { color:var(--warn); }
+  /* weekly Max-pool usage (op#9770) — a full-width VERTICAL stack below the brand
+     row, one .poolrow per pool: the weekly-% pill + its pace advisory (op#12617).
+     Stacking (not the old 2+1 wrap) keeps all pools + pace legible on a phone. */
+  .poolusage { display:flex; flex-direction:column; gap:5px; margin-top:8px; }
+  .poolusage:empty { display:none; }
+  .poolrow { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    font:10.5px/1.4 var(--mono); letter-spacing:.2px; }
+  .poolchip { flex:none; font:10.5px/1.4 var(--mono); letter-spacing:.2px; padding:2px 7px; border-radius:999px;
+    background:rgba(255,255,255,.05); border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
+  .poolchip b { font-weight:700; }
+  .poolchip.good b { color:var(--good); } .poolchip.warn b { color:var(--warn); } .poolchip.bad b { color:var(--bad); }
+  .poolchip.bad { background:rgba(240,90,90,.12); border-color:rgba(251,113,133,.3); }
+  .poolchip.stale { color:var(--dim); opacity:.6; } .poolchip.stale b { color:var(--dim); }
+  /* pace advisory — MUTED/neutral (never a red alarm): pace + projected only say
+     "burning fast", they never gate. runway is the real risk signal, .warn (amber)
+     ONLY when the runway is shorter than the days left to reset. */
+  .pooladv { color:var(--faint); white-space:nowrap; }
+  .poolrun { color:var(--dim); white-space:nowrap; }
+  .poolrun.warn { color:var(--warn); }
+  /* Lane worklists — the per-lane drain view (lane_tasks) */
+  .qlane { margin-bottom:10px; }
+  .qlane-h { font:11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.6px;
+    color:var(--dim); margin:0 0 4px; }
+  .qlane-h .qn { color:var(--txt); font-weight:700; }
+  .qrow { display:flex; align-items:center; gap:8px; padding:5px 0;
+    border-bottom:1px solid var(--line); }
+  .qrow:last-child { border-bottom:none; }
+  .qtitle { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; font-size:13px; color:var(--txt); }
+  .qchip { flex:none; font:10px/1.4 var(--mono); letter-spacing:.2px; padding:2px 7px;
+    border-radius:6px; background:rgba(255,255,255,.05); color:var(--dim); white-space:nowrap; }
+  .qchip.queued { color:var(--dim); }
+  .qchip.stale { color:var(--warn); background:rgba(240,180,41,.10); }
+  .qchip.work { color:var(--good); background:rgba(62,207,142,.12); font-weight:700; }
+  .qchip.wait { color:var(--warn); background:rgba(240,180,41,.14); font-weight:700; }
+  .qchip.over { color:var(--bad); background:rgba(255,107,107,.14); font-weight:700; }
+  .pulse .headline { display:flex; align-items:center; gap:11px; }
+  .pulse .orb { width:12px; height:12px; border-radius:50%; flex:none; background: var(--dim); }
+  .pulse.attn .orb { background: var(--warn); box-shadow:0 0 0 4px rgba(240,180,41,.16), 0 0 12px var(--warn); animation:breathe 2.4s ease-in-out infinite; }
+  .pulse.clear .orb { background: var(--good); box-shadow:0 0 0 4px rgba(62,207,142,.14), 0 0 10px var(--good); }
+  @keyframes breathe { 0%,100%{opacity:.6} 50%{opacity:1} }
+  .pulse .big { font-size: 20px; font-weight: 700; letter-spacing:.2px; }
+  .pulse.attn .big { color: #ffd77a; } .pulse.clear .big { color: var(--good); }
+  /* Glance banner: the top-3 worst-offender context-bloat lanes. Each pct is
+     color-coded by ITS OWN green/amber/red level; the leading dot shows the worst
+     lane's level. Wraps on a narrow phone. Hidden until renderTopBloat adds .show. */
+  .topbloat { display:none; align-items:center; flex-wrap:wrap; gap:4px 7px; margin-top:10px;
+    font:12px/1.2 var(--mono); padding:6px 10px; border-radius:8px;
+    background: rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.06); }
+  .topbloat.show { display:flex; }
+  .topbloat .dot { width:8px; height:8px; border-radius:50%; flex:none; }
+  .topbloat .lbl { color:var(--dim); }
+  .topbloat .ent { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
+  .topbloat .who { color:var(--txt); font-weight:700; }
+  .topbloat .pct { font-weight:700; }
+  .topbloat .sep { color:var(--dim); }
+  .topbloat .dot.green{background:var(--good)} .topbloat .pct.green{color:var(--good)}
+  .topbloat .dot.amber{background:var(--warn)} .topbloat .pct.amber{color:var(--warn)}
+  .topbloat .dot.red{background:var(--bad)}    .topbloat .pct.red{color:var(--bad)}
+  /* Primary nav button to the dedicated /lanes tool (op#10706 B — tool moved off
+     inline). fc-v40: promoted from a thin text chip to an obviously-tappable
+     primary action (operator: "too subtle") — indigo-lit fill, clear border,
+     centered label + arrow, full-tap-target height. Aligned to the section gutter. */
+  .laneslink { display:flex; align-items:center; justify-content:center; gap:9px;
+    margin:12px 0 2px; padding:15px 18px; border-radius:12px;
+    background: linear-gradient(180deg, rgba(138,166,255,.18), rgba(138,166,255,.08));
+    border:1px solid rgba(138,166,255,.44); color:var(--accent);
+    font:700 15.5px/1 var(--sans); letter-spacing:-.01em; text-decoration:none; }
+  .laneslink:active { background: rgba(138,166,255,.26); transform:scale(.99); }
+  .strip { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .chip { display:inline-flex; align-items:center; gap:6px; font:12px/1 var(--mono);
+    padding:7px 11px; border-radius:999px; background: var(--panel-2); border:1px solid var(--line); color: var(--dim); }
+  .chip b { color: var(--txt); font-weight:700; }
+  .chip .d { width:7px; height:7px; border-radius:50%; }
+  .chip .d.good{background:var(--good)} .chip .d.dim{background:var(--dim)} .chip .d.bad{background:var(--bad)}
+
+  section { padding: 0 16px; }
+  .sec-h { display:flex; align-items:center; gap:8px; margin: 20px 2px 10px; }
+  .sec-h h2 { font-size: 11px; margin:0; font-weight:700; text-transform:uppercase; letter-spacing:.8px; color: var(--dim); }
+  .sec-h .count { font:11px var(--mono); color:var(--dim); }
+  .sec-h.needs h2 { color: var(--warn); }
+  .empty { color: var(--dim); font-size: 13px; padding: 6px 2px 2px; }
+
+  /* NEEDS YOU */
+  .need { display:flex; gap:12px; align-items:flex-start; padding:13px 14px; margin-bottom:9px;
+    background: linear-gradient(180deg, rgba(240,180,41,.08), rgba(240,180,41,.03));
+    border:1px solid rgba(240,180,41,.32); border-radius:14px; }
+  .need.crit { background: linear-gradient(180deg, rgba(255,107,107,.09), rgba(255,107,107,.03)); border-color: rgba(255,107,107,.4); }
+  .need .ico { width:30px; height:30px; border-radius:9px; flex:none; display:flex; align-items:center; justify-content:center;
+    font-size:15px; background: rgba(240,180,41,.16); }
+  .need.crit .ico { background: rgba(255,107,107,.16); }
+  .need .m { min-width:0; flex:1; }
+  .need .k { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .need .who { font:12px var(--mono); color:var(--txt); font-weight:600; }
+  .need .tag { font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.4px; padding:3px 7px; border-radius:8px;
+    background: rgba(240,180,41,.16); color:var(--warn); font-weight:700; }
+  .need.crit .tag { background: rgba(255,107,107,.16); color:var(--bad); }
+  .need .age { margin-left:auto; font:11px var(--mono); color:var(--dim); }
+  .need .what { margin-top:4px; font-size:13.5px; color:var(--txt); line-height:1.4; overflow-wrap:anywhere; }
+  /* A needs-you row is tappable ONLY when it maps to a real lane (jump to that
+     lane + open its peek); the chevron/cursor is shown only then, so the
+     affordance never promises a destination that isn't there. */
+  .need.tappable { cursor:pointer; }
+  .need.tappable:active { transform:scale(.995); }
+  /* "peek ›" — the tap opens the lane's live peek (watch), it is NOT a reply
+     affordance; kept small + mono so it reads as an action label, not a chevron. */
+  .need .go { align-self:center; flex:none; margin-left:2px; color:var(--accent);
+    font:11px/1 var(--mono); white-space:nowrap; }
+  /* "Fleet is handling" rows: hub-owned, not the operator's to answer — dimmed
+     and never crit-red so they don't read as demanding his response. */
+  .need.handling { opacity:.72; border-color: var(--line); background: var(--panel-2); }
+  .need.handling .who { color: var(--dim); }
+  .need.handling .what { color: var(--dim); }
+
+  /* lanes */
+  .lane { padding:12px 14px; margin-bottom:9px; background: var(--panel); border:1px solid var(--line);
+    border-radius:13px; border-left:3px solid transparent; }
+  .lane.flag { border-left-color: var(--bad); background: linear-gradient(90deg, rgba(255,107,107,.06), var(--panel) 40%); }
+  .lane[data-peek] { cursor: pointer; }
+  .lane .top { display:flex; align-items:center; gap:9px; }
+  .lane .st-dot { width:9px; height:9px; border-radius:50%; flex:none; }
+  .st-dot.working{background:var(--good); box-shadow:0 0 7px var(--good)} .st-dot.idle{background:var(--dim)} .st-dot.offline{background:var(--bad)}
+  .lane .id { font:13px var(--mono); font-weight:600; overflow-wrap:anywhere; }
+  .lane .badge { font:10px/1 var(--mono); font-weight:700; text-transform:uppercase; letter-spacing:.4px; padding:3px 8px; border-radius:8px;
+    color:var(--bad); background:rgba(255,107,107,.14); border:1px solid rgba(255,107,107,.5); }
+  .lane .state { margin-left:auto; font:11px var(--mono); flex:none; }
+  .state.working{color:var(--good)} .state.idle{color:var(--dim)} .state.offline{color:var(--bad)}
+  .lane .act { margin-top:7px; font-size:13.5px; line-height:1.4; overflow-wrap:anywhere; color: var(--txt); }
+  .lane .meta { margin-top:8px; display:flex; gap:12px; font:11px var(--mono); color:var(--dim); flex-wrap:wrap; align-items:center; }
+  .lane .meta .hb.fresh{color:var(--good)} .lane .meta .hb.stale{color:var(--warn)} .lane .meta .hb.dead{color:var(--bad)}
+  .lane .meta .tap { margin-left:auto; color:var(--accent); }
+  .lane .meta .reset-btn { margin-left:auto; font:10px/1 var(--mono); letter-spacing:.3px;
+    color:var(--bad); background:rgba(255,107,107,.10); border:1px solid rgba(255,107,107,.30);
+    padding:4px 8px; border-radius:7px; cursor:pointer; -webkit-appearance:none; transition:background .12s; }
+  .lane .meta .tap + .reset-btn { margin-left:8px; }
+  .lane .meta .reset-btn:hover { background:rgba(255,107,107,.18); }
+  .lane .meta .reset-btn:active { transform:scale(.96); }
+  .lane .meta .reset-btn:disabled { opacity:.6; cursor:default; }
+  .lane .meta .reset-btn.arm { color:#fff; background:rgba(255,107,107,.32); border-color:rgba(255,107,107,.6); }
+  .collapsed { display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--panel);
+    border:1px dashed var(--line); border-radius:13px; color:var(--dim); font-size:13px; cursor:pointer; }
+  .collapsed b { color:var(--txt); white-space:nowrap; }
+
+  /* readable peek */
+  .peek { margin-top:10px; background:#0a0d13; border:1px solid var(--line); border-radius:11px; overflow:hidden; display:none; }
+  .peek.open { display:block; }
+  .peek .ph { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); font:11px var(--mono); color:var(--dim); }
+  .peek .ph .raw { margin-left:auto; color:var(--accent); cursor:pointer; }
+  .peek .body { max-height:46vh; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:8px 0; }
+  /* Flowing, borderless lines: each pane line wraps as a whole paragraph so a
+     long line stays readable at 430px instead of breaking into boxed shards. */
+  .peek .ln { padding:2px 14px; font-size:13px; line-height:1.5; overflow-wrap:anywhere; white-space:pre-wrap; color:var(--txt); }
+  .peek .ln.now { color:#bcd0ff; box-shadow:inset 3px 0 0 var(--accent); }
+  .peek .raw-pre { margin:0; padding:10px 12px; white-space:pre-wrap; word-break:break-word; font:11px/1.5 var(--mono); color:#9fe8b0; }
+  .peek .peek-empty { padding:10px 12px; color:var(--dim); font-style:italic; }
+
+  /* deploys */
+  .depstrip { display:flex; gap:8px; overflow-x:auto; padding:2px 0 4px; -webkit-overflow-scrolling:touch; }
+  .dep { flex:none; padding:9px 12px; border-radius:11px; background:var(--panel); border:1px solid var(--line); min-width:150px; }
+  .dep .ws { font-size:12.5px; font-weight:600; overflow-wrap:anywhere; }
+  .dep .stg { margin-top:5px; font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.4px; color:var(--dim); }
+  .dep.live .stg{color:var(--good)} .dep.blocked .stg{color:var(--bad)} .dep.in_review .stg{color:var(--warn)} .dep.merged .stg{color:var(--good)} .dep.pushed .stg{color:var(--accent)}
+  .dep .rp { margin-top:5px; font:11px var(--mono); color:var(--dim); }
+  .dep a { display:block; margin-top:4px; font:11px var(--mono); overflow-wrap:anywhere; }
+
+  /* backlog — the operator's realtime "Your asks" tracker (swipe: → top · ← drop) */
+  .blhint { margin-left:auto; font:10px/1 var(--mono); color:var(--dim); letter-spacing:.3px; white-space:nowrap; }
+  .bl-row { position:relative; margin-bottom:8px; border-radius:12px; overflow:hidden; }
+  .bl-row.dropping { opacity:.35; transition:opacity .18s ease; }
+  .bl-act { position:absolute; top:0; bottom:0; display:flex; align-items:center;
+    font:11px/1 var(--mono); font-weight:700; text-transform:uppercase; letter-spacing:.6px; }
+  .bl-act.top  { left:0;  width:58%; justify-content:flex-start; padding-left:16px;  color:var(--good); background:rgba(62,207,142,.14); }
+  .bl-act.drop { right:0; width:58%; justify-content:flex-end;   padding-right:16px; color:var(--bad);  background:rgba(255,107,107,.14); }
+  .bl-row.armtop  .bl-act.top  { background:rgba(62,207,142,.32); }
+  .bl-row.armdrop .bl-act.drop { background:rgba(255,107,107,.32); }
+  .bl { position:relative; z-index:2; display:flex; gap:10px; align-items:flex-start; padding:11px 13px;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    touch-action:pan-y; transition:transform .18s ease; will-change:transform; cursor:grab; }
+  .bl:active { cursor:grabbing; }
+  .bl .bltag { flex:none; font:10px/1 var(--mono); font-weight:700; text-transform:uppercase; letter-spacing:.4px;
+    padding:4px 8px; border-radius:8px; white-space:nowrap; margin-top:1px; }
+  .bl .bltag.wait { color:var(--bad); background:rgba(255,107,107,.14); }
+  .bl .bltag.prog { color:var(--warn); background:rgba(240,180,41,.14); }
+  .bl .bltag.done { color:var(--good); background:rgba(62,207,142,.14); }
+  .bl .bltag.park { color:var(--dim); background:rgba(138,147,166,.14); }
+  .bl .blbody { min-width:0; flex:1; }
+  .bl .blask { font-weight:600; font-size:13.5px; overflow-wrap:anywhere; }
+  .bl .bldone { color:var(--good); font-size:12px; margin-top:4px; line-height:1.35; overflow-wrap:anywhere;
+    background:rgba(62,207,142,.10); border-left:2px solid rgba(62,207,142,.5); padding:3px 8px; border-radius:5px; }
+  .bl .blnote { color:var(--dim); font-size:12.5px; margin-top:3px; line-height:1.4; overflow-wrap:anywhere; }
+  .bl .blop { color:var(--dim); font:11px var(--mono); margin-top:4px; }
+
+  /* per-lane context gauge — the former "Context bloat" section, now FOLDED
+     into each lane card so a lane's status + its /1M window fill read together
+     in one list (unified-lanes redesign). The classes stay context-neutral
+     (.bar/.fill/.ctxpct/.ctxmeta) so the gauge renders inside .lane cards. */
+  .lanectx { margin-top:9px; }
+  .bar { height:7px; border-radius:999px; background:var(--panel-2); overflow:hidden; }
+  .bar .fill { height:100%; border-radius:999px; }
+  .bar .fill.green{background:var(--good)} .bar .fill.amber{background:var(--warn)} .bar .fill.red{background:var(--bad)}
+  .ctxpct { font:11px var(--mono); font-weight:700; }
+  .ctxpct.green{color:var(--good)} .ctxpct.amber{color:var(--warn)} .ctxpct.red{color:var(--bad)}
+  .ctxmeta { margin-top:6px; font:11px var(--mono); color:var(--dim); }
+  .ctxmeta .staler { color:var(--warn); }
+
+  /* token / auth */
+  .tok { display:flex; align-items:center; gap:9px; padding:10px 14px; margin-bottom:7px;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px; flex-wrap:wrap; }
+  .tok .tdot { width:9px; height:9px; border-radius:50%; flex:none; }
+  .tok .tdot.good{background:var(--good); box-shadow:0 0 7px var(--good)} .tok .tdot.bad{background:var(--bad); box-shadow:0 0 7px var(--bad)}
+  .tok .tsess { font:12.5px var(--mono); font-weight:600; overflow-wrap:anywhere; }
+  .tok .tbadge { font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.4px; padding:3px 8px; border-radius:8px; font-weight:700; }
+  .tok .tbadge.good{color:var(--good); background:rgba(62,207,142,.14)} .tok .tbadge.bad{color:var(--bad); background:rgba(255,107,107,.14)}
+  .tok .tacct { margin-left:auto; font:11px var(--mono); color:var(--dim); }
+  #tokenSummary b.good{color:var(--good)} #tokenSummary b.bad{color:var(--bad)}
+
+  .feednote { color:var(--dim); font-size:12.5px; padding: 2px 2px 0; }
+  .lane.coord { border-left:3px solid var(--accent); background: linear-gradient(90deg, rgba(91,140,255,.07), var(--panel) 42%); }
+  .state.coordrole { color: var(--accent); text-transform:none; font-weight:600; }
+  .act.coordidle { color: var(--dim); }
+  /* per-coordinator context readout (op#9088) — lives in the card's meta row */
+  .lane.coord .meta .cctx { font:11px var(--mono); font-weight:700; }
+  .lane.coord .meta .cctx.green{color:var(--good)} .lane.coord .meta .cctx.amber{color:var(--warn)} .lane.coord .meta .cctx.red{color:var(--bad)}
+
+  /* ── Calm Command refinements (fc-v38). Layered AFTER the base rules so they
+     override by source-order without touching any class the JS depends on.
+     Adds crafted depth: card shadows, status spines, refined header + chips,
+     SF-Pro headings with mono reserved for technical data. ── */
+  .pulse { background: linear-gradient(180deg, rgba(12,15,22,.94), rgba(9,11,16,.74));
+    backdrop-filter: saturate(140%) blur(14px); -webkit-backdrop-filter: saturate(140%) blur(14px);
+    padding: 15px 18px 14px; }
+  .pulse .brand { font-family: var(--sans); font-size: 14px; letter-spacing: -.01em; color: var(--dim); }
+  .pulse .brand .live { color: var(--good); }
+  .pulse .build { padding: 4px 9px; border-radius: 999px; background: var(--panel);
+    border: 1px solid var(--line); color: var(--faint); }
+  .pulse .big { font-family: var(--sans); font-size: 21px; font-weight: 800; letter-spacing: -.02em; }
+  .poolchip { border-radius: 999px; padding: 4px 9px; background: rgba(255,255,255,.04);
+    border: 1px solid var(--line); }
+  .poolchip.bad { background: rgba(251,113,133,.12); border-color: rgba(251,113,133,.3); }
+  .laneslink { font-family: var(--sans); font-weight: 700; box-shadow: var(--shadow); }
+  .sec-h h2 { font-family: var(--sans); letter-spacing: .14em; color: var(--faint); }
+  .sec-h.needs h2 { color: var(--warn); }
+  .chip { border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); }
+  /* cards: soft depth + a hairline-lit top edge (native "lit from above" feel) */
+  .need, .lane, .tok, .dep, .bl { box-shadow: var(--shadow); }
+  .need { border-radius: 14px; }
+  .lane { border-radius: 14px; border-left-width: 3px; border-left-color: rgba(55,211,154,.45); }
+  .lane .id { font-family: var(--sans); font-weight: 700; font-size: 14px; letter-spacing: -.01em; }
+  .lane .badge { border-radius: 8px; }
+  .st-dot.working { box-shadow: 0 0 8px var(--good); }
+  .need .who { font-family: var(--sans); font-weight: 700; font-size: 13.5px; }
+  .need .what { color: var(--dim); }
+  .bl .blask { font-family: var(--sans); }
+  .lane .meta .reset-btn { border-radius: 9px; }
+</style>
+</head>
+<body>
+<div id="ptr"><span class="spin">&darr;</span><span id="ptrTxt">Pull to refresh</span></div>
+<div class="wrap">
+
+  <div id="pulse" class="pulse">
+    <div class="brandrow">
+      <span class="brand">Fleet <span id="liveDot" class="live">● live</span></span>
+      <span id="build" class="build" title="build running on this device"></span>
+    </div>
+    <!-- Weekly Max-pool usage (op#9770) — its OWN full-width stacked row below the
+         brand line so the 3 pools read as a clean vertical list (no 2+1 wrap) and
+         each carries its pace advisory (op#12617), instead of being squeezed into
+         the brand row and shoving the build badge off-screen (op#12709 layout fix). -->
+    <div id="poolUsage" class="poolusage" title="Max weekly-pool usage + pace (op#9770/#12617)"></div>
+    <div class="headline"><span class="orb"></span><span id="pulseBig" class="big">Loading…</span></div>
+    <!-- Glance: the single most context-bloated worker lane (operator ask, op#10550
+         follow-up). Display-only, from the existing context_bloat payload; hidden
+         when there is no reading. Coordinators are NOT lanes (own cards) so they're
+         excluded, same as the per-card gauges. -->
+    <div id="topBloat" class="topbloat"></div>
+    <!-- Lane manager: primary nav — kept INSIDE the sticky pulse so it can never
+         scroll under the header and is always visible (op#12475). The status chips
+         (working/idle/flagged/offline) were removed per operator: noise up top. -->
+    <a class="laneslink" href="/lanes">🔑 Lane manager →</a>
+  </div>
+
+  <section>
+    <div class="sec-h needs"><h2>Needs you</h2><span id="needsCount" class="count"></span></div>
+    <div id="needs"></div>
+  </section>
+
+  <!-- Coordinators MOVED above "Your asks" (fc-v40) — hub/console/cai come right
+       after "Needs you". Collapsed by default (coordExpanded=false in fleet.js):
+       just the header + "hub · console · cai" count until the operator taps it. -->
+  <section>
+    <div class="sec-h" id="coordHead" style="cursor:pointer"><h2><span id="coordChevron">▸</span> Coordinators</h2><span class="count">hub · console · cai</span></div>
+    <div id="coordinators"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Your asks</h2><span id="backlogCount" class="count"></span></div>
+    <div id="backlog"><div class="empty">Loading…</div></div>
+  </section>
+
+  <!-- "Context bloat" section removed (unified-lanes redesign): each worker
+       lane's /1M window gauge now renders INSIDE its own lane card below, so
+       status + context read together in one list. -->
+
+  <section id="handlingSec" style="display:none">
+    <div class="sec-h"><h2>Fleet is handling</h2><span class="count">hub owns these · tap to peek</span><span id="handlingCount" class="count"></span></div>
+    <div id="handling"></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Lanes</h2><span class="count">working first · /1M window fill</span></div>
+    <!-- Lane account-switching (per-lane + bulk switch-group / switch-ALL) lives
+         ONLY on the /lanes Lane Manager now (op#12709 dashboard declutter): it
+         kept the switch-ALL mis-tap vector off the main attention view. -->
+    <div id="lanes"><div class="empty">Loading…</div></div>
+  </section>
+
+  <!-- "Lane worklists" (#laneQueues) removed per operator (fc-v40): redundant with
+       the Lanes list above. The /api/fleet payload still carries `queue`; the
+       dashboard just no longer renders it. -->
+
+  <!-- Deploys + Feed sections removed per operator (op#9888): low-signal at the
+       bottom; deploy_status + raw bus live on the hub, not this attention-first view. -->
+
+</div>
+<script>localStorage.setItem("console_token","render");var __D={"pulse": {"working": 0, "idle": 15, "offline": 1, "flagged": 1, "needs_you": 0}, "needs_you": [], "backlog": [{"id": 48, "ask": "Anthropic API credit top-up \u2014 account behind key ...SjtAAA is $0", "status": "parked", "op_ref": "op#11111 thread", "note": "Operator deferred (personal budget). NO LONGER a hard blocker for internal/pitch runs \u2014 plan is to route generation in-lane on Max ($0). Commercial key still needed ONLY to bring the PUBLIC self-serve worker back up; revisit when budget allows.", "sort_order": -30, "done_when": null, "updated_age_s": 553008}, {"id": 61, "ask": "Stand up cc-hadramawt \u2014 dedicated HK client agent + Telegram channel (concierge edits on Max; graduates to self-edit on commercial key)", "status": "in_progress", "op_ref": "op#11155", "note": "Operator approved dedicated agent. Interim concierge (free on Max). Need from operator: Afifah TG + billing terms confirm (S$99+S$49/mo?). Nazim scaffolding agent/bot/channel.", "sort_order": -28, "done_when": null, "updated_age_s": 549964}, {"id": 62, "ask": "HK recurring-billing dogfood \u2014 full SaaS pipeline (Stripe/HitPay auto-collect, recurring, grace-suspend, monthly/annual)", "status": "in_progress", "op_ref": "op#11153", "note": "cc-finance DRIVING (head of revenue); cc-storefront owns pipeline code; Nazim coordinating. BUILD freely; actual CHARGING = operator arms. HK=first paying anchor -> funds commercial key.", "sort_order": -27, "done_when": null, "updated_age_s": 549964}, {"id": 60, "ask": "Rewire shipforge rebuild generation to run in-lane on Max (no API credit) for internal/pitch runs", "status": "in_progress", "op_ref": "op#11123", "note": "cc-shipforge scoping now (#16611). Unblocks HK previews free. Public self-serve stays on commercial-key path.", "sort_order": -26, "done_when": null, "updated_age_s": 553008}, {"id": 49, "ask": "Shipforge \u2192 Hadramawt Kitchen: beautiful ecom site + chat-to-edit + full browser/TG flow", "status": "in_progress", "op_ref": "op#11046-11111", "note": "Capture done (36 real imgs, brief staged, A/B both passes + food-hover hero). BLOCKED on credit top-up above. chat-to-edit not yet tested. Runs instant credit restored.", "sort_order": -25, "done_when": null, "updated_age_s": 555209}, {"id": 50, "ask": "Idle-lane boot-down + SRE/singleton auto-recycle (token-burn conservation)", "status": "in_progress", "op_ref": "op#11049/11096", "note": "cai BLESSED CAI-RESP-768 today; SRE arming observe-first (Part3 done, Part1+2 observe-only next). Hub excluded until cron freshness proven.", "sort_order": -24, "done_when": null, "updated_age_s": 555209}, {"id": 51, "ask": "Fleet console: live operator-backlog + blocked/waiting-on-operator visibility", "status": "in_progress", "op_ref": "op#11113/11115", "note": "Nazim owns. Reconstructed backlog populated (this row set). Next: wire to console UI so nothing is handled-but-invisible.", "sort_order": -23, "done_when": null, "updated_age_s": 555209}, {"id": 52, "ask": "Fleet console: context % not visible for some lanes", "status": "in_progress", "op_ref": "op#11 (08-07)", "note": "Hub fixed (5fce944). Active workers (storefront/irsyad/finance/etc) DO show correctly \u2014 earlier 'can't measure' was an id-mapping bug in an ad-hoc query, NOT a broken writer (verified). Residual: ~6 lanes genuinely unswept (cosem-adcda, ihsanos-qa, cosem-video, irsyad-b + stale exams/platform/scholar) \u2014 SRE owns writer-coverage + offline-reap.", "sort_order": -22, "done_when": null, "updated_age_s": 552339}, {"id": 53, "ask": "Irsyad import: \"Student Matters\" category not appearing + edit-category-after-commit + extract categorized data", "status": "parked", "op_ref": "op# (08-06/07)", "note": "Client-reported as late as 08-07. RECONSTRUCTED from op msgs \u2014 confirming current status with irsyad lane.", "sort_order": -15, "done_when": null, "updated_age_s": 555209}, {"id": 54, "ask": "Irsyad import: auto-differentiate Stripe vs bank statements (one upload, pattern-learn)", "status": "parked", "op_ref": "op# (08-06)", "note": "Discuss-thread; build not confirmed. Confirming with irsyad lane.", "sort_order": -14, "done_when": null, "updated_age_s": 555209}, {"id": 55, "ask": "Irsyad: GIRO/eGIRO/DDA + parent payment portal (partial payments, OCBC)", "status": "parked", "op_ref": "op# (08-05)", "note": "Scoped, not built; client had not set up GIRO yet.", "sort_order": -13, "done_when": null, "updated_age_s": 555209}, {"id": 56, "ask": "Bank-import save-and-exit persistence bug: unticked/grey rows revert on return", "status": "parked", "op_ref": "op# (08-06)", "note": "Reported defect. Confirming fix status with irsyad lane.", "sort_order": -12, "done_when": null, "updated_age_s": 555209}, {"id": 57, "ask": "DMS captured 828 vs manual count 832 \u2014 investigate 4-row gap", "status": "parked", "op_ref": "op# (08-06 23:38)", "note": "Raised late, unresolved in-thread. Confirming with irsyad lane.", "sort_order": -11, "done_when": null, "updated_age_s": 555209}, {"id": 58, "ask": "VPS hub git-tree reconciliation (deployed != committed sha)", "status": "parked", "op_ref": "SRE #16598 / CAI #16596", "note": "Nazim owns. Live hub on fable/substrate-safe-fixes + 14 tracked/13 untracked mods. Non-urgent; reconcile in hub-quiet window onto clean main sha.", "sort_order": 5, "done_when": null, "updated_age_s": 555209}, {"id": 59, "ask": "Confirm status of other-repo asks (Qwen A/B cost, Qwen SFT pipeline, cosem video, cosem retest PDF, Ray/CAAI verify-console, fr.irsyad WooCommerce import, dedicated irsyad autonomy, gauntlet/graph technique eval)", "status": "parked", "op_ref": "op# (08-04/06)", "note": "UNCLEAR from orch repo \u2014 poll owning lanes to confirm done/open.", "sort_order": 10, "done_when": null, "updated_age_s": 555209}], "coordinators": [{"agent_id": "cai", "short": "cai", "role_label": "governance / strategic node", "tmux_session": "cai", "activity": "Corrected (CAI-884): receipt = PLAIN donation acknowledgment not IRAS cert. CAI-874/875 conditions unchanged + ADDED binding no-deception rule: template must NOT claim tax-deductibility/IRAS (verify template + operator wording). Retention = charity own records. My IRAS framing corrected", "activity_age_s": 24644, "ctx_tokens": 579721, "ctx_age_s": 2176, "auth_fp": "68142948c003", "auth_account": null, "host": "Mini", "last_seen_s": 24644, "peekable": true, "ctx_pct": 58, "ctx_level": "green"}, {"agent_id": "cc-finance", "short": "Finance", "role_label": "Head of Revenue", "tmux_session": "finance", "activity": "HK arm row LIVE + finance-verified at source (1 row, da579290 only, envelope 7,259,259 formula, consumed 0, is_active, F1 live). Spot-check welcome; C6 flip pending Nazim. Editor still dark.", "activity_age_s": 235198, "ctx_tokens": 227562, "ctx_age_s": 152611, "auth_fp": "68142948c003", "auth_account": "musa", "host": "Sheikhs-Mini", "last_seen_s": 235198, "peekable": true, "ctx_pct": 23, "ctx_level": "green"}, {"agent_id": "cc-fleet-health", "short": "SRE", "role_label": "fleet reliability / health", "tmux_session": "fleet-health", "activity": "MILESTONE: fc-v45 batch rebased+verified+landed, deploy_console gates 1-3 GREEN, cc-quality GATE-4 routed (20730). Ship on its PASS + I prove set-pointer intact. ETA: minutes.", "activity_age_s": 1706, "ctx_tokens": 514620, "ctx_age_s": 1691, "auth_fp": "68142948c003", "auth_account": null, "host": "Mini", "last_seen_s": 1706, "peekable": true, "ctx_pct": 51, "ctx_level": "green"}, {"agent_id": "cc-orchestrator", "short": "Hub", "role_label": "Orchestrates the fleet", "tmux_session": "orch", "activity": "DELIBERATE HOLD on #299 \u2014 client changed export format (DMS layout); rework redirected (20716); #298 closed; client not blocked", "activity_age_s": 7187, "ctx_tokens": 851158, "ctx_age_s": 658, "auth_fp": "68142948c003", "auth_account": null, "host": "wingmen-core", "last_seen_s": 7187, "peekable": true, "ctx_pct": 85, "ctx_level": "red"}, {"agent_id": "cc-quality", "short": "Quality", "role_label": "Head of Quality (on-demand)", "tmux_session": "quality", "activity": "fc-v45 GATE-4 \u2014 PASS (set-pointer preserved through rebase; deploy unblocked)", "activity_age_s": 84, "ctx_tokens": 371782, "ctx_age_s": 166, "auth_fp": null, "auth_account": null, "host": "Mini", "last_seen_s": 84, "peekable": true, "ctx_pct": 37, "ctx_level": "green"}, {"agent_id": "orch-console", "short": "Nazim", "role_label": "CTO console / 2nd coordinator", "tmux_session": "nazim", "activity": "AGREE rebase-onto-c463cf0 + dont recycle \u2014 but cc-quality reviews the REBASED hash + POST-DEPLOY prove set-pointer NOT reverted", "activity_age_s": 2002, "ctx_tokens": 244096, "ctx_age_s": 291, "auth_fp": "68142948c003", "auth_account": null, "host": "Sheikhs-Mini", "last_seen_s": 333, "peekable": true, "ctx_pct": 24, "ctx_level": "green"}], "lanes": [{"agent_id": "cc-scholar-1", "base_agent_id": "cc-scholar", "display_name": "CC Scholar Engineer", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ai-scholar", "tmux_session": null, "auth_account": "musa", "auth_fp": "68142948c003", "host": "Mac-Studio", "heartbeat_age_s": 295, "desired_state": "up", "lane": "scholar", "activity": "[INTERRUPTED] Session interrupted: ai-scholar (201790s) \u2014 2026-08-12 16:52 UTC", "activity_age_s": 134715, "live": {"running": false}, "bucket": "offline", "flagged": true}, {"agent_id": "cc-caai-1", "base_agent_id": "cc-caai", "display_name": "cc-caai \u2014 AI Course-Administrator scheduling agent (SME: Syed/Ray)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=caai-lane", "tmux_session": "caai", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 21, "desired_state": "up", "lane": "caai", "activity": "Ray-validation loop RUNNING on full 1-17 \u2014 sent him the main link, SME-clean", "activity_age_s": 53228, "live": {"running": true, "state": "idle", "activity": "\u276f\u00a0[wake] new inbox item \u2014 read your agent_messages inbox and act"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-cosem-adcda-1", "base_agent_id": "cc-cosem-adcda", "display_name": "CC COSEM-ADCDA Engineer", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=cosem-adcda-hotfix", "tmux_session": "cosem-adcda", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 69, "desired_state": "up", "lane": "cosem-adcda", "activity": "CAI-713 status: operator DEFERRED migration (CAI-814) -> plan ON HOLD, nothing executes. True-footprint disclosure facts ready for the honest DPA.", "activity_age_s": 300905, "live": {"running": true, "state": "idle", "activity": "Crunched for 1m 50s"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-cosem-exams-1", "base_agent_id": "cc-cosem-exams", "display_name": "cc-cosem-exams \u2014 Exams module dev agent (SME: Hariz)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=cosem-exams-lane", "tmux_session": "cosem-exams", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 258, "desired_state": "up", "lane": "cosem-exams", "activity": "CC: /scdf flows are not my lane \u2014 I own exams on the Supabase platform (demo data verified ready); asked adcda which app the demo is on", "activity_age_s": 304207, "live": {"running": true, "state": "idle", "activity": "Brewed for 48s"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-cosem-platform-1", "base_agent_id": "cc-cosem-platform", "display_name": "cc-cosem-platform \u2014 cosem platform core + ADCDA port owner", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=cosem-port-lane", "tmux_session": "cosem-port", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 240, "desired_state": "up", "lane": "cosem-port", "activity": "DONE: ORBAT committed (5d22918) + pushed to origin/lane/port-b1-org-scoped-batches. Idling for op#11899 drawdown. Other workstreams intact-uncommitted (flagged).", "activity_age_s": 222750, "live": {"running": true, "state": "idle", "activity": "Crunched for 2m 17s"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-cosem-video-1", "base_agent_id": "cc-cosem-video", "display_name": "cosem video pipeline", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=cosem-video-pipeline", "tmux_session": "cosem-video", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 58, "desired_state": "up", "lane": "cosem-video", "activity": "Re: Director demo \u2014 NFPA videos OUT / Phase-2 (confirmed)", "activity_age_s": 304243, "live": {"running": true, "state": "idle", "activity": "\u203b recap: Goal: remove prior-batch instructors from the batch 18/19 course video. The in-tenant SAM2\u2192ProPainter erase pipeline is proven on 2"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-ihsanos-1", "base_agent_id": "cc-ihsanos", "display_name": "CC IhsanOPS Engineer", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-platform", "tmux_session": "ihsanos-platform", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 21, "desired_state": "up", "lane": "mirror", "activity": "Thanks for the reference_no confirm (matches mine) \u2014 but re-verified counterparty_raw = 5/3503 non-blank, NOT ~3000: your ~500 was the is_anonymous count, not cpraw-NULL. So cpraw is NOT the payer-name source. If the client picks parse-from-reference_no for received_from, yes please pull the distinct PayNow-token formats.", "activity_age_s": 6538, "live": {"running": true, "state": "idle", "activity": "Brewed for 33s"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-ihsanos-qa-1", "base_agent_id": "cc-ihsanos-qa", "display_name": "ihsanos QA (read-only)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-qa", "tmux_session": "ihsanos-qa", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 219, "desired_state": "up", "lane": "ihsanos-qa", "activity": null, "activity_age_s": null, "live": {"running": true, "state": "idle", "activity": "\u00a0Referenced file e2e/qa-class-report-sort-export.spec.ts"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-irsyad-1", "base_agent_id": "cc-irsyad", "display_name": "cc-irsyad \u2014 irsyad silo client agent (Gazzabyte/Elly direct)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad", "tmux_session": "irsyad", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 293, "desired_state": "down", "lane": "irsyad", "activity": "#12833 'don't forget pendings' \u2014 updated tracker (my verified slice) incl. tonight's NEW items, so your list is current", "activity_age_s": 744, "live": {"running": true, "state": "idle", "activity": "\u276f\u00a0Stand down for now, ping me if cc-ihsanos needs the token formats"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-irsyad-2", "base_agent_id": "cc-irsyad", "display_name": "cc-irsyad \u2014 irsyad silo client agent (Gazzabyte/Elly direct)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad.wt-coord", "tmux_session": "irsyad-coord", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 170, "desired_state": "up", "lane": "irsyad-coord", "activity": "#12833 'don't forget pendings' \u2014 updated tracker (my verified slice) incl. tonight's NEW items, so your list is current", "activity_age_s": 744, "live": {"running": true, "state": "idle", "activity": "Saut\u00e9ed for 1m 4s"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-irsyad-3", "base_agent_id": "cc-irsyad", "display_name": "cc-irsyad \u2014 irsyad silo client agent (Gazzabyte/Elly direct)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad.wt-prog2", "tmux_session": "irsyad-prog2", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 149, "desired_state": "up", "lane": "irsyad-prog2", "activity": "#12833 'don't forget pendings' \u2014 updated tracker (my verified slice) incl. tonight's NEW items, so your list is current", "activity_age_s": 744, "live": {"running": true, "state": "idle", "activity": "\u276f\u00a0stop the wakes, nothing in my lane"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-irsyad-4", "base_agent_id": "cc-irsyad", "display_name": "cc-irsyad \u2014 irsyad silo client agent (Gazzabyte/Elly direct)", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad.wt-prog1", "tmux_session": "irsyad-prog1", "auth_account": "musa", "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini", "heartbeat_age_s": 293, "desired_state": "up", "lane": "irsyad-prog1", "activity": "#12833 'don't forget pendings' \u2014 updated tracker (my verified slice) incl. tonight's NEW items, so your list is current", "activity_age_s": 744, "live": {"running": true, "state": "idle", "activity": "Brewed for 14s"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-irsyad-b-1", "base_agent_id": "cc-irsyad-b", "display_name": "irsyad perimeter \u2014 fr.irsyad WC import lane", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-irsyad.wt-prog1", "tmux_session": "irsyad-import", "auth_account": "musa", "auth_fp": "582043088eae", "host": "Sheikhs-Mini", "heartbeat_age_s": 95, "desired_state": null, "lane": null, "activity": "ONE shared email helper = mine (hub #20004 gave me CC/From). Your letter CONSUMES it: sendDonationDoc({kind,to,orgSettings,attachment,subject}) + org-settings donation_email_from/cc (JSONB). You build the letter PDF; I own From/CC/Resend send. Interface inside", "activity_age_s": 90563, "live": {"running": true, "state": "idle", "activity": "\u276f\u00a0[wake] new inbox item \u2014 read your agent_messages inbox and act"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-scholar-2", "base_agent_id": "cc-scholar", "display_name": "CC Scholar Engineer", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ai-scholar", "tmux_session": "scholar", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 263, "desired_state": "up", "lane": "scholar", "activity": "[INTERRUPTED] Session interrupted: ai-scholar (201790s) \u2014 2026-08-12 16:52 UTC", "activity_age_s": 134715, "live": {"running": true, "state": "idle", "activity": "Baked for 7m 38s"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-shipforge-1", "base_agent_id": "cc-shipforge", "display_name": "CC Shipforge Engineer", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=shipforge", "tmux_session": "shipforge", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 211, "desired_state": "up", "lane": "shipforge", "activity": "op#12143: shipforge is NOT on HK dogfood path (decision c \u2014 HK=storefront surface, my seam dormant/moot/no-blocker); live site+manual editing GO today; gaps = cai payment-arm (teed up not armed) + storefront order-arm", "activity_age_s": 140969, "live": {"running": true, "state": "idle", "activity": "Brewed for 2m 43s"}, "bucket": "idle", "flagged": false}, {"agent_id": "cc-storefront-1", "base_agent_id": "cc-storefront", "display_name": "CC Storefront Engineer", "status": "working", "current_task": "session-launch model=claude-opus-4-8 repo=ihsanos-storefront", "tmux_session": "storefront", "auth_account": "musa", "auth_fp": "68142948c003", "host": "Sheikhs-Mini", "heartbeat_age_s": 291, "desired_state": "up", "lane": "storefront", "activity": "RETRACTING my all-product ruling \u2014 wrong store (mixed fr.irsyad up with HK). cc-irsyad-b export is authoritative; donations ~S$411k stand.", "activity_age_s": 655312, "live": {"running": true, "state": "idle", "activity": "\u276f\u00a0continue with PR-4"}, "bucket": "idle", "flagged": false}], "deploys": [{"workstream": "ihsanos \u00b7 WP-C NETS/cheque #35 (money)", "repo": "ihsanos", "stage": "live", "detail": "NETS+Cheque POS tenders LIVE (main 14f5684, ihsanos.com+health 200, verified). Migration 071 decoupled/held on cai gate per drift finding.", "url": "https://ihsanos.com", "updated_age_s": 2403938, "updated_by": "orch-console"}, {"workstream": "cosem-tdu \u00b7 admin attendance", "repo": "cosem-tdu", "stage": "in_review", "detail": "Admin Attendance Records view PR #49 \u2014 perf-first, self-verified @390px; awaiting cc-reviewer DESIGN+PERF", "url": "https://github.com/sheikh-musa/cosem-tdu/pull/49", "updated_age_s": 4881879, "updated_by": "cc-cosem-2"}, {"workstream": "fleet-console \u00b7 Deploys panel", "repo": "orchestrator", "stage": "live", "detail": "Deploys tab live: /api/deploys + 3rd tab, mobile+desktop verified; under cc-reviewer design pass", "url": "http://100.123.243.38:8787/", "updated_age_s": 4895165, "updated_by": "cc-orchestrator"}, {"workstream": "ihsanos \u00b7 WP-D receipting #34", "repo": "ihsanos", "stage": "merged", "detail": "on main", "url": null, "updated_age_s": 4897320, "updated_by": "cc-orchestrator"}, {"workstream": "ihsanos \u00b7 FRS bug fixes #38", "repo": "ihsanos", "stage": "merged", "detail": "keluarga hydration+overflow fixed", "url": null, "updated_age_s": 4897320, "updated_by": "cc-orchestrator"}, {"workstream": "cosem-tdu \u00b7 staff flows", "repo": "cosem-tdu", "stage": "live", "detail": "self-attendance ihsan redesign deployed", "url": "https://tdu-tools-prod.web.app", "updated_age_s": 4897320, "updated_by": "cc-orchestrator"}, {"workstream": "mizan bot", "repo": "ai-scholar", "stage": "live", "detail": "level-button re-answer fix deployed", "url": null, "updated_age_s": 4897320, "updated_by": "cc-orchestrator"}, {"workstream": "fleet-console", "repo": "orchestrator", "stage": "live", "detail": "read-only viewer via Tailscale (tailnet-only)", "url": "http://sheikhs-mac-mini.tail623d72.ts.net:8787", "updated_age_s": 4897320, "updated_by": "cc-orchestrator"}, {"workstream": "cosem-adcda \u00b7 edit-OCR + photo-quality fix", "repo": "cosem-adcda", "stage": "in_review", "detail": "reconcile 0f290cf + length-sanity + higher photo caps \u2192 PR \u2192 cc-reviewer \u2192 functions deploy", "url": null, "updated_age_s": 4897320, "updated_by": "cc-orchestrator"}, {"workstream": "ihsanos \u00b7 WP-A keyword #33", "repo": "ihsanos", "stage": "merged", "detail": "on main", "url": null, "updated_age_s": 4897320, "updated_by": "cc-orchestrator"}], "context_bloat": [{"agent": "cc-caai", "sub_tag": null, "ctx_tokens": 550520, "window": 1000000, "pct": 55, "level": "green", "age_s": 2357, "auth_fp": "68142948c003", "host": "Sheikhs-Mini"}, {"agent": "cc-irsyad", "sub_tag": "irsyad-coord", "ctx_tokens": 553574, "window": 1000000, "pct": 55, "level": "green", "age_s": 2202, "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini"}, {"agent": "cc-irsyad", "sub_tag": "irsyad-prog1", "ctx_tokens": 537302, "window": 1000000, "pct": 54, "level": "green", "age_s": 775, "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini"}, {"agent": "cc-storefront", "sub_tag": null, "ctx_tokens": 529903, "window": 1000000, "pct": 53, "level": "green", "age_s": 465, "auth_fp": "68142948c003", "host": "Sheikhs-Mini"}, {"agent": "cc-irsyad", "sub_tag": "irsyad", "ctx_tokens": 450173, "window": 1000000, "pct": 45, "level": "green", "age_s": 720, "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini"}, {"agent": "cc-quality", "sub_tag": null, "ctx_tokens": 371782, "window": 1000000, "pct": 37, "level": "green", "age_s": 166, "auth_fp": null, "host": null}, {"agent": "cc-cosem-video", "sub_tag": null, "ctx_tokens": 343427, "window": 1000000, "pct": 34, "level": "green", "age_s": 152116, "auth_fp": "68142948c003", "host": "Sheikhs-Mini"}, {"agent": "cc-cosem-platform", "sub_tag": null, "ctx_tokens": 306073, "window": 1000000, "pct": 31, "level": "green", "age_s": 152599, "auth_fp": "68142948c003", "host": "Sheikhs-Mini"}, {"agent": "cc-cosem-adcda", "sub_tag": null, "ctx_tokens": 288414, "window": 1000000, "pct": 29, "level": "green", "age_s": 153040, "auth_fp": "68142948c003", "host": "Sheikhs-Mini"}, {"agent": "cc-cosem-exams", "sub_tag": null, "ctx_tokens": 244164, "window": 1000000, "pct": 24, "level": "green", "age_s": 153228, "auth_fp": "68142948c003", "host": "Sheikhs-Mini"}, {"agent": "cc-irsyad", "sub_tag": "irsyad-prog2", "ctx_tokens": 235778, "window": 1000000, "pct": 24, "level": "green", "age_s": 888, "auth_fp": "e1dfa48eec85", "host": "Sheikhs-Mini"}, {"agent": "cc-finance", "sub_tag": null, "ctx_tokens": 227562, "window": 1000000, "pct": 23, "level": "green", "age_s": 152611, "auth_fp": "68142948c003", "host": "Sheikhs-Mini"}, {"agent": "cc-scholar", "sub_tag": null, "ctx_tokens": 234825, "window": 1000000, "pct": 23, "level": "green", "age_s": 139288, "auth_fp": "68142948c003", "host": "Sheikhs-Mini"}], "pool_usage": [{"pool": "Musa", "pct_7d": "54", "pct_5h": "6", "resets_at": "2026-08-19 08:00:00+00:00", "status_7d": "allowed", "pace": "1.98", "projected_pct": "198", "runway_days": null, "updated_age_s": 1766}, {"pool": "musa2", "pct_7d": "14", "pct_5h": "0", "resets_at": "2026-08-18 21:00:00+00:00", "status_7d": "allowed", "pace": "0.414", "projected_pct": "41.4", "runway_days": null, "updated_age_s": 1758}, {"pool": "Syed", "pct_7d": "16", "pct_5h": "1", "resets_at": "2026-08-19 10:00:00+00:00", "status_7d": "allowed", "pace": "0.614", "projected_pct": "61.4", "runway_days": null, "updated_age_s": 1762}], "queue": [{"lane": "backlog", "title": "tarbiyah \u2014 Quran for Zahidah's boys", "detail": "Omar(10)+Anwar(8), parent-led. v1 on hifz-companion stack; v2 Minecraft memory-p\u2026", "priority_rank": 10, "status": "queued", "updated_age_s": 2456401, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "backlog", "title": "alderei \u2014 invoice-tracker PWA", "detail": "Nahar's ADCDA ask: SCDF invoice paid/outstanding visibility. UAE gov+financial -\u2026", "priority_rank": 20, "status": "queued", "updated_age_s": 2456401, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "backlog", "title": "shipforge <-> storefront wiring", "detail": "4-build integration sprint: seam is stubbed (diff DBs), chat-mgmt unbuilt, deplo\u2026", "priority_rank": 30, "status": "queued", "updated_age_s": 2456401, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "backlog", "title": "SushiTei \u2014 F&B full-suite vertical", "detail": "Gazzabyte's multi-outlet chain. roadmap drafted; forces the shipforge<->storefro\u2026", "priority_rank": 40, "status": "queued", "updated_age_s": 2456401, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "backlog", "title": "voice-journal -> life-graph", "detail": "Whisper transcription LIVE (Nazim-only). graph-write BLOCKED on personal DB cred\u2026", "priority_rank": 50, "status": "queued", "updated_age_s": 2456401, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "backlog", "title": "fleet Opus<->Sonnet flip lever", "detail": "scripts/fleet_model.sh proposed, not built. one-switch model flip (separate Max\u2026", "priority_rank": 60, "status": "queued", "updated_age_s": 2456401, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "backlog", "title": "UAE->SEA Shariah-compliant fintech rails", "detail": "north star. ihsan-native Gulf<->SEA rails; win on ERP/orchestration (ujrah not r\u2026", "priority_rank": 70, "status": "queued", "updated_age_s": 2456401, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-adcda", "title": "Permissions overhaul (granular CRUD RBAC)", "detail": "2 LIVE security gaps CLOSED+deployed prod (PR#146: SEV-1 admin-self-escalation +\u2026", "priority_rank": 18, "status": "queued", "updated_age_s": 916095, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-adcda", "title": "BAPT offline-queue fast-follow", "detail": "BAPT results-capture is LIVE (web.app/bapt, verified). Offline-queue = approved\u2026", "priority_rank": 20, "status": "queued", "updated_age_s": 1157137, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-video", "title": "v3 re-render: awaiting operator clip/music picks", "detail": "Review page delivered (adcda-v3-review.html); operator marks unusable clips + pi\u2026", "priority_rank": 10, "status": "active", "updated_age_s": 1157138, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-video", "title": "Visual editor \u2014 Option A (self-contained page)", "detail": "RATIFIED; building. Cut/reorder/swap/pick-music \u2192 Export EDL \u2192 lane renders. Shi\u2026", "priority_rank": 20, "status": "active", "updated_age_s": 1157138, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-video", "title": "Visual editor \u2014 Option B (in-tenant Cloud Run app)", "detail": "Full-tilt op#8889. Real Render button. HUB owns infra seq + IAM grants (cloudbui\u2026", "priority_rank": 25, "status": "active", "updated_age_s": 1157138, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "cosem-video", "title": "Face-safety QA gate before ADCDA delivery", "detail": "HARD gate: human eyes on face-safety (no prior-cohort identifiable faces) before\u2026", "priority_rank": 30, "status": "queued", "updated_age_s": 1157138, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "finance", "title": "\ud83d\udcb0 SHIP: recurring-billing rail (Shipforge + Storefront long pole)", "detail": "GREENLIT by operator (op#9250 proceed). Rails-agnostic payment-adapter layer + H\u2026", "priority_rank": 1, "status": "queued", "updated_age_s": 909286, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "075/077 TG identity-bridge apply+wiring", "detail": " [2026-08-03 stale-review: KEEP (CONFLICT, fail-closed). cc-ihsanos: wiring LIVE\u2026", "priority_rank": 5, "status": "queued", "updated_age_s": 915884, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "fix ui_events telemetry CORS (dead client-side analytics, tabung+storefront)", "detail": " [2026-08-03 stale-review: KEEP (verify-then-likely-close, low-pri non-user-faci\u2026", "priority_rank": 45, "status": "queued", "updated_age_s": 915884, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "durable atomic confirm audit \u2014 single-txn SECDEF RPC (POS-RECORD-ATOMIC-1 hardening)", "detail": "cai CAI-490/495: the confirm flip+audit atomicity is currently COMPENSATION (rev\u2026", "priority_rank": 30, "status": "queued", "updated_age_s": 2124223, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "Audit chain durable fix: per-org advisory lock + tip-read+insert RPC txn for writeAuditLog + writeAuditLogBatch (CAI-528 owed)", "detail": "CAI-528 (#10853/#10857): the audit_log hash chain is per-org and has NO unique i\u2026", "priority_rank": 40, "status": "queued", "updated_age_s": 1823507, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "ihsanos", "title": "Fix check-hydration-safety false-positive: reads inside nested function bodies (event handlers) flagged as render-path", "detail": "check-hydration-safety.mjs (merged to main @15c41eb) FALSE-POSITIVES on browser\u2026", "priority_rank": 45, "status": "queued", "updated_age_s": 1748463, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "irsyad", "title": "Tabung: split-banking \u2014 track notes vs coins banked separately", "detail": " [2026-08-03 stale-review: KEEP, re-homed ihsanos->irsyad. Tabung split-banking\u2026", "priority_rank": 100, "status": "queued", "updated_age_s": 909010, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "irsyad", "title": "Clear the irsyad backlog \u2014 full tilt", "detail": "Displacement-guard: DONE+live. Tin-edit relax (mig134): LANDED \u2014 cai granted (CA\u2026", "priority_rank": 2, "status": "queued", "updated_age_s": 919624, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "irsyad", "title": "CAI-669 HMAC-provenance (PR #215) \u2014 awaiting cai grant", "detail": "Prover PASS (mutation-tested). Routed to cai for the \u00a76.6 grant. Defense-in-dept\u2026", "priority_rank": 15, "status": "blocked", "updated_age_s": 1157137, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "irsyad", "title": "\ud83d\udcb0 SHIP: irsyad client-facing SUPPORT agent (beyond-DMS upsell)", "detail": "Operator GO. Client-facing support agent for irsyad end-users (augments Shuq+Wan\u2026", "priority_rank": 2, "status": "blocked", "updated_age_s": 919624, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "Substrate-as-product roadmap (for cai ruling)", "detail": "Co-develop ONE consolidated proposal: monetizable verticals + reusable pipeline\u2026", "priority_rank": 50, "status": "queued", "updated_age_s": 916175, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "orchestrator", "title": "model partner->client->silo in the substrate + load into boot context (stop mis-attributing Gazzabyte/irsyad)", "detail": "Operator (op#5582, frustrated \u2014 repeated multiple times) corrected: Gazzabyte=PA\u2026", "priority_rank": 20, "status": "queued", "updated_age_s": 916175, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "shipforge", "title": "\ud83d\udcb0 SHIP: un-stub Shipforge money path (cai-gated)", "detail": "From cc-finance ship-list (operator-approved pricing). Sequenced by Nazim; money\u2026", "priority_rank": 1, "status": "blocked", "updated_age_s": 919624, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "shipforge", "title": "\ud83d\udcb0 SHIP: Shipforge prod onboarding + watermark gate + paid Vercel", "detail": "From cc-finance ship-list (operator-approved pricing). Sequenced by Nazim; money\u2026", "priority_rank": 1, "status": "blocked", "updated_age_s": 919624, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "shipforge", "title": "Shipforge prod convergence - declare canonical checkout + redeploy from it", "detail": "Prod (wingmen.dev) is a hand-deploy from OLD centerpiece-live; #40 fix + new bac\u2026", "priority_rank": 1, "status": "blocked", "updated_age_s": 919624, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "storefront", "title": "\ud83d\udcb0 SHIP: Storefront flat-SaaS ujrah billing (food merchants)", "detail": "From cc-finance ship-list (operator-approved pricing). Sequenced by Nazim; money\u2026", "priority_rank": 1, "status": "queued", "updated_age_s": 919624, "elapsed_min": null, "sla_minutes": null, "over_sla": false}, {"lane": "storefront", "title": "\ud83d\udcb0 B1: storefront entitlement primitive + scoped check/place surface + transactional charge+grant (shipforge seam)", "detail": "CAI-RESP-743 unblock (boundary CAI-RESP-423=Option B). Money-writer side of ship\u2026", "priority_rank": 1, "status": "active", "updated_age_s": 739212, "elapsed_min": null, "sla_minutes": null, "over_sla": false}]};var __V={"version": "fc-v45", "sha": "render"};window.fetch=function(u,o){u=String(u);var d=u.indexOf("/api/version")>=0?__V:(u.indexOf("/api/backlog")>=0?(__D.backlog||[]):__D);return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(d);},text:function(){return Promise.resolve(JSON.stringify(d));}});};if(window.EventSource){window.EventSource=function(){return{addEventListener:function(){},close:function(){}};};}</script><script src="file:///Users/sheikhmusa/wingmen/orchestrator/nervous_system/console/static/fleet.js"></script>
+<script>
+  (function () {
+    if (!('serviceWorker' in navigator)) return;
+    // ONE-SHOT reload when a new SW takes control, so a fresh deploy lands in a
+    // SINGLE reopen (kills the iOS 2-launch update lag). Guarded so it can NEVER
+    // infinite-loop (the exact failure the sw.js header warns about):
+    //   - the guard is in sessionStorage, which SURVIVES the reload — an
+    //     in-memory bool (the old code) resets on the new page and can re-fire;
+    //   - we only reload on a real UPDATE (a controller already existed), never
+    //     on the first-install claim (which would reload every first visit).
+    var hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (!hadController) return;                                // first install, not an update
+      if (sessionStorage.getItem('fleet_sw_reloaded')) return;  // already reloaded this session
+      sessionStorage.setItem('fleet_sw_reloaded', '1');
+      window.location.reload();
+    });
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function (reg) {
+      if (!reg) return;
+      // ACTIVELY poll for a new SW so updates LAND on their own — without this,
+      // iOS Safari won't re-check the SW while the PWA is open, so a fresh deploy
+      // gets stuck ("fc-vNN -> fc-vMM" badge) until the operator DELETES + reopens
+      // the app. That manual-delete-every-update is the bug this fixes (operator
+      // 2026-08-13). update() -> new sw.js installs -> skipWaiting -> activate ->
+      // clients.claim -> controllerchange (handler above) -> one-shot reload.
+      var checkUpdate = function () { try { reg.update(); } catch (e) {} };
+      setInterval(checkUpdate, 60000);                                   // periodic while open
+      document.addEventListener('visibilitychange', function () {        // on foreground (iOS resume)
+        if (!document.hidden) checkUpdate();
+      });
+      checkUpdate();                                                     // and immediately on load
+    }).catch(function () {});
+  })();
+</script>
+</body>
+</html>

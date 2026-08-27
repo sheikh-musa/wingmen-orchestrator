@@ -123,6 +123,21 @@ set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
 # explicit named var.
 ( cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.lane_db_residency_guard --repo-dir "$CALLER_DIR" ) || true
 
+# CAI-RESP-1225 L2: fail-loud ENFORCING assert (extends the 1308 guard above). A lane/auditor
+# must NEVER hold the live-WRITE client DSN. The write-DSN is never-present in the shared .env
+# (removed at the cutover, lives only in the console/cai restricted store). If it has REGRESSED
+# back into .env, the `. .env` above just exported it into THIS lane's env — the exact
+# broad-tier-body-holds-prod-write exposure CAI-1225 eliminates. So CRASH the boot rather than
+# run a lane/auditor with prod-write in-env. RO vars (GOUMLYNE_RO/IHSANOS_PROD_RO) are FINE and
+# NOT checked. Names the var + doctrine, NEVER the secret value. Testable:
+#   `GOUMLYNE_DATABASE_URL=x scripts/launch_dangerous_cc.sh ...` must exit 1 before launching claude.
+if [ -n "${GOUMLYNE_DATABASE_URL:-}" ] || [ -n "${IHSANOS_PROD_DATABASE_URL:-}" ]; then
+    echo -e "\033[31mSECURITY[CAI-1225 L2]: a live-WRITE client DSN (GOUMLYNE_DATABASE_URL and/or IHSANOS_PROD_DATABASE_URL) is present in this lane/auditor env — REFUSING to boot.\033[0m" >&2
+    echo "  Never-present invariant: the write-DSN must NOT reach a lane/auditor — it lives ONLY in the console/cai restricted store (~/.wingmen/private/write_dsn.env)." >&2
+    echo "  Likely cause: a regression re-added a write line to $ORCH_DIR/.env. Remove it (the RO vars GOUMLYNE_RO_DATABASE_URL / IHSANOS_PROD_RO_DATABASE_URL stay)." >&2
+    exit 1
+fi
+
 # Fleet lane-default OAuth account (token conservation, op#7985/7987): spread
 # every LANE boot off the operator's personal Max onto a donor account (e.g.
 # Syed) so his weekly pool is reserved for the console. Precedence — highest

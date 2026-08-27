@@ -1,0 +1,92 @@
+{
+  "captured_at_utc": "2026-08-18 08:05:02.307803Z",
+  "incident": "CAI-RESP-1117/1118",
+  "silo": "goumlyne goumlynecruxrlmzlntp",
+  "users": [
+    {
+      "id": "ea09416a-7b84-4682-a944-e6d50fee83e9",
+      "dom": "irsyad.edu.sg",
+      "last_sign_in_at": "2026-08-18 07:38:46.235616+00",
+      "updated_at": "2026-08-18 07:39:04.877087+00",
+      "recovery_sent_at": "2026-08-18 07:39:04.876675+00",
+      "provider": "email"
+    },
+    {
+      "id": "542bb3b8-3a61-446d-8551-46dd88045ad6",
+      "dom": "gazzabyte.sg",
+      "last_sign_in_at": "2026-08-18 07:44:49.638071+00",
+      "updated_at": "2026-08-18 07:44:49.687733+00",
+      "recovery_sent_at": "2026-08-18 07:39:04.25788+00",
+      "provider": "email"
+    },
+    {
+      "id": "6760aba1-ba09-42ca-9ca8-dbf930c7dc45",
+      "dom": "irsyad.edu.sg",
+      "last_sign_in_at": "2026-08-18 01:58:05.593961+00",
+      "updated_at": "2026-08-18 07:47:29.954831+00",
+      "recovery_sent_at": null,
+      "provider": "email"
+    }
+  ],
+  "sessions": [
+    {
+      "id": "c51c0c37-42a8-465d-9f88-fb1b0c0756e4",
+      "user_id": "542bb3b8-3a61-446d-8551-46dd88045ad6",
+      "created_at": "2026-08-18 07:44:49.640745+00",
+      "updated_at": "2026-08-18 07:44:49.640745+00",
+      "not_after": null
+    },
+    {
+      "id": "3a58290d-13fe-40b3-a984-c3f2a9614714",
+      "user_id": "ea09416a-7b84-4682-a944-e6d50fee83e9",
+      "created_at": "2026-08-18 07:38:46.235701+00",
+      "updated_at": "2026-08-18 07:38:46.235701+00",
+      "not_after": null
+    },
+    {
+      "id": "9046fcc8-5d3f-43bc-bd95-9f561e949b12",
+      "user_id": "ea09416a-7b84-4682-a944-e6d50fee83e9",
+      "created_at": "2026-07-29 08:54:05.352492+00",
+      "updated_at": "2026-08-18 07:29:01.150638+00",
+      "not_after": null
+    },
+    {
+      "id": "edae9af5-eb96-4a8a-86b0-b35dcd787783",
+      "user_id": "ea09416a-7b84-4682-a944-e6d50fee83e9",
+      "created_at": "2026-08-03 01:11:35.972368+00",
+      "updated_at": "2026-08-06 08:28:43.146123+00",
+      "not_after": null
+    }
+  ],
+  "refresh_tokens": [
+    {
+      "session_id": "c51c0c37-42a8-465d-9f88-fb1b0c0756e4",
+      "user_id": "542bb3b8-3a61-446d-8551-46dd88045ad6",
+      "created_at": "2026-08-18 07:44:49.66904+00",
+      "updated_at": "2026-08-18 07:44:49.66904+00",
+      "revoked": false
+    },
+    {
+      "session_id": "9046fcc8-5d3f-43bc-bd95-9f561e949b12",
+      "user_id": "ea09416a-7b84-4682-a944-e6d50fee83e9",
+      "created_at": "2026-08-18 06:09:47.426722+00",
+      "updated_at": "2026-08-18 07:29:01.131986+00",
+      "revoked": true
+    },
+    {
+      "session_id": "9046fcc8-5d3f-43bc-bd95-9f561e949b12",
+      "user_id": "ea09416a-7b84-4682-a944-e6d50fee83e9",
+      "created_at": "2026-08-18 07:29:01.140004+00",
+      "updated_at": "2026-08-18 07:29:01.140004+00",
+      "revoked": false
+    },
+    {
+      "session_id": "3a58290d-13fe-40b3-a984-c3f2a9614714",
+      "user_id": "ea09416a-7b84-4682-a944-e6d50fee83e9",
+      "created_at": "2026-08-18 07:38:46.236521+00",
+      "updated_at": "2026-08-18 07:38:46.236521+00",
+      "revoked": false
+    }
+  ],
+  "note": "auth.audit_log_entries EMPTY for the window; these timestamps are the only forensic record. Sessions 3a58290d (elly/ea09416a, 07:38:46) and c51c0c37 (sales/542bb3b8, 07:44:49) are AGENT-MINTED via admin generate_link(magiclink) per cc-irsyad #26559; neither was ever refreshed (updated_at == created_at). Session 9046fcc8 (ea09416a, created 2026-07-29, refreshed 07:29:01) is the GENUINE user's \u2014 must be PRESERVED."
+}

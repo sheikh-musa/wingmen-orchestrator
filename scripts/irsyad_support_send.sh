@@ -23,6 +23,9 @@ CHAT="${TG_CHAT_OVERRIDE:-$(grep '^IRSYAD_SUPPORT_GROUP_CHAT_ID=' "$ORCH_DIR/.en
 TEXT="${1:-$(cat)}"
 TAG="${2:-gazzabyte-irsyad}"   # scoped tag for the Gazzabyte/Irsyad-Support channel
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
+# Fail loud on the channel-first arg-swap footgun (op#16353).
+source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
+_send_arg_guard "$TEXT" || exit 2
 
 # Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
 # token/chat/text passed via env, never argv — keeps the token out of `ps`.

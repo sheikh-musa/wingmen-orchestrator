@@ -1,0 +1,7 @@
+On the access — I can answer that one now, and separately, because it's really a different question.
+
+We don't give anyone outside our own team the ability to change money controls directly. That's not about trusting you; it's that a control someone can switch off without a record stops being a control, and if anything ever went wrong on a collection, the fact that only we can change it is part of what protects you and your people.
+
+It also isn't needed. Whatever gets decided on the two-signature question, we apply it on our side as a proper recorded setting — you'd never have to touch anything to get it. So not having that access doesn't hold you up.
+
+The decision itself is still with Musa, and you'll have it today as I said.

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Your Asks — mockup</title>
+<style>
+  /* Palette lifted verbatim from nervous_system/console/static/fleet.html (fc-v54)
+     so this mockup reads as the live console. */
+  :root {
+    --bg: #090b10; --panel: #12161e; --panel-2: #171c26; --panel-3: #1d2430;
+    --line: rgba(255,255,255,.07); --line-2: rgba(255,255,255,.10);
+    --txt: #e8ebf1; --dim: #949cac; --faint: #5c6472;
+    --accent: #8aa6ff; --good: #37d39a; --good-dim: #1f9e77;
+    --warn: #f6c453; --bad: #fb7185;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    --shadow: 0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; }
+  body {
+    color: var(--txt); min-height: 100vh;
+    font: 15px/1.5 var(--sans); letter-spacing: -.01em; -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -6%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 46% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg, #0c0f16, var(--bg) 42%);
+    background-attachment: fixed;
+  }
+  /* phone frame — ~390px, iPhone-ish */
+  .phone { max-width: 390px; margin: 22px auto; border: 1px solid var(--line-2);
+    border-radius: 26px; overflow: hidden; box-shadow: 0 24px 60px -20px rgba(0,0,0,.8);
+    background: linear-gradient(180deg, #0c0f16, var(--bg) 42%); }
+
+  /* ── command strip (mirrors header.pulse) ── */
+  header.pulse { background: linear-gradient(180deg, rgba(16,21,31,.85), rgba(11,14,20,.35));
+    border-bottom: 1px solid var(--line); padding: 14px 16px 12px; }
+  .pulse .top { display: flex; align-items: center; gap: 10px; }
+  .pulse .orb { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .pulse.attn .orb { background: var(--warn); box-shadow: 0 0 0 4px rgba(240,180,41,.16), 0 0 12px var(--warn); animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe { 0%,100%{opacity:.6} 50%{opacity:1} }
+  .pulse .hl { font: 800 17px/1.1 var(--sans); letter-spacing: -.02em; color: #ffd77a; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pulse .live { flex: none; font: 10px/1 var(--mono); color: var(--good); white-space: nowrap; }
+  .pulse .sub { margin-top: 5px; font: 11px/1.3 var(--mono); color: var(--faint); }
+
+  section { padding: 0 16px; }
+  .sec-h { display: flex; align-items: center; gap: 8px; margin: 18px 2px 10px; }
+  .sec-h h2 { font: 800 11px/1 var(--sans); text-transform: uppercase; letter-spacing: .12em; color: var(--faint); margin: 0; }
+  .sec-h .count { font: 11px var(--mono); color: var(--dim); }
+  .sec-h .asbtn { margin-left: auto; font: 10px/1 var(--mono); color: var(--accent); padding: 7px 11px; border-radius: 999px;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.28); cursor: pointer; white-space: nowrap; }
+
+  /* ── ask card (borrows .bl / .dbody structure) ── */
+  .ask { position: relative; margin-bottom: 8px; display: flex; gap: 11px; align-items: flex-start;
+    padding: 12px 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 13px; box-shadow: var(--shadow); }
+  .ask.needs { border-color: rgba(251,113,133,.45); background: linear-gradient(180deg, rgba(251,113,133,.06), var(--panel) 60%); }
+  .ask .tag { flex: none; font: 10px/1 var(--mono); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+    padding: 5px 8px; border-radius: 8px; white-space: nowrap; margin-top: 1px; }
+  .tag.needs { color: var(--bad);   background: rgba(251,113,133,.16); }
+  .tag.prog  { color: var(--warn);  background: rgba(240,180,41,.14); }
+  .tag.pend  { color: var(--dim);   background: rgba(148,156,172,.14); }
+  .tag.rev   { color: var(--good);  background: rgba(55,211,154,.14); }
+  .tag.naz   { color: var(--accent);background: rgba(138,166,255,.14); }
+  .ask .body { min-width: 0; flex: 1; }
+  .ask .txt { font: 600 13.5px/1.35 var(--sans); overflow-wrap: anywhere; }
+  .ask .meta { margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font: 10.5px/1.3 var(--mono); color: var(--faint); }
+  .ask .meta .to { color: var(--dim); }
+  .ask .meta .to b { color: var(--accent); font-weight: 700; }
+  .ask .meta .dot { color: var(--faint); }
+  .ask .meta .age.warnage { color: var(--warn); }
+  .ask .why { margin-top: 6px; font: 12px/1.4 var(--sans); color: #ffb0bb; overflow-wrap: anywhere;
+    background: rgba(251,113,133,.08); border-left: 2px solid rgba(251,113,133,.5); padding: 4px 8px; border-radius: 5px; }
+  .ask .rev-cta { margin-top: 6px; font: 11px/1.4 var(--sans); color: var(--good);
+    background: rgba(55,211,154,.08); border-left: 2px solid rgba(55,211,154,.5); padding: 4px 8px; border-radius: 5px; }
+
+  .freshbar { display: flex; align-items: center; gap: 7px; padding: 2px 4px 0; margin-bottom: 12px;
+    font: 9.5px/1 var(--mono); color: var(--faint); }
+  .freshbar .g { width: 6px; height: 6px; border-radius: 50%; background: var(--good); box-shadow: 0 0 8px var(--good); }
+
+  /* ── collapsed fleet chatter (the demoted drain board) ── */
+  details.chatter { margin: 4px 0 26px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); overflow: hidden; }
+  details.chatter > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; align-items: center; gap: 9px;
+    font: 700 12px/1 var(--sans); color: var(--dim); }
+  details.chatter > summary::-webkit-details-marker { display: none; }
+  details.chatter > summary .chev { margin-left: auto; color: var(--faint); font: 11px var(--mono); transition: transform .15s; }
+  details.chatter[open] > summary .chev { transform: rotate(90deg); }
+  details.chatter > summary .cc { font: 10px/1 var(--mono); color: var(--faint); }
+  .chatter .inner { padding: 2px 12px 12px; border-top: 1px solid var(--line); }
+  .chatter .drow { display: flex; align-items: baseline; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); }
+  .chatter .drow:first-child { border-top: none; }
+  .chatter .drow .dn { font: 700 12px/1.15 var(--mono); color: var(--dim); }
+  .chatter .drow .dsub { flex: 1; min-width: 0; font: 11px/1.3 var(--sans); color: var(--faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chatter .drow .dc { flex: none; font: 10px/1 var(--mono); font-weight: 700; padding: 3px 7px; border-radius: 999px;
+    color: var(--dim); background: rgba(255,255,255,.05); }
+  .chatter .note { padding: 8px 2px 2px; font: 10px/1.4 var(--mono); color: var(--faint); }
+</style>
+</head>
+<body>
+<div class="phone">
+
+  <header class="pulse attn">
+    <div class="top">
+      <span class="orb"></span>
+      <span class="hl">1 needs your call</span>
+      <span class="live">● live · fc-v55</span>
+    </div>
+    <div class="sub">7 open asks · 1 needs you · 1 ready to review</div>
+  </header>
+
+  <section>
+    <div class="sec-h">
+      <h2>Your asks</h2><span class="count">7 open</span>
+      <button class="asbtn">+ ask</button>
+    </div>
+
+    <!-- NEEDS YOU — pinned to top: lane bounced a decision back, unanswered -->
+    <div class="ask needs">
+      <span class="tag needs">needs you</span>
+      <div class="body">
+        <div class="txt">Head-of-revenue: two decisions</div>
+        <div class="why">cc-finance replied: needs your call — dedicated finance-agent vs a console function, and which card/dashboard to pull real Claude Max billing from.</div>
+        <div class="meta">
+          <span class="to">→ <b>cc-finance</b></span><span class="dot">·</span>
+          <span class="age warnage">bounced back 12m ago</span><span class="dot">·</span>
+          <span>asked 3h ago</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- READY TO REVIEW — delegate stamped responded_at (NOT auto-done) -->
+    <div class="ask">
+      <span class="tag rev">review</span>
+      <div class="body">
+        <div class="txt">Fix the missing screenshots — Ray's images never come through</div>
+        <div class="rev-cta">cc-fleet-health reported done — swipe to confirm it actually landed.</div>
+        <div class="meta">
+          <span class="to">→ <b>cc-fleet-health</b></span><span class="dot">·</span>
+          <span class="age">replied 6m ago</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- IN PROGRESS — lane opened it (read_at set, responded_at null) -->
+    <div class="ask">
+      <span class="tag prog">in progress</span>
+      <div class="body">
+        <div class="txt">Stand up cc-hadramawt — dedicated HK client agent + Telegram surface</div>
+        <div class="meta">
+          <span class="to">→ <b>cc-ihsanos-1</b></span><span class="dot">·</span>
+          <span class="age">updated 9m ago</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="ask">
+      <span class="tag prog">in progress</span>
+      <div class="body">
+        <div class="txt">HK recurring-billing dogfood — full SaaS pipeline (Stripe/Hitpay)</div>
+        <div class="meta">
+          <span class="to">→ <b>cc-shipforge</b></span><span class="dot">·</span>
+          <span class="age warnage">updated 74m ago</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- PENDING — delegated, lane hasn't picked it up (read_at null) -->
+    <div class="ask">
+      <span class="tag pend">pending</span>
+      <div class="body">
+        <div class="txt">Rewire shipforge rebuild generation to run in-lane on Max (not metered API)</div>
+        <div class="meta">
+          <span class="to">→ <b>cc-shipforge</b></span><span class="dot">·</span>
+          <span class="age">sent 4m ago · unopened</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ON NAZIM — captured but not yet delegated (thread_id null) -->
+    <div class="ask">
+      <span class="tag naz">on me</span>
+      <div class="body">
+        <div class="txt">Idle-lane boot-down + SRE/singleton auto-recycle (token-burn)</div>
+        <div class="meta">
+          <span class="to">not yet delegated</span><span class="dot">·</span>
+          <span class="age warnage">asked 42m ago</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="ask">
+      <span class="tag prog">in progress</span>
+      <div class="body">
+        <div class="txt">Payment-agnostic rails, built for irsyad's store reusably</div>
+        <div class="meta">
+          <span class="to">→ <b>cc-irsyad</b></span><span class="dot">·</span>
+          <span class="age">updated 21m ago</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="freshbar">
+      <span class="g"></span>
+      <span>status derived live from the bus on every refresh · never cached · pull to refresh</span>
+    </div>
+  </section>
+
+  <section>
+    <!-- The old DRAIN BOARD, demoted to a collapsed affordance -->
+    <details class="chatter">
+      <summary>
+        <span>Fleet chatter</span>
+        <span class="cc">(raw bus · SRE view)</span>
+        <span class="chev">▸</span>
+      </summary>
+      <div class="inner">
+        <div class="drow"><span class="dn">cc-fleet-health</span><span class="dsub">op#13183 coordination + cross-host recycle</span><span class="dc">3 unread</span></div>
+        <div class="drow"><span class="dn">cc-quality</span><span class="dsub">GATE-4: fc-v54 pct-resilience review</span><span class="dc">2 unread</span></div>
+        <div class="drow"><span class="dn">cc-irsyad-prog1</span><span class="dsub">tin-edit relax mig134 — CI green</span><span class="dc">1 unread</span></div>
+        <div class="note">Per-body unhandled bus inbox (agent_messages · read_at IS NULL). Fleet-internal — drains as lanes catch up.</div>
+      </div>
+    </details>
+  </section>
+
+</div>
+</body>
+</html>

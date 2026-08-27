@@ -22,6 +22,7 @@ any error prints nothing and exits 0 so a hook fault never blocks a boot.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -50,6 +51,27 @@ def _body_role() -> str:
     return ""
 
 
+def _expected_token_fp() -> str | None:
+    """The fp the running console SHOULD carry, computed live from .env's
+    CLAUDE_CODE_OAUTH_TOKEN — never hardcoded. Matches the boot-string method
+    (`printf '%s' "$tok" | shasum | cut -c1-12`): SHA-1 of the token bytes, first
+    12 hex chars. Reading it from .env means a token rotation can't leave a stale
+    constant here that false-alarms every recycle (the 2026-08-07 07ed/6814 slip).
+    """
+    env_path = os.path.join(ORCH_DIR, ".env")
+    try:
+        with open(env_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
+                    tok = line.split("=", 1)[1].strip().strip("'\"")
+                    if tok:
+                        return hashlib.sha1(tok.encode()).hexdigest()[:12]
+    except OSError:
+        pass
+    return None
+
+
 def _newest_handoff() -> str | None:
     paths = glob.glob(_HANDOFF_GLOB)
     if not paths:
@@ -74,6 +96,12 @@ def main() -> int:
     if source not in RECONSTITUTE_SOURCES:
         return 0
 
+    exp_fp = _expected_token_fp()
+    fp_clause = (
+        f"expected fp from .env = {exp_fp}" if exp_fp
+        else "compare against .env's CLAUDE_CODE_OAUTH_TOKEN"
+    )
+
     handoff_path = _newest_handoff()
     if not handoff_path:
         # No handoff on disk — still nudge to reconcile inboxes rather than stay dark.
@@ -82,7 +110,7 @@ def main() -> int:
             "context. No nazim-handoff file was found under reports/. Before acting: "
             "reconcile BOTH `operator_log.unprocessed()` AND `agent_messages` "
             "(to_agent='orch-console'); verify your OWN running OAuth token off your "
-            "live process (musa fp = 68142948c003); reply to the operator ONLY via "
+            f"live process ({fp_clause}); reply to the operator ONLY via "
             "`scripts/nazim_send.sh`."
         )
     else:
@@ -101,7 +129,7 @@ def main() -> int:
             "the handoff below. Then, BEFORE your first outbound action:\n"
             "  1. Verify your OWN running OAuth token off your live process "
             "(walk your shell → claude pid → `ps eww` → CLAUDE_CODE_OAUTH_TOKEN → shasum; "
-            "musa fp = 68142948c003). Do not claim a token you have not fingerprinted.\n"
+            f"{fp_clause}). Do not claim a token you have not fingerprinted.\n"
             "  2. Reconcile BOTH `operator_log.unprocessed()` AND `agent_messages` "
             "(to_agent='orch-console'); answer, then stamp "
             "`operator_log.mark_handled_through(<id>)`.\n"

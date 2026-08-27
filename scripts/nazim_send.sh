@@ -29,6 +29,9 @@ CHAT="${TG_CHAT_OVERRIDE:-${MUSA_TELEGRAM_ID:-$(grep '^MUSA_TELEGRAM_ID=' "$ORCH
 
 TEXT="${1:-$(cat)}"
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
+# Fail loud on the channel-first arg-swap footgun (op#16353).
+source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
+_send_arg_guard "$TEXT" || exit 2
 
 # Scrub secret patterns (pg DSNs, bot tokens, API keys) BEFORE anything leaves
 # the process — the send AND the durable log both use the scrubbed text. Clean

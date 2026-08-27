@@ -1,0 +1,32 @@
+DONOR DATA IMPORT AUTHORISATION
+
+Controller: [IRSYAD — full registered organisation name] ("the Controller"), registered in Singapore [UEN __________].
+Processor: [GAZZABYTE — registered legal entity name, incl. Pte Ltd / suffix] ("the Processor"), operator of the IhsanOS platform ("the Platform").
+  [entity names: OPERATOR-pending. Platform "IhsanOS" = code-derived (F4), owner-confirm recommended.]
+
+1. Authorisation. The Controller, being the data controller of the donor records described in clause 3, authorises the Processor to import those records into the Platform and to process them solely on the Controller's behalf and documented instructions, for the Purpose in clause 2 only.
+
+2. Purpose (R8). The Processor shall process the records only to: (a) maintain the Controller's donor records and donation history; and (b) generate donation receipts. No other purpose is authorised.
+
+3. Dataset and categories (R2 + R4, bound to the named source per CAI-950). The records are the donor records in the file "Batch 1 - Collected Tabung 2020 to Feb 2026 - Done.xlsx" provided by the Controller, being 2,613 records covering collections from 2020 to February 2026. They comprise exactly the fields present in that source, per donor:
+   (a) an internal donor reference (the source "ID" field — not a national identifier);
+   (b) name;
+   (c) address;
+   (d) contact telephone number;
+   (e) email address (present for a subset of the records);
+   (f) collection type;
+   (g) collection date; and
+   (h) collection amount (imported as a historical figure, not a live transaction).
+   The source contains no NRIC/FIN, no date of birth, and no special-category personal data.
+
+4. Data residency (R7). The records are stored at rest and processed by application compute in Singapore (data at rest: Supabase, ap-southeast-1; application compute: Vercel, sin1). No transfer of the records outside Singapore is authorised under this authorisation; any later cross-border transfer requires the Controller's further written instruction and PDPA s.26 comparable-protection safeguards.
+   [VERIFIED SG-only: cai (CAI-954) + coord measured live x-vercel-id=sin1::sin1 on /api/health (function executes in Singapore); data-at-rest ap-southeast-1. TRUE + verified. v4 path-A (disclose US) DROPPED — the iad1 reading was a stale API/config proxy, not the running system. Pending ONLY: cai's platform completeness check (no cron/bg/other-project fn processes Irsyad PII off-sin1) + operator placeholders.]
+
+5. Retention & termination (R5). The Processor shall retain the records only as long as necessary for the Purpose. On termination of the Controller's use of the Platform, the Processor shall, at the Controller's election, return the records to the Controller and/or securely delete them, and confirm the deletion in writing.
+
+6. Processor obligations (R6 — inline; no separate DPA on record per F1). The Processor shall: process only on the Controller's documented instructions; keep the records confidential and protected by appropriate technical and organisational security measures; not engage any sub-processor without the Controller's authorisation; assist the Controller with data-subject access/correction requests and with breach notification; and make available the information necessary to demonstrate compliance with this authorisation.
+
+7. Lawful basis. The Controller confirms that this import and processing are covered by the Controller's donor personal-data policy and its lawful basis for processing under the Singapore Personal Data Protection Act (PDPA).
+
+Signed for and on behalf of the Controller (warranty of authority, R2):
+Name: __________________   Designation: __________________   Signature: __________________   Date: __________

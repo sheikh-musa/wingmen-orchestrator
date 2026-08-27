@@ -1,0 +1,3 @@
+On the Cisco and bank charges — confirmed, that's exactly the model that's built: you key in the Cisco charge and the bank charge, the system deducts both, and the net figure is what goes to the second approval. The deduction logic is in and enforced; the screen you'll key it into is what the team is building now.
+
+One thing worth checking against how you picture it: the deduction comes off the Certis recount — their figure after they recount the coins — so the net equals what actually lands in the bank. If you mean deducting from your own internal count instead, tell me, because that's a different model and I'd want to look at it properly rather than change it on the fly.

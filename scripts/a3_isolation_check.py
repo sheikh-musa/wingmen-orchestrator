@@ -142,8 +142,8 @@ def run_a3_check(*, ceayj_dsn: str, substrate_dsn: str,
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="CAI-985 A3 isolation check (runs under orch-console)")
-    ap.add_argument("--ceayj-dsn-env", default="IHSANOS_PROD_DATABASE_URL",
-                    help="env var holding the ceayj DSN (default IHSANOS_PROD_DATABASE_URL)")
+    ap.add_argument("--ceayj-dsn-env", default="IHSANOS_PROD_RO_DATABASE_URL",  # CAI-1225 RO-move: read-only auditor_ro (was write-DSN); a3 reads ceayj catalogue, writes only substrate
+                    help="env var holding the ceayj DSN (default IHSANOS_PROD_RO_DATABASE_URL)")
     ap.add_argument("--substrate-dsn-env", default="DATABASE_URL",
                     help="env var holding the substrate DSN (default DATABASE_URL)")
     ap.add_argument("--trusted", nargs="*", default=None,

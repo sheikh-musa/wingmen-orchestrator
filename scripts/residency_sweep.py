@@ -36,7 +36,7 @@ CLIENTS = [
         "alias": "irsyad",
         "org_id": "8de59182-eae0-422b-9d1c-0ff05094badb",
         "foreign": [
-            {"ref": "ceayjeamtmcyzzvqflus (ihsanos multi-tenant DB)", "dsn_env": "IHSANOS_PROD_DATABASE_URL"},
+            {"ref": "ceayjeamtmcyzzvqflus (ihsanos multi-tenant DB)", "dsn_env": "IHSANOS_PROD_RO_DATABASE_URL"},  # CAI-1225 RO-move: read-only auditor_ro (was write-DSN); sweep is SELECT-only
         ],
     },
 ]

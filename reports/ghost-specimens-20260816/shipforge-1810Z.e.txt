@@ -1,0 +1,25 @@
+
+  pattern as the existing [38;5;153mtg-issue[39m route) for the two new tasks orch-console
+  assigned (proving the app connects as [38;5;153mshipforge_app[39m; write-and-observe on the
+  audit/alert writers) — awaiting their go-ahead before building, given
+  tonight's heightened credential-handling scrutiny.
+  - Inbox and hk-editor log both clear as of this check.
+
+[38;5;246m✻[39m [38;5;246mBrewed for 24m 14s[39m
+
+[38;5;114m⏺[39m Background command "which lane_operator_reconcile.py 2>/dev/null; find /
+-maxdepth 6 -iname "lane_operator_reconcile.py" 2>/dev/null; find ~ -maxdepth 6
+-iname "*orch*venv*" -o -iname "*agent_bus*" 2>/dev/null | head -20" completed
+(exit code 0)
+
+[38;5;231m⏺[39m That background [38;5;153mfind[39m command was superseded — I located the orchestrator
+  scripts directory a different way earlier and already completed the work that
+  depended on it. Nothing further to act on from this notification. Holding, per
+  the fresh inbox/hk-editor check already done last turn (both clear).
+
+[38;5;246m✻[39m [38;5;246mWorked for 8s[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ [2mcheck for a reply on PR #26[0m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · ← for agents[39m

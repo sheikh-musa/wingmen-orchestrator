@@ -1,0 +1,164 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"></head><body>
+<title>Irsyad — Team Status</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<style>
+  /* ── Irsyad live team status — client-facing (Gazzabyte). SANITIZED:
+        no accounts, no infrastructure detail, no internal identifiers.
+        Self-contained snapshot; refreshed periodically by the Wingmen team. ── */
+  :root {
+    --ground: #f4f7f9; --surface: #ffffff; --surface-2: #f0f4f6;
+    --ink: #142433; --ink-soft: #4a5a6a; --ink-faint: #7a8a99;
+    --line: #dde5eb; --line-soft: #e8eef2;
+    --accent: #0e8f83; --active: #1f9d57; --resting: #8496a6;
+    --track: #e6edf1;
+    --shadow: 0 1px 2px rgba(20,36,51,.05), 0 8px 24px rgba(20,36,51,.05);
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0c1420; --surface: #131f2d; --surface-2: #172436;
+      --ink: #e9f0f6; --ink-soft: #a7b7c6; --ink-faint: #6f8091;
+      --line: #24354a; --line-soft: #1d2c3e;
+      --accent: #2fb6a8; --active: #35b56e; --resting: #7f92a4;
+      --track: #1e2d40;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.28);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0c1420; --surface: #131f2d; --surface-2: #172436;
+    --ink: #e9f0f6; --ink-soft: #a7b7c6; --ink-faint: #6f8091;
+    --line: #24354a; --line-soft: #1d2c3e;
+    --accent: #2fb6a8; --active: #35b56e; --resting: #7f92a4;
+    --track: #1e2d40;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.28);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: clamp(20px, 4vw, 44px) clamp(16px, 4vw, 36px) 56px; }
+
+  header { margin-bottom: 26px; }
+  .eyebrow { text-transform: uppercase; letter-spacing: .16em; font-size: 11.5px; font-weight: 600; color: var(--accent); margin: 0 0 10px; }
+  h1 { font-size: clamp(25px, 4vw, 34px); line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 8px; }
+  .lede { color: var(--ink-soft); font-size: 15.5px; max-width: 58ch; margin: 0; }
+  .meta {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px;
+    margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-soft);
+    font-size: 13px; color: var(--ink-faint);
+  }
+  .meta b { color: var(--ink-soft); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .legend { display: inline-flex; gap: 14px; flex-wrap: wrap; margin-left: auto; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.active { background: var(--active); box-shadow: 0 0 0 3px color-mix(in srgb, var(--active) 20%, transparent); }
+  .dot.resting { background: var(--resting); }
+
+  .section-label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: var(--ink-faint); margin: 4px 2px 12px; }
+
+  /* ── capacity summary ── */
+  .summary { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px 19px; margin-bottom: 28px; }
+  .summary-top { display: flex; align-items: baseline; gap: 10px; }
+  .summary-top .label { font-size: 13px; font-weight: 600; color: var(--ink-soft); }
+  .summary-top .figure { margin-left: auto; font-size: 27px; font-weight: 800; letter-spacing: -.02em; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .summary-top .figure .u { font-size: 14px; font-weight: 600; color: var(--ink-faint); margin-left: 2px; }
+  .bar { height: 9px; border-radius: 999px; background: var(--track); overflow: hidden; margin: 13px 0 12px; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #3ad1b0)); }
+  .summary-meta { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 12.5px; color: var(--ink-faint); }
+  .summary-meta b { color: var(--ink-soft); font-weight: 600; }
+
+  /* ── lane cards ── */
+  .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+  @media (max-width: 560px) { .lanes { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 15px 16px; }
+  .card-top { display: flex; align-items: center; gap: 10px; }
+  .card h3 { font-size: 15.5px; font-weight: 650; margin: 0; letter-spacing: -.01em; }
+  .card .state { margin-left: auto; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+  .card.active .state { color: var(--active); background: color-mix(in srgb, var(--active) 13%, transparent); }
+  .card.resting .state { color: var(--ink-faint); background: var(--surface-2); }
+  .card .role { margin: 7px 0 0; font-size: 12.5px; color: var(--ink-faint); }
+  .ctx { display: flex; align-items: center; gap: 9px; margin-top: 13px; }
+  .ctx .k { font-size: 11px; color: var(--ink-faint); flex: none; }
+  .ctx .meter { flex: 1; height: 5px; border-radius: 999px; background: var(--track); overflow: hidden; min-width: 40px; }
+  .ctx .meter > i { display: block; height: 100%; border-radius: 999px; background: color-mix(in srgb, var(--accent) 55%, var(--resting)); }
+  .ctx .v { font-size: 11px; color: var(--ink-soft); flex: none; font-variant-numeric: tabular-nums; }
+  .ctx .v.none { color: var(--ink-faint); }
+
+  footer { margin-top: 34px; padding-top: 16px; border-top: 1px solid var(--line-soft); font-size: 12px; color: var(--ink-faint); line-height: 1.6; }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Wingmen · Private to Gazzabyte</p>
+    <h1>Irsyad — Team Status</h1>
+    <p class="lede">A live view of the Irsyad build team: who is actively working right now, and how much of this week's capacity the project is using. Refreshed periodically.</p>
+    <div class="meta">
+      <span><b>2</b> active</span>
+      <span><b>3</b> resting</span>
+      <span><b>5</b> lanes</span>
+      <span class="legend">
+        <span><i class="dot active"></i> working now</span>
+        <span><i class="dot resting"></i> between tasks</span>
+      </span>
+    </div>
+  </header>
+
+  <div class="summary">
+    <div class="summary-top">
+      <span class="label">Weekly capacity used</span>
+      <span class="figure">20<span class="u">%</span></span>
+    </div>
+    <div class="bar"><i style="width:20%"></i></div>
+    <div class="summary-meta">
+      <span><b>Pace</b> steady — comfortably within budget</span>
+      <span><b>Projected</b> ~52% by week's end</span>
+      <span><b>Resets</b> in 4 days</span>
+    </div>
+  </div>
+
+  <div class="section-label">The team</div>
+  <div class="lanes">
+
+    <div class="card active">
+      <div class="card-top"><h3>Coordinator</h3><span class="state">Working now</span></div>
+      <p class="role">Plans and sequences the team's work</p>
+      <div class="ctx"><span class="k">Context</span><span class="meter"><i style="width:23%"></i></span><span class="v">fresh</span></div>
+    </div>
+
+    <div class="card active">
+      <div class="card-top"><h3>Builder 1</h3><span class="state">Working now</span></div>
+      <p class="role">Feature development</p>
+      <div class="ctx"><span class="k">Context</span><span class="meter"><i style="width:77%"></i></span><span class="v">77%</span></div>
+    </div>
+
+    <div class="card resting">
+      <div class="card-top"><h3>Lead</h3><span class="state">Between tasks</span></div>
+      <p class="role">Feature development &amp; review</p>
+      <div class="ctx"><span class="k">Context</span><span class="meter"><i style="width:78%"></i></span><span class="v">78%</span></div>
+    </div>
+
+    <div class="card resting">
+      <div class="card-top"><h3>Builder 2</h3><span class="state">Between tasks</span></div>
+      <p class="role">Feature development</p>
+      <div class="ctx"><span class="k">Context</span><span class="meter"><i style="width:36%"></i></span><span class="v">36%</span></div>
+    </div>
+
+    <div class="card resting">
+      <div class="card-top"><h3>Data import</h3><span class="state">Between tasks</span></div>
+      <p class="role">Donation &amp; records import pipeline</p>
+      <div class="ctx"><span class="k">Context</span><span class="meter"><i style="width:0%"></i></span><span class="v none">—</span></div>
+    </div>
+
+  </div>
+
+  <footer>
+    Snapshot as of <b>2026-Aug-14 13:30 UTC</b>. &ldquo;Context&rdquo; shows how full each session's working memory is; sessions refresh automatically as they fill.
+    Maintained by the Wingmen team — updated as work moves. Private to Gazzabyte.
+  </footer>
+</div>
+
+</body></html>

@@ -1,0 +1,28 @@
+
+[1m[36m╔══════════════════════════════════════════════════════════════════════╗[0m
+[1m[36m║   WINGMEN AGENT BOOT — ARCH-022 Layer 2 + Step 3 multi-repo         ║[0m
+[1m[36m╚══════════════════════════════════════════════════════════════════════╝[0m
+  [38;5;153mpeople/page.tsx:18[39m (list), [38;5;153mactions/persons.ts:251[39m + [38;5;153mpeople/[id]/page.tsx:27[39m
+  (byId). The one omitter, [38;5;153msearchPersonsAction:52[39m, defaults to masked
+  (fail-closed) [1mand[0m is dead code ([38;5;153mapi.ts:19[39m labels it "the dead wrapper"; 0 live
+  callers). No fix owed.
+  - [1mAdjacent flag → false alarm, corrected.[0m I initially flagged that the
+  donor/umum typeahead wrappers select plaintext [38;5;153memail[39m/[38;5;153mphone[39m, then
+  source-verified: those columns are DB-locked NULL on goumlyne
+  ([38;5;153mpersons_email_must_be_null[39m/[38;5;153mpersons_phone_must_be_null[39m enforced, 0/0 not-null
+  of 3064). Cleartext-to-cashier is structurally [1mimpossible[0m — a functional
+  no-op, not a Satr risk.
+
+  [1mBus:[0m reply #23504 → correction #23511 to cc-irsyad-coord; #23462 marked
+  read+responded (response_ref=23504); probe row cleaned up. Stale persons-PII
+  memory + index updated to reflect CAI-859 is shipped.
+
+  Back to idle — acting only on messages addressed specifically to cc-irsyad-4,
+  or instructions from orch-console / cc-irsyad-coord.
+
+[38;5;246m✻[39m [38;5;246mBrewed for 5m 25s[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ [2mstay idle[0m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · ← for agents[39m

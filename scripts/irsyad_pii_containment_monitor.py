@@ -27,7 +27,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 ORG_ID = "73339164-7c1f-40ba-a093-33f1f292dd4c"  # Madrasah Irsyad Zuhri Al-Islamiah (goumlyne)
-_GOUMLYNE_ENV = "GOUMLYNE_DATABASE_URL"
+_GOUMLYNE_ENV = "GOUMLYNE_RO_DATABASE_URL"  # CAI-1225 RO-move: read-only auditor_ro (was write-DSN); reads goumlyne, writes only a bus page
 
 # Table names, as module constants so the end-to-end "prove-fired" test can point the
 # detector at a synthetic stand-in (never the live silo). Production defaults unchanged.

@@ -1,0 +1,9 @@
+DONOR DATA IMPORT AUTHORISATION
+
+I, [full name], [role/office] of [Irsyad — full registered organisation name], confirm that [Irsyad] is the data controller of the donor records described below, and authorise IhsanOPS (operated by Gazzabyte) as our data processor to import approximately 2,600 historical donor records — name, contact details, and donation history — into the IhsanOPS platform on our behalf.
+
+Purpose: to maintain our donor records and donation history, and to issue receipts, within IhsanOPS.
+
+I confirm that this import is covered by [Irsyad]'s existing donor personal-data policy and our lawful basis for processing under the Singapore Personal Data Protection Act (PDPA).
+
+Signed: __________________     Name: __________________     Role: __________________     Date: __________

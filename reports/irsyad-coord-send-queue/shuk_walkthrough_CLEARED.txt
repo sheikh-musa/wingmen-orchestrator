@@ -1,0 +1,9 @@
+Sure — two ways, depending on whether the donation is already in:
+
+1. New donation: record it (Donations → cash/PayNow/cheque), put in the donor with their email and tick "Tax-deductible (IRAS receipt)". On save it generates the receipt and emails it to that donor automatically — nothing else to do.
+
+2. A receipt already made: go to the Receipts page, find it, and click the "Email" button next to it. It turns to a green "Sent" once it's gone.
+
+Either way the donor needs an email on their record — if there isn't one, add it to the donor first and the Email button will appear.
+
+Go ahead whenever you're ready. I'm watching for this one, and I'll confirm to you once it's landed.

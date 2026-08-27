@@ -1,0 +1,14 @@
+# Syed→musa2 pool clear — 2026-08-18 (operator op#14438/14440/14441)
+# Directive: empty Syed; FREEZE moved product lanes; keep cai/SRE/hub running on musa2.
+# Frozen lanes below are RECOVERABLE: relaunch with --resume <id> in the lane dir.
+#
+# tmux_session  agent_id  resume_id  dir
+caai  862f3bf4-3eba-498a-8bb3-2b1e18fc4611  /Users/sheikhmusa/wingmen/projects/caai-lane
+cosem-adcda  c44832da-9aa9-4943-8e34-a662cac00154  /Users/sheikhmusa/wingmen/projects/cosem-adcda-hotfix
+cosem-exams  2f22394e-2d43-4925-946a-9314c50478ea  /Users/sheikhmusa/wingmen/projects/cosem-exams-lane
+cosem-port  3f8b6309-ac5f-4128-9310-dc56103fdf9c  /Users/sheikhmusa/wingmen/projects/cosem-port-lane
+finance  474439e7-b2b8-46bf-a061-28b4a1c7d7db  /Users/sheikhmusa/wingmen/projects/finance
+ihsanos-platform  56966d36-d722-4eb9-b1ca-17f1764f0318  /Users/sheikhmusa/wingmen/projects/ihsanos-platform
+ihsanos-qa  4c292129-aa32-4563-a54d-336df8861548  /Users/sheikhmusa/wingmen/projects/ihsanos-qa
+shipforge  02ca2d12-07bc-4a63-9cc7-0c50881d3564  /Users/sheikhmusa/wingmen/projects/shipforge
+storefront  c4048619-edda-452b-830b-1286c9490701  /Users/sheikhmusa/wingmen/projects/ihsanos-storefront

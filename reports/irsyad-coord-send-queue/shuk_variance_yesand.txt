@@ -1,0 +1,5 @@
+Good news on both counts. We're adding the Cisco receipt upload — that was a good idea and it's going in.
+
+On the note when the counts differ: we're keeping that, but it becomes a single tap rather than anything you type — a quick pick like "recount matched" or "foreign coins rejected".
+
+The two do different jobs, which is why both. The receipt shows what Cisco counted; the tap says why that came out different from yours. Between them the money is fully accounted for, and it's one tap on the rare occasion the numbers don't match.

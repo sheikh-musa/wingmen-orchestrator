@@ -1,0 +1,40 @@
+# FULL audit — PR #406 weekly-report CSV export (CAI-1233, minors-PII)
+
+**Auditor:** cc-quality (co-equal FULL, with orch-console opus) · **Date:** 2026-08-21
+**Verdict: PASS — merge-ready (RAIL 4 fix RE-CONFIRMED @ `34774e0`).**
+Money/PII (minors)-sensitive. Verified **at source + empirically**. Requested by orch-console (bus #30361, thread `99296a05`).
+
+> **RESOLVED (2026-08-21, bus #30391 → #30394):** the RAIL 4 gap is FIXED at commit `34774e0` and I re-confirmed it. Delta `f16774d..34774e0` touches ONLY `route.ts` (RAIL 4) + a new `route-audit-failclosed.test.ts` — RAILs 1/2/3/5/6 are byte-unchanged. The route now `const auditResult = await writeAuditLog(...)` and `if (auditResult?.error)` returns **500 with no CSV** before `NextResponse(csv)` (fail-closed-VISIBLE, mirrors `tabung-weekly-reports.ts:1292` / CAI-674/675). The new test MOCKS a failing `writeAuditLog` and asserts 500/no-CSV — **mutation-proven**: removing the `.error` check makes that test FAIL (it is a real behavioural guard, not a source-grep). lint:all EXIT 0, full CSV surface 17/17. **#406 is now merge-ready.**
+>
+> **History (bus #30369):** cc-storefront's co-equal audit found the blocking RAIL 4 gap (route discarded `writeAuditLog`'s `ActionResult.error` → failed audit write silently shipped the CSV, fail-open) that my initial PASS (#30368) and orch-console's opus missed; I re-verified it at source, corrected my verdict, and the fix above resolves it. The PRIMARY (zero-person-PII/whitelist, empirical minors-PII feed) and RAILs 2/3/5/6 + view-consistency always stood.
+
+Pinned HEAD `f16774d1ac5ab9b940fb53b56148971bdc06a928` (= `gh pr view 406`, MERGEABLE, base `main`).
+5 files, +520, **no migration**. Gates: **`npm run lint:all` EXIT 0** (16 gates) · **PR tests 15/15** · **my empirical harness 4/4**.
+
+## PRIMARY — zero-person-PII by construction (whitelist-as-TOTAL). CONFIRMED (source + empirical).
+- **At source:** the emitted column set is EXACTLY `SUMMARY_COLUMNS` + `TIN_COLUMNS` (hard-coded arrays). `tinLine()` builds a fixed 6-element array reading ONLY `serial_number` + the 3 amount fields — it never key-iterates the tin, never `Object.values`, never indexes a name/class/nric field. `sumField()` reads only `amount_notes`/`amount_coins`. So even though the runtime tin objects DO carry `student_name`/`class_name`, those are structurally unreachable in output.
+- **Empirical:** fed `kkTins`/`umumTins` carrying `student_name:"…MINOR…"`, `class_name`, `nric`, `collector_name` → asserted the output CSV contains **none** of those strings (nor the keys `student_name`/`class_name`/`nric`/`collector`), while whitelisted serials (`KK-001`, `UM-001`) + amounts DO appear. Header rows are byte-equal to `SUMMARY_COLUMNS.join(",")` / `TIN_COLUMNS.join(",")`.
+- **(c) no route leak:** `route.ts` only forwards `kk_tins`/`umum_tins` to the whitelisting builder; the response body is the builder's `csv` alone; the audit payload carries only public_id/scope/status/role/counts/content_hash (PII-free). The source-guard test asserts the route code (comments stripped) never references `student_name|class_name|display_name|nric|persons(`.
+
+## RAIL 2 — fail-closed. CONFIRMED (with a precise scope note).
+`tinLine` wraps cell construction in try/catch → a throwing/null tin returns `null` → the row is **omitted + counted**, never a partial row. Empirically: a `null` tin → `omitted=1`; an empty `{}` tin → blank *whitelisted* cells (never PII); the valid row's carried `student_name` still never emitted. **Note (not a defect):** the omit-guarantee is scoped to `tinLine` (per-tin rows); the subtotal `sumField` relies on optional-chaining null-safety (`t?.[key]`), which handles `null`/missing tins. A hypothetical tin that *throws on property read* (cannot arise from a plain DB row) would propagate out of `sumField` to the route's outer `catch` → **500, no CSV** — still fail-closed, no partial/PII output. Critically, PII-safety does not depend on RAIL 2 at all: a partial row can only ever contain whitelisted non-person fields.
+
+## RAIL 3 — CAI-888 formula-injection + RFC-4180 on EVERY cell. CONFIRMED (source + empirical).
+`csvEscape`: leading `= + - @ \t \r` → single-quote prefix, then RFC-4180 quoting if the cell has `,` `\n` `\r` `"`. Applied via `.map(csvEscape)` to the summary row, both header rows, and every `tinLine` cell (incl. serials/refs). Empirically confirmed on `=DANGER()`, `@SUM(1+1)`, `+1`, `-1`, `\ttab`, `=1,2` (prefix-then-quote), and `"…"` doubling — and that a real serial cell `=DANGER()` is emitted as `'=DANGER()`.
+
+## RAIL 4 — audit before CSV. **FIXED @ `34774e0` → PASS (re-confirmed).** _(was: confirmed-blocking FAIL)_
+My initial pass asserted "a write failure throws → outer `catch` → 500, no CSV" **on the strength of the code comment, without verifying `writeAuditLog`'s contract. That was wrong** — and is now fixed (see the RESOLVED note at top: capture `auditResult`, gate on `.error` → 500/no-CSV, mutation-proven test). Re-verified at source (`src/core/audit/api.ts`): `writeAuditLog` returns `Promise<ActionResult<void>>` and **throws ONLY `ViewAsReadOnlyError`** (preview sessions), outside the try; on a normal DB/RLS insert failure — or a dropped row (RLS mismatch) — it **RETURNS `{ error }`, it does not throw.** The route (`route.ts:110`) does `await writeAuditLog({...})` and **discards the result**, so an audit-write failure resolves the await normally and falls through to `return new NextResponse(csv, …)` — the `catch` never fires. **Result: a minors-adjacent CSV can ship with ZERO audit row on write failure, silently — RAIL 4 fails OPEN.** The PR's "write-fail → 500" comment is false. The route-guards test cannot catch this (it is a source-grep for `writeAuditLog`, not a behavioural mock of a failing write).
+
+**Reference for the fix:** the correct fail-closed pattern already exists in the same file — `src/actions/tabung-weekly-reports.ts:1292` captures `const auditResult = await writeAuditLog(...)` and does "Fail-closed-VISIBLE" handling on `auditResult.error` (CAI-674 / CAI-RESP-675 BINDING). The CSV route must: capture the result, and on `.error` return 500 with **no CSV** — plus a test that MOCKS a failing audit write and asserts the CSV is withheld. (Fix routed to cc-irsyad-6.)
+
+## RAIL 5 — RBAC == PDF route EXACTLY. CONFIRMED (byte-parity).
+The CSV route's auth/membership/role guard is line-identical to `…/pdf/route.tsx`: `auth.getUser()`→401; `org_members.select("org_id, role").eq("user_id").is("deleted_at",null).limit(1).single()`→403 if absent; role ∈ {`org_admin`,`cashier`,`viewer`,`preparer`} else **404**. Only delta is a lint-pragma comment. No broadening. The source-guard test asserts the CSV role-set equals the PDF role-set (sorted) and excludes any stray role.
+
+## RAIL 6 — UTF-8 BOM + CRLF. CONFIRMED (source + empirical).
+Output = `BOM + lines.join("\r\n") + "\r\n"`. Empirically: starts with `﻿`, CRLF line endings, trailing CRLF, no bare `\n\n`.
+
+## VIEW-CONSISTENCY. CONFIRMED.
+Same `getWeeklyReportAction(publicId)` data source as the PDF/view. Frozen-vs-live rule is byte-identical to the PDF route: `useFrozen = status !== "draft" && snapshot_totals && Object.keys(snapshot_totals).length > 0`. Notes/Coins subtotals = `sumField` over the SAME `[...kkTins, ...umumTins]` that produce the per-tin rows; grand/keluarga/umum totals from the same frozen/live selection as the PDF.
+
+## Verdict — **PASS, merge-ready** (RAIL 4 fix `34774e0` re-confirmed).
+PRIMARY minors-PII guarantee is absolute and by-construction (empirically leak-free under adversarial minors-PII input); RAILs 2/3/5/6 + view-consistency hold; and RAIL 4 is now fail-closed (capture+gate `auditResult.error` → 500/no-CSV) with a mutation-proven behavioural test. All rails green: lint:all EXIT 0, full CSV surface 17/17. Cleared to merge on the chain (both auditors PASS + opus + CI, past the known tabung/shop-synthtest SIGILL browser-crash flake). Trajectory: my #30368 PASS → superseded by the RAIL 4 finding (#30369) → fix landed → this re-confirm (#30394).

@@ -1,0 +1,5 @@
+<claude-code-hint v="1" type="plugin" value="vercel@claude-plugins-official" />
+Retrieving project…
+> Downloading `production` Environment Variables for wingmen-aa9356e1/wingmen-share
+Downloading
+Created /Users/sheikhmusa/wingmen/orchestrator/reports/share-render/gazzabyte-status/.vercel-env file  [246ms]

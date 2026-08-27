@@ -1,0 +1,5 @@
+[HOLD — send ONLY when client replies on the "notification" question. Per console #24633/CAI-RESP-1040. Do NOT chase proactively.]
+
+On the notification — straight answer: the document doesn't define one yet. It should, and that's on us, not you. We're adding a notices clause that names where formal notices and any data-protection issue go for each side.
+
+So what I need from you is just the Madrasah's side: who should receive those, and at what address. Uzair, or someone else — your call.

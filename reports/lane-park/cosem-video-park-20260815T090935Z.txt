@@ -1,0 +1,28 @@
+=== cosem-video PARK checkpoint 20260815T090935Z (op#13256, operator-directed) ===
+--- full pane capture ---
+
+╔══════════════════════════════════════════════════════════════════════╗
+  intact; it's code/weights, no footage. Say so if you want that torn down too
+  since the Studio's being retired.)
+  - GCS staging: already deleted earlier (the erase-test signed-URL copies).
+  - Mini scratchpad: still holds working copies, but that's session-isolated
+  temp that auto-purges — and it's what lets me instantly re-render group cards
+  or make the 3-second versions if you come back for them. I can wipe it now too
+  if you'd rather zero copies linger.
+  - Your MacBook: ~/Desktop/group_cards/ (your deliverable) untouched.
+  - Other projects' processes on the Studio: never touched.
+
+  That's everything cleaned up. Standing down for real now — thanks again, good
+  session. 👋
+
+✻ Sautéed for 56s
+
+※ recap: Goal: remove prior-batch instructors from the batch 18/19 course video.
+  The in-tenant SAM2→ProPainter erase pipeline is proven on 2 shots, and 8
+  full-screen group cards are delivered. Next: you mark up the removal spec and
+  pick a CUDA box to run the full 28-shot batch. (disable recaps in /config)
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

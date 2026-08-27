@@ -1,0 +1,9 @@
+On the student management system — you asked three days ago, I said I'd scope it and come back, and I didn't. There's no good reason for that; it hasn't been started.
+
+The honest position: it's a separate piece of work from your donations and finance, so it needs its own people rather than pulling this team off your money work. That's a resourcing call I need to make with Musa today. I'll come back to you today with either a plan or a straight no — not another "shortly".
+
+On the tax-deductible wording — understood: fix first, then you test, no workaround. We've settled how it will work: your organisation gets marked as not tax-deductible, and that switches off both the checkbox and the IRAS line on the receipt, so it can't be turned back on by mistake. That's being built now. Because it touches a real field on your donation records it goes through the same money-safety check as anything else that does — I'll give you a real time once it's through, not another "shortly".
+
+On the scrolling — you're right, and I shouldn't have told you it was fixed. What we changed did fix a real overflow on that screen, but evidently not the one you're hitting. We're still on it, and I won't tell you it's done again until I've seen it working myself.
+
+On NETS and debit card — that's the same kind of change as when we added GIRO, so we have a safe way to do it. One quick check so we build the right thing: is "NETS / Debit Card" one option, or two separate ones?

@@ -1,0 +1,13 @@
+You're right, and I'm not going to argue with it. It's taken too long, and what you found today — the tax-deductible label, the screen that still scrolls, the student system I said I'd come back on and didn't — says the product isn't where it should be for you yet. That's on us.
+
+Here's exactly where each thing stands:
+
+Tax-deductible: being built now. It gets switched off at your organisation level, so the checkbox and the IRAS line both disappear and can't be turned back on by mistake.
+
+The scrolling: still being diagnosed. We fixed one real overflow, it wasn't the one you're hitting, and I won't call it done again until I've seen your screen working.
+
+NETS and Debit Card as two separate options: understood, and that's specced.
+
+Student management: I owe you an answer today — a plan or a straight no.
+
+I'll come back to you today with real dates where I have them, and tell you straight where I don't.

@@ -1,0 +1,31 @@
+# FULL audit — PR #416 CAI-1247 unreturned-worklist + report preparer minors-gate
+
+**Auditor:** cc-quality (FULL, no-self-merge) · **Date:** 2026-08-21 · **Verdict: PASS, merge-ready** (with a required pre-apply renumber + 2 non-blocking observations).
+Requested by orch-console (bus #30790, thread `0c4fb65c`). Lens: minors-scope-fidelity. Propose-only (mig NOT applied/wet-proven — console owns goumlyne). Verified at source + tests + helper-semantics.
+
+Pinned HEAD `3a7f33986dfbad24d2ba80e62edffd2b7e3857fe` (= `gh pr view 416`, base `main`).
+3 files: `210_unreturned_worklist_preparer_gate.sql` (**→ 212, see below**) + `tabung-keluarga.ts` + 1 test. Gates: **lint:all EXIT 0** · **18/18**.
+
+## 1. ROLE GATE — server-side + explicit + by-construction. CONFIRMED.
+Two layers, both org_admin/preparer only:
+- **In-function (load-bearing):** both RPCs add `AND p_org_id IN (SELECT auth_user_org_ids_with_roles(ARRAY['org_admin','preparer']))`. Verified the helper (`001_foundation.sql`): `SECURITY DEFINER`, returns `org_id FROM org_members WHERE user_id = auth.uid() AND role = ANY(required_roles) AND deleted_at IS NULL`. So the WHERE-guard is TRUE only for an org_admin/preparer caller; cashier/viewer resolve **zero rows** — even if EXECUTE were over-granted or the app check regressed. It is **narrower than `auth_user_staff_org_ids()`** (which admits cashier/viewer for other surfaces) — the migration correctly notes RLS-through alone would NOT exclude them (the tables admit staff broadly via 069/085), so this explicit WHERE-guard is the real exclusion. Requires the caller's **own session** (`auth.uid()`), which the action provides by switching `svc.rpc` → `supabase.rpc` (service-role has no `auth.uid()`). RPC is `SECURITY INVOKER`, EXECUTE moved service_role→`authenticated` (`anon`/`service_role` revoked) — safe because the in-function gate protects any authenticated caller.
+- **App-layer (outer belt, kept):** `listUnreturnedKkTinsAction` — `if (role !== "org_admin" && role !== "preparer") return FORBIDDEN`, before the RPC.
+- (In-function SQL gate verified by source + helper semantics; not unit-testable through the mocked RPC — wet-prove is console's, propose-only.)
+
+## 2. TESTS PROVE EXCLUSION + scope EXACTLY worklist+report. CONFIRMED (18/18).
+`it.each(["cashier","viewer"])` → `res.error.code === "FORBIDDEN"` **and RPC never reached**; `it.each(["org_admin","preparer"])` → RPC reached. Scope: the diff touches only `listUnreturnedKkTinsAction` (worklist) + the two RPCs + test; the report/export **reuse** that gated action (item 4). No broadening; write/edit access explicitly split out (CAI-1247), not in this change.
+
+## 3. AUDIT-LOG on every name-resolution. CONFIRMED (with an observation).
+`listUnreturnedKkTinsAction` now `writeAuditLog({entityType:"unreturned_worklist_view", action:"create", payload:{viewer_role, page, search, result_count}})` on each successful view. Tested: logged for org_admin/preparer; **not** written for cashier/viewer FORBIDDEN (nothing viewed). **Observation (non-blocking):** it is **best-effort, not fail-closed** — a log failure is `captureActionError`'d (visible in Sentry) but does not block the worklist. Defensible (accountability, not access-control — the role gate is the independent data protection) and the error is *captured, not swallowed* (unlike the #406 RAIL 4 discard). Whether minors-PII **access**-logging should be fail-closed is a policy call worth a coord/cai note; not a #416 blocker.
+
+## 4. TEACHER REPORT — same downstream export, no new exposure path. CONFIRMED (with an observation).
+The PDF route (`/api/tabung/unreturned-tins/pdf`) fetches rows via `exportUnreturnedKkTinsAction({search})`, which loops the gated `listUnreturnedKkTinsAction`. So a cashier/viewer passes the PDF route's outer `ALLOWED` gate + the export's `MAY_EXPORT` gate, then hits **FORBIDDEN at the inner `listUnreturnedKkTinsAction`** → export returns `{error}` → PDF route 500s → **no names**. No separate/service-role name query. **Observation (non-blocking, pre-existing — not in #416's diff):** the PDF route's `ALLOWED` and the export's `MAY_EXPORT` still *list* `cashier`/`viewer` — **looser than the org_admin/preparer names policy**, relying entirely on the inner gate to block them. Harmless today (inner gate holds), but a defense-in-depth inversion: if a future edit sourced names in the PDF/export via a path bypassing `listUnreturnedKkTinsAction`, cashier/viewer would leak. Recommend tightening those two outer gates to `org_admin/preparer` to match the real policy (hardening follow-up).
+
+## 5. DEPLOY-WINDOW fails closed. CONFIRMED.
+The app-layer gate (kept) blocks cashier/viewer in **every** path: RPC success, permission-denied (grant window — `NOT isMissingRpc` → `INTERNAL_ERROR`, fails closed, verified in the error branch), and missing-function (`isMissingRpc` → the PostgREST fallback `listUnreturnedKkTinsViaPostgrest`, which runs **after** the same app-layer gate). No ordering of code-vs-migration deploy widens names to cashier/viewer.
+
+## Required before apply — migration renumber 210 → 212
+The file is still `210_unreturned_worklist_preparer_gate.sql`, but the action comment already references "migration 212", and **210 is claimed by #402 (CAI-1209 Resend webhook) and 211 by #415 (CAI-1249)** on their own branches. The file **must be renamed 210→212** (and its header "Migration number: 210" text updated) before apply, or it collides. orch-console has flagged this to coord (matches my #415 flag). Not a logic defect — a numbering coordination step.
+
+## Verdict
+**PASS.** The minors-PII widening to preparer is enforced by construction — an in-function `auth_user_org_ids_with_roles([org_admin,preparer])` WHERE-guard (verified helper semantics) narrower than the shared staff helper, backed by a kept app-layer belt; cashier/viewer excluded and proven so by RPC-never-reached tests; audit-logged per resolution; the teacher report reuses the gated path (no new exposure); deploy-window fails closed. Scope is exactly worklist+report, no scope-creep. Propose-only → console wet-proves + applies (cai §6.6, both silos) **after the 210→212 rename**. Two non-blocking hardening items flagged (best-effort audit; looser PDF/export outer gates). Routing to orch-console for merge (no self-merge).

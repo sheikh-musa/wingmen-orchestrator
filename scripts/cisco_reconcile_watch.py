@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 import sys
 
-GOUMLYNE_ENV = "GOUMLYNE_DATABASE_URL"
+GOUMLYNE_ENV = "GOUMLYNE_RO_DATABASE_URL"  # CAI-1225 RO-move: read-only auditor_ro (was write-DSN); this monitor is SELECT-only
 TABLE = "public.tabung_coin_deposits"
 # NON-PII allowlist — the ONLY columns this monitor may ever read. status + timestamps +
 # the opaque public uuid. NEVER add an amount / reference / identity / url / notes column.

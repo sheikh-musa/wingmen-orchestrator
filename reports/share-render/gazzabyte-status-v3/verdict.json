@@ -1,0 +1,21 @@
+{
+  "slug": "gazzabyte-status-v3",
+  "fragment": "reports/gazzabyte-status-combined.html",
+  "checks": {
+    "mobile": {
+      "clientWidth": 390,
+      "compatMode": "CSS1Compat",
+      "scrollWidth": 390,
+      "responsive": true,
+      "standards": true,
+      "noOverflow": true
+    }
+  },
+  "pngs": {
+    "mobileTop": "/Users/sheikhmusa/wingmen/orchestrator/reports/share-render/gazzabyte-status-v3/mobile-top.png",
+    "mobileMid": "/Users/sheikhmusa/wingmen/orchestrator/reports/share-render/gazzabyte-status-v3/mobile-mid.png",
+    "desktop": "/Users/sheikhmusa/wingmen/orchestrator/reports/share-render/gazzabyte-status-v3/desktop.png"
+  },
+  "pass": true,
+  "notes": []
+}
