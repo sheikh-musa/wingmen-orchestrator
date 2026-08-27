@@ -440,12 +440,14 @@ MAX_DEFER_SEC = 600      # busy-defer CAP: a message unhandled past this nudges
                          # operator, even if the agent stays busy indefinitely.
 # Channels (by channel_tag) where the CLIENT-facing "📨 Got your message" ack is
 # SUPPRESSED — a human hand-responds and the bot ack reads as "no one's looking"
-# (gazzabyte-irsyad: client op#15034 explicitly asked, coord #29009, 2026-08-20).
+# (gazzabyte-irsyad: client op#15034 explicitly asked, coord #29009, 2026-08-20;
+# cosem-exams: operator op#17235 2026-08-27 — Hariz was seeing bot busy-acks
+# instead of the exams-lane agent replying directly; same agent-hand-responds case).
 # ONLY the client ack is skipped; logging, routing, and the handler-nudge
 # (drain_stale_deferred) stay — so a message is still logged + the handler still
 # woken, it just isn't bot-acked at the sender. Env-overridable (comma-sep tags).
 SUPPRESS_CLIENT_ACK_TAGS = {
-    t.strip() for t in os.environ.get("SUPPRESS_CLIENT_ACK_TAGS", "gazzabyte-irsyad").split(",") if t.strip()
+    t.strip() for t in os.environ.get("SUPPRESS_CLIENT_ACK_TAGS", "gazzabyte-irsyad,cosem-exams").split(",") if t.strip()
 }
 
 
