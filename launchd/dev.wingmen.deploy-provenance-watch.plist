@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.deploy-provenance-watch</string>
+  <!-- cc-fleet-health deploy-integrity monitor (op#34832). DETECT-ONLY: alerts (bus row
+       to cc-fleet-health, deduped) when an ihsanos silo's LIVE prod is a NO-GIT deploy
+       (unverifiable provenance) or its sha != the linked repo's prod-branch HEAD. It
+       NEVER promotes/deploys/rolls back — the deploy action stays a human's. The wrapper
+       sources .env for VERCEL_TOKEN + GH_TOKEN + DATABASE_URL (no secrets in this plist). -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_deploy_provenance_watch.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <!-- 30-min cadence: deploy provenance changes only on deploys, and a 30-min window
+       avoids paging on the brief manual-cli-deploy -> promote-to-git transient. -->
+  <key>StartInterval</key><integer>1800</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/deploy-provenance-watch.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/deploy-provenance-watch.out.log</string>
+</dict>
+</plist>
