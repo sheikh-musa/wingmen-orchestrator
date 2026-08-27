@@ -1,0 +1,390 @@
+# Migration file-triage manifest
+
+Authoritative classification of the Mini's ignored real-work files for the orch->gzb migration (op17195). Produced by cc-fleet-health (triage) with orch-console dispositions (bus 34861/34863). **Paths only — no file content.** PII/secret scanning was counts-only; no PII file was opened.
+
+
+Counts: SECRETS-live 15 | SECRETS-destroy 8 | CLIENT-PII/residency 117 | FLEET-INTERNAL 210 | JUNK(not preserved): logs+node_modules+runtime-state+renders.
+
+
+## BUCKET 1a — SECRETS (LIVE) -> SECRETS->wingmen-core track, tmpfs-fetch on gzb, NEVER gzb disk
+
+Live credentials/pointers. Ride Phase-0 secrets track; never land on gzb disk.
+
+- `.env`
+- `.group_default_token.caai`
+- `.group_default_token.cosem`
+- `.group_default_token.finance`
+- `.group_default_token.ihsanos`
+- `.group_default_token.irsyad`
+- `.group_default_token.scholar`
+- `.group_default_token.shipforge`
+- `.group_default_token.storefront`
+- `.lane_default_token`
+- `.quality_default_token`
+- `.secrets/claude_session_token`
+- `.secrets/console_bearer`
+- `.secrets/ngrok_authtoken`
+- `.secrets/syed_session_token`
+
+## BUCKET 1b — SECRETS (STALE/DEBUG) -> SECURE-DESTROY (after Musa one-line confirm)
+
+Stale credential backups + a debug log. Irreversible destroy -> gated on operator confirm, not unilateral.
+
+- `.env.bak.20260619-tailscale`
+- `.env.bak.20260812-175805-preMusaEnvDefault`
+- `.env.bak.goumlyne-sync`
+- `.env.bak.nazim-cutover-20260708`
+- `.lane_default_token.was.pre`
+- `.nazim_default_token.was.pre`
+- `.nazim_default_token.was.syed-preswitch-op14285`
+- `firebase-debug.log`
+
+## BUCKET 1c — SECRETS-in-text -> SCRUBBED (done by console), now fleet-internal (see Bucket 4)
+
+reports/4b-hub-hb-writer-op11774.diff (real Anthropic OAuth token, redacted) + reports/ihsanos-pathb-handoff-NOW.md (real prod DSN password, redacted). reports/fleet-health-handoff-NOW.md was a CLEAN false-positive. TOKEN-ROTATION of the sk-ant-oat0 token: cc-fleet-health assessing active-vs-stale; if active, operator's call.
+
+
+## BUCKET 2 — CLIENT-PII / RESIDENCY (117) -> HOLD for Musa+cai destination ruling; NEVER gzb/un-cleared VPS
+
+ADCDA (UAE-gov Civil Defence) + cosem client content, incl. omr exam optical-mark sheets. Conservatively includes fleet-internal-ABOUT-a-client-project docs; cai down-classifies the genuinely no-PII ones.
+
+- `reports/ADCDA_b18-19_retest_RESULTS_EN.pdf`
+- `reports/adcda-clip-library-screenshot-20260731.png`
+- `reports/adcda-onprem-eli5-client-draft-20260723.md`
+- `reports/adcda-onprem-explainer-client-20260723.md`
+- `reports/adcda-op8124-after-01-headshot-guide-20260730.png`
+- `reports/adcda-op8124-after-id-guide-20260730.png`
+- `reports/adcda-op8124-after-id-turn-nudge-20260730.png`
+- `reports/adcda-op8124-before-id-guide-20260730.png`
+- `reports/adcda-recap-ASSEMBLY-PLAN-20260729.md`
+- `reports/adcda-recap-AUTO-ASSEMBLER-DONE-20260730.md`
+- `reports/adcda-recap-SHOTLIST-20260729.md`
+- `reports/adcda-recap-shotlist-20260729.csv`
+- `reports/adcda-recap-v2-CARDS-SLOWMO-20260730.md`
+- `reports/adcda-recap-v3-STORYBOARD-20260801.md`
+- `reports/adcda-recap-v3-storyboard-20260801.csv`
+- `reports/adcda-recap-video-plan-20260727.md`
+- `reports/adcda-sovereign-onprem-ai-ops-feasibility-20260723.md`
+- `reports/cc-cosem-adcda-HANDOFF-20260731.md`
+- `reports/cc-cosem-exams-pii-export-fixes-20260729.diff`
+- `reports/cosem-BUS-MONEY-GATE-fired-20260728.md`
+- `reports/cosem-BUS-operator-test-side-effects-20260727.md`
+- `reports/cosem-BUS-tdu-deploy-BLOCKED-supabase-auth-20260727.md`
+- `reports/cosem-P1-12365-offline-marks-reverted-FIXED-20260729.md`
+- `reports/cosem-TDU-TESTBED-LIVE-20260728.md`
+- `reports/cosem-VISUAL-EDITOR-DESIGN-20260801.md`
+- `reports/cosem-adcda-port-gap-inventory-20260725.md`
+- `reports/cosem-b5-sme-content-request-20260726.md`
+- `reports/cosem-exam-platform-deck-bilingual-REVISED.pptx`
+- `reports/cosem-offline-architecture-scope-20260726.md`
+- `reports/cosem-offline-slice/01-synced-online.png`
+- `reports/cosem-offline-slice/02-marked-offline.png`
+- `reports/cosem-offline-slice/03-reload-offline-fallback.png`
+- `reports/cosem-offline-slice/04-reconciled-online.png`
+- `reports/cosem-offline-slice/05-marked-offline-ar.png`
+- `reports/cosem-offline-slice/06-rejected-finalized.png`
+- `reports/cosem-offline-slice/10-deployed-roster.png`
+- `reports/cosem-offline-tailnet-LIVE-20260728.md`
+- `reports/cosem-onboarding-exams-deck-bilingual.pptx`
+- `reports/cosem-onboarding-exams-deck-bilingual.py`
+- `reports/cosem-onboarding-exams-deck.pptx`
+- `reports/cosem-onboarding-exams-deck.py`
+- `reports/cosem-platform-seam-spec-20260723.md`
+- `reports/cosem-port-cut-list-20260726.md`
+- `reports/cosem-port-dependency-plan-20260726.md`
+- `reports/cosem-s2-STATUS-AND-OPERATOR-TEST-PATH-20260727.md`
+- `reports/cosem-s2-offline-DONE-20260727.md`
+- `reports/cosem-s2-offline-lane-brief-20260727.md`
+- `reports/cosem-video-DEMO-READY-20260731.md`
+- `reports/cosem-video-POLLER-BUILT-20260731.md`
+- `reports/cosem-video-pipeline-v1-DONE-97-tagged-20260729.md`
+- `reports/cosem-video-pipeline-v1-READY-FOR-GRANT-20260728.md`
+- `reports/cosem-video-pipeline-v1-spec-20260728.md`
+- `reports/cosem/CSOEM-Assessment-App-Feedbacks-20260822.pdf`
+- `reports/cosem/requirements-20260823/Bubble Forms.pdf`
+- `reports/cosem/requirements-20260823/Response 1- Verifier.xlsx`
+- `reports/cosem/requirements-20260823/Response 2-Student Appraisal Grading Matrix.xlsx`
+- `reports/cosem/requirements-20260823/Response 3_Theory_- Question Bank _ExamView_.docx`
+- `reports/cosem/requirements-20260823/Response 4-Practical Step Scores.xlsx`
+- `reports/cosem/requirements-20260823/Response 5-UAE CDA Official Namelist.pdf`
+- `reports/cosem/requirements-20260823/Response 6-Student Affairs results.pdf`
+- `reports/cosem/requirements-20260823/Response 8- Analysis Summary.pdf`
+- `reports/cosem/requirements-20260823/Response 8- Remediation Summary.pdf`
+- `reports/cosem/requirements-20260823/Response_3Practical_Respond_on_an_apparatus_to_an_emergency_scene.docx`
+- `reports/cosem/requirements-20260823/Set A FF01-FF Theory Test.docx`
+- `reports/demo-qa-seed/1-assessor-today.png`
+- `reports/demo-qa-seed/2-verifier-verify-group2.png`
+- `reports/demo-qa-seed/2-verifier-verify.png`
+- `reports/demo-qa-seed/3-assessor-practical-list.png`
+- `reports/demo-qa-seed/3-assessor-practical-picker.png`
+- `reports/demo-qa-seed/4-admin-matrix-group1.png`
+- `reports/demo-qa-seed/4-admin-matrix.png`
+- `reports/demo-qa-seed/seed-record.json`
+- `reports/gazzabyte-render/BEFORE-broken-mobile.png`
+- `reports/gazzabyte-render/fixed-desktop.png`
+- `reports/gazzabyte-render/fixed-mobile-build.png`
+- `reports/gazzabyte-render/fixed-mobile-top.png`
+- `reports/gazzabyte-render/v2-WRAPPED-desktop.png`
+- `reports/gazzabyte-render/v2-WRAPPED-mobile-build.png`
+- `reports/gazzabyte-render/v2-WRAPPED-mobile-top.png`
+- `reports/gazzabyte-render/v3-CORRECTED-desktop.png`
+- `reports/gazzabyte-render/v3-CORRECTED-mobile-top.png`
+- `reports/gazzabyte-tin-workflow-reference-draft.md`
+- `reports/nazim-handoff-20260717-consolidate.md`
+- `reports/nazim-handoff-20260803.md`
+- `reports/nazim-handoff-archive-2026-08-18-1018.md`
+- `reports/nazim-handoff-preconsolidate-0905.md`
+- `reports/nazim-handoff-prev-0749.md`
+- `reports/omr-AFTER-20260729.png`
+- `reports/omr-AFTER-40q-20260729.png`
+- `reports/omr-AFTER-96q-max-20260729.png`
+- `reports/omr-BEFORE-20260729.png`
+- `reports/practical-parity/01-verifier-home.png`
+- `reports/practical-parity/02-verifier-results-list.png`
+- `reports/practical-parity/03-verifier-result-expanded.png`
+- `reports/practical-parity/04-admin-matrix.png`
+- `reports/practical-parity/05-admin-results-group1-expanded.png`
+- `reports/practical-parity/06-assessor-capture-open.png`
+- `reports/practical-parity/07-assessor-capture-reuse.png`
+- `reports/share-render/gazzabyte-irsyad/desktop.png`
+- `reports/share-render/gazzabyte-irsyad/mobile-mid.png`
+- `reports/share-render/gazzabyte-irsyad/mobile-top.png`
+- `reports/share-render/gazzabyte-status-v3/desktop.png`
+- `reports/share-render/gazzabyte-status-v3/mobile-mid.png`
+- `reports/share-render/gazzabyte-status-v3/mobile-top.png`
+- `reports/share-render/gazzabyte-status/desktop.png`
+- `reports/share-render/gazzabyte-status/mobile-mid.png`
+- `reports/share-render/gazzabyte-status/mobile-top.png`
+- `reports/share-render/platform-docs/desktop.png`
+- `reports/share-render/platform-docs/mobile-mid.png`
+- `reports/share-render/platform-docs/mobile-top.png`
+- `scripts/.agent_wake/cc-cosem-adcda.json`
+- `scripts/.agent_wake/cc-cosem-exams.json`
+- `scripts/.agent_wake/cc-cosem-platform.json`
+- `scripts/.agent_wake/cc-cosem-tdu.json`
+- `scripts/.agent_wake/cc-cosem-video.json`
+- `scripts/.agent_wake/cc-cosem.json`
+- `scripts/.agent_wake/cc-irsyad-student.json`
+
+## BUCKET 4 — FLEET-INTERNAL (210) -> PRIVATE archive repo (travels on clone); no residency constraint
+
+Specs, runbooks, designs, SRE/quality handoffs, cai audit packets, + the 2 scrubbed files. Secret-scanned clean.
+
+- `reports/4b-hub-hb-writer-op11774.diff`
+- `reports/4b-hub-hb-writer-op11774.diff`
+- `reports/CAI713_firebase_residency_migration_plan.md`
+- `reports/DEMO_RUNBOOK_onboarding.md`
+- `reports/active-red-worker-auto-recycle-design-20260818.md`
+- `reports/askariyah-register-identity-spec.md`
+- `reports/auto-recycle-arm-gate-data-20260815.md`
+- `reports/board-topbloat-fix-op18542.diff`
+- `reports/boot-nazim-heartbeat-loop-20260809.diff`
+- `reports/boot-orch-heartbeat-loop-20260811.diff`
+- `reports/cai1209-fajar-packet.md`
+- `reports/cai1225-write-dsn-restricted-store-runbook.md`
+- `reports/cc-fleet-health-handoff-NOW.md`
+- `reports/cc-irsyad-2-tabung-history-handoff-NOW.md`
+- `reports/cc-irsyad-handoff-NOW.md`
+- `reports/cc-quality-boot-NOW.md`
+- `reports/cc-quality-charter.md`
+- `reports/cc-quality-handoff-20260817.md`
+- `reports/cc-quality-handoff-NOW.md`
+- `reports/cc-quality-heartbeat-fix-hunk-20260822.md`
+- `reports/cc-quality-wake-audit-op11297.md`
+- `reports/console-deploy/0eacc5f7ebdbe158/fleet.png`
+- `reports/console-deploy/0eacc5f7ebdbe158/lanes.png`
+- `reports/console-deploy/0eacc5f7ebdbe158/pytest.log`
+- `reports/console-deploy/0eacc5f7ebdbe158/render.log`
+- `reports/console-deploy/1832aa3a4ac470c2/fleet.png`
+- `reports/console-deploy/1832aa3a4ac470c2/lanes.png`
+- `reports/console-deploy/1832aa3a4ac470c2/pytest.log`
+- `reports/console-deploy/1832aa3a4ac470c2/render.log`
+- `reports/console-deploy/1b4a78eee5b52c7a/fleet.png`
+- `reports/console-deploy/1b4a78eee5b52c7a/lanes.png`
+- `reports/console-deploy/1b4a78eee5b52c7a/pytest.log`
+- `reports/console-deploy/1b4a78eee5b52c7a/render.log`
+- `reports/console-deploy/2322ed8d3ab23a2a/fleet.png`
+- `reports/console-deploy/2322ed8d3ab23a2a/lanes.png`
+- `reports/console-deploy/2322ed8d3ab23a2a/pytest.log`
+- `reports/console-deploy/2322ed8d3ab23a2a/render.log`
+- `reports/console-deploy/289385f545154763/fleet.png`
+- `reports/console-deploy/289385f545154763/lanes.png`
+- `reports/console-deploy/289385f545154763/pytest.log`
+- `reports/console-deploy/289385f545154763/render.log`
+- `reports/console-deploy/36a2c32c0e6fbc30/fleet.png`
+- `reports/console-deploy/36a2c32c0e6fbc30/lanes.png`
+- `reports/console-deploy/36a2c32c0e6fbc30/pytest.log`
+- `reports/console-deploy/36a2c32c0e6fbc30/render.log`
+- `reports/console-deploy/3dbe595448d8c82c/fleet.png`
+- `reports/console-deploy/3dbe595448d8c82c/lanes.png`
+- `reports/console-deploy/3dbe595448d8c82c/pytest.log`
+- `reports/console-deploy/3dbe595448d8c82c/render.log`
+- `reports/console-deploy/510d5c8d25586ca3/pytest.log`
+- `reports/console-deploy/671e6aa4a28ed9db/fleet.png`
+- `reports/console-deploy/671e6aa4a28ed9db/lanes.png`
+- `reports/console-deploy/671e6aa4a28ed9db/pytest.log`
+- `reports/console-deploy/671e6aa4a28ed9db/render.log`
+- `reports/console-deploy/74fe39dd828cf075/alert2.png`
+- `reports/console-deploy/74fe39dd828cf075/clear.png`
+- `reports/console-deploy/74fe39dd828cf075/fleet.png`
+- `reports/console-deploy/74fe39dd828cf075/lanes.png`
+- `reports/console-deploy/74fe39dd828cf075/pytest.log`
+- `reports/console-deploy/74fe39dd828cf075/render.log`
+- `reports/console-deploy/74fe39dd828cf075/unknown.png`
+- `reports/console-deploy/849aecc79638a000/alert.png`
+- `reports/console-deploy/849aecc79638a000/clear.png`
+- `reports/console-deploy/849aecc79638a000/fleet.png`
+- `reports/console-deploy/849aecc79638a000/lanes.png`
+- `reports/console-deploy/849aecc79638a000/pytest.log`
+- `reports/console-deploy/849aecc79638a000/render.log`
+- `reports/console-deploy/849aecc79638a000/unknown.png`
+- `reports/console-deploy/8c1c8281814fbf8e/fleet.png`
+- `reports/console-deploy/8c1c8281814fbf8e/lanes.png`
+- `reports/console-deploy/8c1c8281814fbf8e/pytest.log`
+- `reports/console-deploy/8c1c8281814fbf8e/render.log`
+- `reports/console-deploy/9ca8a095f8c2ffd8/fleet.png`
+- `reports/console-deploy/9ca8a095f8c2ffd8/lanes.png`
+- `reports/console-deploy/9ca8a095f8c2ffd8/pytest.log`
+- `reports/console-deploy/9ca8a095f8c2ffd8/render.log`
+- `reports/console-deploy/ae1afa393f6e78ea/fleet.png`
+- `reports/console-deploy/ae1afa393f6e78ea/lanes.png`
+- `reports/console-deploy/ae1afa393f6e78ea/pytest.log`
+- `reports/console-deploy/ae1afa393f6e78ea/render.log`
+- `reports/console-deploy/b3043a50cae7f886/fleet.png`
+- `reports/console-deploy/b3043a50cae7f886/lanes.png`
+- `reports/console-deploy/b3043a50cae7f886/pytest.log`
+- `reports/console-deploy/b3043a50cae7f886/render.log`
+- `reports/console-deploy/b417c6c7ae974170/fleet.png`
+- `reports/console-deploy/b417c6c7ae974170/lanes.png`
+- `reports/console-deploy/b417c6c7ae974170/pytest.log`
+- `reports/console-deploy/b417c6c7ae974170/render.log`
+- `reports/console-deploy/b52beb180ed061e6/fleet.png`
+- `reports/console-deploy/b52beb180ed061e6/lanes.png`
+- `reports/console-deploy/b52beb180ed061e6/pytest.log`
+- `reports/console-deploy/b52beb180ed061e6/render.log`
+- `reports/console-deploy/c02463954bf33560/fleet.png`
+- `reports/console-deploy/c02463954bf33560/lanes.png`
+- `reports/console-deploy/c02463954bf33560/pytest.log`
+- `reports/console-deploy/c02463954bf33560/render.log`
+- `reports/console-deploy/dcbc067a8d77ac01/fleet.png`
+- `reports/console-deploy/dcbc067a8d77ac01/lanes.png`
+- `reports/console-deploy/dcbc067a8d77ac01/pytest.log`
+- `reports/console-deploy/dcbc067a8d77ac01/render.log`
+- `reports/console-deploy/ef37d1924a9e36b5/fleet.png`
+- `reports/console-deploy/ef37d1924a9e36b5/lanes.png`
+- `reports/console-deploy/ef37d1924a9e36b5/pytest.log`
+- `reports/console-deploy/ef37d1924a9e36b5/render.log`
+- `reports/console-deploy/f215157e3b28581c/fleet.png`
+- `reports/console-deploy/f215157e3b28581c/lanes.png`
+- `reports/console-deploy/f215157e3b28581c/pytest.log`
+- `reports/console-deploy/f215157e3b28581c/render.log`
+- `reports/console-deploy/f3ced9931eb3747f/fleet.png`
+- `reports/console-deploy/f3ced9931eb3747f/lanes.png`
+- `reports/console-deploy/f3ced9931eb3747f/pytest.log`
+- `reports/console-deploy/f3ced9931eb3747f/render.log`
+- `reports/console-deploy/f44d0afdc558cc61/fleet.png`
+- `reports/console-deploy/f44d0afdc558cc61/lanes.png`
+- `reports/console-deploy/f44d0afdc558cc61/pytest.log`
+- `reports/console-deploy/f44d0afdc558cc61/render.log`
+- `reports/console-deploy/fc3a63c85b4ec0b6/fleet.png`
+- `reports/console-deploy/fc3a63c85b4ec0b6/lanes.png`
+- `reports/console-deploy/fc3a63c85b4ec0b6/pytest.log`
+- `reports/console-deploy/fc3a63c85b4ec0b6/render.log`
+- `reports/console-overhaul/your-asks-board-mockup.png`
+- `reports/daftar-ar-module-l1-spec-20260716.md`
+- `reports/dev-agent-lane-build-plan-20260723.md`
+- `reports/engine-restart-workstream-audit.md`
+- `reports/exec-reliability-layer-mvp-spec-20260716.md`
+- `reports/finance-agent-spec-20260801.md`
+- `reports/finance-expense-tracker-20260801.md`
+- `reports/fleet-console-token-switch-ui-contract.md`
+- `reports/fleet-context-manager-design-20260807.md`
+- `reports/fleet-target-topology-20260721.md`
+- `reports/flip-button-design-cai788.md`
+- `reports/handoff-persistence-off-prod-main-20260803.md`
+- `reports/hermes-substrate-integration-scope.md`
+- `reports/ihsanos-pathb-handoff-NOW.md`
+- `reports/ihsanos-platform-handoff-NOW.md`
+- `reports/infra-drift-map-mini-studio-20260729.md`
+- `reports/irsyad-1-handoff-NOW.md`
+- `reports/irsyad-6-cai1199-1200-design-spec.md`
+- `reports/irsyad-6-donation-void-correction-design.md`
+- `reports/irsyad-6-handoff-NOW.md`
+- `reports/irsyad-6-merge-redesign-design-doc.md`
+- `reports/irsyad-coord-handoff-NOW.md`
+- `reports/irsyad-coord-send-queue/alarm.log`
+- `reports/irsyad-coord-send-queue/dateheadsup.log`
+- `reports/irsyad-coord-send-queue/unbundle.log`
+- `reports/irsyad-dedicated-agent-design-20260731.md`
+- `reports/irsyad-dms-frs-attachment-gap.md`
+- `reports/irsyad-dms-master-backlog-reconciled.md`
+- `reports/irsyad-dms-wa-requirements.md`
+- `reports/irsyad-handoff-20260813.md`
+- `reports/irsyad-handoff-NOW.md`
+- `reports/irsyad-payments-handoff-NOW.md`
+- `reports/irsyad-receipts-followup-handoff-NOW.md`
+- `reports/jumaat-phaseA-design.md`
+- `reports/media-download-fix-v2.md`
+- `reports/media-download-fix.md`
+- `reports/nazim-handoff-20260716-2.md`
+- `reports/nazim-handoff-20260716.md`
+- `reports/nazim-handoff-20260721-autonomy.md`
+- `reports/nazim-handoff-20260722.md`
+- `reports/nazim-handoff-20260723-demo-mega.md`
+- `reports/nazim-handoff-20260723-substrate.md`
+- `reports/nazim-handoff-20260725-fable-irsyad.md`
+- `reports/nazim-handoff-20260728.md`
+- `reports/nazim-handoff-20260729.md`
+- `reports/nazim-handoff-20260730.md`
+- `reports/nazim-handoff-20260802-evening.md`
+- `reports/nazim-handoff-20260804.md`
+- `reports/nazim-handoff-20260805.md`
+- `reports/nazim-handoff-20260807-2.md`
+- `reports/nazim-handoff-20260807-3.md`
+- `reports/nazim-handoff-20260807.md`
+- `reports/nazim-handoff-20260808-1.md`
+- `reports/nazim-handoff-20260808-2.md`
+- `reports/nazim-handoff-20260809.md`
+- `reports/nazim-handoff-NOW.md`
+- `reports/never-blank-lane-context-design-20260824.md`
+- `reports/nizom-integration-proposal.md`
+- `reports/op10706-phaseB-token-model-manager-design-20260805.md`
+- `reports/op13050b-console-header-honesty-design.md`
+- `reports/op13183-singleton-move-runbook.md`
+- `reports/op13186-bloat-accuracy-wiring-spec.md`
+- `reports/oracle-phase0-op11774.diff`
+- `reports/pane-reflow-test-fix.diff`
+- `reports/quality-handoff-NOW.md`
+- `reports/qwen-capability-testgen.md`
+- `reports/qwen-lane-poc-design.md`
+- `reports/qwen-opus-ab-results.md`
+- `reports/render-gate-publish-share-spec.md`
+- `reports/render-gate-stage0-touchpoint.md`
+- `reports/reset-hardening-op11594-20260811.diff`
+- `reports/reset-keyswitch-safety-contract-design-20260818.md`
+- `reports/reset_nazim-busy-gate-op18941.diff`
+- `reports/share-per-tenant-auth.md`
+- `reports/shipforge-handoff-NOW.md`
+- `reports/sla-read-parked-interim-op11774.diff`
+- `reports/sre-lane-recycle-PRE-ARM-checklist-20260802.md`
+- `reports/step0-coord-identity-design-cai890.md`
+- `reports/storefront-handoff-NOW.md`
+- `reports/support-agent-spec-45-20260803.md`
+- `reports/swallowed-except-slow-cadence-fix-proposal-20260822.md`
+- `reports/switch-lane-token-graceful-drain-op12114.diff`
+- `reports/switch-lane-token-hardening-op12030.diff`
+- `reports/switch-lane-token-resume-verify-belt-op12030.diff`
+- `reports/switch-singleton-console-quality-ext-20260809.diff`
+- `reports/tdu-training-readiness-tracker-replication-spec-20260728.md`
+- `reports/vps-hub-divergence-audit-20260818.md`
+- `reports/vps-oracle-deploy-op11774.md`
+- `reports/wedge-once-and-for-all-plan-op11774.md`
+- `reports/weekly-substrate-audit-20260805.md`
+
+## JUNK (not preserved)
+
+5413 logs/, 113 node_modules/, 30 runtime-state json (scripts/.agent_wake/*, .lane_watch/state.json), render A/B test PNGs (pdflib-ar / pwa-offline), supabase/.temp, old backups/, sandbox, orbat-*.pdf, *.stamp, .DS_Store. Regenerated at boot or reproducible; no preserve.
+
+- `reports/pdflib-ar-1.png`
+- `reports/pwa-offline-ar.png`
+- `reports/pwa-offline-en.png`
