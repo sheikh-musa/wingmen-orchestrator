@@ -4,7 +4,7 @@
 
 **Direction (Musa op17195/17198):** orchestrator COMPUTE → **gzb** (Gazzabyte office server `gzbai` / 192.168.1.114, Ubuntu 26.04, 4cpu/30GB). **SECRETS → wingmen-core** (existing VPS we control, OFF gzb), fetched at runtime. **Orch moves FIRST**, then every other lane (singletons + workers). Access proven: FortiGate SSL-VPN → SSH (openfortivpn headless).
 
-**Blocking gate — CLEARED (2026-08-27):** branch reconcile-before-cutover git gate is green both halves — 38 commits + all real untracked work on origin at `3a0343f`; SRE signed off 46/46; tree clean. Cutover is unblocked *pending this sequence's sign-off*.
+**Blocking gate — CLEARED (2026-08-27, re-verified 2026-08-28):** branch reconcile-before-cutover git gate is green both halves — all commits + real untracked work on origin, branch level with origin (0 ahead / 0 behind) at `bf3d81c`; watchdog 46/46 green (console re-ran post-merge); tree clean; `docs/irsyad-ground-truth.md` now tracked. Secrets host confirmed by Musa = **existing wingmen-core** (op17248). Cutover is unblocked *pending this sequence's sign-off (the 3 decisions below)*.
 
 ---
 
