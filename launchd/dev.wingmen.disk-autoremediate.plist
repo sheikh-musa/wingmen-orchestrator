@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.disk-autoremediate</string>
+  <!-- Tiered PRE-CRASH disk reclaim (§4.6, cc-fleet-health) — the executor half of the
+       disk detect->act loop after the 2026-08-28 ~7h outage (free hit ~0 -> Errno 28 crashed
+       every tmux lane; disk_space_monitor.sh only PAGED). When free < DISK_REMEDIATE_UNDER_GB
+       it runs REVERSIBLE reclaimers (file-history prune, npm/brew cache, .next/cache >60min,
+       held paths excluded) and pages loud only if still below the floor.
+
+       SHIPS DRY-RUN: ProgramArguments has NO "--apply" -> it only REPORTS what it would free,
+       touches nothing. ARM (after operator/Nazim review of the dry-run) by adding "--apply".
+       Interval 300s (tighter than the 600s console monitor — it's the safety net). -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/boot_disk_autoremediate.sh</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/disk-autoremediate.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/disk-autoremediate.log</string>
+</dict>
+</plist>
