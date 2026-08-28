@@ -116,3 +116,33 @@ def test_next_cache_candidates_skips_recently_modified(tmp_path):
     # mtime = now → younger than the 30min gate → NOT a candidate (may be an active build)
     cands = dar.next_cache_candidates(root, exclude=set(), older_than_s=1800, now=time.time())
     assert str(fresh) not in {str(p) for p in cands}
+
+
+# ---- CONCRETE reclaimers mutate NOTHING under dry_run (Nazim review 34985 follow-up) ----
+# Pins what was verified by hand: dry-run is honored at the LEAF, not just the top — a reclaimer
+# in dry_run must never rmtree/subprocess, only measure. Guards against a future regression that
+# arms a destructive command behind a dry-run flag that's checked too late.
+def test_reclaim_dir_cmd_dry_run_never_runs_the_command(tmp_path):
+    size_dir = tmp_path / "cache"
+    size_dir.mkdir()
+    (size_dir / "blob").write_bytes(b"x" * 2048)
+    marker = tmp_path / "COMMAND_RAN"          # the command would create this IF executed
+    apply = dar._reclaim_dir_cmd(str(size_dir), ["touch", str(marker)])
+    freed = apply(dry_run=True)
+    assert not marker.exists(), "dry_run must NOT run the reclaim subprocess"
+    assert freed >= 2048, "dry_run still reports would-free size"
+
+
+def test_reclaim_next_cache_dry_run_deletes_nothing(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    d = root / "ihsanos" / ".next" / "cache"
+    d.mkdir(parents=True)
+    (d / "blob").write_bytes(b"x" * 4096)
+    old = time.time() - 7200                    # older than the 60min age gate → a candidate
+    os.utime(d, (old, old))
+    monkeypatch.setattr(dar, "PROJECTS_ROOT", root)
+    monkeypatch.setattr(dar, "EXCLUDE_PROJECTS", set())
+    monkeypatch.setattr(dar, "NEXT_CACHE_MIN_AGE_S", 3600)
+    freed = dar._reclaim_next_cache(dry_run=True)
+    assert d.exists() and (d / "blob").exists(), "dry_run must NOT rmtree the cache dir"
+    assert freed >= 4096, "dry_run still reports would-free size"

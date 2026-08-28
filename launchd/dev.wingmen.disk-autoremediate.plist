@@ -9,12 +9,15 @@
        it runs REVERSIBLE reclaimers (file-history prune, npm/brew cache, .next/cache >60min,
        held paths excluded) and pages loud only if still below the floor.
 
-       SHIPS DRY-RUN: ProgramArguments has NO "--apply" -> it only REPORTS what it would free,
-       touches nothing. ARM (after operator/Nazim review of the dry-run) by adding "--apply".
-       Interval 300s (tighter than the 600s console monitor — it's the safety net). -->
+       ARMED 2026-08-28 (Nazim review+approve, bus 34985): ProgramArguments includes "--apply"
+       so it RECLAIMS for real when free < DISK_REMEDIATE_UNDER_GB. Safe at arm time (110GB free
+       -> tier=ok no-op until real pressure). Revert to dry-run = remove the "--apply" string;
+       fully disarm = `launchctl bootout` this label. Interval 300s (tighter than the 600s
+       console monitor — it's the safety net). -->
   <key>ProgramArguments</key><array>
     <string>/bin/bash</string>
     <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/boot_disk_autoremediate.sh</string>
+    <string>--apply</string>
   </array>
   <key>StartInterval</key><integer>300</integer>
   <key>RunAtLoad</key><true/>
