@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.singleton-liveness</string>
+  <!-- Protected-singleton DEATH detection (Nazim 35131/35135) — closes the gap where cai
+       was killed-not-relaunched and sat DEAD ~30h undetected. Checks same-host protected
+       singletons (cai, the console) for a live tmux session; a body with NO tmux AND a
+       heartbeat stale past the generous threshold is DEAD -> pages orch-console (P1)
+       "needs boot". DETECT + PAGE ONLY — never auto-boots a singleton (a human relaunches).
+       'protected' means don't auto-reap, NOT exempt-from-liveness (that exemption was the
+       root cause). The hub (cross-host/VPS) is excluded here; self is excluded. --page = the
+       operating mode (omit for a dry-run report). Interval 300s -> death caught within
+       ~threshold+interval, vs 30h. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/boot_singleton_liveness.sh</string>
+    <string>--page</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/singleton-liveness.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/singleton-liveness.log</string>
+</dict>
+</plist>
