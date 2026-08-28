@@ -66,3 +66,24 @@ def test_console_death_pages_the_hub_not_the_dead_console():
 def test_non_console_death_pages_the_console():
     # cai/other death → the console is alive to act on it.
     assert sl.page_recipient("cai") == "orch-console"
+
+
+# ---- is_covered / backstop_action: the wedge-watchdog Gap-2 crux (Nazim 35141) ------
+def test_is_covered_only_for_locally_mapped_singletons():
+    # A singleton with a local tmux mapping is 'covered' by this monitor; the cross-host
+    # hub (no mapping) is NOT — the wedge backstop must page for the uncovered set.
+    assert sl.is_covered("cai", sessions={"cai": "cai", "orch-console": "nazim"}) is True
+    assert sl.is_covered("cc-orchestrator", sessions={"cai": "cai"}) is False
+
+def test_backstop_action_ok_nudge_does_nothing():
+    assert sl.backstop_action("cai", nudge_ok=True, sessions={"cai": "cai"}) == "none"
+
+def test_backstop_defers_for_a_covered_dead_singleton():
+    # covered → the standalone monitor owns the page → DEFER (no double-fire).
+    assert sl.backstop_action("cai", nudge_ok=False, sessions={"cai": "cai"}) == "defer"
+
+def test_backstop_pages_for_an_uncovered_dead_singleton():
+    # UNCOVERED (the cross-host hub) → the backstop is the ONLY detector → it MUST page.
+    # This is the correctness crux: a dead hub must not be silently deferred to a monitor
+    # that never checks it.
+    assert sl.backstop_action("cc-orchestrator", nudge_ok=False, sessions={"cai": "cai"}) == "page"

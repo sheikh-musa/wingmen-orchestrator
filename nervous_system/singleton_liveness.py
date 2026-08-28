@@ -88,6 +88,48 @@ def page_recipient(dead_agent):
     return HUB_AGENT if dead_agent in CONSOLE_AGENTS else DEFAULT_PAGE_TO
 
 
+# ---- shared with the wedge watchdog (Gap-2: liveness precondition + backstop) --------
+def is_covered(agent, sessions=None):
+    """True if THIS monitor locally checks `agent` (has a tmux-session mapping). The
+    cross-host hub is NOT covered — so the wedge backstop must page for it, not defer."""
+    return agent in (CHECK_SESSIONS if sessions is None else sessions)
+
+
+def backstop_action(agent, *, nudge_ok, sessions=None):
+    """The wedge-watchdog rc=255 backstop decision (Nazim 35141 crux). A FAILED singleton
+    nudge is DEAD evidence. DEFER the page IFF this monitor covers the agent (it owns the
+    single page); otherwise (cross-host hub / no local session) the backstop is the ONLY
+    detector on that path -> it MUST page. A successful nudge -> nothing."""
+    if nudge_ok:
+        return "none"
+    return "defer" if is_covered(agent, sessions) else "page"
+
+
+def agent_liveness(agent):
+    """Full liveness verdict for one agent, own short-lived conn. 'uncovered' if this monitor
+    has no local session for it (the wedge precondition then proceeds normally); else
+    classify_dead() on live tmux + heartbeat. Reused as the wedge watchdog's precondition."""
+    if not is_covered(agent):
+        return "uncovered"
+    session = CHECK_SESSIONS[agent]
+    try:
+        present = _tmux_has_session(session)
+    except RuntimeError:
+        return "uncovered"        # tmux unreadable -> don't assert dead; let wedge logic run
+    import psycopg2
+    c = psycopg2.connect(_dsn()); cur = c.cursor()
+    try:
+        hb = _hb_age(cur, agent)
+    finally:
+        cur.close(); c.close()
+    return classify_dead(tmux_present=present, hb_age_s=hb, threshold_s=THRESHOLD_S)
+
+
+def page_dead(agent, hb_age_s=None, dry_run=False):
+    """Public wrapper: page the right LIVE recipient that `agent` is DEAD."""
+    _page(agent, hb_age_s, dry_run, page_recipient(agent))
+
+
 # ---- I/O ----------------------------------------------------------------------
 def _tmux_bin():
     # Mini lanes/singletons live on the /usr/local/bin/tmux server (two-tmux note).

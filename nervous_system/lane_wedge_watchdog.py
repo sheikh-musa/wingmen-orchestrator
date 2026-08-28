@@ -1108,6 +1108,25 @@ def _recover(obs: AgentObs, entry: dict, mode: str, alert: bool, now: float,
         entry["nudge_count"] = int(entry.get("nudge_count", 0)) + 1
         line["action"] = f"auto-nudge {obs.agent}: {'ok' if ok else 'FAILED'} ({mech})"
         log(line["action"])
+        # GAP-2 rc=255 BACKSTOP (Nazim 35141): a FAILED singleton nudge = unreachable = DEAD
+        # evidence (this is exactly how cai's corpse got nudged for 30h). DEFER the page IFF the
+        # singleton-liveness monitor covers this agent (it owns the single page); else (the
+        # cross-host HUB, or any singleton with no local session) the backstop is the ONLY
+        # detector on the nudge path -> it MUST page, never silently defer to a monitor that
+        # never checks it. This DEAD-page is a safety detection alert, not a recovery action.
+        if obs.kind == "singleton":
+            try:
+                from nervous_system import singleton_liveness as _sl
+            except ImportError:
+                import singleton_liveness as _sl
+            act = _sl.backstop_action(obs.agent, nudge_ok=ok)
+            if act == "page":
+                _sl.page_dead(obs.agent, dry_run=False)
+                line["action"] += " — UNCOVERED singleton unreachable → paged DEAD (backstop)"
+                log(f"BACKSTOP {obs.agent}: nudge failed + uncovered → paged DEAD (needs boot)")
+            elif act == "defer":
+                log(f"BACKSTOP {obs.agent}: nudge failed (likely dead) → deferring page to "
+                    f"singleton-liveness monitor (covered)")
         return
 
     if mode != MODE_ESCALATE:
@@ -1210,6 +1229,24 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
 
     results: list[dict] = []
     for obs in observations:
+        # GAP-2 LIVENESS PRECONDITION (Nazim 35141): a DEAD body is not wedged — never score or
+        # nudge a corpse (the gap-2 root cause). Check liveness FIRST for a singleton; if DEAD,
+        # skip wedge-scoring and DEFER the single page to the standalone singleton-liveness
+        # monitor (bounded <=300s — both call the same classify_dead()). 'uncovered'/'alive'/
+        # 'grace' -> proceed to normal wedge logic.
+        if obs.kind == "singleton":
+            try:
+                from nervous_system import singleton_liveness as _sl
+            except ImportError:  # run-as-script: nervous_system dir on sys.path
+                import singleton_liveness as _sl
+            if _sl.agent_liveness(obs.agent) == "dead":
+                line = {"agent": obs.agent, "kind": obs.kind, "session": obs.session,
+                        "verdict": "dead", "unread": obs.bus.unread,
+                        "action": ("DEAD (no tmux) — NOT wedged; skipped scoring, deferring page "
+                                   "to singleton-liveness monitor")}
+                log(f"DEAD {obs.agent}: no tmux/process — not a wedge; deferring page to singleton-liveness")
+                results.append(line)
+                continue
         entry = state["agents"].get(obs.agent)
         verdict, entry = evaluate(entry, obs, now)
         state["agents"][obs.agent] = entry
