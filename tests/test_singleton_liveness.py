@@ -55,3 +55,14 @@ def test_checked_agents_excludes_self_and_crosshost_hub():
 def test_checked_agents_maps_to_tmux_session():
     checked = sl.checked_agents(["cai"], sessions={"cai": "cai"}, self_agent="cc-fleet-health")
     assert checked == {"cai": "cai"}
+
+
+# ---- page_recipient(): a DEAD body can't read its own page (Nazim follow-up #1) ------
+def test_console_death_pages_the_hub_not_the_dead_console():
+    # Paging a dead console = an unread nobody reads. Route to the hub (alive, can TG operator).
+    assert sl.page_recipient("orch-console") == "cc-orchestrator"
+    assert sl.page_recipient("nazim-console") == "cc-orchestrator"
+
+def test_non_console_death_pages_the_console():
+    # cai/other death → the console is alive to act on it.
+    assert sl.page_recipient("cai") == "orch-console"

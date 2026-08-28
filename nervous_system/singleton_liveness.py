@@ -51,6 +51,11 @@ CHECK_SESSIONS = {
 }
 THRESHOLD_S = int(os.environ.get("SINGLETON_LIVENESS_THRESHOLD_S", "1200"))  # 20min, generous
 SELF_AGENT = "cc-fleet-health"
+# A DEAD body can't read its own page (Nazim follow-up #1): if a CONSOLE is the dead one,
+# page the HUB (alive, cross-host, can TG the operator) instead of the dead console.
+CONSOLE_AGENTS = {"orch-console", "nazim-console"}
+HUB_AGENT = "cc-orchestrator"
+DEFAULT_PAGE_TO = "orch-console"
 STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "logs", "singleton_liveness_state.json")
 
@@ -74,6 +79,13 @@ def checked_agents(protected, *, sessions, self_agent):
     """From the protected set, the same-host non-self singletons we can locally death-check:
     those WITH a tmux-session mapping and NOT self. The cross-host hub has no mapping -> skipped."""
     return {a: sessions[a] for a in protected if a != self_agent and a in sessions}
+
+
+def page_recipient(dead_agent):
+    """Route the DEAD-page to a LIVE body that can act. A dead console can't read its own
+    inbox, so a console-death pages the HUB (cross-host, alive, can escalate to the operator);
+    any other death pages the console (alive to act)."""
+    return HUB_AGENT if dead_agent in CONSOLE_AGENTS else DEFAULT_PAGE_TO
 
 
 # ---- I/O ----------------------------------------------------------------------
@@ -118,26 +130,26 @@ def _save_state(state):
         pass
 
 
-def _page(agent, hb_age_s, dry_run):
+def _page(agent, hb_age_s, dry_run, recipient):
     body = (f"TL;DR: {agent} (protected singleton) appears DEAD — no tmux session and heartbeat "
             f"stale {int(hb_age_s) if hb_age_s else '?'}s. A nudge can't drain a dead node; it needs "
-            f"a BOOT (its sanctioned boot script). I do NOT auto-boot a singleton — flagging for a "
-            f"human to relaunch. If this is a false positive (mid-boot), it self-clears when the "
-            f"tmux session reappears.")
-    banner = f"🔴 SINGLETON DEAD: {agent} — no tmux/process, needs boot"
+            f"a BOOT (its sanctioned boot script). I do NOT auto-boot a singleton — flagging you "
+            f"(a LIVE body) to relaunch it. If this is a false positive (mid-boot), it self-clears "
+            f"when the tmux session reappears.")
+    banner = f"🔴 SINGLETON DEAD: {agent} — no tmux/process, needs boot (paging {recipient})"
     print(banner, file=sys.stderr, flush=True)
     if dry_run:
-        log(f"DRY-RUN would page: {banner}")
+        log(f"DRY-RUN would page {recipient}: 🔴 SINGLETON DEAD: {agent} — needs boot")
         return
     try:
         import psycopg2
         c = psycopg2.connect(_dsn()); cur = c.cursor()
         cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
         cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                       VALUES ('cc-fleet-health','orch-console','blocker','P1',%s,%s)""",
-                    (banner, body))
+                       VALUES ('cc-fleet-health',%s,'blocker','P1',%s,%s)""",
+                    (recipient, f"🔴 SINGLETON DEAD: {agent} — no tmux/process, needs boot", body))
         c.commit(); cur.close(); c.close()
-        log(f"paged orch-console: {agent} DEAD")
+        log(f"paged {recipient}: {agent} DEAD")
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already fired
         log(f"WARN page failed ({e}); stderr banner stands")
 
@@ -163,7 +175,7 @@ def sweep(*, dry_run=True):
         results.append({"agent": agent, "session": session, "verdict": verdict, "hb_age_s": hb_age})
         already = state.get(agent, {}).get("paged_dead", False)
         if verdict == "dead" and not already:
-            _page(agent, hb_age, dry_run)
+            _page(agent, hb_age, dry_run, page_recipient(agent))
             state.setdefault(agent, {})["paged_dead"] = True
         elif verdict == "alive":
             if already:
