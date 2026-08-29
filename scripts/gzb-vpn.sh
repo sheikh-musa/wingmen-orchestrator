@@ -88,7 +88,11 @@ up(){
   echo "$TUNIF" > "$IFFILE"
   log "tunnel iface = $TUNIF"
   # 5) add ONLY the gzb subnet via the tunnel — never the default route
-  ip route add "$GZB_SUBNET" dev "$TUNIF"
+  # 4b) WAIT for the iface to be routable (pppd IPCP done) — ppp0 APPEARS before it is up (Nazim caught this)
+  for i in $(seq 1 20); do ip addr show "$TUNIF" 2>/dev/null | grep -q "inet " && break; sleep 1; done
+  # add ONLY the gzb subnet — retry (transient "nexthop not up" until pppd finishes)
+  for i in $(seq 1 10); do ip route add "$GZB_SUBNET" dev "$TUNIF" 2>/dev/null && break; sleep 1; done
+  ip route show "$GZB_SUBNET" | grep -q . || { log "ABORT: gzb route not added after wait"; down; exit 1; }
   # 6) VERIFY the default route is untouched; if not, abort+teardown immediately
   if ! default_ok; then log "ABORT: default route CHANGED after connect — tearing down"; down; exit 1; fi
   # 7) arm the dead-man auto-teardown (self-heal ceiling)
