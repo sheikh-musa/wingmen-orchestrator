@@ -101,7 +101,14 @@ from scripts.lib.require_verified_authorization import (
 # through the console (op#14352 Rule 3 amendment), not through an allowlist entry.
 QA_TARGETS: frozenset[str] = frozenset(
     {
-        "ywrpttpxwfcoodovxhsr",  # cosem-platform demo/dev — synthetic only
+        # (CAI-RESP-1338, 2026-08-31) cosem-platform "ywrpttpxwfcoodovxhsr" REMOVED:
+        # it is NO LONGER synthetic-only — that project now holds a real client org
+        # (cosem 1478c9b2, real trainee PII). is_qa_target keys on project ref, not
+        # org id, so allowlisting the whole project would green-light createUser on
+        # real PII (the exact CAI-1118 case). A cosem UAT identity must be a SEPARATE
+        # synthetic project with its OWN ref, added here under a cai SS6.6 sign-off
+        # (CAI-RESP-1337). Empty set = deny-by-default; all auth-admin writes fall to
+        # the real path (the freeze). Pure tightening, cai-preauthorized.
     }
 )
 
