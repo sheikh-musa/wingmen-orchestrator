@@ -269,6 +269,26 @@ def _dsn() -> Optional[str]:
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
 
+# A transient DB-connect/DNS blip to the substrate pooler must NOT be able to kill
+# the whole safety watchdog (2026-08-31: an unhandled psycopg.OperationalError —
+# "failed to resolve host ...pooler.supabase.com" at the read_context_gauge connect
+# — exited the process and false-paged "watchdog CRASHED" for something that
+# self-heals on the very next StartInterval tick). We retry within the run first;
+# if the gauge is STILL unreachable, we raise GaugeUnreachable so main() can tell a
+# transient single-run skip (soft: log + clean exit, self-heals next tick) apart
+# from a PERSISTENT outage (loud page — a watchdog blind for N runs IS a real
+# dead-man's-switch condition). A raw crash is neither honest signal.
+_GAUGE_CONNECT_ATTEMPTS = 3          # attempts within a single run
+_GAUGE_CONNECT_BACKOFF_S = 2.0       # linear backoff: 2s, 4s between attempts
+_GAUGE_UNREACHABLE_LOUD_AFTER = 2    # consecutive unreachable RUNS before paging loud (~20m at StartInterval 600)
+_GAUGE_TICK_MIN = 10                 # StartInterval 600s, for human-readable messages
+
+
+class GaugeUnreachable(Exception):
+    """The context gauge (substrate) was unreachable after bounded retries this run.
+    A distinct type so main() never confuses a transient DB blip with a real bug."""
+
+
 def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
     """Freshest latest_context_tokens per always-on identity -> classification.
 
@@ -292,8 +312,21 @@ def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
         import psycopg2 as psycopg  # type: ignore
         connect = psycopg.connect
 
+    # Bounded retry on the CONNECT — the exact failure point (transient DNS/pooler
+    # blip). A momentary resolve failure now recovers within the run instead of
+    # crashing the whole watchdog; a still-dead connection after retries raises
+    # GaugeUnreachable (handled softly-then-loudly by main), never a raw traceback.
+    conn = None
+    for _attempt in range(_GAUGE_CONNECT_ATTEMPTS):
+        try:
+            conn = connect(dsn)
+            break
+        except psycopg.OperationalError as _e:
+            if _attempt == _GAUGE_CONNECT_ATTEMPTS - 1:
+                raise GaugeUnreachable(str(_e)) from _e
+            time.sleep(_GAUGE_CONNECT_BACKOFF_S * (_attempt + 1))
     out: list[AgentCtx] = []
-    with connect(dsn) as conn, conn.cursor() as cur:
+    with conn, conn.cursor() as cur:
         cur.execute(
             """
             SELECT DISTINCT ON (cc_identity) cc_identity, latest_context_tokens,
@@ -1641,6 +1674,40 @@ def _resolve_arm_level(args) -> str:
     return env if env in ("amber", "red") else "off"
 
 
+def _clear_gauge_unreachable_streak() -> None:
+    """A successful gauge read clears any prior transient-unreachable streak."""
+    st = _load_exec_state()
+    if st.get("gauge_unreachable_streak"):
+        st["gauge_unreachable_streak"] = 0
+        _save_exec_state(st)
+
+
+def _handle_gauge_unreachable(err: "GaugeUnreachable", args) -> int:
+    """The substrate gauge was unreachable after retries THIS run. A transient single
+    skip self-heals on the next StartInterval tick (soft: log, clean exit, no page).
+    A PERSISTENT streak means the watchdog is genuinely blind and MUST page loud — the
+    dead-man's-switch stays intact; we just don't cry 'CRASHED' at one DNS blip that
+    self-recovers in <=10 min."""
+    st = _load_exec_state()
+    streak = int(st.get("gauge_unreachable_streak", 0)) + 1
+    st["gauge_unreachable_streak"] = streak
+    _save_exec_state(st)
+    print(f"[ctx-health] gauge DB unreachable after {_GAUGE_CONNECT_ATTEMPTS} attempts "
+          f"({err}); skipped this run (streak={streak}), will retry next tick "
+          f"(~{_GAUGE_TICK_MIN}m). No classification this run.", file=sys.stderr)
+    if args.json:
+        print(json.dumps({"rows": [], "exec": [], "arm_level": _resolve_arm_level(args),
+                          "gauge_unreachable": True, "unreachable_streak": streak}, indent=2))
+    # Loud ONLY when persistent, and only in --alert mode (a dry-run never pages).
+    if (args.alert and streak >= _GAUGE_UNREACHABLE_LOUD_AFTER
+            and (streak == _GAUGE_UNREACHABLE_LOUD_AFTER or streak % 6 == 0)):
+        _page_loud(
+            f"🐛 Context watchdog BLIND for {streak} consecutive runs "
+            f"(~{streak * _GAUGE_TICK_MIN}m): substrate gauge UNREACHABLE ({err}). "
+            f"NOT guarding context bloat — check the Mini's DB/DNS path to the pooler.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1661,7 +1728,13 @@ def main() -> int:
     fleet_health_boundaries.assert_no_sre_red_reset(arm_level)
 
     dropped: list = []
-    rows = read_context_gauge(dropped)
+    try:
+        rows = read_context_gauge(dropped)
+    except GaugeUnreachable as _ge:
+        # Transient substrate blip: soft-skip this run (self-heals next tick); page
+        # loud only on a PERSISTENT streak. Never the raw-crash 'watchdog CRASHED'.
+        return _handle_gauge_unreachable(_ge, args)
+    _clear_gauge_unreachable_streak()  # a good read clears any prior blind streak
     if args.json:
         out = [{**asdict(r), "plan": plan_reset(r, arm_level=arm_level)} for r in rows]
         exec_results = run_executor(rows, arm_level) if arm_level != "off" else []

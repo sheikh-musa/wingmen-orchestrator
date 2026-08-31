@@ -20,7 +20,9 @@ immediate and loud — but keywords keep it from arising at all.
 """
 from __future__ import annotations
 
+import json
 import time
+import types
 
 import pytest
 
@@ -1374,3 +1376,72 @@ def test_s2_cai_reset_path_untouched_by_self_compacts(monkeypatch, tmp_path):
     assert calls["checkpoint"] == 1, "cai still write-only checkpoints under amber"
     assert calls["reset"] == 0, "cai is NEVER reset under --arm=amber — self_compacts changed nothing here"
     assert any("cai" in line for line in out)
+
+
+# --------------------------------------------------------------------------- #
+# Transient-substrate-blip hardening (2026-08-31): a DNS/connect blip to the
+# pooler must NOT false-page "watchdog CRASHED"; a single skip self-heals next
+# tick (soft, no page), a PERSISTENT streak still pages LOUD (dead-man's-switch).
+# _page_loud is autouse-RAISE, so a test that reaches its assert without patching
+# it has proven no loud page fired.
+# --------------------------------------------------------------------------- #
+
+def _ge_args(alert=True, json_=False):
+    return types.SimpleNamespace(alert=alert, json=json_, arm=None)
+
+
+def test_gauge_unreachable_single_skip_is_soft_no_page(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    rc = w._handle_gauge_unreachable(w.GaugeUnreachable("failed to resolve host"), _ge_args())
+    assert rc == 0  # clean exit — no external 'crashed' signal
+    assert json.loads((tmp_path / "exec.json").read_text())["gauge_unreachable_streak"] == 1
+    # reaching here without _page_loud (autouse-raise) firing == no page on one blip
+
+
+def test_gauge_unreachable_persistent_pages_loud(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    (tmp_path / "exec.json").write_text(json.dumps({"gauge_unreachable_streak": 1}))
+    pages: list[str] = []
+    monkeypatch.setattr(w, "_page_loud", lambda text: pages.append(text))
+    rc = w._handle_gauge_unreachable(w.GaugeUnreachable("dns dead"), _ge_args())
+    assert rc == 0
+    assert json.loads((tmp_path / "exec.json").read_text())["gauge_unreachable_streak"] == 2
+    assert len(pages) == 1 and "BLIND" in pages[0] and "NOT guarding" in pages[0]
+
+
+def test_gauge_unreachable_dryrun_never_pages(monkeypatch, tmp_path):
+    # Even deep into a persistent streak, a NON-alert (dry-run) invocation must not
+    # page. _page_loud stays autouse-raise; reaching the assert proves it was skipped.
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    (tmp_path / "exec.json").write_text(json.dumps({"gauge_unreachable_streak": 5}))
+    rc = w._handle_gauge_unreachable(w.GaugeUnreachable("x"), _ge_args(alert=False))
+    assert rc == 0
+    assert json.loads((tmp_path / "exec.json").read_text())["gauge_unreachable_streak"] == 6
+
+
+def test_gauge_unreachable_streak_clears_on_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    (tmp_path / "exec.json").write_text(json.dumps({"gauge_unreachable_streak": 3, "other": "keep"}))
+    w._clear_gauge_unreachable_streak()
+    st = json.loads((tmp_path / "exec.json").read_text())
+    assert st["gauge_unreachable_streak"] == 0
+    assert st["other"] == "keep"  # unrelated state preserved
+
+
+def test_read_context_gauge_retries_then_raises_gauge_unreachable(monkeypatch):
+    # Force the connect to always fail with OperationalError; assert it retries
+    # _GAUGE_CONNECT_ATTEMPTS times and converts to GaugeUnreachable (never a raw
+    # OperationalError that would hit the __main__ 'CRASHED' page).
+    import psycopg  # same module read_context_gauge imports
+    calls = {"n": 0}
+
+    def _boom(dsn):
+        calls["n"] += 1
+        raise psycopg.OperationalError("failed to resolve host 'x.pooler'")
+
+    monkeypatch.setattr(w, "_dsn", lambda: "postgresql://u:p@x.pooler:5432/db")
+    monkeypatch.setattr(psycopg, "connect", _boom)
+    monkeypatch.setattr(w.time, "sleep", lambda *_a, **_k: None)  # no real backoff wait
+    with pytest.raises(w.GaugeUnreachable):
+        w.read_context_gauge([])
+    assert calls["n"] == w._GAUGE_CONNECT_ATTEMPTS
