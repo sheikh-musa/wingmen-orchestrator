@@ -1445,3 +1445,56 @@ def test_read_context_gauge_retries_then_raises_gauge_unreachable(monkeypatch):
     with pytest.raises(w.GaugeUnreachable):
         w.read_context_gauge([])
     assert calls["n"] == w._GAUGE_CONNECT_ATTEMPTS
+
+
+# Recovery all-clear (2026-08-31, Nazim review follow-up): a LOUD "BLIND — NOT
+# guarding" page must be bookended by a RECOVERY all-clear so the operator gets
+# closure; a soft single-skip that recovered never paged, so it stays silent.
+
+def test_gauge_recovery_after_loud_page_sends_all_clear(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    (tmp_path / "exec.json").write_text(
+        json.dumps({"gauge_unreachable_streak": 3, "gauge_unreachable_paged": True, "keep": 1}))
+    pages: list[str] = []
+    monkeypatch.setattr(w, "_page_loud", lambda text: pages.append(text))
+    w._clear_gauge_unreachable_streak(alert=True)
+    st = json.loads((tmp_path / "exec.json").read_text())
+    assert st["gauge_unreachable_streak"] == 0
+    assert "gauge_unreachable_paged" not in st
+    assert st["keep"] == 1  # unrelated state preserved
+    assert len(pages) == 1 and "RECOVERED" in pages[0] and "3 run" in pages[0]
+
+
+def test_gauge_recovery_after_soft_skip_is_silent(monkeypatch, tmp_path):
+    # streak=1 never loud-paged; recovery must NOT page. _page_loud stays
+    # autouse-raise, so reaching the assert proves no all-clear fired.
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    (tmp_path / "exec.json").write_text(json.dumps({"gauge_unreachable_streak": 1}))
+    w._clear_gauge_unreachable_streak(alert=True)
+    assert json.loads((tmp_path / "exec.json").read_text())["gauge_unreachable_streak"] == 0
+
+
+def test_gauge_recovery_dryrun_never_all_clears(monkeypatch, tmp_path):
+    # Even a genuinely loud-paged streak recovers silently when not in --alert mode.
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    (tmp_path / "exec.json").write_text(
+        json.dumps({"gauge_unreachable_streak": 2, "gauge_unreachable_paged": True}))
+    w._clear_gauge_unreachable_streak(alert=False)
+    st = json.loads((tmp_path / "exec.json").read_text())
+    assert st["gauge_unreachable_streak"] == 0 and "gauge_unreachable_paged" not in st
+
+
+def test_gauge_loud_then_recover_bookends_exactly_two_pages(monkeypatch, tmp_path):
+    # Full lifecycle: soft skip -> loud page -> recovery all-clear == exactly 2 pages.
+    monkeypatch.setattr(w, "_EXEC_STATE_FILE", tmp_path / "exec.json")
+    pages: list[str] = []
+    monkeypatch.setattr(w, "_page_loud", lambda text: pages.append(text))
+    args = _ge_args(alert=True)
+    w._handle_gauge_unreachable(w.GaugeUnreachable("blip"), args)   # streak 1 - soft, no page
+    assert pages == []
+    w._handle_gauge_unreachable(w.GaugeUnreachable("blip"), args)   # streak 2 - LOUD page
+    assert len(pages) == 1 and "BLIND" in pages[0]
+    w._clear_gauge_unreachable_streak(alert=True)                    # recovery - ALL-CLEAR
+    assert len(pages) == 2 and "RECOVERED" in pages[1]
+    st = json.loads((tmp_path / "exec.json").read_text())
+    assert st["gauge_unreachable_streak"] == 0 and "gauge_unreachable_paged" not in st

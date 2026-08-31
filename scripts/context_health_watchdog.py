@@ -1674,12 +1674,23 @@ def _resolve_arm_level(args) -> str:
     return env if env in ("amber", "red") else "off"
 
 
-def _clear_gauge_unreachable_streak() -> None:
-    """A successful gauge read clears any prior transient-unreachable streak."""
+def _clear_gauge_unreachable_streak(alert: bool = False) -> None:
+    """A successful gauge read clears any prior transient-unreachable streak. If a
+    LOUD 'BLIND — NOT guarding' page actually went out for that streak, bookend it
+    with a RECOVERY all-clear so the operator gets closure instead of a dangling
+    alarm — a real alarm earns a real all-clear. A soft single-skip that recovered
+    never paged, so it stays silent (nothing to close)."""
     st = _load_exec_state()
-    if st.get("gauge_unreachable_streak"):
-        st["gauge_unreachable_streak"] = 0
-        _save_exec_state(st)
+    streak = int(st.get("gauge_unreachable_streak", 0) or 0)
+    paged = bool(st.get("gauge_unreachable_paged"))
+    if not streak and not paged:
+        return
+    st["gauge_unreachable_streak"] = 0
+    st.pop("gauge_unreachable_paged", None)
+    _save_exec_state(st)
+    if paged and alert:
+        _page_loud(f"✅ Context watchdog RECOVERED — guarding again after {streak} "
+                   f"run(s) blind (~{streak * _GAUGE_TICK_MIN}m). Substrate gauge reachable.")
 
 
 def _handle_gauge_unreachable(err: "GaugeUnreachable", args) -> int:
@@ -1691,7 +1702,6 @@ def _handle_gauge_unreachable(err: "GaugeUnreachable", args) -> int:
     st = _load_exec_state()
     streak = int(st.get("gauge_unreachable_streak", 0)) + 1
     st["gauge_unreachable_streak"] = streak
-    _save_exec_state(st)
     print(f"[ctx-health] gauge DB unreachable after {_GAUGE_CONNECT_ATTEMPTS} attempts "
           f"({err}); skipped this run (streak={streak}), will retry next tick "
           f"(~{_GAUGE_TICK_MIN}m). No classification this run.", file=sys.stderr)
@@ -1705,6 +1715,10 @@ def _handle_gauge_unreachable(err: "GaugeUnreachable", args) -> int:
             f"🐛 Context watchdog BLIND for {streak} consecutive runs "
             f"(~{streak * _GAUGE_TICK_MIN}m): substrate gauge UNREACHABLE ({err}). "
             f"NOT guarding context bloat — check the Mini's DB/DNS path to the pooler.")
+        # Record that a loud page went out, so a later recovery can bookend it with
+        # an all-clear instead of clearing the alarm silently.
+        st["gauge_unreachable_paged"] = True
+    _save_exec_state(st)
     return 0
 
 
@@ -1734,7 +1748,7 @@ def main() -> int:
         # Transient substrate blip: soft-skip this run (self-heals next tick); page
         # loud only on a PERSISTENT streak. Never the raw-crash 'watchdog CRASHED'.
         return _handle_gauge_unreachable(_ge, args)
-    _clear_gauge_unreachable_streak()  # a good read clears any prior blind streak
+    _clear_gauge_unreachable_streak(args.alert)  # good read: clear streak (+ all-clear if it loud-paged)
     if args.json:
         out = [{**asdict(r), "plan": plan_reset(r, arm_level=arm_level)} for r in rows]
         exec_results = run_executor(rows, arm_level) if arm_level != "off" else []
