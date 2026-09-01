@@ -1530,6 +1530,10 @@ def test_alerts_value_frozen_suppresses_pct_and_pages_frozen_once(monkeypatch, t
     monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
     sent: list[str] = []
     monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    # cc-orchestrator (the hub) is cross-host — its pane is unreachable from the Mini, so the
+    # idle-vs-active gate falls back to the value band; at amber (61%) an amber+ frozen value
+    # is a genuine hidden-bloat risk and MUST still page (Nazim 36318/36319, op#18601).
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: None)
     w.run_alerts([row])
     # exactly one alert, and it's the FROZEN one — NOT the climbing-% amber page
     assert len(sent) == 1 and "FROZEN" in sent[0] and "ZOMBIE" in sent[0]
@@ -1565,3 +1569,112 @@ def test_alerts_frozen_value_moves_bookends_all_clear(monkeypatch, tmp_path):
     assert any("LIVE again" in t for t in sent)
     st = json.loads((tmp_path / "state.json").read_text())
     assert st["__ctx_freeze__"]["cc-orchestrator"]["paged"] is False
+
+
+# ── IDLE-vs-ACTIVE gate on the frozen-gauge page (Nazim 36318 -> 36319, op#18601) ──
+# The value-freeze guard correctly caught cc-quality's static gauge, but cc-quality is an
+# on-demand auditor sitting IDLE at 13% (GREEN) — no hidden bloat — and it false-paged the
+# operator. Fix: only page a frozen gauge when the body is ACTIVE (pane busy), or when the
+# frozen value is high-band (amber+, where hidden bloat genuinely matters). Suppress the
+# operator page for an idle/unreachable GREEN-band frozen lane. The discriminator is
+# idle-vs-active (36319), NOT the band alone: a writer breaking low-% while the body keeps
+# bloating is a green-frozen TRUE positive (busy pane) that must still page.
+
+def _frozen_green_reg(monkeypatch, agent="odemand", **extra):
+    """An on-demand alerts body (cc-quality shape): alerts:True so the frozen-page path is
+    reachable, self_compacts:True, never auto-reset."""
+    reg = {"label": agent, "window": 1_000_000, "alerts": True, "self_compacts": True,
+           "auto_reset": False, "host": "self", "tmux": agent, **extra}
+    monkeypatch.setitem(w._AGENT_REGISTRY, agent, reg)
+    return reg
+
+
+def _seed_frozen(tmp_path, monkeypatch, row, paged=False):
+    import json, time
+    seed = {"__ctx_freeze__": {row.agent: {"tokens": row.ctx_tokens,
+            "since": time.time() - (w._CTX_FROZEN_S + 600), "paged": paged}}}
+    (tmp_path / "state.json").write_text(json.dumps(seed))
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    return sent
+
+
+def test_frozen_green_idle_lane_suppresses_operator_page(monkeypatch, tmp_path):
+    """op#18601: cc-quality idle at 13% (GREEN) with a static gauge must NOT page the operator.
+    An idle lane's gauge is legitimately frozen — there is no hidden bloat at 13%."""
+    _frozen_green_reg(monkeypatch)
+    row = w.AgentCtx(agent="odemand", ctx_tokens=130_000, pct=13, level="green",
+                     age_s=30, action="ok", stale=False)
+    sent = _seed_frozen(tmp_path, monkeypatch, row)
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)  # empty composer, no active turn
+    fired = w.run_alerts([row])
+    assert sent == [], "an IDLE green-band frozen lane must not page the operator (op#18601)"
+    assert fired == []
+    # paged stays False -> if it later turns active, the next cycle can still page (delayed, not lost)
+    import json
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert st["__ctx_freeze__"]["odemand"]["paged"] is False
+
+
+def test_frozen_green_BUSY_lane_pages_the_true_positive(monkeypatch, tmp_path):
+    """Nazim 36319 correctness nuance: a writer breaking at LOW % while the body keeps WORKING
+    and bloating is a GREEN-frozen TRUE positive. Band-alone would suppress it; the idle-vs-
+    active gate pages it because the pane is BUSY (actively producing)."""
+    _frozen_green_reg(monkeypatch)
+    row = w.AgentCtx(agent="odemand", ctx_tokens=130_000, pct=13, level="green",
+                     age_s=30, action="ok", stale=False)
+    sent = _seed_frozen(tmp_path, monkeypatch, row)
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: False)  # mid-turn: "esc to interrupt"
+    fired = w.run_alerts([row])
+    assert len(sent) == 1 and "FROZEN" in sent[0], "an ACTIVE frozen lane must page regardless of band"
+    assert fired == ["odemand"]
+    import json
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert st["__ctx_freeze__"]["odemand"]["paged"] is True
+
+
+def test_frozen_green_unreachable_lane_suppresses_operator_page(monkeypatch, tmp_path):
+    """Pane unreachable (idle unknown) + GREEN band: either an idle lane or a low-context
+    broken writer — nothing high hidden, so suppress the operator page."""
+    _frozen_green_reg(monkeypatch)
+    row = w.AgentCtx(agent="odemand", ctx_tokens=130_000, pct=13, level="green",
+                     age_s=30, action="ok", stale=False)
+    sent = _seed_frozen(tmp_path, monkeypatch, row)
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: None)  # pane unreachable
+    fired = w.run_alerts([row])
+    assert sent == [] and fired == []
+
+
+def test_frozen_amber_idle_snapshot_still_pages(monkeypatch, tmp_path):
+    """Robustness for the case that MATTERS (the hub-at-61% zombie): an amber+ frozen value is
+    a genuine hidden-bloat risk, so it pages even if a single pane snapshot reads idle (an
+    actively-broken singleton is often caught between turns) or the pane is unreachable."""
+    _frozen_green_reg(monkeypatch, agent="hubish")
+    row = w.AgentCtx(agent="hubish", ctx_tokens=610_000, pct=61, level="amber",
+                     age_s=30, action="checkpoint-nudge", stale=False)
+    sent = _seed_frozen(tmp_path, monkeypatch, row)
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)  # idle SNAPSHOT, but amber value
+    fired = w.run_alerts([row])
+    assert len(sent) == 1 and "FROZEN" in sent[0], "amber+ frozen must page even on an idle snapshot"
+    assert fired == ["hubish"]
+
+
+def test_frozen_gauge_should_page_helper_matrix(monkeypatch):
+    """Unit the decision seam directly across the (idle, band) matrix."""
+    reg = {"tmux": "x", "host": "self", "alerts": True}
+    green = w.AgentCtx(agent="g", ctx_tokens=130_000, pct=13, level="green", age_s=1, action="ok")
+    amber = w.AgentCtx(agent="a", ctx_tokens=650_000, pct=65, level="amber", age_s=1, action="ok")
+    red = w.AgentCtx(agent="r", ctx_tokens=850_000, pct=85, level="red", age_s=1, action="ok")
+    # BUSY -> always page
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: False)
+    assert w._frozen_gauge_should_page(green, reg) is True
+    # IDLE + green -> suppress; IDLE + amber/red -> page
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)
+    assert w._frozen_gauge_should_page(green, reg) is False
+    assert w._frozen_gauge_should_page(amber, reg) is True
+    assert w._frozen_gauge_should_page(red, reg) is True
+    # UNREACHABLE + green -> suppress; UNREACHABLE + amber -> page
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: None)
+    assert w._frozen_gauge_should_page(green, reg) is False
+    assert w._frozen_gauge_should_page(amber, reg) is True

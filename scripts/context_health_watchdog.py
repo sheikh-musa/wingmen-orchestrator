@@ -1619,6 +1619,38 @@ def _handle_self_recycle(a: AgentCtx, reg: dict, state: dict, now: float) -> Opt
     return status
 
 
+def _frozen_gauge_should_page(a: AgentCtx, reg: dict) -> bool:
+    """IDLE-vs-ACTIVE gate on the frozen-gauge page (Nazim 36318 -> 36319, op#18601).
+
+    A frozen ctx gauge means a broken cost-writer HIDING REAL BLOAT only when the body is
+    actually working; an IDLE on-demand lane's gauge is legitimately static (its writer merely
+    keepalive-refreshes ended_at while it produces no tokens). Paging the operator on the
+    latter is the cc-quality-@13%-idle false page (op#18601). The genuinely-safe discriminator
+    is IDLE-vs-ACTIVE (Nazim 36319), NOT the value band alone — a writer breaking at low % while
+    the body keeps bloating is a GREEN-frozen TRUE positive that band-alone would wrongly
+    suppress. So:
+      - pane BUSY (idle is False): actively producing + frozen gauge = real zombie -> PAGE,
+        regardless of band (this is exactly the low-%-then-bloating true positive).
+      - band >= SOFT/amber: a high frozen value is a genuine hidden-bloat risk (the hub-at-61%
+        zombie) -> PAGE even if a single pane snapshot reads idle or the pane is unreachable
+        (robust to a between-turns capture and to cross-host bodies the Mini cannot see).
+      - else (band GREEN and pane idle/unreachable): a legitimately-static idle lane, or a
+        low-context broken writer with nothing high hidden -> SUPPRESS the operator page.
+    A suppressed page is LOGGED LOUDLY (charter #1: a silently-dropped page is worse than none),
+    and leaves rec["paged"] False so the next cycle re-evaluates — the page is delayed if the
+    body turns active, never permanently swallowed.
+    """
+    if _agent_is_idle(reg) is False:  # actively mid-turn ("esc to interrupt")
+        return True
+    if _LEVEL_RANK.get(a.level, 0) >= _LEVEL_RANK["amber"]:  # high frozen value -> hidden-bloat risk
+        return True
+    print(f"[ctx-health] frozen-gauge page SUPPRESSED — {a.agent} static at "
+          f"{a.ctx_tokens:,} tokens ({a.pct}%, green) while idle/unreachable: no active turn "
+          f"and no high band, so no hidden bloat is being hidden — not paging the operator "
+          f"(idle-vs-active gate; op#18601 cc-quality-@13% false page).", file=sys.stderr)
+    return False
+
+
 def run_alerts(rows: list[AgentCtx]) -> list[str]:
     """Handle amber/red bodies. A self_compacts body is NUDGED to self-recycle (no operator
     page) with an operator BACKSTOP if it ignores the nudge (S2). A non-self-compacting
@@ -1665,7 +1697,7 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
                 fired.append(a.agent)
         if frozen_for >= _CTX_FROZEN_S:
             state.pop(a.agent, None)  # do NOT also run the level-rise pager on a zombie reading
-            if not rec.get("paged") and reg.get("alerts"):
+            if not rec.get("paged") and reg.get("alerts") and _frozen_gauge_should_page(a, reg):
                 _send_alert(
                     f"⚠️ ctx gauge FROZEN: {a.agent} stuck at {a.ctx_tokens:,} tokens "
                     f"({a.pct}%) for ~{int(frozen_for // 60)}m while its row keeps refreshing "
