@@ -1498,3 +1498,70 @@ def test_gauge_loud_then_recover_bookends_exactly_two_pages(monkeypatch, tmp_pat
     assert len(pages) == 2 and "RECOVERED" in pages[1]
     st = json.loads((tmp_path / "exec.json").read_text())
     assert st["gauge_unreachable_streak"] == 0 and "gauge_unreachable_paged" not in st
+
+
+# VALUE-FREEZE guard (2026-09-01): a broken cost-writer can refresh ended_at (row looks
+# fresh, a.stale=False) while latest_context_tokens is FROZEN — a zombie reading that was
+# re-paging the operator hourly. run_alerts must refuse the %-page on an unchanged value and
+# surface the frozen gauge ONCE. cc-orchestrator is the only alerts-plain registry body.
+
+def _amber_orch(pct=61):
+    return _ctx(agent="cc-orchestrator", pct=pct, level="amber", action="checkpoint-nudge")
+
+
+def test_alerts_fresh_amber_first_seen_pages_normally_and_seeds_freeze(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    row = _amber_orch()
+    w.run_alerts([row])
+    # first observation is NOT frozen -> a genuine amber page fires (green->amber rise)
+    assert len(sent) == 1 and "FROZEN" not in sent[0]
+    st = __import__("json").loads((tmp_path / "state.json").read_text())
+    assert st["__ctx_freeze__"]["cc-orchestrator"]["tokens"] == row.ctx_tokens
+
+
+def test_alerts_value_frozen_suppresses_pct_and_pages_frozen_once(monkeypatch, tmp_path):
+    import json, time
+    row = _amber_orch()
+    seed = {"__ctx_freeze__": {"cc-orchestrator": {"tokens": row.ctx_tokens,
+            "since": time.time() - (w._CTX_FROZEN_S + 600), "paged": False}}}
+    (tmp_path / "state.json").write_text(json.dumps(seed))
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    w.run_alerts([row])
+    # exactly one alert, and it's the FROZEN one — NOT the climbing-% amber page
+    assert len(sent) == 1 and "FROZEN" in sent[0] and "ZOMBIE" in sent[0]
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert st["__ctx_freeze__"]["cc-orchestrator"]["paged"] is True
+    assert "cc-orchestrator" not in {k for k in st if k != "__ctx_freeze__"}  # no level-alert state
+
+
+def test_alerts_frozen_already_paged_no_duplicate(monkeypatch, tmp_path):
+    import json, time
+    row = _amber_orch()
+    seed = {"__ctx_freeze__": {"cc-orchestrator": {"tokens": row.ctx_tokens,
+            "since": time.time() - (w._CTX_FROZEN_S + 600), "paged": True}}}
+    (tmp_path / "state.json").write_text(json.dumps(seed))
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    w.run_alerts([row])
+    assert sent == []  # already paged the freeze; no re-spam
+
+
+def test_alerts_frozen_value_moves_bookends_all_clear(monkeypatch, tmp_path):
+    import json, time
+    row = _amber_orch(pct=61)  # ctx_tokens=610000
+    seed = {"__ctx_freeze__": {"cc-orchestrator": {"tokens": 999999,  # DIFFERENT old value
+            "since": time.time() - (w._CTX_FROZEN_S + 600), "paged": True}}}
+    (tmp_path / "state.json").write_text(json.dumps(seed))
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    w.run_alerts([row])
+    # value moved after a frozen-page -> an all-clear goes out
+    assert any("LIVE again" in t for t in sent)
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert st["__ctx_freeze__"]["cc-orchestrator"]["paged"] is False

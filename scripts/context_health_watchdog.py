@@ -1425,6 +1425,14 @@ def run_executor(rows: list[AgentCtx], arm_level: str = "red") -> list[str]:
 
 _STATE_FILE = _ORCH_DIR / "logs" / "context_health_state.json"
 _RENAG_MIN = int(os.environ.get("CTX_WD_RENAG_MIN", "60"))
+# VALUE-FREEZE guard (2026-09-01): the age-stale check keys on ended_at, but a broken
+# cost-writer can keep REFRESHING ended_at (row looks fresh) while latest_context_tokens
+# is FROZEN — a zombie reading that isn't age-stale yet isn't a live measurement either
+# (cc-orchestrator was frozen at 605790/60.6% since Aug 18, re-paging the operator hourly).
+# If a body's ctx value hasn't MOVED for this long, it's frozen: refuse to page the % and
+# surface the frozen gauge ONCE instead. A genuinely-active body rewrites its token count
+# every few minutes, so an unchanged value across this window is a strong frozen signal.
+_CTX_FROZEN_S = int(os.environ.get("CTX_WD_FROZEN_MIN", "30")) * 60
 _LEVEL_RANK = {"green": 0, "amber": 1, "red": 2}
 
 # --------------------------------------------------------------------------- #
@@ -1618,6 +1626,7 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
     list of agent names actioned this cycle (for logging)."""
     import time
     state = _load_state()
+    fz = state.setdefault("__ctx_freeze__", {})  # per-agent value-freeze tracking (not an agent key)
     now = time.time()
     fired: list[str] = []
     for a in rows:
@@ -1627,6 +1636,8 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
         if not reg or not (reg.get("alerts") or reg.get("self_compacts")):
             continue
         if a.stale:
+            # (freeze tracking left untouched here: a frozen value stays frozen while
+            # age-stale, so `since` should keep counting, not reset.)
             # STALE = the body has not written telemetry in > _STALE_S: it is offline,
             # dead, or mid-a-very-long-turn — this ctx% is its LAST-KNOWN, not current
             # (ended_at is a live-updated last-activity stamp, so a LIVE body stays
@@ -1635,6 +1646,34 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
             # consistent with the reset path, which already refuses a stale body. A
             # genuinely-bloated LIVE body writes a fresh row and is actioned then.
             state.pop(a.agent, None)
+            continue
+        # --- VALUE-FREEZE guard: a fresh-looking row (not age-stale) whose ctx value has
+        #     not MOVED for _CTX_FROZEN_S is a zombie reading (broken cost-writer refreshing
+        #     ended_at while latest_context_tokens is frozen), NOT climbing context. Refuse
+        #     the %-page; surface the frozen gauge ONCE (deduped), bookend when it recovers. ---
+        rec = fz.get(a.agent)
+        if rec and rec.get("tokens") == a.ctx_tokens:
+            frozen_for = now - float(rec.get("since", now))
+        else:
+            was_paged = bool(rec and rec.get("paged"))
+            fz[a.agent] = {"tokens": a.ctx_tokens, "since": now, "paged": False}
+            rec = fz[a.agent]
+            frozen_for = 0.0
+            if was_paged:  # value moved after a frozen-page -> bookend an all-clear
+                _send_alert(f"✅ ctx gauge for {a.agent} is LIVE again (value moved to "
+                            f"{a.ctx_tokens:,} tokens) — real context is visible.")
+                fired.append(a.agent)
+        if frozen_for >= _CTX_FROZEN_S:
+            state.pop(a.agent, None)  # do NOT also run the level-rise pager on a zombie reading
+            if not rec.get("paged") and reg.get("alerts"):
+                _send_alert(
+                    f"⚠️ ctx gauge FROZEN: {a.agent} stuck at {a.ctx_tokens:,} tokens "
+                    f"({a.pct}%) for ~{int(frozen_for // 60)}m while its row keeps refreshing "
+                    f"— a ZOMBIE reading, NOT climbing context. Real bloat for {a.agent} is NOT "
+                    f"visible; its session cost-writer is likely stale. Verify the body via "
+                    f"lease/pane, not this gauge.")
+                rec["paged"] = True
+                fired.append(a.agent)
             continue
         if reg.get("self_compacts"):
             # S2: NUDGE it to recycle itself; page the operator only as the backstop.
