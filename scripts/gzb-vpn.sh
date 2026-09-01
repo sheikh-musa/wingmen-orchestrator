@@ -54,13 +54,14 @@ down(){
   [ -f "$DEADMANFILE" ] && kill "$(cat "$DEADMANFILE")" 2>/dev/null || true; rm -f "$DEADMANFILE"
   # remove our scoped route (if any)
   if [ -f "$IFFILE" ]; then TUNIF="$(cat "$IFFILE")"; ip route del "$GZB_SUBNET" dev "$TUNIF" 2>/dev/null || true; fi
-  # SIGTERM (graceful — openfortivpn restores its own state; SIGKILL does NOT — Nazim's gotcha)
-  if [ -f "$PIDFILE" ]; then
-    kill -TERM "$(cat "$PIDFILE")" 2>/dev/null || true
-    for i in $(seq 1 10); do kill -0 "$(cat "$PIDFILE")" 2>/dev/null || break; sleep 1; done
-    kill -0 "$(cat "$PIDFILE")" 2>/dev/null && { log "still up after 10s TERM — last-resort KILL + manual route restore"; kill -KILL "$(cat "$PIDFILE")" 2>/dev/null || true; }
-    rm -f "$PIDFILE"
+  # SIGTERM ALL openfortivpn (reap-all — single-tunnel design; robust vs clobbered PIDFILE
+  # from any concurrent/killed run. graceful TERM restores routes; SIGKILL does NOT — Nazim's gotcha).
+  if pgrep -x openfortivpn >/dev/null 2>&1; then
+    pkill -TERM -x openfortivpn 2>/dev/null || true
+    for i in $(seq 1 10); do pgrep -x openfortivpn >/dev/null 2>&1 || break; sleep 1; done
+    pgrep -x openfortivpn >/dev/null 2>&1 && { log "still up after 10s TERM — last-resort KILL + manual route restore"; pkill -KILL -x openfortivpn 2>/dev/null || true; }
   fi
+  rm -f "$PIDFILE"
   rm -f "$IFFILE"
   restore_default            # ALWAYS end with the lifeline intact
   log "teardown complete; default route: $(ip route show default | tr '\n' ' ')"
@@ -88,7 +89,11 @@ up(){
   echo "$TUNIF" > "$IFFILE"
   log "tunnel iface = $TUNIF"
   # 5) add ONLY the gzb subnet via the tunnel — never the default route
-  ip route add "$GZB_SUBNET" dev "$TUNIF"
+  # 4b) WAIT for the iface to be routable (pppd IPCP done) — ppp0 APPEARS before it is up (Nazim caught this)
+  for i in $(seq 1 20); do ip addr show "$TUNIF" 2>/dev/null | grep -q "inet " && break; sleep 1; done
+  # add ONLY the gzb subnet — retry (transient "nexthop not up" until pppd finishes)
+  for i in $(seq 1 10); do ip route add "$GZB_SUBNET" dev "$TUNIF" 2>/dev/null && break; sleep 1; done
+  ip route show "$GZB_SUBNET" | grep -q . || { log "ABORT: gzb route not added after wait"; down; exit 1; }
   # 6) VERIFY the default route is untouched; if not, abort+teardown immediately
   if ! default_ok; then log "ABORT: default route CHANGED after connect — tearing down"; down; exit 1; fi
   # 7) arm the dead-man auto-teardown (self-heal ceiling)
