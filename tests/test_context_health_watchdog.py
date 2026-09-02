@@ -1646,18 +1646,32 @@ def test_frozen_green_unreachable_lane_suppresses_operator_page(monkeypatch, tmp
     assert sent == [] and fired == []
 
 
-def test_frozen_amber_idle_snapshot_still_pages(monkeypatch, tmp_path):
-    """Robustness for the case that MATTERS (the hub-at-61% zombie): an amber+ frozen value is
-    a genuine hidden-bloat risk, so it pages even if a single pane snapshot reads idle (an
-    actively-broken singleton is often caught between turns) or the pane is unreachable."""
+def test_frozen_amber_unreachable_still_pages(monkeypatch, tmp_path):
+    """The case that MATTERS (the hub-@61% cross-host zombie): pane UNREACHABLE (idle is None) +
+    amber+ frozen -> PAGE via the band arm. The Mini can't see the Studio hub's pane, and a
+    genuinely-stuck 53h writer must still be surfaced."""
     _frozen_green_reg(monkeypatch, agent="hubish")
     row = w.AgentCtx(agent="hubish", ctx_tokens=610_000, pct=61, level="amber",
                      age_s=30, action="checkpoint-nudge", stale=False)
     sent = _seed_frozen(tmp_path, monkeypatch, row)
-    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)  # idle SNAPSHOT, but amber value
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: None)  # cross-host: pane unreachable
     fired = w.run_alerts([row])
-    assert len(sent) == 1 and "FROZEN" in sent[0], "amber+ frozen must page even on an idle snapshot"
+    assert len(sent) == 1 and "FROZEN" in sent[0], "amber+ frozen + unreachable must page (hub zombie)"
     assert fired == ["hubish"]
+
+
+def test_frozen_amber_confirmed_idle_suppresses(monkeypatch, tmp_path):
+    """op#18837 ROOT fix (Nazim 36707): a CONFIRMED-idle body (pane not busy) frozen at AMBER must
+    NOT page — for a local body 'frozen' implies idle, and an idle body hides no bloat at any band.
+    This is orch-console frozen-amber overnight; the earlier 'amber+ always pages' rule false-paged it."""
+    _frozen_green_reg(monkeypatch, agent="consoleish")
+    row = w.AgentCtx(agent="consoleish", ctx_tokens=700_000, pct=70, level="amber",
+                     age_s=30, action="checkpoint-nudge", stale=False)
+    sent = _seed_frozen(tmp_path, monkeypatch, row)
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)  # CONFIRMED idle (pane not busy)
+    fired = w.run_alerts([row])
+    assert sent == [], "a confirmed-idle amber-frozen body must NOT page (op#18837 root fix)"
+    assert fired == []
 
 
 def test_frozen_repage_within_cooldown_suppressed_no_flap(monkeypatch, tmp_path):
@@ -1710,7 +1724,7 @@ def test_frozen_first_page_unaffected_by_cooldown(monkeypatch, tmp_path):
     row = w.AgentCtx(agent="hubish", ctx_tokens=610_000, pct=61, level="amber",
                      age_s=30, action="checkpoint-nudge", stale=False)
     sent = _seed_frozen(tmp_path, monkeypatch, row)  # seeds paged False, NO last_page_ts
-    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: None)  # cross-host amber -> pages via band arm
     w.run_alerts([row])
     assert len(sent) == 1 and "FROZEN" in sent[0], "first frozen page must fire regardless of cooldown"
 
@@ -1721,15 +1735,18 @@ def test_frozen_gauge_should_page_helper_matrix(monkeypatch):
     green = w.AgentCtx(agent="g", ctx_tokens=130_000, pct=13, level="green", age_s=1, action="ok")
     amber = w.AgentCtx(agent="a", ctx_tokens=650_000, pct=65, level="amber", age_s=1, action="ok")
     red = w.AgentCtx(agent="r", ctx_tokens=850_000, pct=85, level="red", age_s=1, action="ok")
-    # BUSY -> always page
+    # BUSY -> always page (any band)
     monkeypatch.setattr(w, "_agent_is_idle", lambda reg: False)
     assert w._frozen_gauge_should_page(green, reg) is True
-    # IDLE + green -> suppress; IDLE + amber/red -> page
-    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)
-    assert w._frozen_gauge_should_page(green, reg) is False
     assert w._frozen_gauge_should_page(amber, reg) is True
     assert w._frozen_gauge_should_page(red, reg) is True
-    # UNREACHABLE + green -> suppress; UNREACHABLE + amber -> page
+    # CONFIRMED IDLE -> suppress at ANY band (green AND amber AND red) — op#18837 root fix
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)
+    assert w._frozen_gauge_should_page(green, reg) is False
+    assert w._frozen_gauge_should_page(amber, reg) is False
+    assert w._frozen_gauge_should_page(red, reg) is False
+    # UNREACHABLE (cross-host) -> band arm: green suppress, amber+ page (the hub zombie)
     monkeypatch.setattr(w, "_agent_is_idle", lambda reg: None)
     assert w._frozen_gauge_should_page(green, reg) is False
     assert w._frozen_gauge_should_page(amber, reg) is True
+    assert w._frozen_gauge_should_page(red, reg) is True
