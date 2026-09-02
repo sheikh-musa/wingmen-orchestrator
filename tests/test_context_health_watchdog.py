@@ -1660,6 +1660,61 @@ def test_frozen_amber_idle_snapshot_still_pages(monkeypatch, tmp_path):
     assert fired == ["hubish"]
 
 
+def test_frozen_repage_within_cooldown_suppressed_no_flap(monkeypatch, tmp_path):
+    """op#18830: a BURSTY writer (cai) freezes -> moves a little -> re-freezes, repeatedly. Once
+    the operator has been told the gauge is frozen, a NEW frozen episode WITHIN the re-page
+    cooldown must NOT re-page — that repetition is the FROZEN/LIVE flapping spam Musa reported."""
+    import json, time
+    _frozen_green_reg(monkeypatch, agent="caiish")
+    row = w.AgentCtx(agent="caiish", ctx_tokens=680_000, pct=68, level="green",
+                     age_s=30, action="ok", stale=False)
+    # A fresh frozen episode (paged False) but the operator was frozen-paged 20 min ago — well
+    # inside the 12h re-page cooldown. Pane BUSY so _frozen_gauge_should_page would otherwise page.
+    seed = {"__ctx_freeze__": {"caiish": {"tokens": row.ctx_tokens,
+            "since": time.time() - (w._CTX_FROZEN_S + 600), "paged": False,
+            "last_page_ts": time.time() - 20 * 60}}}
+    (tmp_path / "state.json").write_text(json.dumps(seed))
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: False)  # BUSY -> would page if not cooled
+    fired = w.run_alerts([row])
+    assert sent == [], "a re-freeze within the re-page cooldown must NOT re-page (op#18830 flap fix)"
+    assert fired == []
+
+
+def test_frozen_repage_after_cooldown_pages_again(monkeypatch, tmp_path):
+    """The cooldown DELAYS the re-page, never permanently swallows it: once _FROZEN_REPAGE_S has
+    passed and the gauge is still frozen, the operator is told again."""
+    import json, time
+    _frozen_green_reg(monkeypatch, agent="caiish")
+    row = w.AgentCtx(agent="caiish", ctx_tokens=680_000, pct=68, level="green",
+                     age_s=30, action="ok", stale=False)
+    seed = {"__ctx_freeze__": {"caiish": {"tokens": row.ctx_tokens,
+            "since": time.time() - (w._CTX_FROZEN_S + 600), "paged": False,
+            "last_page_ts": time.time() - (w._FROZEN_REPAGE_S + 3600)}}}  # cooldown expired
+    (tmp_path / "state.json").write_text(json.dumps(seed))
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: False)  # BUSY
+    w.run_alerts([row])
+    assert len(sent) == 1 and "FROZEN" in sent[0], "after the cooldown expires a still-frozen gauge re-pages"
+
+
+def test_frozen_first_page_unaffected_by_cooldown(monkeypatch, tmp_path):
+    """A first-ever frozen page (no prior last_page_ts) is NOT gated by the cooldown — the true
+    positive still fires immediately."""
+    import json, time
+    _frozen_green_reg(monkeypatch, agent="hubish")
+    row = w.AgentCtx(agent="hubish", ctx_tokens=610_000, pct=61, level="amber",
+                     age_s=30, action="checkpoint-nudge", stale=False)
+    sent = _seed_frozen(tmp_path, monkeypatch, row)  # seeds paged False, NO last_page_ts
+    monkeypatch.setattr(w, "_agent_is_idle", lambda reg: True)
+    w.run_alerts([row])
+    assert len(sent) == 1 and "FROZEN" in sent[0], "first frozen page must fire regardless of cooldown"
+
+
 def test_frozen_gauge_should_page_helper_matrix(monkeypatch):
     """Unit the decision seam directly across the (idle, band) matrix."""
     reg = {"tmux": "x", "host": "self", "alerts": True}

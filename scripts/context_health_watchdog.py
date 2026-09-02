@@ -1433,6 +1433,15 @@ _RENAG_MIN = int(os.environ.get("CTX_WD_RENAG_MIN", "60"))
 # surface the frozen gauge ONCE instead. A genuinely-active body rewrites its token count
 # every few minutes, so an unchanged value across this window is a strong frozen signal.
 _CTX_FROZEN_S = int(os.environ.get("CTX_WD_FROZEN_MIN", "30")) * 60
+# RE-PAGE cooldown (Musa op#18830): a body with a legitimately BURSTY cost-writer (cai jumps in
+# steps — 664,111 -> 664,611 -> 676,560 -> 687,252 — with long flat gaps between) trips the freeze
+# guard every gap. Without a cooldown the freeze/move state machine re-fires a fresh FROZEN->LIVE
+# bookend on EACH burst = flapping operator spam (op#18830: FROZEN/LIVE pages every 30-60m all
+# morning). Once the operator has been told a body's gauge is frozen, don't re-tell them for this
+# long — even across the small burst-moves that reset the freeze episode. The FIRST frozen page
+# (the true positive: a broken writer hiding real bloat) still fires immediately; only the
+# repetition is damped. Env-tunable.
+_FROZEN_REPAGE_S = int(os.environ.get("CTX_WD_FROZEN_REPAGE_H", "12")) * 3600
 _LEVEL_RANK = {"green": 0, "amber": 1, "red": 2}
 
 # --------------------------------------------------------------------------- #
@@ -1688,7 +1697,11 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
             frozen_for = now - float(rec.get("since", now))
         else:
             was_paged = bool(rec and rec.get("paged"))
-            fz[a.agent] = {"tokens": a.ctx_tokens, "since": now, "paged": False}
+            # Carry last_page_ts across the value-move: it gates FROZEN RE-pages so a bursty
+            # writer can't re-fire a fresh FROZEN every burst (op#18830 flapping).
+            last_page_ts = float(rec.get("last_page_ts", 0)) if rec else 0.0
+            fz[a.agent] = {"tokens": a.ctx_tokens, "since": now, "paged": False,
+                           "last_page_ts": last_page_ts}
             rec = fz[a.agent]
             frozen_for = 0.0
             if was_paged:  # value moved after a frozen-page -> bookend an all-clear
@@ -1698,14 +1711,26 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
         if frozen_for >= _CTX_FROZEN_S:
             state.pop(a.agent, None)  # do NOT also run the level-rise pager on a zombie reading
             if not rec.get("paged") and reg.get("alerts") and _frozen_gauge_should_page(a, reg):
-                _send_alert(
-                    f"⚠️ ctx gauge FROZEN: {a.agent} stuck at {a.ctx_tokens:,} tokens "
-                    f"({a.pct}%) for ~{int(frozen_for // 60)}m while its row keeps refreshing "
-                    f"— a ZOMBIE reading, NOT climbing context. Real bloat for {a.agent} is NOT "
-                    f"visible; its session cost-writer is likely stale. Verify the body via "
-                    f"lease/pane, not this gauge.")
-                rec["paged"] = True
-                fired.append(a.agent)
+                since_last = now - float(rec.get("last_page_ts", 0) or 0)
+                if since_last >= _FROZEN_REPAGE_S:
+                    _send_alert(
+                        f"⚠️ ctx gauge FROZEN: {a.agent} stuck at {a.ctx_tokens:,} tokens "
+                        f"({a.pct}%) for ~{int(frozen_for // 60)}m while its row keeps refreshing "
+                        f"— a ZOMBIE reading, NOT climbing context. Real bloat for {a.agent} is NOT "
+                        f"visible; its session cost-writer is likely stale. Verify the body via "
+                        f"lease/pane, not this gauge.")
+                    rec["paged"] = True
+                    rec["last_page_ts"] = now
+                    fired.append(a.agent)
+                else:
+                    # Genuinely-frozen gauge, but the operator was told <_FROZEN_REPAGE_S ago and a
+                    # bursty writer keeps re-tripping the guard — suppress the RE-page (LOUD log,
+                    # charter #1), leaving paged False so it re-evaluates. op#18830 flapping fix.
+                    print(f"[ctx-health] frozen-gauge RE-page suppressed for {a.agent} — last "
+                          f"frozen-paged {int(since_last // 60)}m ago, within the "
+                          f"{_FROZEN_REPAGE_S // 3600}h re-page cooldown (bursty writer keeps "
+                          f"re-tripping; Musa op#18830 flapping fix). Gauge still frozen — verify "
+                          f"via lease/pane if you need the real number.", file=sys.stderr)
             continue
         if reg.get("self_compacts"):
             # S2: NUDGE it to recycle itself; page the operator only as the backstop.
