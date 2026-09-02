@@ -1432,7 +1432,14 @@ _RENAG_MIN = int(os.environ.get("CTX_WD_RENAG_MIN", "60"))
 # If a body's ctx value hasn't MOVED for this long, it's frozen: refuse to page the % and
 # surface the frozen gauge ONCE instead. A genuinely-active body rewrites its token count
 # every few minutes, so an unchanged value across this window is a strong frozen signal.
-_CTX_FROZEN_S = int(os.environ.get("CTX_WD_FROZEN_MIN", "30")) * 60
+# FROZEN threshold (Musa op#18830/18837): the ALWAYS-ON bodies (cai, orch-console, cc-orchestrator,
+# the SRE) have LEGITIMATELY BURSTY cost-writers — the value jumps, then sits flat for 30-80 min,
+# then jumps again (observed gaps up to ~80m). A 30-min threshold called every one of those normal
+# flat stretches "frozen" and flap-paged the operator across ALL of them. Raise the window to 3h so
+# a bursty gap is NOT mistaken for a broken writer, while a GENUINELY stuck writer (cc-orchestrator
+# was frozen for DAYS at 605790 since Aug 18) is still caught — it stays flat far past 3h. This is
+# the root fix; the re-page cooldown below is the secondary dampener. Env-overridable.
+_CTX_FROZEN_S = int(os.environ.get("CTX_WD_FROZEN_MIN", "180")) * 60
 # RE-PAGE cooldown (Musa op#18830): a body with a legitimately BURSTY cost-writer (cai jumps in
 # steps — 664,111 -> 664,611 -> 676,560 -> 687,252 — with long flat gaps between) trips the freeze
 # guard every gap. Without a cooldown the freeze/move state machine re-fires a fresh FROZEN->LIVE
