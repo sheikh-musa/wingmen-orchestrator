@@ -47,6 +47,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +76,37 @@ _FRESH_THRESHOLD_S = int(os.environ.get("REPO_CTX_WD_THRESHOLD_S", str(2 * 3600)
 # Supabase read-after-write lag between the upsert connection and the read
 # connection (a genuine >2h freeze survives the re-check and still pages).
 _RECHECK_DELAY_S = float(os.environ.get("REPO_CTX_WD_RECHECK_DELAY_S", "3"))
+
+# Transient-blip retry for the authoritative DB connect (fetch_updated_at). A
+# single transient DNS/network failure resolving the Supabase pooler host used to
+# propagate straight to the __main__ dead-man page and wake the operator overnight
+# for something that self-healed on the next cycle. We retry the connect a few
+# times with short linear backoff so a blip that recovers within seconds is
+# absorbed — but a GENUINE, persistent failure still re-raises and pages (the
+# dead-man's-switch must fail LOUD on real death; retries only buy a grace window).
+_DB_CONNECT_ATTEMPTS = int(os.environ.get("REPO_CTX_WD_DB_ATTEMPTS", "3"))
+_DB_RETRY_BASE_S = float(os.environ.get("REPO_CTX_WD_DB_RETRY_BASE_S", "1.0"))
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection over time.sleep so tests can suppress real backoff delay."""
+    time.sleep(seconds)
+
+
+def _retry(op, *, attempts: int, base_delay_s: float, retry_on, sleep=_sleep):
+    """Call op(); on a `retry_on` exception, retry up to `attempts` TOTAL tries
+    with linear backoff (base_delay_s * attempt_number between tries). Re-raises
+    the last exception after the final attempt — so a persistent failure still
+    surfaces to the caller (and thus the dead-man page). Exceptions outside
+    `retry_on` propagate immediately (do not mask non-transient bugs). `op` must
+    be idempotent/side-effect-free — the DB read here is a plain SELECT."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return op()
+        except retry_on:
+            if attempt == attempts:
+                raise
+            sleep(base_delay_s * attempt)
 
 
 # --------------------------------------------------------------------------- #
@@ -194,11 +226,23 @@ async def fetch_updated_at(supabase=None) -> dict[str, Optional[datetime]]:
 
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     out: dict[str, Optional[datetime]] = {}
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT repo, updated_at FROM public.repo_context")
-        for name, ts in cur.fetchall():
-            if name:
-                out[name] = ts if isinstance(ts, datetime) else _parse_ts(ts)
+
+    def _read_rows():
+        # Retried as a unit on transient connect failures (safe: a plain SELECT
+        # with no side effects). A persistent OperationalError re-raises and pages.
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("SELECT repo, updated_at FROM public.repo_context")
+            return cur.fetchall()
+
+    rows = _retry(
+        _read_rows,
+        attempts=_DB_CONNECT_ATTEMPTS,
+        base_delay_s=_DB_RETRY_BASE_S,
+        retry_on=psycopg.OperationalError,
+    )
+    for name, ts in rows:
+        if name:
+            out[name] = ts if isinstance(ts, datetime) else _parse_ts(ts)
     return out
 
 

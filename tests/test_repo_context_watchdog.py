@@ -20,6 +20,7 @@ from scripts.repo_context_watchdog import (
     evaluate_freshness,
     _parse_ts,
     _degrade_text,
+    _retry,
 )
 
 NOW = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
@@ -158,3 +159,127 @@ def test_degrade_text_names_stale_repos():
     assert "cosem-tdu" in text
     # the page is actionable / mentions repo_context so the operator knows what froze
     assert "repo_context" in text
+
+
+# --- _retry (transient-blip suppression, dead-man preserved) ---------------- #
+#
+# Overnight incident: a single transient DNS failure resolving the Supabase
+# pooler host propagated to the __main__ dead-man page and woke the operator.
+# _retry wraps the DB connect so a transient blip that recovers is suppressed,
+# while a GENUINE persistent failure STILL re-raises (dead-man page fires).
+
+class _Transient(Exception):
+    """Stand-in for psycopg.OperationalError (DNS/connect blip)."""
+
+
+def test_retry_recovers_after_transient_failures_without_raising():
+    # Fails twice (transient), succeeds on the 3rd try -> returns, no exception
+    # propagates -> the dead-man page never fires for a blip that self-heals.
+    attempts = {"n": 0}
+    slept: list[float] = []
+
+    def op():
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise _Transient("failed to resolve host pooler.supabase.com")
+        return "rows"
+
+    result = _retry(op, attempts=3, base_delay_s=0.01,
+                    retry_on=_Transient, sleep=slept.append)
+
+    assert result == "rows"
+    assert attempts["n"] == 3
+    assert slept == [0.01, 0.02]  # linear backoff between the 2 failed tries
+
+
+def test_retry_reraises_after_exhausting_attempts():
+    # A GENUINE, persistent failure must still surface after the retry budget —
+    # the dead-man page fires on real death, retries only buy a short grace window.
+    attempts = {"n": 0}
+    slept: list[float] = []
+
+    def op():
+        attempts["n"] += 1
+        raise _Transient("host still unresolvable")
+
+    with pytest.raises(_Transient, match="host still unresolvable"):
+        _retry(op, attempts=3, base_delay_s=0.01,
+               retry_on=_Transient, sleep=slept.append)
+
+    assert attempts["n"] == 3          # exactly the budget, no more
+    assert slept == [0.01, 0.02]       # slept between tries, not after the last
+
+
+def test_retry_does_not_retry_non_transient_errors():
+    # An error OUTSIDE the retry class (e.g. a programming/SQL bug) must surface
+    # immediately — retrying it only delays a page that should fire fast.
+    attempts = {"n": 0}
+    slept: list[float] = []
+
+    def op():
+        attempts["n"] += 1
+        raise ValueError("bad query")
+
+    with pytest.raises(ValueError, match="bad query"):
+        _retry(op, attempts=3, base_delay_s=0.01,
+               retry_on=_Transient, sleep=slept.append)
+
+    assert attempts["n"] == 1          # tried once, did not retry
+    assert slept == []
+
+
+def test_retry_succeeds_first_try_no_sleep():
+    slept: list[float] = []
+    result = _retry(lambda: 42, attempts=3, base_delay_s=0.01,
+                    retry_on=_Transient, sleep=slept.append)
+    assert result == 42
+    assert slept == []
+
+
+def test_fetch_updated_at_retries_transient_connect_blip(monkeypatch):
+    # Integration proof mirroring the real incident: psycopg.connect raises
+    # OperationalError once (DNS blip), then succeeds. fetch_updated_at must
+    # recover and return rows rather than letting it reach the dead-man page.
+    import asyncio
+    import psycopg
+    import scripts.repo_context_watchdog as wd
+
+    calls = {"n": 0}
+
+    class _FakeCursor:
+        def execute(self, *a, **k):
+            pass
+        def fetchall(self):
+            return [("ihsanos", NOW)]
+
+    class _FakeConn:
+        def cursor(self):
+            return _CtxCursor()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _CtxCursor:
+        def __enter__(self):
+            return _FakeCursor()
+        def __exit__(self, *a):
+            return False
+
+    def fake_connect(dsn):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise psycopg.OperationalError(
+                "connection failed: failed to resolve host "
+                "aws-1-ap-southeast-2.pooler.supabase.com"
+            )
+        return _FakeConn()
+
+    monkeypatch.setenv("DATABASE_URL", "postgres://ignored")
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+    monkeypatch.setattr(wd, "_sleep", lambda s: None)  # no real backoff delay
+
+    out = asyncio.run(wd.fetch_updated_at())
+
+    assert calls["n"] == 2                       # retried the transient blip
+    assert out == {"ihsanos": NOW}               # recovered, returned real rows
