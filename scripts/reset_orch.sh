@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # reset_orch.sh — in-place /clear + boot of the cc-orchestrator (hub) session.
-# MUST run ON THE HUB HOST (the Studio), where tmux 'orch' lives. Nazim (Mini)
-# invokes it over SSH: ssh Musa@mac-studio 'bash ~/wingmen/orchestrator/scripts/reset_orch.sh'
+# MUST run ON THE HUB HOST (the VPS wingmen-core / 91.107.235.77, user `wingmen`), where tmux
+# 'orch' lives. Invoke it over SSH via the cross-host wrapper scripts/reset_hub_remote.sh
+# (ssh root@91.107.235.77 -> sudo -u wingmen -> bash ~/wingmen/orchestrator/scripts/reset_orch.sh).
+# (Hub RELOCATED Studio -> VPS 2026-07-31; the old `ssh Musa@mac-studio` path is DEAD.)
 # It send-keys into tmux 'orch'; it does NOT /clear the shell that runs it.
 # Why in-place /clear (not kill): boot relaunches with --continue, which would
 # reload the bloated conversation — the /clear is what frees the context; the

@@ -166,7 +166,16 @@ _STALE_S = int(os.environ.get("CTX_WD_STALE_MIN", "20")) * 60
 #   ONLY the degrade-prone 1M Studio bodies. orch-console (self, Mini) is
 #   self-compacting and IS this watchdog's own host — NEVER auto-reset self.
 _AGENT_REGISTRY = {
-    "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "inbox_scope": "hub", "label": "The hub (orch, Studio)"},
+    # external_recycle (CAI-RESP-1360): the hub is a long-lived, harness-compacted, EXTERNALLY-
+    # recycled singleton (recovered ONLY via an external recycle — the exact operator command is
+    # parameterized in _HUB_RECYCLE_REMEDIATION, pinned by orch-console; a multi-week session is
+    # NORMAL). It does NOT self-recycle — cai REJECTED giving it self_compacts (that would relocate
+    # the false-alarm to a 70%+ self-recycle nudge the hub cannot act on). Amber/steady-state is
+    # EXPECTED, not degradation, so it does NOT operator-page; it pages ONLY at the ceiling
+    # (>=95%) or on a frozen/non-advancing gauge, and the remediation names the external recycle.
+    # PAGING-ONLY flag: auto_reset stays True (the executor path is untouched — this classifies
+    # escalation copy in run_alerts, exactly as self_compacts does, and touches no reset branch).
+    "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "external_recycle": True, "inbox_scope": "hub", "label": "The hub (orch, Studio)"},
     # self_compacts added in S2 (PURELY ADDITIVE — Nazim point 2): cai is a Claude Code
     # body that auto-compacts, so it can self-recycle on a fresh handoff. The flag ONLY
     # routes the nudge/alert-copy path (run_alerts); it touches NO auto_reset branch —
@@ -1473,6 +1482,28 @@ _NUDGE_BACKSTOP_PCT = int(os.environ.get("CTX_WD_NUDGE_BACKSTOP_PCT", "95"))  # 
 # nag. Env-tunable (CTX_WD_NUDGE_BACKSTOP_PCT) if a body's real ceiling differs.
 _NUDGE_RECYCLE_DROP = int(os.environ.get("CTX_WD_NUDGE_RECYCLE_DROP", "15"))  # a >=15% drop = the body recycled/compacted -> episode over
 
+# EXTERNAL-RECYCLE page line (CAI-RESP-1360): an externally-recycled body (the hub) does NOT
+# self-recycle and its amber/steady-state is EXPECTED — so it pages the operator ONLY at the
+# ceiling. Default 95% matches the existing backstop convention (_NUDGE_BACKSTOP_PCT); a body
+# pinned here can't recover itself and genuinely needs an external recycle. Env-tunable.
+_EXT_RECYCLE_PAGE_PCT = int(os.environ.get("CTX_WD_EXT_RECYCLE_PAGE_PCT", "95"))
+
+# Operator-facing hub recycle command (CAI-1360) — PARAMETERIZED in ONE place (Nazim 36772).
+# cai named reset_orch.sh, but that is the BARE ON-HOST reset and does NOT work from where the
+# operator is; the hub RELOCATED (Studio -> VPS wingmen-core / 91.107.235.77, 2026-07-31) and the
+# operator-facing recycle is the cross-host wrapper reset_hub_remote.sh (SSH -> VPS -> reset_orch.sh
+# on the hub's home turf). A safety page must name the path that actually works. PINNED by
+# orch-console (bus 37012/37014, verified wired to wingmen-core): CTX_WD_HUB_RECYCLE_CMD =
+# `bash ~/wingmen/orchestrator/scripts/reset_hub_remote.sh`. Env-overridable so a future
+# relocation can re-pin without a code edit.
+_HUB_RECYCLE_REMEDIATION = os.environ.get(
+    "CTX_WD_HUB_RECYCLE_CMD",
+    "recycle the hub via its cross-host operator control — run "
+    "`bash ~/wingmen/orchestrator/scripts/reset_hub_remote.sh` (SSHes to the relocated hub on the "
+    "VPS wingmen-core / 91.107.235.77 and runs reset_orch.sh THERE) — NOT the bare on-host "
+    "reset_orch.sh, which no longer reaches the hub",
+)
+
 
 def _load_state() -> dict:
     try:
@@ -1635,6 +1666,43 @@ def _handle_self_recycle(a: AgentCtx, reg: dict, state: dict, now: float) -> Opt
     return status
 
 
+def _external_recycle_alert_text(a: AgentCtx, reg: dict) -> str:
+    """Operator page for an EXTERNALLY-recycled body (the hub) at the ceiling (CAI-1360). Names
+    the REAL remediation (an external recycle, via the parameterized _HUB_RECYCLE_REMEDIATION)
+    and NEVER self-recycle language — this body does NOT self-recycle, so a self-recycle nudge
+    would be un-actionable. Steady-state amber is expected and never reaches this text."""
+    label = reg.get("label", a.agent)
+    return (f"🚨 {label} — needs an EXTERNAL recycle (~{a.pct}%): {label} is at ~{a.pct}% of its "
+            f"1M window ({a.ctx_tokens:,} tokens). It is long-lived and harness-compacted and does "
+            f"NOT self-recycle — {_HUB_RECYCLE_REMEDIATION}. A multi-week session is normal; this "
+            f"fires only at the ceiling (>= {_EXT_RECYCLE_PAGE_PCT}%), not on steady-state amber.")
+
+
+def _handle_external_recycle(a: AgentCtx, reg: dict, state: dict, now: float) -> Optional[str]:
+    """CAI-RESP-1360 external-recycle profile for a long-lived, EXTERNALLY-recycled singleton (the
+    hub). Amber/steady-state is EXPECTED, not degradation -> NO operator page. Page ONLY at the
+    ceiling (>= _EXT_RECYCLE_PAGE_PCT), latched once per episode and red-style re-nagged so a body
+    pinned at the wall keeps surfacing until recovered. The frozen/non-advancing case is handled
+    earlier by the value-freeze guard (which pages with the same external-recycle remediation).
+    Mutates state[a.agent]; returns a status string for `fired`, or None."""
+    if a.pct < _EXT_RECYCLE_PAGE_PCT:
+        state.pop(a.agent, None)  # steady-state (incl. amber) is expected -> no page, clear episode
+        return None
+    prev = state.get(a.agent, {})
+    paged = bool(prev.get("ext_paged", False))
+    prev_ts = float(prev.get("alerted_at", 0) or 0)
+    renag = (now - prev_ts) >= _RENAG_MIN * 60
+    if not paged or renag:
+        _send_alert(_external_recycle_alert_text(a, reg))
+        state[a.agent] = {"level": a.level, "ext_paged": True, "alerted_at": now}
+        # A ceiling page on an externally-recycled body is a genuine escalation — log it loudly.
+        print(f"[ctx-health] EXTERNAL-RECYCLE page: {a.agent} at {a.pct}% "
+              f"(ceiling >= {_EXT_RECYCLE_PAGE_PCT}%) -> operator paged", file=sys.stderr)
+        return f"ext-recycle-paged({a.pct}%)"
+    state[a.agent] = {"level": a.level, "ext_paged": True, "alerted_at": prev_ts}
+    return None
+
+
 def _frozen_gauge_should_page(a: AgentCtx, reg: dict) -> bool:
     """IDLE-vs-ACTIVE gate on the frozen-gauge page (Nazim 36318->36319->36707; op#18601/18830/18837).
 
@@ -1682,7 +1750,7 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
         reg = _AGENT_REGISTRY.get(a.agent)
         # Processed if it takes a plain operator page OR is a self-recyclable body (which may
         # have alerts:False, e.g. the SRE — self-nudge only, never a plain page).
-        if not reg or not (reg.get("alerts") or reg.get("self_compacts")):
+        if not reg or not (reg.get("alerts") or reg.get("self_compacts") or reg.get("external_recycle")):
             continue
         if a.stale:
             # (freeze tracking left untouched here: a frozen value stays frozen while
@@ -1721,12 +1789,19 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
             if not rec.get("paged") and reg.get("alerts") and _frozen_gauge_should_page(a, reg):
                 since_last = now - float(rec.get("last_page_ts", 0) or 0)
                 if since_last >= _FROZEN_REPAGE_S:
+                    # CAI-1360: for an externally-recycled body, name the REAL remediation — but
+                    # keep verify-FIRST (Nazim 36772): a frozen GAUGE can be a dead cost-writer,
+                    # not a stuck BODY, so verify at source before recycling, never blind-recycle.
+                    remediation = (
+                        f" If the body itself (not just the writer) is stuck, recover it with an "
+                        f"external recycle: {_HUB_RECYCLE_REMEDIATION}."
+                        if reg.get("external_recycle") else "")
                     _send_alert(
                         f"⚠️ ctx gauge FROZEN: {a.agent} stuck at {a.ctx_tokens:,} tokens "
                         f"({a.pct}%) for ~{int(frozen_for // 60)}m while its row keeps refreshing "
                         f"— a ZOMBIE reading, NOT climbing context. Real bloat for {a.agent} is NOT "
                         f"visible; its session cost-writer is likely stale. Verify the body via "
-                        f"lease/pane, not this gauge.")
+                        f"lease/pane, not this gauge.{remediation}")
                     rec["paged"] = True
                     rec["last_page_ts"] = now
                     fired.append(a.agent)
@@ -1743,6 +1818,13 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
         if reg.get("self_compacts"):
             # S2: NUDGE it to recycle itself; page the operator only as the backstop.
             status = _handle_self_recycle(a, reg, state, now)
+            if status:
+                fired.append(a.agent)
+            continue
+        if reg.get("external_recycle"):
+            # CAI-1360: long-lived, externally-recycled body (the hub). Amber/steady-state is
+            # EXPECTED -> no page; page only at the ceiling with external-recycle remediation.
+            status = _handle_external_recycle(a, reg, state, now)
             if status:
                 fired.append(a.agent)
             continue

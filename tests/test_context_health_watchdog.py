@@ -1509,14 +1509,18 @@ def _amber_orch(pct=61):
     return _ctx(agent="cc-orchestrator", pct=pct, level="amber", action="checkpoint-nudge")
 
 
-def test_alerts_fresh_amber_first_seen_pages_normally_and_seeds_freeze(monkeypatch, tmp_path):
+def test_alerts_hub_amber_steady_state_does_not_page_but_seeds_freeze(monkeypatch, tmp_path):
+    """CAI-RESP-1360: the hub is a long-lived, EXTERNALLY-recycled singleton — amber/steady-state
+    is EXPECTED, not degradation, so a fresh amber reading must NOT page the operator (this
+    supersedes the S1 page-on-amber-rise behaviour). The value-freeze bookkeeping still seeds."""
     monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
     sent: list[str] = []
     monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
     row = _amber_orch()
-    w.run_alerts([row])
-    # first observation is NOT frozen -> a genuine amber page fires (green->amber rise)
-    assert len(sent) == 1 and "FROZEN" not in sent[0]
+    fired = w.run_alerts([row])
+    assert sent == [], "hub amber steady-state must NOT operator-page (externally-recycled profile)"
+    assert fired == []
+    # value-freeze bookkeeping still runs (seeds the token fingerprint) even though no page fired
     st = __import__("json").loads((tmp_path / "state.json").read_text())
     assert st["__ctx_freeze__"]["cc-orchestrator"]["tokens"] == row.ctx_tokens
 
@@ -1537,6 +1541,10 @@ def test_alerts_value_frozen_suppresses_pct_and_pages_frozen_once(monkeypatch, t
     w.run_alerts([row])
     # exactly one alert, and it's the FROZEN one — NOT the climbing-% amber page
     assert len(sent) == 1 and "FROZEN" in sent[0] and "ZOMBIE" in sent[0]
+    # CAI-1360: the hub is externally-recycled, so the frozen page names the REAL remediation
+    # (the parameterized external-recycle string, pinned by orch-console), never self-recycle.
+    assert w._HUB_RECYCLE_REMEDIATION in sent[0]
+    assert "self_recycle" not in sent[0] and "recycle itself" not in sent[0].lower()
     st = json.loads((tmp_path / "state.json").read_text())
     assert st["__ctx_freeze__"]["cc-orchestrator"]["paged"] is True
     assert "cc-orchestrator" not in {k for k in st if k != "__ctx_freeze__"}  # no level-alert state
@@ -1569,6 +1577,92 @@ def test_alerts_frozen_value_moves_bookends_all_clear(monkeypatch, tmp_path):
     assert any("LIVE again" in t for t in sent)
     st = json.loads((tmp_path / "state.json").read_text())
     assert st["__ctx_freeze__"]["cc-orchestrator"]["paged"] is False
+
+
+# ── CAI-RESP-1360: the hub's EXTERNAL-RECYCLE profile ─────────────────────────────
+# The hub (cc-orchestrator) is long-lived, harness-compacted, and recycled ONLY via
+# scripts/reset_orch.sh — it does NOT self-recycle. Amber/steady-state is EXPECTED (no page);
+# only the ceiling (>=95%) or a frozen/non-advancing gauge pages, and the remediation names
+# the external recycle, never self-recycle language.
+
+def test_registry_hub_external_recycle_profile():
+    """The hub carries external_recycle:True, keeps alerts:True (the frozen-page path is gated
+    on reg.alerts) and auto_reset:True (executor path UNCHANGED — this is a paging-only change),
+    and is NOT self_compacts (it cannot self-recycle — that was cai's reason to reject Option A)."""
+    hub = w._AGENT_REGISTRY.get("cc-orchestrator")
+    assert hub is not None
+    assert hub.get("external_recycle") is True
+    assert hub.get("alerts") is True, "frozen-page path is gated on reg.alerts"
+    assert hub.get("auto_reset") is True, "executor/auto_reset path must be untouched"
+    assert not hub.get("self_compacts"), "the hub does NOT self-recycle (CAI-1360 rejected Option A)"
+
+
+def _er_reg(monkeypatch, agent="er-body", **extra):
+    reg = {"label": agent, "window": 1_000_000, "alerts": True, "external_recycle": True,
+           "auto_reset": True, "host": "mac-studio", "tmux": agent, **extra}
+    monkeypatch.setitem(w._AGENT_REGISTRY, agent, reg)
+    return reg
+
+
+def test_er_amber_steady_state_does_not_page(monkeypatch, tmp_path):
+    """Amber (below the ceiling) is EXPECTED for an externally-recycled body -> NO operator page,
+    across the whole amber band (not just the low edge)."""
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    _er_reg(monkeypatch)
+    for pct in (62, 78):  # low and high amber
+        sent.clear()
+        fired = w.run_alerts([_ctx(agent="er-body", pct=pct, level="amber")])
+        assert sent == [], f"amber {pct}% must not page an externally-recycled body"
+        assert fired == []
+
+
+def test_er_at_ceiling_pages_external_recycle_not_self_recycle(monkeypatch, tmp_path):
+    """At/above the page line (>=95%) the operator IS paged, with reset_orch.sh remediation and
+    NO self-recycle language (the hub cannot self-recycle)."""
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    _er_reg(monkeypatch)
+    fired = w.run_alerts([_ctx(agent="er-body", pct=96, level="red")])
+    assert len(sent) == 1, "a body at the ceiling must page the operator"
+    assert w._HUB_RECYCLE_REMEDIATION in sent[0], "remediation must name the parameterized external recycle"
+    assert "self_recycle" not in sent[0] and "recycle itself" not in sent[0].lower(), \
+        "must NEVER use self-recycle language for an externally-recycled body"
+    assert fired == ["er-body"]
+
+
+def test_er_ceiling_page_latches_then_renags(monkeypatch, tmp_path):
+    """The ceiling page latches once per episode (no per-cycle spam) but red-style re-nags after
+    _RENAG_MIN so a body pinned at the wall keeps surfacing until recovered."""
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    _er_reg(monkeypatch)
+    w.run_alerts([_ctx(agent="er-body", pct=96, level="red")])   # page 1
+    w.run_alerts([_ctx(agent="er-body", pct=97, level="red")])   # same episode, <renag -> silent
+    assert len(sent) == 1, "must not re-page every cycle at the ceiling"
+    # fast-forward past the re-nag window by ageing the stored alerted_at
+    import json
+    st = json.loads((tmp_path / "state.json").read_text())
+    st["er-body"]["alerted_at"] -= (w._RENAG_MIN * 60 + 1)
+    (tmp_path / "state.json").write_text(json.dumps(st))
+    w.run_alerts([_ctx(agent="er-body", pct=97, level="red")])   # past renag -> pages again
+    assert len(sent) == 2, "must re-nag after _RENAG_MIN while still pinned at the ceiling"
+
+
+def test_er_drop_below_ceiling_clears_episode(monkeypatch, tmp_path):
+    """Falling back below the page line ends the episode (state cleared), so a later re-climb
+    to the ceiling pages fresh rather than being suppressed as already-paged."""
+    monkeypatch.setattr(w, "_STATE_FILE", tmp_path / "state.json")
+    sent: list[str] = []
+    monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
+    _er_reg(monkeypatch)
+    w.run_alerts([_ctx(agent="er-body", pct=96, level="red")])   # page 1
+    w.run_alerts([_ctx(agent="er-body", pct=70, level="amber")]) # dropped below ceiling -> clear
+    w.run_alerts([_ctx(agent="er-body", pct=96, level="red")])   # fresh episode -> page again
+    assert len(sent) == 2, "a re-climb to the ceiling after dropping must page fresh"
 
 
 # ── IDLE-vs-ACTIVE gate on the frozen-gauge page (Nazim 36318 -> 36319, op#18601) ──
