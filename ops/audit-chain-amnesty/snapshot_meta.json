@@ -1,0 +1,10 @@
+{
+  "org_id": "73339164-7c1f-40ba-a093-33f1f292dd4c",
+  "project_ref": "goumlynecruxrlmzlntp",
+  "snapshot_at": "2026-09-03T03:52:24.626834+00:00",
+  "tip_id": 33530,
+  "tip_hash": "0823ede4e27f490ce1f1a558e51568ac4d76070361861ea13485dae45fafe467",
+  "row_count_le_tip": 8490,
+  "genesis": "genesis",
+  "cutover_hint": 742
+}
