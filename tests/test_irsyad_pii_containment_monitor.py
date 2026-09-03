@@ -162,3 +162,93 @@ def test_prove_fired_end_to_end(monkeypatch):
         assert M.decide_page(counts, uncl)[:3] == (2, "P1", "could-not-classify")
     finally:
         conn.rollback(); conn.close()
+
+
+# ── retry-before-page on the goumlyne connect (port of ad38b99/f326d3e; 2026-09-03 pooler-blip
+#    sweep, Nazim GATE-approved). A transient Supabase pooler-DNS blip must NOT trip the P1
+#    "containment UNVERIFIED" dead-man; a PERSISTENT failure STILL pages loud (CAI-1060 zero
+#    must never be silently un-monitored).
+import pytest as _pytest
+
+
+class _Transient(Exception):
+    """Stand-in for psycopg2.OperationalError."""
+
+
+def test_retry_recovers_after_transient():
+    n = {"c": 0}
+    slept = []
+    def op():
+        n["c"] += 1
+        if n["c"] < 3:
+            raise _Transient("could not translate host name pooler.supabase.com")
+        return "ok"
+    assert M._retry(op, attempts=3, base_delay_s=0.01, retry_on=_Transient, sleep=slept.append) == "ok"
+    assert n["c"] == 3 and slept == [0.01, 0.02]
+
+
+def test_retry_reraises_on_exhaustion():
+    def op():
+        raise _Transient("down")
+    with _pytest.raises(_Transient):
+        M._retry(op, attempts=3, base_delay_s=0.01, retry_on=_Transient, sleep=lambda s: None)
+
+
+def test_retry_skips_non_transient():
+    n = {"c": 0}
+    def op():
+        n["c"] += 1
+        raise ValueError("x")
+    with _pytest.raises(ValueError):
+        M._retry(op, attempts=3, base_delay_s=0.01, retry_on=_Transient, sleep=lambda s: None)
+    assert n["c"] == 1
+
+
+class _FakeConn:
+    autocommit = False
+    def cursor(self):
+        return object()
+    def close(self):
+        pass
+
+
+def _prep_main(monkeypatch):
+    import psycopg2
+    monkeypatch.setenv(M._GOUMLYNE_ENV, "postgres://goumlyne-ignored")
+    monkeypatch.setattr(M, "_sleep", lambda s: None)
+    monkeypatch.setattr(M, "run_counts", lambda cur, **k: {})
+    monkeypatch.setattr(M, "count_unclassifiable", lambda cur, **k: 0)
+    monkeypatch.setattr(M, "decide_page", lambda counts, unc: ("ok", None, "none", []))
+    paged = []
+    monkeypatch.setattr(M, "_page", lambda subject, body, priority="P0": paged.append((subject, priority)))
+    return psycopg2, paged
+
+
+def test_main_recovers_from_transient_goumlyne_blip(monkeypatch):
+    """goumlyne connect raises OperationalError ONCE (pooler DNS blip) then succeeds -> main
+    recovers and does NOT page 'containment UNVERIFIED'."""
+    psycopg2, paged = _prep_main(monkeypatch)
+    n = {"c": 0}
+    def fake_connect(dsn):
+        n["c"] += 1
+        if n["c"] == 1:
+            raise psycopg2.OperationalError(
+                "could not translate host name aws-1-ap-southeast-1.pooler.supabase.com")
+        return _FakeConn()
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+    rc = M.main()
+    assert n["c"] == 2, "must retry the transient blip"
+    assert not any("CONNECT FAILED" in s for s, _ in paged), "a transient blip must NOT page containment-UNVERIFIED"
+
+
+def test_main_persistent_goumlyne_failure_still_pages_dead_man(monkeypatch):
+    """A GENUINE persistent goumlyne outage MUST still P1-page 'containment UNVERIFIED' after
+    the retry budget — the CAI-1060 zero is never silently un-monitored."""
+    psycopg2, paged = _prep_main(monkeypatch)
+    def fake_connect(dsn):
+        raise psycopg2.OperationalError("persistent outage")
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+    rc = M.main()
+    assert rc == 2
+    assert any("CONNECT FAILED" in s and p == "P1" for s, p in paged), \
+        "persistent failure MUST P1-page containment-UNVERIFIED (dead-man preserved)"

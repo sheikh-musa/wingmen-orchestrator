@@ -24,6 +24,7 @@ cannot read must never read green (dead-man's-switch).
 from __future__ import annotations
 
 import os
+import time
 from typing import Dict, List, Optional, Tuple
 
 ORG_ID = "73339164-7c1f-40ba-a093-33f1f292dd4c"  # Madrasah Irsyad Zuhri Al-Islamiah (goumlyne)
@@ -49,6 +50,34 @@ _CONTENT_TYPES = ("text", "character varying", "character", "date")
 # "assert the total" teeth: coverage shrinking must surface, never silently drift).
 EXPECTED_MIN = {"persons": 14, "sch_students": 3}
 _PARENT_LABEL = "sch_student_parents.rows"
+
+
+# Transient-blip retry for the goumlyne connect (port of ad38b99/f326d3e; 2026-09-03 pooler-blip
+# sweep, Nazim GATE-approved). A transient DNS failure resolving the Supabase pooler host used to
+# trip this dead-man (P1 "containment UNVERIFIED") on a blip that self-heals in seconds. We retry
+# the connect+read a few times with short linear backoff so a blip is absorbed — but a GENUINE,
+# persistent failure STILL re-raises to the dead-man page (the CAI-1060 load-bearing zero must
+# never be silently un-monitored; retries only buy a grace window). Env-tunable.
+_DB_ATTEMPTS = int(os.environ.get("IRSYAD_PII_DB_ATTEMPTS", "3"))
+_DB_RETRY_BASE_S = float(os.environ.get("IRSYAD_PII_DB_RETRY_BASE_S", "1.0"))
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection over time.sleep so tests can suppress real backoff delay."""
+    time.sleep(seconds)
+
+
+def _retry(op, *, attempts: int, base_delay_s: float, retry_on, sleep=_sleep):
+    """Call op(); on a `retry_on` exception retry up to `attempts` TOTAL tries with linear
+    backoff, then re-raise (a persistent failure still reaches the dead-man page). Non-`retry_on`
+    exceptions propagate immediately."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return op()
+        except retry_on:
+            if attempt == attempts:
+                raise
+            sleep(base_delay_s * attempt)
 
 
 def discover_pii_columns(cur, table: str) -> List[str]:
@@ -175,12 +204,21 @@ def main() -> int:
               f"{_GOUMLYNE_ENV} not set; cannot verify the load-bearing containment zero for org {ORG_ID}. "
               "Could-not-measure is not green (CAI-1060).", priority="P1")
         return 2
-    try:
+    def _read_goumlyne():
+        # Retried as a UNIT on a transient pooler blip (SELECT-only, no PII rows read — counts
+        # only). A persistent OperationalError re-raises to the dead-man page in the except below.
         conn = psycopg2.connect(dsn); conn.autocommit = True
-        cur = conn.cursor()
-        counts = run_counts(cur)
-        unclassifiable = count_unclassifiable(cur)
-    except Exception as e:
+        try:
+            cur = conn.cursor()
+            return run_counts(cur), count_unclassifiable(cur)
+        finally:
+            conn.close()
+
+    try:
+        counts, unclassifiable = _retry(
+            _read_goumlyne, attempts=_DB_ATTEMPTS,
+            base_delay_s=_DB_RETRY_BASE_S, retry_on=psycopg2.OperationalError)
+    except Exception as e:  # dead-man's-switch — a persistent failure STILL pages loud
         _page("🟠 Irsyad PII monitor CONNECT FAILED — containment UNVERIFIED",
               f"Could not read goumlyne to verify org {ORG_ID} deep-field zero: {str(e).splitlines()[0]}. "
               "Loud-fail, not green (dead-man's-switch).", priority="P1")
