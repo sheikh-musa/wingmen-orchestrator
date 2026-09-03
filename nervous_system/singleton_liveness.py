@@ -117,7 +117,7 @@ def agent_liveness(agent):
     except RuntimeError:
         return "uncovered"        # tmux unreadable -> don't assert dead; let wedge logic run
     import psycopg2
-    c = psycopg2.connect(_dsn()); cur = c.cursor()
+    c = _connect(); cur = c.cursor()
     try:
         hb = _hb_age(cur, agent)
     finally:
@@ -156,6 +156,44 @@ def _dsn():
     raise SystemExit("singleton_liveness: no DATABASE_URL")
 
 
+# Transient-blip retry for the substrate-pooler connect (port of ad38b99/f326d3e, 2026-09-03
+# pooler-blip sweep). A transient DNS failure resolving the Supabase pooler host used to trip
+# this dead-man (main() -> "PROBE FAILED") on a blip that self-heals in seconds — and the page's
+# OWN connect could then succeed the instant the blip cleared, delivering a FALSE "not watching
+# singletons". Retry the connect a few times with short linear backoff so a blip is absorbed; a
+# GENUINE persistent failure STILL re-raises -> sweep() raises -> main() pages LOUD (dead-man
+# preserved; retries only buy a grace window). Env-tunable.
+_DB_ATTEMPTS = int(os.environ.get("SINGLETON_LIVENESS_DB_ATTEMPTS", "3"))
+_DB_RETRY_BASE_S = float(os.environ.get("SINGLETON_LIVENESS_DB_RETRY_BASE_S", "1.0"))
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection over time.sleep so tests can suppress real backoff delay."""
+    time.sleep(seconds)
+
+
+def _retry(op, *, attempts: int, base_delay_s: float, retry_on, sleep=_sleep):
+    """Call op(); on a `retry_on` exception retry up to `attempts` TOTAL tries with linear
+    backoff, then re-raise the last exception (a persistent failure still surfaces to the
+    dead-man). Non-`retry_on` exceptions propagate immediately."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return op()
+        except retry_on:
+            if attempt == attempts:
+                raise
+            sleep(base_delay_s * attempt)
+
+
+def _connect():
+    """psycopg2.connect(_dsn()) with a bounded retry on a transient pooler-DNS blip
+    (OperationalError). Re-raises on persistent failure so the dead-man still fires."""
+    import psycopg2
+    return _retry(lambda: psycopg2.connect(_dsn()),
+                  attempts=_DB_ATTEMPTS, base_delay_s=_DB_RETRY_BASE_S,
+                  retry_on=psycopg2.OperationalError)
+
+
 def _load_state():
     try:
         with open(STATE_FILE) as f:
@@ -185,7 +223,7 @@ def _page(agent, hb_age_s, dry_run, recipient):
         return
     try:
         import psycopg2
-        c = psycopg2.connect(_dsn()); cur = c.cursor()
+        c = _connect(); cur = c.cursor()
         cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
         cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
                        VALUES ('cc-fleet-health',%s,'blocker','P1',%s,%s)""",
@@ -204,7 +242,7 @@ def _hb_age(cur, agent):
 
 def sweep(*, dry_run=True):
     import psycopg2
-    c = psycopg2.connect(_dsn()); cur = c.cursor()
+    c = _connect(); cur = c.cursor()
     cur.execute("SELECT agent_id FROM protected_agents")
     protected = [r[0] for r in cur.fetchall()]
     checked = checked_agents(protected, sessions=CHECK_SESSIONS, self_agent=SELF_AGENT)
@@ -241,7 +279,7 @@ def main(argv=None) -> int:
         print(f"🔴 SINGLETON-LIVENESS PROBE FAILED ({type(e).__name__}): {e}", file=sys.stderr, flush=True)
         try:
             import psycopg2
-            c = psycopg2.connect(_dsn()); cur = c.cursor()
+            c = _connect(); cur = c.cursor()
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
             cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
                            VALUES ('cc-fleet-health','orch-console','blocker','P2',

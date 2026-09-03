@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 import pathlib
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from nervous_system import singleton_liveness as sl  # noqa: E402
@@ -87,3 +89,71 @@ def test_backstop_pages_for_an_uncovered_dead_singleton():
     # This is the correctness crux: a dead hub must not be silently deferred to a monitor
     # that never checks it.
     assert sl.backstop_action("cc-orchestrator", nudge_ok=False, sessions={"cai": "cai"}) == "page"
+
+
+# ── retry-before-page on the pooler connect (port of ad38b99/f326d3e): a transient Supabase
+#    pooler-DNS blip must NOT trip the singleton-liveness dead-man (PROBE FAILED); a PERSISTENT
+#    failure still re-raises so main() pages loud. (2026-09-03 pooler-blip sweep, Nazim-approved.)
+
+class _Transient(Exception):
+    """Stand-in for psycopg2.OperationalError."""
+
+
+def test_retry_recovers_after_transient_then_succeeds():
+    n = {"c": 0}
+    slept = []
+    def op():
+        n["c"] += 1
+        if n["c"] < 3:
+            raise _Transient("could not translate host name pooler.supabase.com")
+        return "conn"
+    assert sl._retry(op, attempts=3, base_delay_s=0.01, retry_on=_Transient, sleep=slept.append) == "conn"
+    assert n["c"] == 3 and slept == [0.01, 0.02]
+
+
+def test_retry_reraises_on_exhaustion():
+    def op():
+        raise _Transient("still down")
+    with pytest.raises(_Transient, match="still down"):
+        sl._retry(op, attempts=3, base_delay_s=0.01, retry_on=_Transient, sleep=lambda s: None)
+
+
+def test_retry_does_not_retry_non_transient():
+    n = {"c": 0}
+    def op():
+        n["c"] += 1
+        raise ValueError("bad")
+    with pytest.raises(ValueError):
+        sl._retry(op, attempts=3, base_delay_s=0.01, retry_on=_Transient, sleep=lambda s: None)
+    assert n["c"] == 1
+
+
+def test_connect_recovers_from_transient_pooler_blip(monkeypatch):
+    """_connect retries a transient OperationalError on the pooler connect and returns the
+    connection — so sweep() proceeds and the dead-man does NOT false-fire."""
+    import psycopg2
+    monkeypatch.setattr(sl, "_dsn", lambda: "postgres://ignored")
+    monkeypatch.setattr(sl, "_sleep", lambda s: None)
+    n = {"c": 0}
+    def fake_connect(dsn):
+        n["c"] += 1
+        if n["c"] == 1:
+            raise psycopg2.OperationalError(
+                "could not translate host name aws-1-ap-southeast-1.pooler.supabase.com")
+        return "FAKE_CONN"
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+    assert sl._connect() == "FAKE_CONN"
+    assert n["c"] == 2, "must retry the transient blip"
+
+
+def test_connect_reraises_persistent_failure_dead_man_preserved(monkeypatch):
+    """A GENUINE persistent outage must still surface (re-raise) so sweep()->main() pages
+    PROBE FAILED — retries never swallow a real outage."""
+    import psycopg2
+    monkeypatch.setattr(sl, "_dsn", lambda: "postgres://ignored")
+    monkeypatch.setattr(sl, "_sleep", lambda s: None)
+    def fake_connect(dsn):
+        raise psycopg2.OperationalError("persistent outage")
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+    with pytest.raises(psycopg2.OperationalError, match="persistent outage"):
+        sl._connect()
