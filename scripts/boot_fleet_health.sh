@@ -136,8 +136,16 @@ import os, psycopg
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("SELECT set_config('app.current_agent_id', 'cc-fleet-health', true)")
-    cur.execute("UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-fleet-health'")
-    cur.execute("UPDATE agents SET last_heartbeat=now() WHERE id='cc-fleet-health'")
+    # Re-ASSERT status='working' (not just last_heartbeat) each beat: a live
+    # heartbeat loop only runs while THIS launcher is alive, and a live launcher
+    # means the body IS working. This defensively self-heals ANY spurious offline
+    # within one beat (<=5min) instead of leaving it silent-until-noticed — the
+    # exact fail-loud gap that bit us 2026-09-03 (a killed transient boot's
+    # _handle_exit trap flipped the live body offline; the old heartbeat only
+    # refreshed last_heartbeat, so it never self-corrected). Clean exit kills THIS
+    # loop (HB_PID) BEFORE _handle_exit sets offline, so this never fights it.
+    cur.execute("UPDATE agent_status SET status='working', last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-fleet-health'")
+    cur.execute("UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cc-fleet-health'")
     conn.commit()
 PY
         # RENEW the watchdog + fleet-status lease (CAI-RESP-501). Renewal is tied
