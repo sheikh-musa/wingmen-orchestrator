@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 GOUMLYNE_ENV = "GOUMLYNE_RO_DATABASE_URL"  # CAI-1225 RO-move: read-only auditor_ro (was write-DSN); this monitor is SELECT-only
 TABLE = "public.tabung_coin_deposits"
@@ -42,6 +43,36 @@ RECIPIENTS = ("orch-console", "cc-irsyad-coord")   # console owns response; coor
 ENABLED = os.environ.get("CISCO_WATCH_ENABLED") == "1"
 DRY = os.environ.get("CISCO_WATCH_DRY") == "1"
 SRE_FROM = "cc-fleet-health"
+
+# Transient-blip retry for the goumlyne connect (port of ad38b99, orch-console-reviewed). A
+# single transient DNS failure resolving the Supabase pooler host (aws-1-ap-southeast-1.pooler
+# .supabase.com) used to trip the money-path dead-man (could-not-measure) on a blip that
+# self-heals in seconds (2026-09-03: coord + orch-console both reproduced it then saw goumlyne
+# recover on the first retry). We retry the connect+SELECT a few times with short linear backoff
+# so a blip is absorbed — but a GENUINE, persistent failure STILL re-raises to the dead-man page
+# (could-not-measure must fail LOUD on a real money-path outage; retries only buy a grace window).
+_GOUMLYNE_ATTEMPTS = int(os.environ.get("CISCO_DB_ATTEMPTS", "3"))
+_GOUMLYNE_RETRY_BASE_S = float(os.environ.get("CISCO_DB_RETRY_BASE_S", "1.0"))
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection over time.sleep so tests can suppress real backoff delay."""
+    time.sleep(seconds)
+
+
+def _retry(op, *, attempts: int, base_delay_s: float, retry_on, sleep=_sleep):
+    """Call op(); on a `retry_on` exception, retry up to `attempts` TOTAL tries with linear
+    backoff (base_delay_s * attempt_number between tries). Re-raises the last exception after
+    the final attempt — so a persistent failure still surfaces to the dead-man's-switch.
+    Exceptions outside `retry_on` propagate immediately (never mask a non-transient bug). `op`
+    must be idempotent/side-effect-free — the goumlyne read here is SELECT-only."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return op()
+        except retry_on:
+            if attempt == attempts:
+                raise
+            sleep(base_delay_s * attempt)
 
 
 # ── PURE classification (unit-tested; no DB, no PII) ─────────────────────────
@@ -128,7 +159,9 @@ def run_once() -> int:
     gdsn = _dsn_goumlyne()
     if not gdsn:
         return _page_loud_cannot_measure(f"{GOUMLYNE_ENV} not set")
-    try:
+    def _read_goumlyne():
+        # Retried as a UNIT on a transient connect blip (safe: SELECT-only, no side effects). A
+        # persistent OperationalError re-raises to the dead-man page in the except below.
         with psycopg.connect(gdsn, connect_timeout=15) as g, g.cursor() as gcur:
             # (a) first reconciled? count only.
             gcur.execute(f"SELECT count(*) FROM {TABLE} WHERE status = %s", (TERMINAL_CLEAN,))
@@ -138,10 +171,15 @@ def run_once() -> int:
                 f"SELECT public_id, status, extract(epoch from (now() - updated_at)) "
                 f"FROM {TABLE} WHERE status = ANY(%s)", (list(NON_TERMINAL),))
             nonterm = [(str(r[0]), r[1], (float(r[2]) if r[2] is not None else None)) for r in gcur.fetchall()]
-            total_n_row = None
             gcur.execute(f"SELECT count(*) FROM {TABLE}")
             total_n_row = int(gcur.fetchone()[0])
-    except Exception as e:  # noqa: BLE001 — dead-man's-switch
+        return reconciled_n, nonterm, total_n_row
+
+    try:
+        reconciled_n, nonterm, total_n_row = _retry(
+            _read_goumlyne, attempts=_GOUMLYNE_ATTEMPTS,
+            base_delay_s=_GOUMLYNE_RETRY_BASE_S, retry_on=psycopg.OperationalError)
+    except Exception as e:  # noqa: BLE001 — dead-man's-switch (persistent failure pages loud)
         return _page_loud_cannot_measure(str(e).splitlines()[0] if str(e) else type(e).__name__)
 
     stuck = select_stuck(nonterm)
