@@ -178,3 +178,59 @@ def test_armed_recycle_aborts_when_compaction_raises(monkeypatch):
     assert out["recycled"] is False
     assert "compaction failed" in out["reason"]
     assert reset_calls == []                 # reset NEVER runs onto an unproven handoff
+
+
+# ── CAI-RESP-1382: worker-lane recycle carve-out is STANDING-ARMED by default ──────────
+# cai ruled (CAI-RESP-1381/1382) that CAI-681 cond 5's post-director-demo precondition was met
+# >1mo ago and the disarm just sat stale. Flip the DEFAULT to armed; keep an EXPLICIT force-
+# disarm (--no-arm / CTX_WD_LANE_ARM=0); the cond-5 MECHANISM + the other 4 gates stay intact.
+
+def test_resolve_armed_defaults_true():
+    """The flip: no flags -> standing-armed."""
+    assert slr._resolve_armed(no_arm=False, env_lane_arm=None) is True
+
+
+def test_resolve_armed_no_arm_flag_force_disarms():
+    assert slr._resolve_armed(no_arm=True, env_lane_arm=None) is False
+
+
+def test_resolve_armed_env_zero_force_disarms():
+    assert slr._resolve_armed(no_arm=False, env_lane_arm="0") is False
+
+
+def test_resolve_armed_env_nonzero_or_empty_stays_armed():
+    # only an explicit "0" disarms via env; other/empty values keep the standing arm.
+    assert slr._resolve_armed(no_arm=False, env_lane_arm="1") is True
+    assert slr._resolve_armed(no_arm=False, env_lane_arm="") is True
+
+
+def test_resolve_armed_no_arm_wins_over_env():
+    assert slr._resolve_armed(no_arm=True, env_lane_arm="1") is False
+
+
+def test_disarmed_still_refuses_at_boundary_mechanism_intact():
+    """The cond-5 MECHANISM is unchanged: an explicit force-disarm still fails closed at the
+    boundary even with all gates True (the default flipped, the gate did not go away)."""
+    disarmed = slr._resolve_armed(no_arm=True, env_lane_arm=None)
+    with pytest.raises(slr.fhb.BoundaryViolation):
+        slr.fhb.assert_sre_lane_red_permitted(
+            "cc-worker-lane",
+            {"idle": True, "git_clean": True, "fresh_handoff": True},
+            disarmed, identity=slr.fhb.SRE_AGENT_ID)
+
+
+def test_singleton_still_fail_closed_even_when_armed():
+    """cond 3 (singleton off-limits) is untouched: a singleton target refuses even armed=True."""
+    with pytest.raises(slr.fhb.BoundaryViolation):
+        slr.fhb.assert_sre_lane_red_permitted(
+            "cai",  # a SINGLETON_BODY
+            {"idle": True, "git_clean": True, "fresh_handoff": True},
+            True, identity=slr.fhb.SRE_AGENT_ID)
+
+
+def test_armed_worker_lane_with_all_gates_permits():
+    """Positive path: default-armed + worker lane + all gates True -> permitted (no raise)."""
+    slr.fhb.assert_sre_lane_red_permitted(
+        "cc-worker-lane",
+        {"idle": True, "git_clean": True, "fresh_handoff": True},
+        slr._resolve_armed(no_arm=False, env_lane_arm=None), identity=slr.fhb.SRE_AGENT_ID)

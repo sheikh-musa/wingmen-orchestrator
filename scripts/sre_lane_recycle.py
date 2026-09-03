@@ -14,9 +14,11 @@ under the hard, mechanically-verified gates cai bound:
      lossless). Any gate not confirmable -> False -> NO reset (don't assume).
   cond 4: an attributable audit row is written BEFORE the /clear (actor + reason
      + gates-verified), fail-closed-visible.
-  cond 5: DISARMED until an explicit post-demo arm (CTX_WD_LANE_ARM=1 / --arm).
-     Default is DETECT-ONLY: compute gates + report what it WOULD do, touch
-     nothing.
+  cond 5: STANDING-ARMED by default (CAI-RESP-1381/1382 — the post-director-demo
+     precondition was met >1mo ago; the temporary disarm just sat stale). The
+     carve-out fires when cond 1-4 are ALL independently met. An EXPLICIT force-
+     disarm remains available for a deliberate future disarm: --no-arm (or
+     CTX_WD_LANE_ARM=0). Passing no arm flag still ONLY fires when cond 1-4 hold.
 
 This module NEVER touches a singleton — that stays the hub's CAI-500 path
 (context_health_watchdog.py --arm=red). It reuses reset_lane.sh for the actual
@@ -390,10 +392,29 @@ def armed_recycle(conn, lane_row: dict, *, reason: str,
             "boot": boot, "gates": p["gates"], "output": out}
 
 
+def _resolve_armed(no_arm: bool, env_lane_arm: "str | None") -> bool:
+    """CAI-RESP-1382: the worker-lane recycle carve-out (CAI-681 cond 5) is STANDING-ARMED by
+    default. cai ruled (CAI-RESP-1381) that cond 5's post-director-demo precondition was met
+    over a month ago and the temporary disarm just sat stale past its own scope. So the arm bit
+    defaults True; a future deliberate disarm is still available via an EXPLICIT force-disarm
+    (--no-arm, or CTX_WD_LANE_ARM=0). This only sets cond 5's arm bit — the other four CAI-681
+    conditions (worker-lane-not-singleton, idle, git-clean, fresh-handoff) stay fully binding
+    and are verified independently by assert_sre_lane_red_permitted."""
+    if no_arm:
+        return False
+    if env_lane_arm == "0":
+        return False
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="SRE lanes-only auto-recycle (CAI-RESP-681)")
     ap.add_argument("--arm", action="store_true",
-                    help="ARM the destructive /clear (cond 5). Default: detect-only.")
+                    help="(back-compat no-op) the carve-out is STANDING-ARMED by default "
+                         "since CAI-RESP-1382; --arm is accepted but no longer required.")
+    ap.add_argument("--no-arm", action="store_true",
+                    help="force-DISARM this run (detect-only) — the explicit deliberate-disarm "
+                         "path that survives the CAI-RESP-1382 default flip. Same as CTX_WD_LANE_ARM=0.")
     ap.add_argument("--lane", help="restrict to one lane (by fleet_lanes.lane)")
     ap.add_argument("--ignore-context", action="store_true",
                     help="skip the >=80%% context-bloat trigger (manual wedged-lane "
@@ -411,7 +432,7 @@ def main() -> int:
     if args.self_test:
         return _self_test()
 
-    armed = bool(args.arm) or os.environ.get("CTX_WD_LANE_ARM") == "1"
+    armed = _resolve_armed(args.no_arm, os.environ.get("CTX_WD_LANE_ARM"))
     import psycopg
     from dotenv import load_dotenv
     load_dotenv(_ORCH_DIR / ".env")

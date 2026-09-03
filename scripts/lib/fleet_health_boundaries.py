@@ -112,8 +112,11 @@ def assert_sre_lane_red_permitted(
     Enforces cai's binding conditions:
       3 (HARD): target must be a WORKER LANE, never a singleton — checked first,
         always, so a misconfigured target can't slip through.
-      5: `armed` must be True. Disarmed-until-post-demo means every call refuses
-        until an explicit arm signal flips it.
+      5: `armed` must be True. The carve-out is STANDING-ARMED by default since
+        CAI-RESP-1382 (the post-director-demo precondition was met >1mo ago;
+        CAI-RESP-1381 confirmed the temporary disarm just sat stale). This CHECK
+        stays the mechanism: a caller that explicitly force-disarms (--no-arm /
+        CTX_WD_LANE_ARM=0 -> armed=False) still refuses here, fail-closed.
       1+2: every gate in SRE_LANE_RED_GATES must be EXPLICITLY True. idle +
         git_clean + fresh_handoff; fresh_handoff is load-bearing (a stale/absent
         handoff makes the reset lossy). Anything not exactly True — False, None,
@@ -128,11 +131,13 @@ def assert_sre_lane_red_permitted(
     if not running_as_sre(identity):
         return
 
-    # cond 5: disarmed until an explicit post-demo arm.
+    # cond 5: STANDING-ARMED by default (CAI-RESP-1381/1382). The check STAYS the
+    # mechanism — an explicit force-disarm (--no-arm / CTX_WD_LANE_ARM=0) still refuses.
     if armed is not True:
         raise BoundaryViolation(
-            "SRE lane red-reset is DISARMED (CAI-RESP-681 cond 5) — refusing. "
-            "It arms only on an explicit post-cosem-demo signal.")
+            "SRE lane red-reset is force-DISARMED (CAI-RESP-681 cond 5) — refusing. "
+            "The carve-out is standing-armed by default (CAI-RESP-1382); this run was "
+            "explicitly disarmed (--no-arm / CTX_WD_LANE_ARM=0).")
 
     # cond 1+2: all three gates mechanically verified True, else fail-closed.
     if not isinstance(gates, dict):
