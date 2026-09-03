@@ -60,6 +60,43 @@ def _dsn() -> str:
     return dsn
 
 
+# Transient-blip retry for the pooler connect (port of ad38b99/f326d3e; 2026-09-03 pooler-blip
+# sweep, Nazim-approved — irsyad domain). A transient DNS failure resolving the Supabase pooler
+# host used to fire a spurious P1 "CRASHED" + an unnecessary launchd restart on a blip that
+# self-heals in seconds. Retry the connect a few times with short linear backoff so a blip is
+# absorbed; a GENUINE persistent failure STILL re-raises -> the loop's except fires the CRASHED
+# notice + launchd restart (real crash recovery preserved; retries only buy a grace window).
+_DB_ATTEMPTS = int(os.environ.get("SHADOW_WATCH_DB_ATTEMPTS", "3"))
+_DB_RETRY_BASE_S = float(os.environ.get("SHADOW_WATCH_DB_RETRY_BASE_S", "1.0"))
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection over time.sleep so tests can suppress real backoff delay."""
+    time.sleep(seconds)
+
+
+def _retry(op, *, attempts: int, base_delay_s: float, retry_on, sleep=_sleep):
+    """Call op(); on a `retry_on` exception retry up to `attempts` TOTAL tries with linear
+    backoff, then re-raise (a persistent failure still crashes the loop -> launchd restart).
+    Non-`retry_on` exceptions propagate immediately."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return op()
+        except retry_on:
+            if attempt == attempts:
+                raise
+            sleep(base_delay_s * attempt)
+
+
+def _connect():
+    """psycopg.connect(_dsn(), connect_timeout=15) with a bounded retry on a transient
+    pooler-DNS blip (OperationalError). Re-raises on persistent failure so the loop's crash
+    handler still fires."""
+    return _retry(lambda: psycopg.connect(_dsn(), connect_timeout=15),
+                  attempts=_DB_ATTEMPTS, base_delay_s=_DB_RETRY_BASE_S,
+                  retry_on=psycopg.OperationalError)
+
+
 def log(msg: str) -> None:
     line = f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {msg}"
     print(line, flush=True)
@@ -246,7 +283,7 @@ def main() -> None:
     offset = read_offset()
     if offset == 0:
         # First boot: start from NOW, don't replay history into the lane.
-        with psycopg.connect(_dsn(), connect_timeout=15) as conn, conn.cursor() as cur:
+        with _connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT coalesce(max(id),0) FROM operator_messages WHERE tag=%s",
                         (CLIENT_TAG,))
             offset = cur.fetchone()[0]
@@ -256,7 +293,7 @@ def main() -> None:
     consecutive_failures = 0
     while True:
         try:
-            with psycopg.connect(_dsn(), connect_timeout=15) as conn:
+            with _connect() as conn:
                 n_new, max_id = new_inbound(conn, offset)
                 if n_new:
                     n_unhandled = unhandled_count(conn)
