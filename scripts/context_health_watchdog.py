@@ -148,8 +148,8 @@ _STALE_S = int(os.environ.get("CTX_WD_STALE_MIN", "20")) * 60
 # agents, so the set of resettable agents must be an explicit, audited decision.
 #
 # window  — this agent's REAL context window, so pct reflects ITS headroom (not a
-#           blanket 1M). The Studio bodies run the fc-v12 1M window and DEGRADE as
-#           they fill (no auto-compact) — those are the ones this watchdog exists
+#           blanket 1M). The 1M bodies (the hub — cross-host; cai — local, Mini) run the
+#           fc-v12 1M window and DEGRADE as they fill (no auto-compact) — the ones this watchdog exists
 #           for. orch-console (this Mini body) runs the stock ~200K window WITH
 #           auto-compact ON, so it self-heals long before any reset line: kept in
 #           the registry for detection/symmetry but alerts=False (compaction, not a
@@ -159,11 +159,11 @@ _STALE_S = int(os.environ.get("CTX_WD_STALE_MIN", "20")) * 60
 #           the degrade-prone 1M bodies alert; the self-compacting Mini body does
 #           not (that would be noise for a condition it resolves on its own).
 # handoff_dir — base dir (on the agent's host) the handoff_glob is relative to.
-#   The hub's handoffs live in the Studio orchestrator checkout; cai's in its own
-#   ~/wingmen/wingmen-cai checkout; Nazim's in this Mini checkout. Used to verify a
-#   fresh handoff cross-host BEFORE any /clear.
+#   The hub's handoffs live in its own (cross-host) orchestrator checkout — but the hub is now
+#   cross_host_unreachable, so we do NOT read them from here; cai's in its own ~/wingmen/wingmen-cai
+#   checkout (local); Nazim's in this Mini checkout. Used to verify a fresh handoff BEFORE any /clear.
 # auto_reset — whether the ARMED executor may drive checkpoint/reset for this body.
-#   ONLY the degrade-prone 1M Studio bodies. orch-console (self, Mini) is
+#   ONLY the degrade-prone 1M bodies (the hub, cai). orch-console (self, Mini) is
 #   self-compacting and IS this watchdog's own host — NEVER auto-reset self.
 _AGENT_REGISTRY = {
     # external_recycle (CAI-RESP-1360): the hub is a long-lived, harness-compacted, EXTERNALLY-
@@ -175,17 +175,26 @@ _AGENT_REGISTRY = {
     # (>=95%) or on a frozen/non-advancing gauge, and the remediation names the external recycle.
     # PAGING-ONLY flag: auto_reset stays True (the executor path is untouched — this classifies
     # escalation copy in run_alerts, exactly as self_compacts does, and touches no reset branch).
-    "cc-orchestrator": {"host": "mac-studio", "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "external_recycle": True, "inbox_scope": "hub", "label": "The hub (orch, Studio)"},
+    # host is None + cross_host_unreachable: the hub is cross-host AND MOVING (VPS wingmen-core ->
+    # gzb 192.168.1.114, in progress) — the Mini cannot reach its pane, and encoding a host-specific
+    # ssh would just rot on the next move (bus 37021, Option B). idle short-circuits to None (band
+    # fallback), never a doomed ssh. Recovery is the operator-facing cross-host recycle (paged), not
+    # a watchdog pane action, so live capture buys nothing here.
+    "cc-orchestrator": {"host": None, "cross_host_unreachable": True, "tmux": "orch",  "handoff_glob": "reports/session-handoff-*.md", "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,  "auto_reset": True,  "external_recycle": True, "inbox_scope": "hub", "label": "The hub (orch, cross-host VPS->gzb)"},
     # self_compacts added in S2 (PURELY ADDITIVE — Nazim point 2): cai is a Claude Code
     # body that auto-compacts, so it can self-recycle on a fresh handoff. The flag ONLY
     # routes the nudge/alert-copy path (run_alerts); it touches NO auto_reset branch —
     # run_executor selects bodies by auto_reset and never reads self_compacts, so cai's
     # reset path is unchanged. I NUDGE cai, I NEVER reset it (its Tier-C self-arm only).
-    "cai":             {"host": "mac-studio", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "handoff_dir": "~/wingmen/wingmen-cai",  "window": 1_000_000, "alerts": True,  "auto_reset": True,  "self_compacts": True, "inbox_scope": "cai", "label": "cai (Studio)"},
+    # cai runs LOCALLY on the Mini (verified at source 2026-09-03: live local tmux `cai`) — host is
+    # "self" so its pane is captured locally (no ssh), restoring real idle-vs-active detection. The
+    # old host="mac-studio" was a DEAD-host stale-config: every probe did a doomed `ssh Musa@mac-studio`
+    # -> None -> band-fallback, which can false-page a genuinely-idle cai (op#18837 class).
+    "cai":             {"host": "self", "tmux": "cai",   "handoff_glob": "reports/cai-handoff-*.md",     "handoff_dir": "~/wingmen/wingmen-cai",  "window": 1_000_000, "alerts": True,  "auto_reset": True,  "self_compacts": True, "inbox_scope": "cai", "label": "cai (Mini, local)"},
     # window was hardcoded 200K (stale/wrong — op-caught 2026-07-21: the gauge showed
     # orch-console at 776K live tokens, impossible in a 200K window). Real window is
     # ~1M like the other bodies. Nazim DOES fill toward its limit and must be watched;
-    # the difference from the Studio bodies is only the RELEASE VALVE — Claude Code
+    # the difference from the other 1M bodies is only the RELEASE VALVE — Claude Code
     # AUTO-COMPACTS (so alerts=True to warn, but auto_reset=False: recovery is a
     # compaction, not a /clear — and never reset the body the watchdog runs beside).
     "orch-console":    {"host": "self",        "tmux": "nazim", "handoff_glob": "reports/nazim-handoff-*.md",  "handoff_dir": str(_ORCH_DIR),           "window": 1_000_000, "alerts": True,  "auto_reset": False, "self_compacts": True, "label": "Nazim (console, Mini — auto-compacts)"},
@@ -349,8 +358,8 @@ def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
         )
         for ident, ctx, age_s in cur.fetchall():
             ctx = int(ctx or 0)
-            # Per-agent window: a registered body's real window (1M for the Studio
-            # bodies, 200K for the Mini), else the global default for transient lanes.
+            # Per-agent window: a registered body's real window (1M for the hub + cai,
+            # 200K for the Mini console), else the global default for transient lanes.
             window = _AGENT_REGISTRY.get(ident, {}).get("window", _CTX_WINDOW)
             if ctx <= 0 or ctx > window:
                 # NOT silently skipped any more. ctx > window does not mean the
@@ -391,12 +400,13 @@ def read_context_gauge(dropped: Optional[list] = None) -> list[AgentCtx]:
 def _tmux_bin(host: str) -> str:
     """Resolve the tmux binary for a host.
 
-    Local (host='self'): resolve via PATH — this Mini has tmux at
-    /usr/local/bin/tmux, the Studio hub at /opt/homebrew/bin/tmux; hardcoding
-    either breaks the other (this exact hardcode was a latent bug on the Mini).
-    Remote: use an absolute path — a non-login ssh shell's PATH usually omits the
-    homebrew dir (see the reset-from-Mini playbook); Studio is Apple Silicon, so
-    default there is /opt/homebrew/bin/tmux, overridable via REMOTE_TMUX_BIN.
+    Local (host='self'): resolve via PATH — this Mini has tmux at /usr/local/bin/tmux,
+    an Apple-Silicon macOS host at /opt/homebrew/bin/tmux; hardcoding either breaks the
+    other (this exact hardcode was a latent bug on the Mini).
+    Remote: use an absolute path — a non-login ssh shell's PATH usually omits the homebrew
+    dir; the default assumes an Apple-Silicon macOS remote (/opt/homebrew/bin/tmux),
+    overridable via REMOTE_TMUX_BIN. (Currently dormant: no registered body is a reachable
+    remote — the hub is cross_host_unreachable and cai is local.)
     """
     if host == "self":
         found = shutil.which("tmux")
@@ -414,6 +424,11 @@ def _tmux_run(reg: dict, args: list[str], timeout: int = 20):
     CompletedProcess, or None on any transport failure. Uses argv (local) /
     shlex-quoted argv (remote) — never a raw shell string — so pane text and
     send-keys payloads cannot be shell-interpreted."""
+    # Option B (CAI-1360 follow-up): a cross_host_unreachable body has no reachable transport from
+    # here — never attempt a doomed ssh to a dead/moving host. (Belt-and-braces with _pane_state's
+    # short-circuit; also covers the raw _capture_pane callers on the executor path.)
+    if reg.get("cross_host_unreachable"):
+        return None
     tbin = _tmux_bin(reg["host"])
     try:
         if reg["host"] == "self":
@@ -578,6 +593,12 @@ def _bg_agents_live(reg: dict, settle_s: int = 20) -> tuple[int, str]:
 
 def _pane_state(reg: dict) -> PaneState:
     """Classify the agent pane: reachable / idle / authenticated / unsent-input."""
+    # Option B (CAI-1360 follow-up, bus 37021): a body flagged cross_host_unreachable has NO pane
+    # transport reachable from here (the hub is cross-host AND MOVING: VPS wingmen-core -> gzb, so
+    # encoding a host-specific ssh would just rot). Short-circuit to honest-unreachable (idle=None)
+    # WITHOUT a doomed ssh — the frozen path then falls back to the value band, exactly as before.
+    if reg.get("cross_host_unreachable"):
+        return PaneState(reachable=False, idle=None, authenticated=None)
     pane = _capture_pane(reg)
     if pane is None:
         return PaneState(reachable=False, idle=None, authenticated=None)
@@ -618,7 +639,7 @@ def _agent_is_idle(reg: dict) -> Optional[bool]:
 def _newest_handoff(reg: dict) -> Optional[tuple[str, float]]:
     """(name, mtime_epoch) of the newest handoff matching the glob, cross-host.
 
-    Local: python glob. Remote (macOS Studio — `find -printf` is unavailable):
+    Local: python glob. Remote (macOS — `find -printf` is unavailable):
     `ls -t <glob> | head -1` then `stat -f %m`. Handoff names carry no spaces.
     None if none found / unreachable."""
     glob = reg["handoff_glob"]
@@ -633,6 +654,10 @@ def _newest_handoff(reg: dict) -> Optional[tuple[str, float]]:
             if m > newest_m:
                 newest, newest_m = p.name, m
         return (newest, newest_m) if newest else None
+    # Option B (CAI-1360 follow-up): a cross_host_unreachable body has no reachable transport — do
+    # not attempt a doomed `ssh Musa@{host}` (host is None/moving) on every --json/plan run.
+    if reg.get("cross_host_unreachable"):
+        return None
     base = reg.get("handoff_dir", "~/wingmen/orchestrator")
     remote = (f"cd {base} 2>/dev/null && f=$(ls -t {glob} 2>/dev/null | head -1); "
               f'[ -n "$f" ] && echo "$(stat -f %m $f) $f"')
@@ -1716,7 +1741,7 @@ def _frozen_gauge_should_page(a: AgentCtx, reg: dict) -> bool:
         (kills both op#18601 cc-quality-@13%-green and op#18837 orch-console-amber-overnight false pages).
       - pane BUSY (idle is False): actively producing + frozen gauge = real zombie -> PAGE, any band
         (the low-%-then-bloating true positive, Nazim 36319).
-      - pane UNREACHABLE (idle is None: a cross-host body the Mini cannot see, e.g. the hub on Studio):
+      - pane UNREACHABLE (idle is None: a cross-host body the Mini cannot see, e.g. the cross_host_unreachable hub):
         fall back to the value BAND -> PAGE at >= SOFT/amber (the hub-@61% zombie, genuinely stuck 53h),
         SUPPRESS at green (nothing high hidden, and can't confirm active).
     A suppressed page is LOGGED LOUDLY (charter #1: a silently-dropped page is worse than none) and

@@ -38,7 +38,13 @@ def _ctx(agent="cc-orchestrator", pct=85, level="red", action="reset-eligible"):
                       pct=pct, level=level, age_s=30, action=action)
 
 
-REG = w._AGENT_REGISTRY["cc-orchestrator"]  # remote (mac-studio), auto_reset=True
+# A generic REMOTE body for executor/pane-state unit tests, DECOUPLED from the real registry: host
+# is a test placeholder (NOT the dead mac-studio, NOT cross_host_unreachable) so hub-host churn
+# (VPS->gzb) never ripples into these transport-patched tests. (Was w._AGENT_REGISTRY["cc-orchestrator"],
+# but the hub is now cross_host_unreachable -> _pane_state would short-circuit and break these.)
+REG = {"host": "test-host", "tmux": "orch", "handoff_glob": "reports/session-handoff-*.md",
+       "handoff_dir": "~/wingmen/orchestrator", "window": 1_000_000, "alerts": True,
+       "auto_reset": True, "external_recycle": True, "inbox_scope": "hub", "label": "test hub (remote)"}
 
 # Realistic pane fragments.
 PANE_IDLE_AUTHED = (
@@ -1599,7 +1605,7 @@ def test_registry_hub_external_recycle_profile():
 
 def _er_reg(monkeypatch, agent="er-body", **extra):
     reg = {"label": agent, "window": 1_000_000, "alerts": True, "external_recycle": True,
-           "auto_reset": True, "host": "mac-studio", "tmux": agent, **extra}
+           "auto_reset": True, "host": "test-host", "tmux": agent, **extra}
     monkeypatch.setitem(w._AGENT_REGISTRY, agent, reg)
     return reg
 
@@ -1742,7 +1748,7 @@ def test_frozen_green_unreachable_lane_suppresses_operator_page(monkeypatch, tmp
 
 def test_frozen_amber_unreachable_still_pages(monkeypatch, tmp_path):
     """The case that MATTERS (the hub-@61% cross-host zombie): pane UNREACHABLE (idle is None) +
-    amber+ frozen -> PAGE via the band arm. The Mini can't see the Studio hub's pane, and a
+    amber+ frozen -> PAGE via the band arm. The Mini can't see the cross-host hub's pane, and a
     genuinely-stuck 53h writer must still be surfaced."""
     _frozen_green_reg(monkeypatch, agent="hubish")
     row = w.AgentCtx(agent="hubish", ctx_tokens=610_000, pct=61, level="amber",
@@ -1844,3 +1850,82 @@ def test_frozen_gauge_should_page_helper_matrix(monkeypatch):
     assert w._frozen_gauge_should_page(green, reg) is False
     assert w._frozen_gauge_should_page(amber, reg) is True
     assert w._frozen_gauge_should_page(red, reg) is True
+
+
+# ── CAI-1360 follow-up (bus 37018/37021): fix the STALE cross-host registry hosts ────────
+# Verified at source 2026-09-03: cai runs LOCALLY on the Mini (host must be "self", not the DEAD
+# unresolvable mac-studio); the hub is genuinely cross-host AND MOVING (VPS wingmen-core -> gzb),
+# so it is marked cross_host_unreachable -> idle short-circuits to None with NO doomed ssh
+# (Option B, move-resilient: encodes no host-specific ssh to rot). No entry may point at mac-studio.
+
+def test_cai_registry_is_local_self_not_studio():
+    """cai runs LOCALLY on the Mini (live local tmux `cai`, confirmed at source) — host must be
+    'self' so its pane is captured locally (no ssh) and its idle-vs-active gate actually works.
+    The bug: host='mac-studio' -> doomed `ssh Musa@mac-studio` -> None -> band-fallback false-page."""
+    cai = w._AGENT_REGISTRY.get("cai")
+    assert cai is not None
+    assert cai["host"] == "self", "cai is local on the Mini; host must be 'self'"
+    assert "studio" not in cai.get("label", "").lower(), "drop the stale (Studio) label"
+
+
+def test_hub_registry_marked_cross_host_unreachable_no_dead_host():
+    """The hub is genuinely cross-host and MOVING (VPS->gzb) — mark it cross_host_unreachable so
+    idle short-circuits to None with no doomed ssh, encoding no host-specific ssh that will rot.
+    The dead mac-studio host must not linger."""
+    hub = w._AGENT_REGISTRY["cc-orchestrator"]
+    assert hub.get("cross_host_unreachable") is True
+    assert hub.get("host") != "mac-studio", "the dead mac-studio host must not linger on the hub"
+
+
+def test_no_registry_entry_points_at_dead_mac_studio():
+    """mac-studio is DEAD (unresolvable post-relocation 2026-07-31) — no real registry entry may
+    point at it, else every cross-host probe for that body silently fails as a stale-config zombie."""
+    stale = sorted(a for a, r in w._AGENT_REGISTRY.items() if r.get("host") == "mac-studio")
+    assert stale == [], f"registry entries still on the dead mac-studio host: {stale}"
+
+
+def test_cross_host_unreachable_idle_is_none_without_capture(monkeypatch):
+    """A cross_host_unreachable body short-circuits _pane_state to unreachable/idle=None WITHOUT
+    calling _capture_pane at all (Option B: no doomed cross-host ssh to a dead/moving host). The
+    conftest live-seam guard makes _capture_pane/_tmux_run RAISE if reached, so a clean idle=None
+    here proves the short-circuit fired before any transport."""
+    reg = {"host": None, "tmux": "orch", "cross_host_unreachable": True, "label": "hub"}
+    st = w._pane_state(reg)
+    assert st.reachable is False and st.idle is None
+    assert w._agent_is_idle(reg) is None
+
+
+def test_cross_host_unreachable_frozen_amber_still_pages():
+    """Band-fallback preserved: a cross_host_unreachable body with a frozen gauge at amber still
+    PAGES (idle=None -> value band), green still suppresses — via the short-circuit, no ssh (a
+    reached _capture_pane/_tmux_run would trip the conftest live-seam guard and error this test)."""
+    reg = {"host": None, "tmux": "orch", "cross_host_unreachable": True,
+           "external_recycle": True, "alerts": True, "label": "hub"}
+    amber = _ctx(agent="cc-orchestrator", pct=62, level="amber")
+    green = _ctx(agent="cc-orchestrator", pct=30, level="green")
+    assert w._frozen_gauge_should_page(amber, reg) is True, "unreachable+amber frozen -> band-fallback page"
+    assert w._frozen_gauge_should_page(green, reg) is False, "unreachable+green -> nothing high hidden -> suppress"
+
+
+def test_short_circuit_is_narrow_normal_body_still_captured(monkeypatch):
+    """Regression guard: the cross_host_unreachable short-circuit must be NARROW — a normal body
+    (no such flag, e.g. cai=self now) still goes through _capture_pane, keeping real idle detection
+    (that is the whole point of relocating cai to 'self')."""
+    monkeypatch.setattr(w, "_capture_pane", lambda reg, lines=40: PANE_IDLE_AUTHED)
+    reg = {"host": "self", "tmux": "x", "label": "local-body"}  # NO cross_host_unreachable
+    st = w._pane_state(reg)
+    assert st.reachable is True and st.idle is True, "a normal body must NOT be short-circuited"
+
+
+def test_cross_host_unreachable_newest_handoff_makes_no_ssh(monkeypatch):
+    """_newest_handoff for a cross_host_unreachable body returns None WITHOUT ssh — otherwise host=None
+    makes it a doomed `ssh Musa@None` on every --json/plan run (the moving-host rot Option B avoids)."""
+    calls = []
+    def _record(argv, *a, **k):
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    monkeypatch.setattr(w.subprocess, "run", _record)
+    reg = {"host": None, "tmux": "orch", "cross_host_unreachable": True,
+           "handoff_glob": "reports/*.md", "handoff_dir": "~/x", "label": "hub"}
+    assert w._newest_handoff(reg) is None
+    assert calls == [], f"no ssh for a cross_host_unreachable handoff lookup: {calls}"
