@@ -1,0 +1,9 @@
+{
+  "project_ref": "ceayjeamtmcyzzvqflus",
+  "silo": "ihsanos-prod (multi-tenant)",
+  "snapshot_at": "2026-09-03T04:03:26.460500+00:00",
+  "tip_id": 2878,
+  "row_count_le_tip": 2024,
+  "distinct_orgs": 16,
+  "decision_ref": "CAI-RESP-1364"
+}
