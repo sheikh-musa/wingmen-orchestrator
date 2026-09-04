@@ -177,6 +177,24 @@ def execution_ruling_ok(
     if now < challengeable_until:
         return GateResult(False, f"execution ruling's 24h challenge window has not closed yet (closes {challengeable_until.isoformat()}) — fail-closed")
 
+    # REV 4 (orch-console's hardening of both auditors' minor note): op_id
+    # presence alone is a plain SUBSTRING test — a ruling merely NAMING the
+    # op_id (even to deny it, or in passing) would satisfy it. Require a
+    # POSITIVE authorization signal too: execution_status='granted' — a
+    # real column (confirmed live, real observed values include 'granted',
+    # matching the "EXECUTION GRANTED" phrasing cai's own rulings use
+    # verbatim, e.g. CAI-RESP-1378's title) that the cai follow-up ruling
+    # this gate is waiting for will set. Keep the op_id-named check too —
+    # belt AND suspenders, not a replacement.
+    execution_status = str(decision_row.get("execution_status") or "").strip().lower()
+    if execution_status != "granted":
+        return GateResult(
+            False,
+            f"execution ruling execution_status={execution_status!r} (not 'granted') — "
+            "a ruling that merely mentions this op is not the same as one that "
+            "grants it — fail-closed",
+        )
+
     decision_text = " ".join(
         str(decision_row.get(k) or "") for k in ("title", "decision")
     ).lower()
@@ -198,8 +216,8 @@ def _fetch_execution_decision(decision_ref: str, substrate_dsn: str) -> dict | N
     with psycopg.connect(substrate_dsn, connect_timeout=15) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT decision_ref, title, decision, status, challenge_status, "
-            "challengeable_until, superseded_by_decision_ref, superseded_by "
-            "FROM strategic_decisions WHERE decision_ref = %s",
+            "challengeable_until, superseded_by_decision_ref, superseded_by, "
+            "execution_status FROM strategic_decisions WHERE decision_ref = %s",
             (decision_ref,),
         )
         cols = [d[0] for d in cur.description]
