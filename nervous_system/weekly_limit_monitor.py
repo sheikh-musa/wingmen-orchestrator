@@ -70,6 +70,14 @@ PROBE_RETRIES = int(os.environ.get("WEEKLY_PROBE_RETRIES", "3"))
 PROBE_BACKOFF = float(os.environ.get("WEEKLY_PROBE_BACKOFF", "2"))   # seconds, ×attempt
 PROBE_TIMEOUT = int(os.environ.get("WEEKLY_PROBE_TIMEOUT", "30"))
 
+# Transient server-side HTTP codes (Nazim #37094): 529 = Anthropic API OVERLOAD,
+# 502/503/504 = gateway/unavailable. Unlike 429 (over-limit) or 401 (auth) — which
+# carry the rate-limit headers and are a REAL signal — an overloaded/gateway response
+# returns no usable body, so its MISSING utilization header must NOT be mistaken for
+# "auth broke / API shape changed". Treat these like a network blip: RETRY before
+# raising. (Same transient-blip class as the pooler-DNS dead-man sweep, ad38b99.)
+RETRYABLE_HTTP = {502, 503, 504, 529}
+
 STATE_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor_state.json"
 HEARTBEAT_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor_heartbeat"
 LOG_FILE = _ORCH_DIR / "logs" / "weekly_limit_monitor.log"
@@ -190,7 +198,17 @@ def probe_pool(name: str) -> dict:
             _last_err = None
             break
         except urllib.error.HTTPError as e:
-            # Over-limit / auth errors still carry the rate-limit headers — use them.
+            # A transient overload/gateway code (529/503/502/504) carries no usable
+            # rate-limit body — treat it like a network blip and RETRY, never mistake
+            # its missing header for an auth/shape break (Nazim #37094).
+            if e.code in RETRYABLE_HTTP:
+                _last_err = e
+                http = e.code
+                if _attempt < PROBE_RETRIES - 1:
+                    time.sleep(PROBE_BACKOFF * (_attempt + 1))
+                continue
+            # Over-limit (429) / auth (401) errors still carry the rate-limit headers
+            # (or ARE the real signal) — use them directly, never retry/blind.
             headers = e.headers
             http = e.code
             _last_err = None
@@ -203,7 +221,7 @@ def probe_pool(name: str) -> dict:
     if _last_err is not None:
         raise RuntimeError(
             f"pool {name}: probe failed after {PROBE_RETRIES} attempts "
-            f"(transient network/timeout): {_last_err}")
+            f"(transient network/timeout/overload): {_last_err}")
     def _f(key, default=None):
         v = headers.get(key)
         try:
