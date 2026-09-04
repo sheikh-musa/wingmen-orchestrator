@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  CAI-1348 audit-board drainer — cc-quality (fleet-wide extension, orch-console 37304/37307).
+
+  Fires cc-quality to drain its OWN stale decision_audits backlog. Uses the GENERIC wrapper
+  scripts/audit_drain_sweep.sh with AUDITOR_AGENT=cc-quality (identical mechanism to
+  cc-storefront's, save the identity seam): cc-quality's home ~/wingmen/quality is NOT a git repo,
+  so the wrapper runs the bounded session in a DEDICATED non-git isolation dir
+  (~/wingmen/quality.audit-drain, != the live lane dir — CAI-1361 two-claude avoidance) and forces
+  the identity via CC_BASE_OVERRIDE=cc-quality (auto_agent_id --base-override; CAI-258 accepts
+  cc-quality as a safe auditor family). Same skills/audit-drain-sweep-prompt.md (genericized to
+  CC_BASE_AGENT_ID), batch=3, opus-4-8 pin, self-guard pre-filter, empty-tick heartbeat.
+
+  Under launchd the env carries only PATH + AUDITOR_AGENT (below), so the CAI-1225 L2 write-DSN
+  guard passes (no GOUMLYNE_DATABASE_URL/IHSANOS_PROD_DATABASE_URL present); the launcher
+  self-sources .env for DATABASE_URL + token.
+
+  LOAD (only AFTER the mandatory test-fire proved >=1 real cc-quality item drained — CAI-1361
+  gate — AND cc-storefront's audit of this mechanism AND orch-console's gate; do NOT load before):
+    cp launchd/dev.wingmen.cc-quality-audit-drain.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.wingmen.cc-quality-audit-drain.plist
+  UNLOAD:
+    launchctl bootout gui/$(id -u)/dev.wingmen.cc-quality-audit-drain
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.wingmen.cc-quality-audit-drain</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/audit_drain_sweep.sh</string>
+    </array>
+
+    <!-- ~12h. Non-urgent audit-board hygiene; a purely wake-driven backlog demonstrably does not
+         move (cc-quality's re-audit backlog stranded until manual nudge), so this is the dedicated
+         attention it otherwise never gets. -->
+    <key>StartInterval</key>
+    <integer>43200</integer>
+
+    <!-- Don't fire on launchd boot; first fire happens StartInterval seconds after bootstrap. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/cc-quality-audit-drain.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/logs/cc-quality-audit-drain.err</string>
+
+    <!-- Hard ceiling per tick. Each item's completion is a single atomic UPDATE, so a kill between
+         items just leaves remaining items open (next tick takes them) — never a partial write. -->
+    <key>ExitTimeOut</key>
+    <integer>900</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/sheikhmusa/.npm-global/bin:/Users/sheikhmusa/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>AUDITOR_AGENT</key>
+        <string>cc-quality</string>
+    </dict>
+</dict>
+</plist>
