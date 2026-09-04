@@ -796,6 +796,21 @@ fi
 # NEXT lane launch/recycle (running lanes keep their PATH until they relaunch).
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
 
+# ── Trust-gate preflight (Nazim bus 37420/37425 — SRE fleet-boot domain) ──────
+# A Claude Code auto-update reset the folder-TRUST first-run prompt. Launching
+# claude into a cwd NOT marked hasTrustDialogAccepted:true in ~/.claude.json
+# wedges at "Is this a project you trust?" (--dangerously-skip-permissions does
+# NOT auto-answer it) -> killed at ~48s -> exit 1 -> CRASH LOOP. Pre-seed trust
+# for THIS lane's resolved cwd (locked+atomic+backed-up+re-validated in the
+# helper). FAIL-LOUD: abort the launch rather than boot into a cwd that silently
+# 48s-crash-loops (a loud abort is recoverable; a silent brick is not). Runs
+# BEFORE the "Launching" echo so an abort never prints a misleading "Launching"
+# line; the EXIT trap (installed above) reaps the heartbeat loop on exit 1.
+if ! "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_cwd_trusted.py" --cwd "$CALLER_DIR"; then
+    echo -e "${RED}FATAL: trust preflight failed for ${CALLER_DIR} — aborting launch rather than crash-loop at the folder-trust gate. Inspect ~/.claude.json (must stay valid JSON) or single-seed hasTrustDialogAccepted:true for this cwd, then retry.${RESET}" >&2
+    exit 1
+fi
+
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
 echo ""
