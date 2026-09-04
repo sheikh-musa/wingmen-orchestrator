@@ -54,6 +54,7 @@ def _row(**overrides):
         "challengeable_until": CLOSED,
         "superseded_by_decision_ref": None,
         "superseded_by": None,
+        "execution_status": "granted",
     }
     base.update(overrides)
     return base
@@ -135,6 +136,26 @@ def test_bigint_superseded_by_denies_even_with_active_status_and_timeout_challen
     )
     assert res.ok is False
     assert "superseded/overridden" in res.reason
+
+
+def test_execution_status_not_granted_denies_even_when_op_id_is_named():
+    """REV 4 (orch-console's hardening of both auditors' minor note): a
+    ruling that names this op_id but never actually grants it (e.g. still
+    'approved', or a design/build-only ruling like CAI-RESP-1389 itself)
+    must not pass just because the substring is present."""
+    res = execution_ruling_ok(
+        _row(execution_status="approved"),
+        op_id=OP_ID,
+        now=NOW,
+    )
+    assert res.ok is False
+    assert "not 'granted'" in res.reason
+
+
+def test_missing_execution_status_denies():
+    res = execution_ruling_ok(_row(execution_status=None), op_id=OP_ID, now=NOW)
+    assert res.ok is False
+    assert "not 'granted'" in res.reason
 
 
 def test_challenge_window_label_with_closed_timestamp_still_passes():
