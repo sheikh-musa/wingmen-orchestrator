@@ -21,6 +21,14 @@ superseded_by_decision_ref while status STAYS active. Confirmed CAI-RESP-
 1090/1097/1111 sit at challenge_status='challenge_window' with
 challengeable_until already in the past — the window-close check MUST stay
 time-based, challenge_status does not auto-flip on close.
+
+REV 3 (cc-storefront's FULL-audit must-fix, decision_audits 312): REV 2 was
+STILL fail-open — strategic_decisions has a SECOND, separate supersession
+reference, `superseded_by` (BIGINT, the superseding row's numeric `id`),
+distinct from `superseded_by_decision_ref` (TEXT). Confirmed live: 6 real
+rows are superseded ONLY via the bigint FK — status='active',
+challenge_status='accepted_by_timeout', text-ref NULL — e.g. CAI-RESP-1141
+(id=2594, superseded_by=2596, which is CAI-RESP-1143's id).
 """
 from datetime import datetime, timedelta, timezone
 
@@ -45,6 +53,7 @@ def _row(**overrides):
         "challenge_status": "accepted_by_timeout",
         "challengeable_until": CLOSED,
         "superseded_by_decision_ref": None,
+        "superseded_by": None,
     }
     base.update(overrides)
     return base
@@ -108,6 +117,22 @@ def test_superseded_by_decision_ref_set_denies_even_with_active_status():
 
 def test_overridden_challenge_status_denies():
     res = execution_ruling_ok(_row(challenge_status="overridden"), op_id=OP_ID, now=NOW)
+    assert res.ok is False
+    assert "superseded/overridden" in res.reason
+
+
+def test_bigint_superseded_by_denies_even_with_active_status_and_timeout_challenge():
+    """THE cc-storefront FULL-audit catch (decision_audits 312), mirrors
+    CAI-RESP-1141 exactly: status=active, challenge_status=accepted_by_
+    timeout (NOT superseded/overridden), superseded_by_decision_ref NULL,
+    but the BIGINT superseded_by column set to the superseding row's id.
+    REV 2 alone would have WRONGLY PASSED this — none of its three checks
+    (status, challenge_status, text-ref) see this column at all."""
+    res = execution_ruling_ok(
+        _row(status="active", challenge_status="accepted_by_timeout", superseded_by_decision_ref=None, superseded_by=2596),
+        op_id=OP_ID,
+        now=NOW,
+    )
     assert res.ok is False
     assert "superseded/overridden" in res.reason
 
