@@ -130,15 +130,34 @@ def execution_ruling_ok(
     # not exist in the real enum (confirmed live: accepted, accepted_by_
     # audit, accepted_by_timeout, challenge_window, informational,
     # overridden, superseded, unchallenged).
+    #
+    # REV 3 (cc-storefront's FULL-audit must-fix, decision_audits 312,
+    # verified independently against live data before fixing): REV 2 was
+    # STILL fail-open — strategic_decisions has TWO distinct supersession
+    # references: superseded_by_decision_ref (TEXT) and superseded_by
+    # (BIGINT, referencing the numeric `id` PK). REV 2 only read the TEXT
+    # one. Confirmed live: 6 real rows are superseded ONLY via the bigint FK
+    # — status='active', challenge_status='accepted_by_timeout' (not
+    # superseded/overridden), superseded_by_decision_ref NULL, superseded_by
+    # set to the superseding row's numeric id (e.g. CAI-RESP-1141 id=2594,
+    # superseded_by=2596 -> CAI-RESP-1143; also 1142->1143, 1150->1151,
+    # 1173/1174->1175, 1178->1179). A ruling superseded only this way would
+    # have passed every REV 2 check. Same fail-open CLASS, one column over.
     status = str(decision_row.get("status") or "").strip().lower()
     challenge_status = str(decision_row.get("challenge_status") or "").strip().lower()
-    superseded_by = decision_row.get("superseded_by_decision_ref")
-    if status == "superseded" or challenge_status in ("superseded", "overridden") or superseded_by:
+    superseded_by_ref = decision_row.get("superseded_by_decision_ref")
+    superseded_by_id = decision_row.get("superseded_by")
+    if (
+        status == "superseded"
+        or challenge_status in ("superseded", "overridden")
+        or superseded_by_ref
+        or superseded_by_id
+    ):
         return GateResult(
             False,
             f"execution ruling is superseded/overridden (status={status!r}, "
-            f"challenge_status={challenge_status!r}, superseded_by={superseded_by!r}) "
-            "— no longer authorizing — fail-closed",
+            f"challenge_status={challenge_status!r}, superseded_by_decision_ref={superseded_by_ref!r}, "
+            f"superseded_by={superseded_by_id!r}) — no longer authorizing — fail-closed",
         )
 
     # The 24h-window-closed check stays TIME-based (challengeable_until <
@@ -179,7 +198,8 @@ def _fetch_execution_decision(decision_ref: str, substrate_dsn: str) -> dict | N
     with psycopg.connect(substrate_dsn, connect_timeout=15) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT decision_ref, title, decision, status, challenge_status, "
-            "challengeable_until, superseded_by_decision_ref FROM strategic_decisions WHERE decision_ref = %s",
+            "challengeable_until, superseded_by_decision_ref, superseded_by "
+            "FROM strategic_decisions WHERE decision_ref = %s",
             (decision_ref,),
         )
         cols = [d[0] for d in cur.description]
