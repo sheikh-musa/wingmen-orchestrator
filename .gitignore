@@ -52,3 +52,8 @@ reports/practical-parity/
 reports/*.md
 reports/*.diff
 reports/*.py
+# one-off irreversible-op unfreeze sentinels — deliberately never tracked
+# (created by a human/cai act at the moment of a specific, ruled unfreeze;
+# never committed as code)
+.irsyad_purge_UNFROZEN
+.cai1380_create_UNFROZEN
