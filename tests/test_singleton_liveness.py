@@ -91,6 +91,59 @@ def test_backstop_pages_for_an_uncovered_dead_singleton():
     assert sl.backstop_action("cc-orchestrator", nudge_ok=False, sessions={"cai": "cai"}) == "page"
 
 
+# ── lease-freshness gate on the uncovered-hub DEAD-page (Nazim 37448, cross-host false-DEAD fix) ──
+def test_backstop_lease_fresh_hub_is_alive_unreachable_not_dead():
+    # THE fix: an uncovered singleton whose orch_lease is FRESH is ALIVE on its remote host — a
+    # failed Mini->VPS nudge = unreachable-FROM-THE-MINI, NOT death. Must NOT DEAD-page.
+    assert sl.backstop_action("cc-orchestrator", nudge_ok=False, sessions={"cai": "cai"},
+                              lease_fresh=True) == "alive_unreachable"
+
+
+def test_backstop_lease_stale_hub_still_pages_dead():
+    # 35141 safety PRESERVED: a truly-dead hub stops renewing its lease -> stale -> still DEAD-page.
+    assert sl.backstop_action("cc-orchestrator", nudge_ok=False, sessions={"cai": "cai"},
+                              lease_fresh=False) == "page"
+
+
+def test_backstop_lease_unknown_fails_safe_to_page():
+    # lease_fresh unknown (None; DB unreadable / non-lease singleton) -> fail-safe: page (unchanged).
+    assert sl.backstop_action("cc-orchestrator", nudge_ok=False, sessions={"cai": "cai"},
+                              lease_fresh=None) == "page"
+
+
+def test_backstop_lease_fresh_ignored_for_covered_singleton():
+    # A COVERED singleton still DEFERS regardless of lease_fresh — the lease gate only applies to
+    # the uncovered cross-host path.
+    assert sl.backstop_action("cai", nudge_ok=False, sessions={"cai": "cai"},
+                              lease_fresh=True) == "defer"
+
+
+def test_backstop_lease_fresh_ignored_on_ok_nudge():
+    assert sl.backstop_action("cc-orchestrator", nudge_ok=True, sessions={"cai": "cai"},
+                              lease_fresh=True) == "none"
+
+
+# ---- lease_fresh_from_row: the orch_lease freshness mapping (pure) ------------
+def test_lease_fresh_from_row_fresh():
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assert sl.lease_fresh_from_row({"renewed_at": now - timedelta(seconds=60), "ttl_seconds": 900}, now) is True
+
+
+def test_lease_fresh_from_row_expired():
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assert sl.lease_fresh_from_row({"renewed_at": now - timedelta(seconds=1000), "ttl_seconds": 900}, now) is False
+
+
+def test_lease_fresh_from_row_indeterminate_is_none():
+    from datetime import datetime, timezone
+    now = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assert sl.lease_fresh_from_row(None, now) is None
+    assert sl.lease_fresh_from_row({"ttl_seconds": 900}, now) is None          # no renewed_at
+    assert sl.lease_fresh_from_row({"renewed_at": now}, now) is None           # no ttl
+
+
 # ── retry-before-page on the pooler connect (port of ad38b99/f326d3e): a transient Supabase
 #    pooler-DNS blip must NOT trip the singleton-liveness dead-man (PROBE FAILED); a PERSISTENT
 #    failure still re-raises so main() pages loud. (2026-09-03 pooler-blip sweep, Nazim-approved.)

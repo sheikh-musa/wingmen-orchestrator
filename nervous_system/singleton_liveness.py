@@ -40,7 +40,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # same-host protected singletons to check, agent:tmux-session (env-overridable). Excludes
 # self (cc-fleet-health) and the cross-host hub (cc-orchestrator, no local session).
@@ -95,14 +95,28 @@ def is_covered(agent, sessions=None):
     return agent in (CHECK_SESSIONS if sessions is None else sessions)
 
 
-def backstop_action(agent, *, nudge_ok, sessions=None):
+def backstop_action(agent, *, nudge_ok, sessions=None, lease_fresh=None):
     """The wedge-watchdog rc=255 backstop decision (Nazim 35141 crux). A FAILED singleton
     nudge is DEAD evidence. DEFER the page IFF this monitor covers the agent (it owns the
     single page); otherwise (cross-host hub / no local session) the backstop is the ONLY
-    detector on that path -> it MUST page. A successful nudge -> nothing."""
+    detector on that path. A successful nudge -> nothing.
+
+    lease_fresh gates the UNCOVERED path (Nazim 37448 — the cross-host false-DEAD fix). The
+    caller passes the orch_lease.renewed_at freshness for a lease-tracked cross-host body (the
+    hub); it is the AUTHORITATIVE cross-host liveness signal, never a Mini-side tmux/nudge one:
+      - lease_fresh True  -> 'alive_unreachable': the body is ALIVE on its remote host (still
+        renewing its lease); a failed Mini->VPS nudge is unreachable-FROM-HERE, NOT death. The
+        caller surfaces an actionable 'wedged-but-alive, needs a cross-host ssh nudge' page —
+        NEVER a DEAD/needs-boot page (that would risk a split-brain second boot).
+      - lease_fresh False/None -> 'page' (35141 DETECTION PRESERVED: a truly-dead hub stops
+        renewing its lease -> stale; unknown/non-lease singleton fails SAFE to page)."""
     if nudge_ok:
         return "none"
-    return "defer" if is_covered(agent, sessions) else "page"
+    if is_covered(agent, sessions):
+        return "defer"
+    if lease_fresh is True:
+        return "alive_unreachable"
+    return "page"
 
 
 def agent_liveness(agent):
@@ -232,6 +246,78 @@ def _page(agent, hb_age_s, dry_run, recipient):
         log(f"paged {recipient}: {agent} DEAD")
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already fired
         log(f"WARN page failed ({e}); stderr banner stands")
+
+
+ORCH_LEASE_KEY = "orch-hub"
+
+
+def lease_fresh_from_row(row, now):
+    """PURE: True=fresh, False=expired, None=indeterminate. Mirrors orch_lease._is_expired
+    (fresh == NOT expired). None (missing row / null fields) => the caller fails SAFE to page."""
+    if not row:
+        return None
+    ra = row.get("renewed_at")
+    ttl = row.get("ttl_seconds")
+    if ra is None or ttl is None:
+        return None
+    try:
+        return not (now > ra + timedelta(seconds=int(ttl)))
+    except Exception:  # noqa: BLE001 — any arithmetic/type surprise => indeterminate
+        return None
+
+
+def hub_lease_fresh(now=None):
+    """Read the orch-hub lease and return its freshness (True/False/None). This is the
+    AUTHORITATIVE cross-host hub-liveness signal — the VPS hub renews orch_lease every
+    heartbeat, so a FRESH lease means ALIVE regardless of any Mini-side tmux/nudge result
+    (Nazim 37448). None on any read failure => caller fails SAFE to page (dead-man)."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        c = _connect()
+        cur = c.cursor()
+        cur.execute("SELECT renewed_at, ttl_seconds FROM orch_lease WHERE lease_key=%s",
+                    (ORCH_LEASE_KEY,))
+        r = cur.fetchone()
+        cur.close()
+        c.close()
+    except Exception as e:  # noqa: BLE001 — never let a lease-read failure crash the monitor
+        log(f"hub_lease_fresh read failed ({e}) -> None (fail-safe page)")
+        return None
+    if not r:
+        return None
+    return lease_fresh_from_row({"renewed_at": r[0], "ttl_seconds": r[1]}, now)
+
+
+def page_wedged_alive(agent, hb_age_s=None, dry_run=False, recipient=None):
+    """Actionable page for a cross-host body WEDGED but ALIVE (orch_lease fresh): its Mini-side
+    nudge can't land (cross-host) yet it is NOT dead. Surfaces the wedge (so a live body unwedges
+    it) AND names the remedy — an ssh verified-submit to the VPS orch session — so the responder
+    ssh-nudges instead of hunting or (dangerously) booting a second hub. Replaces the false
+    DEAD-page on the lease-fresh uncovered path (Nazim 37448 conditions 1+2)."""
+    recipient = recipient or DEFAULT_PAGE_TO
+    subject = f"🟡 HUB WEDGED (alive): {agent} — needs a cross-host ssh nudge to orch@VPS"
+    body = (f"TL;DR: {agent} is WEDGED (idle + staged-unsubmitted) but ALIVE — its orch_lease is "
+            f"FRESH (still renewing from the VPS), so it is NOT dead and must NOT be booted (a "
+            f"second boot = orch_lease split-brain). A Mini-side nudge can't reach it (cross-host). "
+            f"REMEDY: ssh verified-submit to the VPS 'orch' session (91.107.235.77, tmux 'orch', "
+            f"user wingmen) — e.g. lane_nudge over ssh — to submit its staged input and drain it.")
+    print(subject, file=sys.stderr, flush=True)
+    if dry_run:
+        log(f"DRY-RUN would page {recipient}: {subject}")
+        return
+    try:
+        c = _connect()
+        cur = c.cursor()
+        cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+        cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
+                       VALUES ('cc-fleet-health',%s,'blocker','P2',%s,%s)""",
+                    (recipient, subject, body))
+        c.commit()
+        cur.close()
+        c.close()
+        log(f"paged {recipient}: {agent} WEDGED-alive (needs cross-host ssh nudge)")
+    except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already fired
+        log(f"WARN wedged-alive page failed ({e}); stderr banner stands")
 
 
 def _hb_age(cur, agent):

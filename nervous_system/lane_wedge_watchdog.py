@@ -1119,8 +1119,21 @@ def _recover(obs: AgentObs, entry: dict, mode: str, alert: bool, now: float,
                 from nervous_system import singleton_liveness as _sl
             except ImportError:
                 import singleton_liveness as _sl
-            act = _sl.backstop_action(obs.agent, nudge_ok=ok)
-            if act == "page":
+            # Cross-host bodies (the hub) are ALIVE per their orch_lease even when a Mini-side
+            # nudge fails — so gate the uncovered DEAD-page on lease freshness (Nazim 37448): a
+            # failed Mini→VPS nudge is unreachable-FROM-HERE, NOT death. Only the hub is
+            # lease-tracked; every other agent passes lease_fresh=None (fail-safe → page).
+            lease_fresh = _sl.hub_lease_fresh() if obs.agent == _sl.HUB_AGENT else None
+            act = _sl.backstop_action(obs.agent, nudge_ok=ok, lease_fresh=lease_fresh)
+            if act == "alive_unreachable":
+                # lease FRESH: alive but un-nudgeable from the Mini. Surface the WEDGE (so a live
+                # body unwedges it) + name the ssh remedy — never a false DEAD/needs-boot page.
+                _sl.page_wedged_alive(obs.agent, dry_run=False)
+                line["action"] += (" — UNCOVERED but orch_lease FRESH → WEDGED-alive "
+                                   "(needs cross-host ssh nudge), NOT dead")
+                log(f"BACKSTOP {obs.agent}: nudge failed + uncovered but orch_lease FRESH → "
+                    f"paged WEDGED-alive (cross-host ssh nudge needed), NOT dead")
+            elif act == "page":
                 _sl.page_dead(obs.agent, dry_run=False)
                 line["action"] += " — UNCOVERED singleton unreachable → paged DEAD (backstop)"
                 log(f"BACKSTOP {obs.agent}: nudge failed + uncovered → paged DEAD (needs boot)")
