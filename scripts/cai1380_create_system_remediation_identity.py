@@ -117,14 +117,37 @@ def execution_ruling_ok(
     if decision_row is None:
         return GateResult(False, "no execution ruling found for EXECUTION_DECISION_REF — fail-closed")
 
+    # REV 2 (orch-console's PR#83 must-fix, verified independently against
+    # live strategic_decisions before fixing): the original check here —
+    # status in ('superseded','rejected','revoked') — was FAIL-OPEN.
+    # Supersession is recorded via challenge_status='superseded'/'overridden'
+    # and/or superseded_by_decision_ref, NOT by status changing — status
+    # commonly STAYS 'active' on a superseded ruling (confirmed live:
+    # CAI-BATCH-001 status=active/challenge_status=superseded/superseded_by
+    # _decision_ref=CAI-RESP-058; CAI-RESP-711 status=active/challenge_status
+    # =superseded). The old check would have let a superseded ruling PASS.
+    # Also: challenge_status=='challenged' was dead code — that value does
+    # not exist in the real enum (confirmed live: accepted, accepted_by_
+    # audit, accepted_by_timeout, challenge_window, informational,
+    # overridden, superseded, unchallenged).
     status = str(decision_row.get("status") or "").strip().lower()
-    if status in ("superseded", "rejected", "revoked"):
-        return GateResult(False, f"execution ruling status={status!r} — no longer authorizing — fail-closed")
-
     challenge_status = str(decision_row.get("challenge_status") or "").strip().lower()
-    if challenge_status == "challenged":
-        return GateResult(False, "execution ruling is under an open challenge — fail-closed")
+    superseded_by = decision_row.get("superseded_by_decision_ref")
+    if status == "superseded" or challenge_status in ("superseded", "overridden") or superseded_by:
+        return GateResult(
+            False,
+            f"execution ruling is superseded/overridden (status={status!r}, "
+            f"challenge_status={challenge_status!r}, superseded_by={superseded_by!r}) "
+            "— no longer authorizing — fail-closed",
+        )
 
+    # The 24h-window-closed check stays TIME-based (challengeable_until <
+    # now), not challenge_status-based — confirmed live that challenge_status
+    # does NOT auto-flip to accepted_by_timeout when a window closes: old,
+    # genuinely-closed rulings (CAI-RESP-1090/1097/1111) still sit at
+    # challenge_status='challenge_window' with challengeable_until already
+    # in the past. Relying on the label instead of the timestamp would have
+    # wrongly denied those.
     challengeable_until = decision_row.get("challengeable_until")
     if challengeable_until is None:
         return GateResult(False, "execution ruling has no challengeable_until — cannot confirm the 24h window closed — fail-closed")
@@ -156,7 +179,7 @@ def _fetch_execution_decision(decision_ref: str, substrate_dsn: str) -> dict | N
     with psycopg.connect(substrate_dsn, connect_timeout=15) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT decision_ref, title, decision, status, challenge_status, "
-            "challengeable_until FROM strategic_decisions WHERE decision_ref = %s",
+            "challengeable_until, superseded_by_decision_ref FROM strategic_decisions WHERE decision_ref = %s",
             (decision_ref,),
         )
         cols = [d[0] for d in cur.description]

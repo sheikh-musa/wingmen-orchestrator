@@ -6,6 +6,21 @@ HTTP. It is deliberately fail-closed on every uncertainty, mirroring
 uid_equality_ok's discipline in scripts/lib/auth_write_gate.py (CAI-RESP-1389's
 own framing: "a distinct one-off process ALONGSIDE, not through,
 authorize_auth_write() — but held to the same fail-closed bar").
+
+REV 2 (orch-console's PR#83 must-fix): the row shapes below are modeled on
+the REAL strategic_decisions table, verified live before writing these tests
+— NOT an assumed shape. Confirmed distinct values: status ∈ {active,
+superseded} (only two observed — 'rejected'/'revoked' never occur);
+challenge_status ∈ {accepted, accepted_by_audit, accepted_by_timeout,
+challenge_window, informational, overridden, superseded, unchallenged}
+('challenged' is not a real value). Confirmed against real rows:
+CAI-BATCH-001 (status=active, challenge_status=superseded,
+superseded_by_decision_ref=CAI-RESP-058) and CAI-RESP-711 (status=active,
+challenge_status=superseded) — supersession recorded via challenge_status/
+superseded_by_decision_ref while status STAYS active. Confirmed CAI-RESP-
+1090/1097/1111 sit at challenge_status='challenge_window' with
+challengeable_until already in the past — the window-close check MUST stay
+time-based, challenge_status does not auto-flip on close.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -20,13 +35,16 @@ OPEN = NOW + timedelta(hours=1)  # challenge window still open
 
 
 def _row(**overrides):
+    """A realistic 'ruling authorizes this script, window closed, no
+    supersession' row — the real column set, real observed values."""
     base = {
         "decision_ref": "CAI-RESP-9999",
         "title": f"CAI-1380 execution ruling naming {OP_ID}",
         "decision": "Execution GRANTED for the named script.",
         "status": "active",
-        "challenge_status": "unchallenged",
+        "challenge_status": "accepted_by_timeout",
         "challengeable_until": CLOSED,
+        "superseded_by_decision_ref": None,
     }
     base.update(overrides)
     return base
@@ -56,27 +74,62 @@ def test_missing_challengeable_until_denies():
 
 
 def test_superseded_status_denies():
+    """status='superseded' — the (rarer, but real) direct case."""
     res = execution_ruling_ok(_row(status="superseded"), op_id=OP_ID, now=NOW)
     assert res.ok is False
-    assert "no longer authorizing" in res.reason
+    assert "superseded/overridden" in res.reason
 
 
-def test_rejected_status_denies():
-    res = execution_ruling_ok(_row(status="rejected"), op_id=OP_ID, now=NOW)
+def test_status_active_but_challenge_status_superseded_denies():
+    """THE REAL-WORLD SHAPE (orch-console's must-fix, verified against
+    CAI-RESP-711/CAI-BATCH-001 live): status stays 'active' — the OLD check
+    here (status in ('superseded','rejected','revoked')) would have WRONGLY
+    PASSED this. Supersession is recorded via challenge_status, not status."""
+    res = execution_ruling_ok(
+        _row(status="active", challenge_status="superseded"),
+        op_id=OP_ID,
+        now=NOW,
+    )
     assert res.ok is False
+    assert "superseded/overridden" in res.reason
 
 
-def test_open_challenge_status_denies():
-    res = execution_ruling_ok(_row(challenge_status="challenged"), op_id=OP_ID, now=NOW)
+def test_superseded_by_decision_ref_set_denies_even_with_active_status():
+    """Mirrors CAI-BATCH-001 exactly: status=active, superseded_by_decision_
+    ref set. Must deny regardless of what status/challenge_status say."""
+    res = execution_ruling_ok(
+        _row(status="active", challenge_status="accepted", superseded_by_decision_ref="CAI-RESP-058"),
+        op_id=OP_ID,
+        now=NOW,
+    )
     assert res.ok is False
-    assert "under an open challenge" in res.reason
+    assert "superseded/overridden" in res.reason
+
+
+def test_overridden_challenge_status_denies():
+    res = execution_ruling_ok(_row(challenge_status="overridden"), op_id=OP_ID, now=NOW)
+    assert res.ok is False
+    assert "superseded/overridden" in res.reason
+
+
+def test_challenge_window_label_with_closed_timestamp_still_passes():
+    """Mirrors CAI-RESP-1090/1097/1111 exactly: challenge_status never
+    auto-flipped away from 'challenge_window' even though the window
+    genuinely closed. The time-based check, not the label, must govern —
+    denying this would be WRONGLY blocking a legitimately-closed ruling."""
+    res = execution_ruling_ok(
+        _row(challenge_status="challenge_window", challengeable_until=CLOSED),
+        op_id=OP_ID,
+        now=NOW,
+    )
+    assert res.ok is True
 
 
 def test_ruling_not_referencing_op_id_denies():
-    """A ruling that exists, is unchallenged, and has a closed window — but
+    """A ruling that exists, isn't superseded, and has a closed window — but
     doesn't name THIS script — must not accidentally authorize it. This is
     the create-script equivalent of auth_write_gate's ambiguous-selector
-    guard: don't let a different op's YES satisfy this one."""
+    guard: don't let a different op's ruling satisfy this one."""
     res = execution_ruling_ok(
         _row(title="Some other decision", decision="about something else entirely"),
         op_id=OP_ID,
