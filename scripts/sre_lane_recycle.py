@@ -39,6 +39,7 @@ _ORCH_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ORCH_DIR / "scripts" / "lib"))
 import fleet_health_boundaries as fhb  # noqa: E402
 import handoff_compaction_policy as hcp  # noqa: E402  (SSOT staged handoff compaction)
+import context_truth as _ct  # noqa: E402  (Gap-1: ONE gauge source, shared with the dead-man)
 
 TMUX = os.environ.get("SRE_TMUX_BIN", "/usr/local/bin/tmux")
 _TMUX_TIMEOUT = 5
@@ -174,40 +175,42 @@ def last_material_action_epoch(conn, base_agent_id: str) -> "float | None":
 
 
 def latest_context_frac(conn, base_agent_id: str, window: int = _CTX_WINDOW) -> "float | None":
-    """Latest context fraction (0..1) for a lane from cc_session_costs, or None when
-    it CANNOT be established: no connection, no fresh reading (< _CTX_FRESH_MIN old),
-    a non-positive reading, or a reading that exceeds the assumed window (the
-    'cannot measure' honesty from context_health_watchdog — a wrong window must
-    read as unknown, never as a confident %). None always fails the bloat gate."""
+    """Latest context fraction (0..1) for a lane, or None when it CANNOT be established.
+
+    Gap-1 resolution (sre_lane_recycle.py:219, bus 37752): the measurable-or-not DECISION now
+    lives in ONE place — context_truth.lane_fire_reading (gauge-first, staleness + over-window +
+    non-positive all judged there) — the SAME helper the dead-man (lane_recycle_deadman) pages
+    on, so what FIRES and what PAGES can never diverge. This function stays the executor's thin
+    DB fetch + delegate: it reads the freshest gauge row (freshness judged by lane_fire_reading,
+    NOT the SQL, so a stale row becomes a proper UNKNOWN instead of vanishing), and returns the
+    EXACT tokens/window fraction when the reading is known (no rounding drift at the 80% bar),
+    None when unknown. None always fails the bloat gate (fail-closed).
+
+    op#14565 is preserved: freshness keys on COALESCE(ended_at, created_at) (the last-write time
+    the auto-writer advances), so a long-lived bloated-but-un-recycled lane (old created_at, fresh
+    ended_at) still reads its bloat rather than falling to None."""
     if conn is None:
         return None
     try:
         with conn.cursor() as cur:
-            # op#14565: key freshness on the LAST-WRITE time, not the frozen
-            # session-start created_at. The auto-writer UPSERTs a long-lived lane's
-            # row and advances ended_at (= session-file mtime) every cycle while
-            # created_at stays pinned at session start. Filtering on created_at
-            # wrongly excluded a bloated-but-un-recycled lane (created_at hours old,
-            # telemetry fresh) -> None -> gate never fired. COALESCE(ended_at,
-            # created_at) matches what context_health_watchdog already does and
-            # falls back to created_at for rows a non-auto-writer source left
-            # ended_at NULL on. Fail-closed is preserved: no row inside the window
-            # still -> None.
             cur.execute(
-                "SELECT latest_context_tokens FROM cc_session_costs "
+                "SELECT latest_context_tokens, "
+                "       extract(epoch FROM (now() - COALESCE(ended_at, created_at)))::int AS age_s "
+                "FROM cc_session_costs "
                 "WHERE cc_identity = %s AND latest_context_tokens IS NOT NULL "
-                f"  AND COALESCE(ended_at, created_at) > now() - interval '{_CTX_FRESH_MIN} minutes' "
                 "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT 1",
                 [base_agent_id])
             row = cur.fetchone()
-        if not row or not row[0]:
-            return None
-        ctx = int(row[0])
-        if ctx <= 0 or ctx > window:      # non-positive / over-window -> unmeasurable
-            return None
-        return ctx / float(window)
     except Exception:
         return None
+    if not row or not row[0]:
+        return None
+    tokens, age_s = int(row[0]), int(row[1])
+    reading = _ct.lane_fire_reading(gauge_tokens=tokens, gauge_age_s=age_s,
+                                    window=window, max_gauge_age_s=_CTX_FRESH_MIN * 60)
+    if not reading.known:
+        return None
+    return tokens / float(window)
 
 
 def gate_context_bloat(conn, base_agent_id: str, hard: float = _CTX_HARD,

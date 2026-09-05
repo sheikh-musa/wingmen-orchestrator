@@ -35,23 +35,41 @@ if str(_ORCH_DIR) not in sys.path:
 # and failed to bring the lane down.
 HARD_PCT = int(os.environ.get("DEADMAN_HARD_PCT", "85"))
 SUSTAIN_S = int(os.environ.get("DEADMAN_SUSTAIN_S", "1800"))  # 30 min at >= HARD with no drop
+# The dead-man's OWN gauge-staleness cutoff — DELIBERATELY well above the executor's 30-min fire
+# cutoff and above the gauge's real per-lane refresh. The cost-writer only advances a lane's
+# gauge when that lane takes a TURN, so a normally-IDLE lane's gauge ages indefinitely with
+# nothing wrong (verified 2026-09-05, Nazim 37788: a 30-min cutoff false-alarmed on every idle
+# lane at its refresh boundary). At 60 min a lane must be idle a long while before the gauge is
+# even considered "stale", and the pane rescue + last-known floor below handle the rest.
+GAUGE_STALE_S = int(os.environ.get("DEADMAN_GAUGE_STALE_S", "3600"))
+# On a TRULY-blind lane (gauge stale AND pane blind), blocker-page ONLY when its LAST-KNOWN
+# reading was already this elevated — "was ~high, now blind" is the dangerous blind-band case;
+# "was low, now idle" is benign (an alive/fresh-heartbeat idle low lane does not bloat). Below
+# the floor we still SURFACE it (log_unknown) but do not urgent-page (Nazim 37788).
+UNKNOWN_PAGE_FLOOR = int(os.environ.get("DEADMAN_UNKNOWN_FLOOR", "70"))
 STATE_PATH = _ORCH_DIR / "state" / "lane_recycle_deadman.json"
 
 
 def evaluate_deadman(known, pct, first_over_at, now_epoch,
-                     hard_pct: int = HARD_PCT, sustain_s: int = SUSTAIN_S):
+                     hard_pct: int = HARD_PCT, sustain_s: int = SUSTAIN_S,
+                     last_known_pct=None, unknown_floor: int = UNKNOWN_PAGE_FLOOR):
     """PURE decision core. Given one lane's current reading and its remembered first-crossing
     epoch, return (verdict, new_first_over_at).
 
     verdict:
-      "ok"             — below the bar; clear any timer.
+      "ok"             — below the bar / benign-blind; clear any timer.
       "watching"       — at/over the bar but not yet sustained; timer running.
       "page_sustained" — at/over the bar for >= sustain_s; PAGE.
-      "page_unknown"   — gauge unreadable on a live lane; PAGE (never skip-as-quiet).
+      "page_unknown"   — TRULY blind (gauge stale AND pane blind) AND last-known was elevated
+                         (>= unknown_floor); BLOCKER page — a high lane we have lost sight of.
+      "log_unknown"    — TRULY blind but last-known was low / never measured; SURFACED in the log
+                         (an UNKNOWN is never silent) but NOT urgent-paged — an alive idle low
+                         lane does not bloat (Nazim 37788).
     """
     if not known:
-        # Unreadable/stale gauge on a live lane — the fail-open Nazim made a hard blocker.
-        return "page_unknown", None
+        if last_known_pct is not None and last_known_pct >= unknown_floor:
+            return "page_unknown", None  # was elevated, now blind — the fail-open Nazim blocked
+        return "log_unknown", None       # blind but benign (idle low / never measured) — surface only
     if pct is not None and pct >= hard_pct:
         if first_over_at is None:
             return "watching", now_epoch
@@ -60,6 +78,33 @@ def evaluate_deadman(known, pct, first_over_at, now_epoch,
         return "watching", first_over_at
     # comfortably below the bar (a recycle or organic drop) — reset the timer.
     return "ok", None
+
+
+def resolve_lane_pct(gauge_tokens, gauge_age_s, pane_pct, pane_hint_k,
+                     window: int = 1_000_000, max_gauge_age_s: int = GAUGE_STALE_S):
+    """Best available reading for the dead-man's 'can I see this lane, and how full' question.
+    Returns (known, pct, last_known_pct, reason).
+
+    GAUGE-FIRST (aligned with the executor's fire decision — a FRESH gauge decides and sees the
+    pane's blind band). Only when the gauge is stale/unreadable does it fall back to the PANE as
+    a measurement (this is what rescues an idle lane whose gauge froze from a false UNKNOWN). A
+    lane is TRULY unknown only when BOTH signals fail; last_known_pct carries the stale gauge's
+    pct so the caller can tell was-high (dangerous) from was-low (benign).
+    """
+    from scripts.lib import context_truth as ct  # repo root is on sys.path via the bootstrap
+    lfr = ct.lane_fire_reading(gauge_tokens=gauge_tokens, gauge_age_s=gauge_age_s,
+                               window=window, max_gauge_age_s=max_gauge_age_s)
+    last_known = ct._pct_from_tokens(gauge_tokens, window)
+    if lfr.known:
+        return True, lfr.pct, last_known, lfr.reason
+    # gauge unusable — can the pane measure it? (pane-only resolve, no gauge)
+    pane = ct.resolve(pane_pct=pane_pct, pane_hint_k=pane_hint_k, gauge_tokens=None, window=window)
+    if pane.known:
+        return True, pane.pct, last_known, (f"gauge stale ({gauge_age_s}s); pane {pane.source}="
+                                            f"{pane.pct}% (fallback measurement)")
+    lk = f"{last_known}%" if last_known is not None else "never measured"
+    return False, None, last_known, (f"UNKNOWN — gauge stale ({gauge_age_s}s) AND pane blind; "
+                                     f"last-known {lk}")
 
 
 # ── DB / state / paging shell (never recycles; only detects + pages) ──────────
@@ -138,8 +183,8 @@ def page_message(lane: str, verdict: str, reason: str,
     return subject, body
 
 
-def _page(cur, conn, lane: str, verdict: str, reading, dry: bool) -> str:
-    subject, body = page_message(lane, verdict, reading.reason)
+def _page(cur, conn, lane: str, verdict: str, reason: str, dry: bool) -> str:
+    subject, body = page_message(lane, verdict, reason)
     if dry:
         print(f"            WOULD PAGE orch-console: {verdict}")
         return "would-page"
@@ -178,8 +223,7 @@ def main() -> int:
         print("no DATABASE_URL", file=sys.stderr)
         return 2
 
-    from lib import context_truth as ct
-    from sre_lane_recycle import discover_lanes
+    from scripts.sre_lane_recycle import discover_lanes
 
     now = time.time()
     conn = psycopg.connect(dsn)
@@ -195,18 +239,22 @@ def main() -> int:
             session = lr.get("tmux_session")
             tokens, age_s = _gauge(cur, base)
             pane_pct, pane_hint_k = _pane(session) if session else (None, None)
-            reading = ct.lane_fire_reading(gauge_tokens=tokens, gauge_age_s=age_s,
-                                           pane_pct=pane_pct, pane_hint_k=pane_hint_k)
+            known, pct, last_known, reason = resolve_lane_pct(tokens, age_s, pane_pct, pane_hint_k)
             first_over = state.get(base)
-            verdict, new_first = evaluate_deadman(reading.known, reading.pct, first_over, now)
+            verdict, new_first = evaluate_deadman(known, pct, first_over, now,
+                                                  last_known_pct=last_known)
             if new_first is None:
                 state.pop(base, None)
             else:
                 state[base] = new_first
-            pct_s = f"{reading.pct}%" if reading.pct is not None else "UNKNOWN"
+            pct_s = f"{pct}%" if pct is not None else "UNKNOWN"
             print(f"  {base:22s} {pct_s:>7s} -> {verdict}")
-            if verdict in ("page_sustained", "page_unknown"):
-                if _page(cur, conn, lr["lane"], verdict, reading, args.dry_run) == "paged":
+            if verdict == "log_unknown":
+                # An UNKNOWN is never silent (CLAUDE.md verify-not-assert): surface it in the log,
+                # but it is not urgent (alive idle low lane) so it does not blocker-page.
+                print(f"            LOG (surfaced, not paged): {reason}")
+            elif verdict in ("page_sustained", "page_unknown"):
+                if _page(cur, conn, lr["lane"], verdict, reason, args.dry_run) == "paged":
                     paged += 1
 
     if not args.dry_run:

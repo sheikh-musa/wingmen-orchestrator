@@ -49,11 +49,38 @@ def test_sustained_over_hard_pages():
     assert verdict == "page_sustained" and first_over == 5000.0
 
 
-def test_unknown_gauge_on_live_lane_pages_and_clears():
-    # unreadable gauge = the stale-gauge fail-open Nazim made a hard blocker: page, never skip.
-    verdict, first_over = dm.evaluate_deadman(False, None, first_over_at=5000.0,
-                                              now_epoch=9000.0, hard_pct=HARD, sustain_s=SUSTAIN)
+def test_truly_blind_lane_that_WAS_elevated_pages():
+    # Both signals dead AND the last-known reading was high (the dangerous "was ~94%, now blind"
+    # case — a bloated lane that went idle into the pane's blind band). Blocker page.
+    verdict, first_over = dm.evaluate_deadman(False, None, first_over_at=5000.0, now_epoch=9000.0,
+                                              hard_pct=HARD, sustain_s=SUSTAIN, last_known_pct=92)
     assert verdict == "page_unknown" and first_over is None
+
+
+def test_blind_floor_is_inclusive():
+    # exactly at the floor pages; just under it logs (Nazim 37788: reserve the blocker for high).
+    v_at, _ = dm.evaluate_deadman(False, None, None, 9000.0, hard_pct=HARD, sustain_s=SUSTAIN,
+                                  last_known_pct=70, unknown_floor=70)
+    v_under, _ = dm.evaluate_deadman(False, None, None, 9000.0, hard_pct=HARD, sustain_s=SUSTAIN,
+                                     last_known_pct=69, unknown_floor=70)
+    assert v_at == "page_unknown" and v_under == "log_unknown"
+
+
+def test_truly_blind_lane_that_WAS_low_is_LOGGED_not_paged():
+    # Both signals dead but last-known was low: an alive (fresh-heartbeat) idle low lane whose gauge
+    # froze and whose pane hint is absent because there's nothing to reclaim. Nazim 37788: still
+    # SURFACE it (log_unknown), but do NOT blocker-page — an idle low lane does not bloat.
+    verdict, first_over = dm.evaluate_deadman(False, None, first_over_at=None, now_epoch=9000.0,
+                                              hard_pct=HARD, sustain_s=SUSTAIN, last_known_pct=8,
+                                              unknown_floor=70)
+    assert verdict == "log_unknown" and first_over is None
+
+
+def test_truly_blind_lane_never_measured_is_logged_not_paged():
+    verdict, _ = dm.evaluate_deadman(False, None, first_over_at=None, now_epoch=9000.0,
+                                     hard_pct=HARD, sustain_s=SUSTAIN, last_known_pct=None,
+                                     unknown_floor=70)
+    assert verdict == "log_unknown"
 
 
 def test_drop_below_hard_after_watching_resets():
@@ -61,6 +88,43 @@ def test_drop_below_hard_after_watching_resets():
     verdict, first_over = dm.evaluate_deadman(True, 40, first_over_at=5000.0,
                                               now_epoch=5000.0 + SUSTAIN, hard_pct=HARD, sustain_s=SUSTAIN)
     assert verdict == "ok" and first_over is None
+
+
+# ── resolve_lane_pct: gauge-first, pane fallback when the gauge is stale, truly-blind last ───
+def test_resolve_fresh_gauge_is_known_gauge_first():
+    known, pct, last_known, _ = dm.resolve_lane_pct(gauge_tokens=900_000, gauge_age_s=120,
+                                                    pane_pct=None, pane_hint_k=None)
+    assert known and pct == 90 and last_known == 90
+
+
+def test_resolve_gauge_fresh_within_the_wider_deadman_cutoff():
+    # 40m-old gauge is STALE to the executor's 30m fire cutoff but FRESH to the dead-man's wider
+    # cutoff (Nazim 37788: set it well above the idle-refresh interval so a normally-idle lane is
+    # not flagged). Read straight off the gauge, no pane needed.
+    known, pct, _, _ = dm.resolve_lane_pct(gauge_tokens=460_000, gauge_age_s=2400,
+                                           pane_pct=None, pane_hint_k=None)
+    assert known and pct == 46
+
+
+def test_resolve_very_stale_gauge_rescued_by_pane_hint():
+    # gauge older than even the wide cutoff, but the pane hint reads it — NOT blind, do not page.
+    known, pct, _, _ = dm.resolve_lane_pct(gauge_tokens=457_250, gauge_age_s=5000,
+                                           pane_pct=None, pane_hint_k=457.3)
+    assert known and pct == 46  # via the pane, not the very-stale gauge
+
+
+def test_resolve_truly_blind_reports_unknown_with_last_known():
+    # gauge very stale AND pane blind -> unknown; the stale gauge's pct is carried as last_known so
+    # the page-floor can tell was-high (dangerous) from was-low (benign).
+    known, pct, last_known, _ = dm.resolve_lane_pct(gauge_tokens=940_000, gauge_age_s=9000,
+                                                    pane_pct=None, pane_hint_k=None)
+    assert not known and pct is None and last_known == 94
+
+
+def test_resolve_low_idle_blind_lane_is_unknown_but_last_known_low():
+    known, pct, last_known, _ = dm.resolve_lane_pct(gauge_tokens=81_624, gauge_age_s=9000,
+                                                    pane_pct=None, pane_hint_k=None)
+    assert not known and last_known == 8  # -> evaluate_deadman logs (benign), does not page
 
 
 # ── page_message: the dedup anchor is load-bearing; the two verdicts read differently ─────
