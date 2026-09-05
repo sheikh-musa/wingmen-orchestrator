@@ -45,7 +45,11 @@ ok=$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); 
 # durable log (best-effort)
 # CAI-598/600: log DELIVERY, not intent — operator_log defaults delivered=TRUE, so an
 # unconditional call records a FAILED send as delivered.
-"$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound \
+# PYTHONPATH pins the package root so the `-m` import resolves regardless of CWD. A bare
+# `-m nervous_system.operator_log` only resolves when run from $ORCH_DIR; any other
+# caller-CWD ModuleNotFounds and (behind `|| true`) SILENTLY drops the delivery log.
+# Mirrors the sibling tg_send.sh:59 fix (07-01 audit #11; host-split, this leg never patched).
+PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound \
   "[file] $(basename "$FILE")${CAPTION:+ — $CAPTION}" --chat "$CHAT" \
   $([ "$ok" = 1 ] || echo --undelivered) >/dev/null 2>&1 || true
 
