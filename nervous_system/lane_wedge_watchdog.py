@@ -99,6 +99,7 @@ load_dotenv(_ORCH_DIR / ".env")
 # fleet_health_lease single-owner lease (default holder cc-fleet-health; hub
 # reclaims on expiry) so the SRE and a reclaiming hub never both act on an agent.
 from scripts.lib import fleet_health_lease  # noqa: E402
+from scripts.lib import orch_lease  # noqa: E402  (reuse _me() host-label shape)
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 from scripts.lib import pane_busy  # noqa: E402  (footer-scoped busy check)
 # CAI-786 wake predicate — the ONE source of "would this row wake the recipient",
@@ -961,6 +962,94 @@ def lane_agent_map(conn) -> "tuple[dict, dict]":
     return a2b, dirs
 
 
+def agent_status_lane_map(conn) -> "tuple[dict, set]":
+    """(tmux session -> base bus identity, collided sessions) from LIVE agent_status.
+
+    This is the HONEST live truth of where a lane runs right now. fleet_lanes.lane
+    can drift from the real tmux session name (session 'exams' vs lane 'cosem-exams',
+    'ihsanos-platform' vs 'mirror'), which black-holed those lanes into the
+    coverage-gap. We key on base_agent_id (the stable bus identity that owns the
+    inbox), falling back to agent_id when a row carries no base.
+
+    Safety (Nazim 37645):
+      - HOST-SCOPED (host = this host OR host IS NULL): a foreign-host row must never
+        map a LOCAL session of the same name (the 07-04 'orch' leftover class). Live
+        host-NULL rows are the singletons (cai/fleet-health/quality), skipped anyway.
+      - COLLISION = no map: a session claimed by >1 live row is AMBIGUOUS (e.g.
+        'nazim' carries both cc-orchestrator and orch-console while the console still
+        writes the hub row, audit #1). We do NOT resolve it on row order — the session
+        is dropped from the map (falls through to fleet_lanes) and returned in the
+        collided set so it can surface with a COLLISION reason. ORDER BY makes the
+        scan deterministic regardless.
+      - Offline rows excluded — a reaped row can hold a stale session name."""
+    me = orch_lease._me()  # short host label, .local stripped (flap-safe)
+    first: dict = {}
+    counts: dict = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT tmux_session, base_agent_id, agent_id FROM agent_status "
+            "WHERE tmux_session IS NOT NULL AND status <> 'offline' "
+            "AND (host = %s OR host IS NULL) "
+            "ORDER BY tmux_session, agent_id",
+            (me,),
+        )
+        for sess, base, aid in cur.fetchall():
+            ident = base or aid
+            if not (sess and ident):
+                continue
+            counts[sess] = counts.get(sess, 0) + 1
+            first.setdefault(sess, ident)
+    mapped = {s: first[s] for s in first if counts[s] == 1}
+    collided = {s for s in counts if counts[s] > 1}
+    return mapped, collided
+
+
+# Bodies that must NEVER be treated as a nudgeable/resettable lane, even if a live
+# session resolves to them. The literal core is the fail-closed floor; the live
+# registry (protected_agents) can only ADD to it, never remove.
+_PROTECTED_FALLBACK = frozenset(
+    {"cc-orchestrator", "cai", "cc-fleet-health", "orch-console", "nazim-console"}
+)
+
+
+def protected_agent_ids(conn) -> set:
+    """The set of protected bus identities, read from the protected_agents registry
+    (the first live reader of the DB registry outside auto_agent_id — the audit's
+    single-source-of-truth direction). FAIL-CLOSED: the literal core (_PROTECTED_FALLBACK)
+    is always unioned in, so a missing row or a read error can never silently unprotect
+    a singleton/console body."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT agent_id FROM protected_agents")
+            live = {r[0] for r in cur.fetchall() if r and r[0]}
+        return live | set(_PROTECTED_FALLBACK)
+    except Exception as e:
+        log(f"protected_agents read failed ({e}) — fail-closed to literal core")
+        return set(_PROTECTED_FALLBACK)
+
+
+def merge_session_maps(status_map: dict, fleet_map: dict) -> dict:
+    """Combine the session->identity maps with agent_status as PRIMARY and
+    fleet_lanes as FALLBACK: a session present in both resolves to the live
+    agent_status identity; a session only fleet_lanes knows is still covered."""
+    return {**fleet_map, **status_map}
+
+
+def coverage_gap_episode(unmapped: "list[str]", state: dict) -> "list[str]":
+    """Return the sessions that are NEWLY unmapped this scan (episode starts),
+    recording the current unmapped set in state['unmapped_warned']. A session that
+    was already warned stays silent until it clears and reappears (a new episode).
+
+    This is what stops the per-scan COVERAGE-GAP spam (10,936 lines over 7.6 days):
+    a genuine blind spot surfaces once, not every minute. The stored set is REPLACED
+    (not appended) each scan, so it self-prunes when a session is remapped."""
+    warned = set(state.get("unmapped_warned", []))
+    now_set = set(unmapped)
+    new = sorted(now_set - warned)
+    state["unmapped_warned"] = sorted(now_set)
+    return new
+
+
 def list_lane_sessions() -> list[str]:
     r = _tmux("list-sessions", "-F", "#{session_name}")
     if r is None or r.returncode != 0:
@@ -975,10 +1064,15 @@ def _has_local_session(session: str) -> bool:
     return bool(r and r.returncode == 0)
 
 
-def gather_observations(conn) -> list[AgentObs]:
+def gather_observations(conn, state: Optional[dict] = None,
+                        alert: bool = False) -> list[AgentObs]:
     """Build the live observation set. Singletons: Signal A (+ a local 'working'
     read when the pane is here). Lanes: Signal A (via base_agent_id) + Signal B
-    (local composer)."""
+    (local composer).
+
+    `state` (when given) carries the once-per-episode COVERAGE-GAP dedup so a
+    persistent blind spot is not re-announced every scan; `alert` gates the bus
+    page for a newly-unmapped session (detection/log stays ungated)."""
     obs: list[AgentObs] = []
     # Singletons — bus-only + a working-read when the pane is locally present.
     for agent in MONITOR_SINGLETONS:
@@ -1008,25 +1102,37 @@ def gather_observations(conn) -> list[AgentObs]:
             working = _pane_working(sess)
         obs.append(AgentObs(agent=agent, kind="singleton", session=None, bus=bus,
                             composer=ComposerSignal(COMP_DELEGATED, working=working)))
-    # Lanes — enumerate the live tmux server, map to bus identity.
+    # Lanes — enumerate the live tmux server, map to bus identity. agent_status
+    # (tmux_session -> base) is the PRIMARY, honest live map; fleet_lanes is the
+    # fallback. Keying only on fleet_lanes.lane black-holed sessions whose tmux name
+    # drifts from the lane name ('exams' vs 'cosem-exams') — the coverage-gap bug.
     try:
-        a2b, _dirs = lane_agent_map(conn)
+        fleet_map, _dirs = lane_agent_map(conn)
     except Exception as e:
-        log(f"fleet_lanes map failed ({e}) — no dynamic lanes this scan")
-        a2b = {}
+        log(f"fleet_lanes map failed ({e}) — no fleet fallback this scan")
+        fleet_map = {}
+    try:
+        status_map, collided = agent_status_lane_map(conn)
+    except Exception as e:
+        log(f"agent_status map failed ({e}) — falling back to fleet_lanes only")
+        status_map, collided = {}, set()
+    protected = protected_agent_ids(conn)
+    a2b = merge_session_maps(status_map, fleet_map)
     unmapped: list[str] = []
     for sess in list_lane_sessions():
         base = a2b.get(sess)
         if not base:
-            # No fleet_lanes(session->base) row — we can't read Signal A for it, so it
-            # is UNMONITORED. A stale/missing mapping is exactly how cc-ihsanos (session
-            # 'mirror' in fleet_lanes, but live as 'ihsanos-platform') went unwatched for
-            # ~1 day. Surface the blind spot so it gets reconciled (Nazim 14937/14938).
+            # Neither agent_status.tmux_session nor fleet_lanes knows this live
+            # session, so it is UNMONITORED. A stale/missing mapping is exactly how
+            # cc-ihsanos (session 'ihsanos-platform', lane 'mirror') and 'exams' went
+            # unwatched. Surface the blind spot so it gets reconciled (Nazim 14937/14938).
             unmapped.append(sess)
             continue
-        if base in MONITOR_SINGLETONS:
-            continue  # already covered by the singleton registry — never double-track
-                      # the same bus identity (its episode state is keyed on `base`)
+        if base in MONITOR_SINGLETONS or base in protected:
+            continue  # covered by the singleton registry OR a protected body (console/
+                      # governance/SRE) — NEVER lane-track it: no nudge/reset against a
+                      # singleton, and its episode state is keyed on `base`. `protected`
+                      # is the fail-closed protected_agents registry (Nazim 37645 amd C).
         try:
             bus = read_bus_signal(base, conn)
         except Exception as e:
@@ -1037,8 +1143,17 @@ def gather_observations(conn) -> list[AgentObs]:
         comp = read_composer(sess) if (bus.piling and bus.quiet) else ComposerSignal(COMP_EMPTY)
         obs.append(AgentObs(agent=base, kind="lane", session=sess, bus=bus, composer=comp))
     if unmapped:
-        log(f"COVERAGE-GAP: {len(unmapped)} live tmux session(s) UNMAPPED in fleet_lanes "
-            f"-> UNMONITORED (reconcile the mapping): {','.join(sorted(unmapped))}")
+        # Surface once per episode, not every scan (killed the 10,936-line spam).
+        new = coverage_gap_episode(unmapped, state) if state is not None else sorted(unmapped)
+        if new:
+            labelled = [f"{s} (COLLISION: >1 live agent_status row)" if s in collided else s
+                        for s in new]
+            msg = (f"COVERAGE-GAP: {len(new)} live tmux session(s) UNMAPPED "
+                   f"(no unambiguous agent_status.tmux_session and no fleet_lanes.lane) -> "
+                   f"UNMONITORED (reconcile the mapping): {'; '.join(labelled)}")
+            log(msg)
+            if alert:
+                _page(msg)
     return obs
 
 
@@ -1226,7 +1341,7 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
                 observations = []
             else:
                 conn = connect(dsn, connect_timeout=15)
-                observations = gather_observations(conn)
+                observations = gather_observations(conn, state=state, alert=alert)
                 if lane_dirs is None:
                     _a2b, lane_dirs = lane_agent_map(conn)
         except Exception as e:

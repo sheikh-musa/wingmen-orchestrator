@@ -612,3 +612,138 @@ def test_menu_trap_pages_even_when_not_a_genuine_stall(fast_floor, recorder, mon
                comp=w.COMP_MENU, last_write=1800.0, actionable=0)
     w.run(mode=w.MODE_NUDGE, alert=True, injected=[obs], lane_dirs={}, persist=False)
     assert len(recorder["page"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Coverage-gap fix (substrate audit 2026-09-05 #4). The watchdog mapped live tmux
+# sessions to a bus identity ONLY via fleet_lanes.lane. Session 'exams' is a live
+# lane but fleet_lanes knows it as 'cosem-exams', so it fell into `unmapped` every
+# scan: (a) UNMONITORED for 7.6 days, and (b) a COVERAGE-GAP line logged per minute
+# = 10,936 lines. Fix: map via agent_status.tmux_session (primary, the honest live
+# truth) with fleet_lanes as fallback, and surface COVERAGE-GAP once per episode.
+# --------------------------------------------------------------------------- #
+
+class _MapCursor:
+    def __init__(self, rows, sink=None):
+        self._rows = rows
+        self._sink = sink
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql="", params=None, *a, **k):
+        if self._sink is not None:
+            self._sink["sql"] = sql
+            self._sink["params"] = params
+
+    def fetchall(self):
+        return self._rows
+
+
+class _MapConn:
+    def __init__(self, rows, sink=None):
+        self._rows = rows
+        self._sink = sink
+
+    def cursor(self):
+        return _MapCursor(self._rows, self._sink)
+
+
+def test_agent_status_map_resolves_session_absent_from_fleet_lanes():
+    # 'exams' is a live tmux session; fleet_lanes only knows it as 'cosem-exams'.
+    # agent_status.tmux_session='exams' -> base 'cc-cosem-exams' is the honest map.
+    conn = _MapConn([("exams", "cc-cosem-exams", "cc-cosem-exams-1")])
+    mapped, collided = w.agent_status_lane_map(conn)
+    assert mapped["exams"] == "cc-cosem-exams"  # base_agent_id preferred over the -1 registration
+    assert not collided
+
+
+def test_agent_status_map_falls_back_to_agent_id_when_base_null():
+    conn = _MapConn([("foo", None, "cc-foo-1")])
+    mapped, _ = w.agent_status_lane_map(conn)
+    assert mapped["foo"] == "cc-foo-1"
+
+
+def test_collision_session_is_not_mapped_from_agent_status():
+    # Amendment A (Nazim 37645): tmux_session='nazim' carries BOTH cc-orchestrator and
+    # orch-console (the #1 hub-row bug). A session claimed by >1 live row is ambiguous —
+    # it must NOT be mapped on row order; drop it (fall through to fleet_lanes) and record
+    # the collision so it can surface with a COLLISION reason.
+    conn = _MapConn([("nazim", "cc-orchestrator", "cc-orchestrator"),
+                     ("nazim", "orch-console", "orch-console")])
+    mapped, collided = w.agent_status_lane_map(conn)
+    assert "nazim" not in mapped
+    assert "nazim" in collided
+
+
+def test_agent_status_query_is_host_scoped_and_ordered():
+    # Amendment B: the query must scope to the local host (host = me OR host IS NULL) so a
+    # foreign-host row (the hub's real cc-orchestrator on wingmen-core after #1C) can never
+    # map a local session of the same name (the 07-04 'orch' leftover class); ORDER BY makes
+    # the scan deterministic. The fake conn does not execute SQL, so assert the query shape;
+    # the behavioural filter is proven by the live wet-proof.
+    sink = {}
+    conn = _MapConn([], sink)
+    w.agent_status_lane_map(conn)
+    sql = sink["sql"].lower()
+    assert "host" in sql and "is null" in sql
+    assert "order by" in sql
+
+
+def test_protected_agent_ids_reads_registry():
+    conn = _MapConn([("cc-orchestrator",), ("cai",), ("orch-console",)])
+    ids = w.protected_agent_ids(conn)
+    assert {"cc-orchestrator", "cai", "orch-console"} <= ids
+
+
+def test_protected_agent_ids_fail_closed_on_db_error():
+    # Amendment C: on ANY registry read error, the literal singleton/console core still
+    # protects — protection must never silently vanish.
+    class _BoomConn:
+        def cursor(self):
+            raise RuntimeError("db down")
+    ids = w.protected_agent_ids(_BoomConn())
+    assert {"cc-orchestrator", "cai", "cc-fleet-health", "orch-console", "nazim-console"} <= ids
+
+
+def test_protected_session_yields_no_lane_observation(monkeypatch):
+    # Amendment C: a live session that resolves to a PROTECTED body (here orch-console, which
+    # is NOT in the default MONITOR_SINGLETONS) must never be treated as a nudgeable lane.
+    monkeypatch.setattr(w, "MONITOR_SINGLETONS", [])  # isolate the lane path
+    monkeypatch.setattr(w, "list_lane_sessions", lambda: ["nazim"])
+    monkeypatch.setattr(w, "agent_status_lane_map", lambda conn: ({"nazim": "orch-console"}, set()))
+    monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({}, {}))
+    monkeypatch.setattr(w, "protected_agent_ids", lambda conn: {"orch-console"})
+    obs = w.gather_observations(None, state={}, alert=False)
+    assert obs == [], f"a protected body must not become a lane observation: {obs}"
+
+
+def test_merge_agent_status_is_primary_fleet_is_fallback():
+    fleet = {"cosem-exams": "cc-cosem-exams", "onlyfleet": "cc-of"}
+    status = {"exams": "cc-cosem-exams", "onlyfleet": "cc-of-LIVE"}
+    merged = w.merge_session_maps(status, fleet)
+    assert merged["exams"] == "cc-cosem-exams"        # status-only session present
+    assert merged["cosem-exams"] == "cc-cosem-exams"  # fleet-only session still there (fallback)
+    assert merged["onlyfleet"] == "cc-of-LIVE"        # on conflict, agent_status wins
+
+
+def test_coverage_gap_warns_once_per_episode():
+    state = {}
+    # episode starts: first sighting warns.
+    assert w.coverage_gap_episode(["ghost"], state) == ["ghost"]
+    # still unmapped next scan: silent (no re-warn) — this is what kills the spam.
+    assert w.coverage_gap_episode(["ghost"], state) == []
+    # clears: nothing to warn, state forgets it.
+    assert w.coverage_gap_episode([], state) == []
+    # reappears later: NEW episode -> warns again.
+    assert w.coverage_gap_episode(["ghost"], state) == ["ghost"]
+
+
+def test_coverage_gap_new_session_mid_episode_warns_only_the_new_one():
+    state = {}
+    assert w.coverage_gap_episode(["a"], state) == ["a"]
+    # 'b' newly unmapped while 'a' is still unmapped -> only 'b' is new.
+    assert w.coverage_gap_episode(["a", "b"], state) == ["b"]
