@@ -2,7 +2,8 @@
 -- console #2299): every recurring subscription/infra cost is a substrate row;
 -- monetization floors derive from the finance_burn view. Rule going forward:
 -- the row is created BEFORE a new subscription is taken (registry-first).
--- Apply via scripts/apply_finance_subscriptions.py (decision-962: no db push).
+-- Apply via scripts/apply_migration.py 018 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_finance_subscriptions.py, deleted 2026-09-05 PR #88; decision-962: no db push).
 
 CREATE TABLE IF NOT EXISTS finance_subscriptions (
     id               bigserial PRIMARY KEY,

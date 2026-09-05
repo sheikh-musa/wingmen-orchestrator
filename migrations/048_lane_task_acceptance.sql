@@ -31,7 +31,8 @@
 --   will read CLAIMED-UNACCEPTED, because none was ever accepted by anyone. That is not a bug in
 --   this view — it is the measurement, the same way invariant_registry read 34/34 UNEXERCISED.
 --
--- APPLY: direct psycopg only — scripts/apply_lane_task_acceptance.py. NEVER `supabase db push`
+-- APPLY: scripts/apply_migration.py 048 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_lane_task_acceptance.py, deleted 2026-09-05 PR #89). NEVER `supabase db push`
 --   (decision 962). Target: the SUBSTRATE coordination-plane DB, not any client silo.
 
 ALTER TABLE lane_tasks ADD COLUMN IF NOT EXISTS acceptance_criteria text;

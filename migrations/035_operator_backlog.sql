@@ -6,8 +6,9 @@
 -- for (with status) is always one place to look and refreshes itself. Nazim (the
 -- service role) curates the rows; the read-only console role only SELECTs.
 --
--- Apply via direct psycopg (decision-962: NEVER `supabase db push`) —
--- scripts/apply_operator_backlog.py. RLS + grant shape mirrors migration 013:
+-- Apply via scripts/apply_migration.py 035 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_operator_backlog.py, deleted 2026-09-05 PR #90; decision-962: NEVER
+-- `supabase db push`). RLS + grant shape mirrors migration 013:
 -- service_role owns it, console_readonly gets SELECT, everyone else is revoked.
 
 BEGIN;

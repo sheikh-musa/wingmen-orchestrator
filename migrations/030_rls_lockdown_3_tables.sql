@@ -14,7 +14,8 @@
 --
 -- Hardening only: ENABLE RLS + REVOKE + policy create. No DROP TABLE/COLUMN/etc, so it
 -- passes scripts/check_additive_migration.py. Idempotent (DROP POLICY IF EXISTS + GRANT).
--- Apply via scripts/apply_rls_lockdown_030.py (decision-962: never `supabase db push`).
+-- Apply via scripts/apply_migration.py 030 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_rls_lockdown_030.py, deleted 2026-09-05 PR #90; decision-962: never `supabase db push`).
 -- Transaction is owned by the applier (no BEGIN/COMMIT here) so --dry-run can ROLLBACK.
 
 -- ── fleet_stall_state : FULL-LOCK (internal signal, no public read) ──────────

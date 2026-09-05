@@ -16,7 +16,8 @@
 --
 -- Idempotent (REVOKE + GRANT). No DROP TABLE/COLUMN — passes check_additive_migration.py.
 -- The file owns no BEGIN/COMMIT; the applier owns the txn so --dry-run can ROLLBACK.
--- Apply via scripts/apply_anon_revoke_032.py (decision-962: never `supabase db push`).
+-- Apply via scripts/apply_migration.py 032 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_anon_revoke_032.py, deleted 2026-09-05 PR #88; decision-962: never `supabase db push`).
 -- GATED (CAI-512): latent != live -> standard 24h window. DO NOT APPLY until the window
 -- closes AND cai re-confirms the SQL matches the approved scope (filename+sha posted).
 

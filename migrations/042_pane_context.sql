@@ -21,8 +21,9 @@
 -- Pure OPS-CACHE: additive, no PII / money / governance / residency, on the shared
 -- substrate — NOT a cai-gated class (console signed the schema add directly, 21515).
 -- Ownership mirrors 041: service_role writes, console_readonly SELECTs. Apply via
--- direct psycopg (decision-962: NEVER `supabase db push`) —
--- scripts/apply_mig042_pane_context.py. Reversible: DROP TABLE public.pane_context.
+-- scripts/apply_migration.py 042 --silo tscuymavysscrvoberrr (historical applier:
+-- apply_mig042_pane_context.py, deleted 2026-09-05 PR #89; decision-962: NEVER
+-- `supabase db push`). Reversible: DROP TABLE public.pane_context.
 
 BEGIN;
 

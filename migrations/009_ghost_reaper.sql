@@ -17,7 +17,8 @@
 --      and because every such write is attributed via reaped_by, it is an
 --      audited system reap, not an anonymous forge.
 --
--- Apply via scripts/apply_ghost_reaper.py (direct psycopg — NEVER supabase db push).
+-- Apply via scripts/apply_migration.py 009 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_ghost_reaper.py, deleted 2026-09-05 PR #88). NEVER supabase db push.
 
 BEGIN;
 
