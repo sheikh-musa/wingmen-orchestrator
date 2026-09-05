@@ -43,10 +43,12 @@ SUSTAIN_S = int(os.environ.get("DEADMAN_SUSTAIN_S", "1800"))  # 30 min at >= HAR
 # even considered "stale", and the pane rescue + last-known floor below handle the rest.
 GAUGE_STALE_S = int(os.environ.get("DEADMAN_GAUGE_STALE_S", "3600"))
 # On a TRULY-blind lane (gauge stale AND pane blind), blocker-page ONLY when its LAST-KNOWN
-# reading was already this elevated — "was ~high, now blind" is the dangerous blind-band case;
-# "was low, now idle" is benign (an alive/fresh-heartbeat idle low lane does not bloat). Below
-# the floor we still SURFACE it (log_unknown) but do not urgent-page (Nazim 37788).
-UNKNOWN_PAGE_FLOOR = int(os.environ.get("DEADMAN_UNKNOWN_FLOOR", "70"))
+# reading was in the DANGER zone (>= HARD_PCT) — "was near the cliff, now blind" is the real risk.
+# A lane's gauge goes stale mainly because it's IDLE (no turns to advance ended_at), and an idle
+# lane at, say, 75% is holding below the recycle bar and NOT bloating — paging it is premature
+# (Nazim 37857: "catch it if/when it crosses 80% on real work — not now"). Below the floor we
+# still SURFACE it (log_unknown), never blocker-page. Aligns the blind bar with the sustained bar.
+UNKNOWN_PAGE_FLOOR = int(os.environ.get("DEADMAN_UNKNOWN_FLOOR", str(HARD_PCT)))
 STATE_PATH = _ORCH_DIR / "state" / "lane_recycle_deadman.json"
 
 

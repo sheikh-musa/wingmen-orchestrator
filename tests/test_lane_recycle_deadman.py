@@ -145,3 +145,27 @@ def test_unknown_page_body_explains_the_blind_gauge():
     _, body = dm.page_message("cc-irsyad", "page_unknown", "UNKNOWN — gauge is stale (age 9000s)")
     assert "unreadable" in body.lower() or "stale" in body.lower()
     assert "UNKNOWN" in body  # the reading is carried into the page
+
+
+# ── page_unknown floor aligned to the DANGER bar (Nazim 37857): a 75%-idle-stale lane must NOT
+#    blocker-page — its gauge is stale only because it's idle, and 75% is below the recycle bar. ──
+def test_blind_idle_lane_at_75pct_is_logged_not_paged_by_default():
+    # the cc-substrate case: last-known 75%, gauge stale (idle >60m), pane blind. Default floor
+    # (HARD_PCT=85) -> log, not page. "Catch it if/when it crosses 80% on real work — not now."
+    verdict, first_over = dm.evaluate_deadman(False, None, first_over_at=None, now_epoch=9000.0,
+                                              hard_pct=HARD, sustain_s=SUSTAIN, last_known_pct=75)
+    assert verdict == "log_unknown" and first_over is None
+
+
+def test_blind_near_cliff_lane_pages_by_default():
+    # a lane last-known IN the danger zone (>= HARD) that goes blind IS worth a page (lost sight of
+    # a near-cliff, un-recycled lane).
+    v_at, _ = dm.evaluate_deadman(False, None, None, 9000.0, hard_pct=HARD, sustain_s=SUSTAIN,
+                                  last_known_pct=HARD)          # exactly 85 -> page
+    v_under, _ = dm.evaluate_deadman(False, None, None, 9000.0, hard_pct=HARD, sustain_s=SUSTAIN,
+                                     last_known_pct=HARD - 1)    # 84 -> log
+    assert v_at == "page_unknown" and v_under == "log_unknown"
+
+
+def test_default_unknown_floor_is_the_hard_bar():
+    assert dm.UNKNOWN_PAGE_FLOOR == HARD
