@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from reel_triage import config, db, digest, digest_send
+from legacy.reel_triage import config, db, digest, digest_send
 
 
 async def main() -> int:
