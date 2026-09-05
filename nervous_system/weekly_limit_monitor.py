@@ -518,10 +518,14 @@ def _alert_body(p: dict, level: str) -> str:
         f"{p.get('binds')})")
 
 
-# The operator identity on the bus is 'musa' (the same target cai addresses for
-# operator decisions). #14988: the operator should get this EARLY warning
-# directly, not on a latency-adding hop through Nazim reading his console inbox.
-OPERATOR_AGENT = "musa"
+# The operator identity 'musa' has NO live wake owner (agent_wake ignores it; no
+# agent_status row), so #14988's "warn the operator DIRECTLY, not via Nazim" intent
+# silently BLACK-HOLED: 21 operator pages (7 of them P1) dead-lettered unread across
+# 08-08..09-04 (substrate audit #5). Route to orch-console — the sanctioned operator-
+# facing body (relays to Musa via nazim_send) AND a wake-eligible recipient — so the
+# page reaches someone who acts. A latency hop that DELIVERS beats a direct address
+# that does not.
+OPERATOR_AGENT = "orch-console"
 
 
 def _operator_body(p: dict, level: str) -> str:
