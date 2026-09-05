@@ -59,6 +59,16 @@ independent check already establishes the answer.
 OR something material changed/was incident-reported. Do the full re-audit as
 normal (the same rigor you apply to any FULL-tier audit), then close.
 
+**Verify against the LIVE object, not the named migration file (CAI-1395).**
+Whether fast-triaging or full-re-auditing, re-check a finding's gap on the
+DEPLOYED silo — `pg_get_functiondef(...)` / `\df+` for a function, the live
+policy/column/grant for RLS/schema — NEVER just the migration file the decision
+names. A LATER migration can have closed (or opened) the gap invisibly to a
+file-level read, so a re-audit that trusts the originally-named migration can
+file a phantom finding (the gap was already closed — exactly CAI-1394 →
+retracted CAI-1395) or MISS a newly-opened real one; the live def is ground
+truth. Caught via live-diff before apply.
+
 ## Writing the completion (the ONLY mutation you make)
 
 Close a drained item with a single `decision_audits` UPDATE, as yourself:
