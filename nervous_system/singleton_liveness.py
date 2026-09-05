@@ -289,14 +289,23 @@ def hub_lease_fresh(now=None):
 
 
 def hub_alive_evidence(now=None):
-    """Is the cross-host hub (cc-orchestrator) alive per its orch_lease? The hub renews
-    orch_lease from its OWN host every heartbeat, so a FRESH lease is authoritative liveness
-    even when its Mini-side agent_status heartbeat is stale (the console wrote that row —
-    audit #1). This is the SINGLE shared signal the Mini hub-liveness consumers import — no
-    per-consumer copies (first slice of the audit's liveness.py; Nazim 37658 scope (a)).
-      True  — lease FRESH (alive) OR indeterminate/unreadable (FAIL-SAFE: a read hiccup must
-              never drop a live hub from liveness — that is the harm this guards; logged).
-      False — lease DEFINITIVELY expired: genuinely stale, the normal path proceeds.
+    """Is the cross-host hub's HOST alive per its orch_lease?
+
+    HONEST SCOPE (Nazim 37683): the lease is renewed by a systemd TIMER on the VPS
+    (wingmen-orch-lease-renew.timer -> orch_lease.py renew), INDEPENDENT of the hub's claude
+    session — so a FRESH lease proves the hub HOST is up and the timer runs, NOT that the hub
+    session is alive or reading its inbox (observed: lease renewed every ~3 min while the hub
+    session sat idle with unread piling for 60+ min). This is still strictly BETTER than the
+    signal it replaces (a Mini-side console heartbeat that meant nothing about the hub at
+    all), and it is the right answer to the sweeper's question — 'is cc-orchestrator a
+    reachable address that will drain?' — but it is HOST-alive, not SESSION-alive. SESSION
+    evidence lives elsewhere (hub-ctx-publish freshness in cc_session_costs; the
+    hub-bus-currency wedge monitor) and belongs in Phase-1 liveness.py's evidence ladder
+    (tmux -> lease(HOST) -> bus/pane activity(SESSION) -> heartbeat). Single shared signal
+    for the Mini hub-liveness consumers — no per-consumer copies.
+      True  — lease FRESH (host alive) OR indeterminate/unreadable (FAIL-SAFE: a read hiccup
+              must never drop a live hub from liveness — that is the harm this guards; logged).
+      False — lease DEFINITIVELY expired: host genuinely down, the normal path proceeds.
     Only a positively-expired lease is dead; everything else is treated alive."""
     fresh = hub_lease_fresh(now)  # True / False / None (already catches read errors -> None)
     if fresh is None:
