@@ -1,8 +1,7 @@
 -- 058_close_anon_exec_postgres_owned_half.sql
 -- ledger: silo=tscuymavysscrvoberrr
 -- assert: dropped public.fetch_and_execute_sql(text)
--- assert: no_execute anon public.load_all_morphology_batches(text, integer, integer)
--- assert: no_execute authenticated public.load_all_morphology_batches(text, integer, integer)
+-- assert: dropped public.load_all_morphology_batches(text, integer, integer)
 -- assert: search_path public.auth_user_org_ids()
 -- assert: search_path public.auth_user_org_ids_with_role(text)
 -- assert: search_path public.auth_user_org_ids_with_roles(text[])
@@ -46,18 +45,22 @@
 --    legitimate anon/authenticated/service_role caller needs). DROP, not
 --    just REVOKE, so it cannot be re-exposed by a future GRANT mistake.
 --
--- 2. REVOKE EXECUTE on load_all_morphology_batches(text,integer,integer)
---    FROM PUBLIC, anon, authenticated — a batch data-loader whose body calls
---    fetch_and_execute_sql() internally (verified via pg_get_functiondef)
---    to fetch and run 155 numbered SQL batch files. Zero references in this
---    repo; this is one-time Zahidah-morphology bulk-ingest tooling, not an
---    ongoing API surface — nothing anon/authenticated legitimately needs
---    from it. NOTE (surfaced, not silently fixed here): after step 1 drops
---    fetch_and_execute_sql, THIS function becomes non-functional for EVERY
---    caller, including service_role — its only historical actor was that
---    function's SSRF-execute chain. Left as REVOKE-not-DROP per the exact
---    instruction that scoped this migration; flagged to orch-console
---    separately as a DROP candidate.
+-- 2. DROP load_all_morphology_batches(text,integer,integer) — a batch
+--    data-loader whose body calls fetch_and_execute_sql() internally
+--    (verified via pg_get_functiondef) to fetch and run 155 numbered SQL
+--    batch files. postgres owns it; DROP works cleanly (a plpgsql body
+--    calling another function by name is not a pg_depend dependency, so
+--    dropping fetch_and_execute_sql first does not block or complicate
+--    this DROP). Zero references anywhere in this repo; one-time
+--    Zahidah-morphology bulk-ingest tooling, not an ongoing API surface.
+--    orch-console's call (msg 37820), correctly: since step 1 already
+--    leaves this function non-functional for EVERY caller (its only
+--    actor was that SSRF-execute chain), a REVOKE would leave a dead,
+--    still-anon-facing fetch-execute-chain function present as a latent
+--    re-exposure vector if EXECUTE were ever mistakenly re-granted — DROP
+--    removes the whole chain instead of just gating it. If the morphology
+--    dataset ever needs re-ingest, it gets rebuilt safely, not via anon
+--    fetch-execute.
 --
 -- 3. ALTER ... SET search_path = public on 8 SECURITY DEFINER functions
 --    that run as `postgres` regardless of caller, with no search_path
@@ -74,20 +77,25 @@
 --    function — it only removes the ambient-authority hijack path.
 --
 -- CAUGHT BY THE TOOL'S OWN ASSERTION, ON THE FIRST --dry-run AGAINST REAL
--- DATA: a REVOKE naming only `anon, authenticated` (the literal scope as
--- first given) is ITSELF the F2 silent-no-op — `information_schema.
--- role_routine_grants` shows PUBLIC holds its own separate EXECUTE grant on
--- load_all_morphology_batches (granted by postgres), so revoking anon and
--- authenticated's entries leaves the function fully executable via PUBLIC.
--- Fixed by adding PUBLIC to the REVOKE list before this file was submitted
--- for review — exactly the class of defect CAI-RESP-1397 #5 exists to catch,
--- caught on a REAL migration before it shipped, not after.
+-- DATA (before this file was ever submitted for review, and before the DROP
+-- decision above): the originally-scoped `REVOKE ... FROM anon,
+-- authenticated` was ITSELF the F2 silent-no-op — `information_schema.
+-- role_routine_grants` showed PUBLIC holds its own separate EXECUTE grant on
+-- load_all_morphology_batches (granted by postgres, 5 distinct grantee rows:
+-- PUBLIC/postgres/anon/authenticated/service_role), so revoking only anon
+-- and authenticated's entries left the function fully executable via
+-- PUBLIC — exactly the class of defect CAI-RESP-1397 #5 exists to catch,
+-- caught on a real migration before it shipped, not after. (orch-console's
+-- review note: the DROP above sidesteps this class of gotcha entirely —
+-- there's no partial-grant surface left to get wrong once the function
+-- itself is gone.)
 --
 -- CALLER-SAFETY CONFIRMATION (per hard requirement #2):
 --   - service_role and postgres each hold their OWN separate EXECUTE grant
---     (confirmed via information_schema.role_routine_grants: 5 distinct
---     grantee rows, not one shared PUBLIC-derived entry) — revoking
---     PUBLIC/anon/authenticated's entries does not touch theirs.
+--     on both dropped functions (confirmed via information_schema.
+--     role_routine_grants: 5 distinct grantee rows, not one shared
+--     PUBLIC-derived entry) — irrelevant post-DROP (the grant rows go with
+--     the function), noted for the historical record of what was checked.
 --   - Zero references to fetch_and_execute_sql or load_all_morphology_batches
 --     anywhere in this repo (grep, excl .venv/reports/logs).
 --   - track_functions is 'none' on this instance, so pg_stat_user_functions
@@ -100,17 +108,16 @@
 --     outside what this checkout can verify and is called out here rather
 --     than assumed.
 --
--- ANOTHER FINDING, NOT ACTED ON HERE: bulk_insert_morphology(jsonb) has the
--- identical anon+authenticated EXECUTE exposure as load_all_morphology_batches
--- (owner postgres, not SECDEF, not called out in the original scope) but does
--- NOT call fetch_and_execute_sql — it inserts directly into word_morphology
--- from jsonb. Left untouched: not in the scoped list, and changing it wasn't
--- asked for. Flagged to orch-console for a decision, not included here.
+-- bulk_insert_morphology(jsonb) has the identical PUBLIC+anon+authenticated
+-- EXECUTE exposure but is SECURITY INVOKER (not SECDEF) and doesn't call
+-- fetch_and_execute_sql — orch-console's ruling (msg 37820): out of 058's
+-- SECDEF/anon-exec-primitive scope, routed to migration 059 (the
+-- INVOKER-anon-EXECUTE default-DML sweep, per cc-quality #320/#321). Not
+-- touched here.
 
 DROP FUNCTION public.fetch_and_execute_sql(text);
 
-REVOKE EXECUTE ON FUNCTION public.load_all_morphology_batches(text, integer, integer)
-  FROM PUBLIC, anon, authenticated;
+DROP FUNCTION public.load_all_morphology_batches(text, integer, integer);
 
 ALTER FUNCTION public.auth_user_org_ids() SET search_path = public;
 ALTER FUNCTION public.auth_user_org_ids_with_role(text) SET search_path = public;
