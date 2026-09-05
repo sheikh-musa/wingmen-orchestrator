@@ -175,6 +175,12 @@ def _channel_scope_sql() -> str:
                 " AND tag IS DISTINCT FROM 'cosem-caai'"
                 " AND tag IS DISTINCT FROM 'cosem-exams'"
                 " AND tag IS DISTINCT FROM 'alderei'"
+                # finance-console (2026-09-05, Nazim 37730): the cc-finance lane
+                # reconciles its OWN revenue channel (bot_channels finance-console
+                # inject_target=finance, pinned to the Mini's nazim-ingest). The hub
+                # must not also surface it, or the operator gets a double answer
+                # post-gzb-flip. Same carve-out shape as the 08-03 cosem/alderei one.
+                " AND tag IS DISTINCT FROM 'finance-console'"
                 + _shared_feed_exclusion())
     return ""
 

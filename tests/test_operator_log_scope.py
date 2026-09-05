@@ -79,3 +79,22 @@ def test_unknown_role_raises_not_empty(monkeypatch, bad_role):
 
 def test_recognized_roles_set_is_exactly_console_hub_empty():
     assert ol._RECOGNIZED_BODY_ROLES == frozenset({"console", "hub", ""})
+
+
+# finance-console carve-out (Phase-0 add-on, Nazim 37730 / hub flip-gate parity). The
+# finance lane reconciles its own revenue channel via tag='finance-console'; neither the
+# hub NOR the console may reconcile it, or the operator gets a double answer post-flip.
+def test_hub_excludes_finance_console(monkeypatch):
+    _set_role(monkeypatch, "hub")
+    clause = ol._channel_scope_sql()
+    assert "tag IS DISTINCT FROM 'finance-console'" in clause, (
+        "the hub must NOT reconcile the finance lane's revenue channel"
+    )
+
+
+def test_console_does_not_claim_finance_console(monkeypatch):
+    _set_role(monkeypatch, "console")
+    clause = ol._channel_scope_sql()
+    # The console's scope is an INCLUSION list; finance-console is absent from it, so a
+    # finance-console row is out of console scope (the finance lane answers it, not Nazim).
+    assert "finance-console" not in clause
