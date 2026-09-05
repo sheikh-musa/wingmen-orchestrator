@@ -42,7 +42,9 @@ SENDER_LIVE_WINDOW_H = 24  # a recipient that SENT within this window is "live" 
 # of truth also consulted by admin_mark_offline + the launcher/watchdog reapers —
 # and spares them from offline-marking, pruning, AND the drift check.
 
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+# Don't populate prod env from .env under pytest (audit T1: tests stay prod-clean).
+if not os.environ.get("PYTEST_CURRENT_TEST"):
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
 
@@ -75,6 +77,59 @@ def observed_activity(recent_bus, tmux_session, live_sessions):
     if tmux_session and tmux_session in live_sessions:
         return True, f"live tmux session '{tmux_session}' on this host"
     return False, "no observed activity (no recent bus row, no live co-located session)"
+
+
+def _undeliverable(to_agent) -> bool:
+    """A to_agent with NO possible live wake owner — one that can NEVER be woken: the operator
+    handle 'musa', the non-address 'substrate', any id that is not a cc-* worker / cai / a
+    console. Uses agent_wake's SSOT eligibility on the most-permissive floor (P0 +
+    requires_response) so the hub (cc-orchestrator, narrow-floor-eligible) is NEVER misread as
+    a dead-letter sink. Distinct from a gone-but-once-live cc lane, which is eligible-by-
+    identity and is step 4's job. Imported lazily so importing this module stays
+    load_dotenv-free under pytest."""
+    if not to_agent:
+        return False
+    from nervous_system.agent_wake import is_wake_eligible_recipient
+    return not is_wake_eligible_recipient(to_agent, "P0", True)
+
+
+def surface_dead_letters(cur, dry=False):
+    """Detect unread rows whose to_agent is structurally undeliverable and SURFACE them to
+    orch-console — ONE coalesced row per (to_agent) per day (deduped on today's own surface
+    rows), NEVER reaped. Reaping would hide a real misroute; step 4 already spares these.
+    Returns the to_agents surfaced (or that WOULD be, when dry)."""
+    cur.execute("""SELECT to_agent, count(*) AS n, min(created_at) AS oldest,
+                          max(created_at) AS newest,
+                          count(*) FILTER (WHERE priority IN ('P0','P1')) AS hi
+                   FROM agent_messages
+                   WHERE read_at IS NULL AND to_agent IS NOT NULL
+                   GROUP BY to_agent""")
+    surfaced = []
+    for to_agent, n, oldest, newest, hi in cur.fetchall():
+        if not _undeliverable(to_agent):
+            continue
+        # once per (to_agent) per day: skip if I already surfaced this target today.
+        cur.execute("""SELECT 1 FROM agent_messages
+                       WHERE from_agent='cc-fleet-health' AND to_agent='orch-console'
+                         AND subject LIKE %s
+                         AND created_at >= date_trunc('day', now()) LIMIT 1""",
+                    (f"dead-letter[{to_agent}]:%",))
+        if cur.fetchone():
+            continue
+        if not dry:
+            subj = f"dead-letter[{to_agent}]: {n} unread with no live wake owner"
+            body = (f"{n} unread agent_messages are addressed to '{to_agent}', which has NO live "
+                    f"wake owner — agent_wake will never deliver there, so they accrue silently "
+                    f"(oldest {oldest}, newest {newest}, P0/P1={hi}). NOT reaped: a misroute must "
+                    f"be fixed (retarget the producer) or the address retired, not hidden. "
+                    f"Surfaced once/day by the cc-fleet-health dead-letter detector.")
+            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+            cur.execute("""INSERT INTO agent_messages
+                           (from_agent,to_agent,message_type,subject,body,priority,requires_response)
+                           VALUES ('cc-fleet-health','orch-console','update',%s,%s,'P2',false)""",
+                        (subj, body))
+        surfaced.append(to_agent)
+    return surfaced
 
 
 def main():
@@ -156,6 +211,15 @@ def main():
             archived = [r[0] for r in cur.fetchall()]
             conn.commit()
 
+        # 5. SURFACE dead-letters to STRUCTURALLY-UNDELIVERABLE targets (audit #5B). Distinct
+        # from step 4 (which reaps gone-but-once-live agents): 'musa'/'substrate' and any non
+        # cc-*/cai/console address have NO possible live wake owner, so their unread NEVER
+        # drains — step 4 deliberately spares them. Make them VISIBLE (one coalesced row per
+        # to_agent per day to orch-console), NEVER reap.
+        surfaced = surface_dead_letters(cur)
+        if surfaced:
+            conn.commit()
+
         cur.execute("""SELECT agent_id, status, tmux_session,
                        round(extract(epoch from (now()-last_heartbeat))/60) AS m
                        FROM agent_status ORDER BY last_heartbeat DESC NULLS LAST""")
@@ -183,6 +247,8 @@ def main():
         by = Counter(archived)
         print(f"archived {len(archived)} dead-letters: " +
               ", ".join(f"{a}×{n}" for a, n in by.most_common()))
+    if surfaced:
+        print("dead-letter SURFACED to orch-console (no live wake owner): " + ", ".join(surfaced))
 
     if not quiet:
         if marked:
