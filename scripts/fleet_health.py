@@ -23,8 +23,18 @@ Only touches agent_status (status + delete) and agent_messages.read_at (archive)
 Run on demand:  python3 scripts/fleet_health.py [--quiet] [--no-archive]
 """
 import os, re, subprocess, sys
+from pathlib import Path
 import psycopg
 from dotenv import load_dotenv
+
+# Bootstrap: put the orchestrator root on sys.path so `nervous_system.*` resolves when this is
+# run as `python3 scripts/fleet_health.py` (the launchd daemon's invocation), where sys.path[0]
+# is scripts/ — NOT the repo root. Without this, _undeliverable()'s lazy nervous_system import
+# raised ModuleNotFoundError and crash-looped the job (99de7e3 regression). Same idiom as
+# context_health_watchdog.py / priority_sla_watchdog.py / repo_context_watchdog.py.
+_ORCH_DIR = Path(__file__).resolve().parent.parent
+if str(_ORCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_ORCH_DIR))
 
 STALE_MIN = 30      # heartbeat older than this => mark offline
 PRUNE_DAYS = 1      # offline rows older than this => delete

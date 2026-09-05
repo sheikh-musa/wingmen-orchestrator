@@ -31,3 +31,33 @@ def test_identities_with_a_wake_owner_are_not_flagged():
 def test_none_target_is_not_flagged():
     # a NULL to_agent is filtered by the query; the predicate must not crash on it either.
     assert not fh._undeliverable(None)
+
+
+def test_nervous_system_resolves_under_script_invocation(tmp_path):
+    """Regression guard for 99de7e3 (#5B): the launchd daemon runs `python3 scripts/fleet_health.py`,
+    so sys.path[0] is scripts/ — NOT the repo root. _undeliverable()'s lazy
+    `from nervous_system.agent_wake import is_wake_eligible_recipient` then raised
+    ModuleNotFoundError and crash-looped the job every 10 min. The other tests here import via
+    `from scripts import fleet_health`, which pytest silently masks (repo root already on path),
+    so they never caught it. This reproduces the DAEMON's invocation faithfully: a fresh
+    interpreter whose sys.path[0] is scripts/ (nothing else), then import fleet_health (which
+    must bootstrap the repo root onto sys.path at module load) and resolve nervous_system.
+
+    Prod-clean: PYTEST_CURRENT_TEST is set so fleet_health skips load_dotenv; we only exercise
+    the import path, never the DB sweep."""
+    import os, subprocess, sys
+    orch = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    scripts_dir = os.path.join(orch, "scripts")
+    probe = (
+        "import sys; "
+        f"sys.path.insert(0, {scripts_dir!r}); "      # emulate the daemon: sys.path[0] == scripts/
+        "import fleet_health; "                          # module-top bootstrap must add the repo root
+        "from nervous_system.agent_wake import is_wake_eligible_recipient; "
+        "print('IMPORT_OK')"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}  # don't let PYTHONPATH mask it
+    env["PYTEST_CURRENT_TEST"] = "1"                                  # keep load_dotenv off (prod-clean)
+    r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                       cwd=str(tmp_path), env=env)  # cwd off-repo so the root isn't on path via cwd
+    assert r.returncode == 0, f"nervous_system unresolved under script invocation (99de7e3): {r.stderr}"
+    assert "IMPORT_OK" in r.stdout
