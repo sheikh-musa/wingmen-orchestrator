@@ -121,10 +121,8 @@ _WINDOW_OWNERS = {
     "self_recycle.sh",
 }
 
-# Retired bridges: superseded by nervous_system/ingest.py at the 2026-07-03 cutover and no
-# longer run by any launchd job. Listed explicitly so the exemption is a decision on the
-# record rather than an oversight — if one is ever revived it must take the guard first.
-_RETIRED = {"tg_bridge.py", "cai_bridge.py"}
+# tg_bridge.py / cai_bridge.py were retired at the 2026-07-03 ingest.py cutover and DELETED
+# outright (op#19103 item 1, substrate-cleanup) — no exemption needed once the files are gone.
 
 _SEND_KEYS_PY = re.compile(r"""["']send-keys["']""")
 _SEND_KEYS_SH = re.compile(r"\btmux\s+send-keys\b")
@@ -145,7 +143,7 @@ def _keystroke_senders() -> list:
     out = []
     for d in ("nervous_system", "scripts", "scripts/lib"):
         for path in sorted((_ROOT / d).glob("*.py")) + sorted((_ROOT / d).glob("*.sh")):
-            if path.name in _WINDOW_OWNERS or path.name in _RETIRED:
+            if path.name in _WINDOW_OWNERS:
                 continue
             if _sends_keystrokes(path):
                 out.append(path)
