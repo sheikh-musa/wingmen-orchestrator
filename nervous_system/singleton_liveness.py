@@ -288,6 +288,24 @@ def hub_lease_fresh(now=None):
     return lease_fresh_from_row({"renewed_at": r[0], "ttl_seconds": r[1]}, now)
 
 
+def hub_alive_evidence(now=None):
+    """Is the cross-host hub (cc-orchestrator) alive per its orch_lease? The hub renews
+    orch_lease from its OWN host every heartbeat, so a FRESH lease is authoritative liveness
+    even when its Mini-side agent_status heartbeat is stale (the console wrote that row —
+    audit #1). This is the SINGLE shared signal the Mini hub-liveness consumers import — no
+    per-consumer copies (first slice of the audit's liveness.py; Nazim 37658 scope (a)).
+      True  — lease FRESH (alive) OR indeterminate/unreadable (FAIL-SAFE: a read hiccup must
+              never drop a live hub from liveness — that is the harm this guards; logged).
+      False — lease DEFINITIVELY expired: genuinely stale, the normal path proceeds.
+    Only a positively-expired lease is dead; everything else is treated alive."""
+    fresh = hub_lease_fresh(now)  # True / False / None (already catches read errors -> None)
+    if fresh is None:
+        log("hub_alive_evidence: hub lease indeterminate/unreadable -> fail-safe ALIVE "
+            "(do not drop the hub from liveness)")
+        return True
+    return bool(fresh)
+
+
 def page_wedged_alive(agent, hb_age_s=None, dry_run=False, recipient=None):
     """Actionable page for a cross-host body WEDGED but ALIVE (orch_lease fresh): its Mini-side
     nudge can't land (cross-host) yet it is NOT dead. Surfaces the wedge (so a live body unwedges

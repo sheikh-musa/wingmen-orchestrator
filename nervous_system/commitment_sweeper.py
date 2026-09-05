@@ -49,6 +49,8 @@ import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 
+from nervous_system import singleton_liveness as _sl  # hub_alive_evidence (audit #1A)
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # A3's defect, and the reason this line exists: `a3_isolation_check.py` read os.environ only and
@@ -104,6 +106,14 @@ def _live_agents(cur) -> set[str]:
         parts = aid.rsplit("-", 1)
         if len(parts) == 2 and parts[1].isdigit():
             live.add(parts[0])
+    # The cross-host hub renews orch_lease from its OWN host, not the Mini hb loop, so it
+    # is absent from the heartbeat-window query above even when fully alive (audit #1). A
+    # FRESH lease is authoritative liveness — without this belt a commitment addressed to
+    # cc-orchestrator would read as misaddressed and misroute. hub_alive_evidence() is the
+    # single shared signal (Nazim 37658 scope (a)); only a definitively-expired lease keeps
+    # the hub out.
+    if _sl.hub_alive_evidence():
+        live.add(_sl.HUB_AGENT)
     return live
 
 
