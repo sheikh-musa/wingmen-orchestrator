@@ -62,3 +62,76 @@ def test_just_past_threshold_is_stale():
 def test_threshold_is_configurable(hours, age_h, expected):
     v, _ = m.classify_bus_currency(1, age_h * H, stale_hours=hours)
     assert v == expected
+
+
+# ── session-deaf check (Nazim 37812): catch alive-host/dead-session — the gzb login-screen hole
+#    where orch_lease + heartbeat both stayed FRESH via TIMERS while the claude SESSION was stuck
+#    for 1.5h. Signal = hub last-real-turn age (NOT lease/heartbeat), gated on work-waiting so a
+#    legitimately-quiet hub never false-pages (the quiet-vs-wedged concern). ──
+M = 60.0  # seconds per minute
+
+
+def test_session_deaf_when_host_up_silent_and_work_waiting():
+    v, _ = m.classify_session_liveness(lease_fresh=True, last_turn_age_s=60 * M,
+                                       work_waiting=True, threshold_s=45 * M)
+    assert v == "session_deaf"
+
+
+def test_quiet_hub_with_no_work_waiting_is_ok():
+    # host up, no turn in an hour, but NOTHING waiting — a legitimately idle hub, not deaf. No page.
+    v, _ = m.classify_session_liveness(lease_fresh=True, last_turn_age_s=60 * M,
+                                       work_waiting=False, threshold_s=45 * M)
+    assert v == "ok"
+
+
+def test_recently_turning_hub_is_ok_even_with_work():
+    # turned 10m ago -> alive and reconciling; not deaf even though work is queued.
+    v, _ = m.classify_session_liveness(lease_fresh=True, last_turn_age_s=10 * M,
+                                       work_waiting=True, threshold_s=45 * M)
+    assert v == "ok"
+
+
+def test_lease_not_fresh_is_host_down_not_this_check():
+    # host itself is down -> fleet_health_lease reclaim's job, NOT the session-deaf page (avoid
+    # double-signalling; this check is specifically the alive-host/dead-session hole).
+    v, _ = m.classify_session_liveness(lease_fresh=False, last_turn_age_s=99 * M,
+                                       work_waiting=True, threshold_s=45 * M)
+    assert v == "host_down"
+
+
+def test_threshold_is_exclusive():
+    at, _ = m.classify_session_liveness(True, 45 * M, True, 45 * M)
+    over, _ = m.classify_session_liveness(True, 45 * M + 1, True, 45 * M)
+    assert at == "ok" and over == "session_deaf"
+
+
+# ── session-deaf PAGE path (prove the loud path deterministically — fake cursor, no DB) ──
+class _FakeCur:
+    def __init__(self):
+        self.inserts = []
+        self.last = None
+    def execute(self, sql, params=None):
+        self.last = (sql, params)
+        if sql.lstrip().upper().startswith("INSERT"):
+            self.inserts.append((sql, params))
+    def fetchone(self):
+        return None
+
+
+def test_session_deaf_page_writes_p1_to_both_recipients():
+    cur = _FakeCur()
+    sent = m._page_session_deaf(cur, last_turn_age_s=90 * 60.0, reason="host up, no turn 90m")
+    assert sent == len(m.RECIPIENTS) == 2
+    assert len(cur.inserts) == 2
+    for sql, params in cur.inserts:
+        assert "INSERT INTO agent_messages" in sql
+        assert "'P1'" in sql                       # session-deaf pages at P1 (operator may be unheard)
+        assert params[2].startswith("HUB SESSION-DEAF:")   # subject dedup marker
+        assert params[0] == m.SRE_FROM
+
+
+def test_session_deaf_dedup_queries_the_marker():
+    cur = _FakeCur()
+    m._already_paged_session_deaf(cur, 150)
+    sql, params = cur.last
+    assert "HUB SESSION-DEAF:%" in sql and params[0] == m.SRE_FROM

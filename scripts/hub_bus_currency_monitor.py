@@ -69,6 +69,46 @@ def classify_bus_currency(unread_count: int, oldest_unread_age_s: "float | None"
                   f"within {stale_hours:.1f}h — normal reconcile latency")
 
 
+# Session-deaf threshold: the hub silent (no real turn) for longer than this WHILE work waits and
+# the host is up = the alive-host/dead-session hole (gzb login-screen, 2026-09-05). Below the
+# bus-currency 2.5h so operator-unheard is caught FAST, above a hub's normal inter-turn gap.
+SESSION_STALE_MIN = float(os.environ.get("HUB_SESSION_STALE_MIN", "45"))
+# The session-deaf PAGE has its OWN arm flag, SEPARATE from HUB_BUS_MONITOR_ENABLED, so this new
+# check ships INERT (logs its verdict, never pages) until it's reviewed and armed on the launchd —
+# the hub false-DEAD class (451e110) means a hub-liveness pager gets armed deliberately, not on save.
+SESSION_DEAF_ENABLED = os.environ.get("HUB_SESSION_DEAF_ENABLED") == "1"
+
+
+def classify_session_liveness(lease_fresh: bool, last_turn_age_s: "float | None",
+                              work_waiting: bool,
+                              threshold_s: float = SESSION_STALE_MIN * 60.0) -> "tuple[str, str]":
+    """PURE. Catch alive-host / dead-SESSION — the hole the lease/heartbeat CANNOT see.
+
+    On 2026-09-05 the gzb hub's claude sat at the OAuth login screen for 1.5h; orch_lease.renewed_at
+    (systemd timer) AND the agent_status heartbeat (boot_orch timer) both stayed FRESH the whole
+    time, so every host/lease gauge read healthy while the SESSION reconciled nothing. The only
+    signal that saw it was the SESSION's own activity — the hub's last real bus turn.
+
+    verdict:
+      'host_down'    — lease NOT fresh: the HOST is down, which is fleet_health_lease reclaim's job,
+                       not this check. We stay silent to avoid double-signalling that path.
+      'session_deaf' — lease fresh (host up) AND no hub turn in > threshold AND work is waiting.
+      'ok'           — turning recently, or genuinely quiet (no work waiting). work_waiting is the
+                       quiet-vs-wedged gate: last-turn age ALONE would false-page an idle hub, so we
+                       page only when the hub is silent WHILE something it should handle is queued.
+    """
+    if not lease_fresh:
+        return "host_down", "orch_lease not fresh — HOST down (fleet_health_lease reclaim's job, not session-deaf)"
+    if last_turn_age_s is not None and last_turn_age_s > threshold_s and work_waiting:
+        return "session_deaf", (f"hub host up (lease fresh) but no real turn in "
+                                f"{last_turn_age_s/60.0:.0f}m (> {threshold_s/60.0:.0f}m) WHILE work is "
+                                f"waiting — alive-host/dead-session (session stuck/deaf)")
+    if not work_waiting:
+        return "ok", "hub quiet — nothing waiting (idle is not deaf)"
+    return "ok", (f"hub turned {(last_turn_age_s or 0)/60.0:.0f}m ago — within "
+                  f"{threshold_s/60.0:.0f}m, reconciling")
+
+
 def _dsn() -> "str | None":
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
@@ -153,6 +193,100 @@ def _page(cur, unread_count: int, oldest_unread_age_s: float, reason: str, oldes
     return sent
 
 
+LEASE_FRESH_S = float(os.environ.get("HUB_LEASE_FRESH_S", "900"))  # orch_lease TTL: renewed within = host up
+
+
+def _read_hub_session_state(cur, threshold_s: float):
+    """Return (lease_fresh, last_turn_age_s, work_waiting, detail) for the session-deaf check.
+
+    lease_fresh  — orch_lease renewed within LEASE_FRESH_S (host up; the signal that STAYS fresh
+                   via the systemd timer even when the session is dead — hence NOT sufficient alone).
+    last_turn_age_s — age of the hub's last REAL bus turn (max(agent_messages.created_at) from the
+                   hub); the session-activity signal that actually saw the gzb login-screen stall.
+    work_waiting — something the hub should have handled has waited > threshold: a floor-qualifying
+                   (P0/P1+rr) unread older than threshold, OR an inbound operator message that
+                   arrived AFTER the hub's last turn and is itself older than threshold. This is the
+                   quiet-vs-wedged gate (operator handled_at is unreliable — verified 2026-09-05 —
+                   so we use inbound created_at vs last-turn, never handled_at)."""
+    secs = int(threshold_s)
+    cur.execute("SELECT extract(epoch from (now()-renewed_at)) FROM orch_lease WHERE holder=%s", (HUB_AGENT,))
+    row = cur.fetchone()
+    lease_age = float(row[0]) if row and row[0] is not None else None
+    lease_fresh = lease_age is not None and lease_age < LEASE_FRESH_S
+
+    cur.execute("SELECT extract(epoch from (now()-max(created_at))), max(created_at) "
+                "FROM agent_messages WHERE from_agent=%s", (HUB_AGENT,))
+    row = cur.fetchone()
+    last_turn_age_s = float(row[0]) if row and row[0] is not None else None
+    last_turn_ts = row[1] if row else None
+
+    cur.execute("SELECT EXISTS(SELECT 1 FROM agent_messages WHERE to_agent=%s AND read_at IS NULL "
+                "AND priority IN ('P0','P1') AND requires_response "
+                "AND created_at < now() - make_interval(secs => %s))", (HUB_AGENT, secs))
+    floor_waiting = bool(cur.fetchone()[0])
+
+    op_waiting = False
+    if last_turn_ts is not None:
+        cur.execute("SELECT EXISTS(SELECT 1 FROM operator_messages WHERE direction='inbound' "
+                    "AND created_at > %s AND created_at < now() - make_interval(secs => %s))",
+                    (last_turn_ts, secs))
+        op_waiting = bool(cur.fetchone()[0])
+
+    work_waiting = floor_waiting or op_waiting
+    detail = (f"lease_age={lease_age:.0f}s(fresh={lease_fresh}) "
+              f"last_turn={(last_turn_age_s or -1)/60.0:.0f}m floor_wait={floor_waiting} op_wait={op_waiting}"
+              if lease_age is not None else
+              f"lease_age=NONE last_turn={(last_turn_age_s or -1)/60.0:.0f}m "
+              f"floor_wait={floor_waiting} op_wait={op_waiting}")
+    return lease_fresh, last_turn_age_s, work_waiting, detail
+
+
+def _already_paged_session_deaf(cur, cooldown_min: int) -> bool:
+    cur.execute("SELECT 1 FROM agent_messages WHERE from_agent=%s AND subject LIKE 'HUB SESSION-DEAF:%%' "
+                "AND created_at > now() - make_interval(mins => %s) LIMIT 1", (SRE_FROM, cooldown_min))
+    return cur.fetchone() is not None
+
+
+def _page_session_deaf(cur, last_turn_age_s: float, reason: str) -> int:
+    """NON-DESTRUCTIVE P1 page: the hub host is up but its SESSION is deaf. This is the hole the
+    lease/heartbeat cannot see — the operator can be unheard while every host gauge reads green."""
+    mins = (last_turn_age_s or 0) / 60.0
+    subject = (f"HUB SESSION-DEAF: cc-orchestrator host UP but no real turn in {mins:.0f}m while "
+               f"work waits — alive-host/dead-session")
+    try:
+        from nervous_system.alert_format import format_alert
+        body = format_alert(
+            icon="🕳️",
+            title="Hub host is up but its Claude SESSION is deaf (alive-host/dead-session)",
+            what=(f"cc-orchestrator's orch_lease + heartbeat are FRESH (host up) but it has made no real "
+                  f"bus turn in ~{mins:.0f}m while wake-eligible / operator work is waiting. {reason}."),
+            why=("Both the lease (gzb systemd timer) and the heartbeat (boot_orch timer) renew independently "
+                 "of the claude session, so they stay green even when the session is stuck (e.g. the "
+                 "2026-09-05 gzb OAuth login-screen stall that left the operator unheard 1.5h). The session's "
+                 "own last-turn age is the only signal that sees this; fleet_health_lease reclaim can't (the "
+                 "lease never expires)."),
+            do=("Check the hub session directly: reach gzb via wingmen-core split-tunnel "
+                "(ssh wingmen-core -> sudo gzb-vpn.sh up -> sudo -u wingmen ssh gzb) and look for a login/"
+                "auth prompt or a wedged pane; a GENTLE wake or re-auth, NOT a reset. Operator may be unheard."),
+            detail=f"agent={HUB_AGENT} last_turn={mins:.0f}m threshold={SESSION_STALE_MIN:.0f}m; DETECT-ONLY.",
+            ref="HUB-SESSION-DEAF (hub-bus-currency-monitor)",
+        )
+    except Exception:  # noqa: BLE001 — alert_format optional
+        body = (f"🕳️ Hub session-deaf: cc-orchestrator host up (lease+hb fresh) but no real turn in "
+                f"~{mins:.0f}m while work waits. {reason}. Check gzb session for a login/wedged pane; "
+                f"gentle wake, not a reset. DETECT-ONLY.")
+    sent = 0
+    for to_agent in RECIPIENTS:
+        if DRY:
+            print(f"[hub-session DRY] would page {to_agent} :: {subject}")
+        else:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
+                "VALUES (%s,%s,'update',%s,%s,false,'P1')", (SRE_FROM, to_agent, subject, body))
+        sent += 1
+    return sent
+
+
 def run_once() -> int:
     """One detect pass. Prints the verdict; pages on a deduped stale. Returns 0 (detect-only)."""
     import psycopg
@@ -176,6 +310,23 @@ def run_once() -> int:
                 print(f"[hub-bus-monitor{' DRY' if DRY else ''}] paged {sent} recipient(s) on hub bus-stall")
         elif verdict == "stale":
             print("[hub-bus-monitor] stale but HUB_BUS_MONITOR_ENABLED!=1 — INERT (detect-only, no page)")
+
+        # ── SESSION-DEAF check (alive-host/dead-session; Nazim 37812) — complements the
+        #    bus-currency check above: that keys on unread-AGE (slow drain), this keys on the
+        #    hub's own last-turn age (session stuck) so operator-unheard is caught fast. ──
+        lease_fresh, last_turn_age_s, work_waiting, sdetail = _read_hub_session_state(cur, SESSION_STALE_MIN * 60.0)
+        sverdict, sreason = classify_session_liveness(lease_fresh, last_turn_age_s, work_waiting)
+        print(f"[hub-session] {sverdict.upper()}: {sreason} :: {sdetail}")
+        if sverdict == "session_deaf" and SESSION_DEAF_ENABLED:
+            if _already_paged_session_deaf(cur, PAGE_COOLDOWN_MIN):
+                print(f"[hub-session] session-deaf but already paged within {PAGE_COOLDOWN_MIN}m — cooled, no re-page")
+            else:
+                sent = _page_session_deaf(cur, last_turn_age_s, sreason)
+                if not DRY:
+                    c.commit()
+                print(f"[hub-session{' DRY' if DRY else ''}] paged {sent} recipient(s) on hub session-deaf")
+        elif sverdict == "session_deaf":
+            print("[hub-session] session-deaf but HUB_SESSION_DEAF_ENABLED!=1 — INERT (detect-only, no page)")
     return 0
 
 
