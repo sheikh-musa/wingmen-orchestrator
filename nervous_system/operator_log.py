@@ -3,7 +3,7 @@
 Both directions of the operator<->orchestrator Telegram bridge land here so the
 conversation is never lost and stays coherent across the live-tmux and headless
 incarnations of cc-orchestrator. The tg_send.sh helper logs every outbound reply;
-tg_bridge.py logs every inbound message.
+nervous_system/ingest.py logs every inbound message.
 """
 from __future__ import annotations
 import argparse
