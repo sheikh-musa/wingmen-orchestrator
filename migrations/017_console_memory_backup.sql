@@ -2,7 +2,8 @@
 -- The console body's distilled lessons live in a machine-local memory dir;
 -- per session-mortal-state doctrine, state that must outlive a machine lives
 -- in the substrate. Nightly delta snapshots; restore = latest row per file.
--- Apply via scripts/apply_console_memory_backup.py (decision-962: no db push).
+-- Apply via scripts/apply_migration.py 017 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_console_memory_backup.py, deleted 2026-09-05 PR #88; decision-962: no db push).
 
 CREATE TABLE IF NOT EXISTS console_memory_backup (
     id             bigserial PRIMARY KEY,

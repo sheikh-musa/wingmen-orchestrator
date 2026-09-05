@@ -24,8 +24,9 @@
 -- operator DB (two-DB split) — so it is a plain bigint, NOT a FK (no cross-DB
 -- constraint), exactly as the design notes.
 --
--- Apply via direct psycopg (decision-962: NEVER `supabase db push`) —
--- scripts/apply_operator_asks.py. RLS + grant shape mirrors migration 035:
+-- Apply via scripts/apply_migration.py 044 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_operator_asks.py, deleted 2026-09-05 PR #90; decision-962: NEVER
+-- `supabase db push`). RLS + grant shape mirrors migration 035:
 -- service_role owns it, console_readonly gets SELECT, everyone else is revoked.
 
 BEGIN;

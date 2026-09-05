@@ -6,8 +6,9 @@
 -- (nervous_system/revenue_pipeline.py) renders a weekly digest over these rows.
 --
 -- Additive + idempotent (CREATE TABLE IF NOT EXISTS; seed is ON CONFLICT DO
--- NOTHING keyed on `slug`). Apply via scripts/apply_opportunities_ledger.py
--- (direct psycopg — decision-962: never `supabase db push` against prod).
+-- NOTHING keyed on `slug`). Apply via scripts/apply_migration.py 022
+-- --silo tscuymavysscrvoberrr (historical applier: apply_opportunities_ledger.py,
+-- deleted 2026-09-05 PR #90; decision-962: never `supabase db push` against prod).
 -- Nullable-friendly: only slug + name + stage are required.
 
 CREATE TABLE IF NOT EXISTS opportunities (

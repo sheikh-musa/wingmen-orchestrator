@@ -32,7 +32,8 @@
 --
 -- ADDITIVE AND REVERSIBLE. Creates one view; alters no data, no columns, no constraints.
 --
--- APPLY: direct psycopg only — scripts/apply_invariant_registry_honesty.py.
+-- APPLY: scripts/apply_migration.py 047 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_invariant_registry_honesty.py, deleted 2026-09-05 PR #89).
 --   NEVER `supabase db push` (decision 962 / CC-SUBSTRATE-VIEW-INTEGRITY-001: the CLI shadow-diff
 --   path re-applies historic CREATE OR REPLACE VIEW bodies and silently strips later arms).
 --   Target: the SUBSTRATE db (coordination plane), NOT any client silo.
