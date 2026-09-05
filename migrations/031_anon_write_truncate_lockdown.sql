@@ -20,7 +20,8 @@
 -- IF EXISTS + CREATE reproduces the fixed state on a fresh rebuild). No DROP
 -- TABLE/COLUMN, so it passes scripts/check_additive_migration.py. The file owns no
 -- BEGIN/COMMIT; the applier owns the txn so --dry-run can ROLLBACK.
--- Apply via scripts/apply_anon_lockdown_031.py (decision-962: never `supabase db push`).
+-- Apply via scripts/apply_migration.py 031 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_anon_lockdown_031.py, deleted 2026-09-05 PR #88; decision-962: never `supabase db push`).
 -- Intent call (CAI-RESP-511, Nazim): the 4 anon-SELECT tables cai left for review
 -- (ruling_audit_log, audit_key_registry, daily_attestations, ingestion_provenance)
 -- are cryptographic-transparency surfaces with ZERO PII — anon READ is deliberate

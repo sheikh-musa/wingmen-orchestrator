@@ -14,7 +14,8 @@
 -- client_id, screenshot_url, auto-fix tiers). This is internal, agent-authored, and about
 -- CHANGE rather than breakage.
 --
--- Apply with scripts/apply_mig046_fleet_proposals.py (direct psycopg).
+-- Apply with scripts/apply_migration.py 046 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_mig046_fleet_proposals.py, deleted 2026-09-05 PR #89).
 -- NEVER `supabase db push` against production (decision 962).
 
 CREATE TABLE IF NOT EXISTS public.fleet_proposals (

@@ -19,8 +19,9 @@
 --       window (a reset drops util to ~0 -> a spurious negative burn otherwise).
 --
 -- Ownership mirrors 035/036: cc-fleet-health (the SRE) writes via service_role;
--- the read-only console role only SELECTs. Apply via direct psycopg (decision-962:
--- NEVER `supabase db push`) — scripts/apply_pool_pace.py. Idempotent.
+-- the read-only console role only SELECTs. Apply via scripts/apply_migration.py 037
+-- --silo tscuymavysscrvoberrr (historical applier: apply_pool_pace.py, deleted
+-- 2026-09-05 PR #90; decision-962: NEVER `supabase db push`). Idempotent.
 
 BEGIN;
 

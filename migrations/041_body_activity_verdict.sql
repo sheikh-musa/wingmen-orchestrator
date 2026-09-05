@@ -15,8 +15,9 @@
 -- Pure OPS-CACHE: additive, no PII / money / governance / residency, on the shared
 -- substrate — NOT a cai-gated class (console signed the schema add directly, 18932).
 -- Ownership mirrors 036/pool_usage: service_role writes, console_readonly SELECTs
--- (so #4a's honest board can render it later). Apply via direct psycopg
--- (decision-962: NEVER `supabase db push`) — scripts/apply_mig041_body_activity_verdict.py.
+-- (so #4a's honest board can render it later). Apply via scripts/apply_migration.py 041
+-- --silo tscuymavysscrvoberrr (historical applier: apply_mig041_body_activity_verdict.py,
+-- deleted 2026-09-05 PR #89; decision-962: NEVER `supabase db push`).
 -- Reversible: DROP TABLE public.body_activity_verdict.
 
 BEGIN;
