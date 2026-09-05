@@ -48,7 +48,12 @@ see below) are untouched; those still resolve normally.
 - **`ihsanos_drain/`** — CADENCE-008A drain worker for the ihsanos repo;
   superseded by the current per-repo lane architecture.
 - **`reel_triage/`** — the reel-inbox triage pipeline; retired with its
-  Telegram surface.
+  Telegram surface. `run_reel_digest.py` (a `reel_triage` consumer, missed
+  in the first pass, added on review) lives at `legacy/reel_triage/
+  run_reel_digest.py` rather than a new `legacy/scripts/` — it's entirely
+  built on this package, not a general-purpose script. Its plist,
+  `dev.wingmen.reel-worker.plist` (`reel_triage.worker`), moved to
+  `legacy/ops/launchd/` with the other two relics.
 
 ## Explicitly NOT moved (still live at root)
 
