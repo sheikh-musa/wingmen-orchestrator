@@ -3,7 +3,7 @@ import contextlib
 import psycopg
 from psycopg.rows import dict_row
 
-from reel_triage import config
+from legacy.reel_triage import config
 
 
 @contextlib.contextmanager

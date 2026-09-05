@@ -1,4 +1,8 @@
-from ihsanos_drain.token_budget import within_budget
+from legacy.ihsanos_drain.token_budget import within_budget
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_within_budget_true_when_under_cap():

@@ -6,11 +6,14 @@ import pytest
 
 from tests.conftest import mock_supabase_chain
 
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
 
 class TestWriteHeartbeat:
     @pytest.mark.asyncio
     async def test_write_heartbeat_upserts(self):
-        from heartbeat import write_heartbeat
+        from legacy.heartbeat import write_heartbeat
 
         sb = mock_supabase_chain([])
         await write_heartbeat(sb, service="orchestrator", active_jobs=2)
@@ -24,7 +27,7 @@ class TestWriteHeartbeat:
 
     @pytest.mark.asyncio
     async def test_write_heartbeat_swallows_exception(self):
-        from heartbeat import write_heartbeat
+        from legacy.heartbeat import write_heartbeat
 
         sb = mock_supabase_chain([])
         sb.execute = AsyncMock(side_effect=RuntimeError("db down"))
@@ -35,7 +38,7 @@ class TestWriteHeartbeat:
 class TestWriteOrchestratorHeartbeat:
     @pytest.mark.asyncio
     async def test_write_orchestrator_heartbeat(self):
-        from heartbeat import write_orchestrator_heartbeat
+        from legacy.heartbeat import write_orchestrator_heartbeat
 
         sb = MagicMock()
         sb.table.return_value = sb

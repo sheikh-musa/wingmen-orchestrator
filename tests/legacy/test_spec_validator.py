@@ -1,6 +1,10 @@
 """Tests for spec_generator.validate_spec()."""
 
-from spec_generator import validate_spec
+from legacy.spec_generator import validate_spec
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _make_spec(job_id=1, sections=None, promise=True, base_ref=True):

@@ -1,6 +1,10 @@
-from personality import build_system_prompt
-from bot_manager import ClientBot
-from bot_user_resolver import BotUser
+from legacy.personality import build_system_prompt
+from legacy.bot_manager import ClientBot
+from legacy.bot_user_resolver import BotUser
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestPersonality:

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import logging
 from ai_provider import call_ai, extract_json
-from invite_manager import create_invite
-from conversation import clear_conversation
+from legacy.invite_manager import create_invite
+from legacy.conversation import clear_conversation
 
 logger = logging.getLogger("wingmen.handlers.team")
 

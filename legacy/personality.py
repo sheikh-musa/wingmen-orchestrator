@@ -6,8 +6,8 @@ a coherent system prompt for call_ai().
 
 from __future__ import annotations
 
-from bot_manager import ClientBot
-from bot_user_resolver import BotUser
+from legacy.bot_manager import ClientBot
+from legacy.bot_user_resolver import BotUser
 
 
 def build_system_prompt(client_bot: ClientBot, user: BotUser) -> str:

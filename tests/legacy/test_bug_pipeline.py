@@ -6,8 +6,8 @@ import json
 import os
 import tempfile
 
-from agents.diagnostic import build_diagnostic_prompt, parse_diagnostic_response
-from bug_pipeline import (
+from legacy.agents.diagnostic import build_diagnostic_prompt, parse_diagnostic_response
+from legacy.bug_pipeline import (
     VALID_TRANSITIONS,
     _get_test_command,
     create_bug_report,
@@ -15,6 +15,9 @@ from bug_pipeline import (
     handle_verification,
 )
 from tests.conftest import mock_supabase_chain
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestDiagnosticAgent:

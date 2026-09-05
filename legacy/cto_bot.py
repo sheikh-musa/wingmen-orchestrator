@@ -32,26 +32,26 @@ from telegram.request import HTTPXRequest
 
 import context_loader
 from ai_provider import call_ai, extract_json
-from agents.router import build_router_prompt, parse_router_response
-from agents.brainstorm import build_brainstorm_prompt
-from agents.auditor import build_auditor_prompt, parse_auditor_response
-from agents.fixer import build_fixer_prompt
-from approval_handler import (
+from legacy.agents.router import build_router_prompt, parse_router_response
+from legacy.agents.brainstorm import build_brainstorm_prompt
+from legacy.agents.auditor import build_auditor_prompt, parse_auditor_response
+from legacy.agents.fixer import build_fixer_prompt
+from legacy.approval_handler import (
     get_eligible_approvers,
     build_approval_message,
     build_full_diagnosis_message,
     build_verification_keyboard,
 )
-from bug_pipeline import create_bug_report, apply_fix, handle_verification
-from bug_notifier import (
+from legacy.bug_pipeline import create_bug_report, apply_fix, handle_verification
+from legacy.bug_notifier import (
     notify_reporter_acknowledged,
     notify_reporter_deployed,
     notify_reporter_rejected,
     notify_approvers,
 )
-from heartbeat import write_bot_heartbeat
-from council_commands import cmd_concur, cmd_rule, cmd_halt, cmd_execute, cmd_council, cmd_reply
-from tools_command import cmd_tools
+from legacy.heartbeat import write_bot_heartbeat
+from legacy.council_commands import cmd_concur, cmd_rule, cmd_halt, cmd_execute, cmd_council, cmd_reply
+from legacy.tools_command import cmd_tools
 
 # ── Whisper (local transcription) ────────────────────────────────
 _whisper_model = None
@@ -238,7 +238,7 @@ async def handle_onboarding(update: Update, chat_id: str) -> bool:
     3. intent → collect details based on type
     4. provision → create site automatically
     """
-    import provisioner
+    import legacy.provisioner as provisioner
 
     supabase = await get_supabase()
     text = (update.message.text or "").strip()
@@ -2920,7 +2920,7 @@ async def _handle_bot_onboarding(update: Update, user: dict, chat_id: str, user_
     Detects "set up bot" / "create bot" requests and bot token pastes.
     Returns True if the message was handled, False otherwise.
     """
-    from bot_onboarding import validate_token, onboard_client_bot, get_default_commands
+    from legacy.bot_onboarding import validate_token, onboard_client_bot, get_default_commands
 
     msg = user_msg.strip()
 
@@ -3877,10 +3877,10 @@ def main():
     # Higher-priority group so reel ingest intercepts Musa's IG-link / DYI-ZIP
     # messages; non-reel text/docs return False and fall through to the normal
     # handlers below (ApplicationHandlerStop only fires on an actual ingest).
-    from reel_triage import config as _rt_config
+    from legacy.reel_triage import config as _rt_config
     if _rt_config.reel_triage_enabled():
         from telegram.ext import ApplicationHandlerStop
-        from reel_triage import telegram_handlers as _rt
+        from legacy.reel_triage import telegram_handlers as _rt
 
         async def _reel_message(update, ctx):
             if await _rt.handle_message(update, ctx):

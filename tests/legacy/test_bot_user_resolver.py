@@ -5,7 +5,10 @@ from datetime import datetime, timezone, timedelta
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 
-from bot_user_resolver import resolve_user, try_claim_invite, clear_cache, BotUser
+from legacy.bot_user_resolver import resolve_user, try_claim_invite, clear_cache, BotUser
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _mock_supabase_chain(final_data):

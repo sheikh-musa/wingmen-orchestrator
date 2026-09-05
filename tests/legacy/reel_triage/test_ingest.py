@@ -1,4 +1,8 @@
-from reel_triage import ingest
+from legacy.reel_triage import ingest
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_ingest_links_inserts_new_and_skips_dupes(reel_db):

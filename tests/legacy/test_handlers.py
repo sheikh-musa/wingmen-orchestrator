@@ -3,7 +3,10 @@ import pytest
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 
-from permissions import can_do
+from legacy.permissions import can_do
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestHandlerPermissions:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from reel_triage import config
+from legacy.reel_triage import config
 
 _EVIDENCE = {"cited", "anecdote", "vibes"}
 _EFFORT = {"5min", "habit", "project"}

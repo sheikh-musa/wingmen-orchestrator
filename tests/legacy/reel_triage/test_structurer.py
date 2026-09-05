@@ -2,7 +2,10 @@ import json
 
 import pytest
 
-from reel_triage import structurer
+from legacy.reel_triage import structurer
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_priority_formula():

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from reel_triage import digest
+from legacy.reel_triage import digest
 
 
 def compose(conn) -> tuple[str, list, list]:

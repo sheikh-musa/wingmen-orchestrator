@@ -1,4 +1,8 @@
-from ihsanos_drain.report import build_report_row
+from legacy.ihsanos_drain.report import build_report_row
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_report_row_is_substrate_with_prefixed_subtag():

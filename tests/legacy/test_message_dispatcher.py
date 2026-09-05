@@ -4,7 +4,10 @@ import pytest
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("MUSA_TELEGRAM_ID", "123456")
 
-from message_dispatcher import _command_to_intent, FLOW_HANDLERS, FLOW_TO_INTENT
+from legacy.message_dispatcher import _command_to_intent, FLOW_HANDLERS, FLOW_TO_INTENT
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestCommandMapping:

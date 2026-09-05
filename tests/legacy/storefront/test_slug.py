@@ -10,7 +10,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from storefront.slug import normalize_slug, validate_slug
+from legacy.storefront.slug import normalize_slug, validate_slug
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_validate_accepts_simple_slug():

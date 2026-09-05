@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 PG_BIN = os.environ.get("WINGMEN_PG17_BIN", "/usr/local/opt/postgresql@17/bin")
 PORT = "54330"  # distinct from tests/migrations (54329) to avoid cluster collision
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 MIGRATION_SQL = (_REPO_ROOT / "migrations" / "001_reel_inbox.sql").read_text()
 
 

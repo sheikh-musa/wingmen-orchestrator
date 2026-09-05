@@ -11,7 +11,7 @@ import logging
 
 from aiohttp import web
 
-from bot_manager import BotManager
+from legacy.bot_manager import BotManager
 
 logger = logging.getLogger("wingmen.webhook_server")
 

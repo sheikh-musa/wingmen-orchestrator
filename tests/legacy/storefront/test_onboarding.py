@@ -13,7 +13,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from storefront.onboarding import build_deep_link, register_storefront_org
+from legacy.storefront.onboarding import build_deep_link, register_storefront_org
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_build_deep_link():

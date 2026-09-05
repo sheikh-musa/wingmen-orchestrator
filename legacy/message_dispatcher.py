@@ -12,22 +12,22 @@ import re
 from telegram import Bot
 
 from ai_provider import call_ai, extract_json
-from agents.router import build_router_prompt, parse_router_response
-from bot_manager import ClientBot
-from bot_user_resolver import resolve_user, try_claim_invite, BotUser
-from group_setup import link_group
-from conversation import get_conversation, start_conversation, clear_conversation
-from permissions import can_do
-from personality import build_system_prompt
-from heartbeat import write_client_bot_heartbeat
+from legacy.agents.router import build_router_prompt, parse_router_response
+from legacy.bot_manager import ClientBot
+from legacy.bot_user_resolver import resolve_user, try_claim_invite, BotUser
+from legacy.group_setup import link_group
+from legacy.conversation import get_conversation, start_conversation, clear_conversation
+from legacy.permissions import can_do
+from legacy.personality import build_system_prompt
+from legacy.heartbeat import write_client_bot_heartbeat
 
-import handlers.order_handler as order_handler
-import handlers.qurban_handler as qurban_handler
-import handlers.site_edit_handler as site_edit_handler
-import handlers.team_handler as team_handler
-import handlers.help_handler as help_handler
+import legacy.handlers.order_handler as order_handler
+import legacy.handlers.qurban_handler as qurban_handler
+import legacy.handlers.site_edit_handler as site_edit_handler
+import legacy.handlers.team_handler as team_handler
+import legacy.handlers.help_handler as help_handler
 
-from storefront.miniapp import build_miniapp_keyboard
+from legacy.storefront.miniapp import build_miniapp_keyboard
 
 logger = logging.getLogger("wingmen.dispatcher")
 
@@ -245,7 +245,7 @@ async def dispatch(client_bot: ClientBot, update_data: dict, supabase) -> None:
 
         # --- Handle bug report ---
         if intent == "bug_report":
-            from bug_pipeline import create_bug_report
+            from legacy.bug_pipeline import create_bug_report
             await create_bug_report(
                 supabase,
                 client_id=client_bot.client_id,

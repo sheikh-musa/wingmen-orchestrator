@@ -6,12 +6,15 @@ Integration smoke test lives separately and requires PUBLISHER_E2E=1.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
 
 # ---------- publish_branch ----------
 
 @pytest.mark.asyncio
 async def test_publish_branch_pushes_with_correct_remote_and_refspec():
-    from agents.git_publisher import publish_branch
+    from legacy.agents.git_publisher import publish_branch
 
     fake_proc = MagicMock()
     fake_proc.returncode = 0
@@ -37,7 +40,7 @@ async def test_publish_branch_pushes_with_correct_remote_and_refspec():
 
 @pytest.mark.asyncio
 async def test_publish_branch_returns_failure_on_auth_error():
-    from agents.git_publisher import publish_branch
+    from legacy.agents.git_publisher import publish_branch
 
     fake_proc = MagicMock()
     fake_proc.returncode = 128
@@ -58,14 +61,14 @@ async def test_publish_branch_returns_failure_on_auth_error():
 # ---------- build_branch_name ----------
 
 def test_build_branch_name_uses_autofix_prefix_with_job_id_and_sha():
-    from agents.git_publisher import build_branch_name
+    from legacy.agents.git_publisher import build_branch_name
 
     assert build_branch_name(job_id=115, commit_sha="14ae9556e73dd63") == "autofix/job-115-14ae9556"
     assert build_branch_name(job_id=7, commit_sha="abcd") == "autofix/job-7-abcd"
 
 
 def test_build_branch_name_rejects_empty_sha():
-    from agents.git_publisher import build_branch_name
+    from legacy.agents.git_publisher import build_branch_name
 
     with pytest.raises(ValueError):
         build_branch_name(job_id=1, commit_sha="")
@@ -78,7 +81,7 @@ async def test_open_pr_queries_existing_pr_first_then_creates_if_absent():
     """Per CAI-RESP-078 GAP 2: use `gh pr list --head` to detect existing PR
     instead of regex-parsing stderr from `gh pr create`.
     """
-    from agents.git_publisher import open_pr
+    from legacy.agents.git_publisher import open_pr
 
     # First call: `gh pr list` returns empty (no existing PR).
     list_proc = MagicMock()
@@ -112,7 +115,7 @@ async def test_open_pr_queries_existing_pr_first_then_creates_if_absent():
 
 @pytest.mark.asyncio
 async def test_open_pr_returns_existing_url_when_pr_already_exists():
-    from agents.git_publisher import open_pr
+    from legacy.agents.git_publisher import open_pr
 
     # First call: `gh pr list` returns an existing URL.
     list_proc = MagicMock()
@@ -142,7 +145,7 @@ async def test_open_pr_returns_existing_url_when_pr_already_exists():
 
 @pytest.mark.asyncio
 async def test_open_pr_returns_failure_when_create_fails():
-    from agents.git_publisher import open_pr
+    from legacy.agents.git_publisher import open_pr
 
     list_proc = MagicMock()
     list_proc.returncode = 0
@@ -174,7 +177,7 @@ async def test_open_pr_returns_failure_when_create_fails():
 
 @pytest.mark.asyncio
 async def test_publish_and_open_pr_short_circuits_on_push_failure():
-    from agents.git_publisher import publish_and_open_pr
+    from legacy.agents.git_publisher import publish_and_open_pr
 
     fake_push_proc = MagicMock()
     fake_push_proc.returncode = 1
@@ -201,7 +204,7 @@ async def test_publish_and_open_pr_short_circuits_on_push_failure():
 
 @pytest.mark.asyncio
 async def test_publish_and_open_pr_happy_path():
-    from agents.git_publisher import publish_and_open_pr
+    from legacy.agents.git_publisher import publish_and_open_pr
 
     push_proc = MagicMock()
     push_proc.returncode = 0

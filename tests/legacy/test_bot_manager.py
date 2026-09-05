@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 
-from bot_manager import BotManager, compute_token_hash, ClientBot
+from legacy.bot_manager import BotManager, compute_token_hash, ClientBot
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _mock_supabase_chain(final_data):

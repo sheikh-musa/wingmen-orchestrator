@@ -7,7 +7,7 @@ without acting; the execute arm (plan Task 7) consumes the executable list.
 """
 from __future__ import annotations
 
-from ihsanos_drain.grant import GRANT_SIGNAL, GRANTED, evaluate_grant
+from legacy.ihsanos_drain.grant import GRANT_SIGNAL, GRANTED, evaluate_grant
 
 
 def candidate_query() -> tuple[str, tuple]:

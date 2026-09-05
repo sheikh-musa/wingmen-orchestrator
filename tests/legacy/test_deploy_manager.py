@@ -6,6 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import httpx
 
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
 
 def _make_resp(json_data):
     """Create a MagicMock httpx response with synchronous .json() and .raise_for_status()."""
@@ -18,7 +21,7 @@ def _make_resp(json_data):
 class TestDeploy:
     @pytest.mark.asyncio
     async def test_skips_when_no_vercel_project(self):
-        from deploy_manager import deploy
+        from legacy.deploy_manager import deploy
 
         with patch("deploy_manager.get_repo_config", return_value={"name": "test"}):
             result = await deploy("test")
@@ -26,7 +29,7 @@ class TestDeploy:
 
     @pytest.mark.asyncio
     async def test_skips_when_no_git_link(self):
-        from deploy_manager import deploy
+        from legacy.deploy_manager import deploy
 
         project_resp = _make_resp({"id": "prj_1", "link": {}})
 
@@ -42,7 +45,7 @@ class TestDeploy:
 
     @pytest.mark.asyncio
     async def test_successful_deploy(self):
-        from deploy_manager import deploy
+        from legacy.deploy_manager import deploy
 
         project_resp = _make_resp({
             "id": "prj_1",
@@ -73,7 +76,7 @@ class TestDeploy:
 
     @pytest.mark.asyncio
     async def test_deploy_url_gets_https_prefix(self):
-        from deploy_manager import deploy
+        from legacy.deploy_manager import deploy
 
         project_resp = _make_resp({
             "id": "prj_1",
@@ -101,7 +104,7 @@ class TestDeploy:
 class TestPollDeployment:
     @pytest.mark.asyncio
     async def test_returns_url_on_ready(self):
-        from deploy_manager import _poll_deployment
+        from legacy.deploy_manager import _poll_deployment
 
         resp = _make_resp({"readyState": "READY", "url": "my-app.vercel.app"})
 
@@ -115,7 +118,7 @@ class TestPollDeployment:
 
     @pytest.mark.asyncio
     async def test_raises_on_error(self):
-        from deploy_manager import _poll_deployment
+        from legacy.deploy_manager import _poll_deployment
 
         resp = _make_resp({"readyState": "ERROR", "errorMessage": "Build crashed"})
 
@@ -128,7 +131,7 @@ class TestPollDeployment:
 
     @pytest.mark.asyncio
     async def test_retries_on_http_error(self):
-        from deploy_manager import _poll_deployment
+        from legacy.deploy_manager import _poll_deployment
 
         error_resp = httpx.Response(status_code=500, request=httpx.Request("GET", "http://test"))
 

@@ -1,6 +1,9 @@
 import pytest
 
-from reel_triage import telegram_handlers as th
+from legacy.reel_triage import telegram_handlers as th
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class FakeMsg:

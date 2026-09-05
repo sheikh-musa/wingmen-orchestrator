@@ -18,7 +18,7 @@ from typing import Optional
 from supabase import AsyncClient as SupabaseAsyncClient
 
 from ai_provider import call_ai, extract_json
-from agents.diagnostic import build_diagnostic_prompt, parse_diagnostic_response
+from legacy.agents.diagnostic import build_diagnostic_prompt, parse_diagnostic_response
 import context_loader
 
 logger = logging.getLogger("wingmen.bug_pipeline")
@@ -307,7 +307,7 @@ async def _assign_auto_fix_tier(supabase: SupabaseAsyncClient, bug_id: str) -> i
 
 async def apply_fix(supabase: SupabaseAsyncClient, bug_id: str) -> None:
     """Apply the proposed fix via ralph_runner."""
-    import ralph_runner
+    import legacy.ralph_runner as ralph_runner
 
     bug = (await supabase.table("bug_reports").select("*").eq("id", bug_id).single().execute()).data
 
@@ -361,7 +361,7 @@ async def apply_fix(supabase: SupabaseAsyncClient, bug_id: str) -> None:
 
 async def deploy_fix(supabase: SupabaseAsyncClient, bug_id: str) -> None:
     """Deploy the fix after it's been applied by ralph_runner."""
-    import deploy_manager
+    import legacy.deploy_manager as deploy_manager
     import subprocess
 
     bug = (await supabase.table("bug_reports").select("*").eq("id", bug_id).single().execute()).data

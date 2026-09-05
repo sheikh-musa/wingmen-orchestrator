@@ -1,4 +1,8 @@
-from permissions import get_allowed_intents, can_do
+from legacy.permissions import get_allowed_intents, can_do
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestPermissions:

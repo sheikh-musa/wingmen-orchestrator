@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import httpx
 
-from bot_manager import BotManager, compute_token_hash
+from legacy.bot_manager import BotManager, compute_token_hash
 
 logger = logging.getLogger("wingmen.bot_onboarding")
 

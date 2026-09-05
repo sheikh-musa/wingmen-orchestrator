@@ -1,4 +1,8 @@
-from reel_triage import digest_send
+from legacy.reel_triage import digest_send
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_compose_digest_has_one_line_per_action_and_buttons(reel_db):

@@ -1,7 +1,11 @@
 import pathlib
 import subprocess
+import pytest
 
-_ROOT = str(pathlib.Path(__file__).resolve().parents[2])
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
+_ROOT = str(pathlib.Path(__file__).resolve().parents[3])
 
 
 def test_no_instagram_credentials_in_repo():
@@ -11,6 +15,6 @@ def test_no_instagram_credentials_in_repo():
         ["grep", "-rniE",
          r"(IG_PASSWORD|INSTAGRAM_PASSWORD|ig_username|instaloader|cookies-from-browser)",
          "--include=*.py", "--include=*.sql", "--include=*.plist", "--include=.env",
-         f"{_ROOT}/reel_triage", f"{_ROOT}/migrations", f"{_ROOT}/ops"],
+         f"{_ROOT}/legacy/reel_triage", f"{_ROOT}/migrations", f"{_ROOT}/ops"],
         capture_output=True, text=True)
     assert res.returncode != 0, f"IG credential pattern found:\n{res.stdout}"

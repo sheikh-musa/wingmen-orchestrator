@@ -6,7 +6,7 @@ per-merchant flow in bot_onboarding.py stays DORMANT.
 """
 from __future__ import annotations
 
-from storefront.slug import validate_slug
+from legacy.storefront.slug import validate_slug
 
 
 def build_deep_link(bot_username: str, slug: str) -> str:

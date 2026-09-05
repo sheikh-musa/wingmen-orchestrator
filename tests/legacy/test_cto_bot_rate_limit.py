@@ -2,7 +2,11 @@
 
 from unittest.mock import patch
 
-from cto_bot import check_bug_rate_limit, _bug_rate_limits, MAX_BUG_REPORTS_PER_HOUR
+from legacy.cto_bot import check_bug_rate_limit, _bug_rate_limits, MAX_BUG_REPORTS_PER_HOUR
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestBugRateLimit:

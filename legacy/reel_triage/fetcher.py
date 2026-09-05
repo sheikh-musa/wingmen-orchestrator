@@ -4,7 +4,7 @@ import glob
 import os
 import subprocess
 
-from reel_triage import config
+from legacy.reel_triage import config
 
 
 def build_ytdlp_cmd(url: str, out_path: str) -> list[str]:

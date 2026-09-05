@@ -2,7 +2,11 @@ import io
 import json
 import zipfile
 
-from reel_triage import dyi
+from legacy.reel_triage import dyi
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _zip(files: dict) -> bytes:

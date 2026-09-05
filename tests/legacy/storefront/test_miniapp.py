@@ -10,7 +10,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from storefront.miniapp import build_miniapp_keyboard, build_shop_url
+from legacy.storefront.miniapp import build_miniapp_keyboard, build_shop_url
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_build_shop_url_default_base():

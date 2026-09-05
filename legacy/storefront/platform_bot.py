@@ -9,8 +9,8 @@ from __future__ import annotations
 import logging
 import os
 
-from bot_manager import BotManager, ClientBot, compute_token_hash
-from bot_onboarding import validate_token
+from legacy.bot_manager import BotManager, ClientBot, compute_token_hash
+from legacy.bot_onboarding import validate_token
 
 logger = logging.getLogger("wingmen.storefront.platform_bot")
 

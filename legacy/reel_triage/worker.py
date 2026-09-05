@@ -7,9 +7,9 @@ import subprocess
 import tempfile
 import time
 
-from reel_triage import config, fetcher
-from reel_triage.structurer import structure
-from reel_triage.transcribe import transcribe
+from legacy.reel_triage import config, fetcher
+from legacy.reel_triage.structurer import structure
+from legacy.reel_triage.transcribe import transcribe
 
 
 def _claim(conn):
@@ -69,5 +69,5 @@ def run_forever(conn_factory):
 
 
 if __name__ == "__main__":
-    from reel_triage import db
+    from legacy.reel_triage import db
     run_forever(db.connect)

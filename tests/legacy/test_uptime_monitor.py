@@ -5,8 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from uptime_monitor import check_target, poll_uptime
+from legacy.uptime_monitor import check_target, poll_uptime
 from tests.conftest import mock_supabase_chain
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 # ---------------------------------------------------------------------------

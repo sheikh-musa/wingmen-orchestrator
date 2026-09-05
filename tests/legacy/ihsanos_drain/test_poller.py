@@ -1,4 +1,8 @@
-from ihsanos_drain.poller import inbox_query
+from legacy.ihsanos_drain.poller import inbox_query
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_inbox_query_targets_cc_ihsanos_unread_nontest():

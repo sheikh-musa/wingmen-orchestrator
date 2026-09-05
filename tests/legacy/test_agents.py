@@ -18,7 +18,7 @@ async def test_call_claude_returns_stdout():
     mock_proc.communicate.return_value = (b"  Hello world  ", b"")
 
     with patch("cto_bot.asyncio.create_subprocess_exec", return_value=mock_proc):
-        from cto_bot import _call_claude
+        from legacy.cto_bot import _call_claude
         result = await _call_claude("test prompt", tools="Read", timeout=30)
         assert result == "Hello world"
 
@@ -30,7 +30,7 @@ async def test_call_claude_returns_empty_on_no_output():
     mock_proc.communicate.return_value = (b"", b"some error")
 
     with patch("cto_bot.asyncio.create_subprocess_exec", return_value=mock_proc):
-        from cto_bot import _call_claude
+        from legacy.cto_bot import _call_claude
         result = await _call_claude("test prompt", tools="Read", timeout=30)
         assert result == ""
 
@@ -44,13 +44,13 @@ async def test_call_claude_timeout_kills_process():
     mock_proc.wait = AsyncMock()
 
     with patch("cto_bot.asyncio.create_subprocess_exec", return_value=mock_proc):
-        from cto_bot import _call_claude
+        from legacy.cto_bot import _call_claude
         result = await _call_claude("test prompt", tools="Read", timeout=1)
         assert result == ""
         mock_proc.kill.assert_called_once()
 
 
-from agents.router import build_router_prompt, parse_router_response
+from legacy.agents.router import build_router_prompt, parse_router_response
 
 
 def test_build_router_prompt_includes_repos():
@@ -92,7 +92,7 @@ def test_parse_router_response_fallback_on_invalid_intent():
     assert result["intent"] == "chat"
 
 
-from agents.brainstorm import build_brainstorm_prompt
+from legacy.agents.brainstorm import build_brainstorm_prompt
 
 
 def test_brainstorm_prompt_admin():
@@ -125,7 +125,7 @@ def test_brainstorm_prompt_client():
     assert "git" not in prompt
 
 
-from agents.fixer import build_fixer_prompt
+from legacy.agents.fixer import build_fixer_prompt
 
 
 def test_fixer_prompt_includes_issue_details():
@@ -163,7 +163,10 @@ def test_fixer_prompt_minimal_context():
     assert len(prompt) < 2000
 
 
-from agents.auditor import build_auditor_prompt, parse_auditor_response
+from legacy.agents.auditor import build_auditor_prompt, parse_auditor_response
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_auditor_prompt_includes_deploy_url():

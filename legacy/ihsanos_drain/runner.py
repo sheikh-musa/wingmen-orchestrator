@@ -311,7 +311,7 @@ def publish_drain_pr(ref: str, ruling: dict) -> dict:
     handles that. Returns {ok, pr_url, error}."""
     import asyncio
 
-    from agents.git_publisher import publish_and_open_pr
+    from legacy.agents.git_publisher import publish_and_open_pr
 
     _, branch = worktree_paths(ref)
     title = f"[drain] {ref}: {(ruling.get('decision') or '').strip()[:60]}".rstrip(": ")

@@ -1,4 +1,4 @@
-from ihsanos_drain.runner import (
+from legacy.ihsanos_drain.runner import (
     build_pr_body,
     build_prompt,
     execute_ruling,
@@ -8,6 +8,10 @@ from ihsanos_drain.runner import (
     unauthorized_migrations,
     worktree_paths,
 )
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 # ---- sanitize_ref (pure) ----
