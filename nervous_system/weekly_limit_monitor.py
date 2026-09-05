@@ -518,14 +518,16 @@ def _alert_body(p: dict, level: str) -> str:
         f"{p.get('binds')})")
 
 
-# The operator identity 'musa' has NO live wake owner (agent_wake ignores it; no
-# agent_status row), so #14988's "warn the operator DIRECTLY, not via Nazim" intent
-# silently BLACK-HOLED: 21 operator pages (7 of them P1) dead-lettered unread across
-# 08-08..09-04 (substrate audit #5). Route to orch-console — the sanctioned operator-
-# facing body (relays to Musa via nazim_send) AND a wake-eligible recipient — so the
-# page reaches someone who acts. A latency hop that DELIVERS beats a direct address
-# that does not.
-OPERATOR_AGENT = "orch-console"
+# The operator identity on the bus is 'musa'. This is NOT a dead-letter despite having
+# no agent_wake owner: it is CONSUMED by nervous_system/weekly_alert_relay.py — Nazim's
+# launchd daemon (dev.wingmen.weekly-alert-relay) that watches to_agent='musa' by a
+# durable CURSOR and pushes each ⚠️ row to the operator's phone via nazim_send.sh (direct
+# delivery, no console-inbox hop — the whole point of #14988). agent_wake eligibility is
+# NOT deliverability: a cursor relay is invisible to it. Retargeting this to orch-console
+# (substrate audit #5 / commit b72a6fe) orphaned that relay and was REVERTED — Nazim
+# 37739. The relay's watched target and this constant MUST agree; test_weekly_limit_
+# operator_target.py pins that contract so they can never drift.
+OPERATOR_AGENT = "musa"
 
 
 def _operator_body(p: dict, level: str) -> str:
