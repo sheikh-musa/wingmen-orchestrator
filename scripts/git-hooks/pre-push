@@ -1,17 +1,59 @@
 #!/usr/bin/env bash
-# pre-push — blocks pushing console/static changes without a cc-quality review
-# for the CURRENT console content (op#12457, same gate as deploy_console.sh at
-# push time). Belt to the deploy gate: no unreviewed console reaches the repo.
+# pre-push — blocks pushing console changes without a cc-quality review for the
+# CURRENT console content (op#12457, the same gate as deploy_console.sh at push time).
+# Belt to the deploy gate: no unreviewed console reaches the repo.
+#
+# It MUST hash exactly what the deploy gate reviews. It used to hand-roll a shasum over
+# only five static files, which could never equal the gate's console_content_hash
+# (~31 files: all served static + every backend *.py + the Dockerfile). So the review
+# path it looked for never existed, it blocked every push, and it was routinely bypassed
+# with --no-verify — a dead belt (substrate audit 2026-09-05 #2). Now it SOURCES the SSOT
+# manifest and uses console_content_hash, so hook-hash == gate-hash by construction; and
+# it inspects the REAL pushed range from stdin (not the old HEAD~1..HEAD) over the full
+# gated file set (not just static/).
 set -uo pipefail
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
-STATIC=nervous_system/console/static
-# Only enforce if the last commit touched console static (the common ship flow).
-if git diff --quiet HEAD~1 HEAD -- "$STATIC" 2>/dev/null; then exit 0; fi
-HASH=$(cat "$STATIC"/fleet.html "$STATIC"/fleet.js "$STATIC"/lanes.html "$STATIC"/lanes.js "$STATIC"/sw.js 2>/dev/null | shasum -a 256 | cut -c1-16)
+
+# SSOT: the identical file set + content hash the deploy_console gate uses.
+MANIFEST="$ROOT/scripts/lib/console_deploy_manifest.sh"
+# shellcheck source=/dev/null
+. "$MANIFEST"
+
+# The gated file set as repo-relative pathspecs (served static + backend *.py + Dockerfile).
+# bash-3.2-safe array fill (no mapfile — macOS ships bash 3.2).
+GATED=()
+while IFS= read -r _f; do
+  [ -n "$_f" ] && GATED+=("$_f")
+done < <(console_deploy_files_rel "$ROOT")
+
+# Did any PUSHED commit touch a gated file? git streams one line per ref being pushed on
+# stdin: "<local_ref> <local_sha> <remote_ref> <remote_sha>". Enforce only when gated
+# content actually changed in the range remote_sha..local_sha (avoid re-triggering review
+# on unrelated pushes). A brand-new remote ref (remote_sha all-zeros) is compared against
+# the empty tree, so any gated content on it requires a review (safe default).
+ZERO="0000000000000000000000000000000000000000"
+EMPTY_TREE="$(git hash-object -t tree /dev/null)"
+changed=0
+while read -r _lref _lsha _rref _rsha; do
+  [ -z "${_lsha:-}" ] && continue
+  [ "$_lsha" = "$ZERO" ] && continue          # branch deletion — nothing to gate
+  base="$_rsha"; [ "$_rsha" = "$ZERO" ] && base="$EMPTY_TREE"
+  if ! git diff --quiet "$base" "$_lsha" -- "${GATED[@]}" 2>/dev/null; then
+    changed=1
+  fi
+done
+[ "$changed" -eq 0 ] && exit 0
+
+# Console content changed in this push — require a cc-quality review for THIS exact content.
+HASH="$(console_content_hash "$ROOT")"
+if [ -z "$HASH" ]; then
+  echo "❌ pre-push BLOCKED — could not compute console content hash (manifest seam)." >&2
+  exit 1
+fi
 REVIEW="reports/console-deploy/$HASH/cc-quality-review.md"
 if [ ! -s "$REVIEW" ]; then
   echo "" >&2
-  echo "❌ pre-push BLOCKED — console/static changed but no cc-quality review for content $HASH." >&2
+  echo "❌ pre-push BLOCKED — console content changed but no cc-quality review for content $HASH." >&2
   echo "   The design-verification gate is enforced in code (op#12457). Do:" >&2
   echo "     scripts/deploy_console.sh   # renders + tells you exactly what to review" >&2
   echo "   eyeball the renders, save the cc-quality review to $REVIEW, then push." >&2
