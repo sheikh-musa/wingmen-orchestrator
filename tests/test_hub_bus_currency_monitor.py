@@ -72,21 +72,21 @@ M = 60.0  # seconds per minute
 
 
 def test_session_deaf_when_host_up_silent_and_work_waiting():
-    v, _ = m.classify_session_liveness(lease_fresh=True, last_turn_age_s=60 * M,
+    v, _ = m.classify_session_liveness(lease_fresh=True, last_activity_age_s=60 * M,
                                        work_waiting=True, threshold_s=45 * M)
     assert v == "session_deaf"
 
 
 def test_quiet_hub_with_no_work_waiting_is_ok():
     # host up, no turn in an hour, but NOTHING waiting — a legitimately idle hub, not deaf. No page.
-    v, _ = m.classify_session_liveness(lease_fresh=True, last_turn_age_s=60 * M,
+    v, _ = m.classify_session_liveness(lease_fresh=True, last_activity_age_s=60 * M,
                                        work_waiting=False, threshold_s=45 * M)
     assert v == "ok"
 
 
 def test_recently_turning_hub_is_ok_even_with_work():
     # turned 10m ago -> alive and reconciling; not deaf even though work is queued.
-    v, _ = m.classify_session_liveness(lease_fresh=True, last_turn_age_s=10 * M,
+    v, _ = m.classify_session_liveness(lease_fresh=True, last_activity_age_s=10 * M,
                                        work_waiting=True, threshold_s=45 * M)
     assert v == "ok"
 
@@ -94,7 +94,7 @@ def test_recently_turning_hub_is_ok_even_with_work():
 def test_lease_not_fresh_is_host_down_not_this_check():
     # host itself is down -> fleet_health_lease reclaim's job, NOT the session-deaf page (avoid
     # double-signalling; this check is specifically the alive-host/dead-session hole).
-    v, _ = m.classify_session_liveness(lease_fresh=False, last_turn_age_s=99 * M,
+    v, _ = m.classify_session_liveness(lease_fresh=False, last_activity_age_s=99 * M,
                                        work_waiting=True, threshold_s=45 * M)
     assert v == "host_down"
 
@@ -120,7 +120,7 @@ class _FakeCur:
 
 def test_session_deaf_page_writes_p1_to_both_recipients():
     cur = _FakeCur()
-    sent = m._page_session_deaf(cur, last_turn_age_s=90 * 60.0, reason="host up, no turn 90m")
+    sent = m._page_session_deaf(cur, last_activity_age_s=90 * 60.0, reason="host up, no turn 90m")
     assert sent == len(m.RECIPIENTS) == 2
     assert len(cur.inserts) == 2
     for sql, params in cur.inserts:
@@ -135,3 +135,28 @@ def test_session_deaf_dedup_queries_the_marker():
     m._already_paged_session_deaf(cur, 150)
     sql, params = cur.last
     assert "HUB SESSION-DEAF:%" in sql and params[0] == m.SRE_FROM
+
+
+# ── fix (2026-09-05 false positive): liveness = FRESHEST of the hub's session signals, not just
+#    the agent-bus turn. The hub goes >45m without a bus turn while alive+working the operator
+#    channel; its ctx-publish (jsonl-growing) stays fresh. Feed the min age so bus-quiet≠deaf. ──
+def test_freshest_age_takes_the_minimum_non_none():
+    assert m._freshest_age([73 * 60, 39 * 60]) == 39 * 60
+    assert m._freshest_age([None, 39 * 60]) == 39 * 60
+    assert m._freshest_age([73 * 60, None]) == 73 * 60
+    assert m._freshest_age([None, None]) is None
+
+
+def test_bus_quiet_but_ctx_publish_fresh_is_not_deaf():
+    # THE false positive: no agent-bus turn for 73m, but ctx-publish 39m fresh (session alive via
+    # the operator channel). Fed the FRESHEST activity age (39m) -> OK even with work queued.
+    v, _ = m.classify_session_liveness(lease_fresh=True, last_activity_age_s=39 * 60,
+                                       work_waiting=True, threshold_s=45 * 60)
+    assert v == "ok"
+
+
+def test_both_signals_stale_with_work_is_still_deaf():
+    # the REAL incident shape: bus AND ctx-publish both stale (session truly stuck) + work waiting.
+    v, _ = m.classify_session_liveness(lease_fresh=True, last_activity_age_s=90 * 60,
+                                       work_waiting=True, threshold_s=45 * 60)
+    assert v == "session_deaf"
