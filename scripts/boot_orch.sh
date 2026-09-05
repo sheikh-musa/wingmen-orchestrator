@@ -109,7 +109,15 @@ fi
 # 'wingmen-orchestrator' repo_scope token). Best-effort: a DB blip must not block
 # the boot. The write goes through the hardened identity trigger, so we SET the
 # app.current_agent_id GUC in-txn (mirrors launch_dangerous_cc.sh).
-if [[ -x "$ORCH_DIR/.venv/bin/python3" ]]; then
+if [ "${ORCH_BODY_ROLE:-}" = "console" ]; then
+    # audit #1B (Nazim 37658): a CONSOLE-role boot must NOT write the hub's liveness row.
+    # This body supervises the 'nazim' session; its OWN agent_status row is orch-console
+    # (written by boot_nazim). The cc-orchestrator row belongs to the VPS hub — the Mini
+    # writing it (tmux_session=nazim, host=Sheikhs-Mini) is exactly the false hub-liveness
+    # signal this fix removes. hub liveness is now the orch_lease (singleton_liveness /
+    # hub_alive_evidence), not this row.
+    log "console role — NOT self-registering the cc-orchestrator hub row (audit #1B)."
+elif [[ -x "$ORCH_DIR/.venv/bin/python3" ]]; then
     "$ORCH_DIR/.venv/bin/python3" - "$SESSION" <<'PYREG' || log "agent_status self-register skipped (best-effort)"
 import os, sys, socket, psycopg
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -148,6 +156,9 @@ log "session '$SESSION' is live — waiting for it to exit"
 # identity trigger, BUG-024/ARCH-035) — mirrors the console fix (boot_nazim cdc9131).
 HB_EVERY_SEC="${ORCH_HB_EVERY_SEC:-300}"
 _hub_db() {  # $1 = beat | offline — best-effort, never breaks the boot
+    # audit #1B: a console-role boot NEVER touches the cc-orchestrator hub row (no beat,
+    # no offline-EXIT marker). Its liveness is the orch_lease, not this Mini heartbeat.
+    [ "${ORCH_BODY_ROLE:-}" = "console" ] && return 0
     [[ -x "$ORCH_DIR/.venv/bin/python3" ]] || return 0
     "$ORCH_DIR/.venv/bin/python3" - "${1:-beat}" <<'PYHB' 2>/dev/null || true
 import os, sys, psycopg
