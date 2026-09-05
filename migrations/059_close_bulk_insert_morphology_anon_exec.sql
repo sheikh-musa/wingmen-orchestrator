@@ -1,0 +1,67 @@
+-- 059_close_bulk_insert_morphology_anon_exec.sql
+-- ledger: silo=tscuymavysscrvoberrr
+-- assert: no_execute anon public.bulk_insert_morphology(jsonb)
+-- assert: no_execute authenticated public.bulk_insert_morphology(jsonb)
+--
+-- The SECURITY INVOKER sibling of migration 058 (CAI-RESP-1396). 058 closed
+-- the SECDEF/anon-exec-primitive half of the anon-exec gap
+-- (fetch_and_execute_sql, load_all_morphology_batches, 8 unpinned SECDEF
+-- functions) and explicitly deferred bulk_insert_morphology(jsonb) to this
+-- migration on orch-console's ruling (msg 37820): it's SECURITY INVOKER, not
+-- SECDEF, so it belongs to the INVOKER-anon-EXECUTE track, not 058's scope.
+-- Musa's original GO (op_msg 19181, "clear what we can") covers this closure
+-- too. Applied via scripts/apply_migration.py 059 --silo
+-- tscuymavysscrvoberrr (direct psycopg — NEVER `supabase db push`, decision
+-- 962).
+--
+-- HONEST SCOPE: this migration closes ONLY bulk_insert_morphology(jsonb).
+-- It is NOT the broader "anon holds default DML on 66 tables, masked by
+-- RLS rather than revoked" gap the 2026-09-05 substrate audit flagged
+-- separately (§3-H) — that is a distinct, much larger-blast-radius track
+-- (orch-console, msg 37835) that needs its own cai/cc-quality scoping pass
+-- (per-table RLS-vs-grant assessment, client-silo impact) before anything
+-- is touched. Do not read a clean apply of 059 as progress on that sweep.
+--
+-- WHAT THIS DOES, AND WHY IT'S SAFE:
+--
+-- REVOKE EXECUTE ON bulk_insert_morphology(jsonb) FROM PUBLIC, anon,
+-- authenticated. The function (owner postgres, SECURITY INVOKER — verified:
+-- prosecdef=false) loops a jsonb array and INSERTs each element into
+-- word_morphology; it does not call fetch_and_execute_sql or any dangerous
+-- primitive, but anon/authenticated-EXECUTE on an unrestricted bulk-INSERT
+-- into a real table is its own exposure (arbitrary row injection,
+-- independent of whatever RLS/DML grants govern word_morphology directly,
+-- since a SECURITY INVOKER function still requires the CALLER to have
+-- table-level INSERT — verified below that removing EXECUTE is the correct
+-- lever here, not a table-grant question).
+--
+-- PUBLIC IS IN THE REVOKE LIST — the exact F2 lesson from 058: a REVOKE
+-- naming only anon/authenticated would leave the function fully executable
+-- via PUBLIC's own separate grant record (verified via
+-- information_schema.role_routine_grants: 5 distinct grantee rows —
+-- PUBLIC/postgres/anon/authenticated/service_role, all granted by
+-- postgres — the identical shape to 058's load_all_morphology_batches
+-- finding). The `-- assert: no_execute anon ...` line below will FAIL and
+-- roll back this migration if PUBLIC is ever left out, so this is
+-- enforced by the tool, not just this comment.
+--
+-- CALLER-SAFETY CONFIRMATION:
+--   - service_role and postgres each hold their OWN separate EXECUTE grant
+--     (information_schema.role_routine_grants) — untouched by this REVOKE.
+--   - Zero references to bulk_insert_morphology anywhere in this repo
+--     (grep, excl .venv/reports/logs).
+--   - Zero pg_cron jobs reference it (SELECT ... FROM cron.job).
+--   - Zero other in-DB functions, views, or triggers reference it (grepped
+--     every regular function's pg_get_functiondef + pg_views.definition).
+--   - word_morphology already holds 77,429 rows — the bulk-ingest this
+--     function exists for has already happened; it is one-time historical
+--     tooling, not an ongoing API surface. If the morphology dataset ever
+--     needs a re-ingest or an addition, that should run as service_role
+--     (unaffected by this REVOKE), not via an anon-callable RPC.
+--   - This orchestrator checkout cannot see whether a separate frontend/
+--     PostgREST-facing repo calls this RPC name directly — called out
+--     rather than assumed clean, same caveat as 058; flagged for
+--     cc-quality's cross-repo visibility during review.
+
+REVOKE EXECUTE ON FUNCTION public.bulk_insert_morphology(jsonb)
+  FROM PUBLIC, anon, authenticated;
