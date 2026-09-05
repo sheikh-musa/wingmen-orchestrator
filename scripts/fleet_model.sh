@@ -107,6 +107,6 @@ if [ "$LIVE" -eq 1 ]; then
   done < <(tmux ls -F '#{session_name}' 2>/dev/null || true)
   echo "Live flip: $flipped flipped, $skipped skipped."
 else
-  echo "  To apply to RUNNING lanes: re-run with --live, or restart lanes (scripts/lanes.sh up),"
+  echo "  To apply to RUNNING lanes: re-run with --live, or restart a lane (scripts/lanes.sh up <lane>),"
   echo "  or type '/model $FULL' in each live session."
 fi
