@@ -75,6 +75,40 @@ See `supabase/migrations/20260521_active_loops_parent_pid.sql` for the canonical
 
 Advisories don't block the apply — they're operator-visible signals. A blocking advisory upgrades the cost of opt-out enough that future ops respect the convention.
 
+## Convention 5: Privilege-revoke assertions (CAI-RESP-1397 #5)
+
+A `REVOKE` run by a role that never granted the privilege it's targeting is
+a **silent no-op** — verified against a real Postgres: every new function
+grants EXECUTE to PUBLIC by default, so `REVOKE EXECUTE ON FUNCTION f()
+FROM anon` when `anon` was never granted it *directly* has nothing of
+anon's to remove; PUBLIC still makes the function fully executable, and the
+migration "succeeds" having changed nothing. cc-quality wet-proved exactly
+this class of defect on a real migration.
+
+`scripts/apply_migration.py` now enforces the fix in code:
+
+```sql
+-- assert: no_execute anon public.fetch_and_execute_sql(text)
+-- assert: search_path public.get_decision(text)
+-- assert: dropped public.fetch_and_execute_sql(text)
+```
+
+One `-- assert:` line per (role, function) pair, checked **inside the same
+transaction**, immediately after the migration body runs, before the
+ledger insert:
+
+| kind | passes when |
+|---|---|
+| `no_execute` | `has_function_privilege(role, fn, 'EXECUTE')` is `false` |
+| `search_path` | `pg_proc.proconfig` for `fn` has an entry starting `search_path=` |
+| `dropped` | `to_regprocedure(fn) IS NULL` |
+
+Any assertion failing rolls back the whole migration and names the exact
+pair that failed — a privilege-revoke migration can no longer "succeed"
+without proving its effect. **Required, not optional:** a migration body
+containing `REVOKE` or `DROP FUNCTION` with zero `-- assert:` lines refuses
+to apply at all.
+
 ## Backfill policy
 
 The 5 migrations that currently use `ARRAY[]::text[]` are NOT being backfilled (would require diffing committed migrations against `pg_get_viewdef` for each one). New migrations forward-apply the convention.
