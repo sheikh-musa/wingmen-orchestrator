@@ -234,3 +234,33 @@ def test_armed_worker_lane_with_all_gates_permits():
         "cc-worker-lane",
         {"idle": True, "git_clean": True, "fresh_handoff": True},
         slr._resolve_armed(no_arm=False, env_lane_arm=None), identity=slr.fhb.SRE_AGENT_ID)
+
+
+# ── worker-lanes-first staged arming (Nazim 37793): the executor's ACTION scope can exclude
+#    client-lane prefixes; discover_lanes stays unfiltered so the dead-man still watches all. ──
+def _rows(*bases):
+    return [{"base_agent_id": b, "lane": b, "tmux_session": b} for b in bases]
+
+
+def test_apply_lane_scope_excludes_client_prefixes():
+    lanes = _rows("cc-substrate", "cc-ihsanos", "cc-cosem-adcda", "cc-irsyad-coord",
+                  "cc-shipforge", "cc-storefront", "cc-finance", "cc-quality")
+    kept = [r["base_agent_id"] for r in
+            slr.apply_lane_scope(lanes, ["cc-irsyad", "cc-cosem", "cc-shipforge", "cc-storefront"])]
+    assert kept == ["cc-substrate", "cc-ihsanos", "cc-finance", "cc-quality"]
+
+
+def test_apply_lane_scope_empty_exclude_keeps_all():
+    # the all-lanes end-state (Musa 37752): no exclusions -> every lane in scope.
+    lanes = _rows("cc-substrate", "cc-cosem-adcda", "cc-irsyad")
+    assert slr.apply_lane_scope(lanes, []) == lanes
+
+
+def test_excluded_prefixes_parses_env(monkeypatch):
+    monkeypatch.setenv("SRE_LANE_EXCLUDE_PREFIXES", " cc-irsyad , cc-cosem ,, cc-shipforge ")
+    assert slr._excluded_prefixes() == ["cc-irsyad", "cc-cosem", "cc-shipforge"]
+
+
+def test_excluded_prefixes_unset_is_empty(monkeypatch):
+    monkeypatch.delenv("SRE_LANE_EXCLUDE_PREFIXES", raising=False)
+    assert slr._excluded_prefixes() == []

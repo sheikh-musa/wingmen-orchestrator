@@ -362,6 +362,25 @@ def discover_lanes(conn, lane: "str | None" = None) -> list:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def _excluded_prefixes() -> list:
+    """Base-agent-id prefixes the executor's ACTION scope excludes, from SRE_LANE_EXCLUDE_PREFIXES
+    (comma-separated). Empty when unset — the all-lanes end-state (Musa 37752). Worker-lanes-first
+    staged arming sets it to the client prefixes (Nazim 37793)."""
+    raw = os.environ.get("SRE_LANE_EXCLUDE_PREFIXES", "")
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def apply_lane_scope(lanes: list, exclude_prefixes: list) -> list:
+    """Drop lanes whose base_agent_id starts with any excluded prefix. This scopes only what the
+    EXECUTOR acts on; discover_lanes stays unfiltered so the dead-man still watches EVERY lane (a
+    bloated client lane must still page even while auto-recycle is worker-lanes-only). Empty
+    exclude list => no filtering."""
+    if not exclude_prefixes:
+        return lanes
+    return [lr for lr in lanes
+            if not any(str(lr["base_agent_id"]).startswith(p) for p in exclude_prefixes)]
+
+
 def armed_recycle(conn, lane_row: dict, *, reason: str,
                   handoff_ref_epoch: "float | None" = None) -> dict:
     """The armed checkpoint-recycle ACTION on ONE specific lane_row, in-process. Re-verifies the
@@ -444,12 +463,15 @@ def main() -> int:
         print("no DATABASE_URL", file=sys.stderr); return 2
     conn = psycopg.connect(dsn)
 
-    lanes = discover_lanes(conn, args.lane)
+    exclude = _excluded_prefixes()
+    all_lanes = discover_lanes(conn, args.lane)
+    lanes = apply_lane_scope(all_lanes, exclude)
 
     require_bloat = not args.ignore_context
+    scope = f"worker-only (excluding {','.join(exclude)})" if exclude else "all lanes"
     print(f"SRE lane-recycle — {'ARMED' if armed else 'DETECT-ONLY (disarmed)'} — "
           f"trigger={'>=' + str(int(_CTX_HARD * 100)) + '% context' if require_bloat else 'wedged (context ignored)'} — "
-          f"{len(lanes)} lane(s) · {datetime.now(timezone.utc).isoformat()}")
+          f"scope={scope} — {len(lanes)}/{len(all_lanes)} lane(s) · {datetime.now(timezone.utc).isoformat()}")
     acted = 0
     for lr in lanes:
         p = plan(conn, lr, armed, require_bloat=require_bloat,
