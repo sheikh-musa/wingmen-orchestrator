@@ -1,4 +1,8 @@
-from reel_triage import links
+from legacy.reel_triage import links
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_extracts_shortcode_from_reel_url():

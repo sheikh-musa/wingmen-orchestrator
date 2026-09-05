@@ -8,7 +8,10 @@ import re
 
 import pytest
 
-import spec_generator
+import legacy.spec_generator as spec_generator
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 REPO = str(pathlib.Path(__file__).resolve().parent.parent)  # this repo has an origin
 

@@ -15,7 +15,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import watchdog
+import legacy.watchdog as watchdog
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _mock_viewdef(view_def: str):

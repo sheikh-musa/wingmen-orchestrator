@@ -1,4 +1,8 @@
-from ihsanos_drain.granted_work import candidate_query, summarize
+from legacy.ihsanos_drain.granted_work import candidate_query, summarize
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_candidate_query_filters_granted_signal():

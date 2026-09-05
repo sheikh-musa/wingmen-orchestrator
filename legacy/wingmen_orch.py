@@ -20,18 +20,18 @@ from supabase import acreate_client
 from aiohttp import web
 
 import context_loader
-import spec_generator
-import ralph_runner
-import deploy_manager
-import status_reporter
+import legacy.spec_generator as spec_generator
+import legacy.ralph_runner as ralph_runner
+import legacy.deploy_manager as deploy_manager
+import legacy.status_reporter as status_reporter
 import test_gate
-import build_audit
-import semantic_drift
+import legacy.build_audit as build_audit
+import legacy.semantic_drift as semantic_drift
 from nervous_system.bug_escalation import check_stale_bugs
 from nervous_system.paused_job_escalation import check_paused_jobs
 from nervous_system.paused_jobs_retry_policy import run_paused_jobs_retry_policy
 from nervous_system.queue_stall_detector import check_queue_stalls
-from bug_pipeline import poll_undiagnosed_bugs
+from legacy.bug_pipeline import poll_undiagnosed_bugs
 from nervous_system.conversation_cleanup import cleanup_expired_conversations
 from nervous_system.council_summary import summarize_pending_sessions
 from nervous_system.council_relay import relay_council_messages
@@ -49,7 +49,7 @@ from nervous_system.qa_bridge import poll_qa_findings
 from nervous_system.repo_context_writer import update_repo_contexts
 from nervous_system.orch_self_audit import run_orch_audit
 from nervous_system.deploy_verifier import run_deploy_verifier
-from uptime_monitor import poll_uptime
+from legacy.uptime_monitor import poll_uptime
 from nervous_system.schema_gate import check_and_block as schema_gate_check
 from nervous_system.archive import run_archive
 from nervous_system.wingmen_dream import run_dream
@@ -61,7 +61,7 @@ from nervous_system.ecosystem_auditor import (
     run_six_hour_gates,
     run_daily_gates,
 )
-from heartbeat import write_orchestrator_heartbeat
+from legacy.heartbeat import write_orchestrator_heartbeat
 from nervous_system.swallowed_except_harness import record_swallowed
 from nervous_system.long_running_claude_callers import (
     sweep_manifests as _lrcc_sweep_manifests,
@@ -1601,9 +1601,9 @@ async def run_job(supabase, job: dict) -> None:
 
 async def start_webhook_server(supabase):
     """Start the webhook server for client bots."""
-    from bot_manager import BotManager
-    from webhook_server import create_webhook_app
-    from message_dispatcher import dispatch
+    from legacy.bot_manager import BotManager
+    from legacy.webhook_server import create_webhook_app
+    from legacy.message_dispatcher import dispatch
 
     bot_manager = BotManager()
     count = await bot_manager.load_all(supabase)
@@ -1612,7 +1612,7 @@ async def start_webhook_server(supabase):
         await bot_manager.register_all_webhooks()
         logger.info(f"Registered webhooks for {count} client bots")
 
-    from storefront.platform_bot import load_platform_bot
+    from legacy.storefront.platform_bot import load_platform_bot
     platform_bot = await load_platform_bot(bot_manager)
     if platform_bot:
         logger.info(f"Registered shared platform bot @{platform_bot.bot_username}")
@@ -1679,7 +1679,7 @@ async def main_loop():
         logger.info("Webhook server started")
         # Share bot_manager with cto_bot for onboarding
         try:
-            from cto_bot import set_bot_manager
+            from legacy.cto_bot import set_bot_manager
             set_bot_manager(_bot_manager)
         except Exception as e:
             record_swallowed("set_bot_manager_import", e)

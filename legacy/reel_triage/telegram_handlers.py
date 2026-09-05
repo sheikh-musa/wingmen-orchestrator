@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from reel_triage import config, digest, dyi, ingest, links
+from legacy.reel_triage import config, digest, dyi, ingest, links
 
 MUSA_TG_ID = int(os.environ.get("MUSA_TELEGRAM_ID", "0"))
 

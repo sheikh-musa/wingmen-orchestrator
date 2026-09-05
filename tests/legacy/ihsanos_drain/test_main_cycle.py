@@ -1,6 +1,10 @@
 from collections import namedtuple
 
-from ihsanos_drain.main import run_cycle
+from legacy.ihsanos_drain.main import run_cycle
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 _Out = namedtuple("_Out", "ruling_ref status detail tokens_spent")
 

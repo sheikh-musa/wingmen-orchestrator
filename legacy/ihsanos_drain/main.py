@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import os
 
-from ihsanos_drain.granted_work import candidate_query, summarize
-from ihsanos_drain.kill_switch import drain_disabled
-from ihsanos_drain.poller import inbox_query
-from ihsanos_drain.report import build_report_row
+from legacy.ihsanos_drain.granted_work import candidate_query, summarize
+from legacy.ihsanos_drain.kill_switch import drain_disabled
+from legacy.ihsanos_drain.poller import inbox_query
+from legacy.ihsanos_drain.report import build_report_row
 
 
 def _execute_enabled() -> bool:
@@ -95,8 +95,8 @@ def make_executor(cur, *, caller_name: str):
     """Build the real per-ruling executor (worktree -> claude -> migration gate
     -> local pre-push CI -> open PR), recording spend + posting an outcome report.
     IO boundary — the decision logic it drives is unit-tested in test_runner."""
-    from ihsanos_drain import runner
-    from ihsanos_drain.token_budget import record_spend_sql
+    from legacy.ihsanos_drain import runner
+    from legacy.ihsanos_drain.token_budget import record_spend_sql
 
     def _execute(ruling: dict):
         ref = ruling.get("decision_ref", "(unknown)")

@@ -7,10 +7,13 @@ publishing only happens once the commit has survived the gates.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
 
 @pytest.mark.asyncio
 async def test_publish_job_commit_constructs_canonical_branch_name():
-    from ralph_runner import publish_job_commit
+    from legacy.ralph_runner import publish_job_commit
 
     rev_parse_proc = MagicMock()
     rev_parse_proc.returncode = 0
@@ -51,7 +54,7 @@ async def test_publish_job_commit_constructs_canonical_branch_name():
 
 @pytest.mark.asyncio
 async def test_publish_job_commit_propagates_push_failure():
-    from ralph_runner import publish_job_commit
+    from legacy.ralph_runner import publish_job_commit
 
     rev_parse_proc = MagicMock()
     rev_parse_proc.returncode = 0

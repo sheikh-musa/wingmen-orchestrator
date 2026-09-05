@@ -4,7 +4,7 @@ import io
 import json
 import zipfile
 
-from reel_triage import links
+from legacy.reel_triage import links
 
 
 def _walk_strings(obj):

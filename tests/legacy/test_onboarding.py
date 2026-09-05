@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 
-from bot_onboarding import validate_token, get_default_commands, configure_bot
+from legacy.bot_onboarding import validate_token, get_default_commands, configure_bot
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestValidateToken:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from reel_triage import config
+from legacy.reel_triage import config
 
 
 def top_actions(conn, n: int = config.DIGEST_TOP_N) -> list[dict]:

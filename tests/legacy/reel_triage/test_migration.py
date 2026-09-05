@@ -1,6 +1,9 @@
 import psycopg
 import pytest
 
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
 
 def test_status_defaults_to_inbox(reel_db):
     cur = reel_db.cursor()

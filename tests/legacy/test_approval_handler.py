@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("MUSA_TELEGRAM_ID", "123456")
 
-from approval_handler import get_eligible_approvers, build_approval_message, build_full_diagnosis_message, Approver
+from legacy.approval_handler import get_eligible_approvers, build_approval_message, build_full_diagnosis_message, Approver
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestEligibleApprovers:

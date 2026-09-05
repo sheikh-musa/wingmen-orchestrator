@@ -1,4 +1,8 @@
-from reel_triage import digest
+from legacy.reel_triage import digest
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _triaged(reel_db, code, prio):

@@ -1,4 +1,8 @@
-from ihsanos_drain.kill_switch import drain_disabled
+from legacy.ihsanos_drain.kill_switch import drain_disabled
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_enabled_when_flag_unset(monkeypatch):

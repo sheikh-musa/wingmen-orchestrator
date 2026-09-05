@@ -1,6 +1,9 @@
 import pytest
 
-from reel_triage import config
+from legacy.reel_triage import config
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_effort_weight_mapping():

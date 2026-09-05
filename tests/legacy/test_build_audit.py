@@ -5,7 +5,10 @@ from unittest.mock import patch, AsyncMock
 import pytest
 
 from tests.conftest import mock_supabase_chain
-import build_audit
+import legacy.build_audit as build_audit
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 @pytest.fixture

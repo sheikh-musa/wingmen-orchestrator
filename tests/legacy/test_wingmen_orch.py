@@ -9,6 +9,9 @@ import pytest
 
 from tests.conftest import mock_supabase_chain
 
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
 
 # RALPH_RUNNER_ENABLED gate (added in PR #24): _ralph_runner_enabled() reads
 # this env var on every call and short-circuits pick_next_jobs to [] when
@@ -23,7 +26,7 @@ class TestRalphRunnerEnabledGate:
 
     @pytest.mark.asyncio
     async def test_gate_disabled_returns_empty_without_db_call(self):
-        from wingmen_orch import pick_next_jobs
+        from legacy.wingmen_orch import pick_next_jobs
         sb = MagicMock()
         sb.table = MagicMock()  # any DB call would fail this assertion below
         with patch.dict(os.environ, {"RALPH_RUNNER_ENABLED": "false"}, clear=False):
@@ -33,7 +36,7 @@ class TestRalphRunnerEnabledGate:
 
     @pytest.mark.asyncio
     async def test_gate_enabled_proceeds_to_db_query(self):
-        from wingmen_orch import pick_next_jobs
+        from legacy.wingmen_orch import pick_next_jobs
         sb = mock_supabase_chain([])
         with patch.dict(os.environ, {"RALPH_RUNNER_ENABLED": "true"}, clear=False):
             result = await pick_next_jobs(sb, set(), max_picks=3)
@@ -44,7 +47,7 @@ class TestRalphRunnerEnabledGate:
 class TestPickNextJobs:
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_queued_jobs(self):
-        from wingmen_orch import pick_next_jobs
+        from legacy.wingmen_orch import pick_next_jobs
 
         sb = mock_supabase_chain([])
         result = await pick_next_jobs(sb, set(), max_picks=3)
@@ -52,7 +55,7 @@ class TestPickNextJobs:
 
     @pytest.mark.asyncio
     async def test_picks_one_job_per_repo(self):
-        from wingmen_orch import pick_next_jobs
+        from legacy.wingmen_orch import pick_next_jobs
 
         jobs = [
             {"id": 1, "repo_name": "ihsandms", "status": "queued"},
@@ -72,7 +75,7 @@ class TestPickNextJobs:
 
     @pytest.mark.asyncio
     async def test_skips_repos_with_running_jobs(self):
-        from wingmen_orch import pick_next_jobs
+        from legacy.wingmen_orch import pick_next_jobs
 
         jobs = [
             {"id": 1, "repo_name": "ihsandms", "status": "queued"},
@@ -89,7 +92,7 @@ class TestPickNextJobs:
 
     @pytest.mark.asyncio
     async def test_respects_max_picks(self):
-        from wingmen_orch import pick_next_jobs
+        from legacy.wingmen_orch import pick_next_jobs
 
         jobs = [
             {"id": 1, "repo_name": "ihsandms", "status": "queued"},
@@ -106,7 +109,7 @@ class TestPickNextJobs:
 
     @pytest.mark.asyncio
     async def test_skips_job_when_cas_claim_fails(self):
-        from wingmen_orch import pick_next_jobs
+        from legacy.wingmen_orch import pick_next_jobs
 
         jobs = [
             {"id": 1, "repo_name": "ihsandms", "status": "queued"},
@@ -124,7 +127,7 @@ class TestPickNextJobs:
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_max_picks_zero(self):
-        from wingmen_orch import pick_next_jobs
+        from legacy.wingmen_orch import pick_next_jobs
 
         sb = mock_supabase_chain([])
         result = await pick_next_jobs(sb, set(), max_picks=0)
@@ -150,7 +153,7 @@ class TestMainLoopConcurrency:
 
     @pytest.mark.asyncio
     async def test_respects_max_concurrent_builds(self):
-        from wingmen_orch import pick_next_jobs, MAX_CONCURRENT_BUILDS
+        from legacy.wingmen_orch import pick_next_jobs, MAX_CONCURRENT_BUILDS
 
         sb = mock_supabase_chain()
 
@@ -175,7 +178,7 @@ class TestMainLoopConcurrency:
 class TestRecoverStaleJobs:
     @pytest.mark.asyncio
     async def test_requeues_stale_jobs(self):
-        from wingmen_orch import recover_stale_jobs
+        from legacy.wingmen_orch import recover_stale_jobs
 
         stale_jobs = [{"id": 10, "repo_name": "ihsandms"}]
         sb = MagicMock()
@@ -196,7 +199,7 @@ class TestRecoverStaleJobs:
 
     @pytest.mark.asyncio
     async def test_no_stale_jobs_no_update(self):
-        from wingmen_orch import recover_stale_jobs
+        from legacy.wingmen_orch import recover_stale_jobs
 
         sb = MagicMock()
         sb.table.return_value = sb
@@ -210,7 +213,7 @@ class TestRecoverStaleJobs:
 
     @pytest.mark.asyncio
     async def test_exception_does_not_crash(self):
-        from wingmen_orch import recover_stale_jobs
+        from legacy.wingmen_orch import recover_stale_jobs
 
         sb = MagicMock()
         sb.table.return_value = sb
@@ -225,7 +228,7 @@ class TestRecoverStaleJobs:
 class TestCleanupZombieJobs:
     @pytest.mark.asyncio
     async def test_marks_zombie_jobs_failed(self):
-        from wingmen_orch import cleanup_zombie_jobs
+        from legacy.wingmen_orch import cleanup_zombie_jobs
 
         zombie_jobs = [{"id": 5, "repo_name": "ihsandms"}]
         sb = MagicMock()
@@ -247,7 +250,7 @@ class TestCleanupZombieJobs:
 
     @pytest.mark.asyncio
     async def test_no_zombies_no_update(self):
-        from wingmen_orch import cleanup_zombie_jobs
+        from legacy.wingmen_orch import cleanup_zombie_jobs
 
         sb = MagicMock()
         sb.table.return_value = sb
@@ -261,7 +264,7 @@ class TestCleanupZombieJobs:
 
     @pytest.mark.asyncio
     async def test_exception_does_not_crash(self):
-        from wingmen_orch import cleanup_zombie_jobs
+        from legacy.wingmen_orch import cleanup_zombie_jobs
 
         sb = MagicMock()
         sb.table.return_value = sb
@@ -277,7 +280,7 @@ class TestCleanupZombieJobs:
         """TASK-033 spec deviation #3 fix (per CC-UPDATE-015).
         Without fail_count bumps, a repeatedly-zombied job never hits
         the 3-fail pause threshold — flaps forever."""
-        from wingmen_orch import cleanup_zombie_jobs
+        from legacy.wingmen_orch import cleanup_zombie_jobs
 
         zombie_jobs = [{"id": 5, "repo_name": "ihsandms", "fail_count": 2}]
         sb = MagicMock()
@@ -298,7 +301,7 @@ class TestCleanupZombieJobs:
 class TestSetJobStatus:
     @pytest.mark.asyncio
     async def test_sets_status_with_extras(self):
-        from wingmen_orch import set_job_status
+        from legacy.wingmen_orch import set_job_status
 
         sb = mock_supabase_chain([])
         await set_job_status(sb, job_id=42, status="completed", result_summary="OK")
@@ -313,7 +316,7 @@ class TestSetJobStatus:
 class TestEnsureRepo:
     @pytest.mark.asyncio
     async def test_skips_when_path_exists(self, tmp_path):
-        from wingmen_orch import _ensure_repo
+        from legacy.wingmen_orch import _ensure_repo
 
         repo_dir = tmp_path / "myrepo"
         repo_dir.mkdir()
@@ -324,7 +327,7 @@ class TestEnsureRepo:
 
     @pytest.mark.asyncio
     async def test_clones_when_missing(self, tmp_path):
-        from wingmen_orch import _ensure_repo
+        from legacy.wingmen_orch import _ensure_repo
 
         repo_dir = tmp_path / "newrepo"
 
@@ -343,7 +346,7 @@ class TestEnsureRepo:
 class TestGitPull:
     @pytest.mark.asyncio
     async def test_skips_when_no_git_dir(self, tmp_path):
-        from wingmen_orch import _git_pull
+        from legacy.wingmen_orch import _git_pull
 
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             await _git_pull(str(tmp_path))
@@ -351,7 +354,7 @@ class TestGitPull:
 
     @pytest.mark.asyncio
     async def test_pulls_when_git_exists(self, tmp_path):
-        from wingmen_orch import _git_pull
+        from legacy.wingmen_orch import _git_pull
 
         (tmp_path / ".git").mkdir()
 
@@ -371,7 +374,7 @@ class TestGitPull:
 class TestGitPush:
     @pytest.mark.asyncio
     async def test_skips_when_no_changes(self):
-        from wingmen_orch import _git_push
+        from legacy.wingmen_orch import _git_push
 
         mock_proc = AsyncMock()
         mock_proc.returncode = 0
@@ -385,7 +388,7 @@ class TestGitPush:
 
     @pytest.mark.asyncio
     async def test_commits_and_pushes_changes(self):
-        from wingmen_orch import _git_push
+        from legacy.wingmen_orch import _git_push
 
         status_proc = AsyncMock()
         status_proc.returncode = 0
@@ -419,7 +422,7 @@ class TestGitPush:
 class TestRunJob:
     @pytest.mark.asyncio
     async def test_successful_job_full_pipeline(self, sample_job):
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         sb = mock_supabase_chain([])
 
@@ -466,7 +469,7 @@ class TestRunJob:
 
     @pytest.mark.asyncio
     async def test_failed_job_requeues(self, sample_job):
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         sb = mock_supabase_chain([])
         sample_job["fail_count"] = 0
@@ -500,7 +503,7 @@ class TestRunJob:
 
     @pytest.mark.asyncio
     async def test_failed_job_pauses_after_max_failures(self, sample_job):
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         sb = mock_supabase_chain([])
         sample_job["fail_count"] = 2
@@ -536,7 +539,7 @@ class TestRunJob:
 
     @pytest.mark.asyncio
     async def test_job_crash_sets_failure_status(self, sample_job):
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         sb = mock_supabase_chain([])
         sample_job["fail_count"] = 0
@@ -556,37 +559,37 @@ class TestRunJob:
 
 class TestAutoccPollGate:
     def test_default_enabled(self, monkeypatch):
-        from wingmen_orch import _autocc_poll_enabled
+        from legacy.wingmen_orch import _autocc_poll_enabled
         monkeypatch.delenv("AUTOCC_POLL_ENABLED", raising=False)
         assert _autocc_poll_enabled() is True
 
     def test_explicit_true(self, monkeypatch):
-        from wingmen_orch import _autocc_poll_enabled
+        from legacy.wingmen_orch import _autocc_poll_enabled
         monkeypatch.setenv("AUTOCC_POLL_ENABLED", "true")
         assert _autocc_poll_enabled() is True
 
     def test_disabled_via_false(self, monkeypatch):
-        from wingmen_orch import _autocc_poll_enabled
+        from legacy.wingmen_orch import _autocc_poll_enabled
         monkeypatch.setenv("AUTOCC_POLL_ENABLED", "false")
         assert _autocc_poll_enabled() is False
 
     def test_disabled_via_zero(self, monkeypatch):
-        from wingmen_orch import _autocc_poll_enabled
+        from legacy.wingmen_orch import _autocc_poll_enabled
         monkeypatch.setenv("AUTOCC_POLL_ENABLED", "0")
         assert _autocc_poll_enabled() is False
 
     def test_disabled_via_off(self, monkeypatch):
-        from wingmen_orch import _autocc_poll_enabled
+        from legacy.wingmen_orch import _autocc_poll_enabled
         monkeypatch.setenv("AUTOCC_POLL_ENABLED", "OFF")
         assert _autocc_poll_enabled() is False
 
     def test_case_insensitive(self, monkeypatch):
-        from wingmen_orch import _autocc_poll_enabled
+        from legacy.wingmen_orch import _autocc_poll_enabled
         monkeypatch.setenv("AUTOCC_POLL_ENABLED", "False")
         assert _autocc_poll_enabled() is False
 
     def test_unrecognized_value_treats_as_enabled(self, monkeypatch):
         """Default-safe: unknown values keep the legacy behaviour."""
-        from wingmen_orch import _autocc_poll_enabled
+        from legacy.wingmen_orch import _autocc_poll_enabled
         monkeypatch.setenv("AUTOCC_POLL_ENABLED", "maybe")
         assert _autocc_poll_enabled() is True

@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 
-from invite_manager import generate_invite_code, build_deep_link, create_invite
+from legacy.invite_manager import generate_invite_code, build_deep_link, create_invite
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class TestInviteCode:

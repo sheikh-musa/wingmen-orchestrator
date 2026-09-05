@@ -12,7 +12,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from message_dispatcher import _handle_storefront_start, _resolve_storefront_slug
+from legacy.message_dispatcher import _handle_storefront_start, _resolve_storefront_slug
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 class _FakeResult:

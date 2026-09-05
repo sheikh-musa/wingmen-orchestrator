@@ -13,7 +13,10 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from bug_pipeline import _detect_is_test
+from legacy.bug_pipeline import _detect_is_test
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 load_dotenv()
 _DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")

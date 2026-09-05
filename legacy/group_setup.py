@@ -7,7 +7,7 @@ import logging
 import httpx
 from telegram import Bot
 
-from bot_onboarding import get_default_commands
+from legacy.bot_onboarding import get_default_commands
 
 logger = logging.getLogger("wingmen.group_setup")
 

@@ -7,20 +7,23 @@ import pytest
 
 from tests.conftest import mock_supabase_chain
 
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
 
 class TestFormatElapsed:
     def test_seconds_only(self):
-        from status_reporter import _format_elapsed
+        from legacy.status_reporter import _format_elapsed
 
         assert _format_elapsed(45) == "45s"
 
     def test_minutes_and_seconds(self):
-        from status_reporter import _format_elapsed
+        from legacy.status_reporter import _format_elapsed
 
         assert _format_elapsed(125) == "2m 5s"
 
     def test_zero(self):
-        from status_reporter import _format_elapsed
+        from legacy.status_reporter import _format_elapsed
 
         assert _format_elapsed(0) == "0s"
 
@@ -28,7 +31,7 @@ class TestFormatElapsed:
 class TestNotifyProgress:
     @pytest.mark.asyncio
     async def test_sends_to_admin(self):
-        from status_reporter import notify_progress
+        from legacy.status_reporter import notify_progress
 
         sb = mock_supabase_chain([])
 
@@ -47,7 +50,7 @@ class TestNotifyProgress:
 
     @pytest.mark.asyncio
     async def test_skips_without_token(self, monkeypatch):
-        from status_reporter import notify_progress
+        from legacy.status_reporter import notify_progress
 
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
 
@@ -62,7 +65,7 @@ class TestNotifyProgress:
 
     @pytest.mark.asyncio
     async def test_dedup_skips_duplicate(self):
-        from status_reporter import notify_progress
+        from legacy.status_reporter import notify_progress
 
         existing = [{"id": 99}]
         sb = mock_supabase_chain(existing)
@@ -80,7 +83,7 @@ class TestNotifyProgress:
 class TestUpdateStatusMd:
     @pytest.mark.asyncio
     async def test_writes_fresh_status(self, tmp_path):
-        from status_reporter import _update_status_md
+        from legacy.status_reporter import _update_status_md
 
         job = {
             "id": 42,
@@ -100,7 +103,7 @@ class TestUpdateStatusMd:
 
     @pytest.mark.asyncio
     async def test_preserves_existing_content(self, tmp_path):
-        from status_reporter import _update_status_md
+        from legacy.status_reporter import _update_status_md
 
         status_file = tmp_path / "STATUS.md"
         status_file.write_text("# Old\n## Next Up\n- Fix bug\n- Add tests\n## Other\nstuff\n")
@@ -128,7 +131,7 @@ class TestStatusMdPreservation:
 
     @pytest.mark.asyncio
     async def test_preserves_content_above_marker(self, tmp_path):
-        from status_reporter import _update_status_md
+        from legacy.status_reporter import _update_status_md
 
         status_file = tmp_path / "STATUS.md"
         hand_written = "# My Project\n\nImportant context here.\n\n## Architecture\nDetails about the system.\n"
@@ -146,7 +149,7 @@ class TestStatusMdPreservation:
 
     @pytest.mark.asyncio
     async def test_appends_marker_when_missing(self, tmp_path):
-        from status_reporter import _update_status_md
+        from legacy.status_reporter import _update_status_md
 
         status_file = tmp_path / "STATUS.md"
         original = "# My Project\n\nHand-written content only.\n"
@@ -163,7 +166,7 @@ class TestStatusMdPreservation:
 
     @pytest.mark.asyncio
     async def test_limits_job_rows_to_10(self, tmp_path):
-        from status_reporter import _update_status_md
+        from legacy.status_reporter import _update_status_md
 
         status_file = tmp_path / "STATUS.md"
         existing_rows = "\n".join([f"| #{i} | Job {i} desc | green | N/A |" for i in range(1, 13)])
@@ -187,7 +190,7 @@ class TestStatusMdPreservation:
 
     @pytest.mark.asyncio
     async def test_never_overwrites_entire_file(self, tmp_path):
-        from status_reporter import _update_status_md
+        from legacy.status_reporter import _update_status_md
 
         status_file = tmp_path / "STATUS.md"
         lines = [f"Line {i}: important project context" for i in range(50)]

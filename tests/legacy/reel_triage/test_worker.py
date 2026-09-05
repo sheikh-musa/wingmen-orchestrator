@@ -1,6 +1,10 @@
 import subprocess
 
-from reel_triage import worker
+from legacy.reel_triage import worker
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _insert(reel_db, code):

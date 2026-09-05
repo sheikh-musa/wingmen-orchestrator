@@ -10,7 +10,10 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import ralph_runner
+import legacy.ralph_runner as ralph_runner
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 @pytest.fixture

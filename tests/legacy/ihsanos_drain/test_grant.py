@@ -1,9 +1,13 @@
-from ihsanos_drain.grant import (
+from legacy.ihsanos_drain.grant import (
     GRANTED,
     REFUSED_MIGRATION,
     REPORT_ONLY,
     evaluate_grant,
 )
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _row(**kw):

@@ -15,7 +15,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ralph_runner import _create_worktree, _merge_and_remove_worktree
+from legacy.ralph_runner import _create_worktree, _merge_and_remove_worktree
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def _make_git_repo(path: Path) -> None:

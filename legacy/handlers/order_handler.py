@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import httpx
 from ai_provider import call_ai, extract_json
-from conversation import ConversationState, start_conversation, update_conversation, clear_conversation
+from legacy.conversation import ConversationState, start_conversation, update_conversation, clear_conversation
 
 logger = logging.getLogger("wingmen.handlers.order")
 

@@ -1,4 +1,8 @@
-from reel_triage import config, fetcher
+from legacy.reel_triage import config, fetcher
+import pytest
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_ytdlp_command_has_no_cookies():

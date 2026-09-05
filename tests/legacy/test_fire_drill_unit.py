@@ -19,6 +19,9 @@ import pytest
 
 from tests.conftest import mock_supabase_chain
 
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
+
 
 def _drill_mocks(tmp_path):
     """Context manager yielding a namespace of all mocked subsystems.
@@ -112,7 +115,7 @@ class TestFireDrill:
 
     @pytest.mark.asyncio
     async def test_drill_happy_path(self, tmp_path):
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         ns = _drill_mocks(tmp_path)
         with ns["stack"]:
@@ -141,7 +144,7 @@ class TestFireDrill:
 
     @pytest.mark.asyncio
     async def test_drill_test_gate_failure(self, tmp_path):
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         ns = _drill_mocks(tmp_path)
         with ns["stack"]:
@@ -183,7 +186,7 @@ class TestFireDrill:
         recoverability check against a real repo (stash actually preserves
         the file), see tests/test_auto_stash_recovery.py (STRONG).
         """
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         ns = _drill_mocks(tmp_path)
         with ns["stack"]:
@@ -216,7 +219,7 @@ class TestFireDrill:
 
     @pytest.mark.asyncio
     async def test_drill_build_crash_pauses(self, tmp_path):
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         ns = _drill_mocks(tmp_path)
         with ns["stack"]:
@@ -243,7 +246,7 @@ class TestFireDrill:
 
     @pytest.mark.asyncio
     async def test_drill_schema_gate_blocks(self, tmp_path):
-        from wingmen_orch import run_job
+        from legacy.wingmen_orch import run_job
 
         ns = _drill_mocks(tmp_path)
         with ns["stack"]:

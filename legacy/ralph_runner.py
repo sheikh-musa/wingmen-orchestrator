@@ -559,7 +559,7 @@ async def publish_job_commit(
     Per CAI-RESP-078 GAP 1: branch name is autofix/job-<id>-<short_sha>
     to preempt collisions.
     """
-    from agents.git_publisher import (
+    from legacy.agents.git_publisher import (
         PublisherResult, build_branch_name, publish_and_open_pr,
     )
 

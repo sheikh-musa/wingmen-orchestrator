@@ -9,7 +9,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from wingmen_orch import _cancel_pending_tasks
+from legacy.wingmen_orch import _cancel_pending_tasks
+
+pytestmark = pytest.mark.skip(reason="op#19103 item 4: retired with wingmen_orch.py, see legacy/README.md")
+
 
 
 def test_cancel_pending_tasks_cancels_background_task():
