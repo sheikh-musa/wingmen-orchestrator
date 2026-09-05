@@ -159,6 +159,70 @@ trap '_console_boot_exit' EXIT
 # waiter (op#7004). Default = Opus 4.8 (parity with the hub orch + cai). A caller
 # --model in "$@" still comes later on argv and wins (claude last-wins parsing).
 NAZIM_MODEL="${NAZIM_MODEL:-claude-opus-4-8}"
+
+# ── SELF-FIRING RECONSTITUTION KICK (operator-caught 2026-09-05, op_msg 19154:
+# "again you are recycling without reconstituting") ──────────────────────────────
+# A fresh KILL+RELAUNCH (this path) lands claude at the welcome banner with the
+# SessionStart hook's reconstitution CONTEXT loaded but NO turn started — the body
+# then sits IDLE at the welcome screen until an EXTERNAL nudge (a bus item or an
+# operator DM) happens to arrive and kick a turn. That external-nudge dependency IS
+# the "recycling without reconstituting" the operator kept catching: a quiet inbox
+# leaves a fresh console idle indefinitely (and the operator had to poke it himself).
+# The in-place reset_nazim.sh path already send-keys an explicit boot kick after its
+# /clear; this relaunch path never had one. So background a one-shot that waits for
+# the banner to paint, confirms no turn already started (reusing the fleet's ONE busy
+# definition so we never send-keys into a live turn — the jam hazard reset_nazim
+# guards against), takes the same fire-window lock the nudgers consult (so a nudge
+# can't interleave mid-kick), then send-keys a single kick that starts reconstitution
+# on its own. Backgrounded CHILD of this script (dies with the body); fires at most
+# once. NAZIM_SELF_KICK=0 disables it (e.g. an operator attaching to drive by hand).
+_RECON_KICK="[boot] Fresh console relaunch — begin your reconstitution NOW, do not wait for a nudge. Per the auto-injected reconstitution context: verify your model + token, read the newest reports/nazim-handoff-*.md IN FULL (its FINAL STATE block first) then CLAUDE.md, reconcile BOTH inboxes (operator_log.unprocessed() AND agent_messages to_agent='orch-console'), answer the operator ONLY via scripts/nazim_send.sh and stamp handled, then drive the board."
+_self_kick() {
+    # This runs in a backgrounded subshell that inherited the main shell's
+    # _console_boot_exit EXIT trap (marks the console OFFLINE). Clear it FIRST — when
+    # THIS subshell exits (right after firing) we must NOT mark the live console
+    # offline; only fire_window's own release should run on our exit.
+    trap - EXIT
+    local tm pane i sess
+    tm="$(command -v tmux || true)"; [ -x "$tm" ] || tm=/usr/local/bin/tmux
+    sess="${ORCH_TMUX_SESSION:-nazim}"
+    pane="${sess}:0.0"
+    # Wait up to ~50s for claude's welcome banner to paint (it is then ready for input).
+    for i in $(seq 1 25); do
+        sleep 2
+        "$tm" capture-pane -t "$pane" -p 2>/dev/null | grep -qE 'Claude Code v[0-9]' && break
+    done
+    if ! "$tm" capture-pane -t "$pane" -p 2>/dev/null | grep -qE 'Claude Code v[0-9]'; then
+        echo "[boot_nazim] self-kick: banner never appeared within ~50s — NOT firing (claude may not be up)" >&2
+        return 0
+    fi
+    # Take the host-wide fire-window lock the nudgers consult, so none can send-keys
+    # into the pane between our text and its Enter. Self-expiring (TTL) + released on
+    # this subshell's EXIT — a crash can never leave the pane quiesced.
+    if [ -r "$ORCH_DIR/scripts/lib/fire_window.sh" ]; then
+        . "$ORCH_DIR/scripts/lib/fire_window.sh" 2>/dev/null || true
+        declare -f fire_window_hold >/dev/null 2>&1 && fire_window_hold "$sess" 60 "boot_nazim self-kick" 2>/dev/null || true
+    fi
+    # Reuse the fleet's ONE busy definition: if an external nudge already started a
+    # turn (before our lock), the pane is BUSY -> skip; it is already reconstituting,
+    # and we must not send-keys into a live turn.
+    if [ -r "$ORCH_DIR/scripts/lib/composer_capture.sh" ]; then
+        . "$ORCH_DIR/scripts/lib/composer_capture.sh" 2>/dev/null || true
+        if declare -f pane_busy >/dev/null 2>&1; then
+            pane_busy "$tm" "$pane"
+            if [ "${CC_BUSY:-0}" = 1 ]; then
+                echo "[boot_nazim] self-kick: pane already BUSY (${CC_BUSY_REASON:-turn in progress}) — a turn is already running, not double-firing" >&2
+                return 0
+            fi
+        fi
+    fi
+    "$tm" send-keys -t "$pane" -l "$_RECON_KICK"
+    sleep 1
+    "$tm" send-keys -t "$pane" Enter
+    echo "[boot_nazim] self-kick fired — fresh body reconstituting without waiting for an external nudge"
+}
+if [ "${NAZIM_SELF_KICK:-1}" = 1 ]; then _self_kick & fi
+
 echo "[boot_nazim] $(date '+%H:%M:%S') launching $CLAUDE_BIN as ${ORCH_AGENT_ID:-orch-console} (body=${ORCH_BODY_ROLE:-?}, session=${ORCH_TMUX_SESSION:-?}, model=$NAZIM_MODEL)"
 # FOREGROUND (was `exec`): this shell must survive claude to own the heartbeat loop and
 # fire the EXIT trap (dead-man's-switch). When claude exits, the trap stops the heartbeat
