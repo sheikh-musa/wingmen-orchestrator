@@ -8,15 +8,18 @@
        renewing (healthy-looking), and the P0/P1-only SLA-watchdog missed the P2/P3 backlog.
        ANY-PRIORITY check: flags if the hub has an unread older than HUB_BUS_STALE_HOURS (2.5h).
        FIRES NO reset, NO nudge — pages orch-console + cc-fleet-health only (deduped 150m).
-       Peer of the SLA daemon. HUB_BUS_MONITOR_ENABLED=1 arms the page (else INERT/detect-only).
-       Nazim-approved (#28837); load after the diff is eyeballed. -->
+       Peer of the SLA daemon. HUB_BUS_MONITOR_ENABLED=1 arms the bus-drain page (else INERT).
+       Nazim-approved (#28837); load after the diff is eyeballed.
+       HUB_SESSION_DEAF_ENABLED=1 arms the SECOND check — alive-host/dead-session (Nazim 37823,
+       4f464c1): pages when the host is up (lease fresh) but the hub's last real turn is >45m old
+       while work waits — the gzb OAuth-login-screen hole the lease/heartbeat can't see. -->
   <key>Label</key>
   <string>dev.wingmen.hub-bus-currency-monitor</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; export HUB_BUS_MONITOR_ENABLED=1 &amp;&amp; exec .venv/bin/python3 -m scripts.hub_bus_currency_monitor</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; export HUB_BUS_MONITOR_ENABLED=1 &amp;&amp; export HUB_SESSION_DEAF_ENABLED=1 &amp;&amp; exec .venv/bin/python3 -m scripts.hub_bus_currency_monitor</string>
   </array>
   <key>StartInterval</key>
   <integer>1800</integer>
