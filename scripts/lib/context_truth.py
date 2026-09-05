@@ -123,19 +123,7 @@ def resolve(
         and gauge_age_s <= max_gauge_age_s
     )
 
-    ppct = None
-    psource = None
-    if pane_pct is not None:
-        try:
-            v = int(pane_pct)
-            if 0 < v <= 100:
-                ppct, psource = v, "pane-pct"
-        except (TypeError, ValueError):
-            pass
-    if ppct is None and pane_hint_k is not None:
-        v = _pct_from_tokens(float(pane_hint_k) * 1000 if _is_num(pane_hint_k) else None, window)
-        if v is not None:
-            ppct, psource = v, "pane-hint"
+    ppct, psource = _pane_reading(pane_pct, pane_hint_k, window)
 
     disagreement = abs(ppct - gpct) if (ppct is not None and gauge_fresh) else None
 
@@ -170,6 +158,78 @@ def resolve(
         "UNKNOWN — no readable signal from either the pane or the gauge. "
         "Report it; do NOT treat as clear.",
     )
+
+
+def _pane_reading(pane_pct, pane_hint_k, window: int):
+    """(pct, source) from the pane: an explicit `{N}% context used` wins, else the
+    `/clear to save {N}k` hint mapped through the window. (None, None) if neither is readable."""
+    if pane_pct is not None:
+        try:
+            v = int(pane_pct)
+            if 0 < v <= 100:
+                return v, "pane-pct"
+        except (TypeError, ValueError):
+            pass
+    if pane_hint_k is not None and _is_num(pane_hint_k):
+        v = _pct_from_tokens(float(pane_hint_k) * 1000, window)
+        if v is not None:
+            return v, "pane-hint"
+    return None, None
+
+
+def lane_fire_reading(
+    gauge_tokens=None,
+    gauge_age_s=None,
+    pane_pct=None,
+    pane_hint_k=None,
+    window: int = DEFAULT_WINDOW,
+    max_gauge_age_s: int = DEFAULT_MAX_GAUGE_AGE_S,
+) -> ContextTruth:
+    """GAUGE-FIRST reading for the auto-recycle FIRE decision (bus 37752, op#19141).
+
+    The inverse precedence of resolve(): here the FRESH gauge is the single source that
+    DECIDES, and the pane is a cross-check that only LOGS disagreement — never decides.
+    A stale/unreadable gauge is UNKNOWN: the caller PAGES and never assumes quiet, and a
+    live pane reading (however high) does NOT rescue it into a fire verdict — it only gets
+    carried into the reason so the page is actionable. This is the operator's rule for the
+    recycle path; resolve() (pane-first) stays the reading for the console DISPLAY.
+
+    Failure modes are complementary and both handled: the gauge freezes on an idle lane
+    (staleness cutoff => UNKNOWN, not a frozen-low "green"); the pane is blind at ~94%
+    (which is exactly why the gauge, not the pane, decides here).
+    """
+    gpct = _pct_from_tokens(gauge_tokens, window)
+    gauge_fresh = (
+        gpct is not None
+        and gauge_age_s is not None
+        and gauge_age_s <= max_gauge_age_s
+    )
+    ppct, psource = _pane_reading(pane_pct, pane_hint_k, window)
+
+    if gauge_fresh:
+        disagreement = abs(ppct - gpct) if ppct is not None else None
+        reason = f"gauge={gpct}% (age {gauge_age_s}s)"
+        if disagreement is not None and disagreement > DISAGREE_PCT:
+            reason += (f"; {psource}={ppct}% disagrees by {disagreement}pp — the gauge decides "
+                       f"(pane is a cross-check); large gap = mis-map or a just-recycled body "
+                       f"whose gauge still carries the dead session's final reading")
+        return ContextTruth(gpct, _level(gpct), "gauge", True, disagreement, reason)
+
+    # Gauge is not a usable current reading -> UNKNOWN. Never fire, never assume quiet.
+    if gpct is not None:
+        reason = (f"UNKNOWN — gauge is stale (age {gauge_age_s}s > {max_gauge_age_s}s, "
+                  f"last read {gpct}%); cannot prove current fill")
+    elif gauge_tokens is not None:
+        reason = (f"UNKNOWN — gauge is unreadable (bad data: {gauge_tokens} tokens vs "
+                  f"{window} window); cannot measure")
+    else:
+        reason = "UNKNOWN — no gauge reading available; cannot measure"
+    if ppct is not None:
+        reason += (f". Pane reads {ppct}% ({psource}) — cross-check only, the pane never "
+                   f"decides the fire; PAGE this lane rather than recycle it blind")
+    else:
+        reason += ". PAGE this lane rather than assume it is quiet."
+    return ContextTruth(None, None, None, False, None, reason)
 
 
 def _is_num(v) -> bool:
