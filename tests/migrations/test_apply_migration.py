@@ -107,6 +107,104 @@ def test_strip_txn_control_leaves_survivor_and_refuses():
         am.strip_txn_control(body)
 
 
+# --------------------------------------------------------------------------------
+# Dollar-quote-aware scanning (fleet bug, cc-cosem-exams 2026-09-06): a bare
+# "end;" closing a plpgsql BEGIN...END block inside $$...$$ is idiomatic and
+# must NOT be mistaken for top-level transaction control.
+# --------------------------------------------------------------------------------
+
+def test_strip_txn_control_keeps_bare_end_inside_bare_dollar_quote():
+    body = (
+        "CREATE FUNCTION foo() RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  PERFORM 1;\n"
+        "end;\n"
+        "$$ LANGUAGE plpgsql;\n"
+    )
+    result = am.strip_txn_control(body)
+    assert result == body.rstrip("\n")
+
+
+def test_strip_txn_control_keeps_bare_end_inside_tagged_dollar_quote():
+    body = (
+        "CREATE FUNCTION foo() RETURNS void AS $body$\n"
+        "BEGIN\n"
+        "end;\n"
+        "$body$ LANGUAGE plpgsql;\n"
+    )
+    result = am.strip_txn_control(body)
+    assert result == body.rstrip("\n")
+
+
+def test_strip_txn_control_handles_a_different_tag_nested_as_literal_content():
+    # A $$-tagged literal appearing INSIDE an $outer$-tagged function body is
+    # just text to the outer quote (this is exactly what named tags are for) —
+    # the "end;" inside the literal's own text must not confuse the scanner,
+    # and the function's own closing "end;" (outside the literal, still
+    # inside $outer$) must also be preserved.
+    body = (
+        "CREATE FUNCTION gen_sql() RETURNS text AS $outer$\n"
+        "BEGIN\n"
+        "  RETURN $$ some literal text with END; inside $$;\n"
+        "end;\n"
+        "$outer$ LANGUAGE plpgsql;\n"
+    )
+    result = am.strip_txn_control(body)
+    assert result == body.rstrip("\n")
+
+
+def test_strip_txn_control_still_refuses_bare_end_outside_any_dollar_quote():
+    body = "create table a (id int);\nEND;\n"
+    with pytest.raises(am.Refuse, match="survived the strip"):
+        am.strip_txn_control(body)
+
+
+def test_strip_txn_control_still_refuses_rollback_after_a_dollar_quoted_function():
+    body = (
+        "CREATE FUNCTION foo() RETURNS void AS $$\n"
+        "BEGIN\n"
+        "end;\n"
+        "$$ LANGUAGE plpgsql;\n"
+        "ROLLBACK;\n"
+    )
+    with pytest.raises(am.Refuse, match="survived the strip"):
+        am.strip_txn_control(body)
+
+
+def test_strip_txn_control_still_strips_top_level_begin_commit_around_a_function():
+    body = (
+        "BEGIN;\n"
+        "CREATE FUNCTION foo() RETURNS void AS $$\n"
+        "BEGIN\n"
+        "end;\n"
+        "$$ LANGUAGE plpgsql;\n"
+        "COMMIT;\n"
+    )
+    result = am.strip_txn_control(body)
+    assert "BEGIN;" not in result.splitlines()
+    assert "COMMIT;" not in result.splitlines()
+    assert "end;" in result.splitlines()  # the plpgsql body's own end; survives, untouched
+
+
+def test_apply_migration_with_idiomatic_plpgsql_function_body(ledger_db, tmp_path):
+    """End-to-end: a real plpgsql function whose body ends on a bare 'end;'
+    line must apply cleanly, not false-refuse (the exact reported bug)."""
+    f = _write(
+        tmp_path, "001_make_fn.sql",
+        "CREATE FUNCTION widget_count() RETURNS integer AS $$\n"
+        "BEGIN\n"
+        "  RETURN 42;\n"
+        "end;\n"
+        "$$ LANGUAGE plpgsql;",
+    )
+    result = am.apply_migration(ledger_db, f, silo=SILO)
+    assert result["status"] == "applied"
+
+    with psycopg.connect(ledger_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT widget_count()")
+        assert cur.fetchone()[0] == 42
+
+
 def test_apply_new_migration_ledgers_in_same_transaction(ledger_db, tmp_path):
     f = _write(tmp_path, "001_make_widgets.sql", "create table widgets (id int);", silo=SILO)
     result = am.apply_migration(ledger_db, f, silo=SILO)
