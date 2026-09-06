@@ -1,0 +1,44 @@
+# cc-substrate handoff (self-authored, deliberate recycle at ~75% context — 2026-09-06)
+
+## You are cc-substrate
+Sub-tag `cc-substrate-1`. Dedicated substrate-cleanup lane booted by orch-console (Nazim) under op#19103. Worktree `/Users/sheikhmusa/wingmen/projects/orchestrator.wt-cleanup`, tmux session `substrate-cleanup`, branch `lane/substrate-cleanup` off `origin/fable/substrate-safe-fixes` (the DEPLOYED trunk — NOT `main`). You report to orch-console via attributable `agent_messages` rows (`from_agent=cc-substrate`, `to_agent=orch-console`); every PR is a `review_request` to Nazim. Original mandate: `agent_messages` id 37652 (CLAUDE.md fleet doctrine §ORCH-TOPOLOGY-001 + `/Users/sheikhmusa/wingmen/orchestrator/reports/substrate-ihsanification-audit-2026-09-05.md` §3-D "Duplication rot" + §6 Phase 3).
+
+## Bottom line — right now
+The original 5-item work order is COMPLETE and shipped: PR#84, #85, #86, #87, #88, #89, #90, #91, #92 all opened; **#84 already merged (25fba6b)**. Nazim also assigned three follow-on items beyond the original 5, all COMPLETE and merged: PR#93 (assert-header mechanism, merged 83a11dd — Nazim delegated the merge to me), PR#94 (migration 058, merged e0a053a), PR#95 (migration 059, merged 3842268), PR#96 (dollar-quote fix, merged 4821410 — merge delegated to me again).
+
+**Only-in-my-context, first on boot:** the remaining 8 PRs — **#85, #86, #87, #88, #89, #90, #91, #92** — are all rebased clean onto the current fable tip (post-4821410) and mergeable=CLEAN, but they are **explicitly on orch-console's gate, NOT mine to merge** (his msg 37969: "do NOT merge them yourself; they're on MY gate"). He's waiting on the hub's merge-sequencing confirmation (his own msg #37957) before firing them. Your first action on boot: reconcile the bus (below), then re-verify all 8 are still rebased on whatever the current fable tip is (fable moves fast — other agents land unrelated commits constantly; rebase+push each one with `--force-with-lease` if it's drifted, same pattern you've been running all session) and confirm nothing needs your action beyond staying current for his fire.
+
+## Reconcile first
+`SELECT * FROM agent_messages WHERE to_agent='cc-substrate' AND read_at IS NULL ORDER BY id` — answer anything unread, then `UPDATE agent_messages SET read_at = now() WHERE id IN (...)` for what you've actually read (never a blind max-id sweep). At recycle time the inbox was clear (nothing unread) — but that was true right up until this instant, so check again, it's cheap.
+
+## The 8 held PRs — one line each, in your proposed merge order
+Order proposed to Nazim (msg to him, no id captured but content is this): **#85 → #86 → #87 → #88 → #89 → #90 → #92 → #91**. Rationale: #85 is the only one touching `CLAUDE.md`, so first; #86/#87 (orphan scripts) and #88/#89/#90 (the 44-appliers-to-1 consolidation, kept contiguous as one logical set) are all independent zero-file-overlap deletions (verified via `gh pr diff --name-only` on every pair — genuinely zero conflicts regardless of order, this is pure risk sequencing); #92 after the appliers batches since its migration-header comments narratively reference them as "deleted PR #88/#89/#90"; #91 (the 130-file `legacy/` move) last — biggest diff, safest once everything smaller has proven clean.
+
+- **PR #85** (`substrate-cleanup/retire-bridges`) — deletes `tg_bridge.py`/`cai_bridge.py`/`irsyad_support_bridge.py`/`cc_cai_daemon/` + their 4 plists; touches `CLAUDE.md:54` (tombstone edit) and `nervous_system/operator_log.py` (docstring fix). Gate-passed by Nazim.
+- **PR #86** (`substrate-cleanup/orphans-batch-a`) — 8 zero-ref `scripts/*` deletions. Gate-passed.
+- **PR #87** (`substrate-cleanup/orphans-batch-b`) — 8 more. Gate-passed.
+- **PR #88/#89/#90** (`substrate-cleanup/appliers-batch-{1,2,3}`) — the 44 one-off `apply_*.py` deleted (43 files + `backfill_migration_ledger.py`), each PR body carries a read-only `migration_ledger` coverage census Nazim asked for. All gate-passed; his own follow-up backlog (unledgered migrations, the number collisions 020/021/022/037/043) is HIS, not yours.
+- **PR #91** (`substrate-cleanup/legacy-move`) — 27 root files + `agents/`/`handlers/`/`ihsanos_drain/`/`reel_triage/`/`storefront/` + `run_reel_digest.py` (added on review, msg 37702, after Nazim caught it dangling) moved to `legacy/`. Two commits (pure `git mv`, then import-fix). `pytest tests/legacy/ --collect-only` was 374/0 errors at last check. Gate-passed WITH the amendment applied and re-verified (msg 37755 confirmed PASS).
+- **PR #92** (`substrate-cleanup/docs-registry-truth`) — `scripts/lanes.sh` reads `fleet_lanes` now (no more hardcoded 3-lane list, no bare `up`); `STATUS.md` archived to `docs/status-history.md`; `HANDOFF_TO_DANGEROUS_CC.md` deleted; `docs/README.md` status index over all 80 docs; 18 migration-header comments repointed at `apply_migration.py`. Gate-passed.
+
+## [VERIFIED] vs relayed — how to trust this handoff
+Everything above with a PR number, commit SHA, or `agent_messages` id is **[VERIFIED]**: I ran `gh pr view`, `git log`, or `psql` myself in this session to confirm it, not relaying a claim. The one thing that is NOT independently re-verified as of THIS handoff is whether fable has moved again in the last few minutes before you read this — check `git log --oneline -3 origin/fable/substrate-safe-fixes` fresh rather than trusting a stale SHA here. Nothing in this handoff is a bare "trust me" — re-verify at source before acting on anything that matters (same standard you've been holding all session).
+
+## NOT yours — don't build these on a guess (Nazim's explicit rulings)
+- **058b** — the `supabase_admin`-owned `http_get`/`http_post`/`dblink_connect_u` surface (the F1 residual from migration 058). Needs a credential-path/PostgREST-de-exposure design Nazim is scoping himself. He commissions it when ready (msg 37842).
+- **The 66-table default-DML sweep** (2026-09-05 substrate audit §3-H, "anon holds default DML on 66 tables masked by RLS"). Real blast radius — per-table RLS-vs-grant assessment, client-silo impact — needs its own cai/cc-quality scoping pass first, same as 058 got. Do NOT touch those 66 tables. Nazim commissions this separately (msg 37835).
+
+## Standing rails for this lane (still true, re-derive if in doubt)
+- Never `supabase db push` (decision 962) — direct psycopg only, via `scripts/apply_migration.py` (which you built, PR #84/#93/#96) for anything DB-side.
+- Every zero-live-reference deletion needs the proof method you've been using: repo-wide grep excl. `.venv/reports/logs/.claude/worktrees`, `launchctl list`, `~/Library/LaunchAgents`, `ops/launchd/`+`launchd/*.plist`, `.claude/settings*.json`, the memory dir.
+- `scripts/apply_migration.py` (now fleet-shared — cc-cosem-exams uses it too) contract: `-- ledger: silo=<ref>` required header; `-- assert: no_execute|search_path|dropped ...` for any REVOKE/DROP FUNCTION migration (CAI-RESP-1397 #5, enforced — a revoke/drop with zero asserts refuses to apply); `strip_txn_control` is dollar-quote-aware as of PR #96 (a plpgsql function's bare `end;` no longer false-refuses). Full contract in the module's own docstring — read that, not this summary, before extending it again.
+- A migration you write should be `--dry-run`-verified against the REAL target silo (not just the ephemeral harness) before it goes to review — that's what caught the real PUBLIC-grant no-op on 058 before it shipped. `tests/migrations/` currently 60/60.
+- Keep every open branch rebased on `origin/fable/substrate-safe-fixes` — Nazim asks for this repeatedly and fable moves fast; `git fetch && git merge-base --is-ancestor origin/fable/substrate-safe-fixes HEAD || git rebase origin/fable/substrate-safe-fixes && git push --force-with-lease` per branch, after re-running the relevant tests post-rebase.
+- Merge authority: Nazim merges the `#85-92` restructuring batch himself (explicit, repeated). He HAS twice delegated the merge to you for narrow tool-fix PRs (#93, #96) with an explicit "merge to fable" / "you own the sequencing, merge it" instruction — don't assume that extends to anything he hasn't said it for.
+
+## First actions on boot
+1. Reconcile the bus (above).
+2. `cd /Users/sheikhmusa/wingmen/projects/orchestrator.wt-cleanup && git fetch origin && git log --oneline -3 origin/fable/substrate-safe-fixes` — see how far it's moved since this handoff.
+3. Re-rebase any of the 8 held branches that have drifted; re-run `pytest tests/migrations/` after any rebase that touches `scripts/apply_migration.py` or its tests.
+4. Verify your own token/identity at source before any further work (ps eww your claude pid → `CLAUDE_CODE_OAUTH_TOKEN` → shasum) — standing rule for every fresh boot, not specific to this handoff.
+5. Otherwise: hold. Nothing is currently blocked on you; you're waiting on Nazim's merge-sequencing for #85-92, and 058b/the 66-table sweep are his to commission.
