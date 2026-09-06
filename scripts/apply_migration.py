@@ -87,6 +87,14 @@ _LEDGER_HEADER_RE = re.compile(r"^--\s*ledger:\s*silo=(\S+)\s*$", re.MULTILINE)
 _STRIPPABLE_TXN_CTL = {"BEGIN;", "COMMIT;"}
 _FORBIDDEN_TXN_CTL = {"ROLLBACK;", "START TRANSACTION;", "END TRANSACTION;", "END;"}
 
+# Dollar-quote delimiter: `$$` or `$tag$` (tag = identifier). Used to keep the
+# top-level transaction-control scan out of function/procedure bodies — a
+# bare `end;` closing a plpgsql BEGIN...END block is completely idiomatic
+# and is NOT top-level transaction control (fleet-shared bug, cc-cosem-exams
+# 2026-09-06: strip_txn_control false-rejected every plpgsql migration whose
+# function body ends on its own "end;" line).
+_DOLLAR_TAG_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
 # `-- assert: <kind> <args...>` header lines (CAI-RESP-1397 #5).
 _ASSERT_RE = re.compile(r"^--\s*assert:\s*(\S+)\s+(.+?)\s*$", re.MULTILINE)
 _ASSERT_KINDS = {"no_execute", "search_path", "dropped"}
@@ -210,19 +218,66 @@ def run_assertions(cur, assertions: list[dict]) -> list[dict]:
     return results
 
 
+def _dollar_quote_spans(sql_text: str) -> list[tuple[int, int]]:
+    """Character-offset (start, end) spans covering every dollar-quoted region
+    (`$$...$$`, `$tag$...$tag$`), delimiters included. A tag only closes a
+    region opened with the SAME tag — a different tag encountered while
+    already inside one is just literal text (this is exactly what named
+    tags are for in real SQL: letting one dollar-quoted string contain
+    another tag's delimiter as plain content) and does not toggle state.
+    Does NOT try to understand ordinary '...'-quoted string literals — a
+    literal `$$` inside a single-quoted string is a known, accepted gap
+    (vanishingly rare in migration SQL; a real SQL tokenizer is out of
+    proportion here)."""
+    spans = []
+    open_tag = None
+    open_start = None
+    for m in _DOLLAR_TAG_RE.finditer(sql_text):
+        tag = m.group(1) or ""
+        if open_tag is None:
+            open_tag = tag
+            open_start = m.start()
+        elif tag == open_tag:
+            spans.append((open_start, m.end()))
+            open_tag = None
+            open_start = None
+        # else: a different tag while already inside one — literal content, ignore.
+    return spans
+
+
+def _line_fully_inside_any_span(line_start: int, line_end: int, spans: list[tuple[int, int]]) -> bool:
+    return any(s <= line_start and line_end <= e for s, e in spans)
+
+
 def strip_txn_control(sql_text: str) -> str:
     """Strip top-level BEGIN/COMMIT so a self-committing migration can't escape our
     own transaction and ledger-atomicity guarantee (see the self-committing-migration
     finding: a `\\i`-ed inner BEGIN/COMMIT otherwise breaks caller ROLLBACK). Any other
-    top-level transaction-control statement (ROLLBACK, nested BEGIN, ...) refuses."""
+    top-level transaction-control statement (ROLLBACK, nested BEGIN, ...) refuses.
+
+    Dollar-quote-aware: a line that falls entirely inside a $$...$$/$tag$...$tag$
+    region (e.g. a plpgsql function body's bare `end;` closing its BEGIN block)
+    is left untouched regardless of its content — it is not top-level SQL at
+    all, so it can never be the top-level BEGIN/COMMIT/ROLLBACK this guard
+    exists to catch."""
+    spans = _dollar_quote_spans(sql_text)
     kept = []
-    for ln in sql_text.splitlines():
-        token = ln.strip().upper()
+    pos = 0
+    for ln in sql_text.splitlines(keepends=True):
+        raw = ln[:-1] if ln.endswith("\n") else ln
+        line_start, line_end = pos, pos + len(raw)
+        pos += len(ln)
+
+        if _line_fully_inside_any_span(line_start, line_end, spans):
+            kept.append(raw)
+            continue
+
+        token = raw.strip().upper()
         if token in _STRIPPABLE_TXN_CTL:
             continue
         if token in _FORBIDDEN_TXN_CTL:
-            raise Refuse(f"top-level transaction-control statement survived the strip: {ln!r}")
-        kept.append(ln)
+            raise Refuse(f"top-level transaction-control statement survived the strip: {raw!r}")
+        kept.append(raw)
     return "\n".join(kept)
 
 
