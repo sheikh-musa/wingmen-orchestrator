@@ -185,6 +185,67 @@ def page_message(lane: str, verdict: str, reason: str,
     return subject, body
 
 
+def nudge_message(lane: str, hard_pct: int = HARD_PCT):
+    """PURE (subject, body) for the lane-preserving self-recycle NUDGE — the missing loop half
+    (Nazim 37927/37935, op#19141). Directed AT the lane, not the operator. The subject's
+    `[self-recycle-nudge] {lane}:` prefix is the dedup anchor (`_nudged_today` LIKEs it) — keep it
+    STABLE. The directive is deliberately shaped like Nazim's hand-nudge #37924 (which worked on
+    cosem-exams): write-your-OWN-handoff FIRST, THEN self_recycle.sh, and the LANE decides. We do
+    NOT enumerate the lane's open loops for it and we do NOT force it — recycling mid-critical can
+    be worse than the bloat, and only the lane can safely commit its own in-flight state at its
+    turn boundary (the exact reason external recycle is gated off a busy lane)."""
+    subject = (f"[self-recycle-nudge] {lane}: at/over the {hard_pct}% context bar — write your own "
+               f"handoff then self_recycle.sh (you decide)")
+    body = (
+        f"TL;DR: you (lane '{lane}') are at/over the SRE dead-man's {hard_pct}% context bar and "
+        f"nothing has recycled you. If you're not mid-critical, please self-recycle NOW so you "
+        f"come back fresh instead of bloating.\n\n"
+        f"WHAT: write a fresh handoff of YOUR OWN open loops (you know them; I can't safely "
+        f"enumerate or commit your in-flight state for you), THEN run `scripts/self_recycle.sh` "
+        f"— it is lane-preserving (commits your work at your turn boundary, keeps your token/"
+        f"lease) and /clear's you in place.\n"
+        f"YOU DECIDE: if you're mid-critical-operation where recycling now is worse than the "
+        f"bloat, you may DECLINE — the dead-man stays your backstop and will page a human. But "
+        f"the default at this bar is: handoff, then self_recycle.\n"
+        f"WHY THIS REACHES YOU: the external recycler structurally can't touch a busy lane "
+        f"(never /clear mid-turn or without a fresh handoff), so this nudge is the only path that "
+        f"lets YOU close the loop before a human has to. I'm also paging orch-console.")
+    return subject, body
+
+
+def _nudged_today(cur, lane: str) -> bool:
+    """Dedup anchor for the nudge — one nudge per lane per day (interim; the full ~80% loop does
+    proper per-episode+grace). Kept in lockstep with the page's per-day dedup (`_paged_today`) so
+    the page and the nudge fire together and quiet together — never a per-tick re-nudge."""
+    cur.execute(
+        "SELECT 1 FROM agent_messages "
+        "WHERE from_agent='cc-fleet-health' "
+        "  AND subject LIKE %s AND created_at >= date_trunc('day', now()) LIMIT 1",
+        [f"[self-recycle-nudge] {lane}:%"])
+    return cur.fetchone() is not None
+
+
+def _nudge(cur, conn, lane_display: str, lane_base: str, dry: bool) -> str:
+    """Emit the lane-preserving self-recycle nudge to the LANE (to_agent = its base_agent_id, the
+    deliverable id its wake subscriber listens on — #37924 went to 'cc-cosem-exams' and woke it).
+    Benign reversible MESSAGE-send (never touches the lane's state); deduped per lane per day."""
+    subject, body = nudge_message(lane_display)
+    if dry:
+        print(f"            WOULD NUDGE lane '{lane_base}': self-recycle (write own handoff then self_recycle.sh)")
+        return "would-nudge"
+    if _nudged_today(cur, lane_display):
+        print(f"            already nudged {lane_display} today — deduped")
+        return "deduped"
+    cur.execute(
+        "INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body, "
+        " priority, requires_response, created_at) "
+        "VALUES ('cc-fleet-health',%s,'blocker',%s,%s,'P1',false, now())",
+        [lane_base, subject, body])
+    conn.commit()
+    print(f"            NUDGED lane '{lane_base}': self-recycle")
+    return "nudged"
+
+
 def _page(cur, conn, lane: str, verdict: str, reason: str, dry: bool) -> str:
     subject, body = page_message(lane, verdict, reason)
     if dry:
@@ -235,6 +296,7 @@ def main() -> int:
           f"bar={HARD_PCT}% sustained>{SUSTAIN_S // 60}m — {len(lanes)} lane(s)")
 
     paged = 0
+    nudged = 0
     with conn.cursor() as cur:
         for lr in lanes:
             base = lr["base_agent_id"]
@@ -258,11 +320,18 @@ def main() -> int:
             elif verdict in ("page_sustained", "page_unknown"):
                 if _page(cur, conn, lr["lane"], verdict, reason, args.dry_run) == "paged":
                     paged += 1
+                # INTERIM self-recycle loop (Nazim 37927): when we page, ALSO nudge the LANE to
+                # self-recycle itself (the missing half — external recycle can't touch a busy
+                # lane). The page to orch-console STAYS the backstop unchanged; this is an
+                # additional benign message-send to the lane, deduped per lane per day.
+                if _nudge(cur, conn, lr["lane"], lr["base_agent_id"], args.dry_run) == "nudged":
+                    nudged += 1
 
     if not args.dry_run:
         _stamp_heartbeat(state, now)
         _save_state(state)
-    print(f"done — {paged} paged, state {'unchanged (dry-run)' if args.dry_run else 'saved'}.")
+    print(f"done — {paged} paged, {nudged} nudged, "
+          f"state {'unchanged (dry-run)' if args.dry_run else 'saved'}.")
     conn.close()
     return 0
 

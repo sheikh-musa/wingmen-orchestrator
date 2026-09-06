@@ -169,3 +169,99 @@ def test_blind_near_cliff_lane_pages_by_default():
 
 def test_default_unknown_floor_is_the_hard_bar():
     assert dm.UNKNOWN_PAGE_FLOOR == HARD
+
+
+# ── INTERIM self-recycle NUDGE (Nazim 37927/37935, op#19141) ─────────────────────────────────
+# When the dead-man PAGES orch-console (page_sustained/page_unknown), it ALSO emits a lane-
+# preserving self-recycle NUDGE to the lane itself — the missing loop half: external recycle
+# structurally can't touch a busy/no-handoff lane, so nothing directs the LANE to self-recycle
+# and it falls to a human (Nazim did it by hand, #37924). This closes that live gap at the 85%
+# bar; the earlier-firing ~80% dedicated loop is the full fix. The nudge directs the LANE to
+# write ITS OWN handoff then self_recycle.sh and lets it DECIDE — we can't safely handoff its
+# in-flight state for it (the exact reason external recycle is gated off), so the lane enumerates
+# its own open loops; we never prescribe them. Reference shape: #37924 (worked on cosem-exams).
+
+def test_nudge_subject_prefix_is_the_dedup_anchor():
+    # `_nudged_today` LIKEs "[self-recycle-nudge] {lane}:" — if this prefix drifts, dedup breaks and
+    # the lane gets re-nudged every tick. Lock it exactly (parallel to the page's dedup anchor).
+    subj, _ = dm.nudge_message("cc-cosem-exams")
+    assert subj.startswith("[self-recycle-nudge] cc-cosem-exams:")
+
+
+def test_nudge_body_directs_lane_to_write_own_handoff_then_self_recycle():
+    _, body = dm.nudge_message("cc-cosem-exams")
+    low = body.lower()
+    assert "self_recycle.sh" in body            # the exact lane-preserving command
+    assert "handoff" in low                       # write a fresh handoff FIRST
+    # handoff must come BEFORE the recycle in the directive (order is load-bearing)
+    assert low.index("handoff") < low.index("self_recycle.sh")
+
+
+def test_nudge_tells_the_lane_to_enumerate_its_OWN_loops_not_us():
+    # Nazim 37927 req 2: "don't put a per-lane loops list in the nudge — the lane enumerates its
+    # own." Assert the positive form: it points the lane at ITS OWN open loops.
+    _, body = dm.nudge_message("cc-cosem-exams")
+    low = body.lower()
+    assert "your own" in low and "open loops" in low
+
+
+def test_nudge_lets_the_lane_DECIDE_and_decline():
+    # req 2: the lane can decline if mid-critical — recycling now can be worse than the bloat.
+    _, body = dm.nudge_message("cc-cosem-exams")
+    low = body.lower()
+    assert "decline" in low or "decide" in low
+
+
+# ── WIRING: a PAGE verdict co-fires the nudge; a non-page verdict does NOT (the whole point of
+#    the interim — external recycle can't reach a busy lane, so the page must ALSO nudge the lane;
+#    but an ok/watching/log_unknown lane must never be nudged). Drives the real main() with the
+#    collaborators faked, so a future edit that drops the nudge or nudges on the wrong verdict
+#    fails here. Runs in --dry-run: no real send, no state write. ──
+class _FakeCur:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, *a, **k): pass
+    def fetchone(self): return None
+
+
+class _FakeConn:
+    def cursor(self): return _FakeCur()
+    def commit(self): pass
+    def close(self): pass
+
+
+def test_page_verdict_cofires_nudge_and_ok_does_not(monkeypatch):
+    import scripts.sre_lane_recycle as slr
+    monkeypatch.setenv("DATABASE_URL", "postg://fake")
+    monkeypatch.setattr(sys, "argv", ["lane_recycle_deadman.py", "--dry-run"])
+    lanes = [
+        {"lane": "cc-hot", "base_agent_id": "cc-hot", "tmux_session": "hot"},
+        {"lane": "cc-cool", "base_agent_id": "cc-cool", "tmux_session": "cool"},
+    ]
+    monkeypatch.setattr(slr, "discover_lanes", lambda conn: lanes)
+    import psycopg
+    monkeypatch.setattr(psycopg, "connect", lambda dsn: _FakeConn())
+    monkeypatch.setattr(dm, "_gauge",
+                        lambda cur, base: (900_000, 60) if base == "cc-hot" else (100_000, 60))
+    monkeypatch.setattr(dm, "_pane", lambda s: (None, None))
+    monkeypatch.setattr(dm, "_load_state", lambda: {})
+    monkeypatch.setattr(dm, "_save_state", lambda st: None)
+    # cc-hot -> a paging verdict; cc-cool -> ok
+    monkeypatch.setattr(dm, "resolve_lane_pct",
+                        lambda t, a, pp, ph: (True, 90, 90, "r") if t == 900_000 else (True, 10, 10, "r"))
+
+    def fake_eval(known, pct, first_over, now, **kw):
+        return ("page_sustained", first_over) if pct == 90 else ("ok", None)
+    monkeypatch.setattr(dm, "evaluate_deadman", fake_eval)
+
+    nudged, paged = [], []
+    monkeypatch.setattr(dm, "_nudge",
+                        lambda cur, conn, disp, base, dry: nudged.append((disp, base)) or "would-nudge")
+    monkeypatch.setattr(dm, "_page",
+                        lambda cur, conn, lane, verdict, reason, dry: paged.append(lane) or "would-page")
+
+    rc = dm.main()
+    assert rc == 0
+    assert nudged == [("cc-hot", "cc-hot")]   # the paging lane got nudged (by base_agent_id)
+    assert paged == ["cc-hot"]                 # ...and paged — the backstop stays
+    # cc-cool (ok) was neither paged nor nudged
