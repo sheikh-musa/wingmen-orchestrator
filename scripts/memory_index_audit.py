@@ -206,6 +206,15 @@ def audit(mem_dir: pathlib.Path) -> dict:
     }
 
 
+def missing_index_is_lossy(result: dict) -> bool:
+    """A missing MEMORY.md is a SILENT-LOSS condition only when there are FILES it would orphan.
+    An empty dir (no index, no files) loses nothing — there is nothing to index and nothing to
+    forget, so flagging it NO-INDEX is noise the --alert path then pages (bus 38069 false positive
+    on the empty quality-audit-drain dir). Nazim 37868: files=0 EMPTY dirs are ok/empty, not
+    'needs attention'. Same class as idle-stale-telemetry-is-not-dangerous-blind."""
+    return bool(result["missing_index"]) and result["files"] > 0
+
+
 def fix(result: dict) -> int:
     """Append an index line for each orphan. Returns how many were added."""
     mem_dir = result["dir"]
@@ -258,7 +267,7 @@ def main() -> int:
 
         label = mem_dir.parent.name
         flags = []
-        if r["missing_index"]:
+        if missing_index_is_lossy(r):
             flags.append("NO-INDEX")
         if r.get("tail_unreachable"):
             flags.append(f"TAIL-UNREACHABLE({TAIL_INDEX} exists but MEMORY.md never names it)")
