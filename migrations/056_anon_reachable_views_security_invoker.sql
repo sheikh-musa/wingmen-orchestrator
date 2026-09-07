@@ -32,7 +32,7 @@
 --
 -- REVERSIBLE: `ALTER VIEW ... RESET (security_invoker)` + re-GRANT. Nothing is dropped.
 -- `postgres` and `service_role` are BYPASSRLS, so the orchestrator readers of these views
--- (scripts/apply_held_commitments.py, the SLA watchdog) are unaffected.
+-- (scripts/apply_held_commitments.py [deleted 2026-09-05 PR #89], the SLA watchdog) are unaffected.
 
 BEGIN;
 

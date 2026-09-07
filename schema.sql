@@ -574,7 +574,9 @@ $$;
 -- handoffs. Each blocker gets a substrate row with an id; rulings reference it
 -- via strategic_decisions.unblocks_task_id; reconciled_at is set by an explicit
 -- owner close (never auto-stamped on ruling-existence — that is the read !=
--- reconciled bug). Applied via scripts/apply_blocking_tasks_schema.py.
+-- reconciled bug). Applied via scripts/apply_migration.py (historical applier:
+-- apply_blocking_tasks_schema.py, deleted 2026-09-05 PR #88; no numbered
+-- migration file — inline DDL predates that convention).
 create table if not exists blocking_tasks (
   id bigint generated always as identity primary key,
   owner_agent text not null,

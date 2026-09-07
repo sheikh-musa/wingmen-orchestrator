@@ -11,8 +11,9 @@
 -- (same freshness doctrine as everything else on the console).
 --
 -- Ownership mirrors 035: cc-fleet-health writes via service_role; the read-only
--- console role only SELECTs. Apply via direct psycopg (decision-962: NEVER
--- `supabase db push`) — scripts/apply_pool_usage.py.
+-- console role only SELECTs. Apply via scripts/apply_migration.py 036
+-- --silo tscuymavysscrvoberrr (historical applier: apply_pool_usage.py,
+-- deleted 2026-09-05 PR #90; decision-962: NEVER `supabase db push`).
 
 BEGIN;
 

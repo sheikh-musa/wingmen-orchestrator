@@ -16,7 +16,8 @@
 --     on the underlying fleet tables (pane_context / fleet_lanes / pool_usage).
 --   * role share_readonly — LOGIN, SELECT on exactly those two views and nothing else.
 --
--- Apply with scripts/apply_mig045_share_lane_status.py (direct psycopg).
+-- Apply with scripts/apply_migration.py 045 --silo tscuymavysscrvoberrr (historical
+-- applier: apply_mig045_share_lane_status.py, deleted 2026-09-05 PR #89).
 -- NEVER `supabase db push` against production (decision 962 / CC-SUBSTRATE-VIEW-INTEGRITY-001).
 
 -- ---------------------------------------------------------------- mapping tables

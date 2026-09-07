@@ -10,7 +10,8 @@
 --   * scripts/fleet_health.py                          -> LEASE branch.
 -- ZERO runtime callers remain (re-verified before this migration; the only other
 -- reference is scripts/apply_ghost_reaper.py's post-apply existence-ASSERTION for
--- the historical mig-009 — an inert one-time apply script, not a runtime caller).
+-- the historical mig-009 — an inert one-time apply script, not a runtime caller;
+-- deleted 2026-09-05 PR #88, so this note is now archaeology, not a live pointer).
 --
 -- Also folds in the CAI-765 audit-INSERT tighten: after 039 made admin_offline_audit
 -- erase-proof (no UPDATE/DELETE/TRUNCATE for the RLS/service tiers), lock INSERT too
