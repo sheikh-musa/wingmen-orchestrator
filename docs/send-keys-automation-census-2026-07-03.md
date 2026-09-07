@@ -13,9 +13,9 @@ A **governance / conversational console** (`cai`, `orch`, ai-responder persona c
 | 2 | `nervous_system/agent_wake.py` | default targets include **`cai`** + lanes | bare `_SIGNAL` lifecycle pointer **+ Enter** (no C-u line-clear) | on-demand (not a daemon) | ⚠️ **SAME-CLASS LATENT RISK:** a bare Enter into `cai` with pre-staged text would SUBMIT that staged text (the exact incident mechanism). Recommend: clear the line (C-u) before the signal, and/or governance-aware. Deferred to a reviewed patch. |
 | 3 | `nervous_system/agent_messages_realtime.py` | resolves target per bus row, can include `cai` | wake nudge on new agent_messages INSERT | not a daemon now | ⚠️ same-class: verify it only sends a lifecycle pointer + never a bare submit into a governance console. Deferred to a reviewed patch. |
 | 4 | `nervous_system/ingest.py` | `inject_target` per bot_channels row (`orch`/`cai`) | **nudge-only** count line ("N unread…"), never payload | **live** (dev.wingmen.ingest) | ✅ R1-compliant by construction. |
-| 5 | `nervous_system/cai_bridge.py` | `cai` (CAI_BRIDGE_TMUX_TARGET) | injected operator content (legacy) | **retired/dead** | ⚠️ superseded by ingest; DELETE the module to prevent re-activation. |
-| 6 | `nervous_system/tg_bridge.py` | `orch` (TG_BRIDGE_TMUX_TARGET) | injected operator content (legacy) | **retired/dead** | ⚠️ superseded by ingest; DELETE the module. |
-| 7 | `nervous_system/irsyad_support_bridge.py` | `orch` (IRSYAD_SUPPORT_BRIDGE_TMUX_TARGET) | prefixed group message into hub | **live** (dev.wingmen.irsyad-support-bridge) | migrate to ingest `log-and-route` (perimeter posture unchanged); interim ok — targets hub, not a governance-decision console. |
+| 5 | `nervous_system/cai_bridge.py` | `cai` (CAI_BRIDGE_TMUX_TARGET) | injected operator content (legacy) | **DELETED 2026-09-05** | superseded by ingest; module + `dev.wingmen.cai-bridge` plist removed (op#19103 item 1) after confirming zero live references on Mini + VPS. |
+| 6 | `nervous_system/tg_bridge.py` | `orch` (TG_BRIDGE_TMUX_TARGET) | injected operator content (legacy) | **DELETED 2026-09-05** | superseded by ingest; module + `dev.wingmen.tg-bridge` plist removed (op#19103 item 1) after confirming zero live references on Mini + VPS. |
+| 7 | `nervous_system/irsyad_support_bridge.py` | `orch` (IRSYAD_SUPPORT_BRIDGE_TMUX_TARGET) | prefixed group message into hub | **DELETED 2026-09-05** | this row's "live" status was stale — reverified 2026-09-05, `dev.wingmen.irsyad-support-bridge` was not loaded on either host; module + plist removed (op#19103 item 1). |
 | 8 | `scripts/lane_nudge.sh` | whatever `$SESSION` arg (used by #1) | C-u clear → retype → Enter → verify | helper | ✅ clears the line first (no staged-text submit); only invoked by the watchdog, now never for governance consoles. |
 | 9 | `scripts/nudge_cai.sh` | `cai` (`=cai:0.0`) | **count-only** provenance header, free text rejected | on-demand | ✅ the R1-sanctioned cai injection. |
 | 10 | `scripts/spawn_reviewer.sh` | `reviewer-*` sessions | bare lifecycle pointer (context read on boot) | on-demand | ✅ transient reviewer only; no governance console. |
@@ -25,4 +25,5 @@ A **governance / conversational console** (`cai`, `orch`, ai-responder persona c
 ## Actions
 - **Done (this change):** #1 patched + attempt-capped; census recorded.
 - **Reviewed re-ship:** #1 restored for real lanes on the Studio after cc-reviewer pass (order 2/3).
-- **Follow-up (reviewed patches):** #2 + #3 close the same-class bare-submit risk (clear line before signal, governance-aware); #5 + #6 delete the retired bridge modules; #7 migrate to ingest.
+- **Follow-up (reviewed patches):** #2 + #3 close the same-class bare-submit risk (clear line before signal, governance-aware).
+- **Done 2026-09-05 (op#19103 item 1):** #5, #6, #7 all deleted outright — zero live references confirmed on Mini + VPS, so #7's "migrate to ingest" follow-up is moot (nothing left to migrate).
