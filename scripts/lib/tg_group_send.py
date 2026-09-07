@@ -190,7 +190,12 @@ def main(argv=None) -> int:
             print(f"TELEGRAM REJECTED (definitive, not delivered): {e}", file=sys.stderr)
             return 1
 
-        # Delivered exactly once -> durable outbound log (best-effort; never blocks the send).
+        # Delivered exactly once -> durable outbound log. This row is not optional bookkeeping:
+        # the exit-2 AMBIGUOUS recovery path (see _actionable_ambiguous_message) tells the human to
+        # check operator_messages for a logged send before resending, so a SUCCESSFUL send MUST keep
+        # writing this row — drop it and the no-dupe recovery check goes blind (Nazim 38098). The
+        # try/except only swallows a LOG failure so it can't turn a delivered send into a false
+        # error; it must never become "skip the log".
         try:
             cur.execute(
                 "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered, from_name) "
