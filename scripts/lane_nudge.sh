@@ -15,7 +15,9 @@
 #
 # Verification heuristic (matches the observable Claude-Code TUI states):
 #   working  -> footer shows "esc to interrupt"   (submitted, lane is running)
-#   idle     -> footer shows "for agents"          (NOT submitted / still idle)
+#   idle     -> footer has NO "esc to interrupt"   (NOT submitted / still idle)
+#   NB: the "← for agents" shortcut renders on BOTH footers in current CC, so it is NOT an idle
+#       discriminator — only the presence/absence of "esc to interrupt" is (fixed 2026-09-07).
 set -uo pipefail
 
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -285,9 +287,17 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
 fi
 
 pane_working() {
-  # working iff the live footer shows the interrupt hint and NOT the idle hint
-  local cap; cap="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null | grep -v '^[[:space:]]*$' | tail -3)"
-  printf '%s' "$cap" | grep -q 'esc to interrupt' && ! printf '%s' "$cap" | grep -q 'for agents'
+  # Working iff the live footer shows the interrupt hint. 'esc to interrupt' is present ONLY while
+  # a turn is in progress and is ABSENT on an idle pane, so it alone is authoritative — this is
+  # exactly how the rest of the fleet decides busy (pane_busy.py / _cc_text_busy key ONLY on
+  # 'esc to interrupt'; test_composer_capture.py:146 asserts a footer with BOTH 'esc to interrupt'
+  # AND '← for agents' is busy). lane_nudge was the lone outlier still ANDing '! for agents' as an
+  # idle discriminator — but the current CC footer shows the '← for agents' shortcut on a WORKING
+  # pane too (verified live 2026-09-07: cc-fleet-health + cc-cosem-exams working footers both carry
+  # it), so the conjunct false-negatived a working lane whenever 'for agents' rendered un-truncated
+  # → spurious exit-3 escalations against a live-working lane. Keying on 'esc to interrupt' alone
+  # PRESERVES the escalate-on-stalled-idle guard (idle has no interrupt hint) while fixing that.
+  tmux capture-pane -t "$SESSION" -p 2>/dev/null | grep -v '^[[:space:]]*$' | tail -3 | grep -q 'esc to interrupt'
 }
 
 pane_queued() {

@@ -31,7 +31,11 @@ def _after(replacement: str) -> str:
 
 GHOST_AFTER = _after("~")            # sentinel replaced an empty composer -> ghost
 REAL_AFTER = _after(_FLAT + "~")     # sentinel appended to real staged text -> real
-WORKING = "some output\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t\n"
+# The REAL current-CC working footer carries the "← for agents" shortcut ALONGSIDE "esc to
+# interrupt" (verified live 2026-09-07 on cc-fleet-health + cc-cosem-exams). The old fixture
+# omitted it, which is why pane_working()'s "esc to interrupt AND NOT for agents" conjunct
+# false-negatived a working lane in the field but never in tests. Keep the fixture faithful.
+WORKING = "some output\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents · ctrl+t\n"
 
 
 def run_nudge(tmp_path: Path, after_pane: str, revert_pane: str = None, unstable: bool = False):
