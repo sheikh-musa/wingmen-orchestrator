@@ -153,11 +153,16 @@ def _capture(pane: str, n: int = 30) -> list[str]:
 
 
 def _pane_busy(pane: str) -> bool:
-    """True iff the cai session is mid-task (WORKING), using the same observable
-    heuristic as scripts/lane_nudge.sh: the live footer (last 3 non-blank rows)
-    shows 'esc to interrupt' AND NOT 'for agents'. Pure read-only capture-pane —
+    """True iff the cai session is mid-task (WORKING). Pure read-only capture-pane —
     never types. Callers MUST wrap in try/except (any failure => treat as not
-    busy, so the normal inject path is never blocked)."""
+    busy, so the normal inject path is never blocked).
+
+    CAVEAT (2026-09-07): the 'AND NOT for agents' conjunct below is the SAME false-
+    negative fixed in lane_nudge.pane_working (0a530e1) — current CC renders the
+    '← for agents' shortcut on WORKING footers too, so the conjunct mis-reads a
+    working pane as idle. This module is RETIRED/dead (no importer, no launchd), so
+    NO live impact — but if it is EVER revived, key on 'esc to interrupt' ALONE (the
+    fleet standard: pane_busy.py / _cc_text_busy)."""
     cap = "\n".join(l for l in _capture(pane, 30) if l.strip())[-2000:]
     tail = "\n".join(cap.splitlines()[-3:])
     return ("esc to interrupt" in tail) and ("for agents" not in tail)
