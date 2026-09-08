@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -56,6 +57,14 @@ INDEX_FILES = (INDEX, TAIL_INDEX)
 READ_LIMIT_BYTES = 24_400
 WARN_HEADROOM_FRACTION = 0.20
 WARN_BYTES = int(READ_LIMIT_BYTES * (1 - WARN_HEADROOM_FRACTION))  # 19_520
+
+# Alert dedup memory (Nazim 38293): a stable ADVISORY (NEAR-LIMIT) re-paging every daily run is
+# noise. We remember which dirs we've already advised so we don't re-page — persisted across runs
+# like the dead-man's `_paged_today`. If this file is lost/reset, we re-alert ONCE (fail toward
+# alerting, never silent-suppress-forever). HARD flags are never recorded here — they page every run.
+SRE_AGENT = "cc-fleet-health"
+_STATE_DIR = pathlib.Path(__file__).resolve().parent.parent / "state"
+ALERT_STATE_PATH = _STATE_DIR / "memory_index_audit_alerts.json"
 
 # Require the markdown-link `](target.md)` close-bracket, not a bare `(x.md)`: without the
 # `\]` this matched parenthetical prose INSIDE a link label — e.g. the entry
@@ -234,12 +243,98 @@ def fix(result: dict) -> int:
     return len(lines)
 
 
+def classify_flags(r: dict, e: dict) -> tuple:
+    """Split one dir's audit result into (hard, advisory) flag-string lists.
+
+    HARD = active or imminent SILENT-LOSS (NO-INDEX with real orphans, orphans, dangling links,
+    broken edges, an unreachable tail, OVER-READ-LIMIT) -> page the SRE EVERY run until cleared;
+    never deduped, because the loss is happening/at-the-cliff and must stay loud.
+    ADVISORY = NEAR-LIMIT only (approaching the read-limit, not-yet loss) -> page the dir OWNER,
+    deduped. The status line still concatenates hard+advisory, so DETECTION is unchanged."""
+    hard, advisory = [], []
+    if missing_index_is_lossy(r):
+        hard.append("NO-INDEX")
+    if r.get("tail_unreachable"):
+        hard.append(f"TAIL-UNREACHABLE({TAIL_INDEX} exists but MEMORY.md never names it)")
+    if e["repairable"]:
+        hard.append(f"BROKEN-EDGES={len(e['repairable'])}")
+    if r["orphans"]:
+        hard.append(f"ORPHANED={len(r['orphans'])}")
+    if r["dangling"]:
+        hard.append(f"DANGLING={len(r['dangling'])}")
+    if r["size"] >= READ_LIMIT_BYTES:
+        hard.append(f"OVER-READ-LIMIT({r['size']}B)")
+    elif r["size"] >= WARN_BYTES:
+        advisory.append(f"NEAR-LIMIT({r['size']}B, {READ_LIMIT_BYTES - r['size']}B headroom)")
+    return hard, advisory
+
+
+def resolve_owner(label: str, known_agents) -> "str | None":
+    """Best-effort OWNER agent for a project memory-dir slug, for ADVISORY (NEAR-LIMIT) routing.
+    The slug is the project path with '/'->'-' (e.g. '-Users-me-wingmen-projects-ihsanos'). Strip
+    the `<home>-wingmen-` prefix and an optional `projects-` segment, form `cc-<remainder>`, and
+    accept it ONLY if it is a real registered agent. Returns None when unresolvable -> the caller
+    routes to the SRE (an advisory is never silently dropped because a lookup failed). The whole-
+    remainder (not a '-'-split) keeps multi-word projects intact (fleet-health -> cc-fleet-health)."""
+    home = str(pathlib.Path.home()).strip("/").replace("/", "-")
+    s = label
+    for pre in (f"-{home}-wingmen-", f"{home}-wingmen-"):
+        if s.startswith(pre):
+            s = s[len(pre):]
+            break
+    else:
+        return None
+    if s.startswith("projects-"):
+        s = s[len("projects-"):]
+    cand = f"cc-{s}"
+    return cand if cand in set(known_agents) else None
+
+
+def plan_alerts(entries, state: dict, known_agents, sre_agent: str = SRE_AGENT):
+    """PURE dedup + routing (Nazim 38293). `entries` = [(label, hard_flags, advisory_flags)] for the
+    dirs flagged THIS run; `state` = prior alert memory ({label: {"near_limit": True}}). Returns
+    (posts, new_state).
+
+      * HARD flags -> ALWAYS a post to `sre_agent` (never deduped): active/at-cliff loss stays loud.
+      * ADVISORY (NEAR-LIMIT) -> a post to the dir OWNER (fallback `sre_agent`), but ONLY if this dir
+        was not already advised (dedup). new_state carries the near_limit mark ONLY for dirs still
+        advisory this run, so a dir that CLEARED or WORSENED-to-hard drops out and re-arms.
+
+    Load-bearing invariant: dedup touches ONLY the stable-NEAR-LIMIT case. Any hard flag, any
+    worsening (NEAR->OVER surfaces as a hard OVER post), and any brand-new advisory all alert."""
+    posts, new_state = [], {}
+    for label, hard, advisory in entries:
+        if hard:
+            posts.append({"to": sre_agent, "label": label, "flags": list(hard), "tier": "hard"})
+        if advisory:
+            already = bool(state.get(label, {}).get("near_limit"))
+            new_state[label] = {"near_limit": True}
+            if not already:
+                owner = resolve_owner(label, known_agents) or sre_agent
+                posts.append({"to": owner, "label": label, "flags": list(advisory), "tier": "advisory"})
+    return posts, new_state
+
+
+def _load_alert_state() -> dict:
+    try:
+        return json.loads(ALERT_STATE_PATH.read_text())
+    except Exception:
+        return {}  # missing/corrupt -> re-alert once, never silent-suppress-forever
+
+
+def _save_alert_state(state: dict) -> None:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = ALERT_STATE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    tmp.replace(ALERT_STATE_PATH)  # atomic
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fix", action="store_true",
                     help="append index lines for orphaned memory files")
     ap.add_argument("--alert", action="store_true",
-                    help="post a P2 bus row for each agent still failing after the run")
+                    help="dedup+route bus alerts: NEAR-LIMIT->owner (deduped), hard flags->SRE (every run)")
     a = ap.parse_args()
 
     if not PROJECTS.is_dir():
@@ -266,21 +361,8 @@ def main() -> int:
             e["fixed"] = (before - len(e["repairable"]), n_files)
 
         label = mem_dir.parent.name
-        flags = []
-        if missing_index_is_lossy(r):
-            flags.append("NO-INDEX")
-        if r.get("tail_unreachable"):
-            flags.append(f"TAIL-UNREACHABLE({TAIL_INDEX} exists but MEMORY.md never names it)")
-        if e["repairable"]:
-            flags.append(f"BROKEN-EDGES={len(e['repairable'])}")
-        if r["orphans"]:
-            flags.append(f"ORPHANED={len(r['orphans'])}")
-        if r["dangling"]:
-            flags.append(f"DANGLING={len(r['dangling'])}")
-        if r["size"] >= READ_LIMIT_BYTES:
-            flags.append(f"OVER-READ-LIMIT({r['size']}B)")
-        elif r["size"] >= WARN_BYTES:
-            flags.append(f"NEAR-LIMIT({r['size']}B, {READ_LIMIT_BYTES - r['size']}B headroom)")
+        hard, advisory = classify_flags(r, e)
+        flags = hard + advisory  # DETECTION is unchanged: the status line reports every flag
 
         status = " ".join(flags) if flags else "ok"
         extra = f" (+{r.get('added')} added)" if r.get("added") else ""
@@ -300,7 +382,7 @@ def main() -> int:
         if e["unwritten"]:
             print(f"    unwritten targets (worth writing, not errors): {', '.join(e['unwritten'][:6])}")
         if flags:
-            problems.append((label, status, r))
+            problems.append((label, hard, advisory, r))
 
     if not problems:
         print("\nALL CLEAN — every memory file is indexed, every link resolves, "
@@ -309,47 +391,103 @@ def main() -> int:
 
     print(f"\n{len(problems)} agent memory dir(s) need attention.")
     if a.alert:
-        _alert(problems)
+        _dispatch_alerts(problems)
     return 1
 
 
-def _alert(problems: list) -> None:
-    """LOUD, per the dead-man's-switch rule: a checker that finds a silent-loss condition
-    and then reports it only to a log nobody reads has reproduced the bug it detects."""
+def _hard_body(posts: list, rmap: dict) -> tuple:
+    """(subject, body) for the SRE hard/structural page — unchanged silent-loss framing."""
+    lines = [
+        "Memory-index audit found silent-loss conditions. An ORPHANED file is never loaded at boot "
+        "(invisible from birth); an OVER-LIMIT index truncates on read and whatever falls off the "
+        "end stops existing, with no error.",
+        "",
+    ]
+    for p in posts:
+        lines.append(f"  {p['label']}: {' '.join(p['flags'])}")
+        for n in rmap.get(p["label"], {}).get("orphans", [])[:10]:
+            lines.append(f"      orphan: {n}")
+    lines += [
+        "",
+        "FIX: `python scripts/memory_index_audit.py --fix` appends missing index lines from each "
+        "file's own frontmatter (append-only, reversible). An OVER-LIMIT index needs a manual "
+        "compaction pass — group related entries onto one line and trim hooks; never drop a link.",
+    ]
+    return (f"memory-index audit: {len(posts)} agent memory dir(s) losing entries silently",
+            "\n".join(lines))
+
+
+def _advisory_body(owner: str, posts: list, is_fallback: bool) -> tuple:
+    """(subject, body) for a NEAR-LIMIT advisory routed to the dir OWNER (or SRE fallback)."""
+    labels = ", ".join(p["label"] for p in posts)
+    flags = "; ".join(f"{p['label']}: {' '.join(p['flags'])}" for p in posts)
+    note = ("" if not is_fallback else
+            "(routed to you as SRE — the dir's owner agent could not be resolved.)\n")
+    body = (
+        f"TL;DR (advisory, do at a convenient seam — not a page): your memory index is approaching "
+        f"the boot read-limit; compact it before it crosses so nothing silently drops at your next "
+        f"boot.\n\n{note}"
+        f"{flags}\n\n"
+        f"HOW (owner compacts own): group related index lines onto ONE line, shorten the one-line "
+        f"hooks — NEVER drop a [[link]] or a link target (an orphan gets re-flagged and the index "
+        f"regrows). Only the MEMORY.md index text shrinks; the memory files are untouched. This is "
+        f"deduped — you won't be re-pinged for the same NEAR-LIMIT until it clears or worsens."
+    )
+    return (f"Advisory: your memory index is NEAR the boot read-limit ({labels}) — compact at a seam", body)
+
+
+def _dispatch_alerts(problems: list, connect=None, dsn: "str | None" = None) -> None:
+    """Route + dedup the audit's bus alerts (Nazim 38293). HARD/structural flags -> the SRE, every
+    run (loud). NEAR-LIMIT advisories -> the dir OWNER (SRE fallback), deduped once per episode via
+    persisted state. Never takes down the checker — a dispatch failure only warns."""
     try:
         sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
         import psycopg
         from dotenv import load_dotenv
-        root = pathlib.Path(__file__).resolve().parent.parent
-        load_dotenv(root / ".env")
-        dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-        body_lines = [
-            "Memory-index audit found silent-loss conditions. An ORPHANED file is never "
-            "loaded at boot (invisible from birth); an OVER-LIMIT index truncates on read "
-            "and whatever falls off the end stops existing, with no error.",
-            "",
-        ]
-        for label, status, r in problems:
-            body_lines.append(f"  {label}: {status}")
-            for n in r["orphans"][:10]:
-                body_lines.append(f"      orphan: {n}")
-        body_lines += [
-            "",
-            "FIX: `python scripts/memory_index_audit.py --fix` appends the missing index "
-            "lines from each file's own frontmatter description (append-only, reversible). "
-            "An over-limit index needs a manual compaction pass — group related entries onto "
-            "one line and trim hooks; never drop a link.",
-        ]
-        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-                "priority,requires_response) VALUES "
-                "('orch-console','cc-fleet-health','question',%s,%s,'P2',true)",
-                (f"memory-index audit: {len(problems)} agent memory dir(s) losing entries silently",
-                 "\n".join(body_lines)))
-        print("posted alert bus row to cc-fleet-health")
+        load_dotenv(pathlib.Path(__file__).resolve().parent.parent / ".env")
+        dsn = dsn or os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+        connect = connect or psycopg.connect
+
+        rmap = {label: r for (label, hard, advisory, r) in problems}
+        entries = [(label, hard, advisory) for (label, hard, advisory, r) in problems]
+        state = _load_alert_state()
+
+        with connect(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute("SELECT id FROM agents")
+                    known_agents = {row[0] for row in cur.fetchall()}
+                except Exception:
+                    known_agents = set()  # owner unresolvable -> SRE fallback, never crash
+
+            posts, new_state = plan_alerts(entries, state, known_agents)
+            if not posts:
+                print("all flagged dirs already alerted (deduped) — no new page")
+            else:
+                by_to = {}
+                for p in posts:
+                    by_to.setdefault(p["to"], []).append(p)
+                with conn.cursor() as cur:
+                    for to, ps in by_to.items():
+                        hard_ps = [p for p in ps if p["tier"] == "hard"]
+                        adv_ps = [p for p in ps if p["tier"] == "advisory"]
+                        if hard_ps:  # any hard flag -> the loud SRE page
+                            subj, body = _hard_body(hard_ps, rmap)
+                            cur.execute(
+                                "INSERT INTO agent_messages (from_agent,to_agent,message_type,"
+                                "subject,body,priority,requires_response) VALUES "
+                                "('orch-console',%s,'question',%s,%s,'P2',true)", (to, subj, body))
+                            print(f"posted HARD page to {to}: {subj}")
+                        if adv_ps:  # advisory -> owner (or SRE fallback)
+                            subj, body = _advisory_body(to, adv_ps, is_fallback=(to == SRE_AGENT))
+                            cur.execute(
+                                "INSERT INTO agent_messages (from_agent,to_agent,message_type,"
+                                "subject,body,priority,requires_response) VALUES "
+                                "('cc-fleet-health',%s,'update',%s,%s,'P3',false)", (to, subj, body))
+                            print(f"posted ADVISORY to {to}: {subj}")
+        _save_alert_state(new_state)
     except Exception as exc:  # noqa: BLE001 — the alarm must never take down the checker
-        print(f"WARN: could not post alert bus row: {exc}", file=sys.stderr)
+        print(f"WARN: could not dispatch alerts: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
