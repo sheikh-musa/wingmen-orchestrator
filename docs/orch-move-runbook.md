@@ -6,6 +6,20 @@
 
 **Blocking gate — CLEARED (2026-08-27, re-verified 2026-08-28):** branch reconcile-before-cutover git gate is green both halves — all commits + real untracked work on origin, branch level with origin (0 ahead / 0 behind) at `bf3d81c`; watchdog 46/46 green (console re-ran post-merge); tree clean; `docs/irsyad-ground-truth.md` now tracked. Secrets host confirmed by Musa = **existing wingmen-core** (op17248). Cutover is unblocked *pending this sequence's sign-off (the 3 decisions below)*.
 
+## 🔴 HARD pre-cutover gate — headless-claude authentication (added 2026-09-05, post-incident; hub cc-orchestrator + orch-console)
+
+**Why:** the 2026-09-05 hub flip to gzb lost the operator bridge for ~1.5h. The lease, all systemd daemons, and agent_status all read GREEN while the actual hub Claude session was stuck at the OAuth **login screen** on the fresh gzb clone. `host-alive`/lease/heartbeat green does **NOT** prove `session-alive` — a fresh clone's `claude` was never onboarded, so it swallowed the env token and forced interactive OAuth; ingest's operator-wake nudges then landed on a dead login prompt. Root gaps found: `~/.claude.json` `hasCompletedOnboarding=false` (+ no theme → onboarding wizard eats the token), no trust/bypass acceptance, `--continue` **exits** when the project dir has no prior conversation, and a zero-size detached tmux pane crashes the TUI.
+
+**Gate (must ALL pass on the target host BEFORE marking hub OR any lane 'moved'):**
+1. Seed `~/.claude.json`: `hasCompletedOnboarding=true` + a theme set; trust + bypass-mode accepted for the project dir.
+2. Launcher passes a real terminal size to `tmux new-session` (`-x 220 -y 50`) — never a zero-size detached pane.
+3. `--continue` is **conditional** on a prior conversation existing for that project dir (or omitted on first launch), else the session exits on boot.
+4. **Smoke-test the session takes one real turn** — reaches the composer authenticated (NOT a login screen) and responds — before it is declared up. A green heartbeat/lease/daemon is insufficient proof and will LIE about a login-stuck session.
+
+**Reference implementation:** the gzb hub fix — `/home/gazzai/orch_supervisor.sh` (`-x/-y` + conditional `--continue`) and `/home/gazzai/.claude.json` (onboarding/theme/trust/bypass); backups at `*.bak-prerecovery`. Reuse this pattern per lane in Phase 2.
+
+**Companion gap (hub liveness signal):** the gzb hub supervisor has no agent_status heartbeat writer — the Mini was the only writer (`host=Sheikhs-Mini`), which is what masked the dead session. Fix = a gzb-side dead-man's-switch heartbeat (beats `host=gzbai` only while the `orch` tmux session exists), paired-handoff with stopping the Mini writer to avoid host-field flap. Tracked separately (HOLD #1B).
+
 ---
 
 ## What "orch" concretely is (measured, not named)
@@ -36,7 +50,7 @@
 7. Verify each daemon healthy on gzb (ingest polling, tg_out delivering, watchdogs heart-beating, console rendering). **Rollback lever = re-point the lease back to Mini/Studio; Mini orch is still warm.**
 
 ### Phase 2 — Lanes
-8. Move the CC lanes to gzb honoring token pools: **irsyad lanes → musa2**, **cosem → Syed**, **singletons → Musa** (unchanged). Workers are headless; singletons per their boot scripts.
+8. Move the CC lanes to gzb honoring token pools: **irsyad lanes → musa2**, **cosem → Syed**, **singletons → Musa** (unchanged). Workers are headless; singletons per their boot scripts. **Every lane MUST pass the 🔴 HARD pre-cutover headless-claude authentication gate above (seed .claude.json, real tmux size, conditional --continue, one-real-turn smoke-test) before it is marked 'moved' — a heartbeat alone is not proof (2026-09-05 incident).**
 
 ### Phase 3 — Decommission / compute-node
 9. Retire the flaky Mac(s) **except** the one Apple-compute node kept for arabic-ocr / Whisper / video (DECISION 2). This kills the Mini↔Studio drift that started the workstream.
