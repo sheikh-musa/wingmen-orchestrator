@@ -54,7 +54,7 @@ _resolve_path() {
   fi
 }
 
-RESET=""; HANDOFF=""; DELAY=60; MAX_AGE=900; DRY=0; SESSION=""; MAX_WAIT=900; BOOTFILE=""
+RESET=""; HANDOFF=""; DELAY=60; MAX_AGE=900; DRY=0; SESSION=""; MAX_WAIT=900; BOOTFILE=""; ALLOW_UNRELEASED=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --reset) RESET="$2"; shift 2;;
@@ -64,6 +64,7 @@ while [ $# -gt 0 ]; do
     --session) SESSION="$2"; shift 2;;
     --boot-file) BOOTFILE="$2"; shift 2;;
     --max-wait) MAX_WAIT="$2"; shift 2;;
+    --allow-unreleased-drafts) ALLOW_UNRELEASED=1; shift;;
     --dry-run) DRY=1; shift;;
     *) echo "self_recycle: unknown arg '$1'" >&2; exit 2;;
   esac
@@ -163,6 +164,36 @@ if [ "$BYTES" -lt 800 ]; then
 fi
 
 echo "self_recycle: handoff OK (${BYTES}B, ${AGE}s old)"
+
+# GATE 3 — DO NOT RECYCLE THE REVIEWER WHILE A CLIENT REPLY IS UNRELEASED. A supervised lane
+# (lane_reply.sh) files its client reply as a DRAFT for a reviewer to SEND; if the reviewer —
+# this console body — recycles before releasing it, the client hears nothing and the draft is
+# orphaned SILENTLY. That is the 2026-09-09 gazzabyte-irsyad strand: the coord drafted Wan's
+# answers, the prior console recycled before releasing them, and Wan waited ~11h until the
+# operator caught it. This is the deterministic catch — at recycle time ANY unreleased supervised
+# client draft blocks the recycle. Scoped to the reviewer body (reset_nazim.sh = Nazim, the
+# human-in-loop releaser); other resets do not own the release queue. FAIL-CLOSED on a
+# could-not-measure (assume an orphan). A conscious --allow-unreleased-drafts overrides for the
+# rare intentional hold. The periodic scripts/supervised_draft_deadman.py is the time-based
+# backstop; this is the recycle-time one. Enforce-in-code, not a promise to remember.
+case "$(basename "$RESET")" in
+  reset_nazim.sh)
+    if [ "$ALLOW_UNRELEASED" = 1 ]; then
+      echo "self_recycle: (GATE 3 skipped — --allow-unreleased-drafts)"
+    else
+      "$PY" -m scripts.lib.unreleased_client_drafts --min-age-s 0
+      _rc=$?
+      if [ "$_rc" = 1 ]; then
+        echo "self_recycle: REFUSED — an unreleased supervised CLIENT draft is pending (listed above). Recycling now would orphan the client's answer (the 2026-09-09 Wan strand). RELEASE it first (scripts/reviewer_send.sh <channel> \"<text>\", or clear it), then re-run. Intentional hold: pass --allow-unreleased-drafts." >&2
+        exit 7
+      elif [ "$_rc" = 2 ]; then
+        echo "self_recycle: REFUSED — could NOT measure unreleased client drafts (error above). Failing CLOSED so a recycle cannot silently orphan a client. Fix/retry, or pass --allow-unreleased-drafts if you are certain none are pending." >&2
+        exit 8
+      fi
+      echo "self_recycle: GATE 3 OK — no unreleased client drafts"
+    fi
+    ;;
+esac
 
 # STAGED HANDOFF COMPACTION (Nazim #31825, item-3) — keep the restore point readable-whole
 # for the fresh body. Enforce-in-code so nobody has to REMEMBER to run it. NO-OP when the

@@ -116,3 +116,4 @@ reports/**/*.doc
 reports/**/*.zip
 reports/**/*.db
 reports/**/*.sqlite
+quarantine/
