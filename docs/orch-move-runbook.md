@@ -52,6 +52,19 @@
 ### Phase 2 — Lanes
 8. Move the CC lanes to gzb honoring token pools: **irsyad lanes → musa2**, **cosem → Syed**, **singletons → Musa** (unchanged). Workers are headless; singletons per their boot scripts. **Every lane MUST pass the 🔴 HARD pre-cutover headless-claude authentication gate above (seed .claude.json, real tmux size, conditional --continue, one-real-turn smoke-test) before it is marked 'moved' — a heartbeat alone is not proof (2026-09-05 incident).**
 
+### 🔴 HARD migration-completion gate — COMPLETE-OR-ROLLBACK, never park a split (added 2026-09-09; Musa op#19449)
+
+**Why:** the gzb flip moved the hub/ingest but left `irsyad-coord` + its client channel `gazzabyte-irsyad` on the Mini with the channel `enabled=False` — a SPLIT: ingest on gzb cannot tmux-nudge a Mini lane, so the channel was parked off and the gazzabyte operators went **silently unserved for days** until the operator himself noticed. "The hub is up" is not "the migration is done."
+
+**Gate — a body is not `moved` until ALL of these hold; otherwise ROLL IT BACK to the Mini (don't leave it split):**
+1. The lane is live on gzb AND passed the headless-auth gate (§ above).
+2. **Every channel whose `inject_target` is that lane is served on the SAME host as the lane** — enabled in the host's ingest, its bot-token poller owned by exactly one host (Telegram allows one long-poller per token: the cutover is an ATOMIC Mini-stop ↔ gzb-start, never both, never neither).
+3. **Round-trip verified on each such channel** — a real message in → the lane answers out → delivered — BEFORE marking moved. A green heartbeat/enabled-flag is not proof of a served channel.
+4. **No channel is ever left `enabled=False` while its target lane is alive elsewhere** — that is the stranded state this gate exists to forbid. If you must pause, roll the lane back to where its channel is served.
+5. Client-facing surfaces: give the client a heads-up via the lane's own operator relay before the cutover and an all-clear after (wording pre-approved by Musa); never message the client cold.
+
+**Detection backstop (SRE, cc-fleet-health):** a channel-liveness watchdog must flag any `bot_channel` whose `inject_target` agent is unreachable-from-the-serving-host, or whose poll activity stalls while it should be live — and page/self-heal BEFORE the operator notices. NB detection is subtle: `bot_channels.updated_at` is config-change time (not poll activity) and `inject_target` is a tmux **session** name (not an `agent_id`) — that subtlety is exactly why the stranding went unseen.
+
 ### Phase 3 — Decommission / compute-node
 9. Retire the flaky Mac(s) **except** the one Apple-compute node kept for arabic-ocr / Whisper / video (DECISION 2). This kills the Mini↔Studio drift that started the workstream.
 
