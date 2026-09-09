@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- proactive self-recycle NUDGE tier (op#19141, Nazim 38313 Option A). Detect + nudge-only;
+       NEVER recycles (no reset/send-keys path — structurally cannot). Independent of any agent's
+       heartbeat (the nudger must outlive the lanes it nudges). Nudges a bloating worker lane at a
+       ~80% bar, BUSY-INCLUSIVE, and re-nudges on continued climb (per-episode + grace, escalating);
+       the dead-man's 85%-sustained PAGE stays the last-resort human backstop, untouched.
+       DEPLOYS INERT: this tracked plist does NOT set PROACTIVE_RECYCLE_NUDGE_ENABLED, so even if
+       loaded it only scans + logs WOULD-NUDGE and sends nothing. ARMING = add
+       `export PROACTIVE_RECYCLE_NUDGE_ENABLED=1` to the wrapper + load — a SEPARATE step gated by
+       orch-console (arm ladder). NOT loaded until the PR is gated. -->
+  <key>Label</key>
+  <string>dev.wingmen.lane-proactive-recycle-nudge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.lane_proactive_recycle_nudge</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/lane_proactive_recycle_nudge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/lane_proactive_recycle_nudge.log</string>
+</dict>
+</plist>
