@@ -70,6 +70,26 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ALLOWLIST GUARD (cai silent-fail, 2026-09-09). self_recycle fires the reset DETACHED (nohup,
+# env -u TMUX_PANE, no controlling TTY). Only an IN-PLACE recycler — reset_*.sh, which `tmux
+# send-keys` a /clear INTO a live pane — survives that: it needs no TTY of its own. A COLD-BOOT
+# launcher (boot_*.sh) instead EXECs a fresh interactive `claude`, which with no TTY auto-selects
+# --print and instant-exits ("Input must be provided ... when using --print"). cai hit this firing
+# `--reset boot_cai.sh`: the fire logged "firing", boot_cai exited immediately, and the only trace
+# was a detached log 60s later + a 3-min false-offline. Reject a non-recycle --reset LOUD HERE, at
+# SCHEDULE time where the caller can still fix it — and crucially EVEN WITH --session set: the
+# derivation `case` below is SKIPPED when --session is passed, which is exactly the bypass that let
+# boot_cai.sh through. The 5 in-place recyclers pass; everything else is refused. (Empty $RESET
+# falls through to the "--reset required" check below.)
+if [ -n "$RESET" ]; then
+  case "$(basename "$RESET")" in
+    reset_nazim.sh|reset_cai.sh|reset_fleet_health.sh|reset_orch.sh|reset_lane.sh) ;;  # in-place recyclers
+    *)
+      echo "self_recycle: REFUSED — '$(basename "$RESET")' is not a recycle script. self_recycle only fires the in-place recyclers reset_{nazim,cai,fleet_health,orch,lane}.sh. A cold-boot launcher (e.g. boot_cai.sh) fired through the detached path has NO TTY and claude instant-exits ('Input must be provided ... when using --print') — for an in-place recycle use the matching reset_*.sh (e.g. reset_cai.sh)." >&2
+      exit 2;;
+  esac
+fi
+
 # WHICH PANE THIS ACTS ON. Derived from the reset script, because each reset hardcodes its own
 # target — but NEVER guessed: reset_lane.sh takes its session as an argument, so there is nothing
 # to derive and a guess would aim a /clear at whatever happened to match. Refuse instead.
