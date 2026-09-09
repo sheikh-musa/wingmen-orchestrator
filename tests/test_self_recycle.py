@@ -256,3 +256,49 @@ def test_it_waits_for_idle_instead_of_firing_once_and_hoping():
     assert re.search(r"MAX_WAIT|max-wait", _SRC), (
         "the wait must be bounded — a genuinely stuck body should fail loudly, not hang"
     )
+
+
+# --- allowlist guard: only the in-place reset_*.sh recyclers may be fired ----- #
+# cai 2026-09-09: firing `--reset boot_cai.sh` (a cold-boot launcher) through the DETACHED fire
+# path gave claude no controlling TTY, so it auto-selected --print and instant-exited ("Input must
+# be provided ... when using --print"). The failure surfaced only as a detached log 60s later plus a
+# 3-min false-offline — a singleton-recycle safety gap that silently no-ops. self_recycle must
+# REJECT a non-recycle --reset LOUD at SCHEDULE time, and must do so EVEN WITH --session set: the
+# session-derivation case is SKIPPED when --session is passed, which is exactly the bypass that let
+# boot_cai.sh through.
+
+@pytest.fixture()
+def boot_launcher(tmp_path):
+    """A COLD-BOOT launcher path (basename boot_cai.sh) — NOT an in-place recycler. Its existence
+    is real so the test reaches the allowlist on the same footing as the live misinvocation."""
+    p = tmp_path / "boot_cai.sh"
+    p.write_text("#!/usr/bin/env bash\nclaude --dangerously-skip-permissions --model x\n")
+    return str(p)
+
+
+def test_a_cold_boot_launcher_is_refused_even_with_session(boot_launcher, handoff):
+    """THE bypass that bit cai: --session set skips the derivation case, so before this guard a
+    non-recycle script sailed through to a detached, TTY-less, silent fail."""
+    out = _run("--reset", boot_launcher, "--session", "cai", "--handoff", handoff, "--dry-run")
+    assert out.returncode == 2, (out.returncode, out.stdout, out.stderr)
+    assert "not a recycle script" in out.stderr
+    assert "SCHEDULED" not in out.stdout          # rejected at schedule time, never fired
+    assert "NOTHING scheduled" not in out.stdout  # and not mistaken for a clean dry-run pass
+
+
+def test_a_cold_boot_launcher_is_refused_without_session_too(boot_launcher, handoff):
+    out = _run("--reset", boot_launcher, "--handoff", handoff, "--dry-run")
+    assert out.returncode == 2, (out.returncode, out.stdout, out.stderr)
+    assert "not a recycle script" in out.stderr
+
+
+@pytest.mark.parametrize("reset", [
+    "reset_nazim.sh", "reset_cai.sh", "reset_fleet_health.sh", "reset_orch.sh", "reset_lane.sh",
+])
+def test_the_five_in_place_recyclers_pass_the_allowlist(reset, handoff):
+    """Every legit recycler must clear the allowlist. It may still fail LATER for its own reason
+    (reset_lane needs --boot-file; reset_nazim runs GATE 3; a file may be absent) — but never with
+    the allowlist refusal. Asserting the refusal string is ABSENT keeps this independent of those
+    downstream gates."""
+    out = _run("--reset", f"scripts/{reset}", "--session", "cai", "--handoff", handoff, "--dry-run")
+    assert "not a recycle script" not in (out.stdout + out.stderr), (reset, out.stderr)
