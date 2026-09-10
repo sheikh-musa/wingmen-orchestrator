@@ -845,6 +845,20 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
                 # operator is acked within ACK_AFTER_SEC even when the hub is
                 # stuck-idle (neither replying nor busy) — never left wondering.
                 reassure_if_unhandled(conn, ch)
+                # STEP-0 poll-health (channel-liveness watchdog; SRE 38560): record a
+                # SUCCESSFUL getUpdates cycle. Reuses this conn so it fires ONLY when the
+                # poll actually succeeded — last_ok_at is the liveness clock the rung-1
+                # reader keys on, consec_errors resets to 0. host distinguishes a dark hub
+                # instance from a dark Mini-pinned instance. updated_at bumps every cycle.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO ingest_poll_health "
+                        "(channel_key, host, last_ok_at, consec_errors, last_error, updated_at) "
+                        "VALUES (%s, %s, now(), 0, NULL, now()) "
+                        "ON CONFLICT (channel_key, host) DO UPDATE SET "
+                        "last_ok_at=now(), consec_errors=0, last_error=NULL, updated_at=now()",
+                        (ch.key, socket.gethostname()))
+                conn.commit()
         except psycopg.Error as e:
             # DB unreachable: offset stays un-acked → Telegram will redeliver →
             # A1 dedupe absorbs. Surface loudly for the watchdog (CAI-RESP-357).
@@ -855,6 +869,25 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
             await asyncio.sleep(ERROR_BACKOFF)
         except Exception as e:
             _log_line(f"{key}: loop error {type(e).__name__}: {e}")
+            # STEP-0 poll-health (SRE 38560): count this FAILED poll (the Errno-54 path).
+            # Short-lived conn — the success block's conn isn't open here — in its OWN
+            # try/except so a poll-health write failure can never crash or mask the loop's
+            # error handling. last_ok_at deliberately NOT touched: preserve the last REAL
+            # success time (the watchdog's liveness clock). Typed error string so a real
+            # Telegram 409 would ever surface verbatim (honest competitor-confirm signal).
+            try:
+                with psycopg.connect(_dsn()) as _hconn, _hconn.cursor() as _hcur:
+                    _hcur.execute(
+                        "INSERT INTO ingest_poll_health "
+                        "(channel_key, host, last_ok_at, consec_errors, last_error, updated_at) "
+                        "VALUES (%s, %s, NULL, 1, %s, now()) "
+                        "ON CONFLICT (channel_key, host) DO UPDATE SET "
+                        "consec_errors = ingest_poll_health.consec_errors + 1, "
+                        "last_error = EXCLUDED.last_error, updated_at = now()",
+                        (ch.key, socket.gethostname(), f"{type(e).__name__}: {e}"[:200]))
+                    _hconn.commit()
+            except Exception:
+                pass  # poll-health write is best-effort; never mask the real loop error
             await asyncio.sleep(ERROR_BACKOFF)
 
 
