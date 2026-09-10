@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- channel-liveness watchdog rung-1 (CAI-501). Reads ingest_poll_health (mig 061) and ALERTS
+       orch-console when a Telegram getUpdates poll is WEDGED while the ingest process stays alive
+       (the gazzabyte-irsyad 11h-Errno-54 class). DETECT + operator-alert ONLY — no self-healing
+       action, so nothing lease-gated (charter §3: detection + degrade-alert stay ungated). Independent
+       of any agent heartbeat. NOT loaded until orch-console gates the PR + the arm; runs read-only +
+       per-channel daily dedup + a dead-man heartbeat. StartInterval 120s = timely client-dark
+       detection against the 8min stale bar. -->
+  <key>Label</key>
+  <string>dev.wingmen.channel-liveness-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/channel_liveness_watchdog.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>StartInterval</key>
+  <integer>120</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/channel_liveness_watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/channel_liveness_watchdog.log</string>
+</dict>
+</plist>
