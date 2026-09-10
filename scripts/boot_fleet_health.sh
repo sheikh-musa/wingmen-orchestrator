@@ -103,8 +103,11 @@ fi
 # ── Bring cc-fleet-health online (agent_status + agents). Exact agent_id. ─────
 # base_agent_id='cc-fleet-health' satisfies the prefix CHECK (base == id with any
 # trailing -N stripped; there is none). Self-register the tmux session for
-# launchd-safe wake delivery — read from inside this pane.
-FH_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+# launchd-safe wake delivery. DETERMINISTIC canonical default (env-overridable),
+# NOT `tmux display-message`: a foreign-pane boot would mis-stamp tmux_session and
+# misroute this body's wakes (the cai class-bug, bus 38667-38673, 2026-09-10).
+# Exported so the heartbeat subshell below re-asserts it each beat (self-heal).
+export FH_TMUX_SESSION="${FH_TMUX_SESSION:-fleet-health}"
 _sql "
 INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, auth_fp, last_heartbeat, updated_at)
 VALUES ('cc-fleet-health','cc-fleet-health','working','cc-fleet-health SRE perpetual health lane', ARRAY['*']::text[], NULLIF('$FH_TMUX_SESSION',''), NULLIF('$AUTH_FP',''), now(), now())
@@ -144,7 +147,10 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     # _handle_exit trap flipped the live body offline; the old heartbeat only
     # refreshed last_heartbeat, so it never self-corrected). Clean exit kills THIS
     # loop (HB_PID) BEFORE _handle_exit sets offline, so this never fights it.
-    cur.execute("UPDATE agent_status SET status='working', last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-fleet-health'")
+    # Re-assert tmux_session too (same self-heal rationale as status): a drifted
+    # registration repairs within one beat instead of misrouting wakes to reboot.
+    cur.execute("UPDATE agent_status SET tmux_session=%s, status='working', last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-fleet-health'",
+                (os.environ.get("FH_TMUX_SESSION") or "fleet-health",))
     cur.execute("UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cc-fleet-health'")
     conn.commit()
 PY
