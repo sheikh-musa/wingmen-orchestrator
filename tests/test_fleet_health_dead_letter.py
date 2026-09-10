@@ -11,7 +11,12 @@ step-4's job, not this detector's.
 Prod-clean: pure classification only, no DB (importing fleet_health must not load .env under
 pytest — the module guards load_dotenv on PYTEST_CURRENT_TEST).
 """
+import os
+import pytest
+
 from scripts import fleet_health as fh
+
+DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
 
 def test_operator_and_non_address_are_undeliverable():
@@ -61,3 +66,104 @@ def test_nervous_system_resolves_under_script_invocation(tmp_path):
                        cwd=str(tmp_path), env=env)  # cwd off-repo so the root isn't on path via cwd
     assert r.returncode == 0, f"nervous_system unresolved under script invocation (99de7e3): {r.stderr}"
     assert "IMPORT_OK" in r.stdout
+
+
+# --- cursor-relay exemption (2026-09-10) ------------------------------------- #
+# The operator ('musa') ⚠️ weekly-pace rows are CONSUMED by weekly_alert_relay (a durable-cursor
+# daemon that pushes each to the operator's phone) — delivered, not dead — but a cursor never sets
+# read_at, so the read_at/agent_wake detector false-flagged them as dead-letters. Fix exempts EXACTLY
+# the relay's tuple; a genuine 'musa' misroute (different producer/subject) must still surface.
+
+def test_relay_consumed_is_exactly_the_relay_tuple():
+    assert fh._relay_consumed("musa", "cc-fleet-health", "⚠️ Pace warning — Musa pool may run out")
+    # any leg of the tuple differing -> NOT exempt (a real misroute must stay flaggable)
+    assert not fh._relay_consumed("musa", "cc-fleet-health", "a normal subject with no warning glyph")
+    assert not fh._relay_consumed("musa", "cc-quality", "⚠️ from a different producer")
+    assert not fh._relay_consumed("operator", "cc-fleet-health", "⚠️ different address")
+    assert not fh._relay_consumed(None, None, None)
+
+
+def test_exemption_sql_is_scoped_not_blanket():
+    """Nazim's gate condition: scoped to the EXACT relay tuple, never a blanket 'musa' or
+    blanket-⚠️ that could hide a real future dead-letter to a different producer/address."""
+    sql = fh._RELAY_CONSUMED_SQL
+    assert "'musa'" in sql and "cc-fleet-health" in sql and "⚠️" in sql
+    assert sql.count(" AND ") >= 2, "all three legs must be ANDed (a blanket suppression drops one)"
+
+
+def test_surface_query_carries_the_exemption():
+    """The dead-letter aggregation query must EXCLUDE the relay-consumed set."""
+    class _Cur:
+        def __init__(self):
+            self.sqls = []
+
+        def execute(self, sql, params=None):
+            self.sqls.append(sql)
+
+        def fetchall(self):
+            return []
+
+        def fetchone(self):
+            return None
+
+    cur = _Cur()
+    assert fh.surface_dead_letters(cur, dry=True) == []
+    agg = cur.sqls[0]
+    assert "NOT (" in agg and fh._RELAY_CONSUMED_SQL in agg, \
+        "surface_dead_letters must exclude the relay-consumed set from its count"
+
+
+@pytest.mark.skipif(not DSN, reason="DATABASE_URL not set (DB-executing test)")
+def test_exemption_sql_null_subject_semantics_EXECUTED():
+    """EXECUTED (rolled back): guards the SQL's three-valued NULL semantics the pure twin + string
+    tests cannot. Fed a synthetic NULL subject via VALUES (a real INSERT can't — agent_messages.
+    subject is NOT NULL, so the fail-open is unreachable in PRACTICE; this is defense-in-depth +
+    twin-parity). With the coalesce() fix, NOT(exemption) for a NULL-subject cc-fleet-health->musa
+    row is TRUE (the dead-letter WHERE KEEPS it = surfaces); without coalesce it would be NULL
+    (dropped = a fail-open hide). Also checks a ⚠️ row is exempted and a plain row is not."""
+    import psycopg
+    with psycopg.connect(DSN, autocommit=False) as conn, conn.cursor() as cur:
+        try:
+            cur.execute(
+                f"SELECT subject, NOT ({fh._RELAY_CONSUMED_SQL}) AS surfaces "
+                f"FROM (VALUES ('musa','cc-fleet-health', NULL::text), "
+                f"             ('musa','cc-fleet-health', '⚠️ pace'::text), "
+                f"             ('musa','cc-fleet-health', 'plain misroute'::text)) "
+                f"     t(to_agent, from_agent, subject) "
+                f"ORDER BY 1 NULLS FIRST")
+            rows = {r[0]: r[1] for r in cur.fetchall()}
+            assert rows[None] is True, "NULL subject must NOT be exempted (coalesce null-safety)"
+            assert rows["⚠️ pace"] is False, "a ⚠️ row IS relay-consumed -> exempted (not surfaced)"
+            assert rows["plain misroute"] is True, "a non-⚠️ musa row still surfaces"
+        finally:
+            conn.rollback()
+
+
+@pytest.mark.skipif(not DSN, reason="DATABASE_URL not set (DB-executing test)")
+def test_surface_dead_letters_end_to_end_EXECUTED():
+    """EXECUTED (rolled back, zero residue): run the actual surface_dead_letters against real rows.
+    An empty-subject cc-fleet-health->musa misroute SURFACES; a ⚠️ relay row is EXEMPTED. (Empty '' is
+    the insertable stand-in for the NULL case, which the NOT NULL constraint forbids.)"""
+    import psycopg
+    with psycopg.connect(DSN, autocommit=False) as conn, conn.cursor() as cur:
+        try:
+            # isolate the 'musa' group + clear today's dedup so the surface decision turns ONLY on
+            # the exemption, not on live rows / a prior advisory. All rolled back.
+            cur.execute("DELETE FROM agent_messages WHERE to_agent='musa' AND read_at IS NULL")
+            cur.execute("DELETE FROM agent_messages WHERE from_agent='cc-fleet-health' "
+                        "AND to_agent='orch-console' AND subject LIKE 'dead-letter[musa]:%' "
+                        "AND created_at >= date_trunc('day', now())")
+            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+            cur.execute("INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                        "priority,requires_response) VALUES "
+                        "('cc-fleet-health','musa','update','','(test body)','P2',false)")   # non-⚠️ misroute
+            assert "musa" in fh.surface_dead_letters(cur, dry=True), \
+                "a non-⚠️ cc-fleet-health->musa row must SURFACE"
+            cur.execute("DELETE FROM agent_messages WHERE to_agent='musa' AND read_at IS NULL")
+            cur.execute("INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                        "priority,requires_response) VALUES "
+                        "('cc-fleet-health','musa','update','⚠️ Pace warning — test row','(test body)','P2',false)")
+            assert "musa" not in fh.surface_dead_letters(cur, dry=True), \
+                "a ⚠️ relay-consumed row must be exempted (delivered by the cursor relay, not dead)"
+        finally:
+            conn.rollback()

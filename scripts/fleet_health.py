@@ -103,16 +103,41 @@ def _undeliverable(to_agent) -> bool:
     return not is_wake_eligible_recipient(to_agent, "P0", True)
 
 
+# EXEMPT — cursor-relay-consumed rows are NOT dead-letters. The operator ('musa') ⚠️ weekly-pace
+# rows are CONSUMED by nervous_system/weekly_alert_relay.py — a durable-CURSOR launchd daemon that
+# pushes each to the operator's phone (nazim pen). A cursor relay NEVER sets read_at, so these stay
+# unread forever despite being DELIVERED, and are invisible to the agent_wake/read_at test
+# _undeliverable() uses — so without this they FALSE-flag as dead-letters (2026-09-10: that cascaded
+# into a "retarget the producer" advisory, but that retarget was already tried in b72a6fe and
+# REVERTED by Nazim 37739; test_weekly_limit_operator_target.py pins OPERATOR_AGENT='musa' to the
+# relay, and weekly_limit_monitor.py:~521 documents "this is NOT a dead-letter"). Canonical watched
+# set = weekly_alert_relay._WHERE; this mirrors it. Excluding these from the COUNT still lets a
+# genuine 'musa' misroute (a non-⚠️ / non-SRE row) surface.
+_RELAY_CONSUMED_SQL = ("to_agent = 'musa' AND from_agent = 'cc-fleet-health' "
+                       "AND coalesce(subject,'') LIKE '⚠️%'")  # coalesce: NULL-subject must NOT be
+# exempt (a NULL LIKE is NULL -> NOT(NULL)=NULL drops the row = fail-open hide; Nazim PR#101 gate).
+
+
+def _relay_consumed(to_agent, from_agent, subject) -> bool:
+    """PURE twin of _RELAY_CONSUMED_SQL (drift-guarded by test): True iff this row is a
+    weekly_alert_relay cursor-consumed operator ⚠️ row — delivered to the operator's phone, NOT a
+    dead-letter. Keep in lockstep with _RELAY_CONSUMED_SQL and weekly_alert_relay._WHERE."""
+    return (to_agent == "musa" and from_agent == "cc-fleet-health"
+            and (subject or "").startswith("⚠️"))
+
+
 def surface_dead_letters(cur, dry=False):
     """Detect unread rows whose to_agent is structurally undeliverable and SURFACE them to
     orch-console — ONE coalesced row per (to_agent) per day (deduped on today's own surface
     rows), NEVER reaped. Reaping would hide a real misroute; step 4 already spares these.
-    Returns the to_agents surfaced (or that WOULD be, when dry)."""
-    cur.execute("""SELECT to_agent, count(*) AS n, min(created_at) AS oldest,
+    Cursor-relay-consumed rows (see _RELAY_CONSUMED_SQL) are excluded — they are delivered, not
+    dead. Returns the to_agents surfaced (or that WOULD be, when dry)."""
+    cur.execute(f"""SELECT to_agent, count(*) AS n, min(created_at) AS oldest,
                           max(created_at) AS newest,
                           count(*) FILTER (WHERE priority IN ('P0','P1')) AS hi
                    FROM agent_messages
                    WHERE read_at IS NULL AND to_agent IS NOT NULL
+                     AND NOT ({_RELAY_CONSUMED_SQL})
                    GROUP BY to_agent""")
     surfaced = []
     for to_agent, n, oldest, newest, hi in cur.fetchall():
