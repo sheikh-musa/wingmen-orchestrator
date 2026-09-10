@@ -118,8 +118,11 @@ if [ "$REGISTERED" != "yes" ]; then
 fi
 
 # ── Bring cc-quality online (agent_status + agents). Exact agent_id. ──────────
-# Self-register the tmux session for launchd-safe wake delivery (read from this pane).
-Q_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+# Self-register the tmux session for launchd-safe wake delivery. DETERMINISTIC
+# canonical default (env-overridable), NOT `tmux display-message`: a foreign-pane
+# boot would mis-stamp tmux_session and misroute wakes (the cai class-bug, bus
+# 38667-38673, 2026-09-10). Exported so the heartbeat subshell re-asserts it.
+export Q_TMUX_SESSION="${Q_TMUX_SESSION:-quality}"
 _sql "
 INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, auth_fp, last_heartbeat, updated_at)
 VALUES ('cc-quality','cc-quality','working','cc-quality on-demand review/sweep session', ARRAY['*']::text[], NULLIF('$Q_TMUX_SESSION',''), NULLIF('$AUTH_FP',''), now(), now())
@@ -149,7 +152,10 @@ try:
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         # agent_status identity trigger: GUC must == the row's agent_id.
         cur.execute("SELECT set_config('app.current_agent_id','cc-quality',true)")
-        cur.execute("UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-quality'")
+        # Re-assert tmux_session each beat so a drifted registration self-heals
+        # within one beat instead of misrouting wakes until reboot (bus 38667-38673).
+        cur.execute("UPDATE agent_status SET tmux_session=%s, last_heartbeat=now(), updated_at=now() WHERE agent_id='cc-quality'",
+                    (os.environ.get("Q_TMUX_SESSION") or "quality",))
         cur.execute("UPDATE agents SET last_heartbeat=now() WHERE id='cc-quality'")
         conn.commit()
 except Exception:

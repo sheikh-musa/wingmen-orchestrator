@@ -100,8 +100,12 @@ PY
 # ── Bring cai online (agent_status + agents). Exact agent_id='cai'. ──────────
 # base_agent_id='cai' satisfies the prefix CHECK (base == id with -N stripped).
 # Self-register the tmux session for #111 launchd-safe wake delivery (cai is in
-# the wake set, CAI-RESP-255 #3) — read from inside cai's own pane.
-CAI_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+# the wake set, CAI-RESP-255 #3). DETERMINISTIC canonical default (env-overridable),
+# NOT `tmux display-message`: a boot that ran in a FOREIGN pane (e.g. kicked from the
+# nazim/console session) mis-stamped tmux_session='nazim' and misrouted cai's wakes
+# into the console pane (bus 38667-38673, 2026-09-10). Mirrors boot_nazim_bus_notify.sh.
+# Exported so the heartbeat subshell below can re-assert it each beat (self-heal).
+export CAI_TMUX_SESSION="${CAI_TMUX_SESSION:-cai}"
 _sql "
 INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, auth_fp, last_heartbeat, updated_at)
 VALUES ('cai','cai','working','cc-cai perpetual strategic lane', ARRAY['*']::text[], NULLIF('$CAI_TMUX_SESSION',''), NULLIF('$AUTH_FP',''), now(), now())
@@ -123,7 +127,11 @@ import os, psycopg
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("SELECT set_config('app.current_agent_id', 'cai', true)")
-    cur.execute("UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id='cai'")
+    # Re-ASSERT tmux_session each beat so a drifted registration (e.g. a prior
+    # foreign-pane boot) self-heals within one beat (<=5min) instead of persisting
+    # until reboot (bus 38667-38673). Deterministic canonical, env-overridable.
+    cur.execute("UPDATE agent_status SET tmux_session=%s, last_heartbeat=now(), updated_at=now() WHERE agent_id='cai'",
+                (os.environ.get("CAI_TMUX_SESSION") or "cai",))
     cur.execute("UPDATE agents SET last_heartbeat=now() WHERE id='cai'")
     conn.commit()
 PY
