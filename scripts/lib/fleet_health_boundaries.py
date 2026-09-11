@@ -32,7 +32,19 @@ SRE_AGENT_ID = "cc-fleet-health"
 # recycle ITSELF mid-run — that would drop the fleet_health_lease + kill the very
 # process driving the reset (the self-recycle gap cai flagged at arm time). Worker
 # lanes are everything NOT in this set.
-SINGLETON_BODIES = frozenset({"cc-orchestrator", "cai", "orch-console", SRE_AGENT_ID})
+#
+# CAI-RESP-1392 (A), 2026-09-04: the auditor/brain singletons cc-quality /
+# cc-storefront / cc-finance are ALSO CAI-500 singletons and named here — they
+# recycle via their OWN reset_<name>.sh (once armed), never the worker-lane path.
+# Before this, they were MISSING from the set, so every worker-recycle path that
+# excludes on SINGLETON_BODIES (discover_lanes, auto_recycle_on_bloat,
+# lane_selfrecycle_detect, checkpoint_recycle_driver, the proactive-recycle-nudge
+# tier) treated them as worker lanes — which is why the ~80% proactive nudge fired
+# on cc-quality even though that tier "excludes singletons" (bus 38900/38902).
+SINGLETON_BODIES = frozenset({
+    "cc-orchestrator", "cai", "orch-console", SRE_AGENT_ID,
+    "cc-quality", "cc-storefront", "cc-finance",
+})
 
 # The three gates that must ALL be mechanically verified True before the SRE may
 # red-reset a worker lane (CAI-RESP-681 conditions 1+2). fresh_handoff is the

@@ -219,8 +219,11 @@ def test_run_downgrades_to_scanlog_when_lease_not_held(monkeypatch):
 def test_run_below_bar_does_not_nudge(monkeypatch):
     cur = _WireCur()
     conn = _WireConn(cur)
-    lanes = [{"lane": "cc-quality", "base_agent_id": "cc-quality", "tmux_session": "quality"}]
-    _wire(monkeypatch, lanes=lanes, gauge_pct={"cc-quality": 40}, enabled=True, dry=False)
+    # a WORKER lane below the bar (cc-quality is now a SINGLETON_BODY — CAI-1392 A —
+    # so it is no longer a valid worker-lane fixture; a singleton here would correctly
+    # raise via assert_sre_never_targets_singleton, tested separately below).
+    lanes = [{"lane": "cc-cosem-video", "base_agent_id": "cc-cosem-video", "tmux_session": "cosem-video"}]
+    _wire(monkeypatch, lanes=lanes, gauge_pct={"cc-cosem-video": 40}, enabled=True, dry=False)
     pn.run(conn, dry=False)
     assert cur.inserts == []
 
