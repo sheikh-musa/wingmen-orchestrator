@@ -12,10 +12,19 @@
 # reset — so this is enforce-in-code, not another "I'll do better." A control that needs
 # remembering is a sentence.
 #
-# Fires ONLY for the console body: ORCH_BODY_ROLE=console (the SAME discriminator orch_lease.py
-# trusts, _role()). coord/lanes/hub carry no ORCH_BODY_ROLE=console — VERIFIED 2026-09-11 that
-# coord's live process env has it absent (79 vars captured, 0 ORCH_BODY_ROLE lines) — so their
-# sends pass freely. This restricts CONSOLE ONLY; it can never block coord's client comms.
+# DISCRIMINATOR — why NOT ORCH_BODY_ROLE (2026-09-11 regression, coord-caught): the shared
+# ~/wingmen/orchestrator/.env carries ORCH_BODY_ROLE=console (+ ORCH_AGENT_ID, ORCH_TMUX_SESSION).
+# launch_dangerous_cc.sh UNSETS those at lane boot, BUT a lane's command that re-`source`s .env for
+# its DSN/tokens RE-INTRODUCES ORCH_BODY_ROLE=console — so the first cut here wrongly blocked coord's
+# routine reviewer_send. env vars that live in the shared .env are unusable as a body discriminator.
+#
+# The reliable signal: launch_dangerous_cc.sh EXPORTS CC_BASE_AGENT_ID (the lane's family id, e.g.
+# cc-irsyad-coord) into every lane process. It is NOT in the shared .env, so a lane sourcing .env
+# cannot clear it, and it is inherited by every subprocess incl reviewer_send. The console (Nazim,
+# booted via boot_nazim.sh) has NO CC_BASE_AGENT_ID. VERIFIED 2026-09-11: console env has none; all
+# 10 live lanes carry CC_BASE_AGENT_ID=cc-*. So: a caller WITH CC_BASE_AGENT_ID is a lane → exempt;
+# WITHOUT it → the console body → gate. (The hub, also without it, is on another host + shouldn't
+# routine-send irsyad client either; the override covers a deliberate hub/console send.)
 #
 # Override (a deliberate money/floor send console is entitled to make):
 #   export IRSYAD_CLIENT_SEND_OK="<why this is money/floor>"   # non-empty reason
@@ -32,14 +41,15 @@
 
 _console_irsyad_client_send_gate() {
   local target="${1:-}"
-  # Only the console body is gated.
-  [ "${ORCH_BODY_ROLE:-}" = "console" ] || return 0
   # Only the irsyad client channel(s) are gated.
   local gated=0 ch
   for ch in $CONSOLE_IRSYAD_CLIENT_CHANNELS; do
     [ "$target" = "$ch" ] && { gated=1; break; }
   done
   [ "$gated" = 1 ] || return 0
+  # LANE EXEMPTION (robust, .env-pollution-proof): any lane carries an exported CC_BASE_AGENT_ID
+  # that the console never has. coord and every other lane send freely; only the console is gated.
+  [ -n "${CC_BASE_AGENT_ID:-}" ] && return 0
   # Deliberate money/floor override: an explicit, non-empty, logged reason.
   if [ -n "${IRSYAD_CLIENT_SEND_OK:-}" ]; then
     local logf="${ORCH_DIR:-$HOME/wingmen/orchestrator}/logs/console_irsyad_send_overrides.log"
