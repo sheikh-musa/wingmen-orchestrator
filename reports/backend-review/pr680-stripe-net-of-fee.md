@@ -1,0 +1,28 @@
+# PR#680 — Stripe import records NET-of-fee amount — FULL-tier money-path review
+
+**Auditor:** cc-quality (Opus 4.8, CAI-1170 money-path). **Date:** 2026-09-10. **Repo:** sheikh-musa/ihsanos, head `0ab6810b`. **Silo:** goumlyne (client data; not a floor). **Apply DEFERRED** (blocks on Wan's fund-category).
+**VERDICT: PASS on net-recording correctness; 2 money-VISIBILITY findings to fix or explicitly accept before apply.** Independent adversarial pass; do-not-apply respected (verdict → orch-console).
+
+Files (authoritative gh PR diff, not a stale-local-main diff): `stripe-parser.ts` +64/-8, `bank-import.ts` +71/-4 (Stripe branch), `stripe-import-client.tsx` +15/-1, test +265.
+
+## Correctness — VERIFIED (PASS)
+- **NET math exact, no float drift (ask 1):** `net = Math.max(0, round2(amount − fee − tax_on_fee))`; `round2(n)=Math.round((n+Number.EPSILON)*100)/100`; the recorded value is `.toFixed(2)`-normalized. Test: 320 − 4.16 − 0.37 = **315.47** exact, gross 320 preserved on the parsed row. `stripe_fee_total = round2(fee + tax_on_fee)`.
+- **Recorded == provenance-token == committed (ask 1):** the provenance `material = [external_id, amount.toFixed(2), posted_at]` binds `amount`, which is set to **net**; `verifyStripeProvenance` at commit checks against `r.amount` (net); commit inserts `amount: r.amount` (net). So mint-over-net == verify-against-net == booked row. `.toFixed(2)` normalization (50 vs 50.00) closes the drift gap.
+- **Stripe-only isolation, NON-VACUOUS (ask 2):** the net substitution lives only in the `parseStripeSheet` function (bank-import.ts ~1391+); OCBC/MIF/GIRO/cash keep `amount: row.amount` (gross). `composeStripeNetNote` is `source==="stripe"`-gated (non-Stripe → operator note verbatim). Test proves an OCBC import of the same amount records GROSS. Confirmed the branch gates on source, not a shared codepath.
+- **Fail-closed fee parse (asks 1/3):** `parseFeeComponent` — absent/empty cell → fee-free 0; present-but-non-numeric → `{ok:false}` → row **held out** (`skipped_fee_unparseable++`), never gross-as-net. Tested (skip count = 1 on a garbage fee; fee-free → net===gross).
+- **Dedup / no double-count / no replay (ask 5):** idempotency key is Stripe `payment_intent_id` (globally unique) → re-upload auto-skips; an active-`import_ref` guard drops already-imported refs before insert. The net change is orthogonal to dedup (key is the intent id, not the amount). Provenance token is server-signed over external_id+amount+posted_at; a moved/edited row fails the check.
+- **Provenance trail:** gross + total fee written to the donation's `notes`, **server-authoritative** (operator note can't delete it), org-internal (donor sees only the net receipt). Not a donor-facing surface.
+- **CI:** ran the PR test — **9/9 pass**; `npm run lint:all` — **17/17 gates green** (incl. check-minors-exclusion-fail-closed, check-money-float, check-action-error-capture).
+
+## Findings — both "a silent money edge case is not surfaced"
+
+### F1 [MEDIUM, ask 3] — `skipped_fee_unparseable` count is computed + plumbed to the client but NEVER rendered
+The fail-closed skip is correct (never mis-records money), and the PR adds `skipped_fee_unparseable` to `ParsePreviewResult` (parse returns it) — but `stripe-import-client.tsx` references it **nowhere**; its only skip display is COMMIT-side (`skipped_duplicate`, `skipped.length`). So a donation dropped for an unparseable fee is **invisible to the operator** — they don't know N rows were held out or why, and can't fix-source-and-re-import. This defeats the skip's own purpose (the reason to COUNT held rows is to SURFACE them; "a silently-dropped donation is its own bug"). The plumbing is already there — the fix is a parse-time skip banner (e.g. "N row(s) held out: unparseable Fee/Taxes-On-Fee — fix and re-import"). (Note: the client also doesn't surface the pre-existing parse skips `skipped_malformed/zero/unpaid` — worth surfacing together — but the NEW money-drop skip is this PR's to make visible.) **Fix or explicitly accept before apply.**
+
+### F2 [LOW–MEDIUM, ask 4] — negative net silently clamped to $0, not flagged
+`net = Math.max(0, round2(amount − fee − tax))` books **$0** for any `fee > amount` row without surfacing it. Fee-exceeding-the-charge is a genuine data anomaly — most likely column misalignment (Fee/Amount swapped) or a sub-fee micro-charge — and silently booking a $0 donation both hides the anomaly and adds a $0 row to the count. Consistent with the PR's own fail-closed philosophy, a pre-clamp negative (`amount − fee − tax < 0`) should be **surfaced** (its own skip/flag counter, shown like F1) rather than clamped-and-hidden. Edge case (rare for real Stripe donations, where fee ≈ 2.9%+$0.30 ≪ amount), so operator's call — but I lean toward surfacing. **Operator decision before apply.**
+
+## Verdict
+The money is recorded correctly, isolated to Stripe, token-bound, dedup-safe, and gross is preserved for reconciliation — **PASS on correctness**. The two findings are money-VISIBILITY, not money-CORRECTNESS: both are silent skip/clamp paths that should show the operator what was dropped. Neither blocks the net logic; both should be addressed (or explicitly accepted by Wan/console) before apply — and apply is deferred anyway, so there is time. Alert-not-block / advisory per charter — the fix/accept call is the operator's & console's.
+
+*Method: authoritative gh PR diff (guarded against stale-local-main — the `main...` diff was polluted by already-merged GIRO/config-permission commits); source review of net math, provenance mint/verify, isolation, dedup; ran the PR test (9/9) + full lint:all (17/17) at head 0ab6810b in a throwaway worktree. No mutation, no apply.*

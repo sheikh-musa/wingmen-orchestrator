@@ -1,0 +1,23 @@
+{
+  "watch": "cosem-pr159-ca-attempt-acknowledge-first-real-use",
+  "status": "open",
+  "created_at": "2026-09-06T00:15:00Z",
+  "created_by": "orch-console",
+  "owner": "orch-console",
+  "why": "PR#159 (CA attempt-acknowledgment, Group D ack-half) merged/deployed with condition 2 (authed UI wet-test) satisfied via the CAI-RESP-1191 proportionality substitute, NOT a real authed pass — because an authed login against the cosem project is a per-project auth-admin write frozen for lanes (CAI-1337/1338 / goumlyne CAI-1118 class) and the authed click-through is the console pen (CAI-1124 analog). CAI-RESP-1191 requires the first REAL use be actively watched as the compensating control.",
+  "signal": "First audit_log row action='attempt.acknowledged' on the real cosem org 1478c9b2 (Hariz/ADCDA), project ref ywrpttpxwfcoodovxhsr.",
+  "verify_on_signal": [
+    "The /dashboard/exams/results screen rendered for the real course_administrator (no 500/blank).",
+    "The acknowledgeAttempt action completed: acknowledged_by/acknowledged_at set on the target theory_attempts or skill_assessments row.",
+    "Org-scoping held (the ack row is on org 1478c9b2, not cross-org).",
+    "No error surfaced to the CA."
+  ],
+  "on_pass": "Close this watch; the CAI-RESP-1191 substitute is discharged for PR#159.",
+  "on_fail": "Frontend<->action wiring broke on first use (the exact gap the substitute left uncovered) — treat as a live bug, fix + re-gate.",
+  "refs": {
+    "pr": "cosem-platform PR#159",
+    "code_gate": "agent_messages #37895",
+    "substitute_ruling": "agent_messages #37899 (applies CAI-RESP-1191)",
+    "memory": "reference_goumlyne_authed_qa_is_console_pen"
+  }
+}

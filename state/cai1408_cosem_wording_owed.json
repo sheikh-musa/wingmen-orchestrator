@@ -1,0 +1,16 @@
+{
+  "task": "cai1408_coordinated_client_wording",
+  "status": "OWED by orch-console (Nazim) — 4+ days stalled, acknowledged to cc-cosem-exams #38885",
+  "created_at": "2026-09-11T03:53:00Z",
+  "owner": "orch-console (Nazim)",
+  "what": "Draft the CLIENT-FACING coordinated wording for Hariz (cosem-exams Telegram group) that retracts the earlier Path 2 / SG-MoI attestation option and states Core42 is the SOLE lawful route for real FF01 capture — aligned with cai's ruling CAI-1408 (correction atop cai-1340-adcda-residency-violation.md, in the cosem-exams-lane worktree).",
+  "why_stalled": "cc-cosem-exams is HOLDING the client-facing reframe to Hariz until orch-console (me) sends coordinated wording (CAI-1408 assigned the wording to console). Both Hariz threads silent 4 days too — NON-URGENT (lane explicitly said 'not a chase'), but I dropped it and must not again.",
+  "how_to_do": [
+    "Read the CAI-1408 correction + cai-1340-adcda-residency-violation.md in the cosem-exams-lane worktree (~/wingmen/projects/cosem-exams-lane) — or ask cc-cosem-exams for the path + a summary (it has the context loaded).",
+    "Draft client-friendly wording for Hariz: retract Path 2/SG-MoI, Core42 = sole lawful FF01 route, framed without alarm.",
+    "It's cai's ruling → run the draft past cai for a compliance sanity-check (or ask cai to bless/provide it) before release.",
+    "Hand the blessed wording to cc-cosem-exams to relay via scripts/lane_reply.sh cosem-exams (phase-gated)."
+  ],
+  "note": "Needs a FOCUSED cosem-compliance session, not the tail of a huge one — I deferred to avoid mis-stating a compliance correction. cc-cosem-exams reconstituted clean post-restart + is productive (approved its docs PR#160); it holds the Hariz threads correctly.",
+  "clears_when": "Blessed wording delivered to Hariz via the lane. Delete this file when done."
+}

@@ -1,0 +1,8 @@
+{
+  "armed": true,
+  "plist": "dev.wingmen.cc-quality-audit-drain",
+  "log": "logs/cc-quality-audit-drain.log",
+  "auditor": "cc-quality",
+  "note": "orch-console 37330 condition: FLAG orch-console on the drainer FIRST REAL close (a tick that drains a real item + writes completed_at, NOT the blocked 297). Check the drainer log on each health pass; flag once (set flagged=true).",
+  "flagged": false
+}

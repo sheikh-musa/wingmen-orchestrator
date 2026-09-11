@@ -1,0 +1,33 @@
+# PR#686 — bulk student-enrol name-match reconciliation (op#19405 decision A) — FULL/opus review
+
+**Auditor:** cc-quality (Opus 4.8, CAI-1170 minors-PII record-creation). **Date:** 2026-09-10. **Repo:** sheikh-musa/ihsanos, head `d3718276` (stacked on #684; reviewed the coherent #684+#686 feature). **Migs:** 329 (create engine) + 330 (reconcile orchestrator). **Apply DEFERRED** (console apply-gate + goumlyne wet-prove).
+**VERDICT: PASS on the engine/orchestrator/gates/single-txn structure; 2 MEDIUM findings + 1 LOW that harden the mandatory-operator-review mitigation.** The console-approved (A) design's sole safety against attaching a real minor's BC to the WRONG student is the operator review — both findings strengthen it. Do-not-apply respected; routed to coord + console apply-gate.
+
+## Core — VERIFIED (PASS)
+**mig330 orchestrator (`sch_reconcile_enroll`):**
+- **Single-txn (focus 4, structure):** one plpgsql SECDEF fn; the 3 reused legs are `prokind='f'` (cannot self-COMMIT → participate in the txn); `p_commit=false` early-returns before any leg/audit write. A failure in any leg or audit rolls back both legs + both audit rows. Structure guarantees 0-orphan/0-partial/0-audit-row. (The injected-mid-batch-failure wet-prove is console's at apply-gate — I confirm the code supports it.)
+- **Audit chain no-fork (focus 2):** all writes serialized under one `pg_advisory_xact_lock(org)` (re-entrant in the reused legs), sequential in the txn; the orchestrator's 2 own audit rows use `write_audit_log_secure` (reads tip → chains) with **hand-canonicalised** payloads (string-concat + `to_json`, NOT `jsonb_build_object::text`) — correct per the key-order lesson. The reused mig320/325 manual-insert audits are inherited/pre-existing and, being serialized under the same lock with tip-reads, keep the chain linear. No fork introduced by #686.
+- **Gates:** `org_admin`-only + org-scoped (`auth_user_org_ids_with_roles(ARRAY['org_admin'])`, cross-org→42501), no-session guard, `write_audit_log_secure` absence-guard (fail-closed), proACL (REVOKE PUBLIC/anon/service_role, GRANT authenticated), **ciphertext-only** (nric_encrypted/hash precomputed app-side; payloads roster-keys-only — no names/BC/hash/ciphertext, CAI-1034), reuse-not-fork.
+
+**mig329 create-engine (`sch_bulk_enroll_students`):** BC-hash dedup — in-file (`v_seen_hashes`) + live (org + nric_hash_v2), **>1 live match → ambiguous, never guess** (surfaces colliding student_numbers), **=1 → enrich (never create, COALESCE never-null)**, **=0 → create** (INSERT persons WITH gender/date_of_birth). org_admin gate, advisory lock, STU mint (`STU-`+lpad3) under lock, absence-guard, ciphertext-only.
+
+**Commit-rejects-unresolved gate (focus 1b):** WORKS — `sch-reconcile-enroll.ts:370-380` rejects the commit (VALIDATION_ERROR) if any review-bucket row (fuzzy/multi/near-miss) lacks a resolution; the commit loop `else` fail-closes an unresolved review row to `skip`. Server RE-VALIDATES (re-parses each row `:264`, re-fetches the live roster `:310`, re-classifies from scratch `:319` — bucket is server-truth, only the resolution action is client-supplied); `dryRun` defaults true (`:198`). A roster shift between preview and commit fails closed.
+
+**Review UI (focus 1a):** each review row renders sheet-row + uploaded name, tier/bucket, and per candidate `student_number — existing_name (jaccard%)`; the resolve dropdown lists every candidate. Existing **name + student_number + jaccard + tier** all present → sufficient for a human decision.
+
+**CI:** ran the reconcile + shared + bulk-enroll tests — **71/71 pass**; `lint:all` — **17/17 green**.
+
+## Findings
+### F1 [MEDIUM, focus 1 — the wrong-attachment hazard, server layer]
+The enrich resolution's target `student_number` is client-supplied (`sch-reconcile-enroll.ts:394`) and server-validated ONLY for **existence in the org** (`:415` `existingNumbers.has(enrichNumber)`) — NOT constrained to the surfaced match candidates (`sch-reconcile-shared.ts:308-337`). A caller (already org_admin) who tampers with the client payload could backfill a minor's BC onto **ANY existing org student**, not just a listed candidate. `import_student_identity` is never-clobber, but a name-only student has NULL `nric_hash_v2` so it accepts whatever BC the resolution assigns → **a real minor's BC silently attached to the wrong student**. Not reachable through the normal UI (which only offers candidates, `client:382-386`), but for a first-ever bulk minors-BC-attach the mandatory-review mitigation should be **server-enforced**, not UI-only. **Recommend the commit constrain `enrichNumber ∈ candidates[row]`** (the server already computes the candidate set). Fix before apply.
+
+### F2 [MEDIUM, focus 3 — misleading UI copy]
+No operator-facing string states that DOB/gender are NOT backfilled on enrich — yet `toFields` (`client:142-149`) **does** populate `gender`/`date_of_birth` into the payload, and the enrich fns (mig325/mig320) silently drop them (only mig329's CREATE path sets DOB/gender). So an operator who uploads a file with DOB/gender reasonably believes they were imported for **matched** students — they weren't. Asymmetric and invisible. **Recommend UI copy on the enrich/exact path:** "DOB and gender are applied to newly-created students only; matched students keep their existing record (BC + Tier-A backfilled)." Fix before operators use it.
+
+### Obs [LOW, focus 1a]
+The second similarity signal `max_token_levenshtein` is computed (`shared.ts:303/331`) but never shown to the operator (only jaccard% is), and the inline candidate line caps at 6 (the dropdown shows all). For the highest-stakes fuzzy resolutions, surfacing both signals would strengthen the human decision. Non-blocking.
+
+## Verdict
+PASS on the create engine, orchestrator, gates, ciphertext-only handling, audit-chain integrity, and the single-transaction structure; the commit-rejects-unresolved gate and the review UI both hold. The 2 MEDIUM findings harden the (A) design's mandatory-operator-review — the ONLY thing standing between a mis-resolved name-match and a minor's BC on the wrong student. Recommend **F1 fixed before apply** (server-constrain the enrich target) and **F2 fixed before operator use** (DOB/gender copy). The single-txn rollback + both-silo synthetic wet-prove (incl. injected mid-batch failure, fabricated names/T-series BCs) remain console's at apply-gate. Advisory / alert-not-block per charter.
+
+*Method: mig329/mig330 read at source (worktree at PR head); action/client (sch-reconcile-enroll.ts, import-reconcile-client.tsx, sch-reconcile-shared.ts) analyzed for the commit-gate/UI focus areas; 71/71 tests + lint:all 17/17 at head. DB wet-prove is console's per the routing. No mutation, no apply.*

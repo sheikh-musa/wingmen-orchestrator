@@ -1,0 +1,89 @@
+                MINISTRY OF INTERIOR - DATA-GOVERNANCE ATTESTATION
+              Cross-Border Hosting of ADCDA Trainee Personal Data
+
+
+PURPOSE
+
+This attestation confirms one specific point that a data-processing agreement
+and ordinary consent cannot: that this specific class of data is permitted,
+under the controlling UAE / Abu Dhabi government-data rules, to be stored and
+processed outside the UAE (in Singapore). It is to be completed by a
+representative of the Ministry of Interior (MoI) / Abu Dhabi Civil Defence
+Academy (ADCDA) who can speak to the Ministry's own data-classification and
+governance rules. Wingmen (the processor) relies on it as the Ministry's
+authoritative statement of its own regulatory position.
+
+
+PARTIES AND DATA
+
+Controller (government body): ____________________________________________
+    [Ministry of Interior - UAE / Abu Dhabi Civil Defence Academy (ADCDA),
+     a body under the MoI - confirm exact legal entity name]
+
+Processor: ____________________________________________
+    [Wingmen legal entity], operator of the cosem training-examination platform.
+
+Data in scope ("the Data"): the personal data of ADCDA trainees processed on
+the cosem platform - specifically staff / military-linked identification
+numbers, rank, and names (Arabic and English), together with the associated
+training-examination records.
+
+Hosting location: Singapore - Amazon Web Services region ap-southeast-1 -
+which is OUTSIDE the territory of the United Arab Emirates. The Data is
+single-tenant isolated, encrypted at rest and in transit, org-scoped access,
+service-role-only writes, with an append-only audit log; full terms are in the
+accompanying Data Processing Agreement.
+
+
+ATTESTATION
+
+The undersigned, as a representative of the Ministry of Interior, having
+considered the Ministry's own data-classification, information-security and
+data-governance rules as they apply to the Data described above, attests that:
+
+    Under the controlling UAE / Abu Dhabi government-data rules, the Data is
+    NOT subject to any requirement that it reside within the United Arab
+    Emirates, and it is PERMITTED to be stored and processed in Singapore
+    (AWS ap-southeast-1) as described above.
+
+The undersigned further confirms:
+
+  1. The Data's classification under the Ministry's own rules has been
+     considered specifically for this cross-border arrangement. This is not a
+     general assurance.
+
+  2. The undersigned is authorized to make this specific data-classification /
+     localization determination on behalf of the Ministry of Interior, and
+     this determination reflects consultation with, or originates from, the
+     Ministry's competent data-governance / information-security authority. It
+     is not the undersigned's own personal assessment. (General authority to
+     sign documents for the Ministry is not sufficient for this attestation.)
+
+  3. The undersigned understands that Wingmen relies on this attestation and
+     will not write any real trainee data to the Singapore store unless the
+     statement above is truthfully attested.
+
+If the undersigned cannot truthfully make the statement above, this form must
+not be signed - in which case the data must reside in the UAE and the parties
+will use a UAE-hosted arrangement instead.
+
+
+SIGNATURE
+
+Signed for and on behalf of the Ministry of Interior / ADCDA:
+
+
+  Name: _______________________________________________
+
+
+  Title / Role: _______________________________________________
+
+
+  Signature: __________________________    Date: __________________
+
+
+---------------------------------------------------------------------------
+This attestation is a companion to the Data Processing Agreement, not a
+replacement: the DPA governs how the data is processed; this attestation
+confirms whether it may be hosted outside the UAE. This document records the
+Ministry's own regulatory determination and is not legal advice.
