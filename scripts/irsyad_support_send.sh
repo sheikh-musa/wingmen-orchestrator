@@ -27,6 +27,11 @@ TAG="${2:-gazzabyte-irsyad}"   # scoped tag for the Gazzabyte/Irsyad-Support cha
 source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
 _send_arg_guard "$TEXT" || exit 2
 
+# Fail-closed: the console body (Nazim) may not routine-send irsyad CLIENT replies —
+# coord owns irsyad client-comms directly; console gates money/floor ONLY. No-op for coord.
+source "$ORCH_DIR/scripts/lib/console_irsyad_client_send_gate.sh"
+_console_irsyad_client_send_gate "$TAG" || exit 4
+
 # Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
 # token/chat/text passed via env, never argv — keeps the token out of `ps`.
 if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \

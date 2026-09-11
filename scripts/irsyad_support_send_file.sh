@@ -24,6 +24,11 @@ CAPTION="${2:-}"
 SZ=$(wc -c < "$FILE" | tr -d ' ')
 [ "$SZ" -le 52428800 ] || { echo "File too large ($SZ bytes > 50MB Telegram limit): $FILE" >&2; exit 1; }
 
+# Fail-closed: the console body (Nazim) may not routine-send irsyad CLIENT files —
+# coord owns irsyad client-comms directly; console gates money/floor ONLY. No-op for coord.
+source "$ORCH_DIR/scripts/lib/console_irsyad_client_send_gate.sh"
+_console_irsyad_client_send_gate "gazzabyte-irsyad" || exit 4
+
 ARGS=(-s --ipv4 -X POST "https://api.telegram.org/bot${TOK}/sendDocument"
   -F "chat_id=${CHAT}"
   -F "document=@${FILE}")

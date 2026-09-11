@@ -16,6 +16,12 @@ CHANNEL="${1:?usage: reviewer_send.sh <channel_key> \"message\"}"
 TEXT="${2:-$(cat)}"
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
 
+# Fail-closed: the console body (Nazim) may not routine-send irsyad CLIENT replies —
+# coord owns irsyad client-comms directly; console gates money/floor ONLY. No-op for
+# coord/lanes/hub and for every non-irsyad channel this generic tool serves.
+source "$ORCH_DIR/scripts/lib/console_irsyad_client_send_gate.sh"
+_console_irsyad_client_send_gate "$CHANNEL" || exit 4
+
 # Resolve token_env_key + chat_id from bot_channels (single source of truth).
 read -r TOKEN_KEY CHAT < <(PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" - "$CHANNEL" <<'PY'
 import sys, psycopg
