@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.sentry-new-error-watch</string>
+  <!-- cc-fleet-health standing Sentry NEW-error watch (Musa op#19859). Polls the
+       ihsanos Sentry project, SURFACES each genuinely-new SERVER/app issue ONCE to the
+       bus (orch-console) for triage, ESCALATES only material ones to the operator
+       (paged once; re-escalate only on reopened / fresh spike). Filters client browser
+       noise (MetaMask/extension/<unknown>). Fail-soft dead-man: any API error exits
+       non-zero LOUD, never silently dark. INERT until SENTRY_WATCH_ENABLED=1 (set in
+       .env at arm-time). The wrapper sources .env for SENTRY_* + DATABASE_URL (no
+       secrets in this plist). NOT loaded until Nazim gates + co-verifies a live fire. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_sentry_new_error_watch.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <!-- 20-min cadence (within Musa/Nazim's ~15-30min): frequent enough for "aware of
+       errors going forward", spaced enough to avoid API churn; id-dedup + escalate-dedup
+       mean a steady issue never re-pages. -->
+  <key>StartInterval</key><integer>1200</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/sentry-new-error-watch.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/sentry-new-error-watch.out.log</string>
+</dict>
+</plist>
