@@ -1,0 +1,21 @@
+# /etc/systemd/system/wingmen-irsyad-tabung-jumaat.service
+# cc-irsyad tabung-jumaat WORKER lane keepalive — gzb. Standing/PROTECTED lane
+# (recurring money-adjacent Friday tabung; NOT autoscaler-elastic per Nazim 39334 Q3).
+# Adapted from wingmen-irsyad-coord.service; runs /home/gazzai/tabung_supervisor.sh
+# (identity pin CC_BASE_OVERRIDE=cc-irsyad from fleet_lanes + stop-trap + tmux-server-env
+# write-DSN defense + start-verify; token auto-musa2 via the irsyad group pointer).
+[Unit]
+Description=Wingmen irsyad-tabung-jumaat lane keepalive — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Wants=network-online.target
+Requires=wingmen-fetch-secrets.service
+
+[Service]
+Type=simple
+User=gazzai
+ExecStart=/bin/bash -lc '/home/gazzai/tabung_supervisor.sh'
+Restart=always
+RestartSec=6
+
+[Install]
+WantedBy=multi-user.target
