@@ -53,6 +53,14 @@ if [ -z "$TMUX_BIN" ]; then
 fi
 [ -n "$TMUX_BIN" ] || { echo "[coord_supervisor] FATAL: tmux not found" >&2; exit 1; }
 
+# systemd `stop`/`restart` sends SIGTERM to THIS supervisor, but the coord tmux session
+# runs on the shared tmux SERVER daemon (outside the unit's cgroup), so it would SURVIVE a
+# unit stop as an orphaned claude — the unit could not actually stop coord, and a "restart"
+# would just re-adopt the stale session (invalid recreate). Trap TERM/INT to tear the
+# session down, so systemctl stop/restart cleanly (re)creates coord. Required for a
+# stoppable supervised lane (2026-09-12 cutover recreate-proof).
+trap '"$TMUX_BIN" kill-session -t "$SESSION" 2>/dev/null; exit 0' TERM INT
+
 # --continue is CONDITIONAL: a FRESH coord clone has no prior conversation for this
 # project dir, and --continue would make claude EXIT on boot (crash-loop). The
 # launcher takes claude args after a `--` boundary. Claude munges the cwd to the
@@ -60,6 +68,29 @@ fi
 CONT_ARGS=()
 COORD_PROJ_DIR="$HOME/.claude/projects/-home-gazzai-wingmen-projects-ihsanos-irsyad-wt-coord"
 if ls "$COORD_PROJ_DIR/"*.jsonl >/dev/null 2>&1; then CONT_ARGS=(-- --continue); fi
+
+# CAI-RESP-258 IDENTITY PIN (Nazim 39259): the pwd->family map resolves this worktree to
+# the GENERIC base cc-irsyad (agent cc-irsyad-coord has empty repo_scope), so WITHOUT a pin
+# coord boots as cc-irsyad-N — not its distinct coordinator identity that the gazzabyte-irsyad
+# channel's supervised review flow (group_routing.agent_reviewer=cc-irsyad-coord) references.
+# The intended identity is data-driven in fleet_lanes.base_agent_id; auto_agent_id honors
+# CC_BASE_OVERRIDE (cc-irsyad-coord is a registered cc-family, not an authority id, so allowed).
+# Passed to the pane via `tmux new-session -e` — NOT a plain supervisor export: a pane inherits
+# the tmux SERVER env, not this process's, the SAME lesson as the write-DSN scrub above.
+VENV_PY="$ORCH_DIR/.venv/bin/python3"
+COORD_BASE="$("$VENV_PY" - <<'PY' 2>/dev/null
+import os,sys
+try:
+    import psycopg
+    with psycopg.connect(os.environ['DATABASE_URL']) as c, c.cursor() as cur:
+        cur.execute("SELECT base_agent_id FROM fleet_lanes WHERE lane='irsyad-coord'")
+        r = cur.fetchone()
+        sys.stdout.write((r[0] or '') if r else '')
+except Exception:
+    pass
+PY
+)"
+[ -n "$COORD_BASE" ] || COORD_BASE="cc-irsyad-coord"  # resilient fallback to the known coordinator id
 
 # ADOPT an existing live session; create only if missing. tmux runs the launcher
 # INSIDE the session named "$SESSION", so the launcher's `tmux display-message -p
@@ -75,6 +106,7 @@ if ls "$COORD_PROJ_DIR/"*.jsonl >/dev/null 2>&1; then CONT_ARGS=(-- --continue);
 # any future server-env regression — a lane must NEVER carry the write DSN.
 if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
   "$TMUX_BIN" new-session -d -s "$SESSION" -x 220 -y 50 -c "$COORD_WT" \
+    -e "CC_BASE_OVERRIDE=$COORD_BASE" \
     -- bash -lc 'unset GOUMLYNE_DATABASE_URL IHSANOS_PROD_DATABASE_URL IHSANOS_SUPABASE_SERVICE_KEY; exec "$@"' _ \
        "$LAUNCHER" "${CONT_ARGS[@]+"${CONT_ARGS[@]}"}"
 fi
