@@ -1,0 +1,23 @@
+# /etc/systemd/system/wingmen-irsyad-coord.service
+# cc-irsyad-coord worker lane keepalive — gzb. Adapted from wingmen-orch-hub.service.
+# STAGED, NOT ENABLED: install + enable + start is the Nazim-gated cutover step
+# (STOP-Mini-coord <-> START-gzb-coord is ATOMIC per the runbook migration-completion
+# gate — Telegram allows one long-poller per bot token, so the coord channel poller
+# must move host in lockstep, never both/neither).
+[Unit]
+Description=Wingmen irsyad-coord lane keepalive — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Wants=network-online.target
+Requires=wingmen-fetch-secrets.service
+
+[Service]
+Type=simple
+User=gazzai
+# Login shell so pyenv/node/claude resolve for gazzai; supervisor is lane-scoped
+# (no hub identity pin — the launcher resolves coord's agent_id + musa2 token).
+ExecStart=/bin/bash -lc '/home/gazzai/coord_supervisor.sh'
+Restart=always
+RestartSec=6
+
+[Install]
+WantedBy=multi-user.target
