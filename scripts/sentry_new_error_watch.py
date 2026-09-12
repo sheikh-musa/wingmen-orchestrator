@@ -54,16 +54,20 @@ SERVER_ERROR_PATTERNS = [p.lower() for p in (
     "internal server error",
     "actionerror",
     "captureaction",
+    # OUR generic server/action catch-all (the #686 class): captureActionError surfaces
+    # these on a real server throw. Escalate, don't just surface — esp. given the capture
+    # gap means these are the signal that a server action actually failed (Nazim 39194 #1).
+    "the error has been reported",
+    "something went wrong",
     "unhandledrejection",
     "unhandled promise",
-    " 500",
+    " 500",   # leading space; can over-match ("processed 500 rows") but over-escalation is fail-safe
     "database",
     "psycopg",
     "supabase",
 )]
 MATERIAL_SPIKE_COUNT = int(os.environ.get("SENTRY_MATERIAL_SPIKE_COUNT", "50"))
 STATE_PATH = _ORCH / "state" / "sentry_new_error_watch.json"
-ENABLED = os.environ.get("SENTRY_WATCH_ENABLED") == "1"
 SURFACE_PREFIX = "[sentry-new-error]"
 ESCALATE_PREFIX = "🔴 [sentry-MATERIAL]"
 
@@ -207,10 +211,14 @@ def run(dry: bool = False) -> dict:
         _die(f"{type(e).__name__}: {e}")
     state = _load_state()
     d = decide(state, issues)
-    send_live = ENABLED and not dry
+    # Read the arm flag at CALL-TIME (after load_dotenv), not module-import, so a direct
+    # manual live-run honors a .env-only SENTRY_WATCH_ENABLED too (Nazim 39194 #2) — a
+    # co-verify run without the wrapper is then not silently SCAN+LOG.
+    enabled = os.environ.get("SENTRY_WATCH_ENABLED") == "1"
+    send_live = enabled and not dry
     print(f"sentry-new-error-watch — {'LIVE' if send_live else 'SCAN+LOG'} — "
           f"{len(issues)} unresolved, {len(d['surface'])} new to surface, "
-          f"{len(d['escalate'])} material to escalate — enabled={ENABLED} dry={dry}")
+          f"{len(d['escalate'])} material to escalate — enabled={enabled} dry={dry}")
     for it in d["surface"]:
         print(f"  {'SURFACE' if send_live else 'WOULD-SURFACE'} {it['id']} {str(it['title'])[:70]}")
     for it in d["escalate"]:
