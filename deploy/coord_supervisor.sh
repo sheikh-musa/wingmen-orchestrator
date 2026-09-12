@@ -64,9 +64,19 @@ if ls "$COORD_PROJ_DIR/"*.jsonl >/dev/null 2>&1; then CONT_ARGS=(-- --continue);
 # ADOPT an existing live session; create only if missing. tmux runs the launcher
 # INSIDE the session named "$SESSION", so the launcher's `tmux display-message -p
 # '#S'` returns irsyad-coord and lane_token_resolver maps it to the musa2 pointer.
+#
+# CAI-1225 DEFENSE-IN-DEPTH (2026-09-12): a tmux PANE inherits the tmux SERVER's
+# global environment, NOT this supervisor's clean env. If that server was started
+# before the CAI-1225 split (or otherwise captured write DSNs into its global env),
+# every new pane inherits GOUMLYNE_DATABASE_URL / IHSANOS_PROD_DATABASE_URL /
+# IHSANOS_SUPABASE_SERVICE_KEY and the launcher's L2 guard REFUSES to boot (crash-loop,
+# 2026-09-12 cutover). The root fix is scrubbing the server global env
+# (`tmux set-environment -g -r <var>`), but we ALSO unset here so coord is robust to
+# any future server-env regression — a lane must NEVER carry the write DSN.
 if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
   "$TMUX_BIN" new-session -d -s "$SESSION" -x 220 -y 50 -c "$COORD_WT" \
-    -- "$LAUNCHER" "${CONT_ARGS[@]+"${CONT_ARGS[@]}"}"
+    -- bash -lc 'unset GOUMLYNE_DATABASE_URL IHSANOS_PROD_DATABASE_URL IHSANOS_SUPABASE_SERVICE_KEY; exec "$@"' _ \
+       "$LAUNCHER" "${CONT_ARGS[@]+"${CONT_ARGS[@]}"}"
 fi
 
 # Hold the unit alive while the lane session lives; exit (→ Restart=always) when it dies.
