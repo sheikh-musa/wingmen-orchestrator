@@ -145,17 +145,41 @@ def main():
             print("\nREFUSING --execute: gate not cleared (would risk a double-poller / split). Fix + retry.")
             sys.exit(2)
 
-        print("\nEXECUTE: enable channel on gzb + start coord unit")
-        cur.execute("UPDATE bot_channels SET enabled=true WHERE channel_key=%s", (CHANNEL,))
-        c.commit()
-        print(f"  bot_channels.{CHANNEL}.enabled=true committed")
+        # ORDER MATTERS (safety): START coord on gzb + confirm it's UP *before* flipping
+        # the channel enabled. Otherwise a failed start (e.g. unit not yet in my sudoers
+        # allowlist) would leave the channel enabled with NO lane to inject into = an
+        # "enabled but deaf" stranded state. The interlock already proved Mini-coord is
+        # DOWN, so starting gzb-coord now cannot create a double-body. Channel stays
+        # enabled=false until the lane is verified live, so a start failure is a clean no-op.
+        print("\nEXECUTE (start-then-enable):")
         r = subprocess.run(["sudo", "-n", "systemctl", "start", f"{UNIT}.service"],
                           capture_output=True, text=True)
         if r.returncode != 0:
-            print(f"  [WARN] systemctl start failed (rc={r.returncode}): {r.stderr.strip()}"
-                  f"\n  (unit may not be in the sudoers allowlist yet — Nazim adds it at install.)")
-        else:
-            print(f"  systemctl start {UNIT} ok")
+            print(f"  [ABORT] systemctl start {UNIT} failed (rc={r.returncode}): {r.stderr.strip()}"
+                  f"\n  Likely {UNIT} not in the restart-sudoers allowlist yet (Nazim adds it at install)."
+                  f"\n  Channel NOT enabled (clean no-op). Fix sudoers/unit + retry --execute.")
+            sys.exit(3)
+        print(f"  systemctl start {UNIT} ok — waiting for coord to reach working@gzbai...")
+        up = False
+        for _ in range(12):  # up to ~60s for the lane to boot + first heartbeat
+            time.sleep(5)
+            cur.execute("""SELECT status FROM agent_status
+                           WHERE (agent_id ILIKE '%%coord%%' OR tmux_session='irsyad-coord')
+                             AND host='gzbai' AND updated_at > now()-interval '90 seconds'
+                           ORDER BY updated_at DESC LIMIT 1""")
+            row = cur.fetchone()
+            if row and row[0] == "working":
+                up = True
+                break
+        if not up:
+            print("  [ABORT] coord did not reach working@gzbai within 60s. Channel NOT enabled (clean no-op)."
+                  "\n  Check the unit (journalctl -u wingmen-irsyad-coord) + the headless-auth gate"
+                  " (login screen?), then retry --execute. Mini can be restarted meanwhile.")
+            sys.exit(4)
+        print("  coord is working@gzbai — now enabling the channel on gzb.")
+        cur.execute("UPDATE bot_channels SET enabled=true WHERE channel_key=%s", (CHANNEL,))
+        c.commit()
+        print(f"  bot_channels.{CHANNEL}.enabled=true committed")
         post_verify(cur)
 
 if __name__ == "__main__":
