@@ -1,0 +1,28 @@
+{
+  "task": "Build the PII-safe client-file tooling (CAI-1422/1423/1424 + cc-storefront findings)",
+  "owner": "orch-console (Nazim)",
+  "created": "2026-09-13",
+  "status": "SPEC READY — build committed to Musa + cai; design -> cai gate BEFORE any real-client-file use",
+  "origin": "Musa asked for a friction compromise on the CAI-1034 client-file-open floor (op20060/20064). Routed to cai; cai ruled: NO ephemeral-real-value read (CAI-1423), YES to (1) structure inspector + (2) blind-transform fix-scripts.",
+  "tools": {
+    "1_inspector": {
+      "what": "Reads a client data file, emits STRUCTURE + a masked preview: column headers, per-column type, row count.",
+      "masking": "FAIL-CLOSED ALLOWLIST baseline (cc-storefront #354/CAI-1424): mask EVERY text/freeform column by DEFAULT; allowlist only columns proven PII-free. Value-pattern-scan is an ADDITIONAL layer, NEVER a standalone alternative (pattern-scan alone misses un-patterned PII: names in prose, addresses, free-text welfare/medical notes — e.g. 'met Siti re her son''s condition').",
+      "never": "Never emits a raw PII value."
+    },
+    "2_blind_transform_fix_runner": {
+      "what": "Agent writes a transform RULE (reparse date format, trim whitespace, dedupe on key, coerce type, range-fix); tool RUNS it against the file and reports counts / diffs / pass-fail. NEVER-READ-ONLY-TRANSFORM-AND-REPORT (CAI-1423) — the agent never reads a raw value; more capable than one-row-at-a-time (all matching rows in one pass).",
+      "leak_vectors_MUST_close (cc-storefront #356)": {
+        "output_channel": "Error reporting emits row NUMBER + error CLASS ONLY, never the offending value. No print()/log of raw cell values. (Bad: \"row 47: 'Ahmad bin Ali' failed date-parse\". Good: \"row 47: date-parse error\".)",
+        "diff": "Diffs are FAIL-CLOSED ALLOWLIST — freeform/text columns EXCLUDED from any diff by default (same allowlist as the inspector), else a notes-column diff surfaces PII.",
+        "tracebacks": "Catch pandas/parse/lib exceptions and REDUCE to non-PII shape (row# + error class) BEFORE anything reaches agent context — raw tracebacks routinely embed offending values."
+      }
+    },
+    "3_residual_human_relay": "A genuine one-off value needing human judgment (no rule fits) routes to the CAI-1422 human-mediated relay. Expected rare given blind-transform coverage."
+  },
+  "cross_cutting": "Apply the fail-closed allowlist ONCE, consistently, across BOTH tools (inspector mask + blind-transform diff) — same principle (cc-storefront).",
+  "hard_floor_unchanged": "CAI-1034 default-never (cat/head a raw client PII file into unscrubbed context) STANDS. This toolset adds safe sanctioned lanes; it does NOT touch: ADCDA/gov residency+sovereignty hard-nevers (CAI-1408/1419), cross-tenant reads.",
+  "gate": "Bring the tool DESIGN to cai's gate BEFORE it is used on any real client file (told cai). cc-storefront + cc-ihsanos are the paired auditors.",
+  "audits": "decision_audits 352 (CAI-1421 clean), 354 (CAI-1422 masking must-refine), 356 (CAI-1423 3 leak-vectors). CAI-RESP-1422/1423/1424.",
+  "clears_when": "Both tools built to this spec, cai-gated, in use. Delete this file when done."
+}
