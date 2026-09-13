@@ -210,3 +210,28 @@ def test_connect_reraises_persistent_failure_dead_man_preserved(monkeypatch):
     monkeypatch.setattr(psycopg2, "connect", fake_connect)
     with pytest.raises(psycopg2.OperationalError, match="persistent outage"):
         sl._connect()
+
+
+# ---- _wedged_alive_text(): remedy host-resolved from holder_host, never a stale host ----
+# Root cause (Nazim 39292/39435): page_wedged_alive hardcoded the decommissioned wingmen-core
+# host (91.107.235.77) while the live hub is on gzbai -> a responder hits a dead box. The
+# remedy must resolve from orch_lease.holder_host (via hub_reach); unknown -> name NO host.
+def test_wedged_alive_text_gzb_holder_is_host_resolved_not_the_dead_host():
+    subject, body = sl._wedged_alive_text("cc-orchestrator", "gzbai")
+    assert "91.107.235.77" not in subject
+    assert "91.107.235.77" not in body
+    assert "192.168.1.114" in body  # routes to the CURRENT gzb host
+
+
+def test_wedged_alive_text_unknown_holder_names_no_host():
+    subject, body = sl._wedged_alive_text("cc-orchestrator", None)
+    assert "91.107.235.77" not in body
+    assert "192.168.1.114" not in body
+    assert "orch_lease" in body  # tells the responder to resolve it, never a guess
+
+
+def test_wedged_alive_text_still_says_alive_not_dead():
+    # regression: the page must still convey WEDGED-but-ALIVE (do not boot / split-brain).
+    _, body = sl._wedged_alive_text("cc-orchestrator", "gzbai")
+    assert "ALIVE" in body
+    assert "split-brain" in body.lower()

@@ -42,6 +42,13 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+# hub reach/remedy resolver — host-correct pages (never a hardcoded stale host, Nazim
+# 39292/39435). Path-guarded so it imports whether run as a module or a launchd script.
+_ORCH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ORCH_ROOT not in sys.path:
+    sys.path.insert(0, _ORCH_ROOT)
+from scripts.lib import hub_reach  # noqa: E402
+
 # same-host protected singletons to check, agent:tmux-session (env-overridable). Excludes
 # self (cc-fleet-health) and the cross-host hub (cc-orchestrator, no local session).
 CHECK_SESSIONS = {
@@ -315,19 +322,38 @@ def hub_alive_evidence(now=None):
     return bool(fresh)
 
 
-def page_wedged_alive(agent, hb_age_s=None, dry_run=False, recipient=None):
+def _wedged_alive_text(agent, holder_host):
+    """PURE. (subject, body) for a cross-host body WEDGED but ALIVE. The remedy is resolved
+    from orch_lease.holder_host via hub_reach — HOST-CORRECT, never a hardcoded stale host
+    (Nazim 39292/39435: the old text hardcoded the decommissioned wingmen-core). An unknown/
+    unset holder names NO host (fail-safe: 'resolve from orch_lease'), never a guess."""
+    reach = hub_reach.hub_reach_for_holder(holder_host)
+    where = reach["host"] or "its current orch_lease host"
+    subject = f"🟡 HUB WEDGED (alive): {agent} — needs a cross-host nudge on {where}"
+    body = (f"TL;DR: {agent} is WEDGED (idle + staged/ghost composer) but ALIVE — its orch_lease "
+            f"is FRESH (host up), so it is NOT dead and must NOT be booted (a second boot = "
+            f"orch_lease split-brain). A Mini-side nudge cannot reach it (cross-host). "
+            f"{reach['remedy']}")
+    return subject, body
+
+
+def page_wedged_alive(agent, hb_age_s=None, dry_run=False, recipient=None, holder_host=None):
     """Actionable page for a cross-host body WEDGED but ALIVE (orch_lease fresh): its Mini-side
     nudge can't land (cross-host) yet it is NOT dead. Surfaces the wedge (so a live body unwedges
-    it) AND names the remedy — an ssh verified-submit to the VPS orch session — so the responder
-    ssh-nudges instead of hunting or (dangerously) booting a second hub. Replaces the false
+    it) AND names the remedy — resolved from orch_lease.holder_host via hub_reach so it points at
+    the CURRENT host, never a hardcoded/decommissioned one (Nazim 39292/39435). Replaces the false
     DEAD-page on the lease-fresh uncovered path (Nazim 37448 conditions 1+2)."""
     recipient = recipient or DEFAULT_PAGE_TO
-    subject = f"🟡 HUB WEDGED (alive): {agent} — needs a cross-host ssh nudge to orch@VPS"
-    body = (f"TL;DR: {agent} is WEDGED (idle + staged-unsubmitted) but ALIVE — its orch_lease is "
-            f"FRESH (still renewing from the VPS), so it is NOT dead and must NOT be booted (a "
-            f"second boot = orch_lease split-brain). A Mini-side nudge can't reach it (cross-host). "
-            f"REMEDY: ssh verified-submit to the VPS 'orch' session (91.107.235.77, tmux 'orch', "
-            f"user wingmen) — e.g. lane_nudge over ssh — to submit its staged input and drain it.")
+    # best-effort resolve holder_host so the remedy is host-correct; a read miss -> None ->
+    # safe text (names no host). Kept OUT of the page try so the dead-man banner always fires.
+    if holder_host is None and not dry_run:
+        try:
+            _rc = _connect()
+            holder_host = hub_reach.read_holder_host(_rc)
+            _rc.close()
+        except Exception:  # noqa: BLE001 — resolution is best-effort; fall back to safe text
+            holder_host = None
+    subject, body = _wedged_alive_text(agent, holder_host)
     print(subject, file=sys.stderr, flush=True)
     if dry_run:
         log(f"DRY-RUN would page {recipient}: {subject}")
