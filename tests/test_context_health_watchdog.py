@@ -1544,12 +1544,14 @@ def test_alerts_value_frozen_suppresses_pct_and_pages_frozen_once(monkeypatch, t
     # idle-vs-active gate falls back to the value band; at amber (61%) an amber+ frozen value
     # is a genuine hidden-bloat risk and MUST still page (Nazim 36318/36319, op#18601).
     monkeypatch.setattr(w, "_agent_is_idle", lambda reg: None)
+    monkeypatch.delenv("CTX_WD_HUB_RECYCLE_CMD", raising=False)
+    monkeypatch.setattr(w, "_resolve_hub_holder", lambda: "gzbai")
     w.run_alerts([row])
     # exactly one alert, and it's the FROZEN one — NOT the climbing-% amber page
     assert len(sent) == 1 and "FROZEN" in sent[0] and "ZOMBIE" in sent[0]
-    # CAI-1360: the hub is externally-recycled, so the frozen page names the REAL remediation
-    # (the parameterized external-recycle string, pinned by orch-console), never self-recycle.
-    assert w._HUB_RECYCLE_REMEDIATION in sent[0]
+    # CAI-1360 + remedy-host (Nazim 39335): the frozen page names the REAL external-recycle
+    # remediation for the CURRENT host (gzb), never the decommissioned wingmen-core, never self-recycle.
+    assert "192.168.1.114" in sent[0] and "91.107.235.77" not in sent[0]
     assert "self_recycle" not in sent[0] and "recycle itself" not in sent[0].lower()
     st = json.loads((tmp_path / "state.json").read_text())
     assert st["__ctx_freeze__"]["cc-orchestrator"]["paged"] is True
@@ -1631,9 +1633,13 @@ def test_er_at_ceiling_pages_external_recycle_not_self_recycle(monkeypatch, tmp_
     sent: list[str] = []
     monkeypatch.setattr(w, "_send_alert", lambda t: sent.append(t))
     _er_reg(monkeypatch)
+    monkeypatch.delenv("CTX_WD_HUB_RECYCLE_CMD", raising=False)
+    monkeypatch.setattr(w, "_resolve_hub_holder", lambda: "gzbai")
     fired = w.run_alerts([_ctx(agent="er-body", pct=96, level="red")])
     assert len(sent) == 1, "a body at the ceiling must page the operator"
-    assert w._HUB_RECYCLE_REMEDIATION in sent[0], "remediation must name the parameterized external recycle"
+    # remediation must name the CURRENT host (gzb), never the decommissioned wingmen-core (Nazim 39335)
+    assert "192.168.1.114" in sent[0], "remediation must name the current external-recycle host"
+    assert "91.107.235.77" not in sent[0], "must not name the decommissioned host"
     assert "self_recycle" not in sent[0] and "recycle itself" not in sent[0].lower(), \
         "must NEVER use self-recycle language for an externally-recycled body"
     assert fired == ["er-body"]
@@ -1929,3 +1935,26 @@ def test_cross_host_unreachable_newest_handoff_makes_no_ssh(monkeypatch):
            "handoff_glob": "reports/*.md", "handoff_dir": "~/x", "label": "hub"}
     assert w._newest_handoff(reg) is None
     assert calls == [], f"no ssh for a cross_host_unreachable handoff lookup: {calls}"
+
+
+# ---- _hub_recycle_remedy(): host-resolved via hub_reach, never a hardcoded stale host ----
+# Root cause (Nazim 39292/39335): the external-recycle remedy DEFAULT hardcoded the
+# decommissioned wingmen-core (91.107.235.77). It must resolve from orch_lease.holder_host;
+# an explicit operator pin (CTX_WD_HUB_RECYCLE_CMD) still wins.
+def test_hub_recycle_remedy_operator_pin_wins(monkeypatch):
+    monkeypatch.setenv("CTX_WD_HUB_RECYCLE_CMD", "PINNED: bash reset_hub_remote.sh")
+    assert w._hub_recycle_remedy("gzbai") == "PINNED: bash reset_hub_remote.sh"
+
+
+def test_hub_recycle_remedy_gzb_holder_resolved_not_stale(monkeypatch):
+    monkeypatch.delenv("CTX_WD_HUB_RECYCLE_CMD", raising=False)
+    r = w._hub_recycle_remedy("gzbai")
+    assert "91.107.235.77" not in r
+    assert "192.168.1.114" in r
+
+
+def test_hub_recycle_remedy_unknown_holder_names_no_host(monkeypatch):
+    monkeypatch.delenv("CTX_WD_HUB_RECYCLE_CMD", raising=False)
+    r = w._hub_recycle_remedy(None, resolve=False)
+    assert "91.107.235.77" not in r
+    assert "orch_lease" in r

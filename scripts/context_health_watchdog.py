@@ -87,7 +87,7 @@ load_dotenv(_ORCH_DIR / ".env")
 # CAI-RESP-501: the watchdog (pen iii) is now held via the fleet_health_lease
 # single-owner lease (default holder = cc-fleet-health; hub reclaims on expiry).
 # Self-contained import (no PYTHONPATH under launchd — see the note above).
-from scripts.lib import fleet_health_lease, fleet_health_boundaries  # noqa: E402
+from scripts.lib import fleet_health_lease, fleet_health_boundaries, hub_reach  # noqa: E402
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 
 
@@ -168,7 +168,7 @@ _STALE_S = int(os.environ.get("CTX_WD_STALE_MIN", "20")) * 60
 _AGENT_REGISTRY = {
     # external_recycle (CAI-RESP-1360): the hub is a long-lived, harness-compacted, EXTERNALLY-
     # recycled singleton (recovered ONLY via an external recycle — the exact operator command is
-    # parameterized in _HUB_RECYCLE_REMEDIATION, pinned by orch-console; a multi-week session is
+    # host-resolved by _hub_recycle_remedy() (env-pin CTX_WD_HUB_RECYCLE_CMD wins); a multi-week session is
     # NORMAL). It does NOT self-recycle — cai REJECTED giving it self_compacts (that would relocate
     # the false-alarm to a 70%+ self-recycle nudge the hub cannot act on). Amber/steady-state is
     # EXPECTED, not degradation, so it does NOT operator-page; it pages ONLY at the ceiling
@@ -1513,21 +1513,46 @@ _NUDGE_RECYCLE_DROP = int(os.environ.get("CTX_WD_NUDGE_RECYCLE_DROP", "15"))  # 
 # pinned here can't recover itself and genuinely needs an external recycle. Env-tunable.
 _EXT_RECYCLE_PAGE_PCT = int(os.environ.get("CTX_WD_EXT_RECYCLE_PAGE_PCT", "95"))
 
-# Operator-facing hub recycle command (CAI-1360) — PARAMETERIZED in ONE place (Nazim 36772).
-# cai named reset_orch.sh, but that is the BARE ON-HOST reset and does NOT work from where the
-# operator is; the hub RELOCATED (Studio -> VPS wingmen-core / 91.107.235.77, 2026-07-31) and the
-# operator-facing recycle is the cross-host wrapper reset_hub_remote.sh (SSH -> VPS -> reset_orch.sh
-# on the hub's home turf). A safety page must name the path that actually works. PINNED by
-# orch-console (bus 37012/37014, verified wired to wingmen-core): CTX_WD_HUB_RECYCLE_CMD =
-# `bash ~/wingmen/orchestrator/scripts/reset_hub_remote.sh`. Env-overridable so a future
-# relocation can re-pin without a code edit.
-_HUB_RECYCLE_REMEDIATION = os.environ.get(
-    "CTX_WD_HUB_RECYCLE_CMD",
-    "recycle the hub via its cross-host operator control — run "
-    "`bash ~/wingmen/orchestrator/scripts/reset_hub_remote.sh` (SSHes to the relocated hub on the "
-    "VPS wingmen-core / 91.107.235.77 and runs reset_orch.sh THERE) — NOT the bare on-host "
-    "reset_orch.sh, which no longer reaches the hub",
-)
+# Operator-facing hub recycle remedy (CAI-1360) — now HOST-RESOLVED (Nazim 39335/39457), not a
+# hardcoded host. The hub relocated Studio -> VPS wingmen-core (2026-07-31) -> gzbai (2026-09-05
+# cutover); a safety page must name the CURRENT host, so _hub_recycle_remedy() resolves it from
+# orch_lease.holder_host via hub_reach (unknown -> names no host). An explicit operator pin still
+# WINS: CTX_WD_HUB_RECYCLE_CMD (env-overridable so a future relocation can re-pin without a code
+# edit). reset_hub_remote.sh is holder-host-guarded (aborts unless the target IS the live holder).
+def _resolve_hub_holder() -> Optional[str]:
+    """Best-effort orch_lease.holder_host for the hub remedy. Read miss -> None (safe:
+    the remedy then names NO host). Mirrors read_context_gauge's psycopg(2) import shim."""
+    dsn = _dsn()
+    if not dsn:
+        return None
+    try:
+        try:
+            import psycopg  # type: ignore
+            connect = psycopg.connect
+        except ImportError:
+            import psycopg2 as psycopg  # type: ignore
+            connect = psycopg.connect
+        conn = connect(dsn)
+        try:
+            return hub_reach.read_holder_host(conn)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — best-effort; fall back to the safe (no-host) remedy
+        return None
+
+
+def _hub_recycle_remedy(holder_host: Optional[str] = None, *, resolve: bool = True) -> str:
+    """Operator-facing hub recycle remedy, HOST-RESOLVED from orch_lease.holder_host (Nazim
+    39292/39335). An explicit operator pin (CTX_WD_HUB_RECYCLE_CMD) still wins — env-overridable
+    so a future relocation can re-pin without a code edit; else resolve via hub_reach (unknown
+    holder -> names NO host, fail-safe). Was a static constant that hardcoded the decommissioned
+    wingmen-core host (91.107.235.77)."""
+    pin = os.environ.get("CTX_WD_HUB_RECYCLE_CMD")
+    if pin:
+        return pin
+    if holder_host is None and resolve:
+        holder_host = _resolve_hub_holder()
+    return hub_reach.hub_reach_for_holder(holder_host)["remedy"]
 
 
 def _load_state() -> dict:
@@ -1693,13 +1718,13 @@ def _handle_self_recycle(a: AgentCtx, reg: dict, state: dict, now: float) -> Opt
 
 def _external_recycle_alert_text(a: AgentCtx, reg: dict) -> str:
     """Operator page for an EXTERNALLY-recycled body (the hub) at the ceiling (CAI-1360). Names
-    the REAL remediation (an external recycle, via the parameterized _HUB_RECYCLE_REMEDIATION)
+    the REAL remediation (an external recycle, host-resolved via _hub_recycle_remedy())
     and NEVER self-recycle language — this body does NOT self-recycle, so a self-recycle nudge
     would be un-actionable. Steady-state amber is expected and never reaches this text."""
     label = reg.get("label", a.agent)
     return (f"🚨 {label} — needs an EXTERNAL recycle (~{a.pct}%): {label} is at ~{a.pct}% of its "
             f"1M window ({a.ctx_tokens:,} tokens). It is long-lived and harness-compacted and does "
-            f"NOT self-recycle — {_HUB_RECYCLE_REMEDIATION}. A multi-week session is normal; this "
+            f"NOT self-recycle — {_hub_recycle_remedy()}. A multi-week session is normal; this "
             f"fires only at the ceiling (>= {_EXT_RECYCLE_PAGE_PCT}%), not on steady-state amber.")
 
 
@@ -1819,7 +1844,7 @@ def run_alerts(rows: list[AgentCtx]) -> list[str]:
                     # not a stuck BODY, so verify at source before recycling, never blind-recycle.
                     remediation = (
                         f" If the body itself (not just the writer) is stuck, recover it with an "
-                        f"external recycle: {_HUB_RECYCLE_REMEDIATION}."
+                        f"external recycle: {_hub_recycle_remedy()}."
                         if reg.get("external_recycle") else "")
                     _send_alert(
                         f"⚠️ ctx gauge FROZEN: {a.agent} stuck at {a.ctx_tokens:,} tokens "
