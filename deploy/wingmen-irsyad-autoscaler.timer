@@ -1,0 +1,13 @@
+# /etc/systemd/system/wingmen-irsyad-autoscaler.timer
+# Nazim 39345 ruling-3: TIMER (restart-safe/self-healing, not a wedge-prone loop),
+# cadence 20 min, soak MIN 7 days to capture the Friday tabung peak, then wet-prove -> gate.
+[Unit]
+Description=Wingmen irsyad-autoscaler INERT soak — every 20min (7-day wet-prove window)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

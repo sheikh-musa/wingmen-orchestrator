@@ -60,6 +60,11 @@ CLAIM_GRACE_SECONDS = 120   # "past a short grace" — ignore work younger than 
 POOL_PREFIX = "cc-irsyad-"
 # Exact base ids that share the pool prefix but are PROTECTED (never auto-killable).
 PROTECTED_BASE_IDS = frozenset({"cc-irsyad-coord"})  # coord: supervised coordinator + poller owner
+
+# option-2 measurement bound (Nazim 39345 ruling-1): a 24h ROLLING window + work-ticket types
+# only (exclude 'update'/'agreed' status/ack chatter). Tunable; option-1 (coord queue) is canonical.
+OPTION2_WINDOW_HOURS = 24
+OPTION2_EXCLUDE_TYPES = ("update", "agreed")
 # Coarse money-path markers scanned in a lane's notes — over-protect (a false positive only
 # ever REMOVES a lane from the kill set, the safe direction for an allow-list).
 MONEY_MARKERS = ("money", "giro", "tabung-fajr", "payment", "payout", "bank-transfer")
@@ -257,16 +262,24 @@ def probe_live_agent_ids(conn) -> List[str]:
 
 def probe_option2_count(conn, live_agent_ids: List[str], grace_s: int = CLAIM_GRACE_SECONDS) -> int:
     """§2 option-2: requires_response + unresponded agent_messages to the cc-irsyad* family,
-    past the grace, NOT owned by a live lane (unclaimed, or claimed by a now-dead agent)."""
+    past the grace, NOT owned by a live lane (unclaimed, or claimed by a now-dead agent).
+
+    Nazim 39345 ruling-1: BOUND this to ACTIONABLE RECENT demand for the INERT wet-prove
+    comparison against coord's queue — a 24h ROLLING window (upper bound) + work-ticket
+    message_types only (exclude 'update'/'agreed' status-and-ack chatter). This turns the raw
+    unbounded 761 (all-time noise, which is exactly why agent_messages can't be canonical) into
+    a meaningful 'recent unclaimed demand' figure. Measurement-only — stays INERT."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM agent_messages "
             "WHERE to_agent LIKE 'cc-irsyad%%' "
             "AND requires_response = true AND responded_at IS NULL "
             "AND coalesce(is_test, false) = false "
+            "AND message_type <> ALL(%s) "
             "AND created_at < now() - (%s * interval '1 second') "
+            f"AND created_at > now() - interval '{OPTION2_WINDOW_HOURS} hours' "
             "AND (claimed_by IS NULL OR claimed_by <> ALL(%s))",
-            (grace_s, live_agent_ids or [""]))
+            (list(OPTION2_EXCLUDE_TYPES), grace_s, live_agent_ids or [""]))
         return int(cur.fetchone()[0])
 
 

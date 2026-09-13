@@ -1,0 +1,13 @@
+# /etc/systemd/system/wingmen-irsyad-autoscaler.service
+# INERT irsyad-autoscaler tick (detect+log only, ZERO actuation). Triggered by the .timer.
+# Writes one row to fleet_lane_autoscale_log per fire; nothing armed (Nazim gate before arming).
+[Unit]
+Description=Wingmen irsyad-autoscaler INERT tick (detect+log only) — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gazzai
+# shared tmpfs .env gives DATABASE_URL (substrate) for the read-probes + the log INSERT.
+ExecStart=/bin/bash -lc 'set -a; . /dev/shm/wingmen-secrets/.env 2>/dev/null; set +a; exec .venv/bin/python3 scripts/irsyad_autoscaler.py --once'
