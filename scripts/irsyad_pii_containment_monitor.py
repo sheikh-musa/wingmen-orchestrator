@@ -70,10 +70,14 @@ _PARENT_LABEL = "sch_student_parents.rows"
 #     not AUTHORIZED, not IGNORED, not FORBIDDEN(below), not unstructured -> counted as out-of-
 #     envelope (P0-on-any-nonzero, NEVER --accept'd). A NEW column we never classified fails CLOSED.
 AUTHORIZED_CEILING = {
+    # nric_hash (v1): AUTHORIZED per Nazim #40056 — same data class as nric_hash_v2 (op#20281-signed),
+    # a column-name variant, not an envelope expansion.
     _T_PERSONS: {"date_of_birth", "address", "gender",
-                 "nric_encrypted", "nric_hash_v2", "nric_source"},
-    _T_STUDENTS: {"emergency_contact_name", "emergency_contact_number", "emergency_contact_email",
-                  "emergency_contact_relationship", "emergency_contact_note",
+                 "nric_encrypted", "nric_hash", "nric_hash_v2", "nric_source"},
+    # emergency_contact (bare legacy): AUTHORIZED per Nazim #40056 — same class as the structured
+    # emergency_contact_* fields already authorized.
+    _T_STUDENTS: {"emergency_contact", "emergency_contact_name", "emergency_contact_number",
+                  "emergency_contact_email", "emergency_contact_relationship", "emergency_contact_note",
                   "class_id", "enrollment_date", "house", "citizenship", "nationality",
                   "country_of_birth", "race", "fee_code", "admission_year", "sibling_count",
                   "withdrawal_date"},
@@ -82,9 +86,12 @@ IGNORED_FIELDS = {
     _T_PERSONS: {"id", "org_id", "user_id", "merged_into", "created_at", "updated_at",
                  "deleted_at", "is_active", "display_name", "import_batch_id",
                  "import_batch_role", "import_batch_enriched_fields", "custom_fields", "tags"},
+    # previous_school: IGNORE per Nazim #40056 — education metadata, low-sensitivity, outside the
+    # deep-PII guard scope (not medical/custody/parent/contact); ignore (not ceiling-gate) to avoid
+    # a false-P0 stalling the cutover.
     _T_STUDENTS: {"id", "org_id", "person_id", "created_at", "updated_at", "deleted_at",
-                  "student_number", "status", "import_batch_id", "import_batch_role",
-                  "import_batch_enriched_fields"},
+                  "student_number", "status", "previous_school", "import_batch_id",
+                  "import_batch_role", "import_batch_enriched_fields"},
 }
 # sch_students cols already covered as FORBIDDEN by count_forbidden() — excluded from the
 # fail-closed-unknown enumeration so they are not double-counted (allergy* matched by ILIKE).
