@@ -97,6 +97,14 @@ IGNORED_FIELDS = {
 # fail-closed-unknown enumeration so they are not double-counted (allergy* matched by ILIKE).
 _FORBIDDEN_SCH = {"medical_notes", "custody_court_order_ref", "custody_under_court_order"}
 
+# RESIDUE-NO-GROW GUARD (Nazim #40069): the LIVE-scope above is blind to SOFT-DELETED rows, so a
+# populate-then-soft-delete could hide deep PII. This baseline is the KNOWN reverted-dupe residue
+# (batch d535e594 = 900 soft-deleted role='created' deep-PII rows, HELD as a reversible safety net
+# until post-convergence). The residue may SHRINK (cleanup/hard-delete = fine) but must NOT GROW —
+# a rise above the baseline is a new out-of-envelope signal and pages LOUD. Env-tunable so the
+# baseline can be lowered (→0) once the residue is purged.
+KNOWN_SOFTDELETED_RESIDUE = int(os.environ.get("IRSYAD_PII_KNOWN_RESIDUE", "900"))
+
 
 def _present_columns(cur, table: str) -> List[str]:
     """All column names on `table` (public schema), from the catalog. Used to enumerate the
@@ -196,16 +204,18 @@ def count_forbidden(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
     nonzero here is P0 regardless of the authorized-cohort ceiling (--accept never touches this)."""
     f: Dict[str, Optional[int]] = {}
     S, P, PA = _T_STUDENTS, _T_PERSONS, _T_PARENTS
-    # sch_students: medical + custody are ruled OUT of the enrollment envelope
-    f[f"{S}.medical_notes"] = _count(cur, f"SELECT count(*) FROM {S} WHERE org_id=%(o)s AND medical_notes IS NOT NULL", org_id)
-    f[f"{S}.custody_court_order_ref"] = _count(cur, f"SELECT count(*) FROM {S} WHERE org_id=%(o)s AND custody_court_order_ref IS NOT NULL", org_id)
-    f[f"{S}.custody_under_court_order"] = _count(cur, f"SELECT count(*) FROM {S} WHERE org_id=%(o)s AND custody_under_court_order IS TRUE", org_id)
+    # sch_students: medical + custody are ruled OUT of the enrollment envelope. LIVE-scope
+    # (deleted_at IS NULL, #40069): the ACTIVE cohort must be clean; soft-deleted residue is
+    # guarded by count_softdeleted_residue(), not double-counted here.
+    f[f"{S}.medical_notes"] = _count(cur, f"SELECT count(*) FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND medical_notes IS NOT NULL", org_id)
+    f[f"{S}.custody_court_order_ref"] = _count(cur, f"SELECT count(*) FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND custody_court_order_ref IS NOT NULL", org_id)
+    f[f"{S}.custody_under_court_order"] = _count(cur, f"SELECT count(*) FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND custody_under_court_order IS TRUE", org_id)
     # schema-forward: any allergy-like column (none today) -> non-null; discovery failure is loud
     try:
         cur.execute("""SELECT column_name FROM information_schema.columns WHERE table_schema='public'
                        AND table_name=%s AND column_name ILIKE '%%allergy%%'""", (S,))
         for (cn,) in cur.fetchall():
-            f[f"{S}.{cn}"] = _count(cur, f"SELECT count(*) FROM {S} WHERE org_id=%(o)s AND {cn} IS NOT NULL", org_id)
+            f[f"{S}.{cn}"] = _count(cur, f'SELECT count(*) FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND "{cn}" IS NOT NULL', org_id)
     except Exception:
         f[f"{S}._allergy_discovery"] = None
     # sch_student_parents: ANY row is a parent-guardian LINK — out-of-envelope in the enrollment phase
@@ -225,7 +235,7 @@ def count_forbidden(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
     # forbidden check above, NOT unstructured (custom_fields/tags -> count_unclassifiable) is
     # OUT-OF-ENVELOPE by default -> counted here (P0-on-any-nonzero, never --accept'd). A NEW
     # column mig-added later that neither Nazim nor I classified fails CLOSED, never silent-green.
-    student_persons = f"SELECT person_id FROM {S} WHERE org_id=%(o)s AND person_id IS NOT NULL"
+    student_persons = f"SELECT person_id FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND person_id IS NOT NULL"
     for c in sorted(_present_columns(cur, P)):
         if c in AUTHORIZED_CEILING[P] or c in IGNORED_FIELDS[P]:
             continue
@@ -234,7 +244,7 @@ def count_forbidden(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
         if (c in AUTHORIZED_CEILING[S] or c in IGNORED_FIELDS[S]
                 or c in _FORBIDDEN_SCH or "allergy" in c.lower()):
             continue
-        f[f"{S}.{c}"] = _count(cur, f'SELECT count(*) FROM {S} WHERE org_id=%(o)s AND "{c}" IS NOT NULL', org_id)
+        f[f"{S}.{c}"] = _count(cur, f'SELECT count(*) FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND "{c}" IS NOT NULL', org_id)
     return f
 
 
@@ -244,6 +254,26 @@ def classify_forbidden(forbidden: Dict[str, Optional[int]]):
     breaches = [(l, n) for l, n in sorted(forbidden.items()) if isinstance(n, int) and n > 0]
     unmeasured = [l for l, n in sorted(forbidden.items()) if n is None]
     return breaches, unmeasured
+
+
+def count_softdeleted_residue(cur, org_id: str = ORG_ID) -> Optional[int]:
+    """COUNT-ONLY: soft-deleted students still carrying deep PII — the residue the LIVE-scope is
+    blind to. date_of_birth is the canonical deep-enrichment marker (=900 on the reverted dupes).
+    None on a query error (loud dead-man). Never reads a value."""
+    return _count(
+        cur,
+        f"""SELECT count(*) FROM {_T_STUDENTS} s WHERE s.org_id = %(o)s AND s.deleted_at IS NOT NULL
+             AND s.person_id IN (SELECT id FROM {_T_PERSONS} WHERE date_of_birth IS NOT NULL)""",
+        org_id,
+    )
+
+
+def residue_verdict(residue: Optional[int], known: int = KNOWN_SOFTDELETED_RESIDUE) -> str:
+    """PURE: 'unmeasured' (None -> loud dead-man), 'grew' (residue > known baseline -> LOUD signal:
+    populate-then-soft-delete evasion), or 'ok' (<= baseline; a shrink is benign cleanup)."""
+    if residue is None:
+        return "unmeasured"
+    return "grew" if residue > known else "ok"
 
 
 def decide_page(counts: Dict[str, Optional[int]], unclassifiable: Optional[int]):
@@ -268,19 +298,24 @@ def run_counts(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
     authorized path). Never selects a row value. A per-field query error -> None (loud).
     COVERAGE TEETH: an AUTHORIZED field that has VANISHED from the schema -> None
     (could-not-measure, LOUD) — a rename/drop must surface, never silently narrow the gate.
-    Out-of-envelope (forbidden + fail-closed-unknown) is NOT here — see count_forbidden()."""
+    Out-of-envelope (forbidden + fail-closed-unknown) is NOT here — see count_forbidden().
+    LIVE-SCOPE (Nazim #40069): counts the ACTIVE roster only (deleted_at IS NULL). The 1147
+    ceiling gates the LIVE authorized cohort; soft-deleted residue (the reverted dupes) must NOT
+    inflate the live count or it would false-P0 a legit re-upload once live enrichment > ~247.
+    The residue is not lost sight of — count_softdeleted_residue() guards it against growth."""
     counts: Dict[str, Optional[int]] = {}
     present_p = set(_present_columns(cur, _T_PERSONS))
     present_s = set(_present_columns(cur, _T_STUDENTS))
     person_subq = (
-        f"SELECT person_id FROM {_T_STUDENTS} WHERE org_id = %(o)s AND person_id IS NOT NULL"
+        f"SELECT person_id FROM {_T_STUDENTS} WHERE org_id = %(o)s "
+        f"AND deleted_at IS NULL AND person_id IS NOT NULL"
     )
     for c in sorted(AUTHORIZED_CEILING[_T_PERSONS]):
         counts[f"{_T_PERSONS}.{c}"] = None if c not in present_p else _count(
             cur, f'SELECT count(*) FROM {_T_PERSONS} WHERE id IN ({person_subq}) AND "{c}" IS NOT NULL', org_id)
     for c in sorted(AUTHORIZED_CEILING[_T_STUDENTS]):
         counts[f"{_T_STUDENTS}.{c}"] = None if c not in present_s else _count(
-            cur, f'SELECT count(*) FROM {_T_STUDENTS} WHERE org_id = %(o)s AND "{c}" IS NOT NULL', org_id)
+            cur, f'SELECT count(*) FROM {_T_STUDENTS} WHERE org_id = %(o)s AND deleted_at IS NULL AND "{c}" IS NOT NULL', org_id)
     return counts
 
 
@@ -460,12 +495,13 @@ def main() -> int:
         conn = psycopg2.connect(dsn); conn.autocommit = True
         try:
             cur = conn.cursor()
-            return run_counts(cur), count_unclassifiable(cur), count_forbidden(cur)
+            return (run_counts(cur), count_unclassifiable(cur), count_forbidden(cur),
+                    count_softdeleted_residue(cur))
         finally:
             conn.close()
 
     try:
-        counts, unclassifiable, forbidden = _retry(
+        counts, unclassifiable, forbidden, residue = _retry(
             _read_goumlyne, attempts=_DB_ATTEMPTS,
             base_delay_s=_DB_RETRY_BASE_S, retry_on=psycopg2.OperationalError)
     except Exception as e:  # dead-man's-switch — a persistent failure STILL pages loud
@@ -503,6 +539,22 @@ def main() -> int:
                   f"org {ORG_ID}: forbidden fields/links all zero again; gate RE-ARMED.",
                   priority="P3", requires_response=False)
             _save_state({}, STATE_PATH_FORBIDDEN)
+
+    # ── RESIDUE-NO-GROW GUARD (#40069): the LIVE-scope is blind to soft-deleted rows; assert the
+    # soft-deleted deep-PII residue does not GROW past the known reverted-dupe baseline. UNGATED
+    # (never --accept'd, never suppressed) — a shrink is benign cleanup, a rise is a fresh signal.
+    rv = residue_verdict(residue)
+    if rv == "unmeasured":
+        _page("🟠 Irsyad residue guard could-not-measure — soft-deleted deep-PII UNVERIFIED",
+              f"org {ORG_ID}: could not count the soft-deleted deep-PII residue. Not asserting the "
+              "LIVE-scope is safe on absence (dead-man's-switch).", priority="P1")
+    elif rv == "grew":
+        _page("🔴 Irsyad soft-deleted deep-PII residue GREW — possible populate-then-soft-delete evasion",
+              f"org {ORG_ID}: soft-deleted rows carrying deep PII now {residue} > known baseline "
+              f"{KNOWN_SOFTDELETED_RESIDUE} (reverted-dupe batch d535e594). The LIVE-scope monitor does "
+              "NOT count soft-deleted rows, so a GROWTH here is a NEW out-of-envelope signal (a write "
+              "then soft-delete would hide from the live gate). Counts only. Investigate who wrote.",
+              priority="P1")
 
     prev_state = _load_state()
     code, priority, kind, items = decide_page(counts, unclassifiable)
@@ -689,7 +741,11 @@ def _selftest() -> int:
     # overlap would let an authorized field also count as fail-closed (double-page) or vice-versa.
     disjoint = all(not (AUTHORIZED_CEILING[t] & IGNORED_FIELDS[t]) for t in (_T_PERSONS, _T_STUDENTS))
     print(f"  [{'PASS' if disjoint else 'FAIL'}] AUTHORIZED_CEILING and IGNORED_FIELDS are disjoint per table")
-    ok = ok and funk and disjoint
+    # residue-no-grow guard: == baseline ok, shrink ok, GROW pages, None loud
+    rv_ok = (residue_verdict(900, 900) == "ok" and residue_verdict(500, 900) == "ok"
+             and residue_verdict(901, 900) == "grew" and residue_verdict(None, 900) == "unmeasured")
+    print(f"  [{'PASS' if rv_ok else 'FAIL'}] residue guard: ==/shrink ok, grow->grew, None->unmeasured")
+    ok = ok and funk and disjoint and rv_ok
     print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'}")
     return 0 if ok else 1
 
