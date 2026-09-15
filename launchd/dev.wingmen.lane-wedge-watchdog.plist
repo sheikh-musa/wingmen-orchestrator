@@ -59,7 +59,13 @@
          edit-run loop by hand). It looks idle between his commands — that's
          expected, NOT a wedge. An auto-recovery send-keys would inject into his
          live edit. REMOVE when orch-console signals the operator has detached. -->
-    <key>LANE_WEDGE_EXCLUDE</key><string>nazim,cai,fleet-health,orch,orchestrator,infra,adcda,cosem-video</string>
+    <!-- bayanqa-bot/encoder/mizan-redirect: gzb SERVICES (bot/encoder/redirect), not agent lanes
+         -> excluded from the coverage-gap unmapped-session scan (orch-console #40262, 2026-09-15). -->
+    <key>LANE_WEDGE_EXCLUDE</key><string>nazim,cai,fleet-health,orch,orchestrator,infra,adcda,cosem-video,bayanqa-bot,encoder,mizan-redirect</string>
+    <!-- DEADMAN 240->900 (#40262): scans intermittently take ~300s under load; 240 was BELOW that
+         effective cadence (threshold<cadence) -> false "watchdog DOWN" every slow cycle. 900 fires
+         only on a genuine >15-min stall. Matches the live LaunchAgents plist. -->
+    <key>LANE_WEDGE_DEADMAN_GAP_SEC</key><string>900</string>
     <!-- Thresholds / guards overridable here (defaults shown). Uncomment to change
          without editing code.
     <key>LANE_WEDGE_MIN_POLLS</key><string>4</string>
