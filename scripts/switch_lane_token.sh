@@ -85,6 +85,7 @@ RESUME_MODE="${SWITCH_RESUME_MODE:-summary}"   # default SUMMARY (#34, bus 22582
 # (finish its step, write its handoff, go idle) and WAIT up to SWITCH_DRAIN_TIMEOUT,
 # then re-token+resume. HARD-REFUSE fallback if it won't drain in time (never clobber).
 DRAIN="${SWITCH_DRAIN:-0}"
+RELAUNCH="${SWITCH_RELAUNCH:-0}"
 DRAIN_TIMEOUT="${SWITCH_DRAIN_TIMEOUT:-240}"
 SESS=""
 TOKFILE=""
@@ -96,6 +97,7 @@ for a in "$@"; do
     --summary) RESUME_MODE=summary ;;
     --full) RESUME_MODE=full ;;
     --drain) DRAIN=1 ;;
+    --relaunch) RELAUNCH=1 ;;   # same-account restart for identity/env repair (op#20540 CC_BASE_OVERRIDE drift)
     *) if [ -z "$SESS" ]; then SESS="$a"; elif [ -z "$TOKFILE" ]; then TOKFILE="$a"; fi ;;
   esac
 done
@@ -208,7 +210,7 @@ echo "[switch_lane_token] BEFORE auth_fp=${BEFORE_FP:-<none>}  ->  target auth_f
 # Idempotent short-circuit: already on the target account. Do NOT restart (that
 # would needlessly wipe the lane's context for a no-op).
 # Same-account short-circuit — SKIP it for an intentional model-apply relaunch.
-if [ "$MODEL_APPLY" != "1" ] && [ -n "$BEFORE_FP" ] && [ "$BEFORE_FP" = "$NEW_FP" ]; then
+if [ "$MODEL_APPLY" != "1" ] && [ "$RELAUNCH" != "1" ] && [ -n "$BEFORE_FP" ] && [ "$BEFORE_FP" = "$NEW_FP" ]; then
   echo "[switch_lane_token] lane is ALREADY on target account ($NEW_FP) — no restart. PASS (no-op)."
   exit 0
 fi
@@ -355,11 +357,49 @@ sleep 1
 # We do NOT weaken the guard — it stays a crash so a genuine .env write-DSN regression is
 # still caught. Only lane re-tokens hit this (singletons boot via boot_*.sh, not this path).
 DSN_SCRUB='unset GOUMLYNE_DATABASE_URL IHSANOS_PROD_DATABASE_URL; '
+# IDENTITY-PRESERVING RELAUNCH (op#20540 defect, 2026-09-15): launch_dangerous_cc.sh
+# resolves the lane's base family from PWD unless CC_BASE_OVERRIDE is set. A lane that
+# was BOOTED with an override (fleet_lanes.base_agent_id, e.g. substrate-cleanup =
+# cc-substrate in worktree orchestrator.wt-cleanup) would otherwise come back under the
+# PWD family (it came back as cc-orchestrator-1 — a hub-family phantom next to the
+# singleton pen-holder). Resolve the base from the registry (fleet_lanes by lane name),
+# falling back to the agent_status row this session held BEFORE the kill, and set it
+# INSIDE the session command (tmux env inheritance is not something to rely on).
+# auto_agent_id still validates the override (cc-* whitelist, authority ids refused).
+BASE_OVERRIDE_CMD=''
+_BASE_ID="$(cd "$ORCH_DIR" && "$ORCH_DIR/.venv/bin/python3" - "$SESS" <<'PY' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.getcwd())
+import psycopg
+sess = sys.argv[1]
+dsn = os.environ.get("DATABASE_URL", "")
+if not dsn:
+    sys.exit(0)
+with psycopg.connect(dsn, connect_timeout=10) as c:
+    row = c.execute("SELECT base_agent_id FROM fleet_lanes WHERE lane=%s", (sess,)).fetchone()
+    if not row or not row[0]:
+        row = c.execute(
+            "SELECT base_agent_id FROM agent_status WHERE tmux_session=%s "
+            "ORDER BY (status<>'offline') DESC, last_heartbeat DESC NULLS LAST LIMIT 1",
+            (sess,)).fetchone()
+    if row and row[0]:
+        print(row[0])
+PY
+)"
+if [ -n "$_BASE_ID" ]; then
+  case "$_BASE_ID" in
+    cc-*) printf -v BASE_OVERRIDE_CMD 'CC_BASE_OVERRIDE=%q ' "$_BASE_ID"
+          echo "[switch_lane_token] identity: relaunching with CC_BASE_OVERRIDE=$_BASE_ID (registry/agent_status)";;
+    *)    echo "[switch_lane_token] identity: registry base '$_BASE_ID' is not a cc-* family — NOT overriding (pwd family applies)" >&2;;
+  esac
+else
+  echo "[switch_lane_token] identity: no registry base for '$SESS' — pwd family applies"
+fi
 if [ -n "$RESUME_ID" ]; then
-  printf -v CMD '%s%q %q -- --resume %q' "$DSN_SCRUB" "$LAUNCH_AS" "$TOKFILE" "$RESUME_ID"
+  printf -v CMD '%s%s%q %q -- --resume %q' "$DSN_SCRUB" "$BASE_OVERRIDE_CMD" "$LAUNCH_AS" "$TOKFILE" "$RESUME_ID"
   echo "[switch_lane_token] relaunching '$SESS' in $WORKTREE on the new account, RESUMING $RESUME_ID ..."
 else
-  printf -v CMD '%s%q %q' "$DSN_SCRUB" "$LAUNCH_AS" "$TOKFILE"
+  printf -v CMD '%s%s%q %q' "$DSN_SCRUB" "$BASE_OVERRIDE_CMD" "$LAUNCH_AS" "$TOKFILE"
   echo "[switch_lane_token] relaunching '$SESS' in $WORKTREE on the new account (FRESH — no session to resume) ..."
 fi
 if ! "$TM" new-session -d -s "$SESS" -c "$WORKTREE" "$CMD"; then
