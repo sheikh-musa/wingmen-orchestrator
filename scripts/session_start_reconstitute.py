@@ -52,21 +52,45 @@ def _body_role() -> str:
 
 
 def _expected_token_fp() -> str | None:
-    """The fp the running console SHOULD carry, computed live from .env's
-    CLAUDE_CODE_OAUTH_TOKEN — never hardcoded. Matches the boot-string method
-    (`printf '%s' "$tok" | shasum | cut -c1-12`): SHA-1 of the token bytes, first
-    12 hex chars. Reading it from .env means a token rotation can't leave a stale
-    constant here that false-alarms every recycle (the 2026-08-07 07ed/6814 slip).
+    """The fp the running console SHOULD carry, resolved the SAME way boot_nazim.sh
+    resolves the OAuth token — precedence: CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE >
+    .nazim_default_token (a durable per-body pointer holding a PATH to a token file;
+    op#20537 fleet flip to syed) > .env's CLAUDE_CODE_OAUTH_TOKEN. Never hardcoded.
+    Matches the boot-string method (`printf '%s' "$tok" | shasum | cut -c1-12`):
+    SHA-1 of the token bytes, first 12 hex chars. Honoring the pointer means a
+    durable pool move can't leave this expecting the stale .env default and
+    false-alarm every recycle (the 2026-08-07 07ed/6814 slip; op#20537 syed move).
     """
+    def _fp(tok: str) -> str | None:
+        tok = tok.strip().strip("'\"")
+        return hashlib.sha1(tok.encode()).hexdigest()[:12] if tok else None
+
+    # 1) explicit live override (a switch_singleton-style re-token)
+    ov = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE", "").strip()
+    if ov:
+        return _fp(ov)
+
+    # 2) durable per-body pointer: .nazim_default_token holds a PATH to a token file
+    ptr = os.path.join(ORCH_DIR, ".nazim_default_token")
+    try:
+        with open(ptr, "r", encoding="utf-8") as fh:
+            tok_path = os.path.expanduser(fh.read().strip())
+        if tok_path:
+            with open(tok_path, "r", encoding="utf-8") as tf:
+                fp = _fp(tf.read())
+                if fp:
+                    return fp
+    except OSError:
+        pass
+
+    # 3) fall through to .env's default
     env_path = os.path.join(ORCH_DIR, ".env")
     try:
         with open(env_path, "r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
-                    tok = line.split("=", 1)[1].strip().strip("'\"")
-                    if tok:
-                        return hashlib.sha1(tok.encode()).hexdigest()[:12]
+                    return _fp(line.split("=", 1)[1])
     except OSError:
         pass
     return None
