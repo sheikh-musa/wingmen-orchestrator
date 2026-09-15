@@ -34,6 +34,9 @@ MAX_TRIES="${LANE_NUDGE_TRIES:-3}"
 # Where diagnostic logs land. Defaults to the tree's logs/; overridable so a refusal's
 # self-diagnosis can be relocated (and tested) without touching the live log stream.
 LOGDIR="${LANE_NUDGE_LOG_DIR:-$ORCH_DIR/logs}"
+# Console (singleton) sessions whose revert-fail-on-a-nudge-template is a benign in-flight
+# delivery race, not corruption of a staged step (Nazim #40324). Space-separated; overridable.
+LANE_NUDGE_CONSOLE_SESSIONS="${LANE_NUDGE_CONSOLE_SESSIONS:-nazim orch}"
 
 tmux has-session -t "$SESSION" 2>/dev/null || { echo "lane_nudge: no tmux session '$SESSION'" >&2; exit 2; }
 
@@ -197,6 +200,65 @@ except Exception:
 PYEOF
 }
 
+# Is $1 one of the CONSOLE (singleton) sessions? (Nazim #40324 scope: the down-rank below applies
+# ONLY to the console body — a real staged draft on any other lane still escalates P1.)
+_is_console_session() {
+  local s="$1" x
+  for x in ${LANE_NUDGE_CONSOLE_SESSIONS:-nazim orch}; do [ "$s" = "$x" ] && return 0; done
+  return 1
+}
+
+# Does the pre-probe content look like a nudge/wake TEMPLATE we (or the realtime notifier) deliver —
+# not a staged step? Requires the inbox emoji AND distinctive inbox-reconcile phrasing that a genuine
+# staged draft (a migration, a task line) would never carry. Verified against the real #40323 capture
+# + real-staged-step counterexamples before this shipped (8/8). TIGHT by design: a false match here
+# would silence a P1 on the console, so both anchors must hold.
+_beforeflat_is_nudge_template() {
+  local f="$1"
+  printf '%s' "$f" | LC_ALL=C grep -qE '📥' || return 1
+  printf '%s' "$f" | LC_ALL=C grep -qiE 'reconcile agent_messages|read your agent_messages inbox|new .*bus msg|bus message\(s\) addressed to you|unread past SLA' || return 1
+  return 0
+}
+
+# P3 DOWN-RANK of a console revert-fail whose pre-probe content IS a nudge/wake template (Nazim #40324).
+# The console (a singleton) is frequently nudged and often mid-turn PROCESSING the very nudge when the
+# probe runs, so its composer (showing the delivered nudge line) can revert-fail without any staged step
+# of the console's being at risk — the 'content at risk' is our OWN delivery. The REFUSE already PRESERVED
+# it, so keep a RECORD but do not P1-storm the operator. Same guards/shape/dedupe (6h) as the DIM-stable
+# note; requires_response=false, priority P3. The P1 stays RESERVED for a non-template (real staged) draft.
+_probe_revertfail_nudge_note() {   # $1 = capfile pointer (may be empty), $2 = before-flat
+  local capref="${1:-}" beforeflat="${2:-}"
+  [ -n "${DATABASE_URL:-}" ] || return 0
+  tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  local dedupe="$LOGDIR/.probe_revertfail_nudgenote_${SESSION}.stamp"
+  if [ -f "$dedupe" ]; then
+    find "$dedupe" -mmin -360 2>/dev/null | grep -q . && return 0
+  fi
+  mkdir -p "$LOGDIR" 2>/dev/null && : > "$dedupe" 2>/dev/null || true
+  local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
+  "$py" - "$SESSION" "$beforeflat" "$capref" <<'PYEOF' 2>/dev/null || true
+import os, sys
+try:
+    import psycopg2
+    sess, flat, capref = sys.argv[1], sys.argv[2], sys.argv[3]
+    ev = f"logs/{capref}" if capref else "NONE"
+    c = psycopg2.connect(os.environ["DATABASE_URL"]); cur = c.cursor()
+    cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+    cur.execute(
+        "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
+        "VALUES ('cc-fleet-health','orch-console','update',%s,%s,false,'P3')",
+        (f"lane_nudge revert-fail on {sess} (console + nudge-template) -- down-ranked to P3/log, benign in-flight delivery",
+         f"The ghost-probe on the console '{sess}' revert-failed, but the pre-probe content IS a nudge/wake "
+         f"template we (or the realtime notifier) delivered, NOT a staged step of the console's — the singleton "
+         f"was mid-turn processing the very nudge. The REFUSE already PRESERVED it; nothing of the operator's was "
+         f"at risk. Recording (P3, no P1). Content before probe: '{flat}'. Raw capture: {ev}. Only inspect if this "
+         f"recurs with content that is NOT a nudge line."))
+    c.commit()
+except Exception:
+    pass
+PYEOF
+}
+
 # A revert-fail on a pane that is MID-TURN (busy footer: 'esc to interrupt' / a thinking spinner)
 # is the EXPECTED artifact of the pane REPAINTING under the sentinel+BSpace — not corruption of a
 # staged step (Nazim #25506/#25619/#25635: the probe kept firing false P1s on HEALTHY busy panes,
@@ -258,6 +320,15 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
         # NON-DIM stable revert-fail (high-confidence real). FIX-1-safe (clear-vs-refuse unchanged), not silent.
         _log_probe_capture "REFUSED-revert-fail [DIM-stable: likely benign ghost repaint, P3/log no P1], preserved staged"
         _probe_revertfail_note "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
+      elif _is_console_session "$SESSION" && _beforeflat_is_nudge_template "${CC_PROBE_BEFORE:-}"; then
+        # Nazim #40324: a revert-fail on the CONSOLE body whose pre-probe content IS a nudge/wake
+        # template we delivered (not a staged step of the console's) is a benign in-flight-delivery
+        # race — the singleton was mid-turn processing the very nudge. The REFUSE already PRESERVED it;
+        # DOWN-RANK to a deduped P3/log, NEVER a P1/action (same shape as the DIM-stable rule #40304).
+        # Tight scope (console session only + a matched nudge template) so a REAL non-dim staged draft
+        # on the console still escalates P1. FIX-1-safe: clear-vs-refuse (exit 3) unchanged.
+        _log_probe_capture "REFUSED-revert-fail [console + pre-probe==nudge template: benign in-flight delivery, P3/log no P1], preserved staged"
+        _probe_revertfail_nudge_note "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
       else
         _log_probe_capture "REFUSED-revert-fail, preserved staged"
         _probe_p1_escalate "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
