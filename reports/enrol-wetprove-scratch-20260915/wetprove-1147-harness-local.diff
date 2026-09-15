@@ -1,0 +1,38 @@
+diff --git a/scripts/db/wetprove-1147-sch-enroll-chunk-scale.py b/scripts/db/wetprove-1147-sch-enroll-chunk-scale.py
+index 0c63cd4f..c90e8b66 100644
+--- a/scripts/db/wetprove-1147-sch-enroll-chunk-scale.py
++++ b/scripts/db/wetprove-1147-sch-enroll-chunk-scale.py
+@@ -556,11 +556,32 @@ cur.execute("""
+   SELECT count(*) FROM public.persons p
+   JOIN public.sch_students ss ON ss.person_id=p.id
+   WHERE p.org_id=%s AND ss.student_number <= 'STU-EXIST-%04d'
++    AND ss.import_batch_role='backfilled'
+     AND (p.gender <> 'female' OR p.date_of_birth <> DATE '2010-05-05')
+ """ % ("%s", N_PRESET), (ORG,))
+-ck("[d/retry] never-clobber holds after the retry (pre-set values still intact)",
++ck("[d/retry-CORRECTED] never-clobber holds after the retry (pre-set values still intact)",
+    cur.fetchone()[0] == 0)
+ 
++# ── DIAGNOSTIC (console gate): capture WHAT the retry did to pre-set targets ──
++cur.execute("""
++  SELECT p.gender, p.date_of_birth, count(*)
++  FROM public.persons p JOIN public.sch_students ss ON ss.person_id=p.id
++  WHERE p.org_id=%s AND ss.student_number <= 'STU-EXIST-0100'
++  GROUP BY 1,2 ORDER BY 3 DESC
++""", (ORG,))
++print("  [DIAG] pre-set target (gender,dob) distribution AFTER retry:")
++for g,d,n in cur.fetchall():
++    print(f"    gender={g!r} dob={d} count={n}")
++cur.execute("""
++  SELECT p.import_batch_enriched_fields, count(*)
++  FROM public.persons p JOIN public.sch_students ss ON ss.person_id=p.id
++  WHERE p.org_id=%s AND ss.student_number <= 'STU-EXIST-0100'
++  GROUP BY 1 ORDER BY 2 DESC
++""", (ORG,))
++print("  [DIAG] pre-set target enriched_fields AFTER retry:")
++for ef,n in cur.fetchall():
++    print(f"    enriched_fields={ef} count={n}")
++
+ # =============================================================================
+ # NEVER-COMMIT: roll the entire data proof back. No fabricated minor persists.
+ # =============================================================================

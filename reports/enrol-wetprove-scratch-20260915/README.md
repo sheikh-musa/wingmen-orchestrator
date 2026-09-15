@@ -1,0 +1,1 @@
+Preserved 2026-09-15 from scratch worktrees ihsanos-wetprove-wt (@fb9eacd6) and ihsanos-gate-1147 (@ef45d0f5) before removal. Enrol wet-prove harness scripts + local harness diff + classify bench. Not in any ihsanos branch.

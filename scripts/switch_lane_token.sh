@@ -267,7 +267,7 @@ if [ "$DRAIN" = "1" ] && [ "$FORCE" != "1" ]; then
       echo "[switch_lane_token] --drain: clearing composer draft ('${CC_FLAT}') before the request (captured above)."
       _i=0; while [ "$_i" -lt "$CC_BYTES" ]; do "$TM" send-keys -t "${SESS}:0.0" BSpace; _i=$((_i+1)); done
     fi
-    _DRAIN_MSG="⏸ DRAIN REQUEST (cc-fleet-health, op#12114): you are being re-tokened to the operator's Musa account and WILL RESUME with full context. Please reach a SAFE STOPPING POINT now — finish your current step, write/refresh your handoff (note any pending work so you can pick it up on resume), close any background shell, then go idle with an EMPTY composer. I am watching your pane and will re-token you the moment you are idle. If anything in flight is irreversible, note it in your handoff first."
+    _DRAIN_MSG="⏸ DRAIN REQUEST (cc-fleet-health, op#12114): you are being re-tokened onto a different Claude account (token pool move) and WILL RESUME with full context. Please reach a SAFE STOPPING POINT now — finish your current step, write/refresh your handoff (note any pending work so you can pick it up on resume), close any background shell, then go idle with an EMPTY composer. I am watching your pane and will re-token you the moment you are idle. If anything in flight is irreversible, note it in your handoff first."
     "$TM" send-keys -t "${SESS}:0.0" -l "$_DRAIN_MSG"
     "$TM" send-keys -t "${SESS}:0.0" Enter
     _ddl=$(( $(date -u +%s) + DRAIN_TIMEOUT ))
