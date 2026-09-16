@@ -16,6 +16,8 @@ import pytest
 
 from scripts.lib.project_operator_authorization import (
     ProjectAuthResult,
+    _fetch_operators_for_project,
+    _is_authorizable_chat_id,
     find_verified_project_authorization,
     verified_project_authorization,
 )
@@ -161,6 +163,56 @@ def test_wrapper_db_error_fails_closed():
         "irsyad", "op", after=REQUEST_TS, approval_phrases=PHRASES,
         op_tokens=TOKENS, dsn="postgresql://nope:nope@127.0.0.1:1/nodb")
     assert res.ok is False
+
+
+# ── R1 (op#20702 Stage A gate #40727): a group/channel chat_id can never authorize ──
+
+def test_is_authorizable_chat_id_rejects_negative():
+    """Telegram's convention: negative chat_id = group/channel, never a user."""
+    assert _is_authorizable_chat_id("-5390147776") is False
+    assert _is_authorizable_chat_id(-5390147776) is False
+
+
+def test_is_authorizable_chat_id_accepts_positive():
+    assert _is_authorizable_chat_id("1913044694") is True
+    assert _is_authorizable_chat_id(1913044694) is True
+
+
+def test_is_authorizable_chat_id_rejects_garbage():
+    assert _is_authorizable_chat_id("not-a-number") is False
+    assert _is_authorizable_chat_id(None) is False
+
+
+def test_fetch_operators_excludes_group_ids(monkeypatch):
+    """A project_governance.operators array containing a mistakenly-registered
+    group id must NEVER surface that id as an authorizer — filtered at the
+    fetch layer, by construction, not left to every caller to re-check."""
+    import psycopg  # noqa: F401 — ensure the real module is importable/patchable
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def execute(self, *a, **kw):
+            pass
+        def fetchone(self):
+            return ([
+                {"name": "Hariz", "chat_id": "1913044694"},
+                {"name": "cosem-exams group (mistake)", "chat_id": "-5390372474"},
+            ],)
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def cursor(self):
+            return _FakeCursor()
+
+    monkeypatch.setattr("psycopg.connect", lambda *a, **kw: _FakeConn())
+    result = _fetch_operators_for_project("postg://x", "cosem")
+    assert result == ["1913044694"]
 
 
 def test_wrapper_unknown_project_fails_closed(monkeypatch):

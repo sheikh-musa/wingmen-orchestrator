@@ -120,11 +120,27 @@ def find_verified_project_authorization(
     return None
 
 
+def _is_authorizable_chat_id(chat_id) -> bool:
+    """A GROUP/channel chat_id (Telegram's convention: negative) can NEVER be an
+    authorizer — refuse by construction rather than trusting every seed/edit to
+    this table to be hand-checked correctly forever (op#20702 Stage A gate #40727
+    R1: a seed once carried a group id, which would have let anyone posting in
+    that group authorize the project's scoping decisions)."""
+    try:
+        return int(str(chat_id)) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _fetch_operators_for_project(dsn: str, project: str) -> list[str]:
     """Return the list of registered operator chat_ids for `project`, or []
     if the project has no project_governance row, or has one with an empty
     operators array. Never raises for "not found" — only for a genuine DB
-    error, which the caller treats as fail-closed."""
+    error, which the caller treats as fail-closed.
+
+    Silently EXCLUDES any operator entry whose chat_id is not a positive user
+    id (i.e. a group/channel id) — such an entry can never authorize anything,
+    by construction, regardless of how it got into project_governance."""
     import psycopg
     with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
         cur.execute(
@@ -134,7 +150,10 @@ def _fetch_operators_for_project(dsn: str, project: str) -> list[str]:
         row = cur.fetchone()
         if row is None or not row[0]:
             return []
-        return [str(op.get("chat_id")) for op in row[0] if op.get("chat_id")]
+        return [
+            str(op.get("chat_id")) for op in row[0]
+            if op.get("chat_id") and _is_authorizable_chat_id(op.get("chat_id"))
+        ]
 
 
 def _fetch_candidate_rows(dsn: str, chat_ids: Sequence[str], after: datetime) -> list[dict]:
