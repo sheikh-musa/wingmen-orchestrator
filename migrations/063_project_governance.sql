@@ -14,6 +14,15 @@
 -- to its actual function (_r4_current_arm) so this comment doesn't rot; added `reason
 -- TEXT` for Stage E's write path to populate (copied into the audit row by the trigger).
 --
+-- REVISED AGAIN (2026-09-16, orch-console re-gate #40745, PASS on R1-R4 -- one addition
+-- before apply): added `channels JSONB NOT NULL DEFAULT '[]'::jsonb` -- Stage C's identity
+-- fix (per gate #40738 C1) needs a per-project channel binding since production chat_id is
+-- the CHAT a message arrived on, not the person (Shuq/Wan/Hariz all have zero rows where
+-- chat_id == their own user id -- every real approval comes from their project's group,
+-- person identified by from_user_id). A DM (chat_id == from_user_id) is always acceptable;
+-- a group chat must be explicitly listed here. Seeded from the same real-data channels
+-- Stage C's gate #40738 identified (irsyad's gazzabyte group, cosem's Hariz group).
+--
 -- BUILD ORDER (P1, Musa op#20702/20704/20706, ratified op#20708 "agreed. proceed";
 -- orch-console bus #40707). Stage A of reports/per-project-governance-design-op20702.md.
 --
@@ -68,6 +77,7 @@ CREATE TABLE IF NOT EXISTS public.project_governance (
   project                  TEXT        PRIMARY KEY,
   cai_enabled               BOOLEAN     NOT NULL,
   operators                 JSONB       NOT NULL DEFAULT '[]'::jsonb,   -- [{name, chat_id, internal: bool}]
+  channels                  JSONB       NOT NULL DEFAULT '[]'::jsonb,   -- Telegram chat_ids a project's operators may authorize FROM (group chats only; a DM where chat_id == from_user_id is always acceptable)
   money_clearance_enabled   BOOLEAN     NOT NULL DEFAULT false,
   residency_ack             JSONB,                                      -- NULL = no acknowledgement on file
   updated_by                TEXT,
@@ -90,9 +100,18 @@ COMMENT ON COLUMN public.project_governance.cai_enabled IS
 
 COMMENT ON COLUMN public.project_governance.operators IS
   'Array of {name, chat_id, internal: bool} -- who authorizes this project''s PRODUCT/SCOPING/'
-  'build decisions (Stage C, non-money gate). chat_id is the operator''s Telegram chat id, '
-  'matched against a bridge-verified inbound operator_messages row, same evidentiary shape as '
-  'require_verified_authorization.py (never a console/tmux-typed claim).';
+  'build decisions (Stage C, non-money gate). chat_id is the operator''s Telegram USER id '
+  '(from_user_id on the inbound row, not the chat the message arrived on -- see the '
+  '`channels` column), matched against a bridge-verified inbound operator_messages row, same '
+  'evidentiary shape as require_verified_authorization.py (never a console/tmux-typed claim).';
+
+COMMENT ON COLUMN public.project_governance.channels IS
+  'Array of Telegram chat_id strings a project''s registered operators are allowed to '
+  'authorize FROM (group chats only -- a DM, where chat_id == from_user_id, is always '
+  'acceptable regardless of this list). Stage C gate: from_user_id must be a registered '
+  'operator AND (chat_id == from_user_id OR chat_id IN channels) -- otherwise an approval '
+  'typed in a stranger''s group with a forwarded identity would count. Empty array means '
+  'only DMs authorize (no group is trusted for that project).';
 
 COMMENT ON COLUMN public.project_governance.money_clearance_enabled IS
   'DEFAULT FALSE. ON would let this project''s registered (external) operators clear its own '
@@ -227,9 +246,14 @@ GRANT SELECT ON public.project_governance_audit TO authenticated;
 -- (verified: 590 inbound rows, @hariltz27). Negative chat_ids are Telegram's convention
 -- for groups/channels; Stage C refuses them by construction (a group can never be an
 -- authorizer) rather than relying on every seed being hand-checked correctly forever.
-INSERT INTO public.project_governance (project, cai_enabled, operators, money_clearance_enabled, updated_by)
+-- channels (2026-09-16, orch-console re-gate #40745): the per-project group chat_ids
+-- Stage C's from_user_id-based identity fix must channel-bind against -- irsyad's
+-- Shuq/Wan and cosem's Hariz all authorize from their project's own group in production
+-- (chat_id = the group, from_user_id = the person), never a DM; substrate has no
+-- registered external operators so it stays [] (DM-only, moot today).
+INSERT INTO public.project_governance (project, cai_enabled, operators, channels, money_clearance_enabled, updated_by)
 VALUES
-  ('substrate', true,  '[]'::jsonb, false, 'migration-063-seed'),
-  ('irsyad',    false, '[{"name":"Shuq","chat_id":"605271890","internal":false},{"name":"Wan","chat_id":"661212242","internal":false}]'::jsonb, false, 'migration-063-seed'),
-  ('cosem',     false, '[{"name":"Hariz","chat_id":"1913044694","internal":false}]'::jsonb, false, 'migration-063-seed')
+  ('substrate', true,  '[]'::jsonb, '[]'::jsonb, false, 'migration-063-seed'),
+  ('irsyad',    false, '[{"name":"Shuq","chat_id":"605271890","internal":false},{"name":"Wan","chat_id":"661212242","internal":false}]'::jsonb, '["-5330147776"]'::jsonb, false, 'migration-063-seed'),
+  ('cosem',     false, '[{"name":"Hariz","chat_id":"1913044694","internal":false}]'::jsonb, '["-5390372474"]'::jsonb, false, 'migration-063-seed')
 ON CONFLICT (project) DO NOTHING;
