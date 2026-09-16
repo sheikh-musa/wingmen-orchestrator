@@ -15,6 +15,12 @@
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>/Users/sheikhmusa</string>
+    <!-- git<->live sync (Nazim #40776 disclosure-2): mirror the DEPLOYED live plist so
+         committed==deployed. SLA_READ_PARKED_ENABLED=0 keeps the read-parked net INERT
+         (op#11774 observe-first, not yet armed); SLA_EXCLUDE_AGENTS='' = nobody excluded
+         from actioning. Pre-existed live-only; now tracked. -->
+    <key>SLA_EXCLUDE_AGENTS</key><string></string>
+    <key>SLA_READ_PARKED_ENABLED</key><string>0</string>
     <!-- RULING-3 AGED-RR RE-PAGE ARMED (Nazim #40752, 2026-09-16, after the clean soak
          #40750: 0 aged rr rows in observe = empty blast radius). Promotes PR#108's
          aged-unanswered-rr net from observe/inert to live: a P0/P1 rr the hub or SRE
