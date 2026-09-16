@@ -35,6 +35,7 @@
   // (no named key file), so we name it here where the family is known.
   function acctForFp(fp) {
     fp = fp || "";
+    // SSOT for the set = nervous_system/console/pools.py; fleet.js POOL_FP mirrors it (op#20684).
     if (fp.indexOf("e1dfa48eec85") === 0) return "musa2";
     if (fp.indexOf("68142948") === 0) return "Musa";
     if (fp.indexOf("582043088") === 0) return "Syed";
@@ -220,7 +221,7 @@
   });
 
   // ── version badge (matches fleet.js): baked APP_BUILD vs server /api/version ──
-  var APP_BUILD = 'fc-v61';
+  var APP_BUILD = 'fc-v62';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(sv, sha) {
     var el = $("build");

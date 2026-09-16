@@ -28,6 +28,7 @@ from typing import Dict, List, Optional
 # GAP-B: the ONE canonical lane→token resolver, shared with
 # scripts/launch_dangerous_cc.sh (via its CLI shim). Importing it here is what
 # makes the console's "expected" account == the account a lane actually boots on.
+from nervous_system.console import pools
 from scripts.lib.lane_token_resolver import resolve_lane_token_path as _resolve_lane_token_path
 
 _TIMEOUT_S = 5
@@ -433,7 +434,9 @@ def lane_token_auth() -> dict:
 # Known Max accounts by token fingerprint (sha256[:12] — NON-secret short ids the
 # operator already uses on the bus, never the raw token). CONSOLE_MAX_ACCT_OWNERS
 # (JSON {fp: label}) extends/overrides. Keyed at the length _fingerprint() emits.
-_KNOWN_ACCOUNTS = {"68142948c003": "Musa", "582043088eae": "Syed"}
+# SSOT = nervous_system/console/pools.py (op#20684 — this was a stale copy missing
+# musa2; keep fleet.js POOL_FP / irsyad.js acctForFp in lockstep with it).
+_KNOWN_ACCOUNTS = dict(pools.KNOWN_POOLS)
 # FINAL fallback label only (op#10706 R1 replaced the flat policy): when a body's
 # expected account can't be resolved from its pointer file NOR the .env default,
 # this is the last-resort expected label.

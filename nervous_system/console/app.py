@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from nervous_system.console import auth, db, docs, media, panes, pii
+from nervous_system.console import auth, db, docs, media, panes, pii, pools
 from nervous_system.console.feed import Broadcaster, feeder
 # GAP-B: the shared family helper — the SAME one the token resolver uses to decide
 # which .group_default_token.<family> governs a lane.
@@ -1051,6 +1051,7 @@ def _context_bloat(rows):
             "level": level,
             "age_s": r.get("age_s"),
             "auth_fp": r.get("auth_fp"),
+            "pool": pools.pool_for_fp(r.get("auth_fp")),
             "host": r.get("host"),
         })
     out.sort(key=lambda x: x["pct"], reverse=True)
@@ -1460,6 +1461,9 @@ def _fleet_payload():
         state, flagged = l.pop("_state"), l.pop("_flagged")
         l["bucket"] = state
         l["flagged"] = flagged
+        # op#20684: pool NICKNAME alongside the fp — the same field the hosted
+        # (fp-less) payload carries, so fleet.js reads one key on both consoles.
+        l["pool"] = pools.pool_for_fp(l.get("auth_fp"))
         # fc-v52: the lane's FAMILY (irsyad / cosem / ihsanos …), via the SAME
         # helper the token resolver + GAP-B grouping use — so the spine can sort
         # all of a family's instances together (operator ask). Derived from the

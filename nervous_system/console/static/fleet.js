@@ -49,20 +49,54 @@
   }
   function shortModel(m) { return m ? String(m).replace(/^claude-/, "") : ""; }
 
-  // fp -> short account label + chip class. auth_fp = sha256(OAuth token)[:12].
-  function tokChip(fp) {
-    fp = fp || "";
-    if (fp.indexOf("68142948") === 0) return '<span class="tok musa" title="' + esc(fp) + '">Musa</span>';
-    if (fp.indexOf("e1dfa48") === 0)  return '<span class="tok musa2" title="' + esc(fp) + '">musa2</span>';
-    if (fp.indexOf("582043088") === 0) return '<span class="tok syed" title="' + esc(fp) + '">Syed</span>';
-    return fp ? '<span class="tok other" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 6)) + '</span>' : '';
-  }
+  // fp-prefix -> pool nickname. auth_fp = sha256(OAuth token)[:12]. SSOT for the
+  // set = nervous_system/console/pools.py (backend) — keep this + irsyad.js
+  // acctForFp in lockstep (op#20684). Order = display order of the key roll-up.
+  var POOL_FP = [["68142948", "Musa"], ["e1dfa48", "musa2"], ["582043088", "Syed"]];
+  var POOL_CLS = { "Musa": "musa", "musa2": "musa2", "Syed": "syed" };
   function tokName(fp) {
     fp = fp || "";
-    if (fp.indexOf("68142948") === 0) return "Musa";
-    if (fp.indexOf("e1dfa48") === 0)  return "musa2";
-    if (fp.indexOf("582043088") === 0) return "Syed";
+    for (var i = 0; i < POOL_FP.length; i++) if (fp.indexOf(POOL_FP[i][0]) === 0) return POOL_FP[i][1];
     return fp ? fp.slice(0, 8) : "";
+  }
+  // The pool NICKNAME for a lane/coordinator/bloat row: the backend-derived
+  // `pool` (the only key info the hosted/phone payload carries — never the raw
+  // fp), else derived from auth_fp (local view). "" = unknown.
+  function poolOf(o) {
+    if (!o) return "";
+    if (o.pool) return String(o.pool);
+    return (o.auth_fp && POOL_CLS[tokName(o.auth_fp)]) ? tokName(o.auth_fp) : "";
+  }
+  // Per-lane key chip. `pool` wins (both consoles); an unknown-but-present fp
+  // (local only) still shows its short id so an off-account lane is visible.
+  function tokChip(fp, pool) {
+    fp = fp || ""; pool = pool || "";
+    var cls = POOL_CLS[pool];
+    if (cls) return '<span class="tok ' + cls + '" title="' + esc(fp || pool) + '">' + esc(pool) + '</span>';
+    return fp ? '<span class="tok other" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 6)) + '</span>' : '';
+  }
+  // At-a-glance "which lanes are on which key" (op#20684): live (non-offline)
+  // lanes counted per pool, in POOL_FP order, unknown-key lanes last as "?".
+  // Pure — returns { counts: {pool: n}, total: n, html } for the #keyRoll row.
+  function poolRollup(lanes, active) {
+    var counts = {}, total = 0;
+    (lanes || []).forEach(function (l) {
+      if (!l || l.bucket === "offline") return;
+      var p = poolOf(l) || (l.auth_fp ? "?" : "");
+      if (!p) return;
+      counts[p] = (counts[p] || 0) + 1; total++;
+    });
+    var order = POOL_FP.map(function (x) { return x[1]; });
+    Object.keys(counts).forEach(function (k) { if (order.indexOf(k) < 0) order.push(k); });
+    var chips = order.filter(function (p) { return counts[p]; }).map(function (p) {
+      var cls = POOL_CLS[p] || "other", on = active && active === p;
+      return '<button type="button" class="krchip tok ' + cls + (on ? " on" : "") + '" data-pool="' + esc(p) + '"' +
+        ' title="' + esc(counts[p] + " live lane" + (counts[p] === 1 ? "" : "s") + " on " + (p === "?" ? "an unknown key" : p)) + '">' +
+        esc(p === "?" ? "unknown" : p) + '<b>' + counts[p] + '</b></button>';
+    });
+    var html = chips.length ? '<span class="krl">keys</span>' + chips.join("") +
+      (active ? '<span class="krhint">showing ' + esc(active === "?" ? "unknown" : active) + ' · tap again for all</span>' : "") : "";
+    return { counts: counts, total: total, html: html };
   }
 
   // Which reset "body" the console can clear (POST /api/reset). Only the three
@@ -190,7 +224,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v61';
+  var APP_BUILD = 'fc-v62';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -503,16 +537,35 @@
     var act = (live.running && live.activity) || l.activity || l.current_task || "";
     var picked = multiMode && selected[sess];
     var badge = (l.flagged && l.bucket === "offline") ? '<span class="badge">dark</span>' : "";
-    var tok = tokChip(l.auth_fp);
-    return '<div class="tile ' + esc(cls) + (picked ? " picked" : "") + '" data-lane="' + esc(sess) + '">' +
+    var pool = poolOf(l), tok = tokChip(l.auth_fp, pool);
+    // key roll-up filter (op#20684): a tile off the tapped pool dims, never hides —
+    // the operator still sees the whole fleet, just with that key's lanes lit.
+    var off = poolFilter && (poolFilter === "?" ? (pool || !l.auth_fp) : pool !== poolFilter);
+    return '<div class="tile ' + esc(cls) + (picked ? " picked" : "") + (off ? " offpool" : "") + '" data-lane="' + esc(sess) + '" data-pool="' + esc(pool) + '">' +
       ringHtml(disp, picked) +
       '<div class="idw"><div class="id"><span class="stdot ' + esc(l.bucket) + '"></span>' + esc(l.agent_id) + badge + '</div>' +
         (act ? '<div class="act">' + esc(act) + '</div>' : '<div class="act">' + esc(l.bucket) + '</div>') +
       '</div>' + tok + '<span class="chev">›</span></div>';
   }
   var routineExpanded = false;
+  var poolFilter = "";   // key roll-up: tapped pool nickname ("" = show all)
+  function renderKeyRoll(lanes) {
+    var el = $("keyRoll");
+    if (!el) return;
+    var r = poolRollup(lanes, poolFilter);
+    if (poolFilter && !r.counts[poolFilter]) { poolFilter = ""; r = poolRollup(lanes, ""); }
+    el.innerHTML = r.html;
+    el.querySelectorAll(".krchip[data-pool]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var p = b.getAttribute("data-pool");
+        poolFilter = (poolFilter === p) ? "" : p;
+        renderLanes(lastLanes);
+      });
+    });
+  }
   function renderLanes(lanes) {
     lastLanes = lanes;
+    renderKeyRoll(lanes);
     var primary = lanes.filter(function (l) { return l.bucket === "working" || l.flagged; });
     var routine = lanes.filter(function (l) { return !(l.bucket === "working" || l.flagged); });
     var html = primary.map(tileHtml).join("");
@@ -574,7 +627,7 @@
         kind: "lane", session: sess, agentId: l.agent_id, id: l.agent_id,
         bucket: l.bucket, ctx: laneCtx(l), ctxIdle: l.ctx_idle,
         activity: (live.running && live.activity) || l.activity || l.current_task || "",
-        auth_fp: l.auth_fp, host: l.host, model: null, peekable: true,
+        auth_fp: l.auth_fp, pool: poolOf(l), host: l.host, model: null, peekable: true,
         _routine: !(l.bucket === "working" || l.flagged)
       };
     });
@@ -585,7 +638,7 @@
         kind: "coord", session: sess, agentId: c.agent_id, id: c.short || c.agent_id,
         bucket: (c.last_seen_s != null && c.last_seen_s < 1800) ? "working" : "idle",
         ctx: (c.ctx_pct != null ? { pct: c.ctx_pct, level: c.ctx_level, ctx_tokens: c.ctx_tokens, age_s: c.ctx_age_s } : null),
-        activity: c.activity || "", auth_fp: c.auth_fp, host: c.host, model: null,
+        activity: c.activity || "", auth_fp: c.auth_fp, pool: poolOf(c), host: c.host, model: null,
         peekable: !!c.peekable, roleLabel: c.role_label || ""
       };
     });
@@ -647,7 +700,8 @@
     else { cp.className = "ctxpill"; cp.textContent = "no ctx"; }
     var subBits = [];
     if (e.host) subBits.push(esc(e.host));
-    if (e.auth_fp) subBits.push("🔑 " + esc(tokName(e.auth_fp)));
+    var keyName = e.pool || (e.auth_fp ? tokName(e.auth_fp) : "");
+    if (keyName) subBits.push("🔑 " + esc(keyName));
     if (e.roleLabel) subBits.push(esc(e.roleLabel));
     if (e.activity) subBits.push(esc(e.activity));
     $("shSub").innerHTML = subBits.join(" · ") || "&nbsp;";
@@ -1366,7 +1420,8 @@
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
     module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
-      ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel };
+      ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel,
+      poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup };
   }
 
   start();

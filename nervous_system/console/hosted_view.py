@@ -12,6 +12,8 @@ SECURITY MODEL (why this file is small + paranoid):
   * cond-2: exposes the SIGNED-OFF fields ONLY — metadata, no bodies, no reasoning,
     no auth_fp/auth_account/scope_paths/blocked_on_description. Enumerated columns
     only; SELECT * is never used, so a new sensitive column can't leak by default.
+    op#20684: the cloned lane/coordinator/bloat rows carry `pool` — the Max-pool
+    NICKNAME derived from auth_fp via pools.pool_for_fp — and NOT the raw fp.
   * SCRUB: every exposed free-text value passes through scrub() — currency/$ amounts
     always, plus a configurable SENSITIVE_TERMS list (external client/org/person
     identifiers). Proven on RENDERED output (see prove_scrub / __main__), not just
@@ -26,7 +28,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-from nervous_system.console import coordinators
+from nervous_system.console import coordinators, pools
 
 # ── scrub configuration ──────────────────────────────────────────────────────
 # Currency / money amounts, always scrubbed. Covers S$1.7M, $1,700, RM500,
@@ -331,7 +333,7 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
             tmux_session=scrub_field(tmux_session),
             lane=scrub_field(lane),
             host=host,
-            auth_fp=auth_fp,
+            pool=pools.pool_for_fp(auth_fp),   # nickname only — raw fp never leaves the VPS
             desired_state=desired_state,
             heartbeat_age_s=hb,
             activity_age_s=activity_age_s,
@@ -387,7 +389,7 @@ def _clone_coordinators(cur) -> List[Dict[str, Any]]:
             activity=scrub_field(activity),
             activity_age_s=activity_age_s,
             last_seen_s=activity_age_s,  # bus-only liveness signal (DB-only degrade)
-            auth_fp=auth_fp, host=host,
+            pool=pools.pool_for_fp(auth_fp), host=host,
             ctx_pct=ctx_pct, ctx_level=ctx_level,
             peekable=False,              # no live pane on the public host -> no peek affordance
         ))
@@ -433,7 +435,7 @@ def _clone_context_bloat(cur) -> List[Dict[str, Any]]:
             # gauge. NULL for a solo lane (client falls back to the base id).
             agent=scrub_field(ident), sub_tag=scrub_field(sub_tag),
             ctx_tokens=int(ctx_tokens), window=_CTX_WINDOW,
-            pct=pct, level=level, age_s=age_s, auth_fp=auth_fp, host=host,
+            pct=pct, level=level, age_s=age_s, pool=pools.pool_for_fp(auth_fp), host=host,
         ))
     out.sort(key=lambda x: x["pct"], reverse=True)
     return out
