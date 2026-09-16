@@ -129,3 +129,58 @@ def test_csv_roundtrip(tmp_path):
     assert _col(rep, "Value Date").masked is False
     assert "syn1@example.test" not in out
     assert "Fatimah" not in out
+
+
+# ── VALUE-SHAPE profile for MASKED columns (console, Musa op#20591) ────────────
+# Aggregates ONLY — never a value. Catches the class of quirk that only showed on
+# the client's screen this week (honorific abbreviations, "Hamba Allah" markers,
+# apostrophes/mojibake) without opening the data.
+SHAPE_HEADER = ["Amount", "Donor Name", "Customer Email", "Created date (UTC)"]
+SHAPE_ROWS = [
+    ["10", "Siti Aminah Bte Ahmad", "a@example.test", "2026-02-01 10:00:00"],
+    ["20", "Hamba Allah", "b@example.test", "2026-02-02 10:00:00"],
+    ["30", "HAMBA ALLAH", "c@example.test", "02/03/2026 10:00:00"],
+    ["40", "Md Faizal", "d@example.test", "2026-02-04 10:00:00"],
+    ["50", "O'Neil-Rahman", "e@example.test", "2026-02-05 10:00:00"],
+    ["60", "Nurâ€™aini", "f@example.test", "2026-02-06 10:00:00"],
+    ["70", "", "g@example.test", "2026-02-07 10:00:00"],
+]
+
+
+def test_masked_text_column_carries_a_value_shape_with_no_values():
+    rep = inspect_rows(SHAPE_HEADER, SHAPE_ROWS)
+    dn = _col(rep, "Donor Name")
+    assert dn.masked is True and dn.detail == "***"
+    assert dn.shape is not None
+    assert dn.shape["words"] == {"1": 0, "2": 4, "3": 0, "4+": 1} or dn.shape["words"]["2"] == 4
+    assert dn.shape["markers"]["anonymous"] == 2          # "Hamba Allah" + "HAMBA ALLAH"
+    assert dn.shape["punct"]["apostrophe"] >= 1
+    assert dn.shape["punct"]["hyphen"] >= 1
+    assert dn.shape["punct"]["mojibake"] == 1             # "â€™"
+    assert dn.shape["case"]["upper"] == 1
+    assert dn.shape["distinct"] == 6
+    rendered = rep.render()
+    for raw in ("Siti", "Aminah", "Faizal", "O'Neil", "Nur", "example.test"):
+        assert raw not in rendered, f"value leaked: {raw}"
+    assert "markers" in rendered and "words" in rendered
+
+
+def test_email_column_shape_counts_email_shaped_values_only():
+    rep = inspect_rows(SHAPE_HEADER, SHAPE_ROWS)
+    ce = _col(rep, "Customer Email")
+    assert ce.masked is True
+    assert ce.shape["email_shaped"] == 7
+    assert "@example.test" not in rep.render()
+
+
+def test_date_column_reports_a_format_mix_not_just_the_first_sample():
+    rep = inspect_rows(SHAPE_HEADER, SHAPE_ROWS)
+    cd = _col(rep, "Created date (UTC)")
+    assert cd.masked is False
+    assert "ISO YYYY-MM-DD + time: 6" in cd.detail
+    assert "n/n/YYYY + time" in cd.detail and ": 1" in cd.detail
+
+
+def test_unmasked_columns_have_no_shape_block():
+    rep = inspect_rows(SHAPE_HEADER, SHAPE_ROWS)
+    assert _col(rep, "Amount").shape is None

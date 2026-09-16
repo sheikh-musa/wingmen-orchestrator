@@ -64,6 +64,90 @@ _DATE_SHAPES: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# ── VALUE-SHAPE profile (console, Musa op#20591) ──────────────────────────────
+# For a MASKED text column we still need to know what KIND of values it holds —
+# that is where every client-file quirk of 2026-09-15 lived (honorific
+# abbreviations, "Hamba Allah" anonymous markers, apostrophes, mojibake). The
+# shape is AGGREGATES ONLY: histograms and counts computed from values, never a
+# value, never a substring, never a sample. It cannot reconstruct a name.
+_ANON_MARKERS = {"hamba allah", "hambaallah", "anonymous", "anon", "tanpa nama", "no name"}
+_MOJIBAKE_RE = re.compile(r"â€|Ã.|Â")
+_TITLE_TOKEN_RE = re.compile(r"^[A-Z][a-z'’\-]*$")
+
+
+def _shape_key(v: str) -> str:
+    return re.sub(r"[\s_]+", " ", re.sub(r"[-_.,/]+", " ", v.lower())).strip()
+
+
+def value_shape(values: list[str]) -> dict:
+    """Aggregate-only profile of a list of cell values. Emits counts/labels only."""
+    words = {"1": 0, "2": 0, "3": 0, "4+": 0}
+    case = {"upper": 0, "lower": 0, "title": 0, "mixed": 0}
+    punct = {"apostrophe": 0, "hyphen": 0, "period": 0, "comma": 0, "slash": 0, "parens": 0,
+             "digits": 0, "non_ascii": 0, "mojibake": 0}
+    markers = {"anonymous": 0}
+    email_shaped = 0
+    digits_only = 0
+    distinct: set[int] = set()
+    max_len = 0
+    n = 0
+    for raw in values:
+        v = (raw or "").strip()
+        if v == "":
+            continue
+        n += 1
+        distinct.add(hash(v))          # a hash of the value is not the value; only its COUNT is emitted
+        max_len = max(max_len, len(v))
+        toks = v.split()
+        words["1" if len(toks) == 1 else "2" if len(toks) == 2 else "3" if len(toks) == 3 else "4+"] += 1
+        if v.isupper():
+            case["upper"] += 1
+        elif v.islower():
+            case["lower"] += 1
+        elif all(_TITLE_TOKEN_RE.match(t) or not t[:1].isalpha() for t in toks):
+            case["title"] += 1
+        else:
+            case["mixed"] += 1
+        if "'" in v or "’" in v or "‘" in v:
+            punct["apostrophe"] += 1
+        if "-" in v:
+            punct["hyphen"] += 1
+        if "." in v:
+            punct["period"] += 1
+        if "," in v:
+            punct["comma"] += 1
+        if "/" in v:
+            punct["slash"] += 1
+        if "(" in v or ")" in v:
+            punct["parens"] += 1
+        if any(ch.isdigit() for ch in v):
+            punct["digits"] += 1
+        if any(ord(ch) > 127 for ch in v):
+            punct["non_ascii"] += 1
+        if _MOJIBAKE_RE.search(v):
+            punct["mojibake"] += 1
+        if _shape_key(v) in _ANON_MARKERS:
+            markers["anonymous"] += 1
+        if _EMAIL_RE.search(v):
+            email_shaped += 1
+        if v.replace(" ", "").isdigit():
+            digits_only += 1
+    return {
+        "n": n, "distinct": len(distinct), "max_len": max_len, "words": words, "case": case,
+        "punct": {k: c for k, c in punct.items()}, "markers": markers,
+        "email_shaped": email_shaped, "digits_only": digits_only,
+    }
+
+
+def _render_shape(sh: dict) -> str:
+    w = ",".join(f"{k}:{c}" for k, c in sh["words"].items() if c)
+    cs = ",".join(f"{k}:{c}" for k, c in sh["case"].items() if c)
+    pc = ",".join(f"{k}:{c}" for k, c in sh["punct"].items() if c)
+    return (f"shape: distinct={sh['distinct']} max_len={sh['max_len']} words{{{w}}} case{{{cs}}} "
+            f"punct{{{pc}}} markers{{anonymous:{sh['markers']['anonymous']}}} "
+            f"email_shaped={sh['email_shaped']} digits_only={sh['digits_only']}")
+
+
 @dataclass
 class ColumnReport:
     name: str
@@ -71,6 +155,7 @@ class ColumnReport:
     masked: bool
     detail: str                 # date FORMAT / numeric range / "***" (masked) — never a raw PII value
     non_empty: int
+    shape: Optional[dict] = None   # MASKED text columns only: aggregate value-shape, never a value
 
 
 @dataclass
@@ -84,6 +169,8 @@ class InspectReport:
         for c in self.columns:
             tag = "MASKED" if c.masked else c.detail
             lines.append(f"  - {c.name} [{c.inferred_type}] ({c.non_empty} non-empty): {tag}")
+            if c.masked and c.shape:
+                lines.append(f"      {_render_shape(c.shape)}")
         if self.parse_notes:
             lines.append("parse_notes (row, class — no values):")
             lines.extend(f"  - {n}" for n in self.parse_notes)
@@ -130,7 +217,8 @@ def inspect_rows(header: list[str], rows: list[list[str]],
     for ci in range(ncols):
         name = header[ci] if ci < len(header) else f"col{ci}"
         classes: dict[str, int] = {}
-        first_date_sample = None
+        date_formats: dict[str, int] = {}
+        col_values: list[str] = []
         non_empty = 0
         for ri, r in enumerate(rows):
             try:
@@ -141,9 +229,11 @@ def inspect_rows(header: list[str], rows: list[list[str]],
                 continue
             if cls != "empty":
                 non_empty += 1
+                col_values.append(v)
             classes[cls] = classes.get(cls, 0) + 1
-            if cls == "date" and first_date_sample is None:
-                first_date_sample = v.strip()
+            if cls == "date":
+                lbl = _date_format_label(v)
+                date_formats[lbl] = date_formats.get(lbl, 0) + 1
         # Decide the column's dominant type + masking.
         has_pii = classes.get("pii_email", 0) or classes.get("pii_longnum", 0)
         non_empty_classes = {k: v for k, v in classes.items() if k != "empty"}
@@ -155,11 +245,12 @@ def inspect_rows(header: list[str], rows: list[list[str]],
         # FAIL-CLOSED: any PII signature anywhere in the column → masked (unless the
         # caller explicitly allowlisted it, an override they own).
         if has_pii and not allowlisted:
-            report.columns.append(ColumnReport(name, "text", masked=True, detail="***", non_empty=non_empty))
+            report.columns.append(ColumnReport(name, "text", masked=True, detail="***", non_empty=non_empty,
+                                               shape=value_shape(col_values)))
             continue
         if dominant == "date":
-            fmt = _date_format_label(first_date_sample or "")
-            report.columns.append(ColumnReport(name, "date", masked=False, detail=f"format: {fmt}", non_empty=non_empty))
+            mix = ", ".join(f"{k}: {c}" for k, c in sorted(date_formats.items(), key=lambda kv: -kv[1]))
+            report.columns.append(ColumnReport(name, "date", masked=False, detail=f"format: {mix}", non_empty=non_empty))
         elif dominant == "number" and not has_pii:
             report.columns.append(ColumnReport(name, "number", masked=False, detail="numeric", non_empty=non_empty))
         elif dominant == "boolean":
@@ -167,8 +258,9 @@ def inspect_rows(header: list[str], rows: list[list[str]],
         elif allowlisted:
             report.columns.append(ColumnReport(name, dominant, masked=False, detail="(allowlisted)", non_empty=non_empty))
         else:
-            # text / anything else / PII-adjacent → MASK by default.
-            report.columns.append(ColumnReport(name, "text", masked=True, detail="***", non_empty=non_empty))
+            # text / anything else / PII-adjacent → MASK by default (with an aggregate shape).
+            report.columns.append(ColumnReport(name, "text", masked=True, detail="***", non_empty=non_empty,
+                                               shape=value_shape(col_values)))
     return report
 
 
