@@ -15,6 +15,14 @@
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>/Users/sheikhmusa</string>
+    <!-- RULING-3 AGED-RR RE-PAGE ARMED (Nazim #40752, 2026-09-16, after the clean soak
+         #40750: 0 aged rr rows in observe = empty blast radius). Promotes PR#108's
+         aged-unanswered-rr net from observe/inert to live: a P0/P1 rr the hub or SRE
+         issued that sits unanswered AND UNREAD past 6h re-pages the OWNER body (hub /
+         orch-console; NEVER the operator) at P1 every 6h until read. Arm-time watermark
+         excludes all pre-existing backlog; per-scan cap 3; lease-gated; dead-man
+         stamp-on-success-only. Flip to 0 to disarm. -->
+    <key>SLA_AGED_REPAGE_ENABLED</key><string>1</string>
     <!-- Escalation thresholds / guards are read from these (defaults shown).
          Uncomment to override without editing code.
     <key>SLA_MAX_VIOLATION_AGE_MIN</key><string>1440</string>
