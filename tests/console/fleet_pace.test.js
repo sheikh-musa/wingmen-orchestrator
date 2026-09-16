@@ -67,7 +67,7 @@ function loadFleet() {
   return sandbox.module.exports;
 }
 
-const { poolChip } = loadFleet();
+const { poolChip, hoursToReset, minutesToReset, fmtReset } = loadFleet();
 let passed = 0;
 function ok(name, fn) { fn(); passed++; console.log("  ok - " + name); }
 
@@ -130,6 +130,75 @@ ok("keeps runway neutral when it outlasts the reset", function () {
   });
   assert(/9\.0d/.test(h), "runway value shown");
   assert(!/poolrun warn/.test(h), "runway NOT flagged when it outlasts the reset");
+});
+
+// Musa op#20644/#20657: EVERY key renders a per-key CARD — weekly row (bar +
+// % + "resets in Xd Yh" / "Xh Ym" under 48h) and a 5h row ("window resets in
+// Xh Ym" from resets_5h_at), "—" when null / unparsable / past; card coloured by
+// the WORSE window. Tooltip keeps the full detail.
+assert(typeof hoursToReset === "function", "fleet.js must export hoursToReset");
+assert(typeof minutesToReset === "function", "fleet.js must export minutesToReset");
+function resetsInHours(h) {
+  return new Date(Date.now() + h * 3600000).toISOString().replace("Z", "+00:00");
+}
+ok("minutesToReset/hoursToReset: whole units, null for null/past/garbage", function () {
+  assert.strictEqual(hoursToReset(null), null);
+  assert.strictEqual(minutesToReset(null), null);
+  assert.strictEqual(hoursToReset("not a date"), null);
+  assert.strictEqual(hoursToReset(resetsInHours(-2)), null, "past reset -> null");
+  assert.strictEqual(hoursToReset(resetsInHours(17.4)), 17, "17.4h floors to 17");
+  const m = minutesToReset(resetsInHours(2.5));
+  assert(m === 150 || m === 149, "2.5h -> ~150 min, got " + m);
+  assert.strictEqual(hoursToReset(resetsInHours(0.2)), 0, "<1h floors to 0");
+});
+ok("fmtReset: 'Xh Ym' under 48h, 'Xd Yh' at >= 48h, em-dash for null", function () {
+  assert.strictEqual(fmtReset(null), "—");
+  assert(/^17h (23|24)m$/.test(fmtReset(resetsInHours(17.4))), "17.4h -> 17h 24m, got " + fmtReset(resetsInHours(17.4)));
+  assert(/^47h 5[0-9]m$/.test(fmtReset(resetsInHours(47.99))), "47.99h stays in h/m form");
+  assert.strictEqual(fmtReset(resetsInHours(48.02)), "2d 0h", "48h boundary uses d/h form");
+  assert.strictEqual(fmtReset(resetsInHours(3 * 24 + 5.5)), "3d 5h");
+});
+ok("card: weekly row carries bar + % + 'resets in'", function () {
+  const h = poolChip({ pool: "musa2", pct_7d: 42, pct_5h: 10, updated_age_s: 30,
+    resets_at: resetsInHours(17.4), resets_5h_at: resetsInHours(2.5) });
+  assert(/poolcard/.test(h), "renders as a card");
+  assert(/musa2/.test(h), "key name present");
+  assert(/poolwin good[^>]*>[\s\S]*?poolwl">wk<[\s\S]*?width:42%[\s\S]*?<b>42%<\/b>[\s\S]*?resets in 17h (23|24)m/.test(h), "weekly row: " + h);
+  assert(/title="[^"]*weekly resets in 17h (23|24)m/.test(h), "tooltip carries the weekly countdown");
+});
+ok("card: 5h row carries bar + % + 'window resets in Xh Ym'", function () {
+  const h = poolChip({ pool: "Syed", pct_7d: 42, pct_5h: 43, updated_age_s: 30,
+    resets_at: resetsInHours(100), resets_5h_at: resetsInHours(2.5) });
+  assert(/poolwl">5h<[\s\S]*?width:43%[\s\S]*?<b>43%<\/b>[\s\S]*?window resets in 2h (29|30)m/.test(h), "5h row: " + h);
+  assert(/title="[^"]*5h window resets in 2h (29|30)m/.test(h), "tooltip carries the 5h countdown");
+  assert(/resets in 4d 4h/.test(h), "weekly at 100h -> 4d 4h");
+});
+ok("card: '—' when resets_at / resets_5h_at / pct_5h are null or past", function () {
+  const h = poolChip({ pool: "Musa", pct_7d: 42, updated_age_s: 30 });
+  assert(/>resets —</.test(h), "null resets_at -> 'resets —': " + h);
+  assert(/window resets —</.test(h), "null resets_5h_at -> 'window resets —'");
+  assert(/poolwl">5h<[\s\S]*?width:0%[\s\S]*?<b>—<\/b>/.test(h), "null pct_5h -> em-dash + empty bar");
+  const h2 = poolChip({ pool: "Musa", pct_7d: 42, pct_5h: 0, updated_age_s: 30,
+    resets_at: resetsInHours(-1), resets_5h_at: resetsInHours(-0.1) });
+  assert(/>resets —</.test(h2) && /window resets —</.test(h2), "past -> '—'");
+});
+ok("card colour = WORSE of the two windows; status_7d shown", function () {
+  const h = poolChip({ pool: "Syed", pct_7d: 20, pct_5h: 92, updated_age_s: 30, status_7d: "allowed",
+    resets_at: resetsInHours(100), resets_5h_at: resetsInHours(1) });
+  assert(/poolcard bad/.test(h), "5h at 92% makes the card bad: " + h);
+  assert(/poolwin good[^>]*>[\s\S]*?poolwl">wk</.test(h), "weekly row keeps its own good level");
+  assert(/poolwin bad[^>]*>[\s\S]*?poolwl">5h</.test(h), "5h row is bad");
+  assert(/poolstatus">allowed</.test(h), "status_7d text shown");
+  const w = poolChip({ pool: "Syed", pct_7d: 80, pct_5h: 5, updated_age_s: 30 });
+  assert(/poolcard warn/.test(w), "weekly at 80% makes the card warn");
+  const s = poolChip({ pool: "Syed", pct_7d: 95, pct_5h: 95, updated_age_s: 4000 });
+  assert(/poolcard stale/.test(s) && !/poolcard bad/.test(s), "stale wins over level");
+});
+ok("runway warning logic unchanged alongside the reset rows", function () {
+  const h = poolChip({ pool: "Syed", pct_7d: 80, updated_age_s: 30, pace: 3.0, projected_pct: 120,
+    runway_days: 1.5, resets_at: resetsInDays(5) });
+  assert(/poolrun warn/.test(h), "runway still flagged");
+  assert(/resets in 4d 23h|resets in 5d 0h/.test(h), "weekly countdown present too: " + h);
 });
 
 // fc-v50 Command Surface (Approach C, operator-approved) SUPERSEDES op#12709's

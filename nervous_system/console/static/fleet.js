@@ -86,6 +86,25 @@
     var d = (t - Date.now()) / 86400000;
     return d > 0 ? d : null;
   }
+  // Musa op#20644/#20657: countdown to a window reset. minutesToReset -> whole
+  // minutes (null when resets_at is missing / unparsable / already past — same
+  // parse as daysToReset); hoursToReset -> whole hours of the same; fmtReset ->
+  // "Xd Yh" at >= 48h, "Xh Ym" under, "—" for null.
+  function minutesToReset(resets_at) {
+    var d = daysToReset(resets_at);
+    return d == null ? null : Math.floor(d * 1440);
+  }
+  function hoursToReset(resets_at) {
+    var m = minutesToReset(resets_at);
+    return m == null ? null : Math.floor(m / 60);
+  }
+  function fmtReset(resets_at) {
+    var m = minutesToReset(resets_at);
+    if (m == null) return "—";
+    var h = Math.floor(m / 60);
+    if (h >= 48) return Math.floor(h / 24) + "d " + (h % 24) + "h";
+    return h + "h " + (m % 60) + "m";
+  }
   function paceAdvisory(p) {
     var bits = [];
     if (p.pace != null) bits.push(esc(Number(p.pace).toFixed(1)) + "x");
@@ -100,23 +119,52 @@
     }
     return out;
   }
+  // Level of ONE window: good <75, warn 75-89, bad >=90; "" when unread.
+  function poolLevel(pct) {
+    if (pct == null) return "";
+    return pct >= 90 ? "bad" : (pct >= 75 ? "warn" : "good");
+  }
+  // One usage row of the card: label + bar + % + countdown. `pct` null -> "—", empty bar.
+  function poolWindowRow(label, pct, resets_at, resetWord) {
+    var lvl = poolLevel(pct);
+    var w = pct == null ? 0 : Math.max(0, Math.min(100, Math.round(pct)));
+    return '<div class="poolwin ' + lvl + '">'
+      + '<span class="poolwl">' + label + '</span>'
+      + '<span class="poolbar"><i style="width:' + w + '%"></i></span>'
+      + '<b>' + (pct == null ? "—" : Math.round(pct) + "%") + '</b>'
+      + '<span class="poolreset">' + resetWord + ' ' + (minutesToReset(resets_at) == null ? "—" : "in " + fmtReset(resets_at)) + '</span>'
+      + '</div>';
+  }
+  // Per-key CARD (op#20657): weekly + 5h rows, coloured by the WORSE window.
   function poolChip(p) {
     var pct = p.pct_7d;
     if (pct == null) return "";
     var stale = (p.updated_age_s != null && p.updated_age_s > POOL_STALE_S);
-    var cls = stale ? "stale" : (pct >= 90 ? "bad" : (pct >= 75 ? "warn" : "good"));
-    var title = p.pool + " Max weekly pool: " + Math.round(pct) + "% (7d)"
+    var worst = Math.max(Number(pct), p.pct_5h == null ? 0 : Number(p.pct_5h));
+    var cls = stale ? "stale" : poolLevel(worst);
+    var status = p.status_7d || p.status || "";
+    var title = p.pool + " Max pool: " + Math.round(pct) + "% (7d)"
       + (p.pct_5h != null ? ", " + Math.round(p.pct_5h) + "% (5h)" : "")
+      + (status ? " · " + status : "")
       + (p.pace != null ? " · pace " + Number(p.pace).toFixed(2) + "x" : "")
       + (p.projected_pct != null ? " · projected " + Math.round(Number(p.projected_pct)) + "%" : "")
       + (p.runway_days != null ? " · runway " + Number(p.runway_days).toFixed(1) + "d" : "")
-      + (p.resets_at ? " · resets " + esc(p.resets_at) : "")
+      + " · weekly resets in " + fmtReset(p.resets_at)
+      + (p.resets_at ? " (" + esc(p.resets_at) + ")" : "")
+      + " · 5h window resets in " + fmtReset(p.resets_5h_at)
+      + (p.resets_5h_at ? " (" + esc(p.resets_5h_at) + ")" : "")
       + (p.updated_age_s != null ? " · read " + fmtAge(p.updated_age_s) + " ago" : "")
       + (stale ? " · STALE (monitor stalled)" : "");
-    return '<div class="poolrow" title="' + esc(title) + '">'
-      + '<span class="poolchip ' + cls + '">'
-      + esc(p.pool) + ' <b>' + Math.round(pct) + '%</b> wk' + (stale ? " ⚠" : "") + '</span>'
-      + paceAdvisory(p) + '</div>';
+    return '<div class="poolrow poolcard ' + cls + '" title="' + esc(title) + '">'
+      + '<div class="poolhead">'
+      + '<span class="poolchip ' + cls + '">' + esc(p.pool) + (stale ? " ⚠" : "") + '</span>'
+      + (status ? '<span class="poolstatus">' + esc(status) + '</span>' : "")
+      + (stale ? '<span class="poolstatus">stale ' + fmtAge(p.updated_age_s) + '</span>' : "")
+      + '</div>'
+      + poolWindowRow("wk", pct, p.resets_at, "resets")
+      + poolWindowRow("5h", p.pct_5h, p.resets_5h_at, "window resets")
+      + '<div class="pooladvrow">' + paceAdvisory(p) + '</div>'
+      + '</div>';
   }
   function renderPoolUsage(rows) {
     var el = $("poolUsage");
@@ -125,7 +173,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v59';
+  var APP_BUILD = 'fc-v60';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -1300,7 +1348,7 @@
 
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip,
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel };
   }
 

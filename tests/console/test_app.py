@@ -4,6 +4,7 @@ Spins up the real stdlib threaded server on an ephemeral port and drives it with
 httpx. The DB layer is monkeypatched so tests are hermetic (no live Supabase).
 """
 import pathlib
+import re
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -223,6 +224,64 @@ def test_service_worker_served_unauthenticated(server):
     assert r.headers.get("cache-control") == "no-cache"
     assert "skipWaiting" in r.text
     assert "clients.claim" in r.text
+
+
+def test_fleet_js_served_carries_hours_to_reset(server):
+    """Musa op#20644: the SERVED fleet.js (not just the repo file) must carry the
+    per-pool hours-to-reset helper + the chip text it renders."""
+    r = httpx.get(server + "/static/fleet.js", timeout=5)
+    assert r.status_code == 200
+    assert "function hoursToReset(" in r.text
+    assert "function minutesToReset(" in r.text      # op#20657: 5h-window countdown
+    assert "resets in " in r.text
+    assert "window resets" in r.text
+    assert "resets_5h_at" in r.text
+    assert "hoursToReset: hoursToReset" in r.text  # exported for the node unit test
+
+
+def test_pool_usage_rows_expose_resets_5h_at():
+    """op#20657: every backend pool read (Mini db.py + hosted_view's two clones)
+    carries resets_5h_at so the 5h row can count down."""
+    from nervous_system.console import hosted_view
+    sql, _ = db.build_pool_usage_query()
+    assert "resets_5h_at" in sql and "FROM pool_usage" in sql
+
+    class _Cur:
+        def __init__(self): self.sql = None
+        def execute(self, sql, *a): self.sql = sql
+        def fetchall(self):
+            return [("Musa", 47, 2, "2026-09-23 08:00:00+00:00", "allowed", 100,
+                     2.0, 200.0, None, "2026-09-16 10:10:00+00:00")]
+    cur = _Cur()
+    rows = hosted_view._clone_pool_usage(cur)
+    assert "resets_5h_at" in cur.sql
+    assert rows[0]["resets_5h_at"] == "2026-09-16 10:10:00+00:00"
+    assert rows[0]["resets_at"] == "2026-09-23 08:00:00+00:00"
+    assert rows[0]["pct_5h"] == 2 and rows[0]["updated_age_s"] == 100
+
+    class _Conn:
+        def cursor(self): return _MinCur()
+    class _MinCur(_Cur):
+        def fetchall(self):
+            if "FROM pool_usage" in self.sql:
+                return [("Musa", 47, 2, "2026-09-23 08:00:00+00:00", "allowed",
+                         "2026-09-16 09:00:00+00:00", 2.0, 200.0, None, None)]
+            return []
+    payload = hosted_view.build_minimized_payload(_Conn())
+    assert payload["pools"][0]["resets_5h_at"] is None
+    assert payload["pools"][0]["resets_at"] == "2026-09-23 08:00:00+00:00"
+
+
+def test_console_build_id_lockstep():
+    """deploy_console.sh gate 1: sw.js VERSION == fleet.js APP_BUILD == lanes.html badge
+    (the REAL checkout — the repo_root fixture is a temp dir)."""
+    static = pathlib.Path(__file__).resolve().parents[2] / "nervous_system" / "console" / "static"
+    sw = re.search(r'const VERSION = "(fc-v\d+)"', (static / "sw.js").read_text()).group(1)
+    fl = re.search(r"APP_BUILD = '(fc-v\d+)'", (static / "fleet.js").read_text()).group(1)
+    lanes = [ln for ln in (static / "lanes.html").read_text().splitlines() if 'id="build"' in ln]
+    assert lanes, "lanes.html must carry the id=build badge"
+    lb = re.findall(r"fc-v\d+", lanes[-1])[-1]
+    assert sw == fl == lb, f"version constants out of sync: sw={sw} fleet={fl} lanes={lb}"
 
 
 def test_icons_served_unauthenticated(server):

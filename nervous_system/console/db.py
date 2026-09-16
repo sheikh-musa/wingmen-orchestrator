@@ -626,7 +626,8 @@ def build_pool_usage_query() -> Tuple[str, list]:
     sql = (
         "SELECT pool, pct_7d, pct_5h, resets_at, status_7d, "
         "  pace, projected_pct, runway_days, "
-        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s "
+        "  round(extract(epoch FROM (now() - updated_at)))::int AS updated_age_s, "
+        "  resets_5h_at "                                # op#20657 (additive): 5h-window reset
         "FROM pool_usage ORDER BY pool"
     )
     return sql, []

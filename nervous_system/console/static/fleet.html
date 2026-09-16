@@ -136,6 +136,25 @@
   .poolchip.stale { color: var(--dim); opacity: .6; } .poolchip.stale b { color: var(--dim); }
   .pooladv { color: var(--faint); white-space: nowrap; }
   .poolrun { color: var(--dim); white-space: nowrap; } .poolrun.warn { color: var(--warn); }
+  /* op#20644/#20657: per-KEY card — weekly + 5h rows (bar + % + countdown), coloured by the
+     WORSE window; stale greys out. Rows wrap at phone width, never scroll horizontally. */
+  .poolcard { flex-direction: column; align-items: stretch; gap: 3px; padding: 6px 8px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--line); min-width: 0; }
+  .poolcard.warn { border-color: rgba(246,196,83,.28); } .poolcard.bad { border-color: rgba(251,113,133,.35); }
+  .poolcard.stale { opacity: .6; }
+  .poolhead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .poolhead .poolchip { color: var(--txt); font-weight: 700; }
+  .poolstatus { color: var(--faint); }
+  .poolwin { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+  .poolwl { flex: none; width: 18px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; }
+  .poolbar { flex: 1 1 60px; min-width: 60px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.07); overflow: hidden; }
+  .poolbar i { display: block; height: 100%; border-radius: 3px; background: var(--dim); }
+  .poolwin.good .poolbar i { background: var(--good); } .poolwin.warn .poolbar i { background: var(--warn); }
+  .poolwin.bad .poolbar i { background: var(--bad); }
+  .poolwin b { flex: none; width: 30px; text-align: right; font-weight: 700; color: var(--dim); }
+  .poolwin.good b { color: var(--good); } .poolwin.warn b { color: var(--warn); } .poolwin.bad b { color: var(--bad); }
+  .poolreset { flex: none; color: var(--dim); white-space: nowrap; }
+  .pooladvrow { display: flex; gap: 8px; flex-wrap: wrap; padding-left: 24px; } .pooladvrow:empty { display: none; }
 
   /* top-bloat glance (op#18542) — worst offenders across the whole fleet. */
   .topbloat { display: none; align-items: center; flex-wrap: wrap; gap: 4px 7px; margin-top: 9px;
