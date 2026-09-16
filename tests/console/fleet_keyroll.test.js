@@ -5,8 +5,9 @@
 // LOCKS:
 //  - the per-lane chip renders from the backend `pool` NICKNAME alone (the hosted
 //    payload has no auth_fp), and from auth_fp when only that is present (local).
-//  - poolRollup counts LIVE (non-offline) lanes per pool in Musa/musa2/Syed order,
-//    unknown-key lanes as "unknown", and emits one .krchip per non-empty pool.
+//  - poolRollup counts EVERY lane with a known key per pool (ASSIGNMENT, not liveness —
+//    an offline/cross-host lane is still on its key; fc-v63 Musa fix) in Musa/musa2/Syed
+//    order, unknown-key lanes as "unknown", and emits one .krchip per non-empty pool.
 //  - an unknown fp NEVER leaks into a hosted chip: no pool + no fp = no chip.
 "use strict";
 const fs = require("fs");
@@ -93,20 +94,20 @@ ok("backend pool wins over a stale/absent fp; unknown = no chip on hosted", func
   assert(h.indexOf('class="tok other"') >= 0 && h.indexOf("deadbe") >= 0, h);
 });
 
-ok("poolRollup counts LIVE lanes per pool in canonical order, unknown last", function () {
+ok("poolRollup counts ASSIGNED lanes per pool in canonical order, unknown last", function () {
   const lanes = [
     { bucket: "working", pool: "musa2" },
     { bucket: "idle", pool: "musa2" },
     { bucket: "working", pool: "Musa" },
-    { bucket: "offline", pool: "Musa" },          // offline: not counted
+    { bucket: "offline", pool: "Syed" },          // offline but on a key: COUNTED
     { bucket: "working", auth_fp: "582043088eae" }, // local-shaped row
     { bucket: "idle", auth_fp: "deadbeef0000" },    // unknown key -> "?"
     { bucket: "idle" },                              // no key info -> skipped
   ];
   const r = poolRollup(lanes, "");
   // Object.assign: r.counts was born in the vm realm (different Object prototype).
-  assert.deepStrictEqual(Object.assign({}, r.counts), { musa2: 2, Musa: 1, Syed: 1, "?": 1 });
-  assert.strictEqual(r.total, 5);
+  assert.deepStrictEqual(Object.assign({}, r.counts), { musa2: 2, Musa: 1, Syed: 2, "?": 1 });
+  assert.strictEqual(r.total, 6);
   const order = (r.html.match(/data-pool="([^"]+)"/g) || []).map(function (s) { return s.slice(11, -1); });
   assert.deepStrictEqual(order, ["Musa", "musa2", "Syed", "?"]);
   assert(r.html.indexOf('class="krchip tok musa"') >= 0, r.html);
@@ -123,9 +124,26 @@ ok("poolRollup marks the tapped pool + explains the filter; empty fleet = empty 
   assert(r.html.indexOf('class="krchip tok syed on"') >= 0, r.html);
   assert(r.html.indexOf('class="krchip tok musa"') >= 0 && r.html.indexOf('tok musa on') < 0, r.html);
   assert(r.html.indexOf("showing Syed") >= 0, r.html);
-  const e = poolRollup([{ bucket: "offline", pool: "Musa" }], "");
+  const e = poolRollup([{ bucket: "idle" }, { bucket: "working", pool: "" }], "");
   assert.strictEqual(e.html, "");
   assert.strictEqual(e.total, 0);
+});
+
+ok("fc-v63 (Musa): an OFFLINE / cross-host lane on a key IS counted — assignment, not liveness", function () {
+  // The bug: irsyad lanes on gzb read offline/DARK from the Mini and were dropped, so
+  // musa2 vanished from "KEYS · Musa 3 · Syed 2" while a musa2 lane sat on the board.
+  const lanes = [
+    { bucket: "working", pool: "Musa" }, { bucket: "idle", pool: "Musa" }, { bucket: "working", pool: "Musa" },
+    { bucket: "offline", pool: "musa2" }, { bucket: "offline", pool: "musa2" },
+    { bucket: "working", pool: "Syed" }, { bucket: "idle", pool: "Syed" },
+  ];
+  const r = poolRollup(lanes, "");
+  assert.deepStrictEqual(Object.assign({}, r.counts), { Musa: 3, musa2: 2, Syed: 2 });
+  assert.strictEqual(r.total, 7);
+  const order = (r.html.match(/data-pool="([^"]+)"/g) || []).map(function (s) { return s.slice(11, -1); });
+  assert.deepStrictEqual(order, ["Musa", "musa2", "Syed"], "all three pools appear when each has >=1 assigned lane");
+  assert(r.html.indexOf(">musa2<b>2</b>") >= 0, r.html);
+  assert(r.html.indexOf("assigned to musa2") >= 0, "chip title speaks of assignment, not liveness");
 });
 
 console.log("fleet_keyroll: " + passed + " passed");

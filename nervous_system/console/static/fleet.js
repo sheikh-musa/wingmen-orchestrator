@@ -75,13 +75,17 @@
     if (cls) return '<span class="tok ' + cls + '" title="' + esc(fp || pool) + '">' + esc(pool) + '</span>';
     return fp ? '<span class="tok other" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 6)) + '</span>' : '';
   }
-  // At-a-glance "which lanes are on which key" (op#20684): live (non-offline)
-  // lanes counted per pool, in POOL_FP order, unknown-key lanes last as "?".
+  // At-a-glance "which lanes are on which key" (op#20684): EVERY lane with a known
+  // key counted per pool, in POOL_FP order, unknown-key lanes last as "?". This is
+  // an ASSIGNMENT question, not a liveness one (Musa, fc-v63): a cross-host lane
+  // (irsyad on gzb reads offline/DARK from the Mini) is still ON its key, so it
+  // is counted — dropping it made musa2 vanish from the roll-up while a musa2
+  // lane sat visibly on the board. Only a lane with no key info is skipped.
   // Pure — returns { counts: {pool: n}, total: n, html } for the #keyRoll row.
   function poolRollup(lanes, active) {
     var counts = {}, total = 0;
     (lanes || []).forEach(function (l) {
-      if (!l || l.bucket === "offline") return;
+      if (!l) return;
       var p = poolOf(l) || (l.auth_fp ? "?" : "");
       if (!p) return;
       counts[p] = (counts[p] || 0) + 1; total++;
@@ -91,7 +95,7 @@
     var chips = order.filter(function (p) { return counts[p]; }).map(function (p) {
       var cls = POOL_CLS[p] || "other", on = active && active === p;
       return '<button type="button" class="krchip tok ' + cls + (on ? " on" : "") + '" data-pool="' + esc(p) + '"' +
-        ' title="' + esc(counts[p] + " live lane" + (counts[p] === 1 ? "" : "s") + " on " + (p === "?" ? "an unknown key" : p)) + '">' +
+        ' title="' + esc(counts[p] + " lane" + (counts[p] === 1 ? "" : "s") + " assigned to " + (p === "?" ? "an unknown key" : p)) + '">' +
         esc(p === "?" ? "unknown" : p) + '<b>' + counts[p] + '</b></button>';
     });
     var html = chips.length ? '<span class="krl">keys</span>' + chips.join("") +
@@ -224,7 +228,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v62';
+  var APP_BUILD = 'fc-v63';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -625,6 +629,7 @@
       var live = l.live || {};
       entries[sess] = {
         kind: "lane", session: sess, agentId: l.agent_id, id: l.agent_id,
+        baseId: l.base_agent_id || l.agent_id,
         bucket: l.bucket, ctx: laneCtx(l), ctxIdle: l.ctx_idle,
         activity: (live.running && live.activity) || l.activity || l.current_task || "",
         auth_fp: l.auth_fp, pool: poolOf(l), host: l.host, model: null, peekable: true,
@@ -636,6 +641,7 @@
       if (!sess || entries[sess]) return;
       entries[sess] = {
         kind: "coord", session: sess, agentId: c.agent_id, id: c.short || c.agent_id,
+        baseId: c.agent_id,
         bucket: (c.last_seen_s != null && c.last_seen_s < 1800) ? "working" : "idle",
         ctx: (c.ctx_pct != null ? { pct: c.ctx_pct, level: c.ctx_level, ctx_tokens: c.ctx_tokens, age_s: c.ctx_age_s } : null),
         activity: c.activity || "", auth_fp: c.auth_fp, pool: poolOf(c), host: c.host, model: null,
@@ -686,6 +692,7 @@
     if (openPeek) closePeek();
     currentSheet = null; sheetBulk = false;
     $("shBulk").innerHTML = ""; $("shPeekWrap").innerHTML = "";
+    if ($("shConfirm")) $("shConfirm").innerHTML = "";
   }
   function renderSheet(e) {
     var dot = $("shDot"); dot.className = "st2 " + (e.bucket || "idle");
@@ -706,23 +713,29 @@
     if (e.activity) subBits.push(esc(e.activity));
     $("shSub").innerHTML = subBits.join(" · ") || "&nbsp;";
     renderSheetActions(e);
+    if ($("shConfirm")) $("shConfirm").innerHTML = "";
     $("shControls").innerHTML = '<div class="qctlnote">loading token / model…</div>';
     $("shPeekWrap").innerHTML = '<div class="peek" data-peekbox="' + esc(e.session) + '"></div>';
     $("shBulk").innerHTML = "";
   }
-  // The FULL action set, one tap each. NEW = affordance surfaced now; its guarded
-  // backend endpoint is follow-up work (see the summary). Recycle is LIVE-WIRED
-  // only for the 3 resettable singletons (POST /api/reset); for any other lane it
-  // reports not-yet-wired rather than firing an unguarded destructive action.
+  // The FULL action set, one tap each. fc-v63 (Musa op#20684/20687): Retask
+  // (→ the ask composer, POST /api/assign), Boot (POST /api/lane-boot) and
+  // Stand-down (POST /api/lane-down) are LIVE — the last two behind the in-sheet
+  // typed-confirm strip (never window.prompt: iOS suppresses it in a standalone
+  // PWA). Recycle is live only for the 3 resettable singletons (POST /api/reset);
+  // a worker-lane recycle has no operator rail yet (the SRE's gated recycler is
+  // lease-bound) so it still reports not-wired rather than firing something
+  // unguarded. Mute / Pin have no backend — they stay honest stubs (NEW).
   function renderSheetActions(e) {
     var recWired = !!resetBodyFor(e.agentId);
+    var lane = e.kind === "lane";
     var A = [
       { a: "peek",     cls: "prim", e: "👁", t: "Peek" },
-      { a: "retask",   cls: "new",  e: "💬", t: "Retask" },
+      { a: "retask",   cls: "prim", e: "💬", t: "Retask" },
       { a: "recycle",  cls: (recWired ? "warn" : "warn new"), e: "♻️", t: "Recycle" },
       { a: "attach",   cls: "new",  e: "⤢", t: "Attach" },
-      { a: "boot",     cls: "new",  e: "▶", t: "Boot" },
-      { a: "standdown",cls: "bad new", e: "⏹", t: "Stand&nbsp;down" },
+      { a: "boot",     cls: (lane ? "" : "new"), e: "▶", t: "Boot" },
+      { a: "standdown",cls: (lane ? "bad" : "bad new"), e: "⏹", t: "Stand&nbsp;down" },
       { a: "mute",     cls: "new",  e: "🔕", t: "Mute" },
       { a: "pin",      cls: "new",  e: "📌", t: "Pin ask" }
     ];
@@ -787,14 +800,93 @@
     }
     if (act === "recycle") {
       var body = resetBodyFor(e.agentId);
-      if (!body) { toast("Recycle for an arbitrary lane is not yet wired — needs a guarded backend endpoint (follow-up).", true); return; }
+      if (!body) { toast("Recycle for a worker lane has no operator rail yet (the SRE's gated recycler is lease-bound) — not wired.", true); return; }
       armedReset(btn, body);
       return;
     }
-    // Net-new destructive/soft actions: affordance surfaced (Approach C); the
-    // guarded backend endpoints are follow-up work, so these do NOT fire anything.
-    var LABEL = { retask: "Retask", boot: "Boot", standdown: "Stand-down", mute: "Mute", pin: "Pin" };
-    toast(LABEL[act] + ": affordance surfaced (Approach C) — backend not yet wired.", true);
+    if (act === "retask") { retaskLane(e); return; }
+    if (act === "boot" || act === "standdown") {
+      if (e.kind !== "lane") { toast("Boot / Stand-down are for worker lanes only — singletons are protected.", true); return; }
+      openConfirm(e, act);
+      return;
+    }
+    // Mute / Pin: no backend — honest stubs, they do NOT fire anything.
+    var LABEL = { mute: "Mute", pin: "Pin" };
+    toast((LABEL[act] || act) + ": no backend yet — not wired.", true);
+  }
+  // Retask = hand this lane a new ask through the SAME rail as "+ ask" (a real
+  // bus row via POST /api/assign). Opens the composer pre-targeted at the lane's
+  // bus id; the operator types the ask and sends — the send is the deliberate act.
+  function retaskLane(e) {
+    var target = e.baseId || e.agentId;
+    var sel = $("assignAgent"), form = $("assignForm"), tog = $("assignToggle");
+    if (!sel || !form) { toast("ask composer not on this page", true); return; }
+    var has = false;
+    Array.prototype.forEach.call(sel.options, function (o) { if (o.value === target) has = true; });
+    if (!has) sel.insertAdjacentHTML("beforeend", '<option value="' + esc(target) + '">' + esc(target) + '</option>');
+    sel.value = target;
+    form.classList.add("open"); if (tog) tog.classList.add("on");
+    closeSheet();
+    var inp = $("assignAsk");
+    if (inp) { inp.placeholder = "Retask " + target + ": what should it do now?"; inp.focus(); }
+    try { form.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (er) {}
+    toast("Retask → type the ask for " + target + " and send");
+  }
+  // In-sheet typed-confirm strip (the fat-finger guard for a lane action).
+  // window.prompt is NOT used anywhere: iOS suppresses it in a standalone PWA, which
+  // is exactly the phone the operator drives this from. The fire button only lights
+  // once the typed name equals the target; Esc / ✕ disarms.
+  var CONFIRM_COPY = {
+    boot:      { v: "Boot",        note: "starts the lane's tmux session via lanes.sh (roster-gated, idempotent)", cls: "" },
+    standdown: { v: "Stand down",  note: "ENDS the session — refused if busy, unread bus, stale handoff, or staged text", cls: "bad" },
+    "apply-token": { v: "Apply token", note: "RELAUNCHES the body on its token default (reversible re-pool)", cls: "warn" },
+    "apply-model": { v: "Apply model", note: "RELAUNCHES the body on its model default (reversible)", cls: "warn" }
+  };
+  function openConfirm(e, act) {
+    var box = $("shConfirm"); if (!box) return;
+    var c = CONFIRM_COPY[act] || { v: act, note: "", cls: "" };
+    var s = esc(e.session);
+    box.innerHTML =
+      '<div class="cstrip ' + c.cls + '" data-cact="' + esc(act) + '" data-session="' + s + '">' +
+        '<div class="ch"><span class="cv">' + esc(c.v) + '</span><span class="ct">' + s + '</span><span class="cx" data-cx="1">✕</span></div>' +
+        '<div class="cn">' + esc(c.note) + '</div>' +
+        '<div class="cr"><input class="ci" type="text" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" placeholder="type ' + s + ' to arm" />' +
+        '<button class="cf" disabled>' + esc(c.v) + '</button></div>' +
+      '</div>';
+    var inp = box.querySelector(".ci");
+    if (inp) setTimeout(function () { try { inp.focus(); } catch (er) {} }, 60);
+  }
+  function confirmTyped(strip) {
+    var inp = strip.querySelector(".ci"), fire = strip.querySelector(".cf");
+    var ok = inp && inp.value.trim() === strip.getAttribute("data-session");
+    strip.classList.toggle("armed", !!ok);
+    if (fire) fire.disabled = !ok;
+    return !!ok;
+  }
+  function fireConfirmed(strip) {
+    if (!confirmTyped(strip)) { toast("name did not match — not fired", true); return; }
+    var act = strip.getAttribute("data-cact"), session = strip.getAttribute("data-session");
+    var typed = strip.querySelector(".ci").value.trim();
+    var fire = strip.querySelector(".cf"); if (fire) { fire.disabled = true; fire.textContent = "…"; }
+    if (act === "apply-token" || act === "apply-model") { applyArmed(session, act.slice(6), typed, strip); return; }
+    laneAction(act === "boot" ? "boot" : "down", session, typed, strip);
+  }
+  function laneAction(action, session, typed, strip) {
+    var route = "/api/lane-" + action;
+    fetch(route, {
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ session: session, confirm: typed })
+    }).then(function (r) { return r.json().then(function (j) { return { s: r.status, ok: r.ok, j: j || {} }; }, function () { return { s: r.status, ok: r.ok, j: {} }; }); })
+      .then(function (res) {
+        var verb = action === "boot" ? "boot" : "stand-down";
+        if (res.ok && res.j.ok) { toast((res.j.skipped ? "= " : "✓ ") + verb + " " + session + (res.j.tail ? " — " + String(res.j.tail).split("\n").pop().slice(0, 120) : "")); load(); }
+        else if (res.s === 409) toast("⏸ " + verb + " refused: " + String(res.j.tail || res.j.error || "gate refused").split("\n").pop().slice(0, 160), true);
+        else if (res.s === 429) toast("⏳ just ran — wait " + (res.j.retry_after_s || 30) + "s", true);
+        else if (res.s === 503) toast("✗ " + (res.j.error || "not available from this console"), true);
+        else toast("✗ " + (res.j.error || verb + " failed"), true);
+        if (strip && strip.parentNode) strip.parentNode.innerHTML = "";
+      })
+      .catch(function () { toast("✗ network dropped — " + action + " may have run; refresh", true); if (strip && strip.parentNode) strip.parentNode.innerHTML = ""; });
   }
   // Two-tap armed reset (NOT window.confirm — iOS suppresses it in a standalone PWA).
   function armedReset(btn, body) {
@@ -810,7 +902,7 @@
     btn.disabled = true; btn.innerHTML = '<span class="e">♻️</span>resetting…';
     fetch("/api/reset", {
       method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
-      body: JSON.stringify({ body: body })
+      body: JSON.stringify({ body: body, confirm: body })
     }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, s: r.status, j: j || {} }; }); })
       .then(function (res) {
         var msg;
@@ -854,25 +946,27 @@
       .catch(function (er) { toast("error: " + (er && er.message), true); })
       .finally(function () { busy = false; });
   }
-  function applyArmed(session, kind) {
+  // Apply (op#20692/op#20689): the typed body-name confirm is the operator's
+  // in-console authorization for this REVERSIBLE re-pool; the server still gates
+  // on CONSOLE_R4_ENABLED + confirm==session + the gazzabyte fail-closed.
+  function applyArmed(session, kind, typed, strip) {
     if (busy) return;
-    var typed = window.prompt("ARMED " + kind + " apply for '" + session + "'.\nThis RELAUNCHES the body (reversible).\nType the exact body name to confirm:");
-    if (typed == null) return;
+    if (typed == null) { var e = currentEntry(); if (e && e.session === session) openConfirm(e, "apply-" + kind); return; }
     if (typed.trim() !== session) { toast("name did not match — not applied", true); return; }
     busy = true;
     fetch("/api/apply-armed", {
       method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()), body: JSON.stringify({ session: session, kind: kind, confirm: typed.trim() })
-    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, ok: r.ok, j: j }; }); })
+    }).then(function (r) { return r.json().then(function (j) { return { status: r.status, ok: r.ok, j: j }; }, function () { return { status: r.status, ok: r.ok, j: {} }; }); })
       .then(function (res) {
-        if (res.status === 503) toast("Armed apply is DISABLED (pending cai + Nazim)", true);
-        else if (res.status === 403) toast((res.j && res.j.error) || "arm via Telegram first", true);
+        if (res.status === 503) toast((res.j && res.j.error) || "Apply is disabled on this console (CONSOLE_R4_ENABLED off / no upstream)", true);
+        else if (res.status === 403) toast((res.j && res.j.error) || "refused", true);
         else if (res.status === 202) toast(kind + " QUEUED for " + session + " — fires when idle");
         else if (res.status === 409 || res.status === 429) toast((res.j && res.j.error) || "busy — try again shortly", true);
         else if (!res.ok) toast((res.j && res.j.error) || "apply failed", true);
-        else toast(kind + " applied to " + session + (res.j && res.j.ok ? "" : " (check output)"));
+        else toast("✓ " + kind + " applied to " + session + (res.j && res.j.ok ? "" : " (check output)"));
       })
       .catch(function (er) { toast("error: " + (er && er.message), true); })
-      .finally(function () { busy = false; });
+      .finally(function () { busy = false; if (strip && strip.parentNode) strip.parentNode.innerHTML = ""; });
   }
 
   // ---- multi-select + bulk account switch -----------------------------------
@@ -1362,6 +1456,21 @@
       var b = e.target.closest ? e.target.closest("button[data-act]") : null;
       if (b) handleAction(b.getAttribute("data-act"), b);
     });
+    // typed-confirm strip (delegated): input converges → arms; Enter/button fires; ✕ disarms
+    var cbox = $("shConfirm");
+    if (cbox) {
+      cbox.addEventListener("input", function (e) { var st = e.target.closest ? e.target.closest(".cstrip") : null; if (st) confirmTyped(st); });
+      cbox.addEventListener("keydown", function (e) {
+        var st = e.target.closest ? e.target.closest(".cstrip") : null; if (!st) return;
+        if (e.key === "Enter") { e.preventDefault(); fireConfirmed(st); }
+        if (e.key === "Escape") { cbox.innerHTML = ""; }
+      });
+      cbox.addEventListener("click", function (e) {
+        var st = e.target.closest ? e.target.closest(".cstrip") : null; if (!st) return;
+        if (e.target.closest(".cf")) fireConfirmed(st);
+        else if (e.target.closest("[data-cx]")) cbox.innerHTML = "";
+      });
+    }
     // token/model controls (delegated)
     var ctrls = $("shControls");
     if (ctrls) {
@@ -1421,7 +1530,8 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel,
-      poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup };
+      poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup,
+      confirmTyped: confirmTyped, CONFIRM_COPY: CONFIRM_COPY, resetBodyFor: resetBodyFor };
   }
 
   start();

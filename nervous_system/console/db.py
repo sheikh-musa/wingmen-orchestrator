@@ -608,6 +608,18 @@ def fetch_lanes() -> List[dict]:
     return _query(sql, params)
 
 
+def fetch_fleet_lane_names() -> List[str]:
+    """The WORKER-lane roster: every fleet_lanes.lane whose launcher is the
+    dangerous-CC lane launcher (any desired_state — lanes.sh applies the 'up'
+    rule itself). Used by /api/lane-boot + /api/lane-down to refuse an unknown
+    name BEFORE it can reach argv (read-only SELECT, enumerated column)."""
+    rows = _query(
+        "SELECT lane FROM fleet_lanes WHERE launcher = %s AND lane IS NOT NULL",
+        ["launch_dangerous_cc.sh"],
+    )
+    return [r["lane"] for r in rows if r.get("lane")]
+
+
 def fetch_deploys() -> List[dict]:
     sql, params = build_deploys_query()
     return _query(sql, params)

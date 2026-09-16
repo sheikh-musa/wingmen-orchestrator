@@ -218,6 +218,27 @@ _HELD_LANES = {"irsyad-import"}
 _MODEL_ENV_BODIES = {"nazim", "cai", "fleet-health", "cc-orchestrator"}
 _SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
+# --- Lane BOOT / STAND-DOWN from the console (Musa op#20684/20687) ------------
+# Both shell ONLY to the existing vetted rail `scripts/lanes.sh` (`up <lane>` is
+# fleet_lanes-roster-gated + idempotent; `down <lane> --kill` runs
+# scripts/lib/lane_winddown.py whose gates — busy / unread bus rows / stale handoff /
+# staged composer text — all FAIL CLOSED inside the script). The console adds:
+# strict charset, a SINGLETON guard (never boot/end a body — an outage, not
+# elasticity; the set is the winddown module's own so both paths agree), a
+# roster check against fleet_lanes (an unknown lane never reaches argv), a typed
+# `confirm`==session fat-finger guard, and the per-target inflight/cooldown claim.
+# NEVER --force / RESET_FORCE from here.
+try:
+    from scripts.lib.lane_winddown import SINGLETONS as _WINDDOWN_SINGLETONS
+except Exception:  # noqa: BLE001 — never boot the console without the guard set
+    _WINDDOWN_SINGLETONS = {"nazim", "cai", "orch", "orchestrator", "fleet-health",
+                            "fleet-console", "quality"}
+_LANE_ACTION_PROTECTED = frozenset(_WINDDOWN_SINGLETONS) | frozenset(
+    {"hub", "cc-orchestrator", "cc-fleet-health", "cc-quality", "orch-console"})
+_LANE_ACTION_INFLIGHT: set = set()
+_LANE_ACTION_LAST_RUN: dict = {}
+_LANE_ACTION_COOLDOWN_S = 30.0
+
 
 def _is_remote_body(session: str) -> bool:
     """A body whose pointer files live on ANOTHER host (the VPS hub): a local
@@ -373,6 +394,17 @@ def _token_registry() -> list:
 #      + routes through the SAME switch script (one rail, cai cond 1) which verifies
 #      auth_fp after + emits the identity-stamped audit/alert (cai conds 2/3/4).
 # I NEVER arm it. This block builds the confirm LAYER only, for cai+Nazim review.
+#
+# op#20692 + op#20689 (Musa, 2026-09-16) — SCOPED RELAXATION, reversible token/model
+# switch ONLY: condition (2) — the bridge-verified operator ARM — is NO LONGER required
+# for /api/apply-armed. The operator's rationale: the console is operator-only
+# (IP-allowlist / bearer-gated) and the re-pool of a lane is REVERSIBLE (switch back),
+# so an in-console typed body-name confirm suffices. What STAYS gated: (1) the
+# CONSOLE_R4_ENABLED flag (503 without it), (3) confirm==session, the gazzabyte
+# fingerprint fail-closed, the one-rail switch script (auth_fp verify + audit), the
+# per-lane inflight/cooldown guard. `_r4_current_arm` / require_verified_authorization
+# are UNCHANGED and still the bar for every MONEY or IRREVERSIBLE op — this relaxation
+# is scoped to the reversible token/model switch and must not be generalised.
 _R4_ENABLED = os.environ.get("CONSOLE_R4_ENABLED") == "1"
 _R4_ARM_MAX_WINDOW_MIN = 240          # hard cap on an arm's life (auto-disarm)
 _R4_ARM_PHRASE = "ARM LANE APPLY"      # the operator's Telegram approval phrase
@@ -467,9 +499,10 @@ def _resolve_armed_apply(session: str, kind: str, arm: "dict | None") -> tuple:
 # --- Queue-on-busy apply (op#10861) ------------------------------------------
 # When an armed apply targets a BUSY lane, QUEUE it instead of refusing; a watcher
 # fires it the moment the lane goes idle. NEVER --force (waits, never clobbers).
-# HARD GUARDRAIL: the R4 arm is RE-VALIDATED AT FIRE TIME — a queued apply NEVER
-# fires on an expired/out-of-scope arm (keeps operator authorization honest for a
-# deferred fire). In-memory (single console process); a queue entry is ephemeral —
+# HARD GUARDRAIL: the R4 FLAG + resolve rules are RE-VALIDATED AT FIRE TIME — a
+# queued apply NEVER fires after the flag is pulled or on a target that no longer
+# resolves (op#20692 replaced the bridge-arm with the flag+typed-confirm for this
+# reversible switch; the deferred fire stays honest to the same rules). In-memory (single console process); a queue entry is ephemeral —
 # lost on restart, the operator re-queues. Only meaningful while R4 is enabled +
 # armed. Keyed by "session:kind".
 _APPLY_QUEUE: "dict" = {}
@@ -520,10 +553,13 @@ def _apply_queue_tick() -> None:
         pending = [dict(v) for v in _APPLY_QUEUE.values() if v.get("status") == "queued"]
     for item in pending:
         key = f"{item['session']}:{item['kind']}"
-        arm = _r4_current_arm()                      # RE-VALIDATE at fire time
-        cmd, _account, err = _resolve_armed_apply(item["session"], item["kind"], arm)
-        if not arm or err or cmd is None:
-            reason = ("arm expired while waiting — re-arm to apply" if not arm
+        # op#20692: the bridge-arm is no longer the gate for the reversible token/model
+        # switch; RE-VALIDATE the R4 feature flag + the resolve rules at fire time
+        # instead (a queued apply never fires after the flag is pulled).
+        enabled = os.environ.get("CONSOLE_R4_ENABLED") == "1"
+        cmd, _account, err = _resolve_armed_apply(item["session"], item["kind"], None)
+        if not enabled or err or cmd is None:
+            reason = ("R4 disabled while waiting — re-enable to apply" if not enabled
                       else (err or "cannot apply"))
             with _APPLY_QUEUE_LOCK:
                 if key in _APPLY_QUEUE and _APPLY_QUEUE[key]["status"] == "queued":
@@ -1927,7 +1963,8 @@ def _make_handler(feedloop: "_FeedLoop"):
                             "/api/set-pointer", "/api/set-group-pointer",
                             "/api/add-token", "/api/apply-dry-run",
                             "/api/apply-armed", "/api/apply-queue-cancel",
-                            "/api/assign", "/api/ask-close"):
+                            "/api/assign", "/api/ask-close",
+                            "/api/lane-boot", "/api/lane-down"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
@@ -1980,6 +2017,14 @@ def _make_handler(feedloop: "_FeedLoop"):
             # /api/backlog + /api/assign).
             if path == "/api/ask-close":
                 return self._handle_ask_close()
+            # Musa op#20684/20687: boot / stand-down a WORKER lane via the vetted
+            # scripts/lanes.sh rail (singleton-protected, roster-checked, typed
+            # confirm, fail-closed gates inside lane_winddown.py). Reachable from the
+            # hosted (phone) console via its guarded proxy.
+            if path == "/api/lane-boot":
+                return self._handle_lane_action("boot")
+            if path == "/api/lane-down":
+                return self._handle_lane_action("down")
             if path == "/api/switch-token":
                 return self._handle_switch_token()
             # Bulk re-token: /api/switch-group (one lane-family) and /api/switch-all
@@ -2095,6 +2140,94 @@ def _make_handler(feedloop: "_FeedLoop"):
             return self._json(200 if ok else 500,
                               {"ok": ok, "id": item_id, "action": action,
                                "error": None if ok else (r.stderr or "").strip()[-160:]})
+
+        def _handle_lane_action(self, action: str):
+            """POST /api/lane-boot | /api/lane-down {session, confirm} — boot or wind
+            down ONE worker lane through scripts/lanes.sh (op#20684/20687).
+
+            Guards, in order, all BEFORE any subprocess: JSON shape; strict session
+            charset; SINGLETON protection (nazim/cai/hub/SRE/quality/console can never
+            be booted or ended here); the lane must be a launch_dangerous_cc.sh row in
+            fleet_lanes (roster check via the read-only console DB — an unknown name
+            never reaches argv); typed `confirm` must equal the session; per-target
+            inflight + cooldown claim. Then exactly `lanes.sh up <lane>` or
+            `lanes.sh down <lane> --kill` — the scripts' own gates (roster
+            desired_state='up' for boot; busy / unread bus / stale handoff / staged
+            composer for stand-down) stay in force and fail closed. NEVER --force."""
+            route = f"/api/lane-{action}"
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                p = json.loads(raw or b"{}")
+                session = (p.get("session") or "").strip()
+                confirm = (p.get("confirm") or "").strip()
+            except Exception:  # noqa: BLE001
+                auth.audit(self._client(), route, "400")
+                return self._json(400, {"error": "bad request"})
+            if not _SESSION_RE.match(session):
+                auth.audit(self._client(), route, "400")
+                return self._json(400, {"error": "bad session"})
+            if session in _LANE_ACTION_PROTECTED or session.startswith("cc-"):
+                # singleton bodies + bus ids (cc-*) are not lane sessions — refuse.
+                auth.audit(self._client(), f"{route}:{session}:protected", "403")
+                return self._json(403, {"error": f"'{session}' is a protected body, not a worker lane"})
+            try:
+                roster = set(db.fetch_fleet_lane_names())
+            except Exception as e:  # noqa: BLE001 — cannot verify the roster -> refuse
+                logger.warning("lane-%s roster lookup failed: %s", action, e)
+                auth.audit(self._client(), f"{route}:{session}:roster-unavailable", "503")
+                return self._json(503, {"error": "lane roster unavailable — refusing (fail-closed)"})
+            if session not in roster:
+                auth.audit(self._client(), f"{route}:{session}:unknown", "400")
+                return self._json(400, {"error": "unknown lane", "session": session})
+            if confirm != session:
+                auth.audit(self._client(), f"{route}:{session}:confirm-miss", "400")
+                return self._json(400, {"error": "type the exact lane name to confirm"})
+            key = f"{action}:{session}"
+            now = time.monotonic()
+            with _RESET_GUARD_LOCK:
+                if key in _LANE_ACTION_INFLIGHT:
+                    auth.audit(self._client(), f"{route}:{session}", "409")
+                    return self._json(409, {"error": f"{action} already in progress", "session": session})
+                last = _LANE_ACTION_LAST_RUN.get(key, 0.0)
+                if now - last < _LANE_ACTION_COOLDOWN_S:
+                    retry_after = round(_LANE_ACTION_COOLDOWN_S - (now - last))
+                    auth.audit(self._client(), f"{route}:{session}", "429")
+                    return self._json(429, {"error": f"{action} just ran — wait before retrying",
+                                            "session": session, "retry_after_s": retry_after})
+                _LANE_ACTION_INFLIGHT.add(key)
+            # lanes.sh subcommands are `up` / `down` (the console verb 'boot' maps to `up`).
+            cmd = ["bash", str(_REPO_ROOT / "scripts" / "lanes.sh"), ("up" if action == "boot" else "down"), session]
+            if action == "down":
+                cmd.append("--kill")   # 'actually do it' flag; the gates inside still fail closed
+            auth.audit(self._client(), f"{route}:{session}", "run")
+            logger.info("console lane-%s requested: %s", action, session)
+            try:
+                _env = {**os.environ, "ACTOR": self._client() or "operator"}
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=_env)
+                ok = r.returncode == 0
+                out = ((r.stdout or "") + (r.stderr or "")).strip()
+                tail = "\n".join(out.splitlines()[-6:])
+            except subprocess.TimeoutExpired:
+                auth.audit(self._client(), f"{route}:{session}", "timeout")
+                return self._json(504, {"error": f"{action} timed out", "session": session})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("lane-%s failed (%s): %s", action, session, e)
+                auth.audit(self._client(), f"{route}:{session}", "500")
+                return self._json(500, {"error": f"{action} failed", "session": session})
+            finally:
+                with _RESET_GUARD_LOCK:
+                    _LANE_ACTION_INFLIGHT.discard(key)
+                    _LANE_ACTION_LAST_RUN[key] = time.monotonic()
+            # A script REFUSE/SKIP (roster not 'up', gates refused, already running) is
+            # a legible 409, not a generic failure — the operator reads the reason.
+            refused = (not ok) and ("REFUSE" in out or "SKIP" in out)
+            skipped = ok and "SKIP" in out
+            code = 200 if ok else (409 if refused else 500)
+            logger.info("console lane-%s OUTCOME: %s rc=%s", action, session, r.returncode)
+            auth.audit(self._client(), f"{route}:{session}", str(code))
+            return self._json(code, {"ok": ok, "action": action, "session": session,
+                                     "skipped": skipped, "tail": tail})
 
         def _handle_assign(self):
             """POST /api/assign {agent, ask, priority?} — assign a work item to a
@@ -2215,11 +2348,14 @@ def _make_handler(feedloop: "_FeedLoop"):
             return self._json(200, {"ok": True, "cancelled": existed, "session": session, "kind": kind})
 
         def _handle_apply_armed(self):
-            """POST /api/apply-armed {session, kind, confirm} — the REAL armed apply.
-            DISABLED/unbuilt-live: 503 unless CONSOLE_R4_ENABLED=1 (cai+Nazim gate that)
-            AND a live bridge-verified operator ARM exists AND `confirm`==session (typed
-            body-name guard). gazzabyte fail-closed; routes through the one switch rail
-            (which verifies auth_fp + audits/alerts). I never arm it."""
+            """POST /api/apply-armed {session, kind, confirm} — the REAL armed apply
+            (reversible token/model re-pool of ONE body). 503 unless CONSOLE_R4_ENABLED=1;
+            `confirm`==session (typed body-name guard); gazzabyte fail-closed; routes
+            through the one switch rail (which verifies auth_fp + audits/alerts).
+
+            op#20692/op#20689: the bridge-verified operator ARM is NO LONGER required
+            here — scoped to this REVERSIBLE token/model switch only (see the R4 header
+            comment). Money / irreversible ops keep require_verified_authorization."""
             # (1) Feature flag — DISABLED by default. This alone makes R4 inert.
             if not _R4_ENABLED:
                 auth.audit(self._client(), "/api/apply-armed", "503")
@@ -2238,12 +2374,12 @@ def _make_handler(feedloop: "_FeedLoop"):
                 return self._json(400, {"error": "bad session/kind"})
             if _is_remote_body(session):
                 return self._json(400, {"error": "remote body — armed apply runs on the VPS (cross-host, later)"})
-            # (2) Live bridge-verified operator ARM (scoped + time-bounded).
-            arm = _r4_current_arm()
-            if not arm:
-                auth.audit(self._client(), f"/api/apply-armed:{session}:no-arm", "403")
-                return self._json(403, {"error": "no live operator ARM — the operator must arm via the Telegram bridge (scoped, time-bounded)"})
-            # (3) Typed body-name confirm (fat-finger guard, not authority).
+            # (2) op#20692/op#20689: NO bridge-arm for the reversible token/model switch.
+            # arm=None -> _resolve_armed_apply skips the arm-scope check but keeps every
+            # other rule (gazzabyte fp fail-closed, pointer must resolve, remote refused).
+            arm = None
+            # (3) Typed body-name confirm (fat-finger guard — the operator's in-console
+            # authorization for this reversible op, per op#20692).
             if confirm != session:
                 auth.audit(self._client(), f"/api/apply-armed:{session}:confirm-miss", "400")
                 return self._json(400, {"error": "type the exact body name to confirm"})
