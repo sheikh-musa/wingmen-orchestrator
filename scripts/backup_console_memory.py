@@ -20,8 +20,12 @@ from dotenv import load_dotenv
 ORCH = os.path.expanduser("~/wingmen/orchestrator")
 load_dotenv(os.path.join(ORCH, ".env"))
 
-MEMORY_DIR = os.path.expanduser(
-    "~/.claude/projects/-Users-musa-wingmen-orchestrator/memory")
+# Claude Code names the project dir by slugging the absolute cwd ("/" -> "-"), so
+# derive it from ORCH (itself $HOME-derived) instead of hardcoding a user name —
+# a hardcoded per-user path is why the snapshot silently died 2026-07-11
+# (audit B#1). CONSOLE_MEMORY_DIR overrides for tests / non-standard checkouts.
+MEMORY_DIR = os.environ.get("CONSOLE_MEMORY_DIR") or os.path.join(
+    os.path.expanduser("~/.claude/projects"), ORCH.replace("/", "-"), "memory")
 
 
 def _conn():

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.nazim-memory-backup</string>
+  <!-- Nightly delta snapshot of the console body's memory dir into substrate table
+       console_memory_backup (scripts/backup_console_memory.py). Dead 2026-07-11 ->
+       2026-09-16 because the script + this plist pointed at a /Users/musa checkout that
+       does not exist on this Mac and the plist was never loaded (audit B#1). Loaded via
+       symlink from ~/Library/LaunchAgents (repo convention: launchd/ is canonical). -->
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/backup_console_memory.py</string>
+  </array>
+  <key>StartCalendarInterval</key><dict>
+    <key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer>
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/nazim_memory_backup.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/nazim_memory_backup.log</string>
+</dict>
+</plist>
