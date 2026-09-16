@@ -6,28 +6,46 @@
 # SRE must commit from its OWN git worktree instead:
 #     git worktree add ~/wingmen/orch-<name>-wt -b <branch> fable/substrate-safe-fixes
 #
-# Fires ONLY when BOTH hold: committer email == the SRE identity AND the commit is at the
-# console checkout's top-level (a worktree has a different top-level, so worktree commits
-# pass). Every other committer is unaffected. core.hooksPath is shared across worktrees, so
-# this file is the one place the rule lives for all of them.
+# IDENTITY DISCRIMINATOR (revised, Nazim #40793): the shared host BLEEDS env between the
+# console and the SRE sessions — in the SRE shell CC_BASE_AGENT_ID/AGENT_ID are EMPTY and
+# ORCH_AGENT_ID leaks in as orch-console; and the checkout's git DEFAULT identity has
+# collided with cc-fleet-health before (which misattributed a console build to the SRE). So
+# a bare AGENT_ID check would FAIL-OPEN for the SRE, and a bare git-email check on the
+# checkout DEFAULT would FALSE-BLOCK the console. Fix: gate everything behind the console
+# top-level test (worktrees exit immediately), then OR several SRE signals — the RELIABLE
+# one being the identity the SRE sets EXPLICITLY on every commit
+# (`git -c user.name=cc-fleet-health -c user.email=<sre>`), read here as the EFFECTIVE
+# user.name/user.email, which is immune to the ambient env bleed. A console build (default
+# identity orch-console, no cc-fleet-health env) matches NONE of the signals -> passes.
 set -uo pipefail
 
 CONSOLE_CHECKOUT="/Users/sheikhmusa/wingmen/orchestrator"
+SRE_ID="cc-fleet-health"
 SRE_EMAIL="fleet.health@wingmen.fleet.local"
 
 top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-email="$(git config user.email 2>/dev/null || true)"
+# Only the console's own checkout is guarded; every worktree has a different top-level and
+# passes immediately, so the SRE's worktree commits are never touched.
+[ "$top" = "$CONSOLE_CHECKOUT" ] || exit 0
 
-if [ "$top" = "$CONSOLE_CHECKOUT" ] && [ "$email" = "$SRE_EMAIL" ]; then
-  echo "" >&2
-  echo "❌ pre-commit BLOCKED — cc-fleet-health must NOT commit in the console's live checkout:" >&2
-  echo "     $CONSOLE_CHECKOUT" >&2
-  echo "   That tree is what the fleet console SERVES; branching/committing here switches it" >&2
-  echo "   off trunk and a build subagent can commit on top of yours (Nazim #40776)." >&2
-  echo "   Use your own worktree instead:" >&2
-  echo "     git worktree add ~/wingmen/orch-<name>-wt -b <branch> fable/substrate-safe-fixes" >&2
-  echo "     cd ~/wingmen/orch-<name>-wt   # then edit + commit here" >&2
-  echo "   (Override ONLY in a genuine emergency: git commit --no-verify — and say so.)" >&2
-  exit 1
-fi
-exit 0
+email="$(git config user.email 2>/dev/null || true)"
+name="$(git config user.name 2>/dev/null || true)"
+
+is_sre=0
+[ "$email" = "$SRE_EMAIL" ] && is_sre=1                 # explicit -c on every SRE commit (reliable)
+[ "$name" = "$SRE_ID" ] && is_sre=1                     # explicit -c committer name (belt)
+[ "${AGENT_ID:-}" = "$SRE_ID" ] && is_sre=1            # process identity, when present
+[ "${CC_BASE_AGENT_ID:-}" = "$SRE_ID" ] && is_sre=1   # process identity, when present
+
+[ "$is_sre" -eq 0 ] && exit 0
+
+echo "" >&2
+echo "❌ pre-commit BLOCKED — cc-fleet-health must NOT commit in the console's live checkout:" >&2
+echo "     $CONSOLE_CHECKOUT" >&2
+echo "   That tree is what the fleet console SERVES; branching/committing here switches it" >&2
+echo "   off trunk and a build subagent can commit on top of yours (Nazim #40776)." >&2
+echo "   Use your own worktree instead:" >&2
+echo "     git worktree add ~/wingmen/orch-<name>-wt -b <branch> fable/substrate-safe-fixes" >&2
+echo "     cd ~/wingmen/orch-<name>-wt   # then edit + commit here" >&2
+echo "   (Override ONLY in a genuine emergency: git commit --no-verify — and say so.)" >&2
+exit 1
