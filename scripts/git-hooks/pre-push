@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# pre-push — blocks pushing console changes without a cc-quality review for the
-# CURRENT console content (op#12457, the same gate as deploy_console.sh at push time).
-# Belt to the deploy gate: no unreviewed console reaches the repo.
+# pre-push — two belts:
+#   gate 1 (D#1, substrate audit 2026-09-16): if this push changes any *.py, the pytest
+#     suite must still COLLECT cleanly — a deleted/renamed module a test imports must never
+#     again silently abort collection and disable the whole suite unnoticed.
+#   gate 2 (op#12457): blocks pushing console changes without a cc-quality review for the
+#     CURRENT console content (the same gate as deploy_console.sh at push time).
+# Belt to the deploy gate: no unreviewed console — and no un-collectable test tree — reaches
+# the repo.
 #
 # It MUST hash exactly what the deploy gate reviews. It used to hand-roll a shasum over
 # only five static files, which could never equal the gate's console_content_hash
@@ -34,6 +39,7 @@ done < <(console_deploy_files_rel "$ROOT")
 ZERO="0000000000000000000000000000000000000000"
 EMPTY_TREE="$(git hash-object -t tree /dev/null)"
 changed=0
+py_changed=0
 while read -r _lref _lsha _rref _rsha; do
   [ -z "${_lsha:-}" ] && continue
   [ "$_lsha" = "$ZERO" ] && continue          # branch deletion — nothing to gate
@@ -41,7 +47,39 @@ while read -r _lref _lsha _rref _rsha; do
   if ! git diff --quiet "$base" "$_lsha" -- "${GATED[@]}" 2>/dev/null; then
     changed=1
   fi
+  # Did this push touch any Python? (`*.py` is a git pathspec — matches .py at any depth.)
+  # If so, gate 1 below verifies the test suite still collects.
+  if ! git diff --quiet "$base" "$_lsha" -- '*.py' 2>/dev/null; then
+    py_changed=1
+  fi
 done
+
+# ── gate 1: pytest collection must stay clean (D#1, substrate audit 2026-09-16) ────
+# A deleted module once silently disabled the ENTIRE suite: tests/migrations/
+# test_bug024_identity_enforcement.py imported a removed applier, so `pytest tests/`
+# aborted at collection — 0 of 2,778 tests ran and CI was red on every run, unnoticed.
+# Collect-only imports every test module (NO fixtures, NO DB, NO test bodies) purely to
+# prove they still import. Runs only when this push changes a *.py file. Prefer the repo
+# venv; if no pytest is resolvable, warn and pass (CI is the backstop) rather than block a
+# push over missing local dev deps — a hook that blocks unfixably just gets --no-verify'd.
+if [ "$py_changed" -eq 1 ]; then
+  PYTEST_PY="$ROOT/.venv/bin/python3"; [ -x "$PYTEST_PY" ] || PYTEST_PY="$(command -v python3 || true)"
+  if [ -n "$PYTEST_PY" ] && "$PYTEST_PY" -c 'import pytest' >/dev/null 2>&1; then
+    if ! COLLECT="$("$PYTEST_PY" -m pytest -q --co -p no:cacheprovider tests/ 2>&1)"; then
+      echo "" >&2
+      echo "❌ pre-push BLOCKED — pytest collection FAILED; the test suite would not run." >&2
+      printf '%s\n' "$COLLECT" | grep -E "ERROR|ModuleNotFoundError|Interrupted|error during collection" | head -20 >&2
+      echo "   A test imports a module that no longer exists (deleted/renamed)? Fix it so every" >&2
+      echo "   test collects and the suite actually runs." >&2
+      echo "   (Override ONLY in a genuine emergency: git push --no-verify — and say so.)" >&2
+      exit 1
+    fi
+  else
+    echo "⚠ pre-push: no pytest available — skipping the test-collection check." >&2
+  fi
+fi
+
+# ── gate 2: console content needs a cc-quality review (op#12457) ──────────────────
 [ "$changed" -eq 0 ] && exit 0
 
 # Console content changed in this push — require a cc-quality review for THIS exact content.
