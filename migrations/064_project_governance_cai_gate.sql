@@ -297,8 +297,10 @@ $fn$;
 
 COMMENT ON FUNCTION public.strategic_decisions_cai_gate() IS
   'op#20702 Stage B: refuses a strategic_decisions INSERT with decided_by=''cai'' '
-  'when repos_affected resolves to a project with cai_enabled=false. Rows decided '
-  'by anyone else, or with no resolvable project, pass untouched.';
+  'ONLY when EVERY element of repos_affected resolves to a project with '
+  'cai_enabled=false (per-element via project_for_repo; an element that resolves to '
+  'NULL/ungoverned or a cai-on project lets the row PASS; empty/NULL arrays pass). '
+  'Rows decided by anyone else pass untouched.';
 
 DROP TRIGGER IF EXISTS trg_strategic_decisions_cai_gate ON public.strategic_decisions;
 CREATE TRIGGER trg_strategic_decisions_cai_gate
