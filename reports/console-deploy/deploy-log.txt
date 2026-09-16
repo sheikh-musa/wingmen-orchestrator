@@ -18,3 +18,11 @@
 2026-08-23T00:10:15Z content=f44d0afdc558cc61 ver=fc-v57 served={"version": "fc-v57", "sha": "18011c0"}
 2026-08-23T17:24:34Z content=9ca8a095f8c2ffd8 ver=fc-v58 served={"version": "fc-v58", "sha": "8397d4b"}
 2026-08-23T17:50:25Z content=1b4a78eee5b52c7a ver=fc-v59 served={"version": "fc-v59", "sha": "fcd71f1"}
+# [reconstructed 2026-09-16T15:3xZ by orch-console after a reset --hard during the fable-branch repair discarded this file's uncommitted tail; times = render.log mtime (local-tz mtime, approx), served= unknown; authoritative per-deploy artifacts remain in reports/console-deploy/<hash>/]
+2026-08-24T01:24:31Z content=9ca8a095f8c2ffd8 ver=fc-v58
+2026-08-24T01:50:22Z content=1b4a78eee5b52c7a ver=fc-v59
+2026-09-16T17:07:54Z content=49bf402bf368d5b2 ver=fc-v60
+2026-09-16T19:05:29Z content=939b11c436a22d15 ver=fc-v61
+2026-09-16T19:28:53Z content=7614d20cc01d7fc1 ver=fc-v62
+2026-09-16T22:42:51Z content=6b584121108d1c93 ver=fc-v63 (R4 flag redeploys 14:42Z + 15:2xZ-refused)
+2026-09-16T15:37:04Z content=acc72b9f9bab328a ver=fc-v64 served={"version": "fc-v64", "sha": "b794fb5"}
