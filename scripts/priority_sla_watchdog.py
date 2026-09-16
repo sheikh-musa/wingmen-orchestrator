@@ -115,6 +115,16 @@ CB_REPAGE_MIN = _envint("SLA_CB_REPAGE_MIN", 60)
 # actionable once elapsed exceeds this (defaults to the P0 hard threshold).
 P0_SURFACE_MIN = _envint("SLA_P0_SURFACE_MIN", HARD_ESCALATE_MIN["P0"])
 
+# Ruling-3 (Nazim 2026-09-16): aged unanswered rr re-page net — the #40129 fix.
+# A P0/P1 requires_response that ages past MAX_VIOLATION_AGE_MIN drops out of the
+# actionable set and goes SILENT ("P3-decay"): #40129 (hub->cc-scholar P1 rr) sat
+# UNREAD ~40h with zero re-page. This net re-pages the OWNER body (the issuer; never
+# the operator) at P1 every REPAGE_EVERY_MIN once such a row sits unanswered AND
+# unread past REPAGE_AFTER_MIN, until it is read.
+REPAGE_AFTER_MIN = _envint("SLA_AGED_REPAGE_AFTER_MIN", 360)   # 6h floor
+REPAGE_EVERY_MIN = _envint("SLA_AGED_REPAGE_EVERY_MIN", 360)   # re-page cadence
+MAX_REPAGES_PER_RUN = _envint("SLA_AGED_MAX_REPAGES_PER_RUN", 3)
+
 # Agents to drop from actioning entirely (comma-separated). Lever for Nazim to
 # exclude e.g. the operator-attended hub itself if paging on the hub's own
 # chronic unread proves circular/noisy. Empty by default (nothing excluded).
@@ -859,6 +869,151 @@ def _already_escalated_read_parked(conn, mid: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Ruling-3: aged unanswered rr re-page (the #40129 net) — a SEPARATE track from
+# read_parked. read_parked catches a hub row that was READ then parked (60-360m,
+# pages the operator). This catches any P0/P1 rr that ages past 6h while still
+# UNREAD and unanswered, and re-pages the OWNER body (the issuer) every 6h — NEVER
+# the operator — until the row is read. Replaces the P3-decay that hid #40129.
+# ---------------------------------------------------------------------------
+
+def owner_of(from_agent: str) -> str:
+    """Who to re-page for an unanswered directive: the ISSUER owns it (hub for a
+    hub-directed lane). The SRE runs this watchdog, so re-paging ITSELF is useless —
+    its own unanswered directives escalate to orch-console (the supervisor). The
+    operator is NEVER a re-page target on this net."""
+    if from_agent == "cc-fleet-health":
+        return "orch-console"
+    return from_agent
+
+
+def aged_rr_repage_targets(rows, *, now, repage_state, repage_after_min=REPAGE_AFTER_MIN,
+                           repage_every_min=REPAGE_EVERY_MIN, watermark_id=None):
+    """PURE: P0/P1 requires_response rows that are unanswered (responded_at NULL) AND
+    still UNREAD (read_at NULL) and aged >= repage_after_min, due for a re-page under
+    the every-repage_every_min cadence. `repage_state` maps str(id)->last-repage epoch;
+    a row is due when never re-paged or (now - last) >= the cadence. Each returned row
+    carries its `owner` (owner_of(from_agent)). `watermark_id` (pinned to max(id) at
+    enable-time) excludes the entire pre-existing backlog by construction, so turning the
+    net on pages ZERO history — only stalls crossing the floor going forward re-page."""
+    due = []
+    for r in rows:
+        if (r.get("priority") in ESCALATE_PRIORITIES
+                and r.get("requires_response")
+                and r.get("responded_at") is None
+                and r.get("read_at") is None
+                and (r.get("elapsed_minutes") or 0) >= repage_after_min
+                and (watermark_id is None or (r.get("id") or 0) > watermark_id)):
+            last = repage_state.get(str(r.get("id")), 0) or 0
+            if (now - last) >= repage_every_min * 60:
+                t = dict(r)
+                t["owner"] = owner_of(r.get("from_agent"))
+                due.append(t)
+    return due
+
+
+def repage_aged_owners(targets, *, dry, now, repage_state, send_repage,
+                       max_repages=MAX_REPAGES_PER_RUN):
+    """Re-page each target's OWNER (never the operator), capped at max_repages/scan
+    (defence vs a logic bug). DEAD-MAN'S SWITCH: the per-message re-page timestamp is
+    stamped into repage_state ONLY on a confirmed successful send — a failed send is
+    left UNSTAMPED so the next scan retries rather than silently suppressing for a full
+    cadence. Dry-run sends nothing and stamps nothing. `send_repage(owner, row)->bool`
+    is injected for testability. Returns the count of successful re-pages."""
+    sent = 0
+    for t in targets:
+        if sent >= max_repages:
+            log(f"aged-rr-repage HELD (per-scan cap {max_repages}) #{t.get('id')} -> {t.get('owner')}")
+            continue
+        if dry:
+            continue
+        ok = send_repage(t["owner"], t)
+        if ok:
+            repage_state[str(t["id"])] = now
+            sent += 1
+        else:
+            log(f"aged-rr-repage SEND FAILED #{t.get('id')} -> {t.get('owner')} "
+                f"(left UNSTAMPED for retry — dead-man's switch)")
+    return sent
+
+
+# Scope (faithful to the ruling: "hub for hub-directed lanes, console for mine").
+# Only rows the hub or the SRE ISSUED are in scope — those are the two owners the
+# ruling names. A broadening to every issuer is a deliberate future call for the gate.
+AGED_REPAGE_ISSUERS = [
+    a.strip() for a in os.environ.get(
+        "SLA_AGED_REPAGE_ISSUERS", "cc-orchestrator,cc-fleet-health").split(",") if a.strip()
+]
+
+
+def _fetch_aged_rr(conn):
+    """Impure: unanswered + UNREAD P0/P1 requires_response rows the hub or SRE issued,
+    aged past REPAGE_AFTER_MIN. read_at IS NULL is the hard 'until read' stop (and keeps
+    the set tiny — a READ-but-parked hub row is read_parked's job). Only requires_response
+    rows, so the net's OWN re-page rows (posted requires_response=False) are never re-caught."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, from_agent, to_agent, priority, requires_response, read_at, responded_at, "
+            "  (EXTRACT(epoch FROM (now()-created_at))/60.0)::int AS elapsed_minutes "
+            "FROM agent_messages "
+            "WHERE from_agent = ANY(%s) AND priority IN ('P0','P1') AND requires_response "
+            "  AND read_at IS NULL AND responded_at IS NULL AND is_test IS NOT TRUE "
+            "  AND created_at <= now() - make_interval(mins => %s)",
+            (AGED_REPAGE_ISSUERS, REPAGE_AFTER_MIN))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _send_aged_repage(conn, owner: str, row: dict) -> bool:
+    """Impure: post ONE P1 re-page to the OWNER body (never the operator). NON-rr on
+    purpose — it is an alert to go re-drive the stalled row, not a coordination row that
+    must itself be answered (which would re-enter this net and cascade). Returns True only
+    on a committed insert; any failure returns False so repage_aged_owners leaves it
+    unstamped and the next scan retries (dead-man's switch)."""
+    mid = row.get("id")
+    subj = (f"[sla-repage] {row.get('priority')} rr #{mid} to {row.get('to_agent')} "
+            f"UNREAD ~{row.get('elapsed_minutes')}m — re-drive it (ruling-3)")
+    body = (
+        f"TL;DR: your {row.get('priority')} requires-response message #{mid} to "
+        f"{row.get('to_agent')} has sat UNREAD and unanswered ~{row.get('elapsed_minutes')}m. "
+        f"It fell past the SLA watchdog's fresh window and would otherwise go silent (the #40129 gap). "
+        f"Please re-drive/wake {row.get('to_agent')} to read it, or say why it is correctly waiting. "
+        f"You (the issuer) own it — the operator is NOT being paged. This re-pages every "
+        f"{REPAGE_EVERY_MIN//60}h until the row is read.")
+    try:
+        if not dry_identity_guard(conn):
+            return False
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                "  requires_response,priority,is_test) "
+                "VALUES ('cc-fleet-health',%s,'escalation',%s,%s,false,'P1',false)",
+                (owner, subj, body))
+        conn.commit()
+        log(f"aged-rr-repage SENT #{mid} -> {owner} ({row.get('elapsed_minutes')}m)")
+        return True
+    except Exception as e:
+        log(f"aged-rr-repage INSERT failed #{mid} -> {owner}: {e!r}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def dry_identity_guard(conn) -> bool:
+    """Set the agent-id GUC in this tx so any agent_status trigger attributes the
+    re-page to cc-fleet-health. agent_messages itself needs no trigger, so this is a
+    cheap no-op that also fails LOUD (returns False) if the connection is unusable."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+        return True
+    except Exception as e:
+        log(f"aged-rr-repage identity-guard failed: {e!r}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Main scan
 # ---------------------------------------------------------------------------
 
@@ -1118,6 +1273,39 @@ def run(dry: bool, injected: list[dict] | None = None,
                     + ", ".join(f"#{m}->{o}" for m, o in res))
         except Exception as e:  # fail LOUD, keep the scan alive (KeepAlive re-runs)
             log(f"read-parked-escalate ERROR: {e!r}")
+
+        # Ruling-3 (Nazim 2026-09-16): the aged unanswered rr RE-PAGE net — the #40129
+        # fix. A P0/P1 rr the hub or SRE issued that ages past 6h while still UNREAD
+        # re-pages the OWNER body (issuer; never the operator) at P1 every 6h until read.
+        # Same observe-first doctrine as read-parked: ships INERT (force-dry, log-only)
+        # until ARMED via SLA_AGED_REPAGE_ENABLED=1 at an operator/console go-live. Same
+        # backfill watermark + per-scan cap; fail-LOUD (a crash never kills the scan).
+        ar_dry = dry or os.environ.get("SLA_AGED_REPAGE_ENABLED", "0") != "1"
+        try:
+            wm = state.get("aged_repage_watermark_id")
+            if not ar_dry and wm is None:
+                wm = _max_message_id(conn)
+                state["aged_repage_watermark_id"] = wm
+                log(f"aged-rr-repage backfill-guard ARMED: watermark id={wm} "
+                    f"(entire pre-existing backlog excluded)")
+            repage_state = state.setdefault("aged_repage", {})
+            targets = aged_rr_repage_targets(
+                _fetch_aged_rr(conn), now=now, repage_state=repage_state,
+                watermark_id=(wm if wm is not None else None))
+            if targets:
+                n = repage_aged_owners(
+                    targets, dry=ar_dry, now=now, repage_state=repage_state,
+                    send_repage=lambda owner, t: _send_aged_repage(conn, owner, t),
+                    max_repages=MAX_REPAGES_PER_RUN)
+                for t in targets:
+                    actions.append(f"{'[DRY] ' if ar_dry else ''}AGED-RR-REPAGE #{t['id']} "
+                                   f"({t['priority']} to {t['to_agent']}, ~{t['elapsed_minutes']}m) "
+                                   f"-> owner {t['owner']}")
+                log(f"aged-rr-repage [{'DRY/observe' if ar_dry else 'ARMED'}] wm={wm} "
+                    f"sent={0 if ar_dry else n}/{len(targets)} due: "
+                    + ", ".join(f"#{t['id']}->{t['owner']}" for t in targets))
+        except Exception as e:  # fail LOUD, keep the scan alive
+            log(f"aged-rr-repage ERROR: {e!r}")
 
         if persist:
             save_state(state)
