@@ -105,6 +105,23 @@
     if (h >= 48) return Math.floor(h / 24) + "d " + (h % 24) + "h";
     return h + "h " + (m % 60) + "m";
   }
+  // Musa op#20680: the 5h window has a FIXED 5-hour cadence, but the writer
+  // (weekly_limit_monitor) only refreshes every ~15 min, so between refreshes a
+  // boundary can pass and resets_5h_at sits a few minutes in the PAST -> the 5H
+  // row showed a bare "—". Roll a past resets_5h_at forward in +5h steps to the
+  // next FUTURE boundary (ISO string, so the reset formatters parse it as-is).
+  // null only when genuinely absent / unparsable (or it won't converge).
+  var FIVE_H_MS = 5 * 3600 * 1000;
+  function next5hBoundary(resets_5h_at) {
+    if (!resets_5h_at) return null;
+    var t = Date.parse(String(resets_5h_at));
+    if (isNaN(t)) t = Date.parse(String(resets_5h_at).replace(" ", "T"));
+    if (isNaN(t)) return null;
+    var now = Date.now(), i = 0;
+    while (t <= now && i < 100) { t += FIVE_H_MS; i++; }
+    if (t <= now) return null;
+    return new Date(t).toISOString();
+  }
   function paceAdvisory(p) {
     var bits = [];
     if (p.pace != null) bits.push(esc(Number(p.pace).toFixed(1)) + "x");
@@ -151,7 +168,7 @@
       + (p.runway_days != null ? " · runway " + Number(p.runway_days).toFixed(1) + "d" : "")
       + " · weekly resets in " + fmtReset(p.resets_at)
       + (p.resets_at ? " (" + esc(p.resets_at) + ")" : "")
-      + " · 5h window resets in " + fmtReset(p.resets_5h_at)
+      + " · 5h window resets in " + fmtReset(next5hBoundary(p.resets_5h_at))
       + (p.resets_5h_at ? " (" + esc(p.resets_5h_at) + ")" : "")
       + (p.updated_age_s != null ? " · read " + fmtAge(p.updated_age_s) + " ago" : "")
       + (stale ? " · STALE (monitor stalled)" : "");
@@ -162,7 +179,7 @@
       + (stale ? '<span class="poolstatus">stale ' + fmtAge(p.updated_age_s) + '</span>' : "")
       + '</div>'
       + poolWindowRow("wk", pct, p.resets_at, "resets")
-      + poolWindowRow("5h", p.pct_5h, p.resets_5h_at, "window resets")
+      + poolWindowRow("5h", p.pct_5h, next5hBoundary(p.resets_5h_at), "window resets")
       + '<div class="pooladvrow">' + paceAdvisory(p) + '</div>'
       + '</div>';
   }
@@ -173,7 +190,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v60';
+  var APP_BUILD = 'fc-v61';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -1348,7 +1365,7 @@
 
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset,
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel };
   }
 

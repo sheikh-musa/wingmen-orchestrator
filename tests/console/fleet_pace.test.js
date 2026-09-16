@@ -67,7 +67,7 @@ function loadFleet() {
   return sandbox.module.exports;
 }
 
-const { poolChip, hoursToReset, minutesToReset, fmtReset } = loadFleet();
+const { poolChip, hoursToReset, minutesToReset, fmtReset, next5hBoundary } = loadFleet();
 let passed = 0;
 function ok(name, fn) { fn(); passed++; console.log("  ok - " + name); }
 
@@ -179,8 +179,39 @@ ok("card: '—' when resets_at / resets_5h_at / pct_5h are null or past", functi
   assert(/window resets —</.test(h), "null resets_5h_at -> 'window resets —'");
   assert(/poolwl">5h<[\s\S]*?width:0%[\s\S]*?<b>—<\/b>/.test(h), "null pct_5h -> em-dash + empty bar");
   const h2 = poolChip({ pool: "Musa", pct_7d: 42, pct_5h: 0, updated_age_s: 30,
+    resets_at: resetsInHours(-1), resets_5h_at: "not a date" });
+  assert(/>resets —</.test(h2), "past weekly -> '—' (weekly cadence NOT rolled)");
+  assert(/window resets —</.test(h2), "unparsable resets_5h_at -> '—'");
+});
+// Musa op#20680: a JUST-PASSED 5h boundary (writer refreshes every 15 min) must
+// roll forward to the NEXT 5h boundary, not render a bare "—".
+assert(typeof next5hBoundary === "function", "fleet.js must export next5hBoundary");
+ok("next5hBoundary: past rolls +5h to the next future boundary; null/garbage stay null; future unchanged", function () {
+  assert.strictEqual(next5hBoundary(null), null);
+  assert.strictEqual(next5hBoundary(undefined), null);
+  assert.strictEqual(next5hBoundary(""), null);
+  assert.strictEqual(next5hBoundary("not a date"), null);
+  const m = minutesToReset(next5hBoundary(resetsInHours(-0.1)));
+  assert(m === 294 || m === 293, "6 min past -> ~4h54m to next boundary, got " + m);
+  const m2 = minutesToReset(next5hBoundary(resetsInHours(-12)));
+  assert(m2 === 180 || m2 === 179, "12h past -> rolls 3 steps -> ~3h, got " + m2);
+  const fut = resetsInHours(2.5);
+  const mf = minutesToReset(next5hBoundary(fut));
+  assert(mf === 150 || mf === 149, "future stays as-is, got " + mf);
+  assert.strictEqual(Date.parse(next5hBoundary(fut)), Date.parse(fut), "future value not shifted");
+  // bare "YYYY-MM-DD HH:MM" (no TZ) parses as LOCAL time (same contract as daysToReset)
+  const d6 = new Date(Date.now() - 6 * 60000);
+  const p2 = function (n) { return (n < 10 ? "0" : "") + n; };
+  const sp = d6.getFullYear() + "-" + p2(d6.getMonth() + 1) + "-" + p2(d6.getDate()) + " " + p2(d6.getHours()) + ":" + p2(d6.getMinutes());
+  const ms = minutesToReset(next5hBoundary(sp));
+  assert(ms != null && ms >= 292 && ms <= 295, "'YYYY-MM-DD HH:MM' space form parses + rolls, got " + ms);
+});
+ok("card: 5H row counts down to the next boundary when resets_5h_at just passed; WK row still '—'", function () {
+  const h = poolChip({ pool: "musa2", pct_7d: 42, pct_5h: 12, updated_age_s: 30,
     resets_at: resetsInHours(-1), resets_5h_at: resetsInHours(-0.1) });
-  assert(/>resets —</.test(h2) && /window resets —</.test(h2), "past -> '—'");
+  assert(/window resets in 4h 5[34]m/.test(h), "5h row rolled to next boundary: " + h);
+  assert(/title="[^"]*5h window resets in 4h 5[34]m/.test(h), "tooltip carries the rolled countdown");
+  assert(/>resets —</.test(h), "weekly row untouched (past -> '—')");
 });
 ok("card colour = WORSE of the two windows; status_7d shown", function () {
   const h = poolChip({ pool: "Syed", pct_7d: 20, pct_5h: 92, updated_age_s: 30, status_7d: "allowed",
