@@ -40,6 +40,21 @@ LANE_NUDGE_CONSOLE_SESSIONS="${LANE_NUDGE_CONSOLE_SESSIONS:-nazim orch}"
 
 tmux has-session -t "$SESSION" 2>/dev/null || { echo "lane_nudge: no tmux session '$SESSION'" >&2; exit 2; }
 
+# MENU-PARKED REFUSAL — the single send-keys choke point (authorization-slip guard, Nazim
+# #40469). A pane parked in an interactive SELECTION MENU (AskUserQuestion / permission /
+# trust dialog) intercepts keystrokes: ANY send-keys MOVES or COMMITS the selection =
+# answering an authorization prompt on the lane's behalf. NO caller may ever do that — not
+# the armed wedge-watchdog nudge tier, not the SLA watchdog, not the wake path. Every
+# delivery path below runs through here first, so refusing here closes the slip for ALL of
+# them, fail-closed. A menu needs a HUMAN to Esc/answer it; the caller's payload is a durable
+# bus/operator row the lane reconciles once a human clears the menu, so a skipped nudge costs
+# nothing. Uses the ONE fleet menu definition (composer_capture.sh pane_is_menu; pure bash,
+# so unlike the fire-window guard below it holds identically in a worktree). exit 5 = menu.
+if pane_is_menu tmux "$SESSION"; then
+  echo "lane_nudge: REFUSED — '$SESSION' is parked in an interactive MENU (AskUserQuestion/permission); a nudge would answer it (authorization slip). A human must Esc/answer it." >&2
+  exit 5
+fi
+
 # FIRE-WINDOW GUARD. A recycle owns this pane for a few seconds while it wipes the
 # composer, types /clear, submits it and types the boot instruction. A nudge landing
 # inside that window jams the clear and the body returns half-initialised, holding

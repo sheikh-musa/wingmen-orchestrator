@@ -109,6 +109,23 @@ pane_is_busy() {
   [ "${CC_BUSY:-0}" = 1 ]
 }
 
+# pane_is_menu <tmux-bin> <pane>  -> exit 0 IFF the pane is parked in an interactive
+# SELECTION MENU: an AskUserQuestion prompt or a permission/trust dialog, whose footer
+# shows the menu navigation hints. THE fleet's ONE definition of "menu-parked", reused by
+# BOTH the wedge-watchdog menu-parked detector AND lane_nudge's send-keys refusal guard.
+# WHY it matters: a menu intercepts keystrokes, so send-keys into it MOVES/COMMITS the
+# selection = answering an authorization prompt on the lane's behalf (an authorization
+# slip). No watchdog tier may ever do that; callers use this to REFUSE before typing.
+# Keys on the nav footer only (not composer text), LC_ALL=C for the locale-safe match.
+pane_is_menu() {   # $1 = tmux bin, $2 = pane
+  local txt
+  txt="$("$1" capture-pane -t "$2" -p 2>/dev/null)"
+  CC_MENU=0
+  printf '%s\n' "$txt" | tail -6 | LC_ALL=C grep -qiE 'to navigate|esc to cancel|enter to select' || return 1
+  CC_MENU=1
+  return 0
+}
+
 # Sets CC_BUSY_STALE=1 when a busy marker was PRESENT but the render was frozen,
 # so the caller can say "proceeding despite a stale busy marker" out loud rather
 # than silently treating a frozen body as idle.

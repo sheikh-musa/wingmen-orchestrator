@@ -156,6 +156,19 @@ ALERT_QUIET_SEC = _envint("LANE_WEDGE_ALERT_QUIET_SEC", 90 * 60)         # 90 mi
 WEDGE_MIN_POLLS = _envint("LANE_WEDGE_MIN_POLLS", 4)
 WEDGE_GRACE_SEC = _envint("LANE_WEDGE_GRACE_SEC", 300)
 
+# MENU-PARKED detector (Nazim #40469). A lane parked in an interactive selection menu
+# (AskUserQuestion / permission / trust dialog) is bus-deaf but reads 'working'/'idle' to
+# composer_capture, and the wedge path only ever sees a menu when the lane is ALSO a Signal-A
+# candidate AND local — so cc-scholar sat 40h menu-parked (gzb lane + its unread aged past the
+# 6h Signal-A ceiling). This detector keys on the MENU signal DIRECTLY (independent of Signal A),
+# for every LOCAL live lane. GRACE — BOTH floors must hold (my pick, stated to Nazim): menu
+# present on >= MENU_MIN_POLLS consecutive scans AND >= MENU_GRACE_SEC wall-clock, so a permission
+# prompt a human answers within a minute never trips it (two floors, mirroring the wedge stability
+# gate). The action is ALERT-ONLY forever — a watchdog must NEVER answer/nudge a menu (an
+# authorization slip); enforced independently at the lane_nudge send-keys choke point.
+MENU_MIN_POLLS = _envint("LANE_WEDGE_MENU_MIN_POLLS", 3)
+MENU_GRACE_SEC = _envint("LANE_WEDGE_MENU_GRACE_SEC", 600)   # 10 min
+
 # After an auto-nudge, wait this long (and require this many nudges) before
 # escalating — give the agent time to actually pick up its inbox.
 STAGE2_DELAY_SEC = _envint("LANE_WEDGE_STAGE2_DELAY_SEC", 180)
@@ -522,6 +535,20 @@ def _pane_working(session: str) -> bool:
         return False
 
 
+def _pane_is_menu(session: str) -> bool:
+    """True iff the pane is parked in an interactive selection menu — the fleet's ONE
+    definition, via composer_capture.sh pane_is_menu (shell-out, never reimplemented).
+    Fail-safe: any read miss returns False (a menu detector that FALSE-fires is noise, and
+    the alert track must not page on an unreadable pane; a genuine park re-shows next scan)."""
+    snippet = '. "$1" || exit 9; pane_is_menu "$2" "$3"'
+    try:
+        r = subprocess.run(["bash", "-c", snippet, "_", str(_COMPOSER_LIB), TM, session],
+                           capture_output=True, timeout=15)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Pure wedge state machine — unit-tested offline. No DB, no tmux, no clock beyond
 # the injected `now`.
@@ -532,6 +559,31 @@ V_UNREACHABLE = "unreachable"
 V_MONITORING = "monitoring"      # wedge candidate, not yet past the stability floor
 V_WEDGE = "wedge"                # confirmed wedge, composer safe -> nudge-eligible
 V_WEDGE_UNSAFE = "wedge-unsafe"  # confirmed wedge but REAL staged draft -> alert only
+
+# Menu-parked verdicts (Nazim #40469) — a SEPARATE, alert-only track from the wedge ladder.
+V_MENU_CLEAR = "menu-clear"          # not in a menu -> episode ends
+V_MENU_MONITORING = "menu-monitoring"  # menu seen, not yet past BOTH grace floors
+V_MENU_PARKED = "menu-parked"        # menu sustained past grace -> stuck, ALERT-ONLY
+
+
+def menu_evaluate(entry, is_menu, now):
+    """Pure state machine for the menu-parked track (unit-tested offline; no DB/tmux).
+    A menu must persist >= MENU_MIN_POLLS consecutive scans AND >= MENU_GRACE_SEC seconds
+    before it is PARKED — a menu the lane answers on its own next turn is transient and
+    ends the episode. Never returns anything nudge/answer-eligible: the only downstream
+    action is an alert (a watchdog answering a menu = an authorization slip)."""
+    entry = dict(entry or {})
+    entry["menu_last_seen"] = now
+    if not is_menu:
+        for k in ("menu_first_seen", "menu_polls", "menu_alerted"):
+            entry.pop(k, None)
+        return V_MENU_CLEAR, entry
+    entry["menu_polls"] = int(entry.get("menu_polls", 0)) + 1
+    entry.setdefault("menu_first_seen", now)
+    elapsed = now - float(entry["menu_first_seen"])
+    if entry["menu_polls"] >= MENU_MIN_POLLS and elapsed >= MENU_GRACE_SEC:
+        return V_MENU_PARKED, entry
+    return V_MENU_MONITORING, entry
 
 
 _EPISODE_KEYS = ("sig", "first_seen", "poll_count", "nudged_at", "nudge_count",
@@ -1299,9 +1351,67 @@ def _recover(obs: AgentObs, entry: dict, mode: str, alert: bool, now: float,
     log(line["action"])
 
 
+def menu_parked_scan(conn, state: dict, now: float, menu_alert: bool, alert: bool) -> list:
+    """Menu-parked track (Nazim #40469) — a SEPARATE, ALERT-ONLY pass over every LOCAL live
+    lane, INDEPENDENT of the wedge Signal-A gate (that gate + the 6h unread ceiling + gzb are
+    exactly why cc-scholar's 40h menu-park was invisible). Detect + LOG always (durable record,
+    ships detect-only); PAGE only when `menu_alert` (Nazim's staged gate, same shape as Phase-2).
+    It NEVER nudges/answers — the only action is an alert; the send-keys refusal is enforced
+    independently at the lane_nudge choke point, so this track is structurally answer-free."""
+    results: list = []
+    menu_state = state.setdefault("menu_agents", {})
+    try:
+        fleet_map, _ = lane_agent_map(conn)
+    except Exception:
+        fleet_map = {}
+    try:
+        status_map, _ = agent_status_lane_map(conn)
+    except Exception:
+        status_map = {}
+    a2b = merge_session_maps(status_map, fleet_map)
+    live = set(list_lane_sessions())
+    for sess in sorted(live):
+        entry = menu_state.get(sess)
+        verdict, entry = menu_evaluate(entry, _pane_is_menu(sess), now)
+        menu_state[sess] = entry
+        if verdict == V_MENU_CLEAR:
+            continue
+        elapsed_min = int((now - float(entry.get("menu_first_seen", now))) / 60)
+        if verdict == V_MENU_MONITORING:
+            results.append({"session": sess, "verdict": verdict,
+                            "note": f"menu {entry['menu_polls']}/{MENU_MIN_POLLS} polls, "
+                                    f"{elapsed_min}m/{MENU_GRACE_SEC//60}m"})
+            continue
+        # V_MENU_PARKED — stuck, bus-deaf. Log once per episode (durable record, any mode).
+        base = a2b.get(sess, sess)
+        if not entry.get("menu_logged"):
+            entry["menu_logged"] = now
+            log(f"MENU-PARKED {sess} ({base}): parked in a selection menu ~{elapsed_min}m "
+                f"({'ARMED:alert' if menu_alert else 'DETECT-ONLY'})")
+        paged = False
+        if menu_alert and alert and not entry.get("menu_alerted") and not _lane_snoozed(sess):
+            try:
+                bus = read_bus_signal(base, conn)
+            except Exception:
+                bus = BusSignal(0, 0.0, float("inf"))
+            obs = AgentObs(agent=base, kind="lane", session=sess, bus=bus,
+                           composer=ComposerSignal(COMP_MENU))
+            _page(_menu_trap_alert(obs, elapsed_min))
+            entry["menu_alerted"] = now
+            paged = True
+        results.append({"session": sess, "verdict": verdict, "base": base,
+                        "action": f"MENU-PARKED ~{elapsed_min}m — alert-only "
+                                  f"({'PAGED' if paged else ('would-page (unarmed)' if not menu_alert else 'already-alerted/snoozed')})"})
+    # Prune sessions no longer live (menu cleared by the lane going away).
+    for sess in list(menu_state.keys()):
+        if sess not in live:
+            menu_state.pop(sess, None)
+    return results
+
+
 def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
         injected: Optional[list[AgentObs]] = None, lane_dirs: Optional[dict] = None,
-        persist: Optional[bool] = None) -> int:
+        persist: Optional[bool] = None, menu_alert: bool = False) -> int:
     """One scan. `injected` (list[AgentObs]) + lane_dirs are the test seam. persist
     defaults to (mode != detect-only) so a manual detect run never mutates prod
     state with phantom episodes — but cross-scan episode tracking is needed even in
@@ -1328,6 +1438,7 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             dry = True
             persist = False
 
+    menu_results: list = []
     if injected is not None:
         observations = injected
         lane_dirs = lane_dirs or {}
@@ -1342,6 +1453,13 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             else:
                 conn = connect(dsn, connect_timeout=15)
                 observations = gather_observations(conn, state=state, alert=alert)
+                # Menu-parked track — independent of the wedge Signal-A gate; needs the live
+                # conn + tmux, so it runs here while the conn is open. Detection + log are
+                # ungated (safety); the PAGE is gated on menu_alert (ships detect-only).
+                try:
+                    menu_results = menu_parked_scan(conn, state, now, menu_alert, alert)
+                except Exception as e:
+                    log(f"menu-parked scan failed: {e}")
                 if lane_dirs is None:
                     _a2b, lane_dirs = lane_agent_map(conn)
         except Exception as e:
@@ -1531,15 +1649,20 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
 
     if as_json:
         print(json.dumps({"mode": mode, "alert": alert, "lease": lease_why,
-                          "results": results}, indent=2))
+                          "results": results, "menu_alert": menu_alert,
+                          "menu_results": menu_results}, indent=2))
     else:
         header = f"[lane-wedge] mode={mode} alert={'on' if alert else 'off'} " \
-                 f"agents={len(results)} lease={lease_why}"
+                 f"menu-alert={'on' if menu_alert else 'off'} " \
+                 f"agents={len(results)} menu={len(menu_results)} lease={lease_why}"
         print(header)
         for line in results:
             extra = line.get("note") or line.get("action") or ""
             print(f"  {line['verdict']:13} {str(line.get('agent')):18} "
                   f"unread={line.get('unread')} comp={line.get('composer')} {extra}")
+        for line in menu_results:
+            extra = line.get("note") or line.get("action") or ""
+            print(f"  {line['verdict']:15} {str(line.get('session')):18} {extra}")
     return 0
 
 
@@ -1648,6 +1771,10 @@ def main() -> int:
                          "Lease-gated. Overrides env LANE_WEDGE_ARM.")
     ap.add_argument("--alert", action="store_true",
                     help="page the operator (nazim-console) on a wedge / repeat-wedge / watchdog-down gap")
+    ap.add_argument("--menu-alert", action="store_true",
+                    help="ALSO page on a MENU-PARKED lane (alert-only; never answers a menu). "
+                         "Gated separately from --alert so the menu track ships DETECT-ONLY "
+                         "(log + state) until the operator arms it, same shape as Phase-2.")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--once", action="store_true", help="single scan (default; explicit for tests)")
     ap.add_argument("--loop", action="store_true", help="self-cadenced loop (LANE_WEDGE_LOOP_INTERVAL_SEC)")
@@ -1663,13 +1790,13 @@ def main() -> int:
         log(f"loop mode: interval={interval}s mode={mode} alert={args.alert}")
         while True:
             try:
-                run(mode=mode, alert=args.alert, as_json=args.json)
+                run(mode=mode, alert=args.alert, as_json=args.json, menu_alert=args.menu_alert)
             except Exception as e:  # a loop iteration must never kill the loop
                 import traceback
                 traceback.print_exc()
                 _page(f"🐛 Lane-wedge watchdog loop iteration crashed: {e}. Still looping; fix soon.")
             time.sleep(interval)
-    return run(mode=mode, alert=args.alert, as_json=args.json)
+    return run(mode=mode, alert=args.alert, as_json=args.json, menu_alert=args.menu_alert)
 
 
 if __name__ == "__main__":
