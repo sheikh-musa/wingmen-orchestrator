@@ -2,6 +2,8 @@
 -- ledger: silo=tscuymavysscrvoberrr
 -- assert: no_execute anon public.project_governance_audit_trigger()
 -- assert: search_path public.project_governance_audit_trigger()
+-- assert: no_execute anon public.project_governance_forbid_delete()
+-- assert: search_path public.project_governance_forbid_delete()
 -- (orchestrator substrate)
 --
 -- REVISED (2026-09-16, orch-console gate #40727 on PR#112 head e6e9c0c): 4 required
@@ -68,10 +70,9 @@
 -- this migration and a future console-write-path (Stage E, its own reviewed PR) writes here.
 -- anon gets nothing.
 --
--- NO -- assert: lines: this migration contains no REVOKE/DROP FUNCTION, so none of
--- apply_migration.py's three assert kinds (no_execute/search_path/dropped) apply. Wet-proved via
--- --dry-run instead (transcript posted to orch-console per the build order -- this migration is
--- NOT applied by cc-substrate; console applies via the sanctioned direct-psycopg pattern).
+-- ASSERTS (header lines 3-6): apply_migration.py proves EXECUTE is revoked from anon on both
+-- SECURITY DEFINER trigger functions and that their search_path is pinned; the dry-run is the
+-- wet-prove (transcript posted to orch-console; console applies via the direct-psycopg pattern).
 
 CREATE TABLE IF NOT EXISTS public.project_governance (
   project                  TEXT        PRIMARY KEY,
