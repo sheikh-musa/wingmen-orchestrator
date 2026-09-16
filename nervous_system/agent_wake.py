@@ -270,9 +270,19 @@ def rank_candidates(rows, agent_id: str) -> list[str]:
 
 def _candidate_sessions(agent_id: str) -> list[str]:
     """Registered tmux sessions for the agent, ITS OWN FIRST then its base family, freshest
-    first, with a mild preference for non-offline rows. NOTE (op#11297 #16880): does NOT
-    filter on status — an on-demand body that self-marks offline WHILE its pane is alive
-    still yields its session; liveness is decided by the pane, not the status field."""
+    first, with a mild preference for non-offline rows.
+
+    OFFLINE HANDLING — TWO rules that must BOTH survive; do NOT collapse to one:
+      * op#11297/#16880: the agent's OWN row (exact agent_id) is kept EVEN IF offline — an
+        on-demand body that self-marks offline WHILE its pane is alive still yields its
+        session; liveness is decided by the pane, not the status field. Dropping this is
+        silent wake loss for such a body.
+      * 2026-09-16 (Nazim #40426): base-family SIBLING rows (base match, different agent_id)
+        are dropped WHEN offline. A stale offline sibling was HIJACKING wakes — the phantom
+        cc-orchestrator-1 (base=cc-orchestrator, offline, tmux=substrate-cleanup, a pool-move
+        drift row) made a wake for the hub resolve to cc-substrate's LIVE pane. An offline
+        sibling must never be a wake target.
+    Net: keep offline only for the EXACT self; require non-offline for base-family siblings."""
     base = _base_family(agent_id)
     if not _DSN:
         return []
@@ -280,7 +290,8 @@ def _candidate_sessions(agent_id: str) -> list[str]:
         with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT agent_id, tmux_session FROM agent_status "
-                "WHERE (agent_id=%s OR base_agent_id=%s) AND tmux_session IS NOT NULL "
+                "WHERE tmux_session IS NOT NULL "
+                "  AND (agent_id=%s OR (base_agent_id=%s AND status<>'offline')) "
                 "ORDER BY (status<>'offline') DESC, last_heartbeat DESC NULLS LAST LIMIT 8",
                 (agent_id, base))
             return rank_candidates(cur.fetchall(), agent_id)

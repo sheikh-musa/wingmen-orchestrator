@@ -160,3 +160,43 @@ def test_wake_repeated_unverified_trips_loud_cap(_wake_ready, monkeypatch):
         agent_wake.wake_agent("cc-ihsanos", now=1000.0 + i * 50)
     capped = agent_wake.wake_agent("cc-ihsanos", now=1000.0 + 5 * 50)
     assert capped.get("cap_hit") is True and capped.get("alert_due") is True
+
+
+# ── _candidate_sessions offline-sibling filter (Nazim #40426; phantom hijack 2026-09-16) ──
+class _FakeCur:
+    def __init__(self, captured, rows):
+        self._captured, self._rows = captured, rows
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, sql, params):
+        self._captured["sql"] = " ".join(sql.split())
+        self._captured["params"] = params
+    def fetchall(self): return self._rows
+
+
+class _FakeConn:
+    def __init__(self, captured, rows): self._captured, self._rows = captured, rows
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def cursor(self): return _FakeCur(self._captured, self._rows)
+
+
+def test_candidate_sessions_keeps_own_offline_drops_offline_siblings(monkeypatch):
+    """Two rules must BOTH survive (op#11297 + Nazim #40426): the agent's OWN row is kept
+    even if offline (on-demand-offline-but-live, no silent wake loss), but an OFFLINE
+    base-family SIBLING is dropped so it can't hijack the wake (the phantom cc-orchestrator-1
+    -> cc-substrate misroute). This pins the surgical query shape so a later reader cannot
+    silently revert EITHER rule."""
+    captured = {}
+    monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
+    monkeypatch.setattr(agent_wake.psycopg, "connect",
+                        lambda *a, **k: _FakeConn(captured, [("cc-orchestrator", "orch")]))
+    out = agent_wake._candidate_sessions("cc-orchestrator")
+    sql, params = captured["sql"], captured["params"]
+    # The exact surgical predicate: self kept unconditionally (op#11297), sibling gated on
+    # non-offline (Nazim #40426). Pin the whole clause so neither half can be silently reverted.
+    assert "(agent_id=%s OR (base_agent_id=%s AND status<>'offline'))" in sql
+    # And the self clause is NOT itself status-gated (that would be the op#11297 regression).
+    assert "(agent_id=%s AND status" not in sql
+    assert params == ("cc-orchestrator", "cc-orchestrator")
+    assert out == ["orch"]  # flows through rank_candidates unchanged
