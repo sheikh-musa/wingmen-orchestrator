@@ -136,6 +136,11 @@ def build_lanes_query() -> Tuple[str, list]:
         "    AS heartbeat_age_s, "
         "  l.desired_state, "
         "  l.lane, "
+        # op#20716: the lane's REGISTRY model default (fleet_lanes.model) — the
+        # LAST-resort source for the per-row model chip (app.py precedence: live
+        # proc argv > boot string in current_task > this). Aliased so it can never
+        # be mistaken for the resolved `model` app.py stamps on the row.
+        "  l.model AS registry_model, "
         "  act.subject AS activity, "
         "  round(extract(epoch FROM (now() - act.created_at)))::int "
         "    AS activity_age_s "
@@ -150,7 +155,7 @@ def build_lanes_query() -> Tuple[str, list]:
         # lane==tmux_session gives each instance ITS OWN row; fall back to a
         # base_agent_id match for a lane whose session != its fleet_lanes.lane.
         "LEFT JOIN LATERAL ("
-        "  SELECT desired_state, lane FROM fleet_lanes fl "
+        "  SELECT desired_state, lane, model FROM fleet_lanes fl "
         "  WHERE fl.lane = s.tmux_session OR fl.base_agent_id = s.base_agent_id "
         "  ORDER BY (fl.lane = s.tmux_session) DESC "
         "  LIMIT 1"

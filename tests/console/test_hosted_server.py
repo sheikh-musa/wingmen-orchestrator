@@ -35,6 +35,7 @@ class _Upstream:
                 body = self.rfile.read(n) if n else b""
                 outer.calls.append({"method": self.command, "path": self.path,
                                     "auth": self.headers.get("Authorization"),
+                                    "armed": self.headers.get("X-Armed-Bearer"),
                                     "actor": self.headers.get("X-Wingmen-Hosted-Actor"),
                                     "body": json.loads(body) if body else None})
                 code, payload = outer.reply
@@ -250,6 +251,39 @@ def test_apply_armed_valid_proxied_and_upstream_503_passes_through(hosted, upstr
     upstream.reply = (503, {"error": "R4 armed apply is DISABLED"})
     r = httpx.post(hosted + "/api/apply-armed", headers=H(), json={"session": "cosem-tdu", "kind": "token", "confirm": "cosem-tdu"}, timeout=5)
     assert r.status_code == 503
+
+
+# ------------------------------------------------------------------ CAI-RESP-1434 armed-key pass-through
+def test_armed_key_forwarded_upstream_as_x_armed_bearer_on_reset_and_apply_only(hosted, upstream):
+    """The Mini now demands CONSOLE_ARMED_BEARER on /api/reset + /api/apply-armed even
+    from an allowlisted peer (this proxy). The phone's Authorization slot IS the hosted
+    bearer, so the operator's armed key rides X-Armed-Bearer and is forwarded UNCHANGED
+    for those two routes ONLY — the upstream bearer semantics are untouched."""
+    ak = "operator-armed-key-123"
+    r = httpx.post(hosted + "/api/reset", headers={**H(), "X-Armed-Bearer": ak},
+                   json={"body": "cai", "confirm": "cai"}, timeout=5)
+    assert r.status_code == 200
+    c = upstream.calls[-1]
+    assert c["path"] == "/api/reset" and c["armed"] == ak and c["auth"] == "Bearer " + UPTOK
+    r = httpx.post(hosted + "/api/apply-armed", headers={**H(), "X-Armed-Bearer": ak},
+                   json={"session": "cosem-tdu", "kind": "token", "confirm": "cosem-tdu"}, timeout=5)
+    assert r.status_code == 200
+    c = upstream.calls[-1]
+    assert c["path"] == "/api/apply-armed" and c["armed"] == ak and c["auth"] == "Bearer " + UPTOK
+    # NOT forwarded on the non-armed routes, even when the phone sends it
+    for route, body in (("/api/lane-boot", {"session": "cosem-tdu", "confirm": "cosem-tdu"}),
+                        ("/api/apply-dry-run", {"session": "cosem-tdu", "kind": "token"})):
+        r = httpx.post(hosted + route, headers={**H(), "X-Armed-Bearer": ak}, json=body, timeout=5)
+        assert r.status_code == 200
+        assert upstream.calls[-1]["path"] == route and upstream.calls[-1]["armed"] is None
+    # no key presented -> nothing forwarded (the Mini then 401s; the phone shows the prompt)
+    r = httpx.post(hosted + "/api/reset", headers=H(), json={"body": "cai", "confirm": "cai"}, timeout=5)
+    assert upstream.calls[-1]["armed"] is None
+    # the armed key never lands in the audit trail
+    upstream.reply = (401, {"error": "armed bearer required"})
+    r = httpx.post(hosted + "/api/reset", headers={**H(), "X-Armed-Bearer": ak},
+                   json={"body": "cai", "confirm": "cai"}, timeout=5)
+    assert r.status_code == 401 and r.json()["error"] == "armed bearer required"
 
 
 def test_apply_dry_run_needs_no_confirm_and_is_proxied(hosted, upstream):

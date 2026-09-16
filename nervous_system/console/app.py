@@ -217,6 +217,9 @@ _HELD_LANES = {"irsyad-import"}
 # (fail loud, op#10706 R2b fix (a)).
 _MODEL_ENV_BODIES = {"nazim", "cai", "fleet-health", "cc-orchestrator"}
 _SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# CAI-RESP-1434: the ARMED endpoints that require CONSOLE_ARMED_BEARER on top of
+# the IP allowlist (checked in do_POST right after _authed, before any other gate).
+_ARMED_BEARER_PATHS = ("/api/apply-armed", "/api/reset")
 
 # --- Lane BOOT / STAND-DOWN from the console (Musa op#20684/20687) ------------
 # Both shell ONLY to the existing vetted rail `scripts/lanes.sh` (`up <lane>` is
@@ -579,6 +582,70 @@ def _apply_queue_watcher() -> None:
         except Exception as e:  # noqa: BLE001 — a watcher must never die
             logger.warning("apply-queue watcher tick error: %s", e)
         time.sleep(_APPLY_QUEUE_POLL_S)
+
+
+# --- per-row MODEL (Musa op#20716) --------------------------------------------
+# Every lane tile + coordinator chip carries a MODEL chip without expanding. Source
+# precedence, per body:
+#   (a) "proc"     — the live process's --model argv on THIS host, via
+#                    panes.token_ground_truth(include_remote=False) rows keyed by
+#                    tmux session (only local Mini sessions can be seen this way);
+#   (b) "boot"     — the boot string a lane self-registers in agent_status.
+#                    current_task ("session-launch model=<m> repo=…") — how gzb /
+#                    remote lanes (cc-irsyad-*) report, since their proc is off-box;
+#   (c) "registry" — fleet_lanes.model, the lane's registry default (lanes only);
+#   else None (coordinators: (a) then None — never invented).
+# token_ground_truth shells `ps eww` + tmux and /api/fleet polls every ~8s, so the
+# proc read is CACHED module-level for ~20s (the /api/irsyad path calls it
+# uncached and is left alone). Never puts auth_fp in the model field.
+_BOOT_MODEL_RE = re.compile(r"session-launch model=(\S+)")
+_PROC_MODEL_TTL_S = 20.0
+# `at` is None until the first successful read: time.monotonic() is PROCESS-relative
+# on macOS (sub-second right after boot), so a 0.0 sentinel would read as "fresh"
+# and serve an EMPTY map for the console's first 20s (caught in the fc-v64 render).
+_PROC_MODEL_CACHE = {"at": None, "by_session": {}}
+_PROC_MODEL_LOCK = threading.Lock()
+
+
+def _proc_models() -> dict:
+    """{tmux_session: model} from the live local process truth, cached ~20s.
+    Any failure -> the last good map (or {}), never an exception into /api/fleet."""
+    now = time.monotonic()
+    with _PROC_MODEL_LOCK:
+        at = _PROC_MODEL_CACHE["at"]
+        if at is not None and now - at < _PROC_MODEL_TTL_S:
+            return dict(_PROC_MODEL_CACHE["by_session"])
+    by_session = {}
+    try:
+        for r in panes.token_ground_truth(include_remote=False).get("rows", []):
+            sess, model = r.get("session"), r.get("model")
+            if sess and model and r.get("host") == "Mini":
+                by_session[sess] = str(model)
+    except Exception as e:  # noqa: BLE001 — the fleet payload must never depend on ps
+        logger.warning("proc model read failed: %s", e)
+        with _PROC_MODEL_LOCK:
+            return dict(_PROC_MODEL_CACHE["by_session"])
+    with _PROC_MODEL_LOCK:
+        _PROC_MODEL_CACHE["at"] = now
+        _PROC_MODEL_CACHE["by_session"] = by_session
+    return dict(by_session)
+
+
+def _boot_model(current_task) -> "str | None":
+    m = _BOOT_MODEL_RE.search(current_task or "")
+    return m.group(1) if m else None
+
+
+def _resolve_model(session, current_task, registry_model, proc_models) -> tuple:
+    """(model, model_src) per the precedence above; (None, None) when unknown."""
+    if session and proc_models.get(session):
+        return proc_models[session], "proc"
+    b = _boot_model(current_task)
+    if b:
+        return b, "boot"
+    if registry_model:
+        return str(registry_model), "registry"
+    return None, None
 
 
 def _current_token_file_for(session: str) -> "pathlib.Path | None":
@@ -1464,9 +1531,16 @@ def _fleet_payload():
     # (orch on this Studio host) OR it's a cross-host coordinator we surface via a
     # DB-read activity feed (Nazim on the Mini — reverted from ssh to a DB read,
     # operator #3729). The DB source is always available, so no reachability probe.
+    # op#20715/20716: singletons are on keys + models too. Stamp the SAME `pool`
+    # nickname + `model`/`model_src` fields the lane rows carry, so fleet.js reads
+    # one key on both surfaces (the hosted view strips auth_fp; `pool` is safe).
+    # Coordinators: proc truth only, else None — never a guess.
+    _proc_models_by_sess = _proc_models()
     for c in coordinators:
         sess = c.get("tmux_session")
         c["peekable"] = bool(sess and (sess in live or sess in _COORD_DB_PEEK))
+        c["pool"] = pools.pool_for_fp(c.get("auth_fp"))
+        c["model"], c["model_src"] = _resolve_model(sess, None, None, _proc_models_by_sess)
         # Each coordinator card carries its OWN context readout (op#9088), from
         # the same source + thresholds as the context-bloat list. #25436: suppress a
         # frozen pre-reset ghost via SESSION SUPERSESSION (a recycled coordinator —
@@ -1500,6 +1574,10 @@ def _fleet_payload():
         # op#20684: pool NICKNAME alongside the fp — the same field the hosted
         # (fp-less) payload carries, so fleet.js reads one key on both consoles.
         l["pool"] = pools.pool_for_fp(l.get("auth_fp"))
+        # op#20716: per-row MODEL chip — proc truth > boot string > registry default.
+        l["model"], l["model_src"] = _resolve_model(
+            l.get("tmux_session") or l.get("lane"), l.get("current_task"),
+            l.pop("registry_model", None), _proc_models_by_sess)
         # fc-v52: the lane's FAMILY (irsyad / cosem / ihsanos …), via the SAME
         # helper the token resolver + GAP-B grouping use — so the spine can sort
         # all of a family's instances together (operator ask). Derived from the
@@ -1970,6 +2048,20 @@ def _make_handler(feedloop: "_FeedLoop"):
             if not self._authed():
                 auth.audit(self._client(), path, "401")
                 return self._json(401, {"error": "unauthorized"})
+            # CAI-RESP-1434 (re-enable precondition): the two ARMED endpoints need a
+            # SECOND factor beyond the IP allowlist — CONSOLE_ARMED_BEARER, checked
+            # here for EVERY caller incl. an allowlisted peer (a co-located process
+            # on the Mini could otherwise fire a reset/apply with no credential).
+            # Runs BEFORE any other gate (R4 flag, body parse) so an unkeyed caller
+            # learns nothing past 401/503. Unconfigured key = 503 (fail-closed).
+            if path in _ARMED_BEARER_PATHS:
+                ok_b, why_b = auth.check_armed_bearer(dict(self.headers))
+                if not ok_b:
+                    if why_b == "unconfigured":
+                        auth.audit(self._client(), path, "503-bearer-unconfigured")
+                        return self._json(503, {"error": "armed bearer not configured"})
+                    auth.audit(self._client(), path, "401-bearer")
+                    return self._json(401, {"error": "armed bearer required"})
             # R3 apply DRY-RUN: preview making a default live (no relaunch).
             if path == "/api/apply-dry-run":
                 return self._handle_apply_dry_run()

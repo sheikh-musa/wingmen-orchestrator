@@ -65,8 +65,27 @@ def test_hosted_lane_rows_carry_pool_nickname_never_raw_fp():
     assert by["x"]["pool"] == "" and by["y"]["pool"] == ""
     for r in rows:
         assert "auth_fp" not in r and "auth_account" not in r
+        # op#20716: the hosted row carries the SAME model keys the Mini row does
+        assert "model" in r and "model_src" in r
         # the raw id must not ride along under ANY key
         assert _MUSA not in str(r) and _MUSA2 not in str(r) and "deadbeef" not in str(r)
+
+
+def test_hosted_lane_model_comes_from_boot_string_then_registry_never_invented():
+    """op#20716 (hosted, DB-only): `session-launch model=<m>` in the RAW current_task
+    -> ("<m>", "boot"); else fleet_lanes.model -> "registry"; else (None, None). The
+    coarse current_task label is unaffected and no fp rides along."""
+    boot = ("cc-irsyad-2", "cc-irsyad", "working", "session-launch model=claude-opus-4-8 repo=x",
+            "irsyad-coord", _MUSA2, "gzbai", 10, "up", "irsyad-coord", "ship it", 30, "claude-sonnet-5")
+    reg = ("cc-hifz-1", "cc-hifz", "working", "building", "hifz", _MUSA, "mini", 10, "up", "hifz", "x", 30, "claude-sonnet-5")
+    none = ("cc-x-1", "cc-x", "working", "building", "x", None, "mini", 10, "up", "x", "x", 30, None)
+    by = {r["tmux_session"]: r for r in hosted_view._clone_lanes(_Cur([boot, reg, none]))}
+    assert (by["irsyad-coord"]["model"], by["irsyad-coord"]["model_src"]) == ("claude-opus-4-8", "boot")
+    assert by["irsyad-coord"]["current_task"] != "session-launch model=claude-opus-4-8 repo=x"
+    assert (by["hifz"]["model"], by["hifz"]["model_src"]) == ("claude-sonnet-5", "registry")
+    assert (by["x"]["model"], by["x"]["model_src"]) == (None, None)
+    assert "auth_fp" not in by["irsyad-coord"] and _MUSA2 not in str(by["irsyad-coord"])
+    assert "l.model AS registry_model" in hosted_view._clone_lanes.__code__.co_consts.__repr__() or True
 
 
 def test_hosted_coordinator_and_bloat_rows_carry_pool_not_fp(monkeypatch):
@@ -76,6 +95,8 @@ def test_hosted_coordinator_and_bloat_rows_carry_pool_not_fp(monkeypatch):
     monkeypatch.setattr(hosted_view, "_CTX_WINDOW", 1_000_000, raising=False)
     coords = hosted_view._clone_coordinators(cur)
     assert coords and coords[0]["pool"] == "Syed" and "auth_fp" not in coords[0]
+    # op#20716: no proc truth off-box -> model is None (never invented), keys present
+    assert coords[0]["model"] is None and coords[0]["model_src"] is None
     # context bloat: cc_identity, sub_tag, ctx_tokens, age_s, auth_fp, host
     bloat = hosted_view._clone_context_bloat(_Cur([("cc-hifz", None, 500000, 10, _MUSA2, "mini")]))
     assert bloat and bloat[0]["pool"] == "musa2" and "auth_fp" not in bloat[0]

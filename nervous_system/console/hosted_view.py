@@ -121,6 +121,21 @@ _ACTIVITY = [
 ]
 
 
+_BOOT_MODEL_RE = re.compile(r"session-launch model=(\S+)")
+
+
+def _model_from_db(current_task: Optional[str], registry_model: Optional[str]) -> tuple:
+    """(model, model_src) for a hosted (DB-only) row: the boot string's
+    `session-launch model=<m>` -> "boot"; else fleet_lanes.model -> "registry";
+    else (None, None). Same precedence tail as app.py._resolve_model (op#20716)."""
+    m = _BOOT_MODEL_RE.search(current_task or "")
+    if m:
+        return m.group(1), "boot"
+    if registry_model:
+        return str(registry_model), "registry"
+    return None, None
+
+
 def coarse_task(current_task: Optional[str]) -> Optional[str]:
     """Reduce a raw current_task to a coarse activity label, THEN scrub — so no
     project/$/client specifics ride along even if a verb match is missed."""
@@ -285,7 +300,8 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
     # the columns fleet.js reads. Coordinators are excluded (own cards).
     cur.execute(
         "SELECT agent_id, base_agent_id, status, current_task, tmux_session, "
-        "  auth_fp, host, heartbeat_age_s, desired_state, lane, activity, activity_age_s "
+        "  auth_fp, host, heartbeat_age_s, desired_state, lane, activity, activity_age_s, "
+        "  registry_model "
         "FROM ( "
         "  SELECT DISTINCT ON (COALESCE(s.tmux_session, s.agent_id)) "
         "    s.agent_id, s.base_agent_id, s.status, s.current_task, s.tmux_session, "
@@ -293,7 +309,10 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
         "    round(extract(epoch FROM (now() - s.last_heartbeat)))::int AS heartbeat_age_s, "
         "    l.desired_state, l.lane, "
         "    act.subject AS activity, "
-        "    round(extract(epoch FROM (now() - act.created_at)))::int AS activity_age_s "
+        "    round(extract(epoch FROM (now() - act.created_at)))::int AS activity_age_s, "
+        # op#20716: registry model default (fleet_lanes.model) — last-resort model
+        # source for the hosted row (mirrors db.py build_lanes_query).
+        "    l.model AS registry_model "
         "  FROM agent_status s "
         # obs-2 (op#10550): PREFER the fleet_lanes row whose `lane` == this
         # instance's live tmux_session. A multi-lane FAMILY (the irsyad perimeter:
@@ -304,7 +323,7 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
         # gives each instance ITS OWN row; fall back to a base match for a lane whose
         # session != its fleet_lanes.lane. (Mirrors db.py build_lanes_query exactly.)
         "  LEFT JOIN LATERAL ( "
-        "    SELECT desired_state, lane FROM fleet_lanes fl "
+        "    SELECT desired_state, lane, model FROM fleet_lanes fl "
         "    WHERE fl.lane = s.tmux_session OR fl.base_agent_id = s.base_agent_id "
         "    ORDER BY (fl.lane = s.tmux_session) DESC "
         "    LIMIT 1 "
@@ -321,7 +340,12 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
     for r in cur.fetchall():
         agent_id, base_agent_id, status, current_task, tmux_session = r[0], r[1], r[2], r[3], r[4]
         auth_fp, host, hb, desired_state, lane, activity, activity_age_s = r[5], r[6], r[7], r[8], r[9], r[10], r[11]
+        registry_model = r[12] if len(r) > 12 else None
         state, flagged = _lane_bucket_db(hb, activity_age_s, desired_state)
+        # op#20716: hosted model source — the VPS has no live proc, so (b) the boot
+        # string in the RAW current_task (parsed BEFORE coarse_task genericises it),
+        # else (c) the registry default, else None. A model id is not a client term.
+        model, model_src = _model_from_db(current_task, registry_model)
         # Dead-instance drop (mirrors app.py op#9770): offline + not flagged +
         # heartbeat older than the stale-drop threshold = a dead lane, never render.
         if state == "offline" and not flagged and hb is not None and hb > _LANE_STALE_DROP_S:
@@ -339,6 +363,7 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
             activity_age_s=activity_age_s,
             activity=scrub_field(activity),
             current_task=coarse_task(current_task),  # coarse label, then generic — never raw
+            model=model, model_src=model_src,
             bucket=state,
             flagged=flagged,
         ))
@@ -390,6 +415,7 @@ def _clone_coordinators(cur) -> List[Dict[str, Any]]:
             activity_age_s=activity_age_s,
             last_seen_s=activity_age_s,  # bus-only liveness signal (DB-only degrade)
             pool=pools.pool_for_fp(auth_fp), host=host,
+            model=None, model_src=None,  # op#20716: no proc truth off-box — never invented
             ctx_pct=ctx_pct, ctx_level=ctx_level,
             peekable=False,              # no live pane on the public host -> no peek affordance
         ))

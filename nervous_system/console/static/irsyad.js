@@ -221,7 +221,7 @@
   });
 
   // ── version badge (matches fleet.js): baked APP_BUILD vs server /api/version ──
-  var APP_BUILD = 'fc-v63';
+  var APP_BUILD = 'fc-v64';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(sv, sha) {
     var el = $("build");

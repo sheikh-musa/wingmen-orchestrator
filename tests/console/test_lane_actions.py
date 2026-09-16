@@ -19,6 +19,10 @@ from nervous_system.console import db
 def server(monkeypatch, tmp_path):
     monkeypatch.setenv("CONSOLE_ALLOWED_IPS", "203.0.113.9")
     monkeypatch.setenv("CONSOLE_BREAKGLASS_TOKEN", "test-console-token")
+    # CAI-RESP-1434: the armed endpoints need the SECOND factor on top of access;
+    # configured here so these tests exercise the gates BEHIND it (see
+    # test_armed_bearer.py for the gate itself).
+    monkeypatch.setenv("CONSOLE_ARMED_BEARER", "test-armed-key")
     monkeypatch.setenv("CONSOLE_ACCESS_LOG", str(tmp_path / "console_access.log"))
     monkeypatch.setattr(db, "fetch_messages", lambda limit=50, thread=None, agent=None: [])
     monkeypatch.setattr(db, "fetch_lanes", lambda: [])
@@ -41,6 +45,12 @@ def server(monkeypatch, tmp_path):
 
 def H(tok="test-console-token"):
     return {"Authorization": f"Bearer {tok}"}
+
+
+def HA(tok="test-console-token"):
+    """Access via breakglass (Authorization) + the armed key in its OWN slot
+    (X-Armed-Bearer) — the phone's shape when off-tailnet (CAI-RESP-1434)."""
+    return {**H(tok), "X-Armed-Bearer": "test-armed-key"}
 
 
 OK = MagicMock(returncode=0, stdout="BOOTED cosem-tdu → tmux session 'cosem-tdu' (/x)\n", stderr="")
@@ -154,9 +164,9 @@ def test_apply_armed_503_without_r4_flag(server, monkeypatch):
     monkeypatch.setattr(console_app, "_R4_ENABLED", False)
     p1, p2, p3 = _armed_patches()
     with p1, p2, p3, patch("subprocess.run") as run:
-        r = httpx.post(server + "/api/apply-armed", headers=H(),
+        r = httpx.post(server + "/api/apply-armed", headers=HA(),
                        json={"session": "cosem-tdu", "kind": "token", "confirm": "cosem-tdu"}, timeout=5)
-    assert r.status_code == 503
+    assert r.status_code == 503 and "R4 armed apply is DISABLED" in r.json()["error"]
     run.assert_not_called()
 
 
@@ -164,7 +174,7 @@ def test_apply_armed_confirm_mismatch_400_no_subprocess(server, monkeypatch):
     monkeypatch.setattr(console_app, "_R4_ENABLED", True)
     p1, p2, p3 = _armed_patches()
     with p1, p2, p3, patch("subprocess.run") as run:
-        r = httpx.post(server + "/api/apply-armed", headers=H(),
+        r = httpx.post(server + "/api/apply-armed", headers=HA(),
                        json={"session": "cosem-tdu", "kind": "token", "confirm": "cosem-td"}, timeout=5)
     assert r.status_code == 400
     run.assert_not_called()
@@ -178,7 +188,7 @@ def test_apply_armed_fires_with_flag_and_typed_confirm_and_NO_bridge_arm(server,
     p1, p2, p3 = _armed_patches()
     ok = MagicMock(returncode=0, stdout="switched\n", stderr="")
     with p1 as resolve, p2, p3 as arm, patch("subprocess.run", return_value=ok) as run:
-        r = httpx.post(server + "/api/apply-armed", headers=H(),
+        r = httpx.post(server + "/api/apply-armed", headers=HA(),
                        json={"session": "cosem-tdu", "kind": "token", "confirm": "cosem-tdu"}, timeout=5)
     assert r.status_code == 200 and r.json()["ok"] is True
     arm.assert_not_called()
@@ -196,7 +206,7 @@ def test_apply_armed_resolver_rules_still_fail_closed(server, monkeypatch):
     with patch.object(console_app, "_resolve_armed_apply", return_value=(None, None, "forbidden token (gazzabyte)")), \
          patch.object(console_app, "_lane_busy", return_value=False), \
          patch("subprocess.run") as run:
-        r = httpx.post(server + "/api/apply-armed", headers=H(),
+        r = httpx.post(server + "/api/apply-armed", headers=HA(),
                        json={"session": "cosem-tdu", "kind": "token", "confirm": "cosem-tdu"}, timeout=5)
     assert r.status_code == 400 and "gazzabyte" in r.json()["error"]
     run.assert_not_called()

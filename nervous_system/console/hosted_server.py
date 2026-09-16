@@ -255,7 +255,13 @@ class _Handler(BaseHTTPRequestHandler):
             _audit(self.client_address[0], path, "400")
             self._json(400, {"error": "bad request"})
             return
-        code, payload = _ACTION_ROUTES[path](self.client_address[0], body)
+        # CAI-RESP-1434: the operator's ARMED key rides X-Armed-Bearer (the
+        # Authorization slot here IS the hosted bearer). Handed ONLY to the two
+        # armed routes' handlers, which forward it upstream; never logged.
+        armed = (self.headers.get("X-Armed-Bearer") or "").strip() if path in _ARMED_FORWARD_PATHS else ""
+        handler = _ACTION_ROUTES[path]
+        code, payload = handler(self.client_address[0], body, armed) if path in _ARMED_FORWARD_PATHS \
+            else handler(self.client_address[0], body)
         self._json(code, payload)
 
     def log_message(self, *a):  # quiet — no request logging (privacy)
@@ -283,6 +289,14 @@ import urllib.request      # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 
 _SESSION_RE = _re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# CAI-RESP-1434: the Mini's app.py now requires CONSOLE_ARMED_BEARER on these two
+# routes even from an allowlisted peer (this proxy included). The phone sends the
+# operator's armed key as `X-Armed-Bearer` (its Authorization header is the hosted
+# bearer, so that slot is taken); this wrapper forwards it upstream UNCHANGED for
+# these two routes ONLY — lane-boot / lane-down / dry-run / assign never see it.
+# The upstream's own `Authorization: Bearer <CONSOLE_UPSTREAM_TOKEN>` semantics are
+# kept as-is; app.py accepts the armed key from either slot.
+_ARMED_FORWARD_PATHS = ("/api/reset", "/api/apply-armed")
 _AGENT_RE = _re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 # The three resettable singletons — MIRRORS app.py RESET_ACTIONS exactly (the
@@ -337,8 +351,10 @@ def _upstream_token() -> str:
     return os.environ.get("CONSOLE_UPSTREAM_TOKEN") or os.environ.get("CONSOLE_TOKEN") or ""
 
 
-def _proxy(base: str, method: str, path: str, body, timeout: int = 200):
-    """Forward one request to an upstream console. Returns (status, json|{error})."""
+def _proxy(base: str, method: str, path: str, body, timeout: int = 200, armed: str = ""):
+    """Forward one request to an upstream console. Returns (status, json|{error}).
+    `armed` (CAI-RESP-1434) = the operator's armed key, forwarded as X-Armed-Bearer;
+    only the reset / apply-armed handlers ever pass it."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method)
     req.add_header("Content-Type", "application/json")
@@ -346,6 +362,8 @@ def _proxy(base: str, method: str, path: str, body, timeout: int = 200):
     tok = _upstream_token()
     if tok:
         req.add_header("Authorization", "Bearer " + tok)
+    if armed and path in _ARMED_FORWARD_PATHS:
+        req.add_header("X-Armed-Bearer", armed)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — operator-configured tailnet URL
             return resp.status, _parse_json(resp.read())
@@ -405,7 +423,7 @@ def _resolve_upstream_for(session: str):
 
 
 # ---- the actions -----------------------------------------------------------------------
-def _act_reset(client: str, body: dict):
+def _act_reset(client: str, body: dict, armed: str = ""):
     target = str(body.get("body") or "").strip()
     confirm = str(body.get("confirm") or "").strip()
     if target not in _RESET_BODIES:
@@ -419,7 +437,7 @@ def _act_reset(client: str, body: dict):
         _audit(client, f"/api/reset:{target}", "503")
         return 503, {"error": "no upstream console configured — reset not available here"}
     _audit(client, f"/api/reset:{target}", "proxy")
-    code, payload = _proxy(up, "POST", "/api/reset", {"body": target})
+    code, payload = _proxy(up, "POST", "/api/reset", {"body": target}, armed=armed)
     _audit(client, f"/api/reset:{target}", str(code))
     return code, payload
 
@@ -461,7 +479,9 @@ def _act_lane(action: str):
 def _act_apply(armed: bool):
     route = "/api/apply-armed" if armed else "/api/apply-dry-run"
 
-    def handler(client: str, body: dict):
+    def handler(client: str, body: dict, armed_key: str = ""):
+        # `armed` (closure) = this is the ARMED route; `armed_key` = the operator's
+        # X-Armed-Bearer to forward (CAI-RESP-1434) — only meaningful when armed.
         session = str(body.get("session") or "").strip()
         kind = str(body.get("kind") or "").strip().lower()
         confirm = str(body.get("confirm") or "").strip()
@@ -484,7 +504,8 @@ def _act_apply(armed: bool):
         if armed:
             fwd["confirm"] = confirm
         _audit(client, f"{route}:{kind}:{session}@{host}", "proxy")
-        code, payload = _proxy(up, "POST", route, fwd, timeout=200 if armed else 45)
+        code, payload = _proxy(up, "POST", route, fwd, timeout=200 if armed else 45,
+                               armed=(armed_key if armed else ""))
         _audit(client, f"{route}:{kind}:{session}@{host}", str(code))
         return code, payload
     return handler

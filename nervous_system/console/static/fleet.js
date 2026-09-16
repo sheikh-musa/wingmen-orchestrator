@@ -75,32 +75,91 @@
     if (cls) return '<span class="tok ' + cls + '" title="' + esc(fp || pool) + '">' + esc(pool) + '</span>';
     return fp ? '<span class="tok other" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 6)) + '</span>' : '';
   }
+  // Per-row MODEL chip (Musa op#20716) — visible WITHOUT expanding, next to the key
+  // chip on every tile + coordinator chip. `model` is the backend-resolved id,
+  // `src` its provenance: "proc" = the live process argv (ground truth); "boot" =
+  // declared in the lane's boot string; "registry" = fleet_lanes default. A non-proc
+  // source renders with a leading "~" (declared, not observed). Unknown => NOTHING
+  // (never "null"). Never carries an fp.
+  var MODEL_SRC_TITLE = { proc: "model (live process)", boot: "model (declared at boot)", registry: "model (registry default)" };
+  function mdlChip(model, src) {
+    var m = shortModel(model);
+    if (!m) return "";
+    var approx = src !== "proc";
+    return '<span class="tok mdl' + (approx ? " approx" : "") + '" title="' + esc(MODEL_SRC_TITLE[src] || "model") + '">' +
+      (approx ? "~" : "") + esc(m) + '</span>';
+  }
+  // CAI-RESP-1434: the operator's ARMED key — the second factor app.py now requires
+  // on /api/reset + /api/apply-armed even from an allowlisted IP. Lives ONLY in
+  // localStorage('fc.armedKey'); rides ONLY those two POSTs as X-Armed-Bearer (the
+  // Authorization slot is the breakglass / hosted bearer); never logged, never in a
+  // payload or URL.
+  var ARMED_KEY_LS = "fc.armedKey";
+  function armedKey() { try { return localStorage.getItem(ARMED_KEY_LS) || ""; } catch (e) { return ""; } }
+  function setArmedKey(v) { try { if (v) localStorage.setItem(ARMED_KEY_LS, v); else localStorage.removeItem(ARMED_KEY_LS); } catch (e) {} }
+  function armedHeaders() { var k = armedKey(); return k ? { "X-Armed-Bearer": k } : {}; }
+  function armedKeyMissing() {
+    toast("armed key required — set it in Lane manager", true);
+    var inp = $("armedKey");
+    if (inp) { inp.classList.add("miss"); try { inp.focus(); } catch (e) {} }
+  }
   // At-a-glance "which lanes are on which key" (op#20684): EVERY lane with a known
   // key counted per pool, in POOL_FP order, unknown-key lanes last as "?". This is
   // an ASSIGNMENT question, not a liveness one (Musa, fc-v63): a cross-host lane
   // (irsyad on gzb reads offline/DARK from the Mini) is still ON its key, so it
   // is counted — dropping it made musa2 vanish from the roll-up while a musa2
   // lane sat visibly on the board. Only a lane with no key info is skipped.
-  // Pure — returns { counts: {pool: n}, total: n, html } for the #keyRoll row.
-  function poolRollup(lanes, active) {
-    var counts = {}, total = 0;
+  // Musa op#20715 (fc-v64): the SINGLETONS (coordinators — Hub, Nazim, cai, SRE,
+  // Finance, Quality) are on keys too, so each chip total = lanes + singletons on
+  // that pool, with the split visible in the chip title ("Musa: 3 lanes + 4
+  // singletons") and in the tapped hint line.
+  // Pure — returns { counts: {pool: total}, lanes: {pool: n}, singletons: {pool: n},
+  // total, html } for the #keyRoll row.
+  function poolKey(o) { return poolOf(o) || (o && o.auth_fp ? "?" : ""); }
+  function poolRollup(lanes, coordinators, active) {
+    var counts = {}, laneN = {}, singN = {}, total = 0;
     (lanes || []).forEach(function (l) {
-      if (!l) return;
-      var p = poolOf(l) || (l.auth_fp ? "?" : "");
-      if (!p) return;
-      counts[p] = (counts[p] || 0) + 1; total++;
+      var p = poolKey(l); if (!p) return;
+      counts[p] = (counts[p] || 0) + 1; laneN[p] = (laneN[p] || 0) + 1; total++;
+    });
+    (coordinators || []).forEach(function (c) {
+      var p = poolKey(c); if (!p) return;
+      counts[p] = (counts[p] || 0) + 1; singN[p] = (singN[p] || 0) + 1; total++;
     });
     var order = POOL_FP.map(function (x) { return x[1]; });
     Object.keys(counts).forEach(function (k) { if (order.indexOf(k) < 0) order.push(k); });
+    function split(p) {
+      var ln = laneN[p] || 0, sn = singN[p] || 0;
+      return ln + " lane" + (ln === 1 ? "" : "s") + " + " + sn + " singleton" + (sn === 1 ? "" : "s");
+    }
     var chips = order.filter(function (p) { return counts[p]; }).map(function (p) {
       var cls = POOL_CLS[p] || "other", on = active && active === p;
+      var name = p === "?" ? "unknown" : p;
       return '<button type="button" class="krchip tok ' + cls + (on ? " on" : "") + '" data-pool="' + esc(p) + '"' +
-        ' title="' + esc(counts[p] + " lane" + (counts[p] === 1 ? "" : "s") + " assigned to " + (p === "?" ? "an unknown key" : p)) + '">' +
-        esc(p === "?" ? "unknown" : p) + '<b>' + counts[p] + '</b></button>';
+        ' title="' + esc(name + ": " + split(p)) + '">' + esc(name) + '<b>' + counts[p] + '</b></button>';
     });
-    var html = chips.length ? '<span class="krl">keys</span>' + chips.join("") +
-      (active ? '<span class="krhint">showing ' + esc(active === "?" ? "unknown" : active) + ' · tap again for all</span>' : "") : "";
-    return { counts: counts, total: total, html: html };
+    var hint;
+    if (active) hint = "showing " + (active === "?" ? "unknown" : active) + " · " + (laneN[active] || 0) + " lane" + ((laneN[active] || 0) === 1 ? "" : "s") +
+      " · " + (singN[active] || 0) + " singleton" + ((singN[active] || 0) === 1 ? "" : "s") + " · tap again for all";
+    else hint = "lanes + singletons";
+    var html = chips.length ? '<span class="krl">keys</span>' + chips.join("") + '<span class="krhint">' + esc(hint) + '</span>' : "";
+    return { counts: counts, lanes: laneN, singletons: singN, total: total, html: html };
+  }
+  // Collapsed "idle & fine" group (Musa op#20716): the key split + model split
+  // INLINE so nothing needs expanding. Pure — { keys: [[pool, n]…] in POOL_FP order
+  // (unknown-key lanes skipped), models: [[shortModel, n]…] by count desc, names }.
+  function routineSummary(routine) {
+    var kc = {}, mc = {};
+    (routine || []).forEach(function (l) {
+      var p = poolOf(l); if (p) kc[p] = (kc[p] || 0) + 1;
+      var m = shortModel(l && l.model); if (m) mc[m] = (mc[m] || 0) + 1;
+    });
+    var korder = POOL_FP.map(function (x) { return x[1]; });
+    Object.keys(kc).forEach(function (k) { if (korder.indexOf(k) < 0) korder.push(k); });
+    var keys = korder.filter(function (p) { return kc[p]; }).map(function (p) { return [p, kc[p]]; });
+    var models = Object.keys(mc).map(function (m) { return [m, mc[m]]; })
+      .sort(function (a, b) { return b[1] - a[1] || (a[0] < b[0] ? -1 : 1); });
+    return { keys: keys, models: models, names: (routine || []).map(function (l) { return l.agent_id; }) };
   }
 
   // Which reset "body" the console can clear (POST /api/reset). Only the three
@@ -228,7 +287,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v63';
+  var APP_BUILD = 'fc-v64';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -541,31 +600,44 @@
     var act = (live.running && live.activity) || l.activity || l.current_task || "";
     var picked = multiMode && selected[sess];
     var badge = (l.flagged && l.bucket === "offline") ? '<span class="badge">dark</span>' : "";
-    var pool = poolOf(l), tok = tokChip(l.auth_fp, pool);
+    var pool = poolOf(l), tok = tokChip(l.auth_fp, pool), mdl = mdlChip(l.model, l.model_src);
     // key roll-up filter (op#20684): a tile off the tapped pool dims, never hides —
     // the operator still sees the whole fleet, just with that key's lanes lit.
     var off = poolFilter && (poolFilter === "?" ? (pool || !l.auth_fp) : pool !== poolFilter);
+    // op#20716: key + model chips stacked at the tile's right edge (no expand needed).
+    var pills = (tok || mdl) ? '<div class="pills">' + tok + mdl + '</div>' : "";
     return '<div class="tile ' + esc(cls) + (picked ? " picked" : "") + (off ? " offpool" : "") + '" data-lane="' + esc(sess) + '" data-pool="' + esc(pool) + '">' +
       ringHtml(disp, picked) +
       '<div class="idw"><div class="id"><span class="stdot ' + esc(l.bucket) + '"></span>' + esc(l.agent_id) + badge + '</div>' +
         (act ? '<div class="act">' + esc(act) + '</div>' : '<div class="act">' + esc(l.bucket) + '</div>') +
-      '</div>' + tok + '<span class="chev">›</span></div>';
+      '</div>' + pills + '<span class="chev">›</span></div>';
   }
   var routineExpanded = false;
   var poolFilter = "";   // key roll-up: tapped pool nickname ("" = show all)
+  var lastCoords = [];   // op#20715: the singletons feed the key roll-up + dim on filter
   function renderKeyRoll(lanes) {
     var el = $("keyRoll");
     if (!el) return;
-    var r = poolRollup(lanes, poolFilter);
-    if (poolFilter && !r.counts[poolFilter]) { poolFilter = ""; r = poolRollup(lanes, ""); }
+    var r = poolRollup(lanes, lastCoords, poolFilter);
+    if (poolFilter && !r.counts[poolFilter]) { poolFilter = ""; r = poolRollup(lanes, lastCoords, ""); }
     el.innerHTML = r.html;
     el.querySelectorAll(".krchip[data-pool]").forEach(function (b) {
       b.addEventListener("click", function () {
         var p = b.getAttribute("data-pool");
         poolFilter = (poolFilter === p) ? "" : p;
+        renderCoordinators(lastCoords);   // off-pool singleton chips dim too (op#20715)
         renderLanes(lastLanes);
       });
     });
+  }
+  function collapsedHtml(routine) {
+    var s = routineSummary(routine);
+    var bits = s.keys.map(function (k) { return '<span class="cs ' + esc(POOL_CLS[k[0]] || "other") + '">' + esc(k[0]) + ' ' + k[1] + '</span>'; })
+      .concat(s.models.map(function (m) { return '<span class="cs mdl">' + esc(m[0]) + ' ' + m[1] + '</span>'; }));
+    return '<div class="collapsed" id="routineToggle"><span class="ctog">' + (routineExpanded ? "▾" : "▸") + '</span>' +
+      '<div class="cbody"><div class="cl1"><b>' + routine.length + ' lane' + (routine.length > 1 ? "s" : "") + '</b> <span>idle &amp; fine</span>' +
+        (bits.length ? '<span class="csep">·</span>' + bits.join('<span class="csep">·</span>') : "") + '</div>' +
+      '<div class="cnames">' + esc(s.names.slice(0, 6).join(", ")) + (s.names.length > 6 ? "…" : "") + '</div></div></div>';
   }
   function renderLanes(lanes) {
     lastLanes = lanes;
@@ -574,9 +646,8 @@
     var routine = lanes.filter(function (l) { return !(l.bucket === "working" || l.flagged); });
     var html = primary.map(tileHtml).join("");
     if (routine.length) {
-      html += '<div class="collapsed" id="routineToggle">' + (routineExpanded ? "▾" : "▸") +
-        ' <b>' + routine.length + ' lane' + (routine.length > 1 ? "s" : "") + '</b> idle &amp; fine — ' +
-        esc(routine.map(function (l) { return l.agent_id; }).slice(0, 6).join(", ")) + (routine.length > 6 ? "…" : "") + '</div>' +
+      // op#20716: the collapsed group carries its key split + model split INLINE.
+      html += collapsedHtml(routine) +
         '<div id="routine" style="display:' + (routineExpanded ? "block" : "none") + '">' + routine.map(tileHtml).join("") + '</div>';
     }
     $("lanes").innerHTML = html || '<div class="empty">No lanes.</div>';
@@ -585,7 +656,7 @@
     if (t) t.addEventListener("click", function () {
       routineExpanded = !routineExpanded;
       $("routine").style.display = routineExpanded ? "block" : "none";
-      t.firstChild.textContent = (routineExpanded ? "▾" : "▸") + " ";
+      var tg = t.querySelector(".ctog"); if (tg) tg.textContent = routineExpanded ? "▾" : "▸";
       bindTiles();
     });
     bindTiles();
@@ -602,16 +673,22 @@
   }
 
   // ---- coordinators (compact chip row) --------------------------------------
+  // op#20715/20716: a third line carries the singleton's KEY + MODEL chips (same
+  // pills as a lane tile), and a chip off the tapped pool dims like a tile.
   function coordChip(c) {
     var sess = c.tmux_session || c.agent_id;
     var lvl = c.ctx_level || "";
     var cc = c.ctx_pct != null ? (c.ctx_pct + "% ctx") : (c.last_seen_s != null ? fmtAge(c.last_seen_s) : "quiet");
-    return '<div class="cchip" data-coord="' + esc(sess) + '"><div class="cn">' + esc(c.short || c.agent_id) + '</div>' +
-      '<div class="cc ' + esc(lvl) + '">' + esc(cc) + '</div></div>';
+    var pool = poolOf(c), pills = tokChip(c.auth_fp, pool) + mdlChip(c.model, c.model_src);
+    var off = poolFilter && (poolFilter === "?" ? (pool || !c.auth_fp) : pool !== poolFilter);
+    return '<div class="cchip' + (off ? " offpool" : "") + '" data-coord="' + esc(sess) + '" data-pool="' + esc(pool) + '"><div class="cn">' + esc(c.short || c.agent_id) + '</div>' +
+      '<div class="cc ' + esc(lvl) + '">' + esc(cc) + '</div>' +
+      (pills ? '<div class="ck2">' + pills + '</div>' : "") + '</div>';
   }
   function renderCoordinators(items) {
     var el = $("coordinators");
     if (!el) return;
+    lastCoords = items || [];
     if (!items || !items.length) { el.innerHTML = '<div class="empty">No coordinators.</div>'; return; }
     el.innerHTML = items.map(coordChip).join("");
     el.querySelectorAll(".cchip[data-coord]").forEach(function (chip) {
@@ -632,7 +709,7 @@
         baseId: l.base_agent_id || l.agent_id,
         bucket: l.bucket, ctx: laneCtx(l), ctxIdle: l.ctx_idle,
         activity: (live.running && live.activity) || l.activity || l.current_task || "",
-        auth_fp: l.auth_fp, pool: poolOf(l), host: l.host, model: null, peekable: true,
+        auth_fp: l.auth_fp, pool: poolOf(l), host: l.host, model: l.model || null, peekable: true,
         _routine: !(l.bucket === "working" || l.flagged)
       };
     });
@@ -644,7 +721,7 @@
         baseId: c.agent_id,
         bucket: (c.last_seen_s != null && c.last_seen_s < 1800) ? "working" : "idle",
         ctx: (c.ctx_pct != null ? { pct: c.ctx_pct, level: c.ctx_level, ctx_tokens: c.ctx_tokens, age_s: c.ctx_age_s } : null),
-        activity: c.activity || "", auth_fp: c.auth_fp, pool: poolOf(c), host: c.host, model: null,
+        activity: c.activity || "", auth_fp: c.auth_fp, pool: poolOf(c), host: c.host, model: c.model || null,
         peekable: !!c.peekable, roleLabel: c.role_label || ""
       };
     });
@@ -901,11 +978,12 @@
     clearTimeout(btn._disarm); btn._armed = false; btn.classList.remove("armed");
     btn.disabled = true; btn.innerHTML = '<span class="e">♻️</span>resetting…';
     fetch("/api/reset", {
-      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders(), armedHeaders()),
       body: JSON.stringify({ body: body, confirm: body })
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, s: r.status, j: j || {} }; }); })
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, s: r.status, j: j || {} }; }, function () { return { ok: r.ok, s: r.status, j: {} }; }); })
       .then(function (res) {
         var msg;
+        if (res.s === 401) { armedKeyMissing(); btn.disabled = false; btn.innerHTML = btn._orig || '<span class="e">♻️</span>Recycle'; return; }
         if (res.ok && res.j.ok) msg = "✓ reset sent";
         else if (res.s === 409) msg = "⏳ already resetting";
         else if (res.s === 429) msg = "⏳ just reset — wait " + (res.j.retry_after_s || 60) + "s";
@@ -955,10 +1033,11 @@
     if (typed.trim() !== session) { toast("name did not match — not applied", true); return; }
     busy = true;
     fetch("/api/apply-armed", {
-      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()), body: JSON.stringify({ session: session, kind: kind, confirm: typed.trim() })
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders(), armedHeaders()), body: JSON.stringify({ session: session, kind: kind, confirm: typed.trim() })
     }).then(function (r) { return r.json().then(function (j) { return { status: r.status, ok: r.ok, j: j }; }, function () { return { status: r.status, ok: r.ok, j: {} }; }); })
       .then(function (res) {
-        if (res.status === 503) toast((res.j && res.j.error) || "Apply is disabled on this console (CONSOLE_R4_ENABLED off / no upstream)", true);
+        if (res.status === 401) armedKeyMissing();
+        else if (res.status === 503) toast((res.j && res.j.error) || "Apply is disabled on this console (CONSOLE_R4_ENABLED off / no upstream)", true);
         else if (res.status === 403) toast((res.j && res.j.error) || "refused", true);
         else if (res.status === 202) toast(kind + " QUEUED for " + session + " — fires when idle");
         else if (res.status === 409 || res.status === 429) toast((res.j && res.j.error) || "busy — try again shortly", true);
@@ -1449,6 +1528,14 @@
     var bp = $("bulkPreview"); if (bp) bp.addEventListener("click", bulkPreviewRun);
     var bc = $("bulkClear"); if (bc) bc.addEventListener("click", function () { selected = {}; renderLanes(lastLanes); updateDock(); });
     var sc = $("shClose"); if (sc) sc.addEventListener("click", closeSheet);
+    // CAI-RESP-1434: armed-key field (in the sheet / lane-manager area). Persisted
+    // to localStorage only; cleared on empty. Never echoed anywhere.
+    var ak = $("armedKey");
+    if (ak) {
+      ak.value = armedKey();
+      ak.addEventListener("input", function () { setArmedKey(ak.value.trim()); ak.classList.remove("miss"); });
+      ak.addEventListener("change", function () { setArmedKey(ak.value.trim()); });
+    }
     var scrim = $("scrim"); if (scrim) scrim.addEventListener("click", closeSheet);
     // action grid (delegated)
     var acts = $("shActions");
@@ -1531,6 +1618,8 @@
     module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel,
       poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup,
+      mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,
+      tileHtml: tileHtml, coordChip: coordChip, armedHeaders: armedHeaders, ARMED_KEY_LS: ARMED_KEY_LS,
       confirmTyped: confirmTyped, CONFIRM_COPY: CONFIRM_COPY, resetBodyFor: resetBodyFor };
   }
 

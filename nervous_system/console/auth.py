@@ -121,6 +121,51 @@ def check_access(peer_ip: str, headers: Mapping[str, str]) -> Tuple[bool, str]:
     return False, "denied"
 
 
+def _armed_bearer() -> str:
+    # Read at REQUEST time (like CONSOLE_R4_ENABLED in app.py), never frozen at
+    # import — a rotated/added key is honoured on the next request.
+    return os.environ.get("CONSOLE_ARMED_BEARER", "") or ""
+
+
+def check_armed_bearer(headers: Mapping[str, str]) -> Tuple[bool, str]:
+    """Second factor for the ARMED endpoints (/api/apply-armed, /api/reset) —
+    CAI-RESP-1434 re-enable precondition. The IP allowlist is a NETWORK gate: a
+    co-located process on the Mini (or anything on an allowlisted peer) could
+    otherwise POST an armed op with no credential at all. This check is applied
+    AFTER check_access and REGARDLESS of how that passed (ip or breakglass).
+
+    Returns (ok, why):
+      (True,  "bearer")        presented key == CONSOLE_ARMED_BEARER (constant-time)
+      (False, "unconfigured")  CONSOLE_ARMED_BEARER empty/unset -> caller 503s
+                               (fail-CLOSED: no key configured = no armed ops)
+      (False, "missing")       no key presented
+      (False, "mismatch")      a key was presented and did not match
+
+    The key is accepted from EITHER `X-Armed-Bearer: <key>` OR
+    `Authorization: Bearer <key>`. Why two slots: the Authorization slot is
+    already spoken for on both surfaces the operator uses — the dormant
+    breakglass token on the Mini console, and the hosted (phone) bearer on the
+    VPS wrapper, which only forwards the operator's armed key upstream as
+    X-Armed-Bearer (see hosted_server._proxy). Both are header-only (never URL)."""
+    expected = _armed_bearer()
+    if not expected:
+        return False, "unconfigured"
+    presented = []
+    x = _header(headers, "X-Armed-Bearer").strip()
+    if x:
+        presented.append(x)
+    raw = _header(headers, "Authorization").strip()
+    prefix = "Bearer "
+    if raw.startswith(prefix) and raw[len(prefix):].strip():
+        presented.append(raw[len(prefix):].strip())
+    if not presented:
+        return False, "missing"
+    for p in presented:
+        if hmac.compare_digest(p, expected):
+            return True, "bearer"
+    return False, "mismatch"
+
+
 def _log_breakglass(peer_ip: str) -> None:
     """Breakglass use means the allowlist itself failed someone — log it
     loudly (process log) in addition to whatever per-request audit line the
