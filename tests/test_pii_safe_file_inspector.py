@@ -152,7 +152,8 @@ def test_masked_text_column_carries_a_value_shape_with_no_values():
     dn = _col(rep, "Donor Name")
     assert dn.masked is True and dn.detail == "***"
     assert dn.shape is not None
-    assert dn.shape["words"] == {"1": 0, "2": 4, "3": 0, "4+": 1} or dn.shape["words"]["2"] == 4
+    # "O'Neil-Rahman" + "Nurâ€™aini" = 1 word; "Hamba Allah" x2 + "Md Faizal" = 2; "Siti Aminah Bte Ahmad" = 4+
+    assert dn.shape["words"] == {"1": 2, "2": 3, "3": 0, "4+": 1}
     assert dn.shape["markers"]["anonymous"] == 2          # "Hamba Allah" + "HAMBA ALLAH"
     assert dn.shape["punct"]["apostrophe"] >= 1
     assert dn.shape["punct"]["hyphen"] >= 1
