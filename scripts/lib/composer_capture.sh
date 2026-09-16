@@ -118,8 +118,15 @@ pane_is_busy() {
 # slip). No watchdog tier may ever do that; callers use this to REFUSE before typing.
 # Keys on the nav footer only (not composer text), LC_ALL=C for the locale-safe match.
 pane_is_menu() {   # $1 = tmux bin, $2 = pane
+  # THREE-way (Nazim #40507): exit 0 = parked in a selection menu; 1 = readable, NOT a menu;
+  # 2 = UNREADABLE (capture empty/failed). Unreadable is DISTINCT so a caller that would TYPE
+  # can fail-CLOSED — a send-keys guard must never type BLIND into a pane it could not read
+  # (an unreadable pane may BE a menu). The detect-only watchdog track, by contrast, treats
+  # 2 as not-a-menu (rc!=0 -> no park): a false park on an unreadable pane is the wrong-trade
+  # noise there, and a genuine park re-shows on the next scan. Sets CC_MENU (1/0/x).
   local txt
   txt="$("$1" capture-pane -t "$2" -p 2>/dev/null)"
+  if [ -z "$txt" ]; then CC_MENU=x; return 2; fi
   CC_MENU=0
   printf '%s\n' "$txt" | tail -6 | LC_ALL=C grep -qiE 'to navigate|esc to cancel|enter to select' || return 1
   CC_MENU=1
