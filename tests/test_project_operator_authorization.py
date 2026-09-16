@@ -3,12 +3,17 @@ project-scoped authorization gate (op#20702 Stage C).
 
 Same evidentiary shape as scripts.lib.require_verified_authorization (a
 bridge-verified inbound operator_messages row, never a console/tmux claim),
-but the authorizing chat_id(s) come from that PROJECT's registered operators
+but the authorizing user(s) come from that PROJECT's registered operators
 (project_governance.operators) instead of a single hardcoded MUSA_TELEGRAM_ID.
 This gate is explicitly for a project's own BUILD/SCOPE decisions — it must
 NEVER be used for money/irreversible ops, which stay on
 require_verified_authorization.verified_authorization() (Musa-only)
 unconditionally.
+
+Fixtures use the REAL production row shape (op#20702 Stage C gate #40738
+C1): chat_id is the GROUP the message arrived on, from_user_id is the
+PERSON. Shuq/Wan/Hariz have zero real rows where chat_id == their own user
+id — every real approval comes from their project's group.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -25,17 +30,21 @@ from scripts.lib.project_operator_authorization import (
 SHUQ = "605271890"
 WAN = "661212242"
 STRANGER = "999999999"
+IRSYAD_GROUP = "-5330147776"
+COSEM_GROUP = "-5390372474"
 REQUEST_TS = datetime(2026, 9, 16, 8, 0, 0, tzinfo=timezone.utc)
 PHRASES = ["APPROVED"]
 TOKENS = ["fee-portal"]
 
 
 def _row(**kw):
+    """Real production shape: chat_id = the group, from_user_id = the person."""
     base = dict(
         id=1,
         direction="inbound",
         channel="telegram",
-        chat_id=SHUQ,
+        chat_id=IRSYAD_GROUP,
+        from_user_id=SHUQ,
         text="APPROVED for the fee-portal build",
         created_at=REQUEST_TS + timedelta(minutes=5),
     )
@@ -43,23 +52,29 @@ def _row(**kw):
     return base
 
 
-def _find(rows, operator_chat_ids=(SHUQ, WAN)):
+def _find(rows, operator_user_ids=(SHUQ, WAN), channels=(IRSYAD_GROUP,)):
     return find_verified_project_authorization(
-        rows, operator_chat_ids=operator_chat_ids, approval_phrases=PHRASES,
-        op_tokens=TOKENS, after=REQUEST_TS,
+        rows, operator_user_ids=operator_user_ids, channels=channels,
+        approval_phrases=PHRASES, op_tokens=TOKENS, after=REQUEST_TS,
     )
 
 
 # ── the happy path — ANY registered operator for the project may authorize ────
 
 def test_valid_authorization_from_first_operator_accepted():
-    assert _find([_row(chat_id=SHUQ)]) is not None
+    assert _find([_row(from_user_id=SHUQ)]) is not None
 
 
 def test_valid_authorization_from_second_operator_accepted():
     """A project can have multiple operators (irsyad: Shuq + Wan) — either
     one's bridge-verified approval is sufficient; this is not a dual-sign."""
-    assert _find([_row(chat_id=WAN)]) is not None
+    assert _find([_row(from_user_id=WAN)]) is not None
+
+
+def test_valid_authorization_via_dm_accepted():
+    """A DM (chat_id == from_user_id) is always acceptable, even with no
+    registered channels for the project."""
+    assert _find([_row(chat_id=SHUQ, from_user_id=SHUQ)], channels=()) is not None
 
 
 def test_returns_matching_row_for_audit():
@@ -73,17 +88,32 @@ def test_console_yes_is_not_in_operator_messages_at_all():
     assert _find([]) is None
 
 
-def test_unregistered_chat_rejected():
+def test_unregistered_person_rejected():
     """A YES from anyone NOT in this project's registered operator list is
-    not proof — even a real bridge-verified telegram row from a stranger."""
-    assert _find([_row(chat_id=STRANGER)]) is None
+    not proof — even a real bridge-verified telegram row from a stranger,
+    even posted in the project's own registered group."""
+    assert _find([_row(from_user_id=STRANGER)]) is None
 
 
 def test_wrong_projects_operator_rejected():
-    """An operator authorized for a DIFFERENT project (not in operator_chat_ids
-    for THIS call) cannot authorize this project's decision — cross-project
-    authority must never leak."""
-    assert _find([_row(chat_id="-5390372474")], operator_chat_ids=(SHUQ, WAN)) is None
+    """An operator authorized for a DIFFERENT project (not in
+    operator_user_ids for THIS call) cannot authorize this project's
+    decision — cross-project authority must never leak."""
+    assert _find([_row(from_user_id="1913044694")], operator_user_ids=(SHUQ, WAN)) is None
+
+
+def test_registered_operator_from_unregistered_channel_rejected():
+    """C1 (op#20702 Stage C gate #40738): a registered operator's identity
+    posted in a chat that is NEITHER their own DM NOR a registered channel
+    for this project must not authorize — a forwarded/spoofed identity in a
+    stranger's group must not count."""
+    assert _find([_row(chat_id=STRANGER, from_user_id=SHUQ)]) is None
+
+
+def test_registered_operator_from_other_projects_channel_rejected():
+    """Cosem's group cannot authorize an irsyad decision even if the person
+    posting there happens to also be registered for irsyad."""
+    assert _find([_row(chat_id=COSEM_GROUP, from_user_id=SHUQ)], channels=(IRSYAD_GROUP,)) is None
 
 
 def test_before_request_rejected():
@@ -115,18 +145,28 @@ def test_case_insensitive_match():
     assert _find([_row(text="approved for the FEE-PORTAL rollout")]) is not None
 
 
+def test_phrase_substring_inside_another_word_rejected():
+    """C3 (op#20702 Stage C gate #40738): the phrase must match as a WHOLE
+    WORD, not a bare substring — 'disapproved' must not satisfy 'approved'."""
+    assert _find([_row(text="disapproved, do not build fee-portal")]) is None
+
+
+def test_token_substring_inside_another_word_rejected():
+    assert _find([_row(text="APPROVED for the nonfee-portal-2 experiment")]) is None
+
+
 def test_empty_operator_list_rejects_everything():
     """A project with NO registered operators (project_governance.operators=[])
     has no one who can satisfy this gate — fail-closed, not a fallback to Musa
     (that would blur this gate's boundary with the money-only Musa gate)."""
-    assert _find([_row(chat_id=SHUQ)], operator_chat_ids=()) is None
+    assert _find([_row(from_user_id=SHUQ)], operator_user_ids=()) is None
 
 
 def test_first_valid_of_many_returned():
     rows = [
-        _row(id=1, chat_id=STRANGER),
+        _row(id=1, from_user_id=STRANGER),
         _row(id=2, direction="outbound"),
-        _row(id=3, chat_id=WAN),
+        _row(id=3, from_user_id=WAN),
     ]
     assert _find(rows)["id"] == 3
 
@@ -225,6 +265,21 @@ def test_wrapper_unknown_project_fails_closed(monkeypatch):
         "unknown-project", "op", after=REQUEST_TS, approval_phrases=PHRASES,
         op_tokens=TOKENS, dsn="postg://x")
     assert res.ok is False and "operator" in res.reason.lower()
+
+
+def test_wrapper_operators_valid_only_fails_closed_with_explicit_reason(monkeypatch):
+    """C2 (op#20702 Stage C gate #40738, per #40727 R1): a project whose
+    ONLY registered operator entries are group ids (invalid) must fail
+    closed with an explicit reason, same as having no operators at all —
+    _fetch_operators_for_project already excludes them by construction."""
+    import scripts.lib.project_operator_authorization as mod
+
+    monkeypatch.setattr(mod, "_fetch_operators_for_project", lambda dsn, project: [])
+    res = verified_project_authorization(
+        "cosem", "op", after=REQUEST_TS, approval_phrases=PHRASES,
+        op_tokens=TOKENS, dsn="postg://x")
+    assert res.ok is False
+    assert "no registered operators" in res.reason.lower()
 
 
 if __name__ == "__main__":

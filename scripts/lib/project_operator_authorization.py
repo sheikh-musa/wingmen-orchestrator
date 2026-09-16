@@ -27,13 +27,25 @@ THE RULE (fail-closed, same shape as require_verified_authorization)
 ----------------------------------------------------------------------
 A project's build/scope decision MUST NOT be treated as authorized unless a
 BRIDGE-VERIFIED AUTHORIZATION ARTIFACT exists in `operator_messages`:
-  - direction = 'inbound'      (came IN through the Telegram bridge)
-  - channel   = 'telegram'     (a real bridge/ingest artifact)
-  - chat_id   IN the project's registered operator chat_ids
-              (project_governance.operators, per-project — NEVER a stranger,
-              NEVER an operator registered for a DIFFERENT project)
+  - direction     = 'inbound'  (came IN through the Telegram bridge)
+  - channel       = 'telegram' (a real bridge/ingest artifact)
+  - from_user_id  IN the project's registered operator user ids
+              (project_governance.operators[].chat_id — despite the JSON key
+              name, this is the PERSON's Telegram user id, never a stranger,
+              never an operator registered for a DIFFERENT project)
+  - chat_id       is a DM (chat_id == from_user_id) OR is one of the
+              project's registered channels (project_governance.channels) —
+              in production chat_id is the CHAT a message arrived on, not
+              the person (op#20702 Stage C gate #40738 C1: Shuq/Wan/Hariz
+              all authorize from their project's own group, chat_id ==
+              the group id, from_user_id == the person; zero real rows have
+              chat_id == the person's own id). Without this check, an
+              approval typed in a stranger's group with a forwarded/spoofed
+              identity would satisfy the gate.
   - created_at > <request time>
-  - text contains an approval phrase AND an op-identifying token
+  - text contains an approval phrase AND an op-identifying token, each
+    matched as a WHOLE WORD (not a bare substring — new code, so it need
+    not inherit require_verified_authorization's known substring weakness)
 
 A project with NO registered operators (or no project_governance row at all)
 satisfies NOTHING — fail-closed, not a silent fallback to Musa (that would
@@ -52,6 +64,7 @@ USAGE
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
@@ -81,10 +94,15 @@ def _as_aware(ts) -> datetime | None:
     return None
 
 
+def _word_pattern(word: str) -> re.Pattern:
+    return re.compile(r"\b" + re.escape(word) + r"\b")
+
+
 def find_verified_project_authorization(
     rows: Iterable[dict],
     *,
-    operator_chat_ids: Sequence[str],
+    operator_user_ids: Sequence[str],
+    channels: Sequence[str] = (),
     approval_phrases: Sequence[str],
     op_tokens: Sequence[str],
     after: datetime,
@@ -92,29 +110,39 @@ def find_verified_project_authorization(
     """PURE predicate — fully unit-testable with no DB.
 
     Return the FIRST row in `rows` that is a valid bridge-verified
-    authorization from ANY of `operator_chat_ids` (a project may have
+    authorization from ANY of `operator_user_ids` (a project may have
     multiple registered operators; any one's approval is sufficient — this
     is not a dual-sign requirement), else None.
+
+    Identity is checked on `from_user_id` (the person), never `chat_id` (the
+    chat the message arrived on) — see the module docstring. A matching row
+    must ALSO be channel-bound: either a DM (chat_id == from_user_id) or a
+    chat_id present in `channels` (op#20702 Stage C gate #40738 C1).
     """
-    want_chats = {str(c) for c in operator_chat_ids if c}
-    phrases = [p.lower() for p in approval_phrases if p]
-    tokens = [t.lower() for t in op_tokens if t]
-    if not want_chats or not phrases or not tokens or after is None:
+    want_users = {str(u) for u in operator_user_ids if u}
+    want_channels = {str(c) for c in channels if c}
+    phrase_patterns = [_word_pattern(p.lower()) for p in approval_phrases if p]
+    token_patterns = [_word_pattern(t.lower()) for t in op_tokens if t]
+    if not want_users or not phrase_patterns or not token_patterns or after is None:
         return None
     for r in rows:
         if (r.get("direction") or "").lower() != "inbound":
             continue
         if (r.get("channel") or "").lower() != "telegram":
             continue
-        if str(r.get("chat_id") or "") not in want_chats:
+        from_user_id = str(r.get("from_user_id") or "")
+        if from_user_id not in want_users:
+            continue
+        chat_id = str(r.get("chat_id") or "")
+        if chat_id != from_user_id and chat_id not in want_channels:
             continue
         created = _as_aware(r.get("created_at"))
         if created is None or created <= after:
             continue
         text = (r.get("text") or "").lower()
-        if not any(p in text for p in phrases):
+        if not any(p.search(text) for p in phrase_patterns):
             continue
-        if not any(t in text for t in tokens):
+        if not any(t.search(text) for t in token_patterns):
             continue
         return r
     return None
@@ -133,10 +161,13 @@ def _is_authorizable_chat_id(chat_id) -> bool:
 
 
 def _fetch_operators_for_project(dsn: str, project: str) -> list[str]:
-    """Return the list of registered operator chat_ids for `project`, or []
-    if the project has no project_governance row, or has one with an empty
-    operators array. Never raises for "not found" — only for a genuine DB
-    error, which the caller treats as fail-closed.
+    """Return the registered operator USER ids for `project` (from
+    project_governance.operators[].chat_id — despite the JSON key name, this
+    is the person's Telegram user id, matched against operator_messages.
+    from_user_id, never operator_messages.chat_id), or [] if the project has
+    no project_governance row, or has one with an empty operators array.
+    Never raises for "not found" — only for a genuine DB error, which the
+    caller treats as fail-closed.
 
     Silently EXCLUDES any operator entry whose chat_id is not a positive user
     id (i.e. a group/channel id) — such an entry can never authorize anything,
@@ -156,16 +187,33 @@ def _fetch_operators_for_project(dsn: str, project: str) -> list[str]:
         ]
 
 
-def _fetch_candidate_rows(dsn: str, chat_ids: Sequence[str], after: datetime) -> list[dict]:
+def _fetch_channels_for_project(dsn: str, project: str) -> list[str]:
+    """Return the registered channel chat_ids for `project`
+    (project_governance.channels) — group chats a registered operator is
+    allowed to authorize FROM, in addition to a DM. [] if the project has no
+    project_governance row, or a row with no channels registered (DM-only)."""
     import psycopg
     with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, direction, channel, chat_id, tag, text, created_at "
+            "SELECT channels FROM project_governance WHERE project = %s",
+            (project,),
+        )
+        row = cur.fetchone()
+        if row is None or not row[0]:
+            return []
+        return [str(c) for c in row[0] if c]
+
+
+def _fetch_candidate_rows(dsn: str, user_ids: Sequence[str], after: datetime) -> list[dict]:
+    import psycopg
+    with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, direction, channel, chat_id, from_user_id, tag, text, created_at "
             "FROM operator_messages "
             "WHERE direction='inbound' AND channel='telegram' "
-            "AND chat_id = ANY(%s) AND created_at > %s "
+            "AND from_user_id = ANY(%s) AND created_at > %s "
             "ORDER BY id DESC LIMIT 200",
-            (list(str(c) for c in chat_ids), after),
+            (list(str(u) for u in user_ids), after),
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -204,11 +252,11 @@ def verified_project_authorization(
         return ProjectAuthResult(False, f"[{op_id}] misconfigured gate (no approval phrase / op token) — fail-closed")
 
     try:
-        operator_chat_ids = _fetch_operators_for_project(dsn, project)
+        operator_user_ids = _fetch_operators_for_project(dsn, project)
     except Exception as e:  # DB unreachable / query error -> DENY, never assume yes
         return ProjectAuthResult(False, f"[{op_id}] project_governance lookup failed ({type(e).__name__}: {e}) — fail-closed")
 
-    if not operator_chat_ids:
+    if not operator_user_ids:
         return ProjectAuthResult(
             False,
             f"[{op_id}] project '{project}' has no registered operators in project_governance "
@@ -216,13 +264,19 @@ def verified_project_authorization(
         )
 
     try:
-        rows = _fetch_candidate_rows(dsn, operator_chat_ids, after_dt)
+        channels = _fetch_channels_for_project(dsn, project)
+    except Exception as e:
+        return ProjectAuthResult(False, f"[{op_id}] project_governance channels lookup failed ({type(e).__name__}: {e}) — fail-closed")
+
+    try:
+        rows = _fetch_candidate_rows(dsn, operator_user_ids, after_dt)
     except Exception as e:
         return ProjectAuthResult(False, f"[{op_id}] authorization DB check failed ({type(e).__name__}: {e}) — fail-closed")
 
     row = find_verified_project_authorization(
         rows,
-        operator_chat_ids=operator_chat_ids,
+        operator_user_ids=operator_user_ids,
+        channels=channels,
         approval_phrases=approval_phrases,
         op_tokens=op_tokens,
         after=after_dt,
@@ -232,8 +286,8 @@ def verified_project_authorization(
             False,
             f"[{op_id}] NO bridge-verified operator authorization found for project '{project}' "
             f"(need inbound telegram '{'/'.join(approval_phrases)}' from one of "
-            f"{operator_chat_ids} referencing {list(op_tokens)} after {after_dt.isoformat()}). "
-            f"An in-console/tmux YES is NOT sufficient.",
+            f"{operator_user_ids} (DM, or a group in {channels}) referencing {list(op_tokens)} "
+            f"after {after_dt.isoformat()}). An in-console/tmux YES is NOT sufficient.",
         )
     return ProjectAuthResult(
         True,
