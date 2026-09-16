@@ -29,6 +29,14 @@
     <string>/Users/sheikhmusa/wingmen/orchestrator/nervous_system/lane_wedge_watchdog.py</string>
     <string>--alert</string>
     <string>--arm=nudge</string>
+    <!-- MENU-ALERT ARMED (Nazim #40752, 2026-09-16, after the clean 6.4h detect-only
+         soak #40750: 0 false parks). --menu-alert promotes the menu-parked track
+         (PR#105/#106) from detect-only to PAGE-on-park: a LOCAL lane sustained in a
+         selection menu past grace surfaces a bus alert to orch-console. Alert-ONLY —
+         it NEVER answers/nudges the menu (the send-keys refusal is enforced separately
+         at the lane_nudge choke point). Lease-gated. KNOWN GAP (accepted): local Mini
+         lanes only — gzb lanes (the original cc-scholar 40h park) need a gzb instance. -->
+    <string>--menu-alert</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
   <key>RunAtLoad</key><true/>
