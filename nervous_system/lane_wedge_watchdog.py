@@ -538,8 +538,11 @@ def _pane_working(session: str) -> bool:
 def _pane_is_menu(session: str) -> bool:
     """True iff the pane is parked in an interactive selection menu — the fleet's ONE
     definition, via composer_capture.sh pane_is_menu (shell-out, never reimplemented).
-    Fail-safe: any read miss returns False (a menu detector that FALSE-fires is noise, and
-    the alert track must not page on an unreadable pane; a genuine park re-shows next scan)."""
+    pane_is_menu is 3-way (0=menu, 1=not-menu, 2=UNREADABLE, #40507); we return rc==0, so
+    UNREADABLE (2) maps to False on the DETECT track by design — a false park on an
+    unreadable pane is the wrong-trade noise here, and a genuine park re-shows next scan.
+    (The send-keys side fails the OTHER way: lane_nudge REFUSES on rc 2, never typing blind.)
+    Any exception/timeout also returns False (fail-safe for the detector)."""
     snippet = '. "$1" || exit 9; pane_is_menu "$2" "$3"'
     try:
         r = subprocess.run(["bash", "-c", snippet, "_", str(_COMPOSER_LIB), TM, session],

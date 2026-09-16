@@ -68,6 +68,24 @@ def test_pane_is_menu_does_not_fire_on_an_idle_pane(tmp_path):
     assert _pane_is_menu(tmux, IDLE_PANE) is False
 
 
+def _pane_is_menu_rc(tmux_bin: Path) -> int:
+    snippet = f'. "{LIB}"\npane_is_menu "{tmux_bin}" x\necho rc=$?'
+    r = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
+    line = [ln for ln in r.stdout.strip().splitlines() if ln.startswith("rc=")][-1]
+    return int(line.split("=")[1])
+
+
+def test_pane_is_menu_returns_2_on_unreadable_pane(tmp_path):
+    # Empty/failed capture -> UNREADABLE (rc 2), distinct from readable-not-a-menu (rc 1).
+    tmux = _fake_tmux(tmp_path, "")
+    assert _pane_is_menu_rc(tmux) == 2
+
+
+def test_pane_is_menu_returns_1_on_readable_non_menu(tmp_path):
+    tmux = _fake_tmux(tmp_path, IDLE_PANE)
+    assert _pane_is_menu_rc(tmux) == 1
+
+
 def _run_lane_nudge(tmp_path, capture_text):
     _fake_tmux(tmp_path, capture_text)
     env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
@@ -93,3 +111,12 @@ def test_lane_nudge_does_send_keys_on_a_non_menu_pane(tmp_path):
     r, sends = _run_lane_nudge(tmp_path, IDLE_PANE)
     assert r.returncode != 5, "idle pane must not hit the menu-refusal path"
     assert sends != "", "a non-menu pane must still receive the nudge send-keys"
+
+
+def test_lane_nudge_REFUSES_an_unreadable_pane_with_ZERO_sendkeys(tmp_path):
+    """A guard must not type BLIND (Nazim #40507): an unreadable pane (empty capture) may
+    itself be a menu, so lane_nudge refuses (exit 6) and never send-keys."""
+    r, sends = _run_lane_nudge(tmp_path, "")
+    assert r.returncode == 6, f"expected exit 6 (unreadable-refused), got {r.returncode}: {r.stderr}"
+    assert sends == "", f"typed blind into an unreadable pane:\n{sends}"
+    assert "read" in r.stderr.lower() and "blind" in r.stderr.lower()

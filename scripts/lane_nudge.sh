@@ -50,9 +50,17 @@ tmux has-session -t "$SESSION" 2>/dev/null || { echo "lane_nudge: no tmux sessio
 # bus/operator row the lane reconciles once a human clears the menu, so a skipped nudge costs
 # nothing. Uses the ONE fleet menu definition (composer_capture.sh pane_is_menu; pure bash,
 # so unlike the fire-window guard below it holds identically in a worktree). exit 5 = menu.
-if pane_is_menu tmux "$SESSION"; then
+pane_is_menu tmux "$SESSION"; _menu_rc=$?
+if [ "$_menu_rc" = 0 ]; then
   echo "lane_nudge: REFUSED — '$SESSION' is parked in an interactive MENU (AskUserQuestion/permission); a nudge would answer it (authorization slip). A human must Esc/answer it." >&2
   exit 5
+elif [ "$_menu_rc" = 2 ]; then
+  # Unreadable pane (capture empty/failed): a guard must NOT type BLIND — an unreadable pane
+  # may itself be a menu, so typing risks the same authorization slip we refuse above (Nazim
+  # #40507). Fail-closed: refuse (exit 6) and let the caller escalate/inspect, rather than
+  # send-keys into a pane we could not see.
+  echo "lane_nudge: REFUSED — cannot read '$SESSION' pane (capture empty/failed); a guard must not type blind (it may be a menu). Escalate/inspect the pane." >&2
+  exit 6
 fi
 
 # FIRE-WINDOW GUARD. A recycle owns this pane for a few seconds while it wipes the
