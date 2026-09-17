@@ -50,6 +50,11 @@ HEARTBEAT_FILE = _ORCH / "logs" / "agent_wake_subscriber_heartbeat"
 LOG_FILE = _ORCH / "logs" / "agent-wake-subscriber.log"
 _HEARTBEAT_SEC = 30
 
+# logs/ is gitignored, so it is absent in a clean checkout / CI. FileHandler(LOG_FILE)
+# opens the file at IMPORT time, which raised FileNotFoundError and broke pytest
+# collection of tests/test_agent_wake_subscriber.py. Ensure the dir first — the same
+# guard lane_watchdog / lane_wedge_watchdog / weekly_alert_relay already do for their logs.
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
