@@ -47,6 +47,11 @@ P1_AFTER_MIN = _envint("QUEUE_AGE_P1_MIN", 30)
 P2_AFTER_MIN = _envint("QUEUE_AGE_P2_MIN", 240)      # 4 h
 REPAGE_EVERY_MIN = _envint("QUEUE_AGE_REPAGE_MIN", 60)
 MAX_PAGES_PER_RUN = _envint("QUEUE_AGE_MAX_PAGES_PER_RUN", 5)
+# The page bus row's message_type MUST be in agent_messages_message_type_check
+# (review_request/question/decision/agreed/challenge/update/blocker/counter). 'escalation'
+# is NOT allowed -> a check_violation the send would swallow, so the page fails SILENTLY
+# (Nazim #40859). Locked by test_queue_age_message_type_is_constraint_valid.
+PAGE_MESSAGE_TYPE = "blocker"
 
 # Priorities eligible to page (P3 never pages). Floors keyed here.
 PAGE_FLOORS = {"P1": P1_AFTER_MIN, "P2": P2_AFTER_MIN}
@@ -193,8 +198,8 @@ def _send_queue_page(conn, target: dict) -> bool:
                 cur.execute(
                     "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
                     "  requires_response,priority,is_test) "
-                    "VALUES ('cc-fleet-health',%s,'escalation',%s,%s,false,%s,false)",
-                    (owner, subj, body, pr))
+                    "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,%s,false)",
+                    (owner, PAGE_MESSAGE_TYPE, subj, body, pr))
         conn.commit()
         log(f"queue-age PAGED #{tid} ({pr}, {age}m) -> {','.join(target.get('owners', OWNERS))}")
         return True
