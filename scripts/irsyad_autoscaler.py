@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""irsyad-autoscaler — INERT phase (detect + log ONLY, ZERO actuation).
+"""irsyad-autoscaler — INERT detect+log, plus a SUPERVISED-PROPOSE arm (no actuation).
 
-Design: docs/irsyad-autoscaler-design-v1.md. This module implements ONLY §6 rollout step 1:
-it MEASURES demand, COMPUTES the would-spin / would-kill decision under the §5 hard interlocks,
-and LOGS one row per tick to `fleet_lane_autoscale_log`. It NEVER spins or kills a lane, never
-calls lanes.sh to actuate, never invokes lane_winddown as an actuator. Arming (supervised
-spin-only, then wind-down) is a later, separately-gated step and is NOT in this file.
+Design: docs/irsyad-autoscaler-design-v1.md. Two modes, selected by IRSYAD_AUTOSCALER_MODE
+(default 'inert') or --mode:
+  * 'inert'      — §6 rollout step 1: MEASURE demand, COMPUTE the would-spin / would-kill decision
+                   under the §5 hard interlocks, LOG one row per tick to fleet_lane_autoscale_log.
+                   Never spins/kills, never calls lanes.sh, never invokes lane_winddown as an actuator.
+  * 'supervised' — Nazim #40401 gate. Everything 'inert' does, PLUS: when the pure decision says
+                   would_spin, POST one deduped propose-then-confirm bus row to orch-console (P1 rr)
+                   and stop. It STILL never spins and never kills — spin execution is a separate
+                   Nazim-confirm-gated, wet-proved step (the elastic cc-irsyad-<N> worker-boot path
+                   does not exist yet; actuating blind would be unsafe). So 'supervised' is the SAFE
+                   half of the arm: detection + proposal. It emits nothing while the coord queue is
+                   absent (demand=0). Kill stays idle-proof DETECT-ONLY in both modes.
 
 Two layers, deliberately separated so the interlocks are testable without a DB or a tmux server:
   * `decide(...)` is a PURE function over injected observations. All of tests/test_irsyad_autoscaler.py
@@ -38,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import socket
 import sys
 import time
@@ -77,6 +85,18 @@ COORD_QUEUE_TABLE = os.environ.get("IRSYAD_COORD_QUEUE_TABLE", "coord_dispatch_q
 
 LIVE_HEARTBEAT_WINDOW = "30 minutes"  # what counts as a live lane in agent_status
 
+# ── §6 SUPERVISED arm — PROPOSE layer (Nazim #40401 gate) ─────────────────────────────────
+# Mode selector. Default 'inert' = the original detect+log behaviour, ZERO change. 'supervised'
+# adds ONE thing: when the pure decision says would_spin, POST a deduped propose-then-confirm
+# bus row to orch-console (P1 rr) and STOP. It NEVER auto-spins and NEVER kills — spin execution
+# stays a Nazim-confirm-gated, separately-wet-proved step (the elastic cc-irsyad-<N> worker-boot
+# path does not exist yet; actuating blind would be unsafe). So 'supervised' is the safe half of
+# the arm: detection + proposal. While the coord queue is absent (demand=0) it emits nothing.
+AUTOSCALER_MODE = os.environ.get("IRSYAD_AUTOSCALER_MODE", "inert").strip().lower()
+# Dedup window: never re-propose while a proposal to orch-console is still outstanding.
+PROPOSAL_TTL_MIN = int(os.environ.get("IRSYAD_PROPOSAL_TTL_MIN", "60"))
+PROPOSAL_SUBJECT_PREFIX = "[irsyad-autoscaler] SPIN proposal"
+
 
 # ── data shapes ───────────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
@@ -109,20 +129,58 @@ class Decision:
     host: str = ""
 
 
-def is_auto_killable(base_agent_id: str, owns_bot_channel: bool, money_path: bool) -> bool:
-    """The §5 PROTECTED set expressed as an ALLOW-LIST (never a deny-list): a lane is eligible
-    for auto wind-down ONLY if it is a distinct-identity irsyad worker AND none of the protected
-    conditions hold. Everything else — coord, the bare client agent, singletons, pollers,
-    money-path — is excluded by construction, so a NEW/unknown lane defaults to protected."""
-    if not base_agent_id.startswith(POOL_PREFIX):
-        return False                       # not a pool worker (incl. bare `cc-irsyad`, singletons)
-    if base_agent_id in PROTECTED_BASE_IDS:
-        return False                       # coord
+# A numbered cc-irsyad SUB-TAG (cc-irsyad-1, cc-irsyad-3, …). The real identity model is a
+# SHARED base 'cc-irsyad' with a distinct sub-tag per body (agent_status.agent_id) — NOT a
+# distinct base per worker. So pool membership keys on the AGENT_ID, not base_agent_id. This
+# matches cc-irsyad-<N> and EXCLUDES cc-irsyad-coord-<N> (has 'coord', not a digit, after the
+# prefix) and the bare 'cc-irsyad'. (Fixes the #40672 miscount: is_auto_killable checked
+# base_agent_id.startswith('cc-irsyad-'), but the base is exactly 'cc-irsyad' → it read pool=0
+# while numbered workers were live → over-proposed a spin past MAX_LANES.)
+POOL_SUBTAG_RE = re.compile(r"^cc-irsyad-\d+$")
+# Spun elastic-worker lanes live in tmux sessions named 'irsyad-worker-<N>' (the actuator's pool).
+# Standing cc-irsyad lanes (tabung=irsyad-tabung-jumaat, coord=irsyad-coord) are NOT elastic
+# workers — excluded from BOTH the cap and kill-eligibility (Nazim #40850 ruling (a)).
+WORKER_SESSION_PREFIX = "irsyad-worker-"
+WORKER_SESSION_RE = re.compile(r"^irsyad-worker-\d+$")
+
+
+def is_elastic_worker(lane_session: str) -> bool:
+    """CAP membership (Nazim #40850 ruling (a)): MAX_LANES counts ONLY spun elastic workers —
+    tmux sessions 'irsyad-worker-<N>'. STANDING lanes (tabung=irsyad-tabung-jumaat, coord=
+    irsyad-coord, any future standing irsyad lane) are EXCLUDED from the cap AND from kill. So the
+    effective elastic capacity is a full MAX_LANES concurrent workers regardless of standing lanes.
+    (This supersedes the #40672 sub-tag count, which wrongly let the standing tabung lane eat a slot.)"""
+    return bool(WORKER_SESSION_RE.match(lane_session or ""))
+
+
+def is_pool_member(agent_id: str) -> bool:
+    """A numbered cc-irsyad sub-tag (cc-irsyad-<N>). Retained for identity checks; the CAP no
+    longer uses this (see is_elastic_worker) — a numbered sub-tag alone includes standing lanes."""
+    return bool(POOL_SUBTAG_RE.match(agent_id or ""))
+
+
+def is_auto_killable(agent_id: str, lane_session: str, owns_bot_channel: bool, money_path: bool) -> bool:
+    """KILL eligibility (allow-list): a lane may be auto-wound-down ONLY if it is a SPUN elastic
+    worker (session 'irsyad-worker-<N>') carrying a numbered cc-irsyad sub-tag AND no protected
+    condition holds. Standing lanes (tabung), coord, pollers, money-path are excluded by
+    construction. A NEW/unknown lane defaults to protected."""
+    if not is_pool_member(agent_id):
+        return False                       # not a numbered cc-irsyad body (bare/coord/singleton)
+    if not (lane_session or "").startswith(WORKER_SESSION_PREFIX):
+        return False                       # standing cc-irsyad lane (e.g. tabung) — count-only, never killed
     if owns_bot_channel:
         return False                       # client-poller
     if money_path:
         return False                       # money-path lane
     return True
+
+
+def should_emit_proposal(mode: str, would_spin: bool, ambiguous: bool,
+                         open_proposal_exists: bool) -> bool:
+    """PURE: propose a spin iff SUPERVISED mode AND a real (non-ambiguous) would-spin AND no
+    proposal is already outstanding (dedup). No side effects — the DB read (open_proposal_exists)
+    and the bus write both live in the caller, so this stays unit-testable without a DB."""
+    return (mode == "supervised") and would_spin and (not ambiguous) and (not open_proposal_exists)
 
 
 def decide(
@@ -138,14 +196,16 @@ def decide(
     arrive via `lanes`. Returns the fully-populated INERT decision — no side effects."""
     interlocks: dict = {}
 
-    # Pool = LIVE, auto-killable lanes (protected set already excluded by the allow-list).
-    pool = [l for l in lanes
-            if l.live and is_auto_killable(l.base_agent_id, l.owns_bot_channel, l.money_path)]
+    # Pool (for the CAP) = LIVE numbered cc-irsyad bodies (agent_id ~ cc-irsyad-<N>): spun
+    # elastic workers AND any standing cc-irsyad-<N> lane (tabung). Keys on the sub-tag, the real
+    # identity — NOT base_agent_id (all share the bare 'cc-irsyad' base). Coord (cc-irsyad-coord-N)
+    # is excluded. This is the #40672 fix: it now counts live workers instead of reading 0.
+    pool = [l for l in lanes if l.live and is_elastic_worker(l.lane)]
     pool_size = len(pool)
     interlocks["protected_allowlist"] = (
-        "enforced — only live cc-irsyad-<worker> lanes eligible; coord/client-poller/"
-        "money-path/singletons/bare-cc-irsyad excluded by construction")
-    interlocks["max_lanes_cap"] = f"MAX_LANES={MAX_LANES}; pool={pool_size}"
+        "cap counts ONLY spun elastic workers (irsyad-worker-<N> sessions); standing lanes "
+        "(tabung/coord/any standing irsyad) excluded from cap AND kill (Nazim #40850 ruling (a))")
+    interlocks["max_lanes_cap"] = f"MAX_LANES={MAX_LANES}; pool={pool_size} ({[l.agent_id for l in pool]})"
 
     # ── FAIL-SAFE: any ambiguity in the demand signal => decide NOTHING ──────────────────
     ambiguous = not coord_queue_readable
@@ -189,7 +249,10 @@ def decide(
     else:
         provably_idle = 0
         for l in pool:
-            if l.idle is True:
+            # Kill-eligibility is the STRICTER subset of the cap pool: only SPUN elastic workers
+            # (irsyad-worker-<N> sessions) — never a standing lane (tabung) that merely counts
+            # toward the cap. is_auto_killable enforces session + poller + money guards.
+            if l.idle is True and is_auto_killable(l.agent_id, l.lane, l.owns_bot_channel, l.money_path):
                 provably_idle += 1
                 would_kill.append({
                     "lane": l.lane,
@@ -383,20 +446,84 @@ def write_log_row(conn, d: Decision) -> Optional[int]:
     return new_id
 
 
+def _open_spin_proposal_exists(conn) -> bool:
+    """True if a spin proposal to orch-console is still outstanding (un-answered) within the TTL.
+    Fail-safe: on ANY read error, return True (assume one is open) so we do NOT double-propose."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM agent_messages "
+                "WHERE from_agent='cc-orchestrator' AND to_agent='orch-console' "
+                "AND subject LIKE %s AND responded_at IS NULL "
+                "AND created_at > now() - (%s * interval '1 minute') LIMIT 1",
+                (PROPOSAL_SUBJECT_PREFIX + "%", PROPOSAL_TTL_MIN))
+            return cur.fetchone() is not None
+    except Exception:
+        return True
+
+
+def emit_spin_proposal(conn, d: Decision) -> Optional[int]:
+    """SUPERVISED-propose: post ONE P1 rr spin proposal to orch-console. NEVER actuates — the
+    spin is executed only on Nazim's confirm, as a separate (wet-proved) step. Returns the new
+    bus id, or None on failure."""
+    subject = (f"{PROPOSAL_SUBJECT_PREFIX}: demand={d.demand} pool={d.pool_size}/{MAX_LANES} "
+               f"on {d.host} — CONFIRM to spin +1 irsyad worker")
+    body = (
+        f"AUTOSCALER (SUPERVISED-propose, Nazim #40401 gate) — coord queue "
+        f"'{d.coord_queue_source}' shows unclaimed demand={d.demand} (>= threshold "
+        f"{SPIN_THRESHOLD}) and pool={d.pool_size} < MAX_LANES={MAX_LANES}.\n\n"
+        "PROPOSAL: spin +1 elastic irsyad worker (cc-irsyad-<N>, musa2 key, gzb).\n"
+        f"Interlocks at propose time: {d.interlocks}\n\n"
+        "Reply to CONFIRM (the hub spins on your confirm) or DECLINE. I do NOT auto-spin — this "
+        "is the propose-then-confirm gate you set. Kill path stays idle-proof detect-only this phase."
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                "requires_response,priority) "
+                "VALUES ('cc-orchestrator','orch-console','question',%s,%s,true,'P1') RETURNING id",
+                (subject, body))
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
+    except Exception as e:
+        print(f"    SUPERVISED: proposal emit failed ({type(e).__name__}: {e})")
+        return None
+
+
 def run_tick(write: bool = True) -> Decision:
     import psycopg
     host = socket.gethostname()
+    tag = {"supervised": "SUPERVISED", "auto": "AUTO"}.get(AUTOSCALER_MODE, "INERT")
     with psycopg.connect(_dsn()) as conn:
         d = gather_and_decide(conn, host)
         logged = write_log_row(conn, d) if write else None
-    print(f"[irsyad-autoscaler INERT] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
+        if AUTOSCALER_MODE == "auto" and d.would_spin and not d.ambiguous:
+            # FULLY-AUTO (Nazim #40850): pool-safe demand spins WITHOUT a confirm. The actuator
+            # re-checks would_spin (demand-gate) + MAX_LANES before booting, so this spins ONE
+            # worker per tick and stops at the cap (re-eval after each boot, #40854 (3)).
+            import subprocess as _sp
+            print("    AUTO: would_spin=True -> actuating irsyad_spin_worker --auto (no confirm)")
+            _sp.run([sys.executable, str(_ROOT / "scripts" / "irsyad_spin_worker.py"), "--auto"])
+        elif should_emit_proposal(AUTOSCALER_MODE, d.would_spin, d.ambiguous,
+                                  _open_spin_proposal_exists(conn)):
+            # SUPERVISED-propose arm: detect + propose only (no actuation). Gated + deduped.
+            pid = emit_spin_proposal(conn, d)
+            if pid is not None:
+                print(f"    SUPERVISED: spin proposal posted to orch-console (bus #{pid}) — "
+                      "awaiting Nazim confirm; NO auto-spin")
+        elif AUTOSCALER_MODE == "supervised" and d.would_spin and not d.ambiguous:
+            print("    SUPERVISED: would-spin, but a proposal is already outstanding (dedup) — no re-post")
+    print(f"[irsyad-autoscaler {tag}] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
           f"{d.reason}")
     if d.would_kill:
         for c in d.would_kill:
-            print(f"    would-kill: {c['lane']} ({c['base_agent_id']}) — {c['reason']}")
+            print(f"    would-kill: {c['lane']} ({c['base_agent_id']}) — {c['reason']} "
+                  "(detect-only — kill not armed)")
     if write and logged is None:
         print("    (fleet_lane_autoscale_log absent — decision NOT persisted; migration 062 "
-              "applied by the hub post-review. Detection ran; INERT invariant intact.)")
+              "applied by the hub post-review. Detection ran; log invariant intact.)")
     elif logged is not None:
         print(f"    logged id={logged}")
     return d
@@ -409,10 +536,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--interval", type=int, default=300, help="seconds between ticks in --loop")
     ap.add_argument("--no-write", action="store_true",
                     help="compute + print the decision but do not write the log row")
+    ap.add_argument("--mode", choices=("inert", "supervised", "auto"), default=None,
+                    help="override IRSYAD_AUTOSCALER_MODE (inert=detect+log only; "
+                         "supervised=post deduped spin proposals, spin on confirm; "
+                         "auto=fully-auto, spin directly on pool-safe would_spin, no confirm)")
     args = ap.parse_args(argv)
+    if args.mode:
+        global AUTOSCALER_MODE
+        AUTOSCALER_MODE = args.mode
     write = not args.no_write
+    tag = "SUPERVISED" if AUTOSCALER_MODE == "supervised" else "INERT"
     if args.loop:
-        print(f"[irsyad-autoscaler INERT] loop up (interval {args.interval}s) — detect+log only")
+        print(f"[irsyad-autoscaler {tag}] loop up (interval {args.interval}s) — "
+              + ("detect+log+propose (no actuation)" if tag == "SUPERVISED" else "detect+log only"))
         while True:
             try:
                 run_tick(write=write)
