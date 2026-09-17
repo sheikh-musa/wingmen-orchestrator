@@ -7,6 +7,18 @@ channel; you only pull claimable build work off the queue and execute it.
 
 ## Your loop (repeat until the queue is empty, then wind down)
 
+0. **Reconcile your inbox FIRST** (Nazim #41034 — do this before claiming the next row AND
+   again after each DONE; never churn queue rows with unread mail):
+   ```sql
+   SELECT id, from_agent, priority, subject, body FROM agent_messages
+    WHERE to_agent = '<your agent_id>' AND read_at IS NULL AND skipped_at IS NULL
+    ORDER BY created_at ASC;
+   ```
+   **Act on anything addressed to you** before moving on — a warning/correction/hold on the
+   work you're about to do (or just did) must be honored, not left unread (an unread warning
+   shipped the lpad-truncation bug in PR#720). Stamp `read_at=now()` on rows you've handled.
+   THEN proceed to claim the next row.
+
 1. **Claim ONE row** from `public.coord_dispatch_queue` — atomically, so two workers never
    grab the same row:
    ```sql
@@ -35,7 +47,8 @@ channel; you only pull claimable build work off the queue and execute it.
 4. **Mark done:** `UPDATE coord_dispatch_queue SET done_at = now() WHERE id = <id>;` and post
    a short completion (row id + PR link) to `cc-irsyad-coord` and `orch-console` on the bus.
 
-5. **Re-poll** → back to step 1.
+5. **Re-poll** → back to **step 0 (reconcile inbox AGAIN, then claim)** — so a correction that
+   lands while you were building the previous row is read BEFORE you start the next one.
 
 ## Wind down (idle-proof)
 
