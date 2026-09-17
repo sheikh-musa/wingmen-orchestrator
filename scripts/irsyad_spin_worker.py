@@ -148,10 +148,12 @@ def _boot(n: int, dry: bool) -> int:
 
 
 def _log_bus(conn, n: int, detail: str) -> None:
+    # P3: a routine spin is NOT an exception — Nazim #40871 wants only exceptions (abort criteria,
+    # cap-reached-with-demand-waiting, reaper-refused, confirm-executor alert) to surface as P1.
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
-            "VALUES ('cc-orchestrator','orch-console','update',%s,%s,false,'P1')",
+            "VALUES ('cc-orchestrator','orch-console','update',%s,%s,false,'P3')",
             (f"SPUN cc-irsyad worker (pool slot {n}) — claiming from coord_dispatch_queue",
              detail))
     conn.commit()
