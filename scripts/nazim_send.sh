@@ -42,7 +42,10 @@ if REDACTED="$(printf '%s' "$TEXT" | PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin
 fi
 
 # Send (chunked at Telegram's 4096-char limit). token/chat/text via env, not argv.
-if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \
+# TG_FAIL_OUT: the helper writes the structured failure (status/description/retry_after)
+# here so we can record WHY on the operator_messages row (Nazim #40837).
+FAILOUT="$(mktemp)"
+if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" TG_FAIL_OUT="$FAILOUT" \
      "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/_tg_chunked_send.py"; then
   sent=1
 else
@@ -60,8 +63,11 @@ if [ "$sent" = 1 ]; then
   PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
     outbound "$TEXT" --chat "$CHAT" --tag nazim-console >/dev/null 2>&1 || true
 else
+  REASON="$(cat "$FAILOUT" 2>/dev/null || true)"
   PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
-    outbound "$TEXT" --chat "$CHAT" --tag nazim-console --undelivered >/dev/null 2>&1 || true
+    outbound "$TEXT" --chat "$CHAT" --tag nazim-console --undelivered \
+    ${REASON:+--reason "$REASON"} >/dev/null 2>&1 || true
 fi
+rm -f "$FAILOUT"
 
 [ "$sent" = 1 ] && exit 0 || { echo "nazim_send failed" >&2; exit 1; }

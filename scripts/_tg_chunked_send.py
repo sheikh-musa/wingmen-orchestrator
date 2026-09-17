@@ -6,11 +6,14 @@ Reads TG_TOK / TG_CHAT / TG_TEXT from the environment (not argv — keeps the
 token out of `ps`). Chunks on line boundaries where possible, hard-splitting any
 single oversized line. Exits 0 only if every chunk sent.
 """
+from __future__ import annotations
+
 import difflib
 import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -115,6 +118,78 @@ def chunks(text: str):
     return out or [""]
 
 
+# ── resilient single-chunk send (Nazim #40837) ──────────────────────────────
+# A first-attempt drop that would succeed on retry cost the operator two messages
+# today, and the failure detail was swallowed ('tg send error'). These surface the
+# real Telegram status+description, retry ONCE on a transient failure (429/5xx/network,
+# respecting retry_after), and fall back Markdown->plain on a 400 parse error.
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+RETRY_SLEEP_DEFAULT = 2
+
+
+def _post(tok: str, chat: str, body: str, parse_mode: str | None = None) -> dict:
+    """One sendMessage POST. Returns {ok, status, description, retry_after} — never raises,
+    so the caller can decide retry/fallback on the STRUCTURED result (not a swallowed str)."""
+    params = {"chat_id": chat, "text": body}
+    if parse_mode:
+        params["parse_mode"] = parse_mode
+    data = urllib.parse.urlencode(params).encode()
+    try:
+        with urllib.request.urlopen(
+            f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=30
+        ) as r:
+            d = json.load(r)
+            if d.get("ok"):
+                return {"ok": True, "status": 200, "description": None, "retry_after": None}
+            params_out = d.get("parameters") or {}
+            return {"ok": False, "status": 200, "description": d.get("description"),
+                    "retry_after": params_out.get("retry_after")}
+    except urllib.error.HTTPError as e:
+        desc, ra = str(e), None
+        try:
+            d = json.load(e)
+            desc = d.get("description") or desc
+            ra = (d.get("parameters") or {}).get("retry_after")
+        except Exception:
+            pass
+        return {"ok": False, "status": e.code, "description": desc, "retry_after": ra}
+    except Exception as e:
+        return {"ok": False, "status": None, "description": str(e), "retry_after": None}
+
+
+def send_with_resilience(tok: str, chat: str, body: str, parse_mode: str | None = None,
+                         sleep=time.sleep, post=None) -> dict:
+    """Send one chunk with ONE retry on a transient failure and a Markdown->plain fallback
+    on a parse error. `post`/`sleep` are injected for testing. Returns the final result."""
+    post = post or _post
+    r = post(tok, chat, body, parse_mode)
+    if r["ok"]:
+        return r
+    # A 400 parse error under Markdown: the entities are the problem, not the transport —
+    # resend once as plain text so the operator still gets the message (no backoff sleep).
+    if (r.get("status") == 400 and parse_mode
+            and "parse" in (r.get("description") or "").lower()):
+        return post(tok, chat, body, None)
+    # Transient (throttle / server / network): back off once (honor retry_after) and retry.
+    if r.get("status") in RETRYABLE_STATUS or r.get("status") is None:
+        sleep(r.get("retry_after") or RETRY_SLEEP_DEFAULT)
+        return post(tok, chat, body, parse_mode)
+    return r
+
+
+def _record_failure(reason: dict) -> None:
+    """Write the structured failure to $TG_FAIL_OUT (a file the shell caller reads to pass
+    into operator_log --reason, so the operator_messages row carries WHY it failed)."""
+    out = os.environ.get("TG_FAIL_OUT")
+    if not out:
+        return
+    try:
+        with open(out, "w") as f:
+            json.dump(reason, f)
+    except Exception:
+        pass
+
+
 def main() -> int:
     tok = os.environ.get("TG_TOK", "")
     chat = os.environ.get("TG_CHAT", "")
@@ -132,22 +207,21 @@ def main() -> int:
               f"(operator_messages #{rid}) within {DUP_WINDOW_SEC}s. "
               f"Set TG_ALLOW_DUPLICATE=1 to send anyway.", file=sys.stderr)
         return 0
+    parse_mode = os.environ.get("TG_PARSE_MODE") or None
     parts = chunks(text)
     total = len(parts)
     for i, part in enumerate(parts):
         # suffix a page marker only when actually split, so single messages stay clean
         body = part if total == 1 else f"{part}\n\n({i + 1}/{total})"
-        data = urllib.parse.urlencode({"chat_id": chat, "text": body}).encode()
-        try:
-            with urllib.request.urlopen(
-                f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=30
-            ) as r:
-                d = json.load(r)
-                if not d.get("ok"):
-                    print(f"tg send error: {d.get('description')}", file=sys.stderr)
-                    return 1
-        except Exception as e:
-            print(f"tg send error: {e}", file=sys.stderr)
+        res = send_with_resilience(tok, chat, body, parse_mode)
+        if not res["ok"]:
+            reason = {"status": res.get("status"), "description": res.get("description"),
+                      "retry_after": res.get("retry_after"), "chunk": f"{i + 1}/{total}"}
+            # LOUD + structured (was a swallowed 'tg send error'); the shell caller reads
+            # $TG_FAIL_OUT and passes this into operator_log --reason (cos_triage).
+            print(f"tg send FAILED: status={reason['status']} "
+                  f"description={reason['description']}", file=sys.stderr)
+            _record_failure(reason)
             return 1
         if total > 1:
             time.sleep(0.4)  # stay under Telegram's per-chat rate limit
