@@ -102,3 +102,33 @@ def test_page_dry_run_sends_and_stamps_nothing():
                         dry=True, now=NOW, page_state=state,
                         send_page=lambda t: sent.__setitem__("n", sent["n"] + 1) or True)
     assert sent["n"] == 0 and state == {}
+
+
+# ── CONSTRAINT LOCK (Nazim #40859) ───────────────────────────────────────────
+# The page's message_type must satisfy agent_messages_message_type_check, or an ARMED page
+# raises a check_violation and fails SILENTLY — the very gap this net closes. The unit
+# tests mock the INSERT, so this checks the REAL constraint (live pg_get_constraintdef;
+# pinned copy offline) — a future constraint change fails the suite, not production.
+def _allowed_message_types():
+    import os
+    import re
+    PINNED = {"review_request", "question", "decision", "agreed", "challenge",
+              "update", "blocker", "counter"}
+    dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+    if not dsn:
+        return PINNED
+    try:
+        import psycopg
+        with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
+            cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                        "WHERE conname='agent_messages_message_type_check'")
+            r = cur.fetchone()
+        return set(re.findall(r"'([a-z_]+)'::text", r[0])) if r else PINNED
+    except Exception:
+        return PINNED
+
+
+def test_queue_age_message_type_is_constraint_valid():
+    assert q.PAGE_MESSAGE_TYPE in _allowed_message_types(), (
+        f"{q.PAGE_MESSAGE_TYPE!r} not in agent_messages_message_type_check — an armed "
+        f"page would fail SILENTLY (Nazim #40859)")
