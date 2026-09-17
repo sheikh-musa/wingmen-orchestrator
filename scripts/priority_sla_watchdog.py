@@ -124,6 +124,11 @@ P0_SURFACE_MIN = _envint("SLA_P0_SURFACE_MIN", HARD_ESCALATE_MIN["P0"])
 REPAGE_AFTER_MIN = _envint("SLA_AGED_REPAGE_AFTER_MIN", 360)   # 6h floor
 REPAGE_EVERY_MIN = _envint("SLA_AGED_REPAGE_EVERY_MIN", 360)   # re-page cadence
 MAX_REPAGES_PER_RUN = _envint("SLA_AGED_MAX_REPAGES_PER_RUN", 3)
+# The re-page bus row's message_type MUST be in agent_messages_message_type_check
+# (review_request/question/decision/agreed/challenge/update/blocker/counter). 'escalation'
+# is NOT allowed — it raises a check_violation and the send fails SILENTLY (Nazim #40859),
+# the exact silent-gap this net exists to close. Locked by test_aged_rr_message_type_valid.
+PAGE_MESSAGE_TYPE = "blocker"
 
 # Agents to drop from actioning entirely (comma-separated). Lever for Nazim to
 # exclude e.g. the operator-attended hub itself if paging on the hub's own
@@ -986,8 +991,8 @@ def _send_aged_repage(conn, owner: str, row: dict) -> bool:
             cur.execute(
                 "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
                 "  requires_response,priority,is_test) "
-                "VALUES ('cc-fleet-health',%s,'escalation',%s,%s,false,'P1',false)",
-                (owner, subj, body))
+                "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
+                (owner, PAGE_MESSAGE_TYPE, subj, body))
         conn.commit()
         log(f"aged-rr-repage SENT #{mid} -> {owner} ({row.get('elapsed_minutes')}m)")
         return True
