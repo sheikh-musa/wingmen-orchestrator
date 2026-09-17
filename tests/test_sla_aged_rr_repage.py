@@ -159,3 +159,34 @@ def test_repage_dry_run_sends_nothing_and_stamps_nothing():
                          dry=True, now=1000 * HOUR, repage_state=state,
                          send_repage=lambda owner, t: sent.__setitem__("n", sent["n"] + 1) or True)
     assert sent["n"] == 0 and state == {}
+
+
+# ── CONSTRAINT LOCK (Nazim #40859) ───────────────────────────────────────────
+# The re-page's message_type must satisfy agent_messages_message_type_check, or an ARMED
+# re-page raises a check_violation and fails SILENTLY — the exact silent-gap this net
+# closes. The unit tests above mock the INSERT, so they can't catch a bad type; this test
+# checks the REAL constraint (live via pg_get_constraintdef; a pinned copy offline) so a
+# future constraint change fails the suite instead of production.
+def _allowed_message_types():
+    import os
+    import re
+    PINNED = {"review_request", "question", "decision", "agreed", "challenge",
+              "update", "blocker", "counter"}
+    dsn = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+    if not dsn:
+        return PINNED
+    try:
+        import psycopg
+        with psycopg.connect(dsn, connect_timeout=15) as conn, conn.cursor() as cur:
+            cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                        "WHERE conname='agent_messages_message_type_check'")
+            r = cur.fetchone()
+        return set(re.findall(r"'([a-z_]+)'::text", r[0])) if r else PINNED
+    except Exception:
+        return PINNED
+
+
+def test_aged_rr_message_type_is_constraint_valid():
+    assert w.PAGE_MESSAGE_TYPE in _allowed_message_types(), (
+        f"{w.PAGE_MESSAGE_TYPE!r} not in agent_messages_message_type_check — an armed "
+        f"re-page would fail SILENTLY (Nazim #40859)")
