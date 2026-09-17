@@ -23,9 +23,9 @@
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>/Users/sheikhmusa</string>
     <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
-    <!-- ARM (after soak): uncomment to page live.
+    <!-- ARMED 2026-09-17 (Nazim #40952, after a clean 2h detect-only soak 00:17-02:17Z:
+         25 scans, 0 over-age, 0 false pages). Flip to 0 / re-comment to disarm. -->
     <key>QUEUE_AGE_ALERT_ENABLED</key><string>1</string>
-    -->
   </dict>
   <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/queue-age-watchdog.out.log</string>
   <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/queue-age-watchdog.out.log</string>
