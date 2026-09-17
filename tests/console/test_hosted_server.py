@@ -107,6 +107,7 @@ def _audit_lines(tmp_path):
     ("/api/apply-armed", {"session": "cosem-tdu", "kind": "token", "confirm": "cosem-tdu"}),
     ("/api/assign", {"agent": "cc-cosem-tdu", "ask": "x"}),
     ("/api/ask-close", {"id": 1, "action": "confirm"}),
+    ("/api/governance-set", {"project": "irsyad", "field": "cai_enabled", "value": True, "confirm": "irsyad", "reason": "r"}),
 ])
 def test_every_action_requires_the_bearer(hosted, upstream, route, body):
     with patch("subprocess.run") as run:
@@ -349,3 +350,62 @@ def test_ask_close_validates_then_runs_asks_close_py(hosted):
     assert r.status_code == 200 and r.json()["ok"] is True
     argv = run.call_args.args[0]
     assert argv[1].endswith("scripts/asks_close.py") and argv[2:] == ["7", "drop"]
+
+
+# ------------------------------------------------------------------ fc-v65 governance (op#20702 Stage E)
+def test_governance_get_is_proxied_to_the_default_upstream(hosted, upstream):
+    assert httpx.get(hosted + "/api/governance", timeout=5).status_code == 401
+    upstream.reply = (200, {"projects": [{"project": "irsyad"}], "audit": []})
+    r = httpx.get(hosted + "/api/governance", headers=H(), timeout=5)
+    assert r.status_code == 200 and r.json()["projects"][0]["project"] == "irsyad"
+    c = upstream.calls[-1]
+    assert c["method"] == "GET" and c["path"] == "/api/governance" and c["auth"] == "Bearer " + UPTOK and c["armed"] is None
+    httpx.get(hosted + "/api/governance?fresh=1", headers=H(), timeout=5)
+    assert upstream.calls[-1]["path"] == "/api/governance?fresh=1"
+
+
+def test_governance_get_without_upstream_503(hosted, upstream, monkeypatch):
+    monkeypatch.delenv("CONSOLE_UPSTREAM_URL")
+    r = httpx.get(hosted + "/api/governance", headers=H(), timeout=5)
+    assert r.status_code == 503 and "no upstream" in r.json()["error"]
+
+
+def test_governance_set_validates_shape_then_proxies_with_the_armed_key(hosted, upstream, tmp_path):
+    ak = "operator-armed-key-0123456789"
+    body = {"project": "irsyad", "field": "money_clearance_enabled", "value": True, "confirm": "irsyad",
+            "reason": "client direction on record", "money_ack": "ENABLE MONEY CLEARANCE", "updated_by": "spoof"}
+    # bad field / confirm mismatch / missing reason: refused here, never proxied
+    n = len(upstream.calls)
+    r = httpx.post(hosted + "/api/governance-set", headers={**H(), "X-Armed-Bearer": ak}, json={**body, "field": "updated_by"}, timeout=5)
+    assert r.status_code == 400 and r.json()["error"] == "bad project/field"
+    r = httpx.post(hosted + "/api/governance-set", headers={**H(), "X-Armed-Bearer": ak}, json={**body, "confirm": "Irsyad"}, timeout=5)
+    assert r.status_code == 400 and "type the exact project name" in r.json()["error"]
+    r = httpx.post(hosted + "/api/governance-set", headers={**H(), "X-Armed-Bearer": ak}, json={**body, "reason": ""}, timeout=5)
+    assert r.status_code == 400 and "reason" in r.json()["error"]
+    assert len(upstream.calls) == n
+    # valid: proxied with the armed key + upstream bearer; `updated_by` from the phone is DROPPED
+    upstream.reply = (200, {"ok": True, "audit_id": 11})
+    r = httpx.post(hosted + "/api/governance-set", headers={**H(), "X-Armed-Bearer": ak}, json=body, timeout=5)
+    assert r.status_code == 200 and r.json()["audit_id"] == 11
+    c = upstream.calls[-1]
+    assert c["path"] == "/api/governance-set" and c["armed"] == ak and c["auth"] == "Bearer " + UPTOK
+    assert c["body"] == {"project": "irsyad", "field": "money_clearance_enabled", "value": True, "confirm": "irsyad",
+                         "reason": "client direction on record", "money_ack": "ENABLE MONEY CLEARANCE"}
+    # the Mini's refusals pass through untouched (bearer / R4 / too-short)
+    for code, err in ((401, "armed bearer required"), (503, "armed bearer misconfigured (too short)"),
+                      (503, "governance writes are DISABLED on this console (CONSOLE_R4_ENABLED off)")):
+        upstream.reply = (code, {"error": err})
+        r = httpx.post(hosted + "/api/governance-set", headers={**H(), "X-Armed-Bearer": ak}, json=body, timeout=5)
+        assert r.status_code == code and r.json()["error"] == err
+    # the armed key never lands in the hosted audit trail
+    assert ak not in "\n".join(_audit_lines(tmp_path))
+    # no upstream -> 503, never a local write
+    
+
+def test_governance_set_without_upstream_503_never_local(hosted, upstream, monkeypatch):
+    monkeypatch.delenv("CONSOLE_UPSTREAM_URL")
+    with patch.object(hs.subprocess, "run") as run:
+        r = httpx.post(hosted + "/api/governance-set", headers={**H(), "X-Armed-Bearer": "k" * 24},
+                       json={"project": "irsyad", "field": "cai_enabled", "value": False, "confirm": "irsyad", "reason": "r"}, timeout=5)
+    assert r.status_code == 503 and "no upstream" in r.json()["error"]
+    run.assert_not_called()

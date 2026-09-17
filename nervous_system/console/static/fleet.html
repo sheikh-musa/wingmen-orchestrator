@@ -368,6 +368,50 @@
     background: rgba(138,166,255,.14); border: 1px solid rgba(138,166,255,.32); cursor: pointer; -webkit-appearance: none; }
   .assign .assend:active { transform: scale(.98); } .assign .assend:disabled { opacity: .5; }
 
+  /* ── GOVERNANCE (fc-v65) ─────────────────────────────────────────────────── */
+  .gcard { margin-bottom: 8px; padding: 11px 12px 10px; border-radius: 13px; background: var(--panel); border: 1px solid var(--line);
+    box-shadow: var(--shadow); }
+  .gcard.money { border-color: rgba(251,113,133,.45); background: linear-gradient(180deg, rgba(251,113,133,.07), transparent 60%), var(--panel); }
+  .gcard .gh { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  .gcard .gh b { font: 700 14px/1 var(--sans); color: var(--txt); }
+  .gcard .gh .gmeta { margin-left: auto; font: 10px/1.3 var(--mono); color: var(--faint); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gcard .gtog { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .gcard .gt { font: 700 11px/1 var(--mono); letter-spacing: .04em; padding: 9px 12px; border-radius: 999px; cursor: pointer; -webkit-appearance: none;
+    border: 1px solid var(--line-2); background: rgba(255,255,255,.04); color: var(--dim); }
+  .gcard .gt.on { color: var(--good); background: rgba(55,211,154,.13); border-color: rgba(55,211,154,.35); }
+  .gcard .gt.off { color: var(--dim); }
+  .gcard .gt.moneyon { color: #fff; background: linear-gradient(160deg, var(--bad), #c2415b); border-color: transparent; }
+  .gcard .gt:active { transform: scale(.97); }
+  .gcard .grow { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font: 11px/1.5 var(--mono); color: var(--dim); margin: 3px 0; }
+  .gcard .grow .gl { color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; flex: 0 0 74px; }
+  .gcard .grow .gop { color: var(--txt); } .gcard .grow .gop i { font-style: normal; color: var(--faint); }
+  .gcard .grow .gtag { font-size: 9px; padding: 2px 5px; border-radius: 5px; background: rgba(255,255,255,.06); color: var(--dim); }
+  .gcard .grow .gtag.ext { color: var(--warn); background: rgba(246,196,83,.13); }
+  .gcard .grow .gedit { margin-left: auto; font: 10px/1 var(--mono); color: var(--accent); padding: 5px 9px; border-radius: 999px;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.28); cursor: pointer; -webkit-appearance: none; }
+  .gcard .grow .gnone { color: var(--faint); font-style: italic; }
+  .gcard .gres { font: 10px/1.4 var(--mono); color: var(--faint); margin-top: 4px; }
+  .gcard .gres.on { color: var(--good); }
+  .gunavail { padding: 12px; border-radius: 13px; border: 1px dashed var(--line-2); font: 11px/1.5 var(--mono); color: var(--faint); }
+  #govConfirm .cstrip { margin: 4px 2px 12px; }
+  #govConfirm .cstrip .cn.loud { color: var(--bad); font-weight: 700; font-size: 11px; }
+  #govConfirm .gfield { display: grid; gap: 6px; margin: 6px 0 8px; }
+  #govConfirm .gfield input, #govConfirm .gfield textarea { min-width: 0; width: 100%; font: 12.5px/1.3 var(--mono); color: var(--txt); padding: 9px 11px;
+    border-radius: 10px; border: 1px solid var(--line-2); background: rgba(0,0,0,.25); outline: none; -webkit-appearance: none; }
+  #govConfirm .gfield input:focus, #govConfirm .gfield textarea:focus { border-color: rgba(138,166,255,.5); }
+  #govConfirm .gfield .fl { font: 10px/1 var(--mono); color: var(--faint); text-transform: uppercase; letter-spacing: .06em; }
+  #govConfirm .oprow { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 6px; align-items: center; }
+  #govConfirm .oprow label { font: 10px/1 var(--mono); color: var(--dim); display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  #govConfirm .oprow .opx { font: 13px/1 var(--dim); padding: 6px; cursor: pointer; }
+  #govConfirm .opadd { font: 10px/1 var(--mono); color: var(--accent); padding: 7px 10px; border-radius: 999px; justify-self: start;
+    background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.28); cursor: pointer; -webkit-appearance: none; }
+  .armedkey.govkey { margin: 0 2px 10px; }
+  .chatter.govlog { margin-top: 4px; }
+  .galog { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font: 10.5px/1.45 var(--mono); color: var(--dim); padding: 8px 0 2px; }
+  .galog .gaw { color: var(--faint); white-space: nowrap; }
+  .galog .gam b { color: var(--txt); } .galog .gam .gac { color: var(--accent); } .galog .gam .gamoney { color: var(--bad); }
+  .galog .gar { color: var(--faint); }
+
   .dbody { margin-bottom: 8px; border-radius: 13px; background: var(--panel); border: 1px solid var(--line);
     box-shadow: var(--shadow); overflow: hidden; }
   .dbody .dh { display: flex; align-items: center; gap: 9px; padding: 11px 13px; }
@@ -574,6 +618,23 @@
       <span class="g"></span>
       <span>status derived live from the bus on every refresh · never cached · pull to refresh</span>
     </div>
+  </section>
+
+  <!-- GOVERNANCE (fc-v65, op#20702 Stage E): per-project registry rows — cai
+       on/off · operators (who authorizes build/scope) · money-clearance (default
+       OFF, loudest). Reads /api/governance; every write is an ARMED action
+       (armed key + typed project confirm + reason), audited by the DB trigger. -->
+  <section id="govSec">
+    <div class="sec-h"><h2>Governance</h2><span id="govCount" class="count"></span>
+      <button id="govReload" class="asbtn" title="reload registry">↻ reload</button></div>
+    <div id="gov"><div class="empty">Loading…</div></div>
+    <div id="govConfirm"></div>
+    <div id="govArmed" class="armedkey govkey"><label><span>armed key</span>
+      <input id="govArmedKey" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="required for any governance change" /></label></div>
+    <details class="chatter govlog" id="govLog">
+      <summary><span>Governance audit</span><span class="csub">(append-only · DB trigger)</span><span id="govLogCount" class="ccount"></span><span class="chev">▸</span></summary>
+      <div class="cinner"><div id="govAudit"><div class="empty">—</div></div></div>
+    </details>
   </section>
 
   <!-- Fleet chatter: the old DRAIN BOARD, demoted to a collapsed SRE glance. -->

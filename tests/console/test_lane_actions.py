@@ -22,7 +22,7 @@ def server(monkeypatch, tmp_path):
     # CAI-RESP-1434: the armed endpoints need the SECOND factor on top of access;
     # configured here so these tests exercise the gates BEHIND it (see
     # test_armed_bearer.py for the gate itself).
-    monkeypatch.setenv("CONSOLE_ARMED_BEARER", "test-armed-key")
+    monkeypatch.setenv("CONSOLE_ARMED_BEARER", "test-armed-key-0123456789abcdef")  # fc-v65: >= 24 chars or the gate 503s (by design)
     monkeypatch.setenv("CONSOLE_ACCESS_LOG", str(tmp_path / "console_access.log"))
     monkeypatch.setattr(db, "fetch_messages", lambda limit=50, thread=None, agent=None: [])
     monkeypatch.setattr(db, "fetch_lanes", lambda: [])
@@ -50,7 +50,7 @@ def H(tok="test-console-token"):
 def HA(tok="test-console-token"):
     """Access via breakglass (Authorization) + the armed key in its OWN slot
     (X-Armed-Bearer) — the phone's shape when off-tailnet (CAI-RESP-1434)."""
-    return {**H(tok), "X-Armed-Bearer": "test-armed-key"}
+    return {**H(tok), "X-Armed-Bearer": "test-armed-key-0123456789abcdef"}
 
 
 OK = MagicMock(returncode=0, stdout="BOOTED cosem-tdu → tmux session 'cosem-tdu' (/x)\n", stderr="")

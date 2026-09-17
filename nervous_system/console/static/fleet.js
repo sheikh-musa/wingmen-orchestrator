@@ -287,7 +287,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v64';
+  var APP_BUILD = 'fc-v65';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -1480,6 +1480,222 @@
       });
   }
 
+  // ---- GOVERNANCE (fc-v65, op#20702 Stage E) ---------------------------------
+  // Per-project registry rows (project_governance, mig 063) with the 3 toggles:
+  // cai on/off · operators (who authorizes build/scope; internal/external) ·
+  // money-clearance (DEFAULT OFF — the loudest toggle). Reads /api/governance
+  // (server-side subprocess read; the DSN never reaches the browser). EVERY write
+  // is an ARMED action: X-Armed-Bearer (same key as Recycle/Apply) + typed project
+  // confirm + a mandatory reason, POSTed to /api/governance-set; the server adds
+  // the CONSOLE_R4_ENABLED gate and the DB trigger appends the audit row. Enabling
+  // money clearance additionally requires typing the acknowledgement phrase.
+  var govData = null, govBusy = false;
+  var GOV_MONEY_ACK = "ENABLE MONEY CLEARANCE";
+  var GOV_LABEL = { cai_enabled: "cai", money_clearance_enabled: "money-clearance", operators: "operators", channels: "channels" };
+  function govKeyMissing() {
+    toast("armed key required — set it below the governance rows", true);
+    var inp = $("govArmedKey");
+    if (inp) { inp.classList.add("miss"); try { inp.focus(); } catch (e) {} }
+  }
+  function ageOf(ts) { var t = ts ? Date.parse(ts) : NaN; return isNaN(t) ? null : Math.max(0, (Date.now() - t) / 1000); }
+  // Pure: one project card. Toggles are buttons carrying the field + the value they
+  // would flip TO; operators/channels get an "edit" affordance. Never renders a raw
+  // fp/DSN — only what the registry holds (names, user ids, group ids).
+  function govCardHtml(p) {
+    var proj = esc(p.project);
+    var cai = !!p.cai_enabled, money = !!p.money_clearance_enabled;
+    var ops = Array.isArray(p.operators) ? p.operators : [];
+    var chs = Array.isArray(p.channels) ? p.channels : [];
+    var opsHtml = ops.length ? ops.map(function (o) {
+      return '<span class="gop">' + esc(o.name) + ' <i>' + esc(o.chat_id) + '</i></span>' +
+        '<span class="gtag' + (o.internal ? "" : " ext") + '">' + (o.internal ? "internal" : "external") + '</span>';
+    }).join(" · ") : '<span class="gnone">none — nobody can authorize this project\'s scope (fail-closed)</span>';
+    var chHtml = chs.length ? chs.map(function (c) { return '<span class="gop"><i>' + esc(c) + '</i></span>'; }).join(" · ")
+      : '<span class="gnone">DM-only (no group trusted)</span>';
+    var age = ageOf(p.updated_at);
+    return '<div class="gcard' + (money ? " money" : "") + '" data-project="' + proj + '">' +
+      '<div class="gh"><b>' + proj + '</b><span class="gmeta" title="' + esc(p.reason || "") + '">' + esc(p.updated_by || "") + (age != null ? " · " + fmtAge(age) : "") + '</span></div>' +
+      '<div class="gtog">' +
+        '<button class="gt cai ' + (cai ? "on" : "off") + '" data-gact="toggle" data-field="cai_enabled" data-to="' + (cai ? "false" : "true") + '">cai ' + (cai ? "ON" : "OFF") + '</button>' +
+        '<button class="gt ' + (money ? "moneyon" : "off") + '" data-gact="toggle" data-field="money_clearance_enabled" data-to="' + (money ? "false" : "true") + '">money-clearance ' + (money ? "ON ⚠" : "OFF") + '</button>' +
+      '</div>' +
+      '<div class="grow"><span class="gl">operators</span>' + opsHtml + '<button class="gedit" data-gact="edit" data-field="operators">edit</button></div>' +
+      '<div class="grow"><span class="gl">channels</span>' + chHtml + '<button class="gedit" data-gact="edit" data-field="channels">edit</button></div>' +
+      '<div class="gres' + (p.residency_ack_on_file ? " on" : "") + '">residency ack: ' + (p.residency_ack_on_file ? "on file" : "none on file (never inferred)") + '</div>' +
+    '</div>';
+  }
+  function govUnavailable(msg) {
+    var g = $("gov"); if (g) g.innerHTML = '<div class="gunavail">' + esc(msg) + '</div>';
+    var c = $("govCount"); if (c) c.textContent = "";
+  }
+  function renderGov(d) {
+    var g = $("gov"); if (!g) return;
+    var rows = d.projects || [];
+    g.innerHTML = rows.length ? rows.map(govCardHtml).join("") : '<div class="empty">no governance rows</div>';
+    var c = $("govCount"); if (c) c.textContent = rows.length + " project" + (rows.length === 1 ? "" : "s") + " · " + rows.filter(function (p) { return p.money_clearance_enabled; }).length + " money-on";
+    renderGovAudit(d.audit || []);
+  }
+  function renderGovAudit(rows) {
+    var box = $("govAudit"), cnt = $("govLogCount"); if (!box) return;
+    if (cnt) cnt.textContent = rows.length ? String(rows.length) : "";
+    if (!rows.length) { box.innerHTML = '<div class="empty">—</div>'; return; }
+    box.innerHTML = '<div class="galog">' + rows.map(function (a) {
+      var age = ageOf(a.changed_at);
+      var ch = (a.changed || []).map(function (f) { return '<span class="' + (f === "money_clearance_enabled" ? "gamoney" : "gac") + '">' + esc(GOV_LABEL[f] || f) + '</span>'; }).join(", ");
+      return '<span class="gaw">#' + esc(a.id) + (age != null ? " · " + fmtAge(age) : "") + '</span>' +
+        '<span class="gam"><b>' + esc(a.project) + '</b> ' + (ch || "seed") + ' <span class="gar">— ' + esc(a.changed_by || "") + (a.reason ? ": " + esc(a.reason) : "") + '</span></span>';
+    }).join("") + '</div>';
+  }
+  function loadGov(fresh) {
+    if (!$("gov")) return Promise.resolve();
+    return fetch("/api/governance" + (fresh ? "?fresh=1" : ""), { headers: authHeaders() })
+      .then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }, function () { return { s: r.status, j: {} }; }); })
+      .then(function (res) {
+        if (res.s === 401) { govUnavailable("unauthorized"); return; }
+        if (res.s !== 200 || !res.j || !Array.isArray(res.j.projects)) { govUnavailable((res.j && res.j.error) || "governance registry unavailable on this console"); return; }
+        govData = res.j; renderGov(res.j);
+      })
+      .catch(function () { govUnavailable("governance registry unreachable"); });
+  }
+  // Pure: the confirm-strip copy for a toggle flip. Money ON is the loud one.
+  function govStripCopy(project, field, to) {
+    if (field === "money_clearance_enabled") {
+      return to
+        ? { v: "Enable money clearance", cls: "bad", ack: true,
+            note: "⚠ LETS " + project + "'s registered operators clear ITS OWN money-path via their bridge-verified channel (Stage D). Default is OFF for every project. Only with the project's written direction on record. Audited, append-only." }
+        : { v: "Disable money clearance", cls: "warn", ack: false, note: "Back to the default: " + project + "'s money-path returns to the Musa-only gate. Audited." };
+    }
+    if (field === "cai_enabled") {
+      return to
+        ? { v: "cai ON", cls: "", ack: false, note: "cai precedent BINDS " + project + " again; its lanes may raise review requests to cai." }
+        : { v: "cai OFF", cls: "warn", ack: false, note: "cai precedent stops binding " + project + " (op#20704); review requests from its lanes to cai are refused at the DB (mig 064). Musa / the project operator decides." };
+    }
+    if (field === "operators") return { v: "Save operators", cls: "warn", ack: false, note: "Who authorizes " + project + "'s PRODUCT/SCOPING/build decisions (Stage C, non-money). chat_id = the person's Telegram USER id (positive) — a group id can never authorize." };
+    return { v: "Save channels", cls: "warn", ack: false, note: "Group chat ids " + project + "'s operators may authorize FROM (negative ids). A DM never needs listing; empty = DM-only." };
+  }
+  function govStripHtml(project, field, to, cur) {
+    var c = govStripCopy(project, field, to), s = esc(project);
+    var body = "";
+    if (field === "operators") {
+      var ops = Array.isArray(cur) ? cur : [];
+      body = '<div class="gfield" id="govOps">' + (ops.length ? ops.map(govOpRowHtml).join("") : govOpRowHtml({})) +
+        '<button class="opadd" type="button">+ operator</button></div>';
+    } else if (field === "channels") {
+      body = '<div class="gfield"><span class="fl">group chat ids, comma-separated</span>' +
+        '<input class="gch" type="text" inputmode="numeric" autocomplete="off" value="' + esc((Array.isArray(cur) ? cur : []).join(", ")) + '" placeholder="-100123…, -5330147776" /></div>';
+    }
+    return '<div class="cstrip gov ' + c.cls + '" data-project="' + s + '" data-field="' + esc(field) + '" data-to="' + (to ? "true" : "false") + '" data-ack="' + (c.ack ? "1" : "0") + '">' +
+      '<div class="ch"><span class="cv">' + esc(c.v) + '</span><span class="ct">' + s + '</span><span class="cx" data-cx="1">✕</span></div>' +
+      '<div class="cn' + (c.ack ? " loud" : "") + '">' + esc(c.note) + '</div>' + body +
+      '<div class="gfield"><span class="fl">reason (recorded in the audit row)</span><input class="greason" type="text" autocomplete="off" maxlength="500" placeholder="why — e.g. op#… / client direction" /></div>' +
+      (c.ack ? '<div class="gfield"><span class="fl">acknowledge</span><input class="gack" type="text" autocapitalize="characters" autocomplete="off" placeholder="type ' + esc(GOV_MONEY_ACK) + '" /></div>' : "") +
+      '<div class="cr"><input class="ci" type="text" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" placeholder="type ' + s + ' to arm" />' +
+      '<button class="cf" disabled>' + esc(c.v) + '</button></div>' +
+    '</div>';
+  }
+  function govOpRowHtml(o) {
+    return '<div class="oprow"><input class="opn" type="text" autocomplete="off" placeholder="name" value="' + esc(o.name || "") + '" />' +
+      '<input class="opid" type="text" inputmode="numeric" autocomplete="off" placeholder="Telegram user id" value="' + esc(o.chat_id || "") + '" />' +
+      '<label><input class="opint" type="checkbox"' + (o.internal ? " checked" : "") + ' /> internal</label>' +
+      '<span class="opx" data-opx="1">✕</span></div>';
+  }
+  function govOpenStrip(project, field, to) {
+    var box = $("govConfirm"); if (!box) return;
+    var cur = null;
+    if (govData) (govData.projects || []).forEach(function (p) { if (p.project === project) cur = p[field]; });
+    box.innerHTML = govStripHtml(project, field, to, cur);
+    var inp = box.querySelector(".greason");
+    try { box.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
+    if (inp) setTimeout(function () { try { inp.focus(); } catch (er) {} }, 60);
+  }
+  // Arms ONLY when: typed == project, reason non-empty, and (money ON) ack == phrase.
+  function govConfirmTyped(strip) {
+    var inp = strip.querySelector(".ci"), fire = strip.querySelector(".cf"), rs = strip.querySelector(".greason"), ak = strip.querySelector(".gack");
+    var ok = !!(inp && inp.value.trim() === strip.getAttribute("data-project")) &&
+             !!(rs && rs.value.trim()) &&
+             (strip.getAttribute("data-ack") !== "1" || !!(ak && ak.value.trim() === GOV_MONEY_ACK));
+    strip.classList.toggle("armed", ok);
+    if (fire) fire.disabled = !ok;
+    return ok;
+  }
+  function govValueFromStrip(strip) {
+    var field = strip.getAttribute("data-field");
+    if (field === "operators") {
+      var rows = strip.querySelectorAll(".oprow"), out = [];
+      Array.prototype.forEach.call(rows, function (r) {
+        var n = r.querySelector(".opn"), id = r.querySelector(".opid"), it = r.querySelector(".opint");
+        if (!n || !id) return;
+        if (!n.value.trim() && !id.value.trim()) return;   // blank row = ignored
+        out.push({ name: n.value.trim(), chat_id: id.value.trim(), internal: !!(it && it.checked) });
+      });
+      return out;
+    }
+    if (field === "channels") {
+      var ch = strip.querySelector(".gch");
+      return ch ? ch.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean) : [];
+    }
+    return strip.getAttribute("data-to") === "true";
+  }
+  function govFire(strip) {
+    if (!govConfirmTyped(strip)) { toast("not armed — type the project name, a reason" + (strip.getAttribute("data-ack") === "1" ? " and the acknowledgement" : ""), true); return; }
+    if (govBusy) return;
+    var project = strip.getAttribute("data-project"), field = strip.getAttribute("data-field");
+    var typed = strip.querySelector(".ci").value.trim(), reason = strip.querySelector(".greason").value.trim();
+    var ak = strip.querySelector(".gack"), ack = ak ? ak.value.trim() : "";
+    var value = govValueFromStrip(strip);
+    var fire = strip.querySelector(".cf"); if (fire) { fire.disabled = true; fire.textContent = "…"; }
+    govBusy = true;
+    fetch("/api/governance-set", {
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders(), armedHeaders()),
+      body: JSON.stringify({ project: project, field: field, value: value, confirm: typed, reason: reason, money_ack: ack })
+    }).then(function (r) { return r.json().then(function (j) { return { s: r.status, ok: r.ok, j: j || {} }; }, function () { return { s: r.status, ok: r.ok, j: {} }; }); })
+      .then(function (res) {
+        if (res.s === 401) { govKeyMissing(); govConfirmTyped(strip); if (fire) fire.textContent = govStripCopy(project, field, value === true).v; return; }
+        if (res.s === 503) { toast("✗ " + (res.j.error || "governance writes disabled on this console"), true); govConfirmTyped(strip); if (fire) fire.textContent = govStripCopy(project, field, value === true).v; return; }
+        if (!res.ok || !res.j.ok) { toast("✗ " + (res.j.error || "governance write failed"), true); govConfirmTyped(strip); if (fire) fire.textContent = govStripCopy(project, field, value === true).v; return; }
+        toast("✓ " + project + " · " + (GOV_LABEL[field] || field) + " updated (audit #" + (res.j.audit_id || "?") + ")");
+        var box = $("govConfirm"); if (box) box.innerHTML = "";
+        loadGov(true);
+      })
+      .catch(function () { toast("✗ network dropped — reload to see whether the change landed", true); })
+      .finally(function () { govBusy = false; });
+  }
+  function wireGov() {
+    var g = $("gov");
+    if (g) g.addEventListener("click", function (e) {
+      var b = e.target.closest ? e.target.closest("button[data-gact]") : null; if (!b) return;
+      var card = b.closest(".gcard"); if (!card) return;
+      var project = card.getAttribute("data-project"), field = b.getAttribute("data-field");
+      govOpenStrip(project, field, b.getAttribute("data-to") === "true");
+    });
+    var rl = $("govReload"); if (rl) rl.addEventListener("click", function () { loadGov(true); toast("reloading governance…"); });
+    var box = $("govConfirm");
+    if (box) {
+      box.addEventListener("input", function (e) { var st = e.target.closest ? e.target.closest(".cstrip") : null; if (st) govConfirmTyped(st); });
+      box.addEventListener("change", function (e) { var st = e.target.closest ? e.target.closest(".cstrip") : null; if (st) govConfirmTyped(st); });
+      box.addEventListener("keydown", function (e) {
+        var st = e.target.closest ? e.target.closest(".cstrip") : null; if (!st) return;
+        if (e.key === "Enter" && e.target.classList && e.target.classList.contains("ci")) { e.preventDefault(); govFire(st); }
+        if (e.key === "Escape") { box.innerHTML = ""; }
+      });
+      box.addEventListener("click", function (e) {
+        var st = e.target.closest ? e.target.closest(".cstrip") : null; if (!st) return;
+        if (e.target.closest(".cf")) { govFire(st); return; }
+        if (e.target.closest("[data-cx]")) { box.innerHTML = ""; return; }
+        var add = e.target.closest(".opadd"); if (add) { add.insertAdjacentHTML("beforebegin", govOpRowHtml({})); return; }
+        var x = e.target.closest("[data-opx]"); if (x) { var row = x.closest(".oprow"); if (row && row.parentNode) row.parentNode.removeChild(row); govConfirmTyped(st); }
+      });
+    }
+    // second armed-key field (same localStorage slot as the sheet's) so the
+    // governance section is usable without opening a lane sheet. Never echoed.
+    var gk = $("govArmedKey");
+    if (gk) {
+      gk.value = armedKey();
+      gk.addEventListener("input", function () { setArmedKey(gk.value.trim()); gk.classList.remove("miss"); var ak = $("armedKey"); if (ak) ak.value = gk.value; });
+      gk.addEventListener("change", function () { setArmedKey(gk.value.trim()); });
+    }
+  }
+
   // ---- static wiring (bound once) -------------------------------------------
   function wire() {
     var mt = $("multiToggle"); if (mt) mt.addEventListener("click", toggleMulti);
@@ -1575,10 +1791,13 @@
 
   function start() {
     wire();
+    wireGov();
     loadBuild();
     var cached = loadLastGood();
     if (cached) { setLive(false, "● reconnecting…"); applyData(cached); }
     tick();
+    // governance registry: its own slower cadence (subprocess read server-side).
+    loadGov(false); setInterval(function () { loadGov(false); }, 60000);
   }
 
   // ---- pull-to-refresh — verbatim from fc-v49 -------------------------------
@@ -1620,7 +1839,8 @@
       poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup,
       mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,
       tileHtml: tileHtml, coordChip: coordChip, armedHeaders: armedHeaders, ARMED_KEY_LS: ARMED_KEY_LS,
-      confirmTyped: confirmTyped, CONFIRM_COPY: CONFIRM_COPY, resetBodyFor: resetBodyFor };
+      confirmTyped: confirmTyped, CONFIRM_COPY: CONFIRM_COPY, resetBodyFor: resetBodyFor,
+      govCardHtml: govCardHtml, govStripCopy: govStripCopy, govStripHtml: govStripHtml, GOV_MONEY_ACK: GOV_MONEY_ACK };
   }
 
   start();

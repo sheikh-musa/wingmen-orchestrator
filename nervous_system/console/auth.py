@@ -127,6 +127,39 @@ def _armed_bearer() -> str:
     return os.environ.get("CONSOLE_ARMED_BEARER", "") or ""
 
 
+# fc-v65 (cc-quality [LOW] on fc-v64): a short armed key is a guessable second
+# factor. Anything under this length is treated as MISCONFIGURED — the armed
+# endpoints fail CLOSED (503) exactly as if no key were set, and the server logs
+# it at start. The key's VALUE is never logged anywhere; only its state.
+ARMED_BEARER_MIN_LEN = 24
+ARMED_BEARER_TOO_SHORT_MSG = f"CONSOLE_ARMED_BEARER too short (<{ARMED_BEARER_MIN_LEN})"
+
+
+def armed_bearer_state() -> str:
+    """'unconfigured' (unset/empty) | 'too-short' (< ARMED_BEARER_MIN_LEN chars) |
+    'ok'. Read at call time. Never returns or logs the key itself."""
+    k = _armed_bearer()
+    if not k:
+        return "unconfigured"
+    if len(k) < ARMED_BEARER_MIN_LEN:
+        return "too-short"
+    return "ok"
+
+
+def log_armed_bearer_startup_state() -> str:
+    """Server-start check (called from app.run): log the armed-key STATE so a
+    misconfiguration is visible in the process log at boot, not only on the first
+    refused request. Returns the state for the caller/tests."""
+    st = armed_bearer_state()
+    if st == "too-short":
+        logger.error("%s — armed endpoints will fail closed (503) until it is rotated", ARMED_BEARER_TOO_SHORT_MSG)
+    elif st == "unconfigured":
+        logger.warning("CONSOLE_ARMED_BEARER is not set — armed endpoints fail closed (503)")
+    else:
+        logger.info("CONSOLE_ARMED_BEARER configured (length >= %d)", ARMED_BEARER_MIN_LEN)
+    return st
+
+
 def check_armed_bearer(headers: Mapping[str, str]) -> Tuple[bool, str]:
     """Second factor for the ARMED endpoints (/api/apply-armed, /api/reset) —
     CAI-RESP-1434 re-enable precondition. The IP allowlist is a NETWORK gate: a
@@ -138,6 +171,9 @@ def check_armed_bearer(headers: Mapping[str, str]) -> Tuple[bool, str]:
       (True,  "bearer")        presented key == CONSOLE_ARMED_BEARER (constant-time)
       (False, "unconfigured")  CONSOLE_ARMED_BEARER empty/unset -> caller 503s
                                (fail-CLOSED: no key configured = no armed ops)
+      (False, "too-short")     CONSOLE_ARMED_BEARER set but < ARMED_BEARER_MIN_LEN
+                               chars -> caller 503s + logs "too short" (fc-v65);
+                               a presented key is NOT compared in this state
       (False, "missing")       no key presented
       (False, "mismatch")      a key was presented and did not match
 
@@ -150,6 +186,10 @@ def check_armed_bearer(headers: Mapping[str, str]) -> Tuple[bool, str]:
     expected = _armed_bearer()
     if not expected:
         return False, "unconfigured"
+    if len(expected) < ARMED_BEARER_MIN_LEN:
+        # fc-v65: refused BEFORE any comparison — a short key is never honoured,
+        # even when the caller presents it correctly (fail-closed, 503 upstream).
+        return False, "too-short"
     presented = []
     x = _header(headers, "X-Armed-Bearer").strip()
     if x:

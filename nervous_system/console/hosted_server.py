@@ -208,6 +208,22 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(code, _strip_fps(payload) if isinstance(payload, (dict, list)) else payload)
             return
 
+        # ---- per-project governance registry (op#20702 Stage E, fc-v65): proxied
+        # read from the default upstream (the Mini reads it via its vetted module;
+        # the hosted process holds no registry grant and does no DB read here).
+        if path == "/api/governance":
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"}, extra={"WWW-Authenticate": "Bearer"})
+                return
+            up = _upstream_default()
+            if not up:
+                self._json(503, {"error": "no upstream console configured"})
+                return
+            q = "?fresh=1" if "fresh=1" in (self.path.split("?", 1) + [""])[1] else ""
+            code, payload = _proxy(up, "GET", "/api/governance" + q, None, timeout=60)
+            self._json(code, payload)
+            return
+
         # ---- live-pane peek: not available DB-only; graceful (no leak) ----
         if path.startswith("/api/lanes/") and path.endswith("/pane"):
             if not self._authed():
@@ -296,7 +312,11 @@ _SESSION_RE = _re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 # these two routes ONLY — lane-boot / lane-down / dry-run / assign never see it.
 # The upstream's own `Authorization: Bearer <CONSOLE_UPSTREAM_TOKEN>` semantics are
 # kept as-is; app.py accepts the armed key from either slot.
-_ARMED_FORWARD_PATHS = ("/api/reset", "/api/apply-armed")
+# fc-v65 (op#20702 Stage E): /api/governance-set is the third ARMED route — the
+# Mini's app.py gates it on the same bearer (+ R4 flag + typed confirm); this
+# wrapper only validates shape + confirm, then forwards with the key. One
+# enforcement point (the Mini), never a local write from the hosted process.
+_ARMED_FORWARD_PATHS = ("/api/reset", "/api/apply-armed", "/api/governance-set")
 _AGENT_RE = _re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 # The three resettable singletons — MIRRORS app.py RESET_ACTIONS exactly (the
@@ -579,8 +599,43 @@ def _act_ask_close(client: str, body: dict):
                                   "error": None if ok else (res.stderr or "").strip()[-160:]}
 
 
+_GOV_PROJECT_RE = _re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_GOV_FIELDS = ("cai_enabled", "money_clearance_enabled", "operators", "channels")
+
+
+def _act_governance_set(client: str, body: dict, armed_key: str = ""):
+    """PROXY shape: validate the body's SHAPE + typed confirm here (so a malformed
+    request never leaves the phone), then forward the same JSON + the operator's
+    armed key to the DEFAULT upstream (the Mini), whose app.py applies the real
+    gates (bearer >= 24, R4 flag, confirm, value validation, audited write)."""
+    project = str(body.get("project") or "").strip()
+    field = str(body.get("field") or "").strip()
+    confirm = str(body.get("confirm") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not _GOV_PROJECT_RE.match(project) or field not in _GOV_FIELDS:
+        _audit(client, "/api/governance-set", "400")
+        return 400, {"error": "bad project/field"}
+    if confirm != project:
+        _audit(client, f"/api/governance-set:{project}:confirm-miss", "400")
+        return 400, {"error": "type the exact project name to confirm"}
+    if not reason:
+        _audit(client, f"/api/governance-set:{project}:{field}", "400")
+        return 400, {"error": "a reason is required"}
+    up = _upstream_default()
+    if not up:
+        _audit(client, f"/api/governance-set:{project}:no-upstream", "503")
+        return 503, {"error": "no upstream console configured"}
+    fwd = {"project": project, "field": field, "value": body.get("value"), "confirm": confirm,
+           "reason": reason[:500], "money_ack": str(body.get("money_ack") or "")[:64]}
+    _audit(client, f"/api/governance-set:{project}:{field}", "proxy")
+    code, payload = _proxy(up, "POST", "/api/governance-set", fwd, timeout=90, armed=armed_key)
+    _audit(client, f"/api/governance-set:{project}:{field}", str(code))
+    return code, payload
+
+
 _ACTION_ROUTES = {
     "/api/reset": _act_reset,
+    "/api/governance-set": _act_governance_set,
     "/api/lane-boot": _act_lane("boot"),
     "/api/lane-down": _act_lane("down"),
     "/api/apply-armed": _act_apply(armed=True),

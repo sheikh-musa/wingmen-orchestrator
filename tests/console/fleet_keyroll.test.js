@@ -239,11 +239,13 @@ ok("CAI-RESP-1434: armedHeaders reads localStorage('fc.armedKey') ONLY and rides
   assert.strictEqual(ARMED_KEY_LS, "fc.armedKey");
   assert.deepStrictEqual(Object.assign({}, armedHeaders()), {});   // sandbox localStorage is empty
   const src = fs.readFileSync(path.join(__dirname, "..", "..", "nervous_system", "console", "static", "fleet.js"), "utf8");
-  // the armed key goes on exactly the two armed POSTs, never elsewhere / never in a body or URL
+  // the armed key goes on exactly the THREE armed POSTs (fc-v65 added governance-set,
+  // op#20702 Stage E), never elsewhere / never in a body or URL
   const armedCalls = (src.match(/armedHeaders\(\)/g) || []).length;
-  assert.strictEqual(armedCalls, 3, "one definition + exactly two call sites (reset, apply-armed)");
+  assert.strictEqual(armedCalls, 4, "one definition + exactly three call sites (reset, apply-armed, governance-set)");
   assert(/fetch\("\/api\/reset", \{\n\s+method: "POST", headers: Object\.assign\(\{ "Content-Type": "application\/json" \}, authHeaders\(\), armedHeaders\(\)\)/.test(src), "reset must carry the armed key");
   assert(/fetch\("\/api\/apply-armed", \{\n\s+method: "POST", headers: Object\.assign\(\{ "Content-Type": "application\/json" \}, authHeaders\(\), armedHeaders\(\)\)/.test(src), "apply-armed must carry the armed key");
+  assert(/fetch\("\/api\/governance-set", \{\n\s+method: "POST", headers: Object\.assign\(\{ "Content-Type": "application\/json" \}, authHeaders\(\), armedHeaders\(\)\)/.test(src), "governance-set must carry the armed key");
   assert(!/armedKey\(\)[^\n]*JSON\.stringify/.test(src) && !/console\.log\([^\n]*armed/i.test(src), "never in a payload, never logged");
   assert(/armed key required — set it in Lane manager/.test(src), "401 copy");
 });

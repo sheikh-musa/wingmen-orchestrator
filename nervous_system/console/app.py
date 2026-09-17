@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from nervous_system.console import auth, db, docs, media, panes, pii, pools
+from nervous_system.console import auth, db, docs, governance, media, panes, pii, pools
 from nervous_system.console.feed import Broadcaster, feeder
 # GAP-B: the shared family helper — the SAME one the token resolver uses to decide
 # which .group_default_token.<family> governs a lane.
@@ -219,7 +219,60 @@ _MODEL_ENV_BODIES = {"nazim", "cai", "fleet-health", "cc-orchestrator"}
 _SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 # CAI-RESP-1434: the ARMED endpoints that require CONSOLE_ARMED_BEARER on top of
 # the IP allowlist (checked in do_POST right after _authed, before any other gate).
-_ARMED_BEARER_PATHS = ("/api/apply-armed", "/api/reset")
+_ARMED_BEARER_PATHS = ("/api/apply-armed", "/api/reset", "/api/governance-set")
+
+# --- Per-project GOVERNANCE registry (op#20702 Stage E, fc-v65) ---------------
+# Read + write both run the hash-covered module nervous_system/console/governance
+# as a SUBPROCESS (`python -m nervous_system.console.governance list|set`): the
+# console's own DB session is the SELECT-only console_readonly role, which has NO
+# grant on project_governance (mig 063 grants `authenticated` only — verified), and
+# the console process must never hold the write DSN (CAI-RESP-264 cond 2). Same
+# vetted-script shape as /api/assign + /api/ask-close. The write is the ONE path
+# mig 063 sanctions: an UPDATE of one row with updated_by + reason, audit row
+# appended by trg_project_governance_audit and VERIFIED inside the transaction.
+# Every write is an ARMED action: CONSOLE_ARMED_BEARER (+ >=24 chars) ->
+# CONSOLE_R4_ENABLED -> typed confirm == project -> value pre-validated -> spawn.
+_GOV_CACHE: dict = {"at": None, "data": None}
+_GOV_CACHE_TTL_S = 20.0
+_GOV_LOCK = threading.Lock()
+_GOV_TIMEOUT_S = 45
+
+
+def _governance_run(args: list, timeout: int = _GOV_TIMEOUT_S):
+    """Spawn the governance module CLI (writable orchestrator env, loaded by the
+    module itself). Returns the CompletedProcess. Never passes the DSN on argv."""
+    venv_py = _REPO_ROOT / ".venv" / "bin" / "python3"
+    interp = str(venv_py) if venv_py.is_file() else "python3"
+    return subprocess.run([interp, "-m", "nervous_system.console.governance"] + list(args),
+                          capture_output=True, text=True, timeout=timeout, cwd=str(_REPO_ROOT))
+
+
+def _governance_list(force: bool = False) -> "dict | None":
+    """The registry payload (projects + recent audit), cached ~20s. None = unavailable
+    (the caller answers 503 — never an empty list that reads as "no projects")."""
+    now = time.monotonic()
+    with _GOV_LOCK:
+        if not force and _GOV_CACHE["data"] is not None and _GOV_CACHE["at"] and now - _GOV_CACHE["at"] < _GOV_CACHE_TTL_S:
+            return _GOV_CACHE["data"]
+    try:
+        r = _governance_run(["list"])
+        if r.returncode != 0:
+            logger.warning("governance list failed rc=%s: %s", r.returncode, (r.stderr or "")[-200:])
+            return None
+        data = json.loads(r.stdout or "{}")
+        if not isinstance(data, dict) or not isinstance(data.get("projects"), list):
+            return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("governance list error: %s", type(e).__name__)
+        return None
+    with _GOV_LOCK:
+        _GOV_CACHE["at"] = time.monotonic(); _GOV_CACHE["data"] = data
+    return data
+
+
+def _governance_cache_clear() -> None:
+    with _GOV_LOCK:
+        _GOV_CACHE["at"] = None; _GOV_CACHE["data"] = None
 
 # --- Lane BOOT / STAND-DOWN from the console (Musa op#20684/20687) ------------
 # Both shell ONLY to the existing vetted rail `scripts/lanes.sh` (`up <lane>` is
@@ -1971,6 +2024,17 @@ def _make_handler(feedloop: "_FeedLoop"):
                     auth.audit(self._client(), path, "200")
                     return self._json(200, _jsonable(rows))
 
+                if path == "/api/governance":
+                    # op#20702 Stage E: every project_governance row + recent audit.
+                    # Read-only; the DSN never reaches the browser (subprocess read).
+                    force = parse_qs(parsed.query).get("fresh", ["0"])[0] == "1"
+                    data = _governance_list(force=force)
+                    if data is None:
+                        auth.audit(self._client(), path, "503")
+                        return self._json(503, {"error": "governance registry unavailable"})
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, data)
+
                 if path == "/api/docs":
                     # Catalog of all fleet docs, grouped by repo/vertical.
                     groups = docs.list_docs()
@@ -2042,7 +2106,8 @@ def _make_handler(feedloop: "_FeedLoop"):
                             "/api/add-token", "/api/apply-dry-run",
                             "/api/apply-armed", "/api/apply-queue-cancel",
                             "/api/assign", "/api/ask-close",
-                            "/api/lane-boot", "/api/lane-down"):
+                            "/api/lane-boot", "/api/lane-down",
+                            "/api/governance-set"):
                 auth.audit(self._client(), path, "404")
                 return self._json(404, {"error": "not found"})
             if not self._authed():
@@ -2060,6 +2125,12 @@ def _make_handler(feedloop: "_FeedLoop"):
                     if why_b == "unconfigured":
                         auth.audit(self._client(), path, "503-bearer-unconfigured")
                         return self._json(503, {"error": "armed bearer not configured"})
+                    if why_b == "too-short":
+                        # fc-v65: a short key is a misconfiguration, not a credential —
+                        # refused on EVERY armed call (never a silent no-op), value never logged.
+                        logger.error("%s — refusing %s (fail-closed)", auth.ARMED_BEARER_TOO_SHORT_MSG, path)
+                        auth.audit(self._client(), path, "503-bearer-too-short")
+                        return self._json(503, {"error": "armed bearer misconfigured (too short)"})
                     auth.audit(self._client(), path, "401-bearer")
                     return self._json(401, {"error": "armed bearer required"})
             # R3 apply DRY-RUN: preview making a default live (no relaunch).
@@ -2069,6 +2140,10 @@ def _make_handler(feedloop: "_FeedLoop"):
             # cai+Nazim flip CONSOLE_R4_ENABLED AND a live operator arm exists.
             if path == "/api/apply-armed":
                 return self._handle_apply_armed()
+            # op#20702 Stage E: per-project governance toggle write (ARMED: bearer
+            # above + R4 flag + typed project confirm + reason; audit by DB trigger).
+            if path == "/api/governance-set":
+                return self._handle_governance_set()
             # Cancel a queued-on-busy apply (op#10861).
             if path == "/api/apply-queue-cancel":
                 return self._handle_apply_queue_cancel()
@@ -2528,6 +2603,83 @@ def _make_handler(feedloop: "_FeedLoop"):
                     _SWITCH_LAST_RUN[session] = time.monotonic()
             auth.audit(self._client(), f"/api/apply-armed:{kind}:{session}", "200" if ok else "500")
             return self._json(200 if ok else 500, {"ok": ok, "kind": kind, "session": session, "output": tail})
+
+        def _handle_governance_set(self):
+            """POST /api/governance-set {project, field, value, confirm, reason, money_ack?}
+            — flip ONE per-project governance toggle (op#20702 Stage E). Gates, in
+            order (the armed bearer was already checked in do_POST):
+              (1) CONSOLE_R4_ENABLED -> 503 (same flag as apply-armed; never a no-op)
+              (2) body parse + field allowlist + value pre-validation -> 400
+              (3) typed `confirm` == project (fat-finger guard) -> 400
+              (4) reason mandatory (the audit row records it) -> 400
+              (5) money_clearance_enabled -> true needs the typed acknowledgement
+                  phrase (governance.MONEY_ACK_PHRASE) -> 400 (loudest toggle)
+            then ONE spawn of the governance module (`set`), which re-validates,
+            UPDATEs the row as the writable role and verifies the trigger's audit row
+            in the same transaction. updated_by is server-stamped from the client
+            identity — never taken from the request."""
+            if not _R4_ENABLED:
+                auth.audit(self._client(), "/api/governance-set", "503")
+                return self._json(503, {"error": "governance writes are DISABLED on this console (CONSOLE_R4_ENABLED off)"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                p = json.loads(raw or b"{}")
+                if not isinstance(p, dict):
+                    raise ValueError("not an object")
+                project = str(p.get("project") or "").strip()
+                field = str(p.get("field") or "").strip()
+                value = p.get("value")
+                confirm = str(p.get("confirm") or "").strip()
+                reason = str(p.get("reason") or "").strip()
+                money_ack = str(p.get("money_ack") or "").strip()
+            except Exception:  # noqa: BLE001
+                auth.audit(self._client(), "/api/governance-set", "400")
+                return self._json(400, {"error": "bad request"})
+            if not governance.PROJECT_RE.match(project) or field not in governance.FIELDS:
+                auth.audit(self._client(), "/api/governance-set", "400")
+                return self._json(400, {"error": "bad project/field"})
+            if confirm != project:
+                auth.audit(self._client(), f"/api/governance-set:{project}:confirm-miss", "400")
+                return self._json(400, {"error": "type the exact project name to confirm"})
+            try:
+                field, norm, reason = governance.validate_write(project, field, value, reason, money_ack)
+            except governance.GovernanceError as e:
+                auth.audit(self._client(), f"/api/governance-set:{project}:{field}", "400")
+                return self._json(400, {"error": str(e)})
+            actor = f"console:{self._client() or 'operator'}"
+            args = ["set", "--project", project, "--field", field, "--value", json.dumps(norm),
+                    "--updated-by", actor, "--reason", reason]
+            if field == "money_clearance_enabled" and norm is True:
+                args += ["--money-ack", money_ack]
+            auth.audit(self._client(), f"/api/governance-set:{project}:{field}={json.dumps(norm)[:40]}", "run")
+            logger.info("console governance-set requested: %s.%s by %s", project, field, actor)
+            try:
+                r = _governance_run(args)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("governance-set failed (%s.%s): %s", project, field, type(e).__name__)
+                auth.audit(self._client(), f"/api/governance-set:{project}:{field}", "500")
+                return self._json(500, {"error": "governance write failed"})
+            _governance_cache_clear()
+            if r.returncode != 0:
+                code = {governance.EXIT_NOT_FOUND: 404, governance.EXIT_INVALID: 400}.get(r.returncode, 500)
+                err = "governance write failed"
+                try:
+                    err = json.loads((r.stderr or "").strip().splitlines()[-1]).get("error") or err
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.info("console governance-set OUTCOME: %s.%s rc=%s", project, field, r.returncode)
+                auth.audit(self._client(), f"/api/governance-set:{project}:{field}", str(code))
+                return self._json(code, {"ok": False, "error": str(err)[:200]})
+            try:
+                out = json.loads(r.stdout or "{}")
+            except Exception:  # noqa: BLE001
+                out = {}
+            logger.info("console governance-set OUTCOME: %s.%s audit=%s", project, field, out.get("audit_id"))
+            auth.audit(self._client(), f"/api/governance-set:{project}:{field}:audit#{out.get('audit_id')}", "200")
+            return self._json(200, {"ok": True, "project": project, "field": field,
+                                    "value": out.get("after", norm), "before": out.get("before"),
+                                    "audit_id": out.get("audit_id")})
 
         def _handle_apply_dry_run(self):
             """POST /api/apply-dry-run {session, kind:token|model} — PREVIEW making a
@@ -3244,6 +3396,9 @@ def run() -> None:
         )
     if os.environ.get("CONSOLE_BREAKGLASS_TOKEN"):
         logger.info("CONSOLE_BREAKGLASS_TOKEN is configured (dormant recovery path).")
+    # fc-v65: armed-key length check at START (value never logged) — a too-short key
+    # is also refused per request in do_POST, so this is visibility, not the gate.
+    auth.log_armed_bearer_startup_state()
     httpd = make_server(host, port)
     logger.info("Fleet Console listening on http://%s:%d", host, port)
     try:

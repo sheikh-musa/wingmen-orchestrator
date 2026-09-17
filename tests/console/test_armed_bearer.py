@@ -99,7 +99,9 @@ def _audit(tmp_path):
     return p.read_text() if p.exists() else ""
 
 
-ARMED = ("/api/apply-armed", "/api/reset")
+# fc-v65: /api/governance-set (op#20702 Stage E) is the THIRD armed route — the same
+# gate, the same failure branches, proven here by parametrization.
+ARMED = ("/api/apply-armed", "/api/reset", "/api/governance-set")
 
 
 # ---------------------------------------------------------------- the unit
@@ -116,9 +118,12 @@ def test_check_armed_bearer_states(monkeypatch):
     assert auth.check_armed_bearer({"X-Armed-Bearer": KEY, "Authorization": "Bearer other"}) == (True, "bearer")
     assert auth.check_armed_bearer({"X-Armed-Bearer": "other", "Authorization": "Bearer " + KEY}) == (True, "bearer")
     # read at REQUEST time — a rotation is honoured without a restart
-    monkeypatch.setenv("CONSOLE_ARMED_BEARER", "rotated")
+    monkeypatch.setenv("CONSOLE_ARMED_BEARER", "rotated-to-a-long-enough-key-01")
     assert auth.check_armed_bearer({"X-Armed-Bearer": KEY}) == (False, "mismatch")
-    assert auth.check_armed_bearer({"X-Armed-Bearer": "rotated"}) == (True, "bearer")
+    assert auth.check_armed_bearer({"X-Armed-Bearer": "rotated-to-a-long-enough-key-01"}) == (True, "bearer")
+    # fc-v65: < 24 chars is a distinct fail-closed state, before any comparison
+    monkeypatch.setenv("CONSOLE_ARMED_BEARER", "rotated")
+    assert auth.check_armed_bearer({"X-Armed-Bearer": "rotated"}) == (False, "too-short")
 
 
 # ---------------------------------------------------------------- (ii) env unset -> 503
@@ -171,6 +176,46 @@ def test_correct_bearer_reaches_the_next_gate(server, monkeypatch, hdr):
         r = httpx.post(base + "/api/reset", headers=hdr, json={}, timeout=5)
     assert r.status_code == 400 and r.json()["error"] == "unknown body"
     run.assert_not_called()
+
+
+def test_correct_bearer_governance_set_reaches_the_r4_gate(server, monkeypatch):
+    """governance-set: the NEXT gate after the bearer is the R4 flag (503, distinct
+    text); with R4 on, the next is the body/confirm parse (400) — never a write."""
+    base, _ = server
+    monkeypatch.setenv("CONSOLE_ARMED_BEARER", KEY)
+    monkeypatch.setattr(console_app, "_R4_ENABLED", False)
+    with patch.object(console_app, "_governance_run") as run:
+        r = httpx.post(base + "/api/governance-set", headers={"X-Armed-Bearer": KEY},
+                       json={"project": "irsyad", "field": "cai_enabled", "value": True, "confirm": "irsyad", "reason": "r"}, timeout=5)
+        assert r.status_code == 503 and "CONSOLE_R4_ENABLED off" in r.json()["error"]
+        monkeypatch.setattr(console_app, "_R4_ENABLED", True)
+        r = httpx.post(base + "/api/governance-set", headers={"X-Armed-Bearer": KEY}, json={}, timeout=5)
+        assert r.status_code == 400 and r.json()["error"] == "bad project/field"
+        run.assert_not_called()
+
+
+def test_too_short_bearer_503_on_every_armed_route(server, monkeypatch, tmp_path):
+    """fc-v65 (cc-quality LOW): a key under 24 chars is refused as MISCONFIGURED on
+    every armed route — even when presented correctly — and its value is never logged."""
+    base, _ = server
+    short = "only-twelve1"
+    monkeypatch.setenv("CONSOLE_ARMED_BEARER", short)
+    monkeypatch.setattr(console_app, "_R4_ENABLED", True)
+    with patch.object(console_app.subprocess, "run") as run, patch.object(console_app, "_governance_run") as grun:
+        for path in ARMED:
+            r = httpx.post(base + path, headers={"X-Armed-Bearer": short},
+                           json={"body": "cai", "confirm": "cai", "session": "hifz", "kind": "token",
+                                 "project": "cai", "field": "cai_enabled", "value": True, "reason": "r"}, timeout=5)
+            assert r.status_code == 503 and r.json() == {"error": "armed bearer misconfigured (too short)"}, path
+            assert f"{path}\t503-bearer-too-short" in _audit(tmp_path)
+    run.assert_not_called(); grun.assert_not_called()
+    assert short not in _audit(tmp_path)
+    # exactly 24 is accepted (boundary): reaches the next gate, not 503-too-short
+    key24 = "k" * 24
+    monkeypatch.setenv("CONSOLE_ARMED_BEARER", key24)
+    monkeypatch.setattr(console_app, "_R4_ENABLED", False)
+    r = httpx.post(base + "/api/apply-armed", headers={"X-Armed-Bearer": key24}, json={"session": "hifz", "kind": "token", "confirm": "hifz"}, timeout=5)
+    assert r.status_code == 503 and "R4 armed apply is DISABLED" in r.json()["error"]
 
 
 def test_correct_bearer_apply_armed_400_on_empty_body_when_r4_enabled(server, monkeypatch):
