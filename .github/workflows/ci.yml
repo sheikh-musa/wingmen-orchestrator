@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, fable/substrate-safe-fixes]
   pull_request:
-    branches: [main]
+    branches: [main, fable/substrate-safe-fixes]
 
 jobs:
   quality:
@@ -31,7 +31,9 @@ jobs:
           pip install pytest pytest-asyncio
 
       - name: Syntax check
-        run: python -m py_compile cto_bot.py
+        # compileall over the tree (cto_bot.py moved to legacy/; a single-file py_compile
+        # of a path that no longer exists would error, and checked nothing else anyway).
+        run: python -m compileall -q -x '(\.venv|legacy)' .
 
       - name: Migration additive linter
         run: |
