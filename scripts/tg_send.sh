@@ -42,7 +42,9 @@ fi
 
 # Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
 # token/chat/text passed via env, never argv — keeps the token out of `ps`.
-if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \
+# TG_FAIL_OUT: helper writes the structured failure so we record WHY on the row (#40837).
+FAILOUT="$(mktemp)"
+if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" TG_FAIL_OUT="$FAILOUT" \
      "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/_tg_chunked_send.py"; then
   sent=1
 else
@@ -56,5 +58,7 @@ fi
 # defaulting to TRUE, so a failed send was recorded as delivered. Ported from the Studio's fix
 # (25701aa) — which had been applied there and NOT here: the fix was host-split, each machine
 # carrying half of it, for the same two-host reason that has bitten five times today.
-PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" ${TAG:+--tag "$TAG"} $([ "$sent" = 1 ] || echo --undelivered) >/dev/null 2>&1 || true
+REASON=""; [ "$sent" = 1 ] || REASON="$(cat "$FAILOUT" 2>/dev/null || true)"
+PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" ${TAG:+--tag "$TAG"} $([ "$sent" = 1 ] || echo --undelivered) ${REASON:+--reason "$REASON"} >/dev/null 2>&1 || true
+rm -f "$FAILOUT"
 [ "$sent" = 1 ] && exit 0 || { echo "tg_send failed" >&2; exit 1; }

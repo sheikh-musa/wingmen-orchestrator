@@ -7,6 +7,7 @@ nervous_system/ingest.py logs every inbound message.
 """
 from __future__ import annotations
 import argparse
+import json
 import os
 import sys
 
@@ -187,14 +188,20 @@ def _channel_scope_sql() -> str:
 
 def log(direction: str, text: str, chat_id: str | None = None,
         tag: str | None = None, delivered: bool = True,
-        channel: str = "telegram") -> int:
+        channel: str = "telegram", failure_reason=None) -> int:
+    # failure_reason (Nazim #40837): why a send failed, recorded on the row so a swallowed
+    # 'nazim_send failed' becomes durable evidence. Stored under cos_triage.send_failure.
+    cos = None
+    if failure_reason:
+        payload = failure_reason if isinstance(failure_reason, dict) else {"description": str(failure_reason)}
+        cos = json.dumps({"send_failure": payload})
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
         cur.execute(
-            "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
-            "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
-            (direction, channel, chat_id, tag, text, delivered),
+            "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered, cos_triage) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING id",
+            (direction, channel, chat_id, tag, text, delivered, cos),
         )
         rid = cur.fetchone()[0]
         conn.commit()
@@ -315,8 +322,18 @@ def main() -> int:
     ap.add_argument("--undelivered", action="store_true")
     ap.add_argument("--channel", default="telegram",
                     help="entry surface: telegram (default) | tmux-console | cockpit")
+    ap.add_argument("--reason", default=None,
+                    help="send-failure reason (JSON from _tg_chunked_send $TG_FAIL_OUT, or "
+                         "plain text); stored under cos_triage.send_failure (Nazim #40837)")
     a = ap.parse_args()
-    print(log(a.direction, a.text, a.chat, a.tag, not a.undelivered, a.channel))
+    reason = a.reason
+    if reason:
+        try:
+            reason = json.loads(reason)          # structured {status,description,retry_after,...}
+        except (ValueError, TypeError):
+            pass                                  # fall back to plain text -> {description: ...}
+    print(log(a.direction, a.text, a.chat, a.tag, not a.undelivered, a.channel,
+              failure_reason=reason))
     return 0
 
 
