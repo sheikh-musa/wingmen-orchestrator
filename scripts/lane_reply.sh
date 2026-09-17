@@ -28,6 +28,20 @@ CHANNEL="${1:?usage: lane_reply.sh <channel_key> \"<text>\"}"
 TEXT="${2:-$(cat)}"
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
 
+# Fail loud on the channel-first arg-swap footgun (op#16353) — same guard as tg_send.sh.
+source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
+_send_arg_guard "$TEXT" || exit 2
+
+# A#9 (substrate audit 2026-09-16): lane_reply is the ONE sender that reaches CLIENT groups,
+# yet it had no redaction. Scrub secret patterns (pg DSNs, bot tokens, API keys) here, ONCE,
+# BEFORE the text reaches the DB — so the DRAFT the reviewer forwards, the operator_messages
+# log, AND the outbound send all carry the scrubbed text (same $TEXT downstream). Clean input
+# round-trips byte-identical; a redactor hiccup must not drop the reply, so fall back to the
+# original text on failure. (Copied from tg_send.sh:31-41.)
+if REDACTED="$(printf '%s' "$TEXT" | PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.secret_redact 2>/dev/null)"; then
+  TEXT="$REDACTED"
+fi
+
 ORCH_DIR="$ORCH_DIR" PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" - "$CHANNEL" "$TEXT" <<'PY'
 import os, re, sys, shutil, subprocess, psycopg
 
