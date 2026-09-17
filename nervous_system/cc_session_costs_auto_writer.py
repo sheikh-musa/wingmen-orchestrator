@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -171,6 +172,31 @@ class SessionTokens:
     # (fresh input + cache-read + cache-creation). Unlike the summed fields
     # above (lifetime cost), this is how full the window is *right now*.
     latest_context_tokens: int = 0
+    # The MAX top-level timestamp across REAL conversation turns (user/assistant)
+    # inside the jsonl. This is the true "last activity" time — used for ended_at
+    # instead of the file mtime, which advances without real events (a trailing
+    # cost-state record, an external touch/rsync) and made dead sessions read as
+    # fresh (cc_session_costs false-freshness bug, Nazim #40620/#40624). None when
+    # the file has no real conversation turn.
+    latest_event_ts: Optional[datetime] = None
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """Parse a Claude jsonl top-level ISO `timestamp` ("...Z") to a tz-aware UTC
+    datetime. Defensive (R3): any non-string / unparseable value -> None, so a
+    malformed record is skipped rather than crashing the writer."""
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def parse_jsonl_usage(path: Path) -> Optional[SessionTokens]:
@@ -182,6 +208,7 @@ def parse_jsonl_usage(path: Path) -> Optional[SessionTokens]:
     try:
         in_t = out_t = cc_t = cr_t = 0
         last_ctx = 0
+        last_event_ts: Optional[datetime] = None
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
@@ -193,6 +220,15 @@ def parse_jsonl_usage(path: Path) -> Optional[SessionTokens]:
                     return None  # corrupt — bail
                 if not isinstance(obj, dict):
                     continue
+                # Track the last REAL conversation-turn time (user OR assistant),
+                # BEFORE the assistant-only usage filter below. This drives ended_at
+                # instead of the file mtime. Non-conversational records (cost-state,
+                # mode, ai-title, file-history-*) carry no top-level "timestamp", so
+                # they never advance it.
+                if obj.get("type") in ("user", "assistant"):
+                    ts = _parse_ts(obj.get("timestamp"))
+                    if ts is not None and (last_event_ts is None or ts > last_event_ts):
+                        last_event_ts = ts
                 if obj.get("type") != "assistant":
                     continue
                 msg = obj.get("message")
@@ -217,9 +253,17 @@ def parse_jsonl_usage(path: Path) -> Optional[SessionTokens]:
             cache_creation_input_tokens=cc_t,
             cache_read_input_tokens=cr_t,
             latest_context_tokens=last_ctx,
+            latest_event_ts=last_event_ts,
         )
     except (OSError, FileNotFoundError):
         return None
+
+
+def ended_at_for_row(row: dict[str, Any]) -> Optional[datetime]:
+    """The `ended_at` value for a cc_session_costs upsert: the row's last REAL
+    event timestamp. NEVER the file mtime (that is the false-freshness bug) — a
+    row with no real event ts yields None (unknown), not a mtime-derived time."""
+    return row.get("latest_event_ts")
 
 
 def sweep_projects_root(
@@ -288,6 +332,7 @@ def sweep_projects_root(
                 "cache_creation_input_tokens": tokens.cache_creation_input_tokens,
                 "cache_read_input_tokens": tokens.cache_read_input_tokens,
                 "latest_context_tokens": tokens.latest_context_tokens,
+                "latest_event_ts": tokens.latest_event_ts,
                 "mtime": stats.mtime,
             })
     return rows
@@ -313,8 +358,11 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                 (row["session_id"], source),
             )
             existing = cur.fetchone()
-            from datetime import datetime, timezone
+            # started_at stays the file mtime (cost-window math depends on it,
+            # unchanged). ended_at is the LAST REAL event time, NOT the mtime —
+            # the false-freshness fix (Nazim #40620/#40624).
             started_at = datetime.fromtimestamp(row["mtime"], tz=timezone.utc)
+            ended_at = ended_at_for_row(row)
             if existing:
                 cur.execute(
                     """
@@ -335,7 +383,7 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                         row["cache_read_input_tokens"],
                         row.get("latest_context_tokens", 0),
                         row.get("sub_tag"),
-                        started_at,
+                        ended_at,
                         existing[0],
                     ),
                 )
@@ -352,7 +400,7 @@ def upsert_rows(dsn: str, rows: list[dict[str, Any]], source: str = "auto_writer
                     """,
                     (
                         row["cc_identity"], row.get("sub_tag"),
-                        row["session_id"], started_at, started_at,
+                        row["session_id"], started_at, ended_at,
                         row["input_tokens"], row["output_tokens"],
                         row["cache_creation_input_tokens"], row["cache_read_input_tokens"],
                         row.get("latest_context_tokens", 0),
