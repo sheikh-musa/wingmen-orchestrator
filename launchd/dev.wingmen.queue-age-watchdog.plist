@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.queue-age-watchdog</string>
+  <!-- queue-age watchdog (Nazim #40835). A claimable coord_dispatch_queue row (claimed_by
+       NULL, done_at NULL — a hold:* row has a non-null claimed_by so it is excluded) aged
+       past its floor (P1 > 30m, P2 > 4h; P3 never) pages hub + orch-console, re-pages every
+       60m until claimed. Trigger op#20774 (rows sat 8.5-12h unpaged).
+       SHIPS DETECT-ONLY: with QUEUE_AGE_ALERT_ENABLED unset the scan force-dries — it LOGS
+       what it WOULD page and writes state, but sends NO bus pages. ARM after a short soak by
+       adding <key>QUEUE_AGE_ALERT_ENABLED</key><string>1</string> here + reload (same staged
+       shape as --menu-alert / SLA_AGED_REPAGE_ENABLED). ACTIONS are lease-gated (CAI-RESP-501). -->
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/queue_age_watchdog.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <!-- 5-min cadence: catches a P1 within ~5 min of crossing its 30-min floor; light on DB. -->
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+    <!-- ARM (after soak): uncomment to page live.
+    <key>QUEUE_AGE_ALERT_ENABLED</key><string>1</string>
+    -->
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/queue-age-watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/queue-age-watchdog.out.log</string>
+</dict>
+</plist>
