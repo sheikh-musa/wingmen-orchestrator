@@ -255,6 +255,42 @@ backup_client_silo() {
 backup_client_silo "ihsanos-ceayj"   "${IHSANOS_PROD_DATABASE_URL:-}"
 backup_client_silo "irsyad-goumlyne" "${GOUMLYNE_DATABASE_URL:-}"
 
+# ---------------------------------------------------------------------------
+# OFF-SITE PUSH (Musa op#21244 "dump it in gzbai"): mirror the CLIENT-silo
+# backups to the Gazzabyte VPS (hub-vps = root@91.107.235.77) so an
+# irreplaceable client-data copy survives a Mac Mini disk loss. CLIENT SILOS
+# ONLY — the substrate's ~360MB dump over the home uplink (~37KB/s observed)
+# would take hours nightly, and it is already covered by Supabase's own daily
+# backup + the local dump. Best-effort with a LOUD alert on failure: the local
+# dump above is the amanah guarantee, so a push failure must NOT fail the local
+# backup, but MUST be surfaced (a stale off-site copy is a real risk).
+# ---------------------------------------------------------------------------
+GZB_KEY="$HOME/.ssh/wingmen_vps"
+GZB_HOST="hub-vps"                 # root@91.107.235.77, from ~/.ssh/config
+GZB_REMOTE_DIR="wingmen/backups"
+if [ -f "$GZB_KEY" ]; then
+  GZB_SSH="ssh -i $GZB_KEY -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+  PUSH_FAIL=0
+  $GZB_SSH "$GZB_HOST" "mkdir -p $GZB_REMOTE_DIR/$DATE" 2>/dev/null || true
+  for SILO in ihsanos-ceayj irsyad-goumlyne; do
+    [ -d "$TODAY_DIR/$SILO" ] || continue
+    echo -n "  [off-site] rsync $SILO → $GZB_HOST... "
+    if rsync -az --delete -e "$GZB_SSH" \
+          "$TODAY_DIR/$SILO" "$GZB_HOST:$GZB_REMOTE_DIR/$DATE/" 2>"$TODAY_DIR/_gzb_$SILO.err"; then
+      rm -f "$TODAY_DIR/_gzb_$SILO.err"; echo "✓"
+    else
+      echo "✗ push failed"; cat "$TODAY_DIR/_gzb_$SILO.err" || true; PUSH_FAIL=$((PUSH_FAIL + 1))
+    fi
+  done
+  # Mirror the 7-day retention on gzb too (prune day-dirs older than 7 days).
+  $GZB_SSH "$GZB_HOST" "find $GZB_REMOTE_DIR -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \\;" 2>/dev/null || true
+  if [ "$PUSH_FAIL" -gt 0 ]; then
+    alert "⚠️ Daily backup: off-site push to gzb FAILED for $PUSH_FAIL client silo(s) — LOCAL backup is OK, but the off-site copy is stale. Check $TODAY_DIR/_gzb_*.err"
+  fi
+else
+  echo "  [off-site] SKIPPED: gzb key $GZB_KEY not found (no off-site push)."
+fi
+
 # Cleanup old backups (keep 7 days)
 find "$BACKUP_DIR" -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \;
 
