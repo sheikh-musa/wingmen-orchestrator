@@ -32,6 +32,10 @@ _send_arg_guard "$TEXT" || exit 2
 source "$ORCH_DIR/scripts/lib/console_irsyad_client_send_gate.sh"
 _console_irsyad_client_send_gate "$TAG" || exit 4
 
+# op#21145 (Musa direct): no internal identity / escalation framing reaches a client group.
+source "$ORCH_DIR/scripts/lib/client_send_leak_guard.sh"
+_client_send_leak_guard "$TEXT" || exit 3
+
 # Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
 # token/chat/text passed via env, never argv — keeps the token out of `ps`.
 if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \

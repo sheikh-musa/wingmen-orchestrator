@@ -32,6 +32,14 @@ TEXT="${2:-$(cat)}"
 source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
 _send_arg_guard "$TEXT" || exit 2
 
+# op#21145 (Musa direct, 2026-09-18): lane_reply is the ONE sender that reaches external
+# CLIENT/SME groups, so it is where we fail-closed against leaking an internal identity
+# (Musa/Nazim/cai/…) or "we must check above you" escalation into a client message — the
+# client operators govern their own project and are the decision-makers. Enforced here, not
+# left to memory.
+source "$ORCH_DIR/scripts/lib/client_send_leak_guard.sh"
+_client_send_leak_guard "$TEXT" || exit 3
+
 # A#9 (substrate audit 2026-09-16): lane_reply is the ONE sender that reaches CLIENT groups,
 # yet it had no redaction. Scrub secret patterns (pg DSNs, bot tokens, API keys) here, ONCE,
 # BEFORE the text reaches the DB — so the DRAFT the reviewer forwards, the operator_messages
