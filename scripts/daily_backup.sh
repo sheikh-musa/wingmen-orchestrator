@@ -1,5 +1,10 @@
 #!/bin/bash
-# Daily Supabase backup — wingmen-ops substrate (tscuymavysscrvoberrr).
+# Daily Supabase backup — orchestrator substrate (tscuymavysscrvoberrr) PLUS
+# client silos ihsanos-ceayj (IHSANOS_PROD_DATABASE_URL) and irsyad-goumlyne
+# (GOUMLYNE_DATABASE_URL). Substrate files land at the top level of the day's
+# dir (layout preserved); each client silo dumps into its own subdir. Same dump
+# + row-count-assertion logic for every store (backup_one). A silo with no DSN
+# is skipped (not failed). REST fallback is substrate-only.
 # Runs via launchd at 3 AM SGT (dev.wingmen.daily-backup). Keeps last 7 days.
 #
 # OPS-HEALTH-338 #4 overhaul (amanah-critical):
@@ -63,74 +68,88 @@ FAIL_NAMES=""
 
 # ---------------------------------------------------------------------------
 # Primary path: pg_dump + per-table NDJSON with completeness assertions.
+# Reusable per-store: backup_one STORE_NAME DSN OUTDIR
+#   - STORE_NAME  labels log lines and failure names (e.g. "irsyad-goumlyne").
+#   - DSN         the postgres connection string for that store.
+#   - OUTDIR      where this store's _full_public.dump + per-table NDJSON land.
+# Accumulates into the GLOBAL FAILED/BACKED/FAIL_NAMES so the final fail-LOUD
+# gate aggregates across ALL stores. Failure names are STORE-scoped, e.g.
+# "irsyad-goumlyne/donations(1200/1201)". Also prints a per-store tally.
 # ---------------------------------------------------------------------------
-db_backup() {
-  echo "Mode: pg_dump + per-table NDJSON (psql \\copy)"
+backup_one() {
+  local STORE="$1" DSN_L="$2" OUTDIR="$3"
+  local ST_BACKED=0 ST_FAILED=0
+  local TABLE LIVE OUT GOT SIZE
+  local TABLES=()
+
+  mkdir -p "$OUTDIR"
+  echo "--- [$STORE] pg_dump + per-table NDJSON (psql \\copy) → $OUTDIR"
 
   # (A) Authoritative full public-schema dump (schema + data, no row cap).
-  echo -n "  [full] pg_dump -Fc public schema... "
-  if "$PG_DUMP" "$DSN" --schema=public --no-owner --no-privileges \
-        -Fc -f "$TODAY_DIR/_full_public.dump" 2>"$TODAY_DIR/_pg_dump.err"; then
-    SIZE=$(wc -c < "$TODAY_DIR/_full_public.dump" | tr -d ' ')
-    rm -f "$TODAY_DIR/_pg_dump.err"
+  echo -n "  [$STORE][full] pg_dump -Fc public schema... "
+  if "$PG_DUMP" "$DSN_L" --schema=public --no-owner --no-privileges \
+        -Fc -f "$OUTDIR/_full_public.dump" 2>"$OUTDIR/_pg_dump.err"; then
+    SIZE=$(wc -c < "$OUTDIR/_full_public.dump" | tr -d ' ')
+    rm -f "$OUTDIR/_pg_dump.err"
     echo "✓ ($SIZE bytes)"
   else
     echo "✗ pg_dump FAILED"
-    cat "$TODAY_DIR/_pg_dump.err" || true
-    FAILED=$((FAILED + 1))
-    FAIL_NAMES="$FAIL_NAMES _full_public.dump(pg_dump)"
+    cat "$OUTDIR/_pg_dump.err" || true
+    FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1))
+    FAIL_NAMES="$FAIL_NAMES $STORE/_full_public.dump(pg_dump)"
   fi
 
   # (B) Enumerate ALL base tables in the live public schema, then back up each
   #     to NDJSON and assert line count == live count(*).
   # bash 3.2 (macOS /bin/bash) has no `mapfile` — read into an array via while.
-  TABLES=()
-  while IFS= read -r t; do [ -n "$t" ] && TABLES+=("$t"); done < <("$PSQL" "$DSN" -tAc \
+  while IFS= read -r t; do [ -n "$t" ] && TABLES+=("$t"); done < <("$PSQL" "$DSN_L" -tAc \
     "SELECT table_name FROM information_schema.tables
        WHERE table_schema='public' AND table_type='BASE TABLE'
        ORDER BY table_name;")
 
-  echo "Discovered ${#TABLES[@]} base tables in public schema."
+  echo "  [$STORE] discovered ${#TABLES[@]} base tables in public schema."
 
   for TABLE in "${TABLES[@]}"; do
     [ -z "$TABLE" ] && continue
-    echo -n "  $TABLE... "
+    echo -n "  [$STORE] $TABLE... "
 
     # Live authoritative count.
-    LIVE=$("$PSQL" "$DSN" -tAc "SELECT count(*) FROM \"public\".\"$TABLE\";" 2>/dev/null || echo "ERR")
+    LIVE=$("$PSQL" "$DSN_L" -tAc "SELECT count(*) FROM \"public\".\"$TABLE\";" 2>/dev/null || echo "ERR")
     if [ "$LIVE" = "ERR" ]; then
       echo "✗ count(*) failed"
-      FAILED=$((FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $TABLE(count)"
+      FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE(count)"
       continue
     fi
 
     # Dump every row as newline-delimited JSON (no max_rows cap). Lift the
     # statement timeout in-session (see note above) by feeding SET + \copy to
     # one psql via stdin.
-    OUT="$TODAY_DIR/$TABLE.ndjson"
+    OUT="$OUTDIR/$TABLE.ndjson"
     if ! printf '%s\n' \
           "SET statement_timeout=0;" \
           "\\copy (SELECT row_to_json(t) FROM \"public\".\"$TABLE\" t) TO '$OUT'" \
-        | "$PSQL" "$DSN" -tA > /dev/null 2>"$TODAY_DIR/$TABLE.err"; then
+        | "$PSQL" "$DSN_L" -tA > /dev/null 2>"$OUTDIR/$TABLE.err"; then
       echo "✗ \\copy failed"
-      cat "$TODAY_DIR/$TABLE.err" || true
-      FAILED=$((FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $TABLE(copy)"
+      cat "$OUTDIR/$TABLE.err" || true
+      FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE(copy)"
       continue
     fi
-    rm -f "$TODAY_DIR/$TABLE.err"
+    rm -f "$OUTDIR/$TABLE.err"
 
     # Completeness assertion: backed-up rows must equal live count.
     GOT=$(wc -l < "$OUT" | tr -d ' ')
     if [ "$GOT" != "$LIVE" ]; then
       echo "✗ TRUNCATION: backed up $GOT but live has $LIVE"
-      FAILED=$((FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $TABLE($GOT/$LIVE)"
+      FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE($GOT/$LIVE)"
       continue
     fi
 
     gzip -f "$OUT"
     echo "✓ $GOT rows (matches live)"
-    BACKED=$((BACKED + 1))
+    BACKED=$((BACKED + 1)); ST_BACKED=$((ST_BACKED + 1))
   done
+
+  echo "  [$STORE] backed up $ST_BACKED tables, $ST_FAILED failed."
 }
 
 # ---------------------------------------------------------------------------
@@ -200,11 +219,41 @@ PY
   done
 }
 
+# ---------------------------------------------------------------------------
+# Substrate (tscuymavysscrvoberrr): pg_dump primary, REST fallback if the DB
+# client / DSN is unavailable. Its files land DIRECTLY in $TODAY_DIR (top-level
+# layout preserved — existing restore expectations must not break).
+# ---------------------------------------------------------------------------
 if [ -n "$DSN" ] && [ -x "$PG_DUMP" ] && [ -x "$PSQL" ]; then
-  db_backup
+  backup_one "substrate" "$DSN" "$TODAY_DIR"
 else
   rest_backup
 fi
+
+# ---------------------------------------------------------------------------
+# Client silos (TENANT-RESIDENCY / LAYER-VOCAB): pg_dump/DSN ONLY — NO REST
+# fallback (the REST path is substrate-URL specific). Each silo dumps into its
+# OWN subdir. A silo whose DSN env var is empty/unset is SKIPPED (log line, not
+# a failure) so the script stays robust when a DSN is absent.
+#   name              DSN env var                  subdir
+#   ihsanos-ceayj     IHSANOS_PROD_DATABASE_URL    $TODAY_DIR/ihsanos-ceayj
+#   irsyad-goumlyne   GOUMLYNE_DATABASE_URL        $TODAY_DIR/irsyad-goumlyne
+# ---------------------------------------------------------------------------
+backup_client_silo() {
+  local NAME="$1" SILO_DSN="$2"
+  if [ -z "$SILO_DSN" ]; then
+    echo "--- [$NAME] SKIPPED: DSN env var is empty/unset (not a failure)."
+    return 0
+  fi
+  if [ ! -x "$PG_DUMP" ] || [ ! -x "$PSQL" ]; then
+    echo "--- [$NAME] SKIPPED: pg_dump/psql unavailable (no REST fallback for client silos)."
+    return 0
+  fi
+  backup_one "$NAME" "$SILO_DSN" "$TODAY_DIR/$NAME"
+}
+
+backup_client_silo "ihsanos-ceayj"   "${IHSANOS_PROD_DATABASE_URL:-}"
+backup_client_silo "irsyad-goumlyne" "${GOUMLYNE_DATABASE_URL:-}"
 
 # Cleanup old backups (keep 7 days)
 find "$BACKUP_DIR" -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \;
