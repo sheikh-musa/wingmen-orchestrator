@@ -69,33 +69,68 @@ _PARENT_LABEL = "sch_student_parents.rows"
 #   FAIL-CLOSED-UNKNOWN — DERIVED BY EXCLUSION at runtime: any persons/sch_students column that is
 #     not AUTHORIZED, not IGNORED, not FORBIDDEN(below), not unstructured -> counted as out-of-
 #     envelope (P0-on-any-nonzero, NEVER --accept'd). A NEW column we never classified fails CLOSED.
+# CLASSIFICATION-ROLE KEYS — DECOUPLED from the (test-monkeypatchable) table-name constants _T_*
+# so pointing the detector at a standin table does NOT break the classification lookup. Production
+# values equal the default table names, so behaviour is unchanged; the functions index the
+# classification dicts by these STABLE keys while querying tables via _T_* (which a test may
+# monkeypatch to a standin). Columns are classified by NAME, so a standin with the real column
+# names classifies identically.
+_K_PERSONS, _K_STUDENTS, _K_PARENTS = "persons", "sch_students", "sch_student_parents"
+
 AUTHORIZED_CEILING = {
     # nric_hash (v1): AUTHORIZED per Nazim #40056 — same data class as nric_hash_v2 (op#20281-signed),
     # a column-name variant, not an envelope expansion.
-    _T_PERSONS: {"date_of_birth", "address", "gender",
+    _K_PERSONS: {"date_of_birth", "address", "gender",
                  "nric_encrypted", "nric_hash", "nric_hash_v2", "nric_source"},
     # emergency_contact (bare legacy): AUTHORIZED per Nazim #40056 — same class as the structured
     # emergency_contact_* fields already authorized.
-    _T_STUDENTS: {"emergency_contact", "emergency_contact_name", "emergency_contact_number",
+    # CAI-1030 EXPANSION (Nazim #41335/#41337, Musa op#20281 reply 21193): mig350 operational
+    # care&control custody/marital — school-recorded, PII-gated, gate-passed (PR#742), NOT the
+    # legal-custody model (that stays FLOOR). Authorized in-envelope as the school moved from
+    # minimal-enrollment to the full parent-graph.
+    _K_STUDENTS: {"emergency_contact", "emergency_contact_name", "emergency_contact_number",
                   "emergency_contact_email", "emergency_contact_relationship", "emergency_contact_note",
                   "class_id", "enrollment_date", "house", "citizenship", "nationality",
                   "country_of_birth", "race", "fee_code", "admission_year", "sibling_count",
-                  "withdrawal_date"},
+                  "withdrawal_date",
+                  "marital_status", "care_and_control", "custody_status", "deceased_parent", "custody_note"},
 }
 IGNORED_FIELDS = {
-    _T_PERSONS: {"id", "org_id", "user_id", "merged_into", "created_at", "updated_at",
+    _K_PERSONS: {"id", "org_id", "user_id", "merged_into", "created_at", "updated_at",
                  "deleted_at", "is_active", "display_name", "import_batch_id",
                  "import_batch_role", "import_batch_enriched_fields", "custom_fields", "tags"},
     # previous_school: IGNORE per Nazim #40056 — education metadata, low-sensitivity, outside the
     # deep-PII guard scope (not medical/custody/parent/contact); ignore (not ceiling-gate) to avoid
     # a false-P0 stalling the cutover.
-    _T_STUDENTS: {"id", "org_id", "person_id", "created_at", "updated_at", "deleted_at",
+    _K_STUDENTS: {"id", "org_id", "person_id", "created_at", "updated_at", "deleted_at",
                   "student_number", "status", "previous_school", "import_batch_id",
                   "import_batch_role", "import_batch_enriched_fields"},
+    # sch_student_parents structural/bookkeeping cols (NOT deep-PII): link FKs, contact-flag,
+    # relationship label, timestamps. CAI-1030: enumerated so any OTHER link col fails closed.
+    _K_PARENTS: {"id", "org_id", "parent_person_id", "student_id", "relationship",
+                 "is_primary_contact", "created_at", "updated_at"},
 }
+# CAI-1030 EXPANSION (Nazim #41337): parent persons are the SAME PII class as student persons PLUS
+# guardian CONTACT (the "parent graph" Musa authorized 21193 — the same class already in-envelope as
+# the student emergency_contact_* fields, normalized onto the parent person, CIPHERTEXT-ONLY). This
+# is PARENT-SCOPED and DISTINCT from AUTHORIZED_CEILING[_K_PERSONS] (student-scoped, UNCHANGED) so
+# student-person contact stays fail-closed (minors: no direct-contact PII). PLAINTEXT phone/email are
+# deliberately NOT here -> they stay fail-closed (a raw-plaintext contact write still P0s, mirroring
+# the NRIC ciphertext-only floor).
+_AUTHORIZED_PARENT_PERSONS = AUTHORIZED_CEILING[_K_PERSONS] | {
+    "phone_encrypted", "phone_hash", "phone_hash_v2",
+    "email_encrypted", "email_hash", "email_hash_v2",
+}
+# sch_student_parents authorized link cols (CAI-1030): marital_status. Link EXISTENCE (row count) is
+# authorized too — reflected by REMOVING the old {PA}.rows forbidden check (not a column entry).
+_AUTHORIZED_PARENT_LINK = {"marital_status"}
 # sch_students cols already covered as FORBIDDEN by count_forbidden() — excluded from the
 # fail-closed-unknown enumeration so they are not double-counted (allergy* matched by ILIKE).
 _FORBIDDEN_SCH = {"medical_notes", "custody_court_order_ref", "custody_under_court_order"}
+# sch_student_parents FLOOR (never opened): has_legal_custody = the FORMAL legal-custody flag; mig350
+# is explicitly NOT the legal model, so this stays P0-on-nonzero. Excluded from the link
+# fail-closed-unknown enumeration (checked explicitly).
+_FORBIDDEN_PA = {"has_legal_custody"}
 
 # RESIDUE-NO-GROW GUARD (Nazim #40069): the LIVE-scope above is blind to SOFT-DELETED rows, so a
 # populate-then-soft-delete could hide deep PII. This baseline is the KNOWN reverted-dupe residue
@@ -218,18 +253,25 @@ def count_forbidden(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
             f[f"{S}.{cn}"] = _count(cur, f'SELECT count(*) FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND "{cn}" IS NOT NULL', org_id)
     except Exception:
         f[f"{S}._allergy_discovery"] = None
-    # sch_student_parents: ANY row is a parent-guardian LINK — out-of-envelope in the enrollment phase
-    f[f"{PA}.rows"] = _count(cur, f"SELECT count(*) FROM {PA} WHERE org_id=%(o)s", org_id)
+    # sch_student_parents: has_legal_custody = the FORMAL legal-custody flag = FLOOR (never opened;
+    # mig350 is explicitly NOT the legal model). Link EXISTENCE (row count) + marital_status are now
+    # AUTHORIZED (CAI-1030 expansion, Nazim #41335/#41337) so are NO LONGER forbidden here.
     f[f"{PA}.has_legal_custody"] = _count(cur, f"SELECT count(*) FROM {PA} WHERE org_id=%(o)s AND has_legal_custody IS TRUE", org_id)
-    f[f"{PA}.marital_status"] = _count(cur, f"SELECT count(*) FROM {PA} WHERE org_id=%(o)s AND marital_status IS NOT NULL", org_id)
-    # parent-guardian PII on the LINKED parent persons rows (discover persons PII cols; no hardcoded names)
-    parent_ids = f"SELECT parent_person_id FROM {PA} WHERE org_id=%(o)s AND parent_person_id IS NOT NULL"
-    ppcols = discover_pii_columns(cur, P)
-    if ppcols:
-        conds = " OR ".join(f"{c} IS NOT NULL" for c in ppcols)
-        f["persons(parent).pii"] = _count(cur, f"SELECT count(*) FROM {P} WHERE id IN ({parent_ids}) AND ({conds})", org_id)
-    else:
-        f["persons(parent).pii"] = None  # could-not-discover -> loud
+    # sch_student_parents FAIL-CLOSED-UNKNOWN: any link col not authorized/ignored/floor is
+    # out-of-envelope -> P0-on-nonzero (a NEW unclassified link col fails CLOSED, never silent-green).
+    for c in sorted(_present_columns(cur, PA)):
+        if c in _AUTHORIZED_PARENT_LINK or c in IGNORED_FIELDS[_K_PARENTS] or c in _FORBIDDEN_PA:
+            continue
+        f[f"{PA}.{c}"] = _count(cur, f'SELECT count(*) FROM {PA} WHERE org_id=%(o)s AND "{c}" IS NOT NULL', org_id)
+    # parent-guardian persons: the SAME trichotomy as student persons, but with the PARENT-SCOPED
+    # authorized set (adds guardian CONTACT ciphertext; PLAINTEXT phone/email stay fail-closed).
+    # Authorized/ignored skipped; any OTHER col fails CLOSED (P0-on-nonzero). Replaces the old
+    # blanket persons(parent).pii forbidden count (CAI-1030 expansion, Nazim #41337).
+    parent_persons = f"SELECT parent_person_id FROM {PA} WHERE org_id=%(o)s AND parent_person_id IS NOT NULL"
+    for c in sorted(_present_columns(cur, P)):
+        if c in _AUTHORIZED_PARENT_PERSONS or c in IGNORED_FIELDS[_K_PERSONS]:
+            continue
+        f[f"{P}(parent).{c}"] = _count(cur, f'SELECT count(*) FROM {P} WHERE id IN ({parent_persons}) AND "{c}" IS NOT NULL', org_id)
     # ── FAIL-CLOSED-UNKNOWN (deploy-lockstep, #40044): DERIVED BY EXCLUSION. Any column on the
     # student persons / sch_students rows that is NOT authorized, NOT ignored, NOT already a
     # forbidden check above, NOT unstructured (custom_fields/tags -> count_unclassifiable) is
@@ -237,11 +279,11 @@ def count_forbidden(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
     # column mig-added later that neither Nazim nor I classified fails CLOSED, never silent-green.
     student_persons = f"SELECT person_id FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND person_id IS NOT NULL"
     for c in sorted(_present_columns(cur, P)):
-        if c in AUTHORIZED_CEILING[P] or c in IGNORED_FIELDS[P]:
+        if c in AUTHORIZED_CEILING[_K_PERSONS] or c in IGNORED_FIELDS[_K_PERSONS]:
             continue
         f[f"{P}(student).{c}"] = _count(cur, f'SELECT count(*) FROM {P} WHERE id IN ({student_persons}) AND "{c}" IS NOT NULL', org_id)
     for c in sorted(_present_columns(cur, S)):
-        if (c in AUTHORIZED_CEILING[S] or c in IGNORED_FIELDS[S]
+        if (c in AUTHORIZED_CEILING[_K_STUDENTS] or c in IGNORED_FIELDS[_K_STUDENTS]
                 or c in _FORBIDDEN_SCH or "allergy" in c.lower()):
             continue
         f[f"{S}.{c}"] = _count(cur, f'SELECT count(*) FROM {S} WHERE org_id=%(o)s AND deleted_at IS NULL AND "{c}" IS NOT NULL', org_id)
@@ -310,10 +352,10 @@ def run_counts(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
         f"SELECT person_id FROM {_T_STUDENTS} WHERE org_id = %(o)s "
         f"AND deleted_at IS NULL AND person_id IS NOT NULL"
     )
-    for c in sorted(AUTHORIZED_CEILING[_T_PERSONS]):
+    for c in sorted(AUTHORIZED_CEILING[_K_PERSONS]):
         counts[f"{_T_PERSONS}.{c}"] = None if c not in present_p else _count(
             cur, f'SELECT count(*) FROM {_T_PERSONS} WHERE id IN ({person_subq}) AND "{c}" IS NOT NULL', org_id)
-    for c in sorted(AUTHORIZED_CEILING[_T_STUDENTS]):
+    for c in sorted(AUTHORIZED_CEILING[_K_STUDENTS]):
         counts[f"{_T_STUDENTS}.{c}"] = None if c not in present_s else _count(
             cur, f'SELECT count(*) FROM {_T_STUDENTS} WHERE org_id = %(o)s AND deleted_at IS NULL AND "{c}" IS NOT NULL', org_id)
     return counts
@@ -739,7 +781,13 @@ def _selftest() -> int:
     print(f"  [{'PASS' if funk else 'FAIL'}] fail-closed-unknown email=5 -> breach; zero-unknowns benign: {fb3},{fu3}")
     # classification sets are disjoint (a col is never both authorized AND ignored) — a silent
     # overlap would let an authorized field also count as fail-closed (double-page) or vice-versa.
-    disjoint = all(not (AUTHORIZED_CEILING[t] & IGNORED_FIELDS[t]) for t in (_T_PERSONS, _T_STUDENTS))
+    disjoint = (all(not (AUTHORIZED_CEILING[t] & IGNORED_FIELDS[t]) for t in (_K_PERSONS, _K_STUDENTS))
+                # CAI-1030 parent sets: authorized-link / floor / ignored-link are mutually disjoint,
+                # and the parent-persons authorized set does not overlap the ignored-persons set.
+                and not (_AUTHORIZED_PARENT_LINK & IGNORED_FIELDS[_K_PARENTS])
+                and not (_AUTHORIZED_PARENT_LINK & _FORBIDDEN_PA)
+                and not (_FORBIDDEN_PA & IGNORED_FIELDS[_K_PARENTS])
+                and not (_AUTHORIZED_PARENT_PERSONS & IGNORED_FIELDS[_K_PERSONS]))
     print(f"  [{'PASS' if disjoint else 'FAIL'}] AUTHORIZED_CEILING and IGNORED_FIELDS are disjoint per table")
     # residue-no-grow guard: == baseline ok, shrink ok, GROW pages, None loud
     rv_ok = (residue_verdict(900, 900) == "ok" and residue_verdict(500, 900) == "ok"
