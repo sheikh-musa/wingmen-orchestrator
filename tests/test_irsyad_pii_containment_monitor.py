@@ -252,3 +252,188 @@ def test_main_persistent_goumlyne_failure_still_pages_dead_man(monkeypatch):
     assert rc == 2
     assert any("CONNECT FAILED" in s and p == "P1" for s, p in paged), \
         "persistent failure MUST P1-page containment-UNVERIFIED (dead-man preserved)"
+
+
+# ── CAI-1030 ENVELOPE EXPANSION (Nazim #41335/#41337, Musa op#20281 reply 21193) ─────────
+# The school moved from minimal-enrollment to full parent-graph + operational custody, so the
+# custody/marital fields (mig350) + parent-link existence/marital + parent-person PII (incl.
+# guardian CONTACT ciphertext) move from FORBIDDEN to AUTHORIZED. The FLOOR must NOT open:
+# sch_students {medical_notes, custody_court_order_ref, custody_under_court_order} and
+# sch_student_parents.has_legal_custody stay P0-on-nonzero. Fail-closed-unknown stays on all 3
+# tables. Tests run count_forbidden() against a rolled-back DB standin (real sweep logic).
+_CAI1030_ORG = "73339164-7c1f-40ba-a093-33f1f292dd4c"
+
+_ST_PERSONS_COLS = (
+    "id uuid PRIMARY KEY", "org_id uuid", "user_id uuid", "merged_into uuid",
+    "created_at timestamptz", "updated_at timestamptz", "deleted_at timestamptz",
+    "is_active boolean", "display_name text", "import_batch_id uuid",
+    "import_batch_role text", "import_batch_enriched_fields jsonb",
+    "custom_fields jsonb", "tags text[]",
+    "date_of_birth date", "address text", "gender text",
+    "nric_encrypted text", "nric_hash text", "nric_hash_v2 text", "nric_source text",
+    "phone text", "phone_encrypted text", "phone_hash text", "phone_hash_v2 text",
+    "email text", "email_encrypted text", "email_hash text", "email_hash_v2 text",
+)
+_ST_STUDENTS_COLS = (
+    "id uuid PRIMARY KEY", "org_id uuid", "person_id uuid", "deleted_at timestamptz",
+    "student_number text", "status text",
+    "emergency_contact text", "emergency_contact_name text", "class_id uuid",
+    "medical_notes text", "custody_court_order_ref text", "custody_under_court_order boolean",
+    "marital_status text", "care_and_control text", "custody_status text",
+    "deceased_parent text", "custody_note text",
+)
+_ST_PARENTS_COLS = (
+    "id uuid PRIMARY KEY", "org_id uuid", "parent_person_id uuid", "student_id uuid",
+    "relationship text", "is_primary_contact boolean", "created_at timestamptz",
+    "updated_at timestamptz", "marital_status text", "has_legal_custody boolean",
+)
+
+
+def _cai1030_standin(cur, extra_persons="", extra_students="", extra_parents=""):
+    cur.execute(f"CREATE TABLE _sre_persons2 ({', '.join(_ST_PERSONS_COLS)}{extra_persons})")
+    cur.execute(f"CREATE TABLE _sre_students2 ({', '.join(_ST_STUDENTS_COLS)}{extra_students})")
+    cur.execute(f"CREATE TABLE _sre_parents2 ({', '.join(_ST_PARENTS_COLS)}{extra_parents})")
+
+
+def _cai1030_point(monkeypatch):
+    monkeypatch.setattr(M, "_T_PERSONS", "_sre_persons2")
+    monkeypatch.setattr(M, "_T_STUDENTS", "_sre_students2")
+    monkeypatch.setattr(M, "_T_PARENTS", "_sre_parents2")
+
+
+def _mk_student(cur, org):
+    cur.execute("INSERT INTO _sre_persons2 (id, org_id) VALUES (gen_random_uuid(), %s) RETURNING id", (org,))
+    pid = cur.fetchone()[0]
+    cur.execute("INSERT INTO _sre_students2 (id, org_id, person_id) VALUES (gen_random_uuid(), %s, %s) RETURNING id", (org, pid))
+    sid = cur.fetchone()[0]
+    return sid, pid
+
+
+def _mk_parent_link(cur, org, student_id):
+    cur.execute("INSERT INTO _sre_persons2 (id, org_id) VALUES (gen_random_uuid(), %s) RETURNING id", (org,))
+    ppid = cur.fetchone()[0]
+    cur.execute("INSERT INTO _sre_parents2 (id, org_id, parent_person_id, student_id) VALUES (gen_random_uuid(), %s, %s, %s)",
+                (org, ppid, student_id))
+    return ppid
+
+
+def _cai1030_conn():
+    import os, psycopg2
+    conn = psycopg2.connect(os.environ["DATABASE_URL"]); conn.autocommit = False
+    return conn
+
+
+def test_cai1030_authorized_fields_no_longer_forbidden(monkeypatch):
+    """The formerly-forbidden custody/marital/parent-graph fields, when populated, must NOT
+    appear as forbidden breaches after the CAI-1030 expansion."""
+    conn = _cai1030_conn(); cur = conn.cursor()
+    try:
+        _cai1030_standin(cur); _cai1030_point(monkeypatch)
+        org = _CAI1030_ORG
+        sid, _ = _mk_student(cur, org)
+        ppid = _mk_parent_link(cur, org, sid)
+        # sch_students mig350 operational custody/marital (authorized)
+        cur.execute("""UPDATE _sre_students2 SET marital_status='divorced', care_and_control='mother',
+                       custody_status='joint', deceased_parent='father', custody_note='x' WHERE id=%s""", (sid,))
+        # sch_student_parents link marital_status (authorized) — link existence itself authorized
+        cur.execute("UPDATE _sre_parents2 SET marital_status='married' WHERE parent_person_id=%s", (ppid,))
+        # parent person authorized PII incl. guardian CONTACT ciphertext (authorized)
+        cur.execute("""UPDATE _sre_persons2 SET date_of_birth='2000-01-01', address='a', gender='m',
+                       nric_encrypted='c', nric_hash_v2='h', phone_encrypted='c', phone_hash='h',
+                       phone_hash_v2='h', email_encrypted='c', email_hash='h', email_hash_v2='h'
+                       WHERE id=%s""", (ppid,))
+        forbidden = M.count_forbidden(cur, org)
+        breaches, unmeasured = M.classify_forbidden(forbidden)
+        assert breaches == [], f"authorized CAI-1030 fields must NOT be forbidden breaches; got {breaches}"
+        assert unmeasured == [], f"no could-not-measure expected; got {unmeasured}"
+    finally:
+        conn.rollback(); conn.close()
+
+
+def test_cai1030_floor_still_trips_p0_each(monkeypatch):
+    """The 4 FLOOR fields must STILL trip a forbidden breach on any nonzero, one at a time."""
+    # (table, col, sql-value) — labels are prefixed by the (monkeypatched) standin table name.
+    floor = [
+        ("_sre_students2", "medical_notes", "'note'"),
+        ("_sre_students2", "custody_court_order_ref", "'ref'"),
+        ("_sre_students2", "custody_under_court_order", "TRUE"),
+        ("_sre_parents2", "has_legal_custody", "TRUE"),
+    ]
+    for table, col, val in floor:
+        conn = _cai1030_conn(); cur = conn.cursor()
+        try:
+            _cai1030_standin(cur); _cai1030_point(monkeypatch)
+            org = _CAI1030_ORG
+            sid, _ = _mk_student(cur, org)
+            ppid = _mk_parent_link(cur, org, sid)
+            if table == "_sre_students2":
+                cur.execute(f"UPDATE _sre_students2 SET {col}={val} WHERE id=%s", (sid,))
+            else:
+                cur.execute(f"UPDATE _sre_parents2 SET {col}={val} WHERE parent_person_id=%s", (ppid,))
+            breaches, _ = M.classify_forbidden(M.count_forbidden(cur, org))
+            expected = f"{table}.{col}"
+            assert any(l == expected and n > 0 for l, n in breaches), \
+                f"FLOOR field {expected} must STILL trip P0 on nonzero; got {breaches}"
+        finally:
+            conn.rollback(); conn.close()
+
+
+def test_cai1030_fail_closed_unknown_on_all_three_tables(monkeypatch):
+    """A NEW unclassified column on persons / sch_students / sch_student_parents, populated,
+    must fail CLOSED (forbidden breach) — never silently pass."""
+    conn = _cai1030_conn(); cur = conn.cursor()
+    try:
+        _cai1030_standin(cur, extra_persons=", surprise_p text",
+                         extra_students=", surprise_s text", extra_parents=", surprise_pa text")
+        _cai1030_point(monkeypatch)
+        org = _CAI1030_ORG
+        sid, spid = _mk_student(cur, org)
+        ppid = _mk_parent_link(cur, org, sid)
+        cur.execute("UPDATE _sre_persons2 SET surprise_p='x' WHERE id=%s", (ppid,))   # parent person
+        cur.execute("UPDATE _sre_students2 SET surprise_s='x' WHERE id=%s", (sid,))
+        cur.execute("UPDATE _sre_parents2 SET surprise_pa='x' WHERE parent_person_id=%s", (ppid,))
+        breaches, _ = M.classify_forbidden(M.count_forbidden(cur, org))
+        labels = {l for l, _ in breaches}
+        assert "_sre_persons2(parent).surprise_p" in labels, f"unknown parent-person col must fail closed; got {breaches}"
+        assert "_sre_students2.surprise_s" in labels, f"unknown sch_students col must fail closed; got {breaches}"
+        assert "_sre_parents2.surprise_pa" in labels, f"unknown link col must fail closed; got {breaches}"
+    finally:
+        conn.rollback(); conn.close()
+
+
+def test_cai1030_parent_contact_authorized_but_student_contact_still_forbidden(monkeypatch):
+    """RIGOR (Nazim #41337): authorizing guardian CONTACT for PARENT persons must NOT widen the
+    STUDENT-persons treatment — a student person with phone_encrypted must STILL trip."""
+    conn = _cai1030_conn(); cur = conn.cursor()
+    try:
+        _cai1030_standin(cur); _cai1030_point(monkeypatch)
+        org = _CAI1030_ORG
+        sid, spid = _mk_student(cur, org)
+        ppid = _mk_parent_link(cur, org, sid)
+        cur.execute("UPDATE _sre_persons2 SET phone_encrypted='c' WHERE id=%s", (ppid,))  # parent: authorized
+        cur.execute("UPDATE _sre_persons2 SET phone_encrypted='c' WHERE id=%s", (spid,))  # student: still forbidden
+        breaches, _ = M.classify_forbidden(M.count_forbidden(cur, org))
+        labels = {l for l, _ in breaches}
+        assert "_sre_persons2(student).phone_encrypted" in labels, \
+            f"STUDENT-person contact must STAY fail-closed (not widened); got {breaches}"
+        assert not any("(parent).phone" in l for l in labels), \
+            f"PARENT-person contact ciphertext must be AUTHORIZED (no breach); got {breaches}"
+    finally:
+        conn.rollback(); conn.close()
+
+
+def test_cai1030_plaintext_parent_contact_still_forbidden(monkeypatch):
+    """FLOOR: PLAINTEXT phone/email on a parent person STILL trips (ciphertext-only floor)."""
+    conn = _cai1030_conn(); cur = conn.cursor()
+    try:
+        _cai1030_standin(cur); _cai1030_point(monkeypatch)
+        org = _CAI1030_ORG
+        sid, _ = _mk_student(cur, org)
+        ppid = _mk_parent_link(cur, org, sid)
+        cur.execute("UPDATE _sre_persons2 SET phone='0123', email='a@b.c' WHERE id=%s", (ppid,))
+        breaches, _ = M.classify_forbidden(M.count_forbidden(cur, org))
+        labels = {l for l, _ in breaches}
+        assert "_sre_persons2(parent).phone" in labels and "_sre_persons2(parent).email" in labels, \
+            f"PLAINTEXT parent contact must STILL trip (ciphertext-only floor); got {breaches}"
+    finally:
+        conn.rollback(); conn.close()
