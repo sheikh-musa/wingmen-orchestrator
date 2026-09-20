@@ -303,14 +303,14 @@ class Vault:
         if leak_flagged and not leak_flagged_reason:
             raise VaultError("vault.put(leak_flagged=True) requires leak_flagged_reason.")
 
-        local_host = _local_host_id()
-        kek = _local_kek(local_host)
-        dek = AESGCM.generate_key(bit_length=256)
-        ciphertext = _aead_encrypt(dek, value.encode("utf-8"))
-        wrapped_dek = _aead_encrypt(kek, dek)
-
         conn = _connect()
         try:
+            local_host = _local_host_id()
+            kek = _local_kek(local_host)
+            dek = AESGCM.generate_key(bit_length=256)
+            ciphertext = _aead_encrypt(dek, value.encode("utf-8"))
+            wrapped_dek = _aead_encrypt(kek, dek)
+
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -329,6 +329,14 @@ class Vault:
                 )
             _audit(conn, name, reason, success=True)
             conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+                _audit(conn, name, reason, success=False)
+                conn.commit()
+            except Exception:
+                pass
+            raise
         finally:
             conn.close()
 
@@ -340,11 +348,11 @@ class Vault:
         if not reason:
             raise VaultError("vault.rotate() requires a non-empty reason (goes to the audit log).")
 
-        local_host = _local_host_id()
-        kek = _local_kek(local_host)
-
         conn = _connect()
         try:
+            local_host = _local_host_id()
+            kek = _local_kek(local_host)
+
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT ciphertext, wrapped_dek, kek_host FROM public.vault_secrets WHERE name = %s FOR UPDATE",
@@ -352,7 +360,6 @@ class Vault:
                 )
                 row = cur.fetchone()
                 if row is None:
-                    conn.rollback()
                     raise SecretNotFoundError(f"vault: no secret named {name!r} to rotate.")
                 old_ciphertext, old_wrapped_dek, old_kek_host = row
 
@@ -377,6 +384,14 @@ class Vault:
                 )
             _audit(conn, name, reason, success=True)
             conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+                _audit(conn, name, reason, success=False)
+                conn.commit()
+            except Exception:
+                pass
+            raise
         finally:
             conn.close()
 

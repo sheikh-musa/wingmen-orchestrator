@@ -30,6 +30,15 @@ from nervous_system.vault import (
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
+# vault._agent_id() fails loud without CC_BASE_AGENT_ID/AGENT_ID (by design --
+# see reference_agent_id_not_orch_agent_id_for_identity). A bare shell running
+# this file directly (no lane env) hits that fail-loud and gets a confusing
+# collateral failure unrelated to what's actually being tested. Default to a
+# clearly-test-only identity so it doesn't masquerade as a real agent in the
+# audit log, but don't clobber a real ambient identity if one is already set.
+os.environ.setdefault("CC_BASE_AGENT_ID", "vault-test-suite")
+os.environ.setdefault("AGENT_ID", "vault-test-suite")
+
 TEST_SECRET_NAME = "vault_selftest_op21338"
 
 
@@ -68,16 +77,23 @@ def _cleanup_test_secret():
         conn.close()
 
 
-def test_put_fails_with_actionable_kek_error_before_bootstrap():
-    """Expected failure mode right now: the Mini's Keychain entry for
-    wingmen-vault-kek/mini has not been bootstrapped (orch-console's step,
-    bus #41841 note 1). This must fail with KekNotFoundError naming the exact
-    entry to create -- not a generic error, not a silent no-op."""
+def test_put_fails_with_actionable_kek_error_for_unbootstrapped_host(monkeypatch):
+    """Original intent (op#21338 phase 1): before orch-console bootstrapped the
+    Mini's real Keychain entry (bus #41846), this test exercised that exact
+    missing-entry path against ambient machine state. The entry now genuinely
+    exists here, so that natural precondition is gone -- decouple from ambient
+    state instead by pointing _local_host_id() at an account name that
+    deliberately has no Keychain entry. This still exercises the REAL macOS
+    `security find-generic-password` call (unmocked) and must fail with
+    KekNotFoundError naming the exact entry to create -- not a generic error,
+    not a silent no-op."""
+    fake_host = "vault-test-nonexistent-host-op21338"
+    monkeypatch.setattr("nervous_system.vault._local_host_id", lambda: fake_host)
     with pytest.raises(KekNotFoundError) as exc_info:
         vault.put(TEST_SECRET_NAME, "throwaway-test-value", reason="vault phase 1 self-test")
     msg = str(exc_info.value)
     assert "wingmen-vault-kek" in msg
-    assert "mini" in msg
+    assert fake_host in msg
     assert "security add-generic-password" in msg
 
 
