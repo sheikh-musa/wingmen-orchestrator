@@ -1,4 +1,15 @@
-# cc-substrate handoff (updated 2026-09-17 ~02:46Z, bus #40965/#40986/#40987/#40991)
+# cc-substrate handoff (updated 2026-09-20 ~14:32Z, bus #41762/#41763/#41768/#41777)
+
+## STATUS (2026-09-20): wingmen-core power-off gate = NOT-YET-DRAINABLE
+Musa wants wingmen-core gone; hub/bridge already cut over per orch-console. Ran the full verify-then-execute cycle this session (bus #41762→#41763 verify, #41768→#41777 execute attempt). Verdict unchanged from execution attempt: **still blocked on the same single root-on-gzb constraint** identified 09-17, now confirmed to also block items 4/5 (checked a no-root `systemctl --user` path — doesn't work, `Linger=no` and enabling it needs root too). Full detail: `reports/wingmen-core-drain-cutover-plan-op20655.md`, "EXECUTION ATTEMPT — 2026-09-20" addendum (both copies, synced identical). wingmen-core untouched throughout — nothing stopped/disabled there.
+
+**Access note for next session:** reaching gzb needs `sudo gzb-vpn.sh up` on hub-vps first (FortiGate split-tunnel, `/usr/local/sbin/gzb-vpn.sh`, 900s dead-man auto-teardown, was down at start of this session). First `up` attempt can fail transiently ("Peer refused to agree to our IP address" — stale IPCP lease) — retry once. `gazzai@<tailscale-ip>` is refused by design (LAN-only); always go via the `gzb` SSH alias after the tunnel is up. Tear down (`sudo gzb-vpn.sh down`) when done.
+
+**Only two things unblock the rest of this plan:** (a) root/sudo grant on gzb for `gazzai` (unblocks items 1+4+5 in one pass — packets for all are already prepared/verified, just need applying), (b) Musa's Mini-vs-gzb host pick for item 3 (console+ngrok — the ngrok authtoken question is resolved, it's account-level and portable, no new token needed). Nothing else for this lane to do on gzb until one of those lands.
+
+---
+
+## Prior update (2026-09-17 ~02:46Z, bus #40965/#40986/#40987/#40991)
 
 ## 1. Per-project governance build (op#20702) — CLOSED, all 3 merged
 PR #112/#113/#114 all show `state: MERGED` on GitHub (verified `gh pr view` this session). No action needed here anymore — don't re-touch.
