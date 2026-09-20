@@ -25,10 +25,43 @@ from datetime import datetime, timezone
 import psycopg
 from dotenv import load_dotenv
 
-PROJ = os.path.expanduser("~/.claude/projects/-home-wingmen-wingmen-orchestrator")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CC_IDENTITY = "cc-orchestrator"
 SOURCE = "auto_writer_v1"
 INTERVAL_S = 60
+
+
+def _project_dir() -> str:
+    """Claude Code's mangled ~/.claude/projects/<...> dir for REPO_ROOT, derived
+    dynamically so this script is correct on any host/checkout (was previously
+    hardcoded to wingmen-core's exact path -- broke the moment the hub session
+    moved to a different host). Mangling rule confirmed empirically against this
+    installation's own live project dirs: '/' and '.' both become '-'.
+    Falls back to a fuzzy match (and then newest-jsonl-anywhere) if the exact
+    derived name doesn't exist, since older Claude Code versions / edge cases
+    on this fleet have shown dot-preserving variants -- best-effort by design,
+    matches this script's own fail-soft posture (see main()'s try/except loop)."""
+    mangled = "-" + REPO_ROOT.strip("/").replace("/", "-").replace(".", "-")
+    base = os.path.expanduser("~/.claude/projects")
+    exact = os.path.join(base, mangled)
+    if os.path.isdir(exact):
+        return exact
+    # Fallback: compare with all non-alphanumerics stripped, so a dot-preserving
+    # variant (older Claude Code versions on this fleet) still matches. A plain
+    # dir-name prefix/rstrip trick is NOT used here on purpose -- it's brittle
+    # against arbitrary repo basenames.
+    target = "".join(ch for ch in mangled if ch.isalnum())
+    try:
+        candidates = [d for d in os.listdir(base)
+                      if "".join(ch for ch in d if ch.isalnum()) == target]
+    except OSError:
+        candidates = []
+    if len(candidates) == 1:
+        return os.path.join(base, candidates[0])
+    return exact  # let _parse_newest's glob come up empty rather than guess wrong
+
+
+PROJ = _project_dir()
 
 
 def _parse_newest():
@@ -101,7 +134,7 @@ def _publish(conn) -> "int|None":
 
 
 def main() -> int:
-    load_dotenv(os.path.expanduser("~/wingmen/orchestrator/.env"))
+    load_dotenv(os.path.join(REPO_ROOT, ".env"))
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     if not dsn:
         sys.stderr.write("hub_ctx_publish: no DATABASE_URL\n")
