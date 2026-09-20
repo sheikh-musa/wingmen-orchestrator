@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- wingmen-core drain cutover item 3 (op#20655, 2026-09-20): hosted fleet console
+       moved from wingmen-core to the Mini for residency (fleet-wide admin surface
+       should not sit on one client's premises). Direct port of wingmen-core's
+       wingmen-hosted-console.service -- bearer-gated, DB-only, read-only public
+       console clone (nervous_system.console.hosted_server, CAI-RESP-720).
+       CONSOLE_BEARER_TOKEN copied verbatim from wingmen-core's .env, not regenerated. -->
+  <key>Label</key>
+  <string>dev.wingmen.hosted-console</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m nervous_system.console.hosted_server</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/hosted-console.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/hosted-console.log</string>
+</dict>
+</plist>

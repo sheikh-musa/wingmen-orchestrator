@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- wingmen-core drain cutover item 3 (op#20655, 2026-09-20): ngrok tunnel for the
+       hosted fleet console, moved from wingmen-core to the Mini. NGROK_AUTHTOKEN
+       copied verbatim from wingmen-core's /etc/wingmen-console-ngrok.env (account-level,
+       portable, not regenerated) into this repo's .env. No reserved domain configured
+       on the old host -- this public URL WILL differ from wingmen-core's. -->
+  <key>Label</key>
+  <string>dev.wingmen.console-ngrok</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; exec /usr/local/bin/ngrok http 8788 --log stdout --log-format logfmt</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/console-ngrok.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/console-ngrok.log</string>
+</dict>
+</plist>
