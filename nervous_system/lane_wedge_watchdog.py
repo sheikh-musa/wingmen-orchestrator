@@ -1059,6 +1059,36 @@ def agent_status_lane_map(conn) -> "tuple[dict, set]":
     return mapped, collided
 
 
+def agent_status_base_fallback(conn) -> dict:
+    """(tmux session -> base bus identity) for the FALLBACK tier ONLY — the recycle-window
+    rescue (Nazim 41658/41661). It is deliberately LOOSER than agent_status_lane_map (the
+    PRIMARY, honest map) in exactly two ways, because a lane RECYCLING drops out of the
+    primary map for the few seconds the recycle takes:
+      - INCLUDES offline rows: mid-recycle the row flips status='offline' briefly; its
+        base_agent_id is still the truth of which lane this session is.
+      - COLLAPSES a same-base collision: old + new row both claim one tmux name (e.g.
+        'exams') and both carry ONE base ('cc-cosem-exams') — unambiguous AT THE BASE
+        LEVEL, so it resolves. Rows that disagree on base stay UNRESOLVED (a TRUE
+        cross-different-base collision must still surface as ambiguous — carve-out #2).
+    Host-scoped exactly like the primary (carve-out #1). The CALLER gates a resolved base
+    on it being a KNOWN fleet lane before trusting it (so a session with no row, or a base
+    that is not a lane, still surfaces as a genuine blind spot — carve-out #3)."""
+    me = orch_lease._me()
+    bases: "dict[str, set]" = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT tmux_session, COALESCE(base_agent_id, agent_id) FROM agent_status "
+            "WHERE tmux_session IS NOT NULL "
+            "AND (host = %s OR host IS NULL) "
+            "ORDER BY tmux_session",
+            (me,),
+        )
+        for sess, ident in cur.fetchall():
+            if sess and ident:
+                bases.setdefault(sess, set()).add(ident)
+    return {s: next(iter(v)) for s, v in bases.items() if len(v) == 1}
+
+
 # Bodies that must NEVER be treated as a nudgeable/resettable lane, even if a live
 # session resolves to them. The literal core is the fail-closed floor; the live
 # registry (protected_agents) can only ADD to it, never remove.
@@ -1173,16 +1203,34 @@ def gather_observations(conn, state: Optional[dict] = None,
         status_map, collided = {}, set()
     protected = protected_agent_ids(conn)
     a2b = merge_session_maps(status_map, fleet_map)
+    # Fallback tier for the recycle window (Nazim 41658/41661): the set of bases that ARE
+    # known fleet lanes, and a looser session->base map that survives the seconds a recycle
+    # takes. Only used to RESCUE a session the primary map missed — never to override it.
+    try:
+        base_fb = agent_status_base_fallback(conn)
+    except Exception as e:
+        log(f"agent_status base fallback failed ({e}) — no recycle-window rescue this scan")
+        base_fb = {}
+    fleet_bases = set(fleet_map.values())
     unmapped: list[str] = []
     for sess in list_lane_sessions():
         base = a2b.get(sess)
         if not base:
-            # Neither agent_status.tmux_session nor fleet_lanes knows this live
-            # session, so it is UNMONITORED. A stale/missing mapping is exactly how
-            # cc-ihsanos (session 'ihsanos-platform', lane 'mirror') and 'exams' went
-            # unwatched. Surface the blind spot so it gets reconciled (Nazim 14937/14938).
-            unmapped.append(sess)
-            continue
+            # The session-keyed map missed it. Before declaring UNMONITORED, try the
+            # recycle-window rescue: a live tmux name that drifts from its lane name
+            # ('exams' vs lane 'cosem-exams') drops out of the primary map for the few
+            # seconds a recycle takes (the row flips offline, or old+new rows collide on
+            # the name). Resolve via agent_status.base_agent_id -> fleet_lanes.base_agent_id:
+            # if it resolves (unambiguously) to a base that IS a known fleet lane, it is
+            # MONITORED. Otherwise fall through — a session with NO agent_status row, or one
+            # whose base is not a known lane, is a GENUINE blind spot and must still surface
+            # (Nazim 14937/14938 / 41661 carve-out #3).
+            fb = base_fb.get(sess)
+            if fb and fb in fleet_bases:
+                base = fb
+            else:
+                unmapped.append(sess)
+                continue
         if base in MONITOR_SINGLETONS or base in protected:
             continue  # covered by the singleton registry OR a protected body (console/
                       # governance/SRE) — NEVER lane-track it: no nudge/reset against a

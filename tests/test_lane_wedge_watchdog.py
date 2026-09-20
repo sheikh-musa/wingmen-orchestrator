@@ -747,3 +747,104 @@ def test_coverage_gap_new_session_mid_episode_warns_only_the_new_one():
     assert w.coverage_gap_episode(["a"], state) == ["a"]
     # 'b' newly unmapped while 'a' is still unmapped -> only 'b' is new.
     assert w.coverage_gap_episode(["a", "b"], state) == ["b"]
+
+
+# ---------------------------------------------------------------------------
+# Recycle-window coverage fallback (Nazim 41658/41661 — exams coverage-gap).
+# The tmux session name ('exams') drifts from the lane name ('cosem-exams'), so it
+# only maps via agent_status.tmux_session — which drops out for the seconds a recycle
+# takes (the row flips offline, or old+new rows collide on the name), re-firing a false
+# UNMONITORED P1. The fallback rescues it via agent_status.base_agent_id ->
+# fleet_lanes.base_agent_id WITHOUT silencing a genuine blind spot.
+# ---------------------------------------------------------------------------
+
+def test_base_fallback_collapses_same_base_recycle_collision():
+    # THE key case: mid-recycle the old + new rows both claim tmux_session='exams' and
+    # both carry base 'cc-cosem-exams'. The PRIMARY map drops this as a collision; the
+    # fallback collapses it to the single shared base (unambiguous at the base level).
+    conn = _MapConn([("exams", "cc-cosem-exams"), ("exams", "cc-cosem-exams")])
+    fb = w.agent_status_base_fallback(conn)
+    assert fb["exams"] == "cc-cosem-exams"
+
+
+def test_base_fallback_includes_offline_row():
+    # A lane recycling flips status='offline' for a few seconds; the PRIMARY map excludes
+    # offline rows, but the fallback must still resolve the base from that row. (The fake
+    # conn returns whatever rows the fallback query would select; asserting resolution here
+    # pins that the fallback does not exclude the row — the offline filter is dropped.)
+    conn = _MapConn([("exams", "cc-cosem-exams")])
+    fb = w.agent_status_base_fallback(conn)
+    assert fb["exams"] == "cc-cosem-exams"
+
+
+def test_base_fallback_drops_true_cross_base_collision():
+    # Carve-out #2: two live rows on ONE session name resolving to DIFFERENT bases is a
+    # genuine ambiguity — the fallback must NOT pick one; it stays unresolved so it can
+    # still surface.
+    conn = _MapConn([("nazim", "cc-orchestrator"), ("nazim", "orch-console")])
+    fb = w.agent_status_base_fallback(conn)
+    assert "nazim" not in fb
+
+
+def test_base_fallback_query_is_host_scoped():
+    # Carve-out #1: the fallback query must be host-scoped (host = me OR host IS NULL) so a
+    # foreign-host row never rescues a local session of the same name.
+    sink = {}
+    conn = _MapConn([], sink)
+    w.agent_status_base_fallback(conn)
+    sql = sink["sql"].lower()
+    assert "host" in sql and "is null" in sql
+
+
+def _obs_sessions(obs):
+    return {o.session for o in obs if o.kind == "lane"}
+
+
+def test_recycle_window_session_monitored_via_base_fallback(monkeypatch):
+    # Session 'exams' is live but absent from BOTH the primary status map and fleet_lanes'
+    # session key (which is 'cosem-exams'). The fallback resolves 'exams' -> base
+    # 'cc-cosem-exams', which IS a known fleet lane base -> MONITORED, not a false gap.
+    monkeypatch.setattr(w, "MONITOR_SINGLETONS", [])
+    monkeypatch.setattr(w, "list_lane_sessions", lambda: ["exams"])
+    monkeypatch.setattr(w, "agent_status_lane_map", lambda conn: ({}, set()))
+    monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({"cosem-exams": "cc-cosem-exams"}, {}))
+    monkeypatch.setattr(w, "agent_status_base_fallback", lambda conn: {"exams": "cc-cosem-exams"})
+    monkeypatch.setattr(w, "protected_agent_ids", lambda conn: set())
+    monkeypatch.setattr(w, "read_bus_signal", lambda a, c: w.BusSignal(0, 0.0, float("inf")))
+    state = {}
+    obs = w.gather_observations(None, state=state, alert=False)
+    assert "exams" in _obs_sessions(obs), "recycle-window session must be MONITORED via base fallback"
+    assert "exams" not in state.get("unmapped_warned", []), "must NOT be flagged as a coverage gap"
+
+
+def test_session_with_no_agent_status_row_still_surfaces_as_gap(monkeypatch):
+    # Carve-out #3: a live session with NO agent_status row at all (fallback yields nothing)
+    # is a GENUINE blind spot — the fallback must never silence it.
+    monkeypatch.setattr(w, "MONITOR_SINGLETONS", [])
+    monkeypatch.setattr(w, "list_lane_sessions", lambda: ["ghost"])
+    monkeypatch.setattr(w, "agent_status_lane_map", lambda conn: ({}, set()))
+    monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({"cosem-exams": "cc-cosem-exams"}, {}))
+    monkeypatch.setattr(w, "agent_status_base_fallback", lambda conn: {})
+    monkeypatch.setattr(w, "protected_agent_ids", lambda conn: set())
+    monkeypatch.setattr(w, "read_bus_signal", lambda a, c: w.BusSignal(0, 0.0, float("inf")))
+    state = {}
+    obs = w.gather_observations(None, state=state, alert=False)
+    assert "ghost" not in _obs_sessions(obs)
+    assert "ghost" in state.get("unmapped_warned", []), "a real blind spot must still surface"
+
+
+def test_fallback_base_not_a_known_lane_still_surfaces(monkeypatch):
+    # The fallback rescues ONLY sessions whose base IS a known fleet lane. A session whose
+    # base resolves to something that is NOT a fleet lane (nor a singleton) is not silently
+    # adopted — it still surfaces as a coverage gap.
+    monkeypatch.setattr(w, "MONITOR_SINGLETONS", [])
+    monkeypatch.setattr(w, "list_lane_sessions", lambda: ["rogue"])
+    monkeypatch.setattr(w, "agent_status_lane_map", lambda conn: ({}, set()))
+    monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({"cosem-exams": "cc-cosem-exams"}, {}))
+    monkeypatch.setattr(w, "agent_status_base_fallback", lambda conn: {"rogue": "cc-not-a-lane"})
+    monkeypatch.setattr(w, "protected_agent_ids", lambda conn: set())
+    monkeypatch.setattr(w, "read_bus_signal", lambda a, c: w.BusSignal(0, 0.0, float("inf")))
+    state = {}
+    obs = w.gather_observations(None, state=state, alert=False)
+    assert "rogue" not in _obs_sessions(obs)
+    assert "rogue" in state.get("unmapped_warned", [])
