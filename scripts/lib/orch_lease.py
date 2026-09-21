@@ -60,6 +60,13 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+
+# The ONE stable host-identity resolver (CAI-RESP-1436). Dual-import so it resolves
+# whether this module is imported bare (scripts/lib on sys.path) or as scripts.lib.orch_lease.
+try:
+    import fleet_host_id
+except ModuleNotFoundError:  # pragma: no cover
+    from scripts.lib import fleet_host_id
 from dotenv import load_dotenv
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
@@ -77,11 +84,15 @@ def _role() -> str:
 
 
 def _me() -> str:
-    # Short host label — collapse the macOS gethostname() flap where the same machine reports
-    # "Mac-Studio" vs "Mac-Studio.local" on network-state changes, which false-refused the hub's
-    # pens against a stored holder_host="Mac-Studio" (fleet bugfix folded from the Studio checkout,
-    # cc-orchestrator 2026-07-22). "mac-mini" stays "mac-mini" — cross-body protection intact.
-    return socket.gethostname().split(".")[0]
+    # Stable host identity via the ONE shared resolver (CAI-RESP-1436): a boot-pinned
+    # FLEET_HOST_ID -> alias-match against the git-tracked fleet_hosts map -> LOUD raw
+    # fallback. This supersedes the old bare `socket.gethostname().split(".")[0]`, which
+    # only collapsed the ".local" variant and could NOT collapse a full-name DHCP flap
+    # (Sheikhs-Mini <-> Sheikhs-Mac-mini, bus 41834) that false-refused the pens against a
+    # stored holder_host. A gethostname() failure PROPAGATES so the CAS take/renew fails
+    # CLOSED (never act under an unknown identity). The tier-3 fallback preserves the exact
+    # old behavior when a host is not yet pinned/mapped.
+    return fleet_host_id.fleet_host_id()
 
 
 def _holder_id() -> str:

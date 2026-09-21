@@ -52,6 +52,13 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from dotenv import load_dotenv
 
+# The ONE stable host-identity resolver (CAI-RESP-1436). Dual-import so it resolves
+# whether this module is imported bare (scripts/lib on sys.path) or as scripts.lib.*.
+try:
+    import fleet_host_id
+except ModuleNotFoundError:  # pragma: no cover
+    from scripts.lib import fleet_host_id
+
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 load_dotenv(os.path.join(ROOT, ".env"))
 
@@ -65,7 +72,12 @@ def _dsn():
 
 
 def _me() -> str:
-    return socket.gethostname()
+    # Stable host identity via the ONE shared resolver (CAI-RESP-1436) — supersedes the
+    # bare socket.gethostname() that gave a lease its flappy holder_host (and the '.local'
+    # suffix that split the SRE lease during the 2026-09-20 flap, bus 41834). Unified with
+    # orch_lease._me() so both leases + both watchdog matchers key on ONE identity. A
+    # gethostname() failure PROPAGATES so take/renew fail CLOSED under an unknown identity.
+    return fleet_host_id.fleet_host_id()
 
 
 def _agent_id(override: str | None = None) -> str:
