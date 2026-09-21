@@ -1,0 +1,17 @@
+{
+  "_comment": "Git-tracked fleet host-identity map (CAI-RESP-1436). canonical label -> known aliases (the values socket.gethostname() may return for this physical host across DHCP/network flaps). This ONE reviewed artifact is BOTH the boot source for FLEET_HOST_ID AND the runtime alias-resolver. VALUES are owned/verified by the host-provisioning owner (orch-console) against a verified provisioning source before the floor gate signs. To pin a host durably, its boot exports FLEET_HOST_ID=<canonical>; alias-match is only a mid-rollout/edge resilience net and logs that the host is unpinned.",
+  "hosts": {
+    "Sheikhs-Mini": {
+      "aliases": ["Sheikhs-Mini", "Sheikhs-Mini.local", "Sheikhs-Mac-mini", "Sheikhs-Mac-mini.local"],
+      "note": "Mac Mini. macOS auto-reset the DHCP-derived hostname to 'Sheikhs-Mac-mini' (LocalHostName) / 'Sheikhs-Mac-mini.local' on 2026-09-20 (bus 41834); canonical fleet label is Sheikhs-Mini."
+    },
+    "gzbai": {
+      "aliases": ["gzbai", "gzbai.local"],
+      "note": "Hub host (gazzai@192.168.1.114). VALUES pending orch-console verification against provisioning source."
+    },
+    "wingmen-core": {
+      "aliases": ["wingmen-core", "wingmen-core.local"],
+      "note": "Prior hub host (pre gzb cutover). VALUES pending orch-console verification against provisioning source."
+    }
+  }
+}
