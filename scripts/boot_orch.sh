@@ -47,9 +47,13 @@ fi
 
 # ── Stable host identity (CAI-RESP-1436) — pin FLEET_HOST_ID BEFORE the hub takes the
 #    orch_lease (orch_lease._me() keys the hub dead-man's switch). Shared helper; add A
-#    (loud-if-unpinned) + add B (consistency assert) live in it. [SRE-drafted per bus 41968;
-#    orch-console owns/verifies this is the live gzbai hub boot + deploys. On gzbai the map
-#    alias-matches gethostname()->'gzbai'; verify against the box before signing.]
+#    (loud-if-unpinned) + add B (consistency assert) live in it.
+#    NOTE (bus 42260): this is NOT the live gzbai hub boot — gzbai's hub boots via systemd
+#    wingmen-orch-hub.service -> /home/gazzai/orch_supervisor.sh, and gzbai pins FLEET_HOST_ID
+#    durably via the wingmen-core secrets BUNDLE .env (tmpfs, sourced by hub + lanes). So on
+#    gzbai this source is DEAD CODE. It is KEPT (not removed) because boot_orch.sh may be the
+#    LIVE boot on another host or a DR/failover path — there its pin DOES matter. Verify the
+#    live boot path per host before assuming this runs.
 source "$ORCH_DIR/scripts/lib/pin_fleet_host_id.sh"
 
 # Force the Mac Mini's Claude Max subscription, never metered API billing.
