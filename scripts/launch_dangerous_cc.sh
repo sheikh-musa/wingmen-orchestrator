@@ -739,7 +739,14 @@ CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 # (lane_wedge watchdog matchers) query, so a DHCP hostname flap can't desync writer vs reader
 # and false-gap fresh lane rows (audit of PR #129). Self-resolve via the shared resolver
 # (env pin -> alias-match -> fallback); `|| hostname -s` keeps the launcher unbreakable.
-CC_HOST="$("$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_host_id.py" current 2>/dev/null || hostname -s 2>/dev/null || echo unknown)"
+# Do NOT 2>/dev/null the resolver: its stderr is the OBSERVABILITY signal — a lane running
+# unpinned/on-alias-match must be VISIBLE, not silent (cai CAI-RESP-1436 2nd-lens F1). The
+# 2>/dev/null on `hostname -s` (the last-resort fallback) is fine — that's not the resolver.
+CC_HOST="$("$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_host_id.py" current || hostname -s 2>/dev/null || echo unknown)"
+# EXPORT so this lane AND its child CC body inherit the pin (cai F2: FLEET_HOST_ID must be
+# live on lane processes, not only the 3 brain boots). When .env carries the durable pin this
+# is a silent no-op re-export; when a host is unpinned it still propagates the resolved id.
+export FLEET_HOST_ID="$CC_HOST"
 CC_AUTH_LABEL="${CLAUDE_ACCOUNT_LABEL:-unlabelled}"
 CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
 # Two guards, because an empty token hashes to a REAL-LOOKING value. sha256("") starts
