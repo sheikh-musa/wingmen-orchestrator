@@ -1,0 +1,121 @@
+"""Flap-simulation wet-prove (Nazim floor #4 / cai CAI-RESP-1436 FULL tier).
+
+Encodes the invariant that a simulated hostname flap can NEITHER false-failover a
+lease NOR false-gap a lane. Both symptoms of the 2026-09-20 incident (bus 41834)
+derive from ONE value: the host identity that (a) the lease CAS compares against
+holder_host and (b) the watchdog host-scoped matcher passes as its query param. If
+that identity is STABLE across a flap, both symptoms are impossible.
+
+An independent FULL-tier auditor also runs the live behavioural wet-prove (real
+substrate). These unit assertions pin the deterministic core it verifies.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
+
+import fleet_host_id as fhi
+import orch_lease as ol
+import fleet_health_lease as fhl
+
+MINI = "Sheikhs-Mini"
+# The exact DHCP-derived names the Mini flapped between (bus 41834).
+FLAP_NAMES = ["Sheikhs-Mini", "Sheikhs-Mini.local", "Sheikhs-Mac-mini", "Sheikhs-Mac-mini.local"]
+MINI_ALIASES = {MINI: FLAP_NAMES}
+
+
+def _flap(monkeypatch, name):
+    monkeypatch.setattr(fhi.socket, "gethostname", lambda: name)
+
+
+# ── the core invariant: identity is STABLE across the flap ───────────────────
+
+@pytest.mark.parametrize("flapped", FLAP_NAMES)
+def test_pinned_identity_is_stable_across_flap(monkeypatch, flapped):
+    # Pinned (the durable prod state): NO flapped name can move the identity.
+    monkeypatch.setenv("FLEET_HOST_ID", MINI)
+    _flap(monkeypatch, flapped)
+    assert ol._me() == MINI
+    assert fhl._me() == MINI  # both leases + both matchers derive from these two.
+
+
+@pytest.mark.parametrize("flapped", FLAP_NAMES)
+def test_unpinned_identity_self_heals_via_alias_across_flap(monkeypatch, flapped):
+    # Resilience net: even un-pinned, a KNOWN flap resolves to canonical via the map.
+    monkeypatch.delenv("FLEET_HOST_ID", raising=False)
+    monkeypatch.setattr(fhi, "_load_map", lambda: {c: sorted(set(a)) for c, a in MINI_ALIASES.items()})
+    monkeypatch.setattr(fhi, "_log", lambda m: None)
+    _flap(monkeypatch, flapped)
+    assert ol._me() == MINI
+    assert fhl._me() == MINI
+
+
+def test_flap_never_desyncs_the_two_leases(monkeypatch):
+    # The incident's latent bug: orch_lease stripped .local, fleet_health did not -> the
+    # SRE lease got 'Sheikhs-Mac-mini.local' while the hub-scope used 'Sheikhs-Mac-mini'.
+    # Unified now: the two identities agree under every flap variant.
+    monkeypatch.setenv("FLEET_HOST_ID", MINI)
+    for name in FLAP_NAMES:
+        _flap(monkeypatch, name)
+        assert ol._me() == fhl._me() == MINI
+
+
+# ── no false-failover: the lease CAS predicate holds under flap ──────────────
+
+def test_lease_renew_predicate_matches_under_flap_when_pinned(monkeypatch):
+    # A lease held under holder_host=Sheikhs-Mini must still be renewable by THIS body
+    # after a flap (the renew CAS is holder_host == _me()). Pinned -> _me() stays MINI ->
+    # predicate holds -> renewal succeeds -> NO false-expiry/failover.
+    monkeypatch.setenv("FLEET_HOST_ID", MINI)
+    _flap(monkeypatch, "Sheikhs-Mac-mini.local")
+    held_host = MINI  # what's stored in fleet_health_lease.holder_host
+    assert fhl._me() == held_host, "renew CAS (holder_host == _me()) must still match post-flap"
+
+
+# ── no false-gap: the matcher scopes its query to the STABLE id under flap ────
+
+class _SinkConn:
+    def __init__(self, sink):
+        self._sink = sink
+    def cursor(self):
+        return _SinkCursor(self._sink)
+
+
+class _SinkCursor:
+    def __init__(self, sink):
+        self._sink = sink
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def execute(self, sql="", params=None, *a, **k):
+        self._sink["params"] = params
+    def fetchall(self):
+        return []
+
+
+def test_matcher_scopes_to_stable_id_not_the_flapped_name(monkeypatch):
+    # The host-scoped map query must be parameterised with the STABLE identity, so a
+    # row written under host='Sheikhs-Mini' is NOT excluded when gethostname flaps.
+    import nervous_system.lane_wedge_watchdog as w
+    monkeypatch.setenv("FLEET_HOST_ID", MINI)
+    _flap(monkeypatch, "Sheikhs-Mac-mini.local")
+    sink = {}
+    w.agent_status_lane_map(_SinkConn(sink))
+    assert sink["params"] == (MINI,), \
+        f"matcher must host-scope to the stable id, not the flapped name: {sink['params']}"
+
+
+# ── no regression: pin-unset + unmapped degrades to TODAY's behavior ─────────
+
+def test_unpinned_unmapped_degrades_to_todays_flappy_behavior(monkeypatch):
+    monkeypatch.delenv("FLEET_HOST_ID", raising=False)
+    monkeypatch.setattr(fhi, "_load_map", lambda: {})  # nothing matches
+    monkeypatch.setattr(fhi, "_log", lambda m: None)
+    _flap(monkeypatch, "Sheikhs-Mac-mini.local")
+    # exactly the old orch_lease._me() behavior: gethostname().split('.')[0]
+    assert ol._me() == "Sheikhs-Mac-mini"
