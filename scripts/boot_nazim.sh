@@ -90,6 +90,13 @@ fi
 # this shell survives to own the loop + fire the EXIT trap; an exec'd claude would
 # orphan the loop into a liveness-LIE (heartbeat outliving a dead body).
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
+
+# ── Stable host identity (CAI-RESP-1436) — pin FLEET_HOST_ID before any host-scoped read
+#    (orch_lease pen checks inside the console session read _me()). Shared helper; add A
+#    (loud-if-unpinned) + add B (consistency assert) live in it. [SRE-drafted per bus 41968;
+#    orch-console owns/verifies + deploys.]
+source "$ORCH_DIR/scripts/lib/pin_fleet_host_id.sh"
+
 _console_heartbeat_loop() {
     while true; do
         sleep 300

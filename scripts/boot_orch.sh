@@ -45,6 +45,13 @@ if [[ -f "$ORCH_DIR/.env" ]]; then
     set +a
 fi
 
+# ── Stable host identity (CAI-RESP-1436) — pin FLEET_HOST_ID BEFORE the hub takes the
+#    orch_lease (orch_lease._me() keys the hub dead-man's switch). Shared helper; add A
+#    (loud-if-unpinned) + add B (consistency assert) live in it. [SRE-drafted per bus 41968;
+#    orch-console owns/verifies this is the live gzbai hub boot + deploys. On gzbai the map
+#    alias-matches gethostname()->'gzbai'; verify against the box before signing.]
+source "$ORCH_DIR/scripts/lib/pin_fleet_host_id.sh"
+
 # Force the Mac Mini's Claude Max subscription, never metered API billing.
 # .env carries a live ANTHROPIC_API_KEY; if it survives into the environment,
 # `claude` silently routes this session — the single most continuously-running

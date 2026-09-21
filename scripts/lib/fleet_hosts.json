@@ -1,0 +1,17 @@
+{
+  "_comment": "Git-tracked fleet host-identity map (CAI-RESP-1436). canonical label -> known aliases (the values socket.gethostname() may return for this physical host across DHCP/network flaps). This ONE reviewed artifact is BOTH the boot source for FLEET_HOST_ID AND the runtime alias-resolver. VALUES are owned/verified by the host-provisioning owner (orch-console) against a verified provisioning source before the floor gate signs. To pin a host durably, its boot exports FLEET_HOST_ID=<canonical>; alias-match is only a mid-rollout/edge resilience net and logs that the host is unpinned.",
+  "hosts": {
+    "Sheikhs-Mini": {
+      "aliases": ["Sheikhs-Mini", "Sheikhs-Mini.local", "Sheikhs-Mac-mini", "Sheikhs-Mac-mini.local"],
+      "note": "Mac Mini. macOS auto-reset the DHCP-derived hostname to 'Sheikhs-Mac-mini' (LocalHostName) / 'Sheikhs-Mac-mini.local' on 2026-09-20 (bus 41834); canonical fleet label is Sheikhs-Mini."
+    },
+    "gzbai": {
+      "aliases": ["gzbai", "gzbai.local"],
+      "note": "Hub host (gazzai@192.168.1.114) — a LINUX VPS. Its hostname is statically set (/etc/hostname), NOT subject to the macOS LocalHostName/DHCP auto-reset flap that hit the Mini; the .local alias is defensive only. If the hub ever shows a drifted gethostname() on the box, add that variant. orch-console verifies against the box before signing (agent_status.host='gzbai' is the hub's own self-written value = provisioning source of record)."
+    },
+    "wingmen-core": {
+      "aliases": ["wingmen-core", "wingmen-core.local"],
+      "note": "Prior hub host (pre gzb cutover) — LINUX VPS, stable hostname. Decommissioning: NO live agent_status row, ships as legacy/defensive. Verified-by-convention (addressed as wingmen-core / ssh hub-vps=root@wingmen-core), not by a live row — orch-console accepts with that caveat."
+    }
+  }
+}

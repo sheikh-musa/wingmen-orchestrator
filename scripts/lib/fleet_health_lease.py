@@ -52,6 +52,13 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from dotenv import load_dotenv
 
+# The ONE stable host-identity resolver (CAI-RESP-1436). Dual-import so it resolves
+# whether this module is imported bare (scripts/lib on sys.path) or as scripts.lib.*.
+try:
+    import fleet_host_id
+except ModuleNotFoundError:  # pragma: no cover
+    from scripts.lib import fleet_host_id
+
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 load_dotenv(os.path.join(ROOT, ".env"))
 
@@ -65,7 +72,12 @@ def _dsn():
 
 
 def _me() -> str:
-    return socket.gethostname()
+    # Stable host identity via the ONE shared resolver (CAI-RESP-1436) — supersedes the
+    # bare socket.gethostname() that gave a lease its flappy holder_host (and the '.local'
+    # suffix that split the SRE lease during the 2026-09-20 flap, bus 41834). Unified with
+    # orch_lease._me() so both leases + both watchdog matchers key on ONE identity. A
+    # gethostname() failure PROPAGATES so take/renew fail CLOSED under an unknown identity.
+    return fleet_host_id.fleet_host_id()
 
 
 def _agent_id(override: str | None = None) -> str:
@@ -207,9 +219,23 @@ def cmd_status() -> int:
     return 0
 
 
+def _resolve_host_fail_closed(op: str) -> "str | None":
+    """Resolve the stable host identity; on failure print LOUD and return None so the
+    caller FAILS CLOSED — never take/renew a lease under an unknown identity (Nazim add D).
+    A crash-open here could mis-key the dead-man's switch; refusing is the safe default."""
+    try:
+        return _me()
+    except Exception as e:
+        print(f"{op} REFUSED — cannot resolve a stable host identity ({e}); failing CLOSED "
+              f"(never take/renew under an unknown identity)")
+        return None
+
+
 def cmd_take(agent_id: str | None, reason: str | None, loud: bool = False) -> int:
     me = _agent_id(agent_id)
-    host = _me()
+    host = _resolve_host_fail_closed("take")
+    if host is None:
+        return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         row = _fetch(cur)
         if row is None:
@@ -248,7 +274,9 @@ def cmd_take(agent_id: str | None, reason: str | None, loud: bool = False) -> in
 
 def cmd_renew(agent_id: str | None) -> int:
     me = _agent_id(agent_id)
-    host = _me()
+    host = _resolve_host_fail_closed("renew")
+    if host is None:
+        return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE fleet_health_lease SET renewed_at=now(), holder_host=COALESCE(holder_host,%s) "

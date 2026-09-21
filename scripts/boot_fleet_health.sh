@@ -71,6 +71,12 @@ if [ -z "$DSN" ]; then
     exit 1
 fi
 
+# ── Stable host identity (CAI-RESP-1436) — pin FLEET_HOST_ID from the git-tracked map
+#    BEFORE anything host-scoped (agent_status writes, the lease take below, in-process
+#    matchers) reads _me(). Ends the DHCP-hostname flap (bus 41834). Shared, sourced by
+#    every body's boot (add A loud-if-unpinned + add B consistency assert live in it).
+source "$ORCH_DIR/scripts/lib/pin_fleet_host_id.sh"
+
 _sql() { "$VENV_PY" - "$@" <<'PY'
 import os, sys, psycopg
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")

@@ -60,6 +60,13 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+
+# The ONE stable host-identity resolver (CAI-RESP-1436). Dual-import so it resolves
+# whether this module is imported bare (scripts/lib on sys.path) or as scripts.lib.orch_lease.
+try:
+    import fleet_host_id
+except ModuleNotFoundError:  # pragma: no cover
+    from scripts.lib import fleet_host_id
 from dotenv import load_dotenv
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
@@ -77,11 +84,27 @@ def _role() -> str:
 
 
 def _me() -> str:
-    # Short host label — collapse the macOS gethostname() flap where the same machine reports
-    # "Mac-Studio" vs "Mac-Studio.local" on network-state changes, which false-refused the hub's
-    # pens against a stored holder_host="Mac-Studio" (fleet bugfix folded from the Studio checkout,
-    # cc-orchestrator 2026-07-22). "mac-mini" stays "mac-mini" — cross-body protection intact.
-    return socket.gethostname().split(".")[0]
+    # Stable host identity via the ONE shared resolver (CAI-RESP-1436): a boot-pinned
+    # FLEET_HOST_ID -> alias-match against the git-tracked fleet_hosts map -> LOUD raw
+    # fallback. This supersedes the old bare `socket.gethostname().split(".")[0]`, which
+    # only collapsed the ".local" variant and could NOT collapse a full-name DHCP flap
+    # (Sheikhs-Mini <-> Sheikhs-Mac-mini, bus 41834) that false-refused the pens against a
+    # stored holder_host. A gethostname() failure PROPAGATES so the CAS take/renew fails
+    # CLOSED (never act under an unknown identity). The tier-3 fallback preserves the exact
+    # old behavior when a host is not yet pinned/mapped.
+    return fleet_host_id.fleet_host_id()
+
+
+def _host_or_fail_closed(op: str) -> "str | None":
+    """Resolve the stable host identity; on failure print LOUD and return None so the
+    caller FAILS CLOSED — the hub lease must never take/renew under an unknown identity
+    (Nazim add D); mis-keying the hub dead-man's switch is worse than refusing."""
+    try:
+        return _me()
+    except Exception as e:
+        print(f"{op} REFUSED — cannot resolve a stable host identity ({e}); failing CLOSED "
+              f"(never take/renew the hub lease under an unknown identity)")
+        return None
 
 
 def _holder_id() -> str:
@@ -321,16 +344,19 @@ def _write_hub_heartbeat(cur, fp):
 def cmd_renew() -> int:
     """Hub heartbeat. Renews the lease, then (best-effort) stamps the hub's
     agent_status heartbeat + real auth_fp (#4b). Also self-stamps holder_host."""
+    host = _host_or_fail_closed("renew")
+    if host is None:
+        return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE orch_lease SET renewed_at=now(), holder_host=COALESCE(holder_host,%s) "
             "WHERE lease_key=%s AND (holder_host IS NULL OR holder_host=%s) "
             "RETURNING holder, holder_host",
-            (_me(), LEASE_KEY, _me()))
+            (host, LEASE_KEY, host))
         row = cur.fetchone()
         conn.commit()
     if row is None:
-        print(f"renew REFUSED — lease not held by this host ({_me()})")
+        print(f"renew REFUSED — lease not held by this host ({host})")
         return 3
     # #4b: the lease renewed (we ARE the hub holder) -> stamp the hub's hb + real
     # auth_fp so the console SHOWS the hub key. BEST-EFFORT, AFTER the renew already
@@ -353,7 +379,9 @@ def cmd_take(reason: str, force: bool = False) -> int:
     EXPIRED (or --force). A fresh, live holder is PROTECTED (mistaken-death
     guard) unless --force is given. LOUD on a real handover."""
     holder_id = _holder_id()
-    host = _me()
+    host = _host_or_fail_closed("take")
+    if host is None:
+        return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         row = _fetch_lease(cur)
         if row is None:
