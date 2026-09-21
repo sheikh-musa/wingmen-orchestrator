@@ -21,6 +21,10 @@ _FHID_VENV="${VENV_PY:-$ORCH_DIR/.venv/bin/python3}"
 if _FHID_LABEL="$("$_FHID_VENV" "$ORCH_DIR/scripts/lib/fleet_host_id.py" resolve 2>/dev/null)"; then
     export FLEET_HOST_ID="$_FHID_LABEL"
     echo "▶ FLEET_HOST_ID pinned = $FLEET_HOST_ID (stable host identity; flap-proof)"
+    # NOTE: this heredoc is UNQUOTED (<<PY, not <<'PY') so the shell expands "$ORCH_DIR"
+    # below. That means EVERY $-token here is shell-expanded first — do NOT add a $-bearing
+    # Python expression (f-string ${...}, $VAR, subshell) into this block or the shell will
+    # mangle it. Keep it to plain Python + the single "$ORCH_DIR" substitution.
     if ! "$_FHID_VENV" - "$FLEET_HOST_ID" <<PY
 import os, sys, psycopg
 sys.path.insert(0, os.path.join("$ORCH_DIR", "scripts", "lib"))
