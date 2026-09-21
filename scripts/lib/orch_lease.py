@@ -95,6 +95,18 @@ def _me() -> str:
     return fleet_host_id.fleet_host_id()
 
 
+def _host_or_fail_closed(op: str) -> "str | None":
+    """Resolve the stable host identity; on failure print LOUD and return None so the
+    caller FAILS CLOSED — the hub lease must never take/renew under an unknown identity
+    (Nazim add D); mis-keying the hub dead-man's switch is worse than refusing."""
+    try:
+        return _me()
+    except Exception as e:
+        print(f"{op} REFUSED — cannot resolve a stable host identity ({e}); failing CLOSED "
+              f"(never take/renew the hub lease under an unknown identity)")
+        return None
+
+
 def _holder_id() -> str:
     return os.environ.get("ORCH_AGENT_ID", "cc-orchestrator")
 
@@ -332,16 +344,19 @@ def _write_hub_heartbeat(cur, fp):
 def cmd_renew() -> int:
     """Hub heartbeat. Renews the lease, then (best-effort) stamps the hub's
     agent_status heartbeat + real auth_fp (#4b). Also self-stamps holder_host."""
+    host = _host_or_fail_closed("renew")
+    if host is None:
+        return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE orch_lease SET renewed_at=now(), holder_host=COALESCE(holder_host,%s) "
             "WHERE lease_key=%s AND (holder_host IS NULL OR holder_host=%s) "
             "RETURNING holder, holder_host",
-            (_me(), LEASE_KEY, _me()))
+            (host, LEASE_KEY, host))
         row = cur.fetchone()
         conn.commit()
     if row is None:
-        print(f"renew REFUSED — lease not held by this host ({_me()})")
+        print(f"renew REFUSED — lease not held by this host ({host})")
         return 3
     # #4b: the lease renewed (we ARE the hub holder) -> stamp the hub's hb + real
     # auth_fp so the console SHOWS the hub key. BEST-EFFORT, AFTER the renew already
@@ -364,7 +379,9 @@ def cmd_take(reason: str, force: bool = False) -> int:
     EXPIRED (or --force). A fresh, live holder is PROTECTED (mistaken-death
     guard) unless --force is given. LOUD on a real handover."""
     holder_id = _holder_id()
-    host = _me()
+    host = _host_or_fail_closed("take")
+    if host is None:
+        return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         row = _fetch_lease(cur)
         if row is None:

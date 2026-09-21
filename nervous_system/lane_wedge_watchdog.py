@@ -1037,7 +1037,16 @@ def agent_status_lane_map(conn) -> "tuple[dict, set]":
         collided set so it can surface with a COLLISION reason. ORDER BY makes the
         scan deterministic regardless.
       - Offline rows excluded — a reaped row can hold a stale session name."""
-    me = orch_lease._me()  # short host label, .local stripped (flap-safe)
+    # Nazim add D: if the stable host identity can't be resolved (fleet_host_id raised —
+    # unpinned AND gethostname failed), FAIL TOWARD SURFACING: return no host-scoped map so
+    # every live session falls through to a coverage-gap alert. A false alert is safe; a
+    # silent miss (confidently excluding rows under an unknown host) is not.
+    try:
+        me = orch_lease._me()
+    except Exception as e:
+        log(f"host identity unresolved ({e}) — no host-scoped map this scan; live sessions "
+            f"will SURFACE as coverage gaps (fail toward surfacing, never a silent miss)")
+        return {}, set()
     first: dict = {}
     counts: dict = {}
     with conn.cursor() as cur:
@@ -1073,7 +1082,13 @@ def agent_status_base_fallback(conn) -> dict:
     Host-scoped exactly like the primary (carve-out #1). The CALLER gates a resolved base
     on it being a KNOWN fleet lane before trusting it (so a session with no row, or a base
     that is not a lane, still surfaces as a genuine blind spot — carve-out #3)."""
-    me = orch_lease._me()
+    # Nazim add D: identity unresolved -> FAIL TOWARD SURFACING (no fallback rescue this
+    # scan; the unmapped session surfaces as a genuine gap rather than being silently held).
+    try:
+        me = orch_lease._me()
+    except Exception as e:
+        log(f"host identity unresolved ({e}) — base fallback skipped this scan (fail toward surfacing)")
+        return {}
     bases: "dict[str, set]" = {}
     with conn.cursor() as cur:
         cur.execute(

@@ -219,9 +219,23 @@ def cmd_status() -> int:
     return 0
 
 
+def _resolve_host_fail_closed(op: str) -> "str | None":
+    """Resolve the stable host identity; on failure print LOUD and return None so the
+    caller FAILS CLOSED — never take/renew a lease under an unknown identity (Nazim add D).
+    A crash-open here could mis-key the dead-man's switch; refusing is the safe default."""
+    try:
+        return _me()
+    except Exception as e:
+        print(f"{op} REFUSED — cannot resolve a stable host identity ({e}); failing CLOSED "
+              f"(never take/renew under an unknown identity)")
+        return None
+
+
 def cmd_take(agent_id: str | None, reason: str | None, loud: bool = False) -> int:
     me = _agent_id(agent_id)
-    host = _me()
+    host = _resolve_host_fail_closed("take")
+    if host is None:
+        return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         row = _fetch(cur)
         if row is None:
@@ -260,7 +274,9 @@ def cmd_take(agent_id: str | None, reason: str | None, loud: bool = False) -> in
 
 def cmd_renew(agent_id: str | None) -> int:
     me = _agent_id(agent_id)
-    host = _me()
+    host = _resolve_host_fail_closed("renew")
+    if host is None:
+        return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE fleet_health_lease SET renewed_at=now(), holder_host=COALESCE(holder_host,%s) "

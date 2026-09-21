@@ -119,3 +119,35 @@ def test_unpinned_unmapped_degrades_to_todays_flappy_behavior(monkeypatch):
     _flap(monkeypatch, "Sheikhs-Mac-mini.local")
     # exactly the old orch_lease._me() behavior: gethostname().split('.')[0]
     assert ol._me() == "Sheikhs-Mac-mini"
+
+
+# ── Nazim add D: per-consumer error behaviour when the resolver THROWS ────────
+
+def _raise(*a, **k):
+    raise OSError("no stable identity resolvable")
+
+
+def test_matcher_fails_toward_surfacing_when_identity_unresolved(monkeypatch):
+    import nervous_system.lane_wedge_watchdog as w
+    monkeypatch.setattr(w, "log", lambda m: None)
+    monkeypatch.setattr(w.orch_lease, "_me", _raise)
+    # No host map / no fallback rescue -> sessions SURFACE (a false gap is safe), not a crash.
+    assert w.agent_status_lane_map(object()) == ({}, set())
+    assert w.agent_status_base_fallback(object()) == {}
+
+
+def test_fleet_health_lease_take_and_renew_FAIL_CLOSED_when_identity_unresolved(monkeypatch):
+    monkeypatch.setattr(fhl, "_me", _raise)
+    # If the identity can't be resolved, the lease must NEVER touch the DB.
+    monkeypatch.setattr(fhl.psycopg, "connect",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not connect when identity is unknown")))
+    assert fhl.cmd_take(None, "reason") == 3
+    assert fhl.cmd_renew(None) == 3
+
+
+def test_orch_lease_take_and_renew_FAIL_CLOSED_when_identity_unresolved(monkeypatch):
+    monkeypatch.setattr(ol, "_me", _raise)
+    monkeypatch.setattr(ol.psycopg, "connect",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not connect when identity is unknown")))
+    assert ol.cmd_take("reason") == 3
+    assert ol.cmd_renew() == 3
