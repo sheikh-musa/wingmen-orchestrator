@@ -97,3 +97,39 @@ def fleet_host_id() -> str:
     _log(f"WARNING: running on fragile hostname fallback — no FLEET_HOST_ID pin "
          f"and '{live}' is not in the fleet_hosts map; using '{short}' (flap-prone)")
     return short
+
+
+def resolve_pin() -> "tuple[str, bool]":
+    """Boot helper: compute the canonical label to EXPORT as FLEET_HOST_ID, from the
+    live hostname via the git-tracked map (ignoring any existing env pin). Returns
+    (label, mapped): mapped=True when the map covered this host (safe to pin durably);
+    mapped=False means the host is NOT in fleet_hosts.json -> boot must WARN and the
+    runtime rides the fragile fallback until it's added (Nazim add A / cai deploy-to-all)."""
+    live = socket.gethostname()
+    canon = _match_alias(live, _load_map())
+    if canon:
+        return canon, True
+    return live.split(".")[0], False
+
+
+def main(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="Stable fleet host identity (CAI-RESP-1436).")
+    ap.add_argument("cmd", choices=["current", "resolve"],
+                    help="current = full resolution incl. env pin; resolve = boot helper "
+                         "(canonical from the map, exit 3 + WARN if this host is unmapped)")
+    args = ap.parse_args(argv)
+    if args.cmd == "current":
+        print(fleet_host_id())
+        return 0
+    label, mapped = resolve_pin()
+    print(label)
+    if not mapped:
+        _log(f"WARNING: '{socket.gethostname()}' is not in fleet_hosts.json — cannot pin "
+             f"FLEET_HOST_ID durably; add this host to the map + redeploy (fragile fallback until then)")
+        return 3
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -111,3 +111,19 @@ def test_shipped_map_covers_the_mini_flap_aliases():
     assert fhi._match_alias("Sheikhs-Mac-mini.local", m) == "Sheikhs-Mini"
     assert fhi._match_alias("Sheikhs-Mac-mini", m) == "Sheikhs-Mini"
     assert fhi._match_alias("Sheikhs-Mini", m) == "Sheikhs-Mini"
+
+
+# ── boot helper: resolve_pin (Nazim add A) ───────────────────────────────────
+
+def test_resolve_pin_mapped_host_returns_canonical_and_mapped_true(monkeypatch):
+    monkeypatch.setattr(fhi, "_load_map", lambda: {MINI: [MINI, "Sheikhs-Mac-mini.local"]})
+    _set_hostname(monkeypatch, "Sheikhs-Mac-mini.local")
+    label, mapped = fhi.resolve_pin()
+    assert (label, mapped) == (MINI, True)
+
+
+def test_resolve_pin_unmapped_host_flags_not_mapped(monkeypatch):
+    monkeypatch.setattr(fhi, "_load_map", lambda: {})
+    _set_hostname(monkeypatch, "brand-new-box.local")
+    label, mapped = fhi.resolve_pin()
+    assert (label, mapped) == ("brand-new-box", False)  # boot must WARN + not pin durably
