@@ -127,3 +127,36 @@ def test_resolve_pin_unmapped_host_flags_not_mapped(monkeypatch):
     _set_hostname(monkeypatch, "brand-new-box.local")
     label, mapped = fhi.resolve_pin()
     assert (label, mapped) == ("brand-new-box", False)  # boot must WARN + not pin durably
+
+
+# ── boot consistency check (Nazim add B, now testable) ───────────────────────
+
+class _KnownHostConn:
+    """Fake conn returning a scripted fetchone per execute (agent_status then lease UNION)."""
+    def __init__(self, results):
+        self._results = list(results)
+        self._last = None
+    def cursor(self):
+        return self
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def execute(self, sql, params=None):
+        self._last = self._results.pop(0) if self._results else None
+    def fetchone(self):
+        return self._last
+
+
+def test_is_known_host_true_when_in_agent_status():
+    assert fhi.is_known_host("Sheikhs-Mini", _KnownHostConn([(1,)])) is True
+
+
+def test_is_known_host_true_when_only_a_lease_holder():
+    # not in agent_status (None), but a lease holder_host (1,)
+    assert fhi.is_known_host("gzbai", _KnownHostConn([None, (1,)])) is True
+
+
+def test_is_known_host_false_when_unknown_everywhere():
+    # a pin known to NO agent_status.host and NO lease -> boot B refuses (map misconfig).
+    assert fhi.is_known_host("typo-host", _KnownHostConn([None, None])) is False

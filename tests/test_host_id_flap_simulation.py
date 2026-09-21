@@ -151,3 +151,65 @@ def test_orch_lease_take_and_renew_FAIL_CLOSED_when_identity_unresolved(monkeypa
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not connect when identity is unknown")))
     assert ol.cmd_take("reason") == 3
     assert ol.cmd_renew() == 3
+
+
+# ── PR #129 audit: WRITER/READER end-to-end (a real drift-named row through the matcher) ──
+# The prior suite only asserted the query PARAM via a sink cursor. This drives an actual
+# agent_status row through the shipped host filter (host = <reader _me()> OR host IS NULL),
+# proving a row WRITTEN with the resolved id is MATCHED by the pinned reader under a flap —
+# and that a row written with the RAW flapped hostname (the pre-fix writer) is excluded.
+
+class _FilterConn:
+    """Fake conn that APPLIES the matcher's host filter: fetchall returns only rows whose
+    host == the executed host param OR host IS NULL. Rows are (col1..colN, host)."""
+    def __init__(self, rows, ncols):
+        self._rows, self._ncols, self._host = rows, ncols, object()
+    def cursor(self):
+        return self
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def execute(self, sql, params=None):
+        self._host = params[0] if params else None
+    def fetchall(self):
+        return [r[:self._ncols] for r in self._rows if r[-1] == self._host or r[-1] is None]
+
+
+def test_writer_resolved_row_maps_through_pinned_matcher_under_flap(monkeypatch):
+    import nervous_system.lane_wedge_watchdog as w
+    monkeypatch.setenv("FLEET_HOST_ID", MINI)
+    _flap(monkeypatch, "Sheikhs-Mac-mini.local")
+    # Row as the FIXED writer stamps it: host=<resolved>=Sheikhs-Mini.
+    conn = _FilterConn([("exams", "cc-cosem-exams", "cc-cosem-exams-1", MINI)], ncols=3)
+    mapped, _ = w.agent_status_lane_map(conn)
+    assert mapped.get("exams") == "cc-cosem-exams", "a writer-resolved row must map under a flap"
+
+
+def test_raw_flapped_writer_row_is_excluded_documenting_the_desync(monkeypatch):
+    import nervous_system.lane_wedge_watchdog as w
+    monkeypatch.setenv("FLEET_HOST_ID", MINI)
+    _flap(monkeypatch, "Sheikhs-Mac-mini.local")
+    # Row as the OLD raw writer stamped it: host='Sheikhs-Mac-mini' != pinned reader -> excluded.
+    conn = _FilterConn([("exams", "cc-cosem-exams", "cc-cosem-exams-1", "Sheikhs-Mac-mini")], ncols=3)
+    mapped, _ = w.agent_status_lane_map(conn)
+    assert "exams" not in mapped, "the desync is real — this is WHY the writers were unified"
+
+
+def test_base_fallback_host_scopes_to_stable_id_under_flap(monkeypatch):
+    import nervous_system.lane_wedge_watchdog as w
+    monkeypatch.setenv("FLEET_HOST_ID", MINI)
+    _flap(monkeypatch, "Sheikhs-Mac-mini.local")
+    conn = _FilterConn([("exams", "cc-cosem-exams", MINI)], ncols=2)  # (tmux_session, ident, host)
+    fb = w.agent_status_base_fallback(conn)
+    assert fb.get("exams") == "cc-cosem-exams"
+
+
+def test_writer_and_reader_resolve_the_same_identity_under_flap(monkeypatch):
+    # The invariant behind the end-to-end: the WRITER's self-resolution (fleet_host_id) and
+    # the READERS' (_me()) produce ONE value under a flap, so writes are always matched.
+    monkeypatch.setenv("FLEET_HOST_ID", MINI)
+    for name in FLAP_NAMES:
+        _flap(monkeypatch, name)
+        writer = fhi.fleet_host_id()          # gzb_hub_heartbeat / launcher `current`
+        assert writer == ol._me() == fhl._me() == MINI

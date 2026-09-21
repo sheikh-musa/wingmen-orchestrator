@@ -6,8 +6,12 @@ Sheikhs-Mac-mini incident, bus 41834). That single live call is the key for BOTH
 the host-scoped lane-wedge watchdog matching AND the lease dead-man's switch, so
 one flap false-gapped a healthy lane and near-false-failed-over the SRE lease.
 
-This consolidates every host-identity read onto one deterministic, flap-proof
-resolver (CAI-RESP-1436 identity gate + Nazim floor A-D):
+This consolidates host identity onto one deterministic resolver used by BOTH the
+READERS (both leases' _me(), both watchdog matchers) AND the WRITERS of
+agent_status.host (launch_dangerous_cc.sh, gzb_hub_heartbeat.py). The false-gap
+guarantee needs BOTH sides on this resolver: a reader pinned to the canonical label
+while a writer still stamps the raw flapped hostname would exclude fresh rows just as
+badly (PR #129 audit). Resolution (CAI-RESP-1436 identity gate + Nazim floor A-D):
 
   1. FLEET_HOST_ID env  — the DURABLE path, boot-exported from the git-tracked
      fleet_hosts map. Prod hosts MUST export this. Silent when present.
@@ -110,6 +114,20 @@ def resolve_pin() -> "tuple[str, bool]":
     if canon:
         return canon, True
     return live.split(".")[0], False
+
+
+def is_known_host(pin: str, conn) -> bool:
+    """Boot consistency check (Nazim add B): is `pin` a host the substrate already knows —
+    an agent_status.host or a lease holder_host? A pin known to NO one is a fleet_hosts.json
+    misconfig for this box, which would mis-scope host-matching fleet-wide -> boot refuses.
+    `conn` is injected (a psycopg connection) so this module stays DB-import-free + unit-testable."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM agent_status WHERE host=%s LIMIT 1", (pin,))
+        if cur.fetchone() is not None:
+            return True
+        cur.execute("SELECT 1 FROM fleet_health_lease WHERE holder_host=%s "
+                    "UNION SELECT 1 FROM orch_lease WHERE holder_host=%s LIMIT 1", (pin, pin))
+        return cur.fetchone() is not None
 
 
 def main(argv=None) -> int:

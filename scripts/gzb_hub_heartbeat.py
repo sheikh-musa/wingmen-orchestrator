@@ -36,10 +36,16 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
+import fleet_host_id  # noqa: E402
+
 SESSION = os.environ.get("ORCH_TMUX_SESSION", "orch").strip() or "orch"
 AGENT_ID = os.environ.get("ORCH_AGENT_ID", "cc-orchestrator").strip() or "cc-orchestrator"
 INTERVAL = int(os.environ.get("ORCH_HB_EVERY_SEC", "60") or "60")
-HOST = socket.gethostname()
+# Stable host identity (CAI-RESP-1436): WRITE the same resolved id the host-scoped READERS
+# query, so a hostname flap can't desync writer vs reader (audit of PR #129). Self-resolves
+# via the shared resolver (env pin -> alias-match -> fallback), unified with the matchers.
+HOST = fleet_host_id.fleet_host_id()
 
 
 def _dsn() -> str:

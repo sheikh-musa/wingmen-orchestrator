@@ -735,7 +735,11 @@ CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 # account entirely, which only surfaced when it hit a session cap the Mini didn't share).
 # CLAUDE_ACCOUNT_LABEL is a human CLAIM from this host's .env; the fingerprint is the FACT.
 # Only sha256(token)[:12] is stored — never the token.
-CC_HOST="$(hostname -s 2>/dev/null || echo unknown)"
+# Stable host identity (CAI-RESP-1436): WRITE the same resolved id the host-scoped READERS
+# (lane_wedge watchdog matchers) query, so a DHCP hostname flap can't desync writer vs reader
+# and false-gap fresh lane rows (audit of PR #129). Self-resolve via the shared resolver
+# (env pin -> alias-match -> fallback); `|| hostname -s` keeps the launcher unbreakable.
+CC_HOST="$("$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_host_id.py" current 2>/dev/null || hostname -s 2>/dev/null || echo unknown)"
 CC_AUTH_LABEL="${CLAUDE_ACCOUNT_LABEL:-unlabelled}"
 CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
 # Two guards, because an empty token hashes to a REAL-LOOKING value. sha256("") starts

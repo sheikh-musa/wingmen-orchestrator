@@ -7,11 +7,11 @@
     },
     "gzbai": {
       "aliases": ["gzbai", "gzbai.local"],
-      "note": "Hub host (gazzai@192.168.1.114). VALUES pending orch-console verification against provisioning source."
+      "note": "Hub host (gazzai@192.168.1.114) — a LINUX VPS. Its hostname is statically set (/etc/hostname), NOT subject to the macOS LocalHostName/DHCP auto-reset flap that hit the Mini; the .local alias is defensive only. If the hub ever shows a drifted gethostname() on the box, add that variant. orch-console verifies against the box before signing (agent_status.host='gzbai' is the hub's own self-written value = provisioning source of record)."
     },
     "wingmen-core": {
       "aliases": ["wingmen-core", "wingmen-core.local"],
-      "note": "Prior hub host (pre gzb cutover). VALUES pending orch-console verification against provisioning source."
+      "note": "Prior hub host (pre gzb cutover) — LINUX VPS, stable hostname. Decommissioning: NO live agent_status row, ships as legacy/defensive. Verified-by-convention (addressed as wingmen-core / ssh hub-vps=root@wingmen-core), not by a live row — orch-console accepts with that caveat."
     }
   }
 }

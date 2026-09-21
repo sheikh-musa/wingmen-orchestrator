@@ -21,18 +21,14 @@ _FHID_VENV="${VENV_PY:-$ORCH_DIR/.venv/bin/python3}"
 if _FHID_LABEL="$("$_FHID_VENV" "$ORCH_DIR/scripts/lib/fleet_host_id.py" resolve 2>/dev/null)"; then
     export FLEET_HOST_ID="$_FHID_LABEL"
     echo "▶ FLEET_HOST_ID pinned = $FLEET_HOST_ID (stable host identity; flap-proof)"
-    if ! "$_FHID_VENV" - "$FLEET_HOST_ID" <<'PY'
+    if ! "$_FHID_VENV" - "$FLEET_HOST_ID" <<PY
 import os, sys, psycopg
+sys.path.insert(0, os.path.join("$ORCH_DIR", "scripts", "lib"))
+import fleet_host_id
 pin = sys.argv[1]
 dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-with psycopg.connect(dsn, connect_timeout=8) as c, c.cursor() as cur:
-    cur.execute("SELECT 1 FROM agent_status WHERE host=%s LIMIT 1", (pin,))
-    known = cur.fetchone() is not None
-    if not known:
-        cur.execute("SELECT 1 FROM fleet_health_lease WHERE holder_host=%s "
-                    "UNION SELECT 1 FROM orch_lease WHERE holder_host=%s LIMIT 1", (pin, pin))
-        known = cur.fetchone() is not None
-sys.exit(0 if known else 1)
+with psycopg.connect(dsn, connect_timeout=8) as c:
+    sys.exit(0 if fleet_host_id.is_known_host(pin, c) else 1)
 PY
     then
         echo "❌ FLEET_HOST_ID='$FLEET_HOST_ID' matches NO agent_status.host or lease holder_host — likely a fleet_hosts.json misconfig for this box. Refusing to boot under a possibly mis-scoped identity (Nazim add B)." >&2
