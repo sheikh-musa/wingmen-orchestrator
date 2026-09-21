@@ -71,37 +71,11 @@ if [ -z "$DSN" ]; then
     exit 1
 fi
 
-# ── Stable host identity (CAI-RESP-1436) — pin FLEET_HOST_ID from the git-tracked
-#    fleet_hosts map BEFORE anything host-scoped (agent_status writes, the lease take
-#    below, and every in-process watchdog matcher) reads _me(). This ends the DHCP-
-#    hostname flap (Sheikhs-Mini <-> Sheikhs-Mac-mini, bus 41834) that false-gapped a
-#    lane and false-expired this lease. Nazim add A: a missing pin is LOUD, never silent.
-if _HOSTID="$("$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_host_id.py" resolve 2>/dev/null)"; then
-    export FLEET_HOST_ID="$_HOSTID"
-    echo "▶ FLEET_HOST_ID pinned = $FLEET_HOST_ID (stable host identity; flap-proof)"
-    # Nazim add B: the pin MUST match a host the substrate already knows (agent_status /
-    # lease holder_host). A pin absent from the fleet's known hosts is a map misconfig that
-    # would silently mis-scope host-matching fleet-wide — FAIL LOUD, do not proceed.
-    if ! "$VENV_PY" - "$FLEET_HOST_ID" <<'PY'
-import os, sys, psycopg
-pin = sys.argv[1]
-dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-with psycopg.connect(dsn, connect_timeout=8) as c, c.cursor() as cur:
-    cur.execute("SELECT 1 FROM agent_status WHERE host=%s LIMIT 1", (pin,))
-    known = cur.fetchone() is not None
-    if not known:
-        cur.execute("SELECT 1 FROM fleet_health_lease WHERE holder_host=%s "
-                    "UNION SELECT 1 FROM orch_lease WHERE holder_host=%s LIMIT 1", (pin, pin))
-        known = cur.fetchone() is not None
-sys.exit(0 if known else 1)
-PY
-    then
-        echo "❌ FLEET_HOST_ID='$FLEET_HOST_ID' matches NO agent_status.host or lease holder_host — likely a fleet_hosts.json misconfig for this box. Refusing to boot under a possibly mis-scoped identity (Nazim add B)." >&2
-        exit 1
-    fi
-else
-    echo "⚠️  FLEET_HOST_ID NOT pinned — this host is not in $ORCH_DIR/scripts/lib/fleet_hosts.json; running on the FRAGILE hostname fallback (flap-prone). Add this host to the map + redeploy." >&2
-fi
+# ── Stable host identity (CAI-RESP-1436) — pin FLEET_HOST_ID from the git-tracked map
+#    BEFORE anything host-scoped (agent_status writes, the lease take below, in-process
+#    matchers) reads _me(). Ends the DHCP-hostname flap (bus 41834). Shared, sourced by
+#    every body's boot (add A loud-if-unpinned + add B consistency assert live in it).
+source "$ORCH_DIR/scripts/lib/pin_fleet_host_id.sh"
 
 _sql() { "$VENV_PY" - "$@" <<'PY'
 import os, sys, psycopg
