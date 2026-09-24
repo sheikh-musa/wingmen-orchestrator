@@ -46,6 +46,7 @@ from pathlib import Path
 import psycopg
 
 from . import hosted_view
+from nervous_system.protected_agents import console_protected_identities
 
 _PORT = int(os.environ.get("HOSTED_CONSOLE_PORT", "8788"))
 
@@ -323,10 +324,22 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # upstream re-checks; this only stops an unknown body from ever leaving here).
 _RESET_BODIES = ("nazim", "cai", "hub")
 # Bodies that must never be booted / wound down / re-pooled from the phone —
-# mirrors app.py _LANE_ACTION_PROTECTED (lane_winddown.SINGLETONS + hub/SRE/qa ids).
-_PROTECTED = frozenset({"nazim", "cai", "orch", "orchestrator", "fleet-health",
-                        "fleet-console", "quality", "hub", "cc-orchestrator",
-                        "cc-fleet-health", "cc-quality", "orch-console"})
+# op#42896/#42909 P1 (2026-09-24): reads the SAME shared accessor app.py's
+# _LANE_ACTION_PROTECTED now does (nervous_system.protected_agents.
+# console_protected_identities()), not a second hand-copy of it — this set's own
+# prior comment literally said "mirrors app.py", the exact disagreement-prone
+# duplication that accessor exists to end. This process uses CONSOLE_DB_URL, not
+# DATABASE_URL (see module docstring's Run: line), so the dsn is resolved via
+# hosted_view._dsn() explicitly rather than the accessor's own DATABASE_URL-only
+# default — wrapped defensively so a missing/broken DSN at IMPORT time can never
+# crash the process before it even starts; console_protected_identities() itself
+# already fails safe to its own static floor on any DB error either way (never
+# empty, never raises) — "never boot the console without the guard set" holds
+# either way.
+try:
+    _PROTECTED = console_protected_identities(dsn=hosted_view._dsn())
+except Exception:  # noqa: BLE001 — never boot the console without the guard set
+    _PROTECTED = console_protected_identities()
 
 
 def _audit(client: str, action: str, outcome: str) -> None:

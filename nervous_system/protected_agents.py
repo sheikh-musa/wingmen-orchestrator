@@ -219,6 +219,24 @@ def boots_from_env_only(agent_id: str, dsn: Optional[str] = None) -> bool:
     return False
 
 
+def console_protected_identities(dsn: Optional[str] = None) -> frozenset[str]:
+    """The union both fleet-console UIs' lane-action guard needs (op#42896/#42909
+    P1): `nervous_system/console/app.py`'s `_LANE_ACTION_PROTECTED` and
+    `nervous_system/console/hosted_server.py`'s `_PROTECTED` (documented there,
+    verbatim, as "mirrors app.py") were two independently-hand-maintained copies
+    of the exact same set -- the module docstring's own motivating example
+    ("app.py's own literal set was missing 'cai' before a union with a second
+    source papered over it") is literally this site. A lane-action target can be
+    named either by tmux session or by agent_id depending on the row, so this is
+    `protected_tmux_sessions() | protected_agent_ids()`, plus `"hub"` -- a
+    console-only UI alias for cc-orchestrator that is not a real tmux session
+    name or agent_id anywhere else in this repo, so it stays a literal here
+    rather than leaking a console-specific concept into either registry
+    accessor. Fails safe the same way both underlying accessors do -- never
+    empty, never raises."""
+    return protected_tmux_sessions(dsn) | protected_agent_ids(dsn) | {"hub"}
+
+
 def _main() -> int:
     """CLI for bash consumers (scripts/fleet_model.sh) that can't import this
     module directly. `sessions` prints protected_tmux_sessions() space-separated

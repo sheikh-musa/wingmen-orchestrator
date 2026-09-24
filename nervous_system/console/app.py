@@ -37,6 +37,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from nervous_system.console import auth, db, docs, governance, media, panes, pii, pools
 from nervous_system.console.feed import Broadcaster, feeder
+from nervous_system.protected_agents import console_protected_identities
 # GAP-B: the shared family helper — the SAME one the token resolver uses to decide
 # which .group_default_token.<family> governs a lane.
 from scripts.lib.lane_token_resolver import family_of as _family_of
@@ -280,17 +281,18 @@ def _governance_cache_clear() -> None:
 # scripts/lib/lane_winddown.py whose gates — busy / unread bus rows / stale handoff /
 # staged composer text — all FAIL CLOSED inside the script). The console adds:
 # strict charset, a SINGLETON guard (never boot/end a body — an outage, not
-# elasticity; the set is the winddown module's own so both paths agree), a
-# roster check against fleet_lanes (an unknown lane never reaches argv), a typed
-# `confirm`==session fat-finger guard, and the per-target inflight/cooldown claim.
-# NEVER --force / RESET_FORCE from here.
-try:
-    from scripts.lib.lane_winddown import SINGLETONS as _WINDDOWN_SINGLETONS
-except Exception:  # noqa: BLE001 — never boot the console without the guard set
-    _WINDDOWN_SINGLETONS = {"nazim", "cai", "orch", "orchestrator", "fleet-health",
-                            "fleet-console", "quality"}
-_LANE_ACTION_PROTECTED = frozenset(_WINDDOWN_SINGLETONS) | frozenset(
-    {"hub", "cc-orchestrator", "cc-fleet-health", "cc-quality", "orch-console"})
+# elasticity), a roster check against fleet_lanes (an unknown lane never reaches
+# argv), a typed `confirm`==session fat-finger guard, and the per-target
+# inflight/cooldown claim. NEVER --force / RESET_FORCE from here.
+#
+# op#42896/#42909 P1 (2026-09-24): the guard set now reads
+# nervous_system.protected_agents.console_protected_identities() instead of its
+# own hand-union of the winddown module's SINGLETONS + a second agent_id set —
+# this file's own docstring elsewhere in this repo names THIS exact site as the
+# motivating example of that pattern silently disagreeing (it was once missing
+# 'cai'). nervous_system/console/hosted_server.py's _PROTECTED (documented there
+# as "mirrors app.py") reads the SAME accessor now, not a second hand-copy.
+_LANE_ACTION_PROTECTED = console_protected_identities()
 _LANE_ACTION_INFLIGHT: set = set()
 _LANE_ACTION_LAST_RUN: dict = {}
 _LANE_ACTION_COOLDOWN_S = 30.0
