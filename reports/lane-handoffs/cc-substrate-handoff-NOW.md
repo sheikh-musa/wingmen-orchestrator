@@ -130,3 +130,11 @@ Two live production defects (relink_donation, issue_receipts_for_donations) were
 3. Governance workstream (op#20702) is CLOSED — don't re-touch #112/#113/#114.
 4. **gzb sudo password: searched exhaustively 2026-09-20, genuinely not found anywhere retrievable** (see `reports/wingmen-core-drain-cutover-plan-op20655.md` "CREDENTIAL SEARCH" section for the full sourced trail — bus #41814). orch-console's #41813 claim that it was "stored" was checked and found incorrect; the password was hand-delivered by Musa into two past live sessions (09-12, 09-14) and deliberately never persisted. Don't re-search from scratch — read that section first. If root/sudo access on gzb has landed (via Musa resending the password live, or a Gazzabyte grant): apply the apt + systemd packet from the plan doc item 1 AND item 4/5's packet, restart the runner, re-verify a real CI run lands on it by `runner_name` (check all 5 label-dependent workflows, not just tabung-synthtest-gate — the runner needs labels `self-hosted,studio,Linux,X64,vps-fleet` to cover both label families), install the two publishers on gzb, then report "wingmen-core DRAINABLE" once all three are proven. If it hasn't landed: items 1/4/5 stay parked, nothing to do there.
 5. Item 3 (console+ngrok) is DONE — don't re-do it. If anything looks wrong with it, check `launchctl print gui/$(id -u)/dev.wingmen.hosted-console` and `.../dev.wingmen.console-ngrok` first (both local to this machine).
+
+## op#22237 execution round (2026-09-24, this fork)
+- (c) cosem runner -> Mini: BLOCKED on interactive sudo (this Mac, not gzb). Plan ready, needs a human at the keyboard.
+- (d) second gzb runner + drain wingmen-core ihsanos runner: DONE, verified. wingmen-core-runner deregistered+removed.
+- (b) musa2-oauth mismatch resolved (wingmen-core's copy is current, Mini's is stale) + gzb-vpn.conf vaulted (byte-identical round-trip verified).
+- (a) leftovers triage: only 2/26 genuinely not-in-trunk, neither urgent. Branch likely discardable.
+- Reported: bus #42861 (thread on #42858).
+- Remaining power-off blockers: (c)'s sudo gap, Hermes (hands-off, unresolved).
