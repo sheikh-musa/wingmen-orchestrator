@@ -128,7 +128,10 @@ pane_is_menu() {   # $1 = tmux bin, $2 = pane
   txt="$("$1" capture-pane -t "$2" -p 2>/dev/null)"
   if [ -z "$txt" ]; then CC_MENU=x; return 2; fi
   CC_MENU=0
-  printf '%s\n' "$txt" | tail -6 | LC_ALL=C grep -qiE 'to navigate|esc to cancel|enter to select' || return 1
+  # 'to dismiss' catches the SendFeedback drafts modal (footer "N to review · N to send ·
+  # N to dismiss", Nazim #43083) — it intercepts keys like any menu. The benign subagent-
+  # review widget ("N to review · N to send", NO 'dismiss') is deliberately NOT matched.
+  printf '%s\n' "$txt" | tail -6 | LC_ALL=C grep -qiE 'to navigate|esc to cancel|enter to select|to dismiss' || return 1
   CC_MENU=1
   return 0
 }

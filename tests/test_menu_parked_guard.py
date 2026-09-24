@@ -30,6 +30,22 @@ IDLE_PANE = "\n".join([
     "  ─────────────────────────",
     "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
 ])
+# The SendFeedback drafts dialog: a modal that intercepts keystrokes (so a plain
+# lane_nudge would type INTO it, e.g. hitting "send"). Its footer carries the
+# "to dismiss" option that the benign review widget below never has (Nazim #43083).
+SENDFEEDBACK_PANE = "\n".join([
+    "  Provide feedback to help improve Claude",
+    "  ❯ (draft)",
+    "  ─────────────────────────",
+    "  1 to review · 2 to send · 0 to dismiss",
+])
+# The benign subagent-review widget — NOT a wedge, must stay wakeable (memory
+# review-widget-is-not-a-wedge-signal). Same review/send footer but NO "to dismiss".
+REVIEW_WIDGET_PANE = "\n".join([
+    "  ● Reviewing proposed changes",
+    "  ❯ ",
+    "  1 to review · 2 to send",
+])
 
 
 def _fake_tmux(dir_: Path, capture_text: str) -> Path:
@@ -68,6 +84,20 @@ def test_pane_is_menu_does_not_fire_on_an_idle_pane(tmp_path):
     assert _pane_is_menu(tmux, IDLE_PANE) is False
 
 
+def test_pane_is_menu_detects_a_sendfeedback_dialog(tmp_path):
+    # The SendFeedback modal intercepts keys; a plain nudge would type INTO it. Its
+    # "to dismiss" footer must be classified as a menu so lane_nudge refuses (Nazim #43083).
+    tmux = _fake_tmux(tmp_path, SENDFEEDBACK_PANE)
+    assert _pane_is_menu(tmux, SENDFEEDBACK_PANE) is True
+
+
+def test_pane_is_menu_does_NOT_fire_on_the_benign_review_widget(tmp_path):
+    # Specificity guard (memory review-widget-is-not-a-wedge-signal): the subagent-review
+    # widget ("N to review · N to send", NO "dismiss") is wakeable and must NOT be refused.
+    tmux = _fake_tmux(tmp_path, REVIEW_WIDGET_PANE)
+    assert _pane_is_menu(tmux, REVIEW_WIDGET_PANE) is False
+
+
 def _pane_is_menu_rc(tmux_bin: Path) -> int:
     snippet = f'. "{LIB}"\npane_is_menu "{tmux_bin}" x\necho rc=$?'
     r = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
@@ -101,6 +131,15 @@ def test_lane_nudge_REFUSES_a_menu_pane_with_ZERO_sendkeys(tmp_path):
     r, sends = _run_lane_nudge(tmp_path, MENU_PANE)
     assert r.returncode == 5, f"expected exit 5 (menu-refused), got {r.returncode}: {r.stderr}"
     assert sends == "", f"AUTHORIZATION SLIP: send-keys reached a menu pane:\n{sends}"
+    assert "MENU" in r.stderr.upper()
+
+
+def test_lane_nudge_REFUSES_a_sendfeedback_dialog_with_ZERO_sendkeys(tmp_path):
+    """A SendFeedback dialog must be refused like any menu — never type into it (which
+    could hit 'send'). Recovery is a deliberate manual 'dismiss', not an auto-nudge."""
+    r, sends = _run_lane_nudge(tmp_path, SENDFEEDBACK_PANE)
+    assert r.returncode == 5, f"expected exit 5 (menu-refused), got {r.returncode}: {r.stderr}"
+    assert sends == "", f"AUTHORIZATION SLIP: send-keys reached a SendFeedback dialog:\n{sends}"
     assert "MENU" in r.stderr.upper()
 
 
