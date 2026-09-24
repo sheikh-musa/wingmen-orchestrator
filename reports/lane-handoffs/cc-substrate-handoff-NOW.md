@@ -155,3 +155,26 @@ a same-checkout commit), `lane_winddown.py` + `fleet_model.sh` (blocked, see abo
 `lane_token_resolver.py` (deliberately deferred, correctness-critical). Checkpoint #24 due
 2026-09-27 -- console files are the next safely-actionable work if nothing more urgent
 lands; the 2 blocked sites need cc-fleet-health's call first.
+
+## op#42896/#42909 P1 — schema ruling + gate request (2026-09-24 ~20:50Z, this session)
+
+Orch-console ruled on both blocked sites (#43044): (1) `fleet-console` (launchd server, not
+an agent) gets a named constant `PROTECTED_NON_AGENT_SESSIONS = ("fleet-console",)` in the
+accessor module, never a fake `protected_agents` row — built + tested (leak-guard test),
+committed `2cafc59`, pushed. (2) `cc-orchestrator`'s two session names need an additive
+`tmux_session_aliases text[]` column + a new `protected_tmux_sessions()` accessor
+(tmux_session ∪ aliases ∪ PROTECTED_NON_AGENT_SESSIONS) — this is a SUBSTRATE-DB migration,
+so it goes to orch-console's gate before apply, never self-applied.
+
+Built `migrations/067_protected_agents_tmux_aliases.sql` (additive, backfills
+`cc-orchestrator` → `tmux_session='orch'`, `tmux_session_aliases={'orchestrator'}`).
+`--dry-run` via `scripts/apply_migration.py 067 --silo tscuymavysscrvoberrr` PASSED (rolled
+back, nothing committed to the DB — dry-run is safe to run without the gate; the REAL apply
+is what's gated). Sent SQL + rollback + apply command to orch-console for review (#43046,
+requires_response). **Do NOT run `scripts/apply_migration.py 067 --silo tscuymavysscrvoberrr`
+for real until orch-console's go-ahead lands in the inbox.**
+
+Once gated + applied: build `protected_tmux_sessions()`, then migrate `lane_winddown.py` +
+`fleet_model.sh` onto it (required test: superset by TOTAL COUNT not enumerated list;
+`fleet_model.sh` is bash, needs a tiny `python -m ...` CLI wrapper that fails CLOSED —
+protect everything, wind nothing down — if the accessor errors).
