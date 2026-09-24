@@ -272,3 +272,15 @@ Checkpoint bookkeeping done: `held_commitments` #19 discharged, #24 armed (due 2
 Commit `a2a416a` → pushed as `38ef06e` on `fable/substrate-safe-fixes`, verified via `git ls-remote`. Full detail + execution log in `reports/substrate-ihsanification-next-moves-op42896.md` (both copies, synced). Bus #42918 (thread on #42909).
 
 **Remaining on this programme:** P1 has ~9 of 11 sites still to migrate (or explicitly track-deferred with reason, like `lane_token_resolver.py`'s intentionally-untouched correctness-critical path); P3 (wire `deploy_console.sh` as first `quality_gate.py` consumer) not started. Next checkpoint #24 expects visible progress on both by 2026-09-27.
+
+## op#42907 — gzb backup relay repointed to Tailscale, wingmen-core dependency closed (2026-09-25, this session)
+
+**Same collapsed-dispatch phenomenon as the P1 registry note above** — two Agent-tool dispatch attempts for this exact directive returned anomalous results (no agentId/output_file, then a "Fork is not available inside a forked worker" error confirming I was already running AS the dispatched fork with the full transcript inherited as context). Executed directly per the harness's own instruction rather than retry a third time.
+
+Repointed `daily_backup.sh`'s `GZB_TARGET` to `wbackup@100.77.251.8` (Tailscale tailnet, direct), deleted the `gzb-vpn.sh`/`GZB_RELAY` wingmen-core relay code entirely. Full manual run (425 tables, 0 failed, all 3 off-site pushes landed), core non-involvement proven via a live connection monitor showing zero hits to wingmen-core's IP for the entire run, and a full substrate restore-test (fetch/decrypt/`pg_restore --list`/row-counts all clean — closes the deferred non-client-store restore-test from the prior round).
+
+Mid-task, an urgent interrupt from orch-console required committing immediately (already fully tested) to unblock 4 merged cost-rollout PRs waiting on the shared checkout — resolved by committing+pushing right away rather than finishing the write-up first, confirmed checkout clean after. Rebased through 6 concurrent commits (cc-fleet-health's cost-rollout work) with no conflicts on the actual file.
+
+Commit `0271fa9` on `fable/substrate-safe-fixes`, verified via `git ls-remote`. Full detail in `reports/wingmen-core-drain-cutover-plan-op20655.md` (both copies, synced, final section). Bus #42924 (reply on #42907's thread).
+
+**wingmen-core's backup-relay KNOWN GAP is now closed — per the plan's own tracking, this was the last identified power-off blocker alongside Hermes (already confirmed live by Musa).**
