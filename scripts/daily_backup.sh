@@ -1,10 +1,16 @@
 #!/bin/bash
 # Daily Supabase backup — orchestrator substrate (tscuymavysscrvoberrr) PLUS
-# client silos ihsanos-ceayj (IHSANOS_PROD_DATABASE_URL) and irsyad-goumlyne
-# (GOUMLYNE_DATABASE_URL). Substrate files land at the top level of the day's
-# dir (layout preserved); each client silo dumps into its own subdir. Same dump
-# + row-count-assertion logic for every store (backup_one). A silo with no DSN
-# is skipped (not failed). REST fallback is substrate-only.
+# client silos ihsanos-ceayj (IHSANOS_PROD_RO_DATABASE_URL) and irsyad-goumlyne
+# (GOUMLYNE_RO_DATABASE_URL). READ-ONLY DSNs only for client silos — a backup
+# is read-only by nature and must never even have the capability to write; the
+# write-capable DSN vars must never be referenced here. Substrate files land at
+# the top level of the day's dir (layout preserved); each client silo dumps
+# into its own subdir. Same dump + row-count-assertion logic for every store
+# (backup_one). A missing/unusable client-silo DSN is a FAILURE (non-zero exit
+# + loud alert), not a silent skip — op#42886 (2026-09-24): a stale/absent RO
+# var silently skipped both client silos for 6 of the last 7 days with exit 0,
+# undetected until an unrelated host decommission surfaced it. REST fallback is
+# substrate-only (client silos have no REST fallback path).
 # Runs via launchd at 3 AM SGT (dev.wingmen.daily-backup). Keeps last 7 days.
 #
 # OPS-HEALTH-338 #4 overhaul (amanah-critical):
@@ -233,27 +239,32 @@ fi
 # ---------------------------------------------------------------------------
 # Client silos (TENANT-RESIDENCY / LAYER-VOCAB): pg_dump/DSN ONLY — NO REST
 # fallback (the REST path is substrate-URL specific). Each silo dumps into its
-# OWN subdir. A silo whose DSN env var is empty/unset is SKIPPED (log line, not
-# a failure) so the script stays robust when a DSN is absent.
-#   name              DSN env var                  subdir
-#   ihsanos-ceayj     IHSANOS_PROD_DATABASE_URL    $TODAY_DIR/ihsanos-ceayj
-#   irsyad-goumlyne   GOUMLYNE_DATABASE_URL        $TODAY_DIR/irsyad-goumlyne
+# OWN subdir. READ-ONLY DSNs only (see header) — the write DSN is never
+# referenced. A missing DSN or missing pg_dump/psql is a FAILURE (counted into
+# the global FAILED/FAIL_NAMES gate below, which fires the loud alert + non-zero
+# exit) — op#42886: this used to silently `return 0`, which is exactly how a
+# week of missing-DSN skips went undetected.
+#   name              DSN env var                     subdir
+#   ihsanos-ceayj     IHSANOS_PROD_RO_DATABASE_URL    $TODAY_DIR/ihsanos-ceayj
+#   irsyad-goumlyne   GOUMLYNE_RO_DATABASE_URL        $TODAY_DIR/irsyad-goumlyne
 # ---------------------------------------------------------------------------
 backup_client_silo() {
   local NAME="$1" SILO_DSN="$2"
   if [ -z "$SILO_DSN" ]; then
-    echo "--- [$NAME] SKIPPED: DSN env var is empty/unset (not a failure)."
+    echo "--- [$NAME] FAILED: DSN env var is empty/unset."
+    FAILED=$((FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $NAME(missing-dsn)"
     return 0
   fi
   if [ ! -x "$PG_DUMP" ] || [ ! -x "$PSQL" ]; then
-    echo "--- [$NAME] SKIPPED: pg_dump/psql unavailable (no REST fallback for client silos)."
+    echo "--- [$NAME] FAILED: pg_dump/psql unavailable (no REST fallback for client silos)."
+    FAILED=$((FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $NAME(no-pgtools)"
     return 0
   fi
   backup_one "$NAME" "$SILO_DSN" "$TODAY_DIR/$NAME"
 }
 
-backup_client_silo "ihsanos-ceayj"   "${IHSANOS_PROD_DATABASE_URL:-}"
-backup_client_silo "irsyad-goumlyne" "${GOUMLYNE_DATABASE_URL:-}"
+backup_client_silo "ihsanos-ceayj"   "${IHSANOS_PROD_RO_DATABASE_URL:-}"
+backup_client_silo "irsyad-goumlyne" "${GOUMLYNE_RO_DATABASE_URL:-}"
 
 # ---------------------------------------------------------------------------
 # OFF-SITE PUSH (Musa op#21244 "dump it in gzbai"): mirror the CLIENT-silo
