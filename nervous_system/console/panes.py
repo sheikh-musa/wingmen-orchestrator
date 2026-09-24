@@ -30,6 +30,7 @@ from typing import Dict, List, Optional
 # makes the console's "expected" account == the account a lane actually boots on.
 from nervous_system.console import pools
 from scripts.lib.lane_token_resolver import resolve_lane_token_path as _resolve_lane_token_path
+from scripts.lib import hub_reach
 
 _TIMEOUT_S = 5
 _RAW_CAPTURE_LINES = 200  # generous raw window BEFORE chrome-filtering — filter
@@ -514,10 +515,34 @@ def _account_labels() -> Dict[str, str]:
 # VPS — sha256 on the remote box, only the fp returns). Read-only (ps only).
 # Cached (TTL) so /api/token-truth polls don't re-SSH each time; slow/failed SSH
 # => UNVERIFIED (never an error into the aggregate, never a guess).
-_REMOTE_HUB_HOST = os.environ.get("CONSOLE_HUB_SSH", "root@91.107.235.77")
+#
+# op#42933 (2026-09-24): the default used to hardcode the decommissioned wingmen-core
+# IP. _resolve_hub_ssh_target() below resolves from orch_lease.holder_host via
+# hub_reach instead, same pattern as reset_hub_remote.sh/singleton_liveness.py — an
+# explicit CONSOLE_HUB_SSH override still always wins.
 _REMOTE_HUB_KEY = os.path.expanduser(os.environ.get("CONSOLE_HUB_SSH_KEY", "~/.ssh/wingmen_vps"))
 _REMOTE_CACHE_TTL_S = 45.0
 _remote_hub_cache = {"at": 0.0, "val": None}  # val = {"fp","model"} | None
+
+
+def _resolve_hub_ssh_target() -> Optional[str]:
+    """Best-effort holder_host resolve -> ssh target, or None if unresolved/unknown/
+    not-wingmen-core (this scan is a root@host single-hop SSH; it doesn't implement
+    gzb's multi-hop reach). None here means the same thing a failed SSH already
+    means to callers: UNVERIFIED, never an error, never a guessed host."""
+    override = os.environ.get("CONSOLE_HUB_SSH")
+    if override:
+        return override
+    try:
+        import psycopg
+        with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=5) as _rc:
+            holder = hub_reach.read_holder_host(_rc)
+    except Exception:  # noqa: BLE001 — resolution is best-effort, never fatal here
+        holder = None
+    info = hub_reach.hub_reach_for_holder(holder)
+    if info["known"] and info["host"] == "wingmen-core":
+        return "root@91.107.235.77"
+    return None
 # Linux box: sha256sum (not shasum). Fingerprint the token remote-side; print only
 # "<fp> <model>" — the raw token is read into $tok and never echoed.
 _REMOTE_SCAN_SH = (
@@ -542,10 +567,13 @@ def _remote_hub_scan(force: bool = False) -> Optional[dict]:
         return _remote_hub_cache["val"]
     val = None
     try:
+        target = _resolve_hub_ssh_target()
+        if target is None:
+            raise RuntimeError("hub ssh target unresolved (not wingmen-core, or unknown holder)")
         r = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
              "-o", "StrictHostKeyChecking=accept-new", "-i", _REMOTE_HUB_KEY,
-             _REMOTE_HUB_HOST, _REMOTE_SCAN_SH],
+             target, _REMOTE_SCAN_SH],
             capture_output=True, text=True, timeout=15,
         )
         if r.returncode == 0:
