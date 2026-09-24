@@ -20,6 +20,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Grep|Glob|Edit|Write|NotebookEdit|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3 /Users/sheikhmusa/wingmen/orchestrator/scripts/hooks/console_irsyad_guard.py",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
