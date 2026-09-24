@@ -12,7 +12,19 @@ Musa greenlit the Hermes move (op#22276). Executed per orch-console's #42872 dec
 
 **NOT declaring this "live"** — per orch-console's explicit instruction, that's Musa's call after he messages Hermes on Telegram and gets a real reply. Reported as bus #42883 (thread on #42882/#42872/#42867).
 
-**Remaining power-off blockers: Musa's Telegram confirmation for Hermes, + the newly-found daily_backup.sh off-site destination gap.** Nothing further for this lane until one of those resolves.
+**Remaining power-off blockers: Musa's Telegram confirmation for Hermes, + the daily_backup.sh off-site destination gap.**
+
+## UPDATE (2026-09-24, bus #42884→#42885): backup destination options drafted + framing correction
+
+Read-only research, nothing changed. Full doc: `reports/offsite-backup-destination-options-op42884.md` (both copies).
+
+**Correction to the "Gazzabyte premises" framing above (line 7) and in #42884:** `GZB_HOST="hub-vps"` in `daily_backup.sh` resolves to `91.107.235.77` = **wingmen-core itself**, not gzb (192.168.1.114, Gazzabyte's actual office server). The script's own comment mislabels it "the Gazzabyte VPS" — a stale leftover from op#21244, predating the current wingmen-core/gzb naming split. No client data has actually been sitting on Gazzabyte's premises; the real gap is just that the redundancy-copy host (wingmen-core) is going away.
+
+**Also found: client-silo backups (ihsanos-ceayj, irsyad-goumlyne) are NOT currently running** — `backup.log` shows both silos SKIPPED every night this week except 09-18, because `.env` has the RO DSNs (`IHSANOS_PROD_RO_DATABASE_URL`/`GOUMLYNE_RO_DATABASE_URL`) but not the write-named ones the script checks for. `pg_dump`/`\copy` are read-only, so this is a one-line env-var fix once someone who owns `.env` decides to make it — not done here, config-ownership call.
+
+**Recommendation posted:** Cloudflare R2 (verified pricing, $0 egress) + client-side `age` encryption, key in vault — with S3 ap-southeast-1 flagged as the firmer-jurisdiction alternative if a hard SG-contractual guarantee (not just preference) is required. Genuinely a policy call for Musa, both options laid out.
+
+Nothing further for this lane until orch-console/Musa decide on destination + the DSN-gap fix, or Hermes gets its Telegram confirmation.
 
 ---
 
