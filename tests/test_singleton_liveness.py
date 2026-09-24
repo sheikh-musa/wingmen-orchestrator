@@ -217,10 +217,13 @@ def test_connect_reraises_persistent_failure_dead_man_preserved(monkeypatch):
 # host (91.107.235.77) while the live hub is on gzbai -> a responder hits a dead box. The
 # remedy must resolve from orch_lease.holder_host (via hub_reach); unknown -> name NO host.
 def test_wedged_alive_text_gzb_holder_is_host_resolved_not_the_dead_host():
+    # op#42907/op#20655: the gzb-vpn.sh relay this remedy used to describe is dead and
+    # was never replaced -- the page must say so honestly, not describe a dead hop.
     subject, body = sl._wedged_alive_text("cc-orchestrator", "gzbai")
     assert "91.107.235.77" not in subject
     assert "91.107.235.77" not in body
-    assert "192.168.1.114" in body  # routes to the CURRENT gzb host
+    assert "decommissioned" in body
+    assert "no automated interactive" in body.lower()
 
 
 def test_wedged_alive_text_unknown_holder_names_no_host():

@@ -10,6 +10,13 @@ stale one (fail-safe, never a guess).
 
 PURE core: `hub_reach_for_holder(holder_host)` + `is_reach_host_current(...)`.
 Thin DB reader: `read_holder_host(conn)`.
+
+UPDATE (op#42896/#42909, 2026-09-24): the gzb reach text ITSELF went dead when op#42907
+deleted the gzb-vpn.sh/wingmen-core relay it described, and no replacement interactive
+SSH path to gzb was built. `hub_reach_for_holder("gzbai")` now says so honestly (reach=None,
+remedy names the gap + gzb's systemd self-supervision) rather than describing a hop that no
+longer exists — same fail-safe posture as the unknown-holder branch, applied to a KNOWN
+host whose ONE known route died.
 """
 from __future__ import annotations
 
@@ -42,12 +49,24 @@ def hub_reach_for_holder(holder_host: "str | None") -> dict:
     """
     canon = _canon(holder_host)
     if canon == "gzbai":
-        reach = ("ssh hub-vps -> sudo -n gzb-vpn.sh up (check status; connect can take "
-                 "up to ~2min) -> sudo -u wingmen -H ssh gzb -> tmux 'orch'")
-        remedy = (f"REMEDY: reach the hub via the gzb split-tunnel — {reach}. The hub is on "
-                  f"the gzb LAN (192.168.1.114); a forced typed-nudge (C-u C-u + literal drain "
-                  f"+ Enter) submits its staged/ghost composer. This is the console pen (cross-"
-                  f"host mutating action). Do NOT target the old decommissioned VPS.")
+        # op#42907/op#20655 (2026-09-24): the old relay this remedy told a responder to
+        # use -- ssh hub-vps -> sudo gzb-vpn.sh up -> sudo -u wingmen -H ssh gzb -- is
+        # DEAD. gzb-vpn.sh and the wingmen-core hop were deleted when the backup path was
+        # repointed to gzb's Tailscale IP directly, and wingmen-core itself is cleared for
+        # power-off. No replacement interactive/shell SSH reach to gzb has been built —
+        # the only gzb credential in this repo (scripts/daily_backup.sh's `wbackup`) is a
+        # push/prune-only backup account with no shell, unusable for a tmux nudge/reset.
+        # Per this module's own fail-safe rule (never point at a route we can't actually
+        # use), reach/remedy are honest about the gap rather than describing a dead hop.
+        reach = None
+        remedy = ("REMEDY: the hub is on gzb (Tailscale 100.77.251.8), but no automated "
+                  "interactive SSH reach to it is provisioned in this repo -- the old "
+                  "wingmen-core relay (gzb-vpn.sh) was decommissioned (op#42907/op#20655) "
+                  "and never replaced. gzb's hub process is systemd-supervised "
+                  "(wingmen-orch-hub.service) so a DEAD process self-restarts, but a WEDGED-"
+                  "but-alive composer needs a human with real shell access on gzb directly -- "
+                  "escalate to the operator rather than attempt reset_hub_remote.sh (it "
+                  "correctly refuses for a gzb holder) or invent an untested reach path.")
         return {"known": True, "host": "gzbai", "tmux": "orch", "reach": reach, "remedy": remedy}
     if canon == "wingmen-core":
         reach = ("ssh root@91.107.235.77 (hub-vps) -> tmux 'orch' (user wingmen)")

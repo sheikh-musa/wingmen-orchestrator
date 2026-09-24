@@ -18,15 +18,20 @@ WINGMEN_CORE_IP = "91.107.235.77"
 GZB_IP = "192.168.1.114"
 
 
-def test_gzbai_resolves_to_gzb_split_tunnel_and_never_names_wingmen_core():
+def test_gzbai_is_known_but_honest_about_no_provisioned_reach():
+    # op#42907/op#20655: the old gzb-vpn.sh/wingmen-core relay this remedy used to
+    # describe is DEAD, and no replacement interactive reach to gzb was built. The
+    # remedy must say so plainly, never describe the dead hop as if it still works,
+    # and never fall back to naming the decommissioned wingmen-core host either.
     r = hr.hub_reach_for_holder("gzbai")
     assert r["known"] is True
     assert r["host"] == "gzbai"
-    # remedy must route via the gzb split-tunnel, and must NOT name the dead host
-    assert GZB_IP in r["remedy"]
-    assert "gzb-vpn" in r["remedy"]
+    assert r["reach"] is None
+    # naming wingmen-core as the dead relay's decommissioned former hop (context) is fine;
+    # naming it as a live action target (its IP) is the regression this guards against.
+    assert "decommissioned" in r["remedy"]
     assert WINGMEN_CORE_IP not in r["remedy"]
-    assert "wingmen-core" not in r["remedy"].lower()
+    assert "no automated interactive" in r["remedy"].lower()
 
 
 def test_wingmen_core_resolves_to_direct_vps():

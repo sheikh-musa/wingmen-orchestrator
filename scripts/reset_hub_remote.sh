@@ -27,8 +27,9 @@ ORCH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 _HOLDER="$(psql "${DATABASE_URL:-}" -tAc "SELECT holder_host FROM orch_lease WHERE lease_key='orch-hub'" 2>/dev/null | tr -d '[:space:]')"
 # WINGMEN_VPS_HOST, if set, is an explicit operator override and always wins. Otherwise
 # derive the target from the resolved holder: this script only knows how to reach the
-# wingmen-core canonical group directly (a single `ssh root@host` hop) — it does NOT
-# implement gzb's multi-hop reach (hub-vps -> gzb-vpn.sh up -> sudo -u wingmen ssh gzb),
+# wingmen-core canonical group directly (a single `ssh root@host` hop) — it has no gzb
+# reach at all (op#42907/op#20655: gzb's old relay, gzb-vpn.sh via this same VPS, is
+# dead and was never replaced with an interactive path — see scripts/lib/hub_reach.py),
 # so an unset/unknown/gzb-resolved holder must refuse with a clear pointer, never guess
 # a host this script can't actually act on correctly.
 if [ -n "${WINGMEN_VPS_HOST:-}" ]; then
