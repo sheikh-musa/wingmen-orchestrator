@@ -34,7 +34,6 @@ passive row) now; #9 is flagged, not yet closed.
 from __future__ import annotations
 
 import os
-import socket
 import sys
 import time
 from datetime import datetime, timezone
@@ -67,46 +66,24 @@ WAKE_SWEEP_CAP_AGE_S = int(os.environ.get(
     "WAKE_SWEEP_CAP_AGE_S", str(WAKE_SWEEP_GRACE_S + WAKE_SWEEP_CAP_N * WAKE_SWEEP_SEC)))
 _ESCALATE_TO = os.environ.get("WAKE_SWEEP_ESCALATE_TO", "orch-console")
 
-# (A) HOST-OWNERSHIP SCOPE (Nazim 37519 — fixes a cross-host false-DEAD, the 451e110 class).
+# DEAD-FOREIGN gone-window (Nazim #42994 (2), amend B): an agent is "gone on every host" only
+# if NO matching agent_status row (base-inclusive) has a heartbeat fresher than this. Much
+# longer than fleet_health STALE_MIN (30m) ON PURPOSE — a dead heartbeat DAEMON is not a dead
+# PANE, and quiescing a live-but-stale lane silently drops its directed message.
+GONE_WINDOW_S = int(os.environ.get("WAKE_SWEEP_GONE_WINDOW_S", "7200"))  # 2h
+
+# CROSS-HOST liveness (Nazim #42994 (2) — replaces the old per-instance HOST-OWNERSHIP SCOPE).
 # resolve_tmux_session enumerates only THIS host's panes, but the sweep runs one-instance-per-
-# host against the SHARED substrate DB with no host filter. So a live CROSS-HOST agent resolves
-# to "no live session" on the wrong host — and (A) would declare it DEAD, quiesce (skipped_at,
-# which then defeats the OWNING host's sweep too via the shared DB) + false-escalate. The (B)
-# age-cap is host-agnostic + benign (escalates to a human, leaves read_at NULL for the target's
-# own reconcile), so ONLY (A) needs the host scope. Fix: an instance may (A)-declare-dead only
-# an agent it is the wake-OWNER of (homed here, whose pane a local resolve can see). A local miss
-# for a NON-owned agent means "not mine — leave the row for the owning instance", never "dead".
-HUB_AGENT = "cc-orchestrator"          # the one cross-host body today (homed on the orch_lease host)
-_MINI_HOSTS = {h.strip() for h in (os.environ.get("WAKE_SWEEP_MINI_HOSTS") or "Sheikhs-Mini").split(",") if h.strip()}
-
-
-def _default_owns_agent(agent: str) -> bool:
-    """Does THIS sweep instance own `agent` for (A) dead-inference? Explicit
-    WAKE_SWEEP_OWNED_AGENTS (comma-list) wins — the durable per-instance enforce-in-code answer
-    for multi-host (set it on each host as the fleet spreads to the Gazzabyte VPS). Absent it,
-    a safe host-derived default: the Mini owns every lane EXCEPT the cross-host hub; any other/
-    unknown host owns NOTHING for (A) until explicitly configured (fail-safe — an unconfigured
-    foreign instance never false-DEADs a cross-host body, it just doesn't run (A))."""
-    env = os.environ.get("WAKE_SWEEP_OWNED_AGENTS")
-    if env is not None:
-        owned = {a.strip() for a in env.split(",") if a.strip()}
-        return agent in owned
-    host = os.environ.get("WAKE_SWEEP_HOST") or socket.gethostname()
-    if host in _MINI_HOSTS:
-        return agent != HUB_AGENT
-    return False
-
-# ── DEPLOY NOTE (Nazim 37524) — when the VPS-for-hub sweep instance is stood up ──────────
-# 1. Set WAKE_SWEEP_OWNED_AGENTS=cc-orchestrator on that instance (it owns ONLY the hub; a
-#    bare/unconfigured foreign instance owns nothing for (A), so it fails safe until set).
-# 2. In the SAME change, add the orch_lease belt to (A): on the VPS owns(cc-orchestrator)=True,
-#    so a transient hub tmux-restart blip that exceeds the grace while the orch_lease is STILL
-#    FRESH could (A)-dead a briefly-alive hub on its OWN host. Guard it — never (A)-declare the
-#    hub dead while singleton_liveness.hub_lease_fresh() is True (a 3-line reuse of the 451e110
-#    cross-host-liveness signal). Redundant for every OTHER case (ownership scoping subsumes it),
-#    so it lands WITH the VPS instance, not before — captured here so it isn't a promise-to-remember.
-# The durable multi-host answer (beyond env allowlists) is a `host` column on the lane/agent
-# registry so ownership is enforced-in-code from the registry, not per-instance env.
+# host against the SHARED substrate DB. So a live CROSS-HOST agent resolves to "no live session"
+# on the wrong host — and quiescing it there silently drops a deliverable message AND defeats the
+# owning host's sweep via the shared DB. The old fix scoped dead-inference to an instance's OWNED
+# agents (WAKE_SWEEP_OWNED_AGENTS / a Mini-owns-all-but-hub default). That is now REPLACED: the
+# dead-foreign quiesce reads the SUBSTRATE (agent_status heartbeats on EVERY host, base-inclusive
+# — see _matching_hbs), so ANY instance can safely quiesce a genuinely-gone agent and no per-
+# instance ownership env is needed. Cross-host liveness comes from the shared DB, not from "whose
+# pane can I see". The hub (cc-orchestrator) is the one body whose liveness is a lease not a
+# heartbeat, so it keeps a dedicated belt (_alive_elsewhere -> _default_hub_lease_fresh).
+HUB_AGENT = "cc-orchestrator"          # the one cross-host body whose liveness is the orch_lease
 
 # Broader-than-realtime row predicate. NULL-safe: a NULL is_test counts as not-test,
 # a NULL priority counts as not-P3 (still swept). read_at/​skipped_at gate the quiesce.
@@ -174,18 +151,66 @@ def _fetch_rows(grace_s: int):
         return cur.fetchall()
 
 
-def _mark_skipped(row_ids) -> None:
-    """Set skipped_at on the given rows — quiesces them (the SQL excludes skipped_at IS
-    NOT NULL) AND is the once-guard (a skipped row is never re-fetched → never re-
-    escalated). As cc-fleet-health (identity set for the row trigger). No-op on empty."""
+def _mark_skipped(row_ids) -> list:
+    """Set skipped_at on the given rows via CAS (`WHERE skipped_at IS NULL`) and RETURN the
+    ids actually set. skipped_at quiesces the rows (the SQL excludes skipped_at IS NOT NULL)
+    AND is the once-guard (a skipped row is never re-fetched → never re-escalated). The
+    RETURNING makes it a true CAS: only the instance whose UPDATE wins gets the ids back, so
+    a concurrent second sweeper (shared DB, one-per-host) sees an empty return and does NOT
+    double-escalate. As cc-fleet-health (identity set for the row trigger). [] on empty."""
     ids = [i for i in (row_ids or []) if i is not None]
     if not ids or not _DSN:
-        return
+        return []
     with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
         cur.execute("UPDATE agent_messages SET skipped_at=now() "
-                    "WHERE id = ANY(%s) AND skipped_at IS NULL", (ids,))
+                    "WHERE id = ANY(%s) AND skipped_at IS NULL RETURNING id", (ids,))
+        got = [r[0] for r in cur.fetchall()]
         conn.commit()
+        return got
+
+
+def _matching_hbs(agent) -> list:
+    """last_heartbeat of every agent_status row matching `agent` — BASE-INCLUSIVE
+    (agent_id = agent OR base_agent_id = agent). agent_status is keyed by INSTANCE id with the
+    base in base_agent_id (cc-substrate-1 / base cc-substrate), while bus rows address the BASE
+    id — so a bare agent_id match would find NO row for a live base-addressed lane and call it
+    dead (Nazim amend A). Match is EXACT equality, never a 'cc-cosem%' prefix (a live sibling
+    cc-cosem-adcda must not spare a dead cc-cosem-platform)."""
+    if not _DSN:
+        return []
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT last_heartbeat FROM agent_status "
+                    "WHERE agent_id=%s OR base_agent_id=%s", (agent, agent))
+        return [r[0] for r in cur.fetchall() if r[0] is not None]
+
+
+def _desired_state_of(agent):
+    """fleet_lanes.desired_state for `agent`, matched by lane OR base_agent_id. This is operator
+    INTENT, never liveness (mig003: 'liveness is derived on read, never stored') — used ONLY as
+    a veto (never quiesce a wanted-up lane). Returns the single desired_state, or None if the
+    agent has no lane row. RAISES on an ambiguous match (>1 distinct value) so the caller fails
+    CLOSED — an unprovable veto must never license a quiesce (Nazim amend C)."""
+    if not _DSN:
+        return None
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT desired_state FROM fleet_lanes "
+                    "WHERE lane=%s OR base_agent_id=%s", (agent, agent))
+        vals = [r[0] for r in cur.fetchall()]
+    if len(vals) > 1:
+        raise ValueError(f"ambiguous desired_state for {agent}: {vals}")
+    return vals[0] if vals else None
+
+
+def _default_hub_lease_fresh() -> bool:
+    """Hub (cc-orchestrator) liveness is orch_lease freshness, NOT a heartbeat (deploy note /
+    the 451e110 cross-host class). FAIL-SAFE: if the lease check errors, treat the hub as alive
+    so a broken check never false-quiesces the singleton hub."""
+    try:
+        import singleton_liveness  # same-dir at runtime
+        return bool(singleton_liveness.hub_lease_fresh())
+    except Exception:  # noqa: BLE001 — unknown hub-lease state fails toward "alive" (never quiesce hub)
+        return True
 
 
 def _escalate_operator(subject: str, body: str) -> None:
@@ -205,74 +230,111 @@ def _escalate_operator(subject: str, body: str) -> None:
 
 
 def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
-               mark=_mark_skipped, escalate=_escalate_operator, owns=_default_owns_agent,
+               mark=_mark_skipped, escalate=_escalate_operator,
+               matching_hbs=_matching_hbs, desired_state_of=_desired_state_of,
+               hub_lease_fresh=_default_hub_lease_fresh,
+               gone_window_s: int = GONE_WINDOW_S,
                cap_age_s: int = WAKE_SWEEP_CAP_AGE_S, now: float | None = None,
                now_dt=None, dry_run: bool = False) -> dict:
-    """One pass WITH BACKOFF (Nazim 37512). Find rotting directed rows; wake each eligible
-    recipient of a FRESH (under-cap) row once; then give up on two classes so a stuck row
-    escalates ONCE instead of poking forever:
-      (A) a target that resolves to NO live session (dead/unreachable) → escalate-once +
-          quiesce ALL its rotting rows. Reachability is the PANE signal (computed by
-          wake_agent), never a heartbeat/status field — so a wakeable on-demand body is
-          never false-rotted. Kills the cc-cosem-platform class.
-      (B) a row unread past cap_age_s → escalate-once + quiesce it. Handles the live-but-
-          stuck class (the cai 60+-empty-wakes case).
-    skipped_at is the once-guard (excludes the row from every future sweep). Injectable
-    rows/wake/mark/escalate make it unit-testable without DB or tmux; dry_run mutates
-    nothing (observe-only, honoring the AUTO_WAKE_ENABLED kill-switch)."""
+    """One pass. FRESH (under-cap) rotting rows drive a wake of each eligible recipient (the
+    doorbell backstop). A row PAST cap_age_s is a give-up candidate, but the ONLY give-up that
+    QUIESCES is the DEAD-FOREIGN class (Nazim #42994 (2) + amendments A-D):
+
+      DEAD-FOREIGN = row past cap AND its agent is gone on EVERY host — no agent_status row
+        matching (agent_id OR base_agent_id, base-inclusive) has a heartbeat fresher than
+        gone_window_s (~2h), and for the hub its orch_lease is not fresh — AND desired_state
+        is not 'up'. → quiesce ALL its capped rows via CAS + escalate ONCE, naming agent, ids,
+        evidence. Any sweep instance may do this; the CAS (mark returns only the ids IT set)
+        makes it exactly-once across concurrent instances. Clearing skipped_at re-delivers.
+
+    Everything else past cap is NOT quiesced — quiescing drops a possibly-deliverable message:
+      • ALIVE-ELSEWHERE (amend A/B): a fresh matching heartbeat (base-inclusive) or a fresh hub
+        lease. agent_status is keyed by INSTANCE id with the base in base_agent_id, and a stale
+        heartbeat is NOT a dead pane — so the match is base-inclusive and the window is long.
+      • VETOED (amend C): gone but desired_state='up' — a wanted-up-but-dark lane is a
+        singleton/lane-watchdog page, never a delivery-drop here.
+      • LOOKUP-FAILED (amend C fail-closed): the desired_state veto lookup errored/ambiguous —
+        NEVER quiesce on an unprovable check; escalate for a human instead.
+
+    skipped_at is the once-guard AND the CAS token. Injectable deps make it unit-testable
+    without DB/tmux; dry_run classifies but mutates nothing (honors AUTO_WAKE_ENABLED)."""
     if rows is None:
         rows = _fetch_rows(grace_s)
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
 
-    # (B) partition FIRST: a capped row is pulled out before waking, so it never drives a
-    # wake and is handled exactly once (the capped path) — no double-processing.
+    # A capped row never drives a wake; it is a give-up candidate handled below.
     capped = [r for r in rows if is_capped(r, now_dt, cap_age_s)]
     fresh = [r for r in rows if not is_capped(r, now_dt, cap_age_s)]
 
     targets = eligible_recipients(fresh)
     results = {a: wake(a, reason="backstop-sweep", dry_run=dry_run, now=now) for a in targets}
     woke = [a for a, r in results.items() if isinstance(r, dict) and r.get("woke")]
-
-    # (A) targets that came back with NO live session → dead/unreachable
-    unreachable = sorted(
+    unreachable = sorted(  # observability: fresh-row agents with no local live pane this pass
         a for a, r in results.items()
         if isinstance(r, dict) and r.get("why") == "no live session")
 
-    # (A) HOST SCOPE: only DECLARE-DEAD an agent this instance OWNS. A local-pane miss for a
-    # cross-host (non-owned) agent is "not mine, leave it for the owning instance", NOT dead —
-    # this is what prevents the 451e110 false-DEAD (e.g. the Mini seeing the VPS hub as "dead").
-    dead_owned = [a for a in unreachable if owns(a)]
-    left_foreign = [a for a in unreachable if not owns(a)]
+    # CAPPED rows grouped by agent (order-stable), classified on cross-host substrate liveness.
+    capped_by_agent: dict = {}
+    for r in capped:
+        capped_by_agent.setdefault(_to_agent(r), []).append(_row_id(r))
 
+    def _alive_elsewhere(agent) -> bool:
+        for hb in (matching_hbs(agent) or []):
+            try:
+                if (now_dt - hb).total_seconds() < gone_window_s:
+                    return True
+            except Exception:  # noqa: BLE001 — an un-ageable heartbeat is not proof of life
+                continue
+        if agent == HUB_AGENT:  # the hub's liveness is its lease, not a heartbeat
+            try:
+                return bool(hub_lease_fresh())
+            except Exception:  # noqa: BLE001 — fail SAFE for the singleton (never false-quiesce)
+                return True
+        return False
+
+    dead_foreign, left_alive, vetoed, lookup_failed = [], [], [], []
     escalations: list[dict] = []
-    if not dry_run:
-        for agent in dead_owned:  # (A) one page + quiesce per dead OWNED agent
-            ids = [_row_id(r) for r in fresh if _to_agent(r) == agent]
-            mark(ids)
+    for agent, ids in capped_by_agent.items():
+        if _alive_elsewhere(agent):
+            left_alive.append(agent)                     # amend A/B — keep deliverable
+            continue
+        try:
+            ds = desired_state_of(agent)
+        except Exception as e:  # noqa: BLE001 — amend C fail-closed: unprovable veto never quiesces
+            lookup_failed.append(agent)
+            if not dry_run:
+                escalate(
+                    f"[wake-backstop] can't verify {agent} before quiescing — needs a human",
+                    f"TL;DR: {len(ids)} row(s) to {agent} are past the re-wake cap and it looks "
+                    f"gone (no live heartbeat on any host), but the desired_state veto lookup "
+                    f"FAILED ({e!r}) — so I will NOT quiesce (that could silently drop a message to "
+                    f"a live lane). Left unread (ids={ids}). ACTION: check {agent}'s registry row.")
+                escalations.append({"kind": "lookup-failed", "agent": agent, "ids": ids})
+            continue
+        if str(ds or "").lower() == "up":
+            vetoed.append(agent)                         # amend C veto — keep deliverable
+            continue
+        if dry_run:
+            dead_foreign.append(agent)                   # would-quiesce (observe-only)
+            continue
+        newly = mark(ids)                                # CAS: only the ids we actually set
+        if newly:                                        # escalate ONLY if we won the CAS
+            dead_foreign.append(agent)
             escalate(
-                f"[wake-backstop] directed rows rotting to dead/unreachable agent {agent}",
-                f"TL;DR: {len(ids)} unread directed row(s) to {agent} can't be delivered — it "
-                f"resolves to NO live session (dead/absent pane), so re-poking it forever is "
-                f"pointless. Quiesced (skipped_at) + escalated ONCE. ACTION: re-address or clean "
-                f"these rows (ids={ids}); they stay unread in {agent}'s inbox if it returns. "
-                f"(cc-cosem-platform class.)")
-            escalations.append({"kind": "dead-agent", "agent": agent, "ids": ids})
-        for r in capped:  # (B) one page + quiesce per stuck ROW
-            rid, ta = _row_id(r), _to_agent(r)
-            mark([rid])
-            escalate(
-                f"[wake-backstop] row {rid} to {ta} un-drained past the re-wake cap — needs a human",
-                f"TL;DR: directed row {rid} to {ta} stayed unread past the re-wake cap "
-                f"(~{cap_age_s}s, ~{WAKE_SWEEP_CAP_N} pokes). The sweep STOPPED poking + quiesced it "
-                f"(skipped_at) + escalated ONCE. It is still read_at IS NULL in {ta}'s OWN inbox, so "
-                f"{ta}'s normal reconcile still drains it — quiescing only stops the sweep's redundant "
-                f"re-wakes. ACTION: nudge {ta}, or route to lane_wedge if it's genuinely stuck.")
-            escalations.append({"kind": "capped", "id": rid, "agent": ta})
+                f"[wake-backstop] directed rows rotting to dead agent {agent} — quiesced once",
+                f"TL;DR: {len(newly)} directed row(s) to {agent} (ids={newly}) are past the "
+                f"re-wake cap AND {agent} is GONE on every host — no agent_status heartbeat "
+                f"(base-inclusive) fresher than {gone_window_s}s; desired_state={ds!r} (not up). "
+                f"Re-poking a dead agent forever is pointless, so I quiesced them (set skipped_at) "
+                f"+ escalated ONCE. They are still read_at IS NULL in {agent}'s inbox. ACTION: "
+                f"re-address/clean these rows, or if {agent} should be alive, revive it — CLEARING "
+                f"skipped_at re-delivers them to the sweep. (cc-cosem-platform class.)")
+            escalations.append({"kind": "dead-foreign", "agent": agent, "ids": newly})
 
     return {"considered": len(rows), "targets": targets, "woke": woke, "results": results,
             "capped": [_row_id(r) for r in capped], "unreachable": unreachable,
-            "dead_owned": dead_owned, "left_foreign": left_foreign,
-            "escalations": escalations}
+            "dead_foreign": dead_foreign, "left_alive": left_alive, "vetoed": vetoed,
+            "lookup_failed": lookup_failed, "escalations": escalations}
 
 
 def main() -> int:
