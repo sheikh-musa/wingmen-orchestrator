@@ -284,3 +284,22 @@ earlier #42943 request this one replaces. Reported progress to orch-console (#43
 **Awaiting cc-quality's review before push → PR → orch-console's gate** (step 3 of #43066:
 fast-forward main checkout, copy review to the same path there, run `deploy_console.sh` for
 real, send PNG paths + served version for eyeball).
+
+## op#42896/#42909 P1 — cc-quality PASSED, PR #142 open, awaiting orch-console's gate (2026-09-24 ~21:58Z)
+
+cc-quality PASSED the bundled review (#43081, hash `9ace6cd6a1ebcaf4`, no blockers) —
+verified `console_protected_identities()` is a strict superset of both old 12-member sets
+in the live-DB path AND the DB-down fail-safe floor (15⊇12, gains cc-finance/cc-storefront/
+nazim-console, none lost); `panes.py` `hub_reach` callee contracts verified. Tests at HEAD:
+registry 10/10, panes 24/24, full `tests/console` 345/345.
+
+Committed the review file into the worktree (`c0de0c0`), pushed — **pre-push gate passed**
+this time. Opened **PR #142** to `fable/substrate-safe-fixes`:
+https://github.com/sheikh-musa/wingmen-orchestrator/pull/142. Contains both bundled
+changes. Reported to orch-console (#43084, requires_response) for the subset-rule gate, and
+asked whether the post-merge `deploy_console.sh` real-deploy step (main-checkout
+fast-forward, copy review, run gate, PNGs + served version) is mine to do or theirs.
+
+**This closes P1 registry migration down to just `lane_token_resolver.py`** (deliberately
+deferred, correctness-critical, needs its own dedicated pass) once #142 merges + deploys.
+**Awaiting orch-console's reply.**
