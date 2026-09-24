@@ -43,6 +43,7 @@ VENV_PY="$ORCH_DIR/.venv/bin/python3"
 # flip tool AND scripts/lib/model_precedence.sh (the launch cascade) so the carve-out can't
 # be enforced here but not at launch — the exact gap that let cc-storefront launch on Sonnet.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/auditor_lanes.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/protected_sessions_guard.sh"
 DEFAULT_MODEL="claude-opus-4-8"
 
 resolve() {  # alias|full-id -> full model id
@@ -90,17 +91,11 @@ done
 
 if [ "$LIVE" -eq 1 ]; then
   [ -x "$NUDGE" ] || { echo "ERROR: $NUDGE not found/executable — cannot flip live lanes safely" >&2; exit 3; }
-  # Fail CLOSED (orch-console ruling, bus #43044): if the registry CLI errors or
-  # returns nothing, we cannot tell a singleton session from a worker lane — refuse
-  # the whole --live flip rather than guess with an empty/partial CORE_LANES (which
-  # would silently expose a singleton to a /model nudge).
-  ALL_PROTECTED="$("$VENV_PY" -m nervous_system.protected_agents sessions 2>/dev/null)" \
-    || { echo "ERROR: could not read the protected-sessions registry — refusing --live (fail-closed, nothing flipped)" >&2; exit 5; }
-  [ -n "$ALL_PROTECTED" ] || { echo "ERROR: protected-sessions registry returned EMPTY — refusing --live (fail-closed, nothing flipped)" >&2; exit 5; }
-  CORE_LANES=""
-  for s in $ALL_PROTECTED; do
-    printf '%s ' $AUDITOR_LANES | grep -Fqw -- "$s" || CORE_LANES="$CORE_LANES $s"
-  done
+  # Fail CLOSED (orch-console ruling #43044, hardened per #43051): core_lanes_or_refuse
+  # (scripts/lib/protected_sessions_guard.sh) refuses outright — never proceeds with an
+  # empty/partial CORE_LANES — on a registry-CLI error, empty output, OR a result
+  # missing either non-negotiable strategic brain (cai/orch), even one that "succeeded".
+  CORE_LANES="$(core_lanes_or_refuse)" || exit 5
   echo "Flipping running lanes to $FULL (verified submit)…"
   flipped=0; skipped=0
   while IFS= read -r sess; do

@@ -15,16 +15,23 @@ Backed by the `protected_agents` table (migration 066_protected_agents_registry_
 added `kind`, `tmux_session`, `boots_from_env_only` on top of the pre-existing
 agent_id/reason/added_by/added_at columns).
 
-Fail-safe default: on any DB error, `protected_agent_ids()` returns a hardcoded
-FALLBACK set (the union of every known hardcoded list as of 2026-09-24) rather
-than an empty set — this guards destructive-op protection logic (a query that
-returns "nobody is protected" on a transient DB blip would be catastrophic; a
-stale-but-safe fallback is the correct fail mode here, mirroring app.py's own
-existing `except Exception` fallback pattern this module is replacing).
+Fail-safe default: `protected_agent_ids()` / `protected_tmux_sessions()` /
+`tmux_session_for()` / `boots_from_env_only()` all fall back to a hardcoded
+FALLBACK set on TWO failure modes, not just one — a raised DB error, AND a read
+that SUCCEEDS but is missing a core member (`_CORE_REQUIRED_AGENT_IDS`: cai,
+cc-orchestrator, orch-console, cc-fleet-health). The second mode was a real gap
+found in review (bus #43051, 2026-09-24): a wrong DSN or an RLS role filtering
+every row out returns [] without raising, which is just as dangerous as an
+unreachable DB but was not caught by an `except Exception` alone. See
+`_safe_registry_rows()` — the single gate every accessor routes through. A
+transient blip returning "nobody is protected" would be catastrophic; a
+stale-but-safe fallback, logged loudly, is the correct fail mode here.
 """
 from __future__ import annotations
 
 import os
+import sys
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -64,6 +71,17 @@ PROTECTED_NON_AGENT_SESSIONS = ("fleet-console",)
 _FALLBACK_PROTECTED_SESSIONS = frozenset({
     "nazim", "cai", "orch", "orchestrator", "fleet-health",
     "fleet-console", "quality",
+})
+
+# FAIL-OPEN GUARD (orch-console review, bus #43051, 2026-09-24): a registry read
+# that SUCCEEDS but returns too few rows (wrong DSN, an RLS role filtering
+# everything out, a truncated migration) is NOT a raised exception -- without
+# this check it would silently produce an empty/near-empty protected set, which
+# is exactly as dangerous as the DB-unreachable case both accessors already
+# guard against, but was NOT caught by the `except Exception` fallback. Any read
+# missing one of these agent_ids is treated as untrustworthy, same as an error.
+_CORE_REQUIRED_AGENT_IDS = frozenset({
+    "cai", "cc-orchestrator", "orch-console", "cc-fleet-health",
 })
 
 
@@ -108,27 +126,58 @@ def protected_agents(dsn: Optional[str] = None) -> list[ProtectedAgent]:
         conn.close()
 
 
+def _safe_registry_rows(dsn: Optional[str] = None) -> Optional[list[ProtectedAgent]]:
+    """The live rows, or None if this read must NOT be trusted — a raised DB
+    error, OR a read that succeeded but is missing one of _CORE_REQUIRED_AGENT_IDS
+    (bus #43051: a successful-but-empty/partial read is just as dangerous as an
+    exception and was NOT previously caught). Every accessor below must treat
+    None as "fall back to the static floor", never as "the registry says nobody
+    is protected". Logs LOUD (stderr + a warning) on either failure mode so a
+    silently-degraded registry doesn't go unnoticed."""
+    try:
+        rows = protected_agents(dsn)
+    except Exception as exc:  # noqa: BLE001 — dead-man fallback, must never propagate
+        msg = f"protected_agents: DB read failed ({exc!r}) — falling back to the static floor"
+        print(msg, file=sys.stderr)
+        warnings.warn(msg, stacklevel=2)
+        return None
+    ids = {a.agent_id for a in rows}
+    missing = _CORE_REQUIRED_AGENT_IDS - ids
+    if missing:
+        msg = (
+            f"protected_agents: registry read is missing core member(s) {sorted(missing)} "
+            f"(got {len(rows)} row(s)) — falling back to the static floor rather than "
+            f"trust a suspect read"
+        )
+        print(msg, file=sys.stderr)
+        warnings.warn(msg, stacklevel=2)
+        return None
+    return rows
+
+
 def protected_agent_ids(dsn: Optional[str] = None) -> frozenset[str]:
     """The set every consumer that just needs membership-testing should use.
-    Fails safe (see module docstring) to the hardcoded union fallback on any
-    DB error — never returns an empty set, never raises."""
-    try:
-        return frozenset(a.agent_id for a in protected_agents(dsn))
-    except Exception:  # noqa: BLE001 — dead-man fallback, must never propagate
+    Fails safe (see module docstring) to the hardcoded union fallback on any DB
+    error OR an untrustworthy read (see _safe_registry_rows) — never returns an
+    empty set, never raises."""
+    rows = _safe_registry_rows(dsn)
+    if rows is None:
         return _FALLBACK_PROTECTED
+    return frozenset(a.agent_id for a in rows)
 
 
 def tmux_session_for(agent_id: str, dsn: Optional[str] = None) -> Optional[str]:
-    """The tmux session name this agent_id boots under, or None if unconfirmed.
+    """The tmux session name this agent_id boots under, or None if unconfirmed
+    OR the registry read itself is untrustworthy (see _safe_registry_rows).
     None must be treated as "unknown", never as "this agent has no session" —
     several agent_ids have a real session but it isn't sourced/confirmed yet
     (see migration 066's column comment)."""
-    try:
-        for a in protected_agents(dsn):
-            if a.agent_id == agent_id:
-                return a.tmux_session
-    except Exception:  # noqa: BLE001
-        pass
+    rows = _safe_registry_rows(dsn)
+    if rows is None:
+        return None
+    for a in rows:
+        if a.agent_id == agent_id:
+            return a.tmux_session
     return None
 
 
@@ -139,17 +188,18 @@ def protected_tmux_sessions(dsn: Optional[str] = None) -> frozenset[str]:
     scripts/fleet_model.sh). Union of: every registry row's tmux_session (migration
     066) + tmux_session_aliases (migration 067, e.g. cc-orchestrator's 'orch' +
     'orchestrator') + PROTECTED_NON_AGENT_SESSIONS (services with no agent_id at
-    all, e.g. 'fleet-console'). Fails safe to _FALLBACK_PROTECTED_SESSIONS (never
-    empty, never raises) -- same dead-man rationale as protected_agent_ids()."""
-    try:
-        sessions = set(PROTECTED_NON_AGENT_SESSIONS)
-        for a in protected_agents(dsn):
-            if a.tmux_session:
-                sessions.add(a.tmux_session)
-            sessions.update(a.tmux_session_aliases)
-        return frozenset(sessions)
-    except Exception:  # noqa: BLE001 — dead-man fallback, must never propagate
+    all, e.g. 'fleet-console'). Fails safe to _FALLBACK_PROTECTED_SESSIONS on a DB
+    error OR an untrustworthy read (see _safe_registry_rows) — never empty, never
+    raises."""
+    rows = _safe_registry_rows(dsn)
+    if rows is None:
         return _FALLBACK_PROTECTED_SESSIONS
+    sessions = set(PROTECTED_NON_AGENT_SESSIONS)
+    for a in rows:
+        if a.tmux_session:
+            sessions.add(a.tmux_session)
+        sessions.update(a.tmux_session_aliases)
+    return frozenset(sessions)
 
 
 def boots_from_env_only(agent_id: str, dsn: Optional[str] = None) -> bool:
@@ -157,13 +207,15 @@ def boots_from_env_only(agent_id: str, dsn: Optional[str] = None) -> bool:
     set (currently just 'cai') -- see migration 066's column comment for why this
     is a filter over the registry rather than a second list. NOT YET consumed by
     lane_token_resolver.py itself in this pass (deliberately deferred, see
-    reports/substrate-ihsanification-next-moves-op42896.md)."""
-    try:
-        for a in protected_agents(dsn):
-            if a.agent_id == agent_id:
-                return a.boots_from_env_only
-    except Exception:  # noqa: BLE001
-        pass
+    reports/substrate-ihsanification-next-moves-op42896.md). Returns False (the
+    already-conservative default) if the registry read is untrustworthy — see
+    _safe_registry_rows."""
+    rows = _safe_registry_rows(dsn)
+    if rows is None:
+        return False
+    for a in rows:
+        if a.agent_id == agent_id:
+            return a.boots_from_env_only
     return False
 
 

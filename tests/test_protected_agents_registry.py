@@ -26,8 +26,10 @@ import re
 
 import pytest
 
+import nervous_system.protected_agents as pa
 from nervous_system.protected_agents import (
     PROTECTED_NON_AGENT_SESSIONS,
+    ProtectedAgent,
     protected_agent_ids,
     protected_tmux_sessions,
 )
@@ -240,3 +242,86 @@ def test_no_new_hardcoded_agent_id_lists():
         f"If it's a false positive, add it to a documented exclusion with a "
         f"one-line reason -- do not silently widen this test."
     )
+
+
+# ---------------------------------------------------------------------------
+# FAIL-OPEN regression tests (orch-console review, bus #43051, 2026-09-24).
+#
+# A registry read that SUCCEEDS but returns too few rows (wrong DSN, an RLS
+# role filtering everything out, a truncated migration) is NOT a raised
+# exception -- before this fix it was not caught by the `except Exception`
+# fallback in protected_agent_ids() / protected_tmux_sessions(), so it would
+# silently produce an empty (or near-empty) protected set. Consequences named
+# in review: lane_winddown.may_wind_down() would let cai/orch/nazim/fleet-
+# health be wound down; fleet_model.sh's empty-output guard wouldn't fire
+# (non-empty output, just short); fleet_health_boundaries.SINGLETON_BODIES
+# (== protected_agent_ids() since commit 6bcc583) would empty the CAI-RESP-501
+# red-reset guard too. These monkeypatch protected_agents() directly so the
+# scenario is exercised deterministically, not left to hoping the live DB
+# happens to misbehave during a test run.
+# ---------------------------------------------------------------------------
+
+_HEALTHY_ROW = ProtectedAgent(
+    agent_id="cai", kind="always-on-singleton", tmux_session="cai",
+    boots_from_env_only=True, reason="test row", tmux_session_aliases=(),
+)
+
+
+def test_empty_rows_falls_back_agent_ids(monkeypatch):
+    monkeypatch.setattr(pa, "protected_agents", lambda dsn=None: [])
+    assert pa.protected_agent_ids() == pa._FALLBACK_PROTECTED
+
+
+def test_empty_rows_falls_back_tmux_sessions(monkeypatch):
+    monkeypatch.setattr(pa, "protected_agents", lambda dsn=None: [])
+    assert pa.protected_tmux_sessions() == pa._FALLBACK_PROTECTED_SESSIONS
+
+
+def test_rows_missing_a_core_member_falls_back_agent_ids(monkeypatch):
+    # Has 3 of the 4 required core members -- missing cc-fleet-health.
+    rows = [
+        ProtectedAgent("cai", None, "cai", True, None, ()),
+        ProtectedAgent("cc-orchestrator", None, "orch", False, None, ("orchestrator",)),
+        ProtectedAgent("orch-console", None, "nazim", False, None, ()),
+    ]
+    monkeypatch.setattr(pa, "protected_agents", lambda dsn=None: rows)
+    assert pa.protected_agent_ids() == pa._FALLBACK_PROTECTED
+
+
+def test_rows_missing_a_core_member_falls_back_tmux_sessions(monkeypatch):
+    # The EXACT scenario named in review: only the non-agent session survives
+    # (e.g. every real agent row got filtered out but this one somehow didn't).
+    rows: list[ProtectedAgent] = []
+    monkeypatch.setattr(pa, "protected_agents", lambda dsn=None: rows)
+    result = pa.protected_tmux_sessions()
+    assert result == pa._FALLBACK_PROTECTED_SESSIONS
+    assert result != frozenset(pa.PROTECTED_NON_AGENT_SESSIONS)
+
+
+def test_healthy_full_read_does_not_fall_back(monkeypatch):
+    """Sanity check the guard isn't OVER-firing: a read WITH every core member
+    (plus extras) must be trusted and used as-is, not silently swapped for the
+    static fallback."""
+    rows = [
+        ProtectedAgent("cai", None, "cai", True, None, ()),
+        ProtectedAgent("cc-orchestrator", None, "orch", False, None, ("orchestrator",)),
+        ProtectedAgent("orch-console", None, "nazim", False, None, ()),
+        ProtectedAgent("cc-fleet-health", None, "fleet-health", False, None, ()),
+        ProtectedAgent("cc-quality", None, "quality", False, None, ()),
+    ]
+    monkeypatch.setattr(pa, "protected_agents", lambda dsn=None: rows)
+    ids = pa.protected_agent_ids()
+    assert ids == {r.agent_id for r in rows}
+    assert "cc-storefront" not in ids  # not silently widened to the fallback set
+    sessions = pa.protected_tmux_sessions()
+    assert sessions == {"cai", "orch", "orchestrator", "nazim", "fleet-health", "quality", "fleet-console"}
+
+
+def test_db_error_still_falls_back_agent_ids(monkeypatch):
+    """The original (pre-#43051) failure mode still works -- a raised
+    exception must still fall back, not just the new empty/partial case."""
+    def _raise(dsn=None):
+        raise RuntimeError("simulated DB outage")
+    monkeypatch.setattr(pa, "protected_agents", _raise)
+    assert pa.protected_agent_ids() == pa._FALLBACK_PROTECTED
+    assert pa.protected_tmux_sessions() == pa._FALLBACK_PROTECTED_SESSIONS
