@@ -26,11 +26,24 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from nervous_system.protected_agents import protected_tmux_sessions  # noqa: E402
+
 _REPO = Path(__file__).resolve().parent.parent.parent
 
-# Not lanes. Ending one of these is not elasticity, it is an outage. Hard-coded here rather
-# than left to each caller's memory — the caller who forgets is exactly the failure mode.
-SINGLETONS = {"nazim", "cai", "orch", "orchestrator", "fleet-health", "fleet-console", "quality"}
+# Not lanes. Ending one of these is not elasticity, it is an outage. may_wind_down() below
+# reads protected_tmux_sessions() LIVE on every call (op#42896/#42909 P1) instead of a frozen
+# copy — it fails safe to the exact same 7-name union on any DB error, so this stays testable
+# without a live database (the whole point of this module, per its own docstring) while also
+# picking up new singletons the registry learns about without a second edit here.
+#
+# SINGLETONS itself stays as a module attribute, computed once at import, ONLY for backward
+# compatibility with nervous_system/console/app.py's `from ... import SINGLETONS` (app.py is
+# a separate, not-yet-migrated P1 site — console files need their own worktree branch +
+# cc-quality review, per orch-console #42988 — this is not a second copy of the list, just a
+# snapshot re-export so that import doesn't break). New code should call
+# protected_tmux_sessions() directly, never import SINGLETONS.
+SINGLETONS = protected_tmux_sessions()
 
 # A handoff older than this is not a restore point for a session that is about to cease to
 # exist. Deliberately tighter than self_recycle's 900s: a recycle can be re-run if the boot
@@ -53,7 +66,7 @@ def may_wind_down(
     REFUSED rather than treated as zero — a measurement whose tooling failed reports "could
     not measure", never a finding.
     """
-    if session in SINGLETONS:
+    if session in protected_tmux_sessions():
         return False, f"'{session}' is a SINGLETON body, not a lane — ending it is an outage, not elasticity"
 
     if not session_exists(session):

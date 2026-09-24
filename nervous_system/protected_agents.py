@@ -56,6 +56,16 @@ _FALLBACK_PROTECTED = frozenset({
 # test asserting this never leaks into protected_agent_ids().
 PROTECTED_NON_AGENT_SESSIONS = ("fleet-console",)
 
+# Fail-safe fallback for protected_tmux_sessions() ONLY -- same dead-man
+# rationale as _FALLBACK_PROTECTED above (staleness can only ever make this
+# MORE conservative). This is the union of every tmux-session name either
+# scripts/lib/lane_winddown.py's SINGLETONS or scripts/fleet_model.sh's
+# CORE_LANES protected before their op#42896/#42909 P1 migration.
+_FALLBACK_PROTECTED_SESSIONS = frozenset({
+    "nazim", "cai", "orch", "orchestrator", "fleet-health",
+    "fleet-console", "quality",
+})
+
 
 @dataclass(frozen=True)
 class ProtectedAgent:
@@ -64,6 +74,7 @@ class ProtectedAgent:
     tmux_session: Optional[str]
     boots_from_env_only: bool
     reason: Optional[str]
+    tmux_session_aliases: tuple[str, ...] = ()
 
 
 def _connect(dsn: Optional[str] = None):
@@ -84,11 +95,15 @@ def protected_agents(dsn: Optional[str] = None) -> list[ProtectedAgent]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT agent_id, kind, tmux_session, boots_from_env_only, reason "
+                "SELECT agent_id, kind, tmux_session, boots_from_env_only, reason, "
+                "tmux_session_aliases "
                 "FROM public.protected_agents"
             )
             rows = cur.fetchall()
-        return [ProtectedAgent(*row) for row in rows]
+        return [
+            ProtectedAgent(*row[:5], tmux_session_aliases=tuple(row[5] or ()))
+            for row in rows
+        ]
     finally:
         conn.close()
 
@@ -117,6 +132,26 @@ def tmux_session_for(agent_id: str, dsn: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def protected_tmux_sessions(dsn: Optional[str] = None) -> frozenset[str]:
+    """The set of tmux SESSION NAMES a winddown/model-flip/etc. path must never
+    touch -- a different vocabulary than protected_agent_ids() (agent_id), for
+    the sites that key off the tmux session directly (scripts/lib/lane_winddown.py,
+    scripts/fleet_model.sh). Union of: every registry row's tmux_session (migration
+    066) + tmux_session_aliases (migration 067, e.g. cc-orchestrator's 'orch' +
+    'orchestrator') + PROTECTED_NON_AGENT_SESSIONS (services with no agent_id at
+    all, e.g. 'fleet-console'). Fails safe to _FALLBACK_PROTECTED_SESSIONS (never
+    empty, never raises) -- same dead-man rationale as protected_agent_ids()."""
+    try:
+        sessions = set(PROTECTED_NON_AGENT_SESSIONS)
+        for a in protected_agents(dsn):
+            if a.tmux_session:
+                sessions.add(a.tmux_session)
+            sessions.update(a.tmux_session_aliases)
+        return frozenset(sessions)
+    except Exception:  # noqa: BLE001 — dead-man fallback, must never propagate
+        return _FALLBACK_PROTECTED_SESSIONS
+
+
 def boots_from_env_only(agent_id: str, dsn: Optional[str] = None) -> bool:
     """True for the narrow scripts/lib/lane_token_resolver.py _NO_POINTER_SINGLETONS
     set (currently just 'cai') -- see migration 066's column comment for why this
@@ -130,3 +165,27 @@ def boots_from_env_only(agent_id: str, dsn: Optional[str] = None) -> bool:
     except Exception:  # noqa: BLE001
         pass
     return False
+
+
+def _main() -> int:
+    """CLI for bash consumers (scripts/fleet_model.sh) that can't import this
+    module directly. `sessions` prints protected_tmux_sessions() space-separated
+    on one line -- the exact shape scripts/fleet_model.sh's old CORE_LANES="a b c"
+    literal was, for a drop-in `CORE_LANES="$(python3 -m nervous_system.protected_agents sessions)"`.
+    protected_tmux_sessions() itself never raises (fails safe internally), so this
+    always prints something and exits 0 -- callers should still treat empty output
+    or a nonzero exit as "cannot determine the protected set" and fail CLOSED
+    (protect everything, wind/flip nothing) rather than proceed with no exclusion
+    at all, per orch-console's ruling (bus #43044)."""
+    import sys
+
+    if len(sys.argv) != 2 or sys.argv[1] != "sessions":
+        print("usage: python -m nervous_system.protected_agents sessions", file=sys.stderr)
+        return 2
+    print(" ".join(sorted(protected_tmux_sessions())))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(_main())

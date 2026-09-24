@@ -29,25 +29,26 @@ import pytest
 from nervous_system.protected_agents import (
     PROTECTED_NON_AGENT_SESSIONS,
     protected_agent_ids,
+    protected_tmux_sessions,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The hardcoded sets NOT YET migrated to the accessor, as of this pass --
-# see reports/substrate-ihsanification-next-moves-op42896.md for the full
-# inventory. Both remaining tmux-session-vocabulary sites share a REAL,
-# verified structural blocker (2026-09-24 re-check), not just deferral by
-# habit: (1) "fleet-console" is a launchd Python SERVER (dev.wingmen.fleet-
-# console, scripts/fleet_model.sh:27), not a claude agent -- it has no
-# agent_id and doesn't belong in an agent registry at all; (2) the registry's
-# protected_agents.tmux_session column holds ONE session per agent_id, but
-# cc-orchestrator needs TWO ("orch" live / "orchestrator" idle, per
-# ORCH-TOPOLOGY-001) and today has tmux_session=NULL for both. A mechanical
-# migration here would silently drop outage protection for 3 of 7 names --
-# needs a schema/accessor design decision (multi-session support, or a
-# separate non-agent-service protection list for fleet-console), not a
-# drive-by swap. Flagged to cc-fleet-health (bus, op#42896 P1 continuation).
-_REMAINING_HARDCODED_SETS = {
+# agent_id-keyed sets (not tmux-session-named) that SHOULD already be subsets
+# of the registry.
+_AGENT_ID_KEYED_REMAINING = {
+    "scripts/lib/lane_token_resolver.py _NO_POINTER_SINGLETONS": {"cai"},
+}
+
+# tmux-SESSION-keyed sets, migrated onto protected_tmux_sessions() as of
+# op#42896/#42909 P1 (2026-09-24, migration 067 + orch-console ruling #43044:
+# fleet-console -> PROTECTED_NON_AGENT_SESSIONS, cc-orchestrator's 2nd session
+# -> tmux_session_aliases). Kept here as a PERMANENT regression test, not
+# deleted after the migration landed -- "the 7 names each file protects ⊆ the
+# accessor's output, asserted by total count [missing-set difference], not the
+# enumerated list [never assert equality to a fixed set, which would break the
+# instant the registry legitimately grows]" (orch-console, #43044 condition 3).
+_TMUX_SESSION_KEYED_REMAINING = {
     "scripts/lib/lane_winddown.py SINGLETONS": {
         "nazim", "cai", "orch", "orchestrator", "fleet-health",
         "fleet-console", "quality",
@@ -57,14 +58,16 @@ _REMAINING_HARDCODED_SETS = {
     },
 }
 
-# agent_id-keyed sets (not tmux-session-named) that SHOULD already be subsets
-# of the registry -- these are the ones the superset test actually enforces
-# meaningfully (the tmux-session-named sets above use a different vocabulary
-# entirely and can't be compared to agent_id set membership directly; they're
-# listed for documentation/tracking, not asserted against here).
-_AGENT_ID_KEYED_REMAINING = {
-    "scripts/lib/lane_token_resolver.py _NO_POINTER_SINGLETONS": {"cai"},
-}
+
+def test_accessor_superset_of_every_hardcoded_tmux_session_set():
+    registry = protected_tmux_sessions()
+    for source, hardcoded in _TMUX_SESSION_KEYED_REMAINING.items():
+        missing = hardcoded - registry
+        assert not missing, (
+            f"{source} protects {missing!r} that protected_tmux_sessions() does "
+            f"NOT -- this would mean {source} losing real outage protection. "
+            f"Registry currently: {sorted(registry)}"
+        )
 
 
 def test_accessor_superset_of_every_hardcoded_agent_id_set():
@@ -107,10 +110,8 @@ def test_non_agent_sessions_never_leak_into_agent_id_registry():
 # had previously catalogued -- direct proof the enforcement mechanism works,
 # not just a passing check:
 _KNOWN_HARDCODED_LIST_FILES = {
-    "scripts/lib/lane_winddown.py",
     "nervous_system/console/app.py",
     "scripts/lib/lane_token_resolver.py",
-    "scripts/fleet_model.sh",
     "nervous_system/console/hosted_server.py",
 }
 

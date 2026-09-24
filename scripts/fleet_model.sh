@@ -22,12 +22,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORCH_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ORCH_DIR/.fleet_model"
 NUDGE="$SCRIPT_DIR/lane_nudge.sh"
-# Sessions the live-flip must NEVER send /model into: orch (hub) + cai are the
-# strategic core brains (pass --all to include them); nazim (this console body),
-# fleet-health (the SRE), and fleet-console (a Python server, not a claude REPL —
-# a /model nudge would corrupt it) are Mini infrastructure bodies, never engineer
-# lanes. Excluding them keeps --live scoped to the actual engineer lanes.
-CORE_LANES="orch cai nazim fleet-health fleet-console"
+VENV_PY="$ORCH_DIR/.venv/bin/python3"
+# CORE_LANES (sessions the live-flip must NEVER send /model into: orch/cai = strategic
+# core brains, pass --all to include; nazim/fleet-health/fleet-console = Mini
+# infrastructure bodies, never engineer lanes) is computed LAZILY inside the --live
+# block below (op#42896/#42909 P1) — it reads the shared protected_tmux_sessions()
+# registry via a tiny CLI instead of its own copy, MINUS $AUDITOR_LANES (cc-quality/
+# cc-storefront get their own, more nuanced carve-out right below, not a blanket skip).
+# Deferred to the --live block so a plain `fleet_model.sh <model>` (no --live) never
+# needs the DB at all.
 # FULL-tier auditors (cai CAI-RESP-1170): cc-quality + cc-storefront render governance
 # verdicts on money-path / live-tenant work, which requires being PINNED to claude-opus-4-8
 # EXACTLY. A blanket `fleet_model.sh sonnet --live` conservation flip once swept them to
@@ -87,6 +90,17 @@ done
 
 if [ "$LIVE" -eq 1 ]; then
   [ -x "$NUDGE" ] || { echo "ERROR: $NUDGE not found/executable — cannot flip live lanes safely" >&2; exit 3; }
+  # Fail CLOSED (orch-console ruling, bus #43044): if the registry CLI errors or
+  # returns nothing, we cannot tell a singleton session from a worker lane — refuse
+  # the whole --live flip rather than guess with an empty/partial CORE_LANES (which
+  # would silently expose a singleton to a /model nudge).
+  ALL_PROTECTED="$("$VENV_PY" -m nervous_system.protected_agents sessions 2>/dev/null)" \
+    || { echo "ERROR: could not read the protected-sessions registry — refusing --live (fail-closed, nothing flipped)" >&2; exit 5; }
+  [ -n "$ALL_PROTECTED" ] || { echo "ERROR: protected-sessions registry returned EMPTY — refusing --live (fail-closed, nothing flipped)" >&2; exit 5; }
+  CORE_LANES=""
+  for s in $ALL_PROTECTED; do
+    printf '%s ' $AUDITOR_LANES | grep -Fqw -- "$s" || CORE_LANES="$CORE_LANES $s"
+  done
   echo "Flipping running lanes to $FULL (verified submit)…"
   flipped=0; skipped=0
   while IFS= read -r sess; do
