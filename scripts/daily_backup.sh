@@ -119,39 +119,54 @@ backup_one() {
     [ -z "$TABLE" ] && continue
     echo -n "  [$STORE] $TABLE... "
 
-    # Live authoritative count.
-    LIVE=$("$PSQL" "$DSN_L" -tAc "SELECT count(*) FROM \"public\".\"$TABLE\";" 2>/dev/null || echo "ERR")
-    if [ "$LIVE" = "ERR" ]; then
-      echo "✗ count(*) failed"
-      FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE(count)"
-      continue
-    fi
-
-    # Dump every row as newline-delimited JSON (no max_rows cap). Lift the
-    # statement timeout in-session (see note above) by feeding SET + \copy to
-    # one psql via stdin.
+    # SAME-SNAPSHOT count + dump (op#42888): the count and the \copy used to
+    # run as two SEPARATE psql sessions, so a live write landing between them
+    # on an actively-written table (e.g. substrate/pool_usage_history, an
+    # append-only metrics table) made GOT (post-write) != LIVE (pre-write),
+    # failing LOUD on a false positive every time a row happened to land in
+    # that window. Fix: one psql session, one REPEATABLE READ transaction —
+    # the count and the \copy see the IDENTICAL snapshot, so a concurrent
+    # write literally cannot cause a mismatch. A real truncation/corruption
+    # still fails loud (ON_ERROR_STOP aborts the whole session non-zero; a
+    # genuine short dump still shows GOT != LIVE against that same snapshot).
     OUT="$OUTDIR/$TABLE.ndjson"
+    TXN_OUT=$(mktemp)
     if ! printf '%s\n' \
+          "BEGIN ISOLATION LEVEL REPEATABLE READ;" \
           "SET statement_timeout=0;" \
           "\\copy (SELECT row_to_json(t) FROM \"public\".\"$TABLE\" t) TO '$OUT'" \
-        | "$PSQL" "$DSN_L" -tA > /dev/null 2>"$OUTDIR/$TABLE.err"; then
-      echo "✗ \\copy failed"
+          "SELECT count(*) FROM \"public\".\"$TABLE\";" \
+          "COMMIT;" \
+        | "$PSQL" "$DSN_L" -tAq -v ON_ERROR_STOP=1 > "$TXN_OUT" 2>"$OUTDIR/$TABLE.err"; then
+      echo "✗ dump/count transaction failed"
       cat "$OUTDIR/$TABLE.err" || true
-      FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE(copy)"
+      FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE(txn)"
+      rm -f "$TXN_OUT"
       continue
     fi
     rm -f "$OUTDIR/$TABLE.err"
 
-    # Completeness assertion: backed-up rows must equal live count.
+    # -tAq suppresses headers/footers and BEGIN/COPY/COMMIT command tags, so
+    # stdout should hold exactly the count(*) result — take the last
+    # non-empty line defensively in case any stray notice leaks through.
+    LIVE=$(grep -v '^[[:space:]]*$' "$TXN_OUT" | tail -1)
+    rm -f "$TXN_OUT"
+    if [ -z "$LIVE" ] || ! [[ "$LIVE" =~ ^[0-9]+$ ]]; then
+      echo "✗ count(*) unparseable (got: '$LIVE')"
+      FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE(count)"
+      continue
+    fi
+
+    # Completeness assertion: backed-up rows must equal the SAME-SNAPSHOT count.
     GOT=$(wc -l < "$OUT" | tr -d ' ')
     if [ "$GOT" != "$LIVE" ]; then
-      echo "✗ TRUNCATION: backed up $GOT but live has $LIVE"
+      echo "✗ TRUNCATION: backed up $GOT but live (same snapshot) has $LIVE"
       FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE($GOT/$LIVE)"
       continue
     fi
 
     gzip -f "$OUT"
-    echo "✓ $GOT rows (matches live)"
+    echo "✓ $GOT rows (matches live, same-snapshot)"
     BACKED=$((BACKED + 1)); ST_BACKED=$((ST_BACKED + 1))
   done
 
