@@ -56,13 +56,44 @@ from datetime import datetime, timezone
 
 import psycopg
 
+sys.path.insert(0, str(pathlib.Path(os.environ.get("ORCH_DIR", pathlib.Path.home() / "wingmen/orchestrator"))))
+from scripts.lib import hub_reach  # noqa: E402
+
 ORCH = pathlib.Path(os.environ.get("ORCH_DIR", pathlib.Path.home() / "wingmen/orchestrator"))
 CLIENT_TAG = "gazzabyte-irsyad"
 
 # Same VPS creds as scripts/reset_hub_remote.sh (root@ over tailscale, dedicated key).
-VPS_HOST = os.environ.get("WINGMEN_VPS_HOST", "91.107.235.77")
 VPS_KEY = os.environ.get("WINGMEN_VPS_KEY", str(pathlib.Path.home() / ".ssh/wingmen_vps"))
 VPS_USER = os.environ.get("WINGMEN_VPS_USER", "root")
+
+
+def _resolve_vps_host(conn) -> str | None:
+    """Op#42933 (2026-09-24): this used to hardcode the decommissioned wingmen-core
+    IP as VPS_HOST's default. Resolve from orch_lease.holder_host via hub_reach
+    instead, same pattern as reset_hub_remote.sh/singleton_liveness.py.
+
+    WINGMEN_VPS_HOST, if set, is an explicit operator override and always wins.
+    Otherwise: this script only knows how to scp from the wingmen-core canonical
+    group directly (root@host:path, single hop) — it does NOT implement gzb's
+    reach (a different user/home-dir layout, -home-gazzai- not -home-wingmen-).
+    An unset/unknown/gzb-resolved holder returns None so the caller treats this
+    exactly like any other best-effort scp miss (logged, skipped, never fatal) —
+    never a guess at a host/path this script can't actually pull from correctly.
+    """
+    override = os.environ.get("WINGMEN_VPS_HOST")
+    if override:
+        return override
+    holder = hub_reach.read_holder_host(conn)
+    info = hub_reach.hub_reach_for_holder(holder)
+    if info["known"] and info["host"] == "wingmen-core":
+        return "91.107.235.77"
+    return None
+
+
+# Resolved once per invocation in main() (the holder won't change mid-run) and read
+# by _scp_pull. None means "resolved to nothing reachable this script supports" —
+# every scp attempt then hits the same best-effort skip path as a real scp failure.
+_VPS_HOST: str | None = None
 # Canonical hub tg_media dir. Row paths embed a `nervous_system/../logs/tg_media`
 # relative hop; we anchor on the basename and rebuild the dir to avoid `..` in scp.
 HUB_MEDIA_DIR = os.environ.get(
@@ -147,7 +178,11 @@ def _scp_pull(basename: str, dest: pathlib.Path, timeout: int = 90) -> bool:
     if not _is_safe_basename(basename):
         log(f"REFUSE scp for unsafe basename: {basename!r}")
         return False
-    remote = f"{VPS_USER}@{VPS_HOST}:{HUB_MEDIA_DIR}/{basename}"
+    if not _VPS_HOST:
+        log("scp skipped: VPS host not resolved (holder isn't wingmen-core, or unknown — "
+            "see scripts/lib/hub_reach.py; set WINGMEN_VPS_HOST to override)")
+        return False
+    remote = f"{VPS_USER}@{_VPS_HOST}:{HUB_MEDIA_DIR}/{basename}"
     tmp = dest.with_suffix(dest.suffix + ".part")
     cmd = ["scp", "-i", VPS_KEY, "-o", "ConnectTimeout=15", "-o", "BatchMode=yes",
            remote, str(tmp)]
@@ -343,6 +378,8 @@ def main() -> None:
                     help="print the local path for a hub path or msg id (pull on-demand)")
     args = ap.parse_args()
     with psycopg.connect(_dsn(), connect_timeout=15) as conn:
+        global _VPS_HOST
+        _VPS_HOST = _resolve_vps_host(conn)
         if args.resolve:
             p = resolve(conn, args.resolve)
             if p:
