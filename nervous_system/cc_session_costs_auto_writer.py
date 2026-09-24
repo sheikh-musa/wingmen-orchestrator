@@ -102,6 +102,7 @@ def lane_dir_map_from_fleet_lanes(dsn: str) -> dict:
     resolve canonically via _DIR_TO_CC). Fail-safe: any DB error returns {} (no
     dynamic coverage) rather than crashing the writer."""
     import psycopg
+    from nervous_system.protected_agents import protected_agent_ids
     out: dict = {}
     try:
         with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
@@ -110,10 +111,15 @@ def lane_dir_map_from_fleet_lanes(dsn: str) -> dict:
             # of them must resolve to that base — distinct-on-base dropped the
             # non-first perimeter worktrees to None (op#10550). The sub_tag map
             # then distinguishes the instances.
+            # op#42896/#42909 P1: singleton exclusion now reads the ONE registry
+            # (nervous_system.protected_agents) instead of its own hardcoded
+            # literal — same `dsn` this connection already uses, so this reads
+            # correctly on whichever host runs this writer (Mini or gzb), not
+            # necessarily this process's own DATABASE_URL.
             cur.execute(
                 "SELECT base_agent_id, worktree_path FROM fleet_lanes "
-                "WHERE worktree_path IS NOT NULL AND base_agent_id NOT IN "
-                "  ('cc-orchestrator','cai','orch-console','cc-fleet-health')")
+                "WHERE worktree_path IS NOT NULL AND base_agent_id != ALL(%s)",
+                (list(protected_agent_ids(dsn)),))
             for base, wt in cur.fetchall():
                 d = _mangle_worktree(wt)
                 out[d] = base
@@ -142,13 +148,16 @@ def lane_subtag_map_from_fleet_lanes(dsn: str) -> dict:
     to no sub_tag (unchanged). Fail-safe: {} on any DB error."""
     import psycopg
     import collections
+    from nervous_system.protected_agents import protected_agent_ids
     out: dict = {}
     try:
         with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
+            # op#42896/#42909 P1: see the same-file sibling function above for
+            # why this reads protected_agent_ids(dsn) instead of a literal.
             cur.execute(
                 "SELECT base_agent_id, lane, worktree_path FROM fleet_lanes "
-                "WHERE worktree_path IS NOT NULL AND base_agent_id NOT IN "
-                "  ('cc-orchestrator','cai','orch-console','cc-fleet-health')")
+                "WHERE worktree_path IS NOT NULL AND base_agent_id != ALL(%s)",
+                (list(protected_agent_ids(dsn)),))
             rows = cur.fetchall()
         by_base = collections.Counter(r[0] for r in rows)
         for base, lane, wt in rows:
