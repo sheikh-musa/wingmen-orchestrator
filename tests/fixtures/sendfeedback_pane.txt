@@ -1,0 +1,8 @@
+│ │ stated "no false page was ever sent" and wrote "0 pages ever sent" into a  │
+│ │ git commit…                                                                │
+│ 1 to review · 2 to send · 0 to dismiss                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+                                        ✔ Update installed · Restart to update
+────────────────────────────────────────────────────────────────────────────────
+❯ 📥 1 new bus msg(s) — reconcile your inbox (agent_messages
