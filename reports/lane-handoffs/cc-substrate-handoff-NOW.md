@@ -1,3 +1,25 @@
+# cc-substrate handoff (updated 2026-09-24 ~09:20Z, bus #42862/#42867→#42871)
+
+## STATUS (2026-09-24 ~09:20Z): Hermes read-only inventory + move plan DONE, posted #42871; musa2-oauth-token rename task REFUSED (live pointer found)
+
+Musa confirmed Hermes (`/root/.hermes/` on wingmen-core) is his own agent, wants it moved to the **Mac Mini** (not gzb — residency, Gazzabyte's own premises). Full inventory + move plan written into `reports/wingmen-core-drain-cutover-plan-op20655.md` under "HERMES INVENTORY + MOVE PLAN" (both copies, synced). **Nothing stopped, nothing copied — read-only pass as instructed.**
+
+- **How it runs:** root's own `systemd --user` instance (`~/.config/systemd/user/`, NOT system-wide systemd — why earlier scans missed it). 3 units: `hermes-gateway` (enabled, running since Aug 19), `hermes-dashboard` (running but NOT enabled — wouldn't survive a reboot as-is, independent latent gap), `hermes-gateway-cosem-exams` (disabled, inactive right now).
+- **FLAG for Musa, not resolved by me:** the cosem-exams profile's working dir + the fleet's own `COSEM_EXAMS_BOT_TOKEN` env var are a real name-level correlation (values never compared) — worth his explicit confirmation before treating Hermes as purely personal / the move plan as covering everything it does.
+- **Size:** ~2.2GB total, ~2.1GB is fully reinstallable code (venv+node_modules). Real state to migrate is ~75MB (state.db, profiles/, skills/, sessions/, kanban.db, config.yaml, auth.json, etc. — full table in the doc).
+- **Named credentials only** (values never read): ANTHROPIC_API_KEY/TOKEN, DASHSCOPE_API_KEY, GOOGLE_API_KEY, TELEGRAM_BOT_TOKEN + allowed-users/home-channel, an auth.json provider pool. No wingmen-core-hardcoded inbound path found.
+- **Collision check:** port 9119 free on the Mini, no bot-token *variable-name* overlap with any fleet token — value-level collision can't be ruled out without comparing tokens, the cosem-exams flag above is the one worth confirming.
+- **Move plan written** (not executed): reinstall code fresh as a non-root user on the Mini, copy only the ~75MB state over the `wingmen_vps`-key channel (same pattern as the gzb-vpn.conf vault migration), 2 launchd units mirroring the systemd ones, stop-on-core → copy → start-on-Mini with no dual-run window (Telegram long-polling breaks with 2 live instances), verify via a live Telegram round-trip — **that verify step needs Musa himself** to send/confirm the test message, flagged as not something I can self-certify. Rollback = 1-command `systemctl --user start` on wingmen-core, nothing deleted until proven.
+- **Open items for Musa before execution:** (i) cosem-exams correlation, (ii) root-vs-non-root assumption in the install (worth checking `setup-hermes.sh` for a hard root requirement), (iii) where credentials land long-term (vault vs. local-only, his call since this is personal not fleet material).
+
+**Separately, bus #42862's (b) follow-up — musa2-oauth-token rename: REFUSED, correctly.** Found a LIVE (non-backup) pointer file on the Mini, `.group_default_token.irsyad`, that resolves exactly to the stale `musa2-oauth-token` path. The resolver (`scripts/lib/lane_token_resolver.py`) fails OPEN on an unreadable pointer target — silently falls through to the fleet default token, no error. Renaming would have risked silently booting any Mini-launched irsyad-family lane onto the wrong account (the exact "false-green/wrong-billing divergence" that module's own docstring warns about). Left in place, flagged in the plan doc — don't rename it without first confirming `.group_default_token.irsyad` is genuinely vestigial (no irsyad lane actually boots from this Mini, only from gzb, as far as established doctrine goes — but confirm before assuming, don't re-attempt the rename off this note alone).
+
+Reported combined as bus #42871 (thread on #42867, also cross-referenced on #42862).
+
+**Remaining power-off blockers, unchanged: (c) cosem-runner-to-Mini still needs a human with sudo at this keyboard; Hermes now has its plan written but explicit execution still needs Musa's answers on the 3 open items above.**
+
+---
+
 # cc-substrate handoff (updated 2026-09-24 ~06:35Z, bus #42854→#42857)
 
 ## STATUS (2026-09-24, later): safe-prep (a)-(d) on the 5 blockers DONE, posted #42857 — awaiting orch-console decisions, (e) Hermes untouched
