@@ -1,3 +1,21 @@
+# cc-substrate handoff (updated 2026-09-24 ~19:15Z, bus #42882→#42883)
+
+## STATUS (2026-09-24 ~19:15Z): Hermes move EXECUTED — Mini gateway+dashboard up, awaiting Musa's Telegram confirmation for cutover
+
+Musa greenlit the Hermes move (op#22276). Executed per orch-console's #42872 decisions + #42882's two hard guards (G1: never touch `/Users/sheikhmusa/wingmen`, inventory `/root/wingmen` before copying anything; G2: no client credentials into the hermes user). Full log: `reports/wingmen-core-drain-cutover-plan-op20655.md` under "HERMES MOVE — EXECUTED" (both copies, synced).
+
+**G1 finding:** `/root/wingmen` (8.1GB — stale fleet-orchestrator checkout + client project dirs, untouched since before 09-17) is NOT Hermes-relevant. Copied nothing from it. **Separate finding surfaced, not Hermes-related — flag for orch-console/Musa before power-off:** `/root/wingmen/backups/` is actively written DAILY by `scripts/daily_backup.sh`'s off-site push (`GZB_HOST="hub-vps"` hardcoded) — the Mini's nightly client-silo (ihsanos-ceayj, irsyad-goumlyne) backup depends on wingmen-core existing for off-site redundancy. **No prior inventory round caught this — needs a new destination before power-off**, or the push fails nightly (loud-alerted, not silent, but redundancy is gone until fixed).
+
+**G2: clean**, no client credentials in Hermes' config.
+
+**Execution:** dedicated non-admin `hermes` user created (uid 503), uv+Python 3.12.14 installed, code cloned fresh from upstream at the exact commit wingmen-core runs (not copied), core stopped first (confirmed via `ps`, zero processes) before ~74MB of real state was copied over (incl. `skills/`, confirmed genuine curated state not stock — `.curator_backups/`/`.archive/` history back to August). Both `hermes-gateway`+`hermes-dashboard` installed as LaunchDaemons (mirrors `mini-ci-runner`'s pattern), bootstrapped, verified: dashboard HTTP 200, gateway has 2 ESTABLISHED TCP connections to a real Telegram datacenter IP (`149.154.166.110:443`) — genuinely connected. `cosem-exams` profile copied but NOT activated (stays disabled per #42872(i); its config references `/root/wingmen/projects/cosem-platform` as cwd — dormant, unresolved, only matters if that profile is ever enabled). wingmen-core's original install confirmed untouched beyond the stop (2.2GB/51 entries intact) — 1-command rollback (`systemctl --user start hermes-gateway hermes-dashboard` as root there) available.
+
+**NOT declaring this "live"** — per orch-console's explicit instruction, that's Musa's call after he messages Hermes on Telegram and gets a real reply. Reported as bus #42883 (thread on #42882/#42872/#42867).
+
+**Remaining power-off blockers: Musa's Telegram confirmation for Hermes, + the newly-found daily_backup.sh off-site destination gap.** Nothing further for this lane until one of those resolves.
+
+---
+
 # cc-substrate handoff (updated 2026-09-24 ~09:20Z+later, bus #42869→#42873)
 
 ## STATUS (2026-09-24, later): item (c) cosem runner → Mini DONE, verified — posted #42873. Only Hermes remains as a power-off blocker.
