@@ -74,6 +74,11 @@ _ESCALATE_TO = os.environ.get("WAKE_SWEEP_ESCALATE_TO", "orch-console")
 # ignore the page. So we QUIESCE (stop re-poking) at cap_age but only ESCALATE a row that is STILL
 # unread this long after it was sent. Much longer than cap_age (~6.5m) on purpose.
 STUCK_PAGE_AGE_S = int(os.environ.get("WAKE_SWEEP_STUCK_PAGE_AGE_S", "1800"))  # 30 min
+# UPPER bound on the stuck-page scan (Nazim #43073): the ("stuck", row_id) once-guard is IN-MEMORY,
+# so every daemon restart (deploy / KeepAlive / reboot) would otherwise re-page EVERY quiesced-but-
+# unread row however old — a page burst that grows over time. A row stuck longer than this has
+# already paged once in some daemon's life, or is a dead-foreign/decision problem, not a NEW page.
+STUCK_PAGE_MAX_AGE_S = int(os.environ.get("WAKE_SWEEP_STUCK_PAGE_MAX_AGE_S", "86400"))  # 24 h
 
 # DEAD-FOREIGN gone-window (Nazim #42994 (2), amend B): an agent is "gone on every host" only
 # if NO matching agent_status row (base-inclusive) has a heartbeat fresher than this. Much
@@ -118,6 +123,7 @@ _STUCK_SQL = """
       AND is_test IS NOT TRUE
       AND priority IS DISTINCT FROM 'P3'
       AND created_at < now() - make_interval(secs => %s)
+      AND created_at > now() - make_interval(secs => %s)
     ORDER BY to_agent, created_at
 """
 
@@ -174,12 +180,13 @@ def _fetch_rows(grace_s: int):
         return cur.fetchall()
 
 
-def _fetch_stuck_rows(stuck_page_age_s: int):
-    """Rows QUIESCED but STILL unread past stuck_page_age_s — the (B) stuck-page candidates."""
+def _fetch_stuck_rows(stuck_page_age_s: int, stuck_page_max_age_s: int = STUCK_PAGE_MAX_AGE_S):
+    """Rows QUIESCED but STILL unread in the window [stuck_page_age_s, stuck_page_max_age_s] — the
+    (B) stuck-page candidates. The UPPER bound stops a restart from re-paging very old rows."""
     if not _DSN:
         raise RuntimeError("wake_backstop_sweep: no DATABASE_URL/SUPABASE_DB_URL")
     with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
-        cur.execute(_STUCK_SQL, (stuck_page_age_s,))
+        cur.execute(_STUCK_SQL, (stuck_page_age_s, stuck_page_max_age_s))
         return cur.fetchall()
 
 
@@ -306,6 +313,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                base_of=_base_of, hub_lease_fresh=_default_hub_lease_fresh,
                pane_state=_default_pane_state, stuck_rows=None,
                stuck_page_age_s: int = STUCK_PAGE_AGE_S,
+               stuck_page_max_age_s: int = STUCK_PAGE_MAX_AGE_S,
                escalated_seen=None, gone_window_s: int = GONE_WINDOW_S,
                cap_age_s: int = WAKE_SWEEP_CAP_AGE_S, now: float | None = None,
                now_dt=None, dry_run: bool = False) -> dict:
@@ -344,7 +352,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     if rows is None:
         rows = _fetch_rows(grace_s)
         if stuck_rows is None:  # production: fetch both. A test that injects `rows` but not
-            stuck_rows = _fetch_stuck_rows(stuck_page_age_s)  # `stuck_rows` gets [] (see below).
+            stuck_rows = _fetch_stuck_rows(stuck_page_age_s, stuck_page_max_age_s)  # → [] below.
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
     seen = _ESCALATED_SEEN if escalated_seen is None else escalated_seen
 
@@ -455,6 +463,13 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     stuck_paged: list = []
     stuck_by_agent: dict = {}
     for r in (stuck_rows or []):   # None (a test injected `rows` only) → treated as empty
+        ca = _created_at(r)  # UPPER age bound (Nazim #43073): a row older than max_age has already
+        if ca is not None:   # paged once in some daemon's life — never re-page it on a restart.
+            try:
+                if (now_dt - ca).total_seconds() > stuck_page_max_age_s:
+                    continue
+            except Exception:  # noqa: BLE001 — un-ageable → let the SQL fetch's bound govern
+                pass
         if should_backstop_wake(_to_agent(r), _rf(r, 2, "message_type"), _rf(r, 3, "requires_response"),
                                 _rf(r, 4, "priority"), _rf(r, 5, "is_test")):
             stuck_by_agent.setdefault(_to_agent(r), []).append(_row_id(r))

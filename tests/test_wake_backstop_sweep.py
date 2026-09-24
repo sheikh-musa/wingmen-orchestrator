@@ -513,5 +513,23 @@ def test_stuck_page_ignores_ineligible_recipients():
     assert pages == [] and r["stuck_paged"] == []
 
 
+def test_stuck_page_upper_age_bound_row_older_than_max_never_paged_43073():
+    # Nazim #43073: the in-memory once-guard resets on restart, so an UPPER bound stops a restart
+    # re-paging very old rows. A row 25h old (past the 24h default max) is NEVER stuck-paged.
+    marked, pages, mark, page = _cas_collector()
+    old = [_row_ts("cc-quality", 201, age_s=25 * 3600)]   # 25h > 24h max
+    r = wbs.sweep_once(rows=[], stuck_rows=old, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],  # alive (would page but for age)
+                       pane_state=lambda a: "busy", mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and r["stuck_paged"] == []
+    # sanity: the SAME row 2000s old (inside the window) WOULD page — proving age is the reason
+    marked2, pages2, mark2, page2 = _cas_collector()
+    inwin = [_row_ts("cc-quality", 201, age_s=2000)]
+    r2 = wbs.sweep_once(rows=[], stuck_rows=inwin, wake=lambda a, **k: {"woke": False},
+                        now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                        pane_state=lambda a: "busy", mark=mark2, escalate=page2, escalated_seen=set())
+    assert len(pages2) == 1 and r2["stuck_paged"] == ["cc-quality"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
