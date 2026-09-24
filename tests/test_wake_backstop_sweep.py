@@ -134,69 +134,40 @@ def _row_ts(to_agent, id=1, age_s=0, priority="P2", is_test=False, rr=False, mt=
 
 def _collector():
     marked, pages = [], []
-    return marked, pages, (lambda ids: marked.extend(ids)), (lambda s, b: pages.append((s, b)))
+
+    def mark(ids):
+        marked.extend(ids)
+        return list(ids)          # mark returns the ids it set (CAS contract)
+
+    return marked, pages, mark, (lambda s, b: pages.append((s, b)))
 
 
-def test_unreachable_OWNED_target_skipped_and_escalated_once_not_woken():
-    # (A): an OWNED agent that resolves to 'no live session' -> genuinely dead -> quiesce +
-    # escalate, not woke. owns injected True so the test is host-independent.
+def test_fresh_row_to_unreachable_agent_is_not_quiesced_waits_for_cap():
+    # Nazim #42994 amend B: a FRESH (under-cap) row to an agent with no local live pane is NOT
+    # quiesced — quiesce only ever happens past cap. The fresh row drives a wake (which comes
+    # back 'no live session' -> observability in `unreachable`) and is left unread.
     marked, pages, mark, page = _collector()
-    rows = [_row_ts("cc-cosem-platform", 101), _row_ts("cc-cosem-platform", 102)]
+    rows = [_row_ts("cc-cosem-platform", 101), _row_ts("cc-cosem-platform", 102)]  # age_s=0 (fresh)
     res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
-                         now_dt=_NOW, mark=mark, escalate=page, owns=lambda a: True)
-    assert res["woke"] == []
-    assert set(marked) == {101, 102}          # ALL its rows quiesced
-    assert res["unreachable"] == ["cc-cosem-platform"] and res["dead_owned"] == ["cc-cosem-platform"]
-    assert len(pages) == 1                     # ONE page for the dead agent (not per-row)
-
-
-def test_unreachable_FOREIGN_target_left_alone_not_quiesced_not_escalated():
-    # (A) HOST SCOPE (Nazim 37519 / the 451e110 class): a NON-owned (cross-host) agent that
-    # resolves to 'no live session' is ALIVE-elsewhere, NOT dead -> leave its rows untouched
-    # for the owning host's instance. NEVER quiesce (would defeat the owner's sweep) or escalate.
-    marked, pages, mark, page = _collector()
-    # hub meets the CAI-451 narrow floor only with P0/P1 + requires_response=True
-    rows = [_row_ts("cc-orchestrator", 111, priority="P0", rr=True),
-            _row_ts("cc-orchestrator", 112, priority="P0", rr=True)]
-    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
-                         now_dt=_NOW, mark=mark, escalate=page, owns=lambda a: False)
-    assert marked == [] and pages == []               # left completely alone
-    assert res["left_foreign"] == ["cc-orchestrator"] and res["dead_owned"] == []
-
-
-def test_default_owns_mini_owns_all_but_hub(monkeypatch):
-    monkeypatch.delenv("WAKE_SWEEP_OWNED_AGENTS", raising=False)
-    monkeypatch.setenv("WAKE_SWEEP_HOST", "Sheikhs-Mini")
-    assert wbs._default_owns_agent("cc-quality") is True
-    assert wbs._default_owns_agent("cai") is True
-    assert wbs._default_owns_agent("cc-orchestrator") is False   # the cross-host hub — NOT owned
-
-
-def test_default_owns_unknown_host_owns_nothing_failsafe(monkeypatch):
-    monkeypatch.delenv("WAKE_SWEEP_OWNED_AGENTS", raising=False)
-    monkeypatch.setenv("WAKE_SWEEP_HOST", "some-new-gzb-vps")
-    # an unconfigured foreign host owns NOBODY for (A) -> never false-DEADs a cross-host body
-    assert wbs._default_owns_agent("cc-quality") is False
-    assert wbs._default_owns_agent("cc-orchestrator") is False
-
-
-def test_default_owns_explicit_env_wins(monkeypatch):
-    monkeypatch.setenv("WAKE_SWEEP_OWNED_AGENTS", "cc-orchestrator")
-    monkeypatch.setenv("WAKE_SWEEP_HOST", "wingmen-core")
-    assert wbs._default_owns_agent("cc-orchestrator") is True    # VPS instance owns only the hub
-    assert wbs._default_owns_agent("cc-quality") is False
-
-
-def test_row_past_cap_age_skipped_and_escalated_not_woken():
-    # (B): a row aged past CAP_AGE is stuck -> quiesce + escalate, and does NOT drive a wake
-    marked, pages, mark, page = _collector()
-    woke_calls = []
-    rows = [_row_ts("cai", 201, age_s=10_000)]                 # way past cap
-    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: (woke_calls.append(a), {"woke": True})[1],
                          now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page)
-    assert woke_calls == []                     # capped row is NOT woken
-    assert marked == [201] and res["capped"] == [201]
-    assert len(pages) == 1
+    assert marked == [] and pages == []                # fresh -> never quiesced
+    assert res["unreachable"] == ["cc-cosem-platform"]
+    assert res["dead_foreign"] == []
+
+
+def test_capped_row_to_lease_fresh_hub_is_live_stuck_not_dead_the_451e110_class():
+    # The cross-host hub (cc-orchestrator) has NO local pane and NO heartbeat — its liveness is
+    # the orch_lease. A capped row to a LEASE-FRESH hub is ALIVE, so it is handled as live-stuck
+    # (B), NEVER dead-quiesced (the 451e110 false-DEAD class). matching_hbs=[] but lease fresh.
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-orchestrator", 111, age_s=_PAST_CAP, priority="P0", rr=True),
+            _row_ts("cc-orchestrator", 112, age_s=_PAST_CAP, priority="P0", rr=True)]
+    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+                         now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page,
+                         matching_hbs=lambda a: [], desired_state_of=lambda a: None,
+                         base_of=lambda a: None, hub_lease_fresh=lambda: True, escalated_seen=set())
+    assert res["live_stuck"] == ["cc-orchestrator"] and res["dead_foreign"] == []
+    assert set(marked) == {111, 112} and len(pages) == 1   # B: quiesced + escalated once (not dead)
 
 
 def test_live_fresh_row_still_woken_and_not_escalated():
@@ -209,25 +180,32 @@ def test_live_fresh_row_still_woken_and_not_escalated():
     assert res["unreachable"] == []
 
 
-def test_capped_and_unreachable_row_processed_once_capped_path():
-    # a row BOTH past-cap AND to an unreachable agent: partitioned to capped, never woken,
-    # marked exactly once (no double-processing across the two give-up paths)
+def test_capped_dead_foreign_row_never_drives_a_wake_and_is_marked_once():
+    # a past-cap row to a gone agent: capped rows never drive a wake; the dead-foreign path
+    # marks it exactly once (deps injected so it is hermetic — no DB).
     marked, pages, mark, page = _collector()
     woke_calls = []
     res = wbs.sweep_once(rows=[_row_ts("cc-cosem-platform", 501, age_s=10_000)],
                          wake=lambda a, **k: (woke_calls.append(a), {"woke": False, "why": "no live session"})[1],
-                         now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page)
+                         now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page,
+                         matching_hbs=lambda a: [], desired_state_of=lambda a: "down",
+                         base_of=lambda a: None, escalated_seen=set())
     assert woke_calls == []                      # capped rows are pulled out before waking
     assert marked.count(501) == 1               # marked once, not twice
     assert res["unreachable"] == []             # never reached the wake/reachability path
+    assert res["dead_foreign"] == ["cc-cosem-platform"]
 
 
 def test_dry_run_mutates_nothing():
     marked, pages, mark, page = _collector()
     rows = [_row_ts("cc-cosem-platform", 601), _row_ts("cai", 602, age_s=10_000)]
     res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
-                         now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page, dry_run=True)
+                         now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page, dry_run=True,
+                         matching_hbs=lambda a: [], desired_state_of=lambda a: "down",
+                         base_of=lambda a: None, escalated_seen=set())
     assert marked == [] and pages == []         # observe-only: no quiesce, no escalation
+    # 601 (cc-cosem-platform, age 0) is FRESH -> wake path; 602 (cai) is capped+gone -> would-quiesce
+    assert res["dead_foreign"] == ["cai"]
 
 
 def test_legacy_6tuple_rows_never_capped():
@@ -287,6 +265,213 @@ def test_sql_predicate_selects_rotting_and_quiesces_on_read():
             cur.execute(wbs._SWEEP_SQL, (wbs.WAKE_SWEEP_GRACE_S,))
             assert mid not in [r[0] for r in cur.fetchall()], "read row still selected (no quiesce)"
         conn.rollback()
+
+
+# ---- DEAD-FOREIGN quiesce, substrate-liveness based (Nazim #42994 (2) + 4 amendments) ----
+# Replaces the owns()-scoped (A)/(B) give-up with a cross-host substrate-liveness rule:
+# quiesce a rotting row's agent ONLY when the row is past CAP_AGE AND the agent is gone on
+# EVERY host (no matching agent_status row — base-inclusive — with a heartbeat fresher than
+# GONE_WINDOW_S ~2h) AND desired_state is not 'up' (veto, fail-closed on lookup error).
+# CAS on skipped_at IS NULL is the once-guard: escalate only when the mark actually set rows.
+
+def _hb(age_s):
+    """A last_heartbeat that is age_s seconds before _NOW."""
+    return _NOW - timedelta(seconds=age_s)
+
+
+def _cas_collector():
+    """mark simulates the CAS `UPDATE ... WHERE skipped_at IS NULL RETURNING id`: it marks
+    only ids not already marked and RETURNS the newly-marked ids (so a 2nd sweep marks/returns
+    nothing). escalate records (subject, body)."""
+    marked, pages = [], []
+
+    def mark(ids):
+        new = [i for i in (ids or []) if i not in marked]
+        marked.extend(new)
+        return new
+
+    return marked, pages, mark, (lambda s, b: pages.append((s, b)))
+
+
+_PAST_CAP = 10_000   # well past cap_age_s=390
+
+
+def test_base_addressed_row_to_live_instance_is_not_quiesced_amendA():
+    # (A) agent_status is keyed by INSTANCE id (cc-substrate-1) with base in base_agent_id;
+    # bus rows address the BASE (cc-substrate). A base-inclusive match must find the live
+    # instance's fresh heartbeat and NOT quiesce. Without the base match this live lane would
+    # be called dead and its directed row silently dropped.
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-substrate", 101, age_s=_PAST_CAP)]
+    res = wbs.sweep_once(
+        rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+        now_dt=_NOW, cap_age_s=390,
+        matching_hbs=lambda a: [_hb(60)] if a == "cc-substrate" else [],   # cc-substrate-1 fresh
+        desired_state_of=lambda a: "up", base_of=lambda a: None,
+        mark=mark, escalate=page, escalated_seen=set())
+    # base-inclusive match finds cc-substrate-1's fresh hb -> ALIVE, so it is handled as
+    # live-but-stuck (B), NEVER as a dead agent. That is the amend-A protection.
+    assert "cc-substrate" not in res["dead_foreign"]
+    assert res["live_stuck"] == ["cc-substrate"] and marked == [101]
+
+
+def test_stale_heartbeat_under_gone_window_is_not_dead_amendB():
+    # (B) a stale heartbeat is not death — the hb daemon can die while the pane lives. A matching
+    # row with a heartbeat 1h old (< the 2h gone-window) means NOT gone -> handled as live-stuck,
+    # never as a dead agent.
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-someworker", 111, age_s=_PAST_CAP)]
+    res = wbs.sweep_once(
+        rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+        now_dt=_NOW, cap_age_s=390, gone_window_s=7200,
+        matching_hbs=lambda a: [_hb(3600)],   # 1h old -> stale but < 2h gone-window
+        desired_state_of=lambda a: "down", base_of=lambda a: None,
+        mark=mark, escalate=page, escalated_seen=set())
+    assert "cc-someworker" not in res["dead_foreign"]
+    assert res["live_stuck"] == ["cc-someworker"]   # stale<2h = alive-but-stuck (B), not dead
+
+
+def test_desired_state_up_vetoes_quiesce_amendC():
+    # (C) veto: never quiesce a lane the operator WANTS up, even if gone on every host — a
+    # wanted-up-but-dark lane is a page/flag (singleton/lane watchdog), not a delivery-drop.
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-wantedup", 121, age_s=_PAST_CAP)]
+    res = wbs.sweep_once(
+        rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+        now_dt=_NOW, cap_age_s=390,
+        matching_hbs=lambda a: [],             # gone everywhere
+        desired_state_of=lambda a: "up", base_of=lambda a: None,  # operator wants it up -> VETO
+        mark=mark, escalate=page, escalated_seen=set())
+    assert marked == [] and pages == []        # vetoed -> NOT quiesced, not escalated
+    assert res["vetoed"] == ["cc-wantedup"] and "cc-wantedup" not in res["dead_foreign"]
+
+
+def test_desired_state_lookup_error_fails_closed_escalates_not_quiesced_amendC():
+    # (C) fail-closed: if the desired_state lookup errors (DB error / ambiguous match) we can't
+    # prove it's safe to quiesce -> DO NOT quiesce; escalate for a human instead.
+    marked, pages, mark, page = _cas_collector()
+    def boom(a): raise RuntimeError("ambiguous fleet_lanes match")
+    rows = [_row_ts("cc-ambiguous", 131, age_s=_PAST_CAP)]
+    res = wbs.sweep_once(
+        rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+        now_dt=_NOW, cap_age_s=390,
+        matching_hbs=lambda a: [],             # gone everywhere
+        desired_state_of=boom, base_of=lambda a: None,
+        mark=mark, escalate=page, escalated_seen=set())
+    assert marked == []                        # fail-closed: never quiesce on an unproven check
+    assert len(pages) == 1                     # but DO escalate for a human
+    assert "cc-ambiguous" in res["lookup_failed"]
+
+
+def test_dead_foreign_quiesced_once_escalated_once_second_sweep_noop_amendD():
+    # (5) the whole point: a row past cap to an agent gone on EVERY host (no matching hb) and
+    # not wanted-up -> quiesce (CAS) + ONE escalation naming the agent, ids and evidence; a 2nd
+    # sweep over the same (now-marked) rows does nothing (skipped_at is the once-guard).
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-cosem-platform", 501, age_s=_PAST_CAP),
+            _row_ts("cc-cosem-platform", 502, age_s=_PAST_CAP)]
+    kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
+              now_dt=_NOW, cap_age_s=390, gone_window_s=7200,
+              matching_hbs=lambda a: [],           # gone on every host
+              desired_state_of=lambda a: "down",   # not wanted-up
+              base_of=lambda a: None, mark=mark, escalate=page, escalated_seen=set())
+    res1 = wbs.sweep_once(rows=rows, **kw)
+    assert set(marked) == {501, 502}               # both rows quiesced
+    assert res1["dead_foreign"] == ["cc-cosem-platform"]
+    assert len(pages) == 1                          # ONE page for the dead agent, not per-row
+    subj, body = pages[0]
+    assert "cc-cosem-platform" in subj
+    assert "501" in body and "502" in body          # names the row ids (evidence)
+    assert "skipped_at" in body                      # tells the human clearing it re-delivers
+    # 2nd sweep over the SAME rows: CAS mark returns nothing already-marked -> no-op
+    res2 = wbs.sweep_once(rows=rows, **kw)
+    assert set(marked) == {501, 502}               # unchanged
+    assert len(pages) == 1                          # NOT re-escalated
+
+
+def test_dead_foreign_matches_base_exactly_not_by_prefix():
+    # a sibling cosem lane (cc-cosem-adcda-1) being alive must NOT keep cc-cosem-platform alive:
+    # the match is exact (agent_id = X OR base_agent_id = X), never a 'cc-cosem%' prefix.
+    marked, pages, mark, page = _cas_collector()
+    def hbs(a):
+        # only cc-cosem-adcda has a live instance; cc-cosem-platform has none
+        return [_hb(60)] if a in ("cc-cosem-adcda", "cc-cosem-platform-never") else []
+    rows = [_row_ts("cc-cosem-platform", 601, age_s=_PAST_CAP)]
+    res = wbs.sweep_once(
+        rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+        now_dt=_NOW, cap_age_s=390, matching_hbs=hbs, base_of=lambda a: None,
+        desired_state_of=lambda a: "down", mark=mark, escalate=page, escalated_seen=set())
+    assert marked == [601]                          # still dead — sibling did not spare it
+    assert res["dead_foreign"] == ["cc-cosem-platform"]
+
+
+# ---- PR#139 review fixes (Nazim bus 43007): B-restore, human-filter, instance→base, guard ----
+
+def test_capped_row_to_ALIVE_agent_is_B_quiesced_and_escalated_once_not_dead():
+    # Problem 1 (restore B): a row stuck past cap to a LIVE agent (fresh hb) must escalate ONCE
+    # + quiesce (read_at stays NULL so its own reconcile drains) — NOT be left forever, and NOT
+    # be paged as a dead agent. 2nd sweep is a no-op (skipped_at once-guard via CAS mark).
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-quality", 201, age_s=_PAST_CAP)]
+    kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
+              now_dt=_NOW, cap_age_s=390, matching_hbs=lambda a: [_hb(60)],  # alive
+              desired_state_of=lambda a: "up", mark=mark, escalate=page, escalated_seen=set())
+    r1 = wbs.sweep_once(rows=rows, **kw)
+    assert marked == [201]                          # B quiesces the stuck row
+    assert len(pages) == 1 and "stuck" in (pages[0][0] + pages[0][1]).lower()
+    assert "cc-quality" not in r1["dead_foreign"]   # alive -> NOT a dead agent
+    assert r1["live_stuck"] == ["cc-quality"]
+    r2 = wbs.sweep_once(rows=rows, **kw)
+    assert marked == [201] and len(pages) == 1      # 2nd sweep no-op
+
+
+def test_capped_row_to_human_operator_is_never_classified_dead():
+    # Problem 2: `capped` classification must be filtered by should_backstop_wake, so a human /
+    # operator recipient (musa, cto-desktop — ineligible, no lane, no hb) is NEVER quiesced or
+    # paged as a "dead agent". They simply are not the backstop's business.
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("musa", 301, age_s=_PAST_CAP)]
+    r = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+                       now_dt=_NOW, cap_age_s=390, matching_hbs=lambda a: [],
+                       desired_state_of=lambda a: None, mark=mark, escalate=page, escalated_seen=set())
+    assert marked == [] and pages == []
+    assert r["dead_foreign"] == [] and "musa" not in r.get("live_stuck", [])
+
+
+def test_dead_instance_of_a_live_base_is_readdressed_not_quiesced():
+    # Problem 3 (finish amend A): a row to a DEAD instance (cc-irsyad-2, no rows) whose BASE
+    # (cc-irsyad) has a live instance must NOT be silently quiesced as dead — escalate ONCE
+    # "re-address to <base>" and leave it deliverable. Once-guarded (no skipped_at to lean on).
+    marked, pages, mark, page = _cas_collector()
+    hbs = lambda a: [_hb(60)] if a == "cc-irsyad" else []      # base alive, instance-2 gone
+    rows = [_row_ts("cc-irsyad-2", 401, age_s=_PAST_CAP)]
+    seen = set()
+    kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
+              now_dt=_NOW, cap_age_s=390, matching_hbs=hbs,
+              base_of=lambda a: "cc-irsyad" if a == "cc-irsyad-2" else None,
+              desired_state_of=lambda a: "down", mark=mark, escalate=page, escalated_seen=seen)
+    r1 = wbs.sweep_once(rows=rows, **kw)
+    assert marked == []                             # NOT quiesced (base is alive)
+    assert len(pages) == 1 and "cc-irsyad" in pages[0][1]  # re-address to base
+    assert r1["dead_foreign"] == [] and r1["readdress"] == ["cc-irsyad-2"]
+    r2 = wbs.sweep_once(rows=rows, **kw)
+    assert len(pages) == 1                          # once-guarded, not every sweep
+
+
+def test_lookup_failure_escalates_once_per_process_not_every_sweep():
+    # Problem 4: the fail-closed lookup-error escalation must NOT page every 60s sweep. A
+    # process-level seen-set guards it to the first failure per agent.
+    marked, pages, mark, page = _cas_collector()
+    def boom(a): raise RuntimeError("ambiguous fleet_lanes match")
+    rows = [_row_ts("cc-ambiguous", 131, age_s=_PAST_CAP)]
+    seen = set()
+    kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
+              now_dt=_NOW, cap_age_s=390, matching_hbs=lambda a: [],
+              desired_state_of=boom, mark=mark, escalate=page, escalated_seen=seen)
+    wbs.sweep_once(rows=rows, **kw)
+    wbs.sweep_once(rows=rows, **kw)
+    assert marked == []                             # fail-closed: never quiesced
+    assert len(pages) == 1                          # escalated ONCE, not per-sweep
 
 
 if __name__ == "__main__":
