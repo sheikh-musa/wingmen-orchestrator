@@ -33,14 +33,15 @@ IDLE_PANE = "\n".join([
 # The SendFeedback drafts dialog: a modal that intercepts keystrokes (so a plain
 # lane_nudge would type INTO it, e.g. hitting "send"). Its footer carries the
 # "to dismiss" option that the benign review widget below never has (Nazim #43083).
-SENDFEEDBACK_PANE = "\n".join([
-    "  Provide feedback to help improve Claude",
-    "  ❯ (draft)",
-    "  ─────────────────────────",
-    "  1 to review · 2 to send · 0 to dismiss",
-])
+# REAL capture (Nazim #43096 condition 1): last 8 lines of a fleet-health lane_nudge
+# capture — own-lane, no client content. Note the footer is NOT the last line (an
+# "Update installed" banner follows), which is why pane_is_menu scans tail -6, not -1.
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+SENDFEEDBACK_PANE = (_FIXTURES / "sendfeedback_pane.txt").read_text().rstrip("\n")
 # The benign subagent-review widget — NOT a wedge, must stay wakeable (memory
 # review-widget-is-not-a-wedge-signal). Same review/send footer but NO "to dismiss".
+# NEGATIVE control (no real capture existed in the own-lane corpus): the discriminator
+# under test is purely the ABSENCE of "to dismiss", so a minimal representation suffices.
 REVIEW_WIDGET_PANE = "\n".join([
     "  ● Reviewing proposed changes",
     "  ❯ ",
