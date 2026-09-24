@@ -303,3 +303,34 @@ fast-forward, copy review, run gate, PNGs + served version) is mine to do or the
 **This closes P1 registry migration down to just `lane_token_resolver.py`** (deliberately
 deferred, correctness-critical, needs its own dedicated pass) once #142 merges + deploys.
 **Awaiting orch-console's reply.**
+
+## op#42896/#42909 P1 — PR #142 MERGED + deployed, console files site CLOSED (2026-09-24 ~22:12Z)
+
+Orch-console PASSed conditional on CI (#43085: "same format as before"). CI showed
+`fail`, but diagnosed from the FAIL summary not the warning noise — fetched trunk's
+current tip (`5d23756`, just-merged PR #141) and diffed failing test-ids: PR #142 = 42
+failing, trunk = 42 failing, **identical sets**, `comm -23` empty both directions. Subset
+rule clean; CI's red was expected (trunk itself red on these pre-existing failures, not a
+regression this PR introduced).
+
+**Merged** (squash, matching #138/#139/#140 convention) as `819ae8c`. Deploy done per
+orch-console's 4 steps (#43085 — mine to run, main-checkout access + my change):
+1. fast-forwarded `~/wingmen/orchestrator` to `819ae8c` (clean FF; untracked/modified
+   runtime state files already sitting in that checkout didn't overlap, undisturbed)
+2. confirmed main-checkout hash MATCHES `9ace6cd6a1ebcaf4` (review file came along in the
+   FF, already committed on the branch) — did not stop/flag, since it matched
+3. ran `scripts/deploy_console.sh`, no skip flags: version-sync fc-v65/fc-v65/fc-v65 ✓,
+   `tests/console/test_app.py` 88 passed, render succeeded (PNGs at
+   `reports/console-deploy/9ace6cd6a1ebcaf4/{fleet,lanes}.png`), review present → kickstarted
+4. served version confirmed after a re-curl (the gate script's own inline check raced the
+   kickstart and came back empty first try — not a real problem): `{"version": "fc-v65",
+   "sha": "819ae8c"}`, sha matches the merge commit exactly. Live protected-lane-action
+   check: `POST /api/lane-down {"session":"cai","confirm":"cai"}` → **403** `{"error":
+   "'cai' is a protected body, not a worker lane"}` — `console_protected_identities()`
+   verified live over the real HTTP path, no unprotected lane touched.
+
+Reported full completion to orch-console (#43091).
+
+**P1 registry migration is now done except `lane_token_resolver.py`** (deliberately
+deferred — correctness-critical, needs its own dedicated pass, not a drive-by swap). P3
+(wire `deploy_console.sh` as first `quality_gate.py` consumer) still not started.
