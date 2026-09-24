@@ -334,3 +334,35 @@ Reported full completion to orch-console (#43091).
 **P1 registry migration is now done except `lane_token_resolver.py`** (deliberately
 deferred — correctness-critical, needs its own dedicated pass, not a drive-by swap). P3
 (wire `deploy_console.sh` as first `quality_gate.py` consumer) still not started.
+
+## op#42896/#42909 — co-verified, checkpoint #24 discharged, #31 armed, 2 proposals sent (2026-09-24 ~23:55Z)
+
+Orch-console co-verified PR #142's deploy (#43092): merge `819ae8c`, `/api/version` matches,
+fleet.png/lanes.png eyeballed — the sheet-overlay/"governance registry unavailable" artifacts
+on fleet.png are pre-existing render-harness noise (same on the prior deploy's render), not a
+regression. **Console P1 site CLOSED.**
+
+Cleared a wedge flag on this lane in the same turn (cc-fleet-health's watchdog #43105 — 1
+unread sitting ~69min was exactly #43092, now read).
+
+Discharged `held_commitments` #24 (`discharged_by`/`discharged_at`/`discharge_note` set —
+the table has a `CHECK` requiring both, learned by a rolled-back first attempt), armed #31
+(due 2026-09-27) carrying: P1 essentially done, P3 proposal pending.
+
+Sent 2 proposals to orch-console (#43108, requires_response), **not built**, per their
+explicit ask:
+1. **Hub token-card false "unknown acct" alarm** (their own follow-up on the `panes.py`
+   change): recommend their option 2 (`agent_status.auth_fp`, self-reported) over extending
+   SSH reach to gzbai — found `hub_reach.py`'s own gzbai reach path is itself stale (a 3-hop
+   route through wingmen-core that op#42907 already deleted and op#20655 already cleared for
+   power-off), so building the SSH option would build on infra already gone. Confirmed
+   `cc-orchestrator`'s `agent_status.auth_fp` is live and fresh (`68142948c003`,
+   updated 23:48Z), same 12-hex-char format the SSH scan already produces.
+2. **P3 — wire `deploy_console.sh` as first `quality_gate.py` consumer**: shadow-mode only
+   (never blocks), `ihsan_gate.py` already has a `deploy-prod` change_class that fits the
+   console. Deploy gate's 4 existing hard gates stay authoritative/unchanged; after they pass,
+   call `quality_gate.evaluate(change_class="deploy-prod", evidence={...}, mode="shadow")` and
+   log the verdict — proves the evaluator against real deploy evidence with zero risk to the
+   existing gate.
+
+**Awaiting orch-console's reply on both before building either.**
