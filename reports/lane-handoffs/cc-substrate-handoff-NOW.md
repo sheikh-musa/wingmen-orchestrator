@@ -1,4 +1,15 @@
-# cc-substrate handoff (updated 2026-09-24 ~09:20Z, bus #42862/#42867→#42871)
+# cc-substrate handoff (updated 2026-09-24 ~09:20Z+later, bus #42869→#42873)
+
+## STATUS (2026-09-24, later): item (c) cosem runner → Mini DONE, verified — posted #42873. Only Hermes remains as a power-off blocker.
+
+Musa sent the Mini's admin password; orch-console vaulted it as `mini_sudo_password` (#42869) and unblocked item (c). Executed exactly per the plan already on file: registered `mini-cosem-runner` on this Mac (labels `self-hosted,studio`, LaunchDaemon under the dedicated `ci-runner` user, mirrors `mini-ci-runner`'s exact template), confirmed running via `launchctl print`. Real verification, not just presence — both runners shared the `studio` label at the time, so this was checked, not assumed: re-ran run `34983610743` on `sheikh-musa/cosem-platform`, confirmed `runner_name=mini-cosem-runner` both mid-run and at genuine terminal completion (`conclusion=success`). Then confirmed `vps-cosem-runner` (wingmen-core) was idle before touching it, `systemctl stop` → `svc.sh uninstall` (required first, `config.sh remove` alone refuses) → `config.sh remove` — clean removal, confirmed via `gh api` that only `mini-cosem-runner` remains registered on cosem-platform. All temp registration-token files removed after use. Password never printed anywhere — vault→stdin-only-sudo→`sudo -k` discipline held throughout.
+
+Full writeup: `reports/wingmen-core-drain-cutover-plan-op20655.md` under "(c) Cosem-platform runner → Mini — DONE, verified" (both copies, synced; replaces the earlier BLOCKED note for this item). Reported as bus #42873 (thread on #42869/#42862/#42858).
+
+**Blocker #2 from the 09-24 inventory (cosem runner never migrated) is now CLOSED, alongside blocker #1 (ihsanos runner regression, closed earlier this round via item (d)).** The only remaining power-off blocker is Hermes — still fully read-only/hands-off per #42867, plan written (see the section below), execution needs Musa's answers on the 3 open items already flagged (cosem-exams token correlation, root-vs-non-root install assumption, where its credentials land long-term). Nothing further for this lane until Musa weighs in on Hermes.
+
+---
+
 
 ## STATUS (2026-09-24 ~09:20Z): Hermes read-only inventory + move plan DONE, posted #42871; musa2-oauth-token rename task REFUSED (live pointer found)
 
