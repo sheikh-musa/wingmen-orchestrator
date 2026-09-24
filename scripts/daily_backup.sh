@@ -27,25 +27,22 @@
 # via psql \copy (row_to_json) for human-readable, line-countable verification.
 # Falls back to paginated REST only if pg_dump/psql/DSN are unavailable.
 #
-# OFF-SITE (op#20655/#42890, 2026-09-24): client-silo dumps only, pushed
-# ENCRYPTED to gzb (the real Gazzabyte office LAN, gazzai@192.168.1.114) under
-# a dedicated non-login "wbackup" account restricted to a push+prune dispatch
-# wrapper (no shell, no read access to what it stores). Encryption happens on
-# THIS host with `age` BEFORE the file ever leaves it — gzb holds ciphertext
-# only, never plaintext, never the decryption key (that key lives in the fleet
-# vault as 'backup_age_key', never on gzb, never on the bus/TG).
+# OFF-SITE (op#20655/#42890/#42907, 2026-09-24): client-silo + substrate
+# dumps pushed ENCRYPTED to gzb over Tailscale (direct WireGuard P2P to
+# gzbai's tailnet IP, no relay) under a dedicated non-login "wbackup" account
+# restricted to a push+prune dispatch wrapper (no shell, no read access to
+# what it stores). Encryption happens on THIS host with `age` BEFORE the file
+# ever leaves it — gzb holds ciphertext only, never plaintext, never the
+# decryption key (that key lives in the fleet vault as 'backup_age_key',
+# never on gzb, never on the bus/TG).
 #
-# KNOWN GAP, not silently worked around: gzb's LAN (192.168.1.0/24) is only
-# reachable via a FortiGate split-tunnel VPN whose client (gzb-vpn.sh) is
-# Linux-specific tooling installed ON wingmen-core (hub-vps) — it hardcodes
-# wingmen-core's own default-gateway IP and uses `ip route`/`ip link`, neither
-# of which exist on this Mac. This script therefore currently relays the push
-# THROUGH wingmen-core (raises its VPN, tunnels the scp over an SSH
-# ProxyJump, tears the VPN down after) — meaning the off-site push still
-# depends on wingmen-core being alive, which defeats the point once that host
-# is decommissioned. Flagged to orch-console; NOT fixed here (porting a
-# default-route-manipulating script to the Mini safely is separate, real work
-# that deserves its own review, not something to rush inside a backup fix).
+# PRIOR GAP, now closed (op#42907, 2026-09-24): gzb's LAN was previously only
+# reachable via a FortiGate split-tunnel VPN relayed through wingmen-core
+# (hub-vps), meaning the off-site push depended on that host being alive.
+# Both hosts are already peers on the same Tailscale tailnet (live-verified
+# 2026-09-24, direct WireGuard path, no DERP relay, no wingmen-core involved)
+# — the push now goes straight over the tailnet IP. wingmen-core is no
+# longer touched anywhere in this off-site path.
 
 set -euo pipefail
 
@@ -300,28 +297,23 @@ backup_client_silo "ihsanos-ceayj"   "${IHSANOS_PROD_RO_DATABASE_URL:-}"
 backup_client_silo "irsyad-goumlyne" "${GOUMLYNE_RO_DATABASE_URL:-}"
 
 # ---------------------------------------------------------------------------
-# OFF-SITE PUSH (Musa op#21244 "dump it in gzbai"): mirror the CLIENT-silo
-# backups to the Gazzabyte VPS (hub-vps = root@91.107.235.77) so an
-# irreplaceable client-data copy survives a Mac Mini disk loss. CLIENT SILOS
-# ONLY — the substrate's ~360MB dump over the home uplink (~37KB/s observed)
-# would take hours nightly, and it is already covered by Supabase's own daily
-# backup + the local dump. Best-effort with a LOUD alert on failure: the local
-# dump above is the amanah guarantee, so a push failure must NOT fail the local
-# backup, but MUST be surfaced (a stale off-site copy is a real risk).
+# OFF-SITE PUSH (Musa op#21244 "dump it in gzbai"; extended to substrate
+# op#42891): mirror the local dumps to gzb directly over Tailscale (see file
+# header) so an irreplaceable client-data copy survives a Mac Mini disk loss.
+# Best-effort with a LOUD alert on failure: the local dump above is the
+# amanah guarantee, so a push failure must NOT fail the local backup, but
+# MUST be surfaced (a stale off-site copy is a real risk).
 # ---------------------------------------------------------------------------
 GZB_KEY="$HOME/.ssh/wbackup_gzb"
-GZB_RELAY="hub-vps"                 # wingmen-core, used ONLY as a ProxyJump to reach gzb's LAN over its VPN -- see KNOWN GAP comment above
-GZB_TARGET="wbackup@192.168.1.114"  # dedicated non-login account on gzb, push+prune only, no read/shell access
+GZB_TARGET="wbackup@100.77.251.8"   # dedicated non-login account on gzb, push+prune only, no read/shell access; Tailscale tailnet IP, direct, no relay
 # Public age recipient key -- NOT sensitive, encryption-only. The matching
 # private key lives in the fleet vault ('backup_age_key'), used only by the
 # separate restore-test, never by this nightly path.
 BACKUP_AGE_RECIPIENT="age13ufthckcg98lmj8nvfzpjq0tyqf0ky9fuxqzt9x7pacze0u40gvqmg0330"
 AGE_BIN="/usr/local/bin/age"
 if [ -f "$GZB_KEY" ] && [ -x "$AGE_BIN" ]; then
-  GZB_SSH="ssh -i $GZB_KEY -J $GZB_RELAY -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-  GZB_SCP="scp -O -i $GZB_KEY -J $GZB_RELAY -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-  # Raise the VPN relay on wingmen-core (idempotent; gzb-vpn.sh no-ops if already up).
-  ssh -o ConnectTimeout=15 -o BatchMode=yes "$GZB_RELAY" "sudo /usr/local/sbin/gzb-vpn.sh up" >/dev/null 2>&1 || true
+  GZB_SSH="ssh -i $GZB_KEY -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+  GZB_SCP="scp -O -i $GZB_KEY -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
   PUSH_FAIL=0
   # op#42891 (2026-09-24, Musa "do the same for the daily backups as well"):
   # extends the SAME encrypt+push+prune pattern to substrate, the one
@@ -371,7 +363,6 @@ if [ -f "$GZB_KEY" ] && [ -x "$AGE_BIN" ]; then
   # restricted account's fixed 'prune7' dispatch command (op#42890) --
   # the account has no shell, so it cannot self-prune on gzb's own cron.
   $GZB_SSH "$GZB_TARGET" prune7 >/dev/null 2>&1 || true
-  ssh -o ConnectTimeout=15 -o BatchMode=yes "$GZB_RELAY" "sudo /usr/local/sbin/gzb-vpn.sh down" >/dev/null 2>&1 || true
   if [ "$PUSH_FAIL" -gt 0 ]; then
     alert "⚠️ Daily backup: off-site push to gzb FAILED for $PUSH_FAIL store(s) — LOCAL backup is OK, but the off-site copy is stale. Check $TODAY_DIR/_gzb_*.err"
   fi
