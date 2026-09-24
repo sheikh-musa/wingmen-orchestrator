@@ -847,6 +847,15 @@ if ! "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_cwd_trusted.py" --cwd "$CALLER_DIR
     exit 1
 fi
 
+# NO-HUMAN-AT-THE-KEYBOARD guard (Nazim #42983): an autonomous lane must NEVER be able
+# to open the interactive AskUserQuestion menu — it HANGS the session (it wedged the
+# autocompact pilot lane 2026-09-24, and the same class cost cc-ihsanos a day). Enforce a
+# permissions DENY in THIS lane's per-worktree .claude/settings.local.json, which MERGES
+# with the shared settings (never clobbers hooks) and removes the tool from the model's
+# context entirely — so the lane asks via the bus instead. Best-effort + fail-loud (never
+# blocks the launch over a settings-write).
+"$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$CALLER_DIR" --deny AskUserQuestion || true
+
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
 echo ""
