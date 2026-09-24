@@ -43,7 +43,9 @@ import psycopg
 
 # import (not re-encode) the shared policy + wake primitive
 from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.path at runtime)
+    _pane_busy,
     auto_wake_enabled,
+    resolve_tmux_session,
     should_backstop_wake,
     wake_agent,
 )
@@ -66,6 +68,17 @@ WAKE_SWEEP_CAP_N = int(os.environ.get("WAKE_SWEEP_CAP_N", "5"))
 WAKE_SWEEP_CAP_AGE_S = int(os.environ.get(
     "WAKE_SWEEP_CAP_AGE_S", str(WAKE_SWEEP_GRACE_S + WAKE_SWEEP_CAP_N * WAKE_SWEEP_SEC)))
 _ESCALATE_TO = os.environ.get("WAKE_SWEEP_ESCALATE_TO", "orch-console")
+
+# STUCK-PAGE age (Nazim #43063): (B) live-stuck must PAGE only when a row is genuinely stuck, NOT
+# at cap_age — a lane mid-task for ~7 min is normal latency, and paging then trains the operator to
+# ignore the page. So we QUIESCE (stop re-poking) at cap_age but only ESCALATE a row that is STILL
+# unread this long after it was sent. Much longer than cap_age (~6.5m) on purpose.
+STUCK_PAGE_AGE_S = int(os.environ.get("WAKE_SWEEP_STUCK_PAGE_AGE_S", "1800"))  # 30 min
+# UPPER bound on the stuck-page scan (Nazim #43073): the ("stuck", row_id) once-guard is IN-MEMORY,
+# so every daemon restart (deploy / KeepAlive / reboot) would otherwise re-page EVERY quiesced-but-
+# unread row however old — a page burst that grows over time. A row stuck longer than this has
+# already paged once in some daemon's life, or is a dead-foreign/decision problem, not a NEW page.
+STUCK_PAGE_MAX_AGE_S = int(os.environ.get("WAKE_SWEEP_STUCK_PAGE_MAX_AGE_S", "86400"))  # 24 h
 
 # DEAD-FOREIGN gone-window (Nazim #42994 (2), amend B): an agent is "gone on every host" only
 # if NO matching agent_status row (base-inclusive) has a heartbeat fresher than this. Much
@@ -96,6 +109,21 @@ _SWEEP_SQL = """
       AND is_test IS NOT TRUE
       AND priority IS DISTINCT FROM 'P3'
       AND created_at < now() - make_interval(secs => %s)
+    ORDER BY to_agent, created_at
+"""
+
+# STUCK-PAGE predicate (Nazim #43063): rows already QUIESCED (skipped_at NOT NULL) but STILL unread
+# this long after send. skipped_at is taken by the quiesce, so the once-guard for THIS page is a
+# separate process-level seen-set keyed by row id (below), not skipped_at.
+_STUCK_SQL = """
+    SELECT id, to_agent, message_type, requires_response, priority, is_test, created_at
+    FROM agent_messages
+    WHERE read_at IS NULL
+      AND skipped_at IS NOT NULL
+      AND is_test IS NOT TRUE
+      AND priority IS DISTINCT FROM 'P3'
+      AND created_at < now() - make_interval(secs => %s)
+      AND created_at > now() - make_interval(secs => %s)
     ORDER BY to_agent, created_at
 """
 
@@ -150,6 +178,28 @@ def _fetch_rows(grace_s: int):
     with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
         cur.execute(_SWEEP_SQL, (grace_s,))
         return cur.fetchall()
+
+
+def _fetch_stuck_rows(stuck_page_age_s: int, stuck_page_max_age_s: int = STUCK_PAGE_MAX_AGE_S):
+    """Rows QUIESCED but STILL unread in the window [stuck_page_age_s, stuck_page_max_age_s] — the
+    (B) stuck-page candidates. The UPPER bound stops a restart from re-paging very old rows."""
+    if not _DSN:
+        raise RuntimeError("wake_backstop_sweep: no DATABASE_URL/SUPABASE_DB_URL")
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute(_STUCK_SQL, (stuck_page_age_s, stuck_page_max_age_s))
+        return cur.fetchall()
+
+
+def _default_pane_state(agent) -> str:
+    """Best-effort 'busy'/'idle'/'unknown' for the escalation text so the operator can tell a
+    genuinely-stuck lane from a merely-busy one at a glance (Nazim #43063). Never raises."""
+    try:
+        sess = resolve_tmux_session(agent)
+        if not sess:
+            return "no-live-pane"
+        return "busy" if _pane_busy(sess) else "idle"
+    except Exception:  # noqa: BLE001 — pane read is advisory, never break the sweep
+        return "unknown"
 
 
 def _mark_skipped(row_ids) -> list:
@@ -261,6 +311,9 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                mark=_mark_skipped, escalate=_escalate_operator,
                matching_hbs=_matching_hbs, desired_state_of=_desired_state_of,
                base_of=_base_of, hub_lease_fresh=_default_hub_lease_fresh,
+               pane_state=_default_pane_state, stuck_rows=None,
+               stuck_page_age_s: int = STUCK_PAGE_AGE_S,
+               stuck_page_max_age_s: int = STUCK_PAGE_MAX_AGE_S,
                escalated_seen=None, gone_window_s: int = GONE_WINDOW_S,
                cap_age_s: int = WAKE_SWEEP_CAP_AGE_S, now: float | None = None,
                now_dt=None, dry_run: bool = False) -> dict:
@@ -269,10 +322,14 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     recipients (should_backstop_wake — never a human/operator or a P3/test row) are classified;
     each capped agent falls into exactly one class (Nazim #42994 (2) + amendments A-D, bus 43007/9):
 
-      LIVE-STUCK (B) — the agent is ALIVE (a base-inclusive matching heartbeat fresher than
-        gone_window_s, or a fresh hub lease) but a row is stuck past cap → quiesce its capped
-        rows via CAS + escalate ONCE ("stuck, needs a human"). read_at stays NULL so the target's
-        own reconcile still drains it; quiescing only stops the sweep's redundant re-pokes.
+      LIVE-STUCK (B, split per Nazim #43063) — the agent is ALIVE (a base-inclusive matching
+        heartbeat fresher than gone_window_s, or a fresh hub lease) but a row is past cap → QUIESCE
+        its capped rows via CAS (stop re-poking), but do NOT page here — a ~7min-unread row is
+        normal latency, not stuck. Paging is DEFERRED to the STUCK-PAGE pass below.
+
+      STUCK-PAGE (B page half) — a row QUIESCED but STILL unread past stuck_page_age_s (default
+        30m) to a LIVE agent → escalate ONCE (pane state in the text). Once-guard = `seen` keyed
+        ("stuck", row_id), since skipped_at is already taken by the quiesce.
 
       RE-ADDRESS — the agent is a DEAD INSTANCE of a LIVE base (base_of resolves a base with a
         live instance) → escalate ONCE "re-address to <base>", do NOT quiesce (the message is
@@ -294,6 +351,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     DB/tmux; dry_run classifies but mutates nothing (honors AUTO_WAKE_ENABLED)."""
     if rows is None:
         rows = _fetch_rows(grace_s)
+        if stuck_rows is None:  # production: fetch both. A test that injects `rows` but not
+            stuck_rows = _fetch_stuck_rows(stuck_page_age_s, stuck_page_max_age_s)  # → [] below.
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
     seen = _ESCALATED_SEEN if escalated_seen is None else escalated_seen
 
@@ -342,22 +401,16 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     dead_foreign, live_stuck, readdress, vetoed, lookup_failed = [], [], [], [], []
     escalations: list[dict] = []
     for agent, ids in capped_by_agent.items():
-        if _alive(agent):  # (B) LIVE-STUCK — quiesce + escalate once; reconcile still drains
+        if _alive(agent):  # (B) alive → QUIESCE ONLY (stop re-poking). Paging is DEFERRED to the
+            # stuck-page pass at stuck_page_age_s: a lane mid-task for ~7 min is NORMAL latency, not
+            # stuck, so escalating at cap_age (~6.5m) false-pages the operator (Nazim #43063). The
+            # row stays read_at IS NULL, so the lane's own reconcile still drains it.
             if dry_run:
                 live_stuck.append(agent)
                 continue
             newly = mark(ids)
             if newly:
                 live_stuck.append(agent)
-                escalate(
-                    f"[wake-backstop] rows to {agent} un-drained past the re-wake cap — needs a human",
-                    f"TL;DR: {len(newly)} directed row(s) to {agent} (ids={newly}) stayed unread past "
-                    f"the re-wake cap while {agent} is ALIVE (fresh heartbeat/lease). The sweep STOPPED "
-                    f"re-poking + quiesced them (skipped_at) + escalated ONCE. They are still read_at IS "
-                    f"NULL in {agent}'s inbox, so {agent}'s own reconcile still drains them — quiescing "
-                    f"only stops the sweep's redundant re-wakes. ACTION: nudge {agent}, or route to "
-                    f"lane_wedge if it is genuinely stuck.")
-                escalations.append({"kind": "live-stuck", "agent": agent, "ids": newly})
             continue
         base = base_of(agent)  # gone: a dead INSTANCE of a LIVE base? -> re-address, don't quiesce
         if base and base != agent and _alive(base):
@@ -403,10 +456,48 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                 f"skipped_at re-delivers them to the sweep. (cc-cosem-platform class.)")
             escalations.append({"kind": "dead-foreign", "agent": agent, "ids": newly})
 
+    # STUCK-PAGE pass (Nazim #43063): a row QUIESCED but STILL unread past stuck_page_age_s is
+    # genuinely stuck (not normal ~7min latency) → escalate ONCE. skipped_at is taken by the
+    # quiesce, so the once-guard is `seen` keyed by ("stuck", row_id) (holds across sweeps for the
+    # daemon's life). Only pages a LIVE agent — a dead agent's rows were already dead-foreign-paged.
+    stuck_paged: list = []
+    stuck_by_agent: dict = {}
+    for r in (stuck_rows or []):   # None (a test injected `rows` only) → treated as empty
+        ca = _created_at(r)  # UPPER age bound (Nazim #43073): a row older than max_age has already
+        if ca is not None:   # paged once in some daemon's life — never re-page it on a restart.
+            try:
+                if (now_dt - ca).total_seconds() > stuck_page_max_age_s:
+                    continue
+            except Exception:  # noqa: BLE001 — un-ageable → let the SQL fetch's bound govern
+                pass
+        if should_backstop_wake(_to_agent(r), _rf(r, 2, "message_type"), _rf(r, 3, "requires_response"),
+                                _rf(r, 4, "priority"), _rf(r, 5, "is_test")):
+            stuck_by_agent.setdefault(_to_agent(r), []).append(_row_id(r))
+    for agent, ids in stuck_by_agent.items():
+        new_ids = [i for i in ids if ("stuck", i) not in seen]
+        if not new_ids or not _alive(agent):   # already-paged rows, or a dead agent (dead-foreign)
+            continue
+        if dry_run:
+            stuck_paged.append(agent)
+            continue
+        state = pane_state(agent)
+        escalate(
+            f"[wake-backstop] {agent} has directed row(s) un-drained past {stuck_page_age_s}s — genuinely stuck (pane: {state})",
+            f"TL;DR: row(s) {new_ids} to {agent} are STILL unread {stuck_page_age_s}s+ after they were "
+            f"sent — well past normal latency — although {agent} is ALIVE (pane: {state}). They were "
+            f"already quiesced (skipped_at) so the sweep isn't re-poking; escalating ONCE now that it's "
+            f"genuinely stuck. ACTION: check {agent} — it may be looping/stuck, or the row needs "
+            f"re-routing. (read_at is still NULL, so {agent}'s own reconcile can still drain it.)")
+        for i in new_ids:
+            seen.add(("stuck", i))
+        stuck_paged.append(agent)
+        escalations.append({"kind": "stuck-page", "agent": agent, "ids": new_ids, "pane": state})
+
     return {"considered": len(rows), "targets": targets, "woke": woke, "results": results,
             "capped": [_row_id(r) for r in capped], "unreachable": unreachable,
             "dead_foreign": dead_foreign, "live_stuck": live_stuck, "readdress": readdress,
-            "vetoed": vetoed, "lookup_failed": lookup_failed, "escalations": escalations}
+            "vetoed": vetoed, "lookup_failed": lookup_failed, "stuck_paged": stuck_paged,
+            "escalations": escalations}
 
 
 def main() -> int:

@@ -167,7 +167,8 @@ def test_capped_row_to_lease_fresh_hub_is_live_stuck_not_dead_the_451e110_class(
                          matching_hbs=lambda a: [], desired_state_of=lambda a: None,
                          base_of=lambda a: None, hub_lease_fresh=lambda: True, escalated_seen=set())
     assert res["live_stuck"] == ["cc-orchestrator"] and res["dead_foreign"] == []
-    assert set(marked) == {111, 112} and len(pages) == 1   # B: quiesced + escalated once (not dead)
+    # (B) split (Nazim #43063): alive → QUIESCE only, NO page at cap (page deferred to stuck-pass)
+    assert set(marked) == {111, 112} and pages == []
 
 
 def test_live_fresh_row_still_woken_and_not_escalated():
@@ -407,22 +408,19 @@ def test_dead_foreign_matches_base_exactly_not_by_prefix():
 
 # ---- PR#139 review fixes (Nazim bus 43007): B-restore, human-filter, instance→base, guard ----
 
-def test_capped_row_to_ALIVE_agent_is_B_quiesced_and_escalated_once_not_dead():
-    # Problem 1 (restore B): a row stuck past cap to a LIVE agent (fresh hb) must escalate ONCE
-    # + quiesce (read_at stays NULL so its own reconcile drains) — NOT be left forever, and NOT
-    # be paged as a dead agent. 2nd sweep is a no-op (skipped_at once-guard via CAS mark).
+def test_capped_row_to_ALIVE_agent_is_quiesced_but_NOT_paged_at_cap_amend_43063():
+    # (B) SPLIT (Nazim #43063): a row past cap to a LIVE agent is QUIESCED (stop re-poking) but NOT
+    # paged at cap_age — a ~7min-unread row is normal latency, not stuck. No stuck_rows injected =
+    # nothing past stuck_page_age yet → zero pages. This is the fix for the false-page storm.
     marked, pages, mark, page = _cas_collector()
     rows = [_row_ts("cc-quality", 201, age_s=_PAST_CAP)]
     kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
               now_dt=_NOW, cap_age_s=390, matching_hbs=lambda a: [_hb(60)],  # alive
               desired_state_of=lambda a: "up", mark=mark, escalate=page, escalated_seen=set())
     r1 = wbs.sweep_once(rows=rows, **kw)
-    assert marked == [201]                          # B quiesces the stuck row
-    assert len(pages) == 1 and "stuck" in (pages[0][0] + pages[0][1]).lower()
-    assert "cc-quality" not in r1["dead_foreign"]   # alive -> NOT a dead agent
-    assert r1["live_stuck"] == ["cc-quality"]
-    r2 = wbs.sweep_once(rows=rows, **kw)
-    assert marked == [201] and len(pages) == 1      # 2nd sweep no-op
+    assert marked == [201]                          # quiesced (re-poking stopped)
+    assert pages == []                              # but NOT paged at cap (the fix)
+    assert r1["live_stuck"] == ["cc-quality"] and "cc-quality" not in r1["dead_foreign"]
 
 
 def test_capped_row_to_human_operator_is_never_classified_dead():
@@ -472,6 +470,65 @@ def test_lookup_failure_escalates_once_per_process_not_every_sweep():
     wbs.sweep_once(rows=rows, **kw)
     assert marked == []                             # fail-closed: never quiesced
     assert len(pages) == 1                          # escalated ONCE, not per-sweep
+
+
+# ---- (B) STUCK-PAGE split (Nazim #43063): page only at STUCK_PAGE_AGE, not at cap ----
+
+def test_stuck_row_to_alive_agent_paged_once_with_pane_state_43063():
+    # A QUIESCED-but-still-unread row past stuck_page_age to a LIVE agent → escalate ONCE, with the
+    # lane's pane state in the text; the stuck-page does NOT quiesce (already quiesced). 2nd sweep
+    # over the same rows (same `seen`) does NOT re-page — the once-guard holds across sweeps.
+    marked, pages, mark, page = _cas_collector()
+    seen = set()
+    stuck = [_row_ts("cc-quality", 201, age_s=2000)]   # past default stuck_page_age (1800)
+    kw = dict(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+              now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],   # alive
+              pane_state=lambda a: "busy", mark=mark, escalate=page, escalated_seen=seen)
+    r1 = wbs.sweep_once(**kw)
+    assert marked == []                                # stuck-page never quiesces (already quiesced)
+    assert len(pages) == 1 and "busy" in pages[0][0]   # pane state surfaced in the page
+    assert "201" in pages[0][1] and r1["stuck_paged"] == ["cc-quality"]
+    r2 = wbs.sweep_once(**kw)
+    assert len(pages) == 1                             # once-guarded: no re-page on the 2nd sweep
+
+
+def test_stuck_row_to_dead_agent_not_paged_already_dead_foreign():
+    # a quiesced-unread row to a GONE agent must NOT stuck-page — its rows were already
+    # dead-foreign-escalated; only LIVE agents get the stuck page.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-cosem-platform", 501, age_s=2000)]
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [], base_of=lambda a: None,
+                       pane_state=lambda a: "no-live-pane", mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and r["stuck_paged"] == []
+
+
+def test_stuck_page_ignores_ineligible_recipients():
+    # the stuck-page pass shares should_backstop_wake: a human/operator (musa) is never stuck-paged.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("musa", 301, age_s=2000)]
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [], pane_state=lambda a: "idle",
+                       mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and r["stuck_paged"] == []
+
+
+def test_stuck_page_upper_age_bound_row_older_than_max_never_paged_43073():
+    # Nazim #43073: the in-memory once-guard resets on restart, so an UPPER bound stops a restart
+    # re-paging very old rows. A row 25h old (past the 24h default max) is NEVER stuck-paged.
+    marked, pages, mark, page = _cas_collector()
+    old = [_row_ts("cc-quality", 201, age_s=25 * 3600)]   # 25h > 24h max
+    r = wbs.sweep_once(rows=[], stuck_rows=old, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],  # alive (would page but for age)
+                       pane_state=lambda a: "busy", mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and r["stuck_paged"] == []
+    # sanity: the SAME row 2000s old (inside the window) WOULD page — proving age is the reason
+    marked2, pages2, mark2, page2 = _cas_collector()
+    inwin = [_row_ts("cc-quality", 201, age_s=2000)]
+    r2 = wbs.sweep_once(rows=[], stuck_rows=inwin, wake=lambda a, **k: {"woke": False},
+                        now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                        pane_state=lambda a: "busy", mark=mark2, escalate=page2, escalated_seen=set())
+    assert len(pages2) == 1 and r2["stuck_paged"] == ["cc-quality"]
 
 
 if __name__ == "__main__":
