@@ -1,42 +1,35 @@
-# Hub (cc-orchestrator) Restore-Point Handoff — 2026-08-03 ~00:2xZ
+# Hub session handoff — 2026-09-05 ~15:00Z (cc-orchestrator, VPS/wingmen-core → migrating to gzb, Opus)
 
-Written for a fresh clear (op#9512, Nazim clears via reset_orch.sh). READ THIS IN FULL, then CLAUDE.md, then reconcile inboxes. DURABLE facts (norms, NETS, publish mechanism, seed-cred, hosting-commercial, client-scoped-reports, hub-go-to-mini-lane-nudge) are in the auto-loaded `MEMORY.md` — read those first, they carry the "why".
+Read this, then CLAUDE.md. You are the fleet hub. This captures in-flight state so a fresh you has continuity. **Verify-not-assert every "done" before repeating it.** Refreshed 2026-09-05 (prior was 08-18, badly stale — that staleness is why the operator flagged "recycling without reconstituting"; keep this current).
 
-## Identity / posture (confirm from YOUR OWN .env + substrate, not this string)
-- **hub** (cc-orchestrator) on the VPS **wingmen-core**, tmux `orch`. Hold `orch_lease` (verify: `python -c "from scripts.lib import orch_lease; print(orch_lease.check())"`).
-- `fleet_health_lease` held by **cc-fleet-health@Sheikhs-Mini** → watchdog/fleet-status pens DEFERRED (do NOT run them).
-- **op#9253 FULL AUTONOMOUS TILT** on the irsyad backlog; ping the GAZZABYTE group (`irsyad_support_send.sh`) as each client-visible item lands, not the operator.
-- **Money/pricing/hosting = cc-finance** (op#9217) — hub stays out; relay build-side inputs only.
-- Money-path/security/PII/residency = MY gate: verify-at-source; grants at `execution_status='granted'`; deployed==proven byte-identical. CAI-684 norm. **PII/residency: never put real PII in a non-compliant store without a cai clearance** (held all session — CAI-687 ADCDA console, CAI-525 BAPT).
+## FIRST ON BOOT
+1. Full-drain BOTH inboxes: `agent_messages to_agent='cc-orchestrator' read_at IS NULL` AND `operator_log.unprocessed()`. Act, then stamp **read_at AND responded_at** (sla-watchdog fires on responded_at IS NULL).
+2. **If you booted on gzb (hostname != wingmen-core):** THE FLIP HAPPENED. Verify: `orch_lease` holder_host = your gzb hostname; ingest/tg_out/agent_wake running here; send Nazim (orch-console) the post-flip row (holder_host, ssh target, lease-renew-timer stopped+disabled on wingmen-core confirmed, first heartbeat host=gzb); tg_send the operator "hub live on gzb — try me"; keep wingmen-core WARM for rollback until the operator/Nazim OK decommission. See `docs/orch-move-runbook.md`.
 
-## SHIPPED this session (all deployed==proven, verified at source)
-- **Tin-correction** weekly #226 (3477f94) + jumaat #227 (8e1777a) — both surfaces LIVE; adversarial review 4/4; Gazzabyte pinged.
-- **School-page-split T2 #223** (3070a52) — live on silo (op#9029 complete).
-- **Hadi RLS fix #228** (e44dade + mig135 on ceayj) — SYSTEMATIC all-merchant soft-delete bug; empirical prod leak-check (anon=0/cross-org=0) + cai CAI-686/verified + hash-chained audit annotation (cc-storefront, audit 1053). CLOSED.
-- **Edit Bank Keywords #230** (80149cb) — client backlog #1; authz-reviewed (server gate); Gazzabyte + operator pinged.
-- **Dialog dedup #229** (4132ccc).
-- **Entity-derived-org tenancy #231** (0501a71) — CAI-688/689; adversarial review 3/3; jumaat staff-only tightening confirmed (affected 2 accts = DISABLED test, zero real impact). Batched #1 getOrgContext ordering.
-- **BAPT-4** (cosem-adcda a1da261, /bapt) — group filter + masked PII-reducing display + no-E A/B/C/D/F scale (op#9502, D pass-floor, F only fail). Deployed==proven on hosted CI (ubuntu-latest), operator-confirmed on device. Prod content + functional D-boundary grading verified.
-- mig134→irsyad-qa (QA parity) · client status board refreshed (share.wingmen.dev/r/gazzabyte-status) · cc-ihsanos + cc-irsyad recycled.
+## STANDING RULES (binding)
+- **🔴 NEVER open a client-attached file** (CAI-1034/1037): no open/parse/head/cat of anything under `logs/tg_media/` or on a client channel (this includes the operator's OWN screenshots — work from the caption). Shape → ask orch-console; data → DB-side against the silo. No client PII to the bus.
+- **Stamp BOTH read_at AND responded_at** on handled bus messages — sla-watchdog re-wakes ~15min on responded_at IS NULL. Surgical stamps only (never mark_handled_through across channels — sweeps other bodies' rows).
+- **Answer only HUB-routed inbound**: `operator_log.unprocessed()` tag='orch-channel' is yours. Other tags are other bodies (hk-editor=cc-shipforge, cai-channel=cai, nazim-console/finance-console/cosem-*=their owners). Don't pick up other threads.
+- **Address the INSTANCE not the family** (`to_agent='cc-cosem-adcda'` etc.). Bus body via file-read + psycopg params (NO backticks/literal-% in inline SQL — both bite).
+- **Client sends are body-scoped**: hub has NO HK/irsyad send tokens — route HK sends via Nazim (`hk_send.sh`, Mini), irsyad via coord. tg_send.sh = operator only.
+- **Never `supabase db push`**; migration-apply = fetch@SHA → hash==expect-blob → per-silo DSN guard → apply per file txn contract → enumerate proacl → PGRST reload → cai verify.
+- **Single-owner tunnel** for gzb (`sudo gzb-vpn.sh up/down`); never touch wingmen-core's default route.
 
-## IN-FLIGHT / OPEN (with owners)
-| Stream | Owner | State / next |
-|---|---|---|
-| **BAPT-4 /bapt scoping refinement (op#9510)** | cc-cosem-adcda (Nazim last-mile) | scope /bapt to ONLY the BAPT-4 candidates from the 3 namelists; deploy via **ubuntu-latest** (Studio WAN FLAPPING/unreliable — SRE saw 200, Nazim saw dead; stay on hosted). Trial is TOMORROW AM. |
-| **cc-irsyad next backlog** | cc-irsyad | I directed it (14582/14585) to scope the next-ready 10-item backlog item (money/PII → spec → I cai-route) + report externally-blocked items. Awaiting its reply. |
-| **eNETS/payment build (CAI-682)** | hub via cc-irsyad | PARKED on client payment-type detail (op confirmed A-F rig etc. but eNETS specs = ~next week via Gazzabyte). Relay the instant it lands. |
-| **Operator ADCDA console hosting (CAI-687)** | operator DECISION (parked) | operator chose "host interactive"; cai ruled DEDICATED UAE-residency-compliant gated surface + noindex + time-boxed. Blocked: no UAE-compliant host + no cc-infra lane = real provisioning. Interim: fresh console FILE delivered to Ray. Operator deciding file-now vs build-host vs host+live-feed. |
-| **cc-ihsanos fees/student-payment reports spec** | cc-ihsanos | in progress (verify-at-source what data exists first). |
-| **getOrgContext .limit(1) sweep** | cc-ihsanos (platform hr-*/sch-*) | TRACKED debt (CAI-688), NON-URGENT, entity-derived-org fix, after fees-reports. |
-| **Studio WAN death / durable runner fix** | cc-fleet-health (SRE) | SRE owns KeepAlive+offline-signal fix. VPS-runner permanent-backup needs ROOT = operator fork (I said I'd surface as a non-urgent resilience option). cosem workflows on ubuntu-latest TEMP (restore self-hosted after WAN stable). |
-| cc-storefront | cc-storefront | Hadi audit annotation DONE. env-inject + shop-cell cluster deferred. |
+## TOPOLOGY / TOKEN
+- Hub runs on **wingmen-core** (91.107.235.77, tmux `orch`, user wingmen, ORCH_BODY_ROLE=hub). Daemons = systemd `wingmen-ingest`/`wingmen-tg-out`/`wingmen-agent-wake-subscriber`; lease renewed by root `wingmen-orch-lease-renew.timer` (INDEPENDENT of the session — a fresh lease = HOST alive, not session alive).
+- Hub auth = **Musa** OAuth (`.orch_default_token` pointer → `~/.wingmen/keys/musa-oauth-token`, fp `68142948c003`). boot_orch.sh loads it over the .env Syed fallback.
+- **Nazim = orch-console** (Mini, live). Owns infra/console; paces the fable cleanup behind the flip; has wingmen-core root (installed my scoped sudoers `/etc/sudoers.d/wingmen-units`). cc-fleet-health = SRE (Mini), recovered from a 09-05 false-down (stale lease ≠ dead body — see [[reference-stale-lease-not-dead-sre]]).
 
-## Mechanics
-- **Each turn**: read `operator_log.unprocessed()` → answer via `scripts/tg_send.sh` → `mark_handled_through(<max_id>)`; AND drain the bus (unread = `read_at IS NULL`, mark read after processing). Reply on the channel the operator/client used.
-- **Bus watcher**: `scratchpad/await_gate.sh` sweeps `read_at IS NULL` (gap-proof — do NOT use `id>THRESH`, it misses mid-turn arrivals). Run ONE per turn, `run_in_background:true`, never `&`. (Scratchpad is session-local — recreate it; see the script content pattern.) CI/Vercel pollers: `ci_wait.sh <pr> [owner/repo]` (default ihsanos — pass the repo!), `vercel_wait.sh <sha>`.
-- **Comms**: `tg_send.sh` (operator, hub pen-iv); `irsyad_support_send.sh` (Gazzabyte group, client-facing — NEVER secrets/internal); Nazim relays Mini-lane nudges. **Standing arrangement (Nazim): he PROACTIVELY nudges any hub→Mini-lane directive** (see memory) — but a hub bus GO can still stall an idle lane; verify lane liveness before reporting "working" (bit me twice: cc-storefront + cc-irsyad).
-- **Prod migration apply**: direct psycopg, `--expect-ref` + `--expect-blob` + forward-only; verify DSN ref + a positive-identity marker before ANY write (I have GOUMLYNE_DATABASE_URL + IHSANOS_PROD_DATABASE_URL=ceayj; irsyad-qa DSN was in the prior scratchpad qa_dsn.txt; mgmt API 403s on irsyad-qa).
-- **Independent adversarial review** on security/access-control/money changes (operator standard): spawn a general-purpose agent tasked to FALSIFY the claims; verify its findings + own the conclusion (it can be wrong — it had weekly/jumaat flipped on #231; verify at source).
+## IN-FLIGHT (2026-09-05)
+- **🔴 gzb MIGRATION FLIP — the active priority.** Operator gave live GO (op#19111). ALL gates green: Nazim parity confirm (bus 37727 — fable IS the intended prod daemon runtime + supersedes the live divergent tree; finance-console carve-out ported a8fb6ac; resolve_cc_identity in fable). Phase A DONE (gzb service units installed+validated, DISABLED; secrets pipe; hub supervisor; claude v2.1.247). Root gate CLEARED (Nazim installed scoped sudoers 37754). **NEXT = execute Phase B** per `docs/orch-move-runbook.md`: pull gzb clone to fable tip (4b9ace5), `git pull`; T-0 announce operator; `sudo systemctl disable --now wingmen-orch-lease-renew.timer` + `sudo systemctl stop wingmen-ingest wingmen-tg-out wingmen-agent-wake-subscriber wingmen-orch-hub` on wingmen-core; CAS `orch_lease.py take` from gzb; `systemctl enable --now` gzb daemons + start gzb hub (session-chain agent_status heartbeat writer per Nazim's UPSERT, host=gzb); VERIFY operator gets msg FROM gzb + no 409; rollback = restart wingmen-core services + reclaim lease (Mini/VPS warm). Was HELD 09-05 15:00 to address the operator's reconstitution concern (this refresh) — reconfirm with operator before the ~2-3min line blip.
+- **cosem-adcda archive**: PRs #214 (fail-open fix) + #215 (English-name stale-OCR-badge) merged+deployed. Real batch archive HELD on operator naming the graduated batch (ADCDA 18-19 / Al Ain 2 / SHOWCASE) + a with-Storage manifest GO. Guard is fail-closed (won't delete un-exported). See lane cc-cosem-adcda.
+- **cosem CA new-course flow**: plan ready, grounded in Hariz's cosem-platform build (4-step import wizard). HELD on 2 operator decisions: (1) admin self-service batch creation? (2) real bulk namelist upload? Safe items (#2 self-select, #4 cache, #5 server gate, #6 zod) scopable.
+- **HK (Hadramawt Kitchen / Shazz, she/her)**: hours edit done+verified live on the revamp pilot (hadramawtkitchen-sg.vercel.app). Clarification sent (she edits the revamp, not her live WordPress; signs off → DNS cutover). Her real live site = hadramawtkitchen.sg WordPress, fleet has ZERO access. See [[project-hk-conversational-editing]].
+- **kuehheritage pilot**: preview live (kuehheritage-live.vercel.app), same owner as HK; domain = kuehheritage.com (already their live WordPress). Operator flagged it looks too much like HK — awaiting his design direction (own identity vs recolor) before shipforge redesigns. See [[project-kuehheritage-pilot]].
+- **Nazim held behind the flip**: #1B (stops Mini writing my agent_status), PRs #85-#91 (retired-bridge deletions), Mini 6-pin re-point. Released when I confirm flip complete + gzb holds lease. Soft freeze; he lists every SHA (tip 4b9ace5).
+- **OLDER money/mig in-flight (mig183/180, C5 order-verify, #363 preparer-login) from the 08-18 handoff**: status UNKNOWN as of this refresh — VERIFY via `strategic_decisions`/the bus/cai before assuming pending OR done. Do not act on them as stale facts.
 
-## My own accuracy notes (verify-not-assert)
-Corrected TWICE this session: told operator cc-irsyad was "mid-build" (was idle-stalled on an unread bus GO) + called 2 accts "live" (were disabled test accts). Fully verify a qualifier ("live", "working") before asserting it, not just the adjacent fact. Both caught by looping the context-holder (Nazim, cai) — keep doing that.
+## MECHANICS
+- Migration DSNs: `GOUMLYNE_DATABASE_URL` (irsyad goumlyne), `IHSANOS_PROD_DATABASE_URL` (ceayj), substrate=`DATABASE_URL`.
+- gzb: `ssh gzb` (gazzai@192.168.1.114); clone /home/gazzai/wingmen/orchestrator; secrets tmpfs /dev/shm/wingmen-secrets (run fetch-secrets.sh); gazzai sudo pw = operator_messages 17159 pw-field (never echo).
+- Delegate heavy/tunnel work to ONE subagent (single-owner tunnel); keep hub context for coordination/decisions.

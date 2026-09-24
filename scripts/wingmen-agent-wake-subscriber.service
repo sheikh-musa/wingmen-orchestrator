@@ -1,0 +1,13 @@
+[Unit]
+Description=Wingmen agent-wake subscriber (#111 doorbell, VPS hub — CAI-RESP-451)
+After=network-online.target
+
+[Service]
+Type=simple
+User=wingmen
+ExecStart=/bin/bash -lc "cd /home/wingmen/wingmen/orchestrator && set -a && . ./.env && set +a && unset ANTHROPIC_API_KEY && exec .venv/bin/python3 -m nervous_system.agent_wake_subscriber"
+Restart=always
+RestartSec=6
+
+[Install]
+WantedBy=multi-user.target

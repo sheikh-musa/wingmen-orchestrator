@@ -21,14 +21,40 @@
 // iPhone kept serving the removed breakglass input after 80bf1a6). v2 also
 // makes app.js network-first (below) so future JS changes propagate without a
 // manual bump — the bump is now only a belt-and-suspenders cache reset.
-const VERSION = "fc-v8";
+//
+// RATE-LIMIT (op#10291 — the Aug-3 incident): BATCH a day's console changes into
+// ONE version bump. Each bump triggers the client's hard-reset (confirm-then-
+// clear); shipping many bumps in a day (v22->v27 in one day stranded the operator)
+// re-churns his PWA cache repeatedly over the marginal AD<->SG relay. So: bump
+// this + fleet.js APP_BUILD ONCE per deploy-day, not per-change. `scripts/
+// check_console_version_cadence.py` warns if you're about to re-bump same-day.
+const VERSION = "fc-v28";
+
+// Network-first with a HARD deadline. The failure this fixes (2026-07-11): the
+// navigation/shell fetch was network-first but had NO timeout, so a slow-but-
+// alive tailnet made respondWith() hang until iOS WebKit's own internal timeout
+// fired its native "Could not connect to the server" (X_X) page — the operator
+// never fell back to the perfectly-good cached shell. With a deadline, a slow
+// network aborts fast and we serve cache instantly; the app then handles its
+// own live-data retry. Kept short (well under WebKit's native timeout) so the
+// cached shell always wins the race on a bad connection.
+const NET_TIMEOUT_MS = 3000;
+function fetchDeadline(req) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), NET_TIMEOUT_MS);
+  return fetch(req, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
 const SHELL_CACHE = `fleet-console-shell-${VERSION}`;
 const SHELL_ASSETS = [
+  // "/" now serves the Fleet view (operator #3440), so fleet.js is the primary
+  // shell script and must be precached for offline; app.js still backs /classic.
   "/",
+  "/static/fleet.js",
   "/static/app.js",
   "/manifest.json",
   "/static/icons/icon-192.png",
   "/static/icons/icon-512.png",
+  "/static/icons/favicon.ico",
 ];
 
 self.addEventListener("install", (event) => {
@@ -75,12 +101,14 @@ self.addEventListener("fetch", (event) => {
   // Cache is fallback-only, for offline.
   if (req.mode === "navigate" || url.pathname === "/") {
     event.respondWith(
-      fetch(req)
+      fetchDeadline(req)
         .then((res) => {
           const copy = res.clone();
           caches.open(SHELL_CACHE).then((cache) => cache.put(req, copy));
           return res;
         })
+        // Slow OR failed network -> cached shell immediately, so the operator
+        // sees the app (with last-good data) instead of WebKit's error page.
         .catch(() => caches.match(req).then((cached) => cached || caches.match("/")))
     );
     return;
@@ -94,12 +122,14 @@ self.addEventListener("fetch", (event) => {
   // fallback. Files are tiny and tailnet-local, so the cost is negligible.
   if (url.pathname === "/static/app.js" || url.pathname === "/static/fleet.js" || url.pathname === "/manifest.json") {
     event.respondWith(
-      fetch(req)
+      fetchDeadline(req)
         .then((res) => {
           const copy = res.clone();
           caches.open(SHELL_CACHE).then((cache) => cache.put(req, copy));
           return res;
         })
+        // Slow/failed -> serve the cached copy so the app still boots offline
+        // or on a degraded tailnet (never a broken script -> blank page).
         .catch(() => caches.match(req))
     );
     return;

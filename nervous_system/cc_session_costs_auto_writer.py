@@ -27,7 +27,7 @@ from nervous_system.jsonl_safe_read import safe_file_stats
 # Rewrite the leading `-Users-<user>-` to the canonical Mini form so the sweep
 # resolves cc_identity regardless of which host runs it (the 2026-07-08 topology
 # move to the Studio hub is exactly why the writer silently matched zero dirs).
-_HOME_PREFIX_RE = re.compile(r"^-Users-[^-]+-")
+_HOME_PREFIX_RE = re.compile(r"^-(?:Users|home)-[^-]+-")
 
 
 def _canonical_dir(name: str) -> str:
