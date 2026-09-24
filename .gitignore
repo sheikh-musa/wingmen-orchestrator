@@ -4,6 +4,11 @@ __pycache__/
 .env
 logs/
 .pytest_cache/
+# Per-worktree local CC settings — the launcher writes permissions.deny (e.g.
+# AskUserQuestion) here per-lane; machine/worktree-local, never versioned. Was only
+# ignored by this Mac's global core.excludesfile, so a gzb lane / fresh clone could
+# commit it (Nazim #42990). Leading-slash-less → matches at any depth (worktrees too).
+.claude/settings.local.json
 .DS_Store
 **/.DS_Store
 supabase/.temp/
