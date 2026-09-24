@@ -1,6 +1,14 @@
-# cc-substrate handoff (updated 2026-09-24 ~19:15Z, bus #42882→#42883)
+# cc-substrate handoff (updated 2026-09-24 ~22:30Z, bus #42890→#42891)
 
-## STATUS (2026-09-24 ~19:15Z): Hermes move EXECUTED — Mini gateway+dashboard up, awaiting Musa's Telegram confirmation for cutover
+## STATUS (2026-09-24 ~22:30Z): gzb off-site backup destination BUILT + VERIFIED (#42890), extended to substrate (#42891) — awaiting orch-console on substrate live-run timing
+
+#42890 (client-silo off-site push, gzb destination, client-side age-encrypted) is COMPLETE: dedicated push-only `wbackup` account on gzb, encryption wired via the fleet vault, real production run (425 tables, 0 failed), both client-silo pushes verified landed byte-for-byte, tested restore (goumlyne) verified byte-perfect round-trip. Full detail: `reports/wingmen-core-drain-cutover-plan-op20655.md`, "2026-09-24 (evening) — off-site backup destination BUILT + VERIFIED" section (both copies, synced).
+
+**KNOWN GAP, still open:** the off-site push relays through wingmen-core (gzb's VPN client is Linux-specific tooling installed there, can't run on the Mini unmodified) — a real dependency this whole cutover is trying to remove. Needs its own follow-up.
+
+#42891 (extend to ALL stores per Musa "do the same for the daily backups as well"): code built (substrate now uses the identical encrypt+push+prune mechanism), syntax-checked, committed. Live full-scale proof NOT run this session by judgment call — the measured relay bandwidth (~65KB/s) means substrate's ~360MB dump would add ~90-150 min to the push alone, well over 3 hours for a full push+restore-test proof. Recommended letting tonight's 3am unattended cron exercise it for real at zero live-session cost, then tested-restore-verifying that result tomorrow — flagged to orch-console for the timing call, not decided unilaterally.
+
+## PRIOR STATUS (2026-09-24 ~19:15Z): Hermes move EXECUTED — Mini gateway+dashboard up, awaiting Musa's Telegram confirmation for cutover
 
 Musa greenlit the Hermes move (op#22276). Executed per orch-console's #42872 decisions + #42882's two hard guards (G1: never touch `/Users/sheikhmusa/wingmen`, inventory `/root/wingmen` before copying anything; G2: no client credentials into the hermes user). Full log: `reports/wingmen-core-drain-cutover-plan-op20655.md` under "HERMES MOVE — EXECUTED" (both copies, synced).
 
