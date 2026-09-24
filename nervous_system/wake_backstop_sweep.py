@@ -34,6 +34,7 @@ passive row) now; #9 is flagged, not yet closed.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -213,6 +214,33 @@ def _default_hub_lease_fresh() -> bool:
         return True
 
 
+def _base_of(agent):
+    """The BASE id of a possibly-instance-addressed id (Nazim bus 43009(b)). PREFER the gone
+    instance's OWN agent_status row (its base_agent_id) when a row exists; fall back to stripping
+    a trailing -<digits> only when there is no row. Returns None if neither yields a distinct
+    base. Lets a row to a DEAD instance of a LIVE base be re-addressed, not false-quiesced."""
+    if _DSN:
+        try:
+            with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+                cur.execute("SELECT base_agent_id FROM agent_status "
+                            "WHERE agent_id=%s AND base_agent_id IS NOT NULL LIMIT 1", (agent,))
+                row = cur.fetchone()
+            if row and row[0] and row[0] != agent:
+                return row[0]
+        except Exception:  # noqa: BLE001 — fall through to the suffix strip
+            pass
+    m = re.match(r"^(.+)-\d+$", agent or "")
+    return m.group(1) if (m and m.group(1) != agent) else None
+
+
+# Process-level once-guard for the NON-quiescing escalations (re-address + lookup-failed), which
+# have no skipped_at to lean on (Nazim bus 43009(b)). The sweep is a long-lived `while True` loop
+# under launchd KeepAlive, so this set survives between sweeps and resets only on a restart — at
+# most one repeat page per restart per host. The DURABLE version belongs to root A #3 (budget
+# persistence), NOT here; do not build anything heavier.
+_ESCALATED_SEEN: set = set()
+
+
 def _escalate_operator(subject: str, body: str) -> None:
     """One page to the operator-ops body (default orch-console) about a rotting/dead row.
     Best-effort: a page failure must never crash the sweep floor (KeepAlive re-runs)."""
@@ -232,35 +260,42 @@ def _escalate_operator(subject: str, body: str) -> None:
 def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                mark=_mark_skipped, escalate=_escalate_operator,
                matching_hbs=_matching_hbs, desired_state_of=_desired_state_of,
-               hub_lease_fresh=_default_hub_lease_fresh,
-               gone_window_s: int = GONE_WINDOW_S,
+               base_of=_base_of, hub_lease_fresh=_default_hub_lease_fresh,
+               escalated_seen=None, gone_window_s: int = GONE_WINDOW_S,
                cap_age_s: int = WAKE_SWEEP_CAP_AGE_S, now: float | None = None,
                now_dt=None, dry_run: bool = False) -> dict:
     """One pass. FRESH (under-cap) rotting rows drive a wake of each eligible recipient (the
-    doorbell backstop). A row PAST cap_age_s is a give-up candidate, but the ONLY give-up that
-    QUIESCES is the DEAD-FOREIGN class (Nazim #42994 (2) + amendments A-D):
+    doorbell backstop). A row PAST cap_age_s is a give-up candidate. ONLY backstop-eligible
+    recipients (should_backstop_wake — never a human/operator or a P3/test row) are classified;
+    each capped agent falls into exactly one class (Nazim #42994 (2) + amendments A-D, bus 43007/9):
 
-      DEAD-FOREIGN = row past cap AND its agent is gone on EVERY host — no agent_status row
-        matching (agent_id OR base_agent_id, base-inclusive) has a heartbeat fresher than
-        gone_window_s (~2h), and for the hub its orch_lease is not fresh — AND desired_state
-        is not 'up'. → quiesce ALL its capped rows via CAS + escalate ONCE, naming agent, ids,
-        evidence. Any sweep instance may do this; the CAS (mark returns only the ids IT set)
-        makes it exactly-once across concurrent instances. Clearing skipped_at re-delivers.
+      LIVE-STUCK (B) — the agent is ALIVE (a base-inclusive matching heartbeat fresher than
+        gone_window_s, or a fresh hub lease) but a row is stuck past cap → quiesce its capped
+        rows via CAS + escalate ONCE ("stuck, needs a human"). read_at stays NULL so the target's
+        own reconcile still drains it; quiescing only stops the sweep's redundant re-pokes.
 
-    Everything else past cap is NOT quiesced — quiescing drops a possibly-deliverable message:
-      • ALIVE-ELSEWHERE (amend A/B): a fresh matching heartbeat (base-inclusive) or a fresh hub
-        lease. agent_status is keyed by INSTANCE id with the base in base_agent_id, and a stale
-        heartbeat is NOT a dead pane — so the match is base-inclusive and the window is long.
-      • VETOED (amend C): gone but desired_state='up' — a wanted-up-but-dark lane is a
-        singleton/lane-watchdog page, never a delivery-drop here.
-      • LOOKUP-FAILED (amend C fail-closed): the desired_state veto lookup errored/ambiguous —
-        NEVER quiesce on an unprovable check; escalate for a human instead.
+      RE-ADDRESS — the agent is a DEAD INSTANCE of a LIVE base (base_of resolves a base with a
+        live instance) → escalate ONCE "re-address to <base>", do NOT quiesce (the message is
+        still deliverable to the base). Once-guarded (no skipped_at to lean on).
 
-    skipped_at is the once-guard AND the CAS token. Injectable deps make it unit-testable
-    without DB/tmux; dry_run classifies but mutates nothing (honors AUTO_WAKE_ENABLED)."""
+      DEAD-FOREIGN — gone on EVERY host (no base-inclusive heartbeat < gone_window_s, hub lease
+        not fresh, and no live base) AND desired_state is not 'up' → quiesce all its capped rows
+        via CAS + escalate ONCE naming agent, ids, evidence. Any instance may do this; the CAS
+        (mark returns only the ids IT set) makes it exactly-once. Clearing skipped_at re-delivers.
+
+      VETOED (amend C) — gone but desired_state='up' → NOT quiesced (a wanted-up-but-dark lane is
+        a singleton/lane-watchdog page, never a delivery-drop here).
+
+      LOOKUP-FAILED (amend C fail-closed) — the desired_state veto lookup errored/ambiguous →
+        NEVER quiesce on an unprovable check; escalate for a human. Once-guarded.
+
+    The two NON-quiescing escalations (re-address, lookup-failed) share one process-level guard
+    keyed (kind, agent) — see _ESCALATED_SEEN. Injectable deps make it unit-testable without
+    DB/tmux; dry_run classifies but mutates nothing (honors AUTO_WAKE_ENABLED)."""
     if rows is None:
         rows = _fetch_rows(grace_s)
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
+    seen = _ESCALATED_SEEN if escalated_seen is None else escalated_seen
 
     # A capped row never drives a wake; it is a give-up candidate handled below.
     capped = [r for r in rows if is_capped(r, now_dt, cap_age_s)]
@@ -273,12 +308,15 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         a for a, r in results.items()
         if isinstance(r, dict) and r.get("why") == "no live session")
 
-    # CAPPED rows grouped by agent (order-stable), classified on cross-host substrate liveness.
+    # CAPPED rows — ONLY backstop-eligible recipients may be classified (a human/operator or a
+    # P3/test row is never a "dead agent"). Same canonical predicate as the wake path.
     capped_by_agent: dict = {}
     for r in capped:
-        capped_by_agent.setdefault(_to_agent(r), []).append(_row_id(r))
+        if should_backstop_wake(_to_agent(r), _rf(r, 2, "message_type"), _rf(r, 3, "requires_response"),
+                                _rf(r, 4, "priority"), _rf(r, 5, "is_test")):
+            capped_by_agent.setdefault(_to_agent(r), []).append(_row_id(r))
 
-    def _alive_elsewhere(agent) -> bool:
+    def _alive(agent) -> bool:  # base-inclusive fresh heartbeat, or (for the hub) a fresh lease
         for hb in (matching_hbs(agent) or []):
             try:
                 if (now_dt - hb).total_seconds() < gone_window_s:
@@ -292,23 +330,57 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                 return True
         return False
 
-    dead_foreign, left_alive, vetoed, lookup_failed = [], [], [], []
+    def _escalate_once(kind: str, agent: str, subject: str, body: str) -> bool:
+        # once-guard for the NON-quiescing escalations (re-address, lookup-failed) — they set no
+        # skipped_at, so without this they page every sweep. Keyed (kind, agent).
+        if (kind, agent) in seen:
+            return False
+        escalate(subject, body)
+        seen.add((kind, agent))
+        return True
+
+    dead_foreign, live_stuck, readdress, vetoed, lookup_failed = [], [], [], [], []
     escalations: list[dict] = []
     for agent, ids in capped_by_agent.items():
-        if _alive_elsewhere(agent):
-            left_alive.append(agent)                     # amend A/B — keep deliverable
+        if _alive(agent):  # (B) LIVE-STUCK — quiesce + escalate once; reconcile still drains
+            if dry_run:
+                live_stuck.append(agent)
+                continue
+            newly = mark(ids)
+            if newly:
+                live_stuck.append(agent)
+                escalate(
+                    f"[wake-backstop] rows to {agent} un-drained past the re-wake cap — needs a human",
+                    f"TL;DR: {len(newly)} directed row(s) to {agent} (ids={newly}) stayed unread past "
+                    f"the re-wake cap while {agent} is ALIVE (fresh heartbeat/lease). The sweep STOPPED "
+                    f"re-poking + quiesced them (skipped_at) + escalated ONCE. They are still read_at IS "
+                    f"NULL in {agent}'s inbox, so {agent}'s own reconcile still drains them — quiescing "
+                    f"only stops the sweep's redundant re-wakes. ACTION: nudge {agent}, or route to "
+                    f"lane_wedge if it is genuinely stuck.")
+                escalations.append({"kind": "live-stuck", "agent": agent, "ids": newly})
+            continue
+        base = base_of(agent)  # gone: a dead INSTANCE of a LIVE base? -> re-address, don't quiesce
+        if base and base != agent and _alive(base):
+            readdress.append(agent)
+            if not dry_run and _escalate_once(
+                    "readdress", agent,
+                    f"[wake-backstop] rows to dead instance {agent} — re-address to base {base}",
+                    f"TL;DR: {len(ids)} row(s) to {agent} (ids={ids}) are past the re-wake cap and {agent} "
+                    f"has no live pane, but its BASE {base} IS alive on some host. I did NOT quiesce (the "
+                    f"message is still deliverable to {base}). ACTION: re-address these rows to {base}."):
+                escalations.append({"kind": "readdress", "agent": agent, "base": base, "ids": ids})
             continue
         try:
             ds = desired_state_of(agent)
         except Exception as e:  # noqa: BLE001 — amend C fail-closed: unprovable veto never quiesces
             lookup_failed.append(agent)
-            if not dry_run:
-                escalate(
+            if not dry_run and _escalate_once(
+                    "lookup-failed", agent,
                     f"[wake-backstop] can't verify {agent} before quiescing — needs a human",
-                    f"TL;DR: {len(ids)} row(s) to {agent} are past the re-wake cap and it looks "
-                    f"gone (no live heartbeat on any host), but the desired_state veto lookup "
-                    f"FAILED ({e!r}) — so I will NOT quiesce (that could silently drop a message to "
-                    f"a live lane). Left unread (ids={ids}). ACTION: check {agent}'s registry row.")
+                    f"TL;DR: {len(ids)} row(s) to {agent} (ids={ids}) are past the re-wake cap and it looks "
+                    f"gone (no live heartbeat on any host), but the desired_state veto lookup FAILED "
+                    f"({e!r}) — so I will NOT quiesce (that could silently drop a message to a live lane). "
+                    f"Left unread. ACTION: check {agent}'s registry row."):
                 escalations.append({"kind": "lookup-failed", "agent": agent, "ids": ids})
             continue
         if str(ds or "").lower() == "up":
@@ -333,8 +405,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
 
     return {"considered": len(rows), "targets": targets, "woke": woke, "results": results,
             "capped": [_row_id(r) for r in capped], "unreachable": unreachable,
-            "dead_foreign": dead_foreign, "left_alive": left_alive, "vetoed": vetoed,
-            "lookup_failed": lookup_failed, "escalations": escalations}
+            "dead_foreign": dead_foreign, "live_stuck": live_stuck, "readdress": readdress,
+            "vetoed": vetoed, "lookup_failed": lookup_failed, "escalations": escalations}
 
 
 def main() -> int:
