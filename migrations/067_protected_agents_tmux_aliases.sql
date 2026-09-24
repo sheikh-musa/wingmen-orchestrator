@@ -13,14 +13,25 @@
 -- currently protected). Orch-console ruling (bus #43044, 2026-09-24): additive
 -- array column + accessor union, singular column's semantics untouched.
 --
--- Additive only, no existing row's current read behaviour changes: the new
--- column defaults to an empty array, and only cc-orchestrator's row is
--- backfilled. protected_agent_ids() / protected_agents() (agent_id-keyed) are
--- unaffected -- this column is consumed by a NEW accessor
+-- Additive: the new column defaults to an empty array, and only
+-- cc-orchestrator's row is backfilled. protected_agent_ids() / protected_agents()
+-- (agent_id-keyed) are unaffected -- this column is consumed by a NEW accessor
 -- (protected_tmux_sessions(), a separate deliberately-incremental step per
 -- migration 066's own precedent), not by any existing call site.
 --
--- REVERT: ALTER TABLE public.protected_agents DROP COLUMN IF EXISTS tmux_session_aliases;
+-- NOT a zero-behaviour-change migration, named exactly (orch-console gate
+-- review, bus #43047): this changes cc-orchestrator.tmux_session NULL -> 'orch',
+-- read by nervous_system.protected_agents.tmux_session_for() (protected_agents.py:106).
+-- Verified as of commit 2cafc59: tmux_session_for() has NO non-test callers
+-- anywhere in this repo today, so nothing breaks -- but a future caller reading
+-- that function WILL see 'orch' instead of None after this migration applies.
+--
+-- REVERT: the backfill changes an existing column value, not just adds one --
+-- dropping the new column alone would leave cc-orchestrator.tmux_session='orch'
+-- behind, which is NOT the pre-migration state. Full revert:
+--   UPDATE public.protected_agents SET tmux_session = NULL
+--       WHERE agent_id='cc-orchestrator' AND tmux_session='orch';
+--   ALTER TABLE public.protected_agents DROP COLUMN IF EXISTS tmux_session_aliases;
 
 ALTER TABLE public.protected_agents
     ADD COLUMN IF NOT EXISTS tmux_session_aliases text[] NOT NULL DEFAULT '{}';
