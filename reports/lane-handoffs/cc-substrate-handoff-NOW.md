@@ -1,4 +1,19 @@
-# cc-substrate handoff (updated 2026-09-24 ~06:15Z, bus #42852→#42853)
+# cc-substrate handoff (updated 2026-09-24 ~06:35Z, bus #42854→#42857)
+
+## STATUS (2026-09-24, later): safe-prep (a)-(d) on the 5 blockers DONE, posted #42857 — awaiting orch-console decisions, (e) Hermes untouched
+
+Orch-console's #42854 asked for 4 non-destructive prep items following the inventory below. All done, full detail in `reports/wingmen-core-drain-cutover-plan-op20655.md` (both copies, synced, new sections: "COSEM-PLATFORM RUNNER MOVE PLAN", "RUNNER-RESTART ATTRIBUTION", "CREDENTIAL FINGERPRINT CHECK").
+
+- **(a) Uncommitted wingmen-core work: CAPTURED.** New branch `wingmen-core-leftovers-20260924` @ `081b5b7` on wingmen-core's OWN checkout (a separate git history from this worktree — that checkout is 502 commits behind origin, didn't touch that drift), pushed + verified via `git ls-remote`. Excluded: 6 `.orch_default_token*` backups (listed only) and `scratchpad/` (hundreds of old session files, not source work). orch-console triages live-vs-stale from here — don't merge it yourself.
+- **(b) Credential fingerprints: mostly clean, one real anomaly.** cosem-sa.json/musa-oauth-token/syed-oauth-token all MATCH the Mini. `musa2-oauth-token` exists on BOTH hosts but with DIFFERENT values — not simple match/missing, needs a call on which is authoritative before anyone relies on either. `/etc/gzb-vpn.conf` confirmed MISSING everywhere else (not on Mini, not in the vault — only `gzb_sudo_password` is vaulted). Nothing copied/vaulted, report-only per instruction.
+- **(c) Cosem runner move plan: WRITTEN, not executed.** Target = the Mini (residency, not gzb). Good news found: cosem-platform's one workflow needs only `[self-hosted, studio]`, no Playwright/Linux requirement — a genuine macOS runner satisfies it honestly, no stand-in-label trick needed like ihsanos. Mirrors the Mini's existing `mini-ci-runner` LaunchDaemon pattern exactly (full plist in the plan doc). Awaiting orch-console's ok before registering anything.
+- **(d) Runner-restart attribution: best-evidenced, not certain.** Most likely orch-console itself, restarting `wingmen-core-runner` ~88 seconds after my own #41939 verdict surfaced the "CI throughput halved" caveat — timing rules out my own fork (already concluded by then), and the SSH evidence (this Mac's own IP + the shared `wingmen_vps` key) can't distinguish between bodies running on this machine beyond that correlation. Not stopped — identification only, per instruction. Whether to keep dual-runner is still an open call.
+- **(e) Hermes Agent: NOT touched, NOT investigated further** — hands-off entirely until Musa answers, per explicit instruction.
+
+**Nothing further for this lane until orch-console/Musa act on: the cosem move plan (c), which musa2-oauth-token value is authoritative (b), the dual-runner-or-not call (d), and Hermes awareness (from the original inventory).**
+
+---
+
 
 ## STATUS (2026-09-24): Musa asked directly whether wingmen-core can power off (op#22237) — final inventory says NOT a clean YES, real BLOCKERs found
 
