@@ -120,6 +120,38 @@ P3 (wire `deploy_console.sh` as first `quality_gate.py` consumer) still not star
 **Also observed this session, not this lane's mechanism to fix:** a `[wake] new inbox item`
 signal fired ~13x in a row with zero new `agent_messages` rows each time, and didn't
 correlate with `scripts/.agent_wake/orch-console.json`'s own debounce state at all. Flagged
-to Anthropic via SendFeedback and to cc-fleet-health (#42983/#42984), who confirmed the
-source is a bug on their side and is fixing it. If it recurs, answer tersely, don't
-re-investigate each one.
+to Anthropic via SendFeedback (**do not call SendFeedback again from this lane** -- its
+confirmation dialog wedged the session the same way AskUserQuestion did; cc-fleet-health
+turned Claude-drafted feedback OFF for autonomous lanes) and to cc-fleet-health
+(#42983/#42984), who root-caused it (wake-backstop re-woke the same stale unread row with
+no per-row ceiling) and shipped both fixes: PR#138 (deny AskUserQuestion for lanes,
+enforce-in-code) and PR#139 (wake-backstop dead-foreign quiesce) -- both already merged to
+`fable/substrate-safe-fixes`, rebased through cleanly this session.
+
+## op#42896/#42909 P1 continued (2026-09-24 ~20:40Z, this session)
+
+Per cc-fleet-health's #43029 ("next site lane_winddown.py"): checked it AND its twin
+`fleet_model.sh` before touching either -- found a REAL structural blocker, not just
+deferral. Both mix claude-agent tmux sessions with `"fleet-console"`, which is a launchd
+Python SERVER (`scripts/fleet_model.sh:27`), not an agent -- no agent_id, doesn't belong in
+`protected_agents` at all. Also `protected_agents.tmux_session` is ONE session per
+agent_id, but `cc-orchestrator` needs TWO (`orch` live / `orchestrator` idle) and has NULL
+for both today. Migrating either file as-is would silently drop outage protection for 3 of
+7 names. Left both deferred (documented in the test file), reported to cc-fleet-health
+(#43040) for a schema/accessor call -- their decision, not mine to force.
+
+Migrated a genuinely safe site instead: `scripts/lib/fleet_health_boundaries.py`
+`SINGLETON_BODIES` (the CAI-RESP-501 red-reset boundary) now reads `protected_agent_ids()`
+-- closes a real gap (`nazim-console` was registry-protected but missing from the old
+literal; `test_fleet_health_lease.py` already had a parametrized test expecting it).
+Reclassified `switch_singleton_token.sh` as a documented false positive (bash
+case-statement dispatch branches, not a membership list) and dropped a stale tracking
+entry. Full slice: 399 passed, 1 expected xfail, 4 pre-existing unrelated failures.
+Committed `6bcc583`, pushed to `fable/substrate-safe-fixes`, verified via `git ls-remote`.
+
+**Remaining P1:** `console/app.py` + `console/hosted_server.py` (console files -- per
+orch-console #42988, need a worktree branch + `deploy_console.sh` + cc-quality review, NOT
+a same-checkout commit), `lane_winddown.py` + `fleet_model.sh` (blocked, see above),
+`lane_token_resolver.py` (deliberately deferred, correctness-critical). Checkpoint #24 due
+2026-09-27 -- console files are the next safely-actionable work if nothing more urgent
+lands; the 2 blocked sites need cc-fleet-health's call first.
