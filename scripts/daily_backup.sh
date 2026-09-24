@@ -27,7 +27,25 @@
 # via psql \copy (row_to_json) for human-readable, line-countable verification.
 # Falls back to paginated REST only if pg_dump/psql/DSN are unavailable.
 #
-# OUT OF SCOPE: off-site/GCS/PITR (gated on a Wingmen-owned bucket).
+# OFF-SITE (op#20655/#42890, 2026-09-24): client-silo dumps only, pushed
+# ENCRYPTED to gzb (the real Gazzabyte office LAN, gazzai@192.168.1.114) under
+# a dedicated non-login "wbackup" account restricted to a push+prune dispatch
+# wrapper (no shell, no read access to what it stores). Encryption happens on
+# THIS host with `age` BEFORE the file ever leaves it — gzb holds ciphertext
+# only, never plaintext, never the decryption key (that key lives in the fleet
+# vault as 'backup_age_key', never on gzb, never on the bus/TG).
+#
+# KNOWN GAP, not silently worked around: gzb's LAN (192.168.1.0/24) is only
+# reachable via a FortiGate split-tunnel VPN whose client (gzb-vpn.sh) is
+# Linux-specific tooling installed ON wingmen-core (hub-vps) — it hardcodes
+# wingmen-core's own default-gateway IP and uses `ip route`/`ip link`, neither
+# of which exist on this Mac. This script therefore currently relays the push
+# THROUGH wingmen-core (raises its VPN, tunnels the scp over an SSH
+# ProxyJump, tears the VPN down after) — meaning the off-site push still
+# depends on wingmen-core being alive, which defeats the point once that host
+# is decommissioned. Flagged to orch-console; NOT fixed here (porting a
+# default-route-manipulating script to the Mini safely is separate, real work
+# that deserves its own review, not something to rush inside a backup fix).
 
 set -euo pipefail
 
@@ -291,30 +309,74 @@ backup_client_silo "irsyad-goumlyne" "${GOUMLYNE_RO_DATABASE_URL:-}"
 # dump above is the amanah guarantee, so a push failure must NOT fail the local
 # backup, but MUST be surfaced (a stale off-site copy is a real risk).
 # ---------------------------------------------------------------------------
-GZB_KEY="$HOME/.ssh/wingmen_vps"
-GZB_HOST="hub-vps"                 # root@91.107.235.77, from ~/.ssh/config
-GZB_REMOTE_DIR="wingmen/backups"
-if [ -f "$GZB_KEY" ]; then
-  GZB_SSH="ssh -i $GZB_KEY -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+GZB_KEY="$HOME/.ssh/wbackup_gzb"
+GZB_RELAY="hub-vps"                 # wingmen-core, used ONLY as a ProxyJump to reach gzb's LAN over its VPN -- see KNOWN GAP comment above
+GZB_TARGET="wbackup@192.168.1.114"  # dedicated non-login account on gzb, push+prune only, no read/shell access
+# Public age recipient key -- NOT sensitive, encryption-only. The matching
+# private key lives in the fleet vault ('backup_age_key'), used only by the
+# separate restore-test, never by this nightly path.
+BACKUP_AGE_RECIPIENT="age13ufthckcg98lmj8nvfzpjq0tyqf0ky9fuxqzt9x7pacze0u40gvqmg0330"
+AGE_BIN="/usr/local/bin/age"
+if [ -f "$GZB_KEY" ] && [ -x "$AGE_BIN" ]; then
+  GZB_SSH="ssh -i $GZB_KEY -J $GZB_RELAY -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+  GZB_SCP="scp -O -i $GZB_KEY -J $GZB_RELAY -o ConnectTimeout=20 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+  # Raise the VPN relay on wingmen-core (idempotent; gzb-vpn.sh no-ops if already up).
+  ssh -o ConnectTimeout=15 -o BatchMode=yes "$GZB_RELAY" "sudo /usr/local/sbin/gzb-vpn.sh up" >/dev/null 2>&1 || true
   PUSH_FAIL=0
-  $GZB_SSH "$GZB_HOST" "mkdir -p $GZB_REMOTE_DIR/$DATE" 2>/dev/null || true
+  # op#42891 (2026-09-24, Musa "do the same for the daily backups as well"):
+  # extends the SAME encrypt+push+prune pattern to substrate, the one
+  # remaining store backup_one() touches. Substrate's files land directly at
+  # $TODAY_DIR's top level (not a subdir like the client silos), so it needs
+  # its own tar invocation (top-level .dump + *.ndjson.gz only, explicitly
+  # excluding the client-silo subdirs so they aren't double-archived).
+  # COST, measured empirically this session, not estimated: the relay path
+  # (Mini -> wingmen-core -> gzb VPN) ran at ~65KB/s for a 44MB client-silo
+  # push -- substrate's ~360MB dump would add roughly 90-150 minutes to
+  # EVERY nightly run at that rate. Substrate already has a separate safety
+  # net (Supabase's own managed daily backup) the client silos don't have an
+  # equivalent of -- this was the original, deliberate reason it was excluded
+  # (see file header). Wired in per Musa's explicit instruction; flagged to
+  # orch-console for the timing/scheduling call, not decided unilaterally
+  # here (see op20655 plan doc, 2026-09-24 op42891 section).
+  echo -n "  [off-site] encrypt+push substrate → gzb... "
+  SUB_ARCHIVE="$TODAY_DIR/_gzb_substrate.tar"
+  SUB_ENCRYPTED="$TODAY_DIR/_gzb_substrate_${DATE}.tar.age"
+  SUB_FILES=()
+  [ -f "$TODAY_DIR/_full_public.dump" ] && SUB_FILES+=("_full_public.dump")
+  while IFS= read -r -d '' f; do SUB_FILES+=("$(basename "$f")"); done < <(find "$TODAY_DIR" -maxdepth 1 -name '*.ndjson.gz' -print0)
+  if [ "${#SUB_FILES[@]}" -gt 0 ] \
+      && tar -C "$TODAY_DIR" -cf "$SUB_ARCHIVE" "${SUB_FILES[@]}" \
+      && "$AGE_BIN" -r "$BACKUP_AGE_RECIPIENT" -o "$SUB_ENCRYPTED" "$SUB_ARCHIVE" \
+      && $GZB_SCP "$SUB_ENCRYPTED" "$GZB_TARGET:/home/wbackup/incoming/" 2>"$TODAY_DIR/_gzb_substrate.err"; then
+    rm -f "$TODAY_DIR/_gzb_substrate.err" "$SUB_ARCHIVE" "$SUB_ENCRYPTED"; echo "✓"
+  else
+    echo "✗ push failed"; cat "$TODAY_DIR/_gzb_substrate.err" 2>/dev/null || true; PUSH_FAIL=$((PUSH_FAIL + 1))
+    rm -f "$SUB_ARCHIVE" "$SUB_ENCRYPTED"
+  fi
   for SILO in ihsanos-ceayj irsyad-goumlyne; do
     [ -d "$TODAY_DIR/$SILO" ] || continue
-    echo -n "  [off-site] rsync $SILO → $GZB_HOST... "
-    if rsync -az --delete -e "$GZB_SSH" \
-          "$TODAY_DIR/$SILO" "$GZB_HOST:$GZB_REMOTE_DIR/$DATE/" 2>"$TODAY_DIR/_gzb_$SILO.err"; then
-      rm -f "$TODAY_DIR/_gzb_$SILO.err"; echo "✓"
+    ARCHIVE="$TODAY_DIR/_gzb_${SILO}.tar"
+    ENCRYPTED="$TODAY_DIR/_gzb_${SILO}_${DATE}.tar.age"
+    echo -n "  [off-site] encrypt+push $SILO → gzb... "
+    if tar -C "$TODAY_DIR" -cf "$ARCHIVE" "$SILO" \
+        && "$AGE_BIN" -r "$BACKUP_AGE_RECIPIENT" -o "$ENCRYPTED" "$ARCHIVE" \
+        && $GZB_SCP "$ENCRYPTED" "$GZB_TARGET:/home/wbackup/incoming/" 2>"$TODAY_DIR/_gzb_$SILO.err"; then
+      rm -f "$TODAY_DIR/_gzb_$SILO.err" "$ARCHIVE" "$ENCRYPTED"; echo "✓"
     else
-      echo "✗ push failed"; cat "$TODAY_DIR/_gzb_$SILO.err" || true; PUSH_FAIL=$((PUSH_FAIL + 1))
+      echo "✗ push failed"; cat "$TODAY_DIR/_gzb_$SILO.err" 2>/dev/null || true; PUSH_FAIL=$((PUSH_FAIL + 1))
+      rm -f "$ARCHIVE" "$ENCRYPTED"
     fi
   done
-  # Mirror the 7-day retention on gzb too (prune day-dirs older than 7 days).
-  $GZB_SSH "$GZB_HOST" "find $GZB_REMOTE_DIR -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \\;" 2>/dev/null || true
+  # Retention: 7 days on gzb, pruned by this (Mini-side) script via the
+  # restricted account's fixed 'prune7' dispatch command (op#42890) --
+  # the account has no shell, so it cannot self-prune on gzb's own cron.
+  $GZB_SSH "$GZB_TARGET" prune7 >/dev/null 2>&1 || true
+  ssh -o ConnectTimeout=15 -o BatchMode=yes "$GZB_RELAY" "sudo /usr/local/sbin/gzb-vpn.sh down" >/dev/null 2>&1 || true
   if [ "$PUSH_FAIL" -gt 0 ]; then
-    alert "⚠️ Daily backup: off-site push to gzb FAILED for $PUSH_FAIL client silo(s) — LOCAL backup is OK, but the off-site copy is stale. Check $TODAY_DIR/_gzb_*.err"
+    alert "⚠️ Daily backup: off-site push to gzb FAILED for $PUSH_FAIL store(s) — LOCAL backup is OK, but the off-site copy is stale. Check $TODAY_DIR/_gzb_*.err"
   fi
 else
-  echo "  [off-site] SKIPPED: gzb key $GZB_KEY not found (no off-site push)."
+  echo "  [off-site] SKIPPED: gzb key $GZB_KEY or age binary $AGE_BIN not found (no off-site push)."
 fi
 
 # Cleanup old backups (keep 7 days)
