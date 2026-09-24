@@ -45,6 +45,17 @@ _FALLBACK_PROTECTED = frozenset({
     "cc-quality", "cc-storefront", "cc-finance", "nazim-console",
 })
 
+# Protected tmux SESSION names that do NOT correspond to any claude agent, and
+# so deliberately do NOT go into the `protected_agents` table (orch-console
+# ruling, bus #43044, op#42896/#42909 P1 continuation) — that registry stays
+# agents-only (agent_id vocabulary); nothing here gets a fake agent_id. Today
+# this is a single entry: "fleet-console" is the launchd Python server
+# (dev.wingmen.fleet-console, scripts/fleet_model.sh:27) that a lane-winddown
+# path must never mistake for an idle worker lane, even though it has no
+# agent_id at all. See test_protected_agents_registry.py for the enforcement
+# test asserting this never leaks into protected_agent_ids().
+PROTECTED_NON_AGENT_SESSIONS = ("fleet-console",)
+
 
 @dataclass(frozen=True)
 class ProtectedAgent:

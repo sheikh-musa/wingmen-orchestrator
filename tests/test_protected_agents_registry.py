@@ -26,7 +26,10 @@ import re
 
 import pytest
 
-from nervous_system.protected_agents import protected_agent_ids
+from nervous_system.protected_agents import (
+    PROTECTED_NON_AGENT_SESSIONS,
+    protected_agent_ids,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -73,6 +76,22 @@ def test_accessor_superset_of_every_hardcoded_agent_id_set():
             f"table, read via nervous_system.protected_agents) does NOT -- this "
             f"would mean migrating {source} to the accessor drops real protection. "
             f"Registry currently: {sorted(registry)}"
+        )
+
+
+def test_non_agent_sessions_never_leak_into_agent_id_registry():
+    """Orch-console ruling (bus #43044, op#42896/#42909 P1 continuation):
+    protected_agents stays agents-only -- 'fleet-console' (a launchd Python
+    server, not a claude agent, scripts/fleet_model.sh:27) must NEVER show up
+    as a protected_agent_ids() member, however it's later wired into a tmux-
+    session-scoped accessor. Also guards against a copy-paste drift between
+    PROTECTED_NON_AGENT_SESSIONS and the registry going the other way."""
+    registry = protected_agent_ids()
+    for session in PROTECTED_NON_AGENT_SESSIONS:
+        assert session not in registry, (
+            f"{session!r} (a non-agent tmux session per PROTECTED_NON_AGENT_SESSIONS) "
+            f"leaked into protected_agent_ids() -- someone added it as a fake "
+            f"agent_id row; it belongs only in PROTECTED_NON_AGENT_SESSIONS."
         )
 
 
