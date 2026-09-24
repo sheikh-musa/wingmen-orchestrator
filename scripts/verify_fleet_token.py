@@ -53,13 +53,12 @@ if not os.path.exists(TM):
 KEYS = Path.home() / ".wingmen" / "keys"
 EMPTY_HASH = "e3b0c44298fc"  # sha256("")[:12]
 
-# Singleton node -> tmux session. These do NOT stamp agent_status.auth_fp today.
-SINGLETONS = {
-    "cc-fleet-health": "fleet-health",
-    "cai": "cai",
-    "orch-console": "nazim",
-    "cc-quality": "quality",
-}
+# Singleton membership now reads the shared nervous_system.protected_agents
+# registry (op#42896/#42909 P1) instead of its own copy -- the old hardcoded
+# 4-agent dict was missing cc-storefront/cc-finance/nazim-console, so newer
+# singletons misclassified as "lane" in the report below. These do NOT stamp
+# agent_status.auth_fp today.
+from nervous_system.protected_agents import protected_agent_ids  # noqa: E402
 
 
 def _fp_of_token_file(path: Path) -> str | None:
@@ -149,9 +148,10 @@ def main() -> int:
     args = ap.parse_args()
 
     expected_fp, expected_label = _resolve_expected(args)
+    singletons = protected_agent_ids()
     results = []
     for r in _live_rows():
-        is_singleton = r["agent_id"] in SINGLETONS
+        is_singleton = r["agent_id"] in singletons
         fp = r["auth_fp"]
         metered = _metered_state(r["session"])
         if fp is None:

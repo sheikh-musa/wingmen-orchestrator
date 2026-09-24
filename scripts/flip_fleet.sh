@@ -84,8 +84,9 @@ done
 echo; echo "── STAGE 2: live re-token Mini engineer lanes ──"
 LANES="$("$VENV_PY" - <<'PY' 2>/dev/null
 import os, psycopg
+from nervous_system.protected_agents import protected_agent_ids
 dsn=os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-SING={"cc-fleet-health","cai","orch-console","cc-quality"}
+SING=protected_agent_ids(dsn)
 with psycopg.connect(dsn, connect_timeout=15) as c, c.cursor() as cur:
     cur.execute("""SELECT tmux_session FROM agent_status
                    WHERE status IN ('working','active')

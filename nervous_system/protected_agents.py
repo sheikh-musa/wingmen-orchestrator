@@ -1,16 +1,15 @@
 """protected_agents.py — the ONE registry accessor (op#42896/#42909, P1).
 
-THE PROBLEM THIS FIXES: 9 independent hardcoded singleton/protected-agent lists
-exist across this repo (scripts/lib/fleet_health_boundaries.py,
-scripts/lib/lane_winddown.py, scripts/verify_fleet_token.py,
-nervous_system/console/app.py, scripts/lib/lane_token_resolver.py,
-scripts/fleet_model.sh, scripts/switch_singleton_token.sh,
-nervous_system/console/hosted_server.py, nervous_system/cc_session_costs_auto_writer.py)
-and they DISAGREE (e.g. app.py's own literal set was missing 'cai' before a union
-with a second source papered over it; full inventory in
-reports/substrate-ihsanification-next-moves-op42896.md). Every consumer of
-"which agents are protected singletons" should import from HERE instead of
-defining its own set — that is the entire point: one source, read everywhere.
+THE PROBLEM THIS FIXES: independent hardcoded singleton/protected-agent lists
+existed across this repo and DISAGREED (e.g. app.py's own literal set was
+missing 'cai' before a union with a second source papered over it; full
+inventory + migration status in reports/substrate-ihsanification-next-moves-
+op42896.md, kept current, not this docstring). Every consumer of "which agents
+are protected singletons" should import from HERE instead of defining its own
+set — that is the entire point: one source, read everywhere. As of 2026-09-24,
+migrated: nervous_system/cc_session_costs_auto_writer.py, scripts/flip_fleet.sh,
+scripts/verify_fleet_token.py. Remaining: see tests/test_protected_agents_registry.py's
+_KNOWN_HARDCODED_LIST_FILES (the live enforcement tracking, not a comment here).
 
 Backed by the `protected_agents` table (migration 066_protected_agents_registry_columns.sql
 added `kind`, `tmux_session`, `boots_from_env_only` on top of the pre-existing

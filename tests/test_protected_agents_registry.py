@@ -80,18 +80,12 @@ def test_accessor_superset_of_every_hardcoded_agent_id_set():
 # not just a passing check:
 _KNOWN_HARDCODED_LIST_FILES = {
     "scripts/lib/lane_winddown.py",
-    "scripts/verify_fleet_token.py",
     "nervous_system/console/app.py",
     "scripts/lib/lane_token_resolver.py",
     "scripts/fleet_model.sh",
     "scripts/switch_singleton_token.sh",
     "nervous_system/console/hosted_server.py",
-    "nervous_system/cc_session_costs_auto_writer.py",
     "scripts/lib/fleet_health_boundaries.py",
-    # NEW, found by this test's first real run, not in the 09-05 audit or the
-    # 09-24 re-verification -- the real count is 11, not 9:
-    "scripts/flip_fleet.sh",  # line 88: SING={"cc-fleet-health","cai","orch-console","cc-quality"}
-    "scripts/opus_reprobe_storefront.py",  # line 113: for who in ("cc-fleet-health", "cai", "orch-console"):
 }
 
 # Files this test's first real run flagged that are genuine false positives --
@@ -129,6 +123,14 @@ _KNOWN_NON_PROTECTION_FILES = {
     # structure than membership, out of scope for a simple protected-set
     # migration.
     "scripts/context_health_watchdog.py",
+    # A fixed 3-agent ESCALATION-FANOUT list (who to page on an opus-capacity
+    # deadline breach), not a protected/singleton-membership test -- verified
+    # by reading the call site (op#42896 P1 pass, 2026-09-24): migrating this
+    # to protected_agent_ids() would silently widen the page-out to every
+    # registry member (cc-quality, cc-storefront, cc-finance, nazim-console,
+    # cc-orchestrator too) -- an escalation-policy change, not a registry
+    # migration. Left as a literal tuple deliberately.
+    "scripts/opus_reprobe_storefront.py",
 }
 
 # Deliberately surgical, not broad: a QUOTED-literal token (so prose like
