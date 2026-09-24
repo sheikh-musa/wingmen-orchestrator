@@ -722,6 +722,31 @@ IFS=$'\t' read -r RESOLVED_MODEL _MODEL_TIER < <(
     resolve_lane_model "$_BODY_MODEL_SESSION" "$ORCH_DIR" "$VENV_PY" "$_FLEET_MODEL_FILE" "claude-opus-4-8")
 echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}  ${AMBER}(via ${_MODEL_TIER})${RESET}"
 
+# AUTOCOMPACT threshold (op#22298 cost-rollout / Nazim #42894): export
+# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE so CC compacts EARLIER (default 85% -> e.g. 50%),
+# cutting the tokens carried per turn. Precedence mirrors the model cascade above,
+# keyed on the tmux session:
+#   .<session>_autocompact_pct  >  .fleet_autocompact_pct  >  (unset)
+# DEFAULT-OFF by construction: no marker and no fleet file -> the var is never
+# exported -> CC's built-in default (85%) is byte-identical to today. Staged rollout:
+# STAGE 1 pilots ONE lane by writing .<session>_autocompact_pct; STAGE 2 goes
+# fleet-wide by writing .fleet_autocompact_pct (+ the singleton/console boots, which
+# use their own launchers). Value is scrubbed to digits and range-checked 1..99;
+# anything else is ignored (fail-safe: never export a bad override). Inert until written.
+_AC_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+_AC_PCT=""; _AC_TIER=""
+if [ -n "$_AC_SESSION" ] && [ -r "$ORCH_DIR/.${_AC_SESSION}_autocompact_pct" ]; then
+    _AC_PCT="$(tr -dc '0-9' < "$ORCH_DIR/.${_AC_SESSION}_autocompact_pct")"; _AC_TIER=".${_AC_SESSION}_autocompact_pct"
+elif [ -r "$ORCH_DIR/.fleet_autocompact_pct" ]; then
+    _AC_PCT="$(tr -dc '0-9' < "$ORCH_DIR/.fleet_autocompact_pct")"; _AC_TIER=".fleet_autocompact_pct"
+fi
+if [ -n "$_AC_PCT" ] && [ "$_AC_PCT" -ge 1 ] 2>/dev/null && [ "$_AC_PCT" -le 99 ] 2>/dev/null; then
+    export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="$_AC_PCT"
+    echo -e "${BOLD}${TEAL}▶ Autocompact override: ${_AC_PCT}%${RESET}  ${AMBER}(via ${_AC_TIER})${RESET}"
+elif [ -n "$_AC_PCT" ]; then
+    echo -e "${AMBER}⚠ ignoring out-of-range autocompact override '${_AC_PCT}' (via ${_AC_TIER}); expected 1..99${RESET}" >&2
+fi
+
 # Stamp resolved model into current_task (CAI observes model drift) AND
 # SELF-REGISTER this lane's tmux session for #111 launchd-safe wake delivery:
 # the lane knows its own session from inside its pane; the wake then resolves via
