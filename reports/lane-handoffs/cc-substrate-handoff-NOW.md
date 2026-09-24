@@ -217,3 +217,14 @@ The off-site-destination research (op#42884, above) surfaced that client-silo ba
 Committed `aff7638` on `fable/substrate-safe-fixes` (in `~/wingmen/orchestrator`, the live-script checkout — NOT this worktree), pushed, verified against origin. Reported bus #42887 (thread on #42886).
 
 **Backup coverage gap is now closed.** Remaining power-off blockers unchanged: Hermes (Musa's go-ahead + Telegram test) + the off-site destination host itself (deferred, needs Musa's S3-vs-R2 money/residency call per #42886(3)).
+
+## op#42888 — pool_usage_history false-positive fixed at root cause (2026-09-24, this fork)
+The `substrate/pool_usage_history` mismatch flagged (not fixed, out of scope) in the op#42886 round above was about to fire a FALSE "backup failed" Telegram alert every night — orch-console caught this before tonight's cron run (#42888): `backup_one()` ran the live `count(*)` and the `\copy` dump as two SEPARATE psql sessions, so a write landing on this actively-written metrics table between them made the counts disagree.
+
+**Fixed (root cause, not a tolerance):** folded the count + `\copy` into ONE psql session inside a single `REPEATABLE READ` transaction (`BEGIN ISOLATION LEVEL REPEATABLE READ; SET statement_timeout=0; \copy ...; SELECT count(*)...; COMMIT;`, `-tAq -v ON_ERROR_STOP=1`) — both queries now see the identical snapshot, so a concurrent write can't cause a mismatch, while a genuine truncation still fails loud. Applies uniformly across every table in every store — **no allowlist/tolerance added anywhere; client silos remain exact-match, unaffected.**
+
+**Verified:** isolated pattern test first (small table, clean), then full manual run — 425 tables backed up, 0 failed, exit 0. `pool_usage_history` now passes: 7045/7045 rows, same-snapshot. Both client silos re-confirmed unaffected: ihsanos-ceayj 125/125, irsyad-goumlyne 136/136, both 0 failed.
+
+Committed `62b8349` (rebased to `f7d7061`) on `fable/substrate-safe-fixes` (`~/wingmen/orchestrator`), pushed, verified via `git ls-remote`. Bus #42889 (thread on #42888). Full detail: `reports/wingmen-core-drain-cutover-plan-op20655.md`, dated 2026-09-24 (later still) section.
+
+**The backup script is now fully clean and safe for tonight's 3 AM cron run.** Remaining power-off blockers unchanged: Hermes (Musa's go-ahead + Telegram test) + the off-site destination host (deferred, S3-vs-R2 money/residency call per #42886(3)).
