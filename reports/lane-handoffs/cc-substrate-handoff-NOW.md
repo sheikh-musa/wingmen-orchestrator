@@ -178,3 +178,32 @@ Once gated + applied: build `protected_tmux_sessions()`, then migrate `lane_wind
 `fleet_model.sh` onto it (required test: superset by TOTAL COUNT not enumerated list;
 `fleet_model.sh` is bash, needs a tiny `python -m ...` CLI wrapper that fails CLOSED —
 protect everything, wind nothing down — if the accessor errors).
+
+## op#42896/#42909 P1 — gate cleared, migration applied, both sites done (2026-09-24 ~21:10Z)
+
+Orch-console gated migration 067 conditionally (#43047): rollback was incomplete (only
+dropped the column, didn't revert the `cc-orchestrator.tmux_session` backfill) and the
+header falsely claimed zero behaviour change. Fixed both (commit `5aedf97`, new dry-run
+sha256 `b3ec8976b3f3`), applied for real via `scripts/apply_migration.py 067 --silo
+tscuymavysscrvoberrr`, sent post-state + test results for co-verify (#43048).
+
+Built `protected_tmux_sessions()` in `nervous_system/protected_agents.py` (union of
+`tmux_session` + `tmux_session_aliases` + `PROTECTED_NON_AGENT_SESSIONS`, fail-safe) plus a
+`python -m nervous_system.protected_agents sessions` CLI. Migrated both blocked sites:
+
+- `lane_winddown.py`: `may_wind_down()` reads the accessor live now. Kept a module-level
+  `SINGLETONS = protected_tmux_sessions()` snapshot ONLY because
+  `nervous_system/console/app.py` still does `from ... import SINGLETONS` — app.py itself is
+  untouched (needs its own worktree branch + cc-quality review, #42988).
+- `fleet_model.sh`: `CORE_LANES` computed lazily inside `--live` (no DB touch otherwise),
+  MINUS `$AUDITOR_LANES` so cc-quality/cc-storefront keep their separate opus-pin carve-out.
+  Fails CLOSED (exit 5, nothing flipped) if the CLI errors or returns empty. Verified the
+  exact computation in isolation, did NOT run a real `--live` flip.
+
+Commit `e817d65`, pushed, verified via `git ls-remote`. Full slice: 151 passed. Reported to
+orch-console (#43050), asked whether to start the console-files worktree next or hold for
+checkpoint #24 (2026-09-27) — awaiting reply.
+
+**Remaining P1 (only these 3):** `console/app.py` + `console/hosted_server.py` (worktree +
+`deploy_console.sh` + cc-quality review), `lane_token_resolver.py` (deliberately deferred,
+correctness-critical, needs its own dedicated pass).
