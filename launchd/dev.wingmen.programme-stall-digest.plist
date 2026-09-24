@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.programme-stall-digest</string>
+  <key>ProgramArguments</key><array><string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string><string>/Users/sheikhmusa/wingmen/orchestrator/scripts/programme_stall_guard.py</string><string>--digest</string></array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/programme-stall-digest.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/programme-stall-digest.log</string>
+</dict>
+</plist>
