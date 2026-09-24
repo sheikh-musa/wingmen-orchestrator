@@ -83,6 +83,10 @@ reports/console-deploy/**/*.png
 # was historically tracked; untracked (git rm --cached) in this same change.
 .*_model
 .*_model.bak*
+# Per-lane/fleet AUTOCOMPACT pointers (.<session>_autocompact_pct, .fleet_autocompact_pct)
+# — runtime state read at launch by launch_dangerous_cc.sh; machine-local, never versioned
+# (same shape as the MODEL pointers above). op#22298 cost-rollout.
+.*_autocompact_pct
 # Secret token-pointer variants not already covered above (e.g. the
 # .nazim_default_token.was.<...> preswitch snapshot). SECRET — handle by name only.
 .*_default_token*
