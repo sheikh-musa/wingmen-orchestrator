@@ -1,4 +1,10 @@
-# cc-substrate handoff (updated 2026-09-24 ~22:30Z, bus #42890→#42891)
+# cc-substrate handoff (updated 2026-09-24, bus #42896→#42908)
+
+## STATUS: substrate ihsanification programme — P1/P3 proposal + re-measurement done, NO BUILD (per #42896)
+
+Full doc: `reports/substrate-ihsanification-next-moves-op42896.md` (both copies, synced). Posted bus #42908. Headline: P1 (one registry) — 3 of ~10 original hardcoded singleton-set copies already fixed (read `protected_agents` now), but 2 NEW hardcoded copies appeared since 09-05 (`hosted_server.py`, `cc_session_costs_auto_writer.py`) — net count is a wash, not progress; `console/app.py:293` is missing `cai` entirely, a live disagreement. P3 (ship gate) — zero wiring progress since 09-05; recommended `deploy_console.sh` as first consumer, not a generic pre-push hook. Re-measured: orphan scripts 17/178 top-level (methodology differs from the 09-05 %, flagged not fudged); `boot_briefing` 1.01MB/1861 rows (marginal -8% from 1.09MB/1899, still ~25x over the proposed invariant); **fable/substrate-safe-fixes now HAS CI configured (real change) but is currently RED** — root cause found: `ModuleNotFoundError: psycopg2` in 4 test files, a pre-existing `requirements.txt` gap NOT caused by anything committed this session — flagged as a quick separate fix, not built here (proposal-only task).
+
+
 
 ## STATUS (2026-09-24 ~22:30Z): gzb off-site backup destination BUILT + VERIFIED (#42890), extended to substrate (#42891) — awaiting orch-console on substrate live-run timing
 
