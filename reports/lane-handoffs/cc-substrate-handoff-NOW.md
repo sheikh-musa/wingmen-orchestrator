@@ -246,3 +246,41 @@ on timing).
 **P1 registry migration is now fully done except:** `console/app.py` + `console/
 hosted_server.py` (next — needs a worktree branch + `deploy_console.sh` + cc-quality
 review, per #42988) and `lane_token_resolver.py` (deliberately deferred).
+
+## op#42896/#42909 P1 — console files built+tested, blocked at pre-push, bundled with panes.py, review requested (2026-09-24 ~21:47Z)
+
+Built `console_protected_identities()` (`protected_tmux_sessions() | protected_agent_ids()
+| {"hub"}`) in `nervous_system/protected_agents.py` and migrated both `console/app.py`'s
+`_LANE_ACTION_PROTECTED` and `console/hosted_server.py`'s `_PROTECTED` (whose own comment
+said "mirrors app.py" — the exact duplication this programme exists to end) onto it.
+`hosted_server.py` resolves its DSN via `hosted_view._dsn()` (`CONSOLE_DB_URL`, not
+`DATABASE_URL` — it's the VPS-facing process), defensively wrapped so a missing DSN at
+import can't crash it. Verified both resolve to the identical 15-member set pre/post
+migration. `tests/console` (345) + `test_protected_agents_registry.py` (10): all green.
+
+Committed as `cc-substrate`: `bb4508f` on branch `fix/console-lane-action-protected-migration`
+(this worktree). Confirmed via `console_deploy_manifest.sh` this needs the full
+`deploy_console.sh` gate (cc-quality review), not a plain PR — both files are `*.py` under
+`nervous_system/console/`, covered by the content hash. **Push BLOCKED** by the tracked
+pre-push hook (no review for content `139e2432e5758584`). Did not use `--no-verify`. Asked
+orch-console how to proceed (#43065) — matching the `console/panes.py`→`8aed9ae` precedent.
+
+Orch-console ruled (#43066): bundle the still-unreviewed `panes.py` hub_reach fix (`8aed9ae`,
+op#42933, stuck behind this same gate on its own branch `console/panes-hub-reach-op42933` in
+the main checkout) onto this branch — ONE content hash, ONE review, ONE deploy. Cherry-picked
+it → `468d094` (author stays `orch-console` — their code; committer `cc-substrate` — my
+pick). Re-ran `tests/console` post-bundle: 345 passed. `deploy_console.sh` /
+`render_console_pages.sh` both hardcode `cd "$HOME/wingmen/orchestrator"` (main checkout), so
+neither runs against this worktree's content — computed the hash directly via
+`console_deploy_manifest.sh`'s `console_content_hash "$PWD"` instead: **`9ace6cd6a1ebcaf4`**.
+
+Posted a bundled review request to cc-quality (#43077, `review_request`,
+`requires_response=True`) — worktree path, branch, head SHA `468d094`, hash, both changes
+described, diff paths to review, save-to path
+(`reports/console-deploy/9ace6cd6a1ebcaf4/cc-quality-review.md`, in this worktree — the
+pre-push hook reads it relative to the pushing checkout). Woke cc-quality
+(`agent_wake.wake_agent('cc-quality')`) per orch-console's note it never picked up the
+earlier #42943 request this one replaces. Reported progress to orch-console (#43079).
+**Awaiting cc-quality's review before push → PR → orch-console's gate** (step 3 of #43066:
+fast-forward main checkout, copy review to the same path there, run `deploy_console.sh` for
+real, send PNG paths + served version for eyeball).
