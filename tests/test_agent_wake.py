@@ -118,14 +118,14 @@ def test_wake_delegates_to_verified_submit_not_raw_sendkeys(_wake_ready, monkeyp
         raise AssertionError(f"wake_agent used raw subprocess (send-keys?): {a}")
     monkeypatch.setattr(agent_wake.subprocess, "run", _boom)
     calls = []
-    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig: calls.append((s, sig)) or 0)
+    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: calls.append((s, sig)) or 0)
     r = agent_wake.wake_agent("cc-ihsanos", now=1000.0)
     assert r["woke"] is True
     assert calls == [("sess", agent_wake._SIGNAL)]
 
 
 def test_wake_records_and_reports_true_on_verified_submit(_wake_ready, monkeypatch):
-    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig: 0)  # rc 0 = verified
+    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: 0)  # rc 0 = verified
     r = agent_wake.wake_agent("cc-ihsanos", now=1000.0)
     assert r["woke"] is True and r["session"] == "sess"
     assert agent_wake._read_wakes("cc-ihsanos") == [1000.0]  # recorded
@@ -135,7 +135,7 @@ def test_wake_reports_false_loud_on_unverified_submit(_wake_ready, monkeypatch):
     # rc 3 = lane_nudge could NOT verify submission (staged/wedged/dialog). Must NOT
     # claim woke=True; must flag submit_failed so the caller can escalate; and must
     # RECORD the attempt so repeated failures trip the 5/5min cap -> loud alert_due.
-    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig: 3)
+    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: 3)
     r = agent_wake.wake_agent("cc-ihsanos", now=1000.0)
     assert r["woke"] is False and r.get("submit_failed") is True
     assert agent_wake._read_wakes("cc-ihsanos") == [1000.0]  # attempt counted vs cap
@@ -144,7 +144,7 @@ def test_wake_reports_false_loud_on_unverified_submit(_wake_ready, monkeypatch):
 def test_wake_reports_false_on_session_raced_gone(_wake_ready, monkeypatch):
     # rc 2 = session vanished between resolve and submit; nothing was delivered, so
     # do NOT burn a cap slot (no record) but DO report the failure.
-    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig: 2)
+    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: 2)
     r = agent_wake.wake_agent("cc-ihsanos", now=1000.0)
     assert r["woke"] is False and r.get("submit_failed") is True
     assert agent_wake._read_wakes("cc-ihsanos") == []  # NOT recorded
@@ -153,13 +153,33 @@ def test_wake_reports_false_on_session_raced_gone(_wake_ready, monkeypatch):
 def test_wake_repeated_unverified_trips_loud_cap(_wake_ready, monkeypatch):
     # End-to-end of the self-wiring loud escalation: 5 unverified submits inside the
     # window -> the 6th call is a cap hit with alert_due=True (existing telegram path).
-    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig: 3)
+    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: 3)
     # 50s apart: >45s debounce (each records) AND all 5 stay inside the 300s window
     # when the 6th call lands at +250s (1000..1200 are all >950).
     for i in range(5):
         agent_wake.wake_agent("cc-ihsanos", now=1000.0 + i * 50)
     capped = agent_wake.wake_agent("cc-ihsanos", now=1000.0 + 5 * 50)
     assert capped.get("cap_hit") is True and capped.get("alert_due") is True
+
+
+def test_wake_forwards_row_id_to_verified_submit(_wake_ready, monkeypatch):
+    # Per-row ceiling wiring (Nazim #43063): the row driving the wake must reach
+    # lane_nudge (via _verified_submit) so the ceiling is keyed by it.
+    seen = {}
+    monkeypatch.setattr(agent_wake, "_verified_submit",
+                        lambda s, sig, row_id=None: seen.setdefault("row_id", row_id) or 0)
+    agent_wake.wake_agent("cc-ihsanos", now=1000.0, row_id="R42")
+    assert seen["row_id"] == "R42"
+
+
+def test_wake_row_capped_on_rc7_does_not_burn_a_cap_slot(_wake_ready, monkeypatch):
+    # rc 7 = lane_nudge's per-row ceiling refused (row already delivered enough). It is a
+    # DELIBERATE bound, not a wedge: report row_capped, do NOT record a wake (nothing typed).
+    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: 7)
+    r = agent_wake.wake_agent("cc-ihsanos", now=1000.0, row_id="R7")
+    assert r["woke"] is False and r.get("row_capped") is True
+    assert r.get("submit_failed") is not True
+    assert agent_wake._read_wakes("cc-ihsanos") == []  # ceiling refusal must not burn the per-agent cap
 
 
 # ── _candidate_sessions offline-sibling filter (Nazim #40426; phantom hijack 2026-09-16) ──

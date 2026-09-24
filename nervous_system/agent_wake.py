@@ -333,23 +333,33 @@ def resolve_tmux_session(agent_id: str) -> str | None:
 _LANE_NUDGE = ORCH / "scripts" / "lane_nudge.sh"
 
 
-def _verified_submit(session: str, signal: str) -> int:
+def _verified_submit(session: str, signal: str, row_id=None) -> int:
     """Submit `signal` into `session`'s composer via the fleet's ONE verified-submit
     (scripts/lane_nudge.sh) and return its exit code. lane_nudge does the whole
     clear->type->Enter->confirm-it-left-the-composer->extra-Enter retry AND the
     ghost-aware composer guard (never clobbers the lane's own staged next-step).
 
+    When `row_id` is given it is passed as env LANE_NUDGE_ROW_ID so lane_nudge's
+    per-row delivery ceiling (Nazim #43063) bounds re-delivery of THAT row across every
+    waker — lane_nudge is the common typing choke, so this covers the wake path too.
+
     Returns lane_nudge's exit code so the caller can report honestly:
       0 = verified submitted (pane entered a working/queued state)
       3 = could NOT verify after retries, OR refused to clobber real staged text
       2 = no such session (raced) / usage
+      7 = refused: per-row delivery ceiling hit for this row_id
     A shell-out failure (missing script, exec error) maps to a non-zero rc so the
     caller treats it as a failed wake — never a silent success (charter #1)."""
+    env = None
+    if row_id is not None:
+        import os as _os
+        env = dict(_os.environ, LANE_NUDGE_ROW_ID=str(row_id))
     try:
         proc = subprocess.run(
             [str(_LANE_NUDGE), session, signal],
             check=False, capture_output=True, text=True,
             timeout=120,  # lane_nudge worst case ~3 tries * ~9s + margin
+            env=env,
         )
         return proc.returncode
     except Exception as e:  # noqa: BLE001 — never let a submit failure look like success
@@ -423,12 +433,19 @@ def cap_state(agent_id: str, now: float) -> dict:
     return {"allow": True}
 
 
-def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False, now: float | None = None) -> dict:
+def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False, now: float | None = None,
+               row_id=None) -> dict:
     """Send the fixed wake signal to agent_id's lane. Returns a status dict.
 
     On a cap hit returns {cap_hit: True} so the caller can fail LOUD (notify the
     operator) per CAI-RESP-259 Q4 — never silently drop. The message itself is
     never lost; the bus is the durable channel and the agent sees it next cycle.
+
+    `row_id` (the bus row driving this wake) is forwarded to lane_nudge's per-row
+    delivery ceiling (Nazim #43063): a row already delivered ROW_CAP times is refused
+    (rc 7) so ONE stale row can no longer consume a lane's whole wake budget across
+    successive sweeps. Returns {row_capped: True} on that refusal — nothing was typed,
+    so no cap slot is burned.
     """
     now = time.time() if now is None else now
     session = resolve_tmux_session(agent_id)
@@ -453,10 +470,17 @@ def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False, now: floa
     # submit (scripts/lane_nudge.sh: ghost-aware composer guard -> C-u clear -> type
     # -> Enter -> confirm-it-left-the-composer -> extra-Enter retry) and REPORT the
     # real outcome. Fail LOUD, never silent (charter #1).
-    rc = _verified_submit(session, _SIGNAL)
+    rc = _verified_submit(session, _SIGNAL, row_id=row_id)
     if rc == 0:
         _record_wake(agent_id, now)
         return {"woke": True, "session": session, "reason": reason}
+    # rc 7 = per-row delivery ceiling: this row has already been typed into the lane
+    # ROW_CAP times within the window. A DELIBERATE bound, not a wedge — nothing was
+    # delivered, so do NOT burn a cap slot or flag a submit failure. The bus row is
+    # durable; the recipient reads it on next drain (or #141 escalates the stuck row).
+    if rc == 7:
+        return {"woke": False, "session": session, "why": "row-capped",
+                "row_capped": True, "rc": rc}
     # rc 3 = could not verify submission (staged/wedged/at a dialog) OR the ghost-aware
     # guard REFUSED because the body has its OWN real unsent text (which we must not
     # clobber). Either way the wake did NOT land: report it honestly + flag it, and

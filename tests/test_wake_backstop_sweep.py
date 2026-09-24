@@ -105,7 +105,7 @@ def test_sweep_dedups_recipients():
 
 def test_sweep_once_wakes_each_target_once_via_injected_wake():
     calls = []
-    def fake_wake(agent, reason="", dry_run=False, now=None):
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
         calls.append(agent)
         return {"woke": True, "session": agent}
     rows = [_row("cc-quality", 1), _row("cc-quality", 2), _row("cc-orchestrator", 3)]
@@ -113,6 +113,18 @@ def test_sweep_once_wakes_each_target_once_via_injected_wake():
     assert calls == ["cc-quality"]                 # once, hub excluded
     assert res["woke"] == ["cc-quality"]
     assert res["considered"] == 3
+
+
+def test_sweep_passes_stable_representative_row_id_per_agent():
+    # Per-row ceiling (Nazim #43063): the wake must be keyed to a STABLE row — the agent's
+    # oldest (min id) unread row — so successive sweeps of the SAME stale row hit the ceiling.
+    seen = {}
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        seen[agent] = row_id
+        return {"woke": True, "session": agent}
+    rows = [_row("cc-quality", 7), _row("cc-quality", 2), _row("cc-quality", 5)]
+    wbs.sweep_once(rows=rows, wake=fake_wake)
+    assert seen["cc-quality"] == 2, "must key to the oldest (min id) fresh row, stably"
 
 
 def test_sweep_quiesces_when_nothing_rotting():

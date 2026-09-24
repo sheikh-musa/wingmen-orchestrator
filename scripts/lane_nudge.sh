@@ -9,9 +9,12 @@
 # actually submitted; clear+retype fallback). This is that wrapper.
 #
 # Usage:  lane_nudge.sh <tmux-session> "<message>"
+#         env LANE_NUDGE_ROW_ID=<bus row id>  -> enable the per-row delivery ceiling
 # Exit:   0 = verified submitted (pane entered a working state)
 #         3 = could not verify submission after retries (caller should escalate)
 #         2 = usage / no such session
+#         5 = refused: pane parked in a menu   6 = refused: pane unreadable (see below)
+#         7 = refused: per-row delivery ceiling hit for LANE_NUDGE_ROW_ID
 #
 # Verification heuristic (matches the observable Claude-Code TUI states):
 #   working  -> footer shows "esc to interrupt"   (submitted, lane is running)
@@ -34,6 +37,15 @@ MAX_TRIES="${LANE_NUDGE_TRIES:-3}"
 # Where diagnostic logs land. Defaults to the tree's logs/; overridable so a refusal's
 # self-diagnosis can be relocated (and tested) without touching the live log stream.
 LOGDIR="${LANE_NUDGE_LOG_DIR:-$ORCH_DIR/logs}"
+
+# PER-ROW DELIVERY CEILING (Nazim #43063/#43073). When a caller identifies the bus row it
+# is delivering (env LANE_NUDGE_ROW_ID), bound how many times THIS row is typed into a lane
+# across ALL wakers (this is the common typing choke). State lives beside the logs.
+ROW_CEILING_DIR="${ROW_CEILING_DIR:-$LOGDIR/.rownudge}"
+export ROW_CEILING_DIR
+. "$ORCH_DIR/scripts/lib/row_ceiling.sh" || { echo "lane_nudge: row_ceiling.sh missing" >&2; exit 2; }
+# Record a verified delivery of the current row (no-op when no row_id was passed).
+_row_deliver_ok() { [ -n "${LANE_NUDGE_ROW_ID:-}" ] && row_ceiling_record "$LANE_NUDGE_ROW_ID" || true; }
 # Console (singleton) sessions whose revert-fail-on-a-nudge-template is a benign in-flight
 # delivery race, not corruption of a staged step (Nazim #40324). Space-separated; overridable.
 LANE_NUDGE_CONSOLE_SESSIONS="${LANE_NUDGE_CONSOLE_SESSIONS:-nazim orch}"
@@ -403,6 +415,16 @@ pane_queued() {
   tmux capture-pane -t "$SESSION" -p 2>/dev/null | tail -6 | grep -q 'queued message'
 }
 
+# PER-ROW CEILING gate — refuse BEFORE typing if this row has already been delivered to a
+# lane ROW_CAP times within ROW_WINDOW_S (bounds ANY waker, not just the backstop). The bus
+# row is durable, so a skipped re-delivery costs nothing; the recipient reads it when it
+# next drains. exit 7 = row-cap. Only active when the caller passed a row_id (fail-open:
+# a command nudge with no row_id is never capped).
+if [ -n "${LANE_NUDGE_ROW_ID:-}" ] && ! row_ceiling_ok "$LANE_NUDGE_ROW_ID"; then
+  echo "lane_nudge: REFUSED — row '$LANE_NUDGE_ROW_ID' already delivered to '$SESSION' ${ROW_CAP:-5}x within ${ROW_WINDOW_S:-1800}s (per-row ceiling). NOT re-typing; the bus row is durable — recipient reads it on next drain." >&2
+  exit 7
+fi
+
 for try in $(seq 1 "$MAX_TRIES"); do
   # clear any stale/unsent input, then type fresh, then submit
   tmux send-keys -t "$SESSION" C-u; sleep 0.4
@@ -410,18 +432,22 @@ for try in $(seq 1 "$MAX_TRIES"); do
   tmux send-keys -t "$SESSION" -l "$MSG"; sleep 1
   tmux send-keys -t "$SESSION" Enter; sleep 4
   if pane_working; then
+    _row_deliver_ok
     echo "lane_nudge: '$SESSION' submitted + working (try $try)"; exit 0
   fi
   if pane_queued; then
+    _row_deliver_ok
     echo "lane_nudge: '$SESSION' is BUSY — nudge accepted into its queue (try $try). Delivered; it reads at its next pause."
     exit 0
   fi
   # one extra Enter in case the TUI consumed the first as focus
   tmux send-keys -t "$SESSION" Enter; sleep 3
   if pane_working; then
+    _row_deliver_ok
     echo "lane_nudge: '$SESSION' submitted + working (try $try, 2nd Enter)"; exit 0
   fi
   if pane_queued; then
+    _row_deliver_ok
     echo "lane_nudge: '$SESSION' is BUSY — nudge accepted into its queue (try $try, 2nd Enter)."
     exit 0
   fi

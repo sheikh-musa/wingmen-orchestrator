@@ -361,7 +361,19 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     fresh = [r for r in rows if not is_capped(r, now_dt, cap_age_s)]
 
     targets = eligible_recipients(fresh)
-    results = {a: wake(a, reason="backstop-sweep", dry_run=dry_run, now=now) for a in targets}
+    # Per-row ceiling (Nazim #43063): key each agent's wake to a STABLE representative row —
+    # its oldest (min id) fresh unread row. If that same stale row keeps driving the wake,
+    # lane_nudge's per-row ceiling bounds re-delivery across successive sweeps (the storm
+    # was one row re-woken ~12x/13min within the per-agent cap). Stable id => consistent key.
+    rep_row: dict = {}
+    for r in fresh:
+        a = _to_agent(r); rid = _row_id(r)
+        if rid is None:
+            continue
+        if a not in rep_row or rid < rep_row[a]:
+            rep_row[a] = rid
+    results = {a: wake(a, reason="backstop-sweep", dry_run=dry_run, now=now, row_id=rep_row.get(a))
+               for a in targets}
     woke = [a for a, r in results.items() if isinstance(r, dict) and r.get("woke")]
     unreachable = sorted(  # observability: fresh-row agents with no local live pane this pass
         a for a, r in results.items()
@@ -500,10 +512,16 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             "escalations": escalations}
 
 
+def _ts() -> str:
+    """UTC ISO stamp for every log line. Their ABSENCE hid the root-cause of the wake
+    storm (Nazim #43073: no per-line time meant no way to see 12 wakes in 13 min)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def main() -> int:
     dry = "--dry-run" in sys.argv
     once = "--once" in sys.argv
-    print(f"wake-backstop-sweep up — cadence={WAKE_SWEEP_SEC}s grace={WAKE_SWEEP_GRACE_S}s "
+    print(f"{_ts()} wake-backstop-sweep up — cadence={WAKE_SWEEP_SEC}s grace={WAKE_SWEEP_GRACE_S}s "
           f"dry_run={dry} auto_wake_enabled={auto_wake_enabled()}", flush=True)
     while True:
         try:
@@ -511,10 +529,10 @@ def main() -> int:
             eff_dry = dry or not auto_wake_enabled()
             res = sweep_once(dry_run=eff_dry)
             if res["targets"]:
-                print(f"sweep: considered={res['considered']} targets={res['targets']} "
+                print(f"{_ts()} sweep: considered={res['considered']} targets={res['targets']} "
                       f"woke={res['woke']} dry={eff_dry}", flush=True)
         except Exception as e:  # fail LOUD to the log, keep the floor alive (KeepAlive re-runs)
-            print(f"sweep ERROR: {e!r}", file=sys.stderr, flush=True)
+            print(f"{_ts()} sweep ERROR: {e!r}", file=sys.stderr, flush=True)
         if once:
             return 0
         time.sleep(WAKE_SWEEP_SEC)
