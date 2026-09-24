@@ -32,9 +32,18 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The hardcoded sets NOT YET migrated to the accessor, as of this pass --
 # see reports/substrate-ihsanification-next-moves-op42896.md for the full
-# inventory and why each of these is still independent (tmux-session-name
-# sites and lane_token_resolver's narrower set are deliberately deferred,
-# not overlooked).
+# inventory. Both remaining tmux-session-vocabulary sites share a REAL,
+# verified structural blocker (2026-09-24 re-check), not just deferral by
+# habit: (1) "fleet-console" is a launchd Python SERVER (dev.wingmen.fleet-
+# console, scripts/fleet_model.sh:27), not a claude agent -- it has no
+# agent_id and doesn't belong in an agent registry at all; (2) the registry's
+# protected_agents.tmux_session column holds ONE session per agent_id, but
+# cc-orchestrator needs TWO ("orch" live / "orchestrator" idle, per
+# ORCH-TOPOLOGY-001) and today has tmux_session=NULL for both. A mechanical
+# migration here would silently drop outage protection for 3 of 7 names --
+# needs a schema/accessor design decision (multi-session support, or a
+# separate non-agent-service protection list for fleet-console), not a
+# drive-by swap. Flagged to cc-fleet-health (bus, op#42896 P1 continuation).
 _REMAINING_HARDCODED_SETS = {
     "scripts/lib/lane_winddown.py SINGLETONS": {
         "nazim", "cai", "orch", "orchestrator", "fleet-health",
@@ -83,9 +92,7 @@ _KNOWN_HARDCODED_LIST_FILES = {
     "nervous_system/console/app.py",
     "scripts/lib/lane_token_resolver.py",
     "scripts/fleet_model.sh",
-    "scripts/switch_singleton_token.sh",
     "nervous_system/console/hosted_server.py",
-    "scripts/lib/fleet_health_boundaries.py",
 }
 
 # Files this test's first real run flagged that are genuine false positives --
@@ -131,6 +138,17 @@ _KNOWN_NON_PROTECTION_FILES = {
     # cc-orchestrator too) -- an escalation-policy change, not a registry
     # migration. Left as a literal tuple deliberately.
     "scripts/opus_reprobe_storefront.py",
+    # Not actually a hardcoded protection-membership set at all -- verified by
+    # reading the file (2026-09-24): the 4 names appear only in prose comments
+    # and as bash `case "$NODE" in cc-fleet-health) ... orch-console) ...`
+    # dispatch branch labels (each with genuinely DIFFERENT bespoke re-token
+    # logic per singleton -- stateless kill for fleet-health vs
+    # checkpoint-first for cai, etc.), never as a quoted-literal collection a
+    # shared accessor could replace. The 09-05 audit's original inventory
+    # listed it by inspection, not this test's precise grep, which correctly
+    # does not flag it today -- carried over here so nobody re-adds it to
+    # _KNOWN_HARDCODED_LIST_FILES from stale memory of that inventory.
+    "scripts/switch_singleton_token.sh",
 }
 
 # Deliberately surgical, not broad: a QUOTED-literal token (so prose like

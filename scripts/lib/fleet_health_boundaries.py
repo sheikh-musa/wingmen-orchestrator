@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import os
 
+from nervous_system.protected_agents import protected_agent_ids
+
 SRE_AGENT_ID = "cc-fleet-health"
 
 # Singleton-class bodies the SRE may NEVER red-reset, even by misconfig
@@ -41,10 +43,14 @@ SRE_AGENT_ID = "cc-fleet-health"
 # lane_selfrecycle_detect, checkpoint_recycle_driver, the proactive-recycle-nudge
 # tier) treated them as worker lanes — which is why the ~80% proactive nudge fired
 # on cc-quality even though that tier "excludes singletons" (bus 38900/38902).
-SINGLETON_BODIES = frozenset({
-    "cc-orchestrator", "cai", "orch-console", SRE_AGENT_ID,
-    "cc-quality", "cc-storefront", "cc-finance",
-})
+#
+# op#42896/#42909 P1 (2026-09-24): sourced from the shared protected_agents
+# registry instead of its own literal copy -- same 7-agent set plus whatever the
+# registry has grown to hold (nazim-console today), never fewer (protected_agents
+# fails safe to the union-of-every-known-list fallback on any DB error, so this
+# can only ever be a superset of the old literal, matching the "worker lanes are
+# everything NOT in this set" invariant above in the SAFE direction).
+SINGLETON_BODIES = protected_agent_ids()
 
 # The three gates that must ALL be mechanically verified True before the SRE may
 # red-reset a worker lane (CAI-RESP-681 conditions 1+2). fresh_handoff is the
