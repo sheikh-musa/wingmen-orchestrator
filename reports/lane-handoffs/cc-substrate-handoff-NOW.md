@@ -1,3 +1,22 @@
+# cc-substrate handoff (updated 2026-09-24 ~06:15Z, bus #42852→#42853)
+
+## STATUS (2026-09-24): Musa asked directly whether wingmen-core can power off (op#22237) — final inventory says NOT a clean YES, real BLOCKERs found
+
+**Track A — wingmen-core final power-off inventory, posted #42853 (BLOCKER, supersedes the "greenlight is orch-console's call" line below — do NOT relay a clean YES off the 09-21 #41939 verdict alone):** read-only inventory of wingmen-core surfaced material drift since 09-21 plus several items never in the original 6-item plan scope at all. Full table in `reports/wingmen-core-drain-cutover-plan-op20655.md` under "FINAL POWER-OFF INVENTORY (2026-09-24)" (both copies, synced).
+
+**Real BLOCKERs found:**
+1. **`wingmen-core-runner` is running again right now**, actively executing real jobs — it was stopped by orch-console 09-21 ~07:04 UTC, then came back online at 07:52:03 UTC the SAME DAY (2 min after a root SSH login matching the session that ran the gzb-only test), never recorded anywhere. Current state contradicts the "stays stopped, 1-command rollback" plan — powering off today would kill an in-flight job.
+2. **cosem-platform's GH Actions runner was NEVER migrated** — still on wingmen-core, untouched all session, client-facing (ADCDA). Item 2 of the plan was always in-scope but never executed.
+3. **Hermes Agent** (`/root/.hermes/`) — a completely separate, actively-used agent system under root (own SOUL.md/kanban.db/sessions, state files modified as recently as today) that nothing in this entire effort, the plan doc, or any bus message ever accounted for. Almost certainly Musa's own separate tool. Not classified unilaterally — needs his explicit awareness.
+4. **Real uncommitted git work** on wingmen-core's orchestrator checkout (modified `agent_wake.py`, fleet console static assets, `boot_orch.sh`/`reset_orch.sh`, a staged new file, several token backups) — would be lost on power-off, not captured elsewhere as far as checked.
+5. **Two credential locations not confirmed duplicated elsewhere**: `/root/.wingmen/keys/` + `/home/wingmen/.wingmen/keys/` (oauth tokens, a cosem GCP service-account key), and `/etc/gzb-vpn.conf` (VPN portal creds — never onboarded into the vault, only the gzb sudo password was).
+
+**Non-blockers/clean:** item 3 (console+ngrok) moved+verified on the Mini, wingmen-core's Python service just needs a trivial final stop; item 6 (cron) confirmed genuinely clean; ingest/tg-out/agent-wake-subscriber confirmed inactive on wingmen-core (assumed fleet-owned on gzb per standing doctrine, NOT independently re-verified against gzb in this pass — flagged as a gap, not asserted). Items 4/5 publishers are redundant (running on both wingmen-core AND gzb, duplicate but harmless idempotent writes) — loop never closed.
+
+**Nothing further to do on Track A until orch-console/Musa decide on the blockers above** — especially item 1 (who restarted the runner and why) and item 3 (Hermes Agent awareness).
+
+---
+
 # cc-substrate handoff (updated 2026-09-21 ~07:50Z, bus #41919→#41939)
 
 ## STATUS (2026-09-21 ~07:50Z): wingmen-core-runner STOPPED by orch-console, gzb-only re-test = ALL-ON-GZB NO TIMEOUT (+ throughput caveat) — verdict posted #41939, orch-console's greenlight call
