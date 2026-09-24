@@ -284,3 +284,13 @@ Mid-task, an urgent interrupt from orch-console required committing immediately 
 Commit `0271fa9` on `fable/substrate-safe-fixes`, verified via `git ls-remote`. Full detail in `reports/wingmen-core-drain-cutover-plan-op20655.md` (both copies, synced, final section). Bus #42924 (reply on #42907's thread).
 
 **wingmen-core's backup-relay KNOWN GAP is now closed — per the plan's own tracking, this was the last identified power-off blocker alongside Hermes (already confirmed live by Musa).**
+
+## op#20655 — FINAL wingmen-core inventory: CLEAR FOR POWER-OFF (2026-09-24, this fork)
+
+Last read-only check per orch-console's #42925. No blockers found. 3 duplicate services still running on core are fully redundant (already live on gzb/Mini). 4 units confirmed dead pre-session. No crontab/docker/tmux. One orphaned openfortivpn tunnel found (up since 14:21Z from an earlier fork, dead-man armed, harmless) — not torn down, read-only scope.
+
+Two pre-existing (not newly-caused) reference gaps found and flagged, neither blocking: `scripts/reset_hub_remote.sh` still hardcodes the IP (the one site `hub_reach.py`'s own header names as unfixed, wired live as `ingest.py`'s `reset_orch` remedy); `console/panes.py`'s token-truth remote-scan defaults to the same IP but is already silently degraded today regardless. No webhook/ngrok/cloudflared/DNS references anywhere — confirmed no webhook mechanism exists in this fleet at all.
+
+Hermes rollback copy (2.2GB) + pre-cutover archive (8.1GB) both confirmed present. Snapshot recommendation: not warranted — both already-preserved copies plus independently-migrated/restore-tested client data make a full-disk snapshot redundant.
+
+Checkpoint #20 discharged, final checkpoint #26 armed (due 2026-10-01: "Musa power-off ok + core off + DNS/ssh refs removed"). Bus #42932 (thread on #42925). Full detail: `reports/wingmen-core-drain-cutover-plan-op20655.md`.
