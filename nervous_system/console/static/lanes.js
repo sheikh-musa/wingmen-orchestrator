@@ -26,9 +26,16 @@
   // delegation (change -> setPointer, click -> preview/armed-apply) still binds.
   function rowHtml(r) {
     var cls, badge, acct;
+    // mismatch is checked ahead of verified/self_reported: op#43092/#43109 -- a
+    // self-reported fp that doesn't match the body's expected account must be RED
+    // regardless of which signal (SSH-verified or self-reported) produced it.
     if (r.metered) { cls = "flag"; badge = "METERED"; acct = r.account || "metered (API)"; }
-    else if (!r.verified) { cls = "unver"; badge = "UNVERIFIED"; acct = "unverified"; }
-    else if (r.mismatch) { cls = "flag"; badge = "OFF-ACCOUNT"; acct = r.account; }
+    else if (r.mismatch) { cls = "flag"; badge = "OFF-ACCOUNT"; acct = r.account || "unverified"; }
+    else if (r.self_reported) { cls = "self"; badge = "SELF-REPORTED"; acct = r.account; }
+    else if (!r.verified) {
+      cls = "unver"; badge = "UNVERIFIED";
+      acct = r.self_report_stale ? "unverified (stale self-report)" : "unverified";
+    }
     else { cls = "ok"; badge = "VERIFIED"; acct = r.account; }
     if (r.remote) cls += " remote";
     var attention = r.metered || !r.verified || r.mismatch;

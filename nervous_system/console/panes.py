@@ -587,6 +587,46 @@ def _remote_hub_scan(force: bool = False) -> Optional[dict]:
     return val
 
 
+# op#42896/#42909, orch-console #43092/#43109: when _remote_hub_scan can't SSH the hub
+# (the gzb holder has no provisioned interactive reach -- scripts/lib/hub_reach.py), the
+# card used to show a permanent "unverified" false alarm even though cc-orchestrator's
+# OWN agent_status row already self-reports its live auth_fp every heartbeat. This is a
+# WEAKER signal than the SSH scan (self-reported, not process-verified by a third party)
+# and must stay visually distinct and time-bounded: a self-report older than
+# _SELF_REPORT_FRESH_S is treated as NO signal (never shown as current), never a guess.
+_SELF_REPORT_FRESH_S = 900.0  # ~15 min, per orch-console's #43109 condition
+
+
+def _self_reported_hub_account(session: str) -> dict:
+    """Best-effort read of agent_status.auth_fp for `session`, gated on freshness.
+    Returns {"fp": str|None, "stale": bool}: fp is set only when a row exists AND its
+    updated_at is within _SELF_REPORT_FRESH_S; "stale" distinguishes "a self-report
+    exists but is too old to trust" from "no self-report at all" so the caller can
+    label a stale row as such rather than a bare generic unverified. Any DB error,
+    missing row, or missing fp -> {"fp": None, "stale": False} (fail-safe: never a
+    guess)."""
+    try:
+        import psycopg
+        with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT auth_fp, updated_at FROM agent_status WHERE agent_id=%s",
+                    (session,),
+                )
+                row = cur.fetchone()
+    except Exception:
+        return {"fp": None, "stale": False}
+    if not row or not row[0] or row[1] is None:
+        return {"fp": None, "stale": False}
+    fp, updated_at = row
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    age_s = (now - updated_at).total_seconds()
+    if age_s > _SELF_REPORT_FRESH_S:
+        return {"fp": None, "stale": True}
+    return {"fp": fp, "stale": False}
+
+
 def token_ground_truth(include_remote: bool = False) -> dict:
     """GROUND-TRUTH per-body Claude account, read from the LIVE process env — the
     ACTUAL running token, never a declared value (op#10706/10715). For every claude
@@ -655,6 +695,7 @@ def token_ground_truth(include_remote: bool = False) -> dict:
         rows.append({
             "session": session, "account": account, "fp": fp, "metered": metered,
             "model": model, "host": "Mini", "verified": verified,
+            "self_reported": False, "self_report_stale": False,
             "expected": exp_account, "expected_fp": exp_fp, "mismatch": mismatch,
         })
 
@@ -665,22 +706,38 @@ def token_ground_truth(include_remote: bool = False) -> dict:
         exp_account = (labels.get(exp_fp, "Max (unknown acct)") if exp_fp else _EXPECTED_ACCOUNT)
         # Source-of-truth regardless of host (op#10706 C): SSH-fingerprint the hub.
         # Reachable -> VERIFIED (and can MISMATCH, e.g. hub-on-Syed vs pointer-Musa,
-        # which we surface, never suppress). Unreachable / not requested -> UNVERIFIED.
+        # which we surface, never suppress). Unreachable / not requested -> UNVERIFIED,
+        # unless a FRESH self-report exists (orch-console #43092/#43109) -- a weaker,
+        # visually-distinct signal, never conflated with a process-verified scan. A
+        # mismatched fp is RED regardless of which of the two signals produced it.
         scan = _remote_hub_scan() if include_remote else None
         if scan and scan.get("fp"):
             rfp = scan["fp"]
             rows.append({
                 "session": sess, "account": labels.get(rfp, "Max (unknown acct)"),
                 "fp": rfp, "metered": False, "model": scan.get("model"), "host": host,
-                "verified": True, "expected": exp_account, "expected_fp": exp_fp,
+                "verified": True, "self_reported": False, "self_report_stale": False,
+                "expected": exp_account, "expected_fp": exp_fp,
                 "mismatch": bool(exp_fp is not None and rfp != exp_fp),
             })
         else:
-            rows.append({
-                "session": sess, "account": None, "fp": None, "metered": False,
-                "model": None, "host": host, "verified": False,
-                "expected": exp_account, "expected_fp": exp_fp, "mismatch": False,
-            })
+            sr = _self_reported_hub_account(sess) if include_remote else {"fp": None, "stale": False}
+            if sr.get("fp"):
+                sfp = sr["fp"]
+                rows.append({
+                    "session": sess, "account": labels.get(sfp, "Max (unknown acct)"),
+                    "fp": sfp, "metered": False, "model": None, "host": host,
+                    "verified": False, "self_reported": True, "self_report_stale": False,
+                    "expected": exp_account, "expected_fp": exp_fp,
+                    "mismatch": bool(exp_fp is not None and sfp != exp_fp),
+                })
+            else:
+                rows.append({
+                    "session": sess, "account": None, "fp": None, "metered": False,
+                    "model": None, "host": host, "verified": False,
+                    "self_reported": False, "self_report_stale": bool(sr.get("stale")),
+                    "expected": exp_account, "expected_fp": exp_fp, "mismatch": False,
+                })
 
     # Loud first: mismatches, then metered, then unverified, then green by session.
     rows.sort(key=lambda x: (
