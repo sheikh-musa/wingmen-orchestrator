@@ -748,6 +748,26 @@ elif [ -n "$_AC_PCT" ]; then
     echo -e "${AMBER}⚠ ignoring out-of-range autocompact override '${_AC_PCT}' (via ${_AC_TIER}); expected 1..99${RESET}" >&2
 fi
 
+# SUBAGENT MODEL (op#22298 cost-rollout / Nazim #42821, gate #42793 cond-5): CONDITIONALLY
+# export CLAUDE_CODE_SUBAGENT_MODEL so this lane's SUBAGENTS run on a cheaper model (e.g.
+# Haiku for the scholar pilot half) while the lane's own model is unchanged. The SHIPPED
+# cascade lives in scripts/lib/subagent_model_precedence.sh so it is the TESTED cascade
+# (tests/test_subagent_model_precedence.py). Keyed on the tmux session:
+#   CLAUDE_CODE_SUBAGENT_MODEL env > .<session>_subagent_model > .fleet_subagent_model > (unset)
+# DEFAULT-OFF by construction: no env + no marker + no fleet file -> the var is never
+# exported -> subagents inherit the lane's main model (byte-identical to today). CAI-1170:
+# the FULL auditors (cc-quality/cc-storefront) REFUSE the marker in the lib (fail-closed) so
+# their audit subagents can't be downgraded. Inert until a marker is written.
+# shellcheck source=scripts/lib/subagent_model_precedence.sh
+source "$ORCH_DIR/scripts/lib/subagent_model_precedence.sh"
+_SUBAGENT_MODEL=""; _SUBAGENT_TIER=""
+IFS=$'\t' read -r _SUBAGENT_MODEL _SUBAGENT_TIER < <(
+    resolve_subagent_model "$_BODY_MODEL_SESSION" "$ORCH_DIR")
+if [ -n "$_SUBAGENT_MODEL" ]; then
+    export CLAUDE_CODE_SUBAGENT_MODEL="$_SUBAGENT_MODEL"
+    echo -e "${BOLD}${TEAL}▶ Subagent model: ${_SUBAGENT_MODEL}${RESET}  ${AMBER}(via ${_SUBAGENT_TIER})${RESET}"
+fi
+
 # Stamp resolved model into current_task (CAI observes model drift) AND
 # SELF-REGISTER this lane's tmux session for #111 launchd-safe wake delivery:
 # the lane knows its own session from inside its pane; the wake then resolves via
