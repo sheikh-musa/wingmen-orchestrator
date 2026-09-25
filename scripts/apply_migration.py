@@ -30,13 +30,23 @@ without checking. So:
   -- assert: no_execute <role> <schema.function(arg_types)>
   -- assert: search_path <schema.function(arg_types)>
   -- assert: dropped <schema.function(arg_types)>
+  -- assert: no_table_privilege <role> <schema.table> <privilege>
 
 One per line, anywhere in the header. Checked AFTER the SQL body runs,
 INSIDE the same transaction, before the ledger insert:
-  no_execute   -> has_function_privilege(role, fn, 'EXECUTE') must be FALSE
-  search_path  -> pg_proc.proconfig for fn must contain an entry starting
-                  'search_path='
-  dropped      -> to_regprocedure(fn) IS NULL
+  no_execute         -> has_function_privilege(role, fn, 'EXECUTE') must be FALSE
+  search_path        -> pg_proc.proconfig for fn must contain an entry starting
+                        'search_path='
+  dropped            -> to_regprocedure(fn) IS NULL
+  no_table_privilege -> has_table_privilege(role, table, privilege) must be
+                        FALSE (table-privilege analogue of no_execute — closes
+                        the gap flagged in migration 065's header: a REVOKE on
+                        a table is exactly as unverifiable as a REVOKE on a
+                        function without this, and this project's
+                        pg_default_acl grants anon/authenticated privileges on
+                        every NEW table implicitly, so "this migration touches
+                        no privilege" is never a valid reason to skip it for a
+                        migration that creates a table)
 Any assertion failing -> ROLLBACK, refuse, name the exact (kind, args) pair
 that failed. --dry-run runs the assertions too (still rolls back either
 way) so a preview genuinely previews whether a real apply would pass.
@@ -45,7 +55,9 @@ An unrecognized assert kind refuses before the SQL body ever runs.
 REQUIRED-ness: if the SQL body contains `REVOKE` or `DROP FUNCTION`
 (case-insensitive) and the file has ZERO `-- assert:` lines, this tool
 refuses to apply at all — a revoke/drop with no way to check it happened
-is exactly the defect CAI-RESP-1397 #5 closes.
+is exactly the defect CAI-RESP-1397 #5 closes. `REVOKE` covers both table
+and function privileges, so a table-privilege REVOKE with zero asserts is
+refused identically to a function one.
 
 Usage:
   python scripts/apply_migration.py <NNN|path> --silo <ref> [--dsn <url>] [--dry-run]
@@ -97,7 +109,7 @@ _DOLLAR_TAG_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
 
 # `-- assert: <kind> <args...>` header lines (CAI-RESP-1397 #5).
 _ASSERT_RE = re.compile(r"^--\s*assert:\s*(\S+)\s+(.+?)\s*$", re.MULTILINE)
-_ASSERT_KINDS = {"no_execute", "search_path", "dropped"}
+_ASSERT_KINDS = {"no_execute", "search_path", "dropped", "no_table_privilege"}
 # Case-insensitive: a migration doing either of these MUST carry an assertion
 # (CAI-RESP-1397 #5) — a silent no-op REVOKE/DROP is otherwise indistinguishable
 # from a real one.
@@ -154,6 +166,15 @@ def parse_assert_lines(sql_text: str) -> list[dict]:
                 raise Refuse(f"malformed 'assert: no_execute' line — expected '<role> <function>': {rest!r}")
             role, fn = parts
             assertions.append({"kind": kind, "role": role, "fn": fn})
+        elif kind == "no_table_privilege":
+            parts = rest.split()
+            if len(parts) != 3:
+                raise Refuse(
+                    f"malformed 'assert: no_table_privilege' line — expected "
+                    f"'<role> <schema.table> <privilege>': {rest!r}"
+                )
+            role, table, priv = parts
+            assertions.append({"kind": kind, "role": role, "table": table, "priv": priv})
         else:
             assertions.append({"kind": kind, "fn": rest})
     return assertions
@@ -172,6 +193,8 @@ def check_required_assertions(body: str, assertions: list[dict]) -> None:
 def _assertion_label(a: dict) -> str:
     if a["kind"] == "no_execute":
         return f"no_execute {a['role']} {a['fn']}"
+    if a["kind"] == "no_table_privilege":
+        return f"no_table_privilege {a['role']} {a['table']} {a['priv']}"
     return f"{a['kind']} {a['fn']}"
 
 
@@ -202,6 +225,19 @@ def _check_assertion(cur, a: dict) -> tuple[bool, str]:
         proconfig = row[0]
         ok = any(str(c).startswith("search_path=") for c in proconfig)
         return ok, "" if ok else f"{label} — proconfig has no search_path= entry: {proconfig}"
+
+    if a["kind"] == "no_table_privilege":
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL", (a["table"],))
+        exists = cur.fetchone()[0]
+        if not exists:
+            return False, f"{label} — table does not exist; cannot assert a privilege on it"
+        cur.execute("SELECT has_table_privilege(%s, %s, %s)", (a["role"], a["table"], a["priv"]))
+        has_priv = cur.fetchone()[0]
+        ok = not has_priv
+        return ok, "" if ok else (
+            f"{label} — {a['role']} STILL has {a['priv']} (the REVOKE was a silent no-op, "
+            f"or this project's pg_default_acl re-grants it on every new table)"
+        )
 
     raise Refuse(f"unknown assert kind at check time: {a['kind']!r}")  # pragma: no cover — parse_assert_lines already refused
 
