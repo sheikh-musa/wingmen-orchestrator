@@ -202,5 +202,8 @@ elif [ ! -e "$Q_DIR/scripts/self_recycle.sh" ]; then
 fi
 
 echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $Q_DIR"
+# NO-HUMAN-AT-KEYBOARD guard (Nazim #43143): enforce the AskUserQuestion deny + suppress the
+# prompt-suggestion widget (the singleton boots historically skipped ensure_lane_deny).
+"$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$Q_DIR" || true
 cd "$Q_DIR"
 claude --dangerously-skip-permissions --model "$MODEL"

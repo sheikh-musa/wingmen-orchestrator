@@ -177,5 +177,10 @@ fi
 # ── Launch. CLAUDE.md in $CAI_DIR auto-loads as project instructions; cai runs
 #    its own boot SQL (CLAUDE.md §6.1) — boot_briefing, open windows, inbox. ──
 echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $CAI_DIR"
+# NO-HUMAN-AT-KEYBOARD guard (Nazim #43143): the singleton boot scripts historically skipped
+# ensure_lane_deny (only launch_dangerous_cc.sh had it), so cai never got the AskUserQuestion
+# deny nor promptSuggestionEnabled:false in a fresh checkout. Enforce them here too (merge-safe,
+# best-effort, never blocks the launch).
+"$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$CAI_DIR" || true
 cd "$CAI_DIR"
 claude --dangerously-skip-permissions --model "$MODEL"

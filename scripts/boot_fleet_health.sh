@@ -206,5 +206,8 @@ elif [ ! -e "$FH_DIR/scripts/self_recycle.sh" ]; then
 fi
 
 echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $FH_DIR"
+# NO-HUMAN-AT-KEYBOARD guard (Nazim #43143): enforce the AskUserQuestion deny + suppress the
+# prompt-suggestion widget in my own lane (this boot historically skipped ensure_lane_deny).
+"$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$FH_DIR" || true
 cd "$FH_DIR"
 claude --dangerously-skip-permissions --model "$MODEL"
