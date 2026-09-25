@@ -489,3 +489,70 @@ came back unverified again (2nd time this session; bus row durable, not retrying
 **Status: awaiting cc-quality's 3rd-cycle review before push → PR → orch-console's gate →
 redeploy. The gzb-recovery proposal (previous section) is with cai + the hub for a ruling,
 separately, nothing to chase there until one replies.**
+
+## op#42896/#42909 — orch-console's #43153 challenge: 3 more real gaps found+fixed, branch-tracking slip caught+corrected, 4th review requested (2026-09-25 ~01:10Z)
+
+Orch-console's 3rd-cycle review of the badge-text fix (`77b7b83`) surfaced 3 further real
+gaps via literal acceptance testing against the deployed `fc-v66` render, not anticipated by
+me:
+
+1. **Attention-exclusion**: a fresh self-reported row was still landing in the "needs
+   attention" bucket — `isAttn()` logic was duplicated between `rowHtml()`'s inline
+   `attention` var and `render()`'s local function (risk of drift, and it had drifted).
+   Hoisted to one shared top-level `isAttn(r) { return r.metered || r.mismatch ||
+   (!r.verified && !r.self_reported); }`, both call sites now use it.
+2. **Summary counts**: header read "1 unverified" for a fresh self-report instead of "1
+   self-reported" — `panes.py`'s `summary` dict counted `unverified` as `not x["verified"]`
+   only, not excluding `self_reported`. Added `"self_reported"` count, redefined
+   `"unverified"` to exclude self-reported rows.
+3. **Host label**: remote-body rows showed a stale hardcoded `"(VPS)"` literal from before
+   the hub moved to gzb — built `_remote_body_host(session, fallback)` in `panes.py`, reads
+   `agent_status.host` live (already correctly says `"gzbai"`), falls back to the old static
+   label on any DB error/missing row/null host so a DB hiccup degrades gracefully rather than
+   blanking the label.
+
+**Process slip caught by my own pre-check, not by review:** built all 3 fixes directly on
+`fable/substrate-safe-fixes`'s tip instead of first checking out
+`fix/self-reported-badge-text-render` (the branch holding `77b7b83`, not yet merged) —
+meaning the new edits were building on the pre-badge-fix state of `lanes.js`. Caught via my
+own pre-push render: the attention-exclusion fix showed correctly but the chip still read
+plain "Musa" instead of "SELF-REPORTED · Musa". Traced via `git branch --show-current` +
+grep confirming the file lacked `77b7b83`'s change. Corrected via a scoped `git stash push -u
+-m "cc-substrate-op43153-fixes-<ts>" -- <6 files>` (NOT the whole tree — avoided
+`deploy-log.txt` and other unrelated dirty files), captured the SHA
+(`82fc3567c512a9870f27b6552a0faf51d98d5007`) via `git stash list --format='%H %gs'`,
+`git checkout fix/self-reported-badge-text-render` (clean), `git stash apply
+82fc3567...` (auto-merged cleanly — the two diffs touched different regions of
+`lanes.js`), verified the combined result, deleted the stale render-artifact dirs from the
+wrong-branch attempt, then dropped the stash via its re-found `stash@{0}` form (the raw SHA
+failed as a `drop` argument).
+
+Also retrofitted all 5 pre-existing `token_ground_truth` integration tests in
+`test_panes.py` with `monkeypatch.setattr(panes, "_remote_body_host", lambda session,
+fallback: fallback)` to stay hermetic against the new DB-reading helper, and added ~11 new
+tests (`_remote_body_host` resolves/no-row/null-host/db-error; `token_ground_truth`
+self-report fallback / mismatch-still-red / stale-falls-back / no-scan-no-self-report /
+SSH-wins-over-self-report / host-propagation; summary self_reported/unverified separation).
+Version bumped `fc-v66` → `fc-v67` in lockstep (`sw.js` VERSION, `fleet.js` APP_BUILD,
+`lanes.html` badge).
+
+Committed `72e9789` (parent `77b7b83`, branch `fix/self-reported-badge-text-render`) with an
+explicit "NOTE ON HOW THIS BRANCH GOT HERE" section in the message documenting the slip and
+its correction — reported transparently, not hidden. New content hash `50e4d1c33521b6aa`.
+
+**Honest limitation flagged again (same shape as prior cycles):** the attention-exclusion and
+badge-text fixes are pure client-side logic operating on already-live backend fields, so
+confirmable pre-deploy via render. The host-label and summary-count fixes are
+backend-dependent (new `_remote_body_host` DB read, new summary keys) and can only be
+confirmed against a real post-deploy render, same limitation as every prior cycle's
+backend-touching change.
+
+Sent 4th-cycle review request to cc-quality (#43159, `review_request`,
+`requires_response=True`), woke them — **this wake succeeded** (`{'woke': True, 'session':
+'quality', ...}`), unlike 2 earlier failed wake attempts this session (rc=3, not retried
+manually per Option B durability doctrine).
+
+**Status: awaiting cc-quality's 4th-cycle review (hash `50e4d1c33521b6aa`) before push → PR
+→ orch-console's gate → redeploy → fresh post-deploy render to confirm the host label reads
+"gzbai" and the header shows "10/11 verified · 1 self-reported". gzb-recovery proposal still
+with cai + the hub for a ruling, nothing to chase there until one replies.**
