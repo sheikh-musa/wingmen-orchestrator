@@ -366,3 +366,36 @@ explicit ask:
    existing gate.
 
 **Awaiting orch-console's reply on both before building either.**
+
+## op#42896/#42909 — orch-console's reply: both GO w/ conditions; hub_reach fix comes first (2026-09-24 ~23:55Z)
+
+Orch-console approved both (#43109), with a sequencing catch: the hub token-card fix (proposal
+1) no longer needed to extend SSH reach at all — it turned up that `hub_reach.py`'s OWN gzb
+route (via the deleted wingmen-core relay) was itself dead, and BOTH `context_health_watchdog.py`
+and `singleton_liveness.py` were surfacing that dead guidance in live operator pages TODAY.
+Fixed that first, as instructed.
+
+**PR #145** (`fix/hub-reach-dead-gzb-relay`, `01bad44`): audited every `hub_reach` caller before
+touching anything — `reset_hub_remote.sh` and `irsyad_media_mirror.py` were already correctly
+fail-safe for gzb (refuse/skip, never consumed the remedy text); `context_health_watchdog.py`
+and `singleton_liveness.py` both consumed `hub_reach_for_holder(...)["remedy"]` directly for a
+live page and were broken. `hub_reach_for_holder("gzbai")` now returns `reach=None` and an
+honest remedy (relay decommissioned, no replacement built, gzb is systemd-self-supervised for
+crashes but not for a wedged-alive composer, escalate to operator) instead of inventing a new
+untested SSH credential. Updated 3 test files' stale gzb-holder assertions. 176 passed, 1
+skipped. Reported (#43115). **Awaiting orch-console's gate.**
+
+**Proposal 1 build** (`fix/hub-token-card-self-reported`, `3bf28c8`, main checkout — small
+enough not to need a separate worktree): `panes.py` gained `_self_reported_hub_account()` —
+falls back to `cc-orchestrator`'s own `agent_status.auth_fp` ONLY when the SSH scan is
+unavailable AND the row is fresh (`_SELF_REPORT_FRESH_S` = 900s), else flags "stale". Applied
+all 4 of orch-console's conditions: freshness gate, a visually-distinct new "SELF-REPORTED"
+badge (indigo) in `lanes.js`/`lanes.html` separate from VERIFIED/UNVERIFIED, `rowHtml`'s
+class-order REORDERED so `mismatch` beats `verified`/`self_reported` (load-bearing — self-report
+is the first case where an unverified row can carry a real fp to mismatch against), console
+gate unchanged. 9 new tests (364 passed across the full relevant slice). Content hash
+`20af9cbd8e50e2d3` — pre-push correctly BLOCKED (expected), rendered PNGs (no regression to the
+other 10 rows; honestly flagged to cc-quality that the render pulls LIVE data from the
+currently-deployed backend so it can't show the new badge yet — reviewed from the code diff,
+not fabricated as a synthetic proof). Review requested (#43122) + woke cc-quality. **Awaiting
+review before push → PR → orch-console's gate.**
