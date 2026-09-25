@@ -37,8 +37,12 @@ TMUX_BIN="$(command -v tmux || echo /usr/local/bin/tmux)"
 
 if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
   # No live session here: process-death recovery is orch_supervisor.sh's job, not
-  # this script's (this script exists ONLY for the wedged-but-ALIVE case).
+  # this script's (this script exists ONLY for the wedged-but-ALIVE case). Audit
+  # #43169 finding 6: still record a liveness stamp — without it, this branch
+  # (e.g. the systemd unit's User= doesn't own the hub's tmux) would exit silently
+  # forever, indistinguishable from a healthy tick that simply never ran.
   echo "hub_self_recovery: no '$SESSION' session on this host — nothing to check" >&2
+  "$PY" -m nervous_system.hub_self_recovery --no-session >&2 || true
   exit 0
 fi
 
@@ -47,7 +51,11 @@ PANE_TXT="$("$TMUX_BIN" capture-pane -t "$SESSION" -p -e 2>/dev/null)"
 
 MENU=0
 pane_is_menu "$TMUX_BIN" "$SESSION"; _menu_rc=$?
-[ "$_menu_rc" = 0 ] && MENU=1
+# Audit #43169 finding 5: pane_is_menu returns 0=menu, 1=not-a-menu, 2=unreadable.
+# Fail CLOSED — only the explicit, positively-read "1" (not-a-menu) leaves MENU=0;
+# an unreadable pane (2) must be treated as a menu, same as a genuine one (0),
+# never silently treated as safe-to-act.
+[ "$_menu_rc" = 1 ] || MENU=1
 # Belt-and-suspenders (orch-console #43161(b)): these two are the fleet's OWN tested
 # predicates for the picker screens pane_is_menu's generic nav-footer regex may not
 # all hit (composer_capture.sh, already used by switch_lane_token's health-verify).

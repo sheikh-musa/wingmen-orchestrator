@@ -209,6 +209,90 @@ def test_no_execute_assert_on_missing_function_fails(ledger_db, tmp_path):
 
 
 # --------------------------------------------------------------------------------
+# (c2) no_table_privilege — table-privilege analogue of no_execute (migration
+# 068's audit finding #1: a table REVOKE is exactly as unverifiable as a
+# function REVOKE without this, and this project's pg_default_acl grants
+# anon/authenticated privileges on every new table implicitly).
+# --------------------------------------------------------------------------------
+
+def _setup_table_with_default_acl(dsn: str) -> None:
+    """Creates public.widgets and grants SELECT to anon directly (simulating
+    this project's pg_default_acl auto-grant on every new table — verified
+    empirically in migration 065's own header) so a REVOKE has something
+    real to remove."""
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        _reset_anon_role(cur)
+        cur.execute("CREATE TABLE widgets (id int)")
+        cur.execute("GRANT SELECT ON widgets TO anon")
+
+
+def _has_select(dsn: str) -> bool:
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT has_table_privilege('anon', 'public.widgets', 'SELECT')")
+        return cur.fetchone()[0]
+
+
+def test_no_table_privilege_assert_passes_when_revoked(ledger_db, tmp_path):
+    _setup_table_with_default_acl(ledger_db)
+    assert _has_select(ledger_db) is True
+    f = _write(
+        tmp_path, "001_revoke_widgets_select.sql",
+        "-- assert: no_table_privilege anon public.widgets SELECT\n"
+        "REVOKE ALL ON widgets FROM anon;",
+    )
+    result = am.apply_migration(ledger_db, f, silo=SILO)
+    assert result["status"] == "applied"
+    assert result["assertions"] == [
+        {"kind": "no_table_privilege", "role": "anon", "table": "public.widgets", "priv": "SELECT", "passed": True}
+    ]
+    assert _has_select(ledger_db) is False
+
+
+def test_no_table_privilege_assert_fails_when_privilege_survives(ledger_db, tmp_path):
+    _setup_table_with_default_acl(ledger_db)
+    f = _write(
+        tmp_path, "001_forgot_to_revoke.sql",
+        "-- assert: no_table_privilege anon public.widgets SELECT\n"
+        # migration REVOKEs the wrong role — anon's SELECT survives
+        "REVOKE ALL ON widgets FROM PUBLIC;",
+    )
+    with pytest.raises(am.Refuse, match="no_table_privilege anon public.widgets SELECT.*STILL has SELECT"):
+        am.apply_migration(ledger_db, f, silo=SILO)
+    assert _has_select(ledger_db) is True
+
+
+def test_no_table_privilege_assert_on_missing_table_fails(ledger_db, tmp_path):
+    f = _write(
+        tmp_path, "001_revoke_nonexistent_table.sql",
+        "-- assert: no_table_privilege anon public.does_not_exist SELECT\n"
+        "SELECT 1;",
+    )
+    with pytest.raises(am.Refuse, match="does not exist"):
+        am.apply_migration(ledger_db, f, silo=SILO)
+
+
+def test_malformed_no_table_privilege_assert_refuses(ledger_db, tmp_path):
+    f = _write(
+        tmp_path, "001_bad_no_table_privilege.sql",
+        "-- assert: no_table_privilege anon public.widgets\n"  # missing the privilege token
+        "create table widgets (id int);",
+    )
+    with pytest.raises(am.Refuse, match="malformed"):
+        am.apply_migration(ledger_db, f, silo=SILO)
+
+
+def test_parse_assert_lines_no_table_privilege():
+    text = (
+        "-- ledger: silo=x\n"
+        "-- assert: no_table_privilege authenticated public.widgets UPDATE\n"
+    )
+    result = am.parse_assert_lines(text)
+    assert result == [
+        {"kind": "no_table_privilege", "role": "authenticated", "table": "public.widgets", "priv": "UPDATE"},
+    ]
+
+
+# --------------------------------------------------------------------------------
 # (d) required-ness: a REVOKE/DROP FUNCTION migration with zero asserts refuses
 # --------------------------------------------------------------------------------
 

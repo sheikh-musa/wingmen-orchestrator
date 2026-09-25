@@ -33,10 +33,11 @@ def test_kill_switch_default_enabled():
     assert hsr.kill_switch_enabled(file_present=False, db_enabled=True) is True
 
 
-def test_kill_switch_db_missing_row_fails_open_to_enabled():
-    # pre-migration / table not yet applied: must not silently disable the
-    # predicate's own correctness — a real False always still wins (below).
-    assert hsr.kill_switch_enabled(file_present=False, db_enabled=None) is True
+def test_kill_switch_db_none_fails_closed_to_disabled():
+    # audit #43169 finding 2: db_enabled=None (row/table missing, unreadable, a
+    # permission error, or any other exception) must fail CLOSED — an
+    # unverifiable DB flag must never be treated as "the switch says go".
+    assert hsr.kill_switch_enabled(file_present=False, db_enabled=None) is False
 
 
 def test_kill_switch_file_present_disables_regardless_of_db():
@@ -137,6 +138,7 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self):
         self.committed = False
+        self.commit_count = 0
 
     def __enter__(self):
         return self
@@ -149,6 +151,7 @@ class _FakeConn:
 
     def commit(self):
         self.committed = True
+        self.commit_count += 1
 
     def rollback(self):
         pass
@@ -160,18 +163,22 @@ def wired(monkeypatch):
     pinned to 'hub' (the guard this script requires); lease resolves to self by
     default. Returns a dict of mutable knobs the test tweaks before calling evaluate()."""
     monkeypatch.setenv("ORCH_BODY_ROLE", "hub")
-    monkeypatch.setattr(hsr, "_connect", lambda: _FakeConn())
+    fake_conn = _FakeConn()
+    monkeypatch.setattr(hsr, "_connect", lambda: fake_conn)
     monkeypatch.setattr(hsr.hub_reach, "read_holder_host", lambda conn: "gzbai")
     monkeypatch.setattr(hsr, "fetch_kill_switch_db_enabled", lambda conn, cur: True)
     monkeypatch.setattr(hsr, "fetch_operator_unprocessed", lambda limit=5: [])
     monkeypatch.setattr(hsr, "fetch_stale_p1_bus_rows", lambda cur, max_age_s=900, limit=5: [])
     monkeypatch.setattr(hsr, "recent_action_count", lambda cur, since: 0)
     monkeypatch.setattr(hsr, "row_lifetime_count", lambda cur, triggering_row_id, pending_kind: 0)
+    monkeypatch.setattr(hsr, "rate_limit_state_logged", lambda cur, since: False)
+    monkeypatch.setattr(hsr, "ceiling_state_logged", lambda cur, triggering_row_id, pending_kind: False)
+    monkeypatch.setattr(hsr, "stamp_tick", lambda cur, saw_session, reason: None)
     logged = []
     monkeypatch.setattr(hsr, "log_event",
                          lambda cur, **kw: logged.append(kw) or 1)
     monkeypatch.setattr(hsr, "_page_observation", lambda cur, **kw: None)
-    return {"logged": logged}
+    return {"logged": logged, "conn": fake_conn}
 
 
 def test_evaluate_refuses_when_not_hub_role(monkeypatch, wired):
@@ -251,3 +258,119 @@ def test_evaluate_menu_refuses_before_any_db_pending_check_matters(monkeypatch, 
     assert result["act"] is False
     assert "menu" in result["reason"]
     assert wired["logged"] == []
+
+
+def test_evaluate_db_enabled_none_never_acts(monkeypatch, wired):
+    # audit #43169 finding 2, exercised through the full wired path: an
+    # unreadable/pre-migration kill-switch row must refuse, never act.
+    monkeypatch.setattr(hsr, "fetch_kill_switch_db_enabled", lambda conn, cur: None)
+    monkeypatch.setattr(hsr, "fetch_operator_unprocessed", lambda limit=5: [(7, "t")])
+    result = hsr.evaluate(busy=False, menu=False, composer_empty=False, mode="act")
+    assert result["act"] is False
+    assert "kill switch" in result["reason"]
+    assert wired["logged"] == []
+
+
+def test_evaluate_stamps_tick_on_every_outcome(monkeypatch, wired):
+    # audit #43169 finding 6: stamp_tick must fire exactly once per real tick
+    # regardless of which branch evaluate() takes.
+    calls = []
+    monkeypatch.setattr(hsr, "stamp_tick",
+                         lambda cur, saw_session, reason: calls.append((saw_session, reason)))
+    hsr.evaluate(busy=False, menu=False, composer_empty=False, mode="observe")
+    assert len(calls) == 1
+    assert calls[0][0] is True
+
+    calls.clear()
+    monkeypatch.setattr(hsr, "fetch_operator_unprocessed", lambda limit=5: [(7, "t")])
+    hsr.evaluate(busy=False, menu=False, composer_empty=False, mode="act")
+    assert len(calls) == 1
+
+
+def test_evaluate_rate_limited_flood_suppressed_after_first_window_log(monkeypatch, wired):
+    # audit #43169 finding 3: 30 consecutive ticks stuck on one row must yield a
+    # BOUNDED number of logged/paged rows — the first tick logs 'rate-limited',
+    # every subsequent tick in the same window must see it already logged and
+    # skip re-logging/re-paging entirely.
+    monkeypatch.setattr(hsr, "fetch_operator_unprocessed", lambda limit=5: [(7, "t")])
+    monkeypatch.setattr(hsr, "recent_action_count", lambda cur, since: hsr._RATE_LIMIT_PER_HOUR)
+    already = {"v": False}
+    monkeypatch.setattr(hsr, "rate_limit_state_logged", lambda cur, since: already["v"])
+
+    paged = []
+    monkeypatch.setattr(hsr, "_page_observation", lambda cur, **kw: paged.append(kw))
+
+    for i in range(30):
+        hsr.evaluate(busy=False, menu=False, composer_empty=False, mode="act")
+        already["v"] = True  # after the first real log_event, the state is durably recorded
+
+    assert len(wired["logged"]) == 1
+    assert wired["logged"][0]["action"] == "rate-limited"
+    assert len(paged) == 1
+
+
+def test_evaluate_ceiling_reached_flood_suppressed_after_first_window_log(monkeypatch, wired):
+    # audit #43169 finding 3, the lifetime-ceiling half: same bound, keyed by
+    # (triggering_row_id, pending_kind) rather than a time window.
+    monkeypatch.setattr(hsr, "fetch_operator_unprocessed", lambda limit=5: [(7, "t")])
+    monkeypatch.setattr(hsr, "row_lifetime_count",
+                         lambda cur, triggering_row_id, pending_kind: hsr._ROW_LIFETIME_CEILING)
+    already = {"v": False}
+    monkeypatch.setattr(hsr, "ceiling_state_logged",
+                         lambda cur, triggering_row_id, pending_kind: already["v"])
+    paged = []
+    monkeypatch.setattr(hsr, "_page_observation", lambda cur, **kw: paged.append(kw))
+
+    for i in range(30):
+        hsr.evaluate(busy=False, menu=False, composer_empty=False, mode="act")
+        already["v"] = True
+
+    assert len(wired["logged"]) == 1
+    assert wired["logged"][0]["action"] == "ceiling-reached"
+    assert len(paged) == 1
+
+
+def test_evaluate_failed_page_never_destroys_the_already_committed_audit_row(monkeypatch, wired):
+    # audit #43169 finding 4: the audit row is committed BEFORE a page is even
+    # attempted, so a page that raises must not roll back or discard it — the
+    # detection stays durably logged either way.
+    monkeypatch.setattr(hsr, "fetch_operator_unprocessed", lambda limit=5: [(7, "t")])
+
+    def _boom(cur, **kw):
+        raise RuntimeError("agent_messages unreachable")
+
+    monkeypatch.setattr(hsr, "_page_observation", _boom)
+    result = hsr.evaluate(busy=False, menu=False, composer_empty=False, mode="observe")
+
+    assert result["act"] is False
+    assert len(wired["logged"]) == 1
+    assert wired["logged"][0]["action"] == "would-nudge"
+    # the audit INSERT must have been committed at least once even though the
+    # subsequent page raised.
+    assert wired["conn"].commit_count >= 1
+
+
+def test_record_no_session_stamps_tick(monkeypatch, wired):
+    calls = []
+    monkeypatch.setattr(hsr, "stamp_tick",
+                         lambda cur, saw_session, reason: calls.append((saw_session, reason)))
+    hsr.record_no_session()
+    assert calls == [(False, "no tmux session found")]
+
+
+def test_record_no_session_refuses_when_not_hub_role(monkeypatch, wired):
+    monkeypatch.setenv("ORCH_BODY_ROLE", "console")
+    calls = []
+    monkeypatch.setattr(hsr, "stamp_tick",
+                         lambda cur, saw_session, reason: calls.append((saw_session, reason)))
+    hsr.record_no_session()
+    assert calls == []
+
+
+def test_record_no_session_refuses_when_lease_not_self(monkeypatch, wired):
+    monkeypatch.setattr(hsr.hub_reach, "read_holder_host", lambda conn: "wingmen-core")
+    calls = []
+    monkeypatch.setattr(hsr, "stamp_tick",
+                         lambda cur, saw_session, reason: calls.append((saw_session, reason)))
+    hsr.record_no_session()
+    assert calls == []

@@ -113,15 +113,15 @@ def lease_is_self(holder_host) -> bool:
 def kill_switch_enabled(*, file_present: bool, db_enabled) -> bool:
     """PURE. orch-console's amendment: the FILE (default-absent=enabled) AND the DB
     settings row (default-true=enabled) must BOTH allow — either one saying "off"
-    disables the ACT step. db_enabled=None (row/table missing, e.g. pre-migration)
-    fails OPEN to enabled — this predicate's OWN correctness must not depend on the
-    migration already being applied; a POSITIVE db_enabled=False always wins,
-    exactly like the file."""
+    disables the ACT step. db_enabled=None (row/table missing, unreadable, a
+    permission error, or any other exception) fails CLOSED to disabled (CAI-RESP-
+    1439 cond 5 + FULL-tier audit #43169 finding 2): an unverifiable DB flag must
+    never be treated as "the switch says go" — the migration is applied BEFORE this
+    is ever enabled in production anyway, so "pre-migration" is not a live reason
+    to fail open. Only an explicit, positively-read db_enabled=True allows."""
     if file_present:
         return False
-    if db_enabled is False:
-        return False
-    return True
+    return db_enabled is True
 
 
 def pending_work_verdict(*, operator_unprocessed: list, stale_p1_bus_rows: list) -> dict:
@@ -171,8 +171,9 @@ def fetch_operator_unprocessed(limit: int = 5) -> list:
 
 
 def fetch_kill_switch_db_enabled(conn, cur):
-    """The DB half of the kill switch. None (row/table missing, e.g. pre-migration)
-    -> caller's kill_switch_enabled() fails OPEN to enabled; a real False always wins."""
+    """The DB half of the kill switch. None (row/table missing, unreadable, or any
+    other exception) -> caller's kill_switch_enabled() fails CLOSED to disabled
+    (audit #43169 finding 2); a real False always wins too."""
     try:
         cur.execute("SELECT enabled FROM hub_self_recovery_settings LIMIT 1")
         row = cur.fetchone()
@@ -213,6 +214,51 @@ def row_lifetime_count(cur, *, triggering_row_id, pending_kind) -> int:
     return cur.fetchone()[0]
 
 
+def rate_limit_state_logged(cur, *, since) -> bool:
+    """Audit #43169 finding 3 (flood): a 'rate-limited' row already logged inside
+    the CURRENT hourly window means the state is already durably recorded — log it
+    (and page on it) at most ONCE per window, not once per 2-minute tick for as
+    long as the underlying stuck condition persists."""
+    cur.execute(
+        "SELECT EXISTS(SELECT 1 FROM hub_self_recovery_log WHERE action='rate-limited' AND detected_at >= %s)",
+        (since,),
+    )
+    return cur.fetchone()[0]
+
+
+def ceiling_state_logged(cur, *, triggering_row_id, pending_kind) -> bool:
+    """Audit #43169 finding 3 (flood): 'ceiling-reached' is a LIFETIME verdict on
+    this specific (triggering_row_id, pending_kind) — once logged, it stays true
+    forever for that row (row_lifetime_count only ever grows), so without this
+    check every subsequent 2-minute tick would re-log 'ceiling-reached' and page
+    again, forever. Log it (and page on it) ONCE per (row, state)."""
+    if triggering_row_id is None:
+        return False
+    cur.execute(
+        "SELECT EXISTS(SELECT 1 FROM hub_self_recovery_log WHERE action='ceiling-reached' "
+        "AND triggering_row_id=%s AND pending_kind=%s)",
+        (triggering_row_id, pending_kind),
+    )
+    return cur.fetchone()[0]
+
+
+def stamp_tick(cur, *, saw_session: bool, reason: str) -> None:
+    """Audit #43169 finding 6 (silent no-op indistinguishable from healthy): one
+    UPDATE per tick on the singleton settings row, regardless of outcome. Without
+    this, a script that never even reaches its own logic (e.g. the tmux session
+    belongs to a different OS user than the systemd unit's User=) exits 0 on every
+    tick and leaves ZERO trace — 72h of total silence would look identical to 72h
+    of genuinely healthy observation. Called on every real invocation (this
+    module's evaluate() AND the bash driver's no-session branch, via
+    record_no_session()) so absence of this stamp updating is itself the signal
+    that the tick never ran at all."""
+    cur.execute(
+        "UPDATE hub_self_recovery_settings SET last_tick_at=now(), "
+        "last_tick_saw_session=%s, last_tick_reason=%s WHERE id=true",
+        (saw_session, reason),
+    )
+
+
 def log_event(cur, *, mode: str, action: str, pending_kind, triggering_row_id, detail: str) -> int:
     cur.execute(
         "INSERT INTO hub_self_recovery_log (mode, action, pending_kind, triggering_row_id, detail) "
@@ -223,21 +269,22 @@ def log_event(cur, *, mode: str, action: str, pending_kind, triggering_row_id, d
 
 
 def _page_observation(cur, *, action: str, detail: str) -> None:
-    """One low-priority, non-flooding bus row per genuine detection (in ANY mode) —
-    'silence is never the outcome of an action' per the original proposal, and the
-    observe-first evidence needs a human to actually SEE it land, not just pile
-    silently into a table someone has to remember to query. P3/update (not a page):
-    this is observation data, not an emergency, and observe-mode by construction
-    never touches the pane — flooding P1 alerts here would just be noise."""
-    try:
-        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (HUB_AGENT,))
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body,requires_response) "
-            "VALUES (%s,'orch-console','update','P3',%s,%s,false)",
-            (HUB_AGENT, f"hub-self-recovery: {action}", detail),
-        )
-    except Exception:  # noqa: BLE001 — the observation log write already succeeded; a page is best-effort
-        pass
+    """One low-priority, non-flooding bus row per genuine, newly-logged detection
+    (in ANY mode) — 'silence is never the outcome of an action' per the original
+    proposal, and the observe-first evidence needs a human to actually SEE it land,
+    not just pile silently into a table someone has to remember to query. P3/update
+    (not a page): this is observation data, not an emergency, and observe-mode by
+    construction never touches the pane — flooding P1 alerts here would just be
+    noise. Raises on failure — the caller (evaluate()) is responsible for isolating
+    this from the already-committed audit row (audit #43169 finding 4: this used to
+    share a transaction with the audit INSERT, so a failed page here aborted the
+    whole transaction and silently discarded the audit row too)."""
+    cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (HUB_AGENT,))
+    cur.execute(
+        "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body,requires_response) "
+        "VALUES (%s,'orch-console','update','P3',%s,%s,false)",
+        (HUB_AGENT, f"hub-self-recovery: {action}", detail),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -262,59 +309,116 @@ def evaluate(*, busy: bool, menu: bool, composer_empty: bool, mode: str) -> dict
     file_present = _KILL_FILE.exists()
 
     with _connect() as conn, conn.cursor() as cur:
+        try:
+            holder_host = hub_reach.read_holder_host(conn)
+            if not lease_is_self(holder_host):
+                result["reason"] = (f"refused: orch_lease.holder_host={holder_host!r} does not resolve to "
+                                     f"this host ({SELF_HOST}) — acts on itself only, never a body it doesn't "
+                                     f"currently hold the lease for")
+                return result
+
+            db_enabled = fetch_kill_switch_db_enabled(conn, cur)
+            if not kill_switch_enabled(file_present=file_present, db_enabled=db_enabled):
+                result["reason"] = f"refused: kill switch OFF (file_present={file_present}, db_enabled={db_enabled})"
+                return result
+
+            op_rows = fetch_operator_unprocessed()
+            bus_rows = fetch_stale_p1_bus_rows(cur, max_age_s=_BUS_PENDING_AGE_S)
+            pending = pending_work_verdict(operator_unprocessed=op_rows, stale_p1_bus_rows=bus_rows)
+
+            detected, reason = wedge_detected(pending=pending, busy=busy, menu=menu, composer_empty=composer_empty)
+            result["reason"] = reason
+            if not detected:
+                return result  # healthy or hard-refused — nothing logged, no flood on a healthy hub
+
+            since = datetime.now(timezone.utc) - timedelta(hours=1)
+            recent = recent_action_count(cur, since=since)
+            lifetime = row_lifetime_count(cur, triggering_row_id=pending["row_id"], pending_kind=pending["kind"])
+
+            # Audit #43169 finding 3 (flood): a 'ceiling-reached' or 'rate-limited'
+            # verdict is a STATE, not a fresh event — once it's been durably logged
+            # for this window (rate limit) or this row (ceiling, lifetime-scoped), a
+            # 2-minute tick must keep refusing to act WITHOUT re-logging/re-paging
+            # forever. already_logged short-circuits before the INSERT below.
+            already_logged = False
+            if lifetime >= _ROW_LIFETIME_CEILING:
+                action = "ceiling-reached"
+                result["reason"] = (f"WEDGE detected but the lifetime ceiling ({_ROW_LIFETIME_CEILING}) is "
+                                     f"reached on {pending['kind']}#{pending['row_id']} — escalate to a human, "
+                                     f"no further auto-action on this row")
+                already_logged = ceiling_state_logged(cur, triggering_row_id=pending["row_id"],
+                                                       pending_kind=pending["kind"])
+            elif recent >= _RATE_LIMIT_PER_HOUR:
+                action = "rate-limited"
+                result["reason"] = f"WEDGE detected but the hourly rate limit ({_RATE_LIMIT_PER_HOUR}/hr) is hit — standing off this tick"
+                already_logged = rate_limit_state_logged(cur, since=since)
+            elif mode == "act":
+                action = "nudged"
+                result["act"] = True
+            else:
+                action = "would-nudge"
+
+            if already_logged:
+                return result
+
+            log_event(cur, mode=mode, action=action, pending_kind=pending["kind"],
+                       triggering_row_id=pending["row_id"], detail=result["reason"])
+            conn.commit()  # audit #43169 finding 4: the audit row is durable BEFORE
+            # a page is even attempted — a failed page must never be able to roll
+            # back or otherwise destroy a detection that already happened.
+            try:
+                _page_observation(cur, action=action, detail=result["reason"])
+                conn.commit()
+            except Exception:  # noqa: BLE001 — the audit row above is already committed;
+                # a paging failure (e.g. agent_messages RLS/connectivity) is best-effort
+                # and must never be allowed to look like the detection itself failed.
+                conn.rollback()
+            return result
+        finally:
+            # Audit #43169 finding 6: exactly one liveness stamp per real tick that
+            # reached the DB, on EVERY path out of this block (healthy, refused,
+            # rate-limited, ceiling, would-nudge, nudged) — so a tick that silently
+            # stops reaching even this far (e.g. this whole try block starts raising)
+            # is the one case that does NOT get a fresh stamp, which is exactly the
+            # detectable signal a stale last_tick_at is for.
+            stamp_tick(cur, saw_session=True, reason=result["reason"])
+            conn.commit()
+
+
+def record_no_session() -> None:
+    """Audit #43169 finding 6, the no-session half: the bash driver's no-tmux-
+    session branch exits before any pane-state read is even possible, so
+    evaluate() itself is never reached on that tick — without this, that branch
+    would leave zero trace in `last_tick_at`, indistinguishable from a healthy
+    tick that simply never ran. Same guards as evaluate() (hub role + self lease)
+    so a foreign body or a non-lease-holding host never stamps the hub's own
+    liveness row on its behalf."""
+    if os.environ.get("ORCH_BODY_ROLE", "").strip().lower() != "hub":
+        return
+    with _connect() as conn, conn.cursor() as cur:
         holder_host = hub_reach.read_holder_host(conn)
         if not lease_is_self(holder_host):
-            result["reason"] = (f"refused: orch_lease.holder_host={holder_host!r} does not resolve to "
-                                 f"this host ({SELF_HOST}) — acts on itself only, never a body it doesn't "
-                                 f"currently hold the lease for")
-            return result
-
-        db_enabled = fetch_kill_switch_db_enabled(conn, cur)
-        if not kill_switch_enabled(file_present=file_present, db_enabled=db_enabled):
-            result["reason"] = f"refused: kill switch OFF (file_present={file_present}, db_enabled={db_enabled})"
-            return result
-
-        op_rows = fetch_operator_unprocessed()
-        bus_rows = fetch_stale_p1_bus_rows(cur, max_age_s=_BUS_PENDING_AGE_S)
-        pending = pending_work_verdict(operator_unprocessed=op_rows, stale_p1_bus_rows=bus_rows)
-
-        detected, reason = wedge_detected(pending=pending, busy=busy, menu=menu, composer_empty=composer_empty)
-        result["reason"] = reason
-        if not detected:
-            return result  # healthy or hard-refused — nothing logged, no flood on a healthy hub
-
-        since = datetime.now(timezone.utc) - timedelta(hours=1)
-        recent = recent_action_count(cur, since=since)
-        lifetime = row_lifetime_count(cur, triggering_row_id=pending["row_id"], pending_kind=pending["kind"])
-
-        if lifetime >= _ROW_LIFETIME_CEILING:
-            action = "ceiling-reached"
-            result["reason"] = (f"WEDGE detected but the lifetime ceiling ({_ROW_LIFETIME_CEILING}) is "
-                                 f"reached on {pending['kind']}#{pending['row_id']} — escalate to a human, "
-                                 f"no further auto-action on this row")
-        elif recent >= _RATE_LIMIT_PER_HOUR:
-            action = "rate-limited"
-            result["reason"] = f"WEDGE detected but the hourly rate limit ({_RATE_LIMIT_PER_HOUR}/hr) is hit — standing off this tick"
-        elif mode == "act":
-            action = "nudged"
-            result["act"] = True
-        else:
-            action = "would-nudge"
-
-        log_event(cur, mode=mode, action=action, pending_kind=pending["kind"],
-                   triggering_row_id=pending["row_id"], detail=result["reason"])
-        _page_observation(cur, action=action, detail=result["reason"])
+            return
+        stamp_tick(cur, saw_session=False, reason="no tmux session found")
         conn.commit()
-    return result
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--busy", type=int, choices=[0, 1], required=True)
-    ap.add_argument("--menu", type=int, choices=[0, 1], required=True)
-    ap.add_argument("--composer-empty", type=int, choices=[0, 1], required=True)
+    ap.add_argument("--busy", type=int, choices=[0, 1])
+    ap.add_argument("--menu", type=int, choices=[0, 1])
+    ap.add_argument("--composer-empty", type=int, choices=[0, 1])
     ap.add_argument("--mode", choices=["observe", "act"], default="observe")
+    ap.add_argument("--no-session", action="store_true",
+                     help="the driver found no live tmux session this tick — record "
+                          "a liveness stamp only, never evaluate a wedge")
     a = ap.parse_args(argv)
+    if a.no_session:
+        record_no_session()
+        print(json.dumps({"act": False, "reason": "no tmux session found", "payload": None}))
+        return 0
+    if a.busy is None or a.menu is None or a.composer_empty is None:
+        ap.error("--busy/--menu/--composer-empty are required unless --no-session")
     result = evaluate(busy=bool(a.busy), menu=bool(a.menu),
                        composer_empty=bool(a.composer_empty), mode=a.mode)
     print(json.dumps(result))
