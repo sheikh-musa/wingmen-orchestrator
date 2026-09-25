@@ -399,3 +399,35 @@ other 10 rows; honestly flagged to cc-quality that the render pulls LIVE data fr
 currently-deployed backend so it can't show the new badge yet — reviewed from the code diff,
 not fabricated as a synthetic proof). Review requested (#43122) + woke cc-quality. **Awaiting
 review before push → PR → orch-console's gate.**
+
+## op#42896/#42909 — PR #145 merged; cc-quality PASS+condition on proposal 1, version bump applied (2026-09-25 ~00:25Z)
+
+Orch-console PASSed #145 on the CI subset rule (#43116: "the caller audit is exactly what I
+wanted, fail-loud honesty over an invented route is the right call"). **Merged** (squash) as
+`b15d9b4`, branch deleted, fast-forwarded `fable/substrate-safe-fixes` clean.
+
+**Open gap flagged for later, NOT this PR:** a WEDGED-but-alive gzb hub now has zero
+automated recovery (the operator is the only path out) — orch-console asked for a half-page
+proposal (gzb-LOCAL systemd-timer recovery, same probe logic as `context_health_watchdog.py`,
+touching only gzb's own tmux, lease-gated via a DB read not cross-host SSH) once #145 + the
+token card were done. Sent (#43133, requires_response) — **not built**, theirs + hub +
+fleet-health to broker.
+
+**cc-quality reviewed proposal 1** (#43129): PASS on code correctness (traced the fail-safe
+paths, the tz-aware freshness subtraction, the SSH-wins-over-self-report gating, the
+mismatch-first class reorder across every row state, live-verified `cc-orchestrator`'s real
+`auth_fp` age ~19s — inside the 900s window). 33/33 panes + 10/10 registry + 354/354 console.
+One MEDIUM (alert-not-block): `lanes.js` is served stale-while-revalidate, so with the version
+constants unbumped the phone would keep serving the OLD cached `lanes.js` — the new badge
+wouldn't land until a 2nd reload. **Applied exactly as recommended:** bumped `sw.js`
+VERSION / `fleet.js` APP_BUILD / `lanes.html` badge `fc-v65` → `fc-v66` in sync (left
+`fleet.js`'s historical fc-v65 *comment* alone — not a live constant), committed `7d1f793`.
+This mechanically changed the content hash to `2666db0a8dd3c3c7` (cc-quality's PASS was
+stamped for `20af9cbd8e50e2d3`) — re-rendered, asked for a re-stamp at the new hash (#43132,
+requires_response) rather than assume the old review still covers what actually ships. Wake
+attempt for cc-quality came back unverified (`lane_nudge rc=3`, possibly mid-task) — the bus
+row is durable per Option B, not retrying the nudge.
+
+**Status: PR #145 done. Proposal 1 code-complete + tested + reviewed, awaiting a hash
+re-stamp before push → PR → orch-console's gate. gzb-local-recovery proposal sent, awaiting
+reply. Nothing to build until one of these three lands.**
