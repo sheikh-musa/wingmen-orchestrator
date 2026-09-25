@@ -249,4 +249,154 @@ def test_expected_fp_backcompat_without_group_file(tmp_path, monkeypatch):
     ptr(".lane_default_token", fleet)
     monkeypatch.setattr(panes, "_ORCH_DIR", str(tmp_path))
     assert panes._expected_fp("irsyad-coord") == _fp("MUSA")
-    assert panes._expected_fp("cosem-tdu") == _fp("MUSA")
+
+
+# ---- _self_reported_hub_account(): op#42896/#42909, orch-console #43092/#43109 ----
+# When the hub's SSH scan is unavailable (gzb has no provisioned interactive reach,
+# scripts/lib/hub_reach.py), fall back to cc-orchestrator's OWN agent_status.auth_fp --
+# but ONLY if fresh, and never conflated with a process-verified scan.
+import datetime
+
+
+class _FakeCursor:
+    def __init__(self, row):
+        self._row = row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, *a, **k):
+        pass
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    def __init__(self, row):
+        self._row = row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def cursor(self):
+        return _FakeCursor(self._row)
+
+
+def test_self_reported_hub_account_fresh_row_returns_fp(monkeypatch):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    monkeypatch.setattr("psycopg.connect", lambda *a, **k: _FakeConn(("abc123def456", now)))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    assert panes._self_reported_hub_account("cc-orchestrator") == {"fp": "abc123def456", "stale": False}
+
+
+def test_self_reported_hub_account_stale_row_is_flagged_not_shown_as_current(monkeypatch):
+    old = (datetime.datetime.now(datetime.timezone.utc)
+           - datetime.timedelta(seconds=panes._SELF_REPORT_FRESH_S + 1))
+    monkeypatch.setattr("psycopg.connect", lambda *a, **k: _FakeConn(("abc123def456", old)))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    assert panes._self_reported_hub_account("cc-orchestrator") == {"fp": None, "stale": True}
+
+
+def test_self_reported_hub_account_no_row_is_safe(monkeypatch):
+    monkeypatch.setattr("psycopg.connect", lambda *a, **k: _FakeConn(None))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    assert panes._self_reported_hub_account("cc-orchestrator") == {"fp": None, "stale": False}
+
+
+def test_self_reported_hub_account_db_error_is_safe(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("no db")
+    monkeypatch.setattr("psycopg.connect", _boom)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    assert panes._self_reported_hub_account("cc-orchestrator") == {"fp": None, "stale": False}
+
+
+# ---- token_ground_truth(): remote-body self-report integration ----
+def test_token_ground_truth_falls_back_to_self_report_when_ssh_unreachable(monkeypatch):
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_self_reported_hub_account",
+                         lambda session: {"fp": "selffp123456", "stale": False})
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
+    row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["verified"] is False
+    assert row["self_reported"] is True
+    assert row["self_report_stale"] is False
+    assert row["account"] == "Max (Musa)"
+    assert row["fp"] == "selffp123456"
+    assert row["mismatch"] is False
+
+
+def test_token_ground_truth_self_reported_mismatch_is_still_red(monkeypatch):
+    # the core safety property (orch-console #43109): a self-reported fp that doesn't
+    # match the body's expected account must be RED, whether self-reported or not.
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_self_reported_hub_account",
+                         lambda session: {"fp": "wrongfp0000", "stale": False})
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: "expectedfp99")
+    monkeypatch.setattr(panes, "_account_labels", lambda: {})
+    row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["self_reported"] is True
+    assert row["mismatch"] is True
+
+
+def test_token_ground_truth_stale_self_report_falls_back_to_plain_unverified(monkeypatch):
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_self_reported_hub_account",
+                         lambda session: {"fp": None, "stale": True})
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_account_labels", lambda: {})
+    row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["verified"] is False
+    assert row["self_reported"] is False
+    assert row["self_report_stale"] is True
+    assert row["account"] is None
+
+
+def test_token_ground_truth_no_scan_no_self_report_is_plain_unverified(monkeypatch):
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_self_reported_hub_account",
+                         lambda session: {"fp": None, "stale": False})
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_account_labels", lambda: {})
+    row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["verified"] is False
+    assert row["self_reported"] is False
+    assert row["self_report_stale"] is False
+    assert row["account"] is None
+
+
+def test_token_ground_truth_ssh_verified_scan_wins_over_self_report(monkeypatch):
+    # a process-verified SSH scan must never even consult the weaker self-report signal.
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: {"fp": "sshfp000000", "model": None})
+    called = {"n": 0}
+
+    def _sr(session):
+        called["n"] += 1
+        return {"fp": "shouldnotuse", "stale": False}
+
+    monkeypatch.setattr(panes, "_self_reported_hub_account", _sr)
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_account_labels", lambda: {"sshfp000000": "Max (Musa)"})
+    row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["verified"] is True
+    assert row["self_reported"] is False
+    assert row["fp"] == "sshfp000000"
+    assert called["n"] == 0

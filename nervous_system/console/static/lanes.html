@@ -100,6 +100,12 @@
     background:var(--jade-soft);color:var(--jade);border:1px solid rgba(55,211,154,.25);white-space:nowrap}
   .lane.flag .acct{background:var(--rose-soft);color:var(--rose);border-color:rgba(251,113,133,.3)}
   .lane.unver .acct{background:var(--amber-soft);color:var(--amber);border-color:rgba(246,196,83,.3)}
+  /* SELF-REPORTED (op#43092/#43109): a body's own agent_status.auth_fp, fresh but NOT
+     process-verified by a third party -- distinct from both VERIFIED (jade) and the
+     genuine no-signal UNVERIFIED (amber); shares the .remote indigo tone since this
+     state only ever applies to a cross-host body. A mismatch still wins (see rowHtml's
+     class order), so this color never appears on an off-account fp. */
+  .lane.self .acct{background:var(--indigo-soft);color:var(--indigo);border-color:rgba(138,166,255,.3)}
   .lane .chev{flex:none;color:var(--faint);font-size:12px;transition:transform .22s ease}
   .lane.open .chev{transform:rotate(90deg)}
 
@@ -215,7 +221,7 @@
     <div class="top">
       <a class="back" href="/fleet">‹ Fleet</a>
       <h1>Lane manager</h1>
-      <span id="build" class="build"><span class="d"></span>fc-v65</span>
+      <span id="build" class="build"><span class="d"></span>fc-v66</span>
       <button id="refresh" class="refresh">↻</button>
     </div>
     <div id="sub" class="sub">Loading ground-truth…</div>
