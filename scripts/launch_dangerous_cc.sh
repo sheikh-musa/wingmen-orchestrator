@@ -733,13 +733,14 @@ echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}  ${AMBER}(v
 # fleet-wide by writing .fleet_autocompact_pct (+ the singleton/console boots, which
 # use their own launchers). Value is scrubbed to digits and range-checked 1..99;
 # anything else is ignored (fail-safe: never export a bad override). Inert until written.
-_AC_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+# Robust session resolution (Nazim #43192): the old untargeted `display-message -p '#S'`
+# returned EMPTY in a DETACHED launch → the per-session marker was silently skipped. The lib
+# targets $TMUX_PANE / $LANE_SESSION and warns LOUD if it can't resolve while a marker exists.
+. "$ORCH_DIR/scripts/lib/autocompact_override.sh"
 _AC_PCT=""; _AC_TIER=""
-if [ -n "$_AC_SESSION" ] && [ -r "$ORCH_DIR/.${_AC_SESSION}_autocompact_pct" ]; then
-    _AC_PCT="$(tr -dc '0-9' < "$ORCH_DIR/.${_AC_SESSION}_autocompact_pct")"; _AC_TIER=".${_AC_SESSION}_autocompact_pct"
-elif [ -r "$ORCH_DIR/.fleet_autocompact_pct" ]; then
-    _AC_PCT="$(tr -dc '0-9' < "$ORCH_DIR/.fleet_autocompact_pct")"; _AC_TIER=".fleet_autocompact_pct"
-fi
+read -r _AC_PCT _AC_TIER <<EOF_AC
+$(resolve_autocompact_override "$ORCH_DIR")
+EOF_AC
 if [ -n "$_AC_PCT" ] && [ "$_AC_PCT" -ge 1 ] 2>/dev/null && [ "$_AC_PCT" -le 99 ] 2>/dev/null; then
     export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="$_AC_PCT"
     echo -e "${BOLD}${TEAL}▶ Autocompact override: ${_AC_PCT}%${RESET}  ${AMBER}(via ${_AC_TIER})${RESET}"
