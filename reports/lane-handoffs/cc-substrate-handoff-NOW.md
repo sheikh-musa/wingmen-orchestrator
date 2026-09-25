@@ -461,3 +461,31 @@ authority ruling next, with the hub's consent.
 
 **Status: PR #147 awaiting orch-console's gate. gzb-recovery proposal written, ball is in
 orch-console's court to route to cai. Nothing left to build until one of these lands.**
+
+## op#42896/#42909 — PR #147 merged+deployed; acceptance test caught a real render gap, fixed (2026-09-25 ~00:40Z)
+
+Orch-console PASSed #147 on the CI subset (#43137), all 4 conditions confirmed in code, live
+data backing it (`auth_fp` 23s old at their check). **Merged** (squash) `0448157`, deployed
+`fc-v66` — version-sync, 88 tests, render, review all passed, served version confirmed
+(`fc-v66`/`0448157`).
+
+**Their stated acceptance test (post-deploy `lanes.png` must literally show "SELF-REPORTED ·
+Musa") FAILED — and it was a real, previously-unfound gap, not the session-key bug they
+anticipated.** Checked raw `/api/token-truth` JSON first to rule out a backend bug:
+`self_reported=true, account="Musa", mismatch=false` — all correct. Root cause: `rowHtml()`'s
+`badge` variable was computed (`"SELF-REPORTED"` etc.) but **never actually inserted into the
+returned HTML** — a pre-existing gap that neither of cc-quality's 2 prior reviews nor my own
+testing caught, since nothing before this had exercised literal rendered TEXT against an
+acceptance string (only color/class). Reported the finding + the process gap transparently to
+orch-console (#43149) before fixing anything further.
+
+Fix (`fix/self-reported-badge-text-render`, `77b7b83`): `acct = badge + " · " + account` for
+the self_reported branch only — other branches' chip text untouched. New content hash
+`965821852a9c36c6`. Re-rendered against the SAME already-deployed live data to confirm: chip
+now literally reads "SELF-REPORTED · Musa". 121 tests (panes+app) unaffected, as expected for
+a pure JS text-format change. **3rd review cycle requested from cc-quality (#43151)** — wake
+came back unverified again (2nd time this session; bus row durable, not retrying manually).
+
+**Status: awaiting cc-quality's 3rd-cycle review before push → PR → orch-console's gate →
+redeploy. The gzb-recovery proposal (previous section) is with cai + the hub for a ruling,
+separately, nothing to chase there until one replies.**
