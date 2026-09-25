@@ -172,6 +172,17 @@ def test_wake_forwards_row_id_to_verified_submit(_wake_ready, monkeypatch):
     assert seen["row_id"] == "R42"
 
 
+def test_wake_row_ceiling_unavailable_on_rc8_is_labeled_and_no_cap_slot(_wake_ready, monkeypatch):
+    # rc 8 = lane_nudge fail-closed (ceiling state unavailable). Distinct greppable label,
+    # NOT the generic submit-error; nothing delivered => no cap slot burned (Nazim #43121).
+    monkeypatch.setattr(agent_wake, "_verified_submit", lambda s, sig, row_id=None: 8)
+    r = agent_wake.wake_agent("cc-ihsanos", now=1000.0, row_id="R8")
+    assert r["woke"] is False and r.get("row_ceiling_unavailable") is True
+    assert r.get("why") == "row-ceiling state unavailable"
+    assert r.get("submit_failed") is not True
+    assert agent_wake._read_wakes("cc-ihsanos") == []
+
+
 def test_wake_row_capped_on_rc7_does_not_burn_a_cap_slot(_wake_ready, monkeypatch):
     # rc 7 = lane_nudge's per-row ceiling refused (row already delivered enough). It is a
     # DELIBERATE bound, not a wedge: report row_capped, do NOT record a wake (nothing typed).

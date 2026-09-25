@@ -481,6 +481,15 @@ def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False, now: floa
     if rc == 7:
         return {"woke": False, "session": session, "why": "row-capped",
                 "row_capped": True, "rc": rc}
+    # rc 8 = lane_nudge fail-closed: the per-row ceiling STATE was unavailable (dir
+    # unwritable/unreadable), so it refused rather than deliver uncapped. Distinct,
+    # greppable label (not the generic submit-error); nothing delivered => no cap slot.
+    if rc == 8:
+        logging.getLogger("wingmen.agent_wake").error(
+            "wake REFUSED for %s (session=%s): row-ceiling state unavailable (lane_nudge rc=8) "
+            "— fail-closed; check $HOME/.wingmen_state/rownudge writability.", agent_id, session)
+        return {"woke": False, "session": session, "why": "row-ceiling state unavailable",
+                "row_ceiling_unavailable": True, "rc": rc}
     # rc 3 = could not verify submission (staged/wedged/at a dialog) OR the ghost-aware
     # guard REFUSED because the body has its OWN real unsent text (which we must not
     # clobber). Either way the wake did NOT land: report it honestly + flag it, and
