@@ -452,7 +452,7 @@ def _tmux_countonly(session: str, line: str, host: str | None = None) -> bool:
         return False
 
 
-def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool, conn=None) -> tuple[str, bool]:
+def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool, conn=None, row_id=None) -> tuple[str, bool]:
     """Route a count-only re-nudge to `agent`. Returns (mechanism, ok).
 
     An attempt is always recorded by the caller regardless of ok — an
@@ -523,8 +523,13 @@ def renudge(agent: str, n: int, lanes: dict[str, str], dry: bool, conn=None) -> 
         if dry:
             return (f"lane_nudge.sh:{lane}", True)
         try:
+            # Forward the violation's row id so lane_nudge's per-row ceiling (Nazim #43063)
+            # bounds re-delivery of THIS row — the SLA watchdog calls lane_nudge directly
+            # (it bypasses agent_wake's per-agent cap), so without this its re-nudges of one
+            # stuck row would be unbounded at the common choke.
+            _env = dict(os.environ, LANE_NUDGE_ROW_ID=str(row_id)) if row_id is not None else None
             r = subprocess.run([str(ORCH / "scripts" / "lane_nudge.sh"), lane, line],
-                               capture_output=True, text=True, timeout=90)
+                               capture_output=True, text=True, timeout=90, env=_env)
             return (f"lane_nudge.sh:{lane}", r.returncode == 0)
         except Exception:
             return (f"lane_nudge.sh:{lane}", False)
@@ -1215,7 +1220,7 @@ def run(dry: bool, injected: list[dict] | None = None,
                         f"{elapsed}m) agent={agent} via {mech} (coalesced, no 2nd keystroke) "
                         f"(attempt {rec['nudge_count']})")
                 else:
-                    mech, ok = renudge(agent, by_agent[agent], lanes, dry, conn)
+                    mech, ok = renudge(agent, by_agent[agent], lanes, dry, conn, row_id=mid)
                     nudged_this_cycle[agent] = (mech, ok)
                     rec["nudge_count"] += 1
                     rec["last_nudge_ts"] = now

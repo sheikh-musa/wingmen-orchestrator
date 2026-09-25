@@ -117,14 +117,50 @@ def test_pane_is_menu_returns_1_on_readable_non_menu(tmp_path):
     assert _pane_is_menu_rc(tmux) == 1
 
 
-def _run_lane_nudge(tmp_path, capture_text):
+def _run_lane_nudge(tmp_path, capture_text, env_extra=None):
     _fake_tmux(tmp_path, capture_text)
     env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
+    if env_extra:
+        env.update({k: str(v) for k, v in env_extra.items()})
     r = subprocess.run(["bash", str(LANE_NUDGE), "somesess", "wake up and drain your inbox"],
                        capture_output=True, text=True, env=env, timeout=60)
     log = tmp_path / "sendkeys.log"
     sends = log.read_text() if log.exists() else ""
     return r, sends
+
+
+def test_lane_nudge_REFUSES_a_row_at_its_delivery_ceiling_with_ZERO_sendkeys(tmp_path):
+    """Per-row ceiling (Nazim #43063): a row already delivered ROW_CAP times is refused
+    (exit 7) and never re-typed — bounds ANY waker at the common choke."""
+    rcdir = tmp_path / "rc"; rcdir.mkdir()
+    (rcdir / "ROW1").write_text(f"{int(__import__('time').time())}\n")  # 1 recent delivery
+    r, sends = _run_lane_nudge(tmp_path, IDLE_PANE, env_extra={
+        "LANE_NUDGE_ROW_ID": "ROW1", "ROW_CEILING_DIR": str(rcdir),
+        "ROW_CAP": 1})
+    assert r.returncode == 7, f"expected exit 7 (row-cap), got {r.returncode}: {r.stderr}"
+    assert sends == "", f"row at ceiling must not be re-typed:\n{sends}"
+
+
+def test_lane_nudge_FAILS_CLOSED_on_unwritable_ceiling_state(tmp_path):
+    """Fail-closed (Nazim #43114): if the per-row ceiling STATE can't be created/read,
+    lane_nudge REFUSES (exit 8) rather than deliver uncapped — an unbounded loop is the bug."""
+    afile = tmp_path / "afile"; afile.write_text("x")  # a FILE where the dir must be
+    r, sends = _run_lane_nudge(tmp_path, IDLE_PANE, env_extra={
+        "LANE_NUDGE_ROW_ID": "ROWX", "ROW_CEILING_DIR": str(afile / "sub"), "ROW_CAP": 5})
+    assert r.returncode == 8, f"expected exit 8 (fail-closed), got {r.returncode}: {r.stderr}"
+    assert sends == "", "must not type when the ceiling state is unavailable"
+
+
+def test_lane_nudge_under_row_ceiling_delivers_and_records(tmp_path):
+    """A row under the ceiling still delivers, and a successful delivery is RECORDED so
+    repeated wakes eventually hit the cap. (Idle pane won't verify 'working', so exit!=7
+    and send-keys DID happen — delivery attempted, i.e. not blocked by the ceiling.)"""
+    rcdir = tmp_path / "rc"
+    r, sends = _run_lane_nudge(tmp_path, IDLE_PANE, env_extra={
+        "LANE_NUDGE_ROW_ID": "ROW2", "ROW_CEILING_DIR": str(rcdir),
+        "ROW_CAP": 5})
+    assert r.returncode != 7, "an under-cap row must not be ceiling-refused"
+    assert sends != "", "an under-cap row must still be typed"
 
 
 def test_lane_nudge_REFUSES_a_menu_pane_with_ZERO_sendkeys(tmp_path):
