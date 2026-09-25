@@ -31,7 +31,14 @@
     // regardless of which signal (SSH-verified or self-reported) produced it.
     if (r.metered) { cls = "flag"; badge = "METERED"; acct = r.account || "metered (API)"; }
     else if (r.mismatch) { cls = "flag"; badge = "OFF-ACCOUNT"; acct = r.account || "unverified"; }
-    else if (r.self_reported) { cls = "self"; badge = "SELF-REPORTED"; acct = r.account; }
+    // op#43092/#43109 acceptance: the chip text itself must read "SELF-REPORTED ·
+    // <account>" -- color alone (however distinct) isn't enough, since this is a
+    // WEAKER signal than VERIFIED and the operator must be able to tell at a glance
+    // without relying on hue. `badge` below is otherwise unused in this function
+    // (a pre-existing gap -- VERIFIED/UNVERIFIED/METERED were never rendered as
+    // visible text either, only via `acct`/`cls`); self_reported is the one state
+    // where that gap is load-bearing, so it's the one state fixed here.
+    else if (r.self_reported) { cls = "self"; badge = "SELF-REPORTED"; acct = badge + " · " + (r.account || "?"); }
     else if (!r.verified) {
       cls = "unver"; badge = "UNVERIFIED";
       acct = r.self_report_stale ? "unverified (stale self-report)" : "unverified";
