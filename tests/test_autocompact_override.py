@@ -82,3 +82,17 @@ def test_silent_when_no_marker_at_all(tmp_path):
     r = _run(tmp_path, {"LANE_SESSION": "", "TMUX_PANE": ""})
     assert r.stdout.strip() == ""
     assert "could NOT resolve" not in r.stderr
+
+
+def test_no_untargeted_leak_when_outside_tmux(tmp_path):
+    # Nazim #43192 review add: OUTSIDE any tmux client (TMUX unset), the untargeted
+    # `display-message -p '#S'` returns the server's CURRENT session (e.g. another lane), so the
+    # old step-3 would silently read a DIFFERENT lane's marker. Guarded behind $TMUX, step 3 is
+    # skipped when outside a client: no override is emitted, and the skipped per-session marker
+    # warns LOUD. (Here the fake tmux WOULD resolve "otherlane" if step 3 ran — it must not.)
+    (tmp_path / ".otherlane_autocompact_pct").write_text("20\n")  # a DIFFERENT lane's marker
+    r = _run(tmp_path, {"LANE_SESSION": "", "TMUX_PANE": "", "FAKE_TMUX_SESSION": "otherlane"})
+    assert r.stdout.strip() == "", \
+        f"outside tmux must not leak another session's marker; got {r.stdout!r}"
+    assert "could NOT resolve" in r.stderr and "SKIPPED" in r.stderr, \
+        f"a skipped per-session marker must warn LOUD; stderr={r.stderr!r}"
