@@ -627,6 +627,24 @@ def _self_reported_hub_account(session: str) -> dict:
     return {"fp": fp, "stale": False}
 
 
+def _remote_body_host(session: str, fallback: str) -> str:
+    """Best-effort resolve `session`'s real host label from agent_status.host
+    (orch-console #43153: the "host VPS" label was a stale hardcoded literal from
+    before the hub moved to gzb -- agent_status.host already says "gzbai", read it
+    instead of guessing). Falls back to `fallback` (_REMOTE_BODIES' static label)
+    on any DB error, missing row, or null host, so a DB hiccup degrades to the old
+    behaviour rather than blanking the label."""
+    try:
+        import psycopg
+        with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT host FROM agent_status WHERE agent_id=%s", (session,))
+                row = cur.fetchone()
+    except Exception:
+        return fallback
+    return row[0] if row and row[0] else fallback
+
+
 def token_ground_truth(include_remote: bool = False) -> dict:
     """GROUND-TRUTH per-body Claude account, read from the LIVE process env — the
     ACTUAL running token, never a declared value (op#10706/10715). For every claude
@@ -699,11 +717,12 @@ def token_ground_truth(include_remote: bool = False) -> dict:
             "expected": exp_account, "expected_fp": exp_fp, "mismatch": mismatch,
         })
 
-    for sess, host in _REMOTE_BODIES.items():
+    for sess, fallback_host in _REMOTE_BODIES.items():
         if sess in seen:
             continue
         exp_fp = _expected_fp(sess)
         exp_account = (labels.get(exp_fp, "Max (unknown acct)") if exp_fp else _EXPECTED_ACCOUNT)
+        host = _remote_body_host(sess, fallback_host) if include_remote else fallback_host
         # Source-of-truth regardless of host (op#10706 C): SSH-fingerprint the hub.
         # Reachable -> VERIFIED (and can MISMATCH, e.g. hub-on-Syed vs pointer-Musa,
         # which we surface, never suppress). Unreachable / not requested -> UNVERIFIED,
@@ -739,9 +758,12 @@ def token_ground_truth(include_remote: bool = False) -> dict:
                     "expected": exp_account, "expected_fp": exp_fp, "mismatch": False,
                 })
 
-    # Loud first: mismatches, then metered, then unverified, then green by session.
+    # Loud first: mismatches, then metered, then unverified/stale, then self-reported +
+    # verified together by session (op#43153: a fresh non-mismatched self-report is no
+    # longer an attention item, so it sorts with the normal fleet, not pinned above it).
     rows.sort(key=lambda x: (
-        not x["mismatch"], not x["metered"], x["verified"], x["session"]))
+        not x["mismatch"], not x["metered"],
+        x["verified"] or x["self_reported"], x["session"]))
     by_model: Dict[str, int] = {}
     for x in rows:
         if x.get("model"):
@@ -750,7 +772,12 @@ def token_ground_truth(include_remote: bool = False) -> dict:
     summary = {
         "total": len(rows),
         "verified": sum(1 for x in rows if x["verified"]),
-        "unverified": sum(1 for x in rows if not x["verified"]),
+        # op#43153: "unverified" is reserved for genuine no-signal (incl. a stale
+        # self-report) -- a fresh self-report gets its OWN count, never lumped into
+        # "unverified" (that's what caused the "10/11 verified 1 unverified" false
+        # alarm even though the 1 was a fresh, matching self-report).
+        "self_reported": sum(1 for x in rows if x["self_reported"]),
+        "unverified": sum(1 for x in rows if not x["verified"] and not x["self_reported"]),
         "mismatched": sum(1 for x in rows if x["mismatch"]),
         "metered": sum(1 for x in rows if x["metered"]),
         # the fleet's .env default account, for reference (expected is now per-body)
