@@ -136,9 +136,19 @@ def test_lane_nudge_REFUSES_a_row_at_its_delivery_ceiling_with_ZERO_sendkeys(tmp
     (rcdir / "ROW1").write_text(f"{int(__import__('time').time())}\n")  # 1 recent delivery
     r, sends = _run_lane_nudge(tmp_path, IDLE_PANE, env_extra={
         "LANE_NUDGE_ROW_ID": "ROW1", "ROW_CEILING_DIR": str(rcdir),
-        "ROW_CAP": 1, "ROW_WINDOW_S": 1800})
+        "ROW_CAP": 1})
     assert r.returncode == 7, f"expected exit 7 (row-cap), got {r.returncode}: {r.stderr}"
     assert sends == "", f"row at ceiling must not be re-typed:\n{sends}"
+
+
+def test_lane_nudge_FAILS_CLOSED_on_unwritable_ceiling_state(tmp_path):
+    """Fail-closed (Nazim #43114): if the per-row ceiling STATE can't be created/read,
+    lane_nudge REFUSES (exit 8) rather than deliver uncapped — an unbounded loop is the bug."""
+    afile = tmp_path / "afile"; afile.write_text("x")  # a FILE where the dir must be
+    r, sends = _run_lane_nudge(tmp_path, IDLE_PANE, env_extra={
+        "LANE_NUDGE_ROW_ID": "ROWX", "ROW_CEILING_DIR": str(afile / "sub"), "ROW_CAP": 5})
+    assert r.returncode == 8, f"expected exit 8 (fail-closed), got {r.returncode}: {r.stderr}"
+    assert sends == "", "must not type when the ceiling state is unavailable"
 
 
 def test_lane_nudge_under_row_ceiling_delivers_and_records(tmp_path):
@@ -148,7 +158,7 @@ def test_lane_nudge_under_row_ceiling_delivers_and_records(tmp_path):
     rcdir = tmp_path / "rc"
     r, sends = _run_lane_nudge(tmp_path, IDLE_PANE, env_extra={
         "LANE_NUDGE_ROW_ID": "ROW2", "ROW_CEILING_DIR": str(rcdir),
-        "ROW_CAP": 5, "ROW_WINDOW_S": 1800})
+        "ROW_CAP": 5})
     assert r.returncode != 7, "an under-cap row must not be ceiling-refused"
     assert sends != "", "an under-cap row must still be typed"
 
