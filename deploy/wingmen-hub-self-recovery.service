@@ -1,0 +1,23 @@
+# /etc/systemd/system/wingmen-hub-self-recovery.service
+# gzb-LOCAL hub wedge-recovery tick (op#42896 follow-on, CAI-RESP-1439, bus #43161).
+# OBSERVE-FIRST: HSR_MODE unset here -> scripts/hub_self_recovery.sh defaults to
+# 'observe' (detect + log 'would-nudge' only, NEVER types into the pane). Triggered
+# by the accompanying .timer. Graduating to HSR_MODE=act is orch-console's call
+# (>=72h AND >=3 genuine detections, per bus #43161) — made by editing THIS file's
+# Environment= line after that review, never a default this script flips itself.
+# STAGED, NOT ENABLED: install + enable + start on gzb is a Nazim/orch-console-gated
+# deploy step following code review, same convention as wingmen-irsyad-coord.service.
+[Unit]
+Description=Wingmen hub self-recovery OBSERVE-FIRST tick (detect+log only) — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gazzai
+WorkingDirectory=/home/gazzai/wingmen/orchestrator
+Environment=ORCH_BODY_ROLE=hub
+# shared tmpfs .env gives DATABASE_URL (substrate) for the read-probes + the log
+# INSERT — same source as wingmen-irsyad-autoscaler.service, never the private
+# write_dsn.env (this script never writes client data, only substrate audit rows).
+ExecStart=/bin/bash -lc 'set -a; . /dev/shm/wingmen-secrets/.env 2>/dev/null; set +a; exec scripts/hub_self_recovery.sh'
