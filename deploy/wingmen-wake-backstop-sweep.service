@@ -14,16 +14,24 @@
 # Honors AUTO_WAKE_ENABLED (from the env below): observe-only (dry) when the kill-switch is
 # off — same arming as the realtime subscriber.
 #
+# OBSERVE-FIRST (Nazim #43240 C3): this unit ships with `--dry-run` — it CLASSIFIES
+# (dead_foreign / live_stuck / unreachable) and NEVER pages/quiesces. Install it observe-only,
+# report pid + banner + the first ~2h of classifications next to Mini's for the same window, and
+# ARM (remove `--dry-run`) ONLY after the two-instance paging-dedup fix (C1) is merged + pulled
+# on gzb and a side-by-side shows gzb targets only gzb-local panes. The observe run IS the proof.
+#
 # STAGED, NOT ENABLED. The hub installs + enables + starts (Nazim-gated cutover):
 #   sudo cp deploy/wingmen-wake-backstop-sweep.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now wingmen-wake-backstop-sweep
-#   systemctl status wingmen-wake-backstop-sweep   # confirm active + the "wake-backstop-sweep up" banner
+#   systemctl status wingmen-wake-backstop-sweep   # confirm active + the "wake-backstop-sweep up ... dry_run=True" banner
 # Reversible: `sudo systemctl disable --now wingmen-wake-backstop-sweep`.
 #
 # HOST-PATH CHECK (hub, confirm before enable — I can't see gzb's FS): this assumes the orch
 # checkout is $HOME/wingmen/orchestrator for User=gazzai and the fetch-secrets .env is at
 # /dev/shm/wingmen-secrets/.env (matching wingmen-irsyad-autoscaler.service). If either differs
-# on gzb, adjust WorkingDirectory / the env path below. A wrong path fails LOUD (no banner).
+# on gzb, adjust WorkingDirectory / the env path below. FAIL-LOUD (Nazim #43240 C2): a missing
+# env file exits 1 BEFORE the banner (the daemon needs DATABASE_URL; a swallowed missing-env
+# would otherwise print 'up' then loop 'no DATABASE_URL' forever); a wrong orch dir fails the cd.
 [Unit]
 Description=Wingmen wake BACKSTOP sweep (gzb-local reliability floor) — gzb
 After=network-online.target wingmen-fetch-secrets.service
@@ -36,7 +44,7 @@ User=gazzai
 WorkingDirectory=/home/gazzai/wingmen/orchestrator
 # Shared tmpfs .env (fetch-secrets) — SAME env source as the hub's other units — gives
 # DATABASE_URL (bus) + AUTO_WAKE_ENABLED. Login shell so the venv resolves for gazzai.
-ExecStart=/bin/bash -lc 'cd "$HOME/wingmen/orchestrator" && set -a; . /dev/shm/wingmen-secrets/.env 2>/dev/null; set +a; exec .venv/bin/python3 nervous_system/wake_backstop_sweep.py'
+ExecStart=/bin/bash -lc 'cd "$HOME/wingmen/orchestrator" && { [ -r /dev/shm/wingmen-secrets/.env ] || { echo "backstop: secrets env missing at /dev/shm/wingmen-secrets/.env" >&2; exit 1; }; }; set -a; . /dev/shm/wingmen-secrets/.env; set +a; exec .venv/bin/python3 nervous_system/wake_backstop_sweep.py --dry-run'
 Restart=always
 RestartSec=6
 
