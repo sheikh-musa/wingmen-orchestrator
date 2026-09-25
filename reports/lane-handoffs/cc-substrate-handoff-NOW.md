@@ -623,3 +623,34 @@ already 4th-cycle PASSed, just needs the CI-subset gate) and #150 (hub self-reco
 needs orch-console's own code audit first, then routes to cc-quality FULL-tier deployment
 fidelity, then migration 068 via the gate, then merge, then the gzb systemctl step separately).
 Nothing to build until one of these two lands — next `[wake]` reconciles fresh.**
+
+## op#42896/#42909 — PR #149 MERGED + deployed fc-v67, all 3 acceptance criteria confirmed on a re-render, console P1 site closed again (2026-09-25 ~01:20Z)
+
+Orch-console PASSed #149 on the CI subset (#43167): all 3 of the #43153 items confirmed in
+code, fc-v67 version triple ✓, cc-quality's 4th-cycle PASS unconditional. Re-checked the PR
+head matched what was reviewed (`5eac0ab`) immediately before merging. **Merged** (squash) as
+`4511683`. Fast-forwarded the main checkout clean, confirmed content hash matched exactly
+(`50e4d1c33521b6aa`) before running the gate.
+
+Ran `scripts/deploy_console.sh` for real — all 4 gates passed, kickstarted.
+
+**Caught a real gap along the way, not this PR's bug:** the gate's OWN bundled PNG (rendered
+at gate-3, `scripts/deploy_console.sh:67`) races gate-4's `launchctl kickstart` (`:102`) — the
+render hits the server BEFORE the reload, so it captured the OLD still-running process's data
+(header read "1 unverified", host showed "VPS") even though the deploy itself was fully
+correct. Did not trust the bundled PNG as proof; diffed the served `lanes.js` against git
+(byte-identical — ruled out a static-file problem), confirmed live `/api/token-truth` already
+returned the correct `self_reported`/`gzbai` fields (proving the backend WAS live), then
+re-ran `scripts/render_console_pages.sh` standalone against the now-live post-kickstart
+server. That render confirmed all 3 of orch-console's literal acceptance criteria: the
+cc-orchestrator card sits in the normal SINGLE LANES list (not a separate attention bucket),
+chip reads "SELF-REPORTED · Musa", subtitle reads "host gzbai"; header reads "10/11 verified
+1 self-reported" (no "unverified"); served `/api/version` = `{"version":"fc-v67","sha":"4511683"}`.
+Reported both the confirmation and the race-condition finding to orch-console (#43168ish,
+informational, not blocking) — flagged, not fixed (pre-existing script behaviour, out of
+scope for this PR; their call whether it's worth a follow-up so the gate's own bundled PNG
+can be trusted as post-deploy proof without a manual re-render).
+
+**P1 registry / console-files site is CLOSED again** (same status as the #43092 close, now
+re-verified end-to-end through this 4-cycle detour). PR #150 (hub self-recovery, migration 068)
+is the only open thread — awaiting orch-console's code audit per #43161.
