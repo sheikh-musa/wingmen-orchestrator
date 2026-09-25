@@ -74,6 +74,42 @@ def test_nervous_system_resolves_under_script_invocation(tmp_path):
 # read_at, so the read_at/agent_wake detector false-flagged them as dead-letters. Fix exempts EXACTLY
 # the relay's tuple; a genuine 'musa' misroute (different producer/subject) must still surface.
 
+# --- human-opened liaison addresses (2026-09-25, Nazim #43120) --------------- #
+# cto-desktop is a HUMAN-OPENED Claude Desktop liaison session (Musa's), not an agent and
+# not a misroute. Its rows are superseded, not lost — must NOT be archived (would falsify
+# receipt on the human's behalf) and must NOT be paged daily; a weekly one-line count is
+# enough so rows don't rot unseen. Same never-touch class as 'musa'/'operator'.
+
+def test_cto_desktop_is_classified_human_opened():
+    assert fh._human_opened("cto-desktop")
+    assert fh._human_opened("CTO-DESKTOP")  # case-insensitive
+    assert not fh._human_opened("cc-quality")
+    assert not fh._human_opened("musa")  # musa is operator, handled by its own never-archive entry
+    assert not fh._human_opened(None)
+
+
+def test_human_opened_addrs_are_in_the_never_archive_set():
+    # step-4 archive must SPARE human-opened addresses (don't mark their rows read)
+    assert "cto-desktop" in fh._NEVER_ARCHIVE_ADDRS
+    for a in ("musa", "operator", "substrate"):
+        assert a in fh._NEVER_ARCHIVE_ADDRS
+
+
+def test_surface_uses_WEEKLY_dedup_for_human_opened():
+    """A human-opened address is surfaced at most once per WEEK (not per day)."""
+    class _Cur:
+        def __init__(self): self.sqls = []
+        def execute(self, sql, params=None): self.sqls.append(sql)
+        def fetchall(self):
+            return [("cto-desktop", 8, "2026-09-22", "2026-09-24", 1)]
+        def fetchone(self): return None  # not surfaced this period yet
+    cur = _Cur()
+    fh.surface_dead_letters(cur, dry=True)
+    dedup_sqls = [s for s in cur.sqls if "date_trunc" in s]
+    assert any("date_trunc('week'" in s for s in dedup_sqls), \
+        "human-opened cto-desktop must dedup on WEEK, not day"
+
+
 def test_relay_consumed_is_exactly_the_relay_tuple():
     assert fh._relay_consumed("musa", "cc-fleet-health", "⚠️ Pace warning — Musa pool may run out")
     # any leg of the tuple differing -> NOT exempt (a real misroute must stay flaggable)

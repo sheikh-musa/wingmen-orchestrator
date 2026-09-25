@@ -41,6 +41,20 @@ PRUNE_DAYS = 1      # offline rows older than this => delete
 ARCHIVE_MIN_AGE_H = 72   # dead-letter grace: only archive unread older than this
 SENDER_LIVE_WINDOW_H = 24  # a recipient that SENT within this window is "live" -> spared
 
+# HUMAN-OPENED liaison addresses (Nazim #43120): a human-opened Claude Desktop session
+# (e.g. Musa's 'cto-desktop'), NOT an agent and NOT a misroute. Rows sent there are read
+# when the human next opens that session — superseded, never lost. So: NEVER archive them
+# (marking read would falsify receipt on the human's behalf), and surface them at most
+# WEEKLY (a one-line count so they don't rot unseen), not daily like a real dead-letter.
+_HUMAN_OPENED = frozenset({"cto-desktop"})
+# step-4 archive NEVER touches these (human/non-agent addresses with no wake owner).
+_NEVER_ARCHIVE_ADDRS = frozenset({"musa", "operator", "substrate"}) | _HUMAN_OPENED
+
+
+def _human_opened(to_agent) -> bool:
+    """True iff to_agent is a human-opened liaison session (surface weekly, never archive)."""
+    return bool(to_agent) and to_agent.lower() in _HUMAN_OPENED
+
 # Singletons are NEVER auto-reaped by heartbeat-staleness. Their liveness is
 # tracked by lease/reclaim machinery, not agent_status heartbeats — the hub in
 # particular self-registers but does NOT continuously heartbeat (boots via
@@ -143,21 +157,33 @@ def surface_dead_letters(cur, dry=False):
     for to_agent, n, oldest, newest, hi in cur.fetchall():
         if not _undeliverable(to_agent):
             continue
-        # once per (to_agent) per day: skip if I already surfaced this target today.
-        cur.execute("""SELECT 1 FROM agent_messages
+        # A human-opened liaison address (cto-desktop) is surfaced at most once per WEEK — its
+        # rows are read when the human next opens that session, so a daily page is noise. A real
+        # undeliverable address (a misroute / retired agent) stays once-per-DAY until fixed.
+        human = _human_opened(to_agent)
+        period = "week" if human else "day"
+        cur.execute(f"""SELECT 1 FROM agent_messages
                        WHERE from_agent='cc-fleet-health' AND to_agent='orch-console'
                          AND subject LIKE %s
-                         AND created_at >= date_trunc('day', now()) LIMIT 1""",
+                         AND created_at >= date_trunc('{period}', now()) LIMIT 1""",
                     (f"dead-letter[{to_agent}]:%",))
         if cur.fetchone():
             continue
         if not dry:
-            subj = f"dead-letter[{to_agent}]: {n} unread with no live wake owner"
-            body = (f"{n} unread agent_messages are addressed to '{to_agent}', which has NO live "
-                    f"wake owner — agent_wake will never deliver there, so they accrue silently "
-                    f"(oldest {oldest}, newest {newest}, P0/P1={hi}). NOT reaped: a misroute must "
-                    f"be fixed (retarget the producer) or the address retired, not hidden. "
-                    f"Surfaced once/day by the cc-fleet-health dead-letter detector.")
+            if human:
+                subj = f"dead-letter[{to_agent}]: {n} unread for a human-opened liaison session (weekly count)"
+                body = (f"{n} unread agent_messages are addressed to '{to_agent}', a HUMAN-OPENED "
+                        f"liaison session (not an agent). They are read when the human next opens it "
+                        f"— superseded, not lost (oldest {oldest}, newest {newest}, P0/P1={hi}). NOT "
+                        f"reaped and NOT paged daily; this is a weekly one-line count so they don't "
+                        f"rot unseen. If the address is retired, remove it from _HUMAN_OPENED.")
+            else:
+                subj = f"dead-letter[{to_agent}]: {n} unread with no live wake owner"
+                body = (f"{n} unread agent_messages are addressed to '{to_agent}', which has NO live "
+                        f"wake owner — agent_wake will never deliver there, so they accrue silently "
+                        f"(oldest {oldest}, newest {newest}, P0/P1={hi}). NOT reaped: a misroute must "
+                        f"be fixed (retarget the producer) or the address retired, not hidden. "
+                        f"Surfaced once/day by the cc-fleet-health dead-letter detector.")
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
             cur.execute("""INSERT INTO agent_messages
                            (from_agent,to_agent,message_type,subject,body,priority,requires_response)
@@ -233,7 +259,7 @@ def main():
                 UPDATE agent_messages SET read_at = now()
                 WHERE read_at IS NULL
                   AND to_agent IS NOT NULL
-                  AND lower(to_agent) NOT IN ('musa','operator','substrate')
+                  AND lower(to_agent) NOT IN ({','.join("'" + a + "'" for a in sorted(_NEVER_ARCHIVE_ADDRS))})
                   AND created_at < now() - interval '{ARCHIVE_MIN_AGE_H} hours'
                   AND to_agent NOT IN (
                       SELECT DISTINCT from_agent FROM agent_messages
