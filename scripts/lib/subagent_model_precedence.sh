@@ -1,34 +1,34 @@
 #!/usr/bin/env bash
 # Canonical CONDITIONAL subagent-model tier (#42821, op#22298 cost-rollout, Nazim gate
-# #42793 cond-5). Sourced by scripts/launch_dangerous_cc.sh AND exercised directly by
-# tests/test_subagent_model_precedence.py, so the SHIPPED resolution is the TESTED
-# resolution (gate-test != shipped-path). A pure function (no side effects) so a test
-# can source + call it with controlled inputs.
+# #42793 cond-5, hardened per the #152 review). Sourced by scripts/launch_dangerous_cc.sh
+# AND exercised directly by tests/test_subagent_model_precedence.py, so the SHIPPED
+# resolution is the TESTED resolution (gate-test != shipped-path).
 #
-# WHAT: decide whether to export CLAUDE_CODE_SUBAGENT_MODEL for this lane so its
-# subagents run on a cheaper model (e.g. Haiku) — the scholar Haiku-subagent pilot half.
-# Mirrors the main-model cascade (model_precedence.sh), keyed on the tmux session, but
-# DEFAULT-OFF/opt-in: with nothing set the function echoes NOTHING and the launcher never
-# exports the var, so behaviour is byte-identical to today (subagents inherit the lane's
-# main model). NOT fleet-wide until an operator/hub writes a marker.
+# WHAT: decide whether to export CLAUDE_CODE_SUBAGENT_MODEL for this lane so its subagents
+# run on a cheaper model (e.g. Haiku for the scholar pilot half). Mirrors the main-model
+# cascade (model_precedence.sh), keyed on the tmux session, DEFAULT-OFF/opt-in.
 #
 # Precedence (highest first):
 #   CLAUDE_CODE_SUBAGENT_MODEL env  >  .<session>_subagent_model  >  .fleet_subagent_model  >  (unset)
-# The env tier is the operator escape hatch (mirrors MODEL env in model_precedence.sh).
-# Empty/whitespace markers are inert -> fall through. Fail-safe: unreadable/empty at any
-# tier just falls to the next lower tier, ending at "unset" (the safe, no-op direction).
 #
-# resolve_subagent_model <session> <orch_dir> [fleet_file]
-#   echoes "<model><TAB><tier>" (tier = which source won, for the boot banner), or NOTHING
-#   when no tier applies OR when the CAI-1170 auditor clamp suppresses it.
+# TWO FAIL-CLOSED guards from the #152 review (they compound, so both matter):
+#  (1) UNRESOLVED SESSION: the launcher resolves the session via the SHARED resolver
+#      (lane_session.sh). If it comes back EMPTY (detached launch, no TMUX_PANE/LANE_SESSION),
+#      we CANNOT prove the lane isn't a CAI-1170 auditor -> fail CLOSED (export nothing, and
+#      scrub any inherited value), warn LOUD. (An empty session used to make is_auditor_lane
+#      false and SKIP the clamp — the bug.)
+#  (2) INHERITED ENV: for an auditor (or an unresolved session) it is not enough to "emit
+#      nothing" — the child would INHERIT a CLAUDE_CODE_SUBAGENT_MODEL already in the parent
+#      env (the escape-hatch tier, or a tmux global). So the shipped entry EXPLICITLY `unset`s
+#      it. That is why the shipped entry (apply_subagent_model) is side-effecting and sourced,
+#      not a `$(...)`-captured echo.
 
 # Auditor-lane SSOT (CAI-1170) — the SAME carve-out the model cascade uses, so a full
-# auditor's audit subagents can NEVER be silently downgraded to a cheap model. One edit
-# in auditor_lanes.sh reaches the main-model clamp AND this subagent clamp.
+# auditor's audit subagents can NEVER be silently downgraded to a cheap model.
 source "$(dirname "${BASH_SOURCE[0]}")/auditor_lanes.sh"
 
-# _resolve_subagent_model_raw — the tiered cascade (no clamp). The PUBLIC entry
-# resolve_subagent_model wraps this with the CAI-1170 auditor clamp.
+# _resolve_subagent_model_raw <session> <orch_dir> [fleet_file] — the tiered cascade, NO
+# clamp, NO side effects. Echoes "<model><TAB><tier>" or NOTHING. Unit-testable in a subshell.
 _resolve_subagent_model_raw() {
     local session="$1" orch_dir="$2" fleet_file="${3:-$orch_dir/.fleet_subagent_model}"
 
@@ -60,32 +60,41 @@ _resolve_subagent_model_raw() {
         fi
     fi
 
-    # Tier 4 — DEFAULT-OFF: echo nothing (the launcher leaves CLAUDE_CODE_SUBAGENT_MODEL unset).
+    # Tier 4 — DEFAULT-OFF: echo nothing.
     return 0
 }
 
-# resolve_subagent_model — PUBLIC entry. Runs the cascade, then applies the CAI-1170
-# FULL-AUDITOR CLAMP: cc-quality / cc-storefront render governance and their audit
-# subagents (and the general-purpose builder subagents they spawn) must NEVER run on a
-# downgraded model, regardless of which tier won (an env, a per-session marker, or a
-# fleet flip). For an auditor the function suppresses ALL output (fail-closed = unset =
-# subagents inherit the auditor's opus main model) and warns LOUD on stderr. Same stdout
-# contract (<model>\t<tier>, or empty).
-resolve_subagent_model() {
-    local session="$1"
-    local out model tier
-    out="$(_resolve_subagent_model_raw "$@")"
-    model="${out%%$'\t'*}"
-    tier="${out#*$'\t'}"
+# apply_subagent_model <session> <orch_dir> — the SHIPPED, side-effecting entry. MUST be
+# called SOURCED (it export/unsets in the caller's shell). Applies the fail-closed guards
+# above, then the cascade. Prints a LOUD line to stderr whenever it scrubs/clamps.
+apply_subagent_model() {
+    local session="$1" orch_dir="$2"
 
-    if is_auditor_lane "$session"; then
-        if [ -n "$model" ]; then
-            printf 'subagent_model_precedence: CAI-1170 AUDITOR CLAMP — %s had a subagent-model "%s" via %s; REFUSING (auditor subagents stay on the lane model)\n' \
-                "$session" "$model" "$tier" >&2
-        fi
-        return 0   # emit nothing -> unset
+    # Guard (1) — unresolved session: can't prove non-auditor -> fail closed + scrub inherited.
+    if [ -z "$session" ]; then
+        if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ]; then unset CLAUDE_CODE_SUBAGENT_MODEL; fi
+        echo "subagent-model: tmux session UNRESOLVED — failing CLOSED (CLAUDE_CODE_SUBAGENT_MODEL unset; cannot prove this lane is not a CAI-1170 auditor). Set LANE_SESSION or launch inside a pane." >&2
+        return 0
     fi
 
-    [ -n "$model" ] && printf '%s\t%s\n' "$model" "$tier"
+    # Guard (2) — CAI-1170 auditor: never a downgraded subagent model. Scrub ANY inherited value.
+    if is_auditor_lane "$session"; then
+        if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ]; then
+            echo "subagent-model: CAI-1170 AUDITOR CLAMP — $session; unsetting inherited CLAUDE_CODE_SUBAGENT_MODEL (auditor subagents stay on the lane model)" >&2
+            unset CLAUDE_CODE_SUBAGENT_MODEL
+        fi
+        return 0
+    fi
+
+    # Non-auditor, resolved session: run the cascade.
+    local out model tier
+    out="$(_resolve_subagent_model_raw "$session" "$orch_dir")"
+    model="${out%%$'\t'*}"; tier="${out#*$'\t'}"
+    if [ -n "$model" ]; then
+        export CLAUDE_CODE_SUBAGENT_MODEL="$model"
+        echo "▶ Subagent model: ${model} (via ${tier})"
+    fi
+    # else DEFAULT-OFF: leave the env as-is (a non-auditor may keep an inherited value via the
+    # tier-1 escape hatch, which the cascade above would have returned + re-exported).
     return 0
 }

@@ -9,26 +9,15 @@
 # confidence" class.
 #
 # resolve_autocompact_override <orch_dir>: echoes "<pct> <tier-file>" for this lane's override
-# (per-session marker beats the fleet file), or NOTHING. Resolution order for the session:
-#   1. the pane's OWN target ($TMUX_PANE — set inside any tmux pane, incl. a detached one)
-#   2. explicit $LANE_SESSION env (a launcher may pass it)
-#   3. untargeted display-message — ONLY inside a tmux client ($TMUX set); outside a client it
-#      returns the server's current session (another lane), so it is skipped (Nazim #43192 review)
+# (per-session marker beats the fleet file), or NOTHING. The tmux session is resolved by the
+# SHARED resolver (scripts/lib/lane_session.sh — TMUX_PANE > LANE_SESSION > $TMUX-guarded
+# untargeted; #151 chain, extracted in the #152 review so model/autocompact/subagent share it).
 # If the session can't be resolved but a per-session marker EXISTS, warn LOUD to stderr rather
 # than silently skip. The caller range-checks/exports; default-off when nothing is echoed.
+. "$(dirname "${BASH_SOURCE[0]}")/lane_session.sh"
 resolve_autocompact_override() {
   local orch="$1" sess=""
-  # Only the pane-TARGETED form when TMUX_PANE is actually set — `-t ""` would resolve to some
-  # arbitrary live session (leaking the server's current session) and shadow LANE_SESSION.
-  [ -n "${TMUX_PANE:-}" ] && sess="$(tmux display-message -p -t "$TMUX_PANE" '#S' 2>/dev/null || true)"
-  [ -n "$sess" ] || sess="${LANE_SESSION:-}"
-  # Step 3 (untargeted) ONLY inside a tmux client ($TMUX set): outside any client it returns the
-  # server's CURRENT session (e.g. another lane like nazim), which would make this lane silently
-  # read a DIFFERENT lane's marker (Nazim #43192 review). Outside tmux, skip it and fall through
-  # to the loud-warn path rather than resolve the wrong session.
-  if [ -z "$sess" ] && [ -n "${TMUX:-}" ]; then
-    sess="$(tmux display-message -p '#S' 2>/dev/null || true)"
-  fi
+  sess="$(resolve_lane_session)"
   if [ -n "$sess" ] && [ -r "$orch/.${sess}_autocompact_pct" ]; then
     printf '%s .%s_autocompact_pct' "$(tr -dc '0-9' < "$orch/.${sess}_autocompact_pct")" "$sess"
     return 0

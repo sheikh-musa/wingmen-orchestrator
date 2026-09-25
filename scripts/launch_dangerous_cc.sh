@@ -717,7 +717,13 @@ trap '_handle_exit' EXIT
 _FLEET_MODEL_FILE="$ORCH_DIR/.fleet_model"
 # shellcheck source=scripts/lib/model_precedence.sh
 source "$ORCH_DIR/scripts/lib/model_precedence.sh"
-_BODY_MODEL_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+# Resolve THIS lane's tmux session via the SHARED resolver (lane_session.sh: TMUX_PANE >
+# LANE_SESSION > $TMUX-guarded untargeted). The old untargeted `display-message -p '#S'` here
+# was EMPTY on a detached launch -> it silently skipped every per-body .<session>_model
+# pointer AND (post-#152) would skip the CAI-1170 subagent auditor clamp. One resolver, used
+# by the model cascade, the autocompact marker, and the subagent cascade (#152 review).
+source "$ORCH_DIR/scripts/lib/lane_session.sh"
+_BODY_MODEL_SESSION="$(resolve_lane_session)"
 IFS=$'\t' read -r RESOLVED_MODEL _MODEL_TIER < <(
     resolve_lane_model "$_BODY_MODEL_SESSION" "$ORCH_DIR" "$VENV_PY" "$_FLEET_MODEL_FILE" "claude-opus-4-8")
 echo -e "${BOLD}${TEAL}▶ Resolved model: ${RESOLVED_MODEL}${RESET}  ${AMBER}(via ${_MODEL_TIER})${RESET}"
@@ -756,17 +762,13 @@ fi
 #   CLAUDE_CODE_SUBAGENT_MODEL env > .<session>_subagent_model > .fleet_subagent_model > (unset)
 # DEFAULT-OFF by construction: no env + no marker + no fleet file -> the var is never
 # exported -> subagents inherit the lane's main model (byte-identical to today). CAI-1170:
-# the FULL auditors (cc-quality/cc-storefront) REFUSE the marker in the lib (fail-closed) so
-# their audit subagents can't be downgraded. Inert until a marker is written.
+# the FULL auditors (cc-quality/cc-storefront) REFUSE every tier and their subagent var is
+# explicitly UNSET (scrubs an inherited value too), and an UNRESOLVED session fails CLOSED
+# (unset + loud warn) — both from the #152 review. apply_subagent_model is SOURCED (it
+# export/unsets in THIS shell), keyed on the shared-resolver session above.
 # shellcheck source=scripts/lib/subagent_model_precedence.sh
 source "$ORCH_DIR/scripts/lib/subagent_model_precedence.sh"
-_SUBAGENT_MODEL=""; _SUBAGENT_TIER=""
-IFS=$'\t' read -r _SUBAGENT_MODEL _SUBAGENT_TIER < <(
-    resolve_subagent_model "$_BODY_MODEL_SESSION" "$ORCH_DIR")
-if [ -n "$_SUBAGENT_MODEL" ]; then
-    export CLAUDE_CODE_SUBAGENT_MODEL="$_SUBAGENT_MODEL"
-    echo -e "${BOLD}${TEAL}▶ Subagent model: ${_SUBAGENT_MODEL}${RESET}  ${AMBER}(via ${_SUBAGENT_TIER})${RESET}"
-fi
+apply_subagent_model "$_BODY_MODEL_SESSION" "$ORCH_DIR"
 
 # Stamp resolved model into current_task (CAI observes model drift) AND
 # SELF-REGISTER this lane's tmux session for #111 launchd-safe wake delivery:
