@@ -24,6 +24,16 @@
   // off-account) render OPEN so the action needing you is already visible.
   // The control markup + every data-* attribute is unchanged, so the #rows event
   // delegation (change -> setPointer, click -> preview/armed-apply) still binds.
+  // op#43153: a FRESH, non-mismatched self-report is NOT an attention item -- the
+  // indigo chip already marks it as a weaker signal, and pinning it under "Needs
+  // attention" was itself the permanent false alarm this feature exists to remove.
+  // Attention stays reserved for metered, mismatch, or genuine no-signal (a STALE
+  // self-report has self_reported=false + self_report_stale=true, so it still
+  // falls under the !verified && !self_reported case below). Defined once, shared
+  // by rowHtml's inline "open by default" state and render()'s attn/rest split so
+  // the two can never drift apart.
+  function isAttn(r) { return r.metered || r.mismatch || (!r.verified && !r.self_reported); }
+
   function rowHtml(r) {
     var cls, badge, acct;
     // mismatch is checked ahead of verified/self_reported: op#43092/#43109 -- a
@@ -45,7 +55,7 @@
     }
     else { cls = "ok"; badge = "VERIFIED"; acct = r.account; }
     if (r.remote) cls += " remote";
-    var attention = r.metered || !r.verified || r.mismatch;
+    var attention = isAttn(r);
 
     var s = esc(r.session);
     // one-line technical sub (mono): host · model · fingerprint
@@ -60,10 +70,12 @@
 
     // Controls (R2b) — UNCHANGED logic + data-attributes. A select shows ONLY
     // where a local pointer write takes effect; otherwise a NOTE, never a silent
-    // no-op. A remote (VPS) body is set on its own host; some are env-driven.
+    // no-op. A remote body is set on its own host; some are env-driven. Host name
+    // is r.host (op#43153: was a hardcoded "(VPS)" literal, now whatever
+    // agent_status.host actually says, e.g. "gzbai" post-hub-relocation).
     var ctrls = "";
     if (r.remote) {
-      ctrls = '<div class="ctlnote">remote (VPS) — set its token/model on the hub host; cross-host apply lands in R3/R4</div>';
+      ctrls = '<div class="ctlnote">remote (' + esc(r.host || "?") + ') — set its token/model on the hub host; cross-host apply lands in R3/R4</div>';
     } else {
       if (r.token_settable) {
         // GAP-B: a lane governed by a per-GROUP pin shows its family tier
@@ -420,9 +432,9 @@
     var rows = (d && d.rows) || [];
     var s = (d && d.summary) || {};
     renderQueue(d && d.apply_queue);
-    // Attention-first: metered / unverified / off-account pinned to the top under
-    // "Needs attention"; healthy lanes collapse under "All lanes".
-    function isAttn(r) { return r.metered || !r.verified || r.mismatch; }
+    // Attention-first: metered / mismatch / genuine-no-signal pinned to the top
+    // under "Needs attention" (see the shared isAttn() above); healthy lanes
+    // (incl. a fresh self-report) collapse under "All lanes".
     var attn = rows.filter(isAttn);
     var rest = rows.filter(function (r) { return !isAttn(r); });
     var html = "";
@@ -455,6 +467,9 @@
     var bits = ['<span><b class="good">' + (s.verified || 0) + '/' + (s.total || rows.length) + '</b> verified</span>'];
     if (s.mismatched) bits.push('<span><b class="bad">' + s.mismatched + '</b> off-account</span>');
     if (s.metered) bits.push('<span><b class="bad">' + s.metered + '</b> metered</span>');
+    // op#43153: self-reported gets its OWN count, never folded into "unverified"
+    // (that conflation was the "10/11 verified 1 unverified" false alarm).
+    if (s.self_reported) bits.push('<span>' + s.self_reported + ' self-reported</span>');
     if (s.unverified) bits.push('<span>' + s.unverified + ' unverified</span>');
     $("sub").innerHTML = bits.join("");
     renderFleetSwitch(rows, registry);   // fleet-level bulk switch toolbar (built once, above the list)

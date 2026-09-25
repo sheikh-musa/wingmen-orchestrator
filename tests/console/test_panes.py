@@ -322,6 +322,7 @@ def test_self_reported_hub_account_db_error_is_safe(monkeypatch):
 def test_token_ground_truth_falls_back_to_self_report_when_ssh_unreachable(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
     monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": "selffp123456", "stale": False})
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
@@ -341,6 +342,7 @@ def test_token_ground_truth_self_reported_mismatch_is_still_red(monkeypatch):
     # match the body's expected account must be RED, whether self-reported or not.
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
     monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": "wrongfp0000", "stale": False})
     monkeypatch.setattr(panes, "_expected_fp", lambda session: "expectedfp99")
@@ -354,6 +356,7 @@ def test_token_ground_truth_self_reported_mismatch_is_still_red(monkeypatch):
 def test_token_ground_truth_stale_self_report_falls_back_to_plain_unverified(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
     monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": None, "stale": True})
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
@@ -369,6 +372,7 @@ def test_token_ground_truth_stale_self_report_falls_back_to_plain_unverified(mon
 def test_token_ground_truth_no_scan_no_self_report_is_plain_unverified(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
     monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": None, "stale": False})
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
@@ -385,6 +389,7 @@ def test_token_ground_truth_ssh_verified_scan_wins_over_self_report(monkeypatch)
     # a process-verified SSH scan must never even consult the weaker self-report signal.
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
     monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: {"fp": "sshfp000000", "model": None})
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     called = {"n": 0}
 
     def _sr(session):
@@ -400,3 +405,71 @@ def test_token_ground_truth_ssh_verified_scan_wins_over_self_report(monkeypatch)
     assert row["self_reported"] is False
     assert row["fp"] == "sshfp000000"
     assert called["n"] == 0
+
+
+# ---- _remote_body_host(): op#43153 -- "host VPS" was a stale hardcoded literal ----
+def test_remote_body_host_resolves_from_agent_status(monkeypatch):
+    monkeypatch.setattr("psycopg.connect", lambda *a, **k: _FakeConn(("gzbai",)))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    assert panes._remote_body_host("cc-orchestrator", "VPS") == "gzbai"
+
+
+def test_remote_body_host_falls_back_on_no_row(monkeypatch):
+    monkeypatch.setattr("psycopg.connect", lambda *a, **k: _FakeConn(None))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    assert panes._remote_body_host("cc-orchestrator", "VPS") == "VPS"
+
+
+def test_remote_body_host_falls_back_on_null_host(monkeypatch):
+    monkeypatch.setattr("psycopg.connect", lambda *a, **k: _FakeConn((None,)))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    assert panes._remote_body_host("cc-orchestrator", "VPS") == "VPS"
+
+
+def test_remote_body_host_falls_back_on_db_error(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("no db")
+    monkeypatch.setattr("psycopg.connect", _boom)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    assert panes._remote_body_host("cc-orchestrator", "VPS") == "VPS"
+
+
+def test_token_ground_truth_uses_resolved_host_not_hardcoded_literal(monkeypatch):
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_self_reported_hub_account",
+                         lambda session: {"fp": "selffp123456", "stale": False})
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: "gzbai")
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
+    row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["host"] == "gzbai"
+
+
+# ---- summary counts: op#43153 -- self-reported gets its OWN count, never folded ----
+# into "unverified" (that conflation was the false "1 unverified" alarm).
+def test_summary_self_reported_row_is_not_counted_as_unverified(monkeypatch):
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_self_reported_hub_account",
+                         lambda session: {"fp": "selffp123456", "stale": False})
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
+    summary = panes.token_ground_truth(include_remote=True)["summary"]
+    assert summary["self_reported"] == 1
+    assert summary["unverified"] == 0
+
+
+def test_summary_stale_self_report_still_counts_as_unverified(monkeypatch):
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: None)
+    monkeypatch.setattr(panes, "_self_reported_hub_account",
+                         lambda session: {"fp": None, "stale": True})
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_account_labels", lambda: {})
+    summary = panes.token_ground_truth(include_remote=True)["summary"]
+    assert summary["self_reported"] == 0
+    assert summary["unverified"] == 1
