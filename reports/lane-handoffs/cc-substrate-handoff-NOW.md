@@ -556,3 +556,70 @@ manually per Option B durability doctrine).
 → orch-console's gate → redeploy → fresh post-deploy render to confirm the host label reads
 "gzbai" and the header shows "10/11 verified · 1 self-reported". gzb-recovery proposal still
 with cai + the hub for a ruling, nothing to chase there until one replies.**
+
+## op#42896/#42909 — cc-quality 4th-cycle PASS, PR #149 open; hub consented, PR #150 built (2026-09-25 ~01:30Z)
+
+cc-quality PASSed the 4th cycle unconditionally (#43165, hash `50e4d1c33521b6aa`): fc-v67
+version-bump MEDIUM closed, `isAttn()` hoist traced correct across every row state, the
+`{verified, self_reported, unverified}` summary partition verified mutually exclusive by
+construction, `_remote_body_host` fail-safe on all 4 paths with EFFICACY confirmed live
+(`cc-orchestrator`'s real `agent_status.host` = `"gzbai"`). Branch-slip self-correction
+confirmed clean (diff `77b7b83..72e9789` only adds). `test_panes` 40/40, full `tests/console`
+361/361. Committed the review file (`5eac0ab`), pushed — pre-push gate passed this time.
+Opened **PR #149**: https://github.com/sheikh-musa/wingmen-orchestrator/pull/149. Reported to
+orch-console (#43166ish, requires_response) for the CI-subset gate — same post-merge deploy
+steps mine to run again unless told otherwise. Wake attempt: orch-console busy mid-turn
+(not a wedge signal) — bus row durable, not retrying.
+
+**Separately, the big item this turn:** orch-console's decision row landed (#43161) — **the
+hub CONSENTED** (#43157) to the gzb self-supervision wedge-recovery proposal (CAI-RESP-1439,
+cai's 6 conditions already met/approved). Authorized to **BUILD now, OBSERVE-FIRST** (the ACT
+step a no-op that logs `would-nudge` for ≥72h / ≥3 genuine detections, whichever is longer —
+graduating to real action is orch-console's own later call, not something this code flips
+itself). 4 binding design inputs given, plus the earlier DB kill-flag + per-row-lifetime-
+ceiling amendments: (a) detection gates on PENDING WORK never bare idleness — explicitly named
+today's own case (22.5h idle, only P2 unread → no action) as the test to prove; (b) refuse on
+ANY menu/picker (model picker, trust prompt, resume picker, permission dialog — extend
+`pane_is_menu`'s fixtures if any don't match its generic nav-footer regex); (c) never act
+mid-turn/mid-autocompact; (d) the resubmit payload is a FIXED generic line, hardcoded, never
+templated from row/operator content (R1/R2).
+
+Built exactly that: `migrations/068_hub_self_recovery.sql` (additive —
+`hub_self_recovery_settings` singleton row for the DB kill-flag half, `hub_self_recovery_log`
+append-only audit trail doubling as the graduation-criterion evidence; `--dry-run` verified
+clean against the real substrate, sha256 `303a98aac861…` — **not applied**, orch-console's gate
+first). `nervous_system/hub_self_recovery.py` — the pure decision core
+(`lease_is_self`/`kill_switch_enabled`/`pending_work_verdict`/`wedge_detected`, each mapping to
+exactly one of the binding inputs above) plus DB wiring + a CLI. `scripts/hub_self_recovery.sh`
+— the systemd-invoked driver: sources `composer_capture.sh` for the pane checks (composes
+`pane_is_menu` with `trust_prompt_present`/`resume_menu_present` per condition (b)'s explicit
+instruction), calls the python module, and — critically — never types into the pane itself; the
+ACT step (once graduated) delegates entirely to `lane_nudge.sh`, reusing its existing
+verified-submit + menu-refuse + ghost-vs-real guards unchanged rather than reimplementing any of
+them. `deploy/wingmen-hub-self-recovery.{service,timer}` — staged tracked copies (2min cadence
+oneshot), `HSR_MODE` unset so it defaults to `observe`; actual `systemctl enable/start` on gzb
+is a follow-up deploy step after merge + migration apply, same convention as
+`wingmen-irsyad-coord.service`'s staged-not-enabled precedent. 27 new tests
+(`tests/test_hub_self_recovery.py`): the full pure-core matrix (every condition individually,
+including the exact named 22.5h-idle case) plus `evaluate()` orchestration/routing tests with
+every DB seam monkeypatched to a controllable fake.
+
+Diff is **purely additive — 6 new files, zero existing files touched**, confirmed via
+`git status`, so zero regression surface; a full-suite run (3129 collected, ran to 351 before
+`-x` stopped on `tests/fire_drills/test_drills_all.py::test_each_drill_passes_live[SigkillDrill]`
+— a pre-existing, unrelated live-process drill failure, nothing to do with this change) was
+not needed as a gate for that reason, though it ran anyway for due diligence. Condition→code
+map written to `reports/hub-self-recovery-condition-map-op42896.md` (both copies, gitignored,
+synced) and folded into the PR description. Opened **PR #150**:
+https://github.com/sheikh-musa/wingmen-orchestrator/pull/150 (branch
+`feat/hub-self-recovery-observe-first`, off latest trunk). Reported to orch-console
+(requires_response) requesting the code audit per #43161's own split ("Code audit = me,
+deployment fidelity = cc-quality FULL tier") — cc-quality review comes AFTER orch-console's
+audit, not before, per that explicit ordering. Wake attempt: orch-console busy mid-turn again —
+not retrying, bus row durable.
+
+**Status: two PRs open awaiting orch-console — #149 (console badge/host fixes, cc-quality
+already 4th-cycle PASSed, just needs the CI-subset gate) and #150 (hub self-recovery build,
+needs orch-console's own code audit first, then routes to cc-quality FULL-tier deployment
+fidelity, then migration 068 via the gate, then merge, then the gzb systemctl step separately).
+Nothing to build until one of these two lands — next `[wake]` reconciles fresh.**
