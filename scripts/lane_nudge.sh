@@ -217,23 +217,28 @@ _probe_revertfail_note() {   # $1 = capfile pointer (may be empty), $2 = before-
   fi
   mkdir -p "$LOGDIR" 2>/dev/null && : > "$dedupe" 2>/dev/null || true
   local py="${ORCH_DIR}/.venv/bin/python3"; [ -x "$py" ] || py=python3
-  "$py" - "$SESSION" "$beforeflat" "$capref" <<'PYEOF' 2>/dev/null || true
+  "$py" - "$SESSION" "$beforeflat" "$capref" "${LANE_NUDGE_ROW_ID:-unknown}" <<'PYEOF' 2>/dev/null || true
 import os, sys
 try:
     import psycopg2
-    sess, flat, capref = sys.argv[1], sys.argv[2], sys.argv[3]
+    sess, flat, capref, rowid = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
     ev = f"logs/{capref}" if capref else "NONE"
     c = psycopg2.connect(os.environ["DATABASE_URL"]); cur = c.cursor()
     cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
+    # A refused wake is a DELIVERY FAILURE, never a "benign ghost" (Nazim #43083/#43143): the
+    # wake did NOT reach the lane, so name it as such AND the undelivered row id. Still P3 (the
+    # bus row is durable; it reads on the lane's next turn) and no P1 (the REFUSE preserved any
+    # possibly-real staged text) — but honestly labeled so a real stuck delivery is not hidden.
     cur.execute(
         "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,requires_response,priority) "
         "VALUES ('cc-fleet-health','orch-console','update',%s,%s,false,'P3')",
-        (f"lane_nudge revert-fail on {sess} (DIM-stable) -- down-ranked to P3/log, likely benign ghost",
-         f"The ghost-probe on '{sess}' revert-failed on a STABLE but ENTIRELY-DIM composer. Dim text is "
-         f"FIX-1-ambiguous (a dim ghost and real UNFOCUSED staged text are byte-identical), so this is NOT "
-         f"asserted as a ghost -- but the REFUSE already PRESERVED the content and a dim stable revert-fail "
-         f"is very likely a benign ghost repaint. Recording (P3, no P1). Content before probe: '{flat}'. "
-         f"Raw capture: {ev}. Only inspect if this recurs on a lane you expect to hold REAL staged work."))
+        (f"lane_nudge DELIVERY FAILURE on {sess} (DIM-stable revert-fail) -- undelivered row={rowid}",
+         f"A wake to '{sess}' was NOT DELIVERED: the ghost-probe revert-failed on a STABLE ENTIRELY-DIM "
+         f"composer (a dim ghost and real UNFOCUSED staged text are byte-identical), so lane_nudge REFUSED "
+         f"rather than clobber possibly-real staged text. Undelivered row={rowid}. P3 (the bus row is durable "
+         f"-- it reads on the lane's next turn) and no P1 (the refuse preserved the composer), but this is a "
+         f"delivery failure, not a benign ghost. Content before probe: '{flat}'. Raw capture: {ev}. If a lane "
+         f"stays dim-deadlocked across turns, it needs a turn to re-render (see #43143)."))
     c.commit()
 except Exception:
     pass
@@ -358,7 +363,7 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
         # But the REFUSE already PRESERVED the content, so DOWN-RANK to a deduped P3/log instead of a P1
         # (a dim stable revert-fail is very likely a benign ghost repaint). The P1 stays RESERVED for a
         # NON-DIM stable revert-fail (high-confidence real). FIX-1-safe (clear-vs-refuse unchanged), not silent.
-        _log_probe_capture "REFUSED-revert-fail [DIM-stable: likely benign ghost repaint, P3/log no P1], preserved staged"
+        _log_probe_capture "REFUSED-revert-fail [DIM-stable: DELIVERY FAILURE — undelivered row=${LANE_NUDGE_ROW_ID:-unknown}, refused to avoid clobber, P3/log no P1], preserved staged"
         _probe_revertfail_note "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
       elif _is_console_session "$SESSION" && _beforeflat_is_nudge_template "${CC_PROBE_BEFORE:-}"; then
         # Nazim #40324: a revert-fail on the CONSOLE body whose pre-probe content IS a nudge/wake

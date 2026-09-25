@@ -231,6 +231,10 @@ _self_kick() {
 if [ "${NAZIM_SELF_KICK:-1}" = 1 ]; then _self_kick & fi
 
 echo "[boot_nazim] $(date '+%H:%M:%S') launching $CLAUDE_BIN as ${ORCH_AGENT_ID:-orch-console} (body=${ORCH_BODY_ROLE:-?}, session=${ORCH_TMUX_SESSION:-?}, model=$NAZIM_MODEL)"
+# NO-HUMAN-AT-KEYBOARD guard (Nazim #43143): the operator console is operator-on-phone, so an
+# AskUserQuestion menu would wedge it the same as any lane. Enforce the deny + suppress the
+# prompt-suggestion widget in the checkout's settings.local.json (merge-safe, best-effort).
+"$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$ORCH_DIR" || true
 # FOREGROUND (was `exec`): this shell must survive claude to own the heartbeat loop and
 # fire the EXIT trap (dead-man's-switch). When claude exits, the trap stops the heartbeat
 # + marks offline, this script returns, the pane command ends, the tmux session closes,
