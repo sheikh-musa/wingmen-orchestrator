@@ -1,0 +1,44 @@
+# /etc/systemd/system/wingmen-wake-backstop-sweep.service
+# gzb-local wake BACKSTOP sweep (Nazim #43218; op#11297). The reliability FLOOR under the gzb
+# realtime wingmen-agent-wake-subscriber (the #111 doorbell): a periodic reconciler that
+# re-wakes any gzb recipient with a directed bus row rotting unread, independent of the
+# realtime WS. The hub confirmed gzb runs ONLY the subscriber today (no sweep, no cron), so a
+# missed doorbell to a gzb lane is NEVER retried — this closes that gap (#43158/#43163).
+#
+# Peer of the Mini instance (launchd dev.wingmen.wake-backstop-sweep). TWO instances are SAFE:
+#  - wakes are HOST-LOCAL: the sweep's cross-host-liveness / dead-foreign logic (PR#139) only
+#    pokes recipients this host can serve, so Mini and gzb never double-wake the same lane.
+#  - the per-row delivery ceiling ($HOME/.wingmen_state/rownudge) is PER-HOST by design (a
+#    local FS dir, not shared/DB), so each host counts only its OWN deliveries — correct,
+#    since a gzb lane is only ever woken from gzb.
+# Honors AUTO_WAKE_ENABLED (from the env below): observe-only (dry) when the kill-switch is
+# off — same arming as the realtime subscriber.
+#
+# STAGED, NOT ENABLED. The hub installs + enables + starts (Nazim-gated cutover):
+#   sudo cp deploy/wingmen-wake-backstop-sweep.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wingmen-wake-backstop-sweep
+#   systemctl status wingmen-wake-backstop-sweep   # confirm active + the "wake-backstop-sweep up" banner
+# Reversible: `sudo systemctl disable --now wingmen-wake-backstop-sweep`.
+#
+# HOST-PATH CHECK (hub, confirm before enable — I can't see gzb's FS): this assumes the orch
+# checkout is $HOME/wingmen/orchestrator for User=gazzai and the fetch-secrets .env is at
+# /dev/shm/wingmen-secrets/.env (matching wingmen-irsyad-autoscaler.service). If either differs
+# on gzb, adjust WorkingDirectory / the env path below. A wrong path fails LOUD (no banner).
+[Unit]
+Description=Wingmen wake BACKSTOP sweep (gzb-local reliability floor) — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Wants=network-online.target
+Requires=wingmen-fetch-secrets.service
+
+[Service]
+Type=simple
+User=gazzai
+WorkingDirectory=/home/gazzai/wingmen/orchestrator
+# Shared tmpfs .env (fetch-secrets) — SAME env source as the hub's other units — gives
+# DATABASE_URL (bus) + AUTO_WAKE_ENABLED. Login shell so the venv resolves for gazzai.
+ExecStart=/bin/bash -lc 'cd "$HOME/wingmen/orchestrator" && set -a; . /dev/shm/wingmen-secrets/.env 2>/dev/null; set +a; exec .venv/bin/python3 nervous_system/wake_backstop_sweep.py'
+Restart=always
+RestartSec=6
+
+[Install]
+WantedBy=multi-user.target
