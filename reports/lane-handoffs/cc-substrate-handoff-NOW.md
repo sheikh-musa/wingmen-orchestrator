@@ -431,3 +431,33 @@ row is durable per Option B, not retrying the nudge.
 **Status: PR #145 done. Proposal 1 code-complete + tested + reviewed, awaiting a hash
 re-stamp before push → PR → orch-console's gate. gzb-local-recovery proposal sent, awaiting
 reply. Nothing to build until one of these three lands.**
+
+## op#42896/#42909 — re-stamp landed, PR #147 open; gzb-recovery re-framed + written up (2026-09-25 ~00:30Z)
+
+cc-quality re-stamped PASS at the deploy hash (#43135, `2666db0a8dd3c3c7`) — diff-verified
+their re-check was against the IMMUTABLE commit `7d1f793`, not a working-tree race: exactly 3
+files, +3/-3, only the version literals, zero `.py`/logic change, full PASS transfers
+unchanged, no re-run needed. Committed the re-stamp (`54cc5bb`), pushed clean, opened **PR
+#147**: https://github.com/sheikh-musa/wingmen-orchestrator/pull/147. Reported to orch-console
+(#43136, requires_response) for the subset-rule gate — same post-merge deploy steps as #142
+mine to run again unless told otherwise.
+
+Orch-console re-framed the gzb-recovery proposal (#43134) before it goes anywhere: NOT gated
+on `fleet_health_lease` (that would make it the SRE's pen acting on a singleton — CAI-RESP-
+501/681 keep singleton-affecting action away from the SRE, and the OLD `hub_reach.py` remedy
+named this exact nudge as the CONSOLE's pen, not the SRE's). Re-framed as **hub
+self-supervision**: the actor is gzb's own host supervisor (a systemd timer alongside
+`wingmen-orch-hub.service`/`orch_supervisor.sh`), gated on `orch_lease.holder_host=='gzbai'`
+(acts on itself only), `fleet_health_lease`/cc-fleet-health not in the loop for the action at
+all. Detection + operator page stay ungated. Action envelope: non-destructive only, reuses
+`scripts/lane_nudge.sh`'s EXISTING guards as-is (menu-refuse, ghost-vs-real composer,
+per-row ceiling) rather than new logic, plus a proposed 3/hour rate limit and one page per
+action (never silent, never a flood). Kill switch: a flag FILE on gzb (not DB-only, so it
+still works if the DB this mechanism reads from is itself down), default on.
+
+Written to `reports/hub-self-wedge-recovery-proposal.md` (both copies, gitignored, synced).
+Reported done (#43138) — **not built**, orch-console routes it to cai for a singleton-
+authority ruling next, with the hub's consent.
+
+**Status: PR #147 awaiting orch-console's gate. gzb-recovery proposal written, ball is in
+orch-console's court to route to cai. Nothing left to build until one of these lands.**
