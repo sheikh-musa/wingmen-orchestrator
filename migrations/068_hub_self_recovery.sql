@@ -78,6 +78,8 @@
 -- assert: no_table_privilege authenticated public.hub_self_recovery_log INSERT
 -- assert: no_table_privilege authenticated public.hub_self_recovery_log UPDATE
 -- assert: no_table_privilege authenticated public.hub_self_recovery_log DELETE
+-- assert: no_execute anon public._hub_self_recovery_log_append_only()
+-- assert: no_execute authenticated public._hub_self_recovery_log_append_only()
 
 CREATE TABLE IF NOT EXISTS public.hub_self_recovery_settings (
     id                     boolean PRIMARY KEY DEFAULT true CHECK (id),  -- singleton-row pattern: exactly one row, ever
@@ -129,6 +131,19 @@ $$;
 CREATE TRIGGER hub_self_recovery_log_append_only
     BEFORE UPDATE OR DELETE ON public.hub_self_recovery_log
     FOR EACH ROW EXECUTE FUNCTION public._hub_self_recovery_log_append_only();
+
+-- Re-audit hygiene add (bus #43207): this project's pg_default_acl also grants
+-- EXECUTE on every NEW function to anon/authenticated (verified defaclobjtype='f'),
+-- AND every function additionally grants EXECUTE to PUBLIC at creation by
+-- Postgres's own default (verified empirically: REVOKE ... FROM anon, authenticated
+-- alone is a no-op here, since both roles inherit EXECUTE via PUBLIC regardless of
+-- their own explicit entry — has_function_privilege still returns true until PUBLIC
+-- itself is revoked too). A trigger function is never RPC-callable regardless, but
+-- "new function? check its ACL" is a standing rule here (migration 059 precedent) —
+-- take back PUBLIC's grant as well as the two explicit ones, and assert (header
+-- above) that anon/authenticated actually lose EXECUTE, not just that the
+-- statement ran.
+REVOKE ALL ON FUNCTION public._hub_self_recovery_log_append_only() FROM PUBLIC, anon, authenticated;
 
 -- ---------------------------------------------------------------- RLS: deny-all, no exceptions
 -- Service-role-only, same shape as migration 065's vault tables: the recovery
