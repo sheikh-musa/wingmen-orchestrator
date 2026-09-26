@@ -110,20 +110,37 @@ def test_decide_unclassifiable_none_is_could_not_measure():
 # detector's table constants at it, and proves run_counts -> decide_page fires P0 on a
 # populated deep field, amber on the custom_fields backdoor, and OK when clean.
 
-_PERSONS_PII = ("date_of_birth date", "address text", "phone text", "phone_encrypted text",
-                "phone_hash text", "phone_hash_v2 text", "email text", "email_encrypted text",
-                "email_hash text", "email_hash_v2 text", "nric_encrypted text", "nric_hash text",
-                "nric_source text", "nric_hash_v2 text")
-
-
 def _standin(cur):
-    import os
-    cols = ", ".join(_PERSONS_PII)
-    cur.execute(f"""CREATE TABLE _sre_persons (id uuid PRIMARY KEY, org_id uuid,
-        display_name text, custom_fields jsonb, tags text[], {cols})""")
-    cur.execute("""CREATE TABLE _sre_students (id uuid PRIMARY KEY, org_id uuid, person_id uuid,
-        student_number text, status text, emergency_contact text, medical_notes text, previous_school text)""")
+    """Build the synthetic persons/students tables DERIVED FROM THE MONITOR'S OWN
+    AUTHORIZED_CEILING (Nazim #43385) so the stand-in can never drift out of sync with the
+    ceiling — a hand-copied column list is exactly what let this test go stale. Every ceiling
+    column is present (ceiling cols as text — run_counts' counts are NULL-checks, type-agnostic);
+    the structural columns the monitor's queries reference (deleted_at for the live-scope filter,
+    custom_fields/tags for the unclassifiable backdoor, the id/org_id/person_id FKs) get real types.
+    _assert_standin_covers_ceiling() then proves the coverage."""
+    persons_ceiling = sorted(M.AUTHORIZED_CEILING[M._K_PERSONS])
+    students_ceiling = sorted(M.AUTHORIZED_CEILING[M._K_STUDENTS])
+    persons_cols = (["id uuid PRIMARY KEY", "org_id uuid", "display_name text",
+                     "custom_fields jsonb", "tags text[]", "deleted_at timestamptz"]
+                    + [f'"{c}" text' for c in persons_ceiling])
+    students_cols = (["id uuid PRIMARY KEY", "org_id uuid", "person_id uuid",
+                      "deleted_at timestamptz"]
+                     + [f'"{c}" text' for c in students_ceiling])
+    cur.execute(f"CREATE TABLE _sre_persons ({', '.join(persons_cols)})")
+    cur.execute(f"CREATE TABLE _sre_students ({', '.join(students_cols)})")
     cur.execute("CREATE TABLE _sre_parents (id uuid PRIMARY KEY, org_id uuid)")
+
+
+def _assert_standin_covers_ceiling(cur):
+    """Fail loudly if the stand-in is missing any AUTHORIZED_CEILING column — the guard that
+    keeps this proof honest as the ceiling evolves (a missing ceiling col would otherwise make
+    run_counts return could-not-measure and quietly weaken the end-to-end assertion)."""
+    for tkey, table in ((M._K_PERSONS, "_sre_persons"), (M._K_STUDENTS, "_sre_students")):
+        present = set(M._present_columns(cur, table))
+        missing = set(M.AUTHORIZED_CEILING[tkey]) - present
+        assert not missing, (
+            f"{table} stand-in is missing ceiling columns {sorted(missing)} — "
+            "it must be derived from M.AUTHORIZED_CEILING, not hand-copied")
 
 
 def _seed_one(cur, org):
@@ -133,15 +150,16 @@ def _seed_one(cur, org):
     return pid
 
 
-def test_prove_fired_end_to_end(monkeypatch):
-    import os, psycopg2
-    conn = psycopg2.connect(os.environ["DATABASE_URL"]); conn.autocommit = False
+def test_prove_fired_end_to_end(monkeypatch, pg_dsn):
+    import psycopg2
+    conn = psycopg2.connect(pg_dsn); conn.autocommit = False
     cur = conn.cursor()
     try:
         _standin(cur)
         monkeypatch.setattr(M, "_T_PERSONS", "_sre_persons")
         monkeypatch.setattr(M, "_T_STUDENTS", "_sre_students")
         monkeypatch.setattr(M, "_T_PARENTS", "_sre_parents")
+        _assert_standin_covers_ceiling(cur)
         org = "73339164-7c1f-40ba-a093-33f1f292dd4c"
         pid = _seed_one(cur, org)
 
@@ -154,7 +172,10 @@ def test_prove_fired_end_to_end(monkeypatch):
         counts = M.run_counts(cur, org); uncl = M.count_unclassifiable(cur, org)
         code, pri, kind, items = M.decide_page(counts, uncl)
         assert (code, pri, kind) == (1, "P0", "breach")
-        assert any(lbl == "persons.nric_hash" for lbl, _ in items), "breach must name the field"
+        # run_counts labels a breach `{_T_PERSONS}.{col}`; the test points _T_PERSONS at the
+        # stand-in, so reference the (monkeypatched) table name rather than the hardcoded logical
+        # one — the meaningful assertion is that the breach NAMES the nric_hash field.
+        assert any(lbl == f"{M._T_PERSONS}.nric_hash" for lbl, _ in items), "breach must name the field"
 
         # 3) revert the scalar, populate the jsonb backdoor -> P1 AMBER could-not-classify
         cur.execute("UPDATE _sre_persons SET nric_hash = NULL, custom_fields = '{\"dob\":\"x\"}'::jsonb WHERE id = %s", (pid,))
