@@ -47,7 +47,7 @@ up_lane_row() {
   local want="$1"
   _require_dsn
   psql "$DATABASE_URL" -t -A -F $'\t' -c \
-    "SELECT worktree_path FROM fleet_lanes
+    "SELECT worktree_path, base_agent_id FROM fleet_lanes
      WHERE lane = '${want}' AND launcher = 'launch_dangerous_cc.sh'
        AND desired_state = 'up' AND worktree_path IS NOT NULL;"
 }
@@ -83,21 +83,34 @@ cmd_ls() {
 }
 
 boot_one() {
-  local name="$1" dir="$2"
+  local name="$1" dir="$2" base_agent_id="${3:-}"
   if [ ! -d "$dir" ]; then echo "SKIP $name — dir missing: $dir"; return; fi
   if dir_has_claude "$dir"; then echo "SKIP $name — claude already running in $dir"; return; fi
   if tmux has-session -t "$name" 2>/dev/null; then
     echo "SKIP $name — tmux session already exists (attach with: lanes.sh attach $name)"; return
   fi
-  tmux new-session -d -s "$name" -c "$dir" "$LAUNCHER"
-  echo "BOOTED $name → tmux session '$name' ($dir)"
+  # Pin identity to the row's own base_agent_id (op#22448/bus#43342): launch_dangerous_cc.sh
+  # falls back to pwd-based auto-resolution against agents.repo_scope when no override is
+  # given, which picks the WRONG agent whenever two rows' repo_scope/worktree naming overlap
+  # (e.g. cc-cosem-tdu the builder vs cc-cosem-tdu-coord the coord both plausibly match a
+  # cosem-tdu-ish path — `lanes.sh up cosem-tdu-coord` booted as cc-cosem-tdu until caught and
+  # killed/relaunched by hand). tmux's own `-e` sets a session-local env var applied when the
+  # pane's process starts, so the launcher sees CC_BASE_OVERRIDE regardless of pwd guessing
+  # (same mechanism already used by deploy/tabung_supervisor.sh, deploy/coord_supervisor.sh,
+  # deploy/irsyad_worker_supervisor.sh for the identical purpose).
+  if [ -n "$base_agent_id" ]; then
+    tmux new-session -d -s "$name" -c "$dir" -e "CC_BASE_OVERRIDE=$base_agent_id" "$LAUNCHER"
+  else
+    tmux new-session -d -s "$name" -c "$dir" "$LAUNCHER"
+  fi
+  echo "BOOTED $name → tmux session '$name' ($dir)${base_agent_id:+, base=$base_agent_id}"
 }
 
 cmd_up() {
   local want="${1:?usage: lanes.sh up <lane> — bare 'up' was removed, see the header comment}"
-  local dir
-  dir="$(up_lane_row "$want")"
-  if [ -z "$dir" ]; then
+  local row dir base_agent_id
+  row="$(up_lane_row "$want")"
+  if [ -z "$row" ]; then
     local state
     state="$(lane_exists_any_state "$want")"
     if [ -n "$state" ]; then
@@ -107,7 +120,8 @@ cmd_up() {
     fi
     exit 1
   fi
-  boot_one "$want" "$dir"
+  IFS=$'\t' read -r dir base_agent_id <<< "$row"
+  boot_one "$want" "$dir" "$base_agent_id"
 }
 
 # WIND A LANE DOWN — the counterpart `up` never had. Until 2026-08-16 this substrate was
