@@ -118,6 +118,11 @@ _run_table_txn() {
 }
 
 echo "=== Supabase Backup — $DATE ==="
+# Per-run boundary marker on STDERR: backup.err is the launchd StandardErrorPath and ACCUMULATES
+# across runs (append), so stale errors from a PRIOR run can be misread as this run's. A hard
+# truncate would fight launchd's open append fd; instead emit a dated start marker so any consumer
+# (watcher, report) can bound THIS run's stderr to lines after the last such marker (Nazim #43491).
+echo "===== daily_backup.sh run START $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$ =====" >&2
 
 FAILED=0
 BACKED=0
