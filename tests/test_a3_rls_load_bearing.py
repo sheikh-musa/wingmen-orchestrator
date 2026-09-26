@@ -23,6 +23,14 @@ import pytest
 
 from scripts.lib import a3_rls_load_bearing as R
 
+# DB-integration: every test opens a real substrate connection via DATABASE_URL.
+# Without a DSN (e.g. CI with no secret configured) they would ERROR on connect;
+# skip cleanly instead. They still RUN wherever DATABASE_URL is set.
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="requires DATABASE_URL (DB-integration test)",
+)
+
 
 @pytest.fixture
 def cur():
