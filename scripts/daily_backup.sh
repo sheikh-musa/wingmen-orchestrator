@@ -118,6 +118,11 @@ _run_table_txn() {
 }
 
 echo "=== Supabase Backup — $DATE ==="
+# Per-run boundary marker on STDERR: backup.err is the launchd StandardErrorPath and ACCUMULATES
+# across runs (append), so stale errors from a PRIOR run can be misread as this run's. A hard
+# truncate would fight launchd's open append fd; instead emit a dated start marker so any consumer
+# (watcher, report) can bound THIS run's stderr to lines after the last such marker (Nazim #43491).
+echo "===== daily_backup.sh run START $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$ =====" >&2
 
 FAILED=0
 BACKED=0
@@ -175,7 +180,12 @@ backup_one() {
     FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE(table-enum)"
   fi
 
-  for TABLE in "${TABLES[@]}"; do
+  # ${TABLES[@]+"${TABLES[@]}"} not "${TABLES[@]}": on macOS bash 3.2 under `set -u`, iterating an
+  # EMPTY array raises "unbound variable" and kills the run mid-way — which is exactly what happens
+  # when a pooler network flap makes enumeration return 0 tables (op#22417 2026-09-27 run). The empty
+  # guard above already FAILED++ for that case; this keeps the loop from crashing so the run reaches
+  # the fail-LOUD summary (alert + exit 1) instead of a bare bash abort.
+  for TABLE in ${TABLES[@]+"${TABLES[@]}"}; do
     [ -z "$TABLE" ] && continue
     echo -n "  [$STORE] $TABLE... "
 
@@ -244,7 +254,7 @@ rest_backup() {
   echo "Discovered ${#TABLES[@]} REST resources."
   local PAGE=1000
 
-  for TABLE in "${TABLES[@]}"; do
+  for TABLE in ${TABLES[@]+"${TABLES[@]}"}; do
     [ -z "$TABLE" ] && continue
     echo -n "  $TABLE... "
     local OFFSET=0 TOTAL="" PART_DIR HDRS HTTP RANGE GOT=0 OK=1
