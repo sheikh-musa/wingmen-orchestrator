@@ -196,13 +196,60 @@ def test_backcompat_byte_identical_without_group_files(orch):
     ("irsyad-coord", "irsyad"),
     ("irsyad-prog2", "irsyad"),
     ("cc-irsyad-1", "irsyad"),
-    ("cosem-tdu", "cosem"),
+    # op#22426: cosem-tdu is a COMPOUND family (its own token pool, on Syed) --
+    # it must NOT collapse to the broader 'cosem' family.
+    ("cosem-tdu", "cosem-tdu"),
+    ("cosem-tdu-coord", "cosem-tdu"),
+    ("cosem-tdu-worker-1", "cosem-tdu"),
+    ("cc-cosem-tdu-coord", "cosem-tdu"),
+    # the broader cosem family (cosem-exams pinned to Musa, op#16101) is
+    # unaffected -- only the exact 'cosem-tdu' compound is special-cased.
+    ("cosem-exams", "cosem"),
+    ("cosem-adcda", "cosem"),
     ("cc-ihsanos-1", "ihsanos"),
     ("", None),
     ("cc-", None),
 ])
 def test_family_of(session, fam):
     assert R.family_of(session) == fam
+
+
+# ── Compound family (op#22426: cosem-tdu is its own token pool, on Syed) ──────
+
+def test_compound_family_group_pointer_wins_and_broader_cosem_unaffected(orch):
+    """A `.group_default_token.cosem-tdu` pin resolves cosem-tdu (and its coord/
+    worker siblings) to Syed, while the broader `.group_default_token.cosem`
+    pointer (Musa, op#16101's cosem-exams pin) keeps resolving unrelated cosem
+    lanes -- proving the compound-family carve-out does not leak into the
+    generic 'cosem' family."""
+    orch_dir, make_key, ptr = orch
+    fleet = make_key("musa-oauth-token", "MUSA")
+    cosem_musa = make_key("musa-oauth-token-cosem", "MUSA-COSEM")
+    tdu_syed = make_key("syed-oauth-token", "SYED")
+    ptr(".lane_default_token", fleet)
+    ptr(".group_default_token.cosem", cosem_musa)
+    ptr(".group_default_token.cosem-tdu", tdu_syed)
+
+    assert R.resolve_lane_token_path("cosem-tdu", orch_dir=orch_dir) == tdu_syed
+    assert R.resolve_lane_token_path("cosem-tdu-coord", orch_dir=orch_dir) == tdu_syed
+    assert R.resolve_lane_token_path("cc-cosem-tdu-coord", orch_dir=orch_dir) == tdu_syed
+    assert R.resolve_lane_token_path("cosem-tdu-worker-1", orch_dir=orch_dir) == tdu_syed
+
+    # sibling cosem lanes stay on the broader/Musa pointer, untouched
+    assert R.resolve_lane_token_path("cosem-exams", orch_dir=orch_dir) == cosem_musa
+    assert R.resolve_lane_token_path("cosem-adcda", orch_dir=orch_dir) == cosem_musa
+
+
+def test_compound_family_falls_through_to_fleet_default_without_its_own_pointer(orch):
+    """Before a `.group_default_token.cosem-tdu` file exists, cosem-tdu lanes fall
+    through to the fleet default (never silently inherit the broader 'cosem'
+    pointer) -- this is the pre-pointer-file state PR #156 lands in."""
+    orch_dir, make_key, ptr = orch
+    fleet = make_key("musa-oauth-token", "MUSA")
+    cosem_musa = make_key("musa-oauth-token-cosem", "MUSA-COSEM")
+    ptr(".lane_default_token", fleet)
+    ptr(".group_default_token.cosem", cosem_musa)
+    assert R.resolve_lane_token_path("cosem-tdu-coord", orch_dir=orch_dir) == fleet
 
 
 # ── CLI shim (the rail launch_dangerous_cc.sh calls) ─────────────────────────

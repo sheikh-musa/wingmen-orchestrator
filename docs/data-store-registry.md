@@ -22,10 +22,29 @@ fine, commingled data is not.
 
 ## Firebase (cosem apps — separate stack)
 
-| Alias | Firebase site / project | Tenant |
-|---|---|---|
-| **cosem-adcda app** | `cosem-adcda-cb6d9` | ADCDA (Abu Dhabi Civil Defence) |
-| **cosem-tdu app** | `tdu-tools-prod` | TDU / NEA |
+| Alias | Firebase site / project | Tenant | Region |
+|---|---|---|---|
+| **cosem-adcda app** | `cosem-adcda-cb6d9` | ADCDA (Abu Dhabi Civil Defence) | not re-verified this pass |
+| **cosem-tdu app (prod, default)** | `tdu-tools-prod` | TDU — production | asia-southeast1 (Singapore) — **confirmed** (op#22426, 2026-09-26) |
+| **cosem-tdu app (staging)** | `tdu-tools-staging` | TDU — staging | **unverified** — PERMISSION_DENIED checking region (op#22426, 2026-09-26); do not retry or attempt to bypass, escalate instead |
+
+### cosem-tdu subject data (schema/code review only — CAI-1034, no data files read)
+
+Per op#22426 (project_governance onboarding for `cosem-tdu`). **TDU is a local
+Singapore entity — there is no ADCDA involvement** (Musa op#22429, correcting an
+earlier draft of this entry). Subjects are TDU (Singapore) **staff/trainees**: the
+`staff` collection holds trainees, the `regulars` collection holds trainers/regular
+staff (renamed from "trainers" in code, not in the UI). Sensitive fields found in
+`firestore.rules` / `functions/index.js`:
+
+- `faceDescriptor` — 128-element biometric face-embedding array on `regulars`, used for attendance face-match.
+- `latitude` / `longitude` / `radiusMeters` — geofence definitions used for attendance check-in/out.
+- `photoUrl` — observation/incident photos.
+- `phoneNumber` / `phone` — E.164, used for OTP auth and `phoneAllowlist` (admin-only allowlist of who may register).
+- `idNumber` / `emiratesId` — UAE Emirates ID + OCR extraction fields, **inherited from the shared cosem/ADCDA codebase** (`784-####-#######-#` pattern parsing) — present in schema, not expected in use for a SG entity; unverified whether TDU's product flow ever populates them.
+- `dob`, `enName`, `arName` — also OCR-extracted alongside the ID number; same inherited-from-ADCDA, unverified-for-TDU caveat applies.
+- Attendance/ops collections: `staffAttendanceEvents` (server-write-only, audit trail), `attendanceSessions`, `incidentReports` (type/description/caseStatus/queue, trainer+ role write access), `scdf_theory_results` / `scdf_practical_results`.
+- Wages are **derived** from attendance-hours roll-ups, not a raw stored salary field (none found).
 
 ## Layers of a shared product (say which one)
 

@@ -61,6 +61,26 @@ _FLEET_DEFAULT_POINTER = ".lane_default_token"
 # `.group_default_token.irsyad`, `.group_default_token.cosem`, …
 _GROUP_POINTER_PREFIX = ".group_default_token"
 
+# Two-WORD families that must NOT collapse to their first segment (op#22426:
+# cosem-tdu needs its OWN token pool, on Syed, distinct from the broader 'cosem'
+# family which stays on Musa per op#16101's cosem-exams pin). A bare single-
+# segment split would fold `cosem-tdu`/`cosem-tdu-coord` into family 'cosem' and
+# silently boot TDU lanes on the wrong account.
+#
+# Considered and rejected: renaming the live `cosem-tdu` fleet_lanes row (and its
+# future `cosem-tdu-coord`/autoscaler siblings) to a bare `tdu` family instead of
+# special-casing the split. Checked against the live fleet_lanes table first
+# (op#22426 investigation): every existing cosem sub-lane (`cosem-exams`,
+# `cosem-adcda`, `cosem-port`, `cosem-video`, `cosem-tdu`) uses the
+# `cosem-<suffix>` convention with zero precedent for a bare sub-family name --
+# renaming the EXISTING LIVE lane's primary key to break that convention is a
+# needless, higher-risk identifier change for no gain a prefix-match doesn't
+# already give. This set is checked as a prefix match (exact, or `<compound>-`)
+# BEFORE the generic split, so it also auto-covers a future `cosem-tdu-worker-N`
+# autoscaler pool (mirrors the existing `irsyad-worker-N` convention) with no
+# further edits here.
+_COMPOUND_FAMILIES = {"cosem-tdu"}
+
 
 def _default_orch_dir() -> str:
     """The orchestrator dir = the repo root this module lives in (scripts/lib/x.py
@@ -87,6 +107,9 @@ def family_of(session: str) -> Optional[str]:
     s = session[3:] if session.startswith("cc-") else session
     if not s:
         return None
+    for compound in _COMPOUND_FAMILIES:
+        if s == compound or s.startswith(compound + "-"):
+            return compound
     fam = s.split("-", 1)[0]
     return fam or None
 
