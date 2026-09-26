@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -905,6 +906,20 @@ def _label(obs: AgentObs) -> str:
     return f"lane '{obs.session or obs.agent}'"
 
 
+# last_write_age is +inf for an agent that has NEVER written a bus row (a brand-new lane with
+# unread rows but zero writes — e.g. cc-oeh). int(inf) raises OverflowError, which used to crash
+# the whole watchdog (op#22553-55, paged Musa 3x). Render "never" instead of computing minutes.
+def _quiet_token(age_s: float) -> str:
+    """Compact quiet tag: '5m', or 'never' if the agent has never written a bus row."""
+    return "never" if not math.isfinite(age_s) else f"{int(age_s)//60}m"
+
+
+def _quiet_clause(age_s: float) -> str:
+    """Sentence form: 'has not written to the bus in 5 min' / 'has never written to the bus'."""
+    return ("has never written to the bus" if not math.isfinite(age_s)
+            else f"has not written to the bus in {int(age_s)//60} min")
+
+
 def _wedge_alert(obs: AgentObs, elapsed_min: int, unsafe: bool, armed: bool) -> str:
     label = _label(obs)
     do = ("Its composer holds text read as REAL-per-content — but this is NOT probe-verified, "
@@ -921,19 +936,19 @@ def _wedge_alert(obs: AgentObs, elapsed_min: int, unsafe: bool, armed: bool) -> 
             icon="⚠️",
             title=f"{label} looks wedged — idle but not draining its inbox",
             what=(f"{label} has {obs.bus.unread} unread bus message(s) waiting ~{elapsed_min} min, "
-                  f"has not written to the bus in {int(obs.bus.last_write_age)//60} min, and is idle."),
+                  f"{_quiet_clause(obs.bus.last_write_age)}, and is idle."),
             why=("A wedged agent is alive and holds its lease, so every other gauge reads it green; "
                  "on 2026-07-29 this silently stalled a live money-path grant for ~6h."),
             do=do,
             detail=(f"agent={obs.agent} kind={obs.kind} composer={obs.composer.state} "
                     f"unread={obs.bus.unread} oldest={int(obs.bus.oldest_unread_age)//60}m "
-                    f"quiet={int(obs.bus.last_write_age)//60}m; "
+                    f"quiet={_quiet_token(obs.bus.last_write_age)}; "
                     f"recovery {'ARMED' if armed else 'DETECT-ONLY'}."),
             ref="LANE-WEDGE-WATCHDOG",
         )
     except Exception:
         return (f"⚠️ {label} looks wedged — {obs.bus.unread} unread, idle ~{elapsed_min}m, "
-                f"silent {int(obs.bus.last_write_age)//60}m. {do}")
+                f"silent {_quiet_token(obs.bus.last_write_age)}. {do}")
 
 
 def _menu_trap_alert(obs: AgentObs, elapsed_min: int) -> str:
@@ -948,13 +963,13 @@ def _menu_trap_alert(obs: AgentObs, elapsed_min: int) -> str:
             what=(f"{label}'s pane is sitting in an interactive selection menu (AskUserQuestion — "
                   f"'up/down to navigate / Esc to cancel'), so its turn AND its bus are frozen: "
                   f"{obs.bus.unread} unread piling ~{elapsed_min} min, quiet "
-                  f"{int(obs.bus.last_write_age)//60} min."),
+                  f"{_quiet_token(obs.bus.last_write_age)}."),
             why=("An autonomous agent has nobody at the keyboard to answer the menu, so it stays "
                  "stuck indefinitely — a menu-trap silently cost cc-ihsanos ~1 DAY (14 unread incl "
                  "cai grants piled up) and read as neither idle nor working."),
             do=do,
             detail=(f"agent={obs.agent} kind={obs.kind} composer=menu unread={obs.bus.unread} "
-                    f"oldest={int(obs.bus.oldest_unread_age)//60}m quiet={int(obs.bus.last_write_age)//60}m."),
+                    f"oldest={int(obs.bus.oldest_unread_age)//60}m quiet={_quiet_token(obs.bus.last_write_age)}."),
             ref="LANE-WEDGE-WATCHDOG / MENU-TRAP",
         )
     except Exception:
@@ -1828,6 +1843,43 @@ def self_test() -> int:
     return 0
 
 
+# Dedup the dead-man CRASH page: page once per distinct crash, then stay quiet until the error
+# CHANGES or a clean scan CLEARS it — mirrors the wedge alerts' one-page-then-quiet. A watchdog
+# that crashes every scan (op#22553-55: int(inf) on a never-wrote lane) otherwise pages the
+# operator on a loop. Stdlib-only so the dependency-free __main__ dead-man can call it.
+_CRASH_STATE_FILE = _ORCH_DIR / "logs" / "lane_wedge_watchdog_crash.json"
+
+
+def _crash_fingerprint(exc: BaseException) -> str:
+    first = str(exc).splitlines()[0][:160] if str(exc) else ""
+    return f"{type(exc).__name__}:{first}"
+
+
+def _crash_page_due(fp: str) -> bool:
+    """True if this crash should page (new/changed fingerprint); records it. Same fingerprint as
+    last time -> False (already paged, stay quiet until it changes or _clear_crash_state clears it)."""
+    try:
+        prev = json.loads(_CRASH_STATE_FILE.read_text()).get("fingerprint")
+    except Exception:
+        prev = None
+    if prev == fp:
+        return False
+    try:
+        _CRASH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CRASH_STATE_FILE.write_text(json.dumps({"fingerprint": fp, "ts": time.time()}))
+    except Exception:
+        pass
+    return True
+
+
+def _clear_crash_state() -> None:
+    """A clean scan re-arms the crash page so a genuinely NEW crash pages again."""
+    try:
+        _CRASH_STATE_FILE.unlink()
+    except Exception:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Fleet idle-composer / stopped-draining wedge watchdog.")
     ap.add_argument("--arm", nargs="?", const="escalate", choices=["nudge", "escalate"],
@@ -1857,10 +1909,12 @@ def main() -> int:
         while True:
             try:
                 run(mode=mode, alert=args.alert, as_json=args.json, menu_alert=args.menu_alert)
+                _clear_crash_state()  # a clean iteration re-arms the crash page
             except Exception as e:  # a loop iteration must never kill the loop
                 import traceback
                 traceback.print_exc()
-                _page(f"🐛 Lane-wedge watchdog loop iteration crashed: {e}. Still looping; fix soon.")
+                if _crash_page_due(_crash_fingerprint(e)):  # page once, then quiet until it changes/clears
+                    _page(f"🐛 Lane-wedge watchdog loop iteration crashed: {e}. Still looping; fix soon.")
             time.sleep(interval)
     return run(mode=mode, alert=args.alert, as_json=args.json, menu_alert=args.menu_alert)
 
@@ -1870,18 +1924,23 @@ if __name__ == "__main__":
     # unhandled throw pages via the dependency-free subprocess path (does NOT
     # import nervous_system) so the failure of the guard surfaces itself.
     try:
-        sys.exit(main())
+        _rc = main()
+        _clear_crash_state()  # a clean scan re-arms the crash page (one-shot launchd path)
+        sys.exit(_rc)
     except SystemExit:
         raise
     except Exception as _e:
         import traceback
         traceback.print_exc()
-        try:
-            subprocess.run(
-                [str(_ORCH_DIR / "scripts" / "nazim_send.sh"),
-                 f"🐛 Lane-wedge watchdog CRASHED — it is NOT catching wedged agents right now: {_e}. "
-                 f"Fix before relying on it."],
-                timeout=30, cwd=str(_ORCH_DIR))
-        except Exception:
-            pass
+        # Page once per distinct crash, then quiet until it changes/clears — a one-shot launchd
+        # invocation that crashes every scan otherwise pages the operator on a loop (op#22553-55).
+        if _crash_page_due(_crash_fingerprint(_e)):
+            try:
+                subprocess.run(
+                    [str(_ORCH_DIR / "scripts" / "nazim_send.sh"),
+                     f"🐛 Lane-wedge watchdog CRASHED — it is NOT catching wedged agents right now: {_e}. "
+                     f"Fix before relying on it."],
+                    timeout=30, cwd=str(_ORCH_DIR))
+            except Exception:
+                pass
         sys.exit(1)
