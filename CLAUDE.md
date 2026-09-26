@@ -47,6 +47,7 @@ launchers `unset ANTHROPIC_API_KEY` after sourcing `.env`, so every lane runs on
 the Mac Mini's Claude **Max** subscription, not metered API billing.
 
 - **Engineer lanes** (mirror, etc.): `scripts/lanes.sh ls` (status), `scripts/lanes.sh up [lane]` (boot down lanes, each in its own tmux session), `scripts/lanes.sh attach <lane>`. Idempotent: skips a lane that already has a `claude` running in its dir. Each lane runs `scripts/launch_dangerous_cc.sh` in a worktree.
+- **Onboarding a lane for a BRAND-NEW repo:** seed `<repo>/CLAUDE.md` via `scripts/seed_lane_claude_md.py` (renders `templates/lane_claude_template.md`) as one of the first commits, BEFORE handing the lane its first bus task — an empty repo with no fleet context leaves a lane unable to tell the bus doorbell from a prompt injection (cc-oeh sat idle ~40min and refused a nudge as a probable injection, bus #43474, fixed live by hand; this makes the fix standard).
 - **cc-cai** (singleton strategic node, agent_id='cai' exactly): boot via `scripts/boot_cai.sh` under tmux — `tmux new-session -d -s cai -c ~/wingmen/wingmen-cai scripts/boot_cai.sh`. NOT lanes.sh-managed (fleet_lanes registry desired_state='down'); operator-booted. The live copy at `~/wingmen/wingmen-cai/boot_cai.sh` should stay in sync with `scripts/boot_cai.sh` (canonical, tracked).
 
 ## Operator Telegram bridge (@wingmennorchbot) — unified ingest (CAI-RESP-357/377)
