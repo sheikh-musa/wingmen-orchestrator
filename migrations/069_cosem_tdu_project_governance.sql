@@ -25,12 +25,19 @@
 -- at some point so the directory is fully self-replayable again. Not blocking
 -- this PR -- pre-existing, not caused by it.
 --
--- SHAPE (final, per #43311, which supersedes #43308's unstated priority/chat_id
--- assumptions):
+-- SHAPE (final, per #43311/#43314, which supersedes #43308's unstated priority/
+-- chat_id assumptions, and #43311's own since-superseded "residency_ack stays
+-- NULL" instruction):
 --   1. project_governance('cosem-tdu'): cai_enabled=false, operators=[] (see
 --      note below -- NOT a placeholder chat_id), channels=[], money_clearance_
---      enabled=false, residency_ack left NULL (Musa/Fazlie's on-record decision
---      per op#20706 -- not this migration's to fill), reason cites op#22426.
+--      enabled=false, reason cites op#22426. residency_ack is then SET by a
+--      separate UPDATE below (step 1b), attributed to orch-console specifically
+--      -- not folded into this INSERT's updated_by/reason -- so the append-only
+--      project_governance_audit trail carries two distinct, correctly-attributed
+--      rows: cc-substrate's onboarding INSERT, then orch-console's residency
+--      decision (Musa op#22429, bus #43314, superseding #43311's original "leave
+--      it NULL" call once Musa clarified TDU has no ADCDA involvement and its
+--      prod region is already confirmed in-country).
 --   2. project_governance_families: 'cosem-tdu' rows at priority=5 (lower than
 --      the existing 'cosem' family's priority=10 -- '^cc-cosem-tdu' and
 --      '%cosem-tdu%' must resolve to 'cosem-tdu' before the broader 'cosem'
@@ -60,6 +67,19 @@
 -- pending)" in `reason` achieves the same "pending" state #43311 asked for
 -- without writing a value the column's own contract forbids.
 --
+-- residency_ack is set via a follow-up UPDATE (step 1b), not folded into the
+-- INSERT above, for two reasons: (a) correct audit attribution -- governance.py's
+-- sanctioned console write path (nervous_system/console/governance.py) does NOT
+-- even expose residency_ack in its column allowlist (FIELDS = cai_enabled,
+-- money_clearance_enabled, operators, channels only) -- it is deliberately a
+-- migration/registry-level decision, never a console toggle; (b) it lets
+-- `updated_by`/`reason` name the RIGHT author for each fact: cc-substrate for
+-- "this project now exists", orch-console for "here is the residency ruling",
+-- rather than misattributing Musa's residency call to the lane that merely typed
+-- the SQL. The AFTER INSERT OR UPDATE trigger (project_governance_audit_trigger,
+-- migration 063) appends one audit row per statement regardless of which SQL
+-- client issues it, so both authorships land correctly in project_governance_audit.
+--
 -- REVERT: DELETE FROM public.fleet_lanes WHERE lane = 'cosem-tdu-coord';
 --         DELETE FROM public.agents WHERE id = 'cc-cosem-tdu-coord';
 --         DELETE FROM public.bot_channels WHERE channel_key = 'cosem-tdu';
@@ -80,10 +100,42 @@ VALUES
    'op#22426: cosem-tdu onboarding (bus cce66db2-0b74-47fa-8938-53e4c5d66cf9, '
    '#43308/#43310/#43311). Fazlie is TDU''s external operator (Telegram user id '
    'pending -- Musa has not created the bot yet); operators/channels seeded '
-   'empty rather than with a placeholder value. residency_ack intentionally '
-   'left NULL (op#20706: an explicit on-record acknowledgement, never a silent '
-   'default, is Musa/Fazlie''s call to make, not this migration''s).')
+   'empty rather than with a placeholder value. residency_ack is set by a '
+   'separate step-1b UPDATE below, attributed to orch-console (Musa op#22429).')
 ON CONFLICT (project) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- 1b. residency_ack -- separate UPDATE, separately attributed (see header note
+--     above for why this is not folded into the INSERT). Musa op#22429 (bus
+--     #43314): TDU is a Singapore-local entity with NO ADCDA involvement;
+--     its prod Firebase site (tdu-tools-prod) is confirmed asia-southeast1
+--     (Singapore) -- in-country for a SG entity. Staging (tdu-tools-staging) is
+--     UNVERIFIED (PERMISSION_DENIED checking its region) -- residency_ack
+--     covers the confirmed prod finding only; staging remains an open item,
+--     not silently folded into this acknowledgement.
+--
+--     residency_ack is jsonb (migration 063) with no established schema
+--     anywhere in this codebase (every live row today is NULL; the console's
+--     own field allowlist doesn't even expose it -- nervous_system/console/
+--     governance.py surfaces it read-only as a residency_ack_on_file boolean,
+--     never validates its shape). jsonb_build_object() is used rather than a
+--     hand-quoted JSON string literal so the basis text's own punctuation can
+--     never produce invalid JSON.
+-- ---------------------------------------------------------------------------
+UPDATE public.project_governance
+SET residency_ack = jsonb_build_object(
+      'basis', 'Musa op#22429: TDU is a Singapore local entity; data in SG '
+               '(asia-southeast1) = in-country; staging region unverified.',
+      'acked_via', 'orch-console (bus #43314)'
+    ),
+    updated_by = 'orch-console',
+    reason = 'op#22429 (bus #43314): residency ruling on cosem-tdu -- Singapore-'
+             'local entity, no ADCDA involvement (corrects an earlier draft of '
+             'docs/data-store-registry.md); prod Firebase site confirmed '
+             'asia-southeast1 in-country, staging region unverified pending '
+             'further access.',
+    updated_at = now()
+WHERE project = 'cosem-tdu';
 
 -- ---------------------------------------------------------------------------
 -- 2. project_governance_families -- priority=5, checked before the 'cosem' family
@@ -132,10 +184,12 @@ VALUES
    'desired_state=down, already live) -- per #43311 that becomes this coord''s '
    'BUILDER lane, one track, plus more autoscaler builders if parallel work '
    'appears. Boots with an explicit CC_BASE_OVERRIDE=cc-cosem-tdu-coord (never '
-   'pwd auto-resolution), matching cc-irsyad-coord''s own pattern. Not irsyad --'
-   ' runs on whichever token this lane''s family (''cosem'') pointer resolves to '
-   '(scripts/lib/lane_token_resolver.py, file-based, family-keyed by session '
-   'name prefix) -- no override invented by this migration, and per fleet '
-   'convention (every irsyad lane on the musa2 key; every non-irsyad lane, this '
-   'one included, stays off it) this was never going to be an irsyad-key lane.')
+   'pwd auto-resolution), matching cc-irsyad-coord''s own pattern. Runs on the '
+   'SYED token pool, NOT the broader cosem family''s Musa key (op#16101 keeps '
+   'cosem-exams on Musa) and NOT irsyad''s musa2 key -- its own compound family '
+   '''cosem-tdu'' in scripts/lib/lane_token_resolver.py (family_of()''s '
+   '_COMPOUND_FAMILIES carve-out, PR #156) resolves via a dedicated '
+   '.group_default_token.cosem-tdu pointer file at the Syed key, auto-covering '
+   'this coord and any future cosem-tdu-worker-N autoscaler siblings with no '
+   'further renaming.')
 ON CONFLICT (lane) DO NOTHING;

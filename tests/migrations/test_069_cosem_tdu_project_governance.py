@@ -208,9 +208,27 @@ def test_069_project_governance_row_seeded_pending(cosem_tdu_db):
         assert operators == []
         assert channels == []
         assert money_clearance_enabled is False
-        # residency_ack MUST stay NULL — op#20706, Musa/Fazlie's call, never this migration's.
-        assert residency_ack is None
-        assert "op#22426" in reason
+        # residency_ack: op#22429 (bus #43314) supersedes the original "leave it
+        # NULL" call (op#20706 still holds the PRINCIPLE — an explicit on-record
+        # ack, never a silent default — but Musa has now made that call himself,
+        # via a separately-attributed step-1b UPDATE, not this seed INSERT).
+        assert residency_ack is not None
+        assert "asia-southeast1" in residency_ack["basis"]
+        assert residency_ack["acked_via"] == "orch-console (bus #43314)"
+        # `reason` now reflects the step-1b UPDATE (the row's latest fact, per
+        # the single-column shape of this table) -- op#22426's onboarding reason
+        # was the INSERT's, superseded here exactly as project_governance_audit
+        # (append-only) preserves both versions; this row's CURRENT reason is
+        # legitimately the residency ruling's, not the onboarding's.
+        assert "op#22429" in reason
+
+        cur.execute(
+            "SELECT updated_by FROM project_governance WHERE project = 'cosem-tdu'"
+        )
+        (updated_by,) = cur.fetchone()
+        # the residency ruling is orch-console's, attributed separately from the
+        # onboarding INSERT's cc-substrate authorship (see migration 069 header).
+        assert updated_by == "orch-console"
 
 
 def test_069_family_precedence_cosem_tdu_wins_over_cosem(cosem_tdu_db):
