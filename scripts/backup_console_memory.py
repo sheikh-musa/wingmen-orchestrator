@@ -12,10 +12,29 @@ import argparse
 import hashlib
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 import psycopg
 from dotenv import load_dotenv
+
+# Bounded connect-retry: the Supabase pooler host intermittently fails getaddrinfo on the Mini
+# (transient upstream flap, bus #43426). Retry the CONNECT a few times with short backoff so a
+# blip is absorbed; EXHAUSTED retries RE-RAISE — a persistent failure still fails loud (the
+# nightly backup must never turn a connect failure into a silent pass). Env-tunable. (Nazim #43430.)
+_DB_CONNECT_ATTEMPTS = int(os.environ.get("BACKUP_DB_CONNECT_ATTEMPTS", "3"))
+_DB_CONNECT_BACKOFF_S = float(os.environ.get("BACKUP_DB_CONNECT_BACKOFF_S", "1.0"))
+
+
+def _connect_with_retry(dsn, *, attempts=_DB_CONNECT_ATTEMPTS,
+                        backoff_s=_DB_CONNECT_BACKOFF_S, sleep=time.sleep):
+    for attempt in range(1, attempts + 1):
+        try:
+            return psycopg.connect(dsn)
+        except psycopg.OperationalError:
+            if attempt == attempts:
+                raise  # exhausted — fail loud, never a silent pass
+            sleep(backoff_s * attempt)
 
 ORCH = os.path.expanduser("~/wingmen/orchestrator")
 load_dotenv(os.path.join(ORCH, ".env"))
@@ -30,7 +49,7 @@ MEMORY_DIR = os.environ.get("CONSOLE_MEMORY_DIR") or os.path.join(
 
 def _conn():
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-    conn = psycopg.connect(dsn)
+    conn = _connect_with_retry(dsn)
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','orch-console',true)")
     return conn

@@ -81,6 +81,42 @@ alert() {
     -d "chat_id=$CHAT_ID" --data-urlencode "text=$1" > /dev/null || true
 }
 
+# Bounded connect-retry around the pg_dump/psql calls: the Supabase pooler host
+# intermittently fails getaddrinfo on the Mini (transient upstream flap, bus #43426),
+# and this backup is the one proving wingmen-core can be deleted. Retry a DB command a
+# few times with short backoff so a blip is absorbed. On the LAST attempt the command's
+# non-zero status PROPAGATES unchanged, so the caller's existing fail-LOUD path
+# (✗ + FAILED++ + FAIL_NAMES + the final alert) still fires — retries never turn a
+# failure into a silent pass. (Nazim #43430.)
+DB_ATTEMPTS="${BACKUP_DB_ATTEMPTS:-3}"
+DB_BACKOFF_S="${BACKUP_DB_BACKOFF_S:-2}"
+_retry_db() {
+  local n=1 rc=0
+  while :; do
+    "$@" && return 0
+    rc=$?
+    [ "$n" -ge "$DB_ATTEMPTS" ] && return "$rc"
+    echo "  (db command failed [attempt $n/$DB_ATTEMPTS], retrying in $((DB_BACKOFF_S * n))s...)" >&2
+    sleep "$((DB_BACKOFF_S * n))"
+    n=$((n + 1))
+  done
+}
+
+# The per-table same-snapshot count+\copy transaction, factored into a function so
+# _retry_db can retry the whole (connect+txn) pipeline on a transient pooler blip. Reads
+# TABLE/OUT/DSN_L/PSQL/TXN_OUT/OUTDIR from the backup_one caller (bash dynamic scope). Each
+# attempt re-opens $OUT/$TXN_OUT (idempotent overwrite). ON_ERROR_STOP=1 keeps a REAL
+# truncation/corruption failing non-zero, so retries only paper over transient connect faults.
+_run_table_txn() {
+  printf '%s\n' \
+    "BEGIN ISOLATION LEVEL REPEATABLE READ;" \
+    "SET statement_timeout=0;" \
+    "\\copy (SELECT row_to_json(t) FROM \"public\".\"$TABLE\" t) TO '$OUT'" \
+    "SELECT count(*) FROM \"public\".\"$TABLE\";" \
+    "COMMIT;" \
+    | "$PSQL" "$DSN_L" -tAq -v ON_ERROR_STOP=1 > "$TXN_OUT" 2>"$OUTDIR/$TABLE.err"
+}
+
 echo "=== Supabase Backup — $DATE ==="
 
 FAILED=0
@@ -108,7 +144,7 @@ backup_one() {
 
   # (A) Authoritative full public-schema dump (schema + data, no row cap).
   echo -n "  [$STORE][full] pg_dump -Fc public schema... "
-  if "$PG_DUMP" "$DSN_L" --schema=public --no-owner --no-privileges \
+  if _retry_db "$PG_DUMP" "$DSN_L" --schema=public --no-owner --no-privileges \
         -Fc -f "$OUTDIR/_full_public.dump" 2>"$OUTDIR/_pg_dump.err"; then
     SIZE=$(wc -c < "$OUTDIR/_full_public.dump" | tr -d ' ')
     rm -f "$OUTDIR/_pg_dump.err"
@@ -123,12 +159,21 @@ backup_one() {
   # (B) Enumerate ALL base tables in the live public schema, then back up each
   #     to NDJSON and assert line count == live count(*).
   # bash 3.2 (macOS /bin/bash) has no `mapfile` — read into an array via while.
-  while IFS= read -r t; do [ -n "$t" ] && TABLES+=("$t"); done < <("$PSQL" "$DSN_L" -tAc \
+  while IFS= read -r t; do [ -n "$t" ] && TABLES+=("$t"); done < <(_retry_db "$PSQL" "$DSN_L" -tAc \
     "SELECT table_name FROM information_schema.tables
        WHERE table_schema='public' AND table_type='BASE TABLE'
        ORDER BY table_name;")
 
   echo "  [$STORE] discovered ${#TABLES[@]} base tables in public schema."
+
+  # Table enumeration runs inside a process substitution, so its exit status is LOST — if the
+  # psql fails all retries (e.g. a persistent pooler-DNS outage), TABLES ends up EMPTY, the loop
+  # below does nothing, and the store would report success with 0 NDJSON tables. Fail LOUD on the
+  # empty list so a swallowed enumeration failure can't masquerade as a clean backup. (Nazim #43436.)
+  if [ "${#TABLES[@]}" -eq 0 ]; then
+    echo "  [$STORE] ✗ table enumeration returned 0 tables"
+    FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE(table-enum)"
+  fi
 
   for TABLE in "${TABLES[@]}"; do
     [ -z "$TABLE" ] && continue
@@ -146,13 +191,7 @@ backup_one() {
     # genuine short dump still shows GOT != LIVE against that same snapshot).
     OUT="$OUTDIR/$TABLE.ndjson"
     TXN_OUT=$(mktemp)
-    if ! printf '%s\n' \
-          "BEGIN ISOLATION LEVEL REPEATABLE READ;" \
-          "SET statement_timeout=0;" \
-          "\\copy (SELECT row_to_json(t) FROM \"public\".\"$TABLE\" t) TO '$OUT'" \
-          "SELECT count(*) FROM \"public\".\"$TABLE\";" \
-          "COMMIT;" \
-        | "$PSQL" "$DSN_L" -tAq -v ON_ERROR_STOP=1 > "$TXN_OUT" 2>"$OUTDIR/$TABLE.err"; then
+    if ! _retry_db _run_table_txn; then
       echo "✗ dump/count transaction failed"
       cat "$OUTDIR/$TABLE.err" || true
       FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE/$TABLE(txn)"
