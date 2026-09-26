@@ -6,9 +6,18 @@
   <key>Label</key>
   <string>dev.wingmen.orchestrator</string>
   <key>ProgramArguments</key>
+  <!--
+    Empty-export (NOT unset) ANTHROPIC_API_KEY before exec. wingmen_orch.py calls
+    load_dotenv(), which with override=False re-adds any var ABSENT from the env —
+    so a bare `unset` would be silently defeated and the loop would bill the metered
+    Anthropic API instead of Max. An empty value stays PRESENT, so load_dotenv leaves
+    it, and council's `if not api_key` guard refuses. See tests/test_boot_scripts_strip_api_key.py.
+    (op#22407, Nazim #43280.)
+  -->
   <array>
-    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
-    <string>/Users/sheikhmusa/wingmen/orchestrator/wingmen_orch.py</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>export ANTHROPIC_API_KEY=; exec /Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3 /Users/sheikhmusa/wingmen/orchestrator/wingmen_orch.py</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/sheikhmusa/wingmen/orchestrator</string>
