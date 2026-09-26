@@ -166,6 +166,15 @@ backup_one() {
 
   echo "  [$STORE] discovered ${#TABLES[@]} base tables in public schema."
 
+  # Table enumeration runs inside a process substitution, so its exit status is LOST — if the
+  # psql fails all retries (e.g. a persistent pooler-DNS outage), TABLES ends up EMPTY, the loop
+  # below does nothing, and the store would report success with 0 NDJSON tables. Fail LOUD on the
+  # empty list so a swallowed enumeration failure can't masquerade as a clean backup. (Nazim #43436.)
+  if [ "${#TABLES[@]}" -eq 0 ]; then
+    echo "  [$STORE] ✗ table enumeration returned 0 tables"
+    FAILED=$((FAILED + 1)); ST_FAILED=$((ST_FAILED + 1)); FAIL_NAMES="$FAIL_NAMES $STORE(table-enum)"
+  fi
+
   for TABLE in "${TABLES[@]}"; do
     [ -z "$TABLE" ] && continue
     echo -n "  [$STORE] $TABLE... "
