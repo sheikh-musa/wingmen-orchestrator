@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- agent-worktree-reaper DETECT-ONLY. Reaps stale Claude-native agent worktrees
+       (project-local .claude/worktrees/agent-*, >=14d + git-clean + idle) the git-native,
+       reversible way. FIRES NOTHING in this config — it runs the detect-only sweep and logs
+       which worktrees it WOULD reap, to prove the clean-only gate over a week before it is
+       armed (Nazim 43534, observe-first ladder). TO ARM: append ' --apply' to the python
+       invocation below and reload (orch-console signs the diff first).
+       NOT loaded until orch-console signs. -->
+  <key>Label</key>
+  <string>dev.wingmen.agent-worktree-reaper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.agent_worktree_reaper</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>15</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/agent_worktree_reaper.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/agent_worktree_reaper.log</string>
+</dict>
+</plist>
