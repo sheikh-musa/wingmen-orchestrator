@@ -12,6 +12,10 @@ These tests pin the parts that must not silently rot:
 
 COUNTS ONLY — the monitor never reads a row; nothing here asserts on PII values.
 """
+import os
+
+import pytest
+
 from scripts import irsyad_pii_containment_monitor as M
 
 
@@ -34,6 +38,15 @@ def test_could_not_measure_is_loud_not_green():
     assert M.classify_could_not_measure(counts) == ["persons.address"]
 
 
+# Live-goumlyne integration: connects to GOUMLYNE_DATABASE_URL to read the real schema
+# (information_schema column NAMES only, never a row). CI has no silo access, so skip cleanly
+# there rather than error — cc-irsyad-coord runs it against the goumlyne RO on musa2 as the
+# substitute check (verified PASS: persons 14 / sch_students 8, none missed — bus #43386,
+# Nazim #43375 A2). It still RUNS wherever GOUMLYNE_DATABASE_URL is set.
+@pytest.mark.skipif(
+    not os.environ.get("GOUMLYNE_DATABASE_URL"),
+    reason="requires GOUMLYNE_DATABASE_URL (live goumlyne schema); verified on musa2 by cc-irsyad-coord",
+)
 def test_discovery_is_schema_derived_and_finds_every_live_pii_variant():
     """CAI-1060 / Nazim #24985: the PII column set is DISCOVERED from the catalog at
     runtime, not hardcoded — so a NEW variant (nric_hash_v3, a new contact field) is
