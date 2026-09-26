@@ -39,6 +39,19 @@ load_dotenv(os.path.join(REPO_ROOT, ".env"))
 os.environ.setdefault("CC_BASE_AGENT_ID", "vault-test-suite")
 os.environ.setdefault("AGENT_ID", "vault-test-suite")
 
+# CI-hardening (backlog#68): the crypto tests below need no DB and always run.
+# The DB-backed tests need DATABASE_URL (skip cleanly when no DSN, e.g. CI with
+# no secret — they still RUN wherever a DSN is set), and the host-identity test
+# is Mini-only (skip on any other host, e.g. the ubuntu CI runner).
+_needs_db = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="requires DATABASE_URL (DB-integration test)",
+)
+_needs_mini = pytest.mark.skipif(
+    _local_host_id() != "mini",
+    reason="host-coupled: asserts the Mini (Darwin) identity",
+)
+
 TEST_SECRET_NAME = "vault_selftest_op21338"
 
 
@@ -56,6 +69,7 @@ def test_aead_wrong_key_fails():
         _aead_decrypt(wrong_key, blob)
 
 
+@_needs_mini
 def test_local_host_id_is_mini_on_this_host():
     # This test suite runs on the Mac Mini (Darwin).
     assert _local_host_id() == "mini"
@@ -77,6 +91,7 @@ def _cleanup_test_secret():
         conn.close()
 
 
+@_needs_db
 def test_put_fails_with_actionable_kek_error_for_unbootstrapped_host(monkeypatch):
     """Original intent (op#21338 phase 1): before orch-console bootstrapped the
     Mini's real Keychain entry (bus #41846), this test exercised that exact
@@ -97,6 +112,7 @@ def test_put_fails_with_actionable_kek_error_for_unbootstrapped_host(monkeypatch
     assert "security add-generic-password" in msg
 
 
+@_needs_db
 def test_get_fails_for_nonexistent_secret():
     from nervous_system.vault import SecretNotFoundError
 
@@ -104,6 +120,7 @@ def test_get_fails_for_nonexistent_secret():
         vault.get("vault_selftest_definitely_does_not_exist_op21338", reason="self-test")
 
 
+@_needs_db
 def test_full_put_get_round_trip_with_fake_kek(monkeypatch):
     """Proves the WHOLE pipeline (DB write/read, wrap/unwrap, AEAD, audit log)
     end to end, independent of whether the real Mini Keychain entry has been
@@ -137,6 +154,7 @@ def test_full_put_get_round_trip_with_fake_kek(monkeypatch):
     assert audit_count >= 2  # one for put, one for get
 
 
+@_needs_db
 def test_leak_flagged_surfaces_and_rotate_clears_it(monkeypatch):
     import nervous_system.vault as vault_mod
 

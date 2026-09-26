@@ -19,6 +19,14 @@ import os
 import psycopg2
 import pytest
 
+# DB-integration: applies the migration in a rolled-back txn on a real substrate
+# connection via DATABASE_URL. Without a DSN (e.g. CI with no secret) it would
+# ERROR on connect; skip cleanly. Still RUNS wherever DATABASE_URL is set.
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"),
+    reason="requires DATABASE_URL (DB-integration test)",
+)
+
 _MIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "migrations", "054_sla_observed_recipient_activity.sql")
 

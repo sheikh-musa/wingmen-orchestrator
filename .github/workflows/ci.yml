@@ -30,6 +30,20 @@ jobs:
           pip install -r requirements.txt 2>/dev/null || true
           pip install pytest pytest-asyncio
 
+      - name: Install PostgreSQL 17 (for migration wet-proofs)
+        # tests/migrations/* spin up their OWN ephemeral pg17 (initdb/pg_ctl on a
+        # unix socket, torn down per session) — they need the pg17 BINARIES on the
+        # runner, NOT a service/DSN. Without them the whole migration suite SKIPS,
+        # so migration wet-proofs never run in CI (backlog#68, bus #43327).
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-17
+
       - name: Syntax check
         # compileall over the tree (cto_bot.py moved to legacy/; a single-file py_compile
         # of a path that no longer exists would error, and checked nothing else anyway).
@@ -43,6 +57,12 @@ jobs:
           done
 
       - name: Test (unit + integration-skipped-when-no-DSN)
+        # WINGMEN_PG17_BIN points the migration fixture at the PGDG install so its
+        # ephemeral pg17 starts (and LC_ALL=C inside the fixture avoids the macOS
+        # multithreaded-postmaster fault; harmless on Linux). Migration tests now
+        # RUN here instead of skipping; DB-integration tests still skip with no DSN.
+        env:
+          WINGMEN_PG17_BIN: /usr/lib/postgresql/17/bin
         run: python -m pytest tests/ -v
 
       - name: Integration tests gate (BLOCK MERGE per CAI-RESP-153 P1)

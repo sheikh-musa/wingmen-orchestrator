@@ -1,5 +1,6 @@
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -8,7 +9,22 @@ import psycopg
 import pytest
 
 PG_BIN = os.environ.get("WINGMEN_PG17_BIN", "/usr/local/opt/postgresql@17/bin")
-PORT = "54329"
+
+# Force a C locale for initdb/pg_ctl. On macOS, spawning the postmaster under a
+# non-C locale can trip "FATAL: postmaster became multithreaded during startup"
+# (the getaddrinfo/locale path goes multithreaded before fork), which aborts the
+# ephemeral cluster and made this harness fail machine-wide (bus #43331/#43345).
+# The CAI-1342 throwaway-pg method sets LC_ALL=C for exactly this reason.
+_PG_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+
+
+def _free_port() -> str:
+    """Pick a currently-free TCP port. The cluster runs socket-only
+    (listen_addresses=''), so this only discriminates the socket filename and
+    avoids any fixed-port clash with a local service (e.g. a dev pg on 54329)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return str(s.getsockname()[1])
 
 
 def _bin(name: str) -> str:
@@ -23,19 +39,20 @@ def pg_dsn():
     datadir = tempfile.mkdtemp(prefix="wingmen-pgtest-")
     shutil.rmtree(datadir)  # initdb wants to create it
     sockdir = tempfile.mkdtemp(prefix="wingmen-pgsock-")
+    port = _free_port()
     subprocess.run(
         [_bin("initdb"), "-D", datadir, "-U", "postgres",
          "--auth=trust", "--locale=C", "--encoding=UTF8"],
-        check=True, capture_output=True,
+        check=True, capture_output=True, env=_PG_ENV,
     )
     subprocess.run(
         [_bin("pg_ctl"), "-D", datadir, "-l", os.path.join(datadir, "log"),
-         "-o", f"-p {PORT} -k {sockdir} -c listen_addresses='' "
+         "-o", f"-p {port} -k {sockdir} -c listen_addresses='' "
                f"-c timezone=UTC -c log_timezone=UTC",
          "-w", "start"],
-        check=True, capture_output=True,
+        check=True, capture_output=True, env=_PG_ENV,
     )
-    dsn = f"host={sockdir} port={PORT} user=postgres dbname=postgres"
+    dsn = f"host={sockdir} port={port} user=postgres dbname=postgres"
     for _ in range(50):
         try:
             with psycopg.connect(dsn):
@@ -46,7 +63,7 @@ def pg_dsn():
         yield dsn
     finally:
         subprocess.run([_bin("pg_ctl"), "-D", datadir, "-w", "stop"],
-                       capture_output=True)
+                       capture_output=True, env=_PG_ENV)
         shutil.rmtree(datadir, ignore_errors=True)
         shutil.rmtree(sockdir, ignore_errors=True)
 
