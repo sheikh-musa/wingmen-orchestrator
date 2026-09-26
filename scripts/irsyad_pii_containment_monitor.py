@@ -542,13 +542,25 @@ def main() -> int:
         finally:
             conn.close()
 
+    # A transient connect blip is retried (bounded, _DB_ATTEMPTS with linear backoff) and, if a
+    # retry SUCCEEDS, the check runs normally and does NOT page — only a connect failure that
+    # PERSISTS through the retries pages CONNECT-FAILED. Both dead-man arms stay fail-CLOSED (page,
+    # never silence); they are just labelled distinctly so a recovered blip is not mislabelled as a
+    # connect outage, and an in-check fault is not mislabelled as a connect failure. (Nazim #43375.)
     try:
         counts, unclassifiable, forbidden, residue = _retry(
             _read_goumlyne, attempts=_DB_ATTEMPTS,
             base_delay_s=_DB_RETRY_BASE_S, retry_on=psycopg2.OperationalError)
-    except Exception as e:  # dead-man's-switch — a persistent failure STILL pages loud
+    except psycopg2.OperationalError as e:  # persistent connect failure through the retry budget
         _page("🟠 Irsyad PII monitor CONNECT FAILED — containment UNVERIFIED",
-              f"Could not read goumlyne to verify org {ORG_ID} deep-field zero: {str(e).splitlines()[0]}. "
+              f"Could not connect to goumlyne to verify org {ORG_ID} deep-field zero after "
+              f"{_DB_ATTEMPTS} attempts: {str(e).splitlines()[0]}. "
+              "Loud-fail, not green (dead-man's-switch).", priority="P1")
+        return 2
+    except Exception as e:  # connect SUCCEEDED but the check itself faulted — page fail-CLOSED, distinctly
+        _page("🟠 Irsyad PII monitor CHECK FAILED — containment UNVERIFIED",
+              f"Connected to goumlyne but the containment read for org {ORG_ID} raised "
+              f"{type(e).__name__}: {str(e).splitlines()[0]}. "
               "Loud-fail, not green (dead-man's-switch).", priority="P1")
         return 2
 
