@@ -254,6 +254,23 @@ def test_main_persistent_goumlyne_failure_still_pages_dead_man(monkeypatch):
         "persistent failure MUST P1-page containment-UNVERIFIED (dead-man preserved)"
 
 
+def test_main_transient_blips_exhaust_retries_still_pages(monkeypatch):
+    """Blip, blip, blip — a connect that fails on EVERY attempt through the retry budget must
+    exhaust the retries and STILL P1-page CONNECT-FAILED. The retries only buy a grace window;
+    they never turn a real outage into silence (dead-man's-switch)."""
+    psycopg2, paged = _prep_main(monkeypatch)
+    n = {"c": 0}
+    def fake_connect(dsn):
+        n["c"] += 1
+        raise psycopg2.OperationalError("pooler blip #%d" % n["c"])
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+    rc = M.main()
+    assert rc == 2
+    assert n["c"] == M._DB_ATTEMPTS, "must try exactly the retry budget, then give up"
+    assert any("CONNECT FAILED" in s and p == "P1" for s, p in paged), \
+        "blips through the whole budget MUST P1-page CONNECT-FAILED (dead-man preserved)"
+
+
 # ── CAI-1030 ENVELOPE EXPANSION (Nazim #41335/#41337, Musa op#20281 reply 21193) ─────────
 # The school moved from minimal-enrollment to full parent-graph + operational custody, so the
 # custody/marital fields (mig350) + parent-link existence/marital + parent-person PII (incl.
@@ -317,16 +334,16 @@ def _mk_parent_link(cur, org, student_id):
     return ppid
 
 
-def _cai1030_conn():
-    import os, psycopg2
-    conn = psycopg2.connect(os.environ["DATABASE_URL"]); conn.autocommit = False
+def _cai1030_conn(dsn):
+    import psycopg2
+    conn = psycopg2.connect(dsn); conn.autocommit = False
     return conn
 
 
-def test_cai1030_authorized_fields_no_longer_forbidden(monkeypatch):
+def test_cai1030_authorized_fields_no_longer_forbidden(monkeypatch, pg_dsn):
     """The formerly-forbidden custody/marital/parent-graph fields, when populated, must NOT
     appear as forbidden breaches after the CAI-1030 expansion."""
-    conn = _cai1030_conn(); cur = conn.cursor()
+    conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
     try:
         _cai1030_standin(cur); _cai1030_point(monkeypatch)
         org = _CAI1030_ORG
@@ -350,7 +367,7 @@ def test_cai1030_authorized_fields_no_longer_forbidden(monkeypatch):
         conn.rollback(); conn.close()
 
 
-def test_cai1030_floor_still_trips_p0_each(monkeypatch):
+def test_cai1030_floor_still_trips_p0_each(monkeypatch, pg_dsn):
     """The 4 FLOOR fields must STILL trip a forbidden breach on any nonzero, one at a time."""
     # (table, col, sql-value) — labels are prefixed by the (monkeypatched) standin table name.
     floor = [
@@ -360,7 +377,7 @@ def test_cai1030_floor_still_trips_p0_each(monkeypatch):
         ("_sre_parents2", "has_legal_custody", "TRUE"),
     ]
     for table, col, val in floor:
-        conn = _cai1030_conn(); cur = conn.cursor()
+        conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
         try:
             _cai1030_standin(cur); _cai1030_point(monkeypatch)
             org = _CAI1030_ORG
@@ -378,10 +395,10 @@ def test_cai1030_floor_still_trips_p0_each(monkeypatch):
             conn.rollback(); conn.close()
 
 
-def test_cai1030_fail_closed_unknown_on_all_three_tables(monkeypatch):
+def test_cai1030_fail_closed_unknown_on_all_three_tables(monkeypatch, pg_dsn):
     """A NEW unclassified column on persons / sch_students / sch_student_parents, populated,
     must fail CLOSED (forbidden breach) — never silently pass."""
-    conn = _cai1030_conn(); cur = conn.cursor()
+    conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
     try:
         _cai1030_standin(cur, extra_persons=", surprise_p text",
                          extra_students=", surprise_s text", extra_parents=", surprise_pa text")
@@ -401,10 +418,10 @@ def test_cai1030_fail_closed_unknown_on_all_three_tables(monkeypatch):
         conn.rollback(); conn.close()
 
 
-def test_cai1030_parent_contact_authorized_but_student_contact_still_forbidden(monkeypatch):
+def test_cai1030_parent_contact_authorized_but_student_contact_still_forbidden(monkeypatch, pg_dsn):
     """RIGOR (Nazim #41337): authorizing guardian CONTACT for PARENT persons must NOT widen the
     STUDENT-persons treatment — a student person with phone_encrypted must STILL trip."""
-    conn = _cai1030_conn(); cur = conn.cursor()
+    conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
     try:
         _cai1030_standin(cur); _cai1030_point(monkeypatch)
         org = _CAI1030_ORG
@@ -422,9 +439,9 @@ def test_cai1030_parent_contact_authorized_but_student_contact_still_forbidden(m
         conn.rollback(); conn.close()
 
 
-def test_cai1030_plaintext_parent_contact_still_forbidden(monkeypatch):
+def test_cai1030_plaintext_parent_contact_still_forbidden(monkeypatch, pg_dsn):
     """FLOOR: PLAINTEXT phone/email on a parent person STILL trips (ciphertext-only floor)."""
-    conn = _cai1030_conn(); cur = conn.cursor()
+    conn = _cai1030_conn(pg_dsn); cur = conn.cursor()
     try:
         _cai1030_standin(cur); _cai1030_point(monkeypatch)
         org = _CAI1030_ORG

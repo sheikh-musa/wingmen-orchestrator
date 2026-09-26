@@ -1,9 +1,76 @@
 """Shared fixtures for the Wingmen orchestrator test suite."""
 
 import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
 
+import psycopg
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+
+# ── Ephemeral throwaway PostgreSQL 17 (shared: migration wet-proofs + the PII
+# containment floor proofs). Session-scoped; socket-only (never TCP-binds), C-locale,
+# torn down per session. Promoted here from tests/migrations/conftest.py so tests
+# outside tests/migrations/ can run their synthetic-stand-in proofs against it in CI
+# instead of needing the live substrate (backlog#68, Nazim #43375). ──
+_PG_BIN = os.environ.get("WINGMEN_PG17_BIN", "/usr/local/opt/postgresql@17/bin")
+
+# Force a C locale for initdb/pg_ctl. On macOS a non-C locale can trip
+# "FATAL: postmaster became multithreaded during startup" (bus #43331/#43345).
+_PG_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+
+
+def _pg_free_port() -> str:
+    """A currently-free TCP port. The cluster runs socket-only (listen_addresses=''),
+    so this only discriminates the socket filename and avoids a fixed-port clash."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return str(s.getsockname()[1])
+
+
+def _pg_bin(name: str) -> str:
+    path = os.path.join(_PG_BIN, name)
+    if not os.path.exists(path):
+        pytest.skip(f"PG17 binary missing: {path} (set WINGMEN_PG17_BIN)")
+    return path
+
+
+@pytest.fixture(scope="session")
+def pg_dsn():
+    datadir = tempfile.mkdtemp(prefix="wingmen-pgtest-")
+    shutil.rmtree(datadir)  # initdb wants to create it
+    sockdir = tempfile.mkdtemp(prefix="wingmen-pgsock-")
+    port = _pg_free_port()
+    subprocess.run(
+        [_pg_bin("initdb"), "-D", datadir, "-U", "postgres",
+         "--auth=trust", "--locale=C", "--encoding=UTF8"],
+        check=True, capture_output=True, env=_PG_ENV,
+    )
+    subprocess.run(
+        [_pg_bin("pg_ctl"), "-D", datadir, "-l", os.path.join(datadir, "log"),
+         "-o", f"-p {port} -k {sockdir} -c listen_addresses='' "
+               f"-c timezone=UTC -c log_timezone=UTC",
+         "-w", "start"],
+        check=True, capture_output=True, env=_PG_ENV,
+    )
+    dsn = f"host={sockdir} port={port} user=postgres dbname=postgres"
+    for _ in range(50):
+        try:
+            with psycopg.connect(dsn):
+                break
+        except psycopg.OperationalError:
+            time.sleep(0.1)
+    try:
+        yield dsn
+    finally:
+        subprocess.run([_pg_bin("pg_ctl"), "-D", datadir, "-w", "stop"],
+                       capture_output=True, env=_PG_ENV)
+        shutil.rmtree(datadir, ignore_errors=True)
+        shutil.rmtree(sockdir, ignore_errors=True)
 
 
 def mock_supabase_chain(final_data=None, *, count=None):
