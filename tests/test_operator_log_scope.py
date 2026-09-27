@@ -118,6 +118,20 @@ def test_hub_excludes_cosem_tdu_and_angullia(monkeypatch):
     assert "tag IS DISTINCT FROM 'angullia'" in clause
 
 
+def test_console_scope_includes_oeh(monkeypatch):
+    # op#22521 (bus #43713): oeh is console-reconciled the same way as angullia --
+    # a client channel with no dedicated coord reconcile loop of its own.
+    _set_role(monkeypatch, "console")
+    clause = ol._channel_scope_sql()
+    assert "oeh" in clause
+
+
+def test_hub_excludes_oeh(monkeypatch):
+    _set_role(monkeypatch, "hub")
+    clause = ol._channel_scope_sql()
+    assert "tag IS DISTINCT FROM 'oeh'" in clause
+
+
 def test_console_polled_client_tags_matches_ingest_channels():
     """Guardrail against the op#22517 drift recurring: every client channel the
     Mini's nazim-ingest polls (boot_nazim_ingest.sh INGEST_CHANNELS) that isn't

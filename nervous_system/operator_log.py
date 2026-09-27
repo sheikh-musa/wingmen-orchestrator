@@ -122,6 +122,7 @@ _LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor")
 _CONSOLE_POLLED_CLIENT_TAGS = frozenset({
     "cosem-caai", "cosem-exams", "alderei",  # 2026-08-03
     "cosem-tdu", "angullia",                  # 2026-09-27 (op#22517 fix)
+    "oeh",                                     # 2026-09-27 (op#22521/bus#43713)
 })
 
 # Suffixes written by the lane phase-gate (scripts/lane_reply.sh): '<tag>-drill' is a reply
