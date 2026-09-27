@@ -66,17 +66,40 @@ running_cwds() {
   done
 }
 
+# Does any cwd in the newline-list on STDIN equal $1, or sit nested under "$1/"
+# (a subdir or a nested git worktree of the lane)? Reads a MATERIALISED list from
+# stdin — never a live producer pipe. This is the fix for bus #44251/#44258: the
+# old `running_cwds | grep -Fxq` let grep's match short-circuit SIGPIPE the still-
+# writing running_cwds, and under `set -o pipefail` that non-zero exit propagated
+# so a LIVE lane reported "down" — which made `up`'s guard (boot_one) miss the
+# running claude and risk a second one in the lane's worktree (double-boot).
+_cwd_matches_any() {
+  local target="${1%/}" cwd
+  while IFS= read -r cwd; do
+    [ -z "$cwd" ] && continue
+    cwd="${cwd%/}"
+    [ "$cwd" = "$target" ] && return 0
+    [ "${cwd#"$target"/}" != "$cwd" ] && return 0   # cwd is nested under target/
+  done
+  return 1
+}
+
+# True if a live dangerous-CC has $1 (or a dir nested under it) as its cwd.
+# Snapshots running_cwds ONCE into a variable before matching (pipefail-safe).
 dir_has_claude() {
-  local target="$1"
-  running_cwds | grep -Fxq "$target"
+  local snap
+  snap="$(running_cwds)"
+  _cwd_matches_any "$1" <<< "$snap"
 }
 
 cmd_ls() {
+  local snap
+  snap="$(running_cwds)"   # one snapshot for the whole listing (correct + O(pids), not O(rows*pids))
   printf '%-24s %-8s %-8s %s\n' LANE DESIRED STATUS DIR
   while IFS=$'\t' read -r name desired dir; do
     [ -z "$name" ] && continue
     if [ ! -d "$dir" ]; then status="MISSING"
-    elif dir_has_claude "$dir"; then status="running"
+    elif _cwd_matches_any "$dir" <<< "$snap"; then status="running"
     else status="down"; fi
     printf '%-24s %-8s %-8s %s\n' "$name" "$desired" "$status" "$dir"
   done < <(lane_rows)
@@ -141,6 +164,10 @@ cmd_down() {
   "$HOME/wingmen/orchestrator/.venv/bin/python3" "$HOME/wingmen/orchestrator/scripts/lib/lane_winddown.py" "$lane" "$@"
 }
 
+# Dispatch only when EXECUTED, not when SOURCED — so the liveness helpers
+# (running_cwds / _cwd_matches_any / dir_has_claude) can be unit-tested with
+# stubbed pgrep/lsof without the CLI running (tests/test_lanes_liveness.py).
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 case "${1:-ls}" in
   ls) cmd_ls ;;
   up) cmd_up "${2:-}" ;;
@@ -148,3 +175,4 @@ case "${1:-ls}" in
   attach) tmux attach -t "${2:?usage: lanes.sh attach <lane>}" ;;
   *) echo "usage: lanes.sh {ls|up <lane>|down <lane> [--kill]|attach <lane>}" >&2; exit 2 ;;
 esac
+fi
