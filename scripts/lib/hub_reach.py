@@ -12,11 +12,16 @@ PURE core: `hub_reach_for_holder(holder_host)` + `is_reach_host_current(...)`.
 Thin DB reader: `read_holder_host(conn)`.
 
 UPDATE (op#42896/#42909, 2026-09-24): the gzb reach text ITSELF went dead when op#42907
-deleted the gzb-vpn.sh/wingmen-core relay it described, and no replacement interactive
-SSH path to gzb was built. `hub_reach_for_holder("gzbai")` now says so honestly (reach=None,
-remedy names the gap + gzb's systemd self-supervision) rather than describing a hop that no
-longer exists — same fail-safe posture as the unknown-holder branch, applied to a KNOWN
-host whose ONE known route died.
+deleted the gzb-vpn.sh/wingmen-core relay it described; for a while `hub_reach_for_holder("gzbai")`
+honestly reported reach=None (the gap) rather than a dead hop.
+
+UPDATE (Nazim 43610/43612, 2026-09-27): a dedicated fleet-ops key + ssh-config alias `gzb`
+(gazzai@100.77.251.8 Tailscale-direct, ~/.ssh/gzb_fleet) RESTORED a read/probe + nudge reach
+to the gzb hub, so the gzbai branch now returns a real reach again. The dict also exposes
+`ssh_target` (a runnable ssh destination: "gzb" for gzbai, "root@91.107.235.77" for
+wingmen-core, None when unknown) so callers (console panes, reset paths) resolve the host path
+HERE instead of re-hardcoding it. A hard reset still needs root (the key has no sudo) → that
+step stays operator/vault-gated.
 """
 from __future__ import annotations
 
@@ -49,35 +54,41 @@ def hub_reach_for_holder(holder_host: "str | None") -> dict:
     """
     canon = _canon(holder_host)
     if canon == "gzbai":
-        # op#42907/op#20655 (2026-09-24): the old relay this remedy told a responder to
-        # use -- ssh hub-vps -> sudo gzb-vpn.sh up -> sudo -u wingmen -H ssh gzb -- is
-        # DEAD. gzb-vpn.sh and the wingmen-core hop were deleted when the backup path was
-        # repointed to gzb's Tailscale IP directly, and wingmen-core itself is cleared for
-        # power-off. No replacement interactive/shell SSH reach to gzb has been built —
-        # the only gzb credential in this repo (scripts/daily_backup.sh's `wbackup`) is a
-        # push/prune-only backup account with no shell, unusable for a tmux nudge/reset.
-        # Per this module's own fail-safe rule (never point at a route we can't actually
-        # use), reach/remedy are honest about the gap rather than describing a dead hop.
-        reach = None
-        remedy = ("REMEDY: the hub is on gzb (Tailscale 100.77.251.8), but no automated "
-                  "interactive SSH reach to it is provisioned in this repo -- the old "
-                  "wingmen-core relay (gzb-vpn.sh) was decommissioned (op#42907/op#20655) "
-                  "and never replaced. gzb's hub process is systemd-supervised "
-                  "(wingmen-orch-hub.service) so a DEAD process self-restarts, but a WEDGED-"
-                  "but-alive composer needs a human with real shell access on gzb directly -- "
-                  "escalate to the operator rather than attempt reset_hub_remote.sh (it "
-                  "correctly refuses for a gzb holder) or invent an untested reach path.")
-        return {"known": True, "host": "gzbai", "tmux": "orch", "reach": reach, "remedy": remedy}
+        # 2026-09-27 (Nazim 43610/43612): a dedicated fleet-ops key RESTORED a READ/probe
+        # reach to the gzb hub -- ssh-config alias `gzb` (gazzai@100.77.251.8 Tailscale-direct,
+        # IdentityFile ~/.ssh/gzb_fleet, IdentitiesOnly). The orch tmux session is gazzai-owned,
+        # so capture-pane needs NO sudo. This replaces the honest "no reach provisioned" gap
+        # left when op#42907/op#20655 deleted the old wingmen-core/gzb-vpn.sh relay. WAKING the
+        # hub is NOT done by raw send-keys here (Nazim 43617): a raw `tmux send-keys` into a lane
+        # bypasses the menu-guard/ghost-probe choke point and is forbidden by fleet doctrine --
+        # and this remedy string is exactly what gets copy-pasted under pressure. Wake via the
+        # bus wake floor instead. A HARD reset still needs root the fleet key does NOT grant.
+        reach = ("ssh gzb (ssh-config alias -> gazzai@100.77.251.8 Tailscale-direct, "
+                 "key ~/.ssh/gzb_fleet) -> tmux 'orch' (gazzai-owned), READ-only")
+        remedy = ("REMEDY: READ the hub via `ssh gzb tmux capture-pane -t orch -p` (safe, "
+                  "read-only). To WAKE an idle-but-alive hub, post a P1 + requires_response bus "
+                  "row to cc-orchestrator (the hub's wake floor), or use the sanctioned guarded "
+                  "nudge path if it supports the gzb target -- NEVER bypass that guard by "
+                  "injecting raw keystrokes into the lane (that skips the menu-guard/ghost-probe "
+                  "choke point, which fleet doctrine forbids). A HARD reset (systemctl restart "
+                  "wingmen-orch-hub.service) needs root and the gzb_fleet key has NO sudo -- "
+                  "escalate that step to the operator/console with the vault password. Do NOT "
+                  "use reset_hub_remote.sh (it targets the decommissioned wingmen-core and "
+                  "correctly refuses a gzb holder).")
+        return {"known": True, "host": "gzbai", "tmux": "orch", "reach": reach,
+                "remedy": remedy, "ssh_target": "gzb"}
     if canon == "wingmen-core":
         reach = ("ssh root@91.107.235.77 (hub-vps) -> tmux 'orch' (user wingmen)")
         remedy = (f"REMEDY: reach the hub directly on the VPS — {reach}; forced typed-nudge / "
                   f"reset_orch.sh runs there. Console pen.")
-        return {"known": True, "host": "wingmen-core", "tmux": "orch", "reach": reach, "remedy": remedy}
+        return {"known": True, "host": "wingmen-core", "tmux": "orch", "reach": reach,
+                "remedy": remedy, "ssh_target": "root@91.107.235.77"}
     # unknown / unset / unrecognized: fail-safe — name NO host.
     remedy = ("REMEDY: the hub's holder_host is unknown/unset — resolve it from "
               "orch_lease.holder_host before reaching; do NOT assume a host (a stale one "
               "may be decommissioned).")
-    return {"known": False, "host": None, "tmux": "orch", "reach": None, "remedy": remedy}
+    return {"known": False, "host": None, "tmux": "orch", "reach": None,
+            "remedy": remedy, "ssh_target": None}
 
 
 def is_reach_host_current(target_host: "str | None", holder_host: "str | None") -> bool:

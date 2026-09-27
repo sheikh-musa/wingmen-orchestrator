@@ -43,7 +43,7 @@ info = h.hub_reach_for_holder('$_HOLDER' or None)
 print(info['host'] if info['known'] and info['host'] == 'wingmen-core' else '')
 " 2>/dev/null)"
   if [ -z "$VPS" ]; then
-    echo "[reset_hub_remote] ABORT (safety guard): orch_lease holder_host='${_HOLDER:-<unknown>}' does not resolve to the wingmen-core canonical group (this script only supports a direct single-hop SSH to wingmen-core, not gzb's multi-hop reach). Refusing rather than guessing — see scripts/lib/hub_reach.py for the current reach path, or set WINGMEN_VPS_HOST explicitly if you really mean to target a specific host." >&2
+    echo "[reset_hub_remote] ABORT (safety guard): orch_lease holder_host='${_HOLDER:-<unknown>}' does not resolve to the wingmen-core canonical group (this script only supports a direct root SSH RESET to wingmen-core). A gzb hub can now be PROBED/NUDGED via 'ssh gzb' (see scripts/lib/hub_reach.py ssh_target), but a HARD reset there needs root and the fleet key has no sudo — escalate that to the operator/console with the vault password. Refusing rather than guessing; set WINGMEN_VPS_HOST explicitly if you really mean to target a specific host." >&2
     exit 7
   fi
   VPS="91.107.235.77"  # canonical group resolved to wingmen-core; this is its one known address

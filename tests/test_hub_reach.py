@@ -18,26 +18,35 @@ WINGMEN_CORE_IP = "91.107.235.77"
 GZB_IP = "192.168.1.114"
 
 
-def test_gzbai_is_known_but_honest_about_no_provisioned_reach():
-    # op#42907/op#20655: the old gzb-vpn.sh/wingmen-core relay this remedy used to
-    # describe is DEAD, and no replacement interactive reach to gzb was built. The
-    # remedy must say so plainly, never describe the dead hop as if it still works,
-    # and never fall back to naming the decommissioned wingmen-core host either.
+def test_gzbai_resolves_to_the_ssh_gzb_reach():
+    # Nazim 43610/43612 (2026-09-27): a dedicated fleet-ops key RESTORED a probe+nudge reach
+    # to the gzb hub via the ssh-config alias `gzb`. The resolver must describe THAT working
+    # path (not the old dead relay), expose a runnable ssh_target, and never name the
+    # decommissioned wingmen-core IP as a live action target.
     r = hr.hub_reach_for_holder("gzbai")
     assert r["known"] is True
     assert r["host"] == "gzbai"
-    assert r["reach"] is None
-    # naming wingmen-core as the dead relay's decommissioned former hop (context) is fine;
-    # naming it as a live action target (its IP) is the regression this guards against.
-    assert "decommissioned" in r["remedy"]
+    assert r["reach"] is not None and "ssh gzb" in r["reach"]
+    assert r["ssh_target"] == "gzb"
+    # remedy points at a READ via capture-pane, and gates a HARD reset on the vault (no sudo)
+    assert "ssh gzb" in r["remedy"]
+    assert "capture-pane" in r["remedy"]
+    assert "vault" in r["remedy"].lower()
+    # Nazim 43617: the remedy must NOT prescribe a raw send-keys wake (bypasses the
+    # menu-guard/ghost-probe choke point; it's what gets copy-pasted under pressure).
+    # Waking is via the bus wake floor (P1 + requires_response to the hub) instead.
+    assert "send-keys" not in r["remedy"]
+    assert "requires_response" in r["remedy"]
+    # never name the decommissioned wingmen-core IP as a live action target
     assert WINGMEN_CORE_IP not in r["remedy"]
-    assert "no automated interactive" in r["remedy"].lower()
+    assert WINGMEN_CORE_IP not in (r["reach"] or "")
 
 
 def test_wingmen_core_resolves_to_direct_vps():
     r = hr.hub_reach_for_holder("wingmen-core")
     assert r["known"] is True
     assert r["host"] == "wingmen-core"
+    assert r["ssh_target"] == "root@91.107.235.77"
     assert WINGMEN_CORE_IP in r["remedy"]
     # a wingmen-core hub must NOT be described via the gzb LAN
     assert GZB_IP not in r["remedy"]
@@ -46,6 +55,7 @@ def test_wingmen_core_resolves_to_direct_vps():
 def test_unknown_holder_is_safe_and_names_no_host():
     r = hr.hub_reach_for_holder(None)
     assert r["known"] is False
+    assert r["ssh_target"] is None
     # never assert/name a stale host; tell the reader to resolve from orch_lease
     assert WINGMEN_CORE_IP not in r["remedy"]
     assert GZB_IP not in r["remedy"]
@@ -55,6 +65,7 @@ def test_unknown_holder_is_safe_and_names_no_host():
 def test_unrecognized_host_is_treated_as_unknown_not_a_guess():
     r = hr.hub_reach_for_holder("some-new-host-99")
     assert r["known"] is False
+    assert r["ssh_target"] is None
     assert WINGMEN_CORE_IP not in r["remedy"]
     assert GZB_IP not in r["remedy"]
 
