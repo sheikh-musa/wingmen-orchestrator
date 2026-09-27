@@ -13,6 +13,10 @@ promise to "remember next time" doesn't survive a context reset — this
 script makes --priority a REQUIRED argparse argument so the mistake is no
 longer possible to make silently.
 
+Follow-up (bus #43673): the untracked scratch helpers (_bus_tmp.py,
+scratchpad/bus_send.py) are now thin shims over send() below, so there is
+exactly one INSERT INTO agent_messages in the fleet's ad-hoc-send path.
+
 Usage:
     scripts/bus_send.py --to cc-orchestrator --type update \\
         --subject "short subject" --priority P1 [--req] \\
@@ -114,33 +118,26 @@ def read_body(stream) -> str:
     return body
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-
-    try:
-        from_agent = args.from_agent or resolve_from_agent(os.environ)
-    except IdentityError as e:
-        print(f"bus_send: {e}", file=sys.stderr)
-        return 2
-
-    body = read_body(sys.stdin)
-
-    if args.dry_run:
-        print(f"DRY RUN — would insert: from={from_agent} to={args.to} type={args.type} "
-              f"priority={args.priority} req={args.req} subject={args.subject!r} "
-              f"body_bytes={len(body)}")
-        return 0
+def send(
+    from_agent: str, to: str, mtype: str, subject: str, body: str, priority: str,
+    req: bool = False, thread: str | None = None, reply_to: int | None = None,
+    dsn: str | None = None,
+) -> tuple[int, str]:
+    """Do the actual INSERT. The one place the SQL lives — CLI (`main`) and
+    every shim (`_bus_tmp.py`, `scratchpad/bus_send.py`) call this so there is
+    exactly one INSERT INTO agent_messages in the whole fleet's ad-hoc-send
+    path. `priority` has no default here either — callers must pass it."""
+    if priority not in _VALID_PRIORITIES:
+        raise ValueError(f"send(): priority must be one of {_VALID_PRIORITIES}, got {priority!r}")
 
     import psycopg2
 
-    dsn = dburl(os.environ)
-    conn = psycopg2.connect(dsn)
+    conn = psycopg2.connect(dsn or dburl(os.environ))
     cur = conn.cursor()
     cur.execute("SELECT set_config('app.current_agent_id', %s, true)", (from_agent,))
 
-    thread = args.thread
-    if args.reply_to and not thread:
-        cur.execute("SELECT thread_id FROM agent_messages WHERE id=%s", (args.reply_to,))
+    if reply_to and not thread:
+        cur.execute("SELECT thread_id FROM agent_messages WHERE id=%s", (reply_to,))
         row = cur.fetchone()
         thread = str(row[0]) if row else None
     if thread and len(thread) < 36:
@@ -162,21 +159,44 @@ def main(argv: list[str] | None = None) -> int:
               priority, requires_response, thread_id)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id, thread_id""",
-        (from_agent, args.to, args.type, args.subject, body,
-         args.priority, args.req, thread),
+        (from_agent, to, mtype, subject, body, priority, req, thread),
     )
     row_id, thread_id = cur.fetchone()
 
-    if args.reply_to:
+    if reply_to:
         cur.execute(
             "UPDATE agent_messages SET read_at=coalesce(read_at,now()), "
             "responded_at=coalesce(responded_at,now()), "
             "response_ref=coalesce(response_ref,%s) WHERE id=%s",
-            (str(row_id), args.reply_to),
+            (str(row_id), reply_to),
         )
 
     conn.commit()
     conn.close()
+    return row_id, str(thread_id)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    try:
+        from_agent = args.from_agent or resolve_from_agent(os.environ)
+    except IdentityError as e:
+        print(f"bus_send: {e}", file=sys.stderr)
+        return 2
+
+    body = read_body(sys.stdin)
+
+    if args.dry_run:
+        print(f"DRY RUN — would insert: from={from_agent} to={args.to} type={args.type} "
+              f"priority={args.priority} req={args.req} subject={args.subject!r} "
+              f"body_bytes={len(body)}")
+        return 0
+
+    row_id, thread_id = send(
+        from_agent, args.to, args.type, args.subject, body, args.priority,
+        req=args.req, thread=args.thread, reply_to=args.reply_to,
+    )
     print(f"SENT id={row_id} thread={thread_id} from={from_agent} to={args.to} "
           f"priority={args.priority} req={args.req}")
     return 0
