@@ -105,20 +105,74 @@ def test_maybe_track_ask_reply_to_our_outbound_closes_the_linked_ask():
         )
         ask_id = cur.fetchone()[0]
         c.commit()
+    new_id = None
     try:
-        rid = ol.maybe_track_ask(
+        new_id = ol.maybe_track_ask(
             888888, "inbound", "tmux-console", None, "yes, go ahead",
             reply_to_tg_message_id=424242,
         )
-        assert rid == ask_id, "a genuine reply to the linked outbound must close THAT ask, not open a new one"
+        assert new_id is not None and new_id != ask_id, (
+            "a reply must ALSO open its own new row (op#22669 / bus #43972) — "
+            "the reply's own content is never just discarded"
+        )
         with psycopg.connect(_dsn()) as c, c.cursor() as cur:
             cur.execute("SELECT closed_at, closed_reason FROM operator_asks WHERE id=%s", (ask_id,))
             closed_at, closed_reason = cur.fetchone()
+            cur.execute("SELECT ask, closed_at FROM operator_asks WHERE id=%s", (new_id,))
+            new_ask, new_closed_at = cur.fetchone()
         assert closed_at is not None
-        assert closed_reason == "operator_replied"
+        assert closed_reason == f"operator_replied op#{new_id}"
+        assert new_ask == "yes, go ahead"
+        assert new_closed_at is None, "the new row opened for the reply must stay OPEN"
     finally:
         with psycopg.connect(_dsn()) as c, c.cursor() as cur:
             cur.execute("DELETE FROM operator_asks WHERE id=%s", (ask_id,))
+            if new_id is not None:
+                cur.execute("DELETE FROM operator_asks WHERE id=%s", (new_id,))
+            cur.execute("DELETE FROM operator_messages WHERE id=%s", (outbound_id,))
+            c.commit()
+
+
+@pytest.mark.skipif(not _dsn(), reason="no DSN")
+def test_maybe_track_ask_reply_with_extra_content_leaves_one_closed_one_open():
+    """The exact op#22669 failure mode: a reply that ALSO carries new content
+    ("yes, and also do X") must not silently drop that content just because it
+    happened to match an open ask (orch-console bus #43972/#43985)."""
+    import psycopg
+    with psycopg.connect(_dsn()) as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_messages (direction, channel, tag, text, delivered, tg_message_id) "
+            "VALUES ('outbound','telegram','orch-channel','[__test__] our outbound ask 2',true,434343) "
+            "RETURNING id"
+        )
+        outbound_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO operator_asks (ask, outbound_msg_id) VALUES (%s,%s) RETURNING id",
+            ("[__test__] waiting on a reply 2", outbound_id),
+        )
+        ask_id = cur.fetchone()[0]
+        c.commit()
+    new_id = None
+    try:
+        new_id = ol.maybe_track_ask(
+            898989, "inbound", "tmux-console", None,
+            "yes, and also please rotate the keys",
+            reply_to_tg_message_id=434343,
+        )
+        with psycopg.connect(_dsn()) as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT id, closed_at FROM operator_asks WHERE id IN (%s,%s)",
+                (ask_id, new_id),
+            )
+            by_id = dict(cur.fetchall())
+        assert by_id[ask_id] is not None, "the matched ask must be closed"
+        assert by_id[new_id] is None, "the reply's own row must be open"
+        assert len(by_id) == 2, "exactly one closed + one open row, nothing dropped"
+    finally:
+        with psycopg.connect(_dsn()) as c, c.cursor() as cur:
+            cur.execute("DELETE FROM operator_asks WHERE id=%s", (ask_id,))
+            if new_id is not None:
+                cur.execute("DELETE FROM operator_asks WHERE id=%s", (new_id,))
             cur.execute("DELETE FROM operator_messages WHERE id=%s", (outbound_id,))
             c.commit()
 

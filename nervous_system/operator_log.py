@@ -235,19 +235,26 @@ def _is_operator_ask_surface(channel: str, tag, from_user_id) -> bool:
 def maybe_track_ask(op_msg_id: int, direction: str, channel: str, tag,
                      text: str, from_user_id=None,
                      reply_to_tg_message_id: int | None = None) -> int | None:
-    """Called for every INBOUND message on a monitored operator surface. Exactly
-    one of two outcomes, never both:
-      - the inbound IS a genuine Telegram reply to one of OUR outbound messages
-        that is itself linked to an OPEN ask (operator_asks.outbound_msg_id ->
-        operator_messages.tg_message_id) -> that ask auto-closes
-        (closed_reason='operator_replied'). No new row.
-      - otherwise -> a NEW operator_asks row is opened for this message, so it
-        joins the ledger like everything else the operator asks.
+    """Called for every INBOUND message on a monitored operator surface.
 
-    Returns the id touched (closed or opened), or None if this message isn't on
-    a monitored surface (nothing tracked). Not called for direction='outbound'
-    — that direction's rows are captured via outbound_msg_id at open-ask time
-    (scripts/asks_open.py), never as a NEW ask themselves.
+    A reply-match ALSO opens a new row for the reply itself (orch-console bus
+    #43972/#43985, PR #180 change 1) — closing without opening drops the
+    reply's own content. The operator's reply IS the answer to act on, and
+    often carries a new ask of its own ("yes, and also do X"); silently
+    swallowing that is the op#22669 failure mode itself.
+      - if the inbound IS a genuine Telegram reply to one of OUR outbound
+        messages that is itself linked to an OPEN ask
+        (operator_asks.outbound_msg_id -> operator_messages.tg_message_id):
+        that ask auto-closes (closed_reason='operator_replied op#<new id>')
+        AND a NEW row opens for the reply (source_msg_id = this message).
+      - otherwise -> just the NEW operator_asks row opens for this message,
+        so it joins the ledger like everything else the operator asks.
+
+    Returns the id of the NEW row (opened either way), or None if this
+    message isn't on a monitored surface (nothing tracked). Not called for
+    direction='outbound' — that direction's rows are captured via
+    outbound_msg_id at open-ask time (scripts/asks_open.py), never as a NEW
+    ask themselves.
     """
     if direction != "inbound":
         return None
@@ -257,23 +264,29 @@ def maybe_track_ask(op_msg_id: int, direction: str, channel: str, tag,
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
+        closed_id = None
         if reply_to_tg_message_id is not None:
             cur.execute(
-                "UPDATE operator_asks SET closed_at=now(), closed_reason='operator_replied' "
-                "WHERE closed_at IS NULL AND outbound_msg_id IN "
-                "(SELECT id FROM operator_messages WHERE tg_message_id=%s) "
-                "RETURNING id",
+                "SELECT id FROM operator_asks WHERE closed_at IS NULL AND outbound_msg_id IN "
+                "(SELECT id FROM operator_messages WHERE tg_message_id=%s)",
                 (reply_to_tg_message_id,),
             )
             row = cur.fetchone()
             if row is not None:
-                conn.commit()
-                return row[0]
+                closed_id = row[0]
+
         cur.execute(
             "INSERT INTO operator_asks (ask, source_msg_id) VALUES (%s,%s) RETURNING id",
             (text, op_msg_id),
         )
         rid = cur.fetchone()[0]
+
+        if closed_id is not None:
+            cur.execute(
+                "UPDATE operator_asks SET closed_at=now(), closed_reason=%s WHERE id=%s",
+                (f"operator_replied op#{rid}", closed_id),
+            )
+
         conn.commit()
         return rid
 

@@ -4,6 +4,7 @@ _already_sent_today/_mark_sent are a trivial date-stamp dedup. Both are tested
 with no DB/network."""
 import importlib
 import json
+from types import SimpleNamespace
 
 add = importlib.import_module("scripts.asks_daily_digest")
 
@@ -130,3 +131,24 @@ def test_main_no_dsn_returns_2(monkeypatch, tmp_path):
     monkeypatch.setattr(add, "_dsn", lambda: None)
     rc = add.main(["--force"])
     assert rc == 2
+
+
+def test_main_sends_via_nazim_send_not_tg_send(monkeypatch, tmp_path):
+    """op#22669 / orch-console bus #43972: this launchd job is Mini/console
+    hosted and the asks ledger is Nazim's own thread, not the hub's — sending
+    via tg_send.sh fail-closes for the console body (ORCH-TOPOLOGY-001) and
+    would silently never reach the operator."""
+    monkeypatch.setattr(add, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(add, "_dsn", lambda: "postgresql://unused")
+    monkeypatch.setattr(add.psycopg, "connect", lambda *a, **k: _FakeConn())
+    captured = {}
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(add.subprocess, "run", fake_run)
+    rc = add.main(["--force"])
+    assert rc == 0
+    assert captured["cmd"][:2] == ["bash", str(add.ORCH / "scripts" / "nazim_send.sh")]
+    assert "tg_send.sh" not in " ".join(captured["cmd"])

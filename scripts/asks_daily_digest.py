@@ -8,9 +8,11 @@ Deliberately SIMPLE — this is NOT priority_sla_watchdog's dedup/backoff/
 lease-gating machinery. It sends AT MOST ONE digest per UTC calendar day (a
 persisted date-stamp in $ORCH/logs/asks_daily_digest_state.json is the only
 dedup), so a launchd misfire or manual re-run can never double-send by
-construction. Sends via scripts/tg_send.sh — the hub's own outbound path,
-which already carries the ORCH-TOPOLOGY-001 pen-(iv) gate (fail-closed for the
-console body, fail-safe for the hub) — so this script needs no gate of its own.
+construction. Sends via scripts/nazim_send.sh (orch-console bus #43972, PR
+#180 change 2) — this launchd job is Mini/console-hosted and the asks ledger
+(op#22669) is Nazim's own thread, not the hub's. scripts/tg_send.sh fail-closes
+for the console body under ORCH-TOPOLOGY-001 (orch_lease.py), so sending via it
+from here would silently fail every single day and never reach the operator.
 
 Scheduled via launchd/dev.wingmen.asks-daily-digest.plist at 09:00 Abu Dhabi
 time (UTC+4) — see that file's comment for the UTC-hour conversion. Landing
@@ -121,9 +123,9 @@ def main(argv=None) -> int:
         print(digest)
         return 0
 
-    result = subprocess.run(["bash", str(ORCH / "scripts" / "tg_send.sh"), digest])
+    result = subprocess.run(["bash", str(ORCH / "scripts" / "nazim_send.sh"), digest])
     if result.returncode != 0:
-        print("asks_daily_digest: tg_send.sh failed — not stamping (retry next run)", file=sys.stderr)
+        print("asks_daily_digest: nazim_send.sh failed — not stamping (retry next run)", file=sys.stderr)
         return 1
     _mark_sent(today)
     print(f"asks_daily_digest: sent ({len(rows)} open asks)")
