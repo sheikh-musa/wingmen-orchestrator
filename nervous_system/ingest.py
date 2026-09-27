@@ -365,6 +365,86 @@ def load_channels(conn) -> dict[str, Channel]:
         return {c.key: c for c in (Channel(r) for r in cur.fetchall())}
 
 
+# ── Pinned-channel drift (op#22669 item 3, orch-console bus #43933) ───────────
+#
+# tests/migrations/test_ingest_channels_enabled_false.py only proves the
+# invariant ("a channel pinned via INGEST_CHANNELS ships enabled=false") at
+# migration-authoring time — it parses migrations/*.sql and boot script env,
+# never the live row. A manual UPDATE, a future migration flipping it back, or
+# replication skew can still drift bot_channels.enabled=true under a pinned
+# key AFTER deploy, which is the exact precondition for the dual-poller 409
+# class this host and the hub fighting one bot token (bus #43775/#43833,
+# channel 'oeh', fixed in PR #178). This is the runtime backstop for that.
+
+PAGE_FROM_AGENT = "ingest-watchdog"   # mirrors priority_sla_watchdog.py's 'sla-watchdog'
+PAGE_TO_AGENT = "orch-console"
+
+
+def pinned_keys() -> list[str]:
+    override = os.environ.get("INGEST_CHANNELS", "").strip()
+    return [k.strip() for k in override.split(",") if k.strip()]
+
+
+def drifted_pinned_channels(conn, keys: list[str]) -> list[str]:
+    """Pinned channel_keys that are LIVE enabled=true right now. Empty on the
+    hub (no INGEST_CHANNELS pin — it is SUPPOSED to poll WHERE enabled)."""
+    if not keys:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT channel_key FROM bot_channels WHERE channel_key = ANY(%s) AND enabled",
+            (keys,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def _page_pinned_drift_once(conn, key: str, host: str) -> None:
+    """Page ONCE per (channel, host) — durable dedup via the bus itself (a
+    marker substring in `body`), not in-memory state, so a daemon restart
+    never re-pages an already-reported drift. Page-once-EVER, same shape as
+    priority_sla_watchdog.py's already_paged_on_bus dedup: this is a rare,
+    should-never-happen invariant break, not a recurring metric to re-alert
+    on a timer — clearing it is an explicit human/DB action either way.
+
+    The dedup lookup stays a raw SELECT (read-only), but the actual INSERT
+    goes through scripts/bus_send.send() — CLAUDE.md forbids a hand-written
+    `INSERT INTO agent_messages` (bus #43651: a hand-rolled insert once
+    omitted `priority` and silently landed below the hub's wake floor)."""
+    marker = f"PINNED-CHANNEL-DRIFT:{key}:{host}"
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM agent_messages WHERE body LIKE %s LIMIT 1", (f"{marker}%",))
+        if cur.fetchone():
+            return
+    from scripts import bus_send
+    bus_send.send(
+        from_agent=PAGE_FROM_AGENT, to=PAGE_TO_AGENT, mtype="blocker",
+        subject=f"pinned channel '{key}' enabled=true LIVE on {host}",
+        body=(f"{marker}: bot_channels.enabled=true for a channel pinned via "
+              f"INGEST_CHANNELS on {host} — dual-poller 409 risk against the hub "
+              f"(bus #43775/#43833 precedent, channel 'oeh'). Fix: "
+              f"UPDATE bot_channels SET enabled=false WHERE channel_key='{key}'. "
+              f"Page-once-ever for this channel+host; won't repeat unless this row is removed."),
+        priority="P1", req=True, dsn=_dsn(),
+    )
+
+
+def check_pinned_channels_not_enabled(conn, host: str | None = None) -> list[str]:
+    """Loud log + page-once for every pinned channel currently enabled=true
+    live. Returns the drifted keys (empty list = clean). Called once per
+    CONFIG_REFRESH cycle from main() — cheap (one indexed lookup on a handful
+    of pinned keys) and self-heals its own log noise once the row is fixed."""
+    host = host or socket.gethostname()
+    drifted = drifted_pinned_channels(conn, pinned_keys())
+    for key in drifted:
+        _log_line(f"WATCHDOG: pinned channel '{key}' is enabled=true LIVE on {host} "
+                   f"(INGEST_CHANNELS pins it here) — dual-poller 409 risk. Fix: "
+                   f"UPDATE bot_channels SET enabled=false WHERE channel_key='{key}'")
+        try:
+            _page_pinned_drift_once(conn, key, host)
+        except Exception as e:
+            _log_line(f"WATCHDOG: pinned-channel-drift page for '{key}' failed ({type(e).__name__}: {e})")
+    return drifted
+
+
 # ── Gate (deny-by-default, pure function — unit-tested) ───────────────────────
 
 def gate_allows(ch: Channel, chat_id: int, username: str | None) -> bool:
@@ -907,6 +987,20 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
             await asyncio.sleep(ERROR_BACKOFF)
 
 
+def _run_pinned_channel_drift_check() -> None:
+    """Isolated from load_channels' try/except on purpose: the drift check is
+    a side observation, never load-bearing for ingest itself, and must never
+    cost the main() loop an ERROR_BACKOFF cycle (or worse, a `continue` that
+    skips starting/refreshing channel tasks) if IT fails for any reason (e.g.
+    a transient bus_send DB hiccup unrelated to bot_channels). Swallows and
+    logs everything — ingest keeps running regardless."""
+    try:
+        with psycopg.connect(_dsn()) as conn:
+            check_pinned_channels_not_enabled(conn)
+    except Exception as e:
+        _log_line(f"WATCHDOG: pinned-channel-drift check failed ({type(e).__name__}: {e}) — ingest continues")
+
+
 async def main():
     tasks: dict[str, asyncio.Task] = {}
     channels: dict[str, Channel] = {}
@@ -919,6 +1013,7 @@ async def main():
             _log_line(f"WATCHDOG: cannot read bot_channels ({type(e).__name__}) — retrying")
             await asyncio.sleep(ERROR_BACKOFF)
             continue
+        _run_pinned_channel_drift_check()
         # carry live offsets forward; start/stop tasks to match config
         for k, ch in fresh.items():
             if k in channels and channels[k].poll_offset is not None and (
