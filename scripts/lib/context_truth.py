@@ -93,6 +93,23 @@ def _pct_from_tokens(tokens, window: int) -> Optional[int]:
     return int(round(tokens / window * 100))
 
 
+def _gauge_misuse(gauge_tokens) -> Optional[ContextTruth]:
+    """A mis-called gauge (bus #44344): gauge_tokens is an INT token count, not an agent/lane
+    name. Silently treating a name string as 'bad token data' produced a plausible
+    'UNKNOWN — unreadable gauge — PAGE this lane' verdict that read as a real gauge fault and
+    misled a reviewer. Return a DISTINCT unknown whose reason names the MISUSE and does NOT
+    recommend paging — a caller error is not a gauge reading. (Graceful, not a crash: garbage
+    input must never break a sweep — test_garbage_types_do_not_crash_or_pass_as_a_reading.)"""
+    if gauge_tokens is not None and not _is_num(gauge_tokens):
+        return ContextTruth(
+            None, None, None, False, None,
+            f"MISUSE — gauge_tokens must be an int token count or None, got "
+            f"{type(gauge_tokens).__name__} {gauge_tokens!r}; this is a caller error, not a "
+            f"gauge reading (do NOT page on it). For a by-agent/lane lookup use "
+            f"lane_fire_reading_for_agent(<identity>).")
+    return None
+
+
 def resolve(
     pane_pct=None,
     pane_hint_k=None,
@@ -116,6 +133,9 @@ def resolve(
       3. a FRESH gauge — the only signal that sees into the pane's blind band.
       4. nothing readable -> UNKNOWN. Never green.
     """
+    _mis = _gauge_misuse(gauge_tokens)
+    if _mis is not None:
+        return _mis
     gpct = _pct_from_tokens(gauge_tokens, window)
     gauge_fresh = (
         gpct is not None
@@ -198,6 +218,9 @@ def lane_fire_reading(
     (staleness cutoff => UNKNOWN, not a frozen-low "green"); the pane is blind at ~94%
     (which is exactly why the gauge, not the pane, decides here).
     """
+    _mis = _gauge_misuse(gauge_tokens)
+    if _mis is not None:
+        return _mis
     gpct = _pct_from_tokens(gauge_tokens, window)
     gauge_fresh = (
         gpct is not None
@@ -238,3 +261,52 @@ def _is_num(v) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _fetch_gauge_from_db(identity: str):
+    """(latest_context_tokens, age_s) for the freshest cc_session_costs row of `identity`,
+    resolving a lane/instance name → the base cc_identity via agent_status. (None, None) if
+    none found. Lazy DB import so the pure readers above stay dependency-free."""
+    import os
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    if not dsn:
+        return (None, None)
+    try:
+        import psycopg2 as _pg
+    except ImportError:  # pragma: no cover - env-dependent
+        import psycopg as _pg  # type: ignore
+    conn = _pg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            # a lane/instance name (e.g. 'cosem-port', 'cc-cosem-platform-1') → the base
+            # cc_identity that cc_session_costs is keyed on (e.g. 'cc-cosem-platform').
+            cur.execute(
+                "SELECT COALESCE(base_agent_id, agent_id) FROM agent_status "
+                "WHERE agent_id=%s OR base_agent_id=%s OR tmux_session=%s LIMIT 1",
+                (identity, identity, identity))
+            row = cur.fetchone()
+            ident = row[0] if row else identity
+            cur.execute(
+                "SELECT latest_context_tokens, "
+                "       extract(epoch FROM (now()-COALESCE(ended_at, created_at)))::int "
+                "FROM cc_session_costs WHERE cc_identity=%s AND latest_context_tokens IS NOT NULL "
+                "ORDER BY COALESCE(ended_at, created_at) DESC LIMIT 1",
+                (ident,))
+            r = cur.fetchone()
+            return (int(r[0]), int(r[1])) if r else (None, None)
+    finally:
+        conn.close()
+
+
+def lane_fire_reading_for_agent(identity, *, window: int = DEFAULT_WINDOW,
+                                max_gauge_age_s: int = DEFAULT_MAX_GAUGE_AGE_S,
+                                _fetch=None) -> ContextTruth:
+    """Canonical fire reading for a LANE/AGENT by name — the by-identity call reviewers reach
+    for (bus #44349), so nobody passes a name where lane_fire_reading() wants an int token
+    count. Fetches the freshest cc_session_costs gauge + age (resolving a lane name to its base
+    agent), then defers to lane_fire_reading(). `_fetch(identity) -> (tokens, age_s)` is
+    injectable for tests; the default reads the substrate."""
+    fetch = _fetch or _fetch_gauge_from_db
+    tokens, age_s = fetch(identity)
+    return lane_fire_reading(gauge_tokens=tokens, gauge_age_s=age_s,
+                             window=window, max_gauge_age_s=max_gauge_age_s)
