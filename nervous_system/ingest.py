@@ -52,6 +52,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from nervous_system import triage  # PASSIVE CoS triage annotation (read-only; no routing)
+from nervous_system import operator_log  # op#22669 asks-ledger reply-match (maybe_track_ask)
 from scripts.lib import fire_window  # quiesce keystrokes during a recycle's fire window
 from scripts.lib import pane_busy  # footer-scoped busy check (one implementation)
 
@@ -788,6 +789,23 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         except Exception:
             pass
         return True
+
+    # 3b. ASKS LEDGER (op#22669): only for a channel/tag this ledger actually
+    # watches (nervous_system.operator_log._is_operator_ask_surface — hub's
+    # 'orch-channel', Nazim's 'nazim-console'; a no-op for every other channel
+    # this daemon polls, incl. client channels). A genuine Telegram reply to one
+    # of OUR outbound messages auto-closes the linked ask instead of opening a
+    # new untracked one. Best-effort: never let a tracking hiccup block routing.
+    try:
+        rep = msg.get("reply_to_message") or {}
+        reply_to_tg_message_id = rep.get("message_id")
+        operator_log.maybe_track_ask(
+            op_msg_id, "inbound", "telegram", ch.channel_tag, content,
+            from_user_id=from_user_id, reply_to_tg_message_id=reply_to_tg_message_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        _log_line(f"{ch.key}: asks-ledger tracking raised on update {upd_id} "
+                  f"({type(e).__name__}: {e}) — non-fatal")
 
     # 4. ROUTE (transport only — A2) with busy-aware nudge policy (CAI-RESP-382).
     if ch.mode in ("agent-session", "log-and-route"):

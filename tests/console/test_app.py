@@ -1188,10 +1188,13 @@ _REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
 def test_build_asks_query_derives_every_status_live_in_sql():
-    """Status is COMPUTED in SQL from the linked bus row — never a stored column.
-    Assert the shipped query encodes ALL FIVE states, the exact needs_you
+    """Status is COMPUTED in SQL from the linked bus row — never a stored column
+    (waiting_on_musa is the one exception: it is a STRUCTURAL FACT recorded at
+    open time via scripts/asks_open.py, migration 072 — not derived from the bus
+    thread, which is exactly why it's allowed to outrank everything derived).
+    Assert the shipped query encodes ALL SIX states, the exact needs_you
     condition (a reply BACK to orch-console, requires_response, unanswered), the
-    open-only filter, and the needs_you-pinned ordering + live freshness ages."""
+    open-only filter, and the waiting_on_musa-pinned ordering + live freshness ages."""
     sql, params = db.build_asks_query()
     assert params == []
     low = " ".join(sql.lower().split())
@@ -1200,9 +1203,11 @@ def test_build_asks_query_derives_every_status_live_in_sql():
     assert "left join latest l on l.thread_id = a.thread_id" in low
     assert "from agent_messages" in low and "is_test is not true" in low
     assert "a.closed_at is null" in low            # only OPEN asks (delegate-reply ≠ done)
-    # all five live-derived states present:
-    for state in ("on_nazim", "needs_you", "delegate_done", "in_progress", "pending"):
+    # all six live-derived states present:
+    for state in ("waiting_on_musa", "on_nazim", "needs_you", "delegate_done", "in_progress", "pending"):
         assert "'" + state + "'" in low, f"missing derived state {state}"
+    # waiting_on_musa is the structural-fact top branch (op#22669, migration 072):
+    assert "a.waiting_on_operator" in low
     # the needs_you condition, verbatim shape (bounced back, unanswered):
     assert "l.from_agent <> 'orch-console'" in low
     assert "l.to_agent = 'orch-console'" in low
@@ -1213,9 +1218,11 @@ def test_build_asks_query_derives_every_status_live_in_sql():
     # freshness = age of REAL last bus movement (or the ask if undelegated):
     assert "coalesce(l.created_at, a.created_at)" in low
     assert "updated_age_s" in low and "asked_age_s" in low
-    # needs_you pinned to the very top of the order:
+    # waiting_on_musa pinned to the very top of the order, needs_you second:
     order = low.split("order by", 1)[1]
+    assert order.index("a.waiting_on_operator") < order.index("then 0")
     assert "then 0" in order
+    assert "then 1" in order
 
 
 def test_fetch_asks_passthrough(monkeypatch):

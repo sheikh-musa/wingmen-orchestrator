@@ -27,6 +27,8 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.expanduser("~/wingmen/orchestrator"))
+
 ORCH_DIR = os.path.expanduser("~/wingmen/orchestrator")
 # Fresh-context events only. resume/compact retain context — don't re-inject.
 RECONSTITUTE_SOURCES = {"startup", "clear"}
@@ -96,6 +98,27 @@ def _expected_token_fp() -> str | None:
     return None
 
 
+def _open_asks_block() -> str:
+    """op#22669: surface standing operator_asks delegated to this body (console
+    = 'orch-console') at boot, so a fresh reconstitution can't lose sight of a
+    live ask the way it could lose an unread message before Option B existed.
+    Fail-safe — any error (DB down, migration 072 not yet applied, etc.) yields
+    an empty block, never a boot-blocking exception (see main()'s outer guard)."""
+    try:
+        from nervous_system import operator_log
+        rows = operator_log.open_asks_for("orch-console")
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = ["", "📋 **Open asks delegated to you (orch-console)** — op#22669 ledger:"]
+    for (rid, ask, delegated_to, created_at, waiting_on_operator, chase_by) in rows:
+        flag = " [WAITING ON MUSA]" if waiting_on_operator else ""
+        chase = f" (chase by {chase_by})" if chase_by else ""
+        lines.append(f"  - #{rid} ({created_at}){flag}{chase}: {ask}")
+    return "\n".join(lines) + "\n"
+
+
 def _newest_handoff() -> str | None:
     paths = glob.glob(_HANDOFF_GLOB)
     if not paths:
@@ -126,6 +149,8 @@ def main() -> int:
         else "compare against .env's CLAUDE_CODE_OAUTH_TOKEN"
     )
 
+    asks_block = _open_asks_block()
+
     handoff_path = _newest_handoff()
     if not handoff_path:
         # No handoff on disk — still nudge to reconcile inboxes rather than stay dark.
@@ -136,6 +161,7 @@ def main() -> int:
             "(to_agent='orch-console'); verify your OWN running OAuth token off your "
             f"live process ({fp_clause}); reply to the operator ONLY via "
             "`scripts/nazim_send.sh`."
+            + asks_block
         )
     else:
         try:
@@ -160,6 +186,7 @@ def main() -> int:
             "  3. Reply to the operator ONLY via `scripts/nazim_send.sh` (a terminal "
             "reply never reaches his phone).\n\n"
             f"--- newest handoff ({rel}) ---\n\n{handoff}"
+            + asks_block
         )
 
     print(json.dumps({

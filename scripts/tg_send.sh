@@ -25,6 +25,27 @@ if ! GATE=$("$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/lib/orch_lease.py" 
   exit 3
 fi
 
+# --ask/--chase-hours (op#22669): mark THIS outbound as a genuine ask of the
+# operator (opens its own operator_asks row via scripts/asks_open.py, linked
+# to this send so a reply auto-closes it). Scanned out of argv BEFORE the
+# positional TEXT/TAG so callers can still pass either shape. Not positional
+# themselves — no existing caller ever passes a literal "--ask" as message text.
+ASK=""
+CHASE_HOURS=""
+_POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ask) ASK="${2:-}"; shift 2 ;;
+    --chase-hours) CHASE_HOURS="${2:-}"; shift 2 ;;
+    *) _POSITIONAL+=("$1"); shift ;;
+  esac
+done
+if [ "${#_POSITIONAL[@]}" -gt 0 ]; then
+  set -- "${_POSITIONAL[@]}"
+else
+  set --
+fi
+
 TEXT="${1:-$(cat)}"
 TAG="${2:-}"   # optional @alias context this reply pertains to
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
@@ -43,13 +64,17 @@ fi
 # Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
 # token/chat/text passed via env, never argv — keeps the token out of `ps`.
 # TG_FAIL_OUT: helper writes the structured failure so we record WHY on the row (#40837).
+# TG_MSGID_OUT (op#22669): helper writes Telegram's own message_id for the sent
+# message, so a later reply_to_message can be matched back to this exact row.
 FAILOUT="$(mktemp)"
-if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" TG_FAIL_OUT="$FAILOUT" \
+MSGIDOUT="$(mktemp)"
+if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" TG_FAIL_OUT="$FAILOUT" TG_MSGID_OUT="$MSGIDOUT" \
      "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/_tg_chunked_send.py"; then
   sent=1
 else
   sent=0
 fi
+TGMSGID="$(cat "$MSGIDOUT" 2>/dev/null || true)"
 # durable log every reply (full text, once; best-effort — never fail on a log hiccup).
 # PYTHONPATH pins the package root so the `-m` import works regardless of CWD (a
 # bare `-m nervous_system.operator_log` only resolves when run from $ORCH_DIR;
@@ -59,6 +84,20 @@ fi
 # (25701aa) — which had been applied there and NOT here: the fix was host-split, each machine
 # carrying half of it, for the same two-host reason that has bitten five times today.
 REASON=""; [ "$sent" = 1 ] || REASON="$(cat "$FAILOUT" 2>/dev/null || true)"
-PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" ${TAG:+--tag "$TAG"} $([ "$sent" = 1 ] || echo --undelivered) ${REASON:+--reason "$REASON"} >/dev/null 2>&1 || true
-rm -f "$FAILOUT"
+# Capture the logged row's id (op#22669): needed to link a --ask open to THIS
+# outbound send. Previously discarded to /dev/null — now captured, stderr still
+# discarded so a redirect hiccup can't corrupt the id we read.
+OPLOGID="$(PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log outbound "$TEXT" --chat "$CHAT" ${TAG:+--tag "$TAG"} $([ "$sent" = 1 ] || echo --undelivered) ${REASON:+--reason "$REASON"} ${TGMSGID:+--tg-message-id "$TGMSGID"} 2>/dev/null)" || true
+rm -f "$FAILOUT" "$MSGIDOUT"
+
+# --ask (op#22669): this send is ITSELF a genuine ask of the operator — open its
+# own operator_asks row (waiting_on_operator=true), linked to the row just
+# logged so a genuine reply auto-closes it. Best-effort: an asks_open.py hiccup
+# must never fail the send itself (the message already reached the operator).
+if [ -n "$ASK" ] && [ "$sent" = 1 ]; then
+  "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/asks_open.py" "$ASK" \
+    ${CHASE_HOURS:+--chase-hours "$CHASE_HOURS"} \
+    ${OPLOGID:+--outbound-msg-id "$OPLOGID"} \
+    >/dev/null 2>&1 || true
+fi
 [ "$sent" = 1 ] && exit 0 || { echo "tg_send failed" >&2; exit 1; }

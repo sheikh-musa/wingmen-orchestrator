@@ -701,6 +701,14 @@ def build_asks_query() -> Tuple[str, list]:
     Status is DERIVED LIVE in SQL on every /api/fleet poll — NEVER stored — so it
     structurally cannot go stale (that staleness IS the bug operator_backlog had):
 
+      waiting_on_musa a.waiting_on_operator = true (migration 072)
+                                              -> a body/lane opened this ask
+                                                 SPECIFICALLY needing Musa's input
+                                                 (scripts/asks_open.py --ask). TOP
+                                                 priority: unlike the others below,
+                                                 this is a structural FACT recorded
+                                                 at open time, not derived from the
+                                                 thread, so it wins outright.
       on_nazim      thread_id IS NULL         -> captured, not yet delegated
       needs_you     newest thread msg is a reply BACK to orch-console,
                     requires_response AND responded_at IS NULL
@@ -712,10 +720,13 @@ def build_asks_query() -> Tuple[str, list]:
     `updated_age_s` is the age of the REAL last bus movement on the thread (or the
     ask itself if undelegated) — so a genuinely quiet thread looks quiet honestly,
     never hidden behind an edited timestamp. `asked_age_s` is the age of the ask.
+    `waiting_on_operator`/`chase_by` are passed through so a UI can render a chase
+    countdown (structural facts, not status — see migration 072's own comment).
 
-    Ordered needs_you FIRST (pinned red hero, mirrors the mockup), then on_nazim,
-    then freshest movement. Only OPEN asks (closed_at IS NULL): a delegate reply is
-    NOT done — only the operator's swipe-to-confirm (closed_at) closes an ask."""
+    Ordered waiting_on_musa FIRST, then needs_you (pinned red hero, mirrors the
+    mockup), then on_nazim, then freshest movement. Only OPEN asks
+    (closed_at IS NULL): a delegate reply is NOT done — only the operator's
+    swipe-to-confirm (closed_at) closes an ask."""
     sql = (
         "WITH latest AS ("
         "  SELECT DISTINCT ON (thread_id) "
@@ -725,8 +736,9 @@ def build_asks_query() -> Tuple[str, list]:
         "  WHERE thread_id IS NOT NULL AND is_test IS NOT TRUE "
         "  ORDER BY thread_id, id DESC"
         ") "
-        "SELECT a.id, a.ask, a.delegated_to, "
+        "SELECT a.id, a.ask, a.delegated_to, a.waiting_on_operator, a.chase_by, "
         "  CASE "
+        "    WHEN a.waiting_on_operator                              THEN 'waiting_on_musa' "
         "    WHEN a.thread_id IS NULL                                THEN 'on_nazim' "
         "    WHEN l.from_agent <> 'orch-console' "
         "         AND l.to_agent = 'orch-console' "
@@ -742,11 +754,12 @@ def build_asks_query() -> Tuple[str, list]:
         "WHERE a.closed_at IS NULL "
         "ORDER BY "
         "  CASE "
+        "    WHEN a.waiting_on_operator                              THEN 0 "
         "    WHEN l.from_agent <> 'orch-console' AND l.to_agent = 'orch-console' "
-        "         AND l.requires_response AND l.responded_at IS NULL THEN 0 "
-        "    WHEN a.thread_id IS NULL                                THEN 1 "
-        "    WHEN l.responded_at IS NOT NULL                         THEN 2 "
-        "    ELSE                                                         3 "
+        "         AND l.requires_response AND l.responded_at IS NULL THEN 1 "
+        "    WHEN a.thread_id IS NULL                                THEN 2 "
+        "    WHEN l.responded_at IS NOT NULL                         THEN 3 "
+        "    ELSE                                                         4 "
         "  END, "
         "  COALESCE(l.created_at, a.created_at) DESC "
         "LIMIT 100"

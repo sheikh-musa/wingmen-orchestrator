@@ -205,11 +205,106 @@ def _channel_scope_sql() -> str:
     return ""
 
 
+# --- Operator asks ledger (op#22669) ----------------------------------------
+# "If I ask 1000 things I expect you to track 1001." Every genuine operator
+# message on a MONITORED surface becomes a row in operator_asks, UNLESS it is
+# itself a reply that closes one out — never both for the same message.
+
+# The tag stamped on operator_messages for each monitored Telegram surface:
+#   'orch-channel'  — the hub's operator-orch bridge (migration 014 seed).
+#   'nazim-console' — the console body's own @nazim_cto_bot DM (ORCH-TOPOLOGY-001).
+# tmux-console is matched by `channel`, not `tag` (log_console_msg.sh never sets one).
+_ASK_TRACKED_TAGS = frozenset({"orch-channel", "nazim-console"})
+
+
+def _is_operator_ask_surface(channel: str, tag, from_user_id) -> bool:
+    """True only for a message that is genuinely the OPERATOR, on a surface this
+    ledger watches. tmux-console is operator-only by construction (only
+    scripts/log_console_msg.sh writes it, direct from a human at the keyboard —
+    no from_user_id to check). A Telegram surface additionally requires the
+    sender to BE Musa (MUSA_TELEGRAM_ID) — a bot channel's tag alone doesn't
+    prove who sent a given update."""
+    if channel == "tmux-console":
+        return True
+    if channel == "telegram" and tag in _ASK_TRACKED_TAGS:
+        musa = _musa_id()
+        return bool(musa) and from_user_id is not None and str(from_user_id) == musa
+    return False
+
+
+def maybe_track_ask(op_msg_id: int, direction: str, channel: str, tag,
+                     text: str, from_user_id=None,
+                     reply_to_tg_message_id: int | None = None) -> int | None:
+    """Called for every INBOUND message on a monitored operator surface. Exactly
+    one of two outcomes, never both:
+      - the inbound IS a genuine Telegram reply to one of OUR outbound messages
+        that is itself linked to an OPEN ask (operator_asks.outbound_msg_id ->
+        operator_messages.tg_message_id) -> that ask auto-closes
+        (closed_reason='operator_replied'). No new row.
+      - otherwise -> a NEW operator_asks row is opened for this message, so it
+        joins the ledger like everything else the operator asks.
+
+    Returns the id touched (closed or opened), or None if this message isn't on
+    a monitored surface (nothing tracked). Not called for direction='outbound'
+    — that direction's rows are captured via outbound_msg_id at open-ask time
+    (scripts/asks_open.py), never as a NEW ask themselves.
+    """
+    if direction != "inbound":
+        return None
+    if not _is_operator_ask_surface(channel, tag, from_user_id):
+        return None
+
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
+        if reply_to_tg_message_id is not None:
+            cur.execute(
+                "UPDATE operator_asks SET closed_at=now(), closed_reason='operator_replied' "
+                "WHERE closed_at IS NULL AND outbound_msg_id IN "
+                "(SELECT id FROM operator_messages WHERE tg_message_id=%s) "
+                "RETURNING id",
+                (reply_to_tg_message_id,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                conn.commit()
+                return row[0]
+        cur.execute(
+            "INSERT INTO operator_asks (ask, source_msg_id) VALUES (%s,%s) RETURNING id",
+            (text, op_msg_id),
+        )
+        rid = cur.fetchone()[0]
+        conn.commit()
+        return rid
+
+
+def open_asks_for(body: str) -> list:
+    """Open (closed_at IS NULL) operator_asks rows delegated to `body`,
+    oldest-first — the read a boot-hook / reconstitution step surfaces so a
+    fresh (re)launch doesn't lose sight of standing asks. `body` is an
+    agents.agent_id-shaped value ('orch-console', 'cc-orchestrator', ...), matched
+    against operator_asks.delegated_to. Returns (id, ask, delegated_to, created_at,
+    waiting_on_operator, chase_by)."""
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, ask, delegated_to, created_at, waiting_on_operator, chase_by "
+            "FROM operator_asks WHERE closed_at IS NULL AND delegated_to=%s "
+            "ORDER BY created_at ASC",
+            (body,),
+        )
+        return cur.fetchall()
+
+
 def log(direction: str, text: str, chat_id: str | None = None,
         tag: str | None = None, delivered: bool = True,
-        channel: str = "telegram", failure_reason=None) -> int:
+        channel: str = "telegram", failure_reason=None,
+        tg_message_id: int | None = None) -> int:
     # failure_reason (Nazim #40837): why a send failed, recorded on the row so a swallowed
     # 'nazim_send failed' becomes durable evidence. Stored under cos_triage.send_failure.
+    # tg_message_id (op#22669 asks-tracking): the Telegram Bot API result.message_id for
+    # an OUTBOUND send only — captured so a later inbound reply_to_message can be matched
+    # back to this exact row (reply-linked operator_asks auto-close).
     cos = None
     if failure_reason:
         payload = failure_reason if isinstance(failure_reason, dict) else {"description": str(failure_reason)}
@@ -218,13 +313,21 @@ def log(direction: str, text: str, chat_id: str | None = None,
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
         cur.execute(
-            "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered, cos_triage) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING id",
-            (direction, channel, chat_id, tag, text, delivered, cos),
+            "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered, cos_triage, tg_message_id) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING id",
+            (direction, channel, chat_id, tag, text, delivered, cos, tg_message_id),
         )
         rid = cur.fetchone()[0]
         conn.commit()
-        return rid
+    # Ledger every genuine operator ask (op#22669: "if I ask 1000 things I expect
+    # you to track 1001"). Best-effort — a tracking hiccup must never cost the
+    # primary durable log row above, which has already committed.
+    if direction == "inbound":
+        try:
+            maybe_track_ask(rid, direction, channel, tag, text)
+        except Exception:
+            pass
+    return rid
 
 
 def attach_transcript(msg_id: int, transcript: str) -> bool:
@@ -278,6 +381,11 @@ def recent(limit: int = 20) -> list:
 # handled_at=NULL; cc-orchestrator reconciles by reading unprocessed() each turn
 # / on the autonomous wakeup, answers, then stamps via mark_handled_through().
 # At-least-once: a rare re-surfacing beats a silent loss (cai's ruling).
+# Same convention applies to open_asks_for(<body>) (op#22669): read it at the
+# same reconciliation points (turn start / autonomous wakeup), not just at boot —
+# the SessionStart hook (scripts/session_start_reconstitute.py) only fires on a
+# FRESH context (startup/clear), so a long-lived resumed session must re-check
+# open_asks_for() itself the same way it already re-checks unprocessed().
 
 def unprocessed(limit: int = 20) -> list:
     """Inbound operator messages not yet marked handled, oldest-first. The
@@ -344,6 +452,9 @@ def main() -> int:
     ap.add_argument("--reason", default=None,
                     help="send-failure reason (JSON from _tg_chunked_send $TG_FAIL_OUT, or "
                          "plain text); stored under cos_triage.send_failure (Nazim #40837)")
+    ap.add_argument("--tg-message-id", type=int, default=None,
+                    help="Telegram Bot API result.message_id for an OUTBOUND send "
+                         "(op#22669 asks-tracking reply-match; ignored for inbound)")
     a = ap.parse_args()
     reason = a.reason
     if reason:
@@ -352,7 +463,7 @@ def main() -> int:
         except (ValueError, TypeError):
             pass                                  # fall back to plain text -> {description: ...}
     print(log(a.direction, a.text, a.chat, a.tag, not a.undelivered, a.channel,
-              failure_reason=reason))
+              failure_reason=reason, tg_message_id=a.tg_message_id))
     return 0
 
 
