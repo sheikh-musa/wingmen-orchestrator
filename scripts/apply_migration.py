@@ -87,15 +87,37 @@ up on the fleet bus, NOT necessarily the target --dsn — see --gate-dsn)
 must be:
   - message_type = 'decision'
   - from_agent an allowlisted gate owner for THIS silo (GATE_OWNERS below)
-  - created_at AFTER the migration file's on-disk mtime (the decision
-    post-dates this exact edit of the file — a stale mtime from a fresh
-    clone/checkout only makes this check STRICTER, never looser, so it
-    fails safe)
+  - created_at within GATE_MAX_AGE_DAYS of now (staleness floor, NOT a
+    file-mtime comparison — orch-console bus #43974: the normal flow is
+    gate-on-the-bus, THEN `git pull` on the target host, THEN apply, and a
+    pull/checkout resets the file's mtime to "now", which would make even a
+    same-day gate look like it predates the file it authorizes and get
+    refused. An absolute age floor on the gate row itself has no such
+    false-positive.)
   - body contains the file's sha256 prefix (first 12 hex chars) — ties the
     authorization to this exact content, not just the filename
 Any failure refuses loudly before the target DB is ever touched. The gate
 row's id is recorded in migration_ledger.note. --dry-run and any silo NOT
 in PRODUCTION_SILOS (e.g. a test harness's throwaway DSN) stay ungated.
+
+Known gaps (documented per orch-console bus #43974, filed as P2 follow-ups —
+NOT blockers for this change):
+  a. Forgeability: agent_messages.from_agent is not authenticated
+     (posted_by_identity is 'postgres' for every row; from_agent_verified is
+     NULL). Any body holding gate_dsn's credentials can write a row "from
+     orch-console". This stops a MISREADING fork (the op#22669 failure mode),
+     not a deliberate forger. Follow-up: gate rows carry an HMAC over
+     (gate id, sha12, silo) with a vault key only the gate owners can read,
+     and check_gate() verifies it.
+  b. Coverage: not every repo's production applies go through this tool —
+     e.g. the cosem-platform lanes apply with `psql -f` directly, so applies
+     against ywrpttpxwfcoodovxhsr (see PRODUCTION_SILOS below — this is the
+     REAL cosem-platform production store, not demo/dev) can bypass this gate
+     entirely even though its migration files already carry the required
+     `-- ledger: silo=` headers. Follow-up: route every repo's production
+     applies through apply_migration.py and make that the documented only
+     path (mirrors the "one generic migration applier" goal this module
+     itself was built for, op#19103).
 """
 from __future__ import annotations
 
@@ -147,7 +169,11 @@ PRODUCTION_SILOS = frozenset({
     "ceayjeamtmcyzzvqflus",  # ihsanos multi-tenant DB
     "goumlynecruxrlmzlntp",  # irsyad silo (goumlyne)
     "brrgastulcffamlbggyu",  # wingmen-personal
-    "ywrpttpxwfcoodovxhsr",  # cosem-platform demo/dev
+    "ywrpttpxwfcoodovxhsr",  # cosem-platform PRODUCTION store — holds the REAL
+                             # ADCDA org 1478c9b2 gov-PII (CAI-RESP-1340), NOT
+                             # demo/dev data (a label calling it dev is exactly
+                             # how someone relaxes this gate later — orch-console
+                             # bus #43974)
 })
 
 # Which bus identities may author a --gate decision row, per silo. Every known
@@ -161,6 +187,7 @@ _DEFAULT_GATE_OWNERS = frozenset({"orch-console", "cai"})
 GATE_OWNERS: dict[str, frozenset[str]] = {silo: _DEFAULT_GATE_OWNERS for silo in PRODUCTION_SILOS}
 
 _GATE_SHA_PREFIX_LEN = 12
+GATE_MAX_AGE_DAYS = 14  # staleness floor on the gate row itself (see module docstring)
 
 
 class Refuse(Exception):
@@ -435,11 +462,11 @@ def check_gate(gate_dsn: str, gate_id: int, *, silo: str, path: Path, sha: str) 
             f"silo {silo!r} ({sorted(owners)})."
         )
 
-    file_mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    if created_at <= file_mtime:
+    age = datetime.now(timezone.utc) - created_at
+    if age.days > GATE_MAX_AGE_DAYS:
         raise Refuse(
-            f"--gate {gate_id} (created_at={created_at}) does not post-date {path.name}'s last "
-            f"edit ({file_mtime}) — the decision must come AFTER the file it authorizes."
+            f"--gate {gate_id} (created_at={created_at}) is {age.days}d old, over the "
+            f"{GATE_MAX_AGE_DAYS}d staleness floor — get a fresh decision for {path.name}."
         )
 
     sha_prefix = sha[:_GATE_SHA_PREFIX_LEN]

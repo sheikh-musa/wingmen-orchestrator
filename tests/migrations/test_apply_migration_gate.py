@@ -176,13 +176,34 @@ def test_gate_from_cai_is_allowed(gated_db, tmp_path):
     assert result["status"] == "applied"
 
 
-def test_gate_predating_file_mtime_refuses(gated_db, tmp_path):
+def test_gate_older_than_max_age_refuses(gated_db, tmp_path):
+    """Staleness floor is on the GATE ROW's own age, not a file-mtime
+    comparison (orch-console bus #43974: a git pull resets mtime to "now",
+    which would make even a same-day gate look like it predates the file --
+    the false-positive that check would have hit on the real 072 apply)."""
     f = _write(tmp_path, "001_a.sql", "create table a (id int);")
     sha = am.file_sha256(f)
-    stale = datetime.now(timezone.utc) - timedelta(days=1)
+    stale = datetime.now(timezone.utc) - timedelta(days=am.GATE_MAX_AGE_DAYS + 1)
     gate_id = _insert_gate_row(gated_db, body=sha[:12], created_at=stale)
-    with pytest.raises(am.Refuse, match="does not post-date"):
+    with pytest.raises(am.Refuse, match="staleness floor"):
         am.apply_migration(gated_db, f, silo=PROD_SILO, gate=gate_id, gate_dsn=gated_db)
+
+
+def test_gate_within_max_age_is_allowed_even_if_file_is_newer(gated_db, tmp_path):
+    """The exact false-positive #43974 called out: the file is written (mtime
+    'now') AFTER a still-valid gate row exists -- e.g. a fresh git pull/checkout
+    resetting mtimes post-gate. Must NOT refuse."""
+    sha_source = tmp_path / "sha_source.sql"
+    sha_source.write_text(f"-- ledger: silo={PROD_SILO}\ncreate table a (id int);\n")
+    sha = am.file_sha256(sha_source)
+    gate_id = _insert_gate_row(gated_db, body=sha[:12],
+                                created_at=datetime.now(timezone.utc) - timedelta(days=1))
+    # Now (re)write the actual target file with identical content, well AFTER
+    # the gate row's created_at -- simulates the pull-after-gate ordering.
+    f = _write(tmp_path, "001_a.sql", "create table a (id int);")
+    assert am.file_sha256(f) == sha
+    result = am.apply_migration(gated_db, f, silo=PROD_SILO, gate=gate_id, gate_dsn=gated_db)
+    assert result["status"] == "applied"
 
 
 def test_gate_body_missing_sha_prefix_refuses(gated_db, tmp_path):
@@ -194,9 +215,7 @@ def test_gate_body_missing_sha_prefix_refuses(gated_db, tmp_path):
 
 def test_gate_for_different_content_refuses(gated_db, tmp_path):
     """A gate authorizing one file's sha must not authorize a DIFFERENT file,
-    even to the same silo -- the sha-prefix check is content-specific. Both
-    files are written BEFORE the gate row so the mtime check passes and this
-    exercises the content check specifically."""
+    even to the same silo -- the sha-prefix check is content-specific."""
     f = _write(tmp_path, "001_a.sql", "create table a (id int);")
     other = _write(tmp_path, "999_other.sql", "create table other (id int);")
     other_sha = am.file_sha256(other)
