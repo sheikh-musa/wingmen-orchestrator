@@ -13,7 +13,12 @@ project_governance + project_governance_families) — it originally shipped
 bot_channels only, but bus #43719 (Sya getting the operator role), #43724
 (project_governance_families required for cc-oeh's work to resolve to project
 'oeh'), and #43775 (the OEH Telegram group went live at chat id -5585966657,
-so the channel ships enabled with that chat id wired) widened it before merge.
+so the channel ships with that chat id wired) widened it before merge. The
+channel ships with enabled=false, NOT true (bus #43833 correction, superseding
+#43775's original enabled=true): 'oeh' is pinned in the Mini's nazim-ingest
+INGEST_CHANNELS, which polls it regardless of `enabled` — enabled=true would
+also hand the same OEH_BOT_TOKEN to the gzb hub's unscoped `WHERE enabled`
+poll, the dual-poller 409 class angullia's row already avoids.
 Fixture schema mirrors test_070's approach, seeded with the pre-existing
 'angullia' rows this migration's priority-10 'oeh' rows must NOT disturb.
 
@@ -176,7 +181,7 @@ def oeh_channel_db(fresh_db):
     return fresh_db
 
 
-def test_072_bot_channel_live_group_enabled(oeh_channel_db):
+def test_072_bot_channel_live_group_wired_but_not_enabled(oeh_channel_db):
     with psycopg.connect(oeh_channel_db) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT token_env_key, mode, inject_target, inject_prefix, "
@@ -191,13 +196,17 @@ def test_072_bot_channel_live_group_enabled(oeh_channel_db):
         assert mode == "agent-session"
         assert inject_target == "oeh"
         assert "Sya" in inject_prefix
-        # bus #43775: the OEH group is live at this chat id and the channel ships enabled
+        # bus #43775: the OEH group is live at this chat id
         assert allowed_chat_ids == [-5585966657]
         assert group_routing["agent_phase"] == "supervised"
         assert group_routing["agent_reviewer"] == "cc-oeh"
         assert channel_tag == "oeh"
         assert log_target == "substrate"
-        assert enabled is True
+        # bus #43833: 'oeh' is pinned in the Mini's INGEST_CHANNELS, which polls
+        # it regardless of `enabled` -- enabled=true would ALSO hand the same
+        # bot token to the gzb hub's unscoped `WHERE enabled` poll (dual-poller
+        # 409). Supersedes the original #43775 enabled=true.
+        assert enabled is False
 
 
 def test_072_does_not_disturb_existing_angullia_row(oeh_channel_db):
