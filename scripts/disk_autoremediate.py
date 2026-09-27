@@ -170,7 +170,8 @@ def _reclaim_dir_cmd(size_dir, cmd):
         if dry_run:
             return before
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                           env=_augmented_env())
         except (subprocess.TimeoutExpired, OSError) as e:
             raise RuntimeError(f"{cmd[0]} failed: {e}") from e
         after = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
@@ -218,6 +219,18 @@ def _resolve_bin(name):
     return None
 
 
+def _augmented_env():
+    """os.environ with the known bin dirs PREPENDED to PATH. Resolving a tool to an
+    absolute path is not enough when the tool is a shebang script: /usr/local/bin/npm
+    starts with `#!/usr/bin/env node`, and that `env node` re-resolves node via the
+    CHILD's PATH — which under launchd is minimal, so it fails "node: No such file or
+    directory" (bus #44288). Handing the subprocess an augmented PATH lets the shebang
+    find node/its helpers even when we launched it by absolute path."""
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join(_BIN_DIRS) + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def build_reclaimers():
     """Ordered safest/highest-known-yield first. npm/brew reclaimers are added only
     when the tool resolves to an absolute path — a missing tool is SKIPPED LOUDLY
@@ -235,7 +248,8 @@ def build_reclaimers():
     if brew:
         brew_cache = None
         try:
-            r = subprocess.run([brew, "--cache"], capture_output=True, text=True, timeout=15)
+            r = subprocess.run([brew, "--cache"], capture_output=True, text=True, timeout=15,
+                               env=_augmented_env())
             brew_cache = r.stdout.strip() or None
         except (subprocess.TimeoutExpired, OSError):
             brew_cache = None

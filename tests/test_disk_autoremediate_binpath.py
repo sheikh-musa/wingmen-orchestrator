@@ -70,5 +70,34 @@ def test_build_reclaimers_uses_absolute_argv(monkeypatch):
     assert calls[-1][0] == "/opt/homebrew/bin/npm", calls[-1]
 
 
+def test_augmented_env_prepends_bin_dirs(monkeypatch):
+    # The subprocess env PATH must include the known bin dirs so a tool whose shebang
+    # re-resolves a helper (npm's `#!/usr/bin/env node`) finds it under a minimal PATH.
+    monkeypatch.setattr(da, "_BIN_DIRS", ["/usr/local/bin", "/opt/homebrew/bin"])
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = da._augmented_env()
+    parts = env["PATH"].split(os.pathsep)
+    assert "/usr/local/bin" in parts and "/opt/homebrew/bin" in parts
+    assert "/usr/bin" in parts and "/bin" in parts        # existing PATH preserved
+
+
+def test_reclaimer_subprocess_gets_augmented_path(monkeypatch):
+    # The npm reclaimer must RUN (not just build) under a minimal PATH: assert the
+    # env PATH handed to subprocess.run contains the tool's dir (bus #44288 — npm's
+    # shebang `env node` else fails with "node: No such file or directory").
+    monkeypatch.setattr(da, "_resolve_bin", lambda name: f"/usr/local/bin/{name}")
+    monkeypatch.setattr(da, "_dir_size", lambda p: 0)
+    captured = {}
+    def fake_run(cmd, **k):
+        captured["cmd"] = cmd
+        captured["env"] = k.get("env")
+        return type("R", (), {"stdout": "", "returncode": 0})()
+    monkeypatch.setattr(da.subprocess, "run", fake_run)
+    recs = {r["name"]: r for r in da.build_reclaimers()}
+    recs["npm-cache"]["apply"](dry_run=False)
+    assert captured["env"] is not None, "reclaimer must pass an explicit env"
+    assert "/usr/local/bin" in captured["env"]["PATH"].split(os.pathsep)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
