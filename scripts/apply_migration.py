@@ -112,6 +112,19 @@ Any failure refuses loudly before the target DB is ever touched. The gate
 row's id is recorded in migration_ledger.note. --dry-run and any silo NOT
 in PRODUCTION_SILOS (e.g. a test harness's throwaway DSN) stay ungated.
 
+--repo defaulting (bus #44358): a cosem-platform lane once applied a migration
+to ywrpttpxwfcoodovxhsr (its own production silo) without passing --repo, and
+this tool silently ledgered it under DEFAULT_REPO ('orchestrator') — a real
+mislabel, "fixed" by hand-running an UPDATE on migration_ledger that bypassed
+this tool entirely. Now: for any PRODUCTION_SILOS member other than the
+orchestrator substrate itself, --repo must be given explicitly, or be
+derivable from the migration file's own git checkout (its `origin` remote
+matched against REPOS.json — NOT the checkout directory's own basename, which
+is frequently an unrelated lane/worktree nickname; see derive_repo_from_path).
+Failing both, the apply refuses before touching the DSN. The resolved
+(repo, source) is always printed — on --status, --dry-run, and a real apply —
+so it is visible before anything is written. See resolve_repo().
+
 Known gaps (documented per orch-console bus #43974, filed as P2 follow-ups —
 NOT blockers for this change):
   a. Forgeability: agent_messages.from_agent is not authenticated
@@ -143,8 +156,10 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -153,7 +168,9 @@ import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = ROOT / "migrations"
+REPOS_JSON = ROOT / "REPOS.json"
 DEFAULT_REPO = "orchestrator"
+ORCHESTRATOR_SUBSTRATE_SILO = "tscuymavysscrvoberrr"  # the orchestrator substrate (the monolith)
 
 _LEDGER_HEADER_RE = re.compile(r"^--\s*ledger:\s*silo=(\S+)\s*$", re.MULTILINE)
 # BEGIN/COMMIT are stripped (we supply our own transaction). Any OTHER top-level
@@ -197,7 +214,7 @@ _SEQUENCE_MUTATION_RE = re.compile(
 # throwaway DSN) is not gated — there is nothing in the registry to protect,
 # and the ephemeral-PG17 migration tests must stay gate-free by construction.
 PRODUCTION_SILOS = frozenset({
-    "tscuymavysscrvoberrr",  # orchestrator substrate (the monolith)
+    ORCHESTRATOR_SUBSTRATE_SILO,
     "ceayjeamtmcyzzvqflus",  # ihsanos multi-tenant DB
     "goumlynecruxrlmzlntp",  # irsyad silo (goumlyne)
     "brrgastulcffamlbggyu",  # wingmen-personal
@@ -556,17 +573,104 @@ def check_gate(gate_dsn: str, gate_id: int, *, silo: str, path: Path, sha: str) 
     return {"id": row_id, "from_agent": from_agent, "created_at": created_at}
 
 
+def _normalize_git_remote(url: str) -> str:
+    url = url.strip()
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url.rstrip("/").lower()
+
+
+def _repo_registry() -> list[dict]:
+    try:
+        return json.loads(REPOS_JSON.read_text()).get("repos", [])
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def derive_repo_from_path(path: Path) -> str | None:
+    """Walk up from `path` to the enclosing git checkout, read its `origin`
+    remote, and match it against REPOS.json's `github` field to recover the
+    CANONICAL repo name — never the checkout directory's own basename, which
+    is frequently an unrelated lane/worktree nickname. Confirmed live (bus
+    #44358's root cause file): it sat under a `cosem-port-lane` WORKTREE
+    whose `origin` is github.com/sheikh-musa/cosem-platform — a basename
+    guess would have ledgered `repo='cosem-port-lane'`, a name that doesn't
+    even exist in REPOS.json, which is exactly as wrong as the
+    repo='orchestrator' default this function replaces. Returns None (never
+    guesses) if there's no enclosing checkout, no origin remote, or no
+    REPOS.json entry matches it — the caller refuses rather than falling
+    back to a heuristic name.
+    """
+    try:
+        here = path.resolve().parent
+    except OSError:
+        return None
+    for candidate in (here, *here.parents):
+        if not (candidate / ".git").exists():
+            continue
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(candidate), "remote", "get-url", "origin"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        origin = _normalize_git_remote(proc.stdout)
+        for entry in _repo_registry():
+            github = entry.get("github")
+            if github and _normalize_git_remote(github) == origin:
+                return entry.get("name")
+        return None
+    return None
+
+
+def resolve_repo(*, silo: str, repo: str | None, path: Path) -> tuple[str, str]:
+    """Returns (resolved_repo, source) where source is 'explicit', 'derived',
+    or 'default'. bus #44358: `--repo` silently defaulted to DEFAULT_REPO
+    ('orchestrator') even when --silo targeted a completely different repo's
+    production store — a cosem-platform migration applied to
+    ywrpttpxwfcoodovxhsr got ledgered under repo='orchestrator', and the fix
+    was a hand-run UPDATE on migration_ledger that bypassed this tool
+    entirely. Refuse rather than repeat that: for any PRODUCTION_SILOS
+    member OTHER than the orchestrator substrate itself, repo must be given
+    explicitly or derivable from the migration's own git checkout (see
+    derive_repo_from_path) — DEFAULT_REPO is never used by fallthrough for
+    those silos. Scoped to PRODUCTION_SILOS (mirrors the existing --gate
+    scoping immediately below) rather than every non-substrate silo, so the
+    ephemeral PG17 test harness's throwaway silo refs stay friction-free by
+    construction, same as they already are for --gate.
+    """
+    if repo is not None:
+        return repo, "explicit"
+    if silo == ORCHESTRATOR_SUBSTRATE_SILO or silo not in PRODUCTION_SILOS:
+        return DEFAULT_REPO, "default"
+    derived = derive_repo_from_path(path)
+    if derived:
+        return derived, "derived"
+    raise Refuse(
+        f"--silo {silo!r} is a production store other than the orchestrator substrate "
+        f"({ORCHESTRATOR_SUBSTRATE_SILO}) and no --repo was given — refusing to silently "
+        f"default repo={DEFAULT_REPO!r} (bus #44358: this exact default once mislabeled a "
+        f"cosem-platform migration's ledger row). Pass --repo <name> explicitly, or run "
+        f"this from within {path.name}'s own repo checkout so it can be derived from "
+        f"'git remote get-url origin' against REPOS.json."
+    )
+
+
 def apply_migration(
     dsn: str,
     path: Path,
     *,
     silo: str,
-    repo: str = DEFAULT_REPO,
+    repo: str | None = None,
     dry_run: bool = False,
     applied_by: str = "apply_migration.py",
     gate: int | None = None,
     gate_dsn: str | None = None,
 ) -> dict:
+    repo, repo_source = resolve_repo(silo=silo, repo=repo, path=path)
     sql_text = path.read_text()
     header_silo = parse_ledger_header(sql_text)
     check_residency(dsn, silo, header_silo)
@@ -592,7 +696,10 @@ def apply_migration(
         state = check_ledger_collision(cur, repo, path.name, silo, sha)
         if state == "already_applied":
             conn.rollback()
-            return {"status": "already_applied", "migration": path.name, "silo": silo, "sha256": sha}
+            return {
+                "status": "already_applied", "migration": path.name, "silo": silo,
+                "sha256": sha, "repo": repo, "repo_source": repo_source,
+            }
 
         cur.execute(body)
 
@@ -612,13 +719,14 @@ def apply_migration(
             conn.rollback()
             return {
                 "status": "dry_run_ok", "migration": path.name, "silo": silo,
-                "sha256": sha, "assertions": results,
+                "sha256": sha, "assertions": results, "repo": repo, "repo_source": repo_source,
             }
 
         conn.commit()
         return {
             "status": "applied", "migration": path.name, "silo": silo,
             "sha256": sha, "assertions": results, "note": note,
+            "repo": repo, "repo_source": repo_source,
         }
 
 
@@ -640,7 +748,16 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("migration", help="numeric prefix (NNN) or explicit path to a .sql file")
     p.add_argument("--silo", required=True, help="project ref this migration must target (residency guard)")
-    p.add_argument("--repo", default=DEFAULT_REPO)
+    p.add_argument(
+        "--repo", default=None,
+        help=(
+            f"repo name recorded in migration_ledger. Defaults to {DEFAULT_REPO!r} only when "
+            f"--silo is the orchestrator substrate ({ORCHESTRATOR_SUBSTRATE_SILO}); for any "
+            f"other PRODUCTION_SILOS member this must be given explicitly, or be derivable "
+            f"from the migration file's own git checkout (bus #44358) — refuses rather than "
+            f"silently defaulting to a different repo's name."
+        ),
+    )
     p.add_argument("--dsn", default=None, help="defaults to $DATABASE_URL")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--status", action="store_true")
@@ -664,7 +781,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         path = resolve_migration_path(args.migration)
         if args.status:
-            row = status(dsn, path, silo=args.silo, repo=args.repo)
+            repo, repo_source = resolve_repo(silo=args.silo, repo=args.repo, path=path)
+            print(f"  repo: {repo} ({repo_source})")
+            row = status(dsn, path, silo=args.silo, repo=repo)
             if row is None:
                 print(f"NOT LEDGERED: {path.name} in {args.silo}")
                 return 1
@@ -675,7 +794,10 @@ def main(argv: list[str] | None = None) -> int:
             dsn, path, silo=args.silo, repo=args.repo, dry_run=args.dry_run,
             gate=args.gate, gate_dsn=gate_dsn,
         )
-        print(f"✓ {result['status']}: {result['migration']} ({args.silo}, sha256 {result['sha256'][:12]}…)")
+        print(
+            f"✓ {result['status']}: {result['migration']} ({args.silo}, "
+            f"repo={result['repo']} [{result['repo_source']}], sha256 {result['sha256'][:12]}…)"
+        )
         if result.get("note"):
             print(f"  ledger note: {result['note']}")
         for a in result.get("assertions") or []:
