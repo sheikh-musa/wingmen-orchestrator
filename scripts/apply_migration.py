@@ -74,7 +74,19 @@ side refuses.
 
 --dry-run runs the migration body AND every `-- assert:` check inside a
 transaction, verifies both apply/pass cleanly, then ROLLS BACK (no ledger
-row written, nothing committed).
+row written, nothing committed) — EXCEPT for sequence object state.
+`setval()`/`ALTER SEQUENCE ... RESTART|SET` are never transactional in
+Postgres — ROLLBACK cannot undo them, no matter how correctly the
+surrounding transaction is wrapped. Found live (bus #44213/#44214): a
+--dry-run of migration 075 permanently resynced the substrate's
+operator_backlog_id_seq, with zero migration_ledger row for it — a
+"dry_run_ok" that was actually a real, unledgered change. A migration whose
+body (comments stripped) contains one of these is refused on --dry-run
+outright (same shape as the REVOKE/DROP-without-assert refusal below) —
+use a real --gate'd apply or a scratch/shadow DB instead. `nextval()` and
+ordinary inserts into an identity/serial column are NOT refused: those only
+ever advance a sequence forward and leave a harmless gap, which is normal,
+expected behavior for every serial/identity column in this fleet.
 --status only reads migration_ledger; touches nothing else.
 
 Gate enforcement (op#22669/op#22521 item 3, orch-console ruling bus #43869):
@@ -165,6 +177,19 @@ _ASSERT_KINDS = {"no_execute", "search_path", "dropped", "no_table_privilege"}
 # (CAI-RESP-1397 #5) — a silent no-op REVOKE/DROP is otherwise indistinguishable
 # from a real one.
 _REQUIRES_ASSERT_RE = re.compile(r"\bREVOKE\b|\bDROP\s+FUNCTION\b", re.IGNORECASE)
+
+# setval()/ALTER SEQUENCE ... RESTART|SET reposition a sequence's current
+# value directly -- the dangerous class (bus #44213/#44214): a --dry-run
+# containing one of these is NOT actually rolled back (see module docstring)
+# and can silently move a sequence BACKWARD, causing future duplicate-key
+# failures. `[^;]*` bounds the ALTER SEQUENCE scan to one statement (a
+# semicolon ends it) without needing a full statement splitter.
+# nextval() is deliberately NOT matched here -- it only ever advances a
+# sequence forward (a harmless gap), the same as any ordinary insert into an
+# identity/serial column, and is documented above instead of refused.
+_SEQUENCE_MUTATION_RE = re.compile(
+    r"\bsetval\s*\(|\bALTER\s+SEQUENCE\b[^;]*\b(?:RESTART|SET)\b", re.IGNORECASE
+)
 
 
 # docs/data-store-registry.md — every currently-provisioned production store
@@ -398,6 +423,51 @@ def strip_txn_control(sql_text: str) -> str:
     return "\n".join(kept)
 
 
+def strip_sql_comments(sql_text: str) -> str:
+    """Drop full-line `--` comments before scanning a migration body for a
+    dangerous statement pattern (_SEQUENCE_MUTATION_RE) -- a commented-out
+    `-- setval(...)` must not trigger the dry-run refusal below. Reuses the
+    same dollar-quote-span awareness as strip_txn_control so a `--` that is
+    only literal content inside a function body is left alone rather than
+    (wrongly) treated as a comment start. Not a general SQL comment
+    stripper -- e.g. a trailing `-- comment` after real SQL on the same line
+    is left in place, since this only needs to stop a WHOLE-LINE comment
+    from matching."""
+    spans = _dollar_quote_spans(sql_text)
+    kept = []
+    pos = 0
+    for ln in sql_text.splitlines(keepends=True):
+        raw = ln[:-1] if ln.endswith("\n") else ln
+        line_start, line_end = pos, pos + len(raw)
+        pos += len(ln)
+        if not _line_fully_inside_any_span(line_start, line_end, spans) and raw.lstrip().startswith("--"):
+            continue
+        kept.append(raw)
+    return "\n".join(kept)
+
+
+def check_dry_run_sequence_safety(body: str, dry_run: bool) -> None:
+    """Postgres sequence state is never transactional -- ROLLBACK cannot undo
+    a setval()/ALTER SEQUENCE ... RESTART|SET no matter how correctly the
+    surrounding transaction is wrapped (see module docstring; bus
+    #44213/#44214). Refusing this on --dry-run is the same shape as
+    check_required_assertions' REVOKE/DROP refusal: a "preview" that can
+    silently move a sequence backward under a "dry_run_ok" banner is exactly
+    the printed-safeguard-not-a-ran-safeguard defect class."""
+    if dry_run and _SEQUENCE_MUTATION_RE.search(strip_sql_comments(body)):
+        raise Refuse(
+            "this migration mutates sequence state directly (setval(...) or "
+            "ALTER SEQUENCE ... RESTART/SET) -- Postgres sequences are NOT "
+            "transactional, so --dry-run's ROLLBACK cannot undo this the way "
+            "it undoes ordinary DML/DDL (bus #44213/#44214). A 'dry_run_ok' "
+            "here would be a real, permanent, unledgered live change. Use a "
+            "real --gate'd apply instead, or test against a scratch/shadow "
+            "DB. (nextval()/plain inserts into an identity or serial column "
+            "are fine under --dry-run -- those only ever leave a harmless "
+            "gap.)"
+        )
+
+
 def check_residency(dsn: str, silo: str, header_silo: str) -> None:
     if header_silo != silo:
         raise Refuse(
@@ -504,6 +574,7 @@ def apply_migration(
     sha = file_sha256(path)
     body = strip_txn_control(sql_text)
     check_required_assertions(body, assertions)
+    check_dry_run_sequence_safety(body, dry_run)
 
     note = None
     if not dry_run and silo in PRODUCTION_SILOS:
