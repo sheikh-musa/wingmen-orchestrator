@@ -403,24 +403,28 @@ def _page_pinned_drift_once(conn, key: str, host: str) -> None:
     never re-pages an already-reported drift. Page-once-EVER, same shape as
     priority_sla_watchdog.py's already_paged_on_bus dedup: this is a rare,
     should-never-happen invariant break, not a recurring metric to re-alert
-    on a timer — clearing it is an explicit human/DB action either way."""
+    on a timer — clearing it is an explicit human/DB action either way.
+
+    The dedup lookup stays a raw SELECT (read-only), but the actual INSERT
+    goes through scripts/bus_send.send() — CLAUDE.md forbids a hand-written
+    `INSERT INTO agent_messages` (bus #43651: a hand-rolled insert once
+    omitted `priority` and silently landed below the hub's wake floor)."""
     marker = f"PINNED-CHANNEL-DRIFT:{key}:{host}"
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM agent_messages WHERE body LIKE %s LIMIT 1", (f"{marker}%",))
         if cur.fetchone():
             return
-        cur.execute(
-            "INSERT INTO agent_messages "
-            "(from_agent, to_agent, message_type, subject, body, priority, requires_response) "
-            "VALUES (%s, %s, 'blocker', %s, %s, 'P1', true)",
-            (PAGE_FROM_AGENT, PAGE_TO_AGENT,
-             f"pinned channel '{key}' enabled=true LIVE on {host}",
-             f"{marker}: bot_channels.enabled=true for a channel pinned via "
-             f"INGEST_CHANNELS on {host} — dual-poller 409 risk against the hub "
-             f"(bus #43775/#43833 precedent, channel 'oeh'). Fix: "
-             f"UPDATE bot_channels SET enabled=false WHERE channel_key='{key}'. "
-             f"Page-once-ever for this channel+host; won't repeat unless this row is removed."))
-    conn.commit()
+    from scripts import bus_send
+    bus_send.send(
+        from_agent=PAGE_FROM_AGENT, to=PAGE_TO_AGENT, mtype="blocker",
+        subject=f"pinned channel '{key}' enabled=true LIVE on {host}",
+        body=(f"{marker}: bot_channels.enabled=true for a channel pinned via "
+              f"INGEST_CHANNELS on {host} — dual-poller 409 risk against the hub "
+              f"(bus #43775/#43833 precedent, channel 'oeh'). Fix: "
+              f"UPDATE bot_channels SET enabled=false WHERE channel_key='{key}'. "
+              f"Page-once-ever for this channel+host; won't repeat unless this row is removed."),
+        priority="P1", req=True, dsn=_dsn(),
+    )
 
 
 def check_pinned_channels_not_enabled(conn, host: str | None = None) -> list[str]:
@@ -983,6 +987,20 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
             await asyncio.sleep(ERROR_BACKOFF)
 
 
+def _run_pinned_channel_drift_check() -> None:
+    """Isolated from load_channels' try/except on purpose: the drift check is
+    a side observation, never load-bearing for ingest itself, and must never
+    cost the main() loop an ERROR_BACKOFF cycle (or worse, a `continue` that
+    skips starting/refreshing channel tasks) if IT fails for any reason (e.g.
+    a transient bus_send DB hiccup unrelated to bot_channels). Swallows and
+    logs everything — ingest keeps running regardless."""
+    try:
+        with psycopg.connect(_dsn()) as conn:
+            check_pinned_channels_not_enabled(conn)
+    except Exception as e:
+        _log_line(f"WATCHDOG: pinned-channel-drift check failed ({type(e).__name__}: {e}) — ingest continues")
+
+
 async def main():
     tasks: dict[str, asyncio.Task] = {}
     channels: dict[str, Channel] = {}
@@ -991,11 +1009,11 @@ async def main():
         try:
             with psycopg.connect(_dsn()) as conn:
                 fresh = load_channels(conn)
-                check_pinned_channels_not_enabled(conn)
         except psycopg.Error as e:
             _log_line(f"WATCHDOG: cannot read bot_channels ({type(e).__name__}) — retrying")
             await asyncio.sleep(ERROR_BACKOFF)
             continue
+        _run_pinned_channel_drift_check()
         # carry live offsets forward; start/stop tasks to match config
         for k, ch in fresh.items():
             if k in channels and channels[k].poll_offset is not None and (

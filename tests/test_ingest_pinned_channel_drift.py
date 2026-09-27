@@ -19,7 +19,12 @@ from nervous_system import ingest
 
 
 @pytest.fixture
-def drift_dsn(pg_dsn):
+def drift_dsn(pg_dsn, monkeypatch):
+    # Paging goes through scripts/bus_send.send(), which opens its OWN
+    # connection via dsn=_dsn() -- pin INGEST_DSN to the ephemeral instance so
+    # it can never fall through to this shell's real DATABASE_URL (the live
+    # substrate) if that env var happens to be set.
+    monkeypatch.setenv("INGEST_DSN", pg_dsn)
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")
         cur.execute("CREATE SCHEMA public")
@@ -39,6 +44,7 @@ def drift_dsn(pg_dsn):
                  body text,
                  priority text,
                  requires_response boolean NOT NULL DEFAULT false,
+                 thread_id uuid,
                  created_at timestamptz NOT NULL DEFAULT now()
                )"""
         )
@@ -168,3 +174,27 @@ def test_check_no_pin_at_all_pages_nothing(drift_dsn, monkeypatch, capsys):
     with psycopg.connect(drift_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM agent_messages")
         assert cur.fetchone()[0] == 0
+
+
+# --------------------------------------------------------------------------------
+# _run_pinned_channel_drift_check(): the check must NEVER cost main()'s loop an
+# ERROR_BACKOFF cycle or a `continue` -- isolated from load_channels' own
+# try/except (orch-console bus #43985, PR #182 change 2).
+# --------------------------------------------------------------------------------
+
+def test_drift_check_wrapper_swallows_any_exception(drift_dsn, monkeypatch, capsys):
+    def _boom(conn, host=None):
+        raise RuntimeError("simulated bus_send hiccup")
+
+    monkeypatch.setattr(ingest, "check_pinned_channels_not_enabled", _boom)
+    ingest._run_pinned_channel_drift_check()   # must not raise
+    out = capsys.readouterr().out
+    assert "WATCHDOG" in out and "pinned-channel-drift check failed" in out and "ingest continues" in out
+
+
+def test_drift_check_wrapper_clean_run_is_silent(drift_dsn, monkeypatch, capsys):
+    # drift_dsn pins INGEST_DSN to the ephemeral instance -- _dsn() must never
+    # fall through to a real DATABASE_URL here.
+    monkeypatch.delenv("INGEST_CHANNELS", raising=False)
+    ingest._run_pinned_channel_drift_check()
+    assert "WATCHDOG" not in capsys.readouterr().out
