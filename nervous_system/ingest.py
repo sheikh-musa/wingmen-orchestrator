@@ -771,6 +771,22 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
     # 3. GATE — deny-by-default; disallowed stays logged-and-skipped.
     if chat_id is None or not gate_allows(ch, chat_id, username):
         _log_line(f"{ch.key}: update {upd_id} gated (chat {chat_id}) — logged, not routed")
+        # Stamp handled_at on the gated row: it is logged for AUDIT but needs NO
+        # operator action, so it must NOT count toward the per-channel reassure/
+        # drain unhandled-count NOR the hub's operator_log.unprocessed() queue.
+        # (2026-09-16: an unauthorized user's '/start' on operator-orch was counted
+        # by reassure_if_unhandled and fired a "📨 Got your message" ack into the
+        # OPERATOR's own chat — "i didnt message you". A gated message is handled=
+        # nothing-to-do.) Best-effort: a failed stamp never blocks the gate return.
+        try:
+            with conn.cursor() as _gcur:
+                _gcur.execute(
+                    "UPDATE operator_messages SET handled_at=now() "
+                    "WHERE id=%s AND handled_at IS NULL",
+                    (op_msg_id,))
+            conn.commit()
+        except Exception:
+            pass
         return True
 
     # 4. ROUTE (transport only — A2) with busy-aware nudge policy (CAI-RESP-382).
