@@ -1,0 +1,166 @@
+"""Tests for apply_migration.py's --dry-run sequence-mutation refusal
+(bus #44213/#44214).
+
+Incident: dry-running migration 075 (a single `setval(...)` to resync
+operator_backlog_id_seq) permanently changed the LIVE substrate's sequence
+value, with zero migration_ledger row for it -- a "dry_run_ok" that was
+actually a real, unledgered change. Root cause is a PostgreSQL semantic, not
+an apply_migration.py transaction-handling bug: sequence object state
+(setval()/nextval()) is never rolled back, no matter how correctly the
+surrounding transaction is wrapped. This closes the gap in code: a migration
+whose body (comments stripped) contains setval(...) or
+ALTER SEQUENCE ... RESTART/SET is refused outright on --dry-run, the same
+shape as the existing REVOKE/DROP-without-assert refusal
+(test_apply_migration_asserts.py). nextval()/plain identity-column inserts
+are deliberately NOT refused -- those only ever leave a harmless forward gap.
+
+Runs entirely against the ephemeral PG17 harness (tests/migrations/conftest.py).
+NEVER touches DATABASE_URL / any live silo.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import psycopg
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scripts"))
+import apply_migration as am  # noqa: E402
+
+SILO = "testsilo00000000000000"
+
+
+def _make_ledger_table(dsn: str) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            """CREATE TABLE migration_ledger (
+                 repo text NOT NULL,
+                 migration_name text NOT NULL,
+                 silo_ref text NOT NULL,
+                 sha256 text NOT NULL,
+                 applied_at timestamptz NOT NULL DEFAULT now(),
+                 applied_by text,
+                 note text,
+                 PRIMARY KEY (repo, migration_name, silo_ref)
+               )"""
+        )
+
+
+@pytest.fixture
+def ledger_db(fresh_db):
+    dsn = f"{fresh_db} application_name={SILO}"
+    _make_ledger_table(dsn)
+    return dsn
+
+
+def _write(tmp_path: Path, name: str, body: str, silo: str = SILO) -> Path:
+    f = tmp_path / name
+    f.write_text(f"-- ledger: silo={silo}\n{body}\n")
+    return f
+
+
+# --------------------------------------------------------------------------------
+# Unit-level: check_dry_run_sequence_safety / strip_sql_comments directly
+# --------------------------------------------------------------------------------
+
+def test_setval_refused_on_dry_run():
+    with pytest.raises(am.Refuse, match="sequence state"):
+        am.check_dry_run_sequence_safety("SELECT setval('widgets_id_seq', 5);", dry_run=True)
+
+
+def test_setval_case_insensitive():
+    with pytest.raises(am.Refuse, match="sequence state"):
+        am.check_dry_run_sequence_safety("select SetVal('widgets_id_seq', 5);", dry_run=True)
+
+
+def test_alter_sequence_restart_refused_on_dry_run():
+    with pytest.raises(am.Refuse, match="sequence state"):
+        am.check_dry_run_sequence_safety("ALTER SEQUENCE widgets_id_seq RESTART WITH 5;", dry_run=True)
+
+
+def test_commented_out_setval_is_allowed():
+    body = "-- SELECT setval('widgets_id_seq', 5);\ncreate table widgets (id int);"
+    am.check_dry_run_sequence_safety(body, dry_run=True)  # must not raise
+
+
+def test_nextval_is_allowed():
+    body = "insert into widgets (id) values (nextval('widgets_id_seq'));"
+    am.check_dry_run_sequence_safety(body, dry_run=True)  # must not raise
+
+
+def test_plain_identity_insert_is_allowed():
+    body = "insert into widgets (name) values ('a');"
+    am.check_dry_run_sequence_safety(body, dry_run=True)  # must not raise
+
+
+def test_setval_not_refused_when_not_a_dry_run():
+    # a REAL apply is exactly the sanctioned path for this class of migration --
+    # only --dry-run's false "nothing committed" guarantee is the problem.
+    am.check_dry_run_sequence_safety("SELECT setval('widgets_id_seq', 5);", dry_run=False)  # must not raise
+
+
+def test_strip_sql_comments_drops_whole_line_comments_only():
+    body = "-- a comment\nselect 1; -- trailing comment stays\n"
+    stripped = am.strip_sql_comments(body)
+    assert "a comment" not in stripped
+    assert "select 1; -- trailing comment stays" in stripped
+
+
+def test_strip_sql_comments_leaves_dollar_quoted_body_untouched():
+    body = "CREATE FUNCTION f() RETURNS void AS $$\n-- not a real comment to strip logic, just body text\nBEGIN END\n$$ LANGUAGE plpgsql;"
+    stripped = am.strip_sql_comments(body)
+    assert "not a real comment to strip logic" in stripped
+
+
+# --------------------------------------------------------------------------------
+# Integration-level: through apply_migration() end to end
+# --------------------------------------------------------------------------------
+
+def test_dry_run_refuses_before_touching_the_db(ledger_db, tmp_path):
+    with psycopg.connect(ledger_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE widgets (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name text)")
+        cur.execute("INSERT INTO widgets (id, name) VALUES (5, 'seed')")
+    f = _write(tmp_path, "001_resync.sql", "SELECT setval('widgets_id_seq', 5);")
+    with pytest.raises(am.Refuse, match="sequence state"):
+        am.apply_migration(ledger_db, f, silo=SILO, dry_run=True)
+    # confirms the refusal fired before any connection was even opened for the
+    # apply itself -- the sequence is exactly where the seed left it.
+    with psycopg.connect(ledger_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT last_value FROM widgets_id_seq")
+        assert cur.fetchone()[0] == 1  # untouched: identity default, never bumped
+
+
+def test_alter_sequence_restart_refuses_via_apply_migration(ledger_db, tmp_path):
+    with psycopg.connect(ledger_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE widgets (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY)")
+    f = _write(tmp_path, "001_restart.sql", "ALTER SEQUENCE widgets_id_seq RESTART WITH 100;")
+    with pytest.raises(am.Refuse, match="sequence state"):
+        am.apply_migration(ledger_db, f, silo=SILO, dry_run=True)
+
+
+def test_commented_out_setval_dry_runs_normally(ledger_db, tmp_path):
+    f = _write(
+        tmp_path, "001_commented.sql",
+        "-- SELECT setval('widgets_id_seq', 5); (not real, just an example in a comment)\n"
+        "create table widgets (id int);",
+    )
+    result = am.apply_migration(ledger_db, f, silo=SILO, dry_run=True)
+    assert result["status"] == "dry_run_ok"
+    with psycopg.connect(ledger_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.widgets')")
+        assert cur.fetchone()[0] is None  # rolled back like any ordinary dry-run
+
+
+def test_real_apply_of_a_setval_migration_still_works(ledger_db, tmp_path):
+    # the sanctioned path for this class: a real (non-dry-run) apply is not
+    # refused -- only --dry-run's broken "nothing committed" guarantee is.
+    with psycopg.connect(ledger_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE widgets (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY)")
+        cur.execute("INSERT INTO widgets (id) VALUES (5)")
+    f = _write(tmp_path, "001_resync.sql", "SELECT setval('widgets_id_seq', 5);")
+    result = am.apply_migration(ledger_db, f, silo=SILO, dry_run=False)
+    assert result["status"] == "applied"
+    with psycopg.connect(ledger_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT last_value FROM widgets_id_seq")
+        assert cur.fetchone()[0] == 5
