@@ -61,6 +61,7 @@ refused identically to a function one.
 
 Usage:
   python scripts/apply_migration.py <NNN|path> --silo <ref> [--dsn <url>] [--dry-run]
+  python scripts/apply_migration.py <NNN|path> --silo <ref> --gate <agent_messages id> [--gate-dsn <url>]
   python scripts/apply_migration.py <NNN|path> --silo <ref> --status
 
 <NNN|path>: either a numeric prefix (looked up as migrations/<NNN>_*.sql) or
@@ -75,6 +76,26 @@ side refuses.
 transaction, verifies both apply/pass cleanly, then ROLLS BACK (no ledger
 row written, nothing committed).
 --status only reads migration_ledger; touches nothing else.
+
+Gate enforcement (op#22669/op#22521 item 3, orch-console ruling bus #43869):
+a fork once applied migration 072 straight to the live substrate with no
+review at all — an agent's self-promise to "always gate a live apply"
+does not survive a context reset, so this is enforced here in code instead.
+A non-dry-run apply against a PRODUCTION_SILOS member (docs/data-store-
+registry.md) now REQUIRES `--gate <agent_messages id>`. That row (looked
+up on the fleet bus, NOT necessarily the target --dsn — see --gate-dsn)
+must be:
+  - message_type = 'decision'
+  - from_agent an allowlisted gate owner for THIS silo (GATE_OWNERS below)
+  - created_at AFTER the migration file's on-disk mtime (the decision
+    post-dates this exact edit of the file — a stale mtime from a fresh
+    clone/checkout only makes this check STRICTER, never looser, so it
+    fails safe)
+  - body contains the file's sha256 prefix (first 12 hex chars) — ties the
+    authorization to this exact content, not just the filename
+Any failure refuses loudly before the target DB is ever touched. The gate
+row's id is recorded in migration_ledger.note. --dry-run and any silo NOT
+in PRODUCTION_SILOS (e.g. a test harness's throwaway DSN) stay ungated.
 """
 from __future__ import annotations
 
@@ -84,6 +105,7 @@ import hashlib
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg
@@ -114,6 +136,31 @@ _ASSERT_KINDS = {"no_execute", "search_path", "dropped", "no_table_privilege"}
 # (CAI-RESP-1397 #5) — a silent no-op REVOKE/DROP is otherwise indistinguishable
 # from a real one.
 _REQUIRES_ASSERT_RE = re.compile(r"\bREVOKE\b|\bDROP\s+FUNCTION\b", re.IGNORECASE)
+
+
+# docs/data-store-registry.md — every currently-provisioned production store
+# (LAYER-VOCAB-001 refs). A silo NOT in this set (e.g. a test harness's
+# throwaway DSN) is not gated — there is nothing in the registry to protect,
+# and the ephemeral-PG17 migration tests must stay gate-free by construction.
+PRODUCTION_SILOS = frozenset({
+    "tscuymavysscrvoberrr",  # orchestrator substrate (the monolith)
+    "ceayjeamtmcyzzvqflus",  # ihsanos multi-tenant DB
+    "goumlynecruxrlmzlntp",  # irsyad silo (goumlyne)
+    "brrgastulcffamlbggyu",  # wingmen-personal
+    "ywrpttpxwfcoodovxhsr",  # cosem-platform demo/dev
+})
+
+# Which bus identities may author a --gate decision row, per silo. Every known
+# store defaults to the fleet's two governance/gate-holding bodies (orch-console
+# holds the standing gate pens; money/governance-class decisions route through
+# cai per fleet doctrine) until a stricter, silo-specific owner is ratified.
+# Narrowing one silo is a one-line change here, not a redesign — do it in a
+# bus-ratified PR, same discipline as tests/migrations/test_migration_number_collisions.py's
+# allowlist.
+_DEFAULT_GATE_OWNERS = frozenset({"orch-console", "cai"})
+GATE_OWNERS: dict[str, frozenset[str]] = {silo: _DEFAULT_GATE_OWNERS for silo in PRODUCTION_SILOS}
+
+_GATE_SHA_PREFIX_LEN = 12
 
 
 class Refuse(Exception):
@@ -358,6 +405,53 @@ def check_ledger_collision(cur, repo: str, name: str, silo: str, sha: str) -> st
     return "already_applied"
 
 
+def check_gate(gate_dsn: str, gate_id: int, *, silo: str, path: Path, sha: str) -> dict:
+    """Looks up agent_messages id=gate_id on the FLEET BUS (gate_dsn — not
+    necessarily the target silo's --dsn) and refuses unless it is a valid,
+    silo-scoped authorization for applying THIS exact file content. Returns
+    the row (as a dict) on success, for the caller to ledger."""
+    owners = GATE_OWNERS.get(silo)
+    if not owners:
+        raise Refuse(f"no gate-owner allowlist configured for silo {silo!r} — refusing rather than guessing.")
+
+    with psycopg.connect(gate_dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, from_agent, message_type, body, created_at FROM agent_messages WHERE id = %s",
+            (gate_id,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        raise Refuse(f"--gate {gate_id} does not exist in agent_messages (checked via gate DSN).")
+
+    row_id, from_agent, mtype, gate_body, created_at = row
+
+    if mtype != "decision":
+        raise Refuse(f"--gate {gate_id} is message_type={mtype!r}, not 'decision' — not an authorization.")
+
+    if from_agent not in owners:
+        raise Refuse(
+            f"--gate {gate_id} is from {from_agent!r}, not an allowlisted gate owner for "
+            f"silo {silo!r} ({sorted(owners)})."
+        )
+
+    file_mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    if created_at <= file_mtime:
+        raise Refuse(
+            f"--gate {gate_id} (created_at={created_at}) does not post-date {path.name}'s last "
+            f"edit ({file_mtime}) — the decision must come AFTER the file it authorizes."
+        )
+
+    sha_prefix = sha[:_GATE_SHA_PREFIX_LEN]
+    if sha_prefix not in (gate_body or ""):
+        raise Refuse(
+            f"--gate {gate_id}'s body does not contain {path.name}'s sha256 prefix ({sha_prefix}) "
+            f"— it does not authorize THIS exact content."
+        )
+
+    return {"id": row_id, "from_agent": from_agent, "created_at": created_at}
+
+
 def apply_migration(
     dsn: str,
     path: Path,
@@ -366,6 +460,8 @@ def apply_migration(
     repo: str = DEFAULT_REPO,
     dry_run: bool = False,
     applied_by: str = "apply_migration.py",
+    gate: int | None = None,
+    gate_dsn: str | None = None,
 ) -> dict:
     sql_text = path.read_text()
     header_silo = parse_ledger_header(sql_text)
@@ -374,6 +470,18 @@ def apply_migration(
     sha = file_sha256(path)
     body = strip_txn_control(sql_text)
     check_required_assertions(body, assertions)
+
+    note = None
+    if not dry_run and silo in PRODUCTION_SILOS:
+        if gate is None:
+            raise Refuse(
+                f"silo {silo!r} is a production store (docs/data-store-registry.md) — a non-dry-run "
+                f"apply requires --gate <agent_messages id> (op#22669/#22521 item 3, bus #43869)."
+            )
+        if not gate_dsn:
+            raise Refuse("--gate given but no gate DSN resolved — pass --gate-dsn or set --gate-dsn-env's variable.")
+        gate_row = check_gate(gate_dsn, gate, silo=silo, path=path, sha=sha)
+        note = f"gate={gate_row['id']} from={gate_row['from_agent']}"
 
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
         state = check_ledger_collision(cur, repo, path.name, silo, sha)
@@ -390,9 +498,9 @@ def apply_migration(
             raise
 
         cur.execute(
-            """INSERT INTO migration_ledger (repo, migration_name, silo_ref, sha256, applied_by)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (repo, path.name, silo, sha, applied_by),
+            """INSERT INTO migration_ledger (repo, migration_name, silo_ref, sha256, applied_by, note)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (repo, path.name, silo, sha, applied_by, note),
         )
 
         if dry_run:
@@ -405,7 +513,7 @@ def apply_migration(
         conn.commit()
         return {
             "status": "applied", "migration": path.name, "silo": silo,
-            "sha256": sha, "assertions": results,
+            "sha256": sha, "assertions": results, "note": note,
         }
 
 
@@ -431,12 +539,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dsn", default=None, help="defaults to $DATABASE_URL")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--status", action="store_true")
+    p.add_argument(
+        "--gate", type=int, default=None,
+        help="agent_messages id authorizing a non-dry-run apply to a production silo (op#22669 item 3)",
+    )
+    p.add_argument("--gate-dsn", default=None, help="DSN to look up --gate on (the fleet bus); overrides --gate-dsn-env")
+    p.add_argument(
+        "--gate-dsn-env", default="DATABASE_URL",
+        help="env var to read the gate-lookup DSN from when --gate-dsn is not given (default: DATABASE_URL)",
+    )
     args = p.parse_args(argv)
 
     dsn = args.dsn or os.environ.get("DATABASE_URL")
     if not dsn:
         print("✗ no DSN: pass --dsn or set DATABASE_URL", file=sys.stderr)
         return 2
+    gate_dsn = args.gate_dsn or os.environ.get(args.gate_dsn_env)
 
     try:
         path = resolve_migration_path(args.migration)
@@ -448,8 +566,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"LEDGERED: {row}")
             return 0
 
-        result = apply_migration(dsn, path, silo=args.silo, repo=args.repo, dry_run=args.dry_run)
+        result = apply_migration(
+            dsn, path, silo=args.silo, repo=args.repo, dry_run=args.dry_run,
+            gate=args.gate, gate_dsn=gate_dsn,
+        )
         print(f"✓ {result['status']}: {result['migration']} ({args.silo}, sha256 {result['sha256'][:12]}…)")
+        if result.get("note"):
+            print(f"  ledger note: {result['note']}")
         for a in result.get("assertions") or []:
             print(f"  ✓ assert {_assertion_label(a)}")
         return 0
