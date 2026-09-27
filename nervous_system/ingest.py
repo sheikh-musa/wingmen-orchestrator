@@ -365,6 +365,82 @@ def load_channels(conn) -> dict[str, Channel]:
         return {c.key: c for c in (Channel(r) for r in cur.fetchall())}
 
 
+# ── Pinned-channel drift (op#22669 item 3, orch-console bus #43933) ───────────
+#
+# tests/migrations/test_ingest_channels_enabled_false.py only proves the
+# invariant ("a channel pinned via INGEST_CHANNELS ships enabled=false") at
+# migration-authoring time — it parses migrations/*.sql and boot script env,
+# never the live row. A manual UPDATE, a future migration flipping it back, or
+# replication skew can still drift bot_channels.enabled=true under a pinned
+# key AFTER deploy, which is the exact precondition for the dual-poller 409
+# class this host and the hub fighting one bot token (bus #43775/#43833,
+# channel 'oeh', fixed in PR #178). This is the runtime backstop for that.
+
+PAGE_FROM_AGENT = "ingest-watchdog"   # mirrors priority_sla_watchdog.py's 'sla-watchdog'
+PAGE_TO_AGENT = "orch-console"
+
+
+def pinned_keys() -> list[str]:
+    override = os.environ.get("INGEST_CHANNELS", "").strip()
+    return [k.strip() for k in override.split(",") if k.strip()]
+
+
+def drifted_pinned_channels(conn, keys: list[str]) -> list[str]:
+    """Pinned channel_keys that are LIVE enabled=true right now. Empty on the
+    hub (no INGEST_CHANNELS pin — it is SUPPOSED to poll WHERE enabled)."""
+    if not keys:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT channel_key FROM bot_channels WHERE channel_key = ANY(%s) AND enabled",
+            (keys,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def _page_pinned_drift_once(conn, key: str, host: str) -> None:
+    """Page ONCE per (channel, host) — durable dedup via the bus itself (a
+    marker substring in `body`), not in-memory state, so a daemon restart
+    never re-pages an already-reported drift. Page-once-EVER, same shape as
+    priority_sla_watchdog.py's already_paged_on_bus dedup: this is a rare,
+    should-never-happen invariant break, not a recurring metric to re-alert
+    on a timer — clearing it is an explicit human/DB action either way."""
+    marker = f"PINNED-CHANNEL-DRIFT:{key}:{host}"
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM agent_messages WHERE body LIKE %s LIMIT 1", (f"{marker}%",))
+        if cur.fetchone():
+            return
+        cur.execute(
+            "INSERT INTO agent_messages "
+            "(from_agent, to_agent, message_type, subject, body, priority, requires_response) "
+            "VALUES (%s, %s, 'blocker', %s, %s, 'P1', true)",
+            (PAGE_FROM_AGENT, PAGE_TO_AGENT,
+             f"pinned channel '{key}' enabled=true LIVE on {host}",
+             f"{marker}: bot_channels.enabled=true for a channel pinned via "
+             f"INGEST_CHANNELS on {host} — dual-poller 409 risk against the hub "
+             f"(bus #43775/#43833 precedent, channel 'oeh'). Fix: "
+             f"UPDATE bot_channels SET enabled=false WHERE channel_key='{key}'. "
+             f"Page-once-ever for this channel+host; won't repeat unless this row is removed."))
+    conn.commit()
+
+
+def check_pinned_channels_not_enabled(conn, host: str | None = None) -> list[str]:
+    """Loud log + page-once for every pinned channel currently enabled=true
+    live. Returns the drifted keys (empty list = clean). Called once per
+    CONFIG_REFRESH cycle from main() — cheap (one indexed lookup on a handful
+    of pinned keys) and self-heals its own log noise once the row is fixed."""
+    host = host or socket.gethostname()
+    drifted = drifted_pinned_channels(conn, pinned_keys())
+    for key in drifted:
+        _log_line(f"WATCHDOG: pinned channel '{key}' is enabled=true LIVE on {host} "
+                   f"(INGEST_CHANNELS pins it here) — dual-poller 409 risk. Fix: "
+                   f"UPDATE bot_channels SET enabled=false WHERE channel_key='{key}'")
+        try:
+            _page_pinned_drift_once(conn, key, host)
+        except Exception as e:
+            _log_line(f"WATCHDOG: pinned-channel-drift page for '{key}' failed ({type(e).__name__}: {e})")
+    return drifted
+
+
 # ── Gate (deny-by-default, pure function — unit-tested) ───────────────────────
 
 def gate_allows(ch: Channel, chat_id: int, username: str | None) -> bool:
@@ -915,6 +991,7 @@ async def main():
         try:
             with psycopg.connect(_dsn()) as conn:
                 fresh = load_channels(conn)
+                check_pinned_channels_not_enabled(conn)
         except psycopg.Error as e:
             _log_line(f"WATCHDOG: cannot read bot_channels ({type(e).__name__}) — retrying")
             await asyncio.sleep(ERROR_BACKOFF)
