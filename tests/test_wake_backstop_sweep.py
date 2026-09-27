@@ -531,6 +531,34 @@ def test_stuck_page_SUPPRESSED_when_pane_recently_active_44274():
     assert pages == [] and r["stuck_suppressed"] == ["cc-cosem-platform"]
 
 
+def test_stuck_ceiling_pages_active_but_not_draining_44313():
+    # bus #44313: change-detection can't tell "working" from "hung but ANIMATING" — a lane frozen
+    # on "✻ Waiting for 1 background agent… (3m 47s)" ticks its pane every sample, so it would be
+    # suppressed forever. HARD CEILING: past 3× the stuck threshold, page REGARDLESS of pane,
+    # labelled active-but-not-draining, so a hung lane is never masked.
+    marked, pages, mark, page = _cas_collector()
+    seen = set()
+    stuck = [_row_ts("cc-quality", 301, age_s=6000)]   # > ceiling (3*1800=5400), < max (86400)
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                       pane_state=lambda a: "busy", pane_active=lambda a: True,  # appears to be "working"
+                       mark=mark, escalate=page, escalated_seen=seen)
+    assert r["stuck_paged"] == ["cc-quality"] and r.get("stuck_suppressed") == []
+    assert len(pages) == 1 and "active-but-not-draining" in pages[0][0]   # labelled, not "genuinely stuck"
+
+
+def test_stuck_below_ceiling_still_suppressed_when_working():
+    # A working lane UNDER the ceiling stays suppressed (the #44274 behavior is preserved; the
+    # ceiling only overrides once the row is very old).
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-quality", 302, age_s=2000)]   # > stuck (1800) but < ceiling (5400)
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                       pane_state=lambda a: "busy", pane_active=lambda a: True,
+                       mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and r["stuck_suppressed"] == ["cc-quality"]
+
+
 def test_stuck_page_suppression_does_not_burn_once_guard():
     # Suppressing a working lane must be RE-EVALUABLE: if it later goes stable-idle and the row
     # is still unread, the next sweep DOES page (suppression never consumed the once-guard).

@@ -80,6 +80,11 @@ STUCK_PAGE_AGE_S = int(os.environ.get("WAKE_SWEEP_STUCK_PAGE_AGE_S", "1800"))  #
 # unread row however old — a page burst that grows over time. A row stuck longer than this has
 # already paged once in some daemon's life, or is a dead-foreign/decision problem, not a NEW page.
 STUCK_PAGE_MAX_AGE_S = int(os.environ.get("WAKE_SWEEP_STUCK_PAGE_MAX_AGE_S", "86400"))  # 24 h
+# Hard CEILING (bus #44313): pane change-detection can't tell "working" from "hung but ANIMATING"
+# (a ticking "Waiting for 1 background agent (3m 47s)" spinner changes the pane every sample), so a
+# hung lane could be suppressed forever. Past this age the stuck-page fires REGARDLESS of pane —
+# labelled active-but-not-draining. Default 3× the stuck threshold (~90 min).
+STUCK_PAGE_CEILING_S = int(os.environ.get("WAKE_SWEEP_STUCK_PAGE_CEILING_S", str(3 * STUCK_PAGE_AGE_S)))  # 90 min
 
 # DEAD-FOREIGN gone-window (Nazim #42994 (2), amend B): an agent is "gone on every host" only
 # if NO matching agent_status row (base-inclusive) has a heartbeat fresher than this. Much
@@ -337,6 +342,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                pane_state=_default_pane_state, pane_active=_pane_recently_active, stuck_rows=None,
                stuck_page_age_s: int = STUCK_PAGE_AGE_S,
                stuck_page_max_age_s: int = STUCK_PAGE_MAX_AGE_S,
+               stuck_ceiling_age_s: int = STUCK_PAGE_CEILING_S,
                escalated_seen=None, gone_window_s: int = GONE_WINDOW_S,
                cap_age_s: int = WAKE_SWEEP_CAP_AGE_S, now: float | None = None,
                now_dt=None, dry_run: bool = False) -> dict:
@@ -498,28 +504,38 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     stuck_paged: list = []
     stuck_suppressed: list = []
     stuck_by_agent: dict = {}
+    stuck_oldest_age: dict = {}   # agent -> max unread-age (s) among its rows; drives the #44313 ceiling
     for r in (stuck_rows or []):   # None (a test injected `rows` only) → treated as empty
         ca = _created_at(r)  # UPPER age bound (Nazim #43073): a row older than max_age has already
+        age_s = 0.0
         if ca is not None:   # paged once in some daemon's life — never re-page it on a restart.
             try:
-                if (now_dt - ca).total_seconds() > stuck_page_max_age_s:
+                age_s = (now_dt - ca).total_seconds()
+                if age_s > stuck_page_max_age_s:
                     continue
             except Exception:  # noqa: BLE001 — un-ageable → let the SQL fetch's bound govern
-                pass
+                age_s = 0.0
         if should_backstop_wake(_to_agent(r), _rf(r, 2, "message_type"), _rf(r, 3, "requires_response"),
                                 _rf(r, 4, "priority"), _rf(r, 5, "is_test")):
-            stuck_by_agent.setdefault(_to_agent(r), []).append(_row_id(r))
+            ag = _to_agent(r)
+            stuck_by_agent.setdefault(ag, []).append(_row_id(r))
+            stuck_oldest_age[ag] = max(stuck_oldest_age.get(ag, 0.0), age_s)
     for agent, ids in stuck_by_agent.items():
         new_ids = [i for i in ids if ("stuck", i) not in seen]
         if not new_ids or not _alive(agent):   # already-paged rows, or a dead agent (dead-foreign)
             continue
         state = pane_state(agent)
+        working = state == "busy" or pane_active(agent)
+        over_ceiling = stuck_oldest_age.get(agent, 0.0) > stuck_ceiling_age_s
         # SUPPRESS a working lane (bus #44274): a busy footer ('esc to interrupt') OR recent tool
         # activity (pane changed across two samples) means the lane is WORKING, not stuck — many
         # lanes read their inbox without stamping read_at (cc-cosem-platform/-exams class), so an
-        # unread row + a working pane is normal, not a wedge. Do NOT burn the once-guard: if it
-        # later goes stable-idle with the row still unread, a subsequent sweep pages it.
-        if state == "busy" or pane_active(agent):
+        # unread row + a working pane is normal. Do NOT burn the once-guard: if it later goes
+        # stable-idle with the row still unread, a subsequent sweep pages it.
+        # EXCEPT past the hard CEILING (bus #44313): change-detection can't tell working from
+        # "hung but animating" (a ticking timer changes the pane every sample), so beyond
+        # stuck_ceiling_age_s we page REGARDLESS — labelled active-but-not-draining.
+        if working and not over_ceiling:
             stuck_suppressed.append(agent)
             escalations.append({"kind": "stuck-suppressed", "agent": agent,
                                 "ids": new_ids, "pane": state, "reason": "pane working"})
@@ -527,17 +543,24 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         if dry_run:
             stuck_paged.append(agent)
             continue
+        label = "active-but-not-draining" if working else "genuinely stuck"
+        detail = (
+            f"pane shows activity but the row has been unread past the {stuck_ceiling_age_s}s ceiling "
+            f"— it may be HUNG-but-animating (a ticking timer/spinner), not draining"
+            if working else
+            f"well past normal latency and the pane is not working")
         escalate(
-            f"[wake-backstop] {agent} has directed row(s) un-drained past {stuck_page_age_s}s — genuinely stuck (pane: {state})",
+            f"[wake-backstop] {agent} has directed row(s) un-drained past {stuck_page_age_s}s — {label} (pane: {state})",
             f"TL;DR: row(s) {new_ids} to {agent} are STILL unread {stuck_page_age_s}s+ after they were "
-            f"sent — well past normal latency — although {agent} is ALIVE (pane: {state}). They were "
-            f"already quiesced (skipped_at) so the sweep isn't re-poking; escalating ONCE now that it's "
-            f"genuinely stuck. ACTION: check {agent} — it may be looping/stuck, or the row needs "
-            f"re-routing. (read_at is still NULL, so {agent}'s own reconcile can still drain it.)")
+            f"sent — {detail} — although {agent} is ALIVE (pane: {state}). They were already quiesced "
+            f"(skipped_at) so the sweep isn't re-poking; escalating ONCE. ACTION: check {agent} — it "
+            f"may be looping/hung/stuck, or the row needs re-routing. (read_at is still NULL, so "
+            f"{agent}'s own reconcile can still drain it.)")
         for i in new_ids:
             seen.add(("stuck", i))
         stuck_paged.append(agent)
-        escalations.append({"kind": "stuck-page", "agent": agent, "ids": new_ids, "pane": state})
+        escalations.append({"kind": "stuck-page", "agent": agent, "ids": new_ids,
+                            "pane": state, "label": label})
 
     return {"considered": len(rows), "targets": targets, "woke": woke, "results": results,
             "capped": [_row_id(r) for r in capped], "unreachable": unreachable,
