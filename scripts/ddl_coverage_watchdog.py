@@ -50,6 +50,16 @@ State: a local JSON file (logs/ddl_coverage_watchdog_state.json), keyed by
 silo ref -- {fingerprint, ledger_count, checked_at}. The FIRST scan for a
 silo only establishes a baseline; it never pages (no prior state to diff
 against, same "clean boot" shape as every other watchdog in this fleet).
+
+KNOWN LIMITATION (orch-console, bus #44153): the ledger check is a COUNT
+delta (did migration_ledger grow since the last scan), not a per-event
+correlation. A legitimately ledgered migration and an unledgered raw DDL
+landing in the SAME scan window both show up as "ledger grew" -- the
+unledgered one hides behind the legitimate one and this scan reports clean.
+Mitigation: keep scans frequent (e.g. every 10 min) to shrink the window a
+masking pair could land in. Real fix (not built here, P3 follow-up):
+correlate migration_ledger.applied_at against the specific catalog rows
+that changed, so two co-occurring changes can't hide each other.
 """
 from __future__ import annotations
 
