@@ -136,3 +136,36 @@ def test_main_refuses_when_identity_cannot_resolve(monkeypatch, capsys):
     ])
     assert rc == 2
     assert "cannot resolve" in capsys.readouterr().err
+
+
+# ---- send() — the one INSERT, reused by _bus_tmp.py / scratchpad shims -----
+# (bus #43673). priority validation happens before any DB connection, so
+# these are safe to test directly with no live DB.
+
+def test_send_rejects_invalid_priority():
+    with pytest.raises(ValueError):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, "URGENT")
+
+
+def test_send_rejects_missing_priority():
+    with pytest.raises(ValueError):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, None)
+
+
+@pytest.mark.parametrize("p", ["P0", "P1", "P2", "P3"])
+def test_send_accepts_valid_priority_then_reaches_the_db_call(monkeypatch, p):
+    # Confirms priority validation doesn't reject a valid value — push past
+    # it into psycopg2.connect (monkeypatched to fail fast) so no real DB
+    # connection is attempted. dsn is passed explicitly so this doesn't
+    # depend on DATABASE_URL/.env being present (CI has neither).
+    import psycopg2
+
+    def _boom(*a, **k):
+        raise RuntimeError("no live DB in tests")
+
+    monkeypatch.setattr(psycopg2, "connect", _boom)
+    with pytest.raises(RuntimeError, match="no live DB in tests"):
+        bs.send("cc-substrate", "cc-orchestrator", "update", "s",
+                 "x" * bs._MIN_BODY_BYTES, p, dsn="postgresql://unused")
