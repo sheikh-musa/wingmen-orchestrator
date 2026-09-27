@@ -4,6 +4,7 @@ _already_sent_today/_mark_sent are a trivial date-stamp dedup. Both are tested
 with no DB/network."""
 import importlib
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 add = importlib.import_module("scripts.asks_daily_digest")
@@ -152,3 +153,56 @@ def test_main_sends_via_nazim_send_not_tg_send(monkeypatch, tmp_path):
     assert rc == 0
     assert captured["cmd"][:2] == ["bash", str(add.ORCH / "scripts" / "nazim_send.sh")]
     assert "tg_send.sh" not in " ".join(captured["cmd"])
+
+
+# ── _log_uae_send_time: bus #44286 robustness (log the actual UAE send hour) ──
+def test_log_uae_send_time_at_9am_uae_is_silent_no_warning(capsys):
+    nine_am_uae_as_utc = datetime(2026, 9, 28, 5, 0, tzinfo=timezone.utc)  # 09:00 Asia/Dubai
+    add._log_uae_send_time(nine_am_uae_as_utc)
+    out = capsys.readouterr().out
+    assert "09:00" in out or "09:0" in out
+    assert "WARNING" not in out
+
+
+def test_log_uae_send_time_warns_when_far_from_9am_uae(capsys):
+    one_am_uae_as_utc = datetime(2026, 9, 27, 21, 0, tzinfo=timezone.utc)  # 01:00 Asia/Dubai -- the bus #44286 incident
+    add._log_uae_send_time(one_am_uae_as_utc)
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "44286" in out
+
+
+def test_log_uae_send_time_defaults_to_now_when_no_arg_given(monkeypatch, capsys):
+    fixed = datetime(2026, 9, 28, 5, 0, tzinfo=timezone.utc)
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(add, "datetime", _FixedDatetime)
+    add._log_uae_send_time()
+    assert "WARNING" not in capsys.readouterr().out
+
+
+def test_main_logs_uae_send_time_before_sending(monkeypatch, tmp_path):
+    monkeypatch.setattr(add, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(add, "_dsn", lambda: "postgresql://unused")
+    monkeypatch.setattr(add.psycopg, "connect", lambda *a, **k: _FakeConn())
+    order = []
+    monkeypatch.setattr(add, "_log_uae_send_time", lambda *a, **k: order.append("log"))
+    monkeypatch.setattr(add.subprocess, "run",
+                         lambda *a, **k: order.append("send") or SimpleNamespace(returncode=0))
+    rc = add.main(["--force"])
+    assert rc == 0
+    assert order == ["log", "send"]
+
+
+def test_main_does_not_log_uae_send_time_on_dry_run(monkeypatch, capsys):
+    monkeypatch.setattr(add, "_dsn", lambda: "postgresql://unused")
+    monkeypatch.setattr(add.psycopg, "connect", lambda *a, **k: _FakeConn())
+    called = []
+    monkeypatch.setattr(add, "_log_uae_send_time", lambda *a, **k: called.append(True))
+    rc = add.main(["--dry-run"])
+    assert rc == 0
+    assert called == []

@@ -8,14 +8,19 @@
   <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
   <!-- op#22669: operator (Musa) is UTC+4 (Abu Dhabi) -- memory
        user_operator_timezone_abu_dhabi.md. StartCalendarInterval fires in the
-       HOST's local time zone; this Mac Mini's launchd jobs (see
-       dev.wingmen.programme-stall-digest.plist's Hour=13 for a documented
-       Monday-13:00 slot) are scheduled assuming the host clock is UTC, so
-       09:00 Abu Dhabi = 05:00 UTC -> Hour=5 below. If this host is ever moved
-       to run its system clock in Asia/Dubai instead, change Hour to 9. NOT
+       HOST's local time zone, which is Asia/Singapore (UTC+8) on this Mac
+       Mini -- NOT UTC (bus #44286: the prior Hour=5 here wrongly assumed a
+       UTC host clock, so the first digest fired at 21:00Z = 01:00 UAE
+       instead of 09:00; orch-console hot-fixed the installed plist live to
+       Hour=13 and this file now matches). 09:00 Abu Dhabi = 05:00 UTC =
+       13:00 SGT -> Hour=13 below. dev.wingmen.programme-stall-digest.plist's
+       Hour=13/Weekday=1 slot is the SAME conversion (09:00 UAE Monday) and
+       was already correct. If this host's system clock is ever moved to a
+       different zone, recompute Hour for both files (tests/
+       test_launchd_uae_calendar_hours.py fails loud if they drift). NOT
        launchctl-loaded by this PR -- landing this file alone does not make it
        live; a separate go-live step loads it. -->
-  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
   <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/asks-daily-digest.log</string>
   <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/asks-daily-digest.log</string>
 </dict>
