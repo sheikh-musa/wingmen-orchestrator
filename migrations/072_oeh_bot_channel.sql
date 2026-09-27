@@ -38,8 +38,15 @@
 --   'angullia'). inject_prefix identifies the client user by name (Sya), same
 --   pattern as angullia's '(Rhaihan)'. group_routing.agent_reviewer='cc-oeh'
 --   (supervised phase, same shape as angullia/cc-angullia). allowed_chat_ids=
---   '{-5585966657}' and enabled=true (bus #43775: the group is live and Sya's
---   queued reply needs the channel actually polling today).
+--   '{-5585966657}' wires the live group, but enabled=false (bus #43833
+--   correction, superseding the original #43775 enabled=true): 'oeh' is
+--   PINNED in the Mini's nazim-ingest INGEST_CHANNELS (boot_nazim_ingest.sh),
+--   which polls that channel regardless of `enabled` -- shipping enabled=true
+--   would ALSO make the gzb hub's ingest (which polls every `enabled` row,
+--   no INGEST_CHANNELS scoping) long-poll the same OEH_BOT_TOKEN, the exact
+--   dual-poller 409 class angullia's row already avoids by staying
+--   enabled=false. The Mini's pinned poller does not need `enabled=true` to
+--   see this channel.
 --   project_governance('oeh'): cai_enabled=false, money_clearance_enabled=false,
 --   operators=[] still (Sya's Telegram user id arrives when she first posts --
 --   normalize_operators() requires a real id, same "empty array, not a
@@ -64,7 +71,10 @@
 -- would.)
 
 -- ---------------------------------------------------------------------------
--- 1. bot_channels -- live group chat wired + enabled (bus #43775)
+-- 1. bot_channels -- live group chat wired; enabled=false (bus #43833: 'oeh'
+--    is pinned in the Mini's INGEST_CHANNELS, so enabled=true would also
+--    hand the same bot token to the gzb hub's unscoped `WHERE enabled` poll
+--    -- dual-poller 409, same class angullia's row already avoids)
 -- ---------------------------------------------------------------------------
 INSERT INTO public.bot_channels
   (channel_key, token_env_key, mode, inject_target, inject_prefix, responder_ref,
@@ -73,7 +83,7 @@ VALUES
   ('oeh', 'OEH_BOT_TOKEN', 'agent-session', 'oeh',
    '🎤 OEH (Sya): ', NULL,
    '{-5585966657}', '{}', '{"agent_phase": "supervised", "agent_reviewer": "cc-oeh"}'::jsonb,
-   'oeh', 'substrate', true, NULL)
+   'oeh', 'substrate', false, NULL)
 ON CONFLICT (channel_key) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
