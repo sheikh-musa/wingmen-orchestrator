@@ -199,22 +199,53 @@ def _reclaim_next_cache(dry_run):
     return freed
 
 
+# Where CLI tools live when PATH is minimal. launchd/agent context does NOT inherit
+# the login PATH, so bare `["npm", ...]` / `["brew", ...]` raised FileNotFoundError and
+# the critical-tier reclaimers silently no-op'd (bus #44270). Resolve an absolute path.
+_BIN_DIRS = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+
+
+def _resolve_bin(name):
+    """Absolute path to `name`, robust to a minimal launchd PATH: honour the current
+    PATH first (which()), then fall back to the known bin dirs. None if truly absent."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in _BIN_DIRS:
+        cand = os.path.join(d, name)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def build_reclaimers():
-    """Ordered safest/highest-known-yield first."""
-    brew_cache = None
-    try:
-        r = subprocess.run(["brew", "--cache"], capture_output=True, text=True, timeout=15)
-        brew_cache = r.stdout.strip() or None
-    except (subprocess.TimeoutExpired, OSError):
+    """Ordered safest/highest-known-yield first. npm/brew reclaimers are added only
+    when the tool resolves to an absolute path — a missing tool is SKIPPED LOUDLY
+    (logged) rather than added and left to FileNotFoundError at the critical tier."""
+    reclaimers = [{"name": "file-history", "apply": _reclaim_file_history}]
+
+    npm = _resolve_bin("npm")
+    if npm:
+        reclaimers.append({"name": "npm-cache", "apply": _reclaim_dir_cmd(
+            os.path.expanduser("~/.npm"), [npm, "cache", "clean", "--force"])})
+    else:
+        log("    npm not found on PATH or in known bin dirs — npm-cache reclaimer unavailable")
+
+    brew = _resolve_bin("brew")
+    if brew:
         brew_cache = None
-    return [
-        {"name": "file-history", "apply": _reclaim_file_history},
-        {"name": "npm-cache", "apply": _reclaim_dir_cmd(
-            os.path.expanduser("~/.npm"), ["npm", "cache", "clean", "--force"])},
-        {"name": "brew-cleanup", "apply": _reclaim_dir_cmd(
-            brew_cache, ["brew", "cleanup", "-s"])},
-        {"name": "next-cache", "apply": _reclaim_next_cache},
-    ]
+        try:
+            r = subprocess.run([brew, "--cache"], capture_output=True, text=True, timeout=15)
+            brew_cache = r.stdout.strip() or None
+        except (subprocess.TimeoutExpired, OSError):
+            brew_cache = None
+        reclaimers.append({"name": "brew-cleanup", "apply": _reclaim_dir_cmd(
+            brew_cache, [brew, "cleanup", "-s"])})
+    else:
+        log("    brew not found on PATH or in known bin dirs — brew-cleanup reclaimer unavailable")
+
+    reclaimers.append({"name": "next-cache", "apply": _reclaim_next_cache})
+    return reclaimers
 
 
 # ---- fail-loud page ------------------------------------------------------------
