@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -202,6 +203,28 @@ def _default_pane_state(agent) -> str:
         return "unknown"
 
 
+def _pane_recently_active(agent, gap_s: float = 2.0) -> bool:
+    """True if the lane is ACTIVELY WORKING right now — captured by change-detection, not a
+    single busy-footer sample. Reads the pane twice `gap_s` apart; if the visible text CHANGED,
+    the lane is producing output (tool running / model streaming) = working. This is the fix for
+    bus #44274: a single pane_state() sample caught cc-cosem-platform between tool calls and read
+    'idle', so a genuinely-working lane (that reads its inbox without stamping read_at) was
+    stuck-paged. Change across two samples proves 'recent tool activity' the way a lone footer
+    grep can't. Never raises; unreadable/unchanged → False (fail toward paging, so a genuinely
+    frozen lane is NOT masked)."""
+    try:
+        sess = resolve_tmux_session(agent)
+        if not sess:
+            return False
+        cap = ["tmux", "capture-pane", "-t", f"={sess}:0.0", "-p"]
+        a = subprocess.check_output(cap, text=True, stderr=subprocess.DEVNULL)
+        time.sleep(gap_s)
+        b = subprocess.check_output(cap, text=True, stderr=subprocess.DEVNULL)
+        return a != b
+    except Exception:  # noqa: BLE001 — advisory; never break the sweep
+        return False
+
+
 def _mark_skipped(row_ids) -> list:
     """Set skipped_at on the given rows via CAS (`WHERE skipped_at IS NULL`) and RETURN the
     ids actually set. skipped_at quiesces the rows (the SQL excludes skipped_at IS NOT NULL)
@@ -311,7 +334,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                mark=_mark_skipped, escalate=_escalate_operator,
                matching_hbs=_matching_hbs, desired_state_of=_desired_state_of,
                base_of=_base_of, hub_lease_fresh=_default_hub_lease_fresh,
-               pane_state=_default_pane_state, stuck_rows=None,
+               pane_state=_default_pane_state, pane_active=_pane_recently_active, stuck_rows=None,
                stuck_page_age_s: int = STUCK_PAGE_AGE_S,
                stuck_page_max_age_s: int = STUCK_PAGE_MAX_AGE_S,
                escalated_seen=None, gone_window_s: int = GONE_WINDOW_S,
@@ -473,6 +496,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     # quiesce, so the once-guard is `seen` keyed by ("stuck", row_id) (holds across sweeps for the
     # daemon's life). Only pages a LIVE agent — a dead agent's rows were already dead-foreign-paged.
     stuck_paged: list = []
+    stuck_suppressed: list = []
     stuck_by_agent: dict = {}
     for r in (stuck_rows or []):   # None (a test injected `rows` only) → treated as empty
         ca = _created_at(r)  # UPPER age bound (Nazim #43073): a row older than max_age has already
@@ -489,10 +513,20 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         new_ids = [i for i in ids if ("stuck", i) not in seen]
         if not new_ids or not _alive(agent):   # already-paged rows, or a dead agent (dead-foreign)
             continue
+        state = pane_state(agent)
+        # SUPPRESS a working lane (bus #44274): a busy footer ('esc to interrupt') OR recent tool
+        # activity (pane changed across two samples) means the lane is WORKING, not stuck — many
+        # lanes read their inbox without stamping read_at (cc-cosem-platform/-exams class), so an
+        # unread row + a working pane is normal, not a wedge. Do NOT burn the once-guard: if it
+        # later goes stable-idle with the row still unread, a subsequent sweep pages it.
+        if state == "busy" or pane_active(agent):
+            stuck_suppressed.append(agent)
+            escalations.append({"kind": "stuck-suppressed", "agent": agent,
+                                "ids": new_ids, "pane": state, "reason": "pane working"})
+            continue
         if dry_run:
             stuck_paged.append(agent)
             continue
-        state = pane_state(agent)
         escalate(
             f"[wake-backstop] {agent} has directed row(s) un-drained past {stuck_page_age_s}s — genuinely stuck (pane: {state})",
             f"TL;DR: row(s) {new_ids} to {agent} are STILL unread {stuck_page_age_s}s+ after they were "
@@ -509,7 +543,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             "capped": [_row_id(r) for r in capped], "unreachable": unreachable,
             "dead_foreign": dead_foreign, "live_stuck": live_stuck, "readdress": readdress,
             "vetoed": vetoed, "lookup_failed": lookup_failed, "stuck_paged": stuck_paged,
-            "escalations": escalations}
+            "stuck_suppressed": stuck_suppressed, "escalations": escalations}
 
 
 def _ts() -> str:
