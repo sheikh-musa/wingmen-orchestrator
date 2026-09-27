@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <!-- client-channel no-drop watch, DETECT-ONLY (no --arm): logs which client channels it
+       WOULD page (coord at 30m unanswered, orch-console/Nazim at 2h), writes NOTHING to the
+       bus and does not consume dedup state. TO ARM: append '--arm' to ProgramArguments +
+       reload, after the review window (Nazim 43625). NOT loaded until orch-console signs. -->
+  <key>Label</key><string>dev.wingmen.client-nodrop-watch</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/client_channel_nodrop_watch.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>600</integer>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/client_channel_nodrop_watch.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/client_channel_nodrop_watch.log</string>
+</dict></plist>
