@@ -98,3 +98,43 @@ def test_console_does_not_claim_finance_console(monkeypatch):
     # The console's scope is an INCLUSION list; finance-console is absent from it, so a
     # finance-console row is out of console scope (the finance lane answers it, not Nazim).
     assert "finance-console" not in clause
+
+
+def test_console_scope_includes_cosem_tdu_and_angullia(monkeypatch):
+    # op#22517 (2026-09-26/27): the Mini's nazim-ingest already polls these two
+    # (boot_nazim_ingest.sh INGEST_CHANNELS) but the reconcile scope never followed,
+    # so the hub silently stamped Fazli's cosem-tdu messages "handled" without
+    # anyone answering them (12h silence). Console must claim them.
+    _set_role(monkeypatch, "console")
+    clause = ol._channel_scope_sql()
+    assert "cosem-tdu" in clause
+    assert "angullia" in clause
+
+
+def test_hub_excludes_cosem_tdu_and_angullia(monkeypatch):
+    _set_role(monkeypatch, "hub")
+    clause = ol._channel_scope_sql()
+    assert "tag IS DISTINCT FROM 'cosem-tdu'" in clause
+    assert "tag IS DISTINCT FROM 'angullia'" in clause
+
+
+def test_console_polled_client_tags_matches_ingest_channels():
+    """Guardrail against the op#22517 drift recurring: every client channel the
+    Mini's nazim-ingest polls (boot_nazim_ingest.sh INGEST_CHANNELS) that isn't
+    the console's own DM tag, a lane-owned tag, or the finance-console carve-out
+    must be in _CONSOLE_POLLED_CLIENT_TAGS -- so adding a new channel to
+    INGEST_CHANNELS without updating the reconcile scope fails CI immediately,
+    instead of silently dropping client messages for 12h like Fazli's."""
+    import re
+    from pathlib import Path
+    script = Path(__file__).resolve().parent.parent / "scripts" / "boot_nazim_ingest.sh"
+    text = script.read_text()
+    m = re.search(r'INGEST_CHANNELS="([^"]+)"', text)
+    assert m, "boot_nazim_ingest.sh no longer sets INGEST_CHANNELS -- update this test"
+    ingest_tags = frozenset(t.strip() for t in m.group(1).split(",") if t.strip())
+    expected = ingest_tags.difference({"nazim-console", "finance-console"}, ol._LANE_OWNED_TAGS)
+    assert expected == ol._CONSOLE_POLLED_CLIENT_TAGS, (
+        f"boot_nazim_ingest.sh polls {sorted(ingest_tags)} but "
+        f"_CONSOLE_POLLED_CLIENT_TAGS is {sorted(ol._CONSOLE_POLLED_CLIENT_TAGS)} -- "
+        "a channel was added to one and not the other (op#22517 drift)."
+    )

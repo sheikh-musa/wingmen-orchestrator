@@ -110,6 +110,20 @@ _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 # longer reconcile it. Reverting this line hands the tag back to the hub scope.
 _LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor")
 
+# Client channels the Mini's nazim-ingest actually POLLS (scripts/boot_nazim_ingest.sh
+# INGEST_CHANNELS) that the CONSOLE body (not a dedicated lane, not the hub) reconciles.
+# ONE list feeding BOTH branches below, so a console-inclusion/hub-exclusion pair can never
+# drift out of sync again -- exactly the bug that dropped Fazli's cosem-tdu messages for 12h
+# (op#22517, 2026-09-26/27): INGEST_CHANNELS already polled cosem-tdu + angullia on the Mini,
+# but this list (then duplicated ad hoc in each branch) was never updated, so the HUB's
+# mark_handled_through stamped those rows handled without the console ever answering them.
+# Keep this in lockstep with INGEST_CHANNELS (tests/test_operator_log_scope.py asserts it) --
+# add a channel here THE SAME TIME you add it to boot_nazim_ingest.sh, not after.
+_CONSOLE_POLLED_CLIENT_TAGS = frozenset({
+    "cosem-caai", "cosem-exams", "alderei",  # 2026-08-03
+    "cosem-tdu", "angullia",                  # 2026-09-27 (op#22517 fix)
+})
+
 # Suffixes written by the lane phase-gate (scripts/lane_reply.sh): '<tag>-drill' is a reply
 # that never left the building, '<tag>-draft' is one awaiting a reviewer's send. Neither is
 # ever an operator surface, for either body — excluded by shape so a new lane can't reintroduce
@@ -149,15 +163,18 @@ def _channel_scope_sql() -> str:
         # 'tmux-console') AND his private Telegram DM channel — @nazim_cto_bot,
         # which ingest logs as channel='telegram', tag='nazim-console'. Shared
         # feeds are excluded (a war-room/Hafiz msg is not a personal-DM nudge).
-        # PLUS the cosem/alderei channels his Mini console-ingest already POLLS
-        # (boot_nazim_ingest.sh INGEST_CHANNELS): cosem-caai (Ray), cosem-exams
-        # (Hariz), alderei (Nahar). Align-reconcile-to-ingest-ownership — whoever
-        # polls a channel reconciles it, else the poll-here/reconcile-there split
-        # forces the hub to relay every cosem inbound (2026-08-03, hub+console
-        # co-signed; operator 'cosem = Nazim'). cosem-adcda is NOT here — the hub
+        # PLUS the client channels his Mini console-ingest already POLLS
+        # (boot_nazim_ingest.sh INGEST_CHANNELS, see _CONSOLE_POLLED_CLIENT_TAGS):
+        # cosem-caai (Ray), cosem-exams (Hariz), alderei (Nahar). Align-reconcile-
+        # to-ingest-ownership — whoever polls a channel reconciles it, else the
+        # poll-here/reconcile-there split forces the hub to relay every cosem
+        # inbound (2026-08-03, hub+console co-signed; operator 'cosem = Nazim').
+        # cosem-tdu + angullia joined 2026-09-27 (op#22517: same split dropped
+        # Fazli's cosem-tdu messages for 12h). cosem-adcda is NOT here — the hub
         # ingest polls that one, so the hub keeps reconciling it.
+        tag_list = ",".join("'%s'" % t for t in sorted(_CONSOLE_POLLED_CLIENT_TAGS))
         return (" AND (channel='tmux-console' OR tag='nazim-console'"
-                " OR tag IN ('cosem-caai','cosem-exams','alderei'))"
+                " OR tag IN (%s))" % tag_list
                 + _shared_feed_exclusion())
     if role == "hub":
         # Hub owns every operator surface EXCEPT the OTHER bodies' DMs (Nazim's
@@ -166,16 +183,17 @@ def _channel_scope_sql() -> str:
         # a shared-awareness feed as a personal DM. (cai-channel was already
         # carved from mark_handled; carving it from the read scope too closes the
         # leak the operator's 2026-07-10 pipeline test exposed.)
-        # cosem-caai/cosem-exams/alderei carved out too (2026-08-03): the Mini
-        # console-ingest polls them, so the console reconciles them — the hub must
-        # NOT also discover+relay them. IS DISTINCT FROM (not NOT IN) keeps
-        # NULL-tag rows in hub scope.
+        # _CONSOLE_POLLED_CLIENT_TAGS carved out too (2026-08-03, +cosem-tdu/angullia
+        # 2026-09-27 op#22517): the Mini console-ingest polls them, so the console
+        # reconciles them — the hub must NOT also discover+relay them. IS DISTINCT
+        # FROM (not NOT IN) keeps NULL-tag rows in hub scope.
+        exclusions = " AND ".join(
+            "tag IS DISTINCT FROM '%s'" % t for t in sorted(_CONSOLE_POLLED_CLIENT_TAGS)
+        )
         return (" AND channel<>'tmux-console'"
                 " AND tag IS DISTINCT FROM 'nazim-console'"
                 " AND tag IS DISTINCT FROM 'cai-channel'"
-                " AND tag IS DISTINCT FROM 'cosem-caai'"
-                " AND tag IS DISTINCT FROM 'cosem-exams'"
-                " AND tag IS DISTINCT FROM 'alderei'"
+                " AND " + exclusions +
                 # finance-console (2026-09-05, Nazim 37730): the cc-finance lane
                 # reconciles its OWN revenue channel (bot_channels finance-console
                 # inject_target=finance, pinned to the Mini's nazim-ingest). The hub
