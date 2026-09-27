@@ -46,10 +46,24 @@ Usage:
     scripts/ddl_coverage_watchdog.py --silo <ref> --silo-dsn <dsn> \\
         --bus-dsn <dsn> [--once] [--dry-run]
 
+    # or, when the watching body doesn't hold the silo's DSN directly:
+    scripts/ddl_coverage_watchdog.py --silo <ref> \\
+        --silo-dsn-vault-key <vault secret name> --bus-dsn <dsn>
+
 State: a local JSON file (logs/ddl_coverage_watchdog_state.json), keyed by
 silo ref -- {fingerprint, ledger_count, checked_at}. The FIRST scan for a
 silo only establishes a baseline; it never pages (no prior state to diff
 against, same "clean boot" shape as every other watchdog in this fleet).
+
+KNOWN LIMITATION (orch-console, bus #44153): the ledger check is a COUNT
+delta (did migration_ledger grow since the last scan), not a per-event
+correlation. A legitimately ledgered migration and an unledgered raw DDL
+landing in the SAME scan window both show up as "ledger grew" -- the
+unledgered one hides behind the legitimate one and this scan reports clean.
+Mitigation: keep scans frequent (e.g. every 10 min) to shrink the window a
+masking pair could land in. Real fix (not built here, P3 follow-up):
+correlate migration_ledger.applied_at against the specific catalog rows
+that changed, so two co-occurring changes can't hide each other.
 """
 from __future__ import annotations
 
@@ -205,16 +219,36 @@ def run_scan(*, silo: str, silo_dsn: str, bus_dsn: str, dry_run: bool = False) -
     return unledgered
 
 
+def resolve_silo_dsn(args) -> str:
+    """--silo-dsn is a plain value; --silo-dsn-vault-key fetches it from
+    nervous_system.vault at runtime (op#21338) instead -- for a lane being
+    watched by a DIFFERENT body than the one that holds its DSN (e.g.
+    cc-fleet-health watching ywrpttpxwfcoodovxhsr via a read-only DSN
+    cc-cosem-platform put in the vault, bus #44153 item 2). Never both, and
+    never neither -- enforced by the mutually-exclusive-required group in
+    main()'s parser, not by convention."""
+    if args.silo_dsn_vault_key:
+        from nervous_system.vault import vault
+        return vault.get(
+            args.silo_dsn_vault_key,
+            reason=f"ddl_coverage_watchdog scan of silo {args.silo}",
+        ).value
+    return args.silo_dsn
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--silo", required=True, help="project ref of the silo to fingerprint")
-    p.add_argument("--silo-dsn", required=True, help="DSN of the silo being fingerprinted (never $DATABASE_URL implicitly)")
+    dsn_group = p.add_mutually_exclusive_group(required=True)
+    dsn_group.add_argument("--silo-dsn", default=None, help="DSN of the silo being fingerprinted (never $DATABASE_URL implicitly)")
+    dsn_group.add_argument("--silo-dsn-vault-key", default=None, help="fetch --silo-dsn from nervous_system.vault at runtime instead (e.g. a client silo's read-only DSN the watcher doesn't hold directly)")
     p.add_argument("--bus-dsn", required=True, help="DSN of the fleet bus (substrate) -- where a page lands, NOT necessarily --silo-dsn")
     p.add_argument("--once", action="store_true", help="scan once and exit (default; reserved for a future --loop)")
     p.add_argument("--dry-run", action="store_true", help="detect + print, never pages, never writes state")
     args = p.parse_args(argv)
 
-    drifted = run_scan(silo=args.silo, silo_dsn=args.silo_dsn, bus_dsn=args.bus_dsn, dry_run=args.dry_run)
+    silo_dsn = resolve_silo_dsn(args)
+    drifted = run_scan(silo=args.silo, silo_dsn=silo_dsn, bus_dsn=args.bus_dsn, dry_run=args.dry_run)
     return 1 if drifted else 0
 
 
