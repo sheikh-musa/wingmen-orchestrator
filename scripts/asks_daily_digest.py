@@ -15,9 +15,17 @@ for the console body under ORCH-TOPOLOGY-001 (orch_lease.py), so sending via it
 from here would silently fail every single day and never reach the operator.
 
 Scheduled via launchd/dev.wingmen.asks-daily-digest.plist at 09:00 Abu Dhabi
-time (UTC+4) — see that file's comment for the UTC-hour conversion. Landing
-this file does NOT wire it into launchd; a plist must still be separately
-`launchctl load`ed at go-live, so this is safe to merge without firing.
+time (UTC+4) — see that file's comment for the host-TZ-hour conversion.
+Landing this file does NOT wire it into launchd; a plist must still be
+separately `launchctl load`ed at go-live, so this is safe to merge without
+firing.
+
+Robustness (bus #44286: the plist fired 8h off because launchd's
+StartCalendarInterval is host-local and the host is not UTC): every real
+send logs the wall-clock time in Asia/Dubai it actually fired at, and warns
+loudly if that's far from the intended 09:00 slot — so a future host-TZ
+change or launchd misconfiguration shows up in the log the same day instead
+of waiting for the operator to notice a digest at the wrong hour.
 
 Usage:
   asks_daily_digest.py [--dry-run] [--force]
@@ -33,12 +41,14 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import psycopg
 from dotenv import load_dotenv
 
 ORCH = Path(os.path.expanduser("~/wingmen/orchestrator"))
 STATE_FILE = ORCH / "logs" / "asks_daily_digest_state.json"
+UAE_TZ = ZoneInfo("Asia/Dubai")
 
 load_dotenv(ORCH / ".env")
 
@@ -97,6 +107,19 @@ def _mark_sent(today: str) -> None:
         pass
 
 
+def _log_uae_send_time(now_utc: "datetime | None" = None) -> None:
+    """bus #44286: log the actual send time in Asia/Dubai, and warn loudly if
+    it's far from the intended 09:00 UAE slot — a host-TZ or launchd-Hour
+    drift then shows up in the log the day it happens, not when the operator
+    notices a digest at the wrong hour."""
+    now_uae = (now_utc or datetime.now(timezone.utc)).astimezone(UAE_TZ)
+    line = f"asks_daily_digest: send time {now_uae.strftime('%Y-%m-%d %H:%M %Z')} (target ~09:00 Asia/Dubai)"
+    if abs(now_uae.hour - 9) >= 2:
+        line += (" -- WARNING: more than 1h off the intended 09:00 UAE slot; "
+                 "check launchd Hour vs host TZ (bus #44286)")
+    print(line)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true",
@@ -123,6 +146,7 @@ def main(argv=None) -> int:
         print(digest)
         return 0
 
+    _log_uae_send_time()
     result = subprocess.run(["bash", str(ORCH / "scripts" / "nazim_send.sh"), digest])
     if result.returncode != 0:
         print("asks_daily_digest: nazim_send.sh failed — not stamping (retry next run)", file=sys.stderr)
