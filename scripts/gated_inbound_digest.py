@@ -1,29 +1,34 @@
 #!/usr/bin/env python3
 """gated_inbound_digest.py — once-daily digest of GATED inbound Telegram messages.
 
-WHY (orch-console bus #43647, PR #174 follow-up): PR #174 stamps handled_at on
-gated (deny-by-default) operator_messages rows so a stranger's /start no longer
-fires a "Got your message" ack into the operator's own chat. The risk that
-creates: a LEGITIMATE new client contact — a real person messaging a client bot
-from an unknown chat — is now also silently stamped handled and never surfaced.
-This digest closes that gap: once a day it reports WHO was gated (count + sender
-name/username + channel) so a real new contact gets seen and allowlisted.
+WHY (orch-console bus #43647/#43879, PR #174 follow-up): PR #174 stamps handled_at
+on gated (deny-by-default) operator_messages rows so a stranger's /start no longer
+fires a "Got your message" ack into the operator's own chat. The risk that creates:
+a LEGITIMATE new client contact — a real person messaging a client bot from an
+unknown chat — is now also silently stamped handled and never surfaced. This digest
+closes that gap once a day.
 
-PRIVACY (hard rule, Nazim #43647): the digest carries ONLY count + sender
-name/username + chat_id + channel. It NEVER includes message text.
+ONE GATE IMPLEMENTATION (Nazim #43879): the gated verdict reuses the REAL
+`nervous_system.ingest.gate_allows` (+ `Channel`) — imported, not mirrored, so it
+can never drift from the live gate. Importing ingest is side-effect-free at the
+daemon level (its `main()` runs only under `if __name__ == "__main__"`).
 
-Gated classification (no DB marker exists — ingest only writes a _log_line and
-sets delivered=true at INSERT for all inbound): re-derived here by MIRRORING
-nervous_system.ingest.gate_allows (chat_id in allowed_chat_ids OR normalized
-username in allowed_usernames). `is_gated` below is a faithful inverse of that
-function, kept as a pure function so it is unit-tested without a DB. A message
-is gated iff NO channel matching its tag would have allowed its sender.
+THREE BUCKETS, lead with the actionable one (Nazim #43879):
+  (a) SERVICE, no action  — updates with no sender/chat (chat_id None: my_chat_member
+      etc.). Summarized, not actioned.
+  (b) OPERATOR DM to a client bot, no action — a private DM from a known operator id
+      (MUSA_TELEGRAM_ID). Verified real case: Musa's /start to @angullia_bot (chat
+      286619815) is bot-setup, NOT an actionable drop, and must NOT be allowlisted
+      onto the client lane. Summarized, not actioned.
+  (c) GENUINE unknown sender — the ACTIONABLE ones (a real contact to allowlist).
+The digest LEADS with (c); (a)+(b) are summarized below. It posts ONLY when there is
+at least one (c) — a digest of pure no-action noise is spam.
 
-Signal, not noise: if there were ZERO gated inbound in the window, NOTHING is
-posted (a daily zero-post is spam).
+PRIVACY (hard rule): count + sender name/username + chat_id + channel ONLY. NEVER
+message text.
 
 Run: python scripts/gated_inbound_digest.py [--hours 24] [--dry-run]
-Schedule: see the crontab line in the PR description (host op — not installed here).
+Schedule: see the crontab line in the PR — host op, not installed here.
 """
 from __future__ import annotations
 
@@ -33,78 +38,126 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "scripts"))
+
+# ONE gate implementation — the real one (imported, never mirrored). Side-effect-free
+# at the daemon level: ingest.main() runs only under `if __name__ == "__main__"`.
+from nervous_system.ingest import gate_allows, Channel  # noqa: E402
+
+# Channel.COLS order — what a Channel(row) tuple expects. Used to build Channel
+# objects from a bot_channels query so gate_allows sees exactly the live shape.
+_CHANNEL_COLS = ("channel_key", "token_env_key", "mode", "inject_target", "inject_prefix",
+                 "responder_ref", "allowed_chat_ids", "allowed_usernames", "group_routing",
+                 "channel_tag", "log_target", "poll_offset")
+
+# Bucket labels
+SERVICE = "service"        # (a) no sender/chat
+OPERATOR_DM = "operator_dm"  # (b) known operator's private DM to a client bot
+GENUINE = "genuine"        # (c) actionable unknown sender
 
 
-# ── pure classification (mirrors nervous_system.ingest.gate_allows; unit-tested) ──
-def _norm_user(u):
-    return u.lstrip("@").lower() if u else u
-
-
-def is_gated(chat_id, username, allowed_chat_ids, allowed_usernames) -> bool:
-    """True when this sender would be DENIED by the gate (the inverse of
-    ingest.gate_allows). chat_id None => gated (ingest treats it so). Faithful
-    mirror: allow iff chat_id in allowed_chat_ids OR normalized username in
-    normalized allowed_usernames; gated otherwise."""
+# ── pure classification (unit-tested; uses the REAL gate_allows) ─────────────
+def _chat_int(chat_id):
+    """operator_messages.chat_id is stored as text (or None). Return int, or None
+    if absent/unparseable (both mean 'no valid allowlistable sender')."""
     if chat_id is None:
-        return True
+        return None
     try:
-        cid = int(chat_id)
+        return int(chat_id)
     except (TypeError, ValueError):
-        return True  # unparseable chat id was never a valid allowlisted sender
-    if cid in (allowed_chat_ids or []):
-        return False
-    if username:
-        norm = _norm_user(username)
-        if norm in [_norm_user(u) for u in (allowed_usernames or [])]:
-            return False
-    return True
+        return None
 
 
-def row_is_gated(row: dict, channels_by_tag: dict) -> bool:
-    """Pure: a row is gated iff NO channel matching its tag would allow the
-    sender. `channels_by_tag[tag]` is a list of (channel_key, allowed_chat_ids,
-    allowed_usernames). A tag with no matching channel is treated as NOT gated
-    here (orphan tag — surfaced separately, never as a false 'new contact')."""
+def sender_gated(ch: Channel, chat_id, username) -> bool:
+    """Inverse of ingest's gate decision for ONE channel, mirroring ingest's ORDER
+    (`chat_id is None or not gate_allows(...)`): a None/unparseable chat_id is gated;
+    otherwise defer to the REAL gate_allows."""
+    cid = _chat_int(chat_id)
+    if cid is None:
+        return True
+    return not gate_allows(ch, cid, username)
+
+
+def row_gated(row: dict, channels_by_tag: dict) -> bool:
+    """A row is gated iff NO channel matching its tag would allow the sender. An
+    orphan tag (no matching channel) is NOT flagged (not a 'new contact on a known
+    channel'). `channels_by_tag[tag]` is a list of Channel objects."""
     matches = channels_by_tag.get(row.get("tag"))
     if not matches:
         return False
-    for _key, chat_ids, usernames in matches:
-        if not is_gated(row.get("chat_id"), row.get("from_username"), chat_ids, usernames):
-            return False  # allowed by at least one matching channel => not gated
-    return True
+    return all(sender_gated(ch, row.get("chat_id"), row.get("from_username")) for ch in matches)
+
+
+def bucket_of(row: dict, operator_ids: set) -> str:
+    """Bucket a GATED row: (a) service (no chat), (b) operator DM (known operator id),
+    (c) genuine unknown sender. Pure."""
+    cid = _chat_int(row.get("chat_id"))
+    if cid is None:
+        return SERVICE
+    if cid in operator_ids:
+        return OPERATOR_DM
+    return GENUINE
+
+
+def classify(rows: list, channels_by_tag: dict, operator_ids: set) -> dict:
+    """Return {GENUINE:[], OPERATOR_DM:[], SERVICE:[]} of the GATED rows only."""
+    out = {GENUINE: [], OPERATOR_DM: [], SERVICE: []}
+    for r in rows:
+        if row_gated(r, channels_by_tag):
+            out[bucket_of(r, operator_ids)].append(r)
+    return out
 
 
 def channel_key_for_tag(tag: str, channels_by_tag: dict) -> str:
     matches = channels_by_tag.get(tag)
-    return matches[0][0] if matches else (tag or "?")
+    return matches[0].key if matches else (tag or "?")
 
 
-def build_digest_body(gated_rows: list, channels_by_tag: dict) -> str | None:
-    """Aggregate gated rows by (channel, from_name, from_username, chat_id) and
-    render the digest body. Returns None when there is nothing to report (so the
-    caller posts nothing). NEVER includes message text."""
-    if not gated_rows:
-        return None
-    agg: dict = {}
-    for r in gated_rows:
+def _agg(rows, channels_by_tag):
+    agg = {}
+    for r in rows:
         ckey = channel_key_for_tag(r.get("tag"), channels_by_tag)
         k = (ckey, r.get("from_name"), r.get("from_username"), str(r.get("chat_id")))
         agg[k] = agg.get(k, 0) + 1
-    total = sum(agg.values())
-    senders = len(agg)
+    return agg
+
+
+def build_digest_body(buckets: dict, channels_by_tag: dict) -> str | None:
+    """Render the digest. Returns None unless there is >=1 GENUINE (actionable) row —
+    a digest of pure service/operator noise is spam. Leads with (c); summarizes
+    (a)+(b) below. NEVER includes message text."""
+    genuine = buckets.get(GENUINE) or []
+    if not genuine:
+        return None
+    g_agg = _agg(genuine, channels_by_tag)
+    total = sum(g_agg.values())
     lines = [
-        f"\U0001F4E5 Gated inbound (last 24h): {total} message(s) from {senders} "
-        f"un-allowlisted sender(s). Review + allowlist any REAL client contacts "
-        f"(bot_channels.allowed_chat_ids / allowed_usernames). No message text is included."
+        f"\U0001F4E5 Gated inbound (last 24h) — {total} ACTIONABLE message(s) from "
+        f"{len(g_agg)} unknown sender(s). Review + allowlist any REAL client contacts "
+        f"(bot_channels.allowed_chat_ids / allowed_usernames). No message text is included.",
+        "",
+        "ACTIONABLE — genuine unknown senders:",
     ]
-    for (ckey, name, user, cid) in sorted(agg, key=lambda x: (x[0], str(x[1]))):
-        who = name or "(no name)"
+    for (ckey, name, user, cid) in sorted(g_agg, key=lambda x: (x[0], str(x[1]))):
         uh = f" @{user}" if user else ""
-        lines.append(f"• {ckey}: {who}{uh} (chat {cid}) — {agg[(ckey, name, user, cid)]} msg(s)")
+        lines.append(f"• {ckey}: {name or '(no name)'}{uh} (chat {cid}) — {g_agg[(ckey, name, user, cid)]} msg(s)")
+
+    op = buckets.get(OPERATOR_DM) or []
+    svc = buckets.get(SERVICE) or []
+    if op or svc:
+        lines += ["", "No action needed (summarized):"]
+        if op:
+            op_agg = _agg(op, channels_by_tag)
+            senders = ", ".join(sorted({f"{k[1] or '(no name)'}" for k in op_agg}))
+            lines.append(f"• operator DM to a client bot (bot setup, do NOT allowlist onto the client lane): "
+                         f"{sum(op_agg.values())} msg from {senders}")
+        if svc:
+            lines.append(f"• service updates, no sender (no action): {len(svc)} update(s)")
     return "\n".join(lines)
 
 
-# ── DB I/O (not unit-tested; the classification above is) ─────────────────────
+# ── DB I/O (not unit-tested; the classification above is) ────────────────────
 def _dsn(env: dict) -> str:
     v = env.get("SUPABASE_DB_URL") or env.get("DATABASE_URL")
     if v:
@@ -118,12 +171,27 @@ def _dsn(env: dict) -> str:
     raise SystemExit("gated_inbound_digest: no SUPABASE_DB_URL/DATABASE_URL in env or .env")
 
 
+def _operator_ids(env: dict) -> set:
+    ids = set()
+    for key in ("MUSA_TELEGRAM_ID", "OPERATOR_TELEGRAM_IDS"):
+        v = env.get(key)
+        if not v:
+            continue
+        for part in str(v).replace(",", " ").split():
+            try:
+                ids.add(int(part))
+            except ValueError:
+                pass
+    return ids
+
+
 def load_channels_by_tag(conn) -> dict:
     out: dict = {}
     with conn.cursor() as cur:
-        cur.execute("SELECT channel_key, channel_tag, allowed_chat_ids, allowed_usernames FROM bot_channels")
-        for key, tag, chat_ids, usernames in cur.fetchall():
-            out.setdefault(tag, []).append((key, chat_ids or [], usernames or []))
+        cur.execute(f"SELECT {', '.join(_CHANNEL_COLS)} FROM bot_channels")
+        for row in cur.fetchall():
+            ch = Channel(tuple(row))
+            out.setdefault(ch.channel_tag, []).append(ch)
     return out
 
 
@@ -148,10 +216,10 @@ def main(argv=None) -> int:
 
     try:
         import psycopg2
-        sys.path.insert(0, str(_ROOT / "scripts"))
         import bus_send
 
         dsn = _dsn(os.environ)
+        operator_ids = _operator_ids(os.environ)
         conn = psycopg2.connect(dsn)
         try:
             channels_by_tag = load_channels_by_tag(conn)
@@ -159,13 +227,14 @@ def main(argv=None) -> int:
         finally:
             conn.close()
 
-        gated = [r for r in rows if row_is_gated(r, channels_by_tag)]
-        body = build_digest_body(gated, channels_by_tag)
+        buckets = classify(rows, channels_by_tag, operator_ids)
+        body = build_digest_body(buckets, channels_by_tag)
         if body is None:
-            print(f"gated_inbound_digest: 0 gated inbound in last {args.hours}h — nothing to post.")
+            print(f"gated_inbound_digest: no ACTIONABLE gated inbound in last {args.hours}h "
+                  f"(genuine=0, operator_dm={len(buckets[OPERATOR_DM])}, service={len(buckets[SERVICE])}) — nothing to post.")
             return 0
-        subject = (f"Gated inbound digest ({args.hours}h): "
-                   f"{sum(1 for _ in gated)} msg from {len(set((channel_key_for_tag(r['tag'], channels_by_tag), r.get('chat_id')) for r in gated))} sender(s) — allowlist real contacts")
+        n = len(buckets[GENUINE])
+        subject = f"Gated inbound digest ({args.hours}h): {n} actionable unknown-sender msg — allowlist real contacts"
         if args.dry_run:
             print("SUBJECT:", subject)
             print(body)
@@ -174,7 +243,7 @@ def main(argv=None) -> int:
             from_agent=args.from_agent, to=args.to, mtype="update",
             subject=subject[:200], body=body, priority="P3", req=False, dsn=dsn,
         )
-        print(f"gated_inbound_digest: posted bus #{row_id} to {args.to} ({len(gated)} gated rows).")
+        print(f"gated_inbound_digest: posted bus #{row_id} to {args.to} ({n} actionable rows).")
         return 0
     except SystemExit:
         raise

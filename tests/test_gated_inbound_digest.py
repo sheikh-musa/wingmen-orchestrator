@@ -1,98 +1,108 @@
-"""Pure-function proof for the gated-inbound digest classifier (PR #174 follow-up,
-bus #43647). No DB/network — mirrors the discipline of test_model_precedence.py.
+"""Pure-function proof for the gated-inbound digest (PR #174 follow-up, bus
+#43647/#43879). No live DB — mirrors the discipline of test_model_precedence.py.
 
-Proves: (1) is_gated is a faithful inverse of ingest.gate_allows (chat_id OR
-normalized-username allowlist), (2) row_is_gated resolves a row's tag to its
-channel allowlists and treats orphan tags as NOT gated, (3) build_digest_body
-aggregates + never leaks message text, and returns None on empty (no spam).
+Uses the REAL gate (imports nervous_system.ingest.gate_allows + Channel) — no
+mirror — and builds real Channel objects from fixture tuples, so the test exercises
+the exact gate the digest uses in production. Proves: gated resolution via the real
+gate, orphan-tag handling, the THREE buckets (service / operator-DM / genuine),
+lead-with-actionable, empty-genuine→None (no spam), and the no-message-text invariant.
 """
 import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "scripts"))
 
+from nervous_system.ingest import Channel  # noqa: E402  (the real gate's Channel)
 from gated_inbound_digest import (  # noqa: E402
-    is_gated, row_is_gated, build_digest_body,
+    row_gated, bucket_of, classify, build_digest_body,
+    SERVICE, OPERATOR_DM, GENUINE,
 )
 
-
-# ── is_gated: the inverse of gate_allows ─────────────────────────────────────
-def test_allowed_chat_id_is_not_gated():
-    assert is_gated(286619815, None, [286619815], []) is False
-    # operator_messages stores chat_id as a STRING → must still match
-    assert is_gated("286619815", None, [286619815], []) is False
+MUSA = 286619815  # MUSA_TELEGRAM_ID (an operator id)
 
 
-def test_allowed_username_is_not_gated_normalized():
-    # gate_allows lstrips '@' and lowercases both sides
-    assert is_gated(999, "@Musa", [], ["musa"]) is False
-    assert is_gated(999, "musa", [], ["@MUSA"]) is False
+def _chan(key, tag, chat_ids, usernames):
+    """Build a REAL Channel from a fixture tuple in Channel.COLS order."""
+    return Channel((key, None, "agent-session", key, None, None,
+                    chat_ids, usernames, None, tag, "substrate", 0))
 
 
-def test_unknown_sender_is_gated():
-    assert is_gated(-5585966657, "stranger", [286619815], ["musa"]) is True
-
-
-def test_empty_allowlists_gate_everything():
-    # ingest: "empty allowlists accept NOTHING"
-    assert is_gated(123, "someone", [], []) is True
-
-
-def test_none_or_unparseable_chat_id_is_gated():
-    assert is_gated(None, None, [123], []) is True
-    assert is_gated("not-a-number", None, [123], []) is True
-
-
-# ── row_is_gated: tag → channel allowlist resolution ─────────────────────────
+# tag -> [Channel]; note operator-orch uses tag 'orch-channel' in prod
 _CHANNELS = {
-    "oeh": [("oeh", [-5585966657], [])],
-    "orch-channel": [("operator-orch", [286619815, -5319479270], [])],
+    "oeh": [_chan("oeh", "oeh", [-5585966657], [])],
+    "angullia": [_chan("angullia", "angullia", [-5449309564], [])],
+    "orch-channel": [_chan("operator-orch", "orch-channel", [MUSA, -5319479270], [])],
 }
+_OPS = {MUSA}
 
 
-def test_row_allowed_by_its_channel_is_not_gated():
-    row = {"tag": "oeh", "chat_id": "-5585966657", "from_username": None, "from_name": "OEH bot admin"}
-    assert row_is_gated(row, _CHANNELS) is False
+# ── gated resolution via the REAL gate ───────────────────────────────────────
+def test_allowed_sender_not_gated():
+    assert row_gated({"tag": "oeh", "chat_id": "-5585966657", "from_username": None}, _CHANNELS) is False
 
 
-def test_row_from_unknown_chat_on_known_channel_is_gated():
-    row = {"tag": "oeh", "chat_id": "-5000000000", "from_username": "newperson", "from_name": "New Person"}
-    assert row_is_gated(row, _CHANNELS) is True
+def test_unknown_sender_on_known_channel_is_gated():
+    assert row_gated({"tag": "oeh", "chat_id": "-5000000000", "from_username": "newperson"}, _CHANNELS) is True
 
 
-def test_orphan_tag_is_not_flagged_gated():
-    # a tag with no matching channel is an orphan, not a 'new contact on a known channel'
-    row = {"tag": "removed-channel", "chat_id": "42", "from_username": None, "from_name": "x"}
-    assert row_is_gated(row, _CHANNELS) is False
+def test_orphan_tag_not_flagged():
+    assert row_gated({"tag": "removed", "chat_id": "42", "from_username": None}, _CHANNELS) is False
 
 
-def test_row_allowed_by_any_matching_channel_wins():
-    channels = {"shared": [("a", [111], []), ("b", [222], [])]}
-    assert row_is_gated({"tag": "shared", "chat_id": "222", "from_username": None, "from_name": "y"}, channels) is False
-    assert row_is_gated({"tag": "shared", "chat_id": "333", "from_username": None, "from_name": "z"}, channels) is True
+def test_none_chat_id_is_gated():
+    assert row_gated({"tag": "oeh", "chat_id": None, "from_username": None}, _CHANNELS) is True
 
 
-# ── build_digest_body: aggregation, privacy, empty-is-None ───────────────────
-def test_empty_returns_none_no_spam():
-    assert build_digest_body([], _CHANNELS) is None
+# ── the three buckets ────────────────────────────────────────────────────────
+def test_bucket_service_when_no_chat():
+    assert bucket_of({"tag": "oeh", "chat_id": None}, _OPS) == SERVICE
 
 
-def test_body_aggregates_and_omits_text():
+def test_bucket_operator_dm_for_known_operator_id():
+    # Musa's private /start to @angullia_bot (chat 286619815) — bot setup, NOT actionable
+    assert bucket_of({"tag": "angullia", "chat_id": str(MUSA)}, _OPS) == OPERATOR_DM
+
+
+def test_bucket_genuine_for_unknown_sender():
+    assert bucket_of({"tag": "oeh", "chat_id": "-5000000000"}, _OPS) == GENUINE
+
+
+def test_classify_only_buckets_gated_rows_into_three():
     rows = [
-        {"tag": "oeh", "chat_id": "-5000000000", "from_username": "newperson", "from_name": "New Person",
-         "text": "SECRET body that must never appear"},
-        {"tag": "oeh", "chat_id": "-5000000000", "from_username": "newperson", "from_name": "New Person",
-         "text": "another secret"},
-        {"tag": "orch-channel", "chat_id": "-1", "from_username": None, "from_name": "Someone Else",
-         "text": "leak me"},
+        {"tag": "oeh", "chat_id": "-5585966657", "from_username": None, "from_name": "allowed"},   # not gated
+        {"tag": "oeh", "chat_id": None, "from_username": None, "from_name": None},                  # gated -> service
+        {"tag": "angullia", "chat_id": str(MUSA), "from_username": "haikusmesh", "from_name": "Musa"},  # gated -> operator_dm
+        {"tag": "oeh", "chat_id": "-9999", "from_username": "stranger", "from_name": "Stranger"},   # gated -> genuine
     ]
-    body = build_digest_body(rows, _CHANNELS)
+    b = classify(rows, _CHANNELS, _OPS)
+    assert len(b[GENUINE]) == 1 and len(b[OPERATOR_DM]) == 1 and len(b[SERVICE]) == 1
+
+
+# ── digest body: lead-with-actionable, no-spam, privacy ──────────────────────
+def test_no_genuine_returns_none_even_with_operator_and_service():
+    b = {GENUINE: [], OPERATOR_DM: [{"tag": "angullia", "chat_id": str(MUSA), "from_name": "Musa", "from_username": "haikusmesh"}],
+         SERVICE: [{"tag": "oeh", "chat_id": None, "from_name": None, "from_username": None}]}
+    assert build_digest_body(b, _CHANNELS) is None  # pure no-action noise = no post
+
+
+def test_body_leads_with_actionable_summarizes_rest_and_hides_text():
+    b = {
+        GENUINE: [
+            {"tag": "oeh", "chat_id": "-9999", "from_username": "stranger", "from_name": "Real Contact", "text": "LEAKME hello"},
+            {"tag": "oeh", "chat_id": "-9999", "from_username": "stranger", "from_name": "Real Contact", "text": "LEAKME again"},
+        ],
+        OPERATOR_DM: [{"tag": "angullia", "chat_id": str(MUSA), "from_name": "Musa", "from_username": "haikusmesh", "text": "SECRET /start"}],
+        SERVICE: [{"tag": "oeh", "chat_id": None, "from_name": None, "from_username": None, "text": "my_chat_member"}],
+    }
+    body = build_digest_body(b, _CHANNELS)
     assert body is not None
-    # never leak message text
-    assert "SECRET" not in body and "secret" not in body and "leak" not in body
-    # counts: 3 total, 2 senders
-    assert "3 message(s)" in body and "2 " in body
-    # channel_key resolved (orch-channel tag -> operator-orch key), sender + count present
-    assert "oeh:" in body and "operator-orch:" in body
-    assert "New Person" in body and "@newperson" in body and "2 msg(s)" in body
+    # privacy: no message text ever
+    assert "LEAKME" not in body and "SECRET" not in body and "my_chat_member" not in body
+    # leads with the actionable genuine sender
+    assert "ACTIONABLE" in body and body.index("ACTIONABLE") < body.index("No action")
+    assert "oeh: Real Contact @stranger (chat -9999) — 2 msg(s)" in body
+    # operator DM summarized + explicit do-not-allowlist, service summarized
+    assert "operator DM to a client bot" in body and "do NOT allowlist" in body
+    assert "service updates, no sender" in body
