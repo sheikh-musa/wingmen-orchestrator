@@ -158,7 +158,8 @@ def test_send_rejects_missing_priority():
 def test_send_accepts_valid_priority_then_reaches_the_db_call(monkeypatch, p):
     # Confirms priority validation doesn't reject a valid value — push past
     # it into psycopg2.connect (monkeypatched to fail fast) so no real DB
-    # connection is attempted.
+    # connection is attempted. dsn is passed explicitly so this doesn't
+    # depend on DATABASE_URL/.env being present (CI has neither).
     import psycopg2
 
     def _boom(*a, **k):
@@ -167,4 +168,4 @@ def test_send_accepts_valid_priority_then_reaches_the_db_call(monkeypatch, p):
     monkeypatch.setattr(psycopg2, "connect", _boom)
     with pytest.raises(RuntimeError, match="no live DB in tests"):
         bs.send("cc-substrate", "cc-orchestrator", "update", "s",
-                 "x" * bs._MIN_BODY_BYTES, p)
+                 "x" * bs._MIN_BODY_BYTES, p, dsn="postgresql://unused")
