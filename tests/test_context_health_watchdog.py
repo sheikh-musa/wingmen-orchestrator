@@ -1551,9 +1551,9 @@ def test_alerts_value_frozen_suppresses_pct_and_pages_frozen_once(monkeypatch, t
     assert len(sent) == 1 and "FROZEN" in sent[0] and "ZOMBIE" in sent[0]
     # CAI-1360 + remedy-host (Nazim 39335): the frozen page names the REAL external-recycle
     # remediation for the CURRENT host (gzb), never the decommissioned wingmen-core, never self-recycle.
-    # op#42907/op#20655: gzb's old relay (gzb-vpn.sh) is dead and unreplaced -- the page must
-    # say so honestly rather than describe a hop that no longer exists.
-    assert "no automated interactive" in sent[0].lower() and "91.107.235.77" not in sent[0]
+    # Nazim 43610: the gzb reach was restored (ssh gzb) -- the page must name that working
+    # reach and never the decommissioned wingmen-core host.
+    assert "ssh gzb" in sent[0].lower() and "91.107.235.77" not in sent[0]
     assert "self_recycle" not in sent[0] and "recycle itself" not in sent[0].lower()
     st = json.loads((tmp_path / "state.json").read_text())
     assert st["__ctx_freeze__"]["cc-orchestrator"]["paged"] is True
@@ -1639,9 +1639,9 @@ def test_er_at_ceiling_pages_external_recycle_not_self_recycle(monkeypatch, tmp_
     monkeypatch.setattr(w, "_resolve_hub_holder", lambda: "gzbai")
     fired = w.run_alerts([_ctx(agent="er-body", pct=96, level="red")])
     assert len(sent) == 1, "a body at the ceiling must page the operator"
-    # remediation must name the CURRENT host situation (gzb) honestly -- op#42907/op#20655
-    # killed the old gzb-vpn.sh relay with no replacement -- never the decommissioned wingmen-core.
-    assert "no automated interactive" in sent[0].lower(), "remediation must be honest about the gzb reach gap"
+    # remediation must name the CURRENT gzb reach (ssh gzb, restored Nazim 43610) --
+    # never the decommissioned wingmen-core.
+    assert "ssh gzb" in sent[0].lower(), "remediation must name the current gzb reach (ssh gzb), not a dead host"
     assert "91.107.235.77" not in sent[0], "must not name the decommissioned host"
     assert "self_recycle" not in sent[0] and "recycle itself" not in sent[0].lower(), \
         "must NEVER use self-recycle language for an externally-recycled body"
@@ -1950,12 +1950,12 @@ def test_hub_recycle_remedy_operator_pin_wins(monkeypatch):
 
 
 def test_hub_recycle_remedy_gzb_holder_resolved_not_stale(monkeypatch):
-    # op#42907/op#20655: gzb's old relay (gzb-vpn.sh) is dead, never replaced -- the
-    # remedy must say so honestly rather than name a hop that no longer exists.
+    # Nazim 43610: gzb reach restored (ssh gzb) -- the remedy must name that working reach,
+    # never the decommissioned wingmen-core host.
     monkeypatch.delenv("CTX_WD_HUB_RECYCLE_CMD", raising=False)
     r = w._hub_recycle_remedy("gzbai")
     assert "91.107.235.77" not in r
-    assert "no automated interactive" in r.lower()
+    assert "ssh gzb" in r.lower()
 
 
 def test_hub_recycle_remedy_unknown_holder_names_no_host(monkeypatch):
