@@ -201,12 +201,14 @@ def test_failed_delivery_walks_to_dead_never_dropped(db, monkeypatch):
 
 
 # ── 3b. asks-ledger wiring (op#22669) ─────────────────────────────────────────
-# operator_log.maybe_track_ask() itself is unit-tested against the real
-# DATABASE_URL substrate (tests/test_operator_asks_ledger.py) — here we only
-# verify process_update calls it with the RIGHT arguments off a real Telegram
-# update shape, and that a tracking exception never blocks routing. Monkeypatch
-# the call so this stays isolated from whatever DATABASE_URL resolves to in
-# this ephemeral-DB test run (which is INGEST_DSN, a separate database).
+# operator_log.maybe_track_ask() itself is unit-tested against the ephemeral
+# operator_ledger_db harness (tests/test_operator_asks_ledger.py, orch-console
+# bus #44006/op#22741 — it used to run against the live substrate) — here we
+# only verify process_update calls it with the RIGHT arguments off a real
+# Telegram update shape, and that a tracking exception never blocks routing.
+# Monkeypatch the call so this stays isolated from whatever DATABASE_URL
+# resolves to in this ephemeral-DB test run (which is INGEST_DSN, a separate
+# database).
 
 def _upd_reply(update_id, chat_id=1111, text="yes go ahead", from_id=1111,
                reply_to_message_id=None):
