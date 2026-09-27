@@ -89,16 +89,58 @@ def _bootstrap_roles_and_legacy_stubs(dsn: str) -> None:
         )
 
 
+def _make_gate_table(dsn: str) -> None:
+    """A gate-row table isolated in its own schema (op#22669 item 3) — kept
+    OUT of public.agent_messages so _apply()'s own authorization inserts don't
+    inflate the row counts the cai-gate tests below assert on. gate_dsn points
+    here via search_path, exactly as production keeps the fleet-bus lookup
+    (agent_messages on the substrate) separate from whatever silo is being
+    migrated."""
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA IF EXISTS gate_bus CASCADE")
+        cur.execute("CREATE SCHEMA gate_bus")
+        cur.execute(
+            """CREATE TABLE gate_bus.agent_messages (
+                 id           bigserial PRIMARY KEY,
+                 from_agent   text NOT NULL,
+                 message_type text NOT NULL,
+                 body         text,
+                 created_at   timestamptz NOT NULL DEFAULT now()
+               )"""
+        )
+
+
 @pytest.fixture
 def governance_dsn(fresh_db):
     dsn = f"{fresh_db} application_name={SILO}"
     _make_ledger_table(dsn)
     _bootstrap_roles_and_legacy_stubs(dsn)
+    _make_gate_table(dsn)
     return dsn
 
 
+def _gate_dsn(dsn: str) -> str:
+    return f"{dsn} options='-c search_path=gate_bus'"
+
+
 def _apply(dsn: str, path: Path) -> dict:
-    return am.apply_migration(dsn, path, silo=SILO, applied_by="test-063-064-backport")
+    """Applies with a fresh, valid --gate row per call (op#22669 item 3: a
+    non-dry-run apply to a PRODUCTION_SILOS member, which SILO=tscuymavysscrvoberrr
+    is, now requires one). The gate row lives in gate_bus, not public.agent_messages
+    under test."""
+    sha = am.file_sha256(path)
+    gdsn = _gate_dsn(dsn)
+    with psycopg.connect(gdsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_messages (from_agent, message_type, body) "
+            "VALUES ('orch-console', 'decision', %s) RETURNING id",
+            (sha[:12],),
+        )
+        gate_id = cur.fetchone()[0]
+    return am.apply_migration(
+        dsn, path, silo=SILO, applied_by="test-063-064-backport",
+        gate=gate_id, gate_dsn=gdsn,
+    )
 
 
 # --------------------------------------------------------------------------------
