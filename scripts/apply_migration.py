@@ -109,15 +109,22 @@ NOT blockers for this change):
      not a deliberate forger. Follow-up: gate rows carry an HMAC over
      (gate id, sha12, silo) with a vault key only the gate owners can read,
      and check_gate() verifies it.
-  b. Coverage: not every repo's production applies go through this tool —
-     e.g. the cosem-platform lanes apply with `psql -f` directly, so applies
-     against ywrpttpxwfcoodovxhsr (see PRODUCTION_SILOS below — this is the
-     REAL cosem-platform production store, not demo/dev) can bypass this gate
-     entirely even though its migration files already carry the required
-     `-- ledger: silo=` headers. Follow-up: route every repo's production
-     applies through apply_migration.py and make that the documented only
-     path (mirrors the "one generic migration applier" goal this module
-     itself was built for, op#19103).
+  b. Coverage: this tool IS usable cross-repo today (any repo can invoke it
+     with an explicit file path + --repo <name> + --silo <ref> + its own
+     --dsn — cosem-platform lanes have done exactly this against
+     ywrpttpxwfcoodovxhsr) — the gap is non-enforcement, not impossibility:
+     nothing stops a lane from running `psql -f`/a raw DSN directly INSTEAD
+     of this tool, bypassing --gate entirely (confirmed live, bus #44135: a
+     cosem-platform apply landed on ywrpttpxwfcoodovxhsr with a gate row on
+     record saying to use this tool, but not through it — no ledger row, no
+     gate check). Orch-console correction, bus #44140. Mitigated (detect,
+     not prevent) by scripts/ddl_coverage_watchdog.py, which pages on a
+     silo's schema fingerprint drifting with no matching new
+     migration_ledger row. Real fix (still open, tracked P2, bus #44140
+     Phase 2): make this tool the only path a lane's credentials CAN use —
+     revoke DDL-capable ownership from the lane's normal connection role per
+     production silo, and have this tool fetch a separate migrator role's
+     DSN from a vault only after check_gate() passes.
 """
 from __future__ import annotations
 
