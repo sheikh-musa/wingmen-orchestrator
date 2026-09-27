@@ -90,6 +90,18 @@ fi
 # hub's name (the leftover `orch` name is how the 07-04 pen-(iv) slip happened).
 SESSION="${ORCH_TMUX_SESSION:-orch}"
 
+# Wedge-prevention (Nazim #43162/#43217, cc-fleet-health #43191/#43212): enforce the
+# AskUserQuestion deny + promptSuggestionEnabled:false in the hub worktree's
+# .claude/settings.local.json BEFORE launch. BOTH are LAUNCH-ONLY (not hot-reload, and a
+# /clear does NOT re-read them — only a cold boot does), and the hub is the CATASTROPHIC
+# wedge case (a parked dim prompt-suggestion deadlocks the P1 wake nudge at rc=3). The live
+# gzb hub boots via the untracked /home/gazzai/orch_supervisor.sh, which carries the SAME
+# call — this tracked copy is the durable source so a rebuild can't drop it.
+if [[ -x "$ORCH_DIR/.venv/bin/python3" ]]; then
+    "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" \
+        --cwd "$ORCH_DIR" 2>/dev/null || true
+fi
+
 # ADOPT an existing live session — do NOT kill it. If `orch` already exists
 # (an operator/break-glass manual bring-up, or a still-running prior instance),
 # just supervise it. This lets the launchd KeepAlive job be (re)loaded WITHOUT
