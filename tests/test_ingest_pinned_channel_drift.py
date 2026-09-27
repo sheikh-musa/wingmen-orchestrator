@@ -34,11 +34,27 @@ def drift_dsn(pg_dsn, monkeypatch):
                  enabled boolean NOT NULL DEFAULT false
                )"""
         )
+        # Real-shaped agents + the agent_messages FKs to it (bus #44035: the
+        # live substrate's agent_messages_from_agent_fkey/_to_agent_fkey caught
+        # PAGE_FROM_AGENT='ingest-watchdog' having no agents row on its FIRST
+        # live cycle -- this harness had no FK at all, so it could never have
+        # caught that. Mirrors migrations/073_ingest_watchdog_agent.sql's shape.
+        cur.execute(
+            """CREATE TABLE agents (
+                 id text PRIMARY KEY,
+                 display_name text NOT NULL,
+                 repo_scope text[] NOT NULL DEFAULT '{}',
+                 status text NOT NULL DEFAULT 'idle',
+                 current_task text,
+                 last_heartbeat timestamptz,
+                 created_at timestamptz NOT NULL DEFAULT now()
+               )"""
+        )
         cur.execute(
             """CREATE TABLE agent_messages (
                  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                 from_agent text NOT NULL,
-                 to_agent text NOT NULL,
+                 from_agent text NOT NULL REFERENCES agents(id),
+                 to_agent text NOT NULL REFERENCES agents(id),
                  message_type text NOT NULL,
                  subject text,
                  body text,
@@ -47,6 +63,14 @@ def drift_dsn(pg_dsn, monkeypatch):
                  thread_id uuid,
                  created_at timestamptz NOT NULL DEFAULT now()
                )"""
+        )
+        # Every identity this module's paging path uses (ingest.PAGE_FROM_AGENT/
+        # PAGE_TO_AGENT) must exist for the FK to accept a page -- seeding both
+        # here, not hardcoding the literals, so a rename of either constant
+        # keeps this harness honest.
+        cur.execute(
+            "INSERT INTO agents (id, display_name) VALUES (%s, 'test'), (%s, 'test')",
+            (ingest.PAGE_FROM_AGENT, ingest.PAGE_TO_AGENT),
         )
     return pg_dsn
 
