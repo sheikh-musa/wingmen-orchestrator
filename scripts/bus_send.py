@@ -17,6 +17,13 @@ Follow-up (bus #43673): the untracked scratch helpers (_bus_tmp.py,
 scratchpad/bus_send.py) are now thin shims over send() below, so there is
 exactly one INSERT INTO agent_messages in the fleet's ad-hoc-send path.
 
+Follow-up (op#22669): send() ALSO writes the operator_asks link row (migration
+044) when the call is a fresh console-to-body ask (from_agent='orch-console',
+type='decision', --req, no --thread/--reply-to) — the same link
+console_assign.py's HTTP path writes. This closes a 41-day gap
+(2026-08-17 -> 2026-09-27) where this script became the dominant console-assign
+path but never wrote that half, so operator_asks silently stopped growing.
+
 Usage:
     scripts/bus_send.py --to cc-orchestrator --type update \\
         --subject "short subject" --priority P1 [--req] \\
@@ -130,6 +137,30 @@ def send(
     if priority not in _VALID_PRIORITIES:
         raise ValueError(f"send(): priority must be one of {_VALID_PRIORITIES}, got {priority!r}")
 
+    # op#22669 root-cause fix (operator-asks-tracking build, bus thread
+    # d0533248-2d25-484f-84ad-3cdd08fe1fce): scripts/console_assign.py used to be
+    # the ONLY writer of both an agent_messages bus row AND its operator_asks
+    # link row, in one transaction (see console_assign.assign()). This script
+    # (bus #43651/#43673) has since become the fleet's actual day-to-day
+    # console-assign path — orch-console posts its directives via bus_send.py,
+    # not console_assign.py's HTTP endpoint — but never wrote the operator_asks
+    # half. Confirmed live (2026-09-27): agent_messages kept filling with
+    # from_agent='orch-console', message_type='decision', thread_id NOT NULL rows
+    # at 20-250/day every single day from July through today, while
+    # operator_asks received ZERO writes for 41 days (2026-08-17 -> 2026-09-27,
+    # until a manual backfill). Not a console_assign.py defect — a gap in the
+    # newer, now-dominant write path.
+    #
+    # is_new_ask mirrors console_assign.assign()'s exact shape: a FRESH top-level
+    # ask from the console to a body (a brand-new thread, not a reply riding an
+    # existing one). Computed from the ORIGINAL args — `thread` is reassigned
+    # below when resolving/generating the real thread_id, so this must be
+    # evaluated before that happens.
+    is_new_ask = (
+        from_agent == "orch-console" and mtype == "decision" and req
+        and not reply_to and not thread
+    )
+
     import psycopg2
 
     conn = psycopg2.connect(dsn or dburl(os.environ))
@@ -162,6 +193,15 @@ def send(
         (from_agent, to, mtype, subject, body, priority, req, thread),
     )
     row_id, thread_id = cur.fetchone()
+
+    if is_new_ask:
+        # SAME-TRANSACTION link row (migration 044), same shape console_assign.py
+        # writes: status is NEVER stored here — the "Your asks" board derives it
+        # live from the agent_messages thread just inserted above.
+        cur.execute(
+            "INSERT INTO operator_asks (ask, thread_id, delegated_to) VALUES (%s, %s, %s)",
+            (subject, thread_id, to),
+        )
 
     if reply_to:
         cur.execute(

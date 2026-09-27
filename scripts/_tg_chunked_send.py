@@ -128,8 +128,10 @@ RETRY_SLEEP_DEFAULT = 2
 
 
 def _post(tok: str, chat: str, body: str, parse_mode: str | None = None) -> dict:
-    """One sendMessage POST. Returns {ok, status, description, retry_after} — never raises,
-    so the caller can decide retry/fallback on the STRUCTURED result (not a swallowed str)."""
+    """One sendMessage POST. Returns {ok, status, description, retry_after, message_id} —
+    never raises, so the caller can decide retry/fallback on the STRUCTURED result (not a
+    swallowed str). message_id is Telegram's own id for the sent message (result.message_id,
+    op#22669 asks-tracking reply-match) — None on any non-ok/exception path."""
     params = {"chat_id": chat, "text": body}
     if parse_mode:
         params["parse_mode"] = parse_mode
@@ -140,7 +142,9 @@ def _post(tok: str, chat: str, body: str, parse_mode: str | None = None) -> dict
         ) as r:
             d = json.load(r)
             if d.get("ok"):
-                return {"ok": True, "status": 200, "description": None, "retry_after": None}
+                msgid = (d.get("result") or {}).get("message_id")
+                return {"ok": True, "status": 200, "description": None, "retry_after": None,
+                        "message_id": msgid}
             params_out = d.get("parameters") or {}
             return {"ok": False, "status": 200, "description": d.get("description"),
                     "retry_after": params_out.get("retry_after")}
@@ -190,6 +194,20 @@ def _record_failure(reason: dict) -> None:
         pass
 
 
+def _record_msgid(msgid: int) -> None:
+    """Write the sent message's Telegram message_id to $TG_MSGID_OUT (op#22669
+    asks-tracking) — the shell caller reads this to pass --tg-message-id into
+    operator_log, so a later reply_to_message can be matched back to this row."""
+    out = os.environ.get("TG_MSGID_OUT")
+    if not out or msgid is None:
+        return
+    try:
+        with open(out, "w") as f:
+            f.write(str(msgid))
+    except Exception:
+        pass
+
+
 def main() -> int:
     tok = os.environ.get("TG_TOK", "")
     chat = os.environ.get("TG_CHAT", "")
@@ -210,6 +228,7 @@ def main() -> int:
     parse_mode = os.environ.get("TG_PARSE_MODE") or None
     parts = chunks(text)
     total = len(parts)
+    last_msgid = None
     for i, part in enumerate(parts):
         # suffix a page marker only when actually split, so single messages stay clean
         body = part if total == 1 else f"{part}\n\n({i + 1}/{total})"
@@ -223,8 +242,14 @@ def main() -> int:
                   f"description={reason['description']}", file=sys.stderr)
             _record_failure(reason)
             return 1
+        last_msgid = res.get("message_id")
         if total > 1:
             time.sleep(0.4)  # stay under Telegram's per-chat rate limit
+    # op#22669: capture the LAST chunk's message_id — when a reply lands split-4096
+    # far apart, Telegram's own reply_to_message points at whichever chunk the
+    # operator actually replied to, but the last chunk is the one that reads as
+    # "the end of this reply" and is what asks_open.py links as outbound_msg_id.
+    _record_msgid(last_msgid)
     return 0
 
 

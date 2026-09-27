@@ -124,6 +124,19 @@ P0_SURFACE_MIN = _envint("SLA_P0_SURFACE_MIN", HARD_ESCALATE_MIN["P0"])
 REPAGE_AFTER_MIN = _envint("SLA_AGED_REPAGE_AFTER_MIN", 360)   # 6h floor
 REPAGE_EVERY_MIN = _envint("SLA_AGED_REPAGE_EVERY_MIN", 360)   # re-page cadence
 MAX_REPAGES_PER_RUN = _envint("SLA_AGED_MAX_REPAGES_PER_RUN", 3)
+
+# op#22669 "operator asks" chase net (piece 4 of the operator-asks-tracking
+# build, bus thread d0533248-2d25-484f-84ad-3cdd08fe1fce): a waiting_on_operator
+# ask (migration 072, opened via scripts/asks_open.py) gets its OWNER body
+# (operator_asks.delegated_to) re-paged once it's overdue -- past its own
+# chase_by, or ASKS_CHASE_GRACE_MIN since creation when no chase_by was set --
+# so a "WAITING ON MUSA" ask can never just sit open forever with nobody
+# prompted to go re-raise it with him. Same dead-man's-switch dedup/backoff
+# shape as the aged-rr-repage net (ruling-3) above; naturally excludes every
+# pre-072 row because waiting_on_operator defaults false.
+ASKS_CHASE_GRACE_MIN = _envint("SLA_ASKS_CHASE_GRACE_MIN", 30)
+ASKS_CHASE_EVERY_MIN = _envint("SLA_ASKS_CHASE_EVERY_MIN", 240)
+MAX_ASKS_CHASE_PER_RUN = _envint("SLA_ASKS_MAX_CHASE_PER_RUN", 3)
 # The re-page bus row's message_type MUST be in agent_messages_message_type_check
 # (review_request/question/decision/agreed/challenge/update/blocker/counter). 'escalation'
 # is NOT allowed — it raises a check_violation and the send fails SILENTLY (Nazim #40859),
@@ -1023,6 +1036,111 @@ def dry_identity_guard(conn) -> bool:
         return False
 
 
+def asks_chase_targets(rows, *, now, chase_state, grace_min=ASKS_CHASE_GRACE_MIN,
+                        chase_every_min=ASKS_CHASE_EVERY_MIN):
+    """PURE: waiting_on_operator operator_asks rows overdue for a chase — either
+    past their OWN chase_by, or (no chase_by set) past grace_min since creation
+    — due under the every-chase_every_min re-chase cadence. `chase_state` maps
+    str(id)->last-chase epoch; a row is due when never chased or
+    (now - last) >= the cadence. Rows carry chase_by_epoch/created_epoch (SQL
+    extract(epoch ...), not python datetimes) so this stays tz-naive-safe."""
+    due = []
+    for r in rows:
+        chase_by_epoch = r.get("chase_by_epoch")
+        created_epoch = r.get("created_epoch")
+        if chase_by_epoch is not None:
+            overdue = now >= chase_by_epoch + grace_min * 60
+        elif created_epoch is not None:
+            overdue = now >= created_epoch + grace_min * 60
+        else:
+            overdue = False
+        if not overdue:
+            continue
+        last = chase_state.get(str(r.get("id")), 0) or 0
+        if (now - last) >= chase_every_min * 60:
+            due.append(r)
+    return due
+
+
+def chase_waiting_asks(targets, *, dry, now, chase_state, send_chase,
+                        max_chases=MAX_ASKS_CHASE_PER_RUN):
+    """Chase each target's OWNER body (operator_asks.delegated_to) — never a
+    second page to the operator, who is exactly who this net exists to get
+    someone to go chase. Capped at max_chases/scan (defence vs a logic bug).
+    Dead-man's switch: chase_state is stamped ONLY on a confirmed successful
+    send — a failed send is left UNSTAMPED so the next scan retries. Dry-run
+    sends nothing and stamps nothing. `send_chase(owner, row)->bool` is
+    injected for testability. Returns the count of successful chases."""
+    sent = 0
+    for t in targets:
+        if sent >= max_chases:
+            log(f"asks-chase HELD (per-scan cap {max_chases}) ask#{t.get('id')} -> {t.get('delegated_to')}")
+            continue
+        if dry:
+            continue
+        owner = t.get("delegated_to") or "orch-console"
+        ok = send_chase(owner, t)
+        if ok:
+            chase_state[str(t["id"])] = now
+            sent += 1
+        else:
+            log(f"asks-chase SEND FAILED ask#{t.get('id')} -> {owner} "
+                f"(left UNSTAMPED for retry — dead-man's switch)")
+    return sent
+
+
+def _fetch_waiting_asks(conn):
+    """Impure: OPEN operator_asks rows with waiting_on_operator=true, plus epoch
+    timestamps (extract(epoch FROM ...) done in SQL) so the pure due-check above
+    never has to reconcile a tz-aware/naive datetime mismatch."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, ask, delegated_to, "
+            "  extract(epoch FROM chase_by) AS chase_by_epoch, "
+            "  extract(epoch FROM created_at) AS created_epoch "
+            "FROM operator_asks "
+            "WHERE closed_at IS NULL AND waiting_on_operator IS TRUE"
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _send_asks_chase(conn, owner: str, row: dict) -> bool:
+    """Impure: post ONE P1 chase to the ask's OWNER body (never the operator —
+    this net exists to prompt someone to go chase HIM, not to page him again).
+    Returns True only on a committed insert; any failure returns False so
+    chase_waiting_asks leaves it unstamped and the next scan retries."""
+    aid = row.get("id")
+    ask_text = (row.get("ask") or "")[:200]
+    owner = owner or "orch-console"
+    subj = f"[asks-chase] operator_asks #{aid} still waiting on Musa — go chase him"
+    body = (
+        f"operator_asks #{aid} (yours) has been waiting on the operator's reply past "
+        f"its chase deadline: \"{ask_text}\". Please re-raise it with him directly, or "
+        "update/close the ask (scripts/asks_close.py) if it's since been answered "
+        "off-ledger. You own it — the operator is NOT being paged a second time by this net."
+    )
+    try:
+        if not dry_identity_guard(conn):
+            return False
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                "  requires_response,priority,is_test) "
+                "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
+                (owner, PAGE_MESSAGE_TYPE, subj, body))
+        conn.commit()
+        log(f"asks-chase SENT ask#{aid} -> {owner}")
+        return True
+    except Exception as e:
+        log(f"asks-chase INSERT failed ask#{aid} -> {owner}: {e!r}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Main scan
 # ---------------------------------------------------------------------------
@@ -1316,6 +1434,32 @@ def run(dry: bool, injected: list[dict] | None = None,
                     + ", ".join(f"#{t['id']}->{t['owner']}" for t in targets))
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"aged-rr-repage ERROR: {e!r}")
+
+        # op#22669 asks-chase net (piece 4): waiting_on_operator asks (migration
+        # 072) overdue past chase_by (or ASKS_CHASE_GRACE_MIN with none set) get
+        # their owner body re-paged. Same observe-first doctrine as read-parked/
+        # aged-rr-repage above: ships INERT (force-dry, log-only) until ARMED via
+        # SLA_ASKS_CHASE_ENABLED=1 at an operator/console go-live. No backfill
+        # watermark needed — waiting_on_operator defaults false, so every
+        # pre-existing row is excluded by construction, not by a watermark guess.
+        asks_dry = dry or os.environ.get("SLA_ASKS_CHASE_ENABLED", "0") != "1"
+        try:
+            chase_state = state.setdefault("asks_chase", {})
+            asks_targets = asks_chase_targets(
+                _fetch_waiting_asks(conn), now=now, chase_state=chase_state)
+            if asks_targets:
+                n = chase_waiting_asks(
+                    asks_targets, dry=asks_dry, now=now, chase_state=chase_state,
+                    send_chase=lambda owner, t: _send_asks_chase(conn, owner, t),
+                    max_chases=MAX_ASKS_CHASE_PER_RUN)
+                for t in asks_targets:
+                    actions.append(f"{'[DRY] ' if asks_dry else ''}ASKS-CHASE ask#{t['id']} "
+                                   f"-> owner {t.get('delegated_to')}")
+                log(f"asks-chase [{'DRY/observe' if asks_dry else 'ARMED'}] "
+                    f"sent={0 if asks_dry else n}/{len(asks_targets)} due: "
+                    + ", ".join(f"#{t['id']}->{t.get('delegated_to')}" for t in asks_targets))
+        except Exception as e:  # fail LOUD, keep the scan alive
+            log(f"asks-chase ERROR: {e!r}")
 
         if persist:
             save_state(state)

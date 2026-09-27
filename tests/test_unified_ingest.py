@@ -198,3 +198,65 @@ def test_failed_delivery_walks_to_dead_never_dropped(db, monkeypatch):
         status, attempts, err = cur.fetchone()
     assert status == "dead" and attempts == tg_out.MAX_ATTEMPTS   # watchdog surface
     assert "network down" in err
+
+
+# ── 3b. asks-ledger wiring (op#22669) ─────────────────────────────────────────
+# operator_log.maybe_track_ask() itself is unit-tested against the ephemeral
+# operator_ledger_db harness (tests/test_operator_asks_ledger.py, orch-console
+# bus #44006/op#22741 — it used to run against the live substrate) — here we
+# only verify process_update calls it with the RIGHT arguments off a real
+# Telegram update shape, and that a tracking exception never blocks routing.
+# Monkeypatch the call so this stays isolated from whatever DATABASE_URL
+# resolves to in this ephemeral-DB test run (which is INGEST_DSN, a separate
+# database).
+
+def _upd_reply(update_id, chat_id=1111, text="yes go ahead", from_id=1111,
+               reply_to_message_id=None):
+    msg = {"chat": {"id": chat_id}, "from": {"id": from_id}, "text": text}
+    if reply_to_message_id is not None:
+        msg["reply_to_message"] = {"message_id": reply_to_message_id}
+    return {"update_id": update_id, "message": msg}
+
+
+def test_process_update_calls_maybe_track_ask_with_reply_id(db, monkeypatch):
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    calls = []
+    monkeypatch.setattr(
+        ingest.operator_log, "maybe_track_ask",
+        lambda *a, **k: calls.append((a, k)) or None,
+    )
+    ch = _channel(db)
+    ingest.process_update(db, ch, _upd_reply(9201, reply_to_message_id=424242))
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[1:5] == ("inbound", "telegram", ch.channel_tag, "yes go ahead")
+    assert kwargs["from_user_id"] == "1111"
+    assert kwargs["reply_to_tg_message_id"] == 424242
+
+
+def test_process_update_passes_none_when_not_a_reply(db, monkeypatch):
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    calls = []
+    monkeypatch.setattr(
+        ingest.operator_log, "maybe_track_ask",
+        lambda *a, **k: calls.append(k) or None,
+    )
+    ch = _channel(db)
+    ingest.process_update(db, ch, _upd_reply(9202, reply_to_message_id=None))
+    assert calls[0]["reply_to_tg_message_id"] is None
+
+
+def test_asks_ledger_exception_does_not_block_routing(db, monkeypatch):
+    # a raise inside maybe_track_ask must be swallowed (best-effort) — the
+    # update still routes (nudge still fires) and process_update still
+    # returns True, exactly as if tracking had no opinion at all.
+    nudges = []
+    monkeypatch.setattr(ingest, "nudge_session",
+                        lambda target, key, n: nudges.append((target, key, n)) or True)
+    def _boom(*a, **k):
+        raise RuntimeError("db down for asks ledger")
+    monkeypatch.setattr(ingest.operator_log, "maybe_track_ask", _boom)
+    ch = _channel(db)
+    result = ingest.process_update(db, ch, _upd_reply(9203))
+    assert result is True
+    assert len(nudges) == 1

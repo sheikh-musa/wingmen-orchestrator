@@ -27,6 +27,26 @@ CHAT="${TG_CHAT_OVERRIDE:-${MUSA_TELEGRAM_ID:-$(grep '^MUSA_TELEGRAM_ID=' "$ORCH
 [ -n "${TOK:-}" ] || { echo "NAZIM_BOT_TOKEN missing from .env" >&2; exit 1; }
 [ -n "${CHAT:-}" ] || { echo "MUSA_TELEGRAM_ID missing from .env" >&2; exit 1; }
 
+# --ask/--chase-hours (op#22669): mark THIS outbound as a genuine ask of the
+# operator (opens its own operator_asks row via scripts/asks_open.py, linked to
+# this send so a reply auto-closes it). Scanned out of argv BEFORE the
+# positional TEXT — see scripts/tg_send.sh's identical parsing for the hub side.
+ASK=""
+CHASE_HOURS=""
+_POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ask) ASK="${2:-}"; shift 2 ;;
+    --chase-hours) CHASE_HOURS="${2:-}"; shift 2 ;;
+    *) _POSITIONAL+=("$1"); shift ;;
+  esac
+done
+if [ "${#_POSITIONAL[@]}" -gt 0 ]; then
+  set -- "${_POSITIONAL[@]}"
+else
+  set --
+fi
+
 TEXT="${1:-$(cat)}"
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
 # Fail loud on the channel-first arg-swap footgun (op#16353).
@@ -44,13 +64,17 @@ fi
 # Send (chunked at Telegram's 4096-char limit). token/chat/text via env, not argv.
 # TG_FAIL_OUT: the helper writes the structured failure (status/description/retry_after)
 # here so we can record WHY on the operator_messages row (Nazim #40837).
+# TG_MSGID_OUT (op#22669): helper writes Telegram's own message_id for the sent
+# message, so a later reply_to_message can be matched back to this exact row.
 FAILOUT="$(mktemp)"
-if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" TG_FAIL_OUT="$FAILOUT" \
+MSGIDOUT="$(mktemp)"
+if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" TG_FAIL_OUT="$FAILOUT" TG_MSGID_OUT="$MSGIDOUT" \
      "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/_tg_chunked_send.py"; then
   sent=1
 else
   sent=0
 fi
+TGMSGID="$(cat "$MSGIDOUT" 2>/dev/null || true)"
 
 # Durable log every reply (tag=nazim-console → scopes to the console body and
 # keeps the two-way thread coherent for a rebooted Nazim). Best-effort.
@@ -59,15 +83,30 @@ fi
 # now, on every message this script has ever sent. Found fleet-wide by cc-orchestrator (25701aa)
 # after a real client asked the same question three times while our log showed every reply
 # delivered; this script was NOT in that fix. `delivered` is evidence or it is decoration.
+# OPLOGID (op#22669): captures the logged row's id so a --ask open can link back to it.
 if [ "$sent" = 1 ]; then
-  PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
-    outbound "$TEXT" --chat "$CHAT" --tag nazim-console >/dev/null 2>&1 || true
+  OPLOGID="$(PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
+    outbound "$TEXT" --chat "$CHAT" --tag nazim-console \
+    ${TGMSGID:+--tg-message-id "$TGMSGID"} 2>/dev/null)" || true
 else
   REASON="$(cat "$FAILOUT" 2>/dev/null || true)"
+  OPLOGID=""
   PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
     outbound "$TEXT" --chat "$CHAT" --tag nazim-console --undelivered \
     ${REASON:+--reason "$REASON"} >/dev/null 2>&1 || true
 fi
-rm -f "$FAILOUT"
+rm -f "$FAILOUT" "$MSGIDOUT"
+
+# --ask (op#22669): this send is ITSELF a genuine ask of the operator — open its
+# own operator_asks row (waiting_on_operator=true), linked to the row just
+# logged so a genuine reply auto-closes it. Best-effort: an asks_open.py hiccup
+# must never fail the send itself (the message already reached the operator).
+if [ -n "$ASK" ] && [ "$sent" = 1 ]; then
+  "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/asks_open.py" "$ASK" \
+    --delegated-to orch-console \
+    ${CHASE_HOURS:+--chase-hours "$CHASE_HOURS"} \
+    ${OPLOGID:+--outbound-msg-id "$OPLOGID"} \
+    >/dev/null 2>&1 || true
+fi
 
 [ "$sent" = 1 ] && exit 0 || { echo "nazim_send failed" >&2; exit 1; }
