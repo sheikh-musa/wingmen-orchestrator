@@ -526,10 +526,12 @@ _remote_hub_cache = {"at": 0.0, "val": None}  # val = {"fp","model"} | None
 
 
 def _resolve_hub_ssh_target() -> Optional[str]:
-    """Best-effort holder_host resolve -> ssh target, or None if unresolved/unknown/
-    not-wingmen-core (this scan is a root@host single-hop SSH; it doesn't implement
-    gzb's multi-hop reach). None here means the same thing a failed SSH already
-    means to callers: UNVERIFIED, never an error, never a guessed host."""
+    """Best-effort holder_host resolve -> ssh target, or None if unresolved/unknown.
+    The target is a runnable ssh destination resolved from orch_lease.holder_host via
+    hub_reach (the single source of the host path): an ssh-config ALIAS like `gzb`
+    (gazzai@100.77.251.8 Tailscale-direct, its own key), or `root@<ip>` for wingmen-core.
+    An explicit CONSOLE_HUB_SSH override always wins. None means UNVERIFIED (same as a
+    failed SSH), never an error, never a guessed host."""
     override = os.environ.get("CONSOLE_HUB_SSH")
     if override:
         return override
@@ -539,10 +541,7 @@ def _resolve_hub_ssh_target() -> Optional[str]:
             holder = hub_reach.read_holder_host(_rc)
     except Exception:  # noqa: BLE001 — resolution is best-effort, never fatal here
         holder = None
-    info = hub_reach.hub_reach_for_holder(holder)
-    if info["known"] and info["host"] == "wingmen-core":
-        return "root@91.107.235.77"
-    return None
+    return hub_reach.hub_reach_for_holder(holder).get("ssh_target")
 # Linux box: sha256sum (not shasum). Fingerprint the token remote-side; print only
 # "<fp> <model>" — the raw token is read into $tok and never echoed.
 _REMOTE_SCAN_SH = (
@@ -569,13 +568,16 @@ def _remote_hub_scan(force: bool = False) -> Optional[dict]:
     try:
         target = _resolve_hub_ssh_target()
         if target is None:
-            raise RuntimeError("hub ssh target unresolved (not wingmen-core, or unknown holder)")
-        r = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
-             "-o", "StrictHostKeyChecking=accept-new", "-i", _REMOTE_HUB_KEY,
-             target, _REMOTE_SCAN_SH],
-            capture_output=True, text=True, timeout=15,
-        )
+            raise RuntimeError("hub ssh target unresolved (unknown holder)")
+        ssh_args = ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
+                    "-o", "StrictHostKeyChecking=accept-new"]
+        # A bare ssh-config alias (e.g. `gzb`) carries its own IdentityFile; only a
+        # user@host target (wingmen-core) needs the explicit console key. hub_reach owns
+        # which target applies to the current holder_host.
+        if "@" in target:
+            ssh_args += ["-i", _REMOTE_HUB_KEY]
+        ssh_args += [target, _REMOTE_SCAN_SH]
+        r = subprocess.run(ssh_args, capture_output=True, text=True, timeout=15)
         if r.returncode == 0:
             parts = r.stdout.strip().split()
             if parts and re.fullmatch(r"[0-9a-f]{12}", parts[0]):

@@ -473,3 +473,47 @@ def test_summary_stale_self_report_still_counts_as_unverified(monkeypatch):
     summary = panes.token_ground_truth(include_remote=True)["summary"]
     assert summary["self_reported"] == 0
     assert summary["unverified"] == 1
+
+
+def test_remote_hub_scan_key_only_for_userhost_not_alias(monkeypatch):
+    """gzb repoint (Nazim 43612): a bare ssh-config alias (`gzb`) carries its own
+    IdentityFile, so _remote_hub_scan must NOT force the console's wingmen_vps key onto it;
+    a user@host target (wingmen-core) still needs the explicit -i key."""
+    captured = {}
+
+    class _R:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        captured["argv"] = list(argv)
+        return _R()
+
+    monkeypatch.setattr(panes.subprocess, "run", fake_run)
+
+    # alias target -> no explicit -i (the alias supplies its own key)
+    monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: "gzb")
+    panes._remote_hub_scan(force=True)
+    assert "gzb" in captured["argv"]
+    assert "-i" not in captured["argv"]
+
+    # user@host target -> explicit -i <console key>
+    monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: "root@91.107.235.77")
+    panes._remote_hub_scan(force=True)
+    assert "-i" in captured["argv"]
+    assert "root@91.107.235.77" in captured["argv"]
+
+
+def test_remote_hub_scan_unresolved_target_is_unverified(monkeypatch):
+    """No holder / unknown -> ssh_target None -> scan returns None (UNVERIFIED), no ssh run."""
+    ran = {"called": False}
+
+    def fake_run(argv, **kw):  # pragma: no cover - must NOT be reached
+        ran["called"] = True
+        raise AssertionError("ssh should not run for an unresolved target")
+
+    monkeypatch.setattr(panes.subprocess, "run", fake_run)
+    monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: None)
+    assert panes._remote_hub_scan(force=True) is None
+    assert ran["called"] is False
