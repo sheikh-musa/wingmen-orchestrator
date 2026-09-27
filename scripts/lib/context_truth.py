@@ -93,16 +93,21 @@ def _pct_from_tokens(tokens, window: int) -> Optional[int]:
     return int(round(tokens / window * 100))
 
 
-def _check_gauge_tokens(gauge_tokens) -> None:
-    """FAIL LOUD on a mis-called gauge (bus #44344): gauge_tokens is an INT token count, not
-    an agent/lane name. Silently treating a name string as 'bad token data' produced a
-    plausible 'UNKNOWN — unreadable gauge — PAGE this lane' verdict that read as a real gauge
-    fault and misled a reviewer. A type error is a MISUSE, not a reading — raise it."""
+def _gauge_misuse(gauge_tokens) -> Optional[ContextTruth]:
+    """A mis-called gauge (bus #44344): gauge_tokens is an INT token count, not an agent/lane
+    name. Silently treating a name string as 'bad token data' produced a plausible
+    'UNKNOWN — unreadable gauge — PAGE this lane' verdict that read as a real gauge fault and
+    misled a reviewer. Return a DISTINCT unknown whose reason names the MISUSE and does NOT
+    recommend paging — a caller error is not a gauge reading. (Graceful, not a crash: garbage
+    input must never break a sweep — test_garbage_types_do_not_crash_or_pass_as_a_reading.)"""
     if gauge_tokens is not None and not _is_num(gauge_tokens):
-        raise TypeError(
-            f"gauge_tokens must be an int token count or None, got "
-            f"{type(gauge_tokens).__name__} {gauge_tokens!r}. For a by-agent/lane lookup "
-            f"use lane_fire_reading_for_agent(<identity>).")
+        return ContextTruth(
+            None, None, None, False, None,
+            f"MISUSE — gauge_tokens must be an int token count or None, got "
+            f"{type(gauge_tokens).__name__} {gauge_tokens!r}; this is a caller error, not a "
+            f"gauge reading (do NOT page on it). For a by-agent/lane lookup use "
+            f"lane_fire_reading_for_agent(<identity>).")
+    return None
 
 
 def resolve(
@@ -128,7 +133,9 @@ def resolve(
       3. a FRESH gauge — the only signal that sees into the pane's blind band.
       4. nothing readable -> UNKNOWN. Never green.
     """
-    _check_gauge_tokens(gauge_tokens)
+    _mis = _gauge_misuse(gauge_tokens)
+    if _mis is not None:
+        return _mis
     gpct = _pct_from_tokens(gauge_tokens, window)
     gauge_fresh = (
         gpct is not None
@@ -211,7 +218,9 @@ def lane_fire_reading(
     (staleness cutoff => UNKNOWN, not a frozen-low "green"); the pane is blind at ~94%
     (which is exactly why the gauge, not the pane, decides here).
     """
-    _check_gauge_tokens(gauge_tokens)
+    _mis = _gauge_misuse(gauge_tokens)
+    if _mis is not None:
+        return _mis
     gpct = _pct_from_tokens(gauge_tokens, window)
     gauge_fresh = (
         gpct is not None

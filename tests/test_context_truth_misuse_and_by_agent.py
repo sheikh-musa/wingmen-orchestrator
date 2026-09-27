@@ -18,18 +18,20 @@ ct = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ct)
 
 
-# ---- 1) fail-loud guard on a non-numeric gauge_tokens (the mis-call) ----
-def test_lane_fire_reading_raises_on_string_gauge_tokens():
-    with pytest.raises(TypeError) as ei:
-        ct.lane_fire_reading("cosem-port")            # the exact mis-call from #44344
-    assert "gauge_tokens" in str(ei.value)
-    assert "cosem-port" in str(ei.value)              # names the offending value
-    assert "lane_fire_reading_for_agent" in str(ei.value)  # points at the right call
+# ---- 1) mis-call guard: a name where an int belongs → a clear MISUSE unknown, NOT a
+#         plausible 'unreadable gauge — PAGE' verdict, and NOT a crash (sweeps must survive).
+def test_lane_fire_reading_string_gauge_tokens_is_flagged_misuse():
+    r = ct.lane_fire_reading("cosem-port")            # the exact mis-call from #44344
+    assert r.known is False                            # graceful unknown, no crash
+    assert "MISUSE" in r.reason
+    assert "cosem-port" in r.reason                    # names the offending value
+    assert "lane_fire_reading_for_agent" in r.reason   # points at the right call
+    assert "PAGE" not in r.reason                      # must NOT read as a page directive
 
 
-def test_resolve_raises_on_string_gauge_tokens():
-    with pytest.raises(TypeError):
-        ct.resolve(gauge_tokens="cosem-port")
+def test_resolve_string_gauge_tokens_is_flagged_misuse():
+    r = ct.resolve(gauge_tokens="cosem-port")
+    assert r.known is False and "MISUSE" in r.reason
 
 
 def test_numeric_and_none_gauge_tokens_still_work():
