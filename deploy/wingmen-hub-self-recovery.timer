@@ -1,0 +1,16 @@
+# /etc/systemd/system/wingmen-hub-self-recovery.timer
+# 2-minute cadence per the original proposal (reports/hub-self-wedge-recovery-
+# proposal.md) — short enough that a genuine wedge is caught quickly, but every
+# gate in the .service's script (lease-self, kill switch, menu/busy refuse, the
+# hourly rate limit + per-row lifetime ceiling) means a fast cadence never becomes
+# a hammer even under sustained OBSERVE-mode logging.
+[Unit]
+Description=Wingmen hub self-recovery tick — every 2min — gzb
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
