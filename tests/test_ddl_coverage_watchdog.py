@@ -247,8 +247,71 @@ def test_cli_refuses_without_bus_dsn():
         watchdog.main(["--silo", SILO, "--silo-dsn", "host=x"])
 
 
+def test_cli_refuses_both_silo_dsn_and_vault_key():
+    with pytest.raises(SystemExit):
+        watchdog.main([
+            "--silo", SILO, "--silo-dsn", "host=x",
+            "--silo-dsn-vault-key", "some_key", "--bus-dsn", "host=y",
+        ])
+
+
 def test_cli_exit_code_reflects_drift(two_dsns):
     silo_dsn, bus_dsn = two_dsns
     assert watchdog.main(["--silo", SILO, "--silo-dsn", silo_dsn, "--bus-dsn", bus_dsn]) == 0
     _add_column(silo_dsn)
     assert watchdog.main(["--silo", SILO, "--silo-dsn", silo_dsn, "--bus-dsn", bus_dsn]) == 1
+
+
+# --------------------------------------------------------------------------------
+# --silo-dsn-vault-key: resolves via nervous_system.vault instead of a plain DSN
+# --------------------------------------------------------------------------------
+
+def test_resolve_silo_dsn_from_vault_key(monkeypatch, two_dsns):
+    silo_dsn, _ = two_dsns
+
+    class _FakeSecret:
+        value = silo_dsn
+
+    class _FakeVault:
+        def get(self, name, reason):
+            assert name == "cosem_platform_watch_dsn"
+            assert reason  # a real reason string is passed, not empty
+            return _FakeSecret()
+
+    import nervous_system.vault as vault_mod
+    monkeypatch.setattr(vault_mod, "vault", _FakeVault())
+
+    class Args:
+        silo = "SILO"
+        silo_dsn = None
+        silo_dsn_vault_key = "cosem_platform_watch_dsn"
+
+    assert watchdog.resolve_silo_dsn(Args()) == silo_dsn
+
+
+def test_resolve_silo_dsn_prefers_plain_dsn_when_given():
+    class Args:
+        silo = SILO
+        silo_dsn = "host=plain"
+        silo_dsn_vault_key = None
+
+    assert watchdog.resolve_silo_dsn(Args()) == "host=plain"
+
+
+def test_cli_uses_vault_key_end_to_end(monkeypatch, two_dsns):
+    silo_dsn, bus_dsn = two_dsns
+
+    class _FakeSecret:
+        value = silo_dsn
+
+    class _FakeVault:
+        def get(self, name, reason):
+            return _FakeSecret()
+
+    import nervous_system.vault as vault_mod
+    monkeypatch.setattr(vault_mod, "vault", _FakeVault())
+
+    assert watchdog.main([
+        "--silo", SILO, "--silo-dsn-vault-key", "cosem_platform_watch_dsn",
+        "--bus-dsn", bus_dsn,
+    ]) == 0
