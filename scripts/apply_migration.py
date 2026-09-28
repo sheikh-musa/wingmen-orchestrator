@@ -31,22 +31,34 @@ without checking. So:
   -- assert: search_path <schema.function(arg_types)>
   -- assert: dropped <schema.function(arg_types)>
   -- assert: no_table_privilege <role> <schema.table> <privilege>
+  -- assert: no_sequence_privilege <role> <schema.sequence> <privilege>
 
 One per line, anywhere in the header. Checked AFTER the SQL body runs,
 INSIDE the same transaction, before the ledger insert:
-  no_execute         -> has_function_privilege(role, fn, 'EXECUTE') must be FALSE
-  search_path        -> pg_proc.proconfig for fn must contain an entry starting
-                        'search_path='
-  dropped            -> to_regprocedure(fn) IS NULL
-  no_table_privilege -> has_table_privilege(role, table, privilege) must be
-                        FALSE (table-privilege analogue of no_execute — closes
-                        the gap flagged in migration 065's header: a REVOKE on
-                        a table is exactly as unverifiable as a REVOKE on a
-                        function without this, and this project's
-                        pg_default_acl grants anon/authenticated privileges on
-                        every NEW table implicitly, so "this migration touches
-                        no privilege" is never a valid reason to skip it for a
-                        migration that creates a table)
+  no_execute            -> has_function_privilege(role, fn, 'EXECUTE') must be
+                           FALSE
+  search_path           -> pg_proc.proconfig for fn must contain an entry
+                           starting 'search_path='
+  dropped               -> to_regprocedure(fn) IS NULL
+  no_table_privilege    -> has_table_privilege(role, table, privilege) must be
+                           FALSE (table-privilege analogue of no_execute —
+                           closes the gap flagged in migration 065's header: a
+                           REVOKE on a table is exactly as unverifiable as a
+                           REVOKE on a function without this, and this
+                           project's pg_default_acl grants anon/authenticated
+                           privileges on every NEW table implicitly, so "this
+                           migration touches no privilege" is never a valid
+                           reason to skip it for a migration that creates a
+                           table)
+  no_sequence_privilege -> has_sequence_privilege(role, sequence, privilege)
+                           must be FALSE (sequence analogue of
+                           no_table_privilege — closes bus #44870's gap:
+                           migration 068 REVOKEd a sequence's grants with no
+                           way to check the REVOKE actually stuck, the exact
+                           unverifiable-REVOKE shape no_table_privilege exists
+                           to close for ordinary tables. `USAGE` is the
+                           privilege that matters for a sequence — the
+                           `nextval()` gate — not the table-privilege set)
 Any assertion failing -> ROLLBACK, refuse, name the exact (kind, args) pair
 that failed. --dry-run runs the assertions too (still rolls back either
 way) so a preview genuinely previews whether a real apply would pass.
@@ -189,7 +201,7 @@ _DOLLAR_TAG_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
 
 # `-- assert: <kind> <args...>` header lines (CAI-RESP-1397 #5).
 _ASSERT_RE = re.compile(r"^--\s*assert:\s*(\S+)\s+(.+?)\s*$", re.MULTILINE)
-_ASSERT_KINDS = {"no_execute", "search_path", "dropped", "no_table_privilege"}
+_ASSERT_KINDS = {"no_execute", "search_path", "dropped", "no_table_privilege", "no_sequence_privilege"}
 # Case-insensitive: a migration doing either of these MUST carry an assertion
 # (CAI-RESP-1397 #5) — a silent no-op REVOKE/DROP is otherwise indistinguishable
 # from a real one.
@@ -298,6 +310,15 @@ def parse_assert_lines(sql_text: str) -> list[dict]:
                 )
             role, table, priv = parts
             assertions.append({"kind": kind, "role": role, "table": table, "priv": priv})
+        elif kind == "no_sequence_privilege":
+            parts = rest.split()
+            if len(parts) != 3:
+                raise Refuse(
+                    f"malformed 'assert: no_sequence_privilege' line — expected "
+                    f"'<role> <schema.sequence> <privilege>': {rest!r}"
+                )
+            role, sequence, priv = parts
+            assertions.append({"kind": kind, "role": role, "sequence": sequence, "priv": priv})
         else:
             assertions.append({"kind": kind, "fn": rest})
     return assertions
@@ -318,6 +339,8 @@ def _assertion_label(a: dict) -> str:
         return f"no_execute {a['role']} {a['fn']}"
     if a["kind"] == "no_table_privilege":
         return f"no_table_privilege {a['role']} {a['table']} {a['priv']}"
+    if a["kind"] == "no_sequence_privilege":
+        return f"no_sequence_privilege {a['role']} {a['sequence']} {a['priv']}"
     return f"{a['kind']} {a['fn']}"
 
 
@@ -360,6 +383,19 @@ def _check_assertion(cur, a: dict) -> tuple[bool, str]:
         return ok, "" if ok else (
             f"{label} — {a['role']} STILL has {a['priv']} (the REVOKE was a silent no-op, "
             f"or this project's pg_default_acl re-grants it on every new table)"
+        )
+
+    if a["kind"] == "no_sequence_privilege":
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL", (a["sequence"],))
+        exists = cur.fetchone()[0]
+        if not exists:
+            return False, f"{label} — sequence does not exist; cannot assert a privilege on it"
+        cur.execute("SELECT has_sequence_privilege(%s, %s, %s)", (a["role"], a["sequence"], a["priv"]))
+        has_priv = cur.fetchone()[0]
+        ok = not has_priv
+        return ok, "" if ok else (
+            f"{label} — {a['role']} STILL has {a['priv']} on the sequence (the REVOKE was a "
+            f"silent no-op, or this project's pg_default_acl re-grants it on every new sequence)"
         )
 
     raise Refuse(f"unknown assert kind at check time: {a['kind']!r}")  # pragma: no cover — parse_assert_lines already refused
