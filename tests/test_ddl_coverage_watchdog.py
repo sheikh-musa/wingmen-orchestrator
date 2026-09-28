@@ -12,6 +12,7 @@ conflated.
 """
 from __future__ import annotations
 
+import json
 import uuid
 
 import psycopg
@@ -87,6 +88,12 @@ def _bus_row_count(bus_dsn: str) -> int:
 def _add_column(silo_dsn: str) -> None:
     with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE widgets ADD COLUMN description text")
+
+
+def _create_non_public_schema_object(silo_dsn: str) -> None:
+    with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS platform_internal")
+        cur.execute("CREATE TABLE platform_internal.rotated_partition (id int)")
 
 
 def _insert_ledger_row(silo_dsn: str) -> None:
@@ -214,6 +221,71 @@ def test_different_silos_have_independent_dedup(two_dsns):
     # both silos independently detect the same underlying schema change --
     # two distinct pages, not deduped against each other.
     assert _bus_row_count(bus_dsn) == 2
+
+
+# --------------------------------------------------------------------------------
+# Scope: only 'public' is fingerprinted (bus #44439 postmortem) -- Supabase's own
+# platform-managed schemas (realtime's daily partition rotation being the live
+# case that triggered this fix) must never look like an unledgered gate-bypass.
+# --------------------------------------------------------------------------------
+
+def test_ddl_outside_public_schema_is_never_drift(two_dsns):
+    """Simulates Supabase's own internal schema churn (e.g. realtime's daily
+    messages_YYYY_MM_DD partition rotation, bus #44438/#44439) -- this must
+    never page: it's outside apply_migration.py's --gate surface entirely and
+    no lane could have gated it through the tool even if it wanted to."""
+    silo_dsn, bus_dsn = two_dsns
+    watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)  # baseline
+    _create_non_public_schema_object(silo_dsn)
+    drifted = watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
+    assert drifted is False
+    assert _bus_row_count(bus_dsn) == 0
+
+
+# --------------------------------------------------------------------------------
+# Snapshot persistence + diff (bus #44439 ask #3: "persist the per-component
+# snapshot ... so the page carries the actual diff")
+# --------------------------------------------------------------------------------
+
+def test_state_persists_a_real_snapshot_not_just_the_hash(two_dsns):
+    silo_dsn, bus_dsn = two_dsns
+    watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
+    entry = watchdog.load_state()[SILO]
+    assert "snapshot" in entry
+    assert "columns" in entry["snapshot"]
+    # the widgets table's own columns show up in the raw snapshot, not just a hash
+    assert "widgets" in str(entry["snapshot"]["columns"])
+
+
+def test_drift_alert_body_contains_the_actual_diff(two_dsns):
+    silo_dsn, bus_dsn = two_dsns
+    watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)  # baseline
+    _add_column(silo_dsn)
+    watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
+    with psycopg.connect(bus_dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT body FROM agent_messages ORDER BY id DESC LIMIT 1")
+        body = cur.fetchone()[0]
+    # the actual added column name, not just an opaque fingerprint prefix
+    assert "description" in body
+    assert "columns added" in body
+
+
+def test_old_state_format_rebaselines_without_paging(two_dsns):
+    """Deploying this fix onto a host with an existing pre-#44439 state file
+    (no schema_version, blocklist-scoped fingerprint) must not immediately
+    fire a false page just because the fingerprinted surface itself changed
+    -- the old entry is incomparable, so this re-baselines instead of
+    treating format drift as schema drift."""
+    silo_dsn, bus_dsn = two_dsns
+    watchdog.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    watchdog.STATE_FILE.write_text(json.dumps({
+        SILO: {"fingerprint": "stale-pre-rescope-hash", "ledger_count": 0,
+               "checked_at": "2026-01-01T00:00:00+00:00"},
+    }))
+    drifted = watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
+    assert drifted is False
+    assert _bus_row_count(bus_dsn) == 0
+    assert watchdog.load_state()[SILO]["schema_version"] == watchdog.STATE_SCHEMA_VERSION
 
 
 # --------------------------------------------------------------------------------
