@@ -15,6 +15,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from nervous_system import triage  # PASSIVE CoS triage annotation (read-only)
+from nervous_system.vault_leak_guard import defensive_redact  # bus #44378
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
@@ -309,6 +310,42 @@ def open_asks_for(body: str) -> list:
         return cur.fetchall()
 
 
+def _alert_vault_redaction(leaked_keys: list[str], direction: str, channel: str, tag) -> None:
+    """Loud, durable copy of a fired defensive redaction (orch-console review,
+    bus #44388, fix 1a): the row-level cos_triage.vault_redacted flag written
+    by log() below is the primary durable evidence, but every send script
+    pipes operator_log's own stderr to /dev/null (oeh_send.sh included — the
+    one that leaked), so a WARNING print alone is never seen by anyone. This
+    posts a P1 bus row to orch-console instead. Called by log() only AFTER
+    its own INSERT has committed (bus #44388 round 2 nit — never page about a
+    row that doesn't exist because the write itself failed). Best-effort: a
+    bus-post hiccup (no identity resolvable, DB down) must never cost that
+    already-committed write — the row flag is the fallback if this fails."""
+    try:
+        from scripts import bus_send
+        from_agent = bus_send.resolve_from_agent(os.environ)
+        subject = f"vault_leak_guard fired: {leaked_keys} redacted from a {direction}/{tag} log row"
+        body = (
+            f"vault_leak_guard fired on a {direction} operator_messages row "
+            f"(channel={channel!r}, tag={tag!r}): vault key(s) {leaked_keys} were present "
+            "in the raw text and were redacted before the durable INSERT (bus #44378). "
+            "This means a send script emitted a raw secret value that almost reached the "
+            "durable log — check the originating send path for a missing "
+            "--secret-vault-key wiring (or a hand-pasted value bypassing it entirely)."
+        )
+        bus_send.send(from_agent, "orch-console", "blocker", subject, body, "P1", req=True)
+    except BaseException:
+        # Broad on purpose (bus #44412 CI catch): bus_send.py raises SystemExit,
+        # not a subclass of Exception, when DATABASE_URL is unset — an
+        # `except Exception` here left that specific failure unswallowed,
+        # contradicting this function's own "never raises" docstring claim
+        # (same failure shape as defensive_redact's VaultError-only catch,
+        # bus #44388 round 2). A best-effort bus-post helper must not let ANY
+        # exception type escape past the already-committed row it's a fallback
+        # for.
+        pass
+
+
 def log(direction: str, text: str, chat_id: str | None = None,
         tag: str | None = None, delivered: bool = True,
         channel: str = "telegram", failure_reason=None,
@@ -318,10 +355,42 @@ def log(direction: str, text: str, chat_id: str | None = None,
     # tg_message_id (op#22669 asks-tracking): the Telegram Bot API result.message_id for
     # an OUTBOUND send only — captured so a later inbound reply_to_message can be matched
     # back to this exact row (reply-linked operator_asks auto-close).
-    cos = None
+    cos_payload: dict = {}
     if failure_reason:
         payload = failure_reason if isinstance(failure_reason, dict) else {"description": str(failure_reason)}
-        cos = json.dumps({"send_failure": payload})
+        cos_payload["send_failure"] = payload
+    # Defensive vault-value scan (bus #44378, after op#22696's repeat; tightened
+    # per orch-console's PR #197 review, bus #44388): the LAST line of defense
+    # before a secret reaches the durable log, independent of whether the
+    # caller used --secret-vault-key's {{SECRET}} mechanism or
+    # nervous_system.secret_redact's pattern pass. Best-effort — a
+    # defensive_redact() hiccup must never cost the primary log write.
+    #
+    # "Could not check" must never look the same as "checked, clean" (44388
+    # fix 1b): a fired redaction is recorded on the row (vault_redacted); a
+    # scan that could not RUN for an in-scope key is recorded distinctly
+    # (vault_scan_skipped) instead of being silently indistinguishable from
+    # "ran, found nothing". defensive_redact() itself now catches broadly
+    # (bus #44388 round 2, fix 1c) so it practically never reaches the
+    # `except Exception` below — but if it somehow still does (a bug in the
+    # guard itself, not in vault.get()), that must ALSO be a recorded skip,
+    # not a silent "clean": the key name "*" marks "the whole scan didn't run"
+    # rather than one specific key.
+    try:
+        text, leaked_keys, skipped = defensive_redact(text, tag=tag)
+    except Exception as exc:
+        leaked_keys, skipped = [], [("*", f"guard_error:{type(exc).__name__}")]
+    if leaked_keys:
+        cos_payload["vault_redacted"] = leaked_keys
+        print(
+            f"operator_log: WARNING — defensive redaction fired for vault key(s) "
+            f"{leaked_keys} on a {direction} message (channel={channel!r}, tag={tag!r}) "
+            "— a raw secret value almost reached the durable log (bus #44378)",
+            file=sys.stderr,
+        )
+    if skipped:
+        cos_payload["vault_scan_skipped"] = [{"key": k, "reason": r} for k, r in skipped]
+    cos = json.dumps(cos_payload) if cos_payload else None
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
@@ -332,6 +401,13 @@ def log(direction: str, text: str, chat_id: str | None = None,
         )
         rid = cur.fetchone()[0]
         conn.commit()
+    # Loud bus copy AFTER the commit (orch-console review, bus #44388 round 2
+    # nit): the row must actually exist before we page anyone about it — a
+    # failing INSERT (which would raise out of the `with` block above, before
+    # reaching here) must never trigger a page about a row that was never
+    # written.
+    if leaked_keys:
+        _alert_vault_redaction(leaked_keys, direction, channel, tag)
     # Ledger every genuine operator ask (op#22669: "if I ask 1000 things I expect
     # you to track 1001"). Best-effort — a tracking hiccup must never cost the
     # primary durable log row above, which has already committed.

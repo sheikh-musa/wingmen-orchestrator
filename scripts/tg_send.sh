@@ -32,11 +32,19 @@ fi
 # themselves — no existing caller ever passes a literal "--ask" as message text.
 ASK=""
 CHASE_HOURS=""
+# --secret-vault-key <name> (bus #44378, after op#22696 + the 2026-09-27 OEH
+# preview-password leak into operator_messages row 22824): the RESOLVED
+# secret value must never pass through argv or the durable log. Give the
+# message a literal {{SECRET}} placeholder instead of the real value; this
+# script fetches the vault value itself and substitutes it ONLY into the copy
+# that gets sent — the copy that gets logged keeps the placeholder.
+SECRET_VAULT_KEY=""
 _POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --ask) ASK="${2:-}"; shift 2 ;;
     --chase-hours) CHASE_HOURS="${2:-}"; shift 2 ;;
+    --secret-vault-key) SECRET_VAULT_KEY="${2:-}"; shift 2 ;;
     *) _POSITIONAL+=("$1"); shift ;;
   esac
 done
@@ -61,6 +69,17 @@ if REDACTED="$(printf '%s' "$TEXT" | PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin
   TEXT="$REDACTED"
 fi
 
+# Resolve {{SECRET}} for the SEND ONLY (bus #44378). TEXT (used for the
+# durable log below) keeps the placeholder — the resolved value lives only in
+# SEND_TEXT, passed to the sender via env (never argv, never the log).
+SEND_TEXT="$TEXT"
+if [ -n "$SECRET_VAULT_KEY" ]; then
+  if ! SEND_TEXT="$(VPH_TEMPLATE="$TEXT" VPH_VAULT_KEY="$SECRET_VAULT_KEY" PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/lib/vault_placeholder_send.py")"; then
+    echo "tg_send: --secret-vault-key substitution failed (see above)" >&2
+    exit 5
+  fi
+fi
+
 # Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
 # token/chat/text passed via env, never argv — keeps the token out of `ps`.
 # TG_FAIL_OUT: helper writes the structured failure so we record WHY on the row (#40837).
@@ -68,7 +87,7 @@ fi
 # message, so a later reply_to_message can be matched back to this exact row.
 FAILOUT="$(mktemp)"
 MSGIDOUT="$(mktemp)"
-if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" TG_FAIL_OUT="$FAILOUT" TG_MSGID_OUT="$MSGIDOUT" \
+if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$SEND_TEXT" TG_FAIL_OUT="$FAILOUT" TG_MSGID_OUT="$MSGIDOUT" \
      "$ORCH_DIR/.venv/bin/python3" "$ORCH_DIR/scripts/_tg_chunked_send.py"; then
   sent=1
 else
