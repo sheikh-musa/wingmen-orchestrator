@@ -334,7 +334,15 @@ def _alert_vault_redaction(leaked_keys: list[str], direction: str, channel: str,
             "--secret-vault-key wiring (or a hand-pasted value bypassing it entirely)."
         )
         bus_send.send(from_agent, "orch-console", "blocker", subject, body, "P1", req=True)
-    except Exception:
+    except BaseException:
+        # Broad on purpose (bus #44412 CI catch): bus_send.py raises SystemExit,
+        # not a subclass of Exception, when DATABASE_URL is unset — an
+        # `except Exception` here left that specific failure unswallowed,
+        # contradicting this function's own "never raises" docstring claim
+        # (same failure shape as defensive_redact's VaultError-only catch,
+        # bus #44388 round 2). A best-effort bus-post helper must not let ANY
+        # exception type escape past the already-committed row it's a fallback
+        # for.
         pass
 
 

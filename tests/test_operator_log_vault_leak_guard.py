@@ -285,20 +285,31 @@ def test_alert_never_fires_if_the_insert_itself_raises(monkeypatch):
 # ── _alert_vault_redaction: the loud bus copy ──────────────────────────────
 
 def test_alert_vault_redaction_posts_a_p1_blocker_to_orch_console(monkeypatch):
+    """Patches the REAL scripts.bus_send module's functions in place, not a
+    sys.modules swap-in: `_alert_vault_redaction` does `from scripts import
+    bus_send` on every call, and Python's `from X import Y` skips re-resolving
+    Y from sys.modules once `X` already has a `bus_send` attribute cached —
+    which happens the moment ANY earlier-collected test (e.g.
+    test_bus_send.py, alphabetically before this file) does a real `from
+    scripts import bus_send` or `import scripts.bus_send` first. A
+    sys.modules["scripts.bus_send"] override is then silently ignored and the
+    REAL send() runs, hitting a missing DATABASE_URL in CI's unit-test env
+    (bus #44412 CI failure — passed in an isolated local run, failed in the
+    full alphabetically-ordered CI suite)."""
     sent = []
 
-    class _FakeBusSend:
-        @staticmethod
-        def resolve_from_agent(env):
-            return "cc-substrate"
+    import scripts.bus_send as real_bus_send
 
-        @staticmethod
-        def send(from_agent, to, mtype, subject, body, priority, req=False, **kw):
-            sent.append(dict(from_agent=from_agent, to=to, mtype=mtype, subject=subject,
-                              body=body, priority=priority, req=req))
-            return 1, "thread"
+    def _fake_resolve(env):
+        return "cc-substrate"
 
-    monkeypatch.setitem(__import__("sys").modules, "scripts.bus_send", _FakeBusSend)
+    def _fake_send(from_agent, to, mtype, subject, body, priority, req=False, **kw):
+        sent.append(dict(from_agent=from_agent, to=to, mtype=mtype, subject=subject,
+                          body=body, priority=priority, req=req))
+        return 1, "thread"
+
+    monkeypatch.setattr(real_bus_send, "resolve_from_agent", _fake_resolve)
+    monkeypatch.setattr(real_bus_send, "send", _fake_send)
     ol._alert_vault_redaction(["oeh_preview_password"], "outbound", "telegram", "oeh")
 
     assert len(sent) == 1
@@ -319,15 +330,37 @@ def test_alert_vault_redaction_never_raises_when_bus_send_is_unavailable(monkeyp
 
 
 def test_alert_vault_redaction_never_raises_when_identity_unresolvable(monkeypatch):
-    class _FakeBusSend:
-        @staticmethod
-        def resolve_from_agent(env):
-            raise RuntimeError("cannot resolve bus from_agent identity")
+    """Same real-module-attribute-patching requirement as
+    test_alert_vault_redaction_posts_a_p1_blocker_to_orch_console above — see
+    its docstring."""
+    import scripts.bus_send as real_bus_send
 
-        @staticmethod
-        def send(*a, **k):
-            raise AssertionError("send() must not be reached")
+    def _raise_identity(env):
+        raise RuntimeError("cannot resolve bus from_agent identity")
 
-    monkeypatch.setitem(__import__("sys").modules, "scripts.bus_send", _FakeBusSend)
+    def _unreached_send(*a, **k):
+        raise AssertionError("send() must not be reached")
+
+    monkeypatch.setattr(real_bus_send, "resolve_from_agent", _raise_identity)
+    monkeypatch.setattr(real_bus_send, "send", _unreached_send)
+    # must not raise
+    ol._alert_vault_redaction(["k"], "outbound", "telegram", "oeh")
+
+
+def test_alert_vault_redaction_never_raises_on_system_exit_from_bus_send(monkeypatch):
+    """bus #44412 CI failure: scripts/bus_send.py raises SystemExit (not a
+    subclass of Exception) when DATABASE_URL is unset — an `except Exception`
+    in _alert_vault_redaction left that specific, real failure mode
+    unswallowed, contradicting its own "never raises" docstring claim (the
+    same failure shape as defensive_redact's VaultError-only catch, bus #44388
+    round 2)."""
+    import scripts.bus_send as real_bus_send
+
+    def _raise_system_exit(env):
+        raise SystemExit("no DATABASE_URL: set it in the environment or .env")
+
+    monkeypatch.setattr(real_bus_send, "resolve_from_agent", _raise_system_exit)
+    monkeypatch.setattr(real_bus_send, "send", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("send() must not be reached")))
     # must not raise
     ol._alert_vault_redaction(["k"], "outbound", "telegram", "oeh")
