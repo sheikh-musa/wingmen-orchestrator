@@ -328,6 +328,30 @@ def test_new_function_in_non_public_schema_owned_by_us_still_pages(two_dsns):
     assert _bus_row_count(bus_dsn) == 1
 
 
+def test_grant_execute_to_anon_on_platform_owned_function_still_pages(two_dsns):
+    """orch-console bus #44449 (058b anon-EXEC tripwire): owner-excluding
+    procs would drop a platform-owned function's proacl along with it -- an
+    out-of-gate GRANT EXECUTE ... TO anon (owner stays supabase_auth_admin)
+    must still page. Procs stay fully fingerprinted outside the realtime
+    schema regardless of owner precisely so this can't happen."""
+    silo_dsn, bus_dsn = two_dsns
+    _ensure_role(silo_dsn, "supabase_auth_admin")
+    _ensure_role(silo_dsn, "anon")
+    with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS auth")
+        cur.execute(
+            "CREATE OR REPLACE FUNCTION auth.internal_fn() RETURNS int "
+            "LANGUAGE sql AS $$ SELECT 1 $$"
+        )
+        cur.execute("ALTER FUNCTION auth.internal_fn() OWNER TO supabase_auth_admin")
+    watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)  # baseline
+    with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("GRANT EXECUTE ON FUNCTION auth.internal_fn() TO anon")  # DDL with NO ledger row
+    drifted = watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
+    assert drifted is True
+    assert _bus_row_count(bus_dsn) == 1
+
+
 # --------------------------------------------------------------------------------
 # Snapshot persistence + diff (bus #44439 ask #3: "persist the per-component
 # snapshot ... so the page carries the actual diff")

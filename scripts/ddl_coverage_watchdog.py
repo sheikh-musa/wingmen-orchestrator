@@ -69,7 +69,8 @@ correlate migration_ledger.applied_at against the specific catalog rows
 that changed, so two co-occurring changes can't hide each other.
 
 SCOPE: a NARROW exclusion of Supabase-managed churn, not "public only" and
-not "every non-system schema" (bus #44439/#44444 postmortem -- two rounds).
+not "every non-system schema" (bus #44439/#44444/#44449 postmortem -- three
+rounds).
 Round 1 (blocklist `NOT IN ('pg_catalog', 'information_schema')`): still
 swept up Supabase's own platform-managed schemas. Confirmed live on the
 substrate (tscuymavysscrvoberrr) at 2026-09-28T02:2x -- `realtime.
@@ -85,14 +86,22 @@ governance-relevant RLS changes this watchdog exists to catch. A bare
 'public' allowlist would have let an out-of-gate `DROP POLICY ... ON
 storage.objects` through silently -- worse than the original false
 positive.
+Round 3 (orch-console challenge, bus #44449): the table/index owner
+exclusion, applied to procs too, dropped a platform-owned function's proacl
+along with it -- an out-of-gate `GRANT EXECUTE ON FUNCTION auth.<fn> TO
+anon` (owner stays supabase_*_admin) would never have paged, blinding the
+watchdog to the 058b anon-EXEC tripwire class.
 FINAL SHAPE: exclude the `realtime` schema entirely (partitions + its own
 procs -- fully Supabase-internal, never reachable through apply_migration.py
-even in principle) and exclude any table/proc/index OWNED by a Supabase
-platform role (`supabase_realtime_admin`, `supabase_storage_admin`,
-`supabase_auth_admin`, `supabase_admin`), in ANY schema. Everything else --
-including our own policies, functions and tables living in `storage`/`auth`
--- stays fingerprinted, since pg_policies carries no owner column and a
-policy is never Supabase-authored.
+even in principle); exclude TABLES/INDEXES owned by a Supabase platform role
+(`supabase_realtime_admin`, `supabase_storage_admin`, `supabase_auth_admin`,
+`supabase_admin`), in ANY schema; but PROCS stay fully fingerprinted outside
+`realtime` regardless of owner, since the proc row is already just (schema,
+name, identity args, proacl) -- no probody/version to generate false
+positives from, and dropping it by owner would hide anon-EXEC grants.
+Everything else -- including our own policies, functions and tables living
+in `storage`/`auth` -- stays fingerprinted, since pg_policies carries no
+owner column and a policy is never Supabase-authored.
 
 SNAPSHOT PERSISTENCE (orch-console, bus #44439): the state file now keeps
 the raw per-component rows (not just their hash) for the last-seen scan, so
@@ -121,9 +130,20 @@ PAGE_TO_AGENT = "orch-console"
 # exactly the governance-relevant RLS changes this watchdog exists to catch.
 # Narrow exclusion instead: drop the 'realtime' schema entirely (partitions +
 # its own procs -- Supabase's own rotation, never reachable through
-# apply_migration.py even in principle) and drop objects OWNED by a Supabase
-# platform role, in ANY schema. Everything else -- including our own
+# apply_migration.py even in principle) and drop TABLES/INDEXES owned by a
+# Supabase platform role, in ANY schema. Everything else -- including our own
 # policies/functions/tables in storage/auth -- stays in scope.
+#
+# PROCS ARE THE ONE EXCEPTION (orch-console, bus #44449): owner-excluding
+# procs would drop their proacl along with them, and an out-of-gate
+# `GRANT EXECUTE ON FUNCTION auth.<fn>/storage.<fn> TO anon` leaves the
+# owner as supabase_*_admin -- so an owner exclusion would blind the
+# watchdog to exactly the anon-EXEC grant class it needs to catch (058b
+# anon-EXEC tripwire). So procs stay fully fingerprinted -- (schema, name,
+# identity args, proacl), no probody/version in the row at all -- outside
+# only the fully-excluded 'realtime' schema. A platform upgrade that changes
+# a platform-owned function's signature or ACL will page once; that's an
+# accepted cost of not blinding the watchdog to a live governance class.
 _SUPABASE_PLATFORM_OWNERS = (
     "supabase_realtime_admin", "supabase_storage_admin",
     "supabase_auth_admin", "supabase_admin",
@@ -148,13 +168,11 @@ _POLICIES_SQL = """
     ORDER BY schemaname, tablename, policyname
 """
 
-_PROCS_SQL = f"""
+_PROCS_SQL = """
     SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), p.proacl
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
-    JOIN pg_roles r ON r.oid = p.proowner
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'realtime')
-      {_OWNER_EXCLUSION_SQL}
     ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
 """
 
@@ -177,10 +195,11 @@ _SNAPSHOT_QUERIES = {
 }
 
 # Bumped when the fingerprinted surface itself changes (e.g. the bus #44439
-# blocklist->narrow-exclusion rescope) so an old, apples-to-oranges state
-# entry is treated as "no prior state" -- a fresh baseline, not a page --
-# instead of comparing snapshots taken over two different schema scopes.
-STATE_SCHEMA_VERSION = 3
+# blocklist->narrow-exclusion rescope, or #44449's procs-stay-in-scope fix)
+# so an old, apples-to-oranges state entry is treated as "no prior state" --
+# a fresh baseline, not a page -- instead of comparing snapshots taken over
+# two different schema scopes.
+STATE_SCHEMA_VERSION = 4
 
 
 def compute_schema_snapshot(cur) -> dict[str, list[list]]:
