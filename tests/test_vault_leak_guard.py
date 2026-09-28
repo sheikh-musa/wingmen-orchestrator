@@ -140,6 +140,26 @@ def test_defensive_redact_never_raises_on_unexpected_vault_error(monkeypatch):
     assert skipped == [("oeh_preview_password", "VaultError")]
 
 
+def test_defensive_redact_catches_non_vault_error_too(monkeypatch):
+    """bus #44388 round 2: vault.get() only raises VaultError for ITS OWN
+    checks (not-found, wrong host, KEK missing) — a dead DB connection
+    (psycopg.OperationalError), a corrupt ciphertext (cryptography's
+    InvalidTag), or an _audit() write failure all propagate as raw,
+    non-VaultError exceptions. The per-key catch must be broad enough to
+    actually make good on the "never raises" promise, not just for the
+    vault's own exception hierarchy."""
+    def _raise(name, reason):
+        raise ConnectionError("pooler hung up")
+    monkeypatch.setattr(vlg, "CLIENT_SHAREABLE_VAULT_KEYS", {"oeh_preview_password": ("oeh",)})
+    monkeypatch.setattr(vlg.vault, "get", _raise)
+
+    # must not raise
+    redacted, matched, skipped = vlg.defensive_redact("anything", tag="oeh")
+    assert redacted == "anything"
+    assert matched == []
+    assert skipped == [("oeh_preview_password", "ConnectionError")]
+
+
 def test_allowlist_is_small_and_bounded_not_every_vault_value():
     # This is a deliberate ALLOWLIST, not "every vault secret" (see module
     # docstring: decrypting every stored secret on every log call is

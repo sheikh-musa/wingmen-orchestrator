@@ -43,7 +43,7 @@ of just re-labelling it for reviewers to filter out after the fact.
 """
 from __future__ import annotations
 
-from nervous_system.vault import VaultError, vault
+from nervous_system.vault import vault
 
 # Vault key name -> the operator_messages.tag value(s) whose outbound/inbound
 # text may legitimately carry this secret's value. A key's value is only
@@ -65,11 +65,17 @@ def defensive_redact(text: str, tag: str | None = None) -> tuple[str, list[str],
     for 'oeh_preview_password'.
 
     "Could not check" is reported distinctly from "checked, clean" (orch-console
-    review, bus #44388, fix 1b): a vault lookup failure for an IN-SCOPE key (no
-    DB, no KEK, key not bootstrapped yet, wrong host) is never silently treated
-    as if the scan ran and found nothing — it comes back in the third element so
-    the caller can record "skipped: <reason>" on the row instead. Best-effort
-    per key: one key's failure never blocks checking the rest. Never raises.
+    review, bus #44388, fixes 1b and 1c): a vault lookup failure for an
+    IN-SCOPE key is never silently treated as if the scan ran and found
+    nothing — it comes back in the third element so the caller can record
+    "skipped: <reason>" on the row instead. The per-key catch is a broad
+    `Exception`, not `VaultError` — vault.get() only raises VaultError for its
+    OWN checks (not-found, wrong host, KEK missing); a psycopg
+    OperationalError from a dead connection, a cryptography InvalidTag from
+    _aead_decrypt, or an _audit() write failure all propagate as raw,
+    non-VaultError exceptions (bus #44388 round 2: catching only VaultError
+    made the "never raises" claim below false). Best-effort per key: one
+    key's failure never blocks checking the rest. Never raises.
     """
     if not text:
         return text, [], []
@@ -81,7 +87,7 @@ def defensive_redact(text: str, tag: str | None = None) -> tuple[str, list[str],
             continue
         try:
             value = vault.get(key, reason="vault_leak_guard defensive log-scan (bus #44378)").value
-        except VaultError as exc:
+        except Exception as exc:
             skipped.append((key, type(exc).__name__))
             continue
         if value and value in redacted:

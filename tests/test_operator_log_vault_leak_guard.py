@@ -150,7 +150,11 @@ def test_log_passes_text_through_unchanged_when_nothing_matches(monkeypatch, fak
     assert "WARNING" not in capsys.readouterr().err
 
 
-def test_log_never_fails_when_defensive_redact_raises_non_vault_error(monkeypatch, fake_db, no_bus_alert):
+def test_log_never_fails_when_defensive_redact_raises_and_records_it_as_skipped(monkeypatch, fake_db, no_bus_alert):
+    """bus #44388 round 2: defensive_redact() itself now catches broadly, so
+    this outer except is a last-ditch guard-of-the-guard. Even THAT must not
+    make the row look "checked, clean" — it must record a skip (key '*',
+    reason guard_error:<ExcType>), not silently record nothing."""
     def _raise(text, tag=None):
         raise RuntimeError("vault plumbing exploded")
 
@@ -161,6 +165,9 @@ def test_log_never_fails_when_defensive_redact_raises_non_vault_error(monkeypatc
     # best-effort: a defensive_redact hiccup must never cost the primary log
     # write, even though it means this particular text wasn't scanned.
     assert _insert_params(fake_db)[4] == "message text"
+    cos = _cos(fake_db)
+    assert cos["vault_scan_skipped"] == [{"key": "*", "reason": "guard_error:RuntimeError"}]
+    assert "vault_redacted" not in cos
 
 
 def test_log_calls_defensive_redact_with_the_tag_for_scoping(monkeypatch, fake_db, no_bus_alert):
@@ -188,6 +195,91 @@ def test_log_calls_defensive_redact_for_inbound_too(monkeypatch, fake_db, no_bus
     monkeypatch.setattr(ol, "defensive_redact", _spy)
     ol.log("inbound", "hello from a client", chat_id="123", tag="oeh")
     assert calls == ["hello from a client"]
+
+
+def test_alert_fires_after_the_insert_commits_not_before(monkeypatch):
+    """bus #44388 round 2 nit: never page about a row that doesn't exist yet —
+    the alert must fire strictly after the INSERT's commit(), so a failing
+    write (which raises out of the `with` block before reaching the alert
+    call) can never trigger a page for a row that was never written."""
+    order = []
+
+    class _OrderedCur:
+        def execute(self, sql, params=None):
+            if sql.strip().startswith("INSERT INTO operator_messages"):
+                order.append("insert")
+
+        def fetchone(self):
+            return (999,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _OrderedConn:
+        def cursor(self):
+            return _OrderedCur()
+
+        def commit(self):
+            order.append("commit")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(ol.psycopg, "connect", lambda *a, **k: _OrderedConn())
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
+    monkeypatch.setattr(ol, "defensive_redact", lambda text, tag=None: (text, ["x"], []))
+    monkeypatch.setattr(ol, "_alert_vault_redaction", lambda *a, **k: order.append("alert"))
+
+    ol.log("outbound", "password is hunter2", chat_id="123", tag="oeh")
+
+    assert order == ["insert", "commit", "alert"]
+
+
+def test_alert_never_fires_if_the_insert_itself_raises(monkeypatch):
+    calls = []
+
+    class _ExplodingCur:
+        def execute(self, sql, params=None):
+            if sql.strip().startswith("INSERT INTO operator_messages"):
+                raise RuntimeError("db is down")
+
+        def fetchone(self):
+            return (999,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _ExplodingConn:
+        def cursor(self):
+            return _ExplodingCur()
+
+        def commit(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(ol.psycopg, "connect", lambda *a, **k: _ExplodingConn())
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
+    monkeypatch.setattr(ol, "defensive_redact", lambda text, tag=None: (text, ["x"], []))
+    monkeypatch.setattr(ol, "_alert_vault_redaction", lambda *a, **k: calls.append(a))
+
+    with pytest.raises(RuntimeError):
+        ol.log("outbound", "password is hunter2", chat_id="123", tag="oeh")
+
+    assert calls == []
 
 
 # ── _alert_vault_redaction: the loud bus copy ──────────────────────────────

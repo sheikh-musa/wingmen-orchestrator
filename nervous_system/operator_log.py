@@ -316,10 +316,11 @@ def _alert_vault_redaction(leaked_keys: list[str], direction: str, channel: str,
     by log() below is the primary durable evidence, but every send script
     pipes operator_log's own stderr to /dev/null (oeh_send.sh included — the
     one that leaked), so a WARNING print alone is never seen by anyone. This
-    posts a P1 bus row to orch-console instead. Best-effort: a bus-post
-    hiccup (no identity resolvable, DB down) must never cost the primary log
-    write, which has already committed by the time this runs — the row flag
-    is the fallback if this fails."""
+    posts a P1 bus row to orch-console instead. Called by log() only AFTER
+    its own INSERT has committed (bus #44388 round 2 nit — never page about a
+    row that doesn't exist because the write itself failed). Best-effort: a
+    bus-post hiccup (no identity resolvable, DB down) must never cost that
+    already-committed write — the row flag is the fallback if this fails."""
     try:
         from scripts import bus_send
         from_agent = bus_send.resolve_from_agent(os.environ)
@@ -358,16 +359,19 @@ def log(direction: str, text: str, chat_id: str | None = None,
     # defensive_redact() hiccup must never cost the primary log write.
     #
     # "Could not check" must never look the same as "checked, clean" (44388
-    # fix 1b): a fired redaction is recorded on the row (vault_redacted) AND
-    # posted loudly to the bus, since stderr alone is invisible to every send
-    # script (they pipe it to /dev/null); a scan that could not RUN for an
-    # in-scope key (VaultError: no KEK, wrong host, key not bootstrapped yet,
-    # DB hiccup) is recorded distinctly (vault_scan_skipped) instead of being
-    # silently indistinguishable from "ran, found nothing".
+    # fix 1b): a fired redaction is recorded on the row (vault_redacted); a
+    # scan that could not RUN for an in-scope key is recorded distinctly
+    # (vault_scan_skipped) instead of being silently indistinguishable from
+    # "ran, found nothing". defensive_redact() itself now catches broadly
+    # (bus #44388 round 2, fix 1c) so it practically never reaches the
+    # `except Exception` below — but if it somehow still does (a bug in the
+    # guard itself, not in vault.get()), that must ALSO be a recorded skip,
+    # not a silent "clean": the key name "*" marks "the whole scan didn't run"
+    # rather than one specific key.
     try:
         text, leaked_keys, skipped = defensive_redact(text, tag=tag)
-    except Exception:
-        leaked_keys, skipped = [], []
+    except Exception as exc:
+        leaked_keys, skipped = [], [("*", f"guard_error:{type(exc).__name__}")]
     if leaked_keys:
         cos_payload["vault_redacted"] = leaked_keys
         print(
@@ -376,7 +380,6 @@ def log(direction: str, text: str, chat_id: str | None = None,
             "— a raw secret value almost reached the durable log (bus #44378)",
             file=sys.stderr,
         )
-        _alert_vault_redaction(leaked_keys, direction, channel, tag)
     if skipped:
         cos_payload["vault_scan_skipped"] = [{"key": k, "reason": r} for k, r in skipped]
     cos = json.dumps(cos_payload) if cos_payload else None
@@ -390,6 +393,13 @@ def log(direction: str, text: str, chat_id: str | None = None,
         )
         rid = cur.fetchone()[0]
         conn.commit()
+    # Loud bus copy AFTER the commit (orch-console review, bus #44388 round 2
+    # nit): the row must actually exist before we page anyone about it — a
+    # failing INSERT (which would raise out of the `with` block above, before
+    # reaching here) must never trigger a page about a row that was never
+    # written.
+    if leaked_keys:
+        _alert_vault_redaction(leaked_keys, direction, channel, tag)
     # Ledger every genuine operator ask (op#22669: "if I ask 1000 things I expect
     # you to track 1001"). Best-effort — a tracking hiccup must never cost the
     # primary durable log row above, which has already committed.
