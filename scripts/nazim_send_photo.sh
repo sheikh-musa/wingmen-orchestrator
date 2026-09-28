@@ -24,8 +24,11 @@ source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
 tg_safe_upload_stage photo "$IMG" || { echo "nazim_send_photo: could not stage upload for $IMG" >&2; exit 1; }
 trap '[ -n "${TG_SAFE_UPLOAD_TMPDIR:-}" ] && rm -rf "$TG_SAFE_UPLOAD_TMPDIR"' EXIT
 
+# bus #44680: -F treats a value starting with '@' (upload) or '<' (read-file) as a
+# file directive, not literal text — a caption/chat_id beginning with either would
+# either fail or leak a local file's contents. --form-string sends them as literal.
 code=$(curl -s -o /dev/null -w "%{http_code}" \
-  -F "chat_id=${CHAT}" -F "$TG_SAFE_UPLOAD_FORM" -F "caption=${CAP}" \
+  --form-string "chat_id=${CHAT}" -F "$TG_SAFE_UPLOAD_FORM" --form-string "caption=${CAP}" \
   "https://api.telegram.org/bot${TOK}/sendPhoto" --max-time 30) || code="curl_exit_$?"
 
 # Durable log (tag=nazim-console) so a rebooted Nazim sees the photo went out.

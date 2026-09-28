@@ -42,10 +42,13 @@ source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
 tg_safe_upload_stage document "$FILE" || { echo "tg_send_file: could not stage upload for $FILE" >&2; exit 1; }
 trap '[ -n "${TG_SAFE_UPLOAD_TMPDIR:-}" ] && rm -rf "$TG_SAFE_UPLOAD_TMPDIR"' EXIT
 
+# bus #44680: -F treats a value starting with '@' (upload) or '<' (read-file) as a
+# file directive, not literal text — a caption/chat_id beginning with either would
+# either fail or leak a local file's contents. --form-string sends them as literal.
 resp=$(curl -s --ipv4 "https://api.telegram.org/bot${TOK}/sendDocument" \
-  -F "chat_id=${CHAT}" \
+  --form-string "chat_id=${CHAT}" \
   -F "$TG_SAFE_UPLOAD_FORM" \
-  ${CAPTION:+-F "caption=${CAPTION}"}) || resp="{\"ok\":false,\"description\":\"curl_exit_$?\"}"
+  ${CAPTION:+--form-string "caption=${CAPTION}"}) || resp="{\"ok\":false,\"description\":\"curl_exit_$?\"}"
 ok=$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print('1' if d.get('ok') else '0:'+str(d.get('description')))")
 
 # durable log (best-effort)
