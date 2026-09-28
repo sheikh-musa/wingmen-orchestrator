@@ -27,41 +27,64 @@ for exactly the residual class that bit us: a plain-text credential (no
 recognizable shape) that is routinely SENT to a client/user (so redacting it
 from the send itself would break the legitimate use) but must never be
 persisted into the durable log.
+
+Each key is scoped to the operator_messages.tag value(s) it is legitimately
+shared on (orch-console review, bus #44388, fix 2): vault.get() writes a
+vault_access_log row on EVERY call with no cache, so an unscoped fleet-wide
+scan would decrypt oeh_preview_password on every hub/Nazim/console/oeh
+outbound message, burying the handful of real accesses of that secret under
+hundreds of scanner rows a day. operator_messages has no dedicated
+"channel" narrower than the always-'telegram' `channel` column, so `tag` —
+the column oeh_send.sh already stamps 'oeh' on by default — is the real
+discriminator available here; scoping by it is the (a) option from the
+review (vs. (b) a fleet-wide scan behind an audit-exempt reason), chosen
+because it directly bounds the vault_access_log volume at the source instead
+of just re-labelling it for reviewers to filter out after the fact.
 """
 from __future__ import annotations
 
 from nervous_system.vault import VaultError, vault
 
-# Vault key names whose VALUE is routinely shared over an outbound channel (so
-# nervous_system.secret_redact's fixed-shape patterns don't and shouldn't
-# catch it) but must never be persisted into operator_messages. Add a key here
-# the same time you introduce a new --secret-vault-key use of it —
-# tests/test_vault_leak_guard.py asserts this stays a real allowlist, not a
-# stand-in for "every vault value".
-CLIENT_SHAREABLE_VAULT_KEYS: tuple[str, ...] = (
-    "oeh_preview_password",
-)
+# Vault key name -> the operator_messages.tag value(s) whose outbound/inbound
+# text may legitimately carry this secret's value. A key's value is only
+# decrypted (vault.get()) for a message tagged with one of its tags — never
+# fleet-wide. Add a key+tag pair here the same time you introduce a new
+# --secret-vault-key use of it — tests/test_vault_leak_guard.py asserts this
+# stays a real, bounded allowlist, not a stand-in for "every vault value".
+CLIENT_SHAREABLE_VAULT_KEYS: dict[str, tuple[str, ...]] = {
+    "oeh_preview_password": ("oeh",),
+}
 
 
-def defensive_redact(text: str) -> tuple[str, list[str]]:
-    """Returns (possibly-redacted text, vault key names that fired). Checks
-    `text` for a literal, exact match of each CLIENT_SHAREABLE_VAULT_KEYS
-    value and replaces any hit with "[REDACTED: <key>]".
+def defensive_redact(text: str, tag: str | None = None) -> tuple[str, list[str], list[tuple[str, str]]]:
+    """Returns (possibly-redacted text, keys that FIRED, keys that could NOT be
+    checked as (key, reason_class) pairs).
 
-    Best-effort per key: a vault lookup failure (no DB, no KEK, key doesn't
-    exist yet, etc.) must never block logging the rest of the text — it just
-    means that one key wasn't checked this time. Never raises.
+    Only keys scoped to `tag` (see CLIENT_SHAREABLE_VAULT_KEYS) are looked up
+    at all — a message tagged e.g. 'nazim-console' never triggers a vault.get()
+    for 'oeh_preview_password'.
+
+    "Could not check" is reported distinctly from "checked, clean" (orch-console
+    review, bus #44388, fix 1b): a vault lookup failure for an IN-SCOPE key (no
+    DB, no KEK, key not bootstrapped yet, wrong host) is never silently treated
+    as if the scan ran and found nothing — it comes back in the third element so
+    the caller can record "skipped: <reason>" on the row instead. Best-effort
+    per key: one key's failure never blocks checking the rest. Never raises.
     """
     if not text:
-        return text, []
+        return text, [], []
     redacted = text
     matched: list[str] = []
-    for key in CLIENT_SHAREABLE_VAULT_KEYS:
+    skipped: list[tuple[str, str]] = []
+    for key, tags in CLIENT_SHAREABLE_VAULT_KEYS.items():
+        if tag not in tags:
+            continue
         try:
             value = vault.get(key, reason="vault_leak_guard defensive log-scan (bus #44378)").value
-        except VaultError:
+        except VaultError as exc:
+            skipped.append((key, type(exc).__name__))
             continue
         if value and value in redacted:
             redacted = redacted.replace(value, f"[REDACTED: {key}]")
             matched.append(key)
-    return redacted, matched
+    return redacted, matched, skipped
