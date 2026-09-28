@@ -47,7 +47,7 @@ class SigkillDrill(Drill):
         return {"proc": proc, "sb": sb, "zombie_jobs": zombie_jobs}
 
     async def run(self, state: dict[str, Any]) -> dict[str, Any]:
-        from wingmen_orch import cleanup_zombie_jobs
+        from legacy.wingmen_orch import cleanup_zombie_jobs
 
         proc = state["proc"]
         # 1. Actually SIGKILL the subprocess.
