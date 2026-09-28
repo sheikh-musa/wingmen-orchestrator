@@ -28,6 +28,7 @@ _SCRIPTS = {
     "nazim_send_photo.sh": _ROOT / "scripts" / "nazim_send_photo.sh",
     "tg_send_file.sh": _ROOT / "scripts" / "tg_send_file.sh",
     "irsyad_support_send_file.sh": _ROOT / "scripts" / "irsyad_support_send_file.sh",
+    "angullia_send_photo.sh": _ROOT / "scripts" / "angullia_send_photo.sh",
 }
 
 _STAGE_CALL = re.compile(r"tg_safe_upload_stage\s+\w+\s+")
