@@ -46,17 +46,43 @@ LIVE_CHECKPOINT = ("pending", "fired")
 ESCALATE_EVERY = dt.timedelta(hours=24)
 QUIET_AFTER = dt.timedelta(days=7)
 
+# bus #44697: check()'s INSERT hardcoded from_agent='orch-console' on every STALLED-BY-
+# CONSTRUCTION row, so it misattributed itself as having come from the console (e.g. #44695
+# arrived orch-console -> orch-console). Same misattribution class as bus #44547
+# (commitment_sweeper, migration 076). Dedicated identity, registered by migration 078
+# (agent_messages.from_agent FKs to agents.id -- must exist before the first row posts).
+FROM_AGENT = "programme-stall-guard"
+
+
+def _parse_payload(payload):
+    """(data, corrupt). corrupt is True only when payload is present but does not parse as
+    JSON at all -- distinct from a well-formed payload with no backlog_id (a checkpoint
+    simply not tied to a programme). bus #44697: op#22300's cp#57 payload was broken by
+    appending plain text after the JSON, and the guard silently treated the checkpoint as
+    unclocked instead of flagging the corruption."""
+    if not payload:
+        return None, False
+    if not isinstance(payload, str):
+        return payload, False
+    try:
+        return json.loads(payload), False
+    except (ValueError, TypeError):
+        return None, True
+
 
 def backlog_id_of(payload) -> int | None:
     """held_commitments.payload is TEXT; a checkpoint links by {"backlog_id": N}."""
-    if not payload:
-        return None
+    data, _ = _parse_payload(payload)
+    value = data.get("backlog_id") if isinstance(data, dict) else None
     try:
-        data = json.loads(payload) if isinstance(payload, str) else payload
-        value = data.get("backlog_id") if isinstance(data, dict) else None
         return int(value) if value is not None else None
     except (ValueError, TypeError):
         return None
+
+
+def is_corrupt_payload(payload) -> bool:
+    """True when payload is present but fails to parse as JSON at all."""
+    return _parse_payload(payload)[1]
 
 
 def find_unclocked(programmes, commitments):
@@ -71,6 +97,16 @@ def find_unclocked(programmes, commitments):
         if c["status"] in LIVE_CHECKPOINT
     }
     return [p for p in programmes if p["status"] in OPEN_STATUSES and p["id"] not in clocked]
+
+
+def find_corrupt_checkpoints(commitments):
+    """Live checkpoints (pending/fired) whose payload doesn't parse as JSON at all -- a link
+    the guard could not verify, worth flagging explicitly rather than silently treating as
+    "no link" (bus #44697). Pure, for tests.
+
+    commitments: [{"id", "owner_agent", "title", "payload", "status", ...}]
+    """
+    return [c for c in commitments if c["status"] in LIVE_CHECKPOINT and is_corrupt_payload(c["payload"])]
 
 
 def last_progress(programme, commitments):
@@ -119,39 +155,70 @@ def _read_state():
 def check(dry_run: bool) -> int:
     programmes, commitments = _load()
     unclocked = find_unclocked(programmes, commitments)
+    corrupt = find_corrupt_checkpoints(commitments)
     now = dt.datetime.now(dt.timezone.utc)
     state = _read_state()
-    due = [
-        p for p in unclocked
-        if now - dt.datetime.fromisoformat(state.get(str(p["id"]), "1970-01-01T00:00:00+00:00")) >= ESCALATE_EVERY
-    ]
+
+    def _due(key):
+        return now - dt.datetime.fromisoformat(state.get(key, "1970-01-01T00:00:00+00:00")) >= ESCALATE_EVERY
+
+    due = [p for p in unclocked if _due(str(p["id"]))]
+    corrupt_due = [c for c in corrupt if _due(f"cp#{c['id']}")]
+
     print(f"programme_stall_guard: open={sum(p['status'] in OPEN_STATUSES for p in programmes)} "
-          f"unclocked={len(unclocked)} escalating={len(due)} dry_run={dry_run}")
-    if not due:
+          f"unclocked={len(unclocked)} escalating={len(due)} corrupt={len(corrupt)} "
+          f"corrupt_escalating={len(corrupt_due)} dry_run={dry_run}")
+    if not due and not corrupt_due:
         return 0
-    lines = [
-        f"• backlog#{p['id']} [{p['status']}] {p['ask'][:110]} (last touched {p['updated_at']:%Y-%m-%d})"
-        for p in due
-    ]
+
+    body_parts = []
+    if due:
+        lines = [
+            f"• backlog#{p['id']} [{p['status']}] {p['ask'][:110]} (last touched {p['updated_at']:%Y-%m-%d})"
+            for p in due
+        ]
+        body_parts.append(
+            "These in-progress programmes have NO live checkpoint, so nothing will wake anyone about "
+            "them. For each: arm the next checkpoint (held_commitments with payload.backlog_id), park "
+            "it, or mark it done.\n\n" + "\n".join(lines)
+        )
+    if corrupt_due:
+        corrupt_lines = [
+            f"• checkpoint #{c['id']} ({c['owner_agent']}) has an invalid payload: {c['title'][:110]!r}"
+            for c in corrupt_due
+        ]
+        body_parts.append(
+            "These LIVE checkpoints have a payload that does not parse as JSON at all, so the guard "
+            "cannot tell what programme (if any) they clock. Fix the payload or re-arm the "
+            "checkpoint.\n\n" + "\n".join(corrupt_lines)
+        )
     body = (
-        "These in-progress programmes have NO live checkpoint, so nothing will wake anyone about "
-        "them. For each: arm the next checkpoint (held_commitments with payload.backlog_id), park "
-        "it, or mark it done.\n\n" + "\n".join(lines)
+        "\n\n".join(body_parts)
         + "\n\nConvention: see the docstring of scripts/programme_stall_guard.py. Re-escalates in 24h if unchanged."
     )
     if dry_run:
         print(body)
         return 0
+
+    subject_bits = []
+    if due:
+        subject_bits.append(f"{len(due)} programme(s) with no live checkpoint")
+    if corrupt_due:
+        subject_bits.append(f"{len(corrupt_due)} checkpoint(s) with an invalid payload")
+    subject = "STALLED BY CONSTRUCTION: " + "; ".join(subject_bits)
+
     import psycopg  # noqa: WPS433
     with psycopg.connect(_dsn(), connect_timeout=20) as conn:
         conn.execute(
             """INSERT INTO agent_messages
                  (from_agent, to_agent, message_type, subject, body, requires_response, priority)
-               VALUES ('orch-console', 'orch-console', 'blocker', %s, %s, true, 'P1')""",
-            (f"STALLED BY CONSTRUCTION: {len(due)} programme(s) with no live checkpoint", body),
+               VALUES (%s, 'orch-console', 'blocker', %s, %s, true, 'P1')""",
+            (FROM_AGENT, subject, body),
         )
     for p in due:
         state[str(p["id"])] = now.isoformat()
+    for c in corrupt_due:
+        state[f"cp#{c['id']}"] = now.isoformat()
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps(state, indent=1))
     return 0
