@@ -72,6 +72,13 @@ LIVENESS_MAX_STALE_MIN = 20
 
 CONSOLE = "orch-console"
 
+# bus #44547: _notify() used to hardcode from_agent='orch-console' on every INSERT, so a
+# DUE/FIRED commitment row misattributed itself as having come from the console (e.g.
+# #44511 arrived as orch-console -> orch-console). Dedicated identity, registered by
+# migration 076 (agent_messages.from_agent FKs to agents.id -- the identity must exist
+# BEFORE the first row posts under it, same lesson as ingest-watchdog/#44035).
+FROM_AGENT = "commitment-sweeper"
+
 
 def _dsn() -> str | None:
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
@@ -126,9 +133,9 @@ def _notify(cur, to_agent: str, subject: str, body: str, priority: str = "P1",
     cur.execute(
         """INSERT INTO agent_messages
              (from_agent, to_agent, message_type, subject, body, requires_response, priority)
-           VALUES ('orch-console', %s, 'update', %s, %s, %s, %s)
+           VALUES (%s, %s, 'update', %s, %s, %s, %s)
            RETURNING id""",
-        (to_agent, subject[:300], body, requires_response, priority),
+        (FROM_AGENT, to_agent, subject[:300], body, requires_response, priority),
     )
     return cur.fetchone()["id"]
 

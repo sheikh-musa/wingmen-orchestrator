@@ -93,7 +93,12 @@ def test_due_commitment_owned_by_hub_fires_p1_and_requires_response(due_commitme
 
     assert rc == 0
     assert len(fake_cur.inserts) == 1
-    to_agent, subject, body, requires_response, priority = fake_cur.inserts[0]
+    from_agent, to_agent, subject, body, requires_response, priority = fake_cur.inserts[0]
     assert to_agent == "cc-orchestrator"
     assert priority == "P1"
     assert requires_response is True
+    assert from_agent == "commitment-sweeper"
+    assert from_agent != "orch-console", (
+        "bus #44547: a DUE/FIRED commitment row must not misattribute itself as "
+        "having come from orch-console"
+    )
