@@ -51,9 +51,12 @@ Usage:
         --silo-dsn-vault-key <vault secret name> --bus-dsn <dsn>
 
 State: a local JSON file (logs/ddl_coverage_watchdog_state.json), keyed by
-silo ref -- {fingerprint, ledger_count, checked_at}. The FIRST scan for a
-silo only establishes a baseline; it never pages (no prior state to diff
-against, same "clean boot" shape as every other watchdog in this fleet).
+silo ref -- {schema_version, fingerprint, ledger_count, checked_at,
+snapshot}, where snapshot is the raw per-component rows (bus #44439). The
+FIRST scan for a silo, or the first scan after STATE_SCHEMA_VERSION bumps
+(the fingerprinted surface itself changed), only establishes a baseline; it
+never pages (no comparable prior state to diff against, same "clean boot"
+shape as every other watchdog in this fleet).
 
 KNOWN LIMITATION (orch-console, bus #44153): the ledger check is a COUNT
 delta (did migration_ledger grow since the last scan), not a per-event
@@ -64,6 +67,46 @@ Mitigation: keep scans frequent (e.g. every 10 min) to shrink the window a
 masking pair could land in. Real fix (not built here, P3 follow-up):
 correlate migration_ledger.applied_at against the specific catalog rows
 that changed, so two co-occurring changes can't hide each other.
+
+SCOPE: a NARROW exclusion of Supabase-managed churn, not "public only" and
+not "every non-system schema" (bus #44439/#44444/#44449 postmortem -- three
+rounds).
+Round 1 (blocklist `NOT IN ('pg_catalog', 'information_schema')`): still
+swept up Supabase's own platform-managed schemas. Confirmed live on the
+substrate (tscuymavysscrvoberrr) at 2026-09-28T02:2x -- `realtime.
+messages_2026_10_01` (+ its indexes) appeared, owned by
+`supabase_realtime_admin`, as part of Realtime's routine rolling-window
+daily partition creation. No lane ran that DDL, no lane COULD have gated it
+through apply_migration.py, and it recurs roughly daily.
+Round 2 (orch-console challenge, bus #44444): narrowing to `= 'public'`
+over-corrected -- cosem-platform's migrations legitimately CREATE/DROP
+POLICY on `storage.objects` (trainee_photos_read, trainee_evidence_read;
+docs/data-store-registry.md ref ywrpttpxwfcoodovxhsr) and those ARE the
+governance-relevant RLS changes this watchdog exists to catch. A bare
+'public' allowlist would have let an out-of-gate `DROP POLICY ... ON
+storage.objects` through silently -- worse than the original false
+positive.
+Round 3 (orch-console challenge, bus #44449): the table/index owner
+exclusion, applied to procs too, dropped a platform-owned function's proacl
+along with it -- an out-of-gate `GRANT EXECUTE ON FUNCTION auth.<fn> TO
+anon` (owner stays supabase_*_admin) would never have paged, blinding the
+watchdog to the 058b anon-EXEC tripwire class.
+FINAL SHAPE: exclude the `realtime` schema entirely (partitions + its own
+procs -- fully Supabase-internal, never reachable through apply_migration.py
+even in principle); exclude TABLES/INDEXES owned by a Supabase platform role
+(`supabase_realtime_admin`, `supabase_storage_admin`, `supabase_auth_admin`,
+`supabase_admin`), in ANY schema; but PROCS stay fully fingerprinted outside
+`realtime` regardless of owner, since the proc row is already just (schema,
+name, identity args, proacl) -- no probody/version to generate false
+positives from, and dropping it by owner would hide anon-EXEC grants.
+Everything else -- including our own policies, functions and tables living
+in `storage`/`auth` -- stays fingerprinted, since pg_policies carries no
+owner column and a policy is never Supabase-authored.
+
+SNAPSHOT PERSISTENCE (orch-console, bus #44439): the state file now keeps
+the raw per-component rows (not just their hash) for the last-seen scan, so
+a genuine drift page can name the actual added/removed rows instead of just
+a fingerprint prefix nobody can act on without live archaeology.
 """
 from __future__ import annotations
 
@@ -81,48 +124,107 @@ STATE_FILE = ORCH / "logs" / "ddl_coverage_watchdog_state.json"
 PAGE_FROM_AGENT = "ddl-coverage-watchdog"  # mirrors ingest.py's PAGE_FROM_AGENT convention
 PAGE_TO_AGENT = "orch-console"
 
-_COLUMNS_SQL = """
-    SELECT table_schema, table_name, column_name, data_type, is_nullable, column_default
-    FROM information_schema.columns
-    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    ORDER BY table_schema, table_name, ordinal_position
+# orch-console challenge on bus #44439/#44444: a bare 'public'-only allowlist
+# is too wide a cut -- cosem-platform's migrations CREATE/DROP POLICY on
+# storage.objects (trainee_photos_read, trainee_evidence_read) and those are
+# exactly the governance-relevant RLS changes this watchdog exists to catch.
+# Narrow exclusion instead: drop the 'realtime' schema entirely (partitions +
+# its own procs -- Supabase's own rotation, never reachable through
+# apply_migration.py even in principle) and drop TABLES/INDEXES owned by a
+# Supabase platform role, in ANY schema. Everything else -- including our own
+# policies/functions/tables in storage/auth -- stays in scope.
+#
+# PROCS ARE THE ONE EXCEPTION (orch-console, bus #44449): owner-excluding
+# procs would drop their proacl along with them, and an out-of-gate
+# `GRANT EXECUTE ON FUNCTION auth.<fn>/storage.<fn> TO anon` leaves the
+# owner as supabase_*_admin -- so an owner exclusion would blind the
+# watchdog to exactly the anon-EXEC grant class it needs to catch (058b
+# anon-EXEC tripwire). So procs stay fully fingerprinted -- (schema, name,
+# identity args, proacl), no probody/version in the row at all -- outside
+# only the fully-excluded 'realtime' schema. A platform upgrade that changes
+# a platform-owned function's signature or ACL will page once; that's an
+# accepted cost of not blinding the watchdog to a live governance class.
+_SUPABASE_PLATFORM_OWNERS = (
+    "supabase_realtime_admin", "supabase_storage_admin",
+    "supabase_auth_admin", "supabase_admin",
+)
+_OWNER_EXCLUSION_SQL = "AND r.rolname NOT IN {}".format(_SUPABASE_PLATFORM_OWNERS)
+
+_COLUMNS_SQL = f"""
+    SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default
+    FROM information_schema.columns c
+    JOIN pg_namespace n ON n.nspname = c.table_schema
+    JOIN pg_class t ON t.relname = c.table_name AND t.relnamespace = n.oid
+    JOIN pg_roles r ON r.oid = t.relowner
+    WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema', 'realtime')
+      {_OWNER_EXCLUSION_SQL}
+    ORDER BY c.table_schema, c.table_name, c.ordinal_position
 """
 
 _POLICIES_SQL = """
     SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check
     FROM pg_policies
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'realtime')
     ORDER BY schemaname, tablename, policyname
 """
 
 _PROCS_SQL = """
     SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), p.proacl
-    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'realtime')
     ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
 """
 
-_INDEXES_SQL = """
-    SELECT schemaname, tablename, indexname, indexdef
-    FROM pg_indexes
-    WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-    ORDER BY schemaname, tablename, indexname
+_INDEXES_SQL = f"""
+    SELECT i.schemaname, i.tablename, i.indexname, i.indexdef
+    FROM pg_indexes i
+    JOIN pg_namespace n ON n.nspname = i.schemaname
+    JOIN pg_class ic ON ic.relname = i.indexname AND ic.relnamespace = n.oid
+    JOIN pg_roles r ON r.oid = ic.relowner
+    WHERE i.schemaname NOT IN ('pg_catalog', 'information_schema', 'realtime')
+      {_OWNER_EXCLUSION_SQL}
+    ORDER BY i.schemaname, i.tablename, i.indexname
 """
+
+_SNAPSHOT_QUERIES = {
+    "columns": _COLUMNS_SQL,
+    "policies": _POLICIES_SQL,
+    "procs": _PROCS_SQL,
+    "indexes": _INDEXES_SQL,
+}
+
+# Bumped when the fingerprinted surface itself changes (e.g. the bus #44439
+# blocklist->narrow-exclusion rescope, or #44449's procs-stay-in-scope fix)
+# so an old, apples-to-oranges state entry is treated as "no prior state" --
+# a fresh baseline, not a page -- instead of comparing snapshots taken over
+# two different schema scopes.
+STATE_SCHEMA_VERSION = 4
+
+
+def compute_schema_snapshot(cur) -> dict[str, list[list]]:
+    """Per-component raw rows for the 'public' schema (orch-console bus
+    #44140 spec: information_schema.columns + pg_policies + pg_proc
+    signatures/ACLs + pg_indexes). Read-only -- needs no privilege beyond
+    ordinary catalog SELECT access. Rows are lists (not tuples) so the
+    snapshot is JSON-serializable and can be persisted verbatim (bus #44439:
+    "persist the per-component snapshot, not just the hash")."""
+    snapshot: dict[str, list[list]] = {}
+    for component, sql in _SNAPSHOT_QUERIES.items():
+        cur.execute(sql)
+        snapshot[component] = [list(row) for row in cur.fetchall()]
+    return snapshot
+
+
+def fingerprint_snapshot(snapshot: dict[str, list[list]]) -> str:
+    payload = repr(tuple(snapshot[c] for c in _SNAPSHOT_QUERIES)).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def compute_schema_fingerprint(cur) -> str:
-    """A hash over information_schema.columns + pg_policies + pg_proc
-    signatures/ACLs + pg_indexes (orch-console bus #44140 spec). Read-only —
-    needs no privilege beyond ordinary catalog SELECT access."""
-    cur.execute(_COLUMNS_SQL)
-    columns_part = cur.fetchall()
-    cur.execute(_POLICIES_SQL)
-    policies_part = cur.fetchall()
-    cur.execute(_PROCS_SQL)
-    procs_part = cur.fetchall()
-    cur.execute(_INDEXES_SQL)
-    indexes_part = cur.fetchall()
-    payload = repr((columns_part, policies_part, procs_part, indexes_part)).encode()
-    return hashlib.sha256(payload).hexdigest()
+    """Convenience wrapper over compute_schema_snapshot + fingerprint_snapshot
+    for callers that only need the hash."""
+    return fingerprint_snapshot(compute_schema_snapshot(cur))
 
 
 def _ledger_count(cur, silo: str) -> int:
@@ -142,30 +244,78 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state))
 
 
-def check_unledgered_schema_drift(cur, silo: str, state: dict) -> tuple[bool, str, dict]:
-    """Returns (unledgered_drift, fingerprint, new_state_entry_for_this_silo).
+def _hashable_row(row: list) -> tuple:
+    """A row's own elements can themselves be lists (e.g. pg_policies.roles
+    comes back as a list of role names) -- not hashable as-is, so nested
+    lists are converted to tuples recursively before the row goes into a
+    set."""
+    return tuple(tuple(v) if isinstance(v, list) else v for v in row)
 
-    unledgered_drift is only ever True from the SECOND scan onward for a
-    given silo -- the first scan has nothing to diff against and only
-    establishes a baseline (never pages), same as every other watchdog's
-    clean-boot behavior in this fleet."""
-    fingerprint = compute_schema_fingerprint(cur)
+
+def _diff_snapshots(old: dict[str, list[list]], new: dict[str, list[list]]) -> dict[str, dict[str, list]]:
+    """Per-component added/removed rows. Sorted by repr(), not the row's own
+    values -- some columns (e.g. column_default) can be NULL, and Python 3
+    can't order None against str, so sorting the raw tuples can raise."""
+    diff: dict[str, dict[str, list]] = {}
+    for component, new_rows in new.items():
+        old_set = {_hashable_row(r) for r in old.get(component, [])}
+        new_set = {_hashable_row(r) for r in new_rows}
+        added = sorted((list(r) for r in new_set - old_set), key=repr)
+        removed = sorted((list(r) for r in old_set - new_set), key=repr)
+        if added or removed:
+            diff[component] = {"added": added, "removed": removed}
+    return diff
+
+
+def check_unledgered_schema_drift(
+    cur, silo: str, state: dict
+) -> tuple[bool, str, dict, dict]:
+    """Returns (unledgered_drift, fingerprint, new_state_entry_for_this_silo,
+    diff_if_unledgered).
+
+    unledgered_drift is only ever True from the SECOND comparable scan
+    onward for a given silo -- the first scan (or a scan following a
+    STATE_SCHEMA_VERSION bump, i.e. a rescope of what's fingerprinted) has
+    nothing comparable to diff against and only establishes a fresh
+    baseline (never pages), same as every other watchdog's clean-boot
+    behavior in this fleet."""
+    snapshot = compute_schema_snapshot(cur)
+    fingerprint = fingerprint_snapshot(snapshot)
     ledger_count = _ledger_count(cur, silo)
     new_entry = {
+        "schema_version": STATE_SCHEMA_VERSION,
         "fingerprint": fingerprint,
         "ledger_count": ledger_count,
         "checked_at": datetime.now(timezone.utc).isoformat(),
+        "snapshot": snapshot,
     }
     prev = state.get(silo)
-    if prev is None:
-        return False, fingerprint, new_entry
+    if prev is None or prev.get("schema_version") != STATE_SCHEMA_VERSION:
+        return False, fingerprint, new_entry, {}
     drifted = fingerprint != prev["fingerprint"]
     ledger_grew = ledger_count > prev.get("ledger_count", ledger_count)
     unledgered = drifted and not ledger_grew
-    return unledgered, fingerprint, new_entry
+    diff = _diff_snapshots(prev.get("snapshot", {}), snapshot) if unledgered else {}
+    return unledgered, fingerprint, new_entry, diff
 
 
-def _page_once(bus_dsn: str, silo: str, fingerprint: str) -> None:
+def _format_diff(diff: dict[str, dict[str, list]]) -> str:
+    if not diff:
+        return ("(no row-level diff available -- prior state predates snapshot "
+                "persistence or predates the current fingerprinted scope)")
+    lines = []
+    for component, changes in diff.items():
+        for label, rows in (("added", changes.get("added", [])), ("removed", changes.get("removed", []))):
+            if not rows:
+                continue
+            shown = "; ".join(str(r) for r in rows[:10])
+            lines.append(f"  {component} {label} ({len(rows)}): {shown}")
+            if len(rows) > 10:
+                lines.append(f"    ... and {len(rows) - 10} more")
+    return "\n".join(lines)
+
+
+def _page_once(bus_dsn: str, silo: str, fingerprint: str, diff: dict[str, dict[str, list]]) -> None:
     """Page ONCE per (silo, fingerprint) -- durable dedup via a bus-row
     marker (survives a daemon restart), never a hand-written INSERT INTO
     agent_messages (CLAUDE.md / bus #43651)."""
@@ -181,14 +331,15 @@ def _page_once(bus_dsn: str, silo: str, fingerprint: str) -> None:
     bus_send.send(
         from_agent=PAGE_FROM_AGENT, to=PAGE_TO_AGENT, mtype="blocker",
         subject=f"unledgered schema drift on silo {silo}",
-        body=(f"{marker}: silo {silo}'s schema fingerprint (information_schema."
-              f"columns + pg_policies + pg_proc signatures/ACLs + pg_indexes) "
-              f"changed with NO new migration_ledger row in that silo since "
-              f"the last scan -- a DDL apply bypassed apply_migration.py's "
-              f"--gate entirely (op#22669 item 3 known gap, bus #44135 "
-              f"precedent). Review what changed and whether it needs a "
-              f"retroactive ledger entry. Page-once-ever for this exact "
-              f"fingerprint; won't repeat unless the fingerprint changes again."),
+        body=(f"{marker}: silo {silo}'s public-schema fingerprint (information_"
+              f"schema.columns + pg_policies + pg_proc signatures/ACLs + "
+              f"pg_indexes, public schema only) changed with NO new "
+              f"migration_ledger row in that silo since the last scan -- a DDL "
+              f"apply bypassed apply_migration.py's --gate entirely (op#22669 "
+              f"item 3 known gap, bus #44135 precedent). Review what changed "
+              f"and whether it needs a retroactive ledger entry. Page-once-ever "
+              f"for this exact fingerprint; won't repeat unless the fingerprint "
+              f"changes again.\n\nDiff since last scan:\n{_format_diff(diff)}"),
         priority="P1", req=True, dsn=bus_dsn,
     )
 
@@ -203,13 +354,13 @@ def run_scan(*, silo: str, silo_dsn: str, bus_dsn: str, dry_run: bool = False) -
 
     state = load_state()
     with psycopg.connect(silo_dsn) as conn, conn.cursor() as cur:
-        unledgered, fingerprint, new_entry = check_unledgered_schema_drift(cur, silo, state)
+        unledgered, fingerprint, new_entry, diff = check_unledgered_schema_drift(cur, silo, state)
 
     if unledgered:
         print(f"WATCHDOG: silo {silo} schema drifted with no new migration_ledger row "
               f"(fingerprint {fingerprint[:12]})")
         if not dry_run:
-            _page_once(bus_dsn, silo, fingerprint)
+            _page_once(bus_dsn, silo, fingerprint, diff)
     else:
         print(f"WATCHDOG: silo {silo} clean (fingerprint {fingerprint[:12]})")
 
