@@ -2,7 +2,16 @@
 
 Covers BUG-024 Phase 1B + Phase 1C (BUG-032) + BUG-031 + BUG-029 Part A.
 Requires DATABASE_URL or SUPABASE_DB_URL; migration must be applied.
+
+bus #44531: every write-touching test below runs inside a single transaction
+that is ALWAYS rolled back at teardown (`_rollback_conn()`), never
+autocommit=True + a manual DELETE/COMMIT cleanup. A crash between a write and
+its `finally` cleanup used to leave a permanent row in strategic_decisions /
+agent_status / agent_messages; a rolled-back transaction cannot leak, even on
+a hard crash, because Postgres discards an in-flight transaction the moment
+the client connection drops.
 """
+import contextlib
 import os
 from pathlib import Path
 
@@ -22,12 +31,27 @@ def _dsn():
     return dsn
 
 
+@contextlib.contextmanager
+def _rollback_conn():
+    """Yields (conn, cur) on a transaction that is ALWAYS rolled back at exit
+    (bus #44531). A test that needs to recover from an expected error mid-test
+    (e.g. a CHECK/FK violation) may call conn.rollback() itself to reset the
+    aborted transaction and continue — the final rollback at exit still runs."""
+    conn = psycopg.connect(_dsn())
+    try:
+        with conn.cursor() as cur:
+            yield conn, cur
+    finally:
+        conn.rollback()
+        conn.close()
+
+
 def test_migration_file_exists():
     assert MIGRATION_PATH.exists(), f"migration file missing: {MIGRATION_PATH}"
 
 
 def test_agent_status_has_base_agent_id_column():
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             SELECT data_type, is_nullable FROM information_schema.columns
@@ -42,7 +66,7 @@ def test_agent_status_has_base_agent_id_column():
 
 def test_agent_status_base_agent_id_backfilled():
     """Existing rows should have base_agent_id derived from agent_id pattern."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute("SELECT agent_id, base_agent_id FROM agent_status ORDER BY agent_id")
         import re
         for agent_id, base in cur.fetchall():
@@ -58,10 +82,9 @@ def test_agent_status_base_agent_id_fk_enforced():
     known agents.id row. E.g., 'cc-bogus-9' → 'cc-bogus' (CHECK passes, FK fails).
 
     Note: trg_agent_status_identity requires SET LOCAL app.current_agent_id = <agent_id>
-    matching NEW.agent_id. Wrap in explicit transaction + SET LOCAL.
+    matching NEW.agent_id.
     """
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
-        cur.execute("BEGIN")
+    with _rollback_conn() as (conn, cur):
         cur.execute("SET LOCAL app.current_agent_id = 'cc-bogus-9'")
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             cur.execute(
@@ -70,7 +93,6 @@ def test_agent_status_base_agent_id_fk_enforced():
                 VALUES ('cc-bogus-9', 'cc-bogus', 'offline')
                 """
             )
-        cur.execute("ROLLBACK")
 
 
 def test_agent_status_check_constraint_rejects_prefix_mismatch():
@@ -78,9 +100,8 @@ def test_agent_status_check_constraint_rejects_prefix_mismatch():
 
     trg_agent_status_identity GUC wrap required per note above.
     """
-    # Negative case: CHECK rejects mismatched base
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
-        cur.execute("BEGIN")
+    with _rollback_conn() as (conn, cur):
+        # Negative case: CHECK rejects mismatched base
         cur.execute("SET LOCAL app.current_agent_id = 'cc-ihsanos-999'")
         with pytest.raises(psycopg.errors.CheckViolation):
             cur.execute(
@@ -89,10 +110,10 @@ def test_agent_status_check_constraint_rejects_prefix_mismatch():
                 VALUES ('cc-ihsanos-999', 'cc-scholar', 'offline')
                 """
             )
-        cur.execute("ROLLBACK")
-    # Positive case: matching prefix accepted, then cleanup
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
-        cur.execute("BEGIN")
+        # Reset the aborted transaction from the expected CHECK violation above,
+        # then exercise the positive case in a fresh transaction on the same
+        # connection — still rolled back for good at fixture exit.
+        conn.rollback()
         cur.execute("SET LOCAL app.current_agent_id = 'cc-ihsanos-999'")
         cur.execute(
             """
@@ -100,14 +121,11 @@ def test_agent_status_check_constraint_rejects_prefix_mismatch():
             VALUES ('cc-ihsanos-999', 'cc-ihsanos', 'offline')
             """
         )
-        cur.execute("DELETE FROM agent_status WHERE agent_id = 'cc-ihsanos-999'")
-        cur.execute("COMMIT")
 
 
 def test_agent_status_insert_with_base_agent_id_succeeds():
     """Positive path: matching family inserts cleanly. GUC wrap required."""
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
-        cur.execute("BEGIN")
+    with _rollback_conn() as (conn, cur):
         cur.execute("SET LOCAL app.current_agent_id = 'cc-scholar-99'")
         cur.execute(
             """
@@ -117,15 +135,11 @@ def test_agent_status_insert_with_base_agent_id_succeeds():
             """
         )
         ret = cur.fetchone()[0]
-        try:
-            assert ret == 'cc-scholar'
-        finally:
-            cur.execute("DELETE FROM agent_status WHERE agent_id = 'cc-scholar-99'")
-            cur.execute("COMMIT")
+        assert ret == 'cc-scholar'
 
 
 def test_strategic_decisions_posted_by_identity_column():
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             SELECT data_type, is_nullable FROM information_schema.columns
@@ -139,7 +153,7 @@ def test_strategic_decisions_posted_by_identity_column():
 
 
 def test_strategic_decisions_decided_by_verified_column():
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             SELECT data_type, is_nullable FROM information_schema.columns
@@ -153,7 +167,7 @@ def test_strategic_decisions_decided_by_verified_column():
 
 
 def test_strategic_decisions_trigger_populates_posted_by_identity():
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             INSERT INTO strategic_decisions
@@ -164,16 +178,13 @@ def test_strategic_decisions_trigger_populates_posted_by_identity():
             """
         )
         pbi, verified = cur.fetchone()
-        try:
-            assert pbi is not None  # trigger populated from current_user
-            assert verified is None  # no allowlist match in Phase 1 zero-seed
-        finally:
-            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-SD-PROV-1'")
+        assert pbi is not None  # trigger populated from current_user
+        assert verified is None  # no allowlist match in Phase 1 zero-seed
 
 
 def test_strategic_decisions_trigger_preserves_admin_seeded_value():
     """IF NEW.posted_by_identity IS NULL pattern preserves caller-supplied values."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             INSERT INTO strategic_decisions
@@ -184,24 +195,21 @@ def test_strategic_decisions_trigger_preserves_admin_seeded_value():
                'manual_seed_value')
             """
         )
-        try:
-            cur.execute(
-                """
-                UPDATE strategic_decisions
-                   SET challenge_status = 'accepted'
-                 WHERE decision_ref = 'TEST-SD-PROV-2'
-                RETURNING posted_by_identity
-                """
-            )
-            pbi = cur.fetchone()[0]
-            assert pbi == 'manual_seed_value', f"trigger clobbered admin-seeded value: {pbi}"
-        finally:
-            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-SD-PROV-2'")
+        cur.execute(
+            """
+            UPDATE strategic_decisions
+               SET challenge_status = 'accepted'
+             WHERE decision_ref = 'TEST-SD-PROV-2'
+            RETURNING posted_by_identity
+            """
+        )
+        pbi = cur.fetchone()[0]
+        assert pbi == 'manual_seed_value', f"trigger clobbered admin-seeded value: {pbi}"
 
 
 def test_strategic_decisions_trigger_fires_on_update_challenge_status():
     """UPDATE of challenge_status fires the trigger (bulk-flip failure mode coverage per CAI-RESP-077)."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             INSERT INTO strategic_decisions
@@ -210,28 +218,25 @@ def test_strategic_decisions_trigger_fires_on_update_challenge_status():
               ('TEST-SD-PROV-3', 't', 'd', 'r', 'architecture', 'active', 'informational', 'cc-ihsanos')
             """
         )
-        try:
-            # Directly null posted_by_identity (trigger doesn't fire on UPDATE of unrelated columns)
-            cur.execute(
-                "UPDATE strategic_decisions SET posted_by_identity = NULL WHERE decision_ref = 'TEST-SD-PROV-3'"
-            )
-            # Now UPDATE challenge_status → trigger should repopulate posted_by_identity
-            cur.execute(
-                """
-                UPDATE strategic_decisions
-                   SET challenge_status = 'accepted'
-                 WHERE decision_ref = 'TEST-SD-PROV-3'
-                RETURNING posted_by_identity
-                """
-            )
-            pbi = cur.fetchone()[0]
-            assert pbi is not None, "trigger should have repopulated NULL posted_by_identity on UPDATE OF challenge_status"
-        finally:
-            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-SD-PROV-3'")
+        # Directly null posted_by_identity (trigger doesn't fire on UPDATE of unrelated columns)
+        cur.execute(
+            "UPDATE strategic_decisions SET posted_by_identity = NULL WHERE decision_ref = 'TEST-SD-PROV-3'"
+        )
+        # Now UPDATE challenge_status → trigger should repopulate posted_by_identity
+        cur.execute(
+            """
+            UPDATE strategic_decisions
+               SET challenge_status = 'accepted'
+             WHERE decision_ref = 'TEST-SD-PROV-3'
+            RETURNING posted_by_identity
+            """
+        )
+        pbi = cur.fetchone()[0]
+        assert pbi is not None, "trigger should have repopulated NULL posted_by_identity on UPDATE OF challenge_status"
 
 
 def test_strategic_decisions_has_is_test_column():
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             SELECT data_type, is_nullable, column_default FROM information_schema.columns
@@ -246,7 +251,7 @@ def test_strategic_decisions_has_is_test_column():
 
 
 def test_agent_messages_has_is_test_column():
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             SELECT data_type, is_nullable, column_default FROM information_schema.columns
@@ -262,7 +267,7 @@ def test_agent_messages_has_is_test_column():
 
 def test_agent_messages_is_test_defaults_false_on_insert():
     """New rows default is_test=FALSE."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             INSERT INTO agent_messages (from_agent, to_agent, message_type, subject, body)
@@ -271,14 +276,11 @@ def test_agent_messages_is_test_defaults_false_on_insert():
             """
         )
         mid, is_test = cur.fetchone()
-        try:
-            assert is_test is False
-        finally:
-            cur.execute("DELETE FROM agent_messages WHERE id = %s", (mid,))
+        assert is_test is False
 
 
 def test_enforcer_accepts_test_mode_parameter():
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             SELECT pg_get_function_arguments(oid) FROM pg_proc
@@ -293,7 +295,7 @@ def test_enforcer_accepts_test_mode_parameter():
 def test_enforcer_default_call_excludes_is_test_rows():
     """enforce_challenge_window_timeouts() with no args defaults test_mode=FALSE,
     so is_test=TRUE fixtures are ignored."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             INSERT INTO strategic_decisions
@@ -304,19 +306,15 @@ def test_enforcer_default_call_excludes_is_test_rows():
                now() - interval '2 hours', now() - interval '30 minutes', TRUE)
             """
         )
-        try:
-            cur.execute("SELECT decision_ref FROM enforce_challenge_window_timeouts()")
-            refs = [r[0] for r in cur.fetchall()]
-            assert 'TEST-ENFORCE-DEFAULT' not in refs, \
-                "default call (test_mode=FALSE) must exclude is_test=TRUE rows"
-        finally:
-            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCE-DEFAULT'")
-            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCE-DEFAULT'")
+        cur.execute("SELECT decision_ref FROM enforce_challenge_window_timeouts()")
+        refs = [r[0] for r in cur.fetchall()]
+        assert 'TEST-ENFORCE-DEFAULT' not in refs, \
+            "default call (test_mode=FALSE) must exclude is_test=TRUE rows"
 
 
 def test_enforcer_test_mode_true_includes_is_test_rows():
     """enforce_challenge_window_timeouts(test_mode => TRUE) processes only is_test=TRUE rows."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             INSERT INTO strategic_decisions
@@ -327,21 +325,17 @@ def test_enforcer_test_mode_true_includes_is_test_rows():
                now() - interval '2 hours', now() - interval '30 minutes', TRUE)
             """
         )
-        try:
-            cur.execute("SELECT decision_ref, action FROM enforce_challenge_window_timeouts(test_mode => TRUE)")
-            rows = cur.fetchall()
-            refs = [r[0] for r in rows]
-            assert 'TEST-ENFORCE-TESTMODE' in refs, \
-                "test_mode=TRUE should process is_test=TRUE rows"
-        finally:
-            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCE-TESTMODE'")
-            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCE-TESTMODE'")
+        cur.execute("SELECT decision_ref, action FROM enforce_challenge_window_timeouts(test_mode => TRUE)")
+        rows = cur.fetchall()
+        refs = [r[0] for r in rows]
+        assert 'TEST-ENFORCE-TESTMODE' in refs, \
+            "test_mode=TRUE should process is_test=TRUE rows"
 
 
 def test_enforcer_test_mode_true_excludes_production_rows():
     """CRITICAL — test_mode=TRUE must NOT touch is_test=FALSE rows. Prevents the exact
     test-mutates-prod bug that caused CAI-RESP-077 incident. This is the structural fix."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             INSERT INTO strategic_decisions
@@ -352,19 +346,15 @@ def test_enforcer_test_mode_true_excludes_production_rows():
                now() - interval '2 hours', now() - interval '30 minutes')
             """
         )
-        try:
-            cur.execute("SELECT decision_ref FROM enforce_challenge_window_timeouts(test_mode => TRUE)")
-            refs = [r[0] for r in cur.fetchall()]
-            assert 'TEST-ENFORCE-PROD-SAFE' not in refs, \
-                "test_mode=TRUE must NOT touch is_test=FALSE production rows"
-        finally:
-            cur.execute("DELETE FROM challenge_enforcer_dryrun_log WHERE decision_ref = 'TEST-ENFORCE-PROD-SAFE'")
-            cur.execute("DELETE FROM strategic_decisions WHERE decision_ref = 'TEST-ENFORCE-PROD-SAFE'")
+        cur.execute("SELECT decision_ref FROM enforce_challenge_window_timeouts(test_mode => TRUE)")
+        refs = [r[0] for r in cur.fetchall()]
+        assert 'TEST-ENFORCE-PROD-SAFE' not in refs, \
+            "test_mode=TRUE must NOT touch is_test=FALSE production rows"
 
 
 def test_boot_briefing_unverified_decisions_section():
     """AC-BUG032-6: boot_briefing surfaces per-decided_by count of unverified rows."""
-    with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with _rollback_conn() as (conn, cur):
         cur.execute(
             """
             SELECT source, count(*) FROM boot_briefing
