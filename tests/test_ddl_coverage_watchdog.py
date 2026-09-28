@@ -90,10 +90,51 @@ def _add_column(silo_dsn: str) -> None:
         cur.execute("ALTER TABLE widgets ADD COLUMN description text")
 
 
-def _create_non_public_schema_object(silo_dsn: str) -> None:
+def _ensure_role(dsn: str, rolename: str) -> None:
+    """Roles are cluster-wide in the shared session-scoped pg_dsn harness,
+    so a second test creating the same role must not error."""
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (rolename,))
+        if not cur.fetchone():
+            cur.execute(f"CREATE ROLE {rolename} NOLOGIN")
+
+
+def _create_realtime_partition_churn(silo_dsn: str) -> None:
+    """Simulates Supabase Realtime's own daily partition-table rotation
+    (bus #44438/#44439)."""
     with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("CREATE SCHEMA IF NOT EXISTS platform_internal")
-        cur.execute("CREATE TABLE platform_internal.rotated_partition (id int)")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS realtime")
+        cur.execute("CREATE TABLE realtime.messages_2026_10_02 (id int)")
+
+
+def _create_platform_owned_churn(silo_dsn: str) -> None:
+    """A table owned by a Supabase platform service role in a NON-realtime
+    schema -- the exclusion must be by owner, not just by schema name
+    (orch-console bus #44444: 'if there's more churn of that kind')."""
+    _ensure_role(silo_dsn, "supabase_storage_admin")
+    with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS storage")
+        cur.execute("CREATE TABLE storage.platform_internal_thing (id int)")
+        cur.execute("ALTER TABLE storage.platform_internal_thing OWNER TO supabase_storage_admin")
+
+
+def _create_storage_objects_with_policy(silo_dsn: str) -> None:
+    with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS storage")
+        cur.execute("CREATE TABLE IF NOT EXISTS storage.objects (id int, owner_id text)")
+        cur.execute("ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY")
+        cur.execute("CREATE POLICY trainee_photos_read ON storage.objects FOR SELECT USING (true)")
+
+
+def _drop_storage_objects_policy(silo_dsn: str) -> None:
+    with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP POLICY trainee_photos_read ON storage.objects")
+
+
+def _create_function_in_non_public_schema(silo_dsn: str, schema: str, name: str) -> None:
+    with psycopg.connect(silo_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+        cur.execute(f"CREATE OR REPLACE FUNCTION {schema}.{name}() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
 
 
 def _insert_ledger_row(silo_dsn: str) -> None:
@@ -224,22 +265,67 @@ def test_different_silos_have_independent_dedup(two_dsns):
 
 
 # --------------------------------------------------------------------------------
-# Scope: only 'public' is fingerprinted (bus #44439 postmortem) -- Supabase's own
-# platform-managed schemas (realtime's daily partition rotation being the live
-# case that triggered this fix) must never look like an unledgered gate-bypass.
+# Scope: a NARROW exclusion of Supabase-managed churn (bus #44439/#44444, two
+# rounds) -- a bare 'public'-only allowlist over-corrected, since cosem-platform
+# legitimately gates CREATE/DROP POLICY on storage.objects (trainee_photos_read
+# etc). Excluded: the 'realtime' schema entirely, and objects OWNED by a
+# Supabase platform role in ANY schema. Everything else -- our own policies,
+# functions and tables in storage/auth included -- stays in scope.
 # --------------------------------------------------------------------------------
 
-def test_ddl_outside_public_schema_is_never_drift(two_dsns):
-    """Simulates Supabase's own internal schema churn (e.g. realtime's daily
-    messages_YYYY_MM_DD partition rotation, bus #44438/#44439) -- this must
-    never page: it's outside apply_migration.py's --gate surface entirely and
-    no lane could have gated it through the tool even if it wanted to."""
+def test_realtime_schema_churn_is_never_drift(two_dsns):
+    """Simulates Supabase Realtime's own daily partition-table rotation (bus
+    #44438/#44439) -- must never page: it's outside apply_migration.py's
+    --gate surface entirely and no lane could have gated it even in
+    principle."""
     silo_dsn, bus_dsn = two_dsns
     watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)  # baseline
-    _create_non_public_schema_object(silo_dsn)
+    _create_realtime_partition_churn(silo_dsn)
     drifted = watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
     assert drifted is False
     assert _bus_row_count(bus_dsn) == 0
+
+
+def test_platform_role_owned_object_outside_realtime_is_never_drift(two_dsns):
+    """A table created/owned by a Supabase platform service role (e.g.
+    supabase_storage_admin) in a NON-realtime schema is also excluded -- the
+    exclusion is by owner, not just by schema (orch-console bus #44444: 'if
+    there's more churn of that kind')."""
+    silo_dsn, bus_dsn = two_dsns
+    watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)  # baseline
+    _create_platform_owned_churn(silo_dsn)
+    drifted = watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
+    assert drifted is False
+    assert _bus_row_count(bus_dsn) == 0
+
+
+def test_out_of_gate_policy_drop_on_storage_objects_still_pages(two_dsns):
+    """Orch-console bus #44444: cosem-platform's migrations legitimately
+    CREATE/DROP POLICY on storage.objects (trainee_photos_read,
+    trainee_evidence_read) -- exactly the governance-relevant RLS changes
+    this watchdog exists to catch. A bare 'public'-only allowlist would have
+    let an out-of-gate drop through silently; the realtime/platform-owner
+    exclusion must not."""
+    silo_dsn, bus_dsn = two_dsns
+    _create_storage_objects_with_policy(silo_dsn)
+    watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)  # baseline
+    _drop_storage_objects_policy(silo_dsn)  # DDL with NO ledger row
+    drifted = watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
+    assert drifted is True
+    assert _bus_row_count(bus_dsn) == 1
+
+
+def test_new_function_in_non_public_schema_owned_by_us_still_pages(two_dsns):
+    """A new function in a non-public schema (e.g. auth), owned by OUR role
+    (postgres in this harness) rather than a Supabase platform role, and not
+    in the realtime schema -- must still page: it's within
+    apply_migration.py's gate surface."""
+    silo_dsn, bus_dsn = two_dsns
+    watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)  # baseline
+    _create_function_in_non_public_schema(silo_dsn, "auth", "custom_claim_hook")
+    drifted = watchdog.run_scan(silo=SILO, silo_dsn=silo_dsn, bus_dsn=bus_dsn)
+    assert drifted is True
+    assert _bus_row_count(bus_dsn) == 1
 
 
 # --------------------------------------------------------------------------------

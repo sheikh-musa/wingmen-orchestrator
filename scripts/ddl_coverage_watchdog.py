@@ -68,22 +68,31 @@ masking pair could land in. Real fix (not built here, P3 follow-up):
 correlate migration_ledger.applied_at against the specific catalog rows
 that changed, so two co-occurring changes can't hide each other.
 
-SCOPE: 'public' only, not "every non-system schema" (bus #44439 postmortem).
-The original filter was `table_schema NOT IN ('pg_catalog', 'information_
-schema')` -- a blocklist that still swept up Supabase's own platform-managed
-schemas (realtime, auth, storage, vault, cron, extensions, graphql,
-graphql_public, pgbouncer, supabase_migrations). Those rotate via Supabase's
-OWN internal jobs, not apply_migration.py: confirmed live on the substrate
-(tscuymavysscrvoberrr) at 2026-09-28T02:2x -- `realtime.messages_2026_10_01`
-(+ its indexes) appeared, owned by `supabase_realtime_admin`, as part of
-Realtime's routine rolling-window daily partition creation. No lane ran
-that DDL, no lane COULD have gated it through apply_migration.py, and it
-recurs roughly daily -- so scoping to "non-system" produced a page that
-looked exactly like an unledgered gate-bypass but was actually inert
-platform housekeeping (bus #44438/#44439). Every migration under
-migrations/*.sql targets `public` (or an unqualified name, which defaults to
-it) -- `public` is the ENTIRE surface apply_migration.py's --gate governs,
-so it is the entire surface this watchdog needs to fingerprint.
+SCOPE: a NARROW exclusion of Supabase-managed churn, not "public only" and
+not "every non-system schema" (bus #44439/#44444 postmortem -- two rounds).
+Round 1 (blocklist `NOT IN ('pg_catalog', 'information_schema')`): still
+swept up Supabase's own platform-managed schemas. Confirmed live on the
+substrate (tscuymavysscrvoberrr) at 2026-09-28T02:2x -- `realtime.
+messages_2026_10_01` (+ its indexes) appeared, owned by
+`supabase_realtime_admin`, as part of Realtime's routine rolling-window
+daily partition creation. No lane ran that DDL, no lane COULD have gated it
+through apply_migration.py, and it recurs roughly daily.
+Round 2 (orch-console challenge, bus #44444): narrowing to `= 'public'`
+over-corrected -- cosem-platform's migrations legitimately CREATE/DROP
+POLICY on `storage.objects` (trainee_photos_read, trainee_evidence_read;
+docs/data-store-registry.md ref ywrpttpxwfcoodovxhsr) and those ARE the
+governance-relevant RLS changes this watchdog exists to catch. A bare
+'public' allowlist would have let an out-of-gate `DROP POLICY ... ON
+storage.objects` through silently -- worse than the original false
+positive.
+FINAL SHAPE: exclude the `realtime` schema entirely (partitions + its own
+procs -- fully Supabase-internal, never reachable through apply_migration.py
+even in principle) and exclude any table/proc/index OWNED by a Supabase
+platform role (`supabase_realtime_admin`, `supabase_storage_admin`,
+`supabase_auth_admin`, `supabase_admin`), in ANY schema. Everything else --
+including our own policies, functions and tables living in `storage`/`auth`
+-- stays fingerprinted, since pg_policies carries no owner column and a
+policy is never Supabase-authored.
 
 SNAPSHOT PERSISTENCE (orch-console, bus #44439): the state file now keeps
 the raw per-component rows (not just their hash) for the last-seen scan, so
@@ -106,32 +115,58 @@ STATE_FILE = ORCH / "logs" / "ddl_coverage_watchdog_state.json"
 PAGE_FROM_AGENT = "ddl-coverage-watchdog"  # mirrors ingest.py's PAGE_FROM_AGENT convention
 PAGE_TO_AGENT = "orch-console"
 
-_COLUMNS_SQL = """
-    SELECT table_schema, table_name, column_name, data_type, is_nullable, column_default
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-    ORDER BY table_schema, table_name, ordinal_position
+# orch-console challenge on bus #44439/#44444: a bare 'public'-only allowlist
+# is too wide a cut -- cosem-platform's migrations CREATE/DROP POLICY on
+# storage.objects (trainee_photos_read, trainee_evidence_read) and those are
+# exactly the governance-relevant RLS changes this watchdog exists to catch.
+# Narrow exclusion instead: drop the 'realtime' schema entirely (partitions +
+# its own procs -- Supabase's own rotation, never reachable through
+# apply_migration.py even in principle) and drop objects OWNED by a Supabase
+# platform role, in ANY schema. Everything else -- including our own
+# policies/functions/tables in storage/auth -- stays in scope.
+_SUPABASE_PLATFORM_OWNERS = (
+    "supabase_realtime_admin", "supabase_storage_admin",
+    "supabase_auth_admin", "supabase_admin",
+)
+_OWNER_EXCLUSION_SQL = "AND r.rolname NOT IN {}".format(_SUPABASE_PLATFORM_OWNERS)
+
+_COLUMNS_SQL = f"""
+    SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default
+    FROM information_schema.columns c
+    JOIN pg_namespace n ON n.nspname = c.table_schema
+    JOIN pg_class t ON t.relname = c.table_name AND t.relnamespace = n.oid
+    JOIN pg_roles r ON r.oid = t.relowner
+    WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema', 'realtime')
+      {_OWNER_EXCLUSION_SQL}
+    ORDER BY c.table_schema, c.table_name, c.ordinal_position
 """
 
 _POLICIES_SQL = """
     SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check
     FROM pg_policies
-    WHERE schemaname = 'public'
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'realtime')
     ORDER BY schemaname, tablename, policyname
 """
 
-_PROCS_SQL = """
+_PROCS_SQL = f"""
     SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), p.proacl
-    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public'
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_roles r ON r.oid = p.proowner
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'realtime')
+      {_OWNER_EXCLUSION_SQL}
     ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
 """
 
-_INDEXES_SQL = """
-    SELECT schemaname, tablename, indexname, indexdef
-    FROM pg_indexes
-    WHERE schemaname = 'public'
-    ORDER BY schemaname, tablename, indexname
+_INDEXES_SQL = f"""
+    SELECT i.schemaname, i.tablename, i.indexname, i.indexdef
+    FROM pg_indexes i
+    JOIN pg_namespace n ON n.nspname = i.schemaname
+    JOIN pg_class ic ON ic.relname = i.indexname AND ic.relnamespace = n.oid
+    JOIN pg_roles r ON r.oid = ic.relowner
+    WHERE i.schemaname NOT IN ('pg_catalog', 'information_schema', 'realtime')
+      {_OWNER_EXCLUSION_SQL}
+    ORDER BY i.schemaname, i.tablename, i.indexname
 """
 
 _SNAPSHOT_QUERIES = {
@@ -142,10 +177,10 @@ _SNAPSHOT_QUERIES = {
 }
 
 # Bumped when the fingerprinted surface itself changes (e.g. the bus #44439
-# blocklist->'public'-allowlist rescope) so an old, apples-to-oranges state
+# blocklist->narrow-exclusion rescope) so an old, apples-to-oranges state
 # entry is treated as "no prior state" -- a fresh baseline, not a page --
 # instead of comparing snapshots taken over two different schema scopes.
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 
 def compute_schema_snapshot(cur) -> dict[str, list[list]]:
@@ -190,14 +225,22 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state))
 
 
+def _hashable_row(row: list) -> tuple:
+    """A row's own elements can themselves be lists (e.g. pg_policies.roles
+    comes back as a list of role names) -- not hashable as-is, so nested
+    lists are converted to tuples recursively before the row goes into a
+    set."""
+    return tuple(tuple(v) if isinstance(v, list) else v for v in row)
+
+
 def _diff_snapshots(old: dict[str, list[list]], new: dict[str, list[list]]) -> dict[str, dict[str, list]]:
     """Per-component added/removed rows. Sorted by repr(), not the row's own
     values -- some columns (e.g. column_default) can be NULL, and Python 3
     can't order None against str, so sorting the raw tuples can raise."""
     diff: dict[str, dict[str, list]] = {}
     for component, new_rows in new.items():
-        old_set = {tuple(r) for r in old.get(component, [])}
-        new_set = {tuple(r) for r in new_rows}
+        old_set = {_hashable_row(r) for r in old.get(component, [])}
+        new_set = {_hashable_row(r) for r in new_rows}
         added = sorted((list(r) for r in new_set - old_set), key=repr)
         removed = sorted((list(r) for r in old_set - new_set), key=repr)
         if added or removed:
