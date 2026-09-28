@@ -1,0 +1,23 @@
+# op#11774 body-activity oracle — GZB HUB variant (bus #44544). The base
+# wingmen-body-activity-oracle-vps.service is pathed for the OLD hub-vps
+# (User=wingmen, /home/wingmen, EnvironmentFile) and FAILS on the current gzb hub
+# (user=gazzai, /home/gazzai, tmpfs /dev/shm secrets). Install THIS on gzb:
+#   sudo cp deploy/wingmen-body-activity-oracle-vps-gzb.service /etc/systemd/system/wingmen-body-activity-oracle-vps.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wingmen-body-activity-oracle-vps
+#   journalctl -u wingmen-body-activity-oracle-vps -f   # expect '[oracle-vps] published cc-orchestrator -> ...'
+# Detect-only: reads the hub's local pane via the signed oracle, upserts a busy/idle
+# verdict to the shared cache so the Mini SRE reads it WITHOUT ssh. Reversible:
+#   sudo systemctl disable --now wingmen-body-activity-oracle-vps && sudo rm /etc/systemd/system/wingmen-body-activity-oracle-vps.service
+[Unit]
+Description=Wingmen body-activity oracle (hub busy/idle -> shared cache) — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Requires=wingmen-fetch-secrets.service
+[Service]
+Type=simple
+User=gazzai
+WorkingDirectory=/home/gazzai/wingmen/orchestrator
+ExecStart=/bin/bash -lc 'cd /home/gazzai/wingmen/orchestrator && set -a && . /dev/shm/wingmen-secrets/.env && set +a && unset ANTHROPIC_API_KEY && export PATH="/home/gazzai/.local/bin:/usr/bin:$PATH" && exec .venv/bin/python3 nervous_system/body_activity_oracle_vps.py'
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target
