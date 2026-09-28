@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# post-checkout — pages orch-console if the LIVE checkout ($HOME/wingmen/orchestrator,
+# where the commitment sweeper / DDL watchdog / etc. launchd jobs execute from every few
+# minutes) lands on any branch other than fable/substrate-safe-fixes.
+#
+# bus #44681: cc-angullia branched/committed/pushed from INSIDE the live checkout and
+# switched back. No damage that time (verified back on fable), but for that window the
+# daemons ran another branch's code. "Never checkout in a live worktree" was a promise
+# living only in a memory file — a control that needs remembering is a sentence
+# (feedback_a_control_that_needs_remembering_is_a_sentence). Enforce it in code instead.
+#
+# core.hooksPath is shared across every worktree of this repo (it points at a fixed path,
+# not a per-worktree one), so this file runs on EVERY checkout anywhere — the toplevel-path
+# check below makes it a no-op for lanes/worktrees (their own `git checkout -b` is normal);
+# it only pages when the branch that moved is the LIVE checkout's own.
+#
+# Best-effort: never blocks the checkout itself (exit 0 in every branch) and never fails
+# loudly if the bus post can't resolve an identity/DSN — it still prints the warning to
+# stderr either way, so a human at the terminal sees it even if the page doesn't land.
+set -uo pipefail
+
+PREV_HEAD="${1:-}"; NEW_HEAD="${2:-}"; IS_BRANCH_CHECKOUT="${3:-0}"
+[ "$IS_BRANCH_CHECKOUT" = "1" ] || exit 0
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+LIVE_CHECKOUT="$HOME/wingmen/orchestrator"
+# Resolve the live checkout's toplevel the SAME way ROOT was resolved (git rev-parse
+# canonicalizes symlinks) rather than comparing raw paths — on a $HOME that routes through
+# a symlink (e.g. macOS /var -> /private/var) a raw-string compare can false-negative.
+LIVE_CHECKOUT_CANON="$(cd "$LIVE_CHECKOUT" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"
+[ -n "$LIVE_CHECKOUT_CANON" ] && [ "$ROOT" = "$LIVE_CHECKOUT_CANON" ] || exit 0
+
+EXPECTED_BRANCH="fable/substrate-safe-fixes"
+NEW_BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+[ -n "$NEW_BRANCH" ] || exit 0
+[ "$NEW_BRANCH" = "$EXPECTED_BRANCH" ] && exit 0
+
+WHO="$(whoami 2>/dev/null || echo unknown)"
+HOST="$(hostname 2>/dev/null || echo unknown)"
+
+echo "" >&2
+echo "🚨 post-checkout: LIVE checkout ($LIVE_CHECKOUT) is now on '$NEW_BRANCH', not '$EXPECTED_BRANCH'." >&2
+echo "   The commitment sweeper / DDL watchdog / other launchd daemons execute from THIS" >&2
+echo "   checkout every few minutes — they will run '$NEW_BRANCH' code until this is fixed." >&2
+echo "   git checkout $EXPECTED_BRANCH    # to put it back" >&2
+echo "   Lane/PR work belongs in a 'git worktree add ../orchestrator.wt-<name> <branch>'" >&2
+echo "   checkout, never inside the live one." >&2
+echo "" >&2
+
+BODY="LIVE checkout ($LIVE_CHECKOUT) switched: $PREV_HEAD -> $NEW_HEAD, branch now '$NEW_BRANCH' (expected '$EXPECTED_BRANCH'). user=$WHO pid=$$ host=$HOST. Daemons (commitment sweeper, DDL watchdog, etc.) run from this checkout and will execute '$NEW_BRANCH' code until it is back on $EXPECTED_BRANCH."
+
+PYBIN="$ROOT/.venv/bin/python3"
+if [ -x "$PYBIN" ]; then
+  "$PYBIN" "$ROOT/scripts/bus_send.py" \
+    --to orch-console --type update --priority P1 \
+    --subject "LIVE checkout branch-switched to '$NEW_BRANCH' (post-checkout guard, bus #44681)" \
+    --from live-checkout-guard <<EOF2 >/dev/null 2>&1
+$BODY
+EOF2
+  if [ $? -ne 0 ]; then
+    echo "⚠ post-checkout: could not post the bus alert (see above for the branch state anyway)." >&2
+  fi
+fi
+
+exit 0
