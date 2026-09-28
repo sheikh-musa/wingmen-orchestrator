@@ -15,6 +15,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from nervous_system import triage  # PASSIVE CoS triage annotation (read-only)
+from nervous_system.vault_leak_guard import defensive_redact  # bus #44378
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
@@ -322,6 +323,22 @@ def log(direction: str, text: str, chat_id: str | None = None,
     if failure_reason:
         payload = failure_reason if isinstance(failure_reason, dict) else {"description": str(failure_reason)}
         cos = json.dumps({"send_failure": payload})
+    # Defensive vault-value scan (bus #44378, after op#22696's repeat): the LAST
+    # line of defense before a secret reaches the durable log, independent of
+    # whether the caller used --secret-vault-key's {{SECRET}} mechanism or
+    # nervous_system.secret_redact's pattern pass. Best-effort — a vault lookup
+    # hiccup must never cost the primary log write.
+    try:
+        text, _leaked_keys = defensive_redact(text)
+        if _leaked_keys:
+            print(
+                f"operator_log: WARNING — defensive redaction fired for vault key(s) "
+                f"{_leaked_keys} on a {direction} message (channel={channel!r}, tag={tag!r}) "
+                "— a raw secret value almost reached the durable log (bus #44378)",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
