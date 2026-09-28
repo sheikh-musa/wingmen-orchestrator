@@ -22,17 +22,46 @@ set -uo pipefail
 CAI_DIR="$HOME/wingmen/wingmen-cai"
 ORCH_DIR="$HOME/wingmen/orchestrator"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
-MODEL="${MODEL:-${CAI_MODEL:-claude-opus-4-8}}"
+# MODEL resolution — precedence: MODEL env > CAI_MODEL env > durable pointer (.cai_model)
+# > opus-4-8. The durable pointer mirrors .cai_default_token: a per-body choice that STICKS
+# across reboots, revert = `rm .cai_model`.
+# WHY (op#13633, 2026-08-17): the operator pinned cai to Opus 5 by writing .cai_model, which is
+# the ENGINEER-LANE launcher's mechanism (launch_dangerous_cc.sh). cai is a SINGLETON and boots
+# here, which read env vars only — so the pin was INERT and would have silently done nothing at
+# her next boot. A pointer that looks set but is never read is worse than no pointer: it reports
+# a choice that was never made. Fail-safe: absent/unreadable pointer falls through to the default.
+_MODEL_FROM_ENV="${MODEL:-${CAI_MODEL:-}}"   # capture BEFORE defaulting, or env can never win
+MODEL="claude-opus-4-8"
+if [ -r "$ORCH_DIR/.cai_model" ]; then
+    _CM="$(tr -d '[:space:]' < "$ORCH_DIR/.cai_model" 2>/dev/null || true)"
+    if [ -n "${_CM:-}" ]; then
+        MODEL="$_CM"
+        echo "[boot_cai] durable model pointer applied (.cai_model -> $_CM)" >&2
+    fi
+fi
+[ -n "$_MODEL_FROM_ENV" ] && MODEL="$_MODEL_FROM_ENV"
 AGENT_ID="cai"   # exact — singleton strategic node, never a sub-tag
 
 # .env (DSN etc.) lives in the orchestrator; cai shares the substrate.
 set -a; . "$ORCH_DIR/.env" 2>/dev/null || true; set +a
-# Per-lane OAuth token override (e.g. a donor/loaner account during a cap crunch).
+# OAuth account resolution — precedence: explicit OVERRIDE (a live re-token via
+# switch_singleton_token.sh) > durable pointer (.cai_default_token, the reversible
+# per-body default; op#11326 fleet flip, revert = `rm .cai_default_token`) > .env.
 # Applied AFTER the .env source so it wins; distinct var name so `set -a; . .env`
-# cannot clobber it. Unset for normal boots → no effect on billing.
+# cannot clobber it. FAIL-SAFE: an absent/unreadable pointer falls through to .env.
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
     export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"
+elif [ -r "$ORCH_DIR/.cai_default_token" ]; then
+    _CAITOKF="$(tr -d '[:space:]' < "$ORCH_DIR/.cai_default_token" 2>/dev/null || true)"
+    if [ -n "${_CAITOKF:-}" ] && [ -r "$_CAITOKF" ]; then
+        export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_CAITOKF")"
+        echo "[boot_cai] durable token override applied (.cai_default_token -> $_CAITOKF)" >&2
+    fi
 fi
+# auth_fp = sha256(effective launch token)[:12] — the stable account fingerprint
+# (matches the token FILE fp) stamped into agent_status below so cai is post-flip
+# verifiable (op#11326). Never prints the token.
+AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
 # Max-subscription billing for cai — two parts, both load-bearing:
 #  1. Scrub ANTHROPIC_API_KEY: .env carries it for the orch's own API calls, but
 #     a present ANTHROPIC_API_KEY makes `claude` use metered API-usage billing.
@@ -66,11 +95,12 @@ PY
 # the wake set, CAI-RESP-255 #3) — read from inside cai's own pane.
 CAI_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 _sql "
-INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, last_heartbeat, updated_at)
-VALUES ('cai','cai','working','cc-cai perpetual strategic lane', ARRAY['*']::text[], NULLIF('$CAI_TMUX_SESSION',''), now(), now())
+INSERT INTO agent_status (agent_id, base_agent_id, status, current_task, scope_repos, tmux_session, auth_fp, last_heartbeat, updated_at)
+VALUES ('cai','cai','working','cc-cai perpetual strategic lane', ARRAY['*']::text[], NULLIF('$CAI_TMUX_SESSION',''), NULLIF('$AUTH_FP',''), now(), now())
 ON CONFLICT (agent_id) DO UPDATE
   SET status='working', current_task='cc-cai perpetual strategic lane',
       tmux_session=NULLIF('$CAI_TMUX_SESSION',''),
+      auth_fp=NULLIF('$AUTH_FP',''),
       last_heartbeat=now(), updated_at=now();
 UPDATE agents SET status='active', last_heartbeat=now() WHERE id='cai';
 "
