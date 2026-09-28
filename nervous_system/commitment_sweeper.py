@@ -117,13 +117,18 @@ def _live_agents(cur) -> set[str]:
     return live
 
 
-def _notify(cur, to_agent: str, subject: str, body: str, priority: str = "P1") -> int:
+def _notify(cur, to_agent: str, subject: str, body: str, priority: str = "P1",
+            requires_response: bool = True) -> int:
+    """requires_response defaults True (bus #44527): a DUE/FIRED commitment is always an
+    action item, never advisory-only, so it must clear the hub's wake floor (P0/P1 AND
+    requires_response) whenever it's addressed there — #44508 landed P1 + rr=FALSE and sat
+    unseen for ~14h because that combination falls under the floor."""
     cur.execute(
         """INSERT INTO agent_messages
              (from_agent, to_agent, message_type, subject, body, requires_response, priority)
-           VALUES ('orch-console', %s, 'update', %s, %s, false, %s)
+           VALUES ('orch-console', %s, 'update', %s, %s, %s, %s)
            RETURNING id""",
-        (to_agent, subject[:300], body, priority),
+        (to_agent, subject[:300], body, requires_response, priority),
     )
     return cur.fetchone()["id"]
 

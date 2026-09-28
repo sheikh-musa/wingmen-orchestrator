@@ -56,6 +56,20 @@ _VALID_TYPES = (
     "challenge", "update", "blocker", "counter",
 )
 _MIN_BODY_BYTES = 40
+_HUB_AGENT = "cc-orchestrator"
+
+
+def warn_if_below_hub_wake_floor(to: str, req: bool, priority: str, stream=None) -> None:
+    """bus #44527: --to cc-orchestrator --req at a priority below P1 will NOT wake the
+    hub (floor = P0/P1 AND requires_response — reference_hub_wake_floor_p1_rr). This is
+    a WARNING, not a refusal: P2-rr is a legitimate way to post a non-urgent item that
+    still wants a response eventually."""
+    if to == _HUB_AGENT and req and priority not in ("P0", "P1"):
+        print(
+            f"bus_send: WARNING — --to {_HUB_AGENT} --req at priority {priority} will NOT "
+            "wake the hub (floor = P0/P1 + requires_response); use --priority P1 if it must act.",
+            file=stream or sys.stderr,
+        )
 
 
 class IdentityError(RuntimeError):
@@ -226,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     body = read_body(sys.stdin)
+
+    warn_if_below_hub_wake_floor(args.to, args.req, args.priority)
 
     if args.dry_run:
         print(f"DRY RUN — would insert: from={from_agent} to={args.to} type={args.type} "
