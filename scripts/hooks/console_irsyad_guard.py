@@ -37,7 +37,11 @@ def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except Exception:
-        return 0
+        sys.stderr.write(
+            "BLOCKED by console_irsyad_guard: guard could not read the tool input; refusing "
+            "(fail-closed for the console body -- Musa op#21944/#22229, enforce-in-code).\n"
+        )
+        return 2
     tool_input = payload.get("tool_input") or {}
     haystack = json.dumps(tool_input)
     for pattern, what in BLOCKED:
