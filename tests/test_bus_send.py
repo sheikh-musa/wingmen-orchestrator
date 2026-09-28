@@ -96,6 +96,63 @@ def test_read_body_accepts_body_at_or_above_floor():
     assert bs.read_body(io.StringIO(body)) == body
 
 
+# ---- hub wake-floor warning (bus #44527) — warn, never refuse ---------------
+# #44508 landed P1 + requires_response=FALSE and sat unseen for ~14h below the
+# hub's wake floor (P0/P1 AND requires_response). commitment_sweeper.py fixes
+# the requires_response side; this is the bus_send.py side — a caller who
+# posts --to cc-orchestrator --req below P1 gets a stderr warning (not a
+# refusal: P2-rr is a legitimate way to post a non-urgent item).
+
+def test_warns_when_hub_bound_req_below_p1(capsys):
+    bs.warn_if_below_hub_wake_floor("cc-orchestrator", True, "P2")
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "will NOT wake the hub" in err
+    assert "P2" in err
+
+
+def test_no_warning_when_hub_bound_req_at_p1():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_below_hub_wake_floor("cc-orchestrator", True, "P1", stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_no_warning_when_hub_bound_req_at_p0():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_below_hub_wake_floor("cc-orchestrator", True, "P0", stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_no_warning_when_not_requires_response():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_below_hub_wake_floor("cc-orchestrator", False, "P2", stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_no_warning_when_not_addressed_to_hub():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_below_hub_wake_floor("cc-irsyad", True, "P2", stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_dry_run_still_warns_below_hub_wake_floor(monkeypatch, capsys):
+    import io
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+    rc = bs.main([
+        "--to", "cc-orchestrator", "--type", "update", "--subject", "s",
+        "--priority", "P2", "--req", "--dry-run",
+    ])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "will NOT wake the hub" in err
+
+
 # ---- end-to-end CLI, --dry-run so it never touches the DB -------------------
 
 def test_dry_run_end_to_end(monkeypatch, capsys):
