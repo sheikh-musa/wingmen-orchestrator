@@ -26,6 +26,7 @@ TAG="${2:-gazzabyte-irsyad}"   # scoped tag for the Gazzabyte/Irsyad-Support cha
 # Fail loud on the channel-first arg-swap footgun (op#16353).
 source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
 _send_arg_guard "$TEXT" || exit 2
+_send_tag_shape_guard "$TAG" || exit 2
 
 # Fail-closed: the console body (Nazim) may not routine-send irsyad CLIENT replies —
 # coord owns irsyad client-comms directly; console gates money/floor ONLY. No-op for coord.

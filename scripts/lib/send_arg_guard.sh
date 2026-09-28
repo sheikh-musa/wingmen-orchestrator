@@ -22,3 +22,27 @@ _send_arg_guard() {
   esac
   return 0
 }
+
+# _send_tag_shape_guard — arg2-shape check (bus #44966/#44990/#45020).
+#
+# WHY: _send_arg_guard above only checks arg1 (TEXT) against a hardcoded
+# allowlist of known channel names. It never validated arg2 (TAG)'s *shape* —
+# so a caller landing prose (or a raw Telegram chat_id) in the tag slot, where
+# that string isn't literally one of the hardcoded names, sailed straight
+# through unguarded all the way to the operator_messages INSERT. That's
+# exactly how op#16353's leaked drafts (ids 16347/16348/16352) and the
+# 2026-06-30 chat_id-shaped tags (ids 1675/1758) got in. Mirrors the DB-layer
+# CHECK (operator_messages.tag_shape_chk) and nervous_system/operator_log.py's
+# _validate_tag_shape — same regex, same posture, checked here too so a bad
+# tag fails at the shell before it even reaches Python/the DB.
+_send_tag_shape_guard() {
+  local tag="$1"
+  [ -z "$tag" ] && return 0
+  if [ "${#tag}" -gt 64 ] || ! [[ "$tag" =~ ^[a-zA-Z@][a-zA-Z0-9@_/+-]*$ ]]; then
+    echo "ERROR: tag argument '$tag' doesn't look like a channel tag (<=64 chars, ^[a-zA-Z@][a-zA-Z0-9@_/+-]*\$)." >&2
+    echo "This is the same op#16353 arg-slot footgun class — prose or an id landed in the tag slot." >&2
+    echo "Aborting the send." >&2
+    return 2
+  fi
+  return 0
+}

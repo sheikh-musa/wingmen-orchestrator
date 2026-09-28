@@ -28,6 +28,7 @@ TAG="${2:-angullia}"
 # Fail loud on the channel-first arg-swap footgun (op#16353, same guard as irsyad's).
 source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
 _send_arg_guard "$TEXT" || exit 2
+_send_tag_shape_guard "$TAG" || exit 2
 
 # op#21145 (Musa direct): no internal identity / escalation framing reaches a client group.
 source "$ORCH_DIR/scripts/lib/client_send_leak_guard.sh"
