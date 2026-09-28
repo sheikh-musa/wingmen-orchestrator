@@ -47,6 +47,11 @@
 
 BEGIN;
 
+-- orch-console gate condition (#45084): fail fast instead of queueing behind
+-- a lock held by ingest.py/tg_out.py's normal INSERT traffic on this table --
+-- a stalled apply must not become a stalled outbound-message pipeline.
+SET LOCAL lock_timeout = '5s';
+
 -- Abort the whole migration if the failing-row set has drifted since this file
 -- was authored (new bad data, or the 5 known rows already cleaned up some other
 -- way) -- orch-console's explicit precondition, not a "trust the comment" gate.
