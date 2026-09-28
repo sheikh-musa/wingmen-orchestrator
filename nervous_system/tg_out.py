@@ -187,19 +187,48 @@ def deliver_one(conn, row: tuple) -> None:
         target = chat_id or default_chat
         if target is None:
             raise LookupError(f"no chat target for '{channel_key}' (empty allowlist, no override)")
+        # Deliver text and file as SEPARATE, idempotent-per-part steps. Bug this
+        # guards (2026-08-07, operator-flagged op#11218 — HK-hero message delivered
+        # 11x): text + file rode ONE all-or-nothing retry, so when _send_file threw
+        # (a Mac lane had enqueued a Mac-local file_path the VPS daemon can't open ->
+        # FileNotFoundError) AFTER _send_text had already delivered, the whole row
+        # retried and RE-SENT the text every attempt (up to MAX_ATTEMPTS). Fix: the
+        # instant text is delivered, NULL it in the queue + log it, so no subsequent
+        # retry (for the file) can ever re-deliver it.
         if text:
             _send_text(token, target, text)
+            with conn.cursor() as cur:
+                cur.execute("UPDATE tg_out SET text=NULL WHERE id=%s", (rid,))
+                cur.execute(
+                    "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
+                    "VALUES ('outbound','telegram',%s,%s,%s,true)",
+                    (str(target), tag, text))
+            conn.commit()
+            text = None  # in-memory guard too — nothing below can re-send it
         if file_path:
             _send_file(token, target, file_path)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
+                    "VALUES ('outbound','telegram',%s,%s,%s,true)",
+                    (str(target), tag, f"[file] {file_path}"))
+            conn.commit()
         with conn.cursor() as cur:
             cur.execute("UPDATE tg_out SET status='sent', sent_at=now(), attempts=%s WHERE id=%s",
                         (attempts + 1, rid))
-            cur.execute(
-                "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
-                "VALUES ('outbound','telegram',%s,%s,%s,true)",
-                (str(target), tag, text or f"[file] {file_path}"),
-            )
         conn.commit()
+    except FileNotFoundError as e:
+        # A missing file will NOT reappear on this host (typical cause: a cross-host
+        # local path enqueued by a Mac lane, unreadable by the VPS daemon). Retrying
+        # only churns to 'dead' AND — pre-fix — re-sent the text; mark it dead NOW.
+        # Any text was already delivered + logged + nulled above, so this drops ONLY
+        # the unreachable file (a dead-letter the watchdog surfaces), never text.
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tg_out SET status='dead', attempts=%s, last_error=%s WHERE id=%s",
+                (attempts + 1, f"FileNotFoundError (non-retriable): {e}", rid))
+        conn.commit()
+        _log_line(f"row {rid} -> dead (missing file, non-retriable): {e}")
     except Exception as e:
         status = "dead" if attempts + 1 >= MAX_ATTEMPTS else "failed"
         with conn.cursor() as cur:
