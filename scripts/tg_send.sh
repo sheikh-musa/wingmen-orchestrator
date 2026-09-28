@@ -60,6 +60,7 @@ TAG="${2:-}"   # optional @alias context this reply pertains to
 # Fail loud on the channel-first arg-swap footgun (op#16353).
 source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
 _send_arg_guard "$TEXT" || exit 2
+_send_tag_shape_guard "$TAG" || exit 2
 
 # Scrub secret patterns (pg DSNs, bot tokens, API keys) BEFORE anything leaves
 # the process — the send AND the durable log both use the scrubbed text. Clean

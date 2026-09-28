@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 import psycopg
@@ -33,6 +34,30 @@ def _agent_id() -> str:
 
 def _body_role() -> str:
     return os.environ.get("ORCH_BODY_ROLE", "").strip().lower()
+
+
+# --- tag shape guard (bus #44971/#45020) -------------------------------------
+# Mirrors the operator_messages.tag_shape_chk CHECK constraint (migration
+# fix/operator-messages-tag-shape-44971) so a bad tag is refused at the write
+# call, not just at the DB -- same belt-and-braces posture as the vault-leak
+# guard above. Verified against the live tag corpus (routing tags like
+# '@ihsanos', 'fleet/substrate', lane_reply.sh's '<tag>-drill'/'-draft'
+# suffixes) before being set, not just code literals (op#16353's leaked-draft
+# rows and the 2026-06-30 chat_id-shaped-tag rows are exactly what this
+# excludes).
+_TAG_SHAPE_RE = re.compile(r"^[a-zA-Z@][a-zA-Z0-9@_/+-]*$")
+
+
+def _validate_tag_shape(tag: str | None) -> None:
+    if tag is None:
+        return
+    if len(tag) > 64 or not _TAG_SHAPE_RE.match(tag):
+        raise ValueError(
+            f"operator_log.log(): tag {tag!r} fails the tag-shape guard "
+            r"(<=64 chars, must match ^[a-zA-Z@][a-zA-Z0-9@_/+-]*$) -- "
+            "looks like prose/an id landed in the tag slot instead of a "
+            "channel tag (op#16353's mechanism). Not writing this row."
+        )
 
 
 # --- Sender identity (BOT-INGEST-SENDER-001) --------------------------------
@@ -355,6 +380,7 @@ def log(direction: str, text: str, chat_id: str | None = None,
     # tg_message_id (op#22669 asks-tracking): the Telegram Bot API result.message_id for
     # an OUTBOUND send only — captured so a later inbound reply_to_message can be matched
     # back to this exact row (reply-linked operator_asks auto-close).
+    _validate_tag_shape(tag)
     cos_payload: dict = {}
     if failure_reason:
         payload = failure_reason if isinstance(failure_reason, dict) else {"description": str(failure_reason)}
