@@ -18,9 +18,15 @@ CAP="${2:-}"
 [ -n "${CHAT:-}" ] || { echo "MUSA_TELEGRAM_ID missing from .env" >&2; exit 1; }
 [ -f "$IMG" ]      || { echo "image not found: $IMG" >&2; exit 1; }
 
+# bus #44576: a real filename can contain ',' or ';', both special to curl's own
+# -F parser — route through a syntax-safe staged path instead of @${IMG} directly.
+source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
+tg_safe_upload_stage photo "$IMG" || { echo "nazim_send_photo: could not stage upload for $IMG" >&2; exit 1; }
+trap '[ -n "${TG_SAFE_UPLOAD_TMPDIR:-}" ] && rm -rf "$TG_SAFE_UPLOAD_TMPDIR"' EXIT
+
 code=$(curl -s -o /dev/null -w "%{http_code}" \
-  -F "chat_id=${CHAT}" -F "photo=@${IMG}" -F "caption=${CAP}" \
-  "https://api.telegram.org/bot${TOK}/sendPhoto" --max-time 30)
+  -F "chat_id=${CHAT}" -F "$TG_SAFE_UPLOAD_FORM" -F "caption=${CAP}" \
+  "https://api.telegram.org/bot${TOK}/sendPhoto" --max-time 30) || code="curl_exit_$?"
 
 # Durable log (tag=nazim-console) so a rebooted Nazim sees the photo went out.
 # CAI-598/600: log DELIVERY, not intent — operator_log defaults delivered=TRUE, so an
@@ -29,4 +35,4 @@ PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_
   outbound "[photo] $(basename "$IMG")${CAP:+ — $CAP}" --chat "$CHAT" --tag nazim-console \
   $([ "$code" = "200" ] || echo --undelivered) >/dev/null 2>&1 || true
 
-[ "$code" = "200" ] && { echo "sent $(basename "$IMG")"; exit 0; } || { echo "nazim_send_photo failed (HTTP $code)" >&2; exit 1; }
+[ "$code" = "200" ] && { echo "sent $(basename "$IMG")"; exit 0; } || { echo "nazim_send_photo failed (status: $code)" >&2; exit 1; }

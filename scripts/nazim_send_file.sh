@@ -19,13 +19,19 @@ CAP="${2:-}"
 [ -n "${CHAT:-}" ] || { echo "MUSA_TELEGRAM_ID missing from .env" >&2; exit 1; }
 [ -f "$DOC" ]      || { echo "file not found: $DOC" >&2; exit 1; }
 
+# bus #44576: a real filename can contain ',' or ';', both special to curl's own
+# -F parser — route through a syntax-safe staged path instead of @${DOC} directly.
+source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
+tg_safe_upload_stage document "$DOC" || { echo "nazim_send_file: could not stage upload for $DOC" >&2; exit 1; }
+trap '[ -n "${TG_SAFE_UPLOAD_TMPDIR:-}" ] && rm -rf "$TG_SAFE_UPLOAD_TMPDIR"' EXIT
+
 code=$(curl -s -o /dev/null -w "%{http_code}" \
-  -F "chat_id=${CHAT}" -F "document=@${DOC}" -F "caption=${CAP}" \
-  "https://api.telegram.org/bot${TOK}/sendDocument" --max-time 120)
+  -F "chat_id=${CHAT}" -F "$TG_SAFE_UPLOAD_FORM" -F "caption=${CAP}" \
+  "https://api.telegram.org/bot${TOK}/sendDocument" --max-time 120) || code="curl_exit_$?"
 
 # Durable log (tag=nazim-console) so a rebooted Nazim sees the file went out.
 PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" -m nervous_system.operator_log \
   outbound "[file] $(basename "$DOC")${CAP:+ — $CAP}" --chat "$CHAT" --tag nazim-console \
   $([ "$code" = "200" ] || echo --undelivered) >/dev/null 2>&1 || true
 
-[ "$code" = "200" ] && { echo "sent $(basename "$DOC")"; exit 0; } || { echo "nazim_send_file failed (HTTP $code)" >&2; exit 1; }
+[ "$code" = "200" ] && { echo "sent $(basename "$DOC")"; exit 0; } || { echo "nazim_send_file failed (status: $code)" >&2; exit 1; }

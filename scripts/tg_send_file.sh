@@ -36,10 +36,16 @@ if [ "$bytes" -gt 52428800 ]; then
   echo "file too large for Telegram (${bytes} bytes > 50MB)" >&2; exit 1
 fi
 
+# bus #44576: a real filename can contain ',' or ';', both special to curl's own
+# -F parser — route through a syntax-safe staged path instead of @${FILE} directly.
+source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
+tg_safe_upload_stage document "$FILE" || { echo "tg_send_file: could not stage upload for $FILE" >&2; exit 1; }
+trap '[ -n "${TG_SAFE_UPLOAD_TMPDIR:-}" ] && rm -rf "$TG_SAFE_UPLOAD_TMPDIR"' EXIT
+
 resp=$(curl -s --ipv4 "https://api.telegram.org/bot${TOK}/sendDocument" \
   -F "chat_id=${CHAT}" \
-  -F "document=@${FILE}" \
-  ${CAPTION:+-F "caption=${CAPTION}"})
+  -F "$TG_SAFE_UPLOAD_FORM" \
+  ${CAPTION:+-F "caption=${CAPTION}"}) || resp="{\"ok\":false,\"description\":\"curl_exit_$?\"}"
 ok=$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print('1' if d.get('ok') else '0:'+str(d.get('description')))")
 
 # durable log (best-effort)

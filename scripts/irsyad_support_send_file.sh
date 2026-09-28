@@ -29,12 +29,18 @@ SZ=$(wc -c < "$FILE" | tr -d ' ')
 source "$ORCH_DIR/scripts/lib/console_irsyad_client_send_gate.sh"
 _console_irsyad_client_send_gate "gazzabyte-irsyad" || exit 4
 
+# bus #44576: a real filename can contain ',' or ';', both special to curl's own
+# -F parser — route through a syntax-safe staged path instead of @${FILE} directly.
+source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
+tg_safe_upload_stage document "$FILE" || { echo "irsyad_support_send_file: could not stage upload for $FILE" >&2; exit 1; }
+trap '[ -n "${TG_SAFE_UPLOAD_TMPDIR:-}" ] && rm -rf "$TG_SAFE_UPLOAD_TMPDIR"' EXIT
+
 ARGS=(-s --ipv4 -X POST "https://api.telegram.org/bot${TOK}/sendDocument"
   -F "chat_id=${CHAT}"
-  -F "document=@${FILE}")
+  -F "$TG_SAFE_UPLOAD_FORM")
 [ -n "$CAPTION" ] && ARGS+=(-F "caption=${CAPTION}")
 
-resp=$(curl "${ARGS[@]}")
+resp=$(curl "${ARGS[@]}") || resp="{\"ok\":false,\"description\":\"curl_exit_$?\"}"
 ok=$(printf '%s' "$resp" | "$ORCH_DIR/.venv/bin/python3" -c 'import sys,json;print(json.load(sys.stdin).get("ok"))' 2>/dev/null || echo "False")
 
 # durable log every outbound file (best-effort — never fail on a log hiccup).
