@@ -168,3 +168,69 @@ code=$(curl -s -o /dev/null http://127.0.0.1:1 --max-time 2 -w "%{http_code}") |
     assert "UNDELIVERED:curl_exit_" in r.stdout, (
         f"the undelivered branch did not run after a captured curl failure: {r.stdout!r}"
     )
+
+
+# ── angullia_send_photo.sh: client-channel-specific guards (bus #44679) ─────────────
+# angullia is a CLIENT channel (Rhaihan can see it), so a caption needs the same
+# guards angullia_send.sh runs on its text — a photo caption is just as capable of
+# leaking an internal name or an arg-swap as a plain message. Separately, curl's -F
+# treats a value starting with '@' or '<' as a file to read rather than literal
+# text, so a caption like "@Rhaihan" would try to upload/read a local file instead
+# of being sent — --form-string has no such special-casing.
+_UNSAFE_CAPTION_FORM = re.compile(r'-F\s+"caption=')
+
+
+def test_angullia_send_photo_guards_the_caption_like_a_client_message():
+    code = _code_only(_SCRIPTS["angullia_send_photo.sh"].read_text())
+    assert "_send_arg_guard" in code, (
+        "angullia_send_photo.sh doesn't run _send_arg_guard on the caption — a photo "
+        "caption can carry the same channel/tag arg-swap footgun angullia_send.sh guards "
+        "against on its text (op#16353)"
+    )
+    assert "_client_send_leak_guard" in code, (
+        "angullia_send_photo.sh doesn't run _client_send_leak_guard on the caption — "
+        "angullia is a CLIENT channel, so a caption can leak an internal name/escalation "
+        "phrase exactly like the text path does without it (op#21145)"
+    )
+
+
+def test_angullia_send_photo_caption_uses_form_string_not_dash_F():
+    code = _code_only(_SCRIPTS["angullia_send_photo.sh"].read_text())
+    assert not _UNSAFE_CAPTION_FORM.search(code), (
+        'angullia_send_photo.sh still builds -F "caption=..." — curl treats a value '
+        'starting with @ or < as a file to read, so a caption like "@Rhaihan" or "<3" '
+        "would try to upload/read a local file instead of being sent literally. "
+        "Use --form-string for the caption (and chat_id)."
+    )
+    assert '--form-string "caption=' in code, (
+        "expected --form-string for the caption in angullia_send_photo.sh"
+    )
+
+
+def test_form_string_sends_at_prefixed_caption_literally_not_as_file():
+    """Load-bearing proof: curl's -F treats a value starting with '@' as a file to
+    read (failing locally before any network call), while --form-string sends the
+    same value as a literal field — the fix angullia_send_photo.sh's caption relies
+    on."""
+    unreachable = "http://127.0.0.1:1"  # port 1 refuses instantly, no live network needed
+    caption = "@Rhaihan, does this look right?"
+
+    dash_f = subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+         "-F", f"caption={caption}", unreachable, "--max-time", "3"],
+        capture_output=True, text=True,
+    )
+    assert dash_f.returncode == 26, (
+        f"expected curl exit 26 (READ_ERROR) on -F with an @-prefixed value — got "
+        f"{dash_f.returncode}; if curl's own -F parsing changed, this test (not the fix) "
+        "needs revisiting"
+    )
+
+    form_string = subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+         "--form-string", f"caption={caption}", unreachable, "--max-time", "3"],
+        capture_output=True, text=True,
+    )
+    assert form_string.returncode != 26, (
+        f"--form-string still trips curl's @ file-upload parsing (exit {form_string.returncode})"
+    )

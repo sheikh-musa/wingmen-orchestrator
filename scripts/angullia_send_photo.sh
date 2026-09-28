@@ -20,14 +20,24 @@ CAP="${2:-}"
 [ -n "${CHAT:-}" ] || { echo "ANGULLIA_CHAT_ID missing from .env (and no TG_CHAT_OVERRIDE)" >&2; exit 1; }
 [ -f "$IMG" ]      || { echo "image not found: $IMG" >&2; exit 1; }
 
+# This is a CLIENT channel (angullia) — the caption gets the same guards
+# angullia_send.sh runs on its text, so a caption can't bypass them.
+source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
+_send_arg_guard "$CAP" || exit 2
+source "$ORCH_DIR/scripts/lib/client_send_leak_guard.sh"
+_client_send_leak_guard "$CAP" || exit 3
+
 # bus #44576: a real filename can contain ',' or ';', both special to curl's own
 # -F parser — route through a syntax-safe staged path instead of @${IMG} directly.
 source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
 tg_safe_upload_stage photo "$IMG" || { echo "angullia_send_photo: could not stage upload for $IMG" >&2; exit 1; }
 trap '[ -n "${TG_SAFE_UPLOAD_TMPDIR:-}" ] && rm -rf "$TG_SAFE_UPLOAD_TMPDIR"' EXIT
 
+# --form-string (not -F) for chat_id/caption: -F treats a value starting with
+# @ or < as a file to read, so a caption like "@Rhaihan" or "<3" would try to
+# upload/read a local file instead of being sent as literal text.
 code=$(curl -s -o /dev/null -w "%{http_code}" \
-  -F "chat_id=${CHAT}" -F "$TG_SAFE_UPLOAD_FORM" -F "caption=${CAP}" \
+  --form-string "chat_id=${CHAT}" -F "$TG_SAFE_UPLOAD_FORM" --form-string "caption=${CAP}" \
   "https://api.telegram.org/bot${TOK}/sendPhoto" --max-time 30) || code="curl_exit_$?"
 
 # Durable log (tag=angullia) so a rebooted reviewer sees the photo went out.
