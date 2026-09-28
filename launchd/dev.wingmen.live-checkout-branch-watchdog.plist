@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- live-checkout-branch watchdog (bus #44681). Pages orch-console if the LIVE checkout
+       ($HOME/wingmen/orchestrator, where the commitment sweeper, DDL watchdog, and every
+       other launchd daemon execute from) is off fable/substrate-safe-fixes for more than
+       LIVE_CHECKOUT_GRACE_S (default 120s). Independent backstop to scripts/git-hooks/
+       post-checkout, which pages immediately on the checkout event itself. DETECT plus
+       operator-alert ONLY, no self-healing action, so nothing lease-gated (charter section
+       3: detection and degrade-alert stay ungated). NOT loaded until orch-console gates the
+       PR and the arm. StartInterval 60s keeps the 120s grace window meaningfully
+       sub-divided (at least 2 scans before a real drift alerts). -->
+  <key>Label</key>
+  <string>dev.wingmen.live-checkout-branch-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/live_checkout_branch_watchdog.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/live_checkout_branch_watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/live_checkout_branch_watchdog.log</string>
+</dict>
+</plist>
