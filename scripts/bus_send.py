@@ -96,9 +96,11 @@ def resolve_from_agent(env: dict) -> str:
 
 
 def dburl(env: dict) -> str:
-    v = env.get("DATABASE_URL")
-    if v:
-        return v
+    # The .env FILE wins over the inherited environment: a long-running session
+    # keeps the DATABASE_URL it was launched with, so after a password rotation
+    # every bus post from it failed auth and kept the pooler circuit breaker
+    # tripped fleet-wide (2026-09-28 rotation incident). The file is the
+    # rotation's single push-point (Mini .env; gzb .env -> /dev/shm secrets).
     env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
     try:
         with open(env_path) as f:
@@ -108,6 +110,9 @@ def dburl(env: dict) -> str:
                     return line.split("=", 1)[1].strip().strip('"')
     except FileNotFoundError:
         pass
+    v = env.get("DATABASE_URL")
+    if v:
+        return v
     raise SystemExit("no DATABASE_URL: set it in the environment or .env")
 
 

@@ -18,6 +18,17 @@ from nervous_system import triage  # PASSIVE CoS triage annotation (read-only)
 from nervous_system.vault_leak_guard import defensive_redact  # bus #44378
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+# DATABASE_URL alone comes from the .env FILE even when the process inherited one:
+# after a password rotation a long-running session's inherited value is stale and
+# every call failed auth, keeping the pooler circuit breaker tripped (2026-09-28).
+# Only this key: identity vars (AGENT_ID, ORCH_BODY_ROLE, ...) must stay per-process.
+try:
+    from dotenv import dotenv_values as _dotenv_values
+    _file_db_url = _dotenv_values(os.path.join(os.path.dirname(__file__), "..", ".env")).get("DATABASE_URL")
+    if _file_db_url:
+        os.environ["DATABASE_URL"] = _file_db_url
+except Exception:  # noqa: BLE001 — never block import on this
+    pass
 
 
 # --- ORCH-TOPOLOGY-001 body scoping -----------------------------------------
