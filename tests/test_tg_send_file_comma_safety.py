@@ -15,11 +15,16 @@ TWO bugs, tested separately here:
    the caller sees a silent failure. Fix: `... || code="curl_exit_$?"` (or the `resp=`
    equivalent) so a curl failure is captured as data instead of killing the script.
 """
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
+import psycopg
 import pytest
+
+from tests.conftest import assert_dsn_is_not_production
 
 _ROOT = Path(__file__).resolve().parent.parent
 _LIB = _ROOT / "scripts" / "lib" / "tg_safe_upload.sh"
@@ -30,6 +35,7 @@ _SCRIPTS = {
     "irsyad_support_send_file.sh": _ROOT / "scripts" / "irsyad_support_send_file.sh",
     "angullia_send_photo.sh": _ROOT / "scripts" / "angullia_send_photo.sh",
     "cosem_tdu_support_send_photo.sh": _ROOT / "scripts" / "cosem_tdu_support_send_photo.sh",
+    "reviewer_send_file.sh": _ROOT / "scripts" / "reviewer_send_file.sh",
 }
 
 _STAGE_CALL = re.compile(r"tg_safe_upload_stage\s+\w+\s+")
@@ -216,34 +222,39 @@ code=$(curl -s -o /dev/null http://127.0.0.1:1 --max-time 2 -w "%{http_code}") |
     )
 
 
-# ── client-channel photo scripts: caption-specific guards (bus #44679) ─────────────
-# angullia and cosem-tdu are CLIENT channels (the client can see them), so a caption
-# needs the same guards the text-send sibling runs on its own text — a photo caption
-# is just as capable of leaking an internal name or an arg-swap as a plain message.
-# Separately, curl's -F treats a value starting with '@' or '<' as a file to read
-# rather than literal text, so a caption like "@Rhaihan" would try to upload/read a
-# local file instead of being sent — --form-string has no such special-casing.
+# ── caption-guarded send scripts: caption-specific guards (bus #44679) ─────────────
+# angullia/cosem-tdu are CLIENT channels (the client can see them) and reviewer_send_file.sh
+# is a GENERIC multi-channel tool that can just as easily land in one — a caption needs the
+# same guards the text-send sibling runs on its own text — a caption is just as capable of
+# leaking an internal name or an arg-swap as a plain message. Separately, curl's -F treats a
+# value starting with '@' or '<' as a file to read rather than literal text, so a caption
+# like "@Rhaihan" would try to upload/read a local file instead of being sent — --form-string
+# has no such special-casing.
 _UNSAFE_CAPTION_FORM = re.compile(r'-F\s+"caption=')
-_CLIENT_CHANNEL_PHOTO_SCRIPTS = ("angullia_send_photo.sh", "cosem_tdu_support_send_photo.sh")
+_CAPTION_GUARDED_SCRIPTS = (
+    "angullia_send_photo.sh",
+    "cosem_tdu_support_send_photo.sh",
+    "reviewer_send_file.sh",
+)
 
 
-@pytest.mark.parametrize("name", _CLIENT_CHANNEL_PHOTO_SCRIPTS)
-def test_client_channel_send_photo_guards_the_caption_like_a_client_message(name):
+@pytest.mark.parametrize("name", _CAPTION_GUARDED_SCRIPTS)
+def test_caption_guarded_script_guards_the_caption_like_a_client_message(name):
     code = _code_only(_SCRIPTS[name].read_text())
     assert "_send_arg_guard" in code, (
-        f"{name} doesn't run _send_arg_guard on the caption — a photo "
+        f"{name} doesn't run _send_arg_guard on the caption — a photo/file "
         "caption can carry the same channel/tag arg-swap footgun the text-send sibling "
         "guards against on its text (op#16353)"
     )
     assert "_client_send_leak_guard" in code, (
         f"{name} doesn't run _client_send_leak_guard on the caption — "
-        "this is a CLIENT channel, so a caption can leak an internal name/escalation "
+        "this can reach a CLIENT channel, so a caption can leak an internal name/escalation "
         "phrase exactly like the text path does without it (op#21145)"
     )
 
 
-@pytest.mark.parametrize("name", _CLIENT_CHANNEL_PHOTO_SCRIPTS)
-def test_client_channel_send_photo_caption_uses_form_string_not_dash_F(name):
+@pytest.mark.parametrize("name", _CAPTION_GUARDED_SCRIPTS)
+def test_caption_guarded_script_caption_uses_form_string_not_dash_F(name):
     code = _code_only(_SCRIPTS[name].read_text())
     assert not _UNSAFE_CAPTION_FORM.search(code), (
         f'{name} still builds -F "caption=..." — curl treats a value '
@@ -283,3 +294,91 @@ def test_form_string_sends_at_prefixed_caption_literally_not_as_file():
     assert form_string.returncode != 26, (
         f"--form-string still trips curl's @ file-upload parsing (exit {form_string.returncode})"
     )
+
+
+# ── reviewer_send_file.sh: generic bot_channels lookup + extension dispatch ─────────
+# reviewer_send_file.sh (the FILE counterpart of reviewer_send.sh) resolves
+# token_env_key/allowed_chat_ids from bot_channels at runtime instead of hardcoding a
+# single channel's token/chat like its siblings above. These tests run the ACTUAL
+# heredoc/case-statement blocks extracted verbatim from the shipped script (so a future
+# edit can't silently drift from what's tested) against an ephemeral throwaway Postgres
+# (never the live substrate — assert_dsn_is_not_production guards every DSN used here).
+_REVIEWER_SEND_FILE = _SCRIPTS["reviewer_send_file.sh"]
+_HEREDOC_RE = re.compile(r"<<'PY'\n(.*?)\nPY\n", re.DOTALL)
+_CASE_BLOCK_RE = re.compile(r"shopt -s nocasematch\n.*?\nshopt -u nocasematch", re.DOTALL)
+
+
+def _extract_channel_lookup_snippet() -> str:
+    m = _HEREDOC_RE.search(_REVIEWER_SEND_FILE.read_text())
+    assert m, "reviewer_send_file.sh: could not find the <<'PY' ... PY channel-lookup heredoc"
+    return m.group(1)
+
+
+def _extract_method_dispatch_block() -> str:
+    m = _CASE_BLOCK_RE.search(_REVIEWER_SEND_FILE.read_text())
+    assert m, "reviewer_send_file.sh: could not find the nocasematch METHOD dispatch block"
+    return m.group(0)
+
+
+@pytest.fixture
+def bot_channels_db(pg_dsn):
+    assert_dsn_is_not_production(pg_dsn)
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("""CREATE TABLE bot_channels (
+            channel_key text PRIMARY KEY, token_env_key text,
+            allowed_chat_ids bigint[])""")
+    return pg_dsn
+
+
+def _run_channel_lookup(channel: str, dsn: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "DATABASE_URL": dsn, "PYTHONPATH": str(_ROOT)}
+    env.pop("SUPABASE_DB_URL", None)
+    return subprocess.run(
+        [sys.executable, "-", channel], input=_extract_channel_lookup_snippet(),
+        text=True, capture_output=True, env=env, cwd=str(_ROOT), timeout=20,
+    )
+
+
+def test_channel_lookup_resolves_token_and_chat_from_bot_channels(bot_channels_db):
+    with psycopg.connect(bot_channels_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO bot_channels (channel_key, token_env_key, allowed_chat_ids) "
+            "VALUES (%s, %s, %s)",
+            ("t-reviewer-file", "T_REVIEWER_FILE_BOT_TOKEN", [123456]),
+        )
+    r = _run_channel_lookup("t-reviewer-file", bot_channels_db)
+    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert r.stdout.strip() == "T_REVIEWER_FILE_BOT_TOKEN 123456"
+
+
+def test_channel_lookup_fails_closed_for_unknown_channel(bot_channels_db):
+    r = _run_channel_lookup("no-such-channel", bot_channels_db)
+    assert r.returncode == 2, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+def test_channel_lookup_fails_closed_when_no_allowed_chat_ids(bot_channels_db):
+    with psycopg.connect(bot_channels_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO bot_channels (channel_key, token_env_key, allowed_chat_ids) "
+            "VALUES (%s, %s, %s)",
+            ("t-no-chat", "T_NO_CHAT_BOT_TOKEN", []),
+        )
+    r = _run_channel_lookup("t-no-chat", bot_channels_db)
+    assert r.returncode == 2, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+@pytest.mark.parametrize("filename,expected", [
+    ("report.pdf", "sendDocument"),
+    ("screenshot.png", "sendPhoto"),
+    ("photo.JPG", "sendPhoto"),
+    ("archive.zip", "sendDocument"),
+    ("weird,name;here.jpeg", "sendPhoto"),
+])
+def test_reviewer_send_file_method_dispatch_by_extension(filename, expected):
+    block = _extract_method_dispatch_block()
+    script = f'FILE="{filename}"\n{block}\necho "METHOD:$METHOD"'
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0, r.stderr
+    assert f"METHOD:{expected}" in r.stdout
