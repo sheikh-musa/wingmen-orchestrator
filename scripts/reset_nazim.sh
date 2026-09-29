@@ -101,7 +101,7 @@ if [ -z "$HANDOFF" ]; then
   if [ "${RESET_FORCE:-0}" != 1 ]; then echo "REFUSING /clear (RESET_FORCE=1 to override)." >&2; exit 3; fi
   echo "[reset_nazim] RESET_FORCE=1 — proceeding despite no handoff." >&2
 else
-  _mtime="$(stat -f %m "$HANDOFF" 2>/dev/null || stat -c %Y "$HANDOFF" 2>/dev/null || echo 0)"
+  _mtime="$(stat -c %Y "$HANDOFF" 2>/dev/null || stat -f %m "$HANDOFF" 2>/dev/null || echo 0)"
   _age=$(( _now - _mtime ))
   if [ "$_age" -gt "$FRESH_MAX" ]; then
     echo "[reset_nazim] HANDOFF-FIRST GATE: FAIL — newest handoff $HANDOFF is ${_age}s old (> ${FRESH_MAX}s), STALE. Write a fresh handoff first." >&2

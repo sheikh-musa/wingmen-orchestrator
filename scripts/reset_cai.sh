@@ -39,8 +39,6 @@ if [ -n "${TMUX_PANE:-}" ]; then
     echo "[reset_cai] RESET_ALLOW_SELF=1 — proceeding despite self-fire (NOT for a real recycle)." >&2
   fi
 fi
-[ -f "$HANDOFF" ] || { echo "ERROR: restore point $HANDOFF missing — refusing to clear." >&2; exit 3; }
-
 # Never clear a BUSY body: a /clear discards work in flight. The definition of
 # "busy" lives in the shared lib (pane_busy) so this script and reset_orch.sh
 # cannot drift — drift is exactly what let a foreground-only guard miss a body
@@ -66,6 +64,12 @@ if [ "$CC_BUSY" = 1 ]; then
     exit 5
   fi
 fi
+
+# Restore point must exist — checked AFTER the busy gate (backlog#68: a busy body
+# refuses FIRST, never probe a busy pane's handoff; matches reset_nazim.sh's
+# busy-first order — the two had drifted, which is exactly the reset-family drift
+# the shared pane_busy lib exists to prevent).
+[ -f "$HANDOFF" ] || { echo "ERROR: restore point $HANDOFF missing — refusing to clear." >&2; exit 3; }
 
 # LAYER 3 (op#11594) — QUEUED-COMPOSER GATE: refuse if a QUEUED/dim message is
 # present (inert to the BSpace wipe below — the /clear would stage BEHIND it and

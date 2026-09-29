@@ -32,7 +32,7 @@ require_fresh_handoff() {
     return 3
   fi
 
-  mtime="$(stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo 0)"
+  mtime="$(stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null || echo 0)"
   age=$(( now - mtime ))
 
   if [ "$age" -gt "$max_sec" ]; then

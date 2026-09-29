@@ -167,7 +167,11 @@ if [ -z "$_H" ] || [ ! -f "$_H" ]; then
 fi
 HANDOFF="$_H"
 NOW=$(date +%s)
-MTIME=$(stat -f %m "$HANDOFF" 2>/dev/null || stat -c %Y "$HANDOFF" 2>/dev/null)
+# Linux-FIRST: `stat -f %m` is macOS syntax; on Linux `stat -f` = --file-system and
+# emits `File: "..."` (exit 0!) so the fallback never fired and $(( NOW - MTIME ))
+# choked on "File: unbound variable" (backlog#68). Try Linux `stat -c %Y` first, then
+# the macOS `stat -f %m` fallback — correct on both.
+MTIME=$(stat -c %Y "$HANDOFF" 2>/dev/null || stat -f %m "$HANDOFF" 2>/dev/null)
 AGE=$(( NOW - MTIME ))
 if [ "$AGE" -gt "$MAX_AGE" ]; then
   echo "self_recycle: REFUSED — handoff is ${AGE}s old (max ${MAX_AGE}s). Write a fresh one FIRST." >&2

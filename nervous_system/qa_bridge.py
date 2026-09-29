@@ -72,7 +72,7 @@ async def _process_finding(supabase: SupabaseAsyncClient, finding: dict) -> None
             return
 
     # Bridge: create a new bug report
-    from bug_pipeline import create_bug_report
+    from legacy.bug_pipeline import create_bug_report
 
     bug = await create_bug_report(
         supabase,
