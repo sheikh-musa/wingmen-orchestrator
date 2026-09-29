@@ -58,22 +58,41 @@ def _dsn() -> "str | None":
 
 
 def fetch_open_asks(conn) -> list:
-    """Every OPEN operator_asks row, waiting-on-you first (op#22669's top
+    """Every triaged-open operator_asks row (migration 082: triage_state='ask'
+    only — a 'captured' row has not been judged to even BE a request yet, see
+    fetch_captured_summary() below), waiting-on-you first (op#22669's top
     priority — mirrors db.py's build_asks_query() 'waiting_on_musa' ordering),
     then oldest-first within each group."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, ask, delegated_to, waiting_on_operator, chase_by, created_at "
-            "FROM operator_asks WHERE closed_at IS NULL "
+            "SELECT id, triage_summary, delegated_to, waiting_on_operator, chase_by, created_at "
+            "FROM operator_asks WHERE closed_at IS NULL AND triage_state = 'ask' "
             "ORDER BY waiting_on_operator DESC, created_at ASC"
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def render_digest(rows: list) -> str:
-    """Pure formatting — no DB/network — so this is trivially unit-testable."""
-    if not rows:
+def fetch_captured_summary(conn) -> dict:
+    """count + oldest created_at of untriaged 'captured' rows — never
+    enumerated or shown as asks (bus #45557 condition 3), just a nudge that
+    something needs a human/agent triage pass via scripts/asks_triage.py."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), min(created_at) FROM operator_asks "
+            "WHERE closed_at IS NULL AND triage_state = 'captured'"
+        )
+        count, oldest = cur.fetchone()
+        return {"count": count or 0, "oldest": oldest}
+
+
+def render_digest(rows: list, captured: "dict | None" = None) -> str:
+    """Pure formatting — no DB/network — so this is trivially unit-testable.
+    `rows` must already be triage_state='ask' only — triage_summary is the
+    ONLY text ever shown here, never the raw `ask` column (bus #45557
+    condition 3 — a captured row's raw text must never leak into the digest)."""
+    captured = captured or {"count": 0, "oldest": None}
+    if not rows and not captured["count"]:
         return "📋 Daily asks digest — nothing open. The ledger is clear."
     waiting = [r for r in rows if r.get("waiting_on_operator")]
     others = [r for r in rows if not r.get("waiting_on_operator")]
@@ -82,12 +101,21 @@ def render_digest(rows: list) -> str:
         lines.append("")
         lines.append("WAITING ON YOU:")
         for r in waiting:
-            lines.append(f"  #{r['id']} ({r.get('delegated_to') or '?'}): {r['ask']}")
+            lines.append(f"  #{r['id']} ({r.get('delegated_to') or '?'}): {r['triage_summary']}")
     if others:
         lines.append("")
         lines.append("Open / in progress:")
         for r in others:
-            lines.append(f"  #{r['id']} ({r.get('delegated_to') or 'unassigned'}): {r['ask']}")
+            lines.append(f"  #{r['id']} ({r.get('delegated_to') or 'unassigned'}): {r['triage_summary']}")
+    if captured["count"]:
+        oldest = captured["oldest"]
+        age = ""
+        if oldest is not None:
+            now = datetime.now(oldest.tzinfo or timezone.utc)
+            hours = (now - oldest).total_seconds() / 3600
+            age = f", oldest {hours:.0f}h"
+        lines.append("")
+        lines.append(f"({captured['count']} messages not yet sorted{age})")
     return "\n".join(lines)
 
 
@@ -140,7 +168,8 @@ def main(argv=None) -> int:
 
     with psycopg.connect(dsn, connect_timeout=10) as conn:
         rows = fetch_open_asks(conn)
-    digest = render_digest(rows)
+        captured = fetch_captured_summary(conn)
+    digest = render_digest(rows, captured)
 
     if args.dry_run:
         print(digest)

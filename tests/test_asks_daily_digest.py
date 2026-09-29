@@ -12,7 +12,10 @@ add = importlib.import_module("scripts.asks_daily_digest")
 
 def row(id=1, ask="do the thing", delegated_to="cc-scholar", waiting_on_operator=False,
         chase_by=None, created_at="2026-09-27T10:00:00Z"):
-    return {"id": id, "ask": ask, "delegated_to": delegated_to,
+    # migration 082: fetch_open_asks() now selects triage_summary (never the
+    # raw `ask` column) — the `ask` kwarg name is kept for existing callers'
+    # readability but populates triage_summary, matching the real query shape.
+    return {"id": id, "triage_summary": ask, "delegated_to": delegated_to,
             "waiting_on_operator": waiting_on_operator, "chase_by": chase_by,
             "created_at": created_at}
 
@@ -61,6 +64,42 @@ def test_unassigned_delegated_to_falls_back_to_label():
     assert "unassigned" in digest
 
 
+# ── migration 082: captured-bucket nudge line, never enumerated ──────────────
+def test_captured_count_line_appears_with_age():
+    digest = add.render_digest([], {"count": 5, "oldest": datetime(2026, 9, 27, 0, 0, tzinfo=timezone.utc)})
+    assert "5 messages not yet sorted" in digest
+    assert "oldest" in digest
+
+
+def test_no_captured_line_when_count_zero():
+    rows = [row(id=1)]
+    digest = add.render_digest(rows, {"count": 0, "oldest": None})
+    assert "not yet sorted" not in digest
+
+
+def test_empty_with_zero_captured_still_says_ledger_clear():
+    assert "nothing open" in add.render_digest([], {"count": 0, "oldest": None})
+
+
+def test_not_ledger_clear_when_only_captured_rows_exist():
+    """A digest must not claim 'nothing open' when there ARE untriaged
+    captures sitting in the ledger — only when both buckets are truly empty."""
+    digest = add.render_digest([], {"count": 3, "oldest": datetime(2026, 9, 27, 0, 0, tzinfo=timezone.utc)})
+    assert "nothing open" not in digest
+    assert "3 messages not yet sorted" in digest
+
+
+def test_digest_never_shows_raw_ask_text_only_triage_summary():
+    """render_digest must render triage_summary, never a raw `ask` field —
+    even if a caller's row dict happens to still carry one (defence in depth:
+    fetch_open_asks() no longer SELECTs `ask` at all)."""
+    r = row(id=1, ask="clean summary")
+    r["ask"] = "RAW UNTRIAGED TEXT SHOULD NEVER APPEAR"
+    digest = add.render_digest([r])
+    assert "RAW UNTRIAGED TEXT SHOULD NEVER APPEAR" not in digest
+    assert "clean summary" in digest
+
+
 # ── dedup: at most one send per UTC calendar day ──────────────────────────────
 def test_already_sent_today_false_when_state_file_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(add, "STATE_FILE", tmp_path / "nope.json")
@@ -93,6 +132,7 @@ def test_already_sent_today_false_on_corrupt_state_file(tmp_path, monkeypatch):
 class _FakeCur:
     def execute(self, *a, **k): pass
     def fetchall(self): return []
+    def fetchone(self): return (0, None)
     @property
     def description(self): return []
     def __enter__(self): return self

@@ -96,6 +96,23 @@ def test_open_ask_links_outbound_msg_id(operator_ledger_db):
     assert got == outbound_id
 
 
+def test_open_ask_sets_triage_state_ask_with_summary_at_insert(operator_ledger_db):
+    """migration 082: asks_open.py rows are always deliberate, already-
+    summarized asks — they need no human triage step, unlike
+    maybe_track_ask()'s raw inbound captures which start at 'captured'."""
+    import psycopg
+    rid = ao.open_ask("[__test__] triage-at-open round-trip", delegated_to="__test_body__")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT triage_state, triage_summary, triaged_by FROM operator_asks WHERE id=%s",
+            (rid,),
+        )
+        triage_state, triage_summary, triaged_by = cur.fetchone()
+    assert triage_state == "ask"
+    assert triage_summary == "[__test__] triage-at-open round-trip"
+    assert triaged_by == "asks_open"
+
+
 def test_open_ask_defaults_delegated_to_env_or_orch_console(operator_ledger_db, monkeypatch):
     import psycopg
     monkeypatch.delenv("ORCH_AGENT_ID", raising=False)

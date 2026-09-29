@@ -143,6 +143,23 @@ MAX_ASKS_CHASE_PER_RUN = _envint("SLA_ASKS_MAX_CHASE_PER_RUN", 3)
 # the exact silent-gap this net exists to close. Locked by test_aged_rr_message_type_valid.
 PAGE_MESSAGE_TYPE = "blocker"
 
+# migration 082 (bus #45552 -> #45555 -> #45557 GO condition 3): untriaged
+# 'captured' operator_asks rows aging past SLA_CAPTURED_AGE_MIN get the owning
+# triage body paged once, same dead-man's-switch dedup/backoff shape as the
+# asks-chase net above (a single aggregate page keyed on the OLDEST captured
+# row's id, not one per row — this is a "go triage the backlog" nudge, not a
+# per-message alert). Channel/tag -> owning body mapping per ORCH-TOPOLOGY-001
+# per-channel operator-thread ownership: nazim-console/tmux-console -> orch-
+# console, orch-channel -> cc-orchestrator.
+CAPTURED_AGE_MIN = _envint("SLA_CAPTURED_AGE_MIN", 720)          # 12h floor
+CAPTURED_REPAGE_EVERY_MIN = _envint("SLA_CAPTURED_REPAGE_EVERY_MIN", 720)
+CAPTURED_TAG_OWNER = {
+    "nazim-console": "orch-console",
+    "tmux-console": "orch-console",
+    "orch-channel": "cc-orchestrator",
+}
+DEFAULT_CAPTURED_OWNER = "orch-console"
+
 # Agents to drop from actioning entirely (comma-separated). Lever for Nazim to
 # exclude e.g. the operator-attended hub itself if paging on the hub's own
 # chronic unread proves circular/noisy. Empty by default (nothing excluded).
@@ -1089,6 +1106,94 @@ def chase_waiting_asks(targets, *, dry, now, chase_state, send_chase,
     return sent
 
 
+def captured_triage_page_target(rows, *, now, page_state, age_min=CAPTURED_AGE_MIN,
+                                 repage_every_min=CAPTURED_REPAGE_EVERY_MIN):
+    """PURE: a single aggregate target (not one per row) for the oldest
+    untriaged 'captured' bucket, once it's aged past age_min, re-paged at
+    most every repage_every_min (dead-man's-switch dedup, keyed on the
+    literal string 'captured' in page_state — there is only ever one bucket).
+    `rows` are (id, created_epoch, owner) tuples, oldest-first. Returns None
+    if empty or not yet due."""
+    if not rows:
+        return None
+    oldest_id, oldest_epoch, owner = rows[0]
+    if oldest_epoch is None or now < oldest_epoch + age_min * 60:
+        return None
+    last = page_state.get("captured", 0) or 0
+    if (now - last) < repage_every_min * 60:
+        return None
+    return {"count": len(rows), "oldest_id": oldest_id, "oldest_epoch": oldest_epoch,
+            "owner": owner or DEFAULT_CAPTURED_OWNER}
+
+
+def page_captured_triage(target, *, dry, now, page_state, send_page) -> bool:
+    """Dead-man's-switch: page_state['captured'] stamped ONLY on a confirmed
+    send. `send_page(owner, target)->bool` injected for testability."""
+    if target is None or dry:
+        return False
+    ok = send_page(target["owner"], target)
+    if ok:
+        page_state["captured"] = now
+    return ok
+
+
+def _fetch_captured_asks(conn):
+    """Impure: untriaged 'captured' operator_asks rows, oldest-first, joined
+    to operator_messages for the owning triage body per channel/tag
+    (source_msg_id is not a real FK, same house style as elsewhere in this
+    ledger — a missing/unmatched join just falls back to DEFAULT_CAPTURED_OWNER
+    below). Returns (id, created_epoch, owner) tuples."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT oa.id, extract(epoch FROM oa.created_at), om.channel, om.tag "
+            "FROM operator_asks oa "
+            "LEFT JOIN operator_messages om ON om.id = oa.source_msg_id "
+            "WHERE oa.closed_at IS NULL AND oa.triage_state = 'captured' "
+            "ORDER BY oa.created_at ASC"
+        )
+        out = []
+        for rid, epoch, channel, tag in cur.fetchall():
+            owner = CAPTURED_TAG_OWNER.get(tag) if channel == "telegram" else None
+            if owner is None and channel == "tmux-console":
+                owner = CAPTURED_TAG_OWNER["tmux-console"]
+            out.append((rid, epoch, owner or DEFAULT_CAPTURED_OWNER))
+        return out
+
+
+def _send_captured_triage_page(conn, owner: str, target: dict) -> bool:
+    """Impure: post ONE P1 aggregate page to the owning triage body — never
+    per-row, never to the operator. Returns True only on a committed insert."""
+    count = target.get("count")
+    oldest_id = target.get("oldest_id")
+    owner = owner or DEFAULT_CAPTURED_OWNER
+    subj = f"[captured-triage] {count} untriaged operator_asks row(s), oldest #{oldest_id}"
+    body = (
+        f"{count} operator_asks row(s) are still triage_state='captured' (never judged "
+        f"ask/not_an_ask/done), oldest is #{oldest_id}, past the "
+        f"{CAPTURED_AGE_MIN // 60}h floor. Triage via scripts/asks_triage.py "
+        "<id> ask|not|done — raw captures never reach the daily digest until triaged."
+    )
+    try:
+        if not dry_identity_guard(conn):
+            return False
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                "  requires_response,priority,is_test) "
+                "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
+                (owner, PAGE_MESSAGE_TYPE, subj, body))
+        conn.commit()
+        log(f"captured-triage SENT oldest#{oldest_id} count={count} -> {owner}")
+        return True
+    except Exception as e:
+        log(f"captured-triage INSERT failed oldest#{oldest_id} -> {owner}: {e!r}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def _fetch_waiting_asks(conn):
     """Impure: OPEN operator_asks rows with waiting_on_operator=true, plus epoch
     timestamps (extract(epoch FROM ...) done in SQL) so the pure due-check above
@@ -1460,6 +1565,28 @@ def run(dry: bool, injected: list[dict] | None = None,
                     + ", ".join(f"#{t['id']}->{t.get('delegated_to')}" for t in asks_targets))
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"asks-chase ERROR: {e!r}")
+
+        # migration 082 (bus #45557 condition 3): the oldest untriaged
+        # 'captured' bucket, aged past CAPTURED_AGE_MIN, gets its owning body
+        # paged once (aggregate, not per-row). Same observe-first doctrine and
+        # the same enable gate as the asks-chase net above.
+        captured_dry = dry or os.environ.get("SLA_ASKS_CHASE_ENABLED", "0") != "1"
+        try:
+            captured_state = state.setdefault("captured_triage", {})
+            captured_target = captured_triage_page_target(
+                _fetch_captured_asks(conn), now=now, page_state=captured_state)
+            if captured_target:
+                sent = page_captured_triage(
+                    captured_target, dry=captured_dry, now=now, page_state=captured_state,
+                    send_page=lambda owner, t: _send_captured_triage_page(conn, owner, t))
+                actions.append(
+                    f"{'[DRY] ' if captured_dry else ''}CAPTURED-TRIAGE "
+                    f"oldest#{captured_target['oldest_id']} count={captured_target['count']} "
+                    f"-> owner {captured_target['owner']}")
+                log(f"captured-triage [{'DRY/observe' if captured_dry else 'ARMED'}] "
+                    f"sent={1 if sent else 0} target={captured_target}")
+        except Exception as e:  # fail LOUD, keep the scan alive
+            log(f"captured-triage ERROR: {e!r}")
 
         if persist:
             save_state(state)
