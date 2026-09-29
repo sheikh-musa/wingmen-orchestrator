@@ -18,6 +18,7 @@ parseable JSON.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -53,7 +54,13 @@ def build_evidence(content_hash: str, deploy_dir: Path) -> dict:
     pytest_log = deploy_dir / "pytest.log"
     if pytest_log.is_file():
         text = pytest_log.read_text(errors="replace")
-        checks["unit-tests"] = "fail" if ("FAILED" in text or " failed" in text) else "pass"
+        # orch-console review (#45683): a missing/truncated/collection-error log has
+        # neither "FAILED" nor " failed" in it either, so the old "fail only if a
+        # failure marker is present" logic scored an EMPTY log "pass" — require the
+        # positive "N passed" signal too, not just the absence of a negative one.
+        ran_ok = re.search(r"\b\d+\s+passed\b", text) is not None
+        blew_up = "failed" in text.lower() or "error" in text.lower()
+        checks["unit-tests"] = "pass" if (ran_ok and not blew_up) else "fail"
 
     # G3 (mobile + desktop eyeball): render_console_pages.sh captures fleet.png +
     # lanes.png via Playwright "iPhone 13" emulation (390 CSS px) — a real 390px

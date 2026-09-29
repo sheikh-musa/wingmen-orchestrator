@@ -76,6 +76,38 @@ def test_shadow_wrapper_always_exits_0_when_python_is_broken(tmp_path):
     assert out.returncode == 0, out.stderr
 
 
+def test_shadow_wrapper_kills_a_hung_evaluator_within_the_timeout(tmp_path):
+    """orch-console review (#45683), condition 1: a stuck evaluator must not hang
+    deploy_console.sh. QUALITY_GATE_SHADOW_PYTHON points PY at a fake interpreter
+    that sleeps far longer than the (shortened, via QUALITY_GATE_SHADOW_TIMEOUT_SEC)
+    timeout — the real $ROOT/.venv/bin/python3 always exists in this repo and would
+    otherwise be picked before any fake one on PATH, masking this test."""
+    import time
+
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    sleepy_python = fake_bin / "python3"
+    sleepy_python.write_text("#!/usr/bin/env bash\nsleep 30\n")
+    sleepy_python.chmod(0o755)
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir()
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "QUALITY_GATE_SHADOW_PYTHON": str(sleepy_python),
+        "QUALITY_GATE_SHADOW_TIMEOUT_SEC": "2",
+    }
+    started = time.monotonic()
+    out = subprocess.run(
+        ["bash", str(_SHADOW), "deadbeef00000000", str(deploy_dir)],
+        capture_output=True, text=True, cwd=str(_ROOT), env=env, timeout=20,
+    )
+    elapsed = time.monotonic() - started
+    assert out.returncode == 0, out.stderr
+    assert elapsed < 15, f"wrapper took {elapsed}s — timeout did not fire"
+    err = (deploy_dir / "quality-gate.err").read_text()
+    assert "TIMED OUT" in err
+
+
 def test_shadow_wrapper_always_exits_0_with_pathological_deploy_dir(tmp_path):
     """A deploy-dir that isn't writable (or otherwise pathological) must not turn
     into a non-zero exit for the wrapper — only its OWN arg contract (missing
@@ -153,6 +185,24 @@ def test_evidence_builder_reads_pytest_log(tmp_path):
     (tmp_path / "pytest.log").write_text("1 failed, 4 passed\nFAILED tests/x.py::y\n")
     evidence = build_evidence("deadbeef00000000", tmp_path)
     assert evidence["checks"]["unit-tests"] == "fail"
+
+
+def test_evidence_builder_unit_tests_requires_a_positive_passed_signal(tmp_path):
+    """orch-console review (#45683), condition 2: the old logic scored 'pass'
+    whenever neither 'FAILED' nor ' failed' appeared — which is also true of an
+    EMPTY or truncated log, or one that blew up during collection before any test
+    ran. Require the positive 'N passed' signal, not just the absence of a
+    failure marker."""
+    (tmp_path / "pytest.log").write_text("")
+    evidence = build_evidence("deadbeef00000000", tmp_path)
+    assert evidence["checks"]["unit-tests"] == "fail", "an empty log must not score pass"
+
+    (tmp_path / "pytest.log").write_text(
+        "ERROR tests/conftest.py - ImportError: cannot import name 'x'\n"
+        "!!! Interrupted: 1 error during collection !!!\n"
+    )
+    evidence = build_evidence("deadbeef00000000", tmp_path)
+    assert evidence["checks"]["unit-tests"] == "fail", "a collection error must not score pass"
 
 
 def test_evidence_builder_reads_review_presence(tmp_path):
