@@ -17,6 +17,15 @@
 #                     (content-hash-keyed) must exist. Forces the review to run on
 #                     what you're actually shipping, not a stale/other diff.
 # Only then: launchctl kickstart (so /api/version updates) + record the deploy.
+#
+# SHADOW (bus #43108/#43109 GO'd 2026-09-24): after gate 4, nervous_system/
+# quality_gate.py evaluates this deploy against the `deploy-prod` ihsan floor
+# (all of G1-G10) in shadow mode — observation only, CANNOT block this script
+# (scripts/console_deploy_quality_gate_shadow.sh always exits 0; see its header
+# and tests/test_console_deploy_quality_gate_shadow.py). Verdict lands at
+# reports/console-deploy/<hash>/quality-gate-verdict.json for the operator to
+# read — it is expected to show gaps (the 4 hard gates above are a strict
+# subset of the full floor); that gap is what shadow mode exists to surface.
 set -uo pipefail
 cd "$HOME/wingmen/orchestrator" || exit 9
 set -a; source .env 2>/dev/null; set +a
@@ -96,6 +105,11 @@ EOF
   exit 6
 fi
 echo "        review present: $REVIEW ($(wc -l <"$REVIEW" | tr -d ' ') lines)"
+
+# ---- SHADOW: quality_gate.py (bus #43108/#43109 GO) — observation only, cannot
+# block this deploy by construction; see scripts/console_deploy_quality_gate_shadow.sh ----
+echo "  [shadow] quality-gate evidence for content $HASH..."
+bash "$(dirname "${BASH_SOURCE[0]}")/console_deploy_quality_gate_shadow.sh" "$HASH" "$DIR"
 
 # ---- all gates passed: deploy ----
 echo "== all gates passed -> kickstarting fleet-console =="
