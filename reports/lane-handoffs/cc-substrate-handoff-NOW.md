@@ -459,3 +459,49 @@ working tree — `reports/cc-substrate-boot.txt` (a copy of this session's boot 
 backup of this very file from earlier today). Neither was created by me this session; left
 untouched rather than deleted on a guess. Worth a `git clean`-adjacent decision by whoever
 next has full context on why they're there.
+
+## RECONSTITUTE HERE (2026-09-29 ~09:35Z, this session — supersedes everything above)
+
+**1. PR #215 — unchanged, DONE/CLOSED**, see above.
+
+**2. TRIAGE build — FULLY DONE, migration applied for real, PR #217 MERGED, both live
+checkouts synced. Nothing left to do on this item unless orch-console reopens it.**
+- Gate granted at bus #45707 (orch-console, sha256 `4525b1fd41ab570dd2ead5675d35fa756ea589b5cb30a35d29f698725b11d922`
+  verified against PR #217 head `4fad9421`). Also #45706 approved the 32 summaries with
+  edits: 6 duplicates already closed by hand (162/164/206/177/261/243, drop from backfill —
+  their UPDATEs correctly no-op since they're `closed_at`-guarded) and #228's summary needed
+  updating to "in progress (PR#230)".
+- Applied for real: `scripts/apply_migration.py 082 --silo tscuymavysscrvoberrr --gate 45707`
+  → `applied`, ledger note `gate=45707 from=orch-console`.
+- Readback matched orch-console's prediction exactly: open `triage_state='ask'` = **26**
+  (not 32 — the 6 closed duplicates correctly excluded), open `triage_state='captured'` = 10
+  (today's post-hand-triage messages, oldest 05:49Z). Updated #228 via `asks_triage.py 228
+  ask --summary "...in progress in the ADCDA re-plan (cosem PR#230)."`.
+- Merged **PR #217** (squash → `442d0b2` on `fable/substrate-safe-fixes`). CI was red (30
+  failures) but subset-rule confirmed identical to trunk's own current 30 failures (`comm
+  -23` empty both ways — same backlog#68 cluster) — merged on that basis, same precedent as
+  #215. Remote branch `feat/operator-asks-triage`'s local delete failed (same
+  worktree-checked-out-elsewhere pattern as #215's branch) — left alone.
+- **Pulled (fast-forward only) on both live checkouts** per orch-console's explicit order
+  (migrate-before-deploy): Mini `~/wingmen/orchestrator` (`0e86ea9..442d0b2`) and gzb
+  `/home/gazzai/wingmen/orchestrator` via `ssh gzb` (`48882ab..442d0b2`, gzb was further
+  behind so it also picked up #215's changes in the same ff — both clean, no conflicts, only
+  pre-existing untracked scratch files present on each, not touched).
+- Rendered `scripts/asks_daily_digest.py --dry-run` (sends/stamps nothing) and posted the
+  full text to orch-console — 26 open (6 waiting-on-Musa, 20 in-progress), footer "10
+  messages not yet sorted, oldest 4h" (well under the 12h page floor, no action needed).
+- Full trace reported to orch-console: bus **#45717** (reply-to #45707), all 6 of their
+  ordered steps confirmed done in sequence.
+
+**3. Pooler-capacity thread — now eligible to resume** per item 2 being genuinely done
+(migration applied, PR merged, both checkouts synced), but orch-console hasn't explicitly
+re-asked yet — **do not restart this on your own inference; wait for an explicit ask or
+reply-to on #45574/#45575/#45668 before touching `pool_size`.**
+
+**4. Standing items — unchanged, no action.** `held_commitments` #26 due 2026-10-01,
+migration 081 still HELD/reserved, backlog#68 still cc-orchestrator's.
+
+**On waking: reconcile unread bus first (Option B). If orch-console has replied to #45717
+(e.g. sorted the 10 captured rows, or explicitly re-asked about pooler capacity), action
+that. Otherwise nothing outstanding on items 1/2 — idle-wait for new work rather than
+inventing any.**
