@@ -80,15 +80,22 @@ def open_ask(ask: str, chase_hours: float | None = None, outbound_msg_id: int | 
             # (no make_interval(hours => float8) overload exists). Multiplying a
             # float8 by the `interval '1 hour'` literal handles fractional hours
             # correctly and needs no int truncation.
+            # migration 082: rows opened here are always deliberate, already-
+            # summarized asks (never raw captures), so they get triage_state='ask'
+            # with triage_summary=the ask text at insert time — no human triage
+            # step needed. Only maybe_track_ask()'s raw inbound captures start at
+            # the 'captured' default.
             cur.execute(
                 "INSERT INTO operator_asks "
-                "  (ask, delegated_to, waiting_on_operator, chase_by, outbound_msg_id) "
+                "  (ask, delegated_to, waiting_on_operator, chase_by, outbound_msg_id, "
+                "   triage_state, triage_summary, triaged_at, triaged_by) "
                 "VALUES (%s, %s, true, "
                 "  CASE WHEN %s::float8 IS NULL THEN NULL "
                 "       ELSE now() + (%s::float8 * interval '1 hour') END, "
-                "  %s) "
+                "  %s, 'ask', %s, now(), %s) "
                 "RETURNING id",
-                (ask, delegated_to, chase_hours, chase_hours, outbound_msg_id),
+                (ask, delegated_to, chase_hours, chase_hours, outbound_msg_id,
+                 ask, "asks_open"),
             )
             return cur.fetchone()[0]
 

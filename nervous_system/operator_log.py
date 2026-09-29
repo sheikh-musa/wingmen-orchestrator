@@ -269,6 +269,51 @@ def _is_operator_ask_surface(channel: str, tag, from_user_id) -> bool:
     return False
 
 
+# --- Triage heuristic (migration 082, bus #45557 condition 3) --------------
+# Cheap, reversible pre-classifier for bare acks ("ok", "thanks", "👍") so the
+# digest doesn't need a human pass for the overwhelming common case. Kept
+# deliberately conservative: a false 'not_an_ask' silently hides a real ask
+# from the digest, which is worse than leaving it in the 'captured' bucket
+# for a human/agent to clear via scripts/asks_triage.py. NEVER fires if the
+# text contains '?' or any token that reads as a request.
+_BARE_ACK_TOKENS = frozenset({
+    "ok", "okay", "k", "kk", "thanks", "thank", "thankyou", "ty", "thx",
+    "got", "it", "sounds", "good", "great", "nice", "cool", "yes", "yep",
+    "yeah", "sure", "noted", "understood", "perfect", "awesome", "np",
+})
+_REQUEST_TOKENS = frozenset({
+    "please", "can", "could", "would", "should", "need", "want", "check",
+    "fix", "build", "send", "show", "give", "find", "make", "add", "remove",
+    "update", "deploy", "run", "look", "investigate", "explain", "tell",
+    "why", "when", "where", "who", "how", "what",
+})
+
+
+def _heuristic_triage(text: str) -> str | None:
+    """Returns 'not_an_ask' only for an unambiguous bare acknowledgement;
+    None (defer — stays 'captured') for everything else, including anything
+    ambiguous. Reversible either way: a wrong call is undone with
+    `asks_triage.py <id> ask --summary ...`."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped or "?" in stripped:
+        return None
+    letters = re.sub(r"[^A-Za-z]", " ", stripped).split()
+    if not letters:
+        # no ASCII letters at all -> emoji/punctuation-only, reads as a bare ack
+        return "not_an_ask"
+    tokens = [t.lower().strip(".,!¡") for t in stripped.split()]
+    tokens = [t for t in tokens if t]
+    if len(tokens) > 3:
+        return None
+    if any(t in _REQUEST_TOKENS for t in tokens):
+        return None
+    if all(t in _BARE_ACK_TOKENS for t in tokens):
+        return "not_an_ask"
+    return None
+
+
 def maybe_track_ask(op_msg_id: int, direction: str, channel: str, tag,
                      text: str, from_user_id=None,
                      reply_to_tg_message_id: int | None = None) -> int | None:
@@ -312,10 +357,21 @@ def maybe_track_ask(op_msg_id: int, direction: str, channel: str, tag,
             if row is not None:
                 closed_id = row[0]
 
-        cur.execute(
-            "INSERT INTO operator_asks (ask, source_msg_id) VALUES (%s,%s) RETURNING id",
-            (text, op_msg_id),
-        )
+        heuristic = _heuristic_triage(text)
+        if heuristic == "not_an_ask":
+            # stays OPEN (closed_at IS NULL) — heuristic hits are reversible via
+            # asks_triage.py, unlike a human/agent 'not' triage which closes it.
+            cur.execute(
+                "INSERT INTO operator_asks "
+                "  (ask, source_msg_id, triage_state, triaged_at, triaged_by) "
+                "VALUES (%s,%s,'not_an_ask',now(),'heuristic') RETURNING id",
+                (text, op_msg_id),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO operator_asks (ask, source_msg_id) VALUES (%s,%s) RETURNING id",
+                (text, op_msg_id),
+            )
         rid = cur.fetchone()[0]
 
         if closed_id is not None:

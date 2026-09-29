@@ -153,7 +153,13 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                 closed_reason       text,
                 waiting_on_operator boolean NOT NULL DEFAULT false,
                 chase_by            timestamptz,
-                outbound_msg_id     bigint
+                outbound_msg_id     bigint,
+                triage_state        text NOT NULL DEFAULT 'captured'
+                                    CHECK (triage_state IN ('captured','ask','not_an_ask','done')),
+                triage_summary      text,
+                triage_evidence_ref text,
+                triaged_at          timestamptz,
+                triaged_by          text
             )
         """)
     return pg_dsn

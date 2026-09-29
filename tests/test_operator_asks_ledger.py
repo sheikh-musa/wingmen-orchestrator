@@ -228,3 +228,64 @@ def test_log_inbound_on_tmux_console_opens_an_ask_via_the_hook(operator_ledger_d
         cur.execute("SELECT id FROM operator_asks WHERE source_msg_id=%s", (rid,))
         row = cur.fetchone()
     assert row is not None, "log()'s inbound hook must open an ask for tmux-console"
+
+
+# ── migration 082: _heuristic_triage, pure, no DB ─────────────────────────────
+@pytest.mark.parametrize("text", ["ok", "Ok", "thanks", "thanks!", "got it",
+                                   "sounds good", "👍", "🙏", "yep", "np"])
+def test_heuristic_fires_on_bare_acks(text):
+    assert ol._heuristic_triage(text) == "not_an_ask"
+
+
+@pytest.mark.parametrize("text", [
+    "ok can you also check the deploy",   # has a request token
+    "why is this broken",                 # wh-word request token
+    "is this done?",                      # contains '?'
+    "please fix the migration",
+    "the schedule looks wrong for group 5",  # >3 tokens, not an ack list
+    "",
+    "   ",
+])
+def test_heuristic_never_fires_on_anything_ambiguous_or_a_request(text):
+    assert ol._heuristic_triage(text) is None
+
+
+def test_maybe_track_ask_heuristic_ack_stays_open_but_not_an_ask(operator_ledger_db):
+    """A heuristic hit must NOT close the row (bus #45557 condition 3's
+    reversibility requirement) — it stays open, just excluded from the digest
+    by triage_state, and is one asks_triage.py call away from correction."""
+    import psycopg
+    rid = ol.maybe_track_ask(112233, "inbound", "tmux-console", None, "thanks")
+    assert rid is not None
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT triage_state, triaged_by, closed_at FROM operator_asks WHERE id=%s", (rid,))
+        triage_state, triaged_by, closed_at = cur.fetchone()
+    assert triage_state == "not_an_ask"
+    assert triaged_by == "heuristic"
+    assert closed_at is None, "heuristic classification must stay reversible (row not closed)"
+
+
+def test_maybe_track_ask_ambiguous_text_defaults_to_captured(operator_ledger_db):
+    import psycopg
+    rid = ol.maybe_track_ask(112244, "inbound", "tmux-console", None,
+                              "can you check the cosem schedule for group 5")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triage_state FROM operator_asks WHERE id=%s", (rid,))
+        (triage_state,) = cur.fetchone()
+    assert triage_state == "captured"
+
+
+# ── migration 082 no-drop invariant (bus #45557 condition 5) ─────────────────
+def test_every_row_is_in_exactly_one_triage_bucket(operator_ledger_db):
+    import psycopg
+    ol.maybe_track_ask(1, "inbound", "tmux-console", None, "thanks")
+    ol.maybe_track_ask(2, "inbound", "tmux-console", None,
+                        "can you check the cosem schedule for group 5")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM operator_asks WHERE triage_state NOT IN "
+            "('captured','ask','not_an_ask','done')"
+        )
+        (n,) = cur.fetchone()
+    assert n == 0
