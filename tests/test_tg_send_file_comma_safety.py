@@ -29,6 +29,7 @@ _SCRIPTS = {
     "tg_send_file.sh": _ROOT / "scripts" / "tg_send_file.sh",
     "irsyad_support_send_file.sh": _ROOT / "scripts" / "irsyad_support_send_file.sh",
     "angullia_send_photo.sh": _ROOT / "scripts" / "angullia_send_photo.sh",
+    "cosem_tdu_support_send_photo.sh": _ROOT / "scripts" / "cosem_tdu_support_send_photo.sh",
 }
 
 _STAGE_CALL = re.compile(r"tg_safe_upload_stage\s+\w+\s+")
@@ -215,40 +216,43 @@ code=$(curl -s -o /dev/null http://127.0.0.1:1 --max-time 2 -w "%{http_code}") |
     )
 
 
-# ── angullia_send_photo.sh: client-channel-specific guards (bus #44679) ─────────────
-# angullia is a CLIENT channel (Rhaihan can see it), so a caption needs the same
-# guards angullia_send.sh runs on its text — a photo caption is just as capable of
-# leaking an internal name or an arg-swap as a plain message. Separately, curl's -F
-# treats a value starting with '@' or '<' as a file to read rather than literal
-# text, so a caption like "@Rhaihan" would try to upload/read a local file instead
-# of being sent — --form-string has no such special-casing.
+# ── client-channel photo scripts: caption-specific guards (bus #44679) ─────────────
+# angullia and cosem-tdu are CLIENT channels (the client can see them), so a caption
+# needs the same guards the text-send sibling runs on its own text — a photo caption
+# is just as capable of leaking an internal name or an arg-swap as a plain message.
+# Separately, curl's -F treats a value starting with '@' or '<' as a file to read
+# rather than literal text, so a caption like "@Rhaihan" would try to upload/read a
+# local file instead of being sent — --form-string has no such special-casing.
 _UNSAFE_CAPTION_FORM = re.compile(r'-F\s+"caption=')
+_CLIENT_CHANNEL_PHOTO_SCRIPTS = ("angullia_send_photo.sh", "cosem_tdu_support_send_photo.sh")
 
 
-def test_angullia_send_photo_guards_the_caption_like_a_client_message():
-    code = _code_only(_SCRIPTS["angullia_send_photo.sh"].read_text())
+@pytest.mark.parametrize("name", _CLIENT_CHANNEL_PHOTO_SCRIPTS)
+def test_client_channel_send_photo_guards_the_caption_like_a_client_message(name):
+    code = _code_only(_SCRIPTS[name].read_text())
     assert "_send_arg_guard" in code, (
-        "angullia_send_photo.sh doesn't run _send_arg_guard on the caption — a photo "
-        "caption can carry the same channel/tag arg-swap footgun angullia_send.sh guards "
-        "against on its text (op#16353)"
+        f"{name} doesn't run _send_arg_guard on the caption — a photo "
+        "caption can carry the same channel/tag arg-swap footgun the text-send sibling "
+        "guards against on its text (op#16353)"
     )
     assert "_client_send_leak_guard" in code, (
-        "angullia_send_photo.sh doesn't run _client_send_leak_guard on the caption — "
-        "angullia is a CLIENT channel, so a caption can leak an internal name/escalation "
+        f"{name} doesn't run _client_send_leak_guard on the caption — "
+        "this is a CLIENT channel, so a caption can leak an internal name/escalation "
         "phrase exactly like the text path does without it (op#21145)"
     )
 
 
-def test_angullia_send_photo_caption_uses_form_string_not_dash_F():
-    code = _code_only(_SCRIPTS["angullia_send_photo.sh"].read_text())
+@pytest.mark.parametrize("name", _CLIENT_CHANNEL_PHOTO_SCRIPTS)
+def test_client_channel_send_photo_caption_uses_form_string_not_dash_F(name):
+    code = _code_only(_SCRIPTS[name].read_text())
     assert not _UNSAFE_CAPTION_FORM.search(code), (
-        'angullia_send_photo.sh still builds -F "caption=..." — curl treats a value '
+        f'{name} still builds -F "caption=..." — curl treats a value '
         'starting with @ or < as a file to read, so a caption like "@Rhaihan" or "<3" '
         "would try to upload/read a local file instead of being sent literally. "
         "Use --form-string for the caption (and chat_id)."
     )
     assert '--form-string "caption=' in code, (
-        "expected --form-string for the caption in angullia_send_photo.sh"
+        f"expected --form-string for the caption in {name}"
     )
 
 
