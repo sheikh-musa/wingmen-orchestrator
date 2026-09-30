@@ -174,7 +174,11 @@ async def _route_single_message(
         bool(msg.get("is_test")),
     ):
         try:
-            res = await asyncio.to_thread(agent_wake.wake_agent, msg["to_agent"], f"msg #{msg_id}")
+            # row_id → per-row delivery ceiling + PENDING-RETRY marker on a transient outcome
+            # (Fable audit 2026-09-30 B-1 (iii)): a busy/debounced/rc=3 doorbell is no longer a
+            # single dropped attempt — the backstop sweep retries the row before its grace.
+            res = await asyncio.to_thread(agent_wake.wake_agent, msg["to_agent"], f"msg #{msg_id}",
+                                          row_id=msg_id)
             logger.info(f"realtime: auto-wake {msg.get('to_agent')} for #{msg_id}: {res}")
             if res.get("alert_due") and bot and musa_chat_id:
                 await bot.send_message(

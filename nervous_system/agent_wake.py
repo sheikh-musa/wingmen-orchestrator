@@ -38,6 +38,14 @@ for _d in ("/usr/local/bin", "/opt/homebrew/bin"):
         os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _d
 _DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 _WAKE_DIR = ORCH / "scripts" / ".agent_wake"
+# PENDING-RETRY markers (Fable audit 2026-09-30 B-1 (iii), op#23531): a wake outcome that is
+# TRANSIENT (pane busy, debounced, submit unverified, per-agent cap) used to be a single
+# dropped attempt — only the backstop sweep retried, and by then the row was age-capped
+# (263 'busy' in 48h on the Mini; the #46579 14-min P0). wake_agent() now leaves a per-row
+# marker here on those outcomes and clears it on a verified wake; wake_backstop_sweep retries
+# marked rows BEFORE its grace. Host-local (a marker means "this host's pane was busy").
+_PENDING_DIR = _WAKE_DIR / "pending"
+PENDING_RETRY_WHYS = frozenset({"busy (mid-turn)", "debounced", "submit-unverified", "wake-cap"})
 _DEBOUNCE_S = 45
 _CAP_LIMIT = 5            # CAI-RESP-259 Q4: hard cap...
 _CAP_WINDOW_S = 300      # ...of 5 wakes per 5 min per agent; cap-hit must fail LOUD.
@@ -401,6 +409,55 @@ def _save(agent_id: str, state: dict) -> None:
     (_WAKE_DIR / f"{agent_id}.json").write_text(json.dumps(state))
 
 
+def _pending_name(row_id) -> str:
+    """Filename-safe marker name: anything outside [A-Za-z0-9_-] becomes '_' (same rule as
+    scripts/lib/row_ceiling.sh) so a crafted id can never escape _PENDING_DIR."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", str(row_id)) + ".json"
+
+
+def record_pending(agent_id: str, row_id, why: str) -> None:
+    """Leave (or refresh) the pending-retry marker for `row_id`. Never raises — a marker
+    write failure must not break the doorbell (the row is durable on the bus anyway)."""
+    try:
+        _PENDING_DIR.mkdir(parents=True, exist_ok=True)
+        (_PENDING_DIR / _pending_name(row_id)).write_text(json.dumps(
+            {"agent": agent_id, "row_id": row_id, "why": why, "ts": time.time()}))
+    except Exception:  # noqa: BLE001 — advisory state; the bus row is the durable record
+        pass
+
+
+def clear_pending(row_id) -> None:
+    try:
+        (_PENDING_DIR / _pending_name(row_id)).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def pending_rows() -> list[dict]:
+    """Every pending marker on this host: [{agent, row_id, why, ts}]. Unreadable/corrupt
+    markers are skipped (and dropped) rather than crashing the caller."""
+    out: list[dict] = []
+    try:
+        files = sorted(_PENDING_DIR.iterdir()) if _PENDING_DIR.exists() else []
+    except Exception:  # noqa: BLE001
+        return out
+    for f in files:
+        try:
+            d = json.loads(f.read_text())
+            if "row_id" in d and "agent" in d:
+                out.append(d)
+            else:
+                f.unlink()
+        except Exception:  # noqa: BLE001 — corrupt marker: drop it
+            try:
+                f.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+    return out
+
+
 def _read_wakes(agent_id: str) -> list[float]:
     return list(_load(agent_id).get("wakes", []))
 
@@ -436,6 +493,24 @@ def cap_state(agent_id: str, now: float) -> dict:
 def wake_agent(agent_id: str, reason: str = "", dry_run: bool = False, now: float | None = None,
                row_id=None) -> dict:
     """Send the fixed wake signal to agent_id's lane. Returns a status dict.
+
+    PENDING-RETRY (Fable audit B-1): when `row_id` is given, a TRANSIENT non-delivery
+    (PENDING_RETRY_WHYS) leaves a marker the backstop sweep retries before its grace; a
+    verified wake clears it. Terminal outcomes (no session / row-capped / dry-run) leave
+    nothing — the sweep's own classification owns those.
+    """
+    res = _wake_agent_inner(agent_id, reason, dry_run, now, row_id)
+    if row_id is not None and not dry_run:
+        if res.get("woke"):
+            clear_pending(row_id)
+        elif res.get("why") in PENDING_RETRY_WHYS:
+            record_pending(agent_id, row_id, res.get("why", ""))
+    return res
+
+
+def _wake_agent_inner(agent_id: str, reason: str, dry_run: bool, now: float | None,
+                      row_id) -> dict:
+    """The delivery itself (unchanged semantics).
 
     On a cap hit returns {cap_hit: True} so the caller can fail LOUD (notify the
     operator) per CAI-RESP-259 Q4 — never silently drop. The message itself is

@@ -46,10 +46,15 @@ import psycopg
 from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.path at runtime)
     _pane_busy,
     auto_wake_enabled,
+    clear_pending,
+    pending_rows,
     resolve_tmux_session,
     should_backstop_wake,
     wake_agent,
 )
+
+_ORCH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+pending_rows_default = pending_rows   # the import; sweep_once's `pending_rows` param shadows it
 
 _DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 WAKE_SWEEP_SEC = int(os.environ.get("WAKE_SWEEP_SEC", "60"))     # cadence
@@ -60,14 +65,23 @@ WAKE_SWEEP_GRACE_S = int(os.environ.get("WAKE_SWEEP_GRACE_S", "90"))  # let real
 # (A) a target that resolves to NO live session (dead/unreachable — the correct pane-
 #     liveness signal, NOT a status/heartbeat field, so a wakeable on-demand body is
 #     never false-rotted) is quiesced + escalated ONCE; kills the dead-agent class.
-# (B) a row unread past CAP_AGE (~= grace + N*cadence — an age proxy for ~N pokes, since
-#     there is no per-row counter and wake state is per-agent) is quiesced + escalated ONCE.
+# (B) a row that has had CAP_DELIVERIES verified deliveries and is still unread is quiesced +
+#     escalated ONCE.
+# ATTEMPTS, NOT AGE (Fable audit 2026-09-30 B-1 / op#23531): the cap used to be an AGE proxy
+# (grace + N*cadence ≈ 390s from created_at). A row that landed while the pane was busy, during
+# a WS gap or a pooler-breaker window reached the sweep already "capped" with ZERO deliveries
+# and was quiesced — the #46579 14-min P0 was the designed worst case. The PRIMARY cap is now
+# the per-row count of VERIFIED deliveries (scripts/lib/row_ceiling.sh stamps one line per
+# verified submit under $HOME/.wingmen_state/rownudge/<row_id>, shared by every waker on the
+# host). WAKE_SWEEP_CAP_AGE_S survives only as a GENEROUS safety ceiling (default 1h) so a row
+# that can never be delivered still reaches the stuck-page pass — never the trigger.
 # `skipped_at` IS the once-guard: setting it excludes the row from EVERY future sweep, so
 # each row escalates exactly once. No new state/column (agent_messages has no escalated_at;
 # skipped_at alone suffices). Escalation is a single page to the operator-ops body.
-WAKE_SWEEP_CAP_N = int(os.environ.get("WAKE_SWEEP_CAP_N", "5"))
-WAKE_SWEEP_CAP_AGE_S = int(os.environ.get(
-    "WAKE_SWEEP_CAP_AGE_S", str(WAKE_SWEEP_GRACE_S + WAKE_SWEEP_CAP_N * WAKE_SWEEP_SEC)))
+WAKE_SWEEP_CAP_DELIVERIES = int(os.environ.get("WAKE_SWEEP_CAP_DELIVERIES", "3"))
+WAKE_SWEEP_CAP_AGE_S = int(os.environ.get("WAKE_SWEEP_CAP_AGE_S", "3600"))   # secondary ceiling
+_ROW_CEILING_DIR = os.environ.get("ROW_CEILING_DIR") or os.path.join(
+    os.path.expanduser("~"), ".wingmen_state", "rownudge")
 _ESCALATE_TO = os.environ.get("WAKE_SWEEP_ESCALATE_TO", "orch-console")
 
 # STUCK-PAGE age (Nazim #43063): (B) live-stuck must PAGE only when a row is genuinely stuck, NOT
@@ -148,11 +162,35 @@ def _to_agent(r):   return _rf(r, 1, "to_agent")
 def _created_at(r): return _rf(r, 6, "created_at")
 
 
-def is_capped(r, now_dt, cap_age_s: int) -> bool:
-    """(B) True iff the row has been unread longer than the re-wake cap (age is the proxy
-    for ~N pokes — there is no per-row counter, and wake state is per-agent). Unknown age
-    (no created_at) → NOT capped: fail toward keeping the backstop, never toward silently
-    quiescing a row we cannot age."""
+def _deliveries_of(row_id) -> "int | None":
+    """Verified deliveries of `row_id` on THIS host = stamp lines in its row_ceiling file
+    (scripts/lib/row_ceiling.sh: one line per verified submit, lifetime). None when the
+    state is unreadable (→ NOT capped: fail toward keeping the backstop)."""
+    if row_id is None:
+        return None
+    name = re.sub(r"[^A-Za-z0-9_-]", "_", str(row_id))
+    path = os.path.join(_ROW_CEILING_DIR, name)
+    try:
+        if not os.path.exists(path):
+            return 0
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return sum(1 for ln in fh if ln.strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def is_capped(r, now_dt, cap_age_s: int, deliveries=_deliveries_of,
+              cap_deliveries: int = WAKE_SWEEP_CAP_DELIVERIES) -> bool:
+    """(B) True iff the row has had >= cap_deliveries VERIFIED deliveries (primary, attempt-
+    based) OR is older than the generous cap_age_s safety ceiling (secondary). Unknown
+    delivery count / unknown age → NOT capped: fail toward keeping the backstop, never
+    toward silently quiescing a row we cannot count or age."""
+    try:
+        n = deliveries(_row_id(r))
+    except Exception:  # noqa: BLE001 — unreadable state = unknown = not capped
+        n = None
+    if n is not None and n >= cap_deliveries:
+        return True
     ca = _created_at(r)
     if ca is None:
         return False
@@ -194,6 +232,46 @@ def _fetch_stuck_rows(stuck_page_age_s: int, stuck_page_max_age_s: int = STUCK_P
     with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
         cur.execute(_STUCK_SQL, (stuck_page_age_s, stuck_page_max_age_s))
         return cur.fetchall()
+
+
+def _fetch_pending_rows(ids):
+    """The pending-marker rows that are STILL deliverable (unread, un-skipped) — fetched with
+    NO grace so a busy/rc=3 outcome is retried on the very next pass."""
+    ids = [i for i in (ids or []) if i is not None]
+    if not ids or not _DSN:
+        return []
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, to_agent, message_type, requires_response, priority, is_test, "
+                    "created_at FROM agent_messages WHERE id = ANY(%s) AND read_at IS NULL "
+                    "AND skipped_at IS NULL ORDER BY to_agent, created_at", (ids,))
+        return cur.fetchall()
+
+
+def _agent_host_rows(agent) -> list:
+    """(host, last_heartbeat) of every agent_status row matching `agent` — BASE-INCLUSIVE,
+    exact match (see _matching_hbs). Drives the HOST gate on quiesce: the Mini must never
+    set skipped_at on a row to a lane that lives on gzb (Fable audit B-1: it did, and the
+    shared DB then hid the row from gzb's own sweep)."""
+    if not _DSN:
+        return []
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT host, last_heartbeat FROM agent_status "
+                    "WHERE agent_id=%s OR base_agent_id=%s", (agent, agent))
+        return [(r[0], r[1]) for r in cur.fetchall() if r[1] is not None]
+
+
+def _default_this_host() -> "str | None":
+    """This host's stable fleet identity (scripts/lib/fleet_host_id). None when it cannot be
+    resolved — and None means UNKNOWN, which never licenses a quiesce."""
+    try:
+        if _ORCH_ROOT not in sys.path:
+            sys.path.insert(0, _ORCH_ROOT)
+        from scripts.lib.fleet_host_id import fleet_host_id
+        return fleet_host_id()
+    except Exception as e:  # noqa: BLE001
+        print(f"wake_backstop_sweep: host identity unresolved ({e!r}) — quiesce disabled this pass",
+              file=sys.stderr, flush=True)
+        return None
 
 
 def _default_pane_state(agent) -> str:
@@ -345,7 +423,10 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                stuck_ceiling_age_s: int = STUCK_PAGE_CEILING_S,
                escalated_seen=None, gone_window_s: int = GONE_WINDOW_S,
                cap_age_s: int = WAKE_SWEEP_CAP_AGE_S, now: float | None = None,
-               now_dt=None, dry_run: bool = False) -> dict:
+               now_dt=None, dry_run: bool = False,
+               deliveries=_deliveries_of, cap_deliveries: int = WAKE_SWEEP_CAP_DELIVERIES,
+               agent_host_rows=_agent_host_rows, this_host=None,
+               pending_rows=None, pending_ids=None, clear_pending=clear_pending) -> dict:
     """One pass. FRESH (under-cap) rotting rows drive a wake of each eligible recipient (the
     doorbell backstop). A row PAST cap_age_s is a give-up candidate. ONLY backstop-eligible
     recipients (should_backstop_wake — never a human/operator or a P3/test row) are classified;
@@ -382,12 +463,30 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         rows = _fetch_rows(grace_s)
         if stuck_rows is None:  # production: fetch both. A test that injects `rows` but not
             stuck_rows = _fetch_stuck_rows(stuck_page_age_s, stuck_page_max_age_s)  # → [] below.
+        if pending_ids is None:   # production: this host's pending-retry markers
+            pending_ids = [m["row_id"] for m in pending_rows_default()]
+            pending_rows = _fetch_pending_rows(pending_ids)
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
     seen = _ESCALATED_SEEN if escalated_seen is None else escalated_seen
+    if this_host is None:
+        this_host = _default_this_host()
+
+    # PENDING RETRY (Fable audit B-1 (iii)): rows a transient wake outcome left marked are
+    # retried NOW (no grace). A marker whose row is no longer deliverable (read/skipped/gone)
+    # is dropped. Rows already in `rows` are not duplicated.
+    pending_ids = [i for i in (pending_ids or []) if i is not None]
+    pending_rows = list(pending_rows or [])
+    pending_live = {_row_id(r) for r in pending_rows}
+    for pid in pending_ids:
+        if pid not in pending_live:
+            clear_pending(pid)
+    known = {_row_id(r) for r in rows}
+    rows = list(rows) + [r for r in pending_rows if _row_id(r) not in known]
+    pending_retried: list = [_row_id(r) for r in pending_rows if _row_id(r) in pending_live]
 
     # A capped row never drives a wake; it is a give-up candidate handled below.
-    capped = [r for r in rows if is_capped(r, now_dt, cap_age_s)]
-    fresh = [r for r in rows if not is_capped(r, now_dt, cap_age_s)]
+    capped = [r for r in rows if is_capped(r, now_dt, cap_age_s, deliveries, cap_deliveries)]
+    fresh = [r for r in rows if not is_capped(r, now_dt, cap_age_s, deliveries, cap_deliveries)]
 
     targets = eligible_recipients(fresh)
     # Per-row ceiling (Nazim #43063): key each agent's wake to a STABLE representative row —
@@ -404,6 +503,9 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     results = {a: wake(a, reason="backstop-sweep", dry_run=dry_run, now=now, row_id=rep_row.get(a))
                for a in targets}
     woke = [a for a, r in results.items() if isinstance(r, dict) and r.get("woke")]
+    for r in pending_rows:   # a pending row whose recipient woke is delivered → drop its marker
+        if _to_agent(r) in woke:
+            clear_pending(_row_id(r))
     unreachable = sorted(  # observability: fresh-row agents with no local live pane this pass
         a for a, r in results.items()
         if isinstance(r, dict) and r.get("why") == "no live session")
@@ -430,6 +532,23 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                 return True
         return False
 
+    def _local(agent) -> bool:
+        """HOST GATE (Fable audit B-1 (i)): True only when a FRESH heartbeat row for `agent`
+        names THIS host. Foreign host or NULL/unknown host → False → never quiesce/stuck-page
+        from here; the owning host's sweep does it. Unknown this_host → False."""
+        if not this_host:
+            return False
+        try:
+            for host, hb in (agent_host_rows(agent) or []):
+                try:
+                    if host == this_host and (now_dt - hb).total_seconds() < gone_window_s:
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001 — unreadable = unknown = not local
+            return False
+        return False
+
     def _escalate_once(kind: str, agent: str, subject: str, body: str) -> bool:
         # once-guard for the NON-quiescing escalations (re-address, lookup-failed) — they set no
         # skipped_at, so without this they page every sweep. Keyed (kind, agent).
@@ -440,12 +559,16 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         return True
 
     dead_foreign, live_stuck, readdress, vetoed, lookup_failed = [], [], [], [], []
+    foreign_live: list = []
     escalations: list[dict] = []
     for agent, ids in capped_by_agent.items():
         if _alive(agent):  # (B) alive → QUIESCE ONLY (stop re-poking). Paging is DEFERRED to the
             # stuck-page pass at stuck_page_age_s: a lane mid-task for ~7 min is NORMAL latency, not
             # stuck, so escalating at cap_age (~6.5m) false-pages the operator (Nazim #43063). The
             # row stays read_at IS NULL, so the lane's own reconcile still drains it.
+            if not _local(agent):   # alive on ANOTHER (or unknown) host → not ours to quiesce
+                foreign_live.append(agent)
+                continue
             if dry_run:
                 live_stuck.append(agent)
                 continue
@@ -524,6 +647,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         new_ids = [i for i in ids if ("stuck", i) not in seen]
         if not new_ids or not _alive(agent):   # already-paged rows, or a dead agent (dead-foreign)
             continue
+        if not _local(agent):   # the pane read below is LOCAL — never judge a foreign lane's pane
+            continue
         state = pane_state(agent)
         working = state == "busy" or pane_active(agent)
         over_ceiling = stuck_oldest_age.get(agent, 0.0) > stuck_ceiling_age_s
@@ -566,7 +691,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             "capped": [_row_id(r) for r in capped], "unreachable": unreachable,
             "dead_foreign": dead_foreign, "live_stuck": live_stuck, "readdress": readdress,
             "vetoed": vetoed, "lookup_failed": lookup_failed, "stuck_paged": stuck_paged,
-            "stuck_suppressed": stuck_suppressed, "escalations": escalations}
+            "stuck_suppressed": stuck_suppressed, "escalations": escalations,
+            "foreign_live": foreign_live, "pending_retried": pending_retried}
 
 
 def _ts() -> str:
