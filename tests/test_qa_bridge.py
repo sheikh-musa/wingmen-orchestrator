@@ -153,7 +153,7 @@ class TestProcessFinding:
         }
         sb = mock_supabase_chain([])
 
-        with patch("bug_pipeline.create_bug_report", new_callable=AsyncMock, return_value=new_bug) as mock_create:
+        with patch("legacy.bug_pipeline.create_bug_report", new_callable=AsyncMock, return_value=new_bug) as mock_create:
             await _process_finding(sb, finding)
             mock_create.assert_called_once()
 
