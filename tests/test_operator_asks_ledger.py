@@ -299,6 +299,47 @@ def test_classify_client_ask_recognizes_chatter(text):
     assert ol.classify_client_ask(text) == "not_an_ask"
 
 
+# ── bus #47184 precision-sample fixes ──────────────────────────────────────────
+def test_classify_client_ask_strips_reply_quote_prefix_before_matching():
+    text = '↩️ re "some earlier reply of ours, possibly with \'internal\' quotes": send me the file'
+    assert ol.classify_client_ask(text) == "ask"
+
+
+def test_classify_client_ask_reply_quote_prefix_with_pure_chatter_reply():
+    text = '↩️ re "our earlier answer": yup thanks'
+    assert ol.classify_client_ask(text) == "not_an_ask"
+
+
+def test_classify_client_ask_finds_imperative_in_a_later_sentence():
+    text = "Some context about the record first. It has a formatting issue. make it flexible so it accepts this case."
+    assert ol.classify_client_ask(text) == "ask"
+
+
+def test_classify_client_ask_does_not_match_imperative_word_mid_sentence():
+    text = "we will send this over once it is ready"
+    assert ol.classify_client_ask(text) == "not_an_ask"
+
+
+@pytest.mark.parametrize("text", [
+    "we used to have a page for this. it seems missing",
+    "the export button is broken",
+    "the upload doesn't work",
+    "the dashboard isn't working today",
+    "it stopped working after the update",
+])
+def test_classify_client_ask_recognizes_implicit_bug_reports(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "keep it hidden from everyone else",
+    "guide me on how this works",
+    "we want the names to be clickable",
+])
+def test_classify_client_ask_recognizes_additional_request_phrasing(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
 # ── migration 085: maybe_track_client_ask (Musa op#23944, bus #47105->#47114) ─
 def test_maybe_track_client_ask_opens_a_row_with_required_chase_by(operator_ledger_db):
     import psycopg

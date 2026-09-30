@@ -464,10 +464,40 @@ _CLIENT_ASK_PATTERNS = [re.compile(p, re.I) for p in (
     r"\burgent(?:ly)?\b",
     r"\breminder\b",
     r"\bnot (?:done|fixed|working)\b",
+    r"\b(?:is |seems |appears )?missing\b",
+    r"\bbroken\b",
+    r"\bdoesn'?t work\b",
+    r"\bisn'?t work(?:ing)?\b",
+    r"\bstopped working\b",
+    r"\bwant(?:s|ed)?\b",
     r"\bit(?:'s| is| has been)\b.*\b(?:day|days|hour|hours|week|weeks)\b",
-    r"^\s*(?:add|build|fix|remove|change|send|check|review|confirm|provide|"
-    r"give|share|schedule|arrange|update|deploy|create|make|set ?up)\b",
 )]
+
+# A reply-thread quote wrapper ("↩️ re "<quoted earlier message>": <the actual
+# reply>") sits in front of the real content on every threaded reply -- the
+# leading-imperative check below is anchored to the START of a sentence, and
+# with the wrapper unstripped that start is always the quoted OLD message, not
+# the new one. Lazily matching up to the first literal '":' after 're "'
+# correctly skips past a quoted excerpt that itself contains internal quotes
+# (it doesn't need balanced-quote parsing -- it just needs the next '":').
+_REPLY_QUOTE_PREFIX_RE = re.compile(r'^\s*(?:↩️\s*)?re\s+".*?":\s*', re.I | re.S)
+
+_IMPERATIVE_LEAD_RE = re.compile(
+    r"^(?:add|build|fix|remove|change|send|check|review|confirm|provide|"
+    r"give|share|schedule|arrange|update|deploy|create|make|set ?up|keep|guide)\b", re.I)
+_SENTENCE_SPLIT_RE = re.compile(r"[\n]+|(?<=[.!?])\s+")
+
+
+def _has_leading_imperative(text: str) -> bool:
+    """An imperative ("send me X", "please make Y") only reads as a command
+    at the START of ITS OWN sentence -- checking only the start of the WHOLE
+    message (as a single ^-anchored pattern would) misses every imperative
+    that isn't the message's very first word, which is most of them in a
+    multi-sentence client message (bus #47184 precision-sample finding:
+    "...DP and SPR has different type of BC number. make it flexible when
+    entering..." -- the real ask is the second sentence)."""
+    return any(_IMPERATIVE_LEAD_RE.match(seg.strip())
+               for seg in _SENTENCE_SPLIT_RE.split(text))
 
 
 def classify_client_ask(text: str) -> str:
@@ -484,14 +514,24 @@ def classify_client_ask(text: str) -> str:
     on it floods every lane. A wrong call either way is one command away from
     correction: scripts/asks_triage.py <id> ask --summary "..." (or `not`).
 
+    Strips a leading reply-thread quote wrapper before matching (bus #47184
+    precision-sample finding #2: a reply-quote-prefixed imperative like
+    '↩️ re "...": send me the names' was invisible to a whole-string-anchored
+    check).
+
     Examples: "It's more than a day. It needs to be done" -> ask (needs +
     urgency phrase). "Lolol" / "roger" / "yup" -> not_an_ask."""
     stripped = (text or "").strip()
     if not stripped:
         return "not_an_ask"
+    stripped = _REPLY_QUOTE_PREFIX_RE.sub("", stripped)
+    if not stripped:
+        return "not_an_ask"
     for pat in _CLIENT_ASK_PATTERNS:
         if pat.search(stripped):
             return "ask"
+    if _has_leading_imperative(stripped):
+        return "ask"
     return "not_an_ask"
 
 
