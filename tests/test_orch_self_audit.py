@@ -441,8 +441,8 @@ class TestScanCallSites:
         """
         findings = orch_self_audit._scan_call_sites()
         files_found = {f["file"] for f in findings}
-        # These are known direct-API call sites in the repo
-        assert "ralph_runner.py" in files_found
+        # These are known direct-API call sites in the repo (ralph_runner moved to legacy/)
+        assert "legacy/ralph_runner.py" in files_found
         assert "nervous_system/council_agent.py" in files_found
         assert "ai_provider.py" in files_found
         # Guard against regression: ecosystem_auditor must NOT show up
