@@ -33,17 +33,35 @@ done < <(console_deploy_files_rel "$ROOT")
 
 # Did any PUSHED commit touch a gated file? git streams one line per ref being pushed on
 # stdin: "<local_ref> <local_sha> <remote_ref> <remote_sha>". Enforce only when gated
-# content actually changed in the range remote_sha..local_sha (avoid re-triggering review
-# on unrelated pushes). A brand-new remote ref (remote_sha all-zeros) is compared against
-# the empty tree, so any gated content on it requires a review (safe default).
+# content actually changed in the range base..local_sha (avoid re-triggering review on
+# unrelated pushes).
+#
+# NEW-BRANCH BASE (Fable-audit follow-up, orch-console bus #46860 item 1): remote_sha is
+# all-zeros for a brand-new branch. Diffing that against the EMPTY TREE made every gated
+# file the branch carries — even byte-identical to the already-reviewed trunk — look like
+# brand-new unreviewed content, and blocked a shell-only PR (#227) that touched no console
+# file at all. Diff a new branch against its merge-base with the REVIEWED TRUNK instead:
+# content identical to trunk is not new; content that actually changed relative to trunk
+# still is, and is still blocked (case b below). If the trunk ref can't be resolved (no
+# fetch, renamed remote) or shares no history with the pushed branch, fall back to the old
+# conservative empty-tree diff — never silently widen the gate on an unknown base.
 ZERO="0000000000000000000000000000000000000000"
 EMPTY_TREE="$(git hash-object -t tree /dev/null)"
+REVIEWED_TRUNK="origin/fable/substrate-safe-fixes"
 changed=0
 py_changed=0
 while read -r _lref _lsha _rref _rsha; do
   [ -z "${_lsha:-}" ] && continue
   [ "$_lsha" = "$ZERO" ] && continue          # branch deletion — nothing to gate
-  base="$_rsha"; [ "$_rsha" = "$ZERO" ] && base="$EMPTY_TREE"
+  base="$_rsha"
+  if [ "$_rsha" = "$ZERO" ]; then
+    base=""
+    trunk_sha="$(git rev-parse --verify -q "$REVIEWED_TRUNK" 2>/dev/null)"
+    if [ -n "$trunk_sha" ]; then
+      base="$(git merge-base "$trunk_sha" "$_lsha" 2>/dev/null)"
+    fi
+    [ -z "$base" ] && base="$EMPTY_TREE"      # safe default: unknown base -> conservative
+  fi
   if ! git diff --quiet "$base" "$_lsha" -- "${GATED[@]}" 2>/dev/null; then
     changed=1
   fi
