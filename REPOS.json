@@ -123,7 +123,7 @@
       "github": "https://github.com/sheikh-musa/cosem-platform",
       "local_path": "~/wingmen/projects/cosem-platform",
       "vercel_project": "cosem-platform-demo",
-      "deploy_url": null,
+      "deploy_url": "https://cosem-platform-demo.vercel.app",
       "supabase_project_ref": "ywrpttpxwfcoodovxhsr",
       "supabase_region": "ap-southeast-1",
       "supabase_note": "ywrpttpxwfcoodovxhsr is the shared DEMO/DEV DB (synthetic only) — NOT a home for real tenant data. Real ADCDA data needs its own UAE silo; TDU a dedicated SG prod org. See docs/data-store-registry.md (TENANT-RESIDENCY-001).",
