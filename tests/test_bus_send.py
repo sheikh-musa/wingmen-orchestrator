@@ -228,17 +228,19 @@ def test_send_accepts_valid_priority_then_reaches_the_db_call(monkeypatch, p):
                  "x" * bs._MIN_BODY_BYTES, p, dsn="postgresql://unused")
 
 
-# ---- is_new_ask (op#22669 root-cause fix): the operator_asks link row ------
-# closes the 41-day gap (2026-08-17 -> 2026-09-27) where bus_send.py became
-# the dominant console-assign write path but never wrote the operator_asks
-# half console_assign.py's HTTP path always wrote. Fake psycopg2 connection/
-# cursor (mirrors tests/console/test_app.py's _FakeCursor/_FakeConn) so the
-# REAL SQL send() builds is exercised, not a stand-in.
+# ---- --link-ask (Musa op#23554, bus #46353): a delegation is NEVER a new
+# ask — send() only ever LINKS an existing operator_asks row via --link-ask.
+# The old is_new_ask auto-create heuristic (op#22669) is REVERTED: it couldn't
+# tell a genuine Musa ask from a pure fleet delegation and phantom-appeared on
+# his "Your asks" board (ids 378/381). Fake psycopg2 connection/cursor
+# (mirrors tests/console/test_app.py's _FakeCursor/_FakeConn) so the REAL SQL
+# send() builds is exercised, not a stand-in.
 
 class _FakeCursor:
-    def __init__(self, fetch_queue):
+    def __init__(self, fetch_queue, rowcount=1):
         self.executed = []
         self._fetch = list(fetch_queue)
+        self.rowcount = rowcount
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
@@ -252,6 +254,7 @@ class _FakeConn:
         self._cur = cur
         self.committed = False
         self.closed = False
+        self.rolled_back = False
 
     def cursor(self):
         return self._cur
@@ -259,20 +262,26 @@ class _FakeConn:
     def commit(self):
         self.committed = True
 
+    def rollback(self):
+        self.rolled_back = True
+
     def close(self):
         self.closed = True
 
 
-def _fake_send(monkeypatch, fetch_queue):
+def _fake_send(monkeypatch, fetch_queue, rowcount=1):
     import psycopg2
-    cur = _FakeCursor(fetch_queue)
+    cur = _FakeCursor(fetch_queue, rowcount=rowcount)
     conn = _FakeConn(cur)
     monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
     return cur, conn
 
 
-def test_send_writes_operator_asks_link_for_a_fresh_console_decision(monkeypatch):
-    # set_config (no fetchone), directive INSERT ... RETURNING id, thread_id
+def test_send_never_creates_a_new_operator_asks_row(monkeypatch):
+    # A fresh orch-console decision with --req and no --link-ask must NOT
+    # touch operator_asks at all — that's exactly the ids-378/381 phantom-ask
+    # bug (Musa op#23554, bus #46353). set_config (no fetchone), then the
+    # agent_messages INSERT ... RETURNING id, thread_id.
     cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
     row_id, thread_id = bs.send(
         "orch-console", "cc-irsyad", "decision", "ship the thing",
@@ -280,22 +289,37 @@ def test_send_writes_operator_asks_link_for_a_fresh_console_decision(monkeypatch
     )
     assert (row_id, thread_id) == (4242, "th-uuid-abc")
     assert conn.committed is True
-    sqls = [e[0] for e in cur.executed]
-    assert any("insert into operator_asks" in s.lower() for s in sqls)
-    link = next(e for e in cur.executed if "insert into operator_asks" in e[0].lower())
-    assert link[1] == ("ship the thing", "th-uuid-abc", "cc-irsyad")
-    assert "status" not in link[0].lower()
+    assert not any("operator_asks" in e[0].lower() for e in cur.executed)
 
 
-def test_send_does_not_link_when_not_requires_response(monkeypatch):
-    cur, conn = _fake_send(monkeypatch, fetch_queue=[(1, "th-1")])
-    bs.send("orch-console", "cc-irsyad", "decision", "s",
-            "x" * bs._MIN_BODY_BYTES, "P1", req=False, dsn="postgresql://unused")
+def test_send_with_link_ask_updates_the_existing_row(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")], rowcount=1)
+    bs.send(
+        "orch-console", "cc-irsyad", "decision", "ship the thing",
+        "x" * bs._MIN_BODY_BYTES, "P1", req=True, link_ask=17,
+        dsn="postgresql://unused",
+    )
+    assert conn.committed is True
+    link = next(e for e in cur.executed if "update operator_asks" in e[0].lower())
+    assert link[1] == ("th-uuid-abc", "cc-irsyad", 17)
+    assert "closed_at is null" in link[0].lower()
     assert not any("insert into operator_asks" in e[0].lower() for e in cur.executed)
 
 
-def test_send_does_not_link_a_reply(monkeypatch):
-    # a reply_to riding an existing thread is not a NEW ask. The looked-up
+def test_send_with_link_ask_raises_on_bad_or_closed_id(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")], rowcount=0)
+    with pytest.raises(SystemExit, match="does not exist or is already closed"):
+        bs.send(
+            "orch-console", "cc-irsyad", "decision", "ship the thing",
+            "x" * bs._MIN_BODY_BYTES, "P1", req=True, link_ask=999,
+            dsn="postgresql://unused",
+        )
+    assert conn.committed is False
+    assert conn.closed is True
+
+
+def test_send_without_link_ask_never_touches_operator_asks_on_a_reply(monkeypatch):
+    # a reply_to riding an existing thread, still no --link-ask. The looked-up
     # thread_id is a full 36-char uuid so it skips the separate prefix-lookup
     # branch (len(thread) < 36), which would otherwise consume a 3rd fetchone.
     full_thread = "22222222-2222-2222-2222-222222222222"
@@ -303,31 +327,4 @@ def test_send_does_not_link_a_reply(monkeypatch):
     bs.send("orch-console", "cc-irsyad", "decision", "s",
             "x" * bs._MIN_BODY_BYTES, "P1", req=True, reply_to=99,
             dsn="postgresql://unused")
-    assert not any("insert into operator_asks" in e[0].lower() for e in cur.executed)
-
-
-def test_send_does_not_link_an_explicit_existing_thread(monkeypatch):
-    # a 36-char full uuid thread is used as-is (no prefix-lookup fetchone) —
-    # riding an existing thread is not a fresh ask either.
-    full_thread = "11111111-1111-1111-1111-111111111111"
-    cur, conn = _fake_send(monkeypatch, fetch_queue=[(3, full_thread)])
-    bs.send("orch-console", "cc-irsyad", "decision", "s",
-            "x" * bs._MIN_BODY_BYTES, "P1", req=True, thread=full_thread,
-            dsn="postgresql://unused")
-    assert not any("insert into operator_asks" in e[0].lower() for e in cur.executed)
-
-
-def test_send_does_not_link_non_decision_type(monkeypatch):
-    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4, "th-4")])
-    bs.send("orch-console", "cc-irsyad", "update", "s",
-            "x" * bs._MIN_BODY_BYTES, "P1", req=True, dsn="postgresql://unused")
-    assert not any("insert into operator_asks" in e[0].lower() for e in cur.executed)
-
-
-def test_send_does_not_link_when_from_agent_is_not_console(monkeypatch):
-    # only the console's own fresh asks are tracked this way — a lane-to-lane
-    # decision is not an "operator ask".
-    cur, conn = _fake_send(monkeypatch, fetch_queue=[(5, "th-5")])
-    bs.send("cc-scholar", "cc-irsyad", "decision", "s",
-            "x" * bs._MIN_BODY_BYTES, "P1", req=True, dsn="postgresql://unused")
-    assert not any("insert into operator_asks" in e[0].lower() for e in cur.executed)
+    assert not any("operator_asks" in e[0].lower() for e in cur.executed)
