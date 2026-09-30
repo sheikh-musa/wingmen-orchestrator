@@ -158,15 +158,17 @@ def decide(row: dict | None, host: str, now: datetime) -> "tuple[bool, str]":
     if not expired:
         return False, (f"lease '{LEASE_KEY}' is held by {row.get('holder')}@{holder_host} "
                        f"(fresh); this host is {host} — pens refused (ORCH-TOPOLOGY-001)")
-    # Different host, EXPIRED. Do NOT auto-grant the pens to a non-holder just because
-    # the recorded holder went stale — that silent auto-pass made the pen-(iv) gate a
-    # no-op for ANY non-console body for ~40h (bus #46618, FLEET_HOST_ID=Sheikhs-Mini
-    # expired the hub lease). An expired lease is RECLAIM-ELIGIBLE only via an explicit
-    # `take` (which flips holder_host in the table); until then, FAIL CLOSED.
-    return False, (f"lease '{LEASE_KEY}' held by {row.get('holder')}@{holder_host} is EXPIRED, "
-                   f"and this host is {host} (NOT the holder) — pens REFUSED. Reclaim with "
-                   f"`orch_lease.py take --reason ...` (flips the holder); an expired lease is "
-                   f"never a silent auto-pass (ORCH-TOPOLOGY-001 / bus #46618).")
+    # Different host, but EXPIRED (recorded holder presumed dead) — RECLAIM-ELIGIBLE.
+    # Mirrors fleet_health_lease.decide() (the authoritative sibling): once the recorded
+    # holder's lease has lapsed, the dead-man fallback body may act, so a genuine takeover
+    # is never stranded. This is the load-bearing DR invariant (fresh = refuse, expired =
+    # reclaim-eligible); failing closed here made the gate over-broad and denied the
+    # legitimate reclaim. The #46618 silent-expiry hazard is guarded ELSEWHERE — the
+    # foreign-pin rejection (fleet_host_id) stops the lease from expiring spuriously, and
+    # cmd_renew now PAGES on a failed/refused renew — so expiry is no longer silent while
+    # the pen gate stays reclaim-eligible.
+    return True, (f"prior holder {row.get('holder')}@{holder_host} EXPIRED — "
+                  f"reclaim-eligible")
 
 
 def apply_take(row: dict | None, new_holder: str, host: str, now: datetime,

@@ -82,13 +82,25 @@ def test_decide_fresh_other_holder_refused():
     assert ok is False and "refused" in why.lower()
 
 
-def test_decide_expired_nonholder_FAILS_CLOSED():
-    """THE FIX: an expired lease held by a DIFFERENT host must NOT auto-pass a
-    non-holder (was the ~40h pen-gate no-op, bus #46618)."""
+def test_decide_expired_nonholder_reclaim_eligible():
+    """An expired lease held by a DIFFERENT host is RECLAIM-ELIGIBLE for a non-holder.
+
+    CORRECTED (was `test_decide_expired_nonholder_FAILS_CLOSED`, asserting ok is False):
+    that assertion was provably wrong. It directly contradicted BOTH the pre-existing
+    load-bearing invariant `test_orch_lease.py::test_decide_different_expired_holder_
+    reclaim_eligible` (True) AND the authoritative sibling `test_fleet_health_lease.py::
+    test_decide_different_expired_holder_reclaim_eligible` (True) — for the byte-identical
+    scenario (holder=cc-orchestrator, deciding host != holder_host, lease expired), so no
+    single pure `decide(row, host, now)` can satisfy both. #224 over-corrected `decide()`
+    to fail-closed on the expired branch; that stranded the DR/reclaim path (a genuine
+    takeover could never pass the gate). The real bus #46618 fix is NOT here: it is the
+    foreign-pin rejection (fleet_host_id) that stops spurious expiry, plus the renew-
+    failure PAGE in cmd_renew that makes expiry non-silent. `decide()` stays reclaim-
+    eligible on expiry, matching fleet_health_lease and the pre-existing invariant."""
     now = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
     ok, why = orch_lease.decide(_row("Sheikhs-Mini", now - timedelta(hours=40)), "gzbai", now)
-    assert ok is False                                # <-- was True before the fix
-    assert "EXPIRED" in why and "take" in why
+    assert ok is True
+    assert "reclaim-eligible" in why and "EXPIRED" in why
 
 
 def test_missing_and_null_stay_failsafe():

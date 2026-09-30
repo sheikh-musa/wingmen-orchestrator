@@ -101,7 +101,17 @@ def fleet_host_id() -> str:
     pin = os.environ.get(ENV_KEY)
     if pin and pin.strip():
         pin = pin.strip()
-        live = socket.gethostname()
+        # The durable pin is authoritative (tier 1). We consult gethostname ONLY to
+        # REJECT a foreign pin (bus #46618) — never to RESOLVE identity, which the pin
+        # already fixes. If gethostname is unavailable we cannot prove the pin foreign,
+        # and a boot-reviewed durable pin exists precisely to survive a hostname
+        # hiccup/flap, so we HONOR it rather than fail identity resolution. (A foreign
+        # KNOWN-canonical pin like Sheikhs-Mini-on-gzb can only be caught by comparing
+        # against the live host, so the check needs gethostname when it is available.)
+        try:
+            live = socket.gethostname()
+        except Exception:
+            return pin  # gethostname unavailable — honor the durable pin, can't cross-check
         mapping = _load_map()
         local_canon = _match_alias(live, mapping)
         if local_canon is not None:
