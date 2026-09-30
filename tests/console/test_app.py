@@ -1203,7 +1203,7 @@ def test_build_asks_query_derives_every_status_live_in_sql():
     assert "left join latest l on l.thread_id = a.thread_id" in low
     assert "from agent_messages" in low and "is_test is not true" in low
     assert "a.closed_at is null" in low            # only OPEN asks (delegate-reply ≠ done)
-    # SCOPED to Musa's own board (migration 083, Musa op#23554/bus #46353/#46360):
+    # SCOPED to Musa's own board (migration 084, Musa op#23554/bus #46353/#46360):
     # ask_surface='operator' AND traceable to a real Musa inbound or --ask.
     assert "a.ask_surface = 'operator'" in low
     assert "a.source_msg_id is not null or a.waiting_on_operator" in low

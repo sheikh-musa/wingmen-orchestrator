@@ -27,7 +27,7 @@ appeared on his "Your asks" board (ids 378/381: "OEH: cc-quality review...",
 bodies duplicated identically (ids 210/211/212). A delegation is now NEVER a
 new ask; --link-ask lets a caller LINK this bus row to an operator_asks row
 that already exists because it traces back to something Musa actually said
-(migration 083's ask_surface + source_msg_id/waiting_on_operator scope).
+(migration 084's ask_surface + source_msg_id/waiting_on_operator scope).
 
 Usage:
     scripts/bus_send.py --to cc-orchestrator --type update \\

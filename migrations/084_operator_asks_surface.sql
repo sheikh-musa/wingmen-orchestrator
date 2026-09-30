@@ -1,10 +1,15 @@
--- 083_operator_asks_surface.sql
+-- 084_operator_asks_surface.sql
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 --
 -- Adds ask_surface, the axis that keeps Musa's "Your asks" board scoped to
 -- HIS asks only, and closes a dedupe hole -- Musa op#23554 (bus #46353) +
 -- cc-fleet-health op#23531 (bus #46360), agreed 2026-09-30.
+--
+-- NUMBERING (bus #46430, orch-console): 083 was already taken and ledgered by
+-- cc-fleet-health's 083_operator_messages_defer.sql (sha 0812c26d, gate
+-- #46373, applied 2026-09-30T03:35:38Z) before this file's number was picked
+-- -- renumbered 083 -> 084 here; no other content change from that reason.
 --
 -- PROBLEM 1 (delegation-as-ask, Musa op#23554): scripts/bus_send.py's
 -- is_new_ask heuristic and scripts/console_assign.py's assign() both opened a
@@ -33,7 +38,9 @@
 -- repeated source_msg_id. scripts/console_assign.py now does an existence
 -- check on (source_msg_id, ask) before inserting (this same PR); the unique
 -- index below is the enforce-in-code backstop for any other writer,
--- per feedback_enforce_process_in_code_not_promises.
+-- per feedback_enforce_process_in_code_not_promises. orch-console verified
+-- live (2026-09-30): 0 existing duplicate (source_msg_id, ask) pairs, so the
+-- index builds clean against current data.
 --
 -- PROBLEM 3 (board scope, cc-fleet-health op#23531, bus #46360, AGREED
 -- design): op#23531 makes cc-fleet-health open ONE operator_asks row per
@@ -60,7 +67,12 @@
 -- so a future writer that forgets to stamp ask_surface correctly still can't
 -- leak an untraceable row onto Musa's board.
 --
--- Apply via scripts/apply_migration.py 083 --silo tscuymavysscrvoberrr (direct
+-- IDEMPOTENCE: every statement here can re-run safely. ADD COLUMN and CREATE
+-- INDEX already use IF NOT EXISTS; ADD CONSTRAINT has no such clause in
+-- Postgres, so it is wrapped in a pg_constraint existence check (same DO-block
+-- shape as migration 060's post-apply self-check) instead.
+--
+-- Apply via scripts/apply_migration.py 084 --silo tscuymavysscrvoberrr (direct
 -- psycopg-apply; decision 962 -- NEVER `supabase db push` against this
 -- substrate).
 
@@ -71,16 +83,25 @@ SET LOCAL lock_timeout = '5s';
 ALTER TABLE public.operator_asks
   ADD COLUMN IF NOT EXISTS ask_surface text NOT NULL DEFAULT 'operator';
 
-ALTER TABLE public.operator_asks
-  ADD CONSTRAINT operator_asks_ask_surface_chk
-  CHECK (ask_surface IN ('operator', 'client-channel'));
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.operator_asks'::regclass
+      AND conname  = 'operator_asks_ask_surface_chk'
+  ) THEN
+    ALTER TABLE public.operator_asks
+      ADD CONSTRAINT operator_asks_ask_surface_chk
+      CHECK (ask_surface IN ('operator', 'client-channel'));
+  END IF;
+END $$;
 
 COMMENT ON COLUMN public.operator_asks.ask_surface IS
   '''operator'' (default) = shows on Musa''s "Your asks" board -- traceable '
   'to a real Musa inbound (source_msg_id) or opened via asks_open.py --ask '
   '(waiting_on_operator). ''client-channel'' = cc-fleet-health''s op#23531 '
   'per-lane review ledger; filtered OFF Musa''s board by '
-  'nervous_system/console/db.py build_asks_query(). See migration 083 header.';
+  'nervous_system/console/db.py build_asks_query(). See migration 084 header.';
 
 -- Dedupe backstop (Musa op#23554 item 2): the SAME (source_msg_id, ask) pair
 -- must never be inserted twice, but a single source_msg_id fanning out into

@@ -19,7 +19,7 @@ What it does, in ONE transaction:
       op#23554, bus #46353 — ids 378/381 were console-to-lane delegations that
       phantom-appeared on his "Your asks" board) and touches operator_asks not
       at all. When source_msg_id IS given, an existing-row check runs first
-      (migration 083's (source_msg_id, ask) unique index is the backstop) so a
+      (migration 084's (source_msg_id, ask) unique index is the backstop) so a
       retry/double-call LINKS the same row instead of duplicating it (ids
       210/211/212 were 3 identical rows from 3 identical calls) — while a
       single Musa message that legitimately fans out into several DIFFERENT
@@ -107,7 +107,7 @@ def assign(agent: str, ask: str, priority: str, source_msg_id: "int | None" = No
         # touches operator_asks. Existence check on (source_msg_id, ask) before
         # inserting: a retry/re-delegate LINKS the same row (re-pointing
         # thread_id/delegated_to at this new assign) instead of duplicating it;
-        # migration 083's unique index on that same pair is the backstop if this
+        # migration 084's unique index on that same pair is the backstop if this
         # check is ever bypassed. If operator_asks isn't applied yet, this
         # raises and the whole tx rolls back (no orphan bus row).
         if source_msg_id is not None:

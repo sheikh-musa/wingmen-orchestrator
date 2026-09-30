@@ -728,7 +728,7 @@ def build_asks_query() -> Tuple[str, list]:
     (closed_at IS NULL): a delegate reply is NOT done — only the operator's
     swipe-to-confirm (closed_at) closes an ask.
 
-    SCOPED to Musa's own board (Musa op#23554, bus #46353/#46360, migration 083):
+    SCOPED to Musa's own board (Musa op#23554, bus #46353/#46360, migration 084):
     ask_surface='operator' AND (source_msg_id IS NOT NULL OR waiting_on_operator).
     A pure fleet delegation with no source_msg_id and no --ask flag is NOT an ask
     OF Musa and must never reach this query, even if some future writer forgets to
