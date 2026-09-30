@@ -205,6 +205,17 @@ EXCLUDE_SESSIONS = {
 
 # Which singleton bodies to monitor via Signal A (bus-only). Configurable so the
 # operator can narrow it. Each maps to a recovery spec in _SINGLETONS below.
+#
+# DELIBERATELY a SUBSET of nervous_system.protected_agents.protected_agent_ids()
+# (orch-console ruling, cp#91 f/u to backlog#65, 2026-09-30), not the full
+# registry: this list is only the 3 always-on-singleton bodies for which
+# Signal-A (bus-silence) wedge detection + a sanctioned nudge tool both make
+# sense. orch-console/nazim (the console) is EXCLUDED on purpose — see the
+# EXCLUDE_SESSIONS comment above — and the auditor-singletons (cc-quality,
+# cc-storefront, cc-finance) recycle via their own reset_cc-*.sh path, not this
+# watchdog. tests/test_singleton_registry_parity.py pins two invariants so this
+# can't silently drift: every name here IS a protected_agent_ids() member, and
+# every name here HAS a recovery recipe in _SINGLETONS below.
 MONITOR_SINGLETONS = [
     s.strip() for s in os.environ.get(
         "LANE_WEDGE_SINGLETONS",
