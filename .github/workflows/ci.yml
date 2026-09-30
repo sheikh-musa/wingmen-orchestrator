@@ -11,11 +11,13 @@ jobs:
     name: Lint & Test
     runs-on: ubuntu-latest
 
-    # Job-level env so step-level `if: env.DATABASE_URL != ''` resolves correctly.
-    # GitHub Actions disallows `secrets.X` in step-level `if:` expressions
-    # (parse-time error, results in 0-job startup failure).
-    env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    # NO DATABASE_URL job-env. It used to be `${{ secrets.DATABASE_URL }}`, but the
+    # 09-28 rotation pointed that secret at the PRODUCTION substrate, so every CI run
+    # executed DB tests against prod (backlog#68 incident, bus #45605/#46564). The
+    # secret is deleted and this env is removed so CI can NEVER reach a prod store.
+    # DB-integration tests SKIP (no DSN) until a follow-up wires an EPHEMERAL migrated
+    # Postgres here (DATABASE_URL -> localhost). The root conftest.py prod-ref guard
+    # fail-closes anyway if a prod DSN is ever resolved (local or CI).
 
     steps:
       - uses: actions/checkout@v4
@@ -65,8 +67,7 @@ jobs:
           WINGMEN_PG17_BIN: /usr/lib/postgresql/17/bin
         run: python -m pytest tests/ -v
 
-      - name: Integration tests gate (BLOCK MERGE per CAI-RESP-153 P1)
-        if: env.DATABASE_URL != ''
-        run: |
-          echo "DATABASE_URL secret is configured; explicitly running integration suite."
-          python -m pytest tests/ -v -k "integration"
+      # (Removed) "Integration tests gate": it keyed on env.DATABASE_URL, now gone, so it
+      # never ran; and its `-k integration` filter matched 0 tests (dead step, #44543-3).
+      # The real integration gate returns when an EPHEMERAL migrated Postgres is wired
+      # here (follow-up); until then DB-integration tests skip in the step above.
