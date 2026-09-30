@@ -552,8 +552,20 @@ G6/G7/G8/G10's evidence-wiring needs as its own proposal) — not part of #65.
 `cc-substrate-1` isn't in the `agents` table (bus_send rejected it) — `cc-fleet-health` is
 arranging a relaunch with a fresh env; coordinate with it at a seam, do not self-fix.
 
-**On waking: reconcile unread bus first (Option B). Check PR #220's merge status — if green
-or subset-rule-clean against trunk's own current failures, merge, fast-forward both live
-checkouts, report to orch-console, and close out backlog#65. If orch-console has replied to
-#45717's pooler-capacity resume-eligibility, action that too. Otherwise: pick up bus #45730's
-triage-gap fix next.**
+**DONE (2026-09-30 ~01:30Z): PR #220 merged** (squash `dbee4d8` on `fable/substrate-safe-fixes`,
+CI red 30/30 exact-match trunk via subset-rule). Branch had drifted from trunk since #217's
+squash rewrote/collapsed this very handoff file in a way my later commits didn't inherit
+(the squash-orphans-dependent-work pattern) — merged trunk into the branch first, resolved
+the one conflict (this file; `lane_wedge_watchdog.py` auto-merged clean), reran all 106
+relevant tests green, then merged. Both live checkouts fast-forwarded clean (Mini
+`b8da24e..dbee4d8`, gzb `442d0b2..dbee4d8`). Reported at bus **#46253** (reply-to #46247).
+**backlog#65 (Substrate ihsanification programme, op#19091/22298/42909) is CLOSED** by the
+terms of orch-console's ruling. `held_commitments` **#91 discharged**; no further checkpoint
+inserted (the programme item is done, not blocked — nothing to carry forward). quality_gate
+shadow→enforce remains explicitly open as its OWN future decision (bring G1/G4/G5/G6/G7/G8/
+G10's evidence-wiring needs as a separate proposal), not part of #65.
+
+**On waking: reconcile unread bus first (Option B). If orch-console has replied to #45717's
+pooler-capacity resume-eligibility, action that. Otherwise: pick up bus #45730's triage-gap
+fix (bus_send.py/console_assign.py's operator_asks inserts defaulting to
+triage_state='captured') next — lower priority, nothing else currently outstanding.**
