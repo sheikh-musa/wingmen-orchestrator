@@ -113,14 +113,44 @@ def test_open_ask_sets_triage_state_ask_with_summary_at_insert(operator_ledger_d
     assert triaged_by == "asks_open"
 
 
-def test_open_ask_defaults_delegated_to_env_or_orch_console(operator_ledger_db, monkeypatch):
+# ── identity resolution (bus #47221): fail-closed, never blindly 'orch-console' ─
+def test_open_ask_defaults_delegated_to_resolved_agent_identity(operator_ledger_db):
+    """set_test_env (conftest.py) exports CC_BASE_AGENT_ID=cc-test-harness for
+    the whole suite — this is the normal fleet-lane case (CC_BASE_AGENT_ID set
+    by launch_dangerous_cc.sh)."""
     import psycopg
-    monkeypatch.delenv("ORCH_AGENT_ID", raising=False)
     rid = ao.open_ask("[__test__] default delegated_to")
     with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
         cur.execute("SELECT delegated_to FROM operator_asks WHERE id=%s", (rid,))
         (delegated_to,) = cur.fetchone()
+    assert delegated_to == "cc-test-harness"
+
+
+def test_open_ask_console_body_defaults_delegated_to_orch_console(operator_ledger_db, monkeypatch):
+    """The ONE case where trusting ORCH_AGENT_ID is correct: the console body
+    itself (ORCH_BODY_ROLE=console) sending its own --ask via nazim_send.sh."""
+    import psycopg
+    monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    monkeypatch.setenv("ORCH_BODY_ROLE", "console")
+    monkeypatch.setenv("ORCH_AGENT_ID", "orch-console")
+    rid = ao.open_ask("[__test__] console default delegated_to")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT delegated_to FROM operator_asks WHERE id=%s", (rid,))
+        (delegated_to,) = cur.fetchone()
     assert delegated_to == "orch-console"
+
+
+def test_open_ask_raises_when_no_identity_resolves(monkeypatch):
+    """The old bug (bus #47221): ORCH_AGENT_ID is fleet-wide .env noise every
+    process inherits — blindly trusting it (or defaulting to 'orch-console')
+    silently misattributed asks opened by other bodies. Now it must REFUSE
+    rather than guess."""
+    monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ORCH_AGENT_ID", raising=False)
+    monkeypatch.delenv("ORCH_BODY_ROLE", raising=False)
+    with pytest.raises(RuntimeError):
+        ao.open_ask("a real ask", dsn="postgresql://unused")
 
 
 # ── main(): exit codes ────────────────────────────────────────────────────────

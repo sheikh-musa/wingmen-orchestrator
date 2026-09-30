@@ -303,6 +303,16 @@ def set_test_env(monkeypatch):
         "SUPABASE_URL": "https://test.supabase.co",
         "SUPABASE_SERVICE_KEY": "test-service-key",
         "CTO_GROUP_ID": "cto-group-999",
+        # Deterministic bus/attribution identity for tests that stamp
+        # triaged_by/delegated_to/from_agent via scripts.lib.agent_identity —
+        # isolates the suite from whatever CC_BASE_AGENT_ID the invoking shell
+        # happens to export (bus #47221: identity resolution is now
+        # fail-closed, so a test relying on ambient env would be flaky
+        # depending on who/what runs it).
+        "CC_BASE_AGENT_ID": "cc-test-harness",
     }
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ORCH_AGENT_ID", raising=False)
+    monkeypatch.delenv("ORCH_BODY_ROLE", raising=False)

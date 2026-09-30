@@ -32,9 +32,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import psycopg
 from dotenv import load_dotenv
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.lib.agent_identity import resolve_agent_id  # noqa: E402
 
 
 def _dsn() -> str | None:
@@ -60,8 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="operator_messages.id of the outbound send this ask is linked to "
                           "(enables reply-linked auto-close on a genuine Telegram reply)")
     ap.add_argument("--delegated-to", default=None,
-                     help="agents.agent_id this ask is owned by "
-                          "(default: $ORCH_AGENT_ID, else 'orch-console')")
+                     help="agents.agent_id this ask is owned by (default: auto-resolve "
+                          "fail-closed via CC_BASE_AGENT_ID/AGENT_ID/console's own "
+                          "ORCH_AGENT_ID — see agent_identity.resolve_agent_id; bus #47221)")
     return ap
 
 
@@ -72,7 +77,7 @@ def open_ask(ask: str, chase_hours: float | None = None, outbound_msg_id: int | 
     dsn = dsn or _dsn()
     if not dsn:
         raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
-    delegated_to = delegated_to or os.environ.get("ORCH_AGENT_ID") or "orch-console"
+    delegated_to = delegated_to or resolve_agent_id(os.environ)
     with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn:
         with conn.cursor() as cur:
             # make_interval()'s `hours` parameter is an int, not double precision —

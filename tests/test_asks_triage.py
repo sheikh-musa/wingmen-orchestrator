@@ -35,6 +35,11 @@ def test_parser_rejects_unknown_action():
         at.build_parser().parse_args(["1", "bogus"])
 
 
+def test_parser_accepts_triaged_by_override():
+    args = at.build_parser().parse_args(["1", "not", "--triaged-by", "cc-oeh"])
+    assert args.triaged_by == "cc-oeh"
+
+
 # ── round-trip against the ephemeral harness ─────────────────────────────────
 def _insert_captured(conn, ask="[__test__] captured row"):
     with conn.cursor() as cur:
@@ -133,6 +138,60 @@ def test_triage_not_on_already_closed_row_updates_zero(operator_ledger_db):
 def test_triage_unknown_id_updates_zero(operator_ledger_db):
     n = at.triage(999999999, "not")
     assert n == 0
+
+
+# ── identity resolution (bus #47221): fail-closed, never blindly 'orch-console' ─
+def test_triage_stamps_triaged_by_from_resolved_agent_identity(operator_ledger_db):
+    """set_test_env (conftest.py) exports CC_BASE_AGENT_ID=cc-test-harness for
+    the whole suite — this is the normal fleet-lane case (a lane running
+    asks_triage.py must be attributed as itself, not the console)."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    at.triage(rid, "not")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triaged_by FROM operator_asks WHERE id=%s", (rid,))
+        (triaged_by,) = cur.fetchone()
+    assert triaged_by == "cc-test-harness"
+
+
+def test_triage_console_body_stamps_triaged_by_orch_console(operator_ledger_db, monkeypatch):
+    import psycopg
+    monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    monkeypatch.setenv("ORCH_BODY_ROLE", "console")
+    monkeypatch.setenv("ORCH_AGENT_ID", "orch-console")
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    at.triage(rid, "not")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triaged_by FROM operator_asks WHERE id=%s", (rid,))
+        (triaged_by,) = cur.fetchone()
+    assert triaged_by == "orch-console"
+
+
+def test_triage_raises_when_no_identity_resolves(monkeypatch):
+    """The old bug (bus #47221): asks_triage.py defaulted triaged_by to
+    $ORCH_AGENT_ID or 'orch-console' — since every process that sources the
+    orchestrator .env inherits ORCH_AGENT_ID=orch-console as fleet-wide
+    noise, 19 rows triaged by cc-oeh/cc-angullia got misattributed to the
+    console. Must now REFUSE rather than guess."""
+    monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ORCH_AGENT_ID", raising=False)
+    monkeypatch.delenv("ORCH_BODY_ROLE", raising=False)
+    with pytest.raises(RuntimeError):
+        at.triage(1, "not", dsn="postgresql://unused")
+
+
+def test_triage_explicit_triaged_by_overrides_env(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    at.triage(rid, "not", triaged_by="cc-oeh")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triaged_by FROM operator_asks WHERE id=%s", (rid,))
+        (triaged_by,) = cur.fetchone()
+    assert triaged_by == "cc-oeh"
 
 
 # ── main(): exit codes ────────────────────────────────────────────────────────

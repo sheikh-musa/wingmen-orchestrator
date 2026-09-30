@@ -41,9 +41,14 @@ unless it has --evidence, OR both --committed-date and --outbound-msg-id
 (this call or already on the row). ask_surface='operator' rows are NEVER
 gated — this is a client-channel-only restriction.
 
-triaged_at/triaged_by are always stamped (triaged_by defaults to
-$ORCH_AGENT_ID, else 'orch-console' — same fallback as asks_open.py's
-delegated_to).
+triaged_at/triaged_by are always stamped. triaged_by is resolved fail-closed
+via scripts/lib/agent_identity.resolve_agent_id (CC_BASE_AGENT_ID, then
+AGENT_ID, then ORCH_AGENT_ID only for the console body itself) — REFUSES
+(exit 2) rather than default to 'orch-console' if none resolve (bus #47221:
+the old $ORCH_AGENT_ID-or-'orch-console' fallback misattributed 19 rows
+triaged by cc-oeh/cc-angullia to the console, since ORCH_AGENT_ID is
+fleet-wide .env noise every process inherits regardless of who is actually
+running the script). Pass --triaged-by to override explicitly.
 
 Exit 0 + prints 'ok' on exactly one row updated; exit 2 + stderr
 'error: ...' otherwise (bad args / no DSN / unknown id), so a shell caller
@@ -54,9 +59,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import psycopg
 from dotenv import load_dotenv
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.lib.agent_identity import resolve_agent_id  # noqa: E402
 
 
 def _dsn() -> str | None:
@@ -84,19 +93,22 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--outbound-msg-id", type=int, default=None,
                      help="operator_messages.id of the outbound send that STATED the "
                           "--committed-date (migration 085)")
+    ap.add_argument("--triaged-by", default=None,
+                     help="override triaged_by identity (default: auto-resolve fail-closed "
+                          "via CC_BASE_AGENT_ID/AGENT_ID — see agent_identity.resolve_agent_id)")
     return ap
 
 
 def triage(item_id: int, action: str, *, summary: str | None = None,
            delegated_to: str | None = None, evidence: str | None = None,
            committed_date: str | None = None, outbound_msg_id: int | None = None,
-           dsn: str | None = None) -> int:
+           dsn: str | None = None, triaged_by: str | None = None) -> int:
     if action == "ask" and not (summary and summary.strip()):
         raise ValueError("--summary is required for action=ask")
     dsn = dsn or _dsn()
     if not dsn:
         raise RuntimeError("no DATABASE_URL/SUPABASE_DB_URL")
-    triaged_by = os.environ.get("ORCH_AGENT_ID") or "orch-console"
+    triaged_by = triaged_by or resolve_agent_id(os.environ)
 
     with psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn:
         with conn.cursor() as cur:
@@ -169,7 +181,8 @@ def main(argv=None) -> int:
     try:
         n = triage(args.id, args.action, summary=args.summary,
                    delegated_to=args.delegated_to, evidence=args.evidence,
-                   committed_date=args.committed_date, outbound_msg_id=args.outbound_msg_id)
+                   committed_date=args.committed_date, outbound_msg_id=args.outbound_msg_id,
+                   triaged_by=args.triaged_by)
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"error: {type(e).__name__}: {e}\n")
         return 2
