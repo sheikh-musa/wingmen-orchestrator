@@ -505,3 +505,71 @@ migration 081 still HELD/reserved, backlog#68 still cc-orchestrator's.
 (e.g. sorted the 10 captured rows, or explicitly re-asked about pooler capacity), action
 that. Otherwise nothing outstanding on items 1/2 — idle-wait for new work rather than
 inventing any.**
+
+---
+
+## RECONSTITUTE HERE (2026-09-30, held_commitments #81 / backlog#65 discharged)
+
+Re-owned to `cc-substrate-1` via bus #46239 (fired originally to `orch-console` because that
+instance id had no `agent_status` row — see `commitment_sweeper.py`'s "OWNS NO INBOX"
+re-route; `cc-fleet-health` owns relaunching that heartbeat, not this lane).
+
+**Commitment #81's two `next_progress_expected` items, both actioned:**
+
+1. **Ran `bash scripts/deploy_console.sh` for real** on the Mini live checkout (content
+   `b60ca472ebc75e0d`, fc-v67). All 4 gates passed (version-sync, 88 console tests green,
+   fleet+lanes rendered, cc-quality review present). PR #215's shadow `quality_gate.py` step
+   genuinely executed and wrote
+   `reports/console-deploy/b60ca472ebc75e0d/quality-gate-verdict.json` — an honest mixed
+   verdict (would_block=true, observation-only): G2/G3/G9 pass, G1/G4/G6/G8 unproven
+   (missing evidence wiring, not fabricated pass), G5/G7/G10 fail. This is hard evidence the
+   "consumed" half of done_when is real, not just "shipped". Live-verified the deploy itself
+   (the script's own `/api/version now:` echo raced blank against `launchctl kickstart`, a
+   known pre-existing quirk — don't trust that line, curl the Tailscale IP instead):
+   `curl http://100.83.21.34:8787/api/version` → `{"version":"fc-v67","sha":"b8da24e"}`,
+   ancestor-confirmed to include PR #215 + #217.
+2. **Re-measured the consumer-map** against the 09-05 audit's 9 non-DB code sites: 6/9 fully
+   migrated to `nervous_system/protected_agents.py` accessors (`fleet_health_boundaries.py`,
+   `lane_winddown.py`, `verify_fleet_token.py`, `console/app.py`, `fleet_model.sh`,
+   `lane_watchdog.py`); 1 deliberately deferred + documented (`lane_token_resolver.py`'s
+   `_NO_POINTER_SINGLETONS`, correctness-critical, unchanged); **1 genuine remaining gap**:
+   `nervous_system/lane_wedge_watchdog.py`'s `MONITOR_SINGLETONS` is still a hardcoded
+   env-default list, not reading `protected_agents` — NOT fixed live (looks like an
+   intentional Signal-A-only subset, not the full set; swapping it without confirming that
+   needs its own small PR + test, not a rushed edit under commitment pressure); 2 sites
+   (`lane_wedge_watchdog.py`'s `_SINGLETONS` recovery dict,
+   `switch_singleton_token.sh`'s NODE REGISTRY) judged a different data shape (per-node
+   boot/recovery recipes, not membership-set duplicates) — flagged as a judgment call for
+   orch-console, not asserted compliant.
+
+Given the one open gap, **backlog#65 was NOT declared fully done.** Reported all of the
+above to orch-console at **bus #46245** (reply-to #46239) and asked them to rule: ship
+as-is with 2 documented exceptions (matches `lane_token_resolver.py`'s existing precedent),
+or land the `MONITOR_SINGLETONS` fix first. Per the commitment's own `on_fire` instruction
+("report, then discharge and insert the NEXT checkpoint"): discharged `held_commitments`
+**#81** (`discharged_by='cc-substrate'`, full evidence in `discharge_note`) and inserted
+checkpoint **#91** (due 2026-10-01 ~01:00Z, `source_ref` `op#19091/22298/42909, cp#81`)
+carrying exactly that open question forward.
+
+**Also surfaced this session, not yet actioned — lower priority (P2), pick up next if
+nothing else lands first:** bus #45730 flags that `scripts/bus_send.py`'s `is_new_ask`
+INSERT and `scripts/console_assign.py`'s equivalent (~line 99) both write `operator_asks`
+rows that silently default to `triage_state='captured'` post-migration-082, polluting
+Musa's digest "not yet sorted" count / pager with console-delegation rows that aren't real
+untriaged asks. Orch-console proposed two fix shapes (pre-triage at insert vs. link to the
+originating ask) and an explicit test ("a console --req decision creates no digest-visible
+or pager-visible row") — investigation started, no code changed yet.
+
+**Unrelated noise surfaced this session via stale async task notifications — already
+resolved, no action needed:** an old fork (`feat/lane-claude-md-onboarding`, PR #165,
+"onboard oeh as a fleet lane") completed and merged back on 2026-09-26; its
+task-notification just arrived late. A `lane_wedge_watchdog` test run
+(10 failed / 53 passed) failed on stale pooler credentials (`password authentication
+failed for user "postgres"`) in that subprocess's own env — this session's own direct DB
+writes (discharge, checkpoint insert, bus send) all succeeded moments later using a freshly
+`dotenv_values`-sourced `DATABASE_URL`, so this reads as that one subprocess's stale
+inherited env, not a live credential outage; worth a glance if it recurs, not chased here.
+
+**On waking: reconcile unread bus first (Option B). If orch-console has ruled on the
+MONITOR_SINGLETONS question (checkpoint #91) or replied to #45717's pooler-capacity
+resume-eligibility, action that first. Otherwise: pick up bus #45730's triage-gap fix.**
