@@ -22,12 +22,18 @@ TEXT="${2:-$(cat)}"
 source "$ORCH_DIR/scripts/lib/console_irsyad_client_send_gate.sh"
 _console_irsyad_client_send_gate "$CHANNEL" || exit 4
 
-# Resolve token_env_key + chat_id from bot_channels (single source of truth).
+# Resolve token_env_key + chat_id from bot_channels (single source of truth), via
+# scripts/bus_send.dburl (PR#214/#219): the .env FILE wins over the inherited env, so
+# a long-running caller that's still holding a pre-rotation DATABASE_URL doesn't fail
+# auth and feed the pooler circuit breaker (2026-09-28 rotation incident; hit again
+# here 2026-09-29 before this fix). nazim_bus_notify._dsn() has the opposite order
+# (inherited-env-first) and is deliberately left alone — other callers, fleet-health
+# owns that fleet-wide sweep.
 read -r TOKEN_KEY CHAT < <(PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" - "$CHANNEL" <<'PY'
-import sys, psycopg
-from nervous_system.nazim_bus_notify import _dsn
+import sys, os, psycopg
+from scripts.bus_send import dburl
 ch = sys.argv[1]
-with psycopg.connect(_dsn()) as c:
+with psycopg.connect(dburl(dict(os.environ))) as c:
     r = c.execute("SELECT token_env_key, allowed_chat_ids FROM bot_channels WHERE channel_key=%s", (ch,)).fetchone()
 if not r or not r[0] or not r[1]:
     sys.exit(2)

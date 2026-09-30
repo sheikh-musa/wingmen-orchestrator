@@ -459,52 +459,12 @@ working tree — `reports/cc-substrate-boot.txt` (a copy of this session's boot 
 backup of this very file from earlier today). Neither was created by me this session; left
 untouched rather than deleted on a guess. Worth a `git clean`-adjacent decision by whoever
 next has full context on why they're there.
-
-## RECONSTITUTE HERE (2026-09-29 ~09:35Z, this session — supersedes everything above)
-
-**1. PR #215 — unchanged, DONE/CLOSED**, see above.
-
-**2. TRIAGE build — FULLY DONE, migration applied for real, PR #217 MERGED, both live
-checkouts synced. Nothing left to do on this item unless orch-console reopens it.**
-- Gate granted at bus #45707 (orch-console, sha256 `4525b1fd41ab570dd2ead5675d35fa756ea589b5cb30a35d29f698725b11d922`
-  verified against PR #217 head `4fad9421`). Also #45706 approved the 32 summaries with
-  edits: 6 duplicates already closed by hand (162/164/206/177/261/243, drop from backfill —
-  their UPDATEs correctly no-op since they're `closed_at`-guarded) and #228's summary needed
-  updating to "in progress (PR#230)".
-- Applied for real: `scripts/apply_migration.py 082 --silo tscuymavysscrvoberrr --gate 45707`
-  → `applied`, ledger note `gate=45707 from=orch-console`.
-- Readback matched orch-console's prediction exactly: open `triage_state='ask'` = **26**
-  (not 32 — the 6 closed duplicates correctly excluded), open `triage_state='captured'` = 10
-  (today's post-hand-triage messages, oldest 05:49Z). Updated #228 via `asks_triage.py 228
-  ask --summary "...in progress in the ADCDA re-plan (cosem PR#230)."`.
-- Merged **PR #217** (squash → `442d0b2` on `fable/substrate-safe-fixes`). CI was red (30
-  failures) but subset-rule confirmed identical to trunk's own current 30 failures (`comm
-  -23` empty both ways — same backlog#68 cluster) — merged on that basis, same precedent as
-  #215. Remote branch `feat/operator-asks-triage`'s local delete failed (same
-  worktree-checked-out-elsewhere pattern as #215's branch) — left alone.
-- **Pulled (fast-forward only) on both live checkouts** per orch-console's explicit order
-  (migrate-before-deploy): Mini `~/wingmen/orchestrator` (`0e86ea9..442d0b2`) and gzb
-  `/home/gazzai/wingmen/orchestrator` via `ssh gzb` (`48882ab..442d0b2`, gzb was further
-  behind so it also picked up #215's changes in the same ff — both clean, no conflicts, only
-  pre-existing untracked scratch files present on each, not touched).
-- Rendered `scripts/asks_daily_digest.py --dry-run` (sends/stamps nothing) and posted the
-  full text to orch-console — 26 open (6 waiting-on-Musa, 20 in-progress), footer "10
-  messages not yet sorted, oldest 4h" (well under the 12h page floor, no action needed).
-- Full trace reported to orch-console: bus **#45717** (reply-to #45707), all 6 of their
-  ordered steps confirmed done in sequence.
-
-**3. Pooler-capacity thread — now eligible to resume** per item 2 being genuinely done
-(migration applied, PR merged, both checkouts synced), but orch-console hasn't explicitly
-re-asked yet — **do not restart this on your own inference; wait for an explicit ask or
-reply-to on #45574/#45575/#45668 before touching `pool_size`.**
-
-**4. Standing items — unchanged, no action.** `held_commitments` #26 due 2026-10-01,
-migration 081 still HELD/reserved, backlog#68 still cc-orchestrator's.
-
-**On waking: reconcile unread bus first (Option B). If orch-console has replied to #45717
-(e.g. sorted the 10 captured rows, or explicitly re-asked about pooler capacity), action
-that. Otherwise nothing outstanding on items 1/2 — idle-wait for new work rather than
-inventing any.**
+## SUPERSEDES the tail above (this file's "item 2" section above pre-dates PR #217's squash-
+merge and is STALE): TRIAGE build is FULLY DONE — migration 082 applied for real (gate
+#45707), 26/10 readback matched, PR #217 merged (squash `442d0b2`), both live checkouts
+(Mini + gzb) fast-forwarded, dry digest rendered, full trace reported at bus **#45717**
+(reply-to #45707). Item 3 (pooler capacity) was thus eligible to resume pending an explicit
+re-ask from orch-console — still not re-asked as of the section below.
 
 ---
 
@@ -570,6 +530,30 @@ writes (discharge, checkpoint insert, bus send) all succeeded moments later usin
 `dotenv_values`-sourced `DATABASE_URL`, so this reads as that one subprocess's stale
 inherited env, not a live credential outage; worth a glance if it recurs, not chased here.
 
-**On waking: reconcile unread bus first (Option B). If orch-console has ruled on the
-MONITOR_SINGLETONS question (checkpoint #91) or replied to #45717's pooler-capacity
-resume-eligibility, action that first. Otherwise: pick up bus #45730's triage-gap fix.**
+**RULED (bus #46247, orch-console, same day): backlog#65 closes after ONE small PR** that
+enforces the exceptions in code, not just writes them down — (1) MONITOR_SINGLETONS stays an
+intentional subset but needs a code comment saying why + a test that it's ⊆
+`protected_agent_ids()`; (2) the two per-node recipe maps aren't gaps but need the same
+subset test (their keys ⊆ the registry, every monitored/recipe'd singleton covered); (3)
+`lane_token_resolver._NO_POINTER_SINGLETONS`'s existing exception stands, folded into the
+same test. quality_gate shadow→enforce is explicitly a SEPARATE decision (bring G1/G4/G5/
+G6/G7/G8/G10's evidence-wiring needs as its own proposal) — not part of #65.
+
+**Done, same session:** added the explanatory comment to `MONITOR_SINGLETONS`
+(`nervous_system/lane_wedge_watchdog.py`) and `tests/test_singleton_registry_parity.py`
+(5 tests: MONITOR_SINGLETONS ⊆ registry, MONITOR_SINGLETONS ⊆ `_SINGLETONS` keys,
+`_SINGLETONS` keys ⊆ registry, `switch_singleton_token.sh` NODE REGISTRY labels ⊆ registry,
+`_NO_POINTER_SINGLETONS` ⊆ `protected_tmux_sessions()`) — all green, plus
+`test_lane_wedge_watchdog.py` (63) and `test_protected_agents_registry.py` +
+`test_lane_token_resolver.py` (43 combined) still green. Committed `3efe25a` on
+`feat/operator-asks-triage`, opened **PR #220** against `fable/substrate-safe-fixes`.
+
+**Also noted, orch-console flagged separately:** cc-substrate has no `agent_status` row and
+`cc-substrate-1` isn't in the `agents` table (bus_send rejected it) — `cc-fleet-health` is
+arranging a relaunch with a fresh env; coordinate with it at a seam, do not self-fix.
+
+**On waking: reconcile unread bus first (Option B). Check PR #220's merge status — if green
+or subset-rule-clean against trunk's own current failures, merge, fast-forward both live
+checkouts, report to orch-console, and close out backlog#65. If orch-console has replied to
+#45717's pooler-capacity resume-eligibility, action that too. Otherwise: pick up bus #45730's
+triage-gap fix next.**
