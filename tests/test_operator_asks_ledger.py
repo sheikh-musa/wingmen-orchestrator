@@ -277,6 +277,28 @@ def test_maybe_track_ask_ambiguous_text_defaults_to_captured(operator_ledger_db)
     assert triage_state == "captured"
 
 
+# ── bus #47184: classify_client_ask (pure, no DB) ─────────────────────────────
+@pytest.mark.parametrize("text", [
+    "It's more than a day. It needs to be done",  # Shuq's actual ask (op#23944)
+    "please add feature X",
+    "can you check the receipts export",
+    "when will this be live?",
+    "any update on the onboarding form",
+    "still waiting on the export",
+    "this is not done yet",
+])
+def test_classify_client_ask_recognizes_requests(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "Lolol", "roger", "yup", "thanks", "ok", "noted", "haha yeah true",
+    "it's done, thanks!", "",
+])
+def test_classify_client_ask_recognizes_chatter(text):
+    assert ol.classify_client_ask(text) == "not_an_ask"
+
+
 # ── migration 085: maybe_track_client_ask (Musa op#23944, bus #47105->#47114) ─
 def test_maybe_track_client_ask_opens_a_row_with_required_chase_by(operator_ledger_db):
     import psycopg
@@ -284,13 +306,16 @@ def test_maybe_track_client_ask_opens_a_row_with_required_chase_by(operator_ledg
     assert rid is not None
     with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
         cur.execute(
-            "SELECT ask, source_msg_id, ask_surface, delegated_to, chase_by, closed_at "
+            "SELECT ask, source_msg_id, ask_surface, delegated_to, chase_by, closed_at, "
+            "       triage_state "
             "FROM operator_asks WHERE id=%s", (rid,),
         )
-        ask, source_msg_id, ask_surface, delegated_to, chase_by, closed_at = cur.fetchone()
+        (ask, source_msg_id, ask_surface, delegated_to, chase_by, closed_at,
+         triage_state) = cur.fetchone()
     assert ask == "please add feature X"
     assert source_msg_id == 555001
     assert ask_surface == "client-channel"
+    assert triage_state == "ask", "classify_client_ask() must set triage_state at insert (bus #47184)"
     assert delegated_to == "cc-irsyad-coord"
     assert chase_by is not None
     assert closed_at is None

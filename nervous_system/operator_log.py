@@ -445,6 +445,56 @@ def maybe_track_ask(op_msg_id: int, direction: str, channel: str, tag,
         return rid
 
 
+_CLIENT_ASK_PATTERNS = [re.compile(p, re.I) for p in (
+    r"\?",                                    # any question -- addressed to us
+    r"\bplease\b",
+    r"\bcan (you|we|i)\b",
+    r"\bcould (you|we)\b",
+    r"\bwould (you|it be)\b",
+    r"\bneed(?:s|ed)?\b",
+    r"\bmust\b",
+    r"\bhave to\b",
+    r"\bwhen (will|is|can|does)\b",
+    r"\bhow (do|can|long|much|many)\b",
+    r"\bstatus (on|of)\b",
+    r"\bany update\b",
+    r"\bfollow(?:ing)? up\b",
+    r"\bstill waiting\b",
+    r"\basap\b",
+    r"\burgent(?:ly)?\b",
+    r"\breminder\b",
+    r"\bnot (?:done|fixed|working)\b",
+    r"\bit(?:'s| is| has been)\b.*\b(?:day|days|hour|hours|week|weeks)\b",
+    r"^\s*(?:add|build|fix|remove|change|send|check|review|confirm|provide|"
+    r"give|share|schedule|arrange|update|deploy|create|make|set ?up)\b",
+)]
+
+
+def classify_client_ask(text: str) -> str:
+    """First-pass classifier for client-channel inbound (Musa op#23944 follow-up,
+    orch-console bus #47184): default is 'not_an_ask' -- 'ask' ONLY for a
+    request/question addressed to us (an imperative, "please/can you/how do
+    I/when will", a question mark, or urgency/follow-up phrasing). INVERTED
+    bias from _heuristic_triage()'s operator-surface default (which defers
+    ambiguous text to 'captured', because under-capturing an operator ask is
+    the worse failure there): the 085 backfill classified 199/359 rows as
+    chased asks when most (cosem-caai) were plain client-channel chatter/acks
+    -- a ledger where 1 real ask hides among 20 chatter rows recreates
+    exactly the Shuq failure this whole ledger exists to prevent, and paging
+    on it floods every lane. A wrong call either way is one command away from
+    correction: scripts/asks_triage.py <id> ask --summary "..." (or `not`).
+
+    Examples: "It's more than a day. It needs to be done" -> ask (needs +
+    urgency phrase). "Lolol" / "roger" / "yup" -> not_an_ask."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return "not_an_ask"
+    for pat in _CLIENT_ASK_PATTERNS:
+        if pat.search(stripped):
+            return "ask"
+    return "not_an_ask"
+
+
 def maybe_track_client_ask(op_msg_id: int, text: str, owner_lane: str | None,
                             chase_hours: float = 24, opened_at=None) -> int:
     """Called for every INBOUND message on a channel whose bot_channels.audience
@@ -463,10 +513,12 @@ def maybe_track_client_ask(op_msg_id: int, text: str, owner_lane: str | None,
 
     Every call opens a row (unlike maybe_track_ask(), there is no surface-gate
     or direction check here — the caller, ingest.py's 3c block, already knows
-    this is an inbound client-channel message). A bare ack still opens a row,
-    just pre-triaged 'not_an_ask' by the same reversible heuristic as the
-    operator path, so no client inbound is ever silently dropped. Returns the
-    new row's id.
+    this is an inbound client-channel message). triage_state is set directly
+    from classify_client_ask() at insert (bus #47184 follow-up) -- NOT left at
+    the 'captured' default -- so the owning lane's queue is already filtered
+    to genuine asks instead of every inbound needing a human look. A bare ack
+    still opens a row, just pre-triaged 'not_an_ask', so no client inbound is
+    ever silently dropped. Returns the new row's id.
 
     `opened_at` (scripts/backfill_client_asks_ledger.py, bus #47110 item 4):
     when given, backdates created_at/chase_by to the ORIGINAL message time
@@ -475,28 +527,18 @@ def maybe_track_client_ask(op_msg_id: int, text: str, owner_lane: str | None,
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
-        heuristic = _heuristic_triage(text)
-        if heuristic == "not_an_ask":
-            # stays OPEN (closed_at IS NULL) — heuristic hits are reversible via
-            # asks_triage.py, same convention as the operator path.
-            cur.execute(
-                "INSERT INTO operator_asks "
-                "  (ask, source_msg_id, ask_surface, delegated_to, created_at, chase_by, "
-                "   triage_state, triaged_at, triaged_by) "
-                "VALUES (%s,%s,'client-channel',%s, COALESCE(%s,now()), "
-                "        COALESCE(%s,now()) + (%s || ' hours')::interval, "
-                "        'not_an_ask', now(), 'heuristic') RETURNING id",
-                (text, op_msg_id, owner_lane, opened_at, opened_at, chase_hours),
-            )
-        else:
-            cur.execute(
-                "INSERT INTO operator_asks "
-                "  (ask, source_msg_id, ask_surface, delegated_to, created_at, chase_by) "
-                "VALUES (%s,%s,'client-channel',%s, COALESCE(%s,now()), "
-                "        COALESCE(%s,now()) + (%s || ' hours')::interval) "
-                "RETURNING id",
-                (text, op_msg_id, owner_lane, opened_at, opened_at, chase_hours),
-            )
+        label = classify_client_ask(text)
+        # stays OPEN (closed_at IS NULL) either way — a heuristic hit is
+        # reversible via asks_triage.py, same convention as the operator path.
+        cur.execute(
+            "INSERT INTO operator_asks "
+            "  (ask, source_msg_id, ask_surface, delegated_to, created_at, chase_by, "
+            "   triage_state, triaged_at, triaged_by) "
+            "VALUES (%s,%s,'client-channel',%s, COALESCE(%s,now()), "
+            "        COALESCE(%s,now()) + (%s || ' hours')::interval, "
+            "        %s, now(), 'heuristic') RETURNING id",
+            (text, op_msg_id, owner_lane, opened_at, opened_at, chase_hours, label),
+        )
         rid = cur.fetchone()[0]
         conn.commit()
         return rid
