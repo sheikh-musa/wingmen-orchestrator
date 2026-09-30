@@ -81,6 +81,36 @@ def test_session_pointer_wins_for_singleton_bodies(orch):
     assert R.resolve_lane_token_path("nazim", orch_dir=orch_dir) == naz
 
 
+def test_session_pointer_pins_audit_cosem_to_syed_not_family(orch):
+    """cc-audit-cosem (session 'audit-cosem') gets a per-LANE Tier-2 pin so a
+    KILL+RELAUNCH stays on SYED — WITHOUT a family 'audit' default that would
+    wrongly drag cc-audit-substrate along. family_of('audit-cosem')=='audit' has
+    no group pointer, so absent this pin a relaunch would re-resolve to the fleet
+    default (Musa) and land a cosem/PII lane on the WRONG account (op#23681/#98
+    cosem-stays-Syed). cc-audit-substrate is NOT cosem and correctly rides the
+    fleet default (Musa)."""
+    orch_dir, make_key, ptr = orch
+    fleet = make_key("musa-oauth-token", "MUSA")     # audit-substrate rides this
+    syed = make_key("syed-oauth-token", "SYED")      # audit-cosem pinned here
+    ptr(".lane_default_token", fleet)
+    ptr(".audit_cosem_default_token", syed)
+    # per-lane session pin wins for audit-cosem (checked BEFORE family resolution)
+    assert R.resolve_lane_token_path("audit-cosem", orch_dir=orch_dir) == syed
+    # the sibling 'audit' lane is UNAFFECTED -> fleet default (Musa)
+    assert R.resolve_lane_token_path("audit-substrate", orch_dir=orch_dir) == fleet
+
+
+def test_audit_cosem_pin_missing_falls_to_env_not_fleet(orch):
+    """Tier-2 semantics: an absent audit-cosem pin -> None (.env), NOT the fleet
+    default (same as nazim/cc-orchestrator). The pin file must exist on the host;
+    if it is ever removed the lane falls to the .env account, never silently to
+    the family/fleet default."""
+    orch_dir, make_key, ptr = orch
+    ptr(".lane_default_token", make_key("musa-oauth-token", "MUSA"))
+    # no .audit_cosem_default_token written
+    assert R.resolve_lane_token_path("audit-cosem", orch_dir=orch_dir) is None
+
+
 def test_no_pointer_singletons_return_none(orch):
     """cai + fleet-health boot off .env -> None (caller uses the .env account)."""
     orch_dir, make_key, ptr = orch

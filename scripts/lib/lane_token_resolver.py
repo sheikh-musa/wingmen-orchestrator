@@ -48,7 +48,15 @@ _FORBIDDEN_TOKEN_FPS = {"13589de86f29"}
 # Bodies with their OWN per-session token pointer (they are NOT worker lanes, so
 # the group + fleet-default tiers do not apply to them). Mirrors panes.py
 # `_BODY_POINTER` and app.py `_TOKEN_POINTER_FOR`.
-_SESSION_POINTER = {"nazim": ".nazim_default_token", "cc-orchestrator": ".orch_default_token"}
+# Per-SESSION (per-lane) token pointers, consulted BEFORE family/fleet resolution.
+# nazim/cc-orchestrator are singleton bodies. 'audit-cosem' is a PER-LANE pin (op#23681/
+# #98, orch-console #46841-C): cc-audit-cosem is cosem/PII and must STAY on Syed, but
+# family_of('audit-cosem')=='audit' has NO group pointer, so absent this pin a KILL+RELAUNCH
+# would re-resolve to the fleet default (Musa) and land it on the wrong account. A per-lane
+# pin (not a family 'audit' default) leaves the sibling 'audit-substrate' — NOT cosem —
+# correctly on the fleet default. (Tier-2 has no group/fleet fallback: an absent pin -> .env.)
+_SESSION_POINTER = {"nazim": ".nazim_default_token", "cc-orchestrator": ".orch_default_token",
+                    "audit-cosem": ".audit_cosem_default_token"}
 
 # Singletons that boot straight off the .env account (no pointer of any tier).
 # Mirrors panes.py `_NO_POINTER_SINGLETONS` / app.py `_NO_TOKEN_POINTER`.
