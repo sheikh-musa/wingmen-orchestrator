@@ -304,13 +304,15 @@ def test_form_string_sends_at_prefixed_caption_literally_not_as_file():
 # edit can't silently drift from what's tested) against an ephemeral throwaway Postgres
 # (never the live substrate — assert_dsn_is_not_production guards every DSN used here).
 _REVIEWER_SEND_FILE = _SCRIPTS["reviewer_send_file.sh"]
+_REVIEWER_SEND = _ROOT / "scripts" / "reviewer_send.sh"
+_CHANNEL_LOOKUP_SCRIPTS = (_REVIEWER_SEND_FILE, _REVIEWER_SEND)
 _HEREDOC_RE = re.compile(r"<<'PY'\n(.*?)\nPY\n", re.DOTALL)
 _CASE_BLOCK_RE = re.compile(r"shopt -s nocasematch\n.*?\nshopt -u nocasematch", re.DOTALL)
 
 
-def _extract_channel_lookup_snippet() -> str:
-    m = _HEREDOC_RE.search(_REVIEWER_SEND_FILE.read_text())
-    assert m, "reviewer_send_file.sh: could not find the <<'PY' ... PY channel-lookup heredoc"
+def _extract_channel_lookup_snippet(script_path: Path = _REVIEWER_SEND_FILE) -> str:
+    m = _HEREDOC_RE.search(script_path.read_text())
+    assert m, f"{script_path.name}: could not find the <<'PY' ... PY channel-lookup heredoc"
     return m.group(1)
 
 
@@ -332,11 +334,30 @@ def bot_channels_db(pg_dsn):
     return pg_dsn
 
 
-def _run_channel_lookup(channel: str, dsn: str) -> subprocess.CompletedProcess:
+@pytest.fixture
+def scoped_dot_env():
+    """Temporarily writes a real repo-root .env (gitignored, never committed) so
+    scripts/bus_send.dburl — which resolves its .env path relative to its OWN file,
+    i.e. this repo root when PYTHONPATH points here — has a file to prefer. Refuses to
+    run if a real .env is already sitting there (never overwrite a real secrets file)."""
+    env_path = _ROOT / ".env"
+    assert not env_path.exists(), f"refusing to touch a real {env_path} — remove it or run elsewhere"
+
+    def _write(dsn: str) -> None:
+        env_path.write_text(f"DATABASE_URL={dsn}\n")
+
+    try:
+        yield _write
+    finally:
+        env_path.unlink(missing_ok=True)
+
+
+def _run_channel_lookup(channel: str, dsn: str,
+                         script_path: Path = _REVIEWER_SEND_FILE) -> subprocess.CompletedProcess:
     env = {**os.environ, "DATABASE_URL": dsn, "PYTHONPATH": str(_ROOT)}
     env.pop("SUPABASE_DB_URL", None)
     return subprocess.run(
-        [sys.executable, "-", channel], input=_extract_channel_lookup_snippet(),
+        [sys.executable, "-", channel], input=_extract_channel_lookup_snippet(script_path),
         text=True, capture_output=True, env=env, cwd=str(_ROOT), timeout=20,
     )
 
@@ -367,6 +388,50 @@ def test_channel_lookup_fails_closed_when_no_allowed_chat_ids(bot_channels_db):
         )
     r = _run_channel_lookup("t-no-chat", bot_channels_db)
     assert r.returncode == 2, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+@pytest.mark.parametrize("script_path", _CHANNEL_LOOKUP_SCRIPTS, ids=lambda p: p.name)
+def test_channel_lookup_uses_dburl_not_the_raw_inherited_dsn_fallback(script_path):
+    """bus #46184: both scripts must resolve their DSN via scripts.bus_send.dburl
+    (.env-file-wins), not nervous_system.nazim_bus_notify._dsn (inherited-env-first) —
+    a long-running caller holding a pre-rotation DATABASE_URL would otherwise fail auth
+    and feed the pooler circuit breaker (2026-09-28 rotation incident, hit again here
+    2026-09-29 before this fix)."""
+    code = _code_only(script_path.read_text())
+    assert "from scripts.bus_send import dburl" in code, (
+        f"{script_path.name} doesn't resolve its DSN via scripts.bus_send.dburl"
+    )
+    assert "nazim_bus_notify" not in code, (
+        f"{script_path.name} still imports nazim_bus_notify._dsn (inherited-env-first — "
+        "the exact rotation trap bus #46184 flagged)"
+    )
+
+
+@pytest.mark.parametrize("script_path", _CHANNEL_LOOKUP_SCRIPTS, ids=lambda p: p.name)
+def test_channel_lookup_prefers_dot_env_dsn_over_bogus_inherited_env(
+    script_path, bot_channels_db, scoped_dot_env
+):
+    """Load-bearing proof for bus #46184: runs the ACTUAL heredoc extracted from the
+    shipped script with a BOGUS DATABASE_URL in the process env and the real (ephemeral)
+    DSN only in .env — must still connect via the .env value, proving .env truly wins
+    over the inherited env instead of merely falling back to it."""
+    with psycopg.connect(bot_channels_db, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO bot_channels (channel_key, token_env_key, allowed_chat_ids) "
+            "VALUES (%s, %s, %s)",
+            ("t-dotenv-wins", "T_DOTENV_WINS_BOT_TOKEN", [777]),
+        )
+    scoped_dot_env(bot_channels_db)
+    env = {**os.environ, "DATABASE_URL": "postgresql://bogus:bogus@127.0.0.1:1/bogus",
+           "PYTHONPATH": str(_ROOT)}
+    env.pop("SUPABASE_DB_URL", None)
+    r = subprocess.run(
+        [sys.executable, "-", "t-dotenv-wins"],
+        input=_extract_channel_lookup_snippet(script_path),
+        text=True, capture_output=True, env=env, cwd=str(_ROOT), timeout=20,
+    )
+    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert r.stdout.strip() == "T_DOTENV_WINS_BOT_TOKEN 777"
 
 
 @pytest.mark.parametrize("filename,expected", [
