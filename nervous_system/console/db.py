@@ -726,7 +726,15 @@ def build_asks_query() -> Tuple[str, list]:
     Ordered waiting_on_musa FIRST, then needs_you (pinned red hero, mirrors the
     mockup), then on_nazim, then freshest movement. Only OPEN asks
     (closed_at IS NULL): a delegate reply is NOT done — only the operator's
-    swipe-to-confirm (closed_at) closes an ask."""
+    swipe-to-confirm (closed_at) closes an ask.
+
+    SCOPED to Musa's own board (Musa op#23554, bus #46353/#46360, migration 084):
+    ask_surface='operator' AND (source_msg_id IS NOT NULL OR waiting_on_operator).
+    A pure fleet delegation with no source_msg_id and no --ask flag is NOT an ask
+    OF Musa and must never reach this query, even if some future writer forgets to
+    stamp ask_surface correctly — the traceability condition is a second,
+    independent backstop. cc-fleet-health's op#23531 client-channel ledger rows
+    (ask_surface='client-channel') are a per-lane review view, never this board."""
     sql = (
         "WITH latest AS ("
         "  SELECT DISTINCT ON (thread_id) "
@@ -752,6 +760,8 @@ def build_asks_query() -> Tuple[str, list]:
         "FROM operator_asks a "
         "LEFT JOIN latest l ON l.thread_id = a.thread_id "
         "WHERE a.closed_at IS NULL "
+        "  AND a.ask_surface = 'operator' "
+        "  AND (a.source_msg_id IS NOT NULL OR a.waiting_on_operator) "
         "ORDER BY "
         "  CASE "
         "    WHEN a.waiting_on_operator                              THEN 0 "

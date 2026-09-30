@@ -17,18 +17,23 @@ Follow-up (bus #43673): the untracked scratch helpers (_bus_tmp.py,
 scratchpad/bus_send.py) are now thin shims over send() below, so there is
 exactly one INSERT INTO agent_messages in the fleet's ad-hoc-send path.
 
-Follow-up (op#22669): send() ALSO writes the operator_asks link row (migration
-044) when the call is a fresh console-to-body ask (from_agent='orch-console',
-type='decision', --req, no --thread/--reply-to) — the same link
-console_assign.py's HTTP path writes. This closes a 41-day gap
-(2026-08-17 -> 2026-09-27) where this script became the dominant console-assign
-path but never wrote that half, so operator_asks silently stopped growing.
+Follow-up (op#22669): send() used to ALSO write an operator_asks link row
+(migration 044) for every fresh console-to-body ask (from_agent='orch-console',
+type='decision', --req, no --thread/--reply-to). REVERTED (Musa op#23554, bus
+#46353, 2026-09-30): that heuristic couldn't tell a genuine Musa ask from a
+pure fleet delegation, and a delegation is NOT an ask OF Musa — it phantom-
+appeared on his "Your asks" board (ids 378/381: "OEH: cc-quality review...",
+"Musa picked V2 option B..."), and broadcasting the same decision to several
+bodies duplicated identically (ids 210/211/212). A delegation is now NEVER a
+new ask; --link-ask lets a caller LINK this bus row to an operator_asks row
+that already exists because it traces back to something Musa actually said
+(migration 084's ask_surface + source_msg_id/waiting_on_operator scope).
 
 Usage:
     scripts/bus_send.py --to cc-orchestrator --type update \\
         --subject "short subject" --priority P1 [--req] \\
-        [--thread <uuid-or-prefix>] [--reply-to <id>] [--from <agent_id>] \\
-        [--dry-run] <<'EOF'
+        [--thread <uuid-or-prefix>] [--reply-to <id>] [--link-ask <id>] \\
+        [--from <agent_id>] [--dry-run] <<'EOF'
     body text goes on stdin (>=40 bytes — the empty-body guard; Nazim shipped
     three blank bus rows on 2026-09-05 by forgetting the heredoc)
     EOF
@@ -129,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--req", action="store_true", help="requires_response=true")
     p.add_argument("--thread", default=None, help="uuid or prefix of an existing thread")
     p.add_argument("--reply-to", type=int, default=None, help="id of the row being answered")
+    p.add_argument(
+        "--link-ask", type=int, default=None, dest="link_ask",
+        help="operator_asks.id to LINK this row to — never creates a new ask "
+             "(Musa op#23554, bus #46353)",
+    )
     p.add_argument("--from", dest="from_agent", default=None, help="override identity (default: auto-resolve)")
     p.add_argument("--dry-run", action="store_true", help="resolve+validate, print the row, do not touch the DB")
     return p
@@ -147,7 +157,7 @@ def read_body(stream) -> str:
 def send(
     from_agent: str, to: str, mtype: str, subject: str, body: str, priority: str,
     req: bool = False, thread: str | None = None, reply_to: int | None = None,
-    dsn: str | None = None,
+    link_ask: int | None = None, dsn: str | None = None,
 ) -> tuple[int, str]:
     """Do the actual INSERT. The one place the SQL lives — CLI (`main`) and
     every shim (`_bus_tmp.py`, `scratchpad/bus_send.py`) call this so there is
@@ -155,30 +165,6 @@ def send(
     path. `priority` has no default here either — callers must pass it."""
     if priority not in _VALID_PRIORITIES:
         raise ValueError(f"send(): priority must be one of {_VALID_PRIORITIES}, got {priority!r}")
-
-    # op#22669 root-cause fix (operator-asks-tracking build, bus thread
-    # d0533248-2d25-484f-84ad-3cdd08fe1fce): scripts/console_assign.py used to be
-    # the ONLY writer of both an agent_messages bus row AND its operator_asks
-    # link row, in one transaction (see console_assign.assign()). This script
-    # (bus #43651/#43673) has since become the fleet's actual day-to-day
-    # console-assign path — orch-console posts its directives via bus_send.py,
-    # not console_assign.py's HTTP endpoint — but never wrote the operator_asks
-    # half. Confirmed live (2026-09-27): agent_messages kept filling with
-    # from_agent='orch-console', message_type='decision', thread_id NOT NULL rows
-    # at 20-250/day every single day from July through today, while
-    # operator_asks received ZERO writes for 41 days (2026-08-17 -> 2026-09-27,
-    # until a manual backfill). Not a console_assign.py defect — a gap in the
-    # newer, now-dominant write path.
-    #
-    # is_new_ask mirrors console_assign.assign()'s exact shape: a FRESH top-level
-    # ask from the console to a body (a brand-new thread, not a reply riding an
-    # existing one). Computed from the ORIGINAL args — `thread` is reassigned
-    # below when resolving/generating the real thread_id, so this must be
-    # evaluated before that happens.
-    is_new_ask = (
-        from_agent == "orch-console" and mtype == "decision" and req
-        and not reply_to and not thread
-    )
 
     import psycopg2
 
@@ -213,14 +199,23 @@ def send(
     )
     row_id, thread_id = cur.fetchone()
 
-    if is_new_ask:
-        # SAME-TRANSACTION link row (migration 044), same shape console_assign.py
-        # writes: status is NEVER stored here — the "Your asks" board derives it
-        # live from the agent_messages thread just inserted above.
+    if link_ask is not None:
+        # Musa op#23554 (bus #46353): a delegation is NEVER a new ask — at most
+        # it LINKS an existing operator_asks row (one already traceable to a
+        # real Musa inbound) to this bus thread, so the "Your asks" board
+        # tracks the delegate's live progress. Fails LOUD on a bad/closed id —
+        # a caller typo should never silently no-op.
         cur.execute(
-            "INSERT INTO operator_asks (ask, thread_id, delegated_to) VALUES (%s, %s, %s)",
-            (subject, thread_id, to),
+            "UPDATE operator_asks SET thread_id=%s, delegated_to=%s "
+            "WHERE id=%s AND closed_at IS NULL",
+            (thread_id, to, link_ask),
         )
+        if cur.rowcount == 0:
+            conn.rollback()
+            conn.close()
+            raise SystemExit(
+                f"bus_send: --link-ask {link_ask} does not exist or is already closed"
+            )
 
     if reply_to:
         cur.execute(
@@ -257,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
     row_id, thread_id = send(
         from_agent, args.to, args.type, args.subject, body, args.priority,
         req=args.req, thread=args.thread, reply_to=args.reply_to,
+        link_ask=args.link_ask,
     )
     print(f"SENT id={row_id} thread={thread_id} from={from_agent} to={args.to} "
           f"priority={args.priority} req={args.req}")

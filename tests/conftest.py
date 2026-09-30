@@ -159,8 +159,15 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                 triage_summary      text,
                 triage_evidence_ref text,
                 triaged_at          timestamptz,
-                triaged_by          text
+                triaged_by          text,
+                ask_surface         text NOT NULL DEFAULT 'operator'
+                                    CHECK (ask_surface IN ('operator','client-channel'))
             )
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX operator_asks_source_ask_uniq
+              ON operator_asks (source_msg_id, ask)
+              WHERE source_msg_id IS NOT NULL
         """)
     return pg_dsn
 

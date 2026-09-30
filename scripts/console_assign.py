@@ -13,9 +13,18 @@ What it does, in ONE transaction:
       real, non-test inbox row, the target body sees it in its normal inbox
       (`to_agent=<id> AND read_at IS NULL`) and drains it exactly like any other
       work — so the console's drain board shrinks as the body catches up.
-  (2) writes ONE link row into `operator_asks` (migration 044) storing that SAME
-      `thread_id`, the ask text, the delegated agent, and the originating
-      operator_messages id (if the assign was raised from a specific inbound ask).
+  (2) LINKS `operator_asks` (migration 044) to that SAME `thread_id`, but ONLY
+      when `source_msg_id` traces this assign back to something Musa actually
+      said. A delegation with no source_msg_id is NOT an ask of Musa (Musa
+      op#23554, bus #46353 — ids 378/381 were console-to-lane delegations that
+      phantom-appeared on his "Your asks" board) and touches operator_asks not
+      at all. When source_msg_id IS given, an existing-row check runs first
+      (migration 084's (source_msg_id, ask) unique index is the backstop) so a
+      retry/double-call LINKS the same row instead of duplicating it (ids
+      210/211/212 were 3 identical rows from 3 identical calls) — while a
+      single Musa message that legitimately fans out into several DIFFERENT
+      delegated sub-asks under the same source_msg_id still gets one row each
+      (ids 18/19/20, confirmed live, must keep working).
       operator_asks NEVER stores status — the "Your asks" board derives status LIVE
       from the linked agent_messages thread on every poll, so it cannot go stale
       (op#13250: "this cannot be stale info").
@@ -92,14 +101,33 @@ def assign(agent: str, ask: str, priority: str, source_msg_id: "int | None" = No
             (agent, subject, body, priority),
         )
         new_id, thread_id = cur.fetchone()
-        # SAME-TRANSACTION link row (migration 044). Status is NEVER stored here;
-        # the board derives it live from the thread above. If operator_asks isn't
-        # applied yet, this raises and the whole tx rolls back (no orphan bus row).
-        cur.execute(
-            "INSERT INTO operator_asks (ask, source_msg_id, thread_id, delegated_to) "
-            "VALUES (%s, %s, %s, %s)",
-            (ask, source_msg_id, thread_id, agent),
-        )
+        # SAME-TRANSACTION link (migration 044) — ONLY when source_msg_id traces
+        # this assign back to a real Musa inbound (Musa op#23554, bus #46353): a
+        # pure delegation (source_msg_id=None) is never a new ask and never
+        # touches operator_asks. Existence check on (source_msg_id, ask) before
+        # inserting: a retry/re-delegate LINKS the same row (re-pointing
+        # thread_id/delegated_to at this new assign) instead of duplicating it;
+        # migration 084's unique index on that same pair is the backstop if this
+        # check is ever bypassed. If operator_asks isn't applied yet, this
+        # raises and the whole tx rolls back (no orphan bus row).
+        if source_msg_id is not None:
+            cur.execute(
+                "SELECT id FROM operator_asks WHERE source_msg_id=%s AND ask=%s "
+                "AND closed_at IS NULL",
+                (source_msg_id, ask),
+            )
+            existing = cur.fetchone()
+            if existing:
+                cur.execute(
+                    "UPDATE operator_asks SET thread_id=%s, delegated_to=%s WHERE id=%s",
+                    (thread_id, agent, existing[0]),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO operator_asks (ask, source_msg_id, thread_id, delegated_to) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (ask, source_msg_id, thread_id, agent),
+                )
         conn.commit()
     return new_id
 

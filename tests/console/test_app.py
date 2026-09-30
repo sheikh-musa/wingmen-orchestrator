@@ -1203,6 +1203,10 @@ def test_build_asks_query_derives_every_status_live_in_sql():
     assert "left join latest l on l.thread_id = a.thread_id" in low
     assert "from agent_messages" in low and "is_test is not true" in low
     assert "a.closed_at is null" in low            # only OPEN asks (delegate-reply ≠ done)
+    # SCOPED to Musa's own board (migration 084, Musa op#23554/bus #46353/#46360):
+    # ask_surface='operator' AND traceable to a real Musa inbound or --ask.
+    assert "a.ask_surface = 'operator'" in low
+    assert "a.source_msg_id is not null or a.waiting_on_operator" in low
     # all six live-derived states present:
     for state in ("waiting_on_musa", "on_nazim", "needs_you", "delegate_done", "in_progress", "pending"):
         assert "'" + state + "'" in low, f"missing derived state {state}"
@@ -1273,12 +1277,14 @@ class _FakeConn:
 
 
 def test_console_assign_stamps_link_row_in_same_transaction(monkeypatch):
-    """A console assign inserts the directive (with a fresh uuid thread_id) AND the
-    operator_asks LINK row in ONE transaction, then commits both — so an assign is
-    a tracked operator ask atomically. Status is NOT written (derive-live only)."""
+    """A console assign inserts the directive (with a fresh uuid thread_id), checks
+    for an existing (source_msg_id, ask) row, finds none, and INSERTs a fresh
+    operator_asks link row — all in ONE transaction, then commits. Status is NOT
+    written (derive-live only)."""
     mod = _load_console_assign()
-    # agents-exists check -> truthy; directive INSERT ... RETURNING id, thread_id.
-    cur = _FakeCursor(fetch_queue=[(1,), (4242, "th-uuid-abc")])
+    # agents-exists check -> truthy; directive INSERT ... RETURNING id, thread_id;
+    # existing-row SELECT -> no match (None).
+    cur = _FakeCursor(fetch_queue=[(1,), (4242, "th-uuid-abc"), None])
     conn = _FakeConn(cur)
     monkeypatch.setattr(mod, "_dsn", lambda: "postgres://fake")
     monkeypatch.setattr(mod.psycopg, "connect", lambda dsn: conn)
@@ -1288,19 +1294,59 @@ def test_console_assign_stamps_link_row_in_same_transaction(monkeypatch):
     assert conn.committed is True
 
     sqls = [e[0] for e in cur.executed]
-    # 1) agents existence guard, 2) directive insert, 3) operator_asks link insert
-    assert len(cur.executed) == 3
+    # 1) agents guard, 2) directive insert, 3) existing-row check, 4) link insert
+    assert len(cur.executed) == 4
     assert "from agents" in sqls[0].lower()
     directive = cur.executed[1]
     assert "insert into agent_messages" in directive[0].lower()
     assert "thread_id" in directive[0].lower() and "gen_random_uuid()" in directive[0].lower()
     assert "returning id, thread_id" in directive[0].lower()
-    link = cur.executed[2]
+    existing_check = cur.executed[2]
+    assert "select id from operator_asks" in existing_check[0].lower()
+    assert existing_check[1] == (99, "ship the thing")
+    link = cur.executed[3]
     assert "insert into operator_asks" in link[0].lower()
     # the link row stores the SAME thread_id the directive returned, + the origin.
     assert link[1] == ("ship the thing", 99, "th-uuid-abc", "cc-irsyad")
     # never writes a status column (the whole point — status is derived live).
     assert "status" not in link[0].lower()
+
+
+def test_console_assign_with_no_source_msg_id_never_touches_operator_asks(monkeypatch):
+    """A pure fleet delegation (no source_msg_id) is NOT an ask of Musa (Musa
+    op#23554, bus #46353 — ids 378/381) and must not open or touch any
+    operator_asks row at all."""
+    mod = _load_console_assign()
+    cur = _FakeCursor(fetch_queue=[(1,), (4242, "th-uuid-abc")])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(mod, "_dsn", lambda: "postgres://fake")
+    monkeypatch.setattr(mod.psycopg, "connect", lambda dsn: conn)
+
+    new_id = mod.assign("cc-irsyad", "OEH: cc-quality review...", "P1")
+    assert new_id == 4242
+    assert conn.committed is True
+    assert len(cur.executed) == 2
+    assert not any("operator_asks" in e[0].lower() for e in cur.executed)
+
+
+def test_console_assign_links_existing_row_instead_of_duplicating(monkeypatch):
+    """A retry/re-delegate for the SAME (source_msg_id, ask) pair LINKS the
+    existing operator_asks row (re-pointing thread_id/delegated_to) instead of
+    inserting a duplicate (ids 210/211/212 were 3 identical duplicate rows)."""
+    mod = _load_console_assign()
+    cur = _FakeCursor(fetch_queue=[(1,), (4242, "th-uuid-abc"), (17,)])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(mod, "_dsn", lambda: "postgres://fake")
+    monkeypatch.setattr(mod.psycopg, "connect", lambda dsn: conn)
+
+    new_id = mod.assign("cc-irsyad", "ship the thing", "P1", source_msg_id=99)
+    assert new_id == 4242
+    assert conn.committed is True
+    assert len(cur.executed) == 4
+    update = cur.executed[3]
+    assert "update operator_asks" in update[0].lower()
+    assert update[1] == ("th-uuid-abc", "cc-irsyad", 17)
+    assert not any("insert into operator_asks" in e[0].lower() for e in cur.executed)
 
 
 def test_console_assign_unknown_agent_exits_2_before_any_insert(monkeypatch):
