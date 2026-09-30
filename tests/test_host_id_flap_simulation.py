@@ -149,8 +149,13 @@ def test_orch_lease_take_and_renew_FAIL_CLOSED_when_identity_unresolved(monkeypa
     monkeypatch.setattr(ol, "_me", _raise)
     monkeypatch.setattr(ol.psycopg, "connect",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not connect when identity is unknown")))
+    # cmd_renew PAGES on unresolvable identity (#46618) — capture it so the test never
+    # posts a REAL P1 bus row to orch-console (#47168), while still asserting it fired.
+    paged = []
+    monkeypatch.setattr(ol, "_page", lambda subject, body, _run=None: paged.append(subject))
     assert ol.cmd_take("reason") == 3
     assert ol.cmd_renew() == 3
+    assert paged, "cmd_renew must PAGE (not silently) when host identity is unresolvable"
 
 
 # ── PR #129 audit: WRITER/READER end-to-end (a real drift-named row through the matcher) ──

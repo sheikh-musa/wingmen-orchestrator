@@ -117,6 +117,17 @@ def _page(subject: str, body: str, _run=None) -> None:
     silent 77 runs). Routes through scripts/bus_send.py (P1+req, per bus #43651: never a
     hand-written INSERT that can drop priority). BEST-EFFORT — must NEVER raise or block
     the renew loop; `_run` is injectable for tests."""
+    # bus #47168: a test that drives cmd_renew into the identity-unresolvable path calls
+    # _page WITHOUT injecting _run; under pytest that would fire a REAL P1 operator alarm
+    # (test_host_id_flap_simulation did exactly this during #232's CI on the self-hosted
+    # gzb runner — a false lease-failure page to orch-console, #47165). Refuse to post a
+    # real bus row under pytest unless _run is explicitly injected (same test-touches-a-
+    # live-surface leak class as the DSN guard, #46880). Prod is unaffected: the daemons
+    # don't import pytest, so this branch is never taken outside a test.
+    if _run is None and ("pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST")):
+        print(f"[orch_lease _page] suppressed under pytest (no _run injected): {subject}",
+              file=sys.stderr)
+        return
     run = _run or subprocess.run
     try:
         script = os.path.join(os.path.dirname(__file__), "..", "bus_send.py")
