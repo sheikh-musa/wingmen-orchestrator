@@ -47,6 +47,7 @@ from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.
     _pane_busy,
     auto_wake_enabled,
     clear_pending,
+    is_wake_eligible_recipient,
     pending_rows,
     resolve_tmux_session,
     should_backstop_wake,
@@ -695,6 +696,151 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             "foreign_live": foreign_live, "pending_retried": pending_retried}
 
 
+# ── idle-while-unread nudge (Fable audit follow-up, orch-console bus #46860 item 2) ──
+# A DISTINCT signal from the cap/quiesce machinery above, which is about DELIVERY
+# ATTEMPTS (op#11297): "this pane is doing nothing right now while a directed row sits
+# unread" — a lane can glance at its inbox and go idle again WITHOUT stamping read_at (the
+# class this module's own comments already name: "many lanes read their inbox without
+# stamping read_at" — cc-cosem-platform/-exams, cc-oeh). cc-oeh sat "standing by for
+# cc-quality's verdict" for ~1h while that verdict (#46766) was unread in its OWN inbox;
+# nothing re-poked an idle pane sitting on an unread row. Runs every tick of THIS daemon's
+# loop (main(), below), reusing the ONE pane-busy definition (agent_wake._pane_busy) and
+# the ONE recipient-eligibility definition (agent_wake.is_wake_eligible_recipient).
+# Delivery is via the NORMAL doorbell (agent_wake.wake_agent) — never a raw pane
+# injection.
+IDLE_UNREAD_NUDGE_AGE_S = int(os.environ.get("IDLE_UNREAD_NUDGE_AGE_S", "900"))    # 15 min
+IDLE_UNREAD_WARN_AGE_S = int(os.environ.get("IDLE_UNREAD_WARN_AGE_S", "1800"))     # 30 min
+
+# Process-level dedupe state (mirrors _ESCALATED_SEEN's shape): agent -> frozenset(ids) of
+# the LAST batch nudged/warned. A repeat of the identical situation is never re-sent; a
+# genuinely NEW unread row (a different id-set) fires again. Survives between sweeps,
+# resets only on a daemon restart — same "at most one repeat per restart" posture as the
+# stuck-page once-guard above.
+_IDLE_NUDGED_SEEN: dict = {}
+_IDLE_WARNED_SEEN: dict = {}
+
+
+def _fetch_idle_unread_rows(nudge_age_s: int):
+    """Coarse prefilter (mirrors _fetch_rows/_fetch_stuck_rows): unread, un-skipped,
+    non-test rows past the NUDGE age. idle_unread_sweep double-checks age itself (defense
+    in depth, and what lets tests inject `rows` directly with sub-threshold entries)."""
+    if not _DSN:
+        return []
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, to_agent, created_at FROM agent_messages "
+            "WHERE read_at IS NULL AND skipped_at IS NULL AND is_test IS NOT TRUE "
+            "AND created_at < now() - make_interval(secs => %s) "
+            "ORDER BY to_agent, created_at", (nudge_age_s,))
+        return cur.fetchall()
+
+
+def _bus_insert(from_agent, to_agent, mtype, priority, subject, body, req: bool = False):
+    """One parameterized INSERT (mirrors _escalate_operator's shape/identity stamp) — the
+    ONE place this module writes a bus row for the idle-unread signal."""
+    if not _DSN:
+        return None
+    with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (from_agent,))
+        cur.execute(
+            "INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,"
+            "subject,body,requires_response) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (from_agent, to_agent, mtype, priority, subject[:180], body, req))
+        row_id = cur.fetchone()[0]
+        conn.commit()
+        return row_id
+
+
+def _default_nudge(agent: str, ids: list, wake=wake_agent) -> "int | None":
+    """Post ONE bus row to `agent` naming its unread ids, then deliver it via the NORMAL
+    doorbell (agent_wake.wake_agent) — never a raw pane injection."""
+    ids_str = ", ".join(f"#{i}" for i in ids)
+    row_id = _bus_insert(
+        "cc-fleet-health", agent, "update", "P2",
+        f"[idle-unread] {len(ids)} row(s) sitting unread while you're idle",
+        f"Your pane is idle but {len(ids)} directed row(s) are still unread: {ids_str}. "
+        f"If you're standing by for one of these, it may already be here — reconcile your "
+        f"inbox (unprocessed/agent_messages) before waiting further.")
+    if row_id is not None:
+        wake(agent, reason="idle-unread-nudge", row_id=row_id)
+    return row_id
+
+
+def _default_warn_fleet_health(agent: str, ids: list) -> "int | None":
+    """A row nudged once but STILL unread past the WARN age needs a human/SRE look —
+    escalate ONCE (per distinct id-set) to cc-fleet-health, the same pattern as this
+    module's other escalations."""
+    ids_str = ", ".join(f"#{i}" for i in ids)
+    return _bus_insert(
+        "cc-fleet-health", "cc-fleet-health", "blocker", "P2",
+        f"[idle-unread] {agent} still unread {len(ids)} row(s) 30min+ after going idle",
+        f"ids={ids_str}. Already nudged via the doorbell once; the pane is idle and the "
+        f"row(s) are STILL unread {IDLE_UNREAD_WARN_AGE_S}s+ after they landed. Needs a look "
+        f"— {agent} may be stuck on something else, or the nudge itself may not be landing.")
+
+
+def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_busy=_pane_busy,
+                      nudge=_default_nudge, warn=_default_warn_fleet_health, now_dt=None,
+                      nudge_age_s: int = IDLE_UNREAD_NUDGE_AGE_S,
+                      warn_age_s: int = IDLE_UNREAD_WARN_AGE_S,
+                      nudged_seen=None, warned_seen=None) -> dict:
+    """For each recipient (is_wake_eligible_recipient — never a human/operator, the hub only
+    on ITS OWN wake floor which this age-only signal never satisfies so the hub is simply
+    never nudged here) whose pane is IDLE (never busy — 'esc to interrupt') but has directed
+    row(s) unread past nudge_age_s: nudge it ONCE per distinct unread-id-set via the normal
+    doorbell, naming the ids. If the SAME situation persists past warn_age_s, warn
+    cc-fleet-health ONCE per distinct id-set. A recipient with no live LOCAL session is a
+    different watchdog's job (dead/foreign-host) — skipped here, never nudged."""
+    if rows is None:
+        rows = _fetch_idle_unread_rows(nudge_age_s)
+    now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
+    nudged_seen = _IDLE_NUDGED_SEEN if nudged_seen is None else nudged_seen
+    warned_seen = _IDLE_WARNED_SEEN if warned_seen is None else warned_seen
+
+    by_agent: dict = {}
+    for r in rows:
+        rid, agent, created_at = r[0], r[1], r[2]
+        if not is_wake_eligible_recipient(agent):
+            continue
+        by_agent.setdefault(agent, []).append((rid, created_at))
+
+    nudged, warned, skipped_busy, skipped_dead = [], [], [], []
+    for agent, entries in by_agent.items():
+        session = resolve_session(agent)
+        if not session:
+            skipped_dead.append(agent)          # gone/foreign-host — not this check's job
+            continue
+        if pane_busy(session):
+            skipped_busy.append(agent)          # mid-turn — will drain its own inbox
+            continue
+
+        def _age_s(ca):
+            try:
+                return (now_dt - ca).total_seconds()
+            except Exception:  # noqa: BLE001 — un-ageable -> treat as not-yet-due
+                return -1.0
+
+        nudge_ids = sorted(rid for rid, ca in entries if ca is not None and _age_s(ca) >= nudge_age_s)
+        if not nudge_ids:
+            continue
+        ids_key = frozenset(nudge_ids)
+        if nudged_seen.get(agent) != ids_key:
+            nudge(agent, nudge_ids)
+            nudged_seen[agent] = ids_key
+            nudged.append(agent)
+
+        warn_ids = sorted(rid for rid, ca in entries if ca is not None and _age_s(ca) >= warn_age_s)
+        if warn_ids:
+            wkey = frozenset(warn_ids)
+            if warned_seen.get(agent) != wkey:
+                warn(agent, warn_ids)
+                warned_seen[agent] = wkey
+                warned.append(agent)
+
+    return {"nudged": nudged, "warned": warned, "skipped_busy": skipped_busy,
+            "skipped_dead": skipped_dead}
+
+
 def _ts() -> str:
     """UTC ISO stamp for every log line. Their ABSENCE hid the root-cause of the wake
     storm (Nazim #43073: no per-line time meant no way to see 12 wakes in 13 min)."""
@@ -714,6 +860,11 @@ def main() -> int:
             if res["targets"]:
                 print(f"{_ts()} sweep: considered={res['considered']} targets={res['targets']} "
                       f"woke={res['woke']} dry={eff_dry}", flush=True)
+            if not eff_dry:
+                idle_res = idle_unread_sweep()
+                if idle_res["nudged"] or idle_res["warned"]:
+                    print(f"{_ts()} idle-unread: nudged={idle_res['nudged']} "
+                          f"warned={idle_res['warned']}", flush=True)
         except Exception as e:  # fail LOUD to the log, keep the floor alive (KeepAlive re-runs)
             print(f"{_ts()} sweep ERROR: {e!r}", file=sys.stderr, flush=True)
         if once:
