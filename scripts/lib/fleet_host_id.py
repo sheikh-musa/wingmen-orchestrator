@@ -39,6 +39,14 @@ ENV_KEY = "FLEET_HOST_ID"
 MAP_PATH = Path(__file__).with_name("fleet_hosts.json")
 
 
+class ForeignHostPinError(RuntimeError):
+    """FLEET_HOST_ID is set to a value that does NOT name THIS host — a foreign pin.
+    Raised rather than honored (bus #46618): a shared secrets bundle carried another
+    host's id (FLEET_HOST_ID=Sheikhs-Mini on gzb), which silently mis-keyed the lease
+    dead-man's switch (renew refused ~582x -> lease expired ~40h) and the watchdog
+    matchers. A pin must match this machine's own gethostname aliases or be unset."""
+
+
 def _log(msg: str) -> None:
     """Observability sink (monkeypatched in tests). Best-effort stderr — must
     never itself raise or block identity resolution."""
@@ -85,10 +93,27 @@ def fleet_host_id() -> str:
     """The stable host identity. See module docstring for the tiers. May raise
     (only) if the host has no pin, no alias-match, AND socket.gethostname()
     itself fails — callers handle per their error policy (Nazim add D)."""
-    # 1) durable pin — boot-exported from the reviewed map.
+    # 1) durable pin — boot-exported from the reviewed map. VALIDATED against THIS
+    #    host: a pin that names a DIFFERENT host (a foreign id leaked via a shared
+    #    secrets bundle, e.g. FLEET_HOST_ID=Sheikhs-Mini on gzb, bus #46618) is
+    #    REFUSED, not honored — an honored foreign pin mis-keys the lease/watchdog
+    #    fleet-wide. gethostname() may raise OSError -> propagates to the caller.
     pin = os.environ.get(ENV_KEY)
     if pin and pin.strip():
-        return pin.strip()
+        pin = pin.strip()
+        live = socket.gethostname()
+        mapping = _load_map()
+        local_canon = _match_alias(live, mapping)
+        if local_canon is not None:
+            if pin == local_canon or pin in set(mapping.get(local_canon, [local_canon])):
+                return pin  # pin names THIS host — honor it
+        elif pin == live or pin == live.split(".")[0]:
+            return pin      # host unmapped, but the pin matches the raw hostname — honor it
+        raise ForeignHostPinError(
+            f"FLEET_HOST_ID={pin!r} does not name this host (gethostname={live!r}"
+            + (f" -> {local_canon!r}" if local_canon else " -> unmapped")
+            + "); refusing a foreign pin. A shared secrets bundle must not carry another "
+              "host's identity (bus #46618) — unset FLEET_HOST_ID here or set it to this host.")
     # 2) alias-match — resilience net; OBSERVABLE so an unpinned host is visible.
     live = socket.gethostname()  # may raise OSError -> propagate to caller.
     canon = _match_alias(live, _load_map())

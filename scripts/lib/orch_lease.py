@@ -111,6 +111,23 @@ def _holder_id() -> str:
     return os.environ.get("ORCH_AGENT_ID", "cc-orchestrator")
 
 
+def _page(subject: str, body: str, _run=None) -> None:
+    """LOUD alert to orch-console when the hub lease can't renew / is expired. Bus
+    #46618: the lease sat expired ~40h with NOTHING paging (hub_bus_currency_monitor
+    silent 77 runs). Routes through scripts/bus_send.py (P1+req, per bus #43651: never a
+    hand-written INSERT that can drop priority). BEST-EFFORT — must NEVER raise or block
+    the renew loop; `_run` is injectable for tests."""
+    run = _run or subprocess.run
+    try:
+        script = os.path.join(os.path.dirname(__file__), "..", "bus_send.py")
+        run([sys.executable, script, "--from", HUB_AGENT, "--to", "orch-console",
+             "--type", "blocker", "--priority", "P1", "--req", "--subject", subject],
+            input=body, text=True, timeout=15, check=False,
+            cwd=os.path.abspath(ROOT))
+    except Exception as e:  # never let paging break the caller
+        print(f"[orch_lease _page] alert best-effort skipped: {e}", file=sys.stderr)
+
+
 # ── Pure decision core (no DB, no clock) — unit-tested offline; the DB layer
 #    below mirrors these exact conditions in atomic SQL. Keep them in sync.
 #    Mirrors fleet_health_lease.py, but the orch-hub body identity is its HOST
@@ -141,9 +158,15 @@ def decide(row: dict | None, host: str, now: datetime) -> "tuple[bool, str]":
     if not expired:
         return False, (f"lease '{LEASE_KEY}' is held by {row.get('holder')}@{holder_host} "
                        f"(fresh); this host is {host} — pens refused (ORCH-TOPOLOGY-001)")
-    # Different host, but EXPIRED (presumed dead) — reclaim-eligible.
-    return True, (f"prior holder {row.get('holder')}@{holder_host} EXPIRED — "
-                  f"reclaim-eligible")
+    # Different host, EXPIRED. Do NOT auto-grant the pens to a non-holder just because
+    # the recorded holder went stale — that silent auto-pass made the pen-(iv) gate a
+    # no-op for ANY non-console body for ~40h (bus #46618, FLEET_HOST_ID=Sheikhs-Mini
+    # expired the hub lease). An expired lease is RECLAIM-ELIGIBLE only via an explicit
+    # `take` (which flips holder_host in the table); until then, FAIL CLOSED.
+    return False, (f"lease '{LEASE_KEY}' held by {row.get('holder')}@{holder_host} is EXPIRED, "
+                   f"and this host is {host} (NOT the holder) — pens REFUSED. Reclaim with "
+                   f"`orch_lease.py take --reason ...` (flips the holder); an expired lease is "
+                   f"never a silent auto-pass (ORCH-TOPOLOGY-001 / bus #46618).")
 
 
 def apply_take(row: dict | None, new_holder: str, host: str, now: datetime,
@@ -346,6 +369,12 @@ def cmd_renew() -> int:
     agent_status heartbeat + real auth_fp (#4b). Also self-stamps holder_host."""
     host = _host_or_fail_closed("renew")
     if host is None:
+        # Identity unresolvable (e.g. a foreign FLEET_HOST_ID pin, bus #46618) — the
+        # renew loop cannot run. PAGE so this is never silent again.
+        _page("orch-hub lease renew FAILED: cannot resolve a stable host identity",
+              "cmd_renew could not resolve this host's identity (fail-closed) — likely a "
+              "foreign FLEET_HOST_ID pin or a gethostname failure. The orch-hub lease will "
+              "EXPIRE if this persists (bus #46618). Fix the host pin, then renew/take.")
         return 3
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute(
@@ -357,6 +386,14 @@ def cmd_renew() -> int:
         conn.commit()
     if row is None:
         print(f"renew REFUSED — lease not held by this host ({host})")
+        # A refused renew means the lease has drifted to another holder_host (or this
+        # host mis-resolved) — it will EXPIRE and the pens fall away. PAGE (bus #46618:
+        # the ~40h-silent expiry). A `take` is needed if this host should hold it.
+        _page(f"orch-hub lease renew REFUSED — not held by this host ({host})",
+              f"orch_lease renew was refused: lease_key={LEASE_KEY} is not held by host "
+              f"{host}. The lease will expire and the singleton pens (tg-out, watchdog, "
+              f"fleet-status) fall away. If {host} should hold it, run "
+              f"`orch_lease.py take --reason ...`. (bus #46618: expiry must never be silent.)")
         return 3
     # #4b: the lease renewed (we ARE the hub holder) -> stamp the hub's hb + real
     # auth_fp so the console SHOWS the hub key. BEST-EFFORT, AFTER the renew already
