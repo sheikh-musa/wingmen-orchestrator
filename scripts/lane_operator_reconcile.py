@@ -2,17 +2,23 @@
 """lane_operator_reconcile.py — a DEDICATED LANE AGENT's tag-scoped operator_log
 reconcile (part-2 of #21399: cc-irsyad-coord owning gazzabyte-irsyad inbound).
 
-Mirrors nervous_system/operator_log.py's unprocessed()/mark_handled_through() but
+Mirrors nervous_system/operator_log.py's unprocessed()/mark_handled() but
 scopes by an EXPLICIT tag instead of the hub/console body-role scope — so a lane
 agent (coord) reads + stamps ONLY its own client tag and can never eat another
 surface's rows. FAIL-CLOSED: an empty/whitespace tag raises (never an unscoped
 span — the 2026-07-05 cross-body-loss lesson, operator_log.py comment). Reuses
 operator_log's row-shape helpers for a consistent reader experience.
 
+EXPLICIT IDS ONLY (Fable audit 2026-09-30 B-2, op#23531): `handle --through N` was
+a HIGH-WATER stamp — a coord that answered only the newest message and stamped
+"through" its id silently marked every OLDER unanswered message handled (the
+stamp-past-unanswered incident). It is now REFUSED; a reply names the ids it
+actually answered.
+
 Coord's per-turn loop:
     read  --tag gazzabyte-irsyad          # see Shuk's unhandled inbound (oldest-first)
     (answer via scripts/lane_reply.sh)
-    handle --tag gazzabyte-irsyad --through <max_id>   # stamp handled after answering
+    handle --tag gazzabyte-irsyad --ids <id,id>   # stamp EXACTLY the ids you answered
 
 This is the reconcile GUARANTEE (Option B): delivery is independent of the
 keystroke nudge landing. At-least-once — a rare re-surface beats a silent loss.
@@ -68,22 +74,61 @@ def unprocessed(tag: str, limit: int = 20) -> list:
     ]
 
 
-def mark_handled_through(max_id: int, tag: str) -> int:
-    """Stamp every inbound for THIS tag up to and including max_id as handled.
-    Tag-scoped — cannot stamp another surface's rows. Returns rows stamped."""
+def _agent_identity() -> str:
+    """This lane's OWN identity for the audit GUC — never a hub default."""
+    return (os.environ.get("CC_BASE_AGENT_ID") or os.environ.get("AGENT_ID")
+            or os.environ.get("ORCH_AGENT_ID") or "unknown-lane")
+
+
+def mark_handled(ids, tag: str) -> int:
+    """Stamp EXACTLY the given inbound ids as handled, within THIS tag (an id from
+    another tag is not stamped even if passed). Returns rows stamped; [] -> 0."""
     tag = _require_tag(tag)
+    id_list = sorted({int(i) for i in (ids or []) if i is not None})
+    if not id_list:
+        return 0
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
-        # identity attribution (the lane agent), consistent with operator_log stamps
-        cur.execute("SELECT set_config('app.current_agent_id',%s,true)",
-                    (os.environ.get("ORCH_AGENT_ID", "cc-irsyad-coord"),))
+        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_identity(),))
         cur.execute(
             "UPDATE operator_messages SET handled_at=now() "
-            "WHERE direction='inbound' AND handled_at IS NULL AND tag=%s AND id <= %s",
-            (tag, max_id),
+            "WHERE direction='inbound' AND handled_at IS NULL AND tag=%s AND id = ANY(%s)",
+            (tag, id_list),
         )
         n = cur.rowcount
         conn.commit()
         return n
+
+
+def _unhandled_ids_through(max_id: int, tag: str) -> list:
+    tag = _require_tag(tag)
+    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM operator_messages WHERE direction='inbound' "
+                    "AND handled_at IS NULL AND tag=%s AND id <= %s ORDER BY id",
+                    (tag, max_id))
+        return [r[0] for r in cur.fetchall()]
+
+
+class HighWaterRefused(SystemExit):
+    """Exit 2 with the ids the refused --through would have eaten (message on .why)."""
+    def __init__(self, why: str):
+        super().__init__(2)
+        self.why = why
+
+
+def mark_handled_through(max_id: int, tag: str) -> int:
+    """REFUSED (Fable audit 2026-09-30 B-2): a high-water stamp marks every older
+    unanswered row handled. Prints what it would have eaten to stderr and exits 2 —
+    re-run with mark_handled(ids, tag) / `handle --ids` naming the ids you answered."""
+    would = _unhandled_ids_through(max_id, tag)
+    why = (
+        f"refusing `--through {max_id}` on tag={tag!r}: a high-water stamp silently marks "
+        f"every older unanswered message handled (stamp-past-unanswered, Fable audit "
+        f"2026-09-30). Unhandled ids <= {max_id}: {would}. Answer each (or defer it), then "
+        f"stamp EXACTLY what you answered: handle --tag {tag} --ids "
+        f"{','.join(map(str, would)) or '<id,id>'}"
+    )
+    print(why, file=sys.stderr, flush=True)
+    raise HighWaterRefused(why)
 
 
 def main() -> int:
@@ -92,9 +137,12 @@ def main() -> int:
     r = sub.add_parser("read", help="show unhandled inbound for --tag (oldest-first)")
     r.add_argument("--tag", required=True)
     r.add_argument("--limit", type=int, default=20)
-    h = sub.add_parser("handle", help="stamp inbound for --tag handled through --through")
+    h = sub.add_parser("handle", help="stamp EXACTLY the given inbound ids for --tag handled")
     h.add_argument("--tag", required=True)
-    h.add_argument("--through", type=int, required=True)
+    g = h.add_mutually_exclusive_group(required=True)
+    g.add_argument("--ids", help="comma-separated inbound ids you actually answered")
+    g.add_argument("--through", type=int,
+                   help="REFUSED (high-water stamp = silent loss); kept only to print the ids it would eat")
     a = ap.parse_args()
 
     if a.cmd == "read":
@@ -105,11 +153,15 @@ def main() -> int:
         print(f"{len(rows)} unhandled on tag={a.tag!r} (oldest-first):")
         for (rid, tag, text, created, sender, source, triage) in rows:
             print(f"  #{rid} [{created:%Y-%m-%d %H:%M}Z] {sender} ({source}): {text[:200]}")
-        print(f"→ after answering, run: handle --tag {a.tag} --through {rows[-1][0]}")
+        print(f"→ answer EACH, then stamp exactly those: handle --tag {a.tag} "
+              f"--ids {','.join(str(r[0]) for r in rows)}")
         return 0
     if a.cmd == "handle":
-        n = mark_handled_through(a.through, a.tag)
-        print(f"stamped {n} row(s) handled on tag={a.tag!r} through #{a.through}")
+        if a.through is not None:
+            mark_handled_through(a.through, a.tag)   # always raises SystemExit(2-text)
+        ids = [int(x) for x in a.ids.split(",") if x.strip()]
+        n = mark_handled(ids, a.tag)
+        print(f"stamped {n} row(s) handled on tag={a.tag!r} ids={ids}")
         return 0
     return 2
 

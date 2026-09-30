@@ -39,12 +39,24 @@ except Exception:  # noqa: BLE001 — never block import on this
 # only; hub sees everything EXCEPT tmux-console (console messages are answered
 # in-console by the console body). Unset role = legacy single-body behavior.
 
-def _agent_id() -> str:
-    return os.environ.get("ORCH_AGENT_ID", "cc-orchestrator")
-
-
 def _body_role() -> str:
-    return os.environ.get("ORCH_BODY_ROLE", "").strip().lower()
+    """The body role this process runs as: 'hub' | 'console' | 'lane'. UNSET (or
+    whitespace) is 'lane' — NEVER an unscoped legacy body (Fable audit 2026-09-30,
+    B-2: launch_dangerous_cc.sh unsets ORCH_BODY_ROLE for every lane, and '' used
+    to be the SANCTIONED no-scope role, so one lane stamp could eat every channel)."""
+    return os.environ.get("ORCH_BODY_ROLE", "").strip().lower() or "lane"
+
+
+def _agent_id() -> str:
+    """Audit identity for app.current_agent_id. Hub/console: ORCH_AGENT_ID (the
+    singleton's own .env). Lane: its OWN lane identity (CC_BASE_AGENT_ID, then
+    AGENT_ID) — never a silent 'cc-orchestrator' default, which mis-attributed
+    every lane stamp to the hub (Fable audit B-2)."""
+    role = _body_role()
+    if role in ("hub", "console"):
+        return os.environ.get("ORCH_AGENT_ID", "cc-orchestrator")
+    return (os.environ.get("CC_BASE_AGENT_ID") or os.environ.get("AGENT_ID")
+            or "unknown-lane")
 
 
 # --- tag shape guard (bus #44971/#45020) -------------------------------------
@@ -178,23 +190,67 @@ def _shared_feed_exclusion() -> str:
 
 
 # Recognized body roles. ANY other value MUST fail CLOSED, never silently fall
-# through to "" (an unscoped query). The 2026-07-05 incident (commit 3691cea):
-# a misconfigured/typo'd ORCH_BODY_ROLE fell through and made
+# through to an unscoped query. The 2026-07-05 incident (commit 3691cea): a
+# misconfigured/typo'd ORCH_BODY_ROLE fell through and made
 # mark_handled_through() stamp EVERY channel's inbound handled in ONE call —
-# cross-body message loss. '' (unset) is the SANCTIONED legacy single-body
-# behavior and stays permitted; a non-empty UNRECOGNIZED role raises loudly.
-_RECOGNIZED_BODY_ROLES = frozenset({"console", "hub", ""})
+# cross-body message loss. '' used to be the SANCTIONED legacy single-body
+# (unscoped) role; since the Fable audit (2026-09-30, B-2) UNSET == 'lane', and a
+# lane must name its tag= — there is no unscoped role any more.
+_RECOGNIZED_BODY_ROLES = frozenset({"console", "hub", "lane"})
 
 
-def _channel_scope_sql() -> str:
+def _channel_scope(tag: str | None = None) -> "tuple[str, tuple]":
+    """The (sql_fragment, params) channel scope for THIS body. The fragment starts
+    with ' AND ' and is appended to a WHERE on operator_messages; params are the
+    psycopg placeholders it needs (a lane's tag is PARAMETERIZED, never
+    interpolated). Raises on an unrecognized role, and on role 'lane' without a
+    tag — a lane may never read/stamp across tags."""
     role = _body_role()
     if role not in _RECOGNIZED_BODY_ROLES:
         raise ValueError(
             "ORCH_BODY_ROLE=%r is not a recognized orch body role "
-            "(expected 'console', 'hub', or empty). Refusing to build an "
+            "(expected 'console', 'hub', or 'lane'/unset). Refusing to build an "
             "UNSCOPED channel query: an unrecognized role must never silently "
-            "let unprocessed()/mark_handled_through() span EVERY channel "
+            "let unprocessed()/mark_handled() span EVERY channel "
             "(cross-body message loss — see commit 3691cea, 2026-07-05)." % role
+        )
+    if role == "lane":
+        t = (tag or "").strip()
+        if not t:
+            raise ValueError(
+                "operator_log: this process is a LANE (ORCH_BODY_ROLE unset) — "
+                "unprocessed()/mark_handled() require tag=<your channel tag>. A lane "
+                "never reads or stamps across channels (Fable audit 2026-09-30 B-2: "
+                "an unscoped lane stamp marked every channel handled). Use "
+                "scripts/lane_operator_reconcile.py --tag <tag> or pass tag=."
+            )
+        _validate_tag_shape(t)
+        return (" AND tag=%s", (t,))
+    if tag is not None and str(tag).strip():
+        # a hub/console caller narrowing to one tag INSIDE its own scope is fine
+        _validate_tag_shape(str(tag).strip())
+        return (_channel_scope_sql() + " AND tag=%s", (str(tag).strip(),))
+    return (_channel_scope_sql(), ())
+
+
+def _channel_scope_sql() -> str:
+    """Param-free scope fragment for the two SINGLETON bodies (hub/console). A
+    lane has no param-free form (its scope IS its tag) — raises, use
+    _channel_scope(tag=...)."""
+    role = _body_role()
+    if role not in _RECOGNIZED_BODY_ROLES:
+        raise ValueError(
+            "ORCH_BODY_ROLE=%r is not a recognized orch body role "
+            "(expected 'console', 'hub', or 'lane'/unset). Refusing to build an "
+            "UNSCOPED channel query: an unrecognized role must never silently "
+            "let unprocessed()/mark_handled() span EVERY channel "
+            "(cross-body message loss — see commit 3691cea, 2026-07-05)." % role
+        )
+    if role == "lane":
+        raise ValueError(
+            "operator_log: role 'lane' (ORCH_BODY_ROLE unset) has no unscoped "
+            "channel clause — pass tag= (see _channel_scope). A lane never spans "
+            "every channel (Fable audit 2026-09-30 B-2)."
         )
     if role == "console":
         # Nazim reconciles his OWN surfaces: in-console typing (channel
@@ -239,7 +295,7 @@ def _channel_scope_sql() -> str:
                 # post-gzb-flip. Same carve-out shape as the 08-03 cosem/alderei one.
                 " AND tag IS DISTINCT FROM 'finance-console'"
                 + _shared_feed_exclusion())
-    return ""
+    raise AssertionError("unreachable: role %r" % role)  # every role handled above
 
 
 # --- Operator asks ledger (op#22669) ----------------------------------------
@@ -561,7 +617,8 @@ def recent(limit: int = 20) -> list:
 # The keystroke injection is a best-effort NUDGE; the guarantee that an operator
 # message is seen + answered lives HERE. Every inbound is logged with
 # handled_at=NULL; cc-orchestrator reconciles by reading unprocessed() each turn
-# / on the autonomous wakeup, answers, then stamps via mark_handled_through().
+# / on the autonomous wakeup, answers, then stamps the ids it answered via
+# mark_handled([ids]) (mark_handled_through() is deprecated + bounded to the read).
 # At-least-once: a rare re-surfacing beats a silent loss (cai's ruling).
 # Same convention applies to open_asks_for(<body>) (op#22669): read it at the
 # same reconciliation points (turn start / autonomous wakeup), not just at boot —
@@ -569,9 +626,25 @@ def recent(limit: int = 20) -> list:
 # FRESH context (startup/clear), so a long-lived resumed session must re-check
 # open_asks_for() itself the same way it already re-checks unprocessed().
 
-def unprocessed(limit: int = 20) -> list:
+# The ids the LAST unprocessed() call in this process returned. mark_handled_through()
+# (deprecated) is bounded to this set: it may stamp only rows the caller was actually
+# SHOWN. Before (Fable audit 2026-09-30 B-2): unprocessed(limit=20) showed 20 rows but
+# mark_handled_through(max_id) stamped EVERY row <= max_id — the 21st+ row was marked
+# handled without ever being read (silent loss). Process-local on purpose: the stamp
+# must come from the same body that read.
+_LAST_READ_IDS: list = []
+
+
+def _reset_read_cursor() -> None:
+    _LAST_READ_IDS.clear()
+
+
+def unprocessed(limit: int = 20, tag: str | None = None) -> list:
     """Inbound operator messages not yet marked handled, oldest-first. The
     reconciliation read that makes delivery independent of keystrokes landing.
+    A LANE body (ORCH_BODY_ROLE unset) MUST pass tag=; hub/console may narrow
+    with tag= inside their own scope. Records the returned ids for
+    mark_handled_through()'s bound.
 
     Return shape (BACKWARD-COMPATIBLE — first 4 positions unchanged, sender
     fields then the passive triage suggestion APPENDED at the end):
@@ -580,46 +653,89 @@ def unprocessed(limit: int = 20) -> list:
          sender_label, source,                      # derived: 'Musa'/name, 'DM'/'group'
          triage)                                    # passive CoS route suggestion (dict), read-only
     """
+    scope_sql, scope_params = _channel_scope(tag)
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT id, tag, text, created_at, chat_id, "
             "from_user_id, from_username, from_name, cos_triage FROM operator_messages "
             "WHERE direction='inbound' AND handled_at IS NULL"
-            + _channel_scope_sql() +
-            " ORDER BY id ASC LIMIT %s", (limit,))
+            + scope_sql +
+            " ORDER BY id ASC LIMIT %s", (*scope_params, limit))
         rows = cur.fetchall()
-    return [(rid, tag, text, created_at, fuid, funame, fname,
+    _LAST_READ_IDS[:] = [r[0] for r in rows]
+    return [(rid, tag_, text, created_at, fuid, funame, fname,
              _sender_label(fuid, fname, funame),
              _source_hint(chat_id, fuid),
-             _triage_for(cos_triage, text, tag))
-            for (rid, tag, text, created_at, chat_id,
+             _triage_for(cos_triage, text, tag_))
+            for (rid, tag_, text, created_at, chat_id,
                  fuid, funame, fname, cos_triage) in rows]
 
 
-def mark_handled_through(max_id: int) -> int:
-    """Stamp every inbound up to and including max_id as handled. Called after
-    cc-orchestrator has read + answered the operator's current messages. Returns
-    the number of rows stamped."""
+def _stamp_scope(tag: str | None) -> "tuple[str, tuple]":
+    scope_sql, scope_params = _channel_scope(tag)
+    # Hub stamps must never eat another agent's channel: cai-channel rows are
+    # cai's to handle (2026-07-05 — a blanket stamp nearly marked the operator's
+    # message to cai as handled while cai was still booting). unprocessed()
+    # intentionally still SHOWS them to the hub as a visibility backstop; only
+    # the stamp is scoped away.
+    if _body_role() == "hub":
+        scope_sql += " AND channel IS DISTINCT FROM 'cai-channel'"
+    return scope_sql, scope_params
+
+
+def mark_handled(ids, tag: str | None = None) -> int:
+    """Stamp EXACTLY the given inbound ids as handled (within this body's scope —
+    an id outside it is silently not stamped, so a lane can never stamp another
+    tag's row even by id). The ONE sanctioned stamp: a reply names the ids it
+    answered (or deferred elsewhere). No high-water form. Returns rows stamped;
+    [] -> 0 without touching the DB."""
+    id_list = sorted({int(i) for i in (ids or []) if i is not None})
+    if not id_list:
+        return 0
+    scope_sql, scope_params = _stamp_scope(tag)
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
-        # Hub stamps must never eat another agent's channel: cai-channel rows
-        # are cai's to handle (2026-07-05 — a blanket stamp nearly marked the
-        # operator's message to cai as handled while cai was still booting).
-        # unprocessed() intentionally still SHOWS them to the hub as a
-        # visibility backstop; only the stamp is scoped away.
-        scope = _channel_scope_sql()
-        if _body_role() == "hub":
-            scope += " AND channel IS DISTINCT FROM 'cai-channel'"
         cur.execute(
             "UPDATE operator_messages SET handled_at=now() "
-            "WHERE direction='inbound' AND handled_at IS NULL AND id <= %s"
-            + scope,
-            (max_id,))
+            "WHERE direction='inbound' AND handled_at IS NULL AND id = ANY(%s)"
+            + scope_sql,
+            (id_list, *scope_params))
         n = cur.rowcount
         conn.commit()
         return n
+
+
+def mark_handled_through(max_id: int, tag: str | None = None) -> int:
+    """DEPRECATED high-water stamp — kept only for the two singleton bodies' existing
+    call sites, and BOUNDED: stamps only ids <= max_id that THIS process's last
+    unprocessed() call actually returned (never a row the caller was not shown —
+    the 21st-row loss). Raises for a LANE (use mark_handled(ids, tag=)) and when
+    no unprocessed() read preceded it in this process."""
+    if _body_role() == "lane":
+        raise ValueError(
+            "operator_log.mark_handled_through() is not available to a LANE: a "
+            "high-water stamp across a channel silently marks unanswered rows handled "
+            "(Fable audit 2026-09-30 B-2). Use mark_handled([ids], tag=<tag>) with the "
+            "ids you actually answered, or scripts/lane_operator_reconcile.py handle "
+            "--tag <tag> --ids <id,id>."
+        )
+    if not _LAST_READ_IDS:
+        raise ValueError(
+            "operator_log.mark_handled_through(): no unprocessed() read in this "
+            "process — refusing a blind high-water stamp. Read first, answer, then "
+            "stamp the ids you read (mark_handled([ids]))."
+        )
+    if int(max_id) not in _LAST_READ_IDS:
+        raise ValueError(
+            f"operator_log.mark_handled_through({max_id}): that id was NOT among the rows "
+            f"your last unprocessed() returned ({_LAST_READ_IDS}) — you are stamping past a "
+            f"row you never read (the 21st-row loss, Fable audit 2026-09-30 B-2). Stamp only "
+            f"ids you read+answered: mark_handled([ids])."
+        )
+    ids = [i for i in _LAST_READ_IDS if i <= int(max_id)]
+    return mark_handled(ids, tag=tag)
 
 
 def main() -> int:
