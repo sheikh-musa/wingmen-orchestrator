@@ -23,10 +23,15 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 # after a password rotation a long-running session's inherited value is stale and
 # every call failed auth, keeping the pooler circuit breaker tripped (2026-09-28).
 # Only this key: identity vars (AGENT_ID, ORCH_BODY_ROLE, ...) must stay per-process.
+# NOT under pytest: forcing the .env prod DSN into os.environ at import would leak it
+# across test modules (this module is imported at collection by several tests), un-skip
+# DB tests against prod and defeat the root-conftest DSN seal (bus #46880). Under pytest
+# the sealed / explicit (env-var) DSN wins; the rotation-staleness fix is prod-only.
+_under_pytest = "pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 try:
     from dotenv import dotenv_values as _dotenv_values
     _file_db_url = _dotenv_values(os.path.join(os.path.dirname(__file__), "..", ".env")).get("DATABASE_URL")
-    if _file_db_url:
+    if _file_db_url and not _under_pytest:
         os.environ["DATABASE_URL"] = _file_db_url
 except Exception:  # noqa: BLE001 — never block import on this
     pass
