@@ -1,15 +1,21 @@
-"""Repo-root conftest — PROD-REF REFUSAL GUARD (backlog#68, Nazim #46564/#46566).
+"""Repo-root conftest — PROD-REF REFUSAL GUARD (backlog#68, Nazim #46564/#46566/#46576).
 
-SAFETY-CRITICAL, no opt-out. A pytest session refuses to start if the resolved
-DATABASE_URL (env var OR the .env file) points at any known PRODUCTION store. This
-fires in BOTH local runs AND CI: the 2026-09-28/29 substrate pooler lockout was a
-LOCAL `pytest tests/` run whose stale-password env hammered the prod substrate, and
-the CI job had been exporting the prod DATABASE_URL secret to the whole test run.
-Tests must only ever touch an ephemeral/local database; a prod DSN is a hard refuse.
+SAFETY-CRITICAL, no opt-out. A pytest session refuses to start if the EFFECTIVE
+DATABASE_URL points at any known PRODUCTION store. This fires in BOTH local runs AND
+CI: the 2026-09-28/29 substrate pooler lockout was a LOCAL `pytest tests/` run whose
+stale-password env hammered the prod substrate, and the CI job had been exporting the
+prod DATABASE_URL secret to the whole test run. Tests must only ever touch an
+ephemeral/local database; a prod DSN is a hard refuse.
 
-Resolution mirrors the sources a test actually reads (os.environ DATABASE_URL /
-SUPABASE_DB_URL) PLUS the .env file (the rotation's single push-point, per #214's
-bus_send.dburl), so neither an inherited env var nor a stale .env slips through.
+PRECEDENCE (#46576): resolve ENV-VAR FIRST. If DATABASE_URL (or SUPABASE_DB_URL) is
+SET in the environment, that is the effective DSN and the .env file is NOT consulted —
+so a lane that exports a LOCAL DSN for TDD is ALLOWED even though the fleet .env holds
+the prod DSN. ONLY when the env var is unset do we fall back to the .env file value
+(the rotation's single push-point, per #214). Net:
+  env = local DSN            -> ALLOW (never reads .env)
+  env unset + .env = prod    -> REFUSE
+  env = prod DSN             -> REFUSE
+  env unset + no .env / local -> ALLOW (DB-integration tests skip as before)
 """
 import os
 
@@ -22,50 +28,53 @@ _PROD_REFS = (
 )
 
 
-def _env_file_dsns():
-    """DATABASE_URL / SUPABASE_DB_URL lines from the repo's .env file (if present)."""
-    out = []
+def _env_dsn(environ):
+    """The DSN from the ENVIRONMENT (DATABASE_URL wins over SUPABASE_DB_URL), or None."""
+    return environ.get("DATABASE_URL") or environ.get("SUPABASE_DB_URL") or None
+
+
+def _env_file_dsn():
+    """The first DATABASE_URL / SUPABASE_DB_URL from the repo's .env file, or None."""
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     try:
         with open(env_path) as f:
             for line in f:
                 line = line.strip()
                 if line.startswith(("DATABASE_URL=", "SUPABASE_DB_URL=")):
-                    out.append(line.split("=", 1)[1].strip().strip('"').strip("'"))
+                    return line.split("=", 1)[1].strip().strip('"').strip("'") or None
     except (FileNotFoundError, OSError):
         pass
-    return out
+    return None
 
 
-def resolve_dsns(environ=None, include_env_file=True):
-    """Every DSN string a test could connect with: env DATABASE_URL/SUPABASE_DB_URL
-    plus the .env file's. Pure + injectable so it's unit-testable."""
+def effective_dsn(environ=None):
+    """The ONE DSN a test run will actually use: ENV-VAR FIRST (DATABASE_URL /
+    SUPABASE_DB_URL); only if the env var is UNSET, the .env file. Pure + injectable
+    so it's unit-testable. Returns None when neither source has a DSN."""
     environ = os.environ if environ is None else environ
-    dsns = [environ.get("DATABASE_URL"), environ.get("SUPABASE_DB_URL")]
-    if include_env_file:
-        dsns += _env_file_dsns()
-    return [d for d in dsns if d]
+    return _env_dsn(environ) or _env_file_dsn()
 
 
-def prod_ref_in(dsns):
-    """Return (dsn_snippet, prod_ref) for the first DSN that names a prod store, else
-    None. Pure — the unit test drives this directly."""
-    for dsn in dsns:
-        for ref in _PROD_REFS:
-            if ref in dsn:
-                # never return the full DSN (it carries a password) — just the ref.
-                return ref
+def prod_ref(dsn):
+    """The prod store ref contained in `dsn`, or None. Never returns the full DSN
+    (it carries a password)."""
+    if not dsn:
+        return None
+    for ref in _PROD_REFS:
+        if ref in dsn:
+            return ref
     return None
 
 
 def pytest_configure(config):
-    ref = prod_ref_in(resolve_dsns())
+    ref = prod_ref(effective_dsn())
     if ref:
         import pytest
         pytest.exit(
-            f"REFUSED: a resolved DATABASE_URL/SUPABASE_DB_URL points at the PRODUCTION "
-            f"store '{ref}'. Tests must NEVER run against prod (backlog#68 / bus #46566 — "
-            f"a local run once tripped the substrate pooler circuit breaker). Point "
-            f"DATABASE_URL at an ephemeral/local Postgres and re-run. No opt-out.",
+            f"REFUSED: the effective DATABASE_URL points at the PRODUCTION store "
+            f"'{ref}'. Tests must NEVER run against prod (backlog#68 / bus #46566 — a "
+            f"local run once tripped the substrate pooler circuit breaker). Export "
+            f"DATABASE_URL to a LOCAL/ephemeral Postgres (see scripts/pytest_local.sh) "
+            f"and re-run. No opt-out.",
             returncode=2,
         )
