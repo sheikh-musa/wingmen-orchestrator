@@ -89,6 +89,21 @@ def test_not_ledger_clear_when_only_captured_rows_exist():
     assert "3 messages not yet sorted" in digest
 
 
+def test_fetch_open_asks_scopes_to_operator_surface_only():
+    """Migration 085 regression guard: a client-channel row triaged 'ask'
+    must NEVER leak into Musa's own board mixed in as if he'd asked it
+    himself — fetch_open_asks()'s SQL must filter ask_surface='operator'."""
+    import inspect
+    src = inspect.getsource(add.fetch_open_asks)
+    assert "ask_surface = 'operator'" in src
+
+
+def test_fetch_captured_summary_scopes_to_operator_surface_only():
+    import inspect
+    src = inspect.getsource(add.fetch_captured_summary)
+    assert "ask_surface = 'operator'" in src
+
+
 def test_digest_never_shows_raw_ask_text_only_triage_summary():
     """render_digest must render triage_summary, never a raw `ask` field —
     even if a caller's row dict happens to still carry one (defence in depth:
@@ -246,3 +261,81 @@ def test_main_does_not_log_uae_send_time_on_dry_run(monkeypatch, capsys):
     rc = add.main(["--dry-run"])
     assert rc == 0
     assert called == []
+
+
+# ── migration 085: client asks section (Musa op#23944, bus #47110/#47114) ────
+def client_row(id=1, ask="add feature X", delegated_to="cc-irsyad-coord",
+                committed_date=None, created_at=None):
+    created_at = created_at or datetime(2026, 9, 29, 1, 47, tzinfo=timezone.utc)
+    return {"id": id, "triage_summary": ask, "delegated_to": delegated_to,
+            "committed_date": committed_date, "created_at": created_at}
+
+
+def test_client_section_omitted_when_no_client_rows_or_captured():
+    digest = add.render_digest([row(id=1)])
+    assert "CLIENT ASKS" not in digest
+
+
+def test_client_section_appears_with_count_and_age():
+    now = datetime(2026, 10, 1, 1, 47, tzinfo=timezone.utc)  # 72h after the client_row default
+    digest = add.render_digest([], {"count": 0, "oldest": None},
+                                [client_row(id=7)], {"count": 0, "oldest": None})
+    assert "CLIENT ASKS" in digest
+    assert "1 open" in digest
+    assert "#7" in digest
+    assert "add feature X" in digest
+
+
+def test_client_row_shows_no_date_yet_when_uncommitted():
+    digest = add.render_digest([], None, [client_row(id=7, committed_date=None)], None)
+    assert "no date yet" in digest
+
+
+def test_client_row_shows_committed_date_when_set():
+    committed = datetime(2026, 10, 2, tzinfo=timezone.utc)
+    digest = add.render_digest([], None, [client_row(id=7, committed_date=committed)], None)
+    assert "committed 2026-10-02" in digest
+    assert "FAR-OUT" not in digest
+
+
+def test_client_row_flags_far_out_committed_date():
+    """Musa op#23946: 'no far-out dates' — a commitment given more than 3
+    days after the client's own ask must be flagged (bus #47110 item 3b)."""
+    created = datetime(2026, 9, 29, 0, 0, tzinfo=timezone.utc)
+    committed = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)  # 6 days out
+    digest = add.render_digest(
+        [], None, [client_row(id=7, created_at=created, committed_date=committed)], None)
+    assert "FAR-OUT DATE" in digest
+    assert "op#23946" in digest
+
+
+def test_client_row_within_3_days_is_not_flagged():
+    created = datetime(2026, 9, 29, 0, 0, tzinfo=timezone.utc)
+    committed = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)  # 2 days out
+    digest = add.render_digest(
+        [], None, [client_row(id=7, created_at=created, committed_date=committed)], None)
+    assert "FAR-OUT" not in digest
+
+
+def test_client_captured_count_line_never_enumerates_raw_text():
+    digest = add.render_digest(
+        [], None, [], {"count": 4, "oldest": datetime(2026, 9, 29, tzinfo=timezone.utc)})
+    assert "4 client messages not yet sorted" in digest
+
+
+def test_ledger_not_clear_when_only_client_asks_open():
+    """The digest must not claim 'nothing open' when there ARE open client
+    asks, even with zero operator-surface asks (a plausible day: Musa has no
+    personal asks open, but a client one is sitting there)."""
+    digest = add.render_digest([], None, [client_row(id=9)], None)
+    assert "nothing open" not in digest
+
+
+def test_client_section_never_shows_captured_raw_ask_text():
+    """Only triage_state='ask' rows (a human-reviewed triage_summary) ever
+    reach fetch_client_open_asks() — captured rows are summarized as a count
+    only via fetch_client_captured_summary(), never enumerated (same no-PII
+    rule as the operator side, bus #47114: 'summaries, not raw text')."""
+    digest = add.render_digest(
+        [], None, [], {"count": 1, "oldest": datetime(2026, 9, 29, tzinfo=timezone.utc)})
+    assert "1 client messages not yet sorted" in digest

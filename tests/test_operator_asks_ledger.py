@@ -4,6 +4,7 @@ tests/conftest.py — so a schema mismatch fails the suite, never production;
 orch-console bus #44006/op#22741: these tests used to run against the live
 substrate via os.environ DATABASE_URL and wrote + deleted real rows there)."""
 import importlib
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -274,6 +275,78 @@ def test_maybe_track_ask_ambiguous_text_defaults_to_captured(operator_ledger_db)
         cur.execute("SELECT triage_state FROM operator_asks WHERE id=%s", (rid,))
         (triage_state,) = cur.fetchone()
     assert triage_state == "captured"
+
+
+# ── migration 085: maybe_track_client_ask (Musa op#23944, bus #47105->#47114) ─
+def test_maybe_track_client_ask_opens_a_row_with_required_chase_by(operator_ledger_db):
+    import psycopg
+    rid = ol.maybe_track_client_ask(555001, "please add feature X", "cc-irsyad-coord")
+    assert rid is not None
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT ask, source_msg_id, ask_surface, delegated_to, chase_by, closed_at "
+            "FROM operator_asks WHERE id=%s", (rid,),
+        )
+        ask, source_msg_id, ask_surface, delegated_to, chase_by, closed_at = cur.fetchone()
+    assert ask == "please add feature X"
+    assert source_msg_id == 555001
+    assert ask_surface == "client-channel"
+    assert delegated_to == "cc-irsyad-coord"
+    assert chase_by is not None
+    assert closed_at is None
+
+
+def test_maybe_track_client_ask_bare_ack_stays_open_but_not_an_ask(operator_ledger_db):
+    import psycopg
+    rid = ol.maybe_track_client_ask(555002, "thanks", "cc-irsyad-coord")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT triage_state, triaged_by, closed_at, chase_by FROM operator_asks WHERE id=%s",
+            (rid,),
+        )
+        triage_state, triaged_by, closed_at, chase_by = cur.fetchone()
+    assert triage_state == "not_an_ask"
+    assert triaged_by == "heuristic"
+    assert closed_at is None, "a client ack stays reversible, never hard-closed"
+    assert chase_by is not None, "even a heuristic hit gets a real chase_by (required column)"
+
+
+def test_maybe_track_client_ask_default_opened_at_is_now(operator_ledger_db):
+    import psycopg
+    before = datetime.now(timezone.utc)
+    rid = ol.maybe_track_client_ask(555003, "please add feature Y", "cc-irsyad-coord")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT created_at FROM operator_asks WHERE id=%s", (rid,))
+        (created_at,) = cur.fetchone()
+    assert created_at >= before - timedelta(seconds=5)
+
+
+def test_maybe_track_client_ask_opened_at_backdates_created_and_chase_by(operator_ledger_db):
+    """scripts/backfill_client_asks_ledger.py's whole reason for existing: a
+    3-day-old backfilled message must show as ALREADY overdue, not get a
+    fresh 24h grace period it never had (bus #47110 item 4)."""
+    import psycopg
+    three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
+    rid = ol.maybe_track_client_ask(555004, "please add feature Z", "cc-irsyad-coord",
+                                     chase_hours=24, opened_at=three_days_ago)
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT created_at, chase_by FROM operator_asks WHERE id=%s", (rid,))
+        created_at, chase_by = cur.fetchone()
+    assert abs((created_at - three_days_ago).total_seconds()) < 5
+    assert chase_by < datetime.now(timezone.utc), "backdated chase_by must already be overdue"
+
+
+def test_maybe_track_client_ask_opened_at_backdates_heuristic_row_too(operator_ledger_db):
+    import psycopg
+    three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
+    rid = ol.maybe_track_client_ask(555005, "thanks", "cc-irsyad-coord", opened_at=three_days_ago)
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT created_at, triage_state FROM operator_asks WHERE id=%s", (rid,)
+        )
+        created_at, triage_state = cur.fetchone()
+    assert abs((created_at - three_days_ago).total_seconds()) < 5
+    assert triage_state == "not_an_ask"
 
 
 # ── migration 082 no-drop invariant (bus #45557 condition 5) ─────────────────

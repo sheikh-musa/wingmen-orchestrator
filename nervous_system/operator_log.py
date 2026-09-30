@@ -445,6 +445,63 @@ def maybe_track_ask(op_msg_id: int, direction: str, channel: str, tag,
         return rid
 
 
+def maybe_track_client_ask(op_msg_id: int, text: str, owner_lane: str | None,
+                            chase_hours: float = 24, opened_at=None) -> int:
+    """Called for every INBOUND message on a channel whose bot_channels.audience
+    = 'client' (migration 085, Musa op#23944, bus #47105 -> #47114). Opens ONE
+    operator_asks row per client inbound with ask_surface='client-channel'
+    (supersedes cc-fleet-health's never-built op#23531 component-4, same
+    value -- orch-console #47110 decision 1), delegated_to=owner_lane so the
+    SLA watchdog knows who to page.
+
+    chase_by is REQUIRED here (unlike maybe_track_ask()'s optional chase_by
+    for the operator path) -- every client ask gets a deadline at open time.
+    Unlike maybe_track_ask(), this NEVER auto-closes on a reply: an "in
+    progress" reply must not close the ask or push chase_by out (bus #47110
+    item 3) -- only an explicit dated commitment (scripts/asks_triage.py
+    committed_date+outbound_msg_id) or a done-confirmation closes it.
+
+    Every call opens a row (unlike maybe_track_ask(), there is no surface-gate
+    or direction check here — the caller, ingest.py's 3c block, already knows
+    this is an inbound client-channel message). A bare ack still opens a row,
+    just pre-triaged 'not_an_ask' by the same reversible heuristic as the
+    operator path, so no client inbound is ever silently dropped. Returns the
+    new row's id.
+
+    `opened_at` (scripts/backfill_client_asks_ledger.py, bus #47110 item 4):
+    when given, backdates created_at/chase_by to the ORIGINAL message time
+    instead of now() -- a 3-day-old backfilled ask must show as already
+    overdue, not get a fresh 24h grace period it never actually had."""
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
+        heuristic = _heuristic_triage(text)
+        if heuristic == "not_an_ask":
+            # stays OPEN (closed_at IS NULL) — heuristic hits are reversible via
+            # asks_triage.py, same convention as the operator path.
+            cur.execute(
+                "INSERT INTO operator_asks "
+                "  (ask, source_msg_id, ask_surface, delegated_to, created_at, chase_by, "
+                "   triage_state, triaged_at, triaged_by) "
+                "VALUES (%s,%s,'client-channel',%s, COALESCE(%s,now()), "
+                "        COALESCE(%s,now()) + (%s || ' hours')::interval, "
+                "        'not_an_ask', now(), 'heuristic') RETURNING id",
+                (text, op_msg_id, owner_lane, opened_at, opened_at, chase_hours),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO operator_asks "
+                "  (ask, source_msg_id, ask_surface, delegated_to, created_at, chase_by) "
+                "VALUES (%s,%s,'client-channel',%s, COALESCE(%s,now()), "
+                "        COALESCE(%s,now()) + (%s || ' hours')::interval) "
+                "RETURNING id",
+                (text, op_msg_id, owner_lane, opened_at, opened_at, chase_hours),
+            )
+        rid = cur.fetchone()[0]
+        conn.commit()
+        return rid
+
+
 def open_asks_for(body: str) -> list:
     """Open (closed_at IS NULL) operator_asks rows delegated to `body`,
     oldest-first — the read a boot-hook / reconstitution step surfaces so a

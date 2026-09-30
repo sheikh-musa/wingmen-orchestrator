@@ -105,10 +105,11 @@ def assert_dsn_is_not_production(dsn) -> None:
 @pytest.fixture
 def operator_ledger_db(pg_dsn, monkeypatch):
     """Ephemeral Postgres carrying the real operator_messages/operator_asks
-    schema (mirrors migrations 007/020/021/044/072) — op#22669 ledger tests must
-    NEVER touch the live substrate (orch-console bus #44006, op#22741: a test
-    using DATABASE_URL directly inserted + deleted rows in production and one
-    fake operator message reached a body's live inbox before cleanup ran).
+    schema (mirrors migrations 007/020/021/044/072/082/084/085) — op#22669 ledger
+    tests must NEVER touch the live substrate (orch-console bus #44006,
+    op#22741: a test using DATABASE_URL directly inserted + deleted rows in
+    production and one fake operator message reached a body's live inbox
+    before cleanup ran).
 
     Points DATABASE_URL at the ephemeral instance for the duration of the test
     (nervous_system/operator_log.py and scripts/asks_open.py both read
@@ -161,13 +162,30 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                 triaged_at          timestamptz,
                 triaged_by          text,
                 ask_surface         text NOT NULL DEFAULT 'operator'
-                                    CHECK (ask_surface IN ('operator','client-channel'))
+                                    CHECK (ask_surface IN ('operator','client-channel')),
+                committed_date      timestamptz
+                                    CHECK (committed_date IS NULL OR outbound_msg_id IS NOT NULL)
             )
         """)
         cur.execute("""
             CREATE UNIQUE INDEX operator_asks_source_ask_uniq
               ON operator_asks (source_msg_id, ask)
               WHERE source_msg_id IS NOT NULL
+        """)
+        cur.execute("""
+            CREATE INDEX operator_asks_client_chase_idx
+              ON operator_asks (chase_by)
+              WHERE closed_at IS NULL AND ask_surface = 'client-channel'
+        """)
+        cur.execute("""
+            CREATE TABLE bot_channels (
+                id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                channel_key   text NOT NULL UNIQUE,
+                enabled       boolean NOT NULL DEFAULT true,
+                inject_target text,
+                audience      text NOT NULL CHECK (audience IN ('operator','client','internal')),
+                owner_lane    text
+            )
         """)
     return pg_dsn
 

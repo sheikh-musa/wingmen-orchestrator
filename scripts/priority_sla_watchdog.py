@@ -160,6 +160,18 @@ CAPTURED_TAG_OWNER = {
 }
 DEFAULT_CAPTURED_OWNER = "orch-console"
 
+# migration 085 (Musa op#23944, bus #47105 -> #47110/#47114): the net that
+# would have caught Shuq's 44h-unanswered ask. Every OPEN ask_surface=
+# 'client-channel' row past its (REQUIRED at open time) chase_by pages BOTH
+# the owning lane (operator_asks.delegated_to) AND orch-console -- unlike the
+# waiting-on-operator net above, orch-console is never dropped from this one,
+# since op#23944's whole finding was that nothing was watching these channels
+# at all. Reused cadence constants (ASKS_CHASE_EVERY_MIN/MAX_ASKS_CHASE_PER_RUN)
+# -- same dead-man's-switch dedup shape, separate chase_state namespace
+# ("client_asks_chase") so it can never collide with the operator net's.
+CLIENT_ASKS_CHASE_EVERY_MIN = _envint("SLA_CLIENT_ASKS_CHASE_EVERY_MIN", ASKS_CHASE_EVERY_MIN)
+MAX_CLIENT_ASKS_CHASE_PER_RUN = _envint("SLA_CLIENT_ASKS_MAX_CHASE_PER_RUN", MAX_ASKS_CHASE_PER_RUN)
+
 # Agents to drop from actioning entirely (comma-separated). Lever for Nazim to
 # exclude e.g. the operator-attended hub itself if paging on the hub's own
 # chronic unread proves circular/noisy. Empty by default (nothing excluded).
@@ -1246,6 +1258,111 @@ def _send_asks_chase(conn, owner: str, row: dict) -> bool:
         return False
 
 
+def client_chase_targets(rows, *, now, chase_state, chase_every_min=CLIENT_ASKS_CHASE_EVERY_MIN):
+    """PURE: OPEN ask_surface='client-channel' rows past their chase_by —
+    migration 085's net (Musa op#23944). Every client-channel row gets a
+    chase_by at open time (maybe_track_client_ask(), REQUIRED unlike the
+    operator path), so unlike asks_chase_targets there is no grace-since-
+    created fallback branch to worry about. Re-chased at most every
+    chase_every_min (dead-man's-switch dedup, separate chase_state namespace
+    from the waiting-on-operator net)."""
+    due = []
+    for r in rows:
+        chase_by_epoch = r.get("chase_by_epoch")
+        if chase_by_epoch is None or now < chase_by_epoch:
+            continue
+        last = chase_state.get(str(r.get("id")), 0) or 0
+        if (now - last) >= chase_every_min * 60:
+            due.append(r)
+    return due
+
+
+def chase_client_asks(targets, *, dry, now, chase_state, send_chase,
+                       max_chases=MAX_CLIENT_ASKS_CHASE_PER_RUN):
+    """Same dead-man's-switch/cap shape as chase_waiting_asks. `send_chase`
+    is responsible for paging BOTH the owning lane and orch-console (bus
+    #47110 item 3b) — that dual-recipient behavior lives in the impure sender,
+    not here, so this stays a pure counter/gate like its sibling."""
+    sent = 0
+    for t in targets:
+        if sent >= max_chases:
+            log(f"client-asks-chase HELD (per-scan cap {max_chases}) ask#{t.get('id')} -> {t.get('delegated_to')}")
+            continue
+        if dry:
+            continue
+        ok = send_chase(t.get("delegated_to"), t)
+        if ok:
+            chase_state[str(t["id"])] = now
+            sent += 1
+        else:
+            log(f"client-asks-chase SEND FAILED ask#{t.get('id')} (left UNSTAMPED for retry)")
+    return sent
+
+
+def _fetch_client_chase_asks(conn):
+    """Impure: OPEN ask_surface='client-channel' operator_asks rows with a
+    chase_by set, plus epoch timestamps for the pure due-check above. AGE
+    since the client asked is created_epoch (the row is opened the same turn
+    the client's inbound is captured — nervous_system/ingest.py's 3c block)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, ask, delegated_to, committed_date, "
+            "  extract(epoch FROM chase_by) AS chase_by_epoch, "
+            "  extract(epoch FROM created_at) AS created_epoch "
+            "FROM operator_asks "
+            "WHERE closed_at IS NULL AND ask_surface = 'client-channel' "
+            "  AND chase_by IS NOT NULL"
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _send_client_ask_chase(conn, owner: str, row: dict) -> bool:
+    """Impure: post ONE P1 chase to the owning lane, PLUS a copy to
+    orch-console (bus #47110 item 3b — unlike _send_asks_chase, orch-console
+    is never dropped: op#23944's finding was that nothing at all was watching
+    these channels). Returns True only if every insert commits."""
+    aid = row.get("id")
+    ask_text = (row.get("ask") or "")[:200]
+    owner = owner or "orch-console"
+    created_epoch = row.get("created_epoch")
+    age_str = f"{int((time.time() - created_epoch) // 60)}m" if created_epoch is not None else "unknown"
+    if row.get("committed_date") is not None:
+        subj = f"[client-asks-chase] operator_asks #{aid} — committed date MISSED"
+        detail = "a dated commitment was sent to the client and has now passed with the ask still open"
+    else:
+        subj = f"[client-asks-chase] operator_asks #{aid} — client ask past chase_by, no date given"
+        detail = "no dated commitment has ever been sent back to the client"
+    body = (
+        f"operator_asks #{aid} (client-channel, yours) is past its chase deadline — {detail}. "
+        f"\"{ask_text}\" — age since the client asked: {age_str}. Reply with a dated commitment "
+        "via scripts/asks_triage.py <id> ask --committed-date ... --outbound-msg-id ..., or "
+        "close it (done) once delivered. orch-console is CC'd on this page (bus #47110 item "
+        "3b) — this is the net op#23944 found missing."
+    )
+    try:
+        if not dry_identity_guard(conn):
+            return False
+        recipients = [owner] if owner == "orch-console" else [owner, "orch-console"]
+        with conn.cursor() as cur:
+            for rcpt in recipients:
+                cur.execute(
+                    "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                    "  requires_response,priority,is_test) "
+                    "VALUES ('cc-fleet-health',%s,%s,%s,%s,false,'P1',false)",
+                    (rcpt, PAGE_MESSAGE_TYPE, subj, body))
+        conn.commit()
+        log(f"client-asks-chase SENT ask#{aid} -> {'+'.join(recipients)}")
+        return True
+    except Exception as e:
+        log(f"client-asks-chase INSERT failed ask#{aid} -> {owner}: {e!r}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Main scan
 # ---------------------------------------------------------------------------
@@ -1565,6 +1682,34 @@ def run(dry: bool, injected: list[dict] | None = None,
                     + ", ".join(f"#{t['id']}->{t.get('delegated_to')}" for t in asks_targets))
         except Exception as e:  # fail LOUD, keep the scan alive
             log(f"asks-chase ERROR: {e!r}")
+
+        # migration 085 (Musa op#23944, bus #47105 -> #47110/#47114): every OPEN
+        # ask_surface='client-channel' row past its (REQUIRED at open) chase_by
+        # gets its owning lane AND orch-console paged — the net that would have
+        # caught Shuq's 44h-unanswered ask. Same observe-first doctrine: ships
+        # INERT (force-dry, log-only) until ARMED via
+        # SLA_CLIENT_ASKS_CHASE_ENABLED=1 at an orch-console go-live (separate
+        # gate from the operator asks-chase net above — this is a brand-new
+        # mechanism, armed only once the backfill's open-set list is reviewed).
+        client_asks_dry = dry or os.environ.get("SLA_CLIENT_ASKS_CHASE_ENABLED", "0") != "1"
+        try:
+            client_chase_state = state.setdefault("client_asks_chase", {})
+            client_asks_targets = client_chase_targets(
+                _fetch_client_chase_asks(conn), now=now, chase_state=client_chase_state)
+            if client_asks_targets:
+                n = chase_client_asks(
+                    client_asks_targets, dry=client_asks_dry, now=now,
+                    chase_state=client_chase_state,
+                    send_chase=lambda owner, t: _send_client_ask_chase(conn, owner, t),
+                    max_chases=MAX_CLIENT_ASKS_CHASE_PER_RUN)
+                for t in client_asks_targets:
+                    actions.append(f"{'[DRY] ' if client_asks_dry else ''}CLIENT-ASKS-CHASE "
+                                   f"ask#{t['id']} -> owner {t.get('delegated_to')}")
+                log(f"client-asks-chase [{'DRY/observe' if client_asks_dry else 'ARMED'}] "
+                    f"sent={0 if client_asks_dry else n}/{len(client_asks_targets)} due: "
+                    + ", ".join(f"#{t['id']}->{t.get('delegated_to')}" for t in client_asks_targets))
+        except Exception as e:  # fail LOUD, keep the scan alive
+            log(f"client-asks-chase ERROR: {e!r}")
 
         # migration 082 (bus #45557 condition 3): the oldest untriaged
         # 'captured' bucket, aged past CAPTURED_AGE_MIN, gets its owning body
