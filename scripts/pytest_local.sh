@@ -23,9 +23,13 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # export DATABASE_URL="postgresql://postgres@localhost:5432/wingmen_test"   # <-- set to your local DB
 #
 # ── Option B (safe default): DATABASE_URL UNSET -> guard allows -> DB-integration tests
-#    SKIP; unit/logic tests run. Unset any inherited value so a stale prod DSN can't leak in.
+#    SKIP; unit/logic tests run. Unset any inherited value so a stale prod DSN can't leak
+#    in, then export PYTEST_NO_DB=1 so the conftest guard skips the prod-.env fallback
+#    (WITHOUT it the guard falls back to the fleet-host .env's prod DSN and REFUSES the
+#    whole session — bus #46781: there was NO way to run even pure unit tests on gzb/Mini).
 if [ -z "${DATABASE_URL:-}" ]; then
     unset DATABASE_URL SUPABASE_DB_URL 2>/dev/null || true
+    export PYTEST_NO_DB=1
 fi
 
 exec .venv/bin/python3 -m pytest "$@"

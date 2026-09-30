@@ -20,6 +20,26 @@ import wake_backstop_sweep as wbs  # noqa: E402
 
 _DSN = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
+# The prod stores (docs/data-store-registry.md) — a live-substrate fixture must refuse any of them.
+_PROD_REFS = ("tscuymavysscrvoberrr", "ceayjeamtmcyzzvqflus", "goumlynecruxrlmzlntp")
+
+
+@pytest.fixture
+def live_local_dsn():
+    """A DSN for a LIVE-substrate test, resolved AT CALL TIME from a DEDICATED opt-in var
+    (WINGMEN_TEST_DB_DSN) and only if it is an EXPLICIT LOCAL dsn. It deliberately does NOT
+    read DATABASE_URL/SUPABASE_DB_URL, so a prod DSN leaked into those by another module's
+    import-time load_dotenv (bus #46880) can NEVER un-skip a test using this fixture — the
+    #46880 failure where a wide collection flipped the skipif and queried the live prod
+    substrate. Skips unless the operator opts in with a local dsn; refuses a prod ref."""
+    dsn = os.environ.get("WINGMEN_TEST_DB_DSN")
+    if not dsn:
+        pytest.skip("set WINGMEN_TEST_DB_DSN to a LOCAL dsn to run live-substrate tests")
+    for ref in _PROD_REFS:
+        if ref in dsn:
+            pytest.skip(f"WINGMEN_TEST_DB_DSN must be a LOCAL dsn, not the prod ref '{ref}'")
+    return dsn
+
 
 # ---- shared recipient policy (the refactor) ----
 
@@ -240,13 +260,14 @@ def test_first_live_session_picks_first_live_skips_dead():
     assert agent_wake._first_live_session([], has_session=hs) is None
 
 
-@pytest.mark.skipif(not _DSN, reason="no DATABASE_URL")
-def test_resolve_uses_live_session_not_status_field():
+def test_resolve_uses_live_session_not_status_field(live_local_dsn):
     """A registered agent with a LIVE pane resolves regardless of its status field
     (the #16880 fix: offline-while-alive + {*}-scoped roles). Live fixture: cc-quality
-    (offered itself — status=offline, repo_scope={*}, pane 'quality' live). Skips only
-    if the fixture is not currently registered/live."""
-    with psycopg.connect(_DSN) as c, c.cursor() as cur:
+    (offered itself — status=offline, repo_scope={*}, pane 'quality' live). The DSN is
+    resolved AT CALL TIME via the live_local_dsn fixture (an explicit LOCAL dsn only), so
+    a leaked prod DSN can never un-skip this test (bus #46880). Skips otherwise, and also
+    if the fixture agent is not currently registered/live."""
+    with psycopg.connect(live_local_dsn) as c, c.cursor() as cur:
         cur.execute("SELECT status, tmux_session FROM agent_status WHERE agent_id='cc-quality'")
         row = cur.fetchone()
     if not row or not row[1] or not agent_wake._tmux_has_session(row[1]):
