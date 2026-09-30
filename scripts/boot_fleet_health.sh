@@ -209,5 +209,65 @@ echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $FH_
 # NO-HUMAN-AT-KEYBOARD guard (Nazim #43143): enforce the AskUserQuestion deny + suppress the
 # prompt-suggestion widget in my own lane (this boot historically skipped ensure_lane_deny).
 "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$FH_DIR" || true
+
+# ── SELF-KICK on a fresh relaunch (op#23775 / bus #46814) — idle-at-boot is the failure
+#    mode. A fresh KILL+RELAUNCH (launchd waiter, switch_singleton_token.sh, cold boot)
+#    lands `claude` at the welcome banner with CLAUDE.md loaded as project instructions
+#    but NO turn started — the SRE then sits IDLE until an EXTERNAL nudge (a bus item)
+#    happens to arrive and kick a turn. Musa's op#23775 re-token relaunch hit exactly
+#    this: the pane came up empty, no boot turn fired. This is the SRE sibling of
+#    boot_nazim.sh's self-kick: background a one-shot that waits for the banner, confirms
+#    no turn already started (reusing the fleet's ONE busy definition so we never
+#    send-keys into a live turn), takes the host-wide fire-window lock the nudgers
+#    consult (so a nudge can't interleave mid-kick), then send-keys a single kick that
+#    starts the charter §6 boot sequence on its own. Backgrounded CHILD of this script
+#    (dies with the body); fires at most once. FH_SELF_KICK=0 disables it (e.g. an
+#    operator attaching to drive by hand).
+_FH_KICK="[boot] Fresh fleet-health (SRE) relaunch — begin your charter §6 boot sequence NOW, do not wait for a nudge. In order: (1) check your inbox (agent_messages to_agent='cc-fleet-health' AND read_at IS NULL) and act on directives; (2) re-read CLAUDE.md (§2 discipline, §3 pen boundary, §4 owned loops); (3) run one health pass from ~/wingmen/orchestrator — context_health_watchdog.py --json (DETECT only, never --arm), priority_sla_watchdog.py --dry-run, fleet_health.py --quiet; (4) act on what is safe + reversible, log it; (5) escalate genuine forks to nazim-console over the bus; (6) confirm your fleet_health_lease is renewing, persist a brief state note, then idle."
+_self_kick() {
+    # Backgrounded subshell inherited the main shell's _handle_exit EXIT trap (marks
+    # the SRE OFFLINE). Clear it FIRST — when THIS subshell exits (right after firing)
+    # we must NOT flip the live body offline; only the main shell's exit should.
+    trap - EXIT
+    local tm pane i sess
+    tm="$(command -v tmux || true)"; [ -x "$tm" ] || tm=/usr/local/bin/tmux
+    sess="${FH_TMUX_SESSION:-fleet-health}"
+    pane="${sess}:0.0"
+    # Wait up to ~50s for claude's welcome banner to paint (then ready for input).
+    for i in $(seq 1 25); do
+        sleep 2
+        "$tm" capture-pane -t "$pane" -p 2>/dev/null | grep -qE 'Claude Code v[0-9]' && break
+    done
+    if ! "$tm" capture-pane -t "$pane" -p 2>/dev/null | grep -qE 'Claude Code v[0-9]'; then
+        echo "[boot_fleet_health] self-kick: banner never appeared within ~50s — NOT firing (claude may not be up)" >&2
+        return 0
+    fi
+    # Take the host-wide fire-window lock the nudgers consult, so none can send-keys
+    # into the pane between our text and its Enter. Self-expiring (TTL) + released on
+    # this subshell's EXIT — a crash can never leave the pane quiesced.
+    if [ -r "$ORCH_DIR/scripts/lib/fire_window.sh" ]; then
+        . "$ORCH_DIR/scripts/lib/fire_window.sh" 2>/dev/null || true
+        declare -f fire_window_hold >/dev/null 2>&1 && fire_window_hold "$sess" 60 "boot_fleet_health self-kick" 2>/dev/null || true
+    fi
+    # Reuse the fleet's ONE busy definition: if an external nudge already started a turn
+    # (before our lock), the pane is BUSY -> skip; it is already booting, and we must
+    # not send-keys into a live turn.
+    if [ -r "$ORCH_DIR/scripts/lib/composer_capture.sh" ]; then
+        . "$ORCH_DIR/scripts/lib/composer_capture.sh" 2>/dev/null || true
+        if declare -f pane_busy >/dev/null 2>&1; then
+            pane_busy "$tm" "$pane"
+            if [ "${CC_BUSY:-0}" = 1 ]; then
+                echo "[boot_fleet_health] self-kick: pane already BUSY (${CC_BUSY_REASON:-turn in progress}) — a turn is already running, not double-firing" >&2
+                return 0
+            fi
+        fi
+    fi
+    "$tm" send-keys -t "$pane" -l "$_FH_KICK"
+    sleep 1
+    "$tm" send-keys -t "$pane" Enter
+    echo "[boot_fleet_health] self-kick fired — fresh SRE booting without waiting for an external nudge"
+}
+if [ "${FH_SELF_KICK:-1}" = 1 ]; then _self_kick & fi
+
 cd "$FH_DIR"
 claude --dangerously-skip-permissions --model "$MODEL"
