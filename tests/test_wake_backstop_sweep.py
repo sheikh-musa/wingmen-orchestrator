@@ -177,7 +177,8 @@ def test_capped_row_to_lease_fresh_hub_is_live_stuck_not_dead_the_451e110_class(
     res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
                          now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page,
                          matching_hbs=lambda a: [], desired_state_of=lambda a: None,
-                         base_of=lambda a: None, hub_lease_fresh=lambda: True, escalated_seen=set())
+                         base_of=lambda a: None, hub_lease_fresh=lambda: True, escalated_seen=set(),
+                         agent_host_rows=_local_rows(), this_host="Sheikhs-Mini")
     assert res["live_stuck"] == ["cc-orchestrator"] and res["dead_foreign"] == []
     # (B) split (Nazim #43063): alive → QUIESCE only, NO page at cap (page deferred to stuck-pass)
     assert set(marked) == {111, 112} and pages == []
@@ -319,7 +320,7 @@ def test_base_addressed_row_to_live_instance_is_not_quiesced_amendA():
     res = wbs.sweep_once(
         rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
         now_dt=_NOW, cap_age_s=390,
-        matching_hbs=lambda a: [_hb(60)] if a == "cc-substrate" else [],   # cc-substrate-1 fresh
+        matching_hbs=lambda a: [_hb(60)] if a == "cc-substrate" else [], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",   # cc-substrate-1 fresh
         desired_state_of=lambda a: "up", base_of=lambda a: None,
         mark=mark, escalate=page, escalated_seen=set())
     # base-inclusive match finds cc-substrate-1's fresh hb -> ALIVE, so it is handled as
@@ -337,7 +338,7 @@ def test_stale_heartbeat_under_gone_window_is_not_dead_amendB():
     res = wbs.sweep_once(
         rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
         now_dt=_NOW, cap_age_s=390, gone_window_s=7200,
-        matching_hbs=lambda a: [_hb(3600)],   # 1h old -> stale but < 2h gone-window
+        matching_hbs=lambda a: [_hb(3600)], agent_host_rows=_local_rows(hb_age=3600), this_host="Sheikhs-Mini",   # 1h old -> stale but < 2h gone-window
         desired_state_of=lambda a: "down", base_of=lambda a: None,
         mark=mark, escalate=page, escalated_seen=set())
     assert "cc-someworker" not in res["dead_foreign"]
@@ -427,7 +428,7 @@ def test_capped_row_to_ALIVE_agent_is_quiesced_but_NOT_paged_at_cap_amend_43063(
     marked, pages, mark, page = _cas_collector()
     rows = [_row_ts("cc-quality", 201, age_s=_PAST_CAP)]
     kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
-              now_dt=_NOW, cap_age_s=390, matching_hbs=lambda a: [_hb(60)],  # alive
+              now_dt=_NOW, cap_age_s=390, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",  # alive
               desired_state_of=lambda a: "up", mark=mark, escalate=page, escalated_seen=set())
     r1 = wbs.sweep_once(rows=rows, **kw)
     assert marked == [201]                          # quiesced (re-poking stopped)
@@ -494,7 +495,7 @@ def test_stuck_row_to_alive_agent_paged_once_with_pane_state_43063():
     seen = set()
     stuck = [_row_ts("cc-quality", 201, age_s=2000)]   # past default stuck_page_age (1800)
     kw = dict(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
-              now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],   # alive
+              now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",   # alive
               pane_state=lambda a: "idle", pane_active=lambda a: False,  # genuinely stable-idle
               mark=mark, escalate=page, escalated_seen=seen)
     r1 = wbs.sweep_once(**kw)
@@ -512,7 +513,7 @@ def test_stuck_page_SUPPRESSED_when_pane_busy_44274():
     seen = set()
     stuck = [_row_ts("cc-cosem-platform", 44257, age_s=2000)]
     r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
-                       now_dt=_NOW, matching_hbs=lambda a: [_hb(52)],       # alive
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(52)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",       # alive
                        pane_state=lambda a: "busy", pane_active=lambda a: False,
                        mark=mark, escalate=page, escalated_seen=seen)
     assert pages == [] and r["stuck_paged"] == []            # NOT paged — it's working
@@ -525,7 +526,7 @@ def test_stuck_page_SUPPRESSED_when_pane_recently_active_44274():
     marked, pages, mark, page = _cas_collector()
     stuck = [_row_ts("cc-cosem-platform", 44257, age_s=2000)]
     r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
-                       now_dt=_NOW, matching_hbs=lambda a: [_hb(52)],
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(52)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
                        pane_state=lambda a: "idle", pane_active=lambda a: True,   # changed between samples
                        mark=mark, escalate=page, escalated_seen=set())
     assert pages == [] and r["stuck_suppressed"] == ["cc-cosem-platform"]
@@ -540,7 +541,7 @@ def test_stuck_ceiling_pages_active_but_not_draining_44313():
     seen = set()
     stuck = [_row_ts("cc-quality", 301, age_s=6000)]   # > ceiling (3*1800=5400), < max (86400)
     r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
-                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
                        pane_state=lambda a: "busy", pane_active=lambda a: True,  # appears to be "working"
                        mark=mark, escalate=page, escalated_seen=seen)
     assert r["stuck_paged"] == ["cc-quality"] and r.get("stuck_suppressed") == []
@@ -553,7 +554,7 @@ def test_stuck_below_ceiling_still_suppressed_when_working():
     marked, pages, mark, page = _cas_collector()
     stuck = [_row_ts("cc-quality", 302, age_s=2000)]   # > stuck (1800) but < ceiling (5400)
     r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
-                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
                        pane_state=lambda a: "busy", pane_active=lambda a: True,
                        mark=mark, escalate=page, escalated_seen=set())
     assert pages == [] and r["stuck_suppressed"] == ["cc-quality"]
@@ -566,7 +567,7 @@ def test_stuck_page_suppression_does_not_burn_once_guard():
     seen = set()
     stuck = [_row_ts("cc-quality", 202, age_s=2000)]
     base = dict(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
-                now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], mark=mark, escalate=page,
+                now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini", mark=mark, escalate=page,
                 escalated_seen=seen)
     r1 = wbs.sweep_once(pane_state=lambda a: "busy", pane_active=lambda a: False, **base)
     assert pages == [] and r1["stuck_suppressed"] == ["cc-quality"]      # working → suppressed
@@ -601,7 +602,7 @@ def test_stuck_page_upper_age_bound_row_older_than_max_never_paged_43073():
     marked, pages, mark, page = _cas_collector()
     old = [_row_ts("cc-quality", 201, age_s=25 * 3600)]   # 25h > 24h max
     r = wbs.sweep_once(rows=[], stuck_rows=old, wake=lambda a, **k: {"woke": False},
-                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],  # alive (would page but for age)
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",  # alive (would page but for age)
                        pane_state=lambda a: "idle", pane_active=lambda a: False,  # stable-idle: age is the only reason
                        mark=mark, escalate=page, escalated_seen=set())
     assert pages == [] and r["stuck_paged"] == []
@@ -609,7 +610,7 @@ def test_stuck_page_upper_age_bound_row_older_than_max_never_paged_43073():
     marked2, pages2, mark2, page2 = _cas_collector()
     inwin = [_row_ts("cc-quality", 201, age_s=2000)]
     r2 = wbs.sweep_once(rows=[], stuck_rows=inwin, wake=lambda a, **k: {"woke": False},
-                        now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                        now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
                         pane_state=lambda a: "idle", pane_active=lambda a: False,
                         mark=mark2, escalate=page2, escalated_seen=set())
     assert len(pages2) == 1 and r2["stuck_paged"] == ["cc-quality"]
@@ -617,3 +618,130 @@ def test_stuck_page_upper_age_bound_row_older_than_max_never_paged_43073():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---- Fable audit 2026-09-30 (B-1 / S-3, op#23531 helper PR A): attempt-cap + host-scoped
+#      quiesce + pending retry. The 14-min P0 (#46579) was the DESIGNED worst case: a row was
+#      quiesced 390s after created_at with ZERO verified deliveries (busy pane / breaker window),
+#      and the Mini quiesced rows to gzb lanes it can never reach. ----
+
+def _local_rows(host="Sheikhs-Mini", hb_age=60):
+    """agent_host_rows injector: one fresh heartbeat on `host`."""
+    return lambda a: [(host, _hb(hb_age))]
+
+
+def test_g_row_is_capped_by_verified_deliveries_not_by_age():
+    """(g) PRIMARY cap = N verified deliveries. A YOUNG row with N deliveries is capped; a
+    row with fewer deliveries is NOT capped however it is aged (below the generous age
+    ceiling) and still drives a wake."""
+    now = _NOW
+    young = _row_ts("cc-quality", 301, age_s=120)           # 2 min old, well under any age cap
+    assert wbs.is_capped(young, now, cap_age_s=3600, deliveries=lambda rid: 3, cap_deliveries=3)
+    assert not wbs.is_capped(young, now, cap_age_s=3600, deliveries=lambda rid: 2, cap_deliveries=3)
+    old_undelivered = _row_ts("cc-quality", 302, age_s=420)   # 7 min (past the OLD 390s cap), 0 deliveries
+    assert not wbs.is_capped(old_undelivered, now, cap_age_s=3600, deliveries=lambda rid: 0,
+                             cap_deliveries=3)
+    # the ceiling is SECONDARY and generous: only a row far older than normal latency trips it
+    assert wbs.is_capped(_row_ts("cc-quality", 303, age_s=3601), now, cap_age_s=3600,
+                         deliveries=lambda rid: 0, cap_deliveries=3)
+
+
+def test_g_defaults_cap_on_attempts_and_age_ceiling_is_generous():
+    assert wbs.WAKE_SWEEP_CAP_DELIVERIES == 3
+    assert wbs.WAKE_SWEEP_CAP_AGE_S >= 3600          # never the trigger at ~6.5 min again
+    # unknown delivery count (state unreadable) → NOT capped (fail toward the backstop)
+    assert not wbs.is_capped(_row_ts("cc-quality", 1, age_s=120), _NOW, cap_age_s=3600,
+                             deliveries=lambda rid: None, cap_deliveries=3)
+
+
+def test_g_undelivered_old_row_still_drives_a_wake_not_quiesce():
+    """The #46579 shape: row past the OLD 390s age cap, zero verified deliveries, lane alive
+    locally → it is FRESH (keeps being woken), never quiesced."""
+    marked, pages, mark, page = _cas_collector()
+    woke = []
+    rows = [_row_ts("cc-quality", 311, age_s=420)]   # 7 min: past the OLD 390s age cap
+    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: woke.append(a) or {"woke": True},
+                         now_dt=_NOW, cap_age_s=3600, deliveries=lambda rid: 0, cap_deliveries=3,
+                         matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(),
+                         this_host="Sheikhs-Mini", desired_state_of=lambda a: "up",
+                         mark=mark, escalate=page, escalated_seen=set())
+    assert woke == ["cc-quality"] and marked == [] and res["capped"] == []
+
+
+def test_f_capped_row_to_live_agent_on_FOREIGN_host_is_not_quiesced_from_this_host():
+    """(f) alive (fresh heartbeat) but its host is gzbai and we are the Mini → leave it for the
+    owning host's sweep: NO skipped_at, classified foreign_live."""
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-irsyad-coord", 321, age_s=120)]
+    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+                         now_dt=_NOW, cap_age_s=3600, deliveries=lambda rid: 3, cap_deliveries=3,
+                         matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows("gzbai"),
+                         this_host="Sheikhs-Mini", desired_state_of=lambda a: "up",
+                         mark=mark, escalate=page, escalated_seen=set())
+    assert marked == [] and pages == []
+    assert res["foreign_live"] == ["cc-irsyad-coord"] and res["live_stuck"] == []
+
+
+def test_f_capped_row_to_live_agent_with_UNKNOWN_host_is_not_quiesced():
+    """NULL host = unknown → do not quiesce (fail toward keeping the backstop)."""
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-substrate", 331, age_s=120)]
+    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+                         now_dt=_NOW, cap_age_s=3600, deliveries=lambda rid: 3, cap_deliveries=3,
+                         matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(None),
+                         this_host="Sheikhs-Mini", desired_state_of=lambda a: "up",
+                         mark=mark, escalate=page, escalated_seen=set())
+    assert marked == [] and res["foreign_live"] == ["cc-substrate"]
+
+
+def test_f_capped_row_to_live_LOCAL_agent_is_still_quiesced():
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-quality", 341, age_s=120)]
+    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "busy (mid-turn)"},
+                         now_dt=_NOW, cap_age_s=3600, deliveries=lambda rid: 3, cap_deliveries=3,
+                         matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows("Sheikhs-Mini"),
+                         this_host="Sheikhs-Mini", desired_state_of=lambda a: "up",
+                         mark=mark, escalate=page, escalated_seen=set())
+    assert marked == [341] and res["live_stuck"] == ["cc-quality"] and pages == []
+
+
+def test_f_stuck_page_is_not_fired_from_a_foreign_host():
+    """The stuck-page pass reads the pane LOCALLY ('no-live-pane' for a gzb lane) — from the
+    wrong host that would page 'genuinely stuck' for a lane that is fine. Host-gate it too."""
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-irsyad-coord", 351, age_s=2000)]
+    res = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                         now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                         agent_host_rows=_local_rows("gzbai"), this_host="Sheikhs-Mini",
+                         pane_state=lambda a: "no-live-pane", pane_active=lambda a: False,
+                         mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and res["stuck_paged"] == []
+
+
+def test_h_pending_marker_rows_are_retried_before_grace_and_cleared_when_gone():
+    """(h) a realtime busy/rc=3 outcome leaves a pending marker; the sweep wakes that row's
+    recipient on its next pass even though the row is younger than the grace, and clears the
+    marker for any row that is no longer unread."""
+    woke, cleared = [], []
+    pending = [_row_ts("cc-cosem-platform", 361, age_s=5)]      # 5s old: under any grace
+    res = wbs.sweep_once(rows=[], pending_rows=pending, pending_ids=[361, 999],
+                         clear_pending=lambda rid: cleared.append(rid),
+                         wake=lambda a, **k: woke.append((a, k.get("row_id"))) or {"woke": True},
+                         now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                         agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+                         mark=lambda ids: [], escalate=lambda s, b: None, escalated_seen=set())
+    assert woke == [("cc-cosem-platform", 361)]
+    assert cleared == [999, 361]      # 999 vanished (read/skipped) → dropped; 361 woke → cleared
+    assert res["pending_retried"] == [361]
+
+
+def test_h_pending_row_not_cleared_when_wake_still_fails():
+    woke_cleared = []
+    pending = [_row_ts("cc-cosem-platform", 371, age_s=5)]
+    wbs.sweep_once(rows=[], pending_rows=pending, pending_ids=[371],
+                   clear_pending=lambda rid: woke_cleared.append(rid),
+                   wake=lambda a, **k: {"woke": False, "why": "busy (mid-turn)"},
+                   now_dt=_NOW, matching_hbs=lambda a: [_hb(60)],
+                   agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+                   mark=lambda ids: [], escalate=lambda s, b: None, escalated_seen=set())
+    assert woke_cleared == []         # still pending: retried next pass
