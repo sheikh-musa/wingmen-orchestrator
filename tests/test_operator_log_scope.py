@@ -47,16 +47,21 @@ def test_hub_role_scopes_away_other_bodies(monkeypatch):
     assert clause.strip() != ""
 
 
-def test_empty_role_is_legacy_unscoped(monkeypatch):
-    # Unset (legacy single-body) behavior is SANCTIONED and unchanged: "".
+def test_empty_role_is_lane_and_requires_tag(monkeypatch):
+    """Fable audit 2026-09-30 (B-2): '' used to be the SANCTIONED unscoped legacy role,
+    so a lane (role unset by launch_dangerous_cc.sh) could stamp EVERY channel. Unset
+    now means 'lane' and a lane must pass tag= — never an unscoped clause."""
     _set_role(monkeypatch, None)
-    assert ol._channel_scope_sql() == ""
+    assert ol._body_role() == "lane"
+    with pytest.raises(ValueError):
+        ol._channel_scope_sql()
 
 
-def test_whitespace_only_role_treated_as_empty(monkeypatch):
-    # _body_role() strips + lowercases, so "  " normalizes to the empty role.
+def test_whitespace_only_role_treated_as_lane(monkeypatch):
     _set_role(monkeypatch, "   ")
-    assert ol._channel_scope_sql() == ""
+    assert ol._body_role() == "lane"
+    with pytest.raises(ValueError):
+        ol._channel_scope_sql()
 
 
 def test_uppercase_role_normalizes(monkeypatch):
@@ -77,13 +82,10 @@ def test_unknown_role_raises_not_empty(monkeypatch, bad_role):
     assert "ORCH_BODY_ROLE" in str(exc.value)
 
 
-def test_recognized_roles_set_is_exactly_console_hub_empty():
-    assert ol._RECOGNIZED_BODY_ROLES == frozenset({"console", "hub", ""})
+def test_recognized_roles_set_is_exactly_console_hub_lane():
+    assert ol._RECOGNIZED_BODY_ROLES == frozenset({"console", "hub", "lane"})
 
 
-# finance-console carve-out (Phase-0 add-on, Nazim 37730 / hub flip-gate parity). The
-# finance lane reconciles its own revenue channel via tag='finance-console'; neither the
-# hub NOR the console may reconcile it, or the operator gets a double answer post-flip.
 def test_hub_excludes_finance_console(monkeypatch):
     _set_role(monkeypatch, "hub")
     clause = ol._channel_scope_sql()
