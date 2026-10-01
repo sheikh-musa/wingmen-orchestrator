@@ -212,6 +212,25 @@ def test_connect_reraises_persistent_failure_dead_man_preserved(monkeypatch):
         sl._connect()
 
 
+# ---- agent_liveness(): DB-read fail-open WARN (bus #47588 follow-up) -----------
+def test_agent_liveness_db_failure_logs_warn_with_exception_class_never_dsn(monkeypatch, capsys):
+    """A silent 'uncovered' on every DB-read failure is how a broken DSN goes unnoticed
+    (bus #47588). Must log a WARN naming the exception CLASS -- and must NEVER leak the
+    DSN/connection-string value itself into that log line."""
+    secret_dsn = "postgres://realuser:supersecretpw@aws-1-pooler.example.com:5432/real_prod_db"
+    monkeypatch.setattr(sl, "_tmux_has_session", lambda session: True)
+    monkeypatch.setattr(sl, "_dsn", lambda: secret_dsn)
+
+    def fake_connect():
+        raise RuntimeError(f"could not connect to {secret_dsn}")
+    monkeypatch.setattr(sl, "_connect", fake_connect)
+
+    assert sl.agent_liveness("cai") == "uncovered"
+    out = capsys.readouterr().out
+    assert "WARN" in out and "RuntimeError" in out
+    assert secret_dsn not in out, "the DSN must NEVER be logged, only the exception class"
+
+
 # ---- _wedged_alive_text(): remedy host-resolved from holder_host, never a stale host ----
 # Root cause (Nazim 39292/39435): page_wedged_alive hardcoded the decommissioned wingmen-core
 # host (91.107.235.77) while the live hub is on gzbai -> a responder hits a dead box. The

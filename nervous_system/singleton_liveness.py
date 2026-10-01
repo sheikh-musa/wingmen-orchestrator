@@ -144,7 +144,10 @@ def agent_liveness(agent):
     # (found via CI's clean checkout, which has neither a .env nor DATABASE_URL set).
     try:
         c = _connect()
-    except Exception:
+    except Exception as e:
+        # bus #47588 follow-up: a silent "uncovered" for EVERY agent is how a broken DSN
+        # goes unnoticed. Log the exception CLASS only -- never the DSN/connection string.
+        log(f"WARN agent_liveness({agent}): DB read failed ({type(e).__name__}) -- treating as uncovered")
         return "uncovered"
     cur = c.cursor()
     try:

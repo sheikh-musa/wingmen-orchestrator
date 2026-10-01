@@ -848,3 +848,60 @@ def test_fallback_base_not_a_known_lane_still_surfaces(monkeypatch):
     obs = w.gather_observations(None, state=state, alert=False)
     assert "rogue" not in _obs_sessions(obs)
     assert "rogue" in state.get("unmapped_warned", [])
+
+
+# --------------------------------------------------------------------------- #
+# ALL singletons 'uncovered' in a sweep -> possible broken DSN (bus #47588 follow-up)
+# --------------------------------------------------------------------------- #
+
+def _healthy_obs():
+    # 0 unread, wrote "recently" (huge last_write floor) -> V_HEALTHY on its own, so any
+    # page recorded is unambiguously from the all-uncovered sweep check, not a real wedge.
+    return _obs(unread=0, oldest=0, last_write=1e9)
+
+
+def test_all_uncovered_single_sweep_does_not_page(recorder, monkeypatch):
+    from nervous_system import singleton_liveness as sl
+    monkeypatch.setattr(sl, "agent_liveness", lambda agent: "uncovered")
+    w.run(mode=w.MODE_DETECT, alert=True, injected=[_healthy_obs()], lane_dirs={}, persist=True)
+    assert recorder["page"] == [], "one sweep is not yet a sustained outage (stability floor)"
+
+
+def test_all_uncovered_pages_once_after_min_polls_then_stays_quiet(recorder, monkeypatch):
+    from nervous_system import singleton_liveness as sl
+    monkeypatch.setattr(sl, "agent_liveness", lambda agent: "uncovered")
+    obs = _healthy_obs()
+    for _ in range(w.ALL_UNCOVERED_MIN_POLLS - 1):
+        w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=True)
+    assert recorder["page"] == []
+    w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=True)
+    assert len(recorder["page"]) == 1
+    assert "uncovered" in recorder["page"][0] and "DSN" in recorder["page"][0]
+    # a further sweep, still all-uncovered, must NOT page again (once per episode).
+    w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=True)
+    assert len(recorder["page"]) == 1
+
+
+def test_all_uncovered_streak_resets_once_coverage_returns(recorder, monkeypatch):
+    from nervous_system import singleton_liveness as sl
+    verdicts = iter(["uncovered"] * w.ALL_UNCOVERED_MIN_POLLS + ["alive"]
+                     + ["uncovered"] * w.ALL_UNCOVERED_MIN_POLLS)
+    monkeypatch.setattr(sl, "agent_liveness", lambda agent: next(verdicts))
+    obs = _healthy_obs()
+    for _ in range(w.ALL_UNCOVERED_MIN_POLLS):
+        w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=True)
+    assert len(recorder["page"]) == 1          # first sustained outage -> one page
+    w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=True)  # coverage returns
+    for _ in range(w.ALL_UNCOVERED_MIN_POLLS):
+        w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=True)
+    assert len(recorder["page"]) == 2, "a NEW sustained outage after recovery must page again"
+
+
+def test_not_all_uncovered_never_pages_for_dsn(recorder, monkeypatch):
+    from nervous_system import singleton_liveness as sl
+    # one covered agent is enough to prove the sweep is NOT all-uncovered.
+    monkeypatch.setattr(sl, "agent_liveness", lambda agent: "alive")
+    obs = _healthy_obs()
+    for _ in range(w.ALL_UNCOVERED_MIN_POLLS + 2):
+        w.run(mode=w.MODE_DETECT, alert=True, injected=[obs], lane_dirs={}, persist=True)
+    assert recorder["page"] == []
