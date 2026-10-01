@@ -165,3 +165,95 @@ def test_empty_manifest_refuses(tmp_path, capsys):
     _write(tr, json.dumps({"x": "y"}) + "\n")
     rc = s.main(["--env", str(env), "--scan", str(tr), "--dry-run"])
     assert rc == 3                               # refuse empty manifest
+
+
+# ── orch-console #49038: plaintext mode + any-real-token matcher + file-history classing ──
+# A FABRICATED token of real Anthropic shape/length (sk-ant- + >=60 chars). Not in any manifest.
+SHAPE_TOKEN = "sk-ant-oat01-" + "FAKEshape" * 9 + "-Zz"          # 13 + 81 + 3 = 97 chars
+
+
+def _manifest(tmp_path):
+    env = tmp_path / ".env"
+    _write(env, "ANTHROPIC_API_KEY=%s\n" % FAKE_KEY)
+    return s.build_secret_set([str(env)])
+
+
+def test_shape_matcher_catches_token_absent_from_manifest(tmp_path):
+    f = tmp_path / "t.jsonl"
+    _write(f, json.dumps({"out": "TOKEN_OVERRIDE=%s done" % SHAPE_TOKEN}) + "\n")
+    rep = s.sweep_file(str(f), _manifest(tmp_path), execute=True, ledger_path=str(tmp_path / "l"))
+    assert rep["matches_before"] == 1 and rep["matches_after"] == 0 and rep["error"] is None
+    assert rep["by_source"] == {"shape": 1}
+    body = f.read_text()
+    assert SHAPE_TOKEN not in body and "done" in body
+    json.loads(body)                                   # still a valid transcript line
+
+
+def test_shape_matcher_can_be_disabled(tmp_path):
+    f = tmp_path / "t.jsonl"
+    _write(f, json.dumps({"out": SHAPE_TOKEN}) + "\n")
+    rep = s.sweep_file(str(f), _manifest(tmp_path), execute=False, shape_match=False)
+    assert rep["matches_before"] == 0
+
+
+def test_short_sk_ant_strings_are_not_shape_matched(tmp_path):
+    f = tmp_path / "t.jsonl"
+    _write(f, json.dumps({"out": "see sk-ant-api03-xxxx and sk-ant-" + "a" * 59}) + "\n")
+    rep = s.sweep_file(str(f), _manifest(tmp_path), execute=False)
+    assert rep["matches_before"] == 0
+
+
+def test_plaintext_file_is_redacted_without_json_gate(tmp_path):
+    f = tmp_path / "tool-results" / "abc.txt"; f.parent.mkdir()
+    _write(f, "env dump\nCLAUDE_CODE_OAUTH_TOKEN_OVERRIDE=%s\nKEY=%s\nnot json at all {\n"
+           % (SHAPE_TOKEN, FAKE_KEY))
+    size = f.stat().st_size
+    rep = s.sweep_file(str(f), _manifest(tmp_path), execute=True, ledger_path=str(tmp_path / "l"))
+    assert rep["mode"] == "plaintext" and rep["error"] is None
+    assert rep["matches_before"] == 2 and rep["matches_after"] == 0
+    assert f.stat().st_size == size
+    body = f.read_text()
+    assert SHAPE_TOKEN not in body and FAKE_KEY not in body and "not json at all {" in body
+
+
+def test_jsonl_keeps_its_json_gate(tmp_path):
+    f = tmp_path / "t.jsonl"
+    _write(f, json.dumps({"k": SHAPE_TOKEN}) + "\n")
+    rep = s.sweep_file(str(f), _manifest(tmp_path), execute=False)
+    assert rep["mode"] == "jsonl"
+
+
+def test_file_history_env_snapshot_is_classified_not_redacted(tmp_path):
+    f = tmp_path / "file-history" / "abc123" / "deadbeef@v3"; f.parent.mkdir(parents=True)
+    _write(f, "# orchestrator env\nANTHROPIC_API_KEY=%s\nPORT=5432\nMODE=prod\n" % FAKE_KEY)
+    before = f.read_bytes()
+    rep = s.sweep_file(str(f), _manifest(tmp_path), execute=True, ledger_path=str(tmp_path / "l"))
+    assert rep["class"] == "env-snapshot"
+    assert rep["matches_before"] == 1
+    assert f.read_bytes() == before, "an .env snapshot is the same trust boundary as .env: never edited"
+
+
+def test_file_history_non_env_snapshot_still_counts_as_a_leak(tmp_path):
+    f = tmp_path / "file-history" / "abc123" / "cafe@v1"; f.parent.mkdir(parents=True)
+    _write(f, "#!/bin/bash\necho hello\ncurl -H 'x-api-key: %s' https://x\nexit 0\n" % FAKE_KEY)
+    rep = s.sweep_file(str(f), _manifest(tmp_path), execute=False)
+    assert rep["class"] == "file-history"
+
+
+def test_main_pages_count_excludes_env_snapshots(tmp_path, capsys):
+    env = tmp_path / ".env"; _write(env, "ANTHROPIC_API_KEY=%s\n" % FAKE_KEY)
+    snap = tmp_path / "file-history" / "s" / "x@v1"; snap.parent.mkdir(parents=True)
+    _write(snap, "ANTHROPIC_API_KEY=%s\nA=b\n" % FAKE_KEY)
+    tr = tmp_path / "t.jsonl"; _write(tr, json.dumps({"o": FAKE_KEY}) + "\n")
+    rc = s.main(["--env", str(env), "--scan", str(snap), str(tr), "--dry-run", "--report-json"])
+    d = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert d["total_before"] == 2 and d["total_paging"] == 1 and d["env_snapshot_hits"] == 1
+    assert SHAPE_TOKEN not in json.dumps(d) and FAKE_KEY not in json.dumps(d)
+
+
+def test_run_wrapper_uses_ledger_not_removed_backup_dir_flag():
+    src = open(os.path.join(os.path.dirname(__file__), "..", "scripts", "secret_hash_sweep_run.sh")).read()
+    assert "--backup-dir" not in src, "the tool removed --backup-dir (#48678); armed runs would crash"
+    assert "--ledger" in src
+    assert "tool-results" in src, "recurring sweep must cover tool-results/*.txt (#49038)"

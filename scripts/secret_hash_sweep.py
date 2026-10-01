@@ -30,7 +30,7 @@ the embedded password of any postgres DSN value. Trivial values are skipped by t
 
 Usage:
   secret_hash_sweep.py --env <envfile>... --scan <jsonl>... --dry-run
-  secret_hash_sweep.py --env <envfile>... --scan <jsonl>... --execute --backup-dir <dir>
+  secret_hash_sweep.py --env <envfile>... --scan <jsonl|txt>... --execute --ledger <file>
   (globs are accepted for --env and --scan)
 """
 from __future__ import annotations
@@ -48,6 +48,11 @@ from typing import Dict, List, Tuple
 MIN_SECRET_LEN = 16          # exact matches shorter than this risk hitting benign text
 MIN_DSN_PW_LEN = 8           # DSN passwords are real secrets even when a bit shorter
 _DSN_RE = re.compile(rb"postgres(?:ql)?://[^\s:@/]+:([^\s@/]+)@")
+# ANY real-length Anthropic credential (OAuth sk-ant-oat…, API sk-ant-api…), manifest or not
+# (orch-console #49038: one tool-results file held 4 real tokens; a musa2-only manifest saw 1).
+# Real ones are ~100+ chars; >=60 after the prefix keeps short doc/example strings out.
+_TOKEN_SHAPE_RE = re.compile(rb"sk-ant-[A-Za-z0-9_-]{60,}")
+_ENV_LINE_RE = re.compile(rb"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=")
 
 # Key-name shapes whose VALUE is public-by-design or a non-credential identifier — these are
 # NOT secrets and redacting them would corrupt transcripts (e.g. SUPABASE_PROJECT_REF appears
@@ -118,6 +123,28 @@ def build_secret_set(env_paths: List[str]) -> Dict[bytes, str]:
     return secrets
 
 
+def shape_secrets(data: bytes, known: Dict[bytes, str]) -> Dict[bytes, str]:
+    """Token-shaped values in *data* that the manifest does not already hold. {value: hash8}."""
+    found: Dict[bytes, str] = {}
+    for m in _TOKEN_SHAPE_RE.finditer(data):
+        v = m.group(0)
+        if v not in known:
+            found[v] = hash8(v)
+    return found
+
+
+def classify(path: str, data: bytes) -> str:
+    """'env-snapshot' = a Claude Code file-history backup of an env file (same trust boundary as
+    the .env itself, #49038: classify, never page, never edit). Any OTHER file-history snapshot
+    (a script, a doc) holding a secret is a real leak -> 'file-history'. Else 'transcript'."""
+    if "/file-history/" not in path.replace(os.sep, "/"):
+        return "transcript"
+    lines = [l for l in data.splitlines() if l.strip() and not l.lstrip().startswith(b"#")]
+    if lines and sum(1 for l in lines if _ENV_LINE_RE.match(l)) >= 0.8 * len(lines):
+        return "env-snapshot"
+    return "file-history"
+
+
 def marker_for(value: bytes, h8: str) -> bytes:
     """A same-length, JSON-string-safe replacement for *value*."""
     m = b"[REDACTED:" + h8.encode() + b"]"
@@ -165,8 +192,14 @@ def _line_offsets(data: bytes) -> List[Tuple[int, int]]:
 
 
 def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
-               ledger_path: str | None = None) -> dict:
-    """Detect (and, if execute, redact in place) secret spans in one .jsonl file.
+               ledger_path: str | None = None, shape_match: bool = True) -> dict:
+    """Detect (and, if execute, redact in place) secret spans in one file.
+
+    Mode is chosen per file: a .jsonl transcript keeps the JSON gate (every redacted line must
+    still json.loads, so the session still loads); any other file (tool-results/*.txt, #49038)
+    is 'plaintext': the same exact-span, size-preserving, ledgered redaction without that gate.
+    With shape_match (default), any real-length sk-ant- token is redacted too, manifest or not.
+    An 'env-snapshot' (see classify) is detected + counted but NEVER edited.
 
     On --execute we keep NO plaintext backup (orch-console #48678: a plaintext copy is 714
     secrets at rest readable by every agent's user). Instead, if *ledger_path* is given, we
@@ -174,7 +207,9 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
     the value. Returns a values-free report dict."""
     rep = {"file": path, "matches_before": 0, "matches_after": 0, "lines_changed": 0,
            "spans_redacted": 0, "by_hash": {}, "size_before": 0, "size_after": 0,
-           "size_preserved": True, "parses_ok": True, "error": None}
+           "size_preserved": True, "parses_ok": True, "error": None,
+           "mode": "jsonl" if path.endswith(".jsonl") else "plaintext",
+           "class": "transcript", "by_source": {}}
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -182,6 +217,11 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
         rep["error"] = "read failed: %s" % e.__class__.__name__
         return rep
     rep["size_before"] = len(data)
+    rep["class"] = classify(path, data)
+    shaped = shape_secrets(data, secrets) if shape_match else {}
+    if shaped:
+        secrets = dict(secrets); secrets.update(shaped)
+    shaped_h8 = set(shaped.values())
 
     changes: List[Tuple[int, bytes]] = []            # (line_offset, new_line_bytes)
     ledger: List[dict] = []                          # abs-offset + length + hash8, no values
@@ -192,25 +232,29 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
             for h, c in hits.items():
                 rep["by_hash"][h] = rep["by_hash"].get(h, 0) + c
                 rep["matches_before"] += c
+                src = "shape" if h in shaped_h8 else "manifest"
+                rep["by_source"][src] = rep["by_source"].get(src, 0) + c
             if new != line:
                 if len(new) != len(line):            # must never happen — fail loud
                     rep["error"] = "length drift on a redacted line — ABORT file"
                     rep["size_preserved"] = False
                     return rep
-                try:
-                    json.loads(new.rstrip(b"\n"))     # redacted line must still parse
-                except Exception:
-                    rep["parses_ok"] = False
-                    rep["error"] = "redacted line no longer valid JSON — ABORT file"
-                    return rep
+                if rep["mode"] == "jsonl":
+                    try:
+                        json.loads(new.rstrip(b"\n"))     # redacted line must still parse
+                    except Exception:
+                        rep["parses_ok"] = False
+                        rep["error"] = "redacted line no longer valid JSON — ABORT file"
+                        return rep
                 changes.append((s, new))
                 for (rel, ln, h8) in spans:
                     ledger.append({"file": path, "offset": s + rel, "length": ln, "hash8": h8})
 
     rep["lines_changed"] = len(changes)
     rep["spans_redacted"] = len(ledger)
-    if not execute:
+    if not execute or rep["class"] == "env-snapshot":
         rep["size_after"] = rep["size_before"]
+        rep["matches_after"] = rep["matches_before"] if rep["class"] == "env-snapshot" else 0
         return rep
 
     if changes:
@@ -258,13 +302,16 @@ def _expand(globs: List[str]) -> List[str]:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="hash-identified exact-span secret redaction sweep")
     ap.add_argument("--env", nargs="+", required=True, help="env file(s)/glob(s) holding real secret values")
-    ap.add_argument("--scan", nargs="+", required=True, help="transcript .jsonl file(s)/glob(s) to sweep")
+    ap.add_argument("--scan", nargs="+", required=True,
+                    help="file(s)/glob(s) to sweep: .jsonl transcripts (JSON-gated) or plaintext (e.g. tool-results/*.txt)")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--dry-run", action="store_true", help="detect + report only (default)")
     g.add_argument("--execute", action="store_true", help="redact in place (requires --ledger)")
     ap.add_argument("--ledger", help="append-only audit ledger (offset+length+hash8, NEVER values); "
                                      "required with --execute")
     ap.add_argument("--report-json", action="store_true", help="emit the per-file report as JSON")
+    ap.add_argument("--no-shape-match", action="store_true",
+                    help="manifest values only; skip the any-real-length sk-ant- token matcher")
     args = ap.parse_args(argv)
 
     if args.execute and not args.ledger:
@@ -280,28 +327,34 @@ def main(argv=None) -> int:
         return 3
 
     scan_files = _expand(args.scan)
-    reports = [sweep_file(p, secrets, args.execute, args.ledger) for p in scan_files]
+    reports = [sweep_file(p, secrets, args.execute, args.ledger, shape_match=not args.no_shape_match)
+               for p in scan_files]
 
     total_before = sum(r["matches_before"] for r in reports)
-    total_after = sum(r["matches_after"] for r in reports)
+    paging = [r for r in reports if r["class"] != "env-snapshot"]
+    total_paging = sum(r["matches_before"] for r in paging)
+    env_snapshot_hits = total_before - total_paging
+    total_after = sum(r["matches_after"] for r in paging)    # snapshots are never edited
     errors = [r for r in reports if r["error"]]
 
     if args.report_json:
         print(json.dumps({"env_files": len(env_files), "secrets_in_manifest": len(secrets),
                           "scanned": len(scan_files), "total_before": total_before,
-                          "total_after": total_after, "reports": reports}, indent=2))
+                          "total_after": total_after, "total_paging": total_paging,
+                          "env_snapshot_hits": env_snapshot_hits, "reports": reports}, indent=2))
     else:
         mode = "EXECUTE" if args.execute else "DRY-RUN"
         print("secret_hash_sweep [%s]: %d secret value(s) in manifest from %d env file(s); "
               "scanned %d transcript(s)." % (mode, len(secrets), len(env_files), len(scan_files)))
         for r in reports:
             if r["matches_before"] or r["error"]:
-                print("  %s | before=%d after=%d lines_changed=%d size_preserved=%s parses_ok=%s%s"
-                      % (r["file"], r["matches_before"], r["matches_after"], r["lines_changed"],
-                         r["size_preserved"], r["parses_ok"],
+                print("  %s | %s/%s before=%d after=%d lines_changed=%d size_preserved=%s parses_ok=%s%s"
+                      % (r["file"], r["mode"], r["class"], r["matches_before"], r["matches_after"],
+                         r["lines_changed"], r["size_preserved"], r["parses_ok"],
                          (" ERROR=%s" % r["error"]) if r["error"] else ""))
-        print("  TOTAL before=%d after=%d  files_with_hits=%d  errors=%d"
-              % (total_before, total_after, sum(1 for r in reports if r["matches_before"]), len(errors)))
+        print("  TOTAL before=%d after=%d  paging=%d env_snapshot_hits=%d  files_with_hits=%d  errors=%d"
+              % (total_before, total_after, total_paging, env_snapshot_hits,
+                 sum(1 for r in reports if r["matches_before"]), len(errors)))
 
     # exit non-zero if anything failed, or (on execute) if any secret survived
     if errors:

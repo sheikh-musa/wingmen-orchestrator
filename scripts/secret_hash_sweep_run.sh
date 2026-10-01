@@ -9,16 +9,19 @@
 # SAFETY / ARMING (matches the fleet's detect-ungated / destructive-action-armed shape):
 #   * DEFAULT = DETECT + ALERT: runs --dry-run; if ANY secret span is found it pages
 #     orch-console (P1) with COUNTS ONLY (never a value) and exits non-zero. Nothing is edited.
-#   * ARMED (SECRET_SWEEP_ARM=1) = EXECUTE: redacts in place (size-preserving, reversible via
-#     per-run 0600 backups), then pages a count-only summary. Arm only after review.
+#   * ARMED (SECRET_SWEEP_ARM=1) = EXECUTE: redacts in place (size-preserving), appending an
+#     offsets+hash8-only audit LEDGER (no plaintext backups, #48678), then pages a count-only
+#     summary. Arm only after review.
+#   * Covers .jsonl transcripts AND tool-results/*.txt (plaintext mode), and redacts ANY
+#     real-length sk-ant- token even if no .env lists it (#49038). Env-file snapshots under
+#     ~/.claude/file-history are classified by the tool and never paged or edited.
 # Never prints a secret value (the tool identifies everything by sha256[:8]).
 set -uo pipefail
 
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ORCH_DIR/.venv/bin/python3"; [ -x "$PY" ] || PY="$(command -v python3)"
 WINDOW="${SECRET_SWEEP_WINDOW:-}"   # EMPTY = ALL dates (orch-console #48734: older transcripts hold secrets too; hash match is cheap). Set e.g. "30 hours ago" to window.
-BAK_ROOT="${SECRET_SWEEP_BAK_ROOT:-$HOME/secret-sweep-backups}"
-STAMP="$(date -u +%Y%m%dT%H%MZ)"
+LEDGER="${SECRET_SWEEP_LEDGER:-$ORCH_DIR/logs/secret-hash-sweep-ledger.jsonl}"
 
 # Real .env files on THIS host (skip *.example / *.sample — placeholders).
 ENVS=()
@@ -33,18 +36,20 @@ done
 # Transcripts to scan: ALL by default (every date, incl. subagent dirs — find recurses);
 # only windowed when SECRET_SWEEP_WINDOW is set.
 # NB: bash 3.2 (macOS /bin/bash, what launchd runs) has no `mapfile` — build the array by hand.
+# tool-results/*.txt are plaintext tool outputs saved beside a session (#49038: one held 4 real
+# tokens the .jsonl-only sweep never looked at).
 SCANS=()
 if [ -n "$WINDOW" ]; then
   while IFS= read -r _f; do [ -n "$_f" ] && SCANS+=("$_f"); done \
-    < <(find "$HOME/.claude/projects" -name '*.jsonl' -newermt "$WINDOW" 2>/dev/null)
+    < <(find "$HOME/.claude/projects" \( -name '*.jsonl' -o \( -path '*/tool-results/*' -name '*.txt' \) \) -newermt "$WINDOW" 2>/dev/null)
 else
   while IFS= read -r _f; do [ -n "$_f" ] && SCANS+=("$_f"); done \
-    < <(find "$HOME/.claude/projects" -name '*.jsonl' 2>/dev/null)
+    < <(find "$HOME/.claude/projects" \( -name '*.jsonl' -o \( -path '*/tool-results/*' -name '*.txt' \) \) 2>/dev/null)
 fi
 [ "${#SCANS[@]}" -gt 0 ] || { echo "secret_sweep_run: no transcripts — nothing to do"; exit 0; }
 
 REPORT="$("$PY" "$ORCH_DIR/scripts/secret_hash_sweep.py" --env "${ENVS[@]}" --scan "${SCANS[@]}" \
-          $([ "${SECRET_SWEEP_ARM:-0}" = "1" ] && printf -- "--execute --backup-dir %s" "$BAK_ROOT/$STAMP" || printf -- "--dry-run") \
+          $([ "${SECRET_SWEEP_ARM:-0}" = "1" ] && printf -- "--execute --ledger %s" "$LEDGER" || printf -- "--dry-run") \
           --report-json 2>&1)" || true
 
 # Pull count-only fields (never values) out of the JSON report.
@@ -55,7 +60,9 @@ try:
 except Exception:
     print("-1 -1 -1"); sys.exit(0)
 reps=d.get("reports",[])
-print(d.get("total_before",-1), d.get("total_after",-1), sum(1 for r in reps if r.get("matches_before")))
+# PAGE on total_paging: env-file snapshots (file-history) are the .env trust boundary, not a leak.
+print(d.get("total_paging",-1), d.get("total_after",-1),
+      sum(1 for r in reps if r.get("matches_before") and r.get("class") != "env-snapshot"))
 ')
 
 if [ "$BEFORE" = "-1" ]; then
@@ -72,7 +79,7 @@ if [ "${BEFORE:-0}" -gt 0 ]; then
     --priority P1 --req --subject "secret-hash-sweep [$MODE] on $(hostname): $BEFORE secret span(s) in $FILES transcript(s) (after=$AFTER)" \
     <<EOF >/dev/null 2>&1 || true
 secret-hash-sweep found $BEFORE real-secret span(s) across $FILES recent transcript(s) on $(hostname) [$MODE].
-after=$AFTER. Counts only — no values. $([ "$MODE" = DETECT ] && echo "DETECT mode: nothing was edited; arm SECRET_SWEEP_ARM=1 (after review) to auto-redact, or run the manual sweep." || echo "EXECUTE mode: redacted in place, size-preserving, reversible (backups under $BAK_ROOT/$STAMP).")
+after=$AFTER. Counts only — no values. $([ "$MODE" = DETECT ] && echo "DETECT mode: nothing was edited; arm SECRET_SWEEP_ARM=1 (after review) to auto-redact, or run the manual sweep." || echo "EXECUTE mode: redacted in place, size-preserving; audit ledger (offsets+hash8 only) at $LEDGER.")
 EOF
   echo "secret_sweep_run [$MODE]: before=$BEFORE after=$AFTER files=$FILES (paged)"
   # In DETECT we surfaced a real finding; exit non-zero so launchd logs it as actionable.
