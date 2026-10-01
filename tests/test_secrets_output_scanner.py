@@ -212,7 +212,16 @@ def test_redact_recent_lines_only_touches_the_window(tmp_path):
 
 # ---- bus #48740: demo/replay runs must not page orch-console at real P1 ----
 
-def test_page_orch_console_demo_mode_tags_subject_and_drops_to_p3(monkeypatch):
+def _fake_orch_root(tmp_path):
+    # _page_orch_console early-returns if scripts/bus_send.py doesn't exist under
+    # ORCH_ROOT -- on a CI runner there's no ~/wingmen/orchestrator default, so the
+    # test must point ORCH_ROOT at a real (if empty) stand-in, not rely on the host.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "bus_send.py").write_text("# fake, never executed (subprocess.run is mocked)\n")
+    return tmp_path
+
+
+def test_page_orch_console_demo_mode_tags_subject_and_drops_to_p3(monkeypatch, tmp_path):
     import subprocess as subprocess_module
     captured = {}
 
@@ -222,6 +231,7 @@ def test_page_orch_console_demo_mode_tags_subject_and_drops_to_p3(monkeypatch):
             returncode = 0
         return R()
 
+    monkeypatch.setenv("ORCH_ROOT", str(_fake_orch_root(tmp_path)))
     monkeypatch.setenv("SECRETS_SCANNER_DEMO", "1")
     monkeypatch.setattr(subprocess_module, "run", fake_run)
     scanner._page_orch_console("postgres-dsn", "Bash")
@@ -234,7 +244,7 @@ def test_page_orch_console_demo_mode_tags_subject_and_drops_to_p3(monkeypatch):
     assert "--req" not in args
 
 
-def test_page_orch_console_real_mode_is_unchanged(monkeypatch):
+def test_page_orch_console_real_mode_is_unchanged(monkeypatch, tmp_path):
     import subprocess as subprocess_module
     captured = {}
 
@@ -244,6 +254,7 @@ def test_page_orch_console_real_mode_is_unchanged(monkeypatch):
             returncode = 0
         return R()
 
+    monkeypatch.setenv("ORCH_ROOT", str(_fake_orch_root(tmp_path)))
     monkeypatch.delenv("SECRETS_SCANNER_DEMO", raising=False)
     monkeypatch.setattr(subprocess_module, "run", fake_run)
     scanner._page_orch_console("postgres-dsn", "Bash")
