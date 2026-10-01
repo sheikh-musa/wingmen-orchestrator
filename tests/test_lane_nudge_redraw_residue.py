@@ -161,3 +161,28 @@ def test_no_keystrokes_between_redraw_and_reparse(tmp_path):
     i = next(n for n, l in enumerate(lines) if "resize-window" in l and "-x 118" in l)
     j = next(n for n, l in enumerate(lines) if "resize-window" in l and "-x 120" in l)
     assert not any(l.startswith("send-keys") for l in lines[i:j + 1])
+
+
+# cc-quality #49035: composer_parse reports CC_EMPTY=1 BOTH for a genuinely blank composer
+# (CC_PARTIAL=ok) AND for a capture where no prompt/border was found at all (noprompt/noborder,
+# e.g. a mid-repaint frame right after the resize-back). The delivery loop starts with C-u,
+# so treating "could not read" as "confirmed empty" would erase a real unsent message.
+MIDREPAINT = "some scrollback output\nstill repainting, no prompt glyph yet\n"   # no ❯, no border
+
+
+def test_postredraw_unreadable_frame_does_not_deliver(tmp_path):
+    out, logdir, calls, _ = run_nudge(tmp_path, postredraw=MIDREPAINT)
+    assert out.returncode == 3, f"a noprompt post-redraw frame must REFUSE, got {out.returncode}: {out.stderr}"
+    assert "a nudge message" not in calls, "must never type the nudge after an unreadable redraw"
+    # and must NOT re-probe (type a sentinel) into a pane it cannot read
+    after_redraw = calls.split("-x 120", 1)[1]
+    assert "send-keys" not in after_redraw, f"no keystrokes after an unreadable redraw: {after_redraw!r}"
+    assert "unreadable" in out.stderr
+
+
+def test_genuinely_empty_composer_still_reports_ok_partial():
+    # Guard the fix's premise: the empty fixture parses CC_EMPTY=1 AND CC_PARTIAL=ok.
+    lib = REPO / "scripts" / "lib" / "composer_capture.sh"
+    r = subprocess.run(["/bin/bash", "-c", 'source "$1"; composer_parse "$(cat "$2")"; echo "$CC_EMPTY $CC_PARTIAL"',
+                        "_", str(lib), str(FIX / "empty.e.txt")], capture_output=True, text=True)
+    assert r.stdout.split() == ["1", "ok"], r.stdout + r.stderr

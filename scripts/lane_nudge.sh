@@ -382,7 +382,13 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       if [ "$_ln_race" = 0 ]; then
         if _redraw_cleared_residue "$SESSION"; then
           composer_parse_pane tmux "$SESSION"
-          if [ "${CC_EMPTY:-0}" = 1 ]; then
+          # cc-quality #49035: composer_parse sets CC_EMPTY=1 for BOTH a genuinely blank composer
+          # (CC_PARTIAL=ok) AND a capture with no prompt/border found (a mid-repaint frame right after
+          # the resize-back). The delivery loop starts with C-u, so "could not read" must never count
+          # as "confirmed empty" — and must not be re-probed either (no sentinel into an unreadable pane).
+          if [ "${CC_PARTIAL:-}" != 'ok' ]; then
+            _ln_redraw="unreadable(${CC_PARTIAL:-unset})"
+          elif [ "${CC_EMPTY:-0}" = 1 ]; then
             _ln_redraw='empty'
           else
             _probe_composer tmux "$SESSION"
