@@ -307,6 +307,56 @@ def _candidate_sessions(agent_id: str) -> list[str]:
         return []
 
 
+def host_scope_allows(recipient_host: "str | None", host_scope: "str | None") -> bool:
+    """PURE partition rule for the realtime wake doorbell when MORE THAN ONE host runs a
+    subscriber (today: the Mini AND gzb). It decides whether THIS subscriber (scoped to
+    `host_scope`) should attempt to wake a recipient whose registered agent_status.host is
+    `recipient_host`. This is what guarantees the Mini and gzb subscribers NEVER both act on
+    the same bus row:
+
+      * host_scope FALSY  -> the subscriber is UNSCOPED (legacy single-host behavior, e.g. an
+        un-pinned Mini): allow — the local-tmux gate in resolve_tmux_session is the only
+        partition, exactly as before this change.
+      * recipient_host FALSY (unknown: no agent_status row / no host column) -> allow, and let
+        resolve_tmux_session's local has-session gate decide. A brand-new / unregistered lane
+        must still be reachable; only ONE host will actually have its live pane, so this cannot
+        double-wake a *registered* lane. (Logged as observable by the caller.)
+      * both known -> allow IFF they match. A lane with a KNOWN host is woken ONLY by the
+        subscriber whose scope equals that host; the other subscriber skips the row outright,
+        BEFORE touching tmux. This removes any reliance on tmux session-name uniqueness across
+        hosts for the common (registered-lane) case.
+    """
+    if not host_scope:
+        return True
+    if not recipient_host:
+        return True
+    return recipient_host == host_scope
+
+
+def agent_registered_host(agent_id: str) -> "str | None":
+    """The agent's registered agent_status.host (its OWN row first, then its base family,
+    freshest non-offline first), or None if unknown/unavailable. Mirrors _candidate_sessions'
+    exact-self-vs-family rule so host-scoping and session-resolution agree on which row speaks
+    for an agent. Best-effort: any DB error -> None (caller treats unknown as 'fall back to the
+    local-tmux gate', never a hard failure of the doorbell)."""
+    base = _base_family(agent_id)
+    if not _DSN:
+        return None
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT host FROM agent_status "
+                "WHERE host IS NOT NULL "
+                "  AND (agent_id=%s OR (base_agent_id=%s AND status<>'offline')) "
+                "ORDER BY (agent_id=%s) DESC, (status<>'offline') DESC, "
+                "         last_heartbeat DESC NULLS LAST LIMIT 1",
+                (agent_id, base, agent_id))
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception:
+        return None
+
+
 def _first_live_session(candidates, has_session=None) -> str | None:
     """Pure: the first candidate whose pane is actually live. Injectable has_session
     for testing."""

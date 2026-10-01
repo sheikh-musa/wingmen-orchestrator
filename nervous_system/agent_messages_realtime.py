@@ -125,8 +125,32 @@ def _stall_detected(lag: int) -> None:
     os._exit(1)
 
 
+async def _host_scope_allows_wake(
+    to_agent: str | None, host_scope: str | None, msg_id: int
+) -> bool:
+    """Resolve the recipient's registered host (off the event loop — a blocking psycopg
+    query) and apply the pure partition rule agent_wake.host_scope_allows. host_scope=None
+    short-circuits to True with NO DB hit (legacy single-subscriber path). A SKIP (known,
+    non-matching host) is logged at INFO so the partition is observable, not silent."""
+    if not host_scope:
+        return True
+    recipient_host = await asyncio.to_thread(agent_wake.agent_registered_host, to_agent)
+    allow = agent_wake.host_scope_allows(recipient_host, host_scope)
+    if not allow:
+        logger.info(
+            "realtime: skip auto-wake of %s for #%s — host %r != this subscriber's scope %r "
+            "(the %r subscriber owns this wake)",
+            to_agent, msg_id, recipient_host, host_scope, recipient_host)
+    elif recipient_host is None:
+        logger.info(
+            "realtime: auto-wake of %s for #%s — host UNKNOWN (no agent_status row); "
+            "falling back to the local-tmux gate under scope %r", to_agent, msg_id, host_scope)
+    return allow
+
+
 async def _route_single_message(
-    supabase, bot, musa_chat_id: str | None, msg_id: int, wake_only: bool = False
+    supabase, bot, musa_chat_id: str | None, msg_id: int, wake_only: bool = False,
+    host_scope: str | None = None,
 ) -> None:
     """Fetch full row by id and run it through the same pipeline as poll.
 
@@ -168,11 +192,17 @@ async def _route_single_message(
     # exactly the inter-agent messages a recipient lane needs woken for. The wake
     # is a doorbell (fixed signal, zero authority); kill-switch gated; runs off the
     # event loop (resolve + send-keys are blocking). Cap-hit fails LOUD (Q4).
+    #
+    # HOST-SCOPE (multi-subscriber partition): when >1 host runs a subscriber (today the
+    # Mini AND gzb), each wakes ONLY recipients whose registered agent_status.host matches
+    # THIS subscriber's host_scope, so the two NEVER both act on one row. host_scope=None
+    # (the wingmen_orch full-mode caller + an un-pinned Mini) disables the partition and
+    # leaves behavior byte-for-byte unchanged (the local-tmux gate is then the only scope).
     if agent_wake.auto_wake_enabled() and agent_wake.should_auto_wake(
         msg.get("to_agent"), msg.get("message_type", ""),
         bool(msg.get("requires_response")), msg.get("priority", "P2"),
         bool(msg.get("is_test")),
-    ):
+    ) and await _host_scope_allows_wake(msg.get("to_agent"), host_scope, msg_id):
         try:
             # row_id → per-row delivery ceiling + PENDING-RETRY marker on a transient outcome
             # (Fable audit 2026-09-30 B-1 (iii)): a busy/debounced/rc=3 doorbell is no longer a
@@ -244,7 +274,7 @@ async def _route_single_message(
 
 async def subscribe_agent_messages(
     supabase, bot=None, musa_chat_id: str | None = None, wake_only: bool = False,
-    liveness: "_LivenessTracker | None" = None,
+    liveness: "_LivenessTracker | None" = None, host_scope: str | None = None,
 ) -> None:
     """Long-running coroutine: subscribe to agent_messages INSERT events.
 
@@ -280,7 +310,8 @@ async def subscribe_agent_messages(
                 return
             tracker.note_delivered(msg_id)  # 5B: proof the feed is live
             logger.info(f"realtime: _on_insert fired for msg #{msg_id}")
-            await _route_single_message(supabase, bot, musa_chat_id, msg_id, wake_only)
+            await _route_single_message(supabase, bot, musa_chat_id, msg_id, wake_only,
+                                        host_scope)
         except Exception as e:
             logger.error(f"realtime: _on_insert handler failed: {e}")
             track_exception("agent_messages_realtime.callback", e)
