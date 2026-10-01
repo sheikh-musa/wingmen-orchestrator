@@ -339,3 +339,90 @@ def test_client_section_never_shows_captured_raw_ask_text():
     digest = add.render_digest(
         [], None, [], {"count": 1, "oldest": datetime(2026, 9, 29, tzinfo=timezone.utc)})
     assert "1 client messages not yet sorted" in digest
+
+
+# ── bus #47267 item 2: DIGEST_CLIENT_ASKS_ENABLED default-off gate ───────────
+def test_client_asks_digest_enabled_defaults_off(monkeypatch):
+    monkeypatch.delenv(add.DIGEST_CLIENT_ASKS_ENABLED_ENV, raising=False)
+    assert add.client_asks_digest_enabled() is False
+
+
+def test_client_asks_digest_enabled_off_for_non_exact_values(monkeypatch):
+    for v in ("true", "TRUE", "yes", "0", ""):
+        monkeypatch.setenv(add.DIGEST_CLIENT_ASKS_ENABLED_ENV, v)
+        assert add.client_asks_digest_enabled() is False
+
+
+def test_client_asks_digest_enabled_true_only_for_exact_1(monkeypatch):
+    monkeypatch.setenv(add.DIGEST_CLIENT_ASKS_ENABLED_ENV, "1")
+    assert add.client_asks_digest_enabled() is True
+
+
+def test_main_does_not_fetch_client_rows_when_flag_off(monkeypatch, tmp_path):
+    """orch-console bus #47267 decision 2: until the ~118-row irsyad backlog is
+    triaged, the client section must stay OFF Musa's morning roll-up by
+    default — main() must not even query the client tables."""
+    monkeypatch.delenv(add.DIGEST_CLIENT_ASKS_ENABLED_ENV, raising=False)
+    monkeypatch.setattr(add, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(add, "_dsn", lambda: "postgresql://unused")
+    monkeypatch.setattr(add.psycopg, "connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr(
+        add, "fetch_client_open_asks",
+        lambda conn: (_ for _ in ()).throw(AssertionError("must not fetch when flag is off")))
+    monkeypatch.setattr(
+        add, "fetch_client_captured_summary",
+        lambda conn: (_ for _ in ()).throw(AssertionError("must not fetch when flag is off")))
+    rc = add.main(["--dry-run"])
+    assert rc == 0
+
+
+def test_main_fetches_client_rows_when_flag_on(monkeypatch, tmp_path):
+    monkeypatch.setenv(add.DIGEST_CLIENT_ASKS_ENABLED_ENV, "1")
+    monkeypatch.setattr(add, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(add, "_dsn", lambda: "postgresql://unused")
+    monkeypatch.setattr(add.psycopg, "connect", lambda *a, **k: _FakeConn())
+    called = {"open": False, "captured": False}
+
+    def fake_open(conn):
+        called["open"] = True
+        return []
+
+    def fake_captured(conn):
+        called["captured"] = True
+        return {"count": 0, "oldest": None}
+
+    monkeypatch.setattr(add, "fetch_client_open_asks", fake_open)
+    monkeypatch.setattr(add, "fetch_client_captured_summary", fake_captured)
+    rc = add.main(["--dry-run"])
+    assert rc == 0
+    assert called["open"] and called["captured"]
+
+
+# ── bus #47267 item 4: behavioral row-level surface-scoping (not just SQL text) ─
+def test_fetch_open_asks_and_fetch_client_open_asks_are_row_level_disjoint(operator_ledger_db):
+    """Insert one operator-surface row and one client-channel row and prove
+    each fetcher returns ONLY its own surface — a stronger guard than the
+    existing inspect.getsource string checks, which would pass even if the
+    SQL text and the live query diverged."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO operator_asks (ask, triage_state, triage_summary, ask_surface) "
+                "VALUES ('op ask text', 'ask', 'operator summary', 'operator') RETURNING id")
+            operator_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO operator_asks (ask, triage_state, triage_summary, ask_surface) "
+                "VALUES ('client ask text', 'ask', 'client summary', 'client-channel') RETURNING id")
+            client_id = cur.fetchone()[0]
+            conn.commit()
+
+        operator_rows = add.fetch_open_asks(conn)
+        client_rows = add.fetch_client_open_asks(conn)
+
+    operator_ids = {r["id"] for r in operator_rows}
+    client_ids = {r["id"] for r in client_rows}
+    assert operator_id in operator_ids
+    assert operator_id not in client_ids
+    assert client_id in client_ids
+    assert client_id not in operator_ids

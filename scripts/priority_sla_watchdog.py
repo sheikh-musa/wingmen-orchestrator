@@ -1367,6 +1367,18 @@ def _send_client_ask_chase(conn, owner: str, row: dict) -> bool:
 # Main scan
 # ---------------------------------------------------------------------------
 
+def _gated_dry(dry: bool, env_var: str) -> bool:
+    """observe-first doctrine, factored out (bus #47267 item 2, cc-quality
+    PR#231 review #47265): a gated net (asks-chase, client-asks-chase,
+    captured-triage-page) ships force-dry/log-only until explicitly ARMED via
+    `env_var=='1'` at a go-live. Exact '1' arms it -- any other value (unset,
+    '0', 'true', ...) stays dry. `dry` (e.g. a manual --dry-run) always wins
+    regardless of the env var. Extracted so the default-OFF behavior is
+    directly unit-testable instead of only reachable through run()'s ~400-line
+    scan loop."""
+    return dry or os.environ.get(env_var, "0") != "1"
+
+
 def run(dry: bool, injected: list[dict] | None = None,
         persist: bool | None = None) -> int:
     # A live --dry-run must be side-effect-free on the PRODUCTION state file, or
@@ -1664,7 +1676,7 @@ def run(dry: bool, injected: list[dict] | None = None,
         # SLA_ASKS_CHASE_ENABLED=1 at an operator/console go-live. No backfill
         # watermark needed — waiting_on_operator defaults false, so every
         # pre-existing row is excluded by construction, not by a watermark guess.
-        asks_dry = dry or os.environ.get("SLA_ASKS_CHASE_ENABLED", "0") != "1"
+        asks_dry = _gated_dry(dry, "SLA_ASKS_CHASE_ENABLED")
         try:
             chase_state = state.setdefault("asks_chase", {})
             asks_targets = asks_chase_targets(
@@ -1691,7 +1703,7 @@ def run(dry: bool, injected: list[dict] | None = None,
         # SLA_CLIENT_ASKS_CHASE_ENABLED=1 at an orch-console go-live (separate
         # gate from the operator asks-chase net above — this is a brand-new
         # mechanism, armed only once the backfill's open-set list is reviewed).
-        client_asks_dry = dry or os.environ.get("SLA_CLIENT_ASKS_CHASE_ENABLED", "0") != "1"
+        client_asks_dry = _gated_dry(dry, "SLA_CLIENT_ASKS_CHASE_ENABLED")
         try:
             client_chase_state = state.setdefault("client_asks_chase", {})
             client_asks_targets = client_chase_targets(
@@ -1715,7 +1727,7 @@ def run(dry: bool, injected: list[dict] | None = None,
         # 'captured' bucket, aged past CAPTURED_AGE_MIN, gets its owning body
         # paged once (aggregate, not per-row). Same observe-first doctrine and
         # the same enable gate as the asks-chase net above.
-        captured_dry = dry or os.environ.get("SLA_ASKS_CHASE_ENABLED", "0") != "1"
+        captured_dry = _gated_dry(dry, "SLA_ASKS_CHASE_ENABLED")
         try:
             captured_state = state.setdefault("captured_triage", {})
             captured_target = captured_triage_page_target(

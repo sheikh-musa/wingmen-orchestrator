@@ -57,6 +57,19 @@ def _dsn() -> "str | None":
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
 
+DIGEST_CLIENT_ASKS_ENABLED_ENV = "DIGEST_CLIENT_ASKS_ENABLED"
+
+
+def client_asks_digest_enabled() -> bool:
+    """orch-console bus #47267 decision 2: the client-ask section is in scope
+    for the same "paging off by default" doctrine as SLA_CLIENT_ASKS_CHASE_ENABLED
+    (scripts/priority_sla_watchdog.py) -- until the ~118-row irsyad backlog is
+    triaged, showing it unconditionally would put every unsorted item straight
+    into Musa's morning roll-up. Exact '1' arms it; sibling flag, same
+    convention, same default OFF."""
+    return os.environ.get(DIGEST_CLIENT_ASKS_ENABLED_ENV, "0") == "1"
+
+
 def fetch_open_asks(conn) -> list:
     """Every triaged-open operator_asks row (migration 082: triage_state='ask'
     only — a 'captured' row has not been judged to even BE a request yet, see
@@ -246,8 +259,11 @@ def main(argv=None) -> int:
     with psycopg.connect(dsn, connect_timeout=10) as conn:
         rows = fetch_open_asks(conn)
         captured = fetch_captured_summary(conn)
-        client_rows = fetch_client_open_asks(conn)
-        client_captured = fetch_client_captured_summary(conn)
+        if client_asks_digest_enabled():
+            client_rows = fetch_client_open_asks(conn)
+            client_captured = fetch_client_captured_summary(conn)
+        else:
+            client_rows, client_captured = [], {"count": 0, "oldest": None}
     digest = render_digest(rows, captured, client_rows, client_captured)
 
     if args.dry_run:

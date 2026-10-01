@@ -282,3 +282,35 @@ def test_client_ask_chase_owner_is_orch_console_deduplicates_to_one_send(monkeyp
     ok = w._send_client_ask_chase(FakeConn(), "orch-console", client_row(id=43, delegated_to="orch-console"))
     assert ok is True
     assert sent_to == ["orch-console"]
+
+
+# ── bus #47267 item 2: _gated_dry() observe-first default-OFF (both switches) ─
+def test_gated_dry_defaults_true_when_asks_chase_env_unset(monkeypatch):
+    monkeypatch.delenv("SLA_ASKS_CHASE_ENABLED", raising=False)
+    assert w._gated_dry(False, "SLA_ASKS_CHASE_ENABLED") is True
+
+
+def test_gated_dry_false_when_asks_chase_env_is_exact_1(monkeypatch):
+    monkeypatch.setenv("SLA_ASKS_CHASE_ENABLED", "1")
+    assert w._gated_dry(False, "SLA_ASKS_CHASE_ENABLED") is False
+
+
+def test_gated_dry_stays_true_for_non_exact_1_values_asks_chase(monkeypatch):
+    for v in ("true", "TRUE", "yes", "0", ""):
+        monkeypatch.setenv("SLA_ASKS_CHASE_ENABLED", v)
+        assert w._gated_dry(False, "SLA_ASKS_CHASE_ENABLED") is True
+
+
+def test_gated_dry_defaults_true_when_client_asks_chase_env_unset(monkeypatch):
+    monkeypatch.delenv("SLA_CLIENT_ASKS_CHASE_ENABLED", raising=False)
+    assert w._gated_dry(False, "SLA_CLIENT_ASKS_CHASE_ENABLED") is True
+
+
+def test_gated_dry_false_when_client_asks_chase_env_is_exact_1(monkeypatch):
+    monkeypatch.setenv("SLA_CLIENT_ASKS_CHASE_ENABLED", "1")
+    assert w._gated_dry(False, "SLA_CLIENT_ASKS_CHASE_ENABLED") is False
+
+
+def test_gated_dry_manual_dry_run_wins_even_when_armed(monkeypatch):
+    monkeypatch.setenv("SLA_ASKS_CHASE_ENABLED", "1")
+    assert w._gated_dry(True, "SLA_ASKS_CHASE_ENABLED") is True

@@ -340,6 +340,69 @@ def test_classify_client_ask_recognizes_additional_request_phrasing(text):
     assert ol.classify_client_ask(text) == "ask"
 
 
+# ── bus #47267 item 3: recall fixes (WH-stem, politeness lead, quote-strip,
+# indirect/declarative asks) + precision tightening (want/need false positives) ─
+@pytest.mark.parametrize("text", [
+    "where is the invoice for this month",
+    "what's the status on this",
+    "who is handling the export",
+    "which one is correct",
+])
+def test_classify_client_ask_recognizes_wh_stem_question_without_question_mark(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "pls send the updated file",
+    "plz check this again",
+    "kindly confirm the total",
+])
+def test_classify_client_ask_recognizes_politeness_prefixed_imperative(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+def test_classify_client_ask_quote_strip_handles_internal_quote_in_wrapper():
+    """The wrapper's own quoted excerpt can itself contain a '":' sequence
+    (e.g. it quotes something that was itself a quote-wrapped reply). A lazy
+    strip stops at that INNER '":' and leaves the tail of the old quoted text
+    spliced onto what the imperative check then sees as the new reply --
+    greedy-to-the-final-'":' must skip the whole wrapper instead."""
+    text = '↩️ re "earlier note: re "even earlier note": ok thanks": send me the file'
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "haven't received the export yet",
+    "no reply yet on this",
+    "is it ready",
+    "is it done",
+    "something looks wrong here",
+    "getting an error on upload",
+    "the total seems off",
+])
+def test_classify_client_ask_recognizes_indirect_declarative_asks(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "I need a coffee before we start",
+    "just need a minute",
+    "want a break after this call",
+])
+def test_classify_client_ask_personal_desire_chatter_not_a_request(text):
+    """need/want tightened (bus #47267 item 3): a bare personal-desire clause
+    with no directed object must not flood the ledger as a request of us."""
+    assert ol.classify_client_ask(text) == "not_an_ask"
+
+
+def test_classify_client_ask_reminder_bare_fyi_not_a_request():
+    assert ol.classify_client_ask("just a reminder we're closed tomorrow") == "not_an_ask"
+
+
+def test_classify_client_ask_reminder_directed_is_a_request():
+    assert ol.classify_client_ask("reminder to please send the file") == "ask"
+
+
 # ── migration 085: maybe_track_client_ask (Musa op#23944, bus #47105->#47114) ─
 def test_maybe_track_client_ask_opens_a_row_with_required_chase_by(operator_ledger_db):
     import psycopg
