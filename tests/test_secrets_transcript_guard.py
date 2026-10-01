@@ -79,6 +79,24 @@ def test_blocks_printenv_without_sink():
     assert_blocked("Bash", {"command": "printenv | grep TOKEN"})
 
 
+# ---- must BLOCK: .ssh dir under a home that isn't the hook's own $HOME ------------
+# found via synthetic tool-path replay (scripts/scratch_toolpath_replay.py), not the
+# real 1200 corpus -- os.path.expanduser("~/.ssh/") only ever resolves against THIS
+# process's own home, so the tilde-prefix check alone misses e.g. /root/.ssh/ (exactly
+# where LOCK 1 relocates gzb_to_mini) or another user's home.
+
+def test_blocks_edit_tool_under_root_dot_ssh():
+    assert_blocked("Edit", {"file_path": "/root/.ssh/gzb_to_mini_wrapper_notes",
+                             "old_string": "a", "new_string": "b"},
+                   expect_substr="this path is a secret file")
+
+
+def test_blocks_edit_tool_under_another_users_dot_ssh():
+    assert_blocked("Edit", {"file_path": "/home/gazzai/.ssh/config",
+                             "old_string": "a", "new_string": "b"},
+                   expect_substr="this path is a secret file")
+
+
 def test_blocks_ps_eww_dump_without_sink():
     assert_blocked("Bash", {"command": "ps eww -p 123"})
 

@@ -147,6 +147,14 @@ SECRET_DIR_PREFIXES = tuple(
 )
 CLIENT_CRED_FILE_RE = re.compile(r"service[-_]?account[\w.-]*\.json$|[\w-]*-sa\.json$", re.IGNORECASE)
 
+# found via synthetic tool-path replay (not the real 1200 corpus, which is Bash-text
+# only): os.path.expanduser("~/.ssh/") resolves against THIS PROCESS's own $HOME, so the
+# tilde-prefix check above only ever protects the current user's own .ssh dir -- it
+# never catches e.g. /root/.ssh/ (exactly where LOCK 1 relocates gzb_to_mini) or another
+# user's home when the hook's process home differs from the path's owner. Generic
+# path-component match closes that regardless of whose home it is.
+SSH_DIR_COMPONENT_RE = re.compile(r"(^|/)\.ssh/")
+
 
 def _is_secret_path(path: str) -> bool:
     if not path:
@@ -155,6 +163,8 @@ def _is_secret_path(path: str) -> bool:
     if _is_secret_file(path) or _is_secret_file(expanded):
         return True
     if CLIENT_CRED_FILE_RE.search(path):
+        return True
+    if SSH_DIR_COMPONENT_RE.search(path) or SSH_DIR_COMPONENT_RE.search(expanded):
         return True
     return any(expanded.startswith(prefix) for prefix in SECRET_DIR_PREFIXES)
 
