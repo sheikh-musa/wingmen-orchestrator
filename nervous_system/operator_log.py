@@ -169,7 +169,9 @@ _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 # same shape as hk-editor/gazzabyte-irsyad -- this is PRIVATE FAMILY data (Musa
 # + wife Zahidah), not a client channel the console should read or answer on
 # Zahidah's behalf.
-_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor", "mamadah")
+# `coffeemedia` JOINED 2026-10-01 (op#24578/24592): cc-coffeemedia, the Coffee Media GLM lane, talks to
+# Musa directly over @wingmendevbot and reconciles its own tag, like mamadah.
+_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor", "mamadah", "coffeemedia")
 
 # Client channels the Mini's nazim-ingest actually POLLS (scripts/boot_nazim_ingest.sh
 # INGEST_CHANNELS) that the CONSOLE body (not a dedicated lane, not the hub) reconciles.
