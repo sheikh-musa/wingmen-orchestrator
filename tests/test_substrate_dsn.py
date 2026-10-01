@@ -56,3 +56,30 @@ def test_parses_export_prefix_and_quotes(tmp_path):
     env_path = _write_env(tmp_path, 'export DATABASE_URL="%s"\n' % FILE_DSN)
     got = substrate_dsn.dsn_from_env_file(env_path=env_path, env={})
     assert got == FILE_DSN
+
+
+def test_last_match_wins_on_duplicate_lines(tmp_path):
+    # Mirrors `set -a; . .env` (LAST-wins). An append-rotation must NOT leave a stale
+    # first value winning (cc-quality MEDIUM on PR #242).
+    old = "postgresql://OLD:OLD@aws-pooler:5432/postgres"
+    env_path = _write_env(tmp_path, "DATABASE_URL=%s\nDATABASE_URL=%s\n" % (old, FILE_DSN))
+    assert substrate_dsn.dsn_from_env_file(env_path=env_path, env={}) == FILE_DSN
+
+
+def test_strips_unquoted_trailing_inline_comment(tmp_path):
+    env_path = _write_env(tmp_path, "DATABASE_URL=%s  # rotated 2026-10-01\n" % FILE_DSN)
+    assert substrate_dsn.dsn_from_env_file(env_path=env_path, env={}) == FILE_DSN
+
+
+def test_hash_in_unquoted_password_is_not_a_comment(tmp_path):
+    # A '#' with no preceding whitespace is part of the value (shell keeps it).
+    dsn = "postgresql://u:p#ss@aws-pooler:5432/postgres"
+    env_path = _write_env(tmp_path, "DATABASE_URL=%s\n" % dsn)
+    assert substrate_dsn.dsn_from_env_file(env_path=env_path, env={}) == dsn
+
+
+def test_non_utf8_file_falls_back_to_env(tmp_path):
+    p = tmp_path / ".env"
+    p.write_bytes(b"DATABASE_URL=postgresql://x\xff\xfe@h/db\n")  # invalid UTF-8
+    got = substrate_dsn.dsn_from_env_file(env_path=str(p), env={"DATABASE_URL": ENV_DSN})
+    assert got == ENV_DSN

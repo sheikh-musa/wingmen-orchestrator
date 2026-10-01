@@ -16,6 +16,7 @@ Callers must fail fast + LOUD on a missing DSN (this raises), and on a psycopg
 auth failure at the connect site they must stop + log loud, never retry-hammer.
 """
 import os
+import re
 
 # scripts/lib/substrate_dsn.py -> ../../ = the orchestrator repo root, where .env lives.
 _DEFAULT_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
@@ -24,10 +25,19 @@ _DEFAULT_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..
 def _dsn_from_file(env_path):
     """Return the DATABASE_URL defined in the .env FILE, or None if absent/unreadable.
 
-    Matches a ``DATABASE_URL=...`` (optionally ``export``-prefixed) line, strips
-    surrounding quotes. First match wins, mirroring ``set -a; . .env`` semantics.
-    A missing/unreadable file is not an error here — the caller falls back to env.
+    Mirrors ``set -a; . .env``, which is **LAST-wins** on duplicate assignments: we keep
+    the LAST non-empty ``DATABASE_URL=`` line, not the first (cc-quality review, PR #242).
+    This matters because the whole point of op#24342 is to avoid a stale DSN — if a
+    rotation ever APPENDS a new line instead of replacing it in place, first-match would
+    return the OLD value while every shell-sourced caller used the new one, re-creating
+    the exact stale-DSN pooler-hammer this module exists to kill.
+
+    Matches a ``DATABASE_URL=...`` (optionally ``export``-prefixed) line; strips
+    surrounding quotes; for an UNQUOTED value drops a trailing shell comment
+    (whitespace + ``#``...), as the shell does. An empty value never wins (falls back).
+    A missing / unreadable / undecodable file is not an error here — the caller falls back.
     """
+    found = None
     try:
         with open(env_path) as f:
             for raw in f:
@@ -35,11 +45,19 @@ def _dsn_from_file(env_path):
                 if line.startswith("export "):
                     line = line[len("export "):].strip()
                 if line.startswith("DATABASE_URL="):
-                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    return val or None
-    except OSError:
+                    val = line.split("=", 1)[1].strip()
+                    if val[:1] in ("'", '"'):
+                        q = val[0]
+                        end = val.find(q, 1)
+                        val = val[1:end] if end != -1 else val[1:]
+                    else:
+                        # unquoted: a shell comment begins at whitespace followed by '#'
+                        val = re.split(r"\s+#", val, 1)[0].rstrip()
+                    if val:
+                        found = val  # last non-empty wins (shell append semantics)
+    except (OSError, UnicodeDecodeError):
         return None
-    return None
+    return found
 
 
 def dsn_from_env_file(env_path=None, env=None):
