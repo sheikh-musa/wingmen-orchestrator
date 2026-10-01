@@ -36,6 +36,7 @@ SECRET_PATTERNS = {
     "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
     "vercel-token": re.compile(r"\bvcp_[A-Za-z0-9]{20,}\b"),
     "github-token": re.compile(r"\bghp_[A-Za-z0-9]{30,}\b"),
+    "ssh-private-key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 }
 
 REDACTION = "[REDACTED by secrets_output_scanner -- pattern:{cls}]"

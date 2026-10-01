@@ -28,6 +28,13 @@ def test_detects_telegram_bot_token():
     assert hits and hits[0][0] == "telegram-bot-token"
 
 
+def test_detects_ssh_private_key():
+    # cc-quality PR#245 review (bus #48441 MED #1): non-DSN secret files (SSH keys
+    # other than gzb_to_mini) previously had no value-backstop at all.
+    hits = scanner.scan("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk...\n")
+    assert hits and any(h[0] == "ssh-private-key" for h in hits)
+
+
 def test_no_hit_on_clean_output():
     assert scanner.scan("all tests passed, 42 rows updated") == []
 

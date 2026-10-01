@@ -52,7 +52,7 @@ BLOCK_MESSAGE = "secret would enter the transcript -- hash it or use the value w
 # ---- Rule A: known secret files -------------------------------------------------
 
 SECRET_FILE_PATTERNS = [
-    r"(^|/)\.env$",
+    r"(^|/)\.env(\.[\w-]+)?$",
     r"write_dsn\.env",
     r"bayanqa\.env",
     r"[\w-]*-oauth-token(\.[\w-]+)?$",
@@ -69,6 +69,13 @@ FILE_PRINT_LEADING_RE = re.compile(r"^(cat|head|tail|less|more)\b")
 SED_PRINT_LEADING_RE = re.compile(r"^sed\b(?!.*-n)")  # sed without -n prints every line by default
 AWK_PRINT_LEADING_RE = re.compile(r"^awk\b")
 GREP_LEADING_RE = re.compile(r"^grep\b")
+# cc-quality PR#245 review (bus #48441 MEDIUM #1): these also dump a whole file's bytes
+# to the transcript and were previously unguarded for non-DSN secret files (the DSN
+# alone is backstopped by secrets_output_scanner's postgres-dsn pattern; a non-DSN
+# secret file read this way was not).
+BINARY_DUMP_LEADING_RE = re.compile(r"^(base64|strings|xxd|od|hexdump|dd|nl|tac|rev)\b")
+PYTHON_LEADING_RE = re.compile(r"^python3?\b")
+PYTHON_OPEN_FILE_RE = re.compile(r"open\(\s*['\"]([^'\"]+)['\"]")
 
 # top-level statement/pipeline splitting shared by Rule A and Rule B. Not a full shell
 # parser (doesn't track quoting/subshell nesting) -- a known, documented limitation;
@@ -168,20 +175,55 @@ def _grep_has_safe_output_mode(segment: str) -> bool:
     return False
 
 
+def _segment_python_open_secret_file(segment: str, lead: str) -> str | None:
+    # `python3 -c "print(open('.env').read())"` -- the filename is a substring of a
+    # single shlex token (the quoted -c script), so the token-based secret-file check
+    # below never sees it as its own token; extracted separately here.
+    if not PYTHON_LEADING_RE.match(lead) or "print" not in segment:
+        return None
+    m = PYTHON_OPEN_FILE_RE.search(segment)
+    if not m:
+        return None
+    path = m.group(1)
+    return path if _is_secret_file(path) else None
+
+
+def _pipeline_resolves_through_sink(segments: list[str], trigger_index: int) -> bool:
+    # mirrors Rule B's sink resolution (defined below) -- a grep match line on a secret
+    # file is as safe as an env-dump once it has gone through a hash/sed-mask sink with
+    # nothing but trimming after it. Module-level forward reference: resolved at call
+    # time (check_rule_a runs from main(), after the whole module has loaded).
+    sink_index = None
+    for i in range(trigger_index, len(segments)):
+        if _is_sink(segments[i]):
+            sink_index = i
+            break
+    if sink_index is None:
+        return False
+    return all(SAFE_AFTER_SINK_RE.match(_leading_command(seg)) for seg in segments[sink_index + 1:])
+
+
 def check_rule_a(command: str) -> str | None:
     for statement in _split_statements(command):
         if _is_source_or_dotenv(statement):
             continue
-        for segment in _split_pipeline(statement):
+        segments = _split_pipeline(statement)
+        for i, segment in enumerate(segments):
+            lead = _leading_command(segment)
+            py_target = _segment_python_open_secret_file(segment, lead)
+            if py_target:
+                return f"python open()+print of secret file {py_target!r}"
             target = _segment_secret_file_token(segment)
             if not target:
                 continue
-            lead = _leading_command(segment)
             if GREP_LEADING_RE.match(lead):
                 if _is_name_only_grep(segment) or _grep_has_safe_output_mode(segment):
                     continue
+                if _pipeline_resolves_through_sink(segments, i):
+                    continue
                 return f"grep on secret file {target!r} without a name-only -o pattern or a content-safe output mode (-l/-L/-c)"
-            if FILE_PRINT_LEADING_RE.match(lead) or SED_PRINT_LEADING_RE.match(lead) or AWK_PRINT_LEADING_RE.match(lead):
+            if (FILE_PRINT_LEADING_RE.match(lead) or SED_PRINT_LEADING_RE.match(lead)
+                    or AWK_PRINT_LEADING_RE.match(lead) or BINARY_DUMP_LEADING_RE.match(lead)):
                 return f"prints the contents of secret file {target!r}"
     return None
 
@@ -261,6 +303,12 @@ SENSITIVE_VAR_RE = re.compile(
     r"\$\{?(DATABASE_URL|WRITE_DSN|\w*_DSN|\w*_TOKEN|\w*_KEY|\w*SECRET\w*|\w*PASSWORD\w*|"
     r"GOUMLYNE_\w*|API_KEY\w*)\b\}?"
 )
+# same name alternation, bare (no $ / braces) -- for matching a NAME string literal
+# inside os.environ['NAME'] / ENVIRON["NAME"], not a shell variable reference.
+SENSITIVE_VAR_NAME_RE = re.compile(
+    r"^(DATABASE_URL|WRITE_DSN|\w*_DSN|\w*_TOKEN|\w*_KEY|\w*SECRET\w*|\w*PASSWORD\w*|"
+    r"GOUMLYNE_\w*|API_KEY\w*)$"
+)
 
 PRINT_LEADING_RE = re.compile(r"^(echo|printf|print|tee|logger)\b")
 PS_DUMP_LEADING_RE = re.compile(r"^ps\s+e\w*\b")
@@ -268,6 +316,33 @@ PRINTENV_LEADING_RE = re.compile(r"^printenv\b")
 EXPORT_DUMP_LEADING_RE = re.compile(r"^export\s+-p\b")
 TMUX_DUMP_LEADING_RE = re.compile(r"^tmux\s+show-environment\b")
 PROC_ENVIRON_RE = re.compile(r"/proc/[0-9A-Za-z$*]+/environ")  # usually an ARGUMENT (e.g. to cat), not leading
+TEE_LEADING_RE = re.compile(r"^tee\b")
+
+# cc-quality PR#245 review (bus #48441 LOW #3): non-shell print of a sensitive var by
+# NAME -- `python3 -c "print(os.environ['TOKEN'])"` / `awk 'BEGIN{print ENVIRON["TOKEN"]}'`
+# -- bypassed Rule B entirely since it's not $VAR-shaped. The DSN is backstopped by
+# secrets_output_scanner's postgres-dsn pattern regardless; this closes the gap for
+# every other named secret. Matched against the FULL raw command text, not a split
+# statement/segment -- the `;` inside a `python -c "a; b"` string is not a real
+# statement separator, but STATEMENT_SPLIT_RE (not quote-aware) treats it as one and
+# would otherwise tear the `print(` away from the `os.environ[...]` it wraps.
+PYTHON_PRINT_ENVIRON_RE = re.compile(
+    r"print\s*\(\s*(?:str\(|repr\()?\s*os\.environ(?:\[\s*['\"]([^'\"]+)['\"]\s*\]|"
+    r"\.get\(\s*['\"]([^'\"]+)['\"])"
+)
+AWK_PRINT_ENVIRON_RE = re.compile(r"print\s+ENVIRON\[\s*['\"]([^'\"]+)['\"]\s*\]")
+
+
+def check_rule_b_environ_print(command: str) -> str | None:
+    for m in PYTHON_PRINT_ENVIRON_RE.finditer(command):
+        name = m.group(1) or m.group(2)
+        if name and SENSITIVE_VAR_NAME_RE.match(name):
+            return f"python os.environ[{name!r}] passed directly to print()"
+    for m in AWK_PRINT_ENVIRON_RE.finditer(command):
+        name = m.group(1)
+        if name and SENSITIVE_VAR_NAME_RE.match(name):
+            return f"awk ENVIRON[{name!r}] passed directly to print"
+    return None
 
 HASH_SINK_RE = re.compile(r"\b(shasum|sha1sum|sha256sum|sha512sum|md5sum|md5|openssl\s+dgst|wc\s+-c)\b")
 
@@ -332,7 +407,14 @@ def check_rule_b(command: str) -> str | None:
 
         sink_index = None
         for i in range(trigger_index, len(segments)):
-            if _is_sink(segments[i]):
+            seg = segments[i]
+            # cc-quality PR#245 review (bus #48441 LOW #4): tee duplicates the raw
+            # value to another destination (a file, /dev/stderr) regardless of what a
+            # LATER segment does with its own stdout copy -- a hash sink downstream of
+            # a tee does not retroactively un-leak what tee already wrote.
+            if i > trigger_index and TEE_LEADING_RE.match(_leading_command(seg)):
+                return f"{trigger_kind} and pipes it through tee (duplicates the raw value to another destination) before any hash sink"
+            if _is_sink(seg):
                 sink_index = i
                 break
         if sink_index is None:
@@ -379,7 +461,8 @@ def main() -> int:
             return 2
         return 0
 
-    reason = check_rule_a(text) or check_rule_c(text) or check_rule_b(text)
+    reason = (check_rule_a(text) or check_rule_c(text) or check_rule_b(text)
+              or check_rule_b_environ_print(text))
     if reason:
         sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {BLOCK_MESSAGE} ({reason})\n")
         return 2

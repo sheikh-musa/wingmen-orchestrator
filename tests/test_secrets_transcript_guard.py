@@ -275,6 +275,80 @@ def test_blocks_lane_services_disable_regardless_of_account():
     )
 
 
+# ---- cc-quality PR#245 review fixes (bus #48441) -----------------------------------
+
+def test_blocks_env_local_as_secret_file():
+    # LOW #2: `.env` end-anchor missed `.env.local` / `.env.production`
+    assert_blocked("Bash", {"command": "cat .env.local"})
+
+
+def test_blocks_env_production_as_secret_file():
+    assert_blocked("Bash", {"command": "cat .env.production"})
+
+
+def test_blocks_base64_dump_of_secret_file():
+    # MED #1: binary-dump readers bypassed the file-print blocklist entirely
+    assert_blocked("Bash", {"command": "base64 .env"})
+
+
+def test_blocks_strings_dump_of_oauth_token():
+    assert_blocked("Bash", {"command": "strings ~/.wingmen/keys/musa-oauth-token"})
+
+
+def test_blocks_dd_dump_of_write_dsn():
+    assert_blocked("Bash", {"command": "dd if=~/.wingmen/private/write_dsn.env"})
+
+
+def test_blocks_python_open_print_of_secret_file():
+    assert_blocked("Bash", {"command": "python3 -c \"print(open('.env').read())\""})
+
+
+def test_allows_python_open_of_non_secret_file():
+    assert_allowed("Bash", {"command": "python3 -c \"print(open('README.md').read())\""})
+
+
+def test_blocks_python_environ_print_of_non_dsn_secret():
+    # LOW #3: non-shell print-by-name bypassed Rule B's $VAR-shaped trigger entirely
+    assert_blocked("Bash", {"command": "python3 -c \"import os; print(os.environ['SUPABASE_SERVICE_KEY'])\""})
+
+
+def test_blocks_python_environ_get_print_of_token():
+    assert_blocked("Bash", {"command": "python3 -c \"import os; print(os.environ.get('API_KEY'))\""})
+
+
+def test_blocks_awk_environ_print_of_secret():
+    assert_blocked("Bash", {"command": "awk 'BEGIN{print ENVIRON[\"GOUMLYNE_RO_DATABASE_URL\"]}'"})
+
+
+def test_allows_python_environ_use_without_print():
+    # unchanged: USE (not PRINT) of os.environ stays allowed
+    assert_allowed("Bash", {"command": "python3 -c \"import os; conn(os.environ['DATABASE_URL'])\""})
+
+
+def test_blocks_tee_leak_before_hash_sink():
+    # LOW #4: a hash sink downstream doesn't un-leak what tee already duplicated
+    assert_blocked("Bash", {"command": 'printf %s "$DATABASE_URL" | tee /tmp/leak | shasum'})
+
+
+def test_allows_grep_on_env_local_through_sed_mask_sink():
+    # widening .env.local into SECRET_FILE_RE (LOW #2) must not re-break the
+    # already-accepted sed-mask-sink exception for a grep match line on that file
+    assert_allowed("Bash", {
+        "command": 'grep -iE "SUPABASE" /home/gazzai/wingmen/projects/ihsanos/.env.local | sed -E \'s/=.*/=<redacted>/\''
+    })
+
+
+def test_blocks_grep_on_env_local_without_a_sink():
+    assert_blocked("Bash", {"command": 'grep -iE "SUPABASE" .env.local'})
+
+
+def test_allows_hash_sink_with_no_tee_in_between():
+    # regression guard: the tee check must not fire on pipelines without tee
+    assert_allowed("Bash", {
+        "command": "ps eww -p 123 | tr ' ' '\\n' | grep '^X=' | cut -d= -f2- | shasum"
+    })
+
+
 # ---- fail-closed on unparseable input ---------------------------------------------
 
 def test_fails_closed_on_bad_json():
