@@ -21,6 +21,21 @@ tests/test_secrets_output_scanner.py::test_redaction_preserves_transcript_struct
 for the proof this session doctor was asked for; an actual `claude --continue` replay
 is the final manual check at gate time (not automatable safely from inside this hook's
 own test suite).
+
+Paging is deduped per class per tool call (bus #48900/#48901/#48920): a single real
+event can match in both the tool_use input and the tool_response (e.g. a Write whose
+response echoes a preview of its own content), which previously produced two separate
+P1 pages for one leak. Redaction still runs for every match -- it's idempotent, so
+running it twice for the same class costs nothing -- only the page is deduped.
+
+Fixture allowlist (bus #48965/#48982): developing against THIS file's own test suite
+means editing/reading content that is intentionally secret-shaped, which otherwise
+pages orch-console for every fixture -- 20+ real P1 pages in ~25 minutes, burying real
+alerts. A narrow, explicit allowlist recognizes only this repo's own known fixture
+conventions (a handful of placeholder DSN hosts, a test-/fake-/example- token prefix,
+the Telegram test bot id, and the dedicated secrets-hook test files by path) -- never a
+broad heuristic that could mask a real leak. Redaction and the stderr note to the model
+still happen for an allowlisted hit; only the page to orch-console is skipped.
 """
 from __future__ import annotations
 
@@ -38,6 +53,48 @@ from secret_shape_patterns import SECRET_VALUE_PATTERNS  # noqa: E402
 SECRET_PATTERNS = SECRET_VALUE_PATTERNS
 
 REDACTION = "[REDACTED by secrets_output_scanner -- pattern:{cls}]"
+
+# fixture allowlist (bus #48965/#48982) -- see module docstring.
+FIXTURE_FILE_PATH_RE = re.compile(r"tests?/test_secrets_\w*\.py")
+# the postgres-dsn pattern matches only "scheme://user:pass@" (stops at "@"); the host
+# follows immediately after the match, so this is checked against the text AFTER the
+# match end, not the match itself.
+FIXTURE_DSN_HOST_RE = re.compile(
+    r"(?:[\w.-]*\.)?example(?:\.(?:com|internal))?(?::\d+)?[/\s]|"
+    r"localhost(?::\d+)?[/\s]|host(?::\d+)?[/\s]",
+    re.IGNORECASE,
+)
+FIXTURE_TOKEN_MARKER_RE = re.compile(r"(?:test|fake|example)-?", re.IGNORECASE)
+FIXTURE_TELEGRAM_BOT_ID = "123456789"
+
+
+def _mentions_fixture_file(tool_input, tool_response) -> bool:
+    """True if this tool call's input or response references one of the dedicated
+    secrets-hook test files by path (bus #48982: "skip tests/test_secrets_*.py by
+    path") -- covers both a direct file_path and a Bash/pytest invocation naming it."""
+    try:
+        text = (json.dumps(tool_input) if tool_input else "") + " " + (
+            tool_response if isinstance(tool_response, str) else json.dumps(tool_response or "")
+        )
+    except Exception:
+        return False
+    return bool(FIXTURE_FILE_PATH_RE.search(text))
+
+
+def _is_fixture_hit(cls: str, match: re.Match) -> bool:
+    """True if a matched secret-shape is one of this repo's known test fixtures, not a
+    real credential. Deliberately narrow -- only the specific conventions this repo's
+    own tests use, never a substring match against arbitrary content."""
+    matched = match.group(0)
+    if FIXTURE_TOKEN_MARKER_RE.search(matched):
+        return True
+    if cls == "postgres-dsn":
+        tail = match.string[match.end():match.end() + 64]
+        if FIXTURE_DSN_HOST_RE.match(tail):
+            return True
+    if cls == "telegram-bot-token" and matched.startswith(FIXTURE_TELEGRAM_BOT_ID):
+        return True
+    return False
 
 
 def scan(text: str) -> list[tuple[str, re.Match]]:
@@ -165,12 +222,33 @@ def main() -> int:
     if not hits:
         return 0
 
-    for cls, _match in hits:
+    # fixture allowlist (bus #48965/#48982): redaction + the stderr note below still run
+    # for a fixture hit -- cheap, idempotent, never wrong to do. Only the page is skipped,
+    # for either a known fixture shape (_is_fixture_hit) or a call that names one of the
+    # dedicated secrets-hook test files (_mentions_fixture_file), e.g. the fixture SSH-key
+    # header in test_detects_ssh_private_key, which carries no test-/fake-/example- marker
+    # of its own and is only identifiable by its file.
+    is_fixture_call = _mentions_fixture_file(tool_input, tool_response)
+
+    # bus #48900/#48901/#48920: the same class can match in BOTH input_text and
+    # output_text for one tool call (e.g. a Write whose tool_response echoes back a
+    # preview of the content it just wrote) -- that produced two independent pages for
+    # a single real event. One hit across input+response is one page; dedupe by class,
+    # not by (cls, match) pair, since two matches of the same class are still one leak
+    # event worth reporting once. Redaction is unaffected -- it's idempotent per class
+    # (a second call over an already-redacted line is a no-op), so only paging is deduped.
+    seen_classes = set()
+    for cls, match in hits:
         if transcript_path:
             # window=3: covers the tool_use line and the tool_result line even with one
             # intervening line (observed in some transcript shapes); cheap and harmless
             # to widen since _redact_strings is a no-op on any line with no match.
             redact_recent_lines(transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
+        if cls in seen_classes:
+            continue
+        seen_classes.add(cls)
+        if is_fixture_call or _is_fixture_hit(cls, match):
+            continue
         _page_orch_console(cls, tool_name)
 
     classes = ", ".join(cls for cls, _ in hits)
