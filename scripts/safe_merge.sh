@@ -32,12 +32,21 @@ STATE="$(printf '%s' "$VIEW" | "$PY" -c 'import json,sys;print(json.load(sys.std
 MERGEABLE="$(printf '%s' "$VIEW" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["mergeable"])')"
 HEAD="$(printf '%s' "$VIEW" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["headRefOid"])')"
 [ "$STATE" = "OPEN" ]       || { echo "safe_merge: PR #$PR state=$STATE (not OPEN) — REFUSE" >&2; exit 3; }
+# GitHub returns mergeable=UNKNOWN transiently while it computes mergeability (often right
+# after a push); re-read a few times before treating it as a hard refuse (cc-quality LOW #246).
+_tries=0
+while [ "$MERGEABLE" = "UNKNOWN" ] && [ "$_tries" -lt 3 ]; do
+  sleep 2; _tries=$((_tries + 1))
+  VIEW="$(gh pr view "$PR" --repo "$REPO" --json state,mergeable,headRefOid 2>/dev/null)" || break
+  MERGEABLE="$(printf '%s' "$VIEW" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["mergeable"])')"
+  HEAD="$(printf '%s' "$VIEW" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["headRefOid"])')"
+done
 [ "$MERGEABLE" = "MERGEABLE" ] || { echo "safe_merge: PR #$PR mergeable=$MERGEABLE — REFUSE" >&2; exit 3; }
 
 # 2. Every check green (fail-closed on pending/failure/zero) — the testable gate.
 CHECKS="$(gh pr checks "$PR" --repo "$REPO" --json name,state 2>/dev/null)" \
   || { echo "safe_merge: gh pr checks failed — REFUSE (fail-closed; a PR with no measurable checks is not provably green)" >&2; exit 3; }
-if ! printf '%s' "$CHECKS" | "$PY" "$ORCH_DIR/scripts/lib/merge_gate.py" "${ALLOW[@]}"; then
+if ! printf '%s' "$CHECKS" | "$PY" "$ORCH_DIR/scripts/lib/merge_gate.py" "${ALLOW[@]+"${ALLOW[@]}"}"; then
   echo "safe_merge: checks not green — REFUSE" >&2; exit 3
 fi
 
