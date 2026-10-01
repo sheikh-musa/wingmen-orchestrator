@@ -148,3 +148,59 @@ def test_main_is_fail_open_on_unparseable_input():
     import subprocess
     r = subprocess.run([sys.executable, str(HOOK_PATH)], input="not json", text=True, capture_output=True)
     assert r.returncode == 0  # PostToolUse never blocks -- the tool call already happened
+
+
+def test_detects_bearer_token():
+    hits = scanner.scan("Authorization: Bearer FakeSyntheticToken1234567890abcdef")
+    assert hits and any(h[0] == "bearer-token" for h in hits)
+
+
+# ---- bus #48685/#48695: scanner must also catch a secret typed literally into the
+# tool_use INPUT, not just the tool_response/output (shapes 1/2 land in the input) ---
+
+def test_main_catches_and_redacts_a_literal_dsn_in_the_tool_use_input(tmp_path):
+    import subprocess
+
+    transcript = tmp_path / "session.jsonl"
+    fake_dsn = "postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": f'psql "{fake_dsn}"'}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"output": "SELECT 1"}}) + "\n")
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": f'psql "{fake_dsn}"'},
+        "tool_response": "SELECT 1",
+        "transcript_path": str(transcript),
+    })
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True)
+    assert "secret-shaped content" in r.stderr
+
+    after = transcript.read_text()
+    assert fake_dsn not in after
+    assert "REDACTED" in after
+    # the output line (no secret in it) must be untouched
+    after_lines = after.splitlines()
+    assert json.loads(after_lines[1])["toolUseResult"]["output"] == "SELECT 1"
+
+
+def test_redact_recent_lines_only_touches_the_window(tmp_path):
+    p = tmp_path / "t.jsonl"
+    lines = [
+        {"n": 1, "msg": "clean line far back"},
+        {"n": 2, "msg": "sk-ant-" + "a" * 30},
+        {"n": 3, "msg": "sk-ant-" + "b" * 30},
+    ]
+    with open(p, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+
+    changed = scanner.redact_recent_lines(str(p), "anthropic-api-key",
+                                           scanner.SECRET_PATTERNS["anthropic-api-key"], max_lines=2)
+    assert changed is True
+    after = [json.loads(l) for l in p.read_text().splitlines()]
+    assert after[0]["msg"] == "clean line far back"  # outside the window, untouched
+    assert "REDACTED" in after[1]["msg"]
+    assert "REDACTED" in after[2]["msg"]

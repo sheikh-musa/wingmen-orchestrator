@@ -71,7 +71,15 @@ import re
 import shlex
 import sys
 
+sys.path.insert(0, os.path.dirname(__file__))
+from secret_shape_patterns import SECRET_VALUE_PATTERNS  # noqa: E402
+
 BLOCK_MESSAGE = "secret would enter the transcript -- hash it or use the value without printing."
+LITERAL_SECRET_MESSAGE = (
+    "this command types a secret VALUE literally instead of referencing it by name -- "
+    "use the env var (e.g. $DATABASE_URL, $X) or a secrets-store lookup, never paste "
+    "the literal value into a command."
+)
 TOOL_SECRET_FILE_MESSAGE = (
     "this path is a secret file -- Read/Edit/MultiEdit/Write/NotebookEdit on it would put "
     "its contents into the transcript. For a .env-shaped file, change one key without "
@@ -154,6 +162,12 @@ CLIENT_CRED_FILE_RE = re.compile(r"service[-_]?account[\w.-]*\.json$|[\w-]*-sa\.
 # user's home when the hook's process home differs from the path's owner. Generic
 # path-component match closes that regardless of whose home it is.
 SSH_DIR_COMPONENT_RE = re.compile(r"(^|/)\.ssh/")
+# cc-quality bus #48712: the SAME process-$HOME-expansion bug as .ssh, found on the
+# other two tilde-based SECRET_DIR_PREFIXES entries -- "~/.wingmen/private/" and
+# "~/.wingmen/keys/" only ever protect the CURRENT process's own home, so e.g.
+# /root/.wingmen/keys/... or another user's home silently fell through. Generic
+# path-component match, same shape as SSH_DIR_COMPONENT_RE, independent of whose home.
+WINGMEN_DIR_COMPONENT_RE = re.compile(r"(^|/)\.wingmen/(private|keys)/")
 
 
 def _is_secret_path(path: str) -> bool:
@@ -165,6 +179,8 @@ def _is_secret_path(path: str) -> bool:
     if CLIENT_CRED_FILE_RE.search(path):
         return True
     if SSH_DIR_COMPONENT_RE.search(path) or SSH_DIR_COMPONENT_RE.search(expanded):
+        return True
+    if WINGMEN_DIR_COMPONENT_RE.search(path) or WINGMEN_DIR_COMPONENT_RE.search(expanded):
         return True
     return any(expanded.startswith(prefix) for prefix in SECRET_DIR_PREFIXES)
 
@@ -316,6 +332,25 @@ def check_rule_c(command: str) -> str | None:
     m = DIRECT_KEY_INVOCATION_RE.search(command)
     if m:
         return f"directly invokes the secrets-fetch key/wrapper ({m.group(0)!r})"
+    return None
+
+
+# ---- Rule E: a secret VALUE typed literally into a Bash command (bus #48685/#48695) -
+# cc-fleet-health's real-leak-shapes sweep (#48685): shape 1 (~84x, mostly cai) a
+# password-bearing DSN typed inline (`psql postgres://user:pass@host/db`, `DB="<dsn>"`,
+# `export X=<dsn>`); shape 2 (~55x, cosem-adcda) a Bearer/bot token typed inline into
+# curl/export. Both are already IN the tool_use INPUT by the time PreToolUse fires --
+# no sink downstream can un-leak that, so this is unconditional, same as Rule A/C, not
+# sink-gated like Rule B (Rule B is about a NAMED var being printed; this is about the
+# literal value itself appearing in the command text, independent of what's done with
+# it). Reuses the same pattern set the scanner backstops with (secret_shape_patterns.py)
+# so the two layers can't drift apart.
+
+
+def check_rule_e(command: str) -> str | None:
+    for cls, pattern in SECRET_VALUE_PATTERNS.items():
+        if pattern.search(command):
+            return f"a literal {cls}-shaped value in the command text"
     return None
 
 
@@ -563,6 +598,12 @@ def main() -> int:
             sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {TOOL_SECRET_FILE_MESSAGE}\n")
             return 2
         return 0
+
+    if tool_name == "Bash":
+        literal_reason = check_rule_e(text)
+        if literal_reason:
+            sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {LITERAL_SECRET_MESSAGE} ({literal_reason})\n")
+            return 2
 
     reason = (check_rule_a(text) or check_rule_c(text) or check_rule_b(text)
               or check_rule_b_environ_print(text))

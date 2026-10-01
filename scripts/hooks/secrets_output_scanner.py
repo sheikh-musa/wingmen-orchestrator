@@ -25,28 +25,17 @@ own test suite).
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 
-SECRET_PATTERNS = {
-    "anthropic-api-key": re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
-    "supabase-service-key": re.compile(r"sbp_[a-f0-9]{20,}"),
-    # Dropped the LEADING \b (bus #48642 blind spot, real incident 2026-10-01 ~20:03Z):
-    # a Telegram Bot API URL embeds the token right after "bot" with no word boundary
-    # (https://api.telegram.org/bot123456789:AA.../sendMessage) -- "bot1234..." is one
-    # continuous word-char run, so \b\d{6,} never matched there. Anchored on the "AA"
-    # prefix real bot tokens use instead, to keep this specific and not over-broad.
-    "telegram-bot-token": re.compile(r"\d{8,10}:AA[A-Za-z0-9_-]{30,}\b"),
-    "postgres-dsn": re.compile(r"postgres(?:ql)?://[^:\s]+:[^@\s]+@"),
-    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
-    "vercel-token": re.compile(r"\bvcp_[A-Za-z0-9]{20,}\b"),
-    # bus #48642: only ghp_ (classic PAT) was covered -- gh[ousr]_ (OAuth/user-to-server/
-    # server-to-server/refresh) tokens all slipped.
-    "github-token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
-    # bus #48642: Google OAuth refresh tokens ("1//0...").
-    "google-oauth-refresh-token": re.compile(r"\b1//0[A-Za-z0-9_-]{20,}\b"),
-    "ssh-private-key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-}
+sys.path.insert(0, os.path.dirname(__file__))
+from secret_shape_patterns import SECRET_VALUE_PATTERNS  # noqa: E402
+
+# kept as SECRET_PATTERNS (the pre-existing name tests/this module reference) --
+# sourced from the shared module so the guard's Rule E and this scanner can't drift
+# apart (bus #48685/#48695).
+SECRET_PATTERNS = SECRET_VALUE_PATTERNS
 
 REDACTION = "[REDACTED by secrets_output_scanner -- pattern:{cls}]"
 
@@ -75,6 +64,18 @@ def _redact_strings(obj, pattern: re.Pattern, cls: str):
 def redact_last_line(transcript_path: str, cls: str, pattern: re.Pattern) -> bool:
     """Redact `pattern` matches in the last JSONL line of transcript_path, in place.
     Returns True if a redaction was made. Never touches any other line."""
+    return redact_recent_lines(transcript_path, cls, pattern, max_lines=1)
+
+
+def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int = 3) -> bool:
+    """Redact `pattern` matches in each of the last `max_lines` JSONL lines of
+    transcript_path, in place. Returns True if any redaction was made. Never touches
+    a line outside that window.
+
+    bus #48685/#48695: the assistant's tool_use (the command/input) and its tool_result
+    (the output) are SEPARATE JSONL lines -- a secret typed literally into the input can
+    land one line before the result that redact_last_line (max_lines=1) alone would
+    check, so this widens the window without touching anything further back."""
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -83,24 +84,28 @@ def redact_last_line(transcript_path: str, cls: str, pattern: re.Pattern) -> boo
     if not lines:
         return False
 
-    last = lines[-1]
-    stripped = last.rstrip("\n")
-    if not stripped:
-        return False
-    try:
-        obj = json.loads(stripped)
-    except json.JSONDecodeError:
-        return False
+    window_start = max(0, len(lines) - max_lines)
+    changed = False
+    for i in range(window_start, len(lines)):
+        line = lines[i]
+        stripped = line.rstrip("\n")
+        if not stripped:
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
 
-    redacted = _redact_strings(obj, pattern, cls)
-    new_line = json.dumps(redacted) + "\n"
-    if new_line == last:
-        return False
+        redacted = _redact_strings(obj, pattern, cls)
+        new_line = json.dumps(redacted) + "\n"
+        if new_line != line:
+            lines[i] = new_line
+            changed = True
 
-    lines[-1] = new_line
-    with open(transcript_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    return True
+    if changed:
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    return changed
 
 
 def _page_orch_console(cls: str, tool_name: str) -> None:
@@ -139,17 +144,26 @@ def main() -> int:
         return 0  # PostToolUse: fail-open, the tool call already completed
 
     tool_name = payload.get("tool_name") or ""
+    tool_input = payload.get("tool_input")
     tool_response = payload.get("tool_response")
     transcript_path = payload.get("transcript_path")
-    text = tool_response if isinstance(tool_response, str) else json.dumps(tool_response or "")
 
-    hits = scan(text)
+    output_text = tool_response if isinstance(tool_response, str) else json.dumps(tool_response or "")
+    # bus #48685/#48695: a secret typed LITERALLY into the command itself (not a $VAR
+    # reference) is already in the transcript via the tool_use INPUT, before the tool
+    # even runs -- scanning only tool_response misses that half entirely (shapes 1/2).
+    input_text = json.dumps(tool_input) if tool_input else ""
+
+    hits = scan(output_text) + scan(input_text)
     if not hits:
         return 0
 
     for cls, _match in hits:
         if transcript_path:
-            redact_last_line(transcript_path, cls, SECRET_PATTERNS[cls])
+            # window=3: covers the tool_use line and the tool_result line even with one
+            # intervening line (observed in some transcript shapes); cheap and harmless
+            # to widen since _redact_strings is a no-op on any line with no match.
+            redact_recent_lines(transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
         _page_orch_console(cls, tool_name)
 
     classes = ", ".join(cls for cls, _ in hits)

@@ -97,6 +97,66 @@ def test_blocks_edit_tool_under_another_users_dot_ssh():
                    expect_substr="this path is a secret file")
 
 
+# ---- must BLOCK: .wingmen/private and .wingmen/keys under a home that isn't the
+# hook's own $HOME (cc-quality bus #48712 -- same gap as .ssh, found on review) --------
+
+def test_blocks_edit_tool_under_root_dot_wingmen_keys():
+    assert_blocked("Edit", {"file_path": "/root/.wingmen/keys/some_credential.txt",
+                             "old_string": "a", "new_string": "b"},
+                   expect_substr="this path is a secret file")
+
+
+def test_blocks_edit_tool_under_another_users_dot_wingmen_private():
+    assert_blocked("Edit", {"file_path": "/home/gazzai/.wingmen/private/some_credential.txt",
+                             "old_string": "a", "new_string": "b"},
+                   expect_substr="this path is a secret file")
+
+
+# ---- must BLOCK: Rule E -- a secret VALUE typed literally into a Bash command -----
+# cc-fleet-health's real-leak-shapes sweep (bus #48685), confirmed by orch-console
+# (bus #48695): shape 1 (literal password DSN) and shape 2 (literal Bearer/bot token)
+# were typed directly into Bash commands, not referenced via $VAR -- already in the
+# tool_use INPUT by the time PreToolUse fires, so this must be unconditional (no sink
+# exception can un-leak an argv that's already in the transcript).
+
+def test_blocks_literal_password_dsn_in_psql():
+    assert_blocked(
+        "Bash",
+        {"command": 'psql "postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch" -c "select 1"'},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_dsn_assigned_to_a_shell_var():
+    assert_blocked(
+        "Bash",
+        {"command": 'DB="postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch"; echo "$DB" | head -c0'},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_bearer_token_in_curl():
+    assert_blocked(
+        "Bash",
+        {"command": 'curl -H "Authorization: Bearer FakeSyntheticToken1234567890abcdef" https://api.example.com/x'},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_bot_token_in_curl_url():
+    assert_blocked(
+        "Bash",
+        {"command": "curl https://api.telegram.org/bot123456789:AAFakeSyntheticTokenNotReal123456/sendMessage"},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_allows_dsn_referenced_by_variable_not_literal():
+    # the sanctioned idiom (`psql $DATABASE_URL`) must stay allowed -- Rule E only
+    # fires on the LITERAL value shape, never a bare $VAR reference.
+    assert_allowed("Bash", {"command": 'psql "$DATABASE_URL" -c "select 1"'})
+
+
 def test_blocks_ps_eww_dump_without_sink():
     assert_blocked("Bash", {"command": "ps eww -p 123"})
 
