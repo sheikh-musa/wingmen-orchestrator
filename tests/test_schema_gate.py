@@ -72,6 +72,10 @@ class TestExtractSchemaDdl:
 class TestCheckAndBlock:
     @pytest.mark.asyncio
     async def test_blocks_and_pings_when_ddl_found(self):
+        # Notification delivery moved off the legacy `bot` object onto
+        # notify_operator (nervous_system.operator_notify -> @wingmennorchbot
+        # via tg_send.sh); `bot` is accepted for signature compat but is no
+        # longer what actually sends. Assert on notify_operator instead.
         supabase = _mock_supabase()
         bot = AsyncMock()
         fake_cfg = {"supabase_project_ref": "tscuymavysscrvoberrr"}
@@ -79,15 +83,16 @@ class TestCheckAndBlock:
         with patch("nervous_system.schema_gate.get_repo_config", return_value=fake_cfg), \
              patch("nervous_system.schema_gate.extract_schema_ddl",
                    AsyncMock(return_value=["alter table foo add column bar text;"])), \
-             patch("nervous_system.schema_gate.get_chat_id", return_value="cto_chat"):
+             patch("nervous_system.schema_gate.get_chat_id", return_value="cto_chat"), \
+             patch("nervous_system.schema_gate.notify_operator", return_value=True) as notify:
             blocked = await check_and_block(
                 supabase, "/tmp/repo", "wingmen-orchestrator", 42,
                 "TASK-032 something", bot,
             )
 
         assert blocked is True
-        bot.send_message.assert_called_once()
-        msg = bot.send_message.call_args.kwargs["text"]
+        notify.assert_called_once()
+        msg = notify.call_args.args[0]
         assert "42" in msg
         assert "alter table foo" in msg
         assert "tscuymavysscrvoberrr" in msg
@@ -130,11 +135,12 @@ class TestCheckAndBlock:
         with patch("nervous_system.schema_gate.get_repo_config", return_value=fake_cfg), \
              patch("nervous_system.schema_gate.extract_schema_ddl",
                    AsyncMock(return_value=["alter table foo add column bar text;"])), \
-             patch("nervous_system.schema_gate.get_chat_id", return_value="cto_chat"):
+             patch("nervous_system.schema_gate.get_chat_id", return_value="cto_chat"), \
+             patch("nervous_system.schema_gate.notify_operator", return_value=True) as notify:
             blocked = await check_and_block(
                 supabase, "/tmp/repo", "wingmen-orchestrator", 42,
                 "TASK-032 something", bot,
             )
 
         assert blocked is True
-        bot.send_message.assert_not_called()
+        notify.assert_not_called()

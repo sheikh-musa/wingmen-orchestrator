@@ -31,6 +31,22 @@ def _after(replacement: str) -> str:
 
 GHOST_AFTER = _after("~")            # sentinel replaced an empty composer -> ghost
 REAL_AFTER = _after(_FLAT + "~")     # sentinel appended to real staged text -> real
+
+# A NON-dim real-text fixture (no \x1b[2m wrapper around the staged text), needed for the
+# "stable idle, NON-dim -> still escalates P1" case: CC_N_POS/REAL_AFTER above are built from
+# real_dim_queued.e.txt, which ALWAYS parses to CC_PH_BASIS='real-text(dim)' (see
+# test_ghost_log_verdict_fields_are_the_matched_pair_not_postrevert) and so always hits the
+# DIM-stable DOWN-RANK branch (op#29056/#29048) -- the P1 path is explicitly RESERVED for a
+# non-dim stable revert-fail, which that fixture can never reach.
+BRIGHT_POS = (FIX / "real_bright.e.txt").read_text()         # parses CC_N>0 real-text(not-dim)
+_BRIGHT_FLAT = "build the CAI-752 UI"
+
+
+def _bright_after(replacement: str) -> str:
+    return BRIGHT_POS.replace(_BRIGHT_FLAT, replacement)
+
+
+BRIGHT_REAL_AFTER = _bright_after(_BRIGHT_FLAT + "~")
 # The REAL current-CC working footer carries the "← for agents" shortcut ALONGSIDE "esc to
 # interrupt" (verified live 2026-09-07 on cc-fleet-health + cc-cosem-exams). The old fixture
 # omitted it, which is why pane_working()'s "esc to interrupt AND NOT for agents" conjunct
@@ -38,18 +54,22 @@ REAL_AFTER = _after(_FLAT + "~")     # sentinel appended to real staged text -> 
 WORKING = "some output\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents · ctrl+t\n"
 
 
-def run_nudge(tmp_path: Path, after_pane: str, revert_pane: str = None, unstable: bool = False):
+def run_nudge(tmp_path: Path, after_pane: str, revert_pane: str = None, unstable: bool = False,
+              before_pane: str = None):
     """Drive lane_nudge.sh with a state-machine fake tmux. `after_pane` is what the composer
     reads AFTER the sentinel is typed (GHOST_AFTER or REAL_AFTER); `revert_pane` is what it reads
     AFTER the BSpace (defaults to the original `before`, i.e. a clean byte-identical revert).
     `unstable=True` makes every post-revert capture DIFFER (appends an incrementing tick), i.e.
     a pane changing on its own (busy / mid-delivery / tearing-down) — the instability signal.
+    `before_pane` overrides the pre-sentinel composer state (defaults to CC_N_POS, the dim
+    fixture) -- pass BRIGHT_POS for a non-dim real-text(not-dim) scenario.
     Returns (completedprocess, logdir)."""
+    before_pane = before_pane if before_pane is not None else CC_N_POS
     bindir = tmp_path / "bin"; bindir.mkdir()
     st = tmp_path / "state"; st.mkdir()
-    (st / "before").write_text(CC_N_POS)
+    (st / "before").write_text(before_pane)
     (st / "after").write_text(after_pane)
-    (st / "revert").write_text(revert_pane if revert_pane is not None else CC_N_POS)
+    (st / "revert").write_text(revert_pane if revert_pane is not None else before_pane)
     (st / "working").write_text(WORKING)
     if unstable:
         (st / "unstable").write_text("1")
@@ -150,8 +170,11 @@ def test_revert_fail_on_busy_pane_is_low_not_p1(tmp_path):
 def test_revert_fail_on_stable_idle_pane_still_escalates_p1(tmp_path):
     # The reserved case: a revert-fail on a STABLE idle pane (no busy footer, byte-identical across
     # captures) keeps the P1 path — a genuine byte anomaly still surfaces. empty.e.txt is idle/stable.
+    # Must use the NON-dim fixture: the dim one always basis=real-text(dim), which the DIM-stable
+    # down-rank branch (op#29056/#29048) claims first -- the P1 path is explicitly RESERVED for a
+    # non-dim stable revert-fail, so a dim fixture can never reach it (see BRIGHT_POS comment above).
     empty = (FIX / "empty.e.txt").read_text()
-    out, logdir = run_nudge(tmp_path, REAL_AFTER, revert_pane=empty)  # unstable=False -> captures identical
+    out, logdir = run_nudge(tmp_path, BRIGHT_REAL_AFTER, revert_pane=empty, before_pane=BRIGHT_POS)
     assert out.returncode == 3
     assert "REVERT-FAIL" in out.stderr and "escalated P1" in out.stderr, \
         f"a stable-idle-pane revert-fail must keep the P1 path, got: {out.stderr!r}"

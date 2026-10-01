@@ -199,8 +199,10 @@ def test_open_asks_for_excludes_closed_rows(operator_ledger_db):
 # ── log(): tg_message_id column + inbound hook wiring ────────────────────────
 def test_log_persists_tg_message_id(operator_ledger_db):
     import psycopg
+    # tag must satisfy _validate_tag_shape's channel-tag shape (op#16353) -- the "this is
+    # a test row" marker belongs in the body's [__test__] prose prefix, not the tag slot.
     rid = ol.log("outbound", "[__test__] tg_message_id round-trip", chat_id="123456",
-                 tag="__test__", delivered=True, tg_message_id=555555)
+                 tag="orch-channel", delivered=True, tg_message_id=555555)
     with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
         cur.execute("SELECT tg_message_id FROM operator_messages WHERE id=%s", (rid,))
         (tg_message_id,) = cur.fetchone()
