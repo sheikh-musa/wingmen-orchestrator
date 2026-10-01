@@ -26,10 +26,28 @@ import sys
 import psycopg
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from nervous_system import operator_log  # reuse _sender_label/_source_hint row shape
+from nervous_system import operator_log  # reuse _source_hint row shape
 from nervous_system import personal_routing
 
 _TAG = "mamadah"
+
+# "Always know who's speaking" (bus #47892, orch-console ruling #47912 point 2):
+# identity no longer lands in the substrate row for this tag (PR #240 HIGH fix
+# — stored_from_* is NULL there by design), so resolve it from the
+# wingmen-personal row's real from_user_id instead. Fixed two-person mapping
+# per orch-console's explicit ruling, not derived from any env var — this
+# channel has exactly two known humans.
+_MUSA_ID = "286619815"
+_ZAHIDAH_ID = "6606903261"
+
+
+def _mamadah_sender_label(from_user_id) -> str:
+    uid = str(from_user_id) if from_user_id is not None else ""
+    if uid == _MUSA_ID:
+        return "Musa"
+    if uid == _ZAHIDAH_ID:
+        return "Zahidah"
+    return "unknown"
 
 
 def _dsn() -> str:
@@ -56,8 +74,7 @@ def unprocessed(tag: str, limit: int = 20) -> list:
     tag = _require_mamadah_tag(tag)
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, tag, created_at, chat_id, "
-            "from_user_id, from_username, from_name FROM operator_messages "
+            "SELECT id, tag, created_at, chat_id FROM operator_messages "
             "WHERE direction='inbound' AND handled_at IS NULL AND tag=%s "
             "ORDER BY id ASC LIMIT %s",
             (tag, limit),
@@ -66,13 +83,17 @@ def unprocessed(tag: str, limit: int = 20) -> list:
     ids = [r[0] for r in rows]
     personal = personal_routing.read_personal_content(ids)
     out = []
-    for (rid, rtag, created_at, chat_id, fuid, funame, fname) in rows:
+    for (rid, rtag, created_at, chat_id) in rows:
         prow = personal.get(rid)
         text = prow["text"] if prow else "[[wingmen-personal row missing — DATA LOSS, escalate]]"
+        # Identity is sentinel-NULL on the substrate row (fuid/fname/funame
+        # above) by design for this tag — resolve from wingmen-personal's
+        # real from_user_id instead, never from the substrate columns.
+        personal_fuid = prow.get("from_user_id") if prow else None
         out.append((
             rid, rtag, text, created_at,
-            operator_log._sender_label(fuid, fname, funame),
-            operator_log._source_hint(chat_id, fuid),
+            _mamadah_sender_label(personal_fuid),
+            operator_log._source_hint(chat_id, personal_fuid),
         ))
     return out
 

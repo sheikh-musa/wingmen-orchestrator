@@ -49,6 +49,16 @@
 --         inject_prefix=NULL, responder_ref='mamadah_second_brain',
 --         allowed_chat_ids='{}', group_routing='{}'::jsonb
 --         WHERE channel_key = 'mamadah';
+--
+-- POST-HOC NOTE (PR #240, bus #47837/#47912, 2026-10-01): content routing to
+-- wingmen-personal for this channel is gated by
+-- nervous_system/personal_routing.PERSONAL_ROUTED_TAGS, NOT by this row's
+-- log_target column -- log_target stays 'substrate' (above) and is informational
+-- only; do not read it as the routing decision. Separately, CAI-RESP-355's
+-- design (migration 012, mamadah_notes/mamadah_sources in THIS substrate) is
+-- superseded for this channel by #47837's wingmen-personal residency design --
+-- the 33 pre-existing mamadah_notes rows here are migrated to wingmen-personal
+-- in a follow-up migration after go-live, not in this one.
 
 UPDATE public.bot_channels
 SET

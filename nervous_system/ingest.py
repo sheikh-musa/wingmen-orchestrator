@@ -965,6 +965,20 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         if personal_routed:
             cos_triage = personal_routing.SENTINEL_COS_TRIAGE
             stored_content = personal_routing.SENTINEL_TEXT
+            # cc-quality PR #240 HIGH (orch-console ruling, 2026-10-01: sender
+            # identity IS in-silo for a personal-routed tag): the envelope is
+            # "content-free" for identity too, not just text. Telegram's
+            # from_user_id/from_username/from_name are metadata, not text —
+            # they weren't text-derived so they slipped the original C1/C2 net.
+            # The real values still reach wingmen-personal unchanged (see the
+            # write_personal_content() call below, which closes over the
+            # original from_user_id/from_username/from_name locals directly,
+            # not these stored_ ones) — speaker identity is resolved on the
+            # personal side only (286619815->Musa, her id->Zahidah, else
+            # unknown), never from the substrate row.
+            stored_from_user_id = None
+            stored_from_username = None
+            stored_from_name = None
         else:
             # PASSIVE CoS triage (Step 1): compute the read-only route suggestion and
             # store it in the additive `cos_triage` column. STRICTLY additive — it
@@ -979,13 +993,17 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             except Exception:
                 cos_triage = None
             stored_content = content
+            stored_from_user_id = from_user_id
+            stored_from_username = from_username
+            stored_from_name = from_name
         cur.execute(
             "INSERT INTO operator_messages "
             "(direction, channel, chat_id, tag, text, delivered, "
             " from_user_id, from_username, from_name, cos_triage) "
             "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s) RETURNING id",
             (str(chat_id) if chat_id is not None else None, ch.channel_tag,
-             stored_content, from_user_id, from_username, from_name, cos_triage),
+             stored_content, stored_from_user_id, stored_from_username,
+             stored_from_name, cos_triage),
         )
         op_msg_id = cur.fetchone()[0]
         cur.execute(

@@ -57,7 +57,14 @@ class PersonalRouteError(RuntimeError):
 
 
 def is_personal_routed(tag: str | None) -> bool:
-    return tag in PERSONAL_ROUTED_TAGS
+    # Normalized compare (cc-quality PR #240 LOW): a leak gate must fail
+    # SAFE on a variant, not fail open — strip/lower so ' Mamadah '/'MAMADAH'
+    # still route, rather than silently falling through to the substrate.
+    # The DB's channel_tag is deterministic ('mamadah'), so this never changes
+    # behavior for the real system; it only removes a theoretical gap.
+    if not tag:
+        return False
+    return tag.strip().lower() in PERSONAL_ROUTED_TAGS
 
 
 def _rest_config() -> tuple[str, str]:
