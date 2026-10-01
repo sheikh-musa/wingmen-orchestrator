@@ -329,6 +329,32 @@ _probe_revertfail_is_repaint_race() {
   [ "$c1" != "$c2" ]
 }
 
+# RESIZE-REDRAW before refusing a REVERT-FAIL (orch-console #49010). Field case 2026-10-01
+# 22:56-23:22Z: a stale render line from the boot banner sat over the composer's bottom
+# separator; the real composer was EMPTY but the probe's byte-identical revert check failed on
+# the residue, so every wake was REFUSED. A resize to W-2 and back forces the TUI to redraw and
+# erases residue — and types NOTHING, so it cannot touch a staged step. Returns 0 IFF the redraw
+# CHANGED the capture (residue gone); 1 if it changed nothing (a real anomaly looks the same
+# after a redraw) or could not run. resize-window pins window-size=manual (verified tmux 3.6a),
+# so restore the option if the window did not have its own value before.
+_redraw_cleared_residue() {   # $1 = session
+  local s="$1" w pre post had_ws
+  w="$(tmux display-message -p -t "$s" '#{window_width}' 2>/dev/null)"
+  case "$w" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$w" -gt 20 ] || return 1
+  pre="$(tmux capture-pane -p -t "$s" 2>/dev/null)" || return 1
+  had_ws="$(tmux show-window-options -t "$s" -v window-size 2>/dev/null)"
+  tmux resize-window -t "$s" -x "$((w - 2))" 2>/dev/null || return 1
+  sleep "${LANE_NUDGE_REDRAW_SETTLE_S:-0.5}"
+  if ! tmux resize-window -t "$s" -x "$w" 2>/dev/null; then
+    echo "lane_nudge: WARN — resize-redraw could not restore '$s' to width $w (left at $((w - 2))); inspect the window." >&2
+  fi
+  [ -n "$had_ws" ] || tmux set-window-option -t "$s" -u window-size 2>/dev/null || true
+  sleep "${LANE_NUDGE_REDRAW_SETTLE_S:-1}"
+  post="$(tmux capture-pane -p -t "$s" 2>/dev/null)" || return 1
+  [ "$pre" != "$post" ]
+}
+
 if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [ "${CC_N:-0}" -gt 0 ] 2>/dev/null; then
   # STEP-4 (Nazim promotion, coupled behind the pane_busy collapse b5d82ce). The composer READS
   # as real staged text — but a dim AUTOSUGGESTION ghost parses identically (#23536), and at
@@ -348,13 +374,37 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
       # fall through past this if-block to the delivery loop
       ;;
     revert-fail)
+      # #49010: on a STABLE pane, try ONE resize-redraw first. Re-evaluate only if the redraw
+      # CHANGED the pane (render residue): EMPTY composer or a ghost re-probe -> deliver. Any other
+      # outcome, or a redraw that changed nothing, falls to the unchanged refuse chain below.
+      _ln_race=0; _probe_revertfail_is_repaint_race "$SESSION" && _ln_race=1
+      _ln_redraw=''
+      if [ "$_ln_race" = 0 ]; then
+        if _redraw_cleared_residue "$SESSION"; then
+          composer_parse_pane tmux "$SESSION"
+          if [ "${CC_EMPTY:-0}" = 1 ]; then
+            _ln_redraw='empty'
+          else
+            _probe_composer tmux "$SESSION"
+            _ln_redraw="reprobe=${CC_PROBE:-unset}"
+          fi
+        else
+          _ln_redraw='no-change'
+        fi
+      fi
+      case "$_ln_redraw" in
+        empty|reprobe=ghost)
+          _log_probe_capture "PROCEEDED after REVERT-FAIL: resize-redraw cleared render residue (${_ln_redraw}), delivering"
+          echo "lane_nudge: revert-fail on '$SESSION' was render residue — a resize-redraw cleared it (${_ln_redraw}); proceeding to deliver." >&2
+          ;;
+        *)
       # cond#2: the BSpace did NOT restore the composer byte-identical. REFUSE regardless (exit 3,
       # never clobber a possibly-real staged step). SEVERITY depends on the pane: a MID-TURN pane
       # repaints under the sentinel+BSpace, so a byte-mismatch there is the EXPECTED busy artifact,
       # NOT corruption — LOW/log, no operator P1. Reserve the P1 for a revert-fail on an IDLE (or
       # unreadable) pane, a genuine byte anomaly (Nazim #25506/#25619/#25635: the probe kept firing
       # false P1s on healthy busy panes). The REFUSE + preserve is identical on both branches.
-      if _probe_revertfail_is_repaint_race "$SESSION"; then
+      if [ "$_ln_race" = 1 ]; then
         _log_probe_capture "REFUSED-revert-fail [UNSTABLE pane: repaint race (busy/delivering/exiting), LOW — no P1], preserved staged"
         echo "lane_nudge: revert-fail on '$SESSION' but the pane is UNSTABLE (busy / mid-delivery / tearing-down) — expected repaint race, NOT corruption; REFUSING (LOW, no P1)." >&2
       elif [ "${CC_RAW_PH_BASIS:-${CC_PH_BASIS:-}}" = "real-text(dim)" ]; then
@@ -379,7 +429,10 @@ if [ "${CC_EMPTY:-0}" != 1 ] && [ "${CC_PARTIAL:-noprompt}" != 'noprompt' ] && [
         _probe_p1_escalate "${CC_LAST_CAPFILE:-}" "${CC_PROBE_BEFORE:-}"
         echo "lane_nudge: REVERT-FAIL on '$SESSION' (STABLE pane) — composer NOT restored byte-identical after the probe; REFUSING + escalated P1 (possible corruption of a real staged step)." >&2
       fi
+      [ -n "$_ln_redraw" ] && echo "lane_nudge: (resize-redraw was tried first: ${_ln_redraw})" >&2
       exit 3
+          ;;
+      esac
       ;;
     *)
       # real | unsure | busy | locked | '' : preserve + refuse (as before step-4). But these are
