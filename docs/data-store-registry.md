@@ -20,6 +20,14 @@ fine, commingled data is not.
 | **cosem-platform ADCDA silo** | _not yet provisioned — 🔴 migration target for the CAI-RESP-1340 real-PII in `ywrpttpxwfcoodovxhsr`_ | ADCDA real trainee data (Emirates-ID gov-PII) — MUST be its OWN UAE-**sovereign** silo (sovereignty ≠ region; AWS me-central-1 UAE only if sovereignty independently confirmed per CAI-809, never assumed from region name) before any further real write (TENANT-RESIDENCY-001). Migration plan + Musa sign-off on target pending. | UAE-sovereign (TBD) |
 | **cosem-platform TDU silo** | _designation pending_ | TDU real staff/asset data — dedicated SG production org, never the demo project | ap-southeast-1 (SG) |
 
+**mamadah routing note (PR #240, cc-quality MEDIUM):** content routing for the
+`mamadah` channel to wingmen-personal is gated by
+`nervous_system/personal_routing.PERSONAL_ROUTED_TAGS` in the orchestrator
+substrate repo — **not** by `bot_channels.log_target`, which is read/stored
+but does not drive any routing decision in code. Don't infer residency
+behavior from `log_target`'s value for any channel; check
+`PERSONAL_ROUTED_TAGS` instead.
+
 ## Firebase (cosem apps — separate stack)
 
 | Alias | Firebase site / project | Tenant | Region |

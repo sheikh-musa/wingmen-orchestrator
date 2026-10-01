@@ -16,6 +16,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from nervous_system import triage  # PASSIVE CoS triage annotation (read-only)
+from nervous_system import personal_routing  # bus #47837: private-family content routing
 from nervous_system.vault_leak_guard import defensive_redact  # bus #44378
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -162,7 +163,13 @@ _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 # (#21399, 2026-08-14 Beat-3): coord now owns+reconciles the live client thread via
 # its own tag-scoped loop (scripts/lane_operator_reconcile.py); the hub/console no
 # longer reconcile it. Reverting this line hands the tag back to the hub scope.
-_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor")
+# `mamadah` JOINED 2026-10-01 (bus #47808, op#24172/op#24173): cc-mamadah ("Mama
+# Dah's Assistant") owns+reconciles its own private-family Telegram channel via
+# its own tag-scoped loop (scripts/lane_operator_reconcile.py --tag mamadah),
+# same shape as hk-editor/gazzabyte-irsyad -- this is PRIVATE FAMILY data (Musa
+# + wife Zahidah), not a client channel the console should read or answer on
+# Zahidah's behalf.
+_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor", "mamadah")
 
 # Client channels the Mini's nazim-ingest actually POLLS (scripts/boot_nazim_ingest.sh
 # INGEST_CHANNELS) that the CONSOLE body (not a dedicated lane, not the hub) reconciles.
@@ -735,15 +742,38 @@ def log(direction: str, text: str, chat_id: str | None = None,
     if skipped:
         cos_payload["vault_scan_skipped"] = [{"key": k, "reason": r} for k, r in skipped]
     cos = json.dumps(cos_payload) if cos_payload else None
+    # PRIVATE-FAMILY routing (bus #47837 C1/C2): this `log()` is the ONE shared
+    # INSERT point every *_send.sh sibling's `operator_log outbound` call goes
+    # through (plus any inbound caller other than ingest.py's own raw insert),
+    # so a personal-routed tag's real text must never land here either — a
+    # reply quoting her draft/coursework is content too, not just her own
+    # inbound words. Every other tag is byte-identical (personal_routed=False
+    # takes the untouched original path below).
+    personal_routed = personal_routing.is_personal_routed(tag)
+    stored_text = personal_routing.SENTINEL_TEXT if personal_routed else text
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
         cur.execute(
             "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered, cos_triage, tg_message_id) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING id",
-            (direction, channel, chat_id, tag, text, delivered, cos, tg_message_id),
+            (direction, channel, chat_id, tag, stored_text, delivered, cos, tg_message_id),
         )
         rid = cur.fetchone()[0]
+        # C1 (bus #47837): envelope NOT committed yet. The real-content write
+        # to wingmen-personal must land first and be committed — if it raises,
+        # roll back the envelope and re-raise (caller sees the failure; no
+        # orphaned content-free row, no false "logged" result). Not
+        # best-effort, unlike every other side-effect in this function.
+        if personal_routed:
+            try:
+                personal_routing.write_personal_content(
+                    rid, direction=direction, channel=channel, tag=tag,
+                    text=text, chat_id=chat_id, tg_message_id=tg_message_id,
+                )
+            except Exception:
+                conn.rollback()
+                raise
         conn.commit()
     # Loud bus copy AFTER the commit (orch-console review, bus #44388 round 2
     # nit): the row must actually exist before we page anyone about it — a
@@ -754,10 +784,14 @@ def log(direction: str, text: str, chat_id: str | None = None,
         _alert_vault_redaction(leaked_keys, direction, channel, tag)
     # Ledger every genuine operator ask (op#22669: "if I ask 1000 things I expect
     # you to track 1001"). Best-effort — a tracking hiccup must never cost the
-    # primary durable log row above, which has already committed.
+    # primary durable log row above, which has already committed. Skipped for
+    # a personal-routed tag's own sentinel text: _is_operator_ask_surface
+    # already excludes 'mamadah' (not in _ASK_TRACKED_TAGS) so this was always
+    # a no-op for it, but routing the SENTINEL through here instead of real
+    # text is correct regardless if that set ever changes.
     if direction == "inbound":
         try:
-            maybe_track_ask(rid, direction, channel, tag, text)
+            maybe_track_ask(rid, direction, channel, tag, stored_text)
         except Exception:
             pass
     return rid

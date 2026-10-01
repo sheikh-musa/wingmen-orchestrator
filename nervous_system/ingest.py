@@ -53,6 +53,7 @@ from dotenv import load_dotenv
 
 from nervous_system import triage  # PASSIVE CoS triage annotation (read-only; no routing)
 from nervous_system import operator_log  # op#22669 asks-ledger reply-match (maybe_track_ask)
+from nervous_system import personal_routing  # bus #47837: private-family content routing
 from scripts.lib import fire_window  # quiesce keystrokes during a recycle's fire window
 from scripts.lib import pane_busy  # footer-scoped busy check (one implementation)
 
@@ -953,25 +954,56 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         # 2. LOG — durable first, always. Media is downloaded here so the row
         #    carries the local path (screenshot/doc), not a bare non-text marker.
         content = message_content(ch, msg, upd_id)
-        # PASSIVE CoS triage (Step 1): compute the read-only route suggestion and
-        # store it in the additive `cos_triage` column. STRICTLY additive — it
-        # never routes, sends, or gates. Dead-man's-switch: any classifier error
-        # → cos_triage NULL → today's manual behavior, LOG still succeeds. The
-        # text-based route (msg.text) is used, not the media pointer, so a
-        # screenshot's caption still triages.
-        try:
-            cos_triage = json.dumps(triage.classify(
-                msg.get("text") or msg.get("caption") or content,
-                tag=ch.channel_tag).to_dict())
-        except Exception:
-            cos_triage = None
+        # PRIVATE-FAMILY routing (bus #47837 C1/C2): a personal-routed tag's
+        # content must never reach the substrate. Skip classify() entirely —
+        # its governance-fork branch would quote a matched phrase from the
+        # text into cos_triage (a named leak path), and the channel tag alone
+        # already fixes the domain deterministically (triage._CHANNEL_TAGS).
+        # `stored_content` is what the SUBSTRATE row gets; `content` (the real
+        # text) is only ever passed to write_personal_content() below.
+        personal_routed = personal_routing.is_personal_routed(ch.channel_tag)
+        if personal_routed:
+            cos_triage = personal_routing.SENTINEL_COS_TRIAGE
+            stored_content = personal_routing.SENTINEL_TEXT
+            # cc-quality PR #240 HIGH (orch-console ruling, 2026-10-01: sender
+            # identity IS in-silo for a personal-routed tag): the envelope is
+            # "content-free" for identity too, not just text. Telegram's
+            # from_user_id/from_username/from_name are metadata, not text —
+            # they weren't text-derived so they slipped the original C1/C2 net.
+            # The real values still reach wingmen-personal unchanged (see the
+            # write_personal_content() call below, which closes over the
+            # original from_user_id/from_username/from_name locals directly,
+            # not these stored_ ones) — speaker identity is resolved on the
+            # personal side only (286619815->Musa, her id->Zahidah, else
+            # unknown), never from the substrate row.
+            stored_from_user_id = None
+            stored_from_username = None
+            stored_from_name = None
+        else:
+            # PASSIVE CoS triage (Step 1): compute the read-only route suggestion and
+            # store it in the additive `cos_triage` column. STRICTLY additive — it
+            # never routes, sends, or gates. Dead-man's-switch: any classifier error
+            # → cos_triage NULL → today's manual behavior, LOG still succeeds. The
+            # text-based route (msg.text) is used, not the media pointer, so a
+            # screenshot's caption still triages.
+            try:
+                cos_triage = json.dumps(triage.classify(
+                    msg.get("text") or msg.get("caption") or content,
+                    tag=ch.channel_tag).to_dict())
+            except Exception:
+                cos_triage = None
+            stored_content = content
+            stored_from_user_id = from_user_id
+            stored_from_username = from_username
+            stored_from_name = from_name
         cur.execute(
             "INSERT INTO operator_messages "
             "(direction, channel, chat_id, tag, text, delivered, "
             " from_user_id, from_username, from_name, cos_triage) "
             "VALUES ('inbound','telegram',%s,%s,%s,true,%s,%s,%s,%s) RETURNING id",
             (str(chat_id) if chat_id is not None else None, ch.channel_tag,
-             content, from_user_id, from_username, from_name, cos_triage),
+             stored_content, stored_from_user_id, stored_from_username,
+             stored_from_name, cos_triage),
         )
         op_msg_id = cur.fetchone()[0]
         cur.execute(
@@ -979,6 +1011,32 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             "WHERE channel_key=%s AND telegram_update_id=%s",
             (op_msg_id, ch.key, upd_id),
         )
+        # C1 (bus #47837): substrate envelope is NOT committed yet. The real
+        # content write to wingmen-personal must succeed and be committed
+        # FIRST — if it raises, roll back the envelope (+ the dedupe row, same
+        # txn) and re-raise. The caller (channel_loop) then never reaches the
+        # poll-offset UPDATE for this batch (Telegram redelivers, A1 dedupe
+        # absorbs the replay) — same offset fail-safe shape the file already
+        # uses for a DB-unreachable error. channel_loop's `except Exception`
+        # handler logs loudly AND increments ingest_poll_health.consec_errors
+        # for this channel, which scripts/channel_liveness_watchdog.py already
+        # pages on past ERROR_STORM (6) — no new paging mechanism needed. Not
+        # best-effort: a swallowed failure here would silently orphan an
+        # envelope with no content behind it.
+        if personal_routed:
+            try:
+                personal_routing.write_personal_content(
+                    op_msg_id, direction="inbound", channel="telegram",
+                    tag=ch.channel_tag, text=content, chat_id=chat_id,
+                    from_user_id=from_user_id, from_username=from_username,
+                    from_name=from_name, tg_message_id=msg.get("message_id"),
+                )
+            except Exception as e:                                     # noqa: BLE001
+                conn.rollback()
+                _log_line(f"{ch.key}: PERSONAL ROUTE WRITE FAILED update {upd_id} "
+                          f"({type(e).__name__}: {e}) — substrate rolled back, "
+                          f"offset NOT advanced, Telegram will redeliver")
+                raise
         conn.commit()
 
     # 3. GATE — deny-by-default; disallowed stays logged-and-skipped.
