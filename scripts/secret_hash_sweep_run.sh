@@ -31,7 +31,10 @@ done
 [ "${#ENVS[@]}" -gt 0 ] || { echo "secret_sweep_run: no .env files found — REFUSE" >&2; exit 3; }
 
 # Transcripts touched within the window (live + recent).
-mapfile -t SCANS < <(find "$HOME/.claude/projects" -name '*.jsonl' -newermt "$WINDOW" 2>/dev/null)
+# NB: bash 3.2 (macOS /bin/bash, what launchd runs) has no `mapfile` — build the array by hand.
+SCANS=()
+while IFS= read -r _f; do [ -n "$_f" ] && SCANS+=("$_f"); done \
+  < <(find "$HOME/.claude/projects" -name '*.jsonl' -newermt "$WINDOW" 2>/dev/null)
 [ "${#SCANS[@]}" -gt 0 ] || { echo "secret_sweep_run: no recent transcripts — nothing to do"; exit 0; }
 
 REPORT="$("$PY" "$ORCH_DIR/scripts/secret_hash_sweep.py" --env "${ENVS[@]}" --scan "${SCANS[@]}" \
