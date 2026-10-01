@@ -883,6 +883,41 @@ echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: $
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
 echo ""
 
+# GLM PROVIDER (Musa op#24283/24299/24541: GLM Pro trial on cosem-platform). A resolved
+# model of `glm-*` (e.g. `.cosem-port_model` = glm-5) routes this lane to z.ai's
+# Anthropic-compatible endpoint instead of Anthropic. Runs LAST, after the token cascade
+# and the subagent cascade, so it overrides both:
+#   - the GLM key comes from the fleet vault (GLM_CODING_KEY), never .env, never printed;
+#   - the Anthropic OAuth token + API key are UNSET so no Anthropic credential can ever be
+#     sent to z.ai;
+#   - every model slot (main, opus/sonnet/haiku defaults, subagents) is a glm model, since
+#     z.ai rejects claude-* ids.
+# FAIL-CLOSED: if the key can't be fetched we refuse to boot rather than silently fall
+# back to Anthropic (a GLM lane on Claude would quietly invalidate the trial).
+case "$RESOLVED_MODEL" in
+    glm-*)
+        _GLM_KEY="$(cd "$ORCH_DIR" && AGENT_ID="${CC_AGENT_ID:-$CC_BASE_AGENT_ID}" "$VENV_PY" -c '
+import sys
+from nervous_system.vault import vault
+s = vault.get("GLM_CODING_KEY", reason="launch_dangerous_cc: GLM provider for lane boot")
+sys.stdout.write(s.value)' 2>/dev/null || true)"
+        if [ -z "$_GLM_KEY" ]; then
+            echo -e "${RED}FATAL: model ${RESOLVED_MODEL} needs GLM_CODING_KEY from the vault and it could not be read. Refusing to boot (no silent fallback to Anthropic).${RESET}" >&2
+            exit 1
+        fi
+        unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE ANTHROPIC_API_KEY
+        export ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
+        export ANTHROPIC_AUTH_TOKEN="$_GLM_KEY"
+        unset _GLM_KEY
+        _GLM_SMALL="${GLM_SMALL_MODEL:-glm-4.7}"
+        export ANTHROPIC_DEFAULT_OPUS_MODEL="$RESOLVED_MODEL"
+        export ANTHROPIC_DEFAULT_SONNET_MODEL="$RESOLVED_MODEL"
+        export ANTHROPIC_DEFAULT_HAIKU_MODEL="$_GLM_SMALL"
+        export CLAUDE_CODE_SUBAGENT_MODEL="$RESOLVED_MODEL"
+        echo -e "${BOLD}${TEAL}▶ Provider: z.ai GLM (${RESOLVED_MODEL}, small=${_GLM_SMALL}); Anthropic credentials unset${RESET}"
+        ;;
+esac
+
 # Restore caller's directory for the actual claude session
 cd "$CALLER_DIR"
 
