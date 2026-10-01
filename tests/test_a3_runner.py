@@ -37,7 +37,10 @@ def test_main_loads_dotenv_from_workdir_before_reading_dsns(monkeypatch):
     import scripts.a3_isolation_check as runner
     seen = {}
     monkeypatch.setattr(runner, "load_dotenv", lambda path=None, *a, **k: seen.setdefault("path", path))
-    monkeypatch.setenv("IHSANOS_PROD_DATABASE_URL", "x")   # present so it proceeds past the DSN gate
+    # CAI-1225 RO-move: the runner's default --ceayj-dsn-env is IHSANOS_PROD_RO_DATABASE_URL
+    # (was IHSANOS_PROD_DATABASE_URL pre-move) -- set the var main() actually reads, so this
+    # doesn't rely on another test's real-.env load having already populated os.environ.
+    monkeypatch.setenv("IHSANOS_PROD_RO_DATABASE_URL", "x")   # present so it proceeds past the DSN gate
     monkeypatch.setenv("DATABASE_URL", "y")
     monkeypatch.setattr(runner, "run_a3_check",
                         lambda **k: {"outcome": PASS, "detail": "", "finding_count": 0,

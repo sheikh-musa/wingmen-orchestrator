@@ -338,10 +338,13 @@ def bot_channels_db(pg_dsn):
 def scoped_dot_env():
     """Temporarily writes a real repo-root .env (gitignored, never committed) so
     scripts/bus_send.dburl — which resolves its .env path relative to its OWN file,
-    i.e. this repo root when PYTHONPATH points here — has a file to prefer. Refuses to
-    run if a real .env is already sitting there (never overwrite a real secrets file)."""
+    i.e. this repo root when PYTHONPATH points here — has a file to prefer. Skips (never
+    overwrites a real secrets file) if a real .env is already sitting there -- e.g. a
+    live checkout/worktree, as opposed to CI's clean checkout."""
     env_path = _ROOT / ".env"
-    assert not env_path.exists(), f"refusing to touch a real {env_path} — remove it or run elsewhere"
+    if env_path.exists():
+        pytest.skip(f"a real {env_path} already exists -- refusing to touch it; "
+                     "this scenario needs a repo checkout with no .env")
 
     def _write(dsn: str) -> None:
         env_path.write_text(f"DATABASE_URL={dsn}\n")
@@ -362,6 +365,22 @@ def _run_channel_lookup(channel: str, dsn: str,
     )
 
 
+# scripts.bus_send.dburl() deliberately makes a real repo-root .env file WIN over any
+# injected DATABASE_URL env var (rotation-safety, 2026-09-28 incident) -- so on a live
+# checkout/worktree that carries real secrets, these two tests can't actually exercise
+# the ephemeral-DSN path they're asserting on: the subprocess reads the real .env's prod
+# DSN instead, and either silently fails-closed (this channel key doesn't exist in prod)
+# or, for scoped_dot_env, would have to clobber a real secrets file to proceed. Skip
+# rather than fail/error when that precondition can't be met (CI's checkout has no .env).
+_REAL_DOT_ENV_PRESENT = (_ROOT / ".env").exists()
+_SKIP_REAL_DOT_ENV = pytest.mark.skipif(
+    _REAL_DOT_ENV_PRESENT,
+    reason="a real .env exists at repo root -- dburl()'s file-wins rotation-safety "
+           "shadows the injected test DSN; this scenario needs a repo checkout with no .env",
+)
+
+
+@_SKIP_REAL_DOT_ENV
 def test_channel_lookup_resolves_token_and_chat_from_bot_channels(bot_channels_db):
     with psycopg.connect(bot_channels_db, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(

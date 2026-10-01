@@ -138,7 +138,15 @@ def agent_liveness(agent):
     except RuntimeError:
         return "uncovered"        # tmux unreadable -> don't assert dead; let wedge logic run
     import psycopg2
-    c = _connect(); cur = c.cursor()
+    # Same fail-open shape as the tmux check above: a DSN unavailable/unreachable (no .env,
+    # no DATABASE_URL, DB down) is an infra hiccup on OUR read, not evidence the agent is
+    # dead -- crashing here would take the whole wedge-watchdog precondition down with it
+    # (found via CI's clean checkout, which has neither a .env nor DATABASE_URL set).
+    try:
+        c = _connect()
+    except Exception:
+        return "uncovered"
+    cur = c.cursor()
     try:
         hb = _hb_age(cur, agent)
     finally:
