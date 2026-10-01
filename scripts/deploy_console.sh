@@ -66,7 +66,12 @@ echo "  [1/4] version-sync: sw.js=$SW fleet.js=$FL lanes.html=$LB"
 # ---- GATE 2: tests ----
 echo "  [2/4] console tests..."
 if [ -x .venv/bin/python3 ]; then
-  PYTHONPATH="$PWD" .venv/bin/python3 -m pytest tests/console/test_app.py -q >"$DIR/pytest.log" 2>&1 \
+  # The .env sourced above holds the prod substrate DSN; the root conftest prod-ref guard
+  # (backlog#68, #223/#232) refuses any pytest session that can see it. Run the tests in
+  # the sanctioned no-DB mode (same as scripts/pytest_local.sh Option B); the render gate
+  # below still uses the live DSN.
+  env -u DATABASE_URL -u SUPABASE_DB_URL PYTEST_NO_DB=1 \
+    PYTHONPATH="$PWD" .venv/bin/python3 -m pytest tests/console/test_app.py -q >"$DIR/pytest.log" 2>&1 \
     || fail "console tests FAILED (see $DIR/pytest.log)." 4
   echo "        $(grep -oE '[0-9]+ passed[^,]*' "$DIR/pytest.log" | tail -1)"
 else echo "        (.venv missing — skipped, but flagging)"; fi
