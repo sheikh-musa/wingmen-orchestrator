@@ -212,22 +212,64 @@ class _FakeConn:
     def cursor(self): return _FakeCur(self._captured, self._rows)
 
 
-def test_candidate_sessions_keeps_own_offline_drops_offline_siblings(monkeypatch):
-    """Two rules must BOTH survive (op#11297 + Nazim #40426): the agent's OWN row is kept
-    even if offline (on-demand-offline-but-live, no silent wake loss), but an OFFLINE
-    base-family SIBLING is dropped so it can't hijack the wake (the phantom cc-orchestrator-1
-    -> cc-substrate misroute). This pins the surgical query shape so a later reader cannot
-    silently revert EITHER rule."""
+def test_candidate_sessions_includes_offline_family_hijack_guard_at_resolve(monkeypatch):
+    """Candidate SELECTION now includes OFFLINE base-family rows too (so a base-id wake can
+    reach an offline-but-live-pane instance, e.g. cc-cosem-tdu-coord-1). The op#11297 self
+    rule still holds (self kept unconditionally). The Nazim #40426 sibling-hijack guard is NOT
+    dropped — it MOVES to resolve time (live has-session AND reverse-ownership), so an offline
+    drift row can still be a CANDIDATE here but is rejected before it is woken. This pins the
+    widened query shape so a later reader cannot silently re-add the status<>'offline' sibling
+    filter (which would re-break the tdu-coord recovery)."""
     captured = {}
     monkeypatch.setattr(agent_wake, "_DSN", "postgres://x")
     monkeypatch.setattr(agent_wake.psycopg, "connect",
-                        lambda *a, **k: _FakeConn(captured, [("cc-orchestrator", "orch")]))
+                        lambda *a, **k: _FakeConn(captured, [("cc-orchestrator", "orch", "online")]))
     out = agent_wake._candidate_sessions("cc-orchestrator")
     sql, params = captured["sql"], captured["params"]
-    # The exact surgical predicate: self kept unconditionally (op#11297), sibling gated on
-    # non-offline (Nazim #40426). Pin the whole clause so neither half can be silently reverted.
-    assert "(agent_id=%s OR (base_agent_id=%s AND status<>'offline'))" in sql
-    # And the self clause is NOT itself status-gated (that would be the op#11297 regression).
+    # Widened predicate: self OR any base-family row, offline or not.
+    assert "(agent_id=%s OR base_agent_id=%s)" in sql
+    # The old sibling status gate must be GONE (its re-presence would drop offline-but-live).
+    assert "base_agent_id=%s AND status<>'offline'" not in sql
+    # Self is still not itself status-gated (op#11297).
     assert "(agent_id=%s AND status" not in sql
     assert params == ("cc-orchestrator", "cc-orchestrator")
     assert out == ["orch"]  # flows through rank_candidates unchanged
+
+
+# ── resolve-time hijack guard: offline-but-live-pane wake vs #40426 sibling-hijack ──────────
+def test_offline_base_instance_with_live_own_pane_is_woken(monkeypatch):
+    """tdu-coord RECOVERY. A bus row to the BASE id cc-cosem-tdu-coord whose only instance
+    (cc-cosem-tdu-coord-1) is offline-with-stale-heartbeat BUT whose pane is live must still
+    be woken. The session is live (has-session) and owned by NO OTHER non-offline agent
+    (its only owner is the offline instance), so the reverse-ownership guard lets it through."""
+    candidates = ["tdu-coord-sess"]  # surfaced now that offline family rows are candidates
+    live = lambda s: s == "tdu-coord-sess"                      # pane is genuinely alive
+    owners = lambda s: [("cc-cosem-tdu-coord-1", "offline")]    # only owner, and it's offline
+    out = agent_wake._first_live_session(
+        candidates, has_session=live, agent_id="cc-cosem-tdu-coord", owner_source=owners)
+    assert out == "tdu-coord-sess"
+
+
+def test_offline_sibling_session_owned_by_foreign_live_agent_is_not_woken(monkeypatch):
+    """#40426 NON-HIJACK. The phantom offline cc-orchestrator-1's tmux_session is actually
+    cc-substrate's LIVE pane (a pool-move drift row). has-session is TRUE (the pane is alive),
+    but it belongs to a DIFFERENT non-offline family, so the reverse-ownership guard rejects it
+    and the wake for cc-orchestrator does NOT land on cc-substrate."""
+    candidates = ["substrate-cleanup"]
+    live = lambda s: s == "substrate-cleanup"                   # live — but not ours
+    owners = lambda s: [("cc-orchestrator-1", "offline"),       # the drift row
+                        ("cc-substrate", "online")]             # the real, foreign, live owner
+    out = agent_wake._first_live_session(
+        candidates, has_session=live, agent_id="cc-orchestrator", owner_source=owners)
+    assert out is None
+
+
+def test_live_same_family_sibling_owner_is_not_treated_as_hijack(monkeypatch):
+    """The guard is FAMILY-aware: a live same-family sibling legitimately owning the session
+    (op#11297 family fallback) is NOT a foreign hijack and must still be woken."""
+    candidates = ["irsyad-prog1"]
+    live = lambda s: True
+    owners = lambda s: [("cc-irsyad-4", "online")]  # live sibling, same base family
+    out = agent_wake._first_live_session(
+        candidates, has_session=live, agent_id="cc-irsyad-9", owner_source=owners)
+    assert out == "irsyad-prog1"
