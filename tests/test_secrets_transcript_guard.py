@@ -349,6 +349,48 @@ def test_allows_hash_sink_with_no_tee_in_between():
     })
 
 
+# ---- cc-quality PR#245 Rule D re-review fixes (bus #48466) -------------------------
+
+def test_blocks_dd_if_equals_dotenv_operand():
+    # cc-quality #48499 LOW: `if=.env` is one shlex token; the value-half of a
+    # key=value operand needs checking too, not just whole-token matches
+    assert_blocked("Bash", {"command": "dd if=.env"})
+
+
+def test_blocks_lane_sudo_gcloud_iam_mutation():
+    assert_cloud_blocked(
+        {"command": "sudo gcloud projects add-iam-policy-binding cosem-prod "
+                     "--member=user:foo@example.com --role=roles/owner"},
+        env=LANE_ENV,
+    )
+
+
+def test_blocks_lane_absolute_path_gcloud_iam_mutation():
+    assert_cloud_blocked(
+        {"command": "/usr/bin/gcloud projects add-iam-policy-binding cosem-prod "
+                     "--member=user:foo@example.com --role=roles/owner"},
+        env=LANE_ENV,
+    )
+
+
+def test_blocks_lane_secrets_version_access_with_no_account():
+    # the "sharp edge" cc-quality flagged: a lane reading a client prod secret via
+    # the shared owner login, with no explicit SA
+    assert_cloud_blocked(
+        {"command": "gcloud secrets versions access latest --secret=client-db-password"},
+        env=LANE_ENV,
+    )
+
+
+def test_allows_lane_secrets_version_access_with_service_account():
+    assert_allowed(
+        "Bash",
+        {"command": "gcloud secrets versions access latest --secret=client-db-password "
+                     "--account=cosem-deployer@my-proj.iam.gserviceaccount.com"},
+        env=LANE_ENV,
+    )
+
+
 # ---- fail-closed on unparseable input ---------------------------------------------
 
 def test_fails_closed_on_bad_json():

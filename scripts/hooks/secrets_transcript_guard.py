@@ -34,7 +34,17 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
   mutation subcommand (add-iam-policy-binding, remove-iam-policy-binding, set-iam-policy,
   projects create/delete, services disable) unconditionally for a lane, any account; and
   print-access-token unless it explicitly names a service account (fail-closed on a
-  bare print-access-token with no --account -- the incident's own shape).
+  bare print-access-token with no --account -- the incident's own shape); and
+  `secrets versions access` unless it explicitly names a service account (cc-quality
+  bus #48466 MEDIUM -- reading a client prod secret via the shared owner login is the
+  same trust boundary the incident exposed). Tolerates a leading `sudo`/absolute-path/
+  `command` prefix (bus #48466 LOW).
+
+  Rule D is a STOPGAP for these enumerated dangerous shapes, not a general "a lane
+  can't reach the owner cloud login" control -- e.g. `gcloud storage rm` on a client
+  bucket still isn't caught. The durable fix is OS-level credential isolation (per-lane
+  CLOUDSDK_CONFIG with no human ADC reachable from a lane's OS user), tracked as
+  separate work (bus #48469) -- do not treat that work as superseded by Rule D.
 
 Exit 2 + stderr = refused, the reason is shown to the model (same contract as the
 irsyad guard). Fail-closed on unparseable input.
@@ -110,6 +120,13 @@ def _segment_secret_file_token(segment: str) -> str | None:
     for token in tokens:
         if _is_secret_file(token):
             return token
+        # cc-quality PR#245 re-review (bus #48499 LOW): `dd if=.env` -- the operand is
+        # one shlex token ("if=.env"), so the anchored `(^|/)\.env$` pattern never sees
+        # a bare ".env" start-of-token; check the value half of a key=value operand too.
+        if "=" in token:
+            value = token.split("=", 1)[1]
+            if value and _is_secret_file(value):
+                return value
     return None
 
 
@@ -248,6 +265,11 @@ def check_rule_c(command: str) -> str | None:
 # ---- Rule D: lane-scoped human-owner cloud login / IAM mutation block (bus #48386) -
 
 CLOUD_CLI_LEADING_RE = re.compile(r"^(gcloud|firebase)\b")
+# cc-quality PR#245 Rule D re-review (bus #48466 LOW): `sudo gcloud ...` / absolute-path
+# `/usr/bin/gcloud ...` / `command gcloud ...` all slipped the leading-command match.
+CLOUD_CLI_PREFIX_STRIP_RE = re.compile(
+    r"^(?:sudo\s+|command\s+|/usr/(?:local/)?bin/|/opt/homebrew/bin/)+"
+)
 IAM_MUTATION_SUBCOMMAND_RE = re.compile(
     r"\b(add-iam-policy-binding|remove-iam-policy-binding|set-iam-policy|"
     r"projects\s+(create|delete)|services\s+disable)\b"
@@ -256,6 +278,12 @@ ACCOUNT_SWITCH_RE = re.compile(
     r"\bgcloud\s+config\s+set\s+account\s+(\S+)|\bgcloud\s+auth\s+login\s+(\S+)"
 )
 PRINT_ACCESS_TOKEN_RE = re.compile(r"\bprint-access-token\b")
+# cc-quality PR#245 Rule D re-review (bus #48466 MEDIUM, "the sharp edge"): a lane
+# reading a CLIENT PROD SECRET via the shared owner login is exactly the trust
+# boundary the 2026-10-01 incident exposed. In-scope for a secrets-leak-prevention
+# control (op#24408), unlike generic destructive ops (gcloud storage rm) which
+# orch-console scoped to the separate OS-level credential-isolation PR (bus #48469).
+SECRET_VERSION_ACCESS_RE = re.compile(r"\bsecrets\s+versions\s+access\b")
 OWNER_CLOUD_ACTION_MESSAGE = "owner-level cloud action: send the exact command to orch-console"
 
 
@@ -274,7 +302,7 @@ def check_rule_d(command: str) -> str | None:
         return None  # console/hub -- human-owner cloud logins are legitimately theirs
     for statement in _split_statements(command):
         for segment in _split_pipeline(statement):
-            lead = _leading_command(segment)
+            lead = CLOUD_CLI_PREFIX_STRIP_RE.sub("", _leading_command(segment))
             if not CLOUD_CLI_LEADING_RE.match(lead):
                 continue
 
@@ -292,6 +320,10 @@ def check_rule_d(command: str) -> str | None:
                 return OWNER_CLOUD_ACTION_MESSAGE
 
             if PRINT_ACCESS_TOKEN_RE.search(segment):
+                if not acct or _is_human_account(acct):
+                    return OWNER_CLOUD_ACTION_MESSAGE
+
+            if SECRET_VERSION_ACCESS_RE.search(segment):
                 if not acct or _is_human_account(acct):
                     return OWNER_CLOUD_ACTION_MESSAGE
     return None
