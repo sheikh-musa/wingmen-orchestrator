@@ -165,7 +165,7 @@ def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max
     return changed
 
 
-def _page_orch_console(cls: str, tool_name: str) -> None:
+def _page_orch_console(cls: str, tool_name: str, agent_id: str | None = None, agent_type: str | None = None) -> None:
     import os
     import subprocess
 
@@ -176,6 +176,14 @@ def _page_orch_console(cls: str, tool_name: str) -> None:
         return
     host = os.environ.get("FLEET_HOST_ID", "unknown-host")
     agent = os.environ.get("AGENT_ID", os.environ.get("CC_BASE_AGENT_ID", "unknown-agent"))
+    # bus #48907: a tool call originating inside a SUBAGENT carries agent_id/agent_type
+    # in the hook payload (Claude Code hooks docs) -- without this, every subagent hit
+    # paged as the bare session identity above, or fell back to "unknown-agent" when
+    # even that was unset. There is no separate per-subagent transcript file (confirmed
+    # against the docs) -- transcript_path is the one shared session file regardless of
+    # origin, so redaction already lands correctly; this only fixes attribution.
+    if agent_type:
+        agent = f"{agent} (subagent: {agent_type}" + (f"/{agent_id})" if agent_id else ")")
     body = (
         f"secrets_output_scanner auto-redacted a secret-shaped match in the on-disk "
         f"session transcript. pattern class: {cls}; tool: {tool_name}; host: {host}; "
@@ -211,6 +219,9 @@ def main() -> int:
     tool_input = payload.get("tool_input")
     tool_response = payload.get("tool_response")
     transcript_path = payload.get("transcript_path")
+    # bus #48907: present only when this tool call originated inside a subagent.
+    agent_id = payload.get("agent_id")
+    agent_type = payload.get("agent_type")
 
     output_text = tool_response if isinstance(tool_response, str) else json.dumps(tool_response or "")
     # bus #48685/#48695: a secret typed LITERALLY into the command itself (not a $VAR
@@ -249,7 +260,7 @@ def main() -> int:
         seen_classes.add(cls)
         if is_fixture_call or _is_fixture_hit(cls, match):
             continue
-        _page_orch_console(cls, tool_name)
+        _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type)
 
     classes = ", ".join(cls for cls, _ in hits)
     sys.stderr.write(

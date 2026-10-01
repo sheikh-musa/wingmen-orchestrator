@@ -389,3 +389,75 @@ def test_page_orch_console_real_mode_is_unchanged(monkeypatch, tmp_path):
     assert not args[subject_idx].startswith("[DEMO]")
     assert args[priority_idx] == "P1"
     assert "--req" in args
+
+
+# ---- bus #48907: a tool call originating inside a subagent must page with the
+# subagent's identity, not a bare "unknown-agent" / the parent session's own label. No
+# separate per-subagent transcript file exists (confirmed against Claude Code's hooks
+# docs) -- transcript_path is shared, so redaction is unaffected; only attribution.
+
+def test_page_orch_console_labels_subagent_when_present(monkeypatch, tmp_path):
+    import subprocess as subprocess_module
+    captured = {}
+
+    def fake_run(args, input=None, **kwargs):
+        captured["body"] = input
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setenv("ORCH_ROOT", str(_fake_orch_root(tmp_path)))
+    monkeypatch.setenv("SECRETS_SCANNER_DEMO", "1")
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+    scanner._page_orch_console("postgres-dsn", "Bash", agent_id="subagent_xyz789", agent_type="Explore")
+
+    assert "Explore" in captured["body"]
+    assert "subagent_xyz789" in captured["body"]
+
+
+def test_page_orch_console_omits_subagent_label_when_absent(monkeypatch, tmp_path):
+    import subprocess as subprocess_module
+    captured = {}
+
+    def fake_run(args, input=None, **kwargs):
+        captured["body"] = input
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setenv("ORCH_ROOT", str(_fake_orch_root(tmp_path)))
+    monkeypatch.setenv("SECRETS_SCANNER_DEMO", "1")
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+    scanner._page_orch_console("postgres-dsn", "Bash")
+
+    assert "subagent" not in captured["body"]
+
+
+def test_main_passes_agent_id_and_type_from_payload_to_the_page(tmp_path):
+    import os
+    import subprocess
+
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    orch_root_dir = tmp_path / "orch_root"
+    orch_root_dir.mkdir()
+    orch_root = _fake_orch_root(orch_root_dir)
+    env["ORCH_ROOT"] = str(orch_root)
+
+    body_file = tmp_path / "body.txt"
+    (orch_root / "scripts" / "bus_send.py").write_text(
+        "import sys, pathlib; "
+        f"pathlib.Path({str(body_file)!r}).write_text(sys.stdin.read())\n"
+    )
+
+    real_looking_dsn = "postgres://appuser:Zq9mPlKx2RzT7@203.0.113.42:5432/billing"
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": f'psql "{real_looking_dsn}"'},
+        "tool_response": "SELECT 1",
+        "agent_id": "subagent_abc123",
+        "agent_type": "security-reviewer",
+    })
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    assert r.returncode == 0
+    assert "security-reviewer" in body_file.read_text()
+    assert "subagent_abc123" in body_file.read_text()
