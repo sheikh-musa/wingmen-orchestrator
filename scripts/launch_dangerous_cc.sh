@@ -365,33 +365,22 @@ now_iso = datetime.now(timezone.utc).isoformat()
 # agents table — base id (FK-enforced)
 sb.table('agents').update({'last_heartbeat': now_iso}).eq('id', '$BASE_AGENT_ID').execute()
 " 2>>"$HB_ERR_LOG"
-        # agent_status heartbeat needs psycopg (GUC).
-        "$VENV_PY" -c "
-import os, sys
-sys.path.insert(0, '$ORCH_DIR')
-from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
-try:
-    import psycopg
-except ImportError:
-    sys.exit(0)
-dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
-if not dsn:
-    sys.exit(0)
-try:
-    with psycopg.connect(dsn, autocommit=False) as conn:
-        with conn.cursor() as cur:
-            cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$AGENT_ID',))
-            cur.execute(\"UPDATE agent_status SET last_heartbeat=now(), updated_at=now() WHERE agent_id=%s\", ('$AGENT_ID',))
-        conn.commit()
-except Exception:
-    pass
-" 2>/dev/null || true
+        # agent_status heartbeat (2026-10-01): ONE shared writer that also RE-ASSERTS
+        # host + tmux_session (+ the boot model string over the bare 'session-launch'
+        # placeholder), never NULLing a populated value — so a boot stamp lost to a
+        # pooler outage self-heals on the next beat instead of leaving a live lane
+        # host-less / session-less forever (cc-irsyad-2 + cc-irsyad-coord-1, gzb).
+        # File-first DSN (no stale inherited password); failures go LOUD to the log.
+        "$VENV_PY" "$ORCH_DIR/scripts/lib/agent_status_stamp.py" --mode beat \
+            --agent-id "$AGENT_ID" --host "${CC_HOST:-}" --session "${CC_TMUX_SESSION:-}" \
+            --model "${RESOLVED_MODEL:-}" --repo "$REPO_NAME" \
+            --auth-fp "${CC_AUTH_FP:-}" 2>>"$HB_ERR_LOG" || true
     done
 }
 
-_heartbeat_loop &
-HEARTBEAT_PID=$!
+# NOTE: the heartbeat loop is STARTED further down, right after the boot stamp, so
+# the forked subshell captures CC_HOST / CC_TMUX_SESSION / RESOLVED_MODEL (computed
+# in section 6). It was started here before those existed.
 
 # ── 4. Vercel deployment verification ─────────────────────────────────────────
 # Operator-decision (2026-04-30): the prior CHECK-IN reminder loop and
@@ -775,7 +764,11 @@ apply_subagent_model "$_BODY_MODEL_SESSION" "$ORCH_DIR"
 # the lane knows its own session from inside its pane; the wake then resolves via
 # a pure DB read instead of cross-process introspection (sandbox-blocked under
 # launchd). Empty when not launched inside tmux -> stored NULL.
-CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+# Prefer the shared TMUX_PANE-targeted resolver (_BODY_MODEL_SESSION, above): the bare
+# untargeted display-message can return EMPTY on a detached launch (how every gzb
+# supervisor boots its lane), which used to store tmux_session=NULL.
+CC_TMUX_SESSION="${_BODY_MODEL_SESSION:-}"
+[ -n "$CC_TMUX_SESSION" ] || CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
 
 # AUTH ATTRIBUTION (op#7094, migration 033): stamp WHICH MACHINE and WHICH CLAUDE ACCOUNT this
 # session actually authenticated with. The fleet console used to display every lane as the
@@ -803,33 +796,22 @@ CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/
 # as missing data, e3b0c442 reads as an answer. (Trap spotted by cc-caai, 2026-07-25.)
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || CC_AUTH_FP=""
 [ "$CC_AUTH_FP" = "e3b0c44298fc" ] && CC_AUTH_FP=""
-"$VENV_PY" -c "
-import os, sys
-sys.path.insert(0, '$ORCH_DIR')
-from dotenv import load_dotenv
-load_dotenv('$ORCH_DIR/.env')
-try:
-    import psycopg
-except ImportError:
-    sys.exit(0)
-dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
-if not dsn:
-    sys.exit(0)
-try:
-    with psycopg.connect(dsn, autocommit=False) as conn:
-        with conn.cursor() as cur:
-            cur.execute(\"SELECT set_config('app.current_agent_id', %s, true)\", ('$CC_AGENT_ID',))
-            cur.execute(
-                \"UPDATE agent_status SET current_task = %s, tmux_session = NULLIF(%s, ''), \"
-                \"host = NULLIF(%s,''), auth_account = NULLIF(%s,''), auth_fp = NULLIF(%s,''), \"
-                \"updated_at=now() WHERE agent_id = %s\",
-                ('session-launch model=$RESOLVED_MODEL repo=$REPO_NAME', '$CC_TMUX_SESSION',
-                 '$CC_HOST', '$CC_AUTH_LABEL', '$CC_AUTH_FP', '$CC_AGENT_ID'),
-            )
-        conn.commit()
-except Exception:
-    pass
-" 2>/dev/null || true
+# Boot stamp via the ONE shared writer (2026-10-01): bounded retries + LOUD failure
+# (was a silent one-shot `except: pass` — the lost stamp that left cc-irsyad-2 and
+# cc-irsyad-coord-1 host-less/session-less/model-less on gzb). A populated host or
+# tmux_session is never overwritten with NULL. Non-fatal: the heartbeat loop started
+# just below re-asserts host/session/model every beat, so a stamp lost here self-heals.
+"$VENV_PY" "$ORCH_DIR/scripts/lib/agent_status_stamp.py" --mode boot --retries 3 \
+    --agent-id "$CC_AGENT_ID" --host "$CC_HOST" --session "$CC_TMUX_SESSION" \
+    --model "$RESOLVED_MODEL" --repo "$REPO_NAME" \
+    --auth-account "$CC_AUTH_LABEL" --auth-fp "$CC_AUTH_FP" \
+    || echo -e "${AMBER}⚠ agent_status boot stamp failed — the heartbeat will retry it every beat${RESET}" >&2
+
+# ── 3b. Start the background heartbeat loop (moved here from section 3 so the forked
+# subshell captures CC_HOST / CC_TMUX_SESSION / RESOLVED_MODEL / CC_AUTH_FP for its
+# self-healing re-stamp). Killed by the EXIT trap (_handle_exit) like before.
+_heartbeat_loop &
+HEARTBEAT_PID=$!
 
 
 # Resolve claude robustly: when a lane is booted over a NON-LOGIN SSH session

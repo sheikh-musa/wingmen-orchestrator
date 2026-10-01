@@ -122,15 +122,24 @@ _ACTIVITY = [
 
 
 _BOOT_MODEL_RE = re.compile(r"session-launch model=(\S+)")
+# A body's OWN heartbeat-stamped `model=<id>` token (the cross-host hub: orch_lease
+# renew reads its live process argv on gzb). Whitespace-anchored so it never
+# matches inside another word, and the value must look like a model id (claude-*/
+# opus/sonnet/haiku) so free-text current_task can't be misread. Mirrors app.py.
+_HB_MODEL_RE = re.compile(r"(?:^|\s)model=((?:claude-|opus|sonnet|haiku)[^\s,;)]*)")
 
 
 def _model_from_db(current_task: Optional[str], registry_model: Optional[str]) -> tuple:
     """(model, model_src) for a hosted (DB-only) row: the boot string's
-    `session-launch model=<m>` -> "boot"; else fleet_lanes.model -> "registry";
-    else (None, None). Same precedence tail as app.py._resolve_model (op#20716)."""
+    `session-launch model=<m>` -> "boot"; else a heartbeat-stamped `model=<m>`
+    token -> "hb"; else fleet_lanes.model -> "registry"; else (None, None). Same
+    precedence tail as app.py._resolve_model (op#20716)."""
     m = _BOOT_MODEL_RE.search(current_task or "")
     if m:
         return m.group(1), "boot"
+    m = _HB_MODEL_RE.search(current_task or "")
+    if m:
+        return m.group(1), "hb"
     if registry_model:
         return str(registry_model), "registry"
     return None, None
@@ -322,10 +331,16 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
         # instance (why a live instance showed 'down'/duplicated). lane==tmux_session
         # gives each instance ITS OWN row; fall back to a base match for a lane whose
         # session != its fleet_lanes.lane. (Mirrors db.py build_lanes_query exactly.)
+        # Base fallback only when the base owns exactly ONE fleet_lanes row (mirrors
+        # db.py: a multi-lane family's session-less instance must not inherit an
+        # arbitrary sibling's lane label and be deduped into it).
         "  LEFT JOIN LATERAL ( "
         "    SELECT desired_state, lane, model FROM fleet_lanes fl "
-        "    WHERE fl.lane = s.tmux_session OR fl.base_agent_id = s.base_agent_id "
-        "    ORDER BY (fl.lane = s.tmux_session) DESC "
+        "    WHERE fl.lane = s.tmux_session "
+        "       OR (fl.base_agent_id = s.base_agent_id "
+        "           AND (SELECT count(*) FROM fleet_lanes f2 "
+        "                WHERE f2.base_agent_id = s.base_agent_id) = 1) "
+        "    ORDER BY (fl.lane = s.tmux_session) DESC NULLS LAST "
         "    LIMIT 1 "
         "  ) l ON true "
         "  LEFT JOIN LATERAL ( "
@@ -374,6 +389,12 @@ def _clone_lanes(cur) -> List[Dict[str, Any]]:
     return lanes
 
 
+def _coord_model(current_task: Optional[str]) -> tuple:
+    """A coordinator's model from its own agent_status current_task ONLY (boot
+    string or heartbeat token) — no registry default exists for a singleton."""
+    return _model_from_db(current_task, None)
+
+
 def _clone_coordinators(cur) -> List[Dict[str, Any]]:
     # The four always-on brains. last_seen_s/activity come from their latest bus
     # row ONLY (the Mini also LEASTs an outbound operator_messages age, but that
@@ -394,7 +415,12 @@ def _clone_coordinators(cur) -> List[Dict[str, Any]]:
         "  COALESCE( "
         "    (SELECT a.host FROM agent_status a "
         "       WHERE a.base_agent_id = c.agent_id AND a.host IS NOT NULL "
-        "       ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1), c.host_hint) AS host "
+        "       ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1), c.host_hint) AS host, "
+        # The body's own heartbeat-stamped `model=<id>` token (raw current_task is
+        # parsed for the model ONLY, never exposed — see _model_from_db).
+        "  (SELECT a.current_task FROM agent_status a "
+        "     WHERE a.base_agent_id = c.agent_id "
+        "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS current_task "
         # Coordinator rows from the single canonical list (coordinators.py),
         # projected to the 4 cols the clone needs (no op_tag/tmux_session: the VPS
         # has no live pane, peek is off).
@@ -407,6 +433,8 @@ def _clone_coordinators(cur) -> List[Dict[str, Any]]:
     for r in cur.fetchall():
         agent_id, short, role_label = r[0], r[1], r[2]
         activity, activity_age_s, ctx_tokens, auth_fp, host = r[4], r[5], r[6], r[7], r[8]
+        current_task = r[9] if len(r) > 9 and isinstance(r[9], str) else None
+        c_model, c_model_src = _coord_model(current_task)
         ctx_pct, ctx_level = _ctx_level(ctx_tokens)
         out.append(dict(
             agent_id=agent_id,           # fixed singleton ids — no client term
@@ -415,7 +443,9 @@ def _clone_coordinators(cur) -> List[Dict[str, Any]]:
             activity_age_s=activity_age_s,
             last_seen_s=activity_age_s,  # bus-only liveness signal (DB-only degrade)
             pool=pools.pool_for_fp(auth_fp), host=host,
-            model=None, model_src=None,  # op#20716: no proc truth off-box — never invented
+            # op#20716: no proc truth off-box; the body's OWN heartbeat-stamped model
+            # (raw current_task parsed for the model id only) — else None, never invented.
+            model=c_model, model_src=c_model_src,
             ctx_pct=ctx_pct, ctx_level=ctx_level,
             peekable=False,              # no live pane on the public host -> no peek affordance
         ))

@@ -58,3 +58,73 @@ def test_hub_hb_write_sql_uses_coalesce_retain():
     sql = ol._HUB_HB_SQL
     assert "COALESCE" in sql and "auth_fp" in sql and "last_heartbeat=now()" in sql
     assert "cc-orchestrator" in sql or "%s" in sql  # parameterized target
+
+
+# --- 2026-10-01: the hub's renew also stamps its LIVE model (operator: "I still
+# don't see the hub's model"). The console on the Mini cannot read the gzb hub's
+# process, so the hub reports the model from its own /proc argv as a `model=<id>`
+# token in current_task. Unreadable -> None -> current_task untouched (never a guess).
+
+def _argv(*a):
+    return "\x00".join(a) + "\x00"
+
+
+def test_hub_model_from_cmdline_reads_model_flag():
+    cmd = _argv("/usr/bin/claude", "--dangerously-skip-permissions", "--continue",
+                "--model", "claude-opus-4-8")
+    assert ol._hub_model_from_proc(cmd) == "claude-opus-4-8"
+
+
+def test_hub_model_last_model_flag_wins_and_equals_form():
+    cmd = _argv("claude", "--model", "claude-opus-4-8", "--model=claude-sonnet-5")
+    assert ol._hub_model_from_proc(cmd) == "claude-sonnet-5"
+
+
+def test_hub_model_falls_back_to_anthropic_model_environ():
+    cmd = _argv("claude", "--dangerously-skip-permissions", "--continue")
+    env = "PATH=/usr/bin\x00ANTHROPIC_MODEL=claude-opus-5-5\x00"
+    assert ol._hub_model_from_proc(cmd, env) == "claude-opus-5-5"
+
+
+def test_hub_model_none_when_unreadable_never_a_default():
+    assert ol._hub_model_from_proc(_argv("claude", "--continue"), "PATH=/x\x00") is None
+    assert ol._hub_model_from_proc("", None) is None
+    assert ol._hub_model_from_proc(_argv("claude", "--model", "; drop table x")) is None
+
+
+def test_read_hub_model_failsoft():
+    assert ol._read_hub_model(find_pid=lambda: None) is None
+
+    def boom(p):
+        raise OSError("gone")
+    assert ol._read_hub_model(find_pid=lambda: 7, read_cmdline=boom, read_environ=boom) is None
+    assert ol._read_hub_model(
+        find_pid=lambda: 7, read_cmdline=lambda p: _argv("claude", "--model", "claude-opus-4-8"),
+        read_environ=boom) == "claude-opus-4-8"
+
+
+class _Cur:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+
+def test_write_hub_heartbeat_passes_model_and_null_model_leaves_task():
+    cur = _Cur()
+    ol._write_hub_heartbeat(cur, "abc123def456", "claude-opus-4-8")
+    sql, params = cur.calls[0]
+    assert params == ("abc123def456", "claude-opus-4-8", "claude-opus-4-8", "cc-orchestrator")
+    # NULL model -> CASE keeps current_task as-is (no blanking, no guess)
+    assert "WHEN %s::text IS NULL THEN current_task" in sql
+    cur2 = _Cur()
+    ol._write_hub_heartbeat(cur2, None)
+    assert cur2.calls[0][1] == (None, None, None, "cc-orchestrator")
+
+
+def test_hub_model_token_is_the_form_the_console_parses():
+    """The SQL appends ' model=<id>'; the console's parser must read it back."""
+    from nervous_system.console import app as console_app
+    task = "hub — always-on orchestrator (VPS) model=claude-opus-4-8"
+    assert console_app._resolve_model("orch", task, None, {}) == ("claude-opus-4-8", "hb")

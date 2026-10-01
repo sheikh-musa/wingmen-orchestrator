@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -311,11 +312,23 @@ def cmd_status() -> int:
 # last-known fp rather than NULL it (COALESCE) — a stale-but-present key beats an
 # invisible one.
 HUB_AGENT = "cc-orchestrator"
+# 2026-10-01 (operator: "I still don't see the hub's model"): the console on the Mini
+# cannot read the gzb hub's process, so the hub's OWN renew also stamps the model it
+# reads from its live claude argv (/proc/<pid>/cmdline `--model`, else the
+# ANTHROPIC_MODEL in its environ) as a `model=<id>` token in current_task — the form
+# the console (app._HB_MODEL_RE / hosted_view) parses. Any prior token is replaced,
+# the human text kept. Unreadable model (None) -> current_task UNTOUCHED: a stale
+# stamped value is retained, never blanked, and nothing is ever guessed.
 _HUB_HB_SQL = (
     "UPDATE agent_status SET last_heartbeat=now(), status='working', "
-    "auth_fp=COALESCE(%s, auth_fp), updated_at=now() "
+    "auth_fp=COALESCE(%s, auth_fp), "
+    "current_task=CASE WHEN %s::text IS NULL THEN current_task ELSE "
+    "btrim(regexp_replace(COALESCE(current_task, ''), '(^|\\s)model=\\S+', '', 'g') "
+    "|| ' model=' || %s::text) END, "
+    "updated_at=now() "
     "WHERE agent_id=%s"
 )
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-\[\]/]{1,80}$")
 
 
 def _hub_auth_fp_from_environ(environ_text):
@@ -371,10 +384,60 @@ def _read_hub_auth_fp(find_pid=None, read_environ=None):
         return None
 
 
-def _write_hub_heartbeat(cur, fp):
-    """Stamp the hub's agent_status heartbeat + auth_fp (COALESCE-retains a NULL fp).
+def _valid_model(m):
+    m = (m or "").strip()
+    return m if _MODEL_ID_RE.match(m) else None
+
+
+def _hub_model_from_proc(cmdline_text, environ_text=None):
+    """The model the hub's claude process actually runs, from its NUL-separated
+    /proc/<pid>/cmdline: the LAST `--model X` / `--model=X` (claude is last-wins on
+    argv), else ANTHROPIC_MODEL from its environ. None when neither is present or
+    the value is not a plausible model id — never a default/guess."""
+    model = None
+    args = [a for a in (cmdline_text or "").split("\x00") if a != ""]
+    for i, a in enumerate(args):
+        if a == "--model" and i + 1 < len(args):
+            model = args[i + 1]
+        elif a.startswith("--model="):
+            model = a.split("=", 1)[1]
+    if model:
+        return _valid_model(model)
+    for kv in (environ_text or "").split("\x00"):
+        if kv.startswith("ANTHROPIC_MODEL="):
+            return _valid_model(kv.split("=", 1)[1])
+    return None
+
+
+def _default_read_cmdline(pid):
+    with open(f"/proc/{pid}/cmdline", "r") as f:
+        return f.read()
+
+
+def _read_hub_model(find_pid=None, read_cmdline=None, read_environ=None):
+    """The hub's live model from /proc. FAIL-SOFT -> None; NEVER raises."""
+    find_pid = find_pid or _default_find_orch_pid
+    read_cmdline = read_cmdline or _default_read_cmdline
+    read_environ = read_environ or _default_read_environ
+    try:
+        pid = find_pid()
+        if not pid:
+            return None
+        try:
+            env_text = read_environ(pid)
+        except Exception:
+            env_text = None
+        return _hub_model_from_proc(read_cmdline(pid), env_text)
+    except Exception:
+        return None
+
+
+def _write_hub_heartbeat(cur, fp, model=None):
+    """Stamp the hub's agent_status heartbeat + auth_fp (COALESCE-retains a NULL fp)
+    + its live `model=` token (a NULL model leaves current_task untouched).
     Caller MUST have set the identity GUC in the same txn (hardened identity trigger)."""
-    cur.execute(_HUB_HB_SQL, (fp, HUB_AGENT))
+    model = _valid_model(model)
+    cur.execute(_HUB_HB_SQL, (fp, model, model, HUB_AGENT))
 
 
 def cmd_renew() -> int:
@@ -413,11 +476,13 @@ def cmd_renew() -> int:
     # committed above -> a fp/hb hiccup can never fail the renew (console's hard req).
     try:
         fp = _read_hub_auth_fp()
+        model = _read_hub_model()
         with psycopg.connect(_dsn()) as c2, c2.cursor() as cur2:
             cur2.execute("SELECT set_config('app.current_agent_id',%s,true)", (HUB_AGENT,))
-            _write_hub_heartbeat(cur2, fp)
+            _write_hub_heartbeat(cur2, fp, model)
             c2.commit()
-        print(f"hub-hb stamped: auth_fp={fp or '(retained last-known)'}")
+        print(f"hub-hb stamped: auth_fp={fp or '(retained last-known)'} "
+              f"model={model or '(unreadable — left as-is)'}")
     except Exception as e:  # never let the hb write break the renew
         print(f"[orch_lease renew] hub-hb best-effort skipped: {e}")
     print(f"renewed: holder={row[0]} host={row[1]}")
