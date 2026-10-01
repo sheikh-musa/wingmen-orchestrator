@@ -35,6 +35,11 @@ def test_parser_rejects_unknown_action():
         at.build_parser().parse_args(["1", "bogus"])
 
 
+def test_parser_accepts_triaged_by_override():
+    args = at.build_parser().parse_args(["1", "not", "--triaged-by", "cc-oeh"])
+    assert args.triaged_by == "cc-oeh"
+
+
 # ── round-trip against the ephemeral harness ─────────────────────────────────
 def _insert_captured(conn, ask="[__test__] captured row"):
     with conn.cursor() as cur:
@@ -135,6 +140,60 @@ def test_triage_unknown_id_updates_zero(operator_ledger_db):
     assert n == 0
 
 
+# ── identity resolution (bus #47221): fail-closed, never blindly 'orch-console' ─
+def test_triage_stamps_triaged_by_from_resolved_agent_identity(operator_ledger_db):
+    """set_test_env (conftest.py) exports CC_BASE_AGENT_ID=cc-test-harness for
+    the whole suite — this is the normal fleet-lane case (a lane running
+    asks_triage.py must be attributed as itself, not the console)."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    at.triage(rid, "not")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triaged_by FROM operator_asks WHERE id=%s", (rid,))
+        (triaged_by,) = cur.fetchone()
+    assert triaged_by == "cc-test-harness"
+
+
+def test_triage_console_body_stamps_triaged_by_orch_console(operator_ledger_db, monkeypatch):
+    import psycopg
+    monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    monkeypatch.setenv("ORCH_BODY_ROLE", "console")
+    monkeypatch.setenv("ORCH_AGENT_ID", "orch-console")
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    at.triage(rid, "not")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triaged_by FROM operator_asks WHERE id=%s", (rid,))
+        (triaged_by,) = cur.fetchone()
+    assert triaged_by == "orch-console"
+
+
+def test_triage_raises_when_no_identity_resolves(monkeypatch):
+    """The old bug (bus #47221): asks_triage.py defaulted triaged_by to
+    $ORCH_AGENT_ID or 'orch-console' — since every process that sources the
+    orchestrator .env inherits ORCH_AGENT_ID=orch-console as fleet-wide
+    noise, 19 rows triaged by cc-oeh/cc-angullia got misattributed to the
+    console. Must now REFUSE rather than guess."""
+    monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ORCH_AGENT_ID", raising=False)
+    monkeypatch.delenv("ORCH_BODY_ROLE", raising=False)
+    with pytest.raises(RuntimeError):
+        at.triage(1, "not", dsn="postgresql://unused")
+
+
+def test_triage_explicit_triaged_by_overrides_env(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    at.triage(rid, "not", triaged_by="cc-oeh")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT triaged_by FROM operator_asks WHERE id=%s", (rid,))
+        (triaged_by,) = cur.fetchone()
+    assert triaged_by == "cc-oeh"
+
+
 # ── main(): exit codes ────────────────────────────────────────────────────────
 def test_main_returns_2_on_missing_summary(capsys):
     rc = at.main(["1", "ask"])
@@ -151,3 +210,139 @@ def test_main_prints_ok_and_returns_0_on_success(operator_ledger_db, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert captured.out.strip() == "ok"
+
+
+# ── migration 085: client-channel done-gate + committed_date (bus #47114 3a/3c) ─
+def _insert_client_channel(conn, ask="[__test__] client-channel row", delegated_to=None):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, ask_surface, delegated_to, chase_by) "
+            "VALUES (%s,'client-channel',%s, now() + interval '24 hours') RETURNING id",
+            (ask, delegated_to),
+        )
+        rid = cur.fetchone()[0]
+    conn.commit()
+    return rid
+
+
+def test_operator_surface_done_is_never_gated_by_committed_date(operator_ledger_db):
+    """Regression: ask_surface='operator' rows (the default) must keep working
+    exactly as before migration 085 — plain --evidence, no date/outbound
+    required (bus #47110 item 3c-e)."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_captured(c)
+    n = at.triage(rid, "done", evidence="am#1")
+    assert n == 1
+
+
+def test_client_channel_done_without_evidence_or_date_raises(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+    with pytest.raises(ValueError):
+        at.triage(rid, "done")
+
+
+def test_client_channel_done_with_evidence_succeeds(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+    n = at.triage(rid, "done", evidence="am#47200")
+    assert n == 1
+
+
+def test_client_channel_done_with_committed_date_but_no_outbound_raises(operator_ledger_db):
+    """A date with no matching outbound send never satisfies the gate — the
+    whole point is 'was it actually SENT to the client' (bus #47114 item 3a)."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+    with pytest.raises(ValueError):
+        at.triage(rid, "done", committed_date="2026-10-05T00:00:00Z")
+
+
+def test_client_channel_done_with_committed_date_and_outbound_succeeds(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        rid = _insert_client_channel(c)
+        cur.execute(
+            "INSERT INTO operator_messages (direction, channel, tag, text, delivered) "
+            "VALUES ('outbound','telegram','gazzabyte-irsyad','[__test__] date sent',true) "
+            "RETURNING id"
+        )
+        outbound_id = cur.fetchone()[0]
+        c.commit()
+    n = at.triage(rid, "done", committed_date="2026-10-05T00:00:00Z", outbound_msg_id=outbound_id)
+    assert n == 1
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT triage_state, committed_date, outbound_msg_id FROM operator_asks WHERE id=%s",
+            (rid,),
+        )
+        triage_state, committed_date, ob = cur.fetchone()
+    assert triage_state == "done"
+    assert committed_date is not None
+    assert ob == outbound_id
+
+
+def test_client_channel_done_uses_committed_date_already_on_the_row(operator_ledger_db):
+    """A row that already carries a valid committed_date+outbound (set by an
+    earlier 'ask' triage) needs no fresh --committed-date/--outbound-msg-id on
+    the 'done' call itself."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        rid = _insert_client_channel(c)
+        cur.execute(
+            "INSERT INTO operator_messages (direction, channel, tag, text, delivered) "
+            "VALUES ('outbound','telegram','gazzabyte-irsyad','[__test__] date sent 2',true) "
+            "RETURNING id"
+        )
+        outbound_id = cur.fetchone()[0]
+        c.commit()
+    at.triage(rid, "ask", summary="in progress, dated",
+              committed_date="2026-10-05T00:00:00Z", outbound_msg_id=outbound_id)
+    n = at.triage(rid, "done")
+    assert n == 1
+
+
+def test_client_channel_ask_without_committed_date_does_not_change_chase_by(operator_ledger_db):
+    """A plain 'in progress' triage (no --committed-date) must NOT reschedule
+    the chase net — bus #47114 item 3a/b: only a real dated commitment moves
+    chase_by."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT chase_by FROM operator_asks WHERE id=%s", (rid,))
+        (before,) = cur.fetchone()
+    at.triage(rid, "ask", summary="in progress, no date yet")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT chase_by, closed_at FROM operator_asks WHERE id=%s", (rid,))
+        after, closed_at = cur.fetchone()
+    assert after == before
+    assert closed_at is None, "'ask' triage must never close a client-channel row"
+
+
+def test_client_channel_ask_with_committed_date_extends_chase_by(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        rid = _insert_client_channel(c)
+        cur.execute(
+            "INSERT INTO operator_messages (direction, channel, tag, text, delivered) "
+            "VALUES ('outbound','telegram','gazzabyte-irsyad','[__test__] date sent 3',true) "
+            "RETURNING id"
+        )
+        outbound_id = cur.fetchone()[0]
+        c.commit()
+    at.triage(rid, "ask", summary="dated commitment",
+              committed_date="2026-11-01T00:00:00Z", outbound_msg_id=outbound_id)
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT chase_by, committed_date, outbound_msg_id FROM operator_asks WHERE id=%s",
+            (rid,),
+        )
+        chase_by, committed_date, ob = cur.fetchone()
+    assert committed_date is not None
+    assert ob == outbound_id
+    assert chase_by >= committed_date

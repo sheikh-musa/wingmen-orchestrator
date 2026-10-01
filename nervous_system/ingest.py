@@ -333,7 +333,7 @@ class Channel:
         (self.key, self.token_env_key, self.mode, self.inject_target,
          self.inject_prefix, self.responder_ref, self.allowed_chat_ids,
          self.allowed_usernames, self.group_routing, self.channel_tag,
-         self.log_target, self.poll_offset) = row
+         self.log_target, self.poll_offset, self.audience, self.owner_lane) = row
         self.token = os.environ.get(self.token_env_key or "", "")
         # Per-channel override (in the group_routing JSONB bag): nudge EVEN WHEN the
         # target reads WORKING, instead of busy-deferring (CAI-RESP-382). ON for the
@@ -344,7 +344,7 @@ class Channel:
 
     COLS = ("channel_key, token_env_key, mode, inject_target, inject_prefix, "
             "responder_ref, allowed_chat_ids, allowed_usernames, group_routing, "
-            "channel_tag, log_target, poll_offset")
+            "channel_tag, log_target, poll_offset, audience, owner_lane")
 
 
 def load_channels(conn) -> dict[str, Channel]:
@@ -886,6 +886,18 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
     except Exception as e:  # noqa: BLE001
         _log_line(f"{ch.key}: asks-ledger tracking raised on update {upd_id} "
                   f"({type(e).__name__}: {e}) — non-fatal")
+
+    # 3c. CLIENT ASKS LEDGER (migration 085, Musa op#23944, bus #47105->#47114):
+    # every inbound on a bot_channels.audience='client' channel opens its own
+    # operator_asks row (ask_surface='client-channel', delegated_to=ch.owner_lane,
+    # REQUIRED chase_by) — the gap that let Shuq's 44h-unanswered ask go
+    # untracked. Best-effort: a tracking hiccup here must not block routing.
+    if ch.audience == "client":
+        try:
+            operator_log.maybe_track_client_ask(op_msg_id, content, ch.owner_lane)
+        except Exception as e:  # noqa: BLE001
+            _log_line(f"{ch.key}: client-ask tracking raised on update {upd_id} "
+                      f"({type(e).__name__}: {e}) — non-fatal")
 
     # 4. ROUTE (transport only — A2) with busy-aware nudge policy (CAI-RESP-382).
     if ch.mode in ("agent-session", "log-and-route"):

@@ -4,6 +4,7 @@ tests/conftest.py — so a schema mismatch fails the suite, never production;
 orch-console bus #44006/op#22741: these tests used to run against the live
 substrate via os.environ DATABASE_URL and wrote + deleted real rows there)."""
 import importlib
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -274,6 +275,207 @@ def test_maybe_track_ask_ambiguous_text_defaults_to_captured(operator_ledger_db)
         cur.execute("SELECT triage_state FROM operator_asks WHERE id=%s", (rid,))
         (triage_state,) = cur.fetchone()
     assert triage_state == "captured"
+
+
+# ── bus #47184: classify_client_ask (pure, no DB) ─────────────────────────────
+@pytest.mark.parametrize("text", [
+    "It's more than a day. It needs to be done",  # Shuq's actual ask (op#23944)
+    "please add feature X",
+    "can you check the receipts export",
+    "when will this be live?",
+    "any update on the onboarding form",
+    "still waiting on the export",
+    "this is not done yet",
+])
+def test_classify_client_ask_recognizes_requests(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "Lolol", "roger", "yup", "thanks", "ok", "noted", "haha yeah true",
+    "it's done, thanks!", "",
+])
+def test_classify_client_ask_recognizes_chatter(text):
+    assert ol.classify_client_ask(text) == "not_an_ask"
+
+
+# ── bus #47184 precision-sample fixes ──────────────────────────────────────────
+def test_classify_client_ask_strips_reply_quote_prefix_before_matching():
+    text = '↩️ re "some earlier reply of ours, possibly with \'internal\' quotes": send me the file'
+    assert ol.classify_client_ask(text) == "ask"
+
+
+def test_classify_client_ask_reply_quote_prefix_with_pure_chatter_reply():
+    text = '↩️ re "our earlier answer": yup thanks'
+    assert ol.classify_client_ask(text) == "not_an_ask"
+
+
+def test_classify_client_ask_finds_imperative_in_a_later_sentence():
+    text = "Some context about the record first. It has a formatting issue. make it flexible so it accepts this case."
+    assert ol.classify_client_ask(text) == "ask"
+
+
+def test_classify_client_ask_does_not_match_imperative_word_mid_sentence():
+    text = "we will send this over once it is ready"
+    assert ol.classify_client_ask(text) == "not_an_ask"
+
+
+@pytest.mark.parametrize("text", [
+    "we used to have a page for this. it seems missing",
+    "the export button is broken",
+    "the upload doesn't work",
+    "the dashboard isn't working today",
+    "it stopped working after the update",
+])
+def test_classify_client_ask_recognizes_implicit_bug_reports(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "keep it hidden from everyone else",
+    "guide me on how this works",
+    "we want the names to be clickable",
+])
+def test_classify_client_ask_recognizes_additional_request_phrasing(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+# ── bus #47267 item 3: recall fixes (WH-stem, politeness lead, quote-strip,
+# indirect/declarative asks) + precision tightening (want/need false positives) ─
+@pytest.mark.parametrize("text", [
+    "where is the invoice for this month",
+    "what's the status on this",
+    "who is handling the export",
+    "which one is correct",
+])
+def test_classify_client_ask_recognizes_wh_stem_question_without_question_mark(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "pls send the updated file",
+    "plz check this again",
+    "kindly confirm the total",
+])
+def test_classify_client_ask_recognizes_politeness_prefixed_imperative(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+def test_classify_client_ask_quote_strip_handles_internal_quote_in_wrapper():
+    """The wrapper's own quoted excerpt can itself contain a '":' sequence
+    (e.g. it quotes something that was itself a quote-wrapped reply). A lazy
+    strip stops at that INNER '":' and leaves the tail of the old quoted text
+    spliced onto what the imperative check then sees as the new reply --
+    greedy-to-the-final-'":' must skip the whole wrapper instead."""
+    text = '↩️ re "earlier note: re "even earlier note": ok thanks": send me the file'
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "haven't received the export yet",
+    "no reply yet on this",
+    "is it ready",
+    "is it done",
+    "something looks wrong here",
+    "getting an error on upload",
+    "the total seems off",
+])
+def test_classify_client_ask_recognizes_indirect_declarative_asks(text):
+    assert ol.classify_client_ask(text) == "ask"
+
+
+@pytest.mark.parametrize("text", [
+    "I need a coffee before we start",
+    "just need a minute",
+    "want a break after this call",
+])
+def test_classify_client_ask_personal_desire_chatter_not_a_request(text):
+    """need/want tightened (bus #47267 item 3): a bare personal-desire clause
+    with no directed object must not flood the ledger as a request of us."""
+    assert ol.classify_client_ask(text) == "not_an_ask"
+
+
+def test_classify_client_ask_reminder_bare_fyi_not_a_request():
+    assert ol.classify_client_ask("just a reminder we're closed tomorrow") == "not_an_ask"
+
+
+def test_classify_client_ask_reminder_directed_is_a_request():
+    assert ol.classify_client_ask("reminder to please send the file") == "ask"
+
+
+# ── migration 085: maybe_track_client_ask (Musa op#23944, bus #47105->#47114) ─
+def test_maybe_track_client_ask_opens_a_row_with_required_chase_by(operator_ledger_db):
+    import psycopg
+    rid = ol.maybe_track_client_ask(555001, "please add feature X", "cc-irsyad-coord")
+    assert rid is not None
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT ask, source_msg_id, ask_surface, delegated_to, chase_by, closed_at, "
+            "       triage_state "
+            "FROM operator_asks WHERE id=%s", (rid,),
+        )
+        (ask, source_msg_id, ask_surface, delegated_to, chase_by, closed_at,
+         triage_state) = cur.fetchone()
+    assert ask == "please add feature X"
+    assert source_msg_id == 555001
+    assert ask_surface == "client-channel"
+    assert triage_state == "ask", "classify_client_ask() must set triage_state at insert (bus #47184)"
+    assert delegated_to == "cc-irsyad-coord"
+    assert chase_by is not None
+    assert closed_at is None
+
+
+def test_maybe_track_client_ask_bare_ack_stays_open_but_not_an_ask(operator_ledger_db):
+    import psycopg
+    rid = ol.maybe_track_client_ask(555002, "thanks", "cc-irsyad-coord")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT triage_state, triaged_by, closed_at, chase_by FROM operator_asks WHERE id=%s",
+            (rid,),
+        )
+        triage_state, triaged_by, closed_at, chase_by = cur.fetchone()
+    assert triage_state == "not_an_ask"
+    assert triaged_by == "heuristic"
+    assert closed_at is None, "a client ack stays reversible, never hard-closed"
+    assert chase_by is not None, "even a heuristic hit gets a real chase_by (required column)"
+
+
+def test_maybe_track_client_ask_default_opened_at_is_now(operator_ledger_db):
+    import psycopg
+    before = datetime.now(timezone.utc)
+    rid = ol.maybe_track_client_ask(555003, "please add feature Y", "cc-irsyad-coord")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT created_at FROM operator_asks WHERE id=%s", (rid,))
+        (created_at,) = cur.fetchone()
+    assert created_at >= before - timedelta(seconds=5)
+
+
+def test_maybe_track_client_ask_opened_at_backdates_created_and_chase_by(operator_ledger_db):
+    """scripts/backfill_client_asks_ledger.py's whole reason for existing: a
+    3-day-old backfilled message must show as ALREADY overdue, not get a
+    fresh 24h grace period it never had (bus #47110 item 4)."""
+    import psycopg
+    three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
+    rid = ol.maybe_track_client_ask(555004, "please add feature Z", "cc-irsyad-coord",
+                                     chase_hours=24, opened_at=three_days_ago)
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT created_at, chase_by FROM operator_asks WHERE id=%s", (rid,))
+        created_at, chase_by = cur.fetchone()
+    assert abs((created_at - three_days_ago).total_seconds()) < 5
+    assert chase_by < datetime.now(timezone.utc), "backdated chase_by must already be overdue"
+
+
+def test_maybe_track_client_ask_opened_at_backdates_heuristic_row_too(operator_ledger_db):
+    import psycopg
+    three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
+    rid = ol.maybe_track_client_ask(555005, "thanks", "cc-irsyad-coord", opened_at=three_days_ago)
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT created_at, triage_state FROM operator_asks WHERE id=%s", (rid,)
+        )
+        created_at, triage_state = cur.fetchone()
+    assert abs((created_at - three_days_ago).total_seconds()) < 5
+    assert triage_state == "not_an_ask"
 
 
 # ── migration 082 no-drop invariant (bus #45557 condition 5) ─────────────────

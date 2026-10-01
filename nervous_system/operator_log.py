@@ -445,6 +445,183 @@ def maybe_track_ask(op_msg_id: int, direction: str, channel: str, tag,
         return rid
 
 
+_WH_WORD = r"(?:where|what|which|who|why|when|how)"
+
+_CLIENT_ASK_PATTERNS = [re.compile(p, re.I) for p in (
+    r"\?",                                    # any question -- addressed to us
+    r"\bplease\b",
+    r"\bcan (you|we|i)\b",
+    r"\bcould (you|we)\b",
+    r"\bwould (you|it be)\b",
+    # bus #47267 item 3a: a WH-stem question with the '?' dropped ("where is
+    # the invoice", "what's the status") -- contracted 's forms need no
+    # trailing aux since the aux IS the contraction.
+    rf"\b{_WH_WORD}'s\b",
+    rf"\b{_WH_WORD}\b[^.?!]{{0,40}}?\b(?:is|are|do|does|did)\b",
+    # need/want: bare substrings flood on personal-desire chatter ("I need a
+    # coffee", "want a break") -- negative-lookahead excludes that short,
+    # common class without narrowing the directed-request recall the 359-row
+    # backfill was already validated against (bus #47267 item 3: tighten
+    # without re-litigating the proven irsyad-coord sample).
+    r"\bneed(?:s|ed)?\b(?!\s+(?:a\s+)?(?:break|rest|coffee|nap|vacation|sleep|minute|moment)\b)",
+    r"\bmust\b",
+    r"\bhave to\b",
+    r"\bwhen (will|is|can|does)\b",
+    r"\bhow (do|can|long|much|many)\b",
+    r"\bstatus (on|of)\b",
+    r"\bany update\b",
+    r"\bfollow(?:ing)? up\b",
+    r"\bstill waiting\b",
+    r"\basap\b",
+    r"\burgent(?:ly)?\b",
+    # reminder: only as a directed nudge, not a plain FYI ("just a reminder
+    # we're closed tomorrow" is chatter, not a request of us).
+    r"\breminder\b.{0,25}\b(?:to|that you|please|kindly)\b",
+    r"\bnot (?:done|fixed|working)\b",
+    r"\b(?:is |seems |appears )?missing\b",
+    r"\bbroken\b",
+    r"\bdoesn'?t work\b",
+    r"\bisn'?t work(?:ing)?\b",
+    r"\bstopped working\b",
+    r"\bwant(?:s|ed)?\b(?!\s+(?:a\s+)?(?:break|rest|coffee|nap|vacation|sleep)\b)",
+    r"\bit(?:'s| is| has been)\b.*\b(?:day|days|hour|hours|week|weeks)\b",
+    # bus #47267 item 3d: indirect/declarative asks with no '?' and no
+    # imperative -- a status complaint phrased as a statement of fact.
+    r"\bhaven'?t (?:received|got(?:ten)?|heard)\b",
+    r"\bno\b[^.?!]{0,25}\byet\b",
+    r"\bis it (?:ready|done|fixed|working|live|up)\b",
+    r"\bwrong\b",
+    r"\berror\b",
+    r"\b(?:is|looks|seems|appears|feels) off\b",
+)]
+
+# A reply-thread quote wrapper ("↩️ re "<quoted earlier message>": <the actual
+# reply>") sits in front of the real content on every threaded reply -- the
+# leading-imperative check below is anchored to the START of a sentence, and
+# with the wrapper unstripped that start is always the quoted OLD message, not
+# the new one. GREEDY matching up to the FINAL literal '":' in the string
+# (bus #47267 item 3c, fixing the prior lazy `.*?`) -- a quoted excerpt that
+# itself contains an internal '":' sequence made the lazy match stop at that
+# internal occurrence, leaving the tail of the OLD quoted text spliced onto
+# the front of what the imperative check then treated as the NEW reply. The
+# real reply always follows the wrapper's own closing '":', which is the
+# LAST one in the string (the reply itself is not expected to contain a
+# '":' sequence of its own).
+_REPLY_QUOTE_PREFIX_RE = re.compile(r'^\s*(?:↩️\s*)?re\s+".*":\s*', re.I | re.S)
+
+_IMPERATIVE_LEAD_RE = re.compile(
+    r"^(?:add|build|fix|remove|change|send|check|review|confirm|provide|"
+    r"give|share|schedule|arrange|update|deploy|create|make|set ?up|keep|guide)\b", re.I)
+_SENTENCE_SPLIT_RE = re.compile(r"[\n]+|(?<=[.!?])\s+")
+# bus #47267 item 3b: strip a leading politeness token before the imperative
+# check -- "please X" is already caught by _CLIENT_ASK_PATTERNS' bare
+# \bplease\b, but "pls/plz/kindly X" reached neither that pattern nor the
+# imperative check (the politeness token, not the verb, sat at sentence-start).
+_POLITENESS_LEAD_RE = re.compile(r"^(?:pls|plz|please|kindly)[,:]?\s+", re.I)
+
+
+def _has_leading_imperative(text: str) -> bool:
+    """An imperative ("send me X", "please make Y") only reads as a command
+    at the START of ITS OWN sentence -- checking only the start of the WHOLE
+    message (as a single ^-anchored pattern would) misses every imperative
+    that isn't the message's very first word, which is most of them in a
+    multi-sentence client message (bus #47184 precision-sample finding:
+    "...DP and SPR has different type of BC number. make it flexible when
+    entering..." -- the real ask is the second sentence). A leading
+    politeness token ("pls send X") is stripped first so the imperative verb
+    itself lands at the segment start (bus #47267 item 3b)."""
+    return any(_IMPERATIVE_LEAD_RE.match(_POLITENESS_LEAD_RE.sub("", seg.strip()))
+               for seg in _SENTENCE_SPLIT_RE.split(text))
+
+
+def classify_client_ask(text: str) -> str:
+    """First-pass classifier for client-channel inbound (Musa op#23944 follow-up,
+    orch-console bus #47184): default is 'not_an_ask' -- 'ask' ONLY for a
+    request/question addressed to us (an imperative, "please/can you/how do
+    I/when will", a question mark, or urgency/follow-up phrasing). INVERTED
+    bias from _heuristic_triage()'s operator-surface default (which defers
+    ambiguous text to 'captured', because under-capturing an operator ask is
+    the worse failure there): the 085 backfill classified 199/359 rows as
+    chased asks when most (cosem-caai) were plain client-channel chatter/acks
+    -- a ledger where 1 real ask hides among 20 chatter rows recreates
+    exactly the Shuq failure this whole ledger exists to prevent, and paging
+    on it floods every lane. A wrong call either way is one command away from
+    correction: scripts/asks_triage.py <id> ask --summary "..." (or `not`).
+
+    Strips a leading reply-thread quote wrapper before matching (bus #47184
+    precision-sample finding #2: a reply-quote-prefixed imperative like
+    '↩️ re "...": send me the names' was invisible to a whole-string-anchored
+    check).
+
+    Examples: "It's more than a day. It needs to be done" -> ask (needs +
+    urgency phrase). "Lolol" / "roger" / "yup" -> not_an_ask."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return "not_an_ask"
+    stripped = _REPLY_QUOTE_PREFIX_RE.sub("", stripped)
+    if not stripped:
+        return "not_an_ask"
+    for pat in _CLIENT_ASK_PATTERNS:
+        if pat.search(stripped):
+            return "ask"
+    if _has_leading_imperative(stripped):
+        return "ask"
+    return "not_an_ask"
+
+
+def maybe_track_client_ask(op_msg_id: int, text: str, owner_lane: str | None,
+                            chase_hours: float = 24, opened_at=None) -> int:
+    """Called for every INBOUND message on a channel whose bot_channels.audience
+    = 'client' (migration 085, Musa op#23944, bus #47105 -> #47114). Opens ONE
+    operator_asks row per client inbound with ask_surface='client-channel'
+    (supersedes cc-fleet-health's never-built op#23531 component-4, same
+    value -- orch-console #47110 decision 1), delegated_to=owner_lane so the
+    SLA watchdog knows who to page.
+
+    chase_by is REQUIRED here (unlike maybe_track_ask()'s optional chase_by
+    for the operator path) -- every client ask gets a deadline at open time.
+    Unlike maybe_track_ask(), this NEVER auto-closes on a reply: an "in
+    progress" reply must not close the ask or push chase_by out (bus #47110
+    item 3) -- only an explicit dated commitment (scripts/asks_triage.py
+    committed_date+outbound_msg_id) or a done-confirmation closes it.
+
+    Every call opens a row (unlike maybe_track_ask(), there is no surface-gate
+    or direction check here — the caller, ingest.py's 3c block, already knows
+    this is an inbound client-channel message). triage_state is set directly
+    from classify_client_ask() at insert (bus #47184 follow-up) -- NOT left at
+    the 'captured' default -- so the owning lane's queue is already filtered
+    to genuine asks instead of every inbound needing a human look. A bare ack
+    still opens a row, just pre-triaged 'not_an_ask', so no client inbound is
+    ever silently dropped. Returns the new row's id.
+
+    `opened_at` (scripts/backfill_client_asks_ledger.py, bus #47110 item 4):
+    when given, backdates created_at/chase_by to the ORIGINAL message time
+    instead of now() -- a 3-day-old backfilled ask must show as already
+    overdue, not get a fresh 24h grace period it never actually had."""
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+    # cc-quality PR#231 review (bus #47265, LOW): this connect had no timeout,
+    # unlike every other fresh-connect call site in this file -- a stalled
+    # pooler would hang ingest.py's inbound path indefinitely instead of
+    # failing the capture loud and fast.
+    with psycopg.connect(dsn, connect_timeout=10) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id',%s,true)", (_agent_id(),))
+        label = classify_client_ask(text)
+        # stays OPEN (closed_at IS NULL) either way — a heuristic hit is
+        # reversible via asks_triage.py, same convention as the operator path.
+        cur.execute(
+            "INSERT INTO operator_asks "
+            "  (ask, source_msg_id, ask_surface, delegated_to, created_at, chase_by, "
+            "   triage_state, triaged_at, triaged_by) "
+            "VALUES (%s,%s,'client-channel',%s, COALESCE(%s,now()), "
+            "        COALESCE(%s,now()) + (%s || ' hours')::interval, "
+            "        %s, now(), 'heuristic') RETURNING id",
+            (text, op_msg_id, owner_lane, opened_at, opened_at, chase_hours, label),
+        )
+        rid = cur.fetchone()[0]
+        conn.commit()
+        return rid
+
+
 def open_asks_for(body: str) -> list:
     """Open (closed_at IS NULL) operator_asks rows delegated to `body`,
     oldest-first — the read a boot-hook / reconstitution step surfaces so a

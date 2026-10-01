@@ -7,6 +7,7 @@ just sit open forever with nobody prompted to go re-raise it with him. Mirrors
 test_sla_aged_rr_repage.py's pure-logic, no-live-DB style function-for-function.
 """
 import importlib
+import time
 
 w = importlib.import_module("scripts.priority_sla_watchdog")
 
@@ -148,3 +149,168 @@ def test_asks_chase_message_type_is_constraint_valid():
     assert w.PAGE_MESSAGE_TYPE in allowed, (
         f"{w.PAGE_MESSAGE_TYPE!r} not in agent_messages_message_type_check — an armed "
         f"asks-chase would fail SILENTLY")
+
+
+# ── migration 085 client-asks-chase net (Musa op#23944, bus #47110/#47114) ────
+# Mirrors the waiting-on-operator suite above function-for-function; the one
+# behavioral difference under test is that this net ALWAYS also pages
+# orch-console (op#23944's finding was that nothing was watching these
+# channels at all), and has no grace-since-created fallback (every
+# client-channel row gets a REQUIRED chase_by at open time).
+
+def client_row(id=1, delegated_to="cc-irsyad-coord", chase_by_epoch=None,
+                created_epoch=0, committed_date=None):
+    return {
+        "id": id,
+        "ask": "please add feature X",
+        "delegated_to": delegated_to,
+        "committed_date": committed_date,
+        "chase_by_epoch": chase_by_epoch,
+        "created_epoch": created_epoch,
+    }
+
+
+def test_client_row_not_yet_past_chase_by_is_not_a_target():
+    now = 1000 * MIN
+    r = client_row(chase_by_epoch=now + 10 * MIN)
+    assert w.client_chase_targets([r], now=now, chase_state={}) == []
+
+
+def test_client_row_past_chase_by_is_a_target():
+    now = 1000 * MIN
+    r = client_row(id=5, chase_by_epoch=now - 1 * MIN)
+    got = w.client_chase_targets([r], now=now, chase_state={})
+    assert [t["id"] for t in got] == [5]
+
+
+def test_client_row_with_no_chase_by_never_targets():
+    # should never happen (chase_by is REQUIRED at open time) but a missing
+    # value must fail closed to "not due", never crash the scan.
+    now = 1000 * MIN
+    r = client_row(id=6, chase_by_epoch=None)
+    assert w.client_chase_targets([r], now=now, chase_state={}) == []
+
+
+def test_client_row_within_cadence_of_last_chase_is_suppressed():
+    now = 1000 * MIN
+    state = {"5": now - 60 * MIN}
+    r = client_row(id=5, chase_by_epoch=now - 100 * MIN)
+    assert w.client_chase_targets([r], now=now, chase_state=state) == []
+
+
+def test_client_chase_is_capped_per_scan():
+    targets = [client_row(id=100 + i, chase_by_epoch=0) for i in range(10)]
+    n = w.chase_client_asks(
+        targets, dry=False, now=1000 * MIN, chase_state={},
+        send_chase=lambda owner, t: True, max_chases=3,
+    )
+    assert n == 3
+
+
+def test_client_chase_stamps_state_only_on_success():
+    state = {}
+    w.chase_client_asks(
+        [client_row(id=9, chase_by_epoch=0)], dry=False, now=1000 * MIN, chase_state=state,
+        send_chase=lambda owner, t: False,
+    )
+    assert "9" not in state
+
+
+def test_client_chase_dry_run_sends_nothing_and_stamps_nothing():
+    sent = {"n": 0}
+    state = {}
+    w.chase_client_asks(
+        [client_row(id=9, chase_by_epoch=0)], dry=True, now=1000 * MIN, chase_state=state,
+        send_chase=lambda owner, t: sent.__setitem__("n", sent["n"] + 1) or True,
+    )
+    assert sent["n"] == 0 and state == {}
+
+
+def test_client_ask_chase_pages_both_owner_and_orch_console(monkeypatch):
+    """The dual-recipient behavior lives in _send_client_ask_chase — verify it
+    inserts an agent_messages row for BOTH the owning lane and orch-console,
+    not just one (bus #47110 item 3b)."""
+    sent_to = []
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            if "INSERT INTO agent_messages" in sql:
+                sent_to.append(params[0])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+    monkeypatch.setattr(w, "dry_identity_guard", lambda conn: True)
+    ok = w._send_client_ask_chase(FakeConn(), "cc-irsyad-coord",
+                                   client_row(id=42, created_epoch=time.time() - 60))
+    assert ok is True
+    assert set(sent_to) == {"cc-irsyad-coord", "orch-console"}
+
+
+def test_client_ask_chase_owner_is_orch_console_deduplicates_to_one_send(monkeypatch):
+    sent_to = []
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            if "INSERT INTO agent_messages" in sql:
+                sent_to.append(params[0])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+    monkeypatch.setattr(w, "dry_identity_guard", lambda conn: True)
+    ok = w._send_client_ask_chase(FakeConn(), "orch-console", client_row(id=43, delegated_to="orch-console"))
+    assert ok is True
+    assert sent_to == ["orch-console"]
+
+
+# ── bus #47267 item 2: _gated_dry() observe-first default-OFF (both switches) ─
+def test_gated_dry_defaults_true_when_asks_chase_env_unset(monkeypatch):
+    monkeypatch.delenv("SLA_ASKS_CHASE_ENABLED", raising=False)
+    assert w._gated_dry(False, "SLA_ASKS_CHASE_ENABLED") is True
+
+
+def test_gated_dry_false_when_asks_chase_env_is_exact_1(monkeypatch):
+    monkeypatch.setenv("SLA_ASKS_CHASE_ENABLED", "1")
+    assert w._gated_dry(False, "SLA_ASKS_CHASE_ENABLED") is False
+
+
+def test_gated_dry_stays_true_for_non_exact_1_values_asks_chase(monkeypatch):
+    for v in ("true", "TRUE", "yes", "0", ""):
+        monkeypatch.setenv("SLA_ASKS_CHASE_ENABLED", v)
+        assert w._gated_dry(False, "SLA_ASKS_CHASE_ENABLED") is True
+
+
+def test_gated_dry_defaults_true_when_client_asks_chase_env_unset(monkeypatch):
+    monkeypatch.delenv("SLA_CLIENT_ASKS_CHASE_ENABLED", raising=False)
+    assert w._gated_dry(False, "SLA_CLIENT_ASKS_CHASE_ENABLED") is True
+
+
+def test_gated_dry_false_when_client_asks_chase_env_is_exact_1(monkeypatch):
+    monkeypatch.setenv("SLA_CLIENT_ASKS_CHASE_ENABLED", "1")
+    assert w._gated_dry(False, "SLA_CLIENT_ASKS_CHASE_ENABLED") is False
+
+
+def test_gated_dry_manual_dry_run_wins_even_when_armed(monkeypatch):
+    monkeypatch.setenv("SLA_ASKS_CHASE_ENABLED", "1")
+    assert w._gated_dry(True, "SLA_ASKS_CHASE_ENABLED") is True

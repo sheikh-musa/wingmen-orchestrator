@@ -39,7 +39,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -57,16 +57,34 @@ def _dsn() -> "str | None":
     return os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 
 
+DIGEST_CLIENT_ASKS_ENABLED_ENV = "DIGEST_CLIENT_ASKS_ENABLED"
+
+
+def client_asks_digest_enabled() -> bool:
+    """orch-console bus #47267 decision 2: the client-ask section is in scope
+    for the same "paging off by default" doctrine as SLA_CLIENT_ASKS_CHASE_ENABLED
+    (scripts/priority_sla_watchdog.py) -- until the ~118-row irsyad backlog is
+    triaged, showing it unconditionally would put every unsorted item straight
+    into Musa's morning roll-up. Exact '1' arms it; sibling flag, same
+    convention, same default OFF."""
+    return os.environ.get(DIGEST_CLIENT_ASKS_ENABLED_ENV, "0") == "1"
+
+
 def fetch_open_asks(conn) -> list:
     """Every triaged-open operator_asks row (migration 082: triage_state='ask'
     only — a 'captured' row has not been judged to even BE a request yet, see
     fetch_captured_summary() below), waiting-on-you first (op#22669's top
     priority — mirrors db.py's build_asks_query() 'waiting_on_musa' ordering),
-    then oldest-first within each group."""
+    then oldest-first within each group.
+
+    ask_surface = 'operator' ONLY (migration 084/085): a client-channel row
+    must never leak into Musa's own board mixed in as if he'd asked it
+    himself — see fetch_client_open_asks() for the separate client section."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, triage_summary, delegated_to, waiting_on_operator, chase_by, created_at "
             "FROM operator_asks WHERE closed_at IS NULL AND triage_state = 'ask' "
+            "  AND ask_surface = 'operator' "
             "ORDER BY waiting_on_operator DESC, created_at ASC"
         )
         cols = [d[0] for d in cur.description]
@@ -76,46 +94,118 @@ def fetch_open_asks(conn) -> list:
 def fetch_captured_summary(conn) -> dict:
     """count + oldest created_at of untriaged 'captured' rows — never
     enumerated or shown as asks (bus #45557 condition 3), just a nudge that
-    something needs a human/agent triage pass via scripts/asks_triage.py."""
+    something needs a human/agent triage pass via scripts/asks_triage.py.
+    ask_surface='operator' only, same scoping as fetch_open_asks()."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*), min(created_at) FROM operator_asks "
-            "WHERE closed_at IS NULL AND triage_state = 'captured'"
+            "WHERE closed_at IS NULL AND triage_state = 'captured' "
+            "  AND ask_surface = 'operator'"
         )
         count, oldest = cur.fetchone()
         return {"count": count or 0, "oldest": oldest}
 
 
-def render_digest(rows: list, captured: "dict | None" = None) -> str:
+# ── migration 085: client-channel asks (Musa op#23944, bus #47110/#47114) ────
+def fetch_client_open_asks(conn) -> list:
+    """Every triaged-open ask_surface='client-channel' row (triage_state='ask'
+    only — same no-PII rule as fetch_open_asks: only a human-reviewed
+    triage_summary is ever shown here, never the raw client text). Oldest-
+    first — bus #47110 item 3b wants AGE since the client asked, visible."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, triage_summary, delegated_to, committed_date, created_at "
+            "FROM operator_asks "
+            "WHERE closed_at IS NULL AND ask_surface = 'client-channel' AND triage_state = 'ask' "
+            "ORDER BY created_at ASC"
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def fetch_client_captured_summary(conn) -> dict:
+    """count + oldest created_at of untriaged client-channel rows — same
+    no-PII rule as fetch_captured_summary: never enumerated, just a count +
+    age nudge to go triage via scripts/asks_triage.py."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), min(created_at) FROM operator_asks "
+            "WHERE closed_at IS NULL AND ask_surface = 'client-channel' "
+            "  AND triage_state = 'captured'"
+        )
+        count, oldest = cur.fetchone()
+        return {"count": count or 0, "oldest": oldest}
+
+
+def _age_str(ts, now: "datetime | None" = None) -> str:
+    """Pure: a human-readable age string for a timestamptz, hours under 48h
+    else days (bus #47110 item 3b: AGE since the client asked)."""
+    if ts is None:
+        return "?"
+    now = now or datetime.now(ts.tzinfo or timezone.utc)
+    hours = (now - ts).total_seconds() / 3600
+    if hours < 48:
+        return f"{hours:.0f}h"
+    return f"{hours / 24:.1f}d"
+
+
+def render_digest(rows: list, captured: "dict | None" = None,
+                   client_rows: "list | None" = None,
+                   client_captured: "dict | None" = None) -> str:
     """Pure formatting — no DB/network — so this is trivially unit-testable.
     `rows` must already be triage_state='ask' only — triage_summary is the
     ONLY text ever shown here, never the raw `ask` column (bus #45557
-    condition 3 — a captured row's raw text must never leak into the digest)."""
+    condition 3 — a captured row's raw text must never leak into the digest).
+
+    `client_rows`/`client_captured` (migration 085, bus #47110 item 3b): the
+    separate CLIENT ASKS section, kept visually distinct from Musa's own
+    operator-surface asks above (ask_surface scoping must stay legible to the
+    reader, not just to the query) — each shows AGE since the client asked
+    and flags a committed_date given more than 3 days out (Musa op#23946:
+    "no far-out dates")."""
     captured = captured or {"count": 0, "oldest": None}
-    if not rows and not captured["count"]:
+    client_rows = client_rows or []
+    client_captured = client_captured or {"count": 0, "oldest": None}
+    if not rows and not captured["count"] and not client_rows and not client_captured["count"]:
         return "📋 Daily asks digest — nothing open. The ledger is clear."
-    waiting = [r for r in rows if r.get("waiting_on_operator")]
-    others = [r for r in rows if not r.get("waiting_on_operator")]
-    lines = [f"📋 Daily asks digest — {len(rows)} open ({len(waiting)} waiting on you)"]
-    if waiting:
-        lines.append("")
-        lines.append("WAITING ON YOU:")
-        for r in waiting:
-            lines.append(f"  #{r['id']} ({r.get('delegated_to') or '?'}): {r['triage_summary']}")
-    if others:
-        lines.append("")
-        lines.append("Open / in progress:")
-        for r in others:
-            lines.append(f"  #{r['id']} ({r.get('delegated_to') or 'unassigned'}): {r['triage_summary']}")
-    if captured["count"]:
-        oldest = captured["oldest"]
-        age = ""
-        if oldest is not None:
-            now = datetime.now(oldest.tzinfo or timezone.utc)
-            hours = (now - oldest).total_seconds() / 3600
-            age = f", oldest {hours:.0f}h"
-        lines.append("")
-        lines.append(f"({captured['count']} messages not yet sorted{age})")
+    now = datetime.now(timezone.utc)
+    lines: list[str] = []
+    if rows or captured["count"]:
+        waiting = [r for r in rows if r.get("waiting_on_operator")]
+        others = [r for r in rows if not r.get("waiting_on_operator")]
+        lines.append(f"📋 Daily asks digest — {len(rows)} open ({len(waiting)} waiting on you)")
+        if waiting:
+            lines.append("")
+            lines.append("WAITING ON YOU:")
+            for r in waiting:
+                lines.append(f"  #{r['id']} ({r.get('delegated_to') or '?'}): {r['triage_summary']}")
+        if others:
+            lines.append("")
+            lines.append("Open / in progress:")
+            for r in others:
+                lines.append(f"  #{r['id']} ({r.get('delegated_to') or 'unassigned'}): {r['triage_summary']}")
+        if captured["count"]:
+            age_suffix = f", oldest {_age_str(captured['oldest'], now)}" if captured["oldest"] else ""
+            lines.append("")
+            lines.append(f"({captured['count']} messages not yet sorted{age_suffix})")
+    if client_rows or client_captured["count"]:
+        if lines:
+            lines.append("")
+        lines.append(f"CLIENT ASKS — {len(client_rows)} open (migration 085 / op#23944):")
+        for r in client_rows:
+            age = _age_str(r.get("created_at"), now)
+            committed = r.get("committed_date")
+            created_at = r.get("created_at")
+            far_out = (committed is not None and created_at is not None
+                       and committed > created_at + timedelta(days=3))
+            date_str = f"committed {committed.date()}" if committed else "no date yet"
+            flag = " ⚠️ FAR-OUT DATE (op#23946)" if far_out else ""
+            lines.append(f"  #{r['id']} ({r.get('delegated_to') or '?'}, age {age}, {date_str})"
+                         f"{flag}: {r['triage_summary']}")
+        if client_captured["count"]:
+            oldest = client_captured["oldest"]
+            age = f", oldest {_age_str(oldest, now)}" if oldest else ""
+            lines.append(f"  ({client_captured['count']} client messages not yet sorted{age})")
     return "\n".join(lines)
 
 
@@ -169,7 +259,12 @@ def main(argv=None) -> int:
     with psycopg.connect(dsn, connect_timeout=10) as conn:
         rows = fetch_open_asks(conn)
         captured = fetch_captured_summary(conn)
-    digest = render_digest(rows, captured)
+        if client_asks_digest_enabled():
+            client_rows = fetch_client_open_asks(conn)
+            client_captured = fetch_client_captured_summary(conn)
+        else:
+            client_rows, client_captured = [], {"count": 0, "oldest": None}
+    digest = render_digest(rows, captured, client_rows, client_captured)
 
     if args.dry_run:
         print(digest)

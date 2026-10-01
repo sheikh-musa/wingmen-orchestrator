@@ -54,6 +54,10 @@ import argparse
 import os
 import sys
 import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.lib.agent_identity import IdentityError, resolve_agent_id  # noqa: E402
 
 _VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
 _VALID_TYPES = (
@@ -77,27 +81,11 @@ def warn_if_below_hub_wake_floor(to: str, req: bool, priority: str, stream=None)
         )
 
 
-class IdentityError(RuntimeError):
-    pass
-
-
-def resolve_from_agent(env: dict) -> str:
-    """Resolve "who am I" for bus attribution. Fail closed, never guess."""
-    v = env.get("CC_BASE_AGENT_ID")
-    if v:
-        return v
-    v = env.get("AGENT_ID")
-    if v:
-        return v
-    if env.get("ORCH_BODY_ROLE") == "console":
-        v = env.get("ORCH_AGENT_ID")
-        if v:
-            return v
-    raise IdentityError(
-        "cannot resolve bus from_agent identity: set CC_BASE_AGENT_ID or "
-        "AGENT_ID in the environment, or pass --from explicitly. Refusing "
-        "to guess (see reference_agent_id_not_orch_agent_id_for_identity)."
-    )
+# Re-exported for callers/tests that reach for bus_send.resolve_from_agent /
+# bus_send.IdentityError directly — the real logic now lives in
+# scripts/lib/agent_identity.py (bus #47221) so asks_triage.py, asks_open.py,
+# etc. can reuse the same fail-closed resolver instead of re-deriving it.
+resolve_from_agent = resolve_agent_id
 
 
 def dburl(env: dict) -> str:
