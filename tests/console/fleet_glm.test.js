@@ -116,4 +116,24 @@ ok("high usage colours the card bad", () => {
   assert(html.includes("resets —"), html);
 });
 
+ok("accepted leak-flagged key shows a muted warning line", () => {
+  const html = glmCard({ available: true, level: "pro", age_s: 1,
+    key_warning: "key leak-flagged — use accepted by Musa (op#24626); rotate when convenient",
+    windows: [{ label: "5h", used: 10, cap: 100, pct: 10, resets_at: null }] });
+  assert(html.includes('class="glmwarn"'), html);
+  assert(html.includes("use accepted by Musa (op#24626)"), html);
+});
+
+ok("no key_warning -> no warning line", () => {
+  const html = glmCard({ available: true, level: "pro", key_warning: null,
+    windows: [{ label: "5h", used: 10, cap: 100, pct: 10, resets_at: null }] });
+  assert(!html.includes("glmwarn"), html);
+});
+
+ok("key_warning is escaped", () => {
+  const html = glmCard({ available: true, level: "pro", key_warning: "<img src=x>",
+    windows: [{ label: "5h", used: 10, cap: 100, pct: 10, resets_at: null }] });
+  assert(!html.includes("<img"), html);
+});
+
 console.log("fleet_glm.test.js: " + passed + " passed");

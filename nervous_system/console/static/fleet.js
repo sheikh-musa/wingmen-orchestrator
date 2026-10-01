@@ -330,7 +330,11 @@
     return '<div class="poolrow poolcard glm ' + cls + '" title="' + esc(title) + '">'
       + '<div class="poolhead"><span class="poolchip ' + cls + '">' + esc(name) + '</span>'
       + (lvl ? '<span class="poolstatus">plan ' + esc(lvl) + '</span>' : "")
-      + '</div>' + rows + '</div>';
+      + '</div>' + rows
+      // op#24626: the key is leak-flagged in the vault but the operator accepted
+      // continued use — keep that risk visible as a small muted line.
+      + (g.key_warning ? '<div class="glmwarn">⚠ ' + esc(g.key_warning) + '</div>' : "")
+      + '</div>';
   }
   function renderPoolUsage(rows, glm) {
     var el = $("poolUsage");
@@ -339,7 +343,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v68';
+  var APP_BUILD = 'fc-v69';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
