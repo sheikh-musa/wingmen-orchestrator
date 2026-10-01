@@ -180,16 +180,78 @@ def test_vault_read_pins_file_first_dsn_and_restores_environment(monkeypatch):
     assert "AGENT_ID" not in os.environ
 
 
-def test_vault_leak_flagged_key_is_refused(monkeypatch):
+def _fake_vault(monkeypatch, leak_flagged):
     class _V:
         def get(self, name, reason):
-            return types.SimpleNamespace(value=FAKE_KEY, leak_flagged=True, leak_reason="x")
+            return types.SimpleNamespace(value=FAKE_KEY, leak_flagged=leak_flagged,
+                                         leak_reason="x" if leak_flagged else None)
     monkeypatch.setitem(sys.modules, "nervous_system.vault", types.SimpleNamespace(vault=_V()))
     import scripts.lib.substrate_dsn as sd
     monkeypatch.setattr(sd, "dsn_from_env_file", lambda: "postgresql://file-first.invalid/db")
+    # conftest stubs read_key hermetically; route through the REAL vault reader
+    # (against the fake vault above) so the leak-flag branch is exercised.
+    monkeypatch.setattr(glm_usage, "read_key", glm_usage._read_key_from_vault)
+
+
+def test_vault_leak_flagged_key_is_refused_when_not_accepted(monkeypatch):
+    _fake_vault(monkeypatch, leak_flagged=True)
+    monkeypatch.setattr(glm_usage, "ACCEPTED_LEAK_FLAG", {})
     with pytest.raises(glm_usage.GlmUsageError) as ei:
         glm_usage._read_key_from_vault()
     assert FAKE_KEY not in str(ei.value)
+    assert glm_usage._key_warning is None
+
+
+def test_accepted_leak_flag_is_name_scoped_and_attributed():
+    # The override is a code constant for exactly this key, attributed to the operator ruling.
+    assert set(glm_usage.ACCEPTED_LEAK_FLAG) == {"GLM_CODING_KEY"}
+    assert "op#24626" in glm_usage.ACCEPTED_LEAK_FLAG["GLM_CODING_KEY"]
+    assert "Musa" in glm_usage.ACCEPTED_LEAK_FLAG["GLM_CODING_KEY"]
+    with pytest.raises(TypeError):
+        glm_usage.ACCEPTED_LEAK_FLAG["OTHER_KEY"] = "x"   # read-only mapping
+
+
+def test_flagged_and_accepted_key_is_used_and_payload_warns(monkeypatch, caplog):
+    _fake_vault(monkeypatch, leak_flagged=True)
+    calls = []
+    monkeypatch.setattr(glm_usage, "http_get_json", _fake_http(calls))
+    with caplog.at_level(logging.DEBUG):
+        out = glm_usage.get_glm_usage(now=1000.0)
+    assert calls == [(glm_usage.QUOTA_URL, FAKE_KEY)]
+    assert out["available"] is True
+    assert out["key_warning"] == glm_usage.ACCEPTED_LEAK_WARNING
+    assert "op#24626" in out["key_warning"] and "leak-flagged" in out["key_warning"]
+    assert FAKE_KEY not in json.dumps(out)
+    assert all(FAKE_KEY not in r.getMessage() for r in caplog.records)
+    # the warning persists on cached reads while the same key is in use
+    again = glm_usage.get_glm_usage(now=1000.0 + glm_usage.CACHE_TTL_S + 1)
+    assert again["key_warning"] == glm_usage.ACCEPTED_LEAK_WARNING
+
+
+def test_flagged_not_accepted_is_unavailable_end_to_end(monkeypatch):
+    _fake_vault(monkeypatch, leak_flagged=True)
+    monkeypatch.setattr(glm_usage, "ACCEPTED_LEAK_FLAG", {})
+    calls = []
+    monkeypatch.setattr(glm_usage, "http_get_json", _fake_http(calls))
+    out = glm_usage.get_glm_usage(now=1000.0)
+    assert out == {"available": False, "level": None, "windows": [], "age_s": None}
+    assert calls == []          # the flagged key never reached z.ai
+
+
+def test_unflagged_key_has_no_warning(monkeypatch):
+    _fake_vault(monkeypatch, leak_flagged=False)
+    monkeypatch.setattr(glm_usage, "http_get_json", _fake_http([]))
+    out = glm_usage.get_glm_usage(now=1000.0)
+    assert out["available"] is True and out["key_warning"] is None
+
+
+def test_glm_error_log_carries_exception_class(fake_key, monkeypatch, caplog):
+    def _down(url, key):
+        raise glm_usage.GlmUsageError("z.ai quota HTTP 500")
+    monkeypatch.setattr(glm_usage, "http_get_json", _down)
+    with caplog.at_level(logging.DEBUG):
+        glm_usage.get_glm_usage(now=1.0)
+    assert any("GlmUsageError" in r.getMessage() for r in caplog.records)
 
 
 # ---- /api/fleet end to end: numbers present, key absent from body + logs -----

@@ -16,6 +16,13 @@ process and held ONLY in this module's memory. It is never logged, never put in
 argv, never returned in a payload, and never interpolated into an error message:
 failure paths log the exception CLASS name only (plus an HTTP status code).
 
+LEAK FLAG — the vault refuses nothing itself; a leak-flagged secret is returned with
+`leak_flagged=True` and this module fails CLOSED on it, EXCEPT for a name listed in
+ACCEPTED_LEAK_FLAG: an explicit, attributable, code-reviewed operator risk acceptance
+(never env-driven, never generic). The vault row is NOT touched — its design forbids
+clearing a leak flag without rotating — and the card shows a muted `key_warning` line
+for as long as the accepted-but-flagged key is in use, so the risk stays visible.
+
 HONESTY — a successful read is cached for CACHE_TTL_S (page loads must not hammer
 z.ai or the vault). When a refresh FAILS the card reads "unavailable": stale
 numbers are never presented as current and nothing is ever guessed.
@@ -30,7 +37,8 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from types import MappingProxyType
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 logger = logging.getLogger("wingmen.console.glm_usage")
 
@@ -41,6 +49,16 @@ FAIL_TTL_S = 60            # a failure is re-tried at most once a minute
 HTTP_TIMEOUT_S = 5.0
 _CONSOLE_AGENT_ID = "fleet-console"   # vault audit identity when the process has none
 
+# Operator-accepted risk: secret name -> attribution. Name-scoped and code-reviewed on
+# purpose — adding a name here is a deliberate, reviewable act, not configuration.
+# GLM_CODING_KEY was leak-flagged because it was pasted in a Telegram DM (op#24293);
+# Musa (owner of the z.ai account) decided to keep using it: "bruh just use it"
+# (operator_messages op#24626, 2026-10-01). Remove the entry once the key is rotated.
+ACCEPTED_LEAK_FLAG: Mapping[str, str] = MappingProxyType({
+    "GLM_CODING_KEY": "Musa op#24626 (2026-10-01): operator accepted continued use of the leak-flagged key",
+})
+ACCEPTED_LEAK_WARNING = "key leak-flagged — use accepted by Musa (op#24626); rotate when convenient"
+
 # unit code -> (short label, seconds per unit). Only codes verified against the
 # live response are mapped; anything else is shown with a neutral label.
 _UNITS = {3: ("h", 3600), 6: ("wk", 7 * 86400)}
@@ -49,6 +67,7 @@ _lock = threading.Lock()
 _key: Optional[str] = None                 # in-memory only — NEVER log / return
 _cache: Optional[Dict[str, Any]] = None    # last result (good or unavailable)
 _cache_at: float = 0.0
+_key_warning: Optional[str] = None         # set when an accepted leak-flagged key is in use
 
 
 class GlmUsageError(RuntimeError):
@@ -62,7 +81,13 @@ def _read_key_from_vault() -> str:
     os.environ. The console is not an agent and the inherited DATABASE_URL can be a
     stale pre-rotation value, so for the duration of this one call we pin the DSN
     FILE-FIRST (scripts/lib/substrate_dsn — op#24342) and supply a console identity
-    when none is set, then restore the environment exactly."""
+    when none is set, then restore the environment exactly. (vault.get() has no DSN
+    parameter — vault._connect() reads os.environ — so the env pin stays until the
+    vault API grows one.)
+
+    A leak-flagged secret is refused unless its name is in ACCEPTED_LEAK_FLAG, in
+    which case it is used and `_key_warning` is set for the card."""
+    global _key_warning
     from nervous_system.vault import vault
     from scripts.lib.substrate_dsn import dsn_from_env_file
 
@@ -79,10 +104,17 @@ def _read_key_from_vault() -> str:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    if secret.leak_flagged:
-        raise GlmUsageError("vault marks GLM_CODING_KEY leak-flagged; not using it")
     if not secret.value:
         raise GlmUsageError("vault returned an empty GLM_CODING_KEY")
+    if secret.leak_flagged:
+        accepted = ACCEPTED_LEAK_FLAG.get(VAULT_NAME)
+        if not accepted:
+            raise GlmUsageError("vault marks GLM_CODING_KEY leak-flagged; not using it")
+        logger.warning("glm usage: using leak-flagged %s under operator-accepted risk (%s)",
+                       VAULT_NAME, accepted)
+        _key_warning = ACCEPTED_LEAK_WARNING
+    else:
+        _key_warning = None
     return secret.value
 
 
@@ -166,8 +198,9 @@ def _unavailable() -> Dict[str, Any]:
 
 
 def _fetch() -> Dict[str, Any]:
-    global _key
+    global _key, _key_warning
     if _key is None:
+        _key_warning = None   # re-derived by the vault read for the key now in use
         _key = read_key()
     try:
         body = http_get_json(QUOTA_URL, _key)
@@ -175,7 +208,9 @@ def _fetch() -> Dict[str, Any]:
         if "HTTP 401" in str(e) or "HTTP 403" in str(e):
             _key = None   # rotated/revoked key: re-read from the vault next refresh
         raise
-    return parse_quota(body)
+    out = parse_quota(body)
+    out["key_warning"] = _key_warning
+    return out
 
 
 def get_glm_usage(now: Optional[float] = None) -> Dict[str, Any]:
@@ -191,7 +226,7 @@ def get_glm_usage(now: Optional[float] = None) -> Dict[str, Any]:
             result = _fetch()
             result["fetched_at"] = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
         except GlmUsageError as e:
-            logger.warning("glm usage unavailable: %s", e)
+            logger.warning("glm usage unavailable: %s: %s", type(e).__name__, e)
             result = _unavailable()
         except Exception as e:  # noqa: BLE001 — vault/DB errors: class name only
             logger.warning("glm usage unavailable: %s", type(e).__name__)
@@ -208,6 +243,6 @@ def _with_age(result: Dict[str, Any], now: float) -> Dict[str, Any]:
 
 
 def _reset_for_tests() -> None:
-    global _key, _cache, _cache_at
+    global _key, _cache, _cache_at, _key_warning
     with _lock:
-        _key, _cache, _cache_at = None, None, 0.0
+        _key, _cache, _cache_at, _key_warning = None, None, 0.0, None
