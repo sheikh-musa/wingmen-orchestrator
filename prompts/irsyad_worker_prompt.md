@@ -27,7 +27,7 @@ channel; you only pull claimable build work off the queue and execute it.
     WHERE id = (
       SELECT id FROM coord_dispatch_queue
        WHERE claimed_by IS NULL AND created_at < now() - interval '120 seconds'
-       ORDER BY priority DESC NULLS LAST, created_at ASC
+       ORDER BY priority ASC NULLS LAST, created_at ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED)
     RETURNING id, title, spec_ref;
