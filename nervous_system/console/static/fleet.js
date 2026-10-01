@@ -280,14 +280,66 @@
       + '<div class="pooladvrow">' + paceAdvisory(p) + '</div>'
       + '</div>';
   }
-  function renderPoolUsage(rows) {
+  // ---- GLM Coding Plan (z.ai) quota card (op#24597) ------------------------
+  // Sits beside the Claude Max pool cards. Backend: nervous_system/console/
+  // glm_usage.py (5-min server cache; the key never reaches the payload). When
+  // the read failed the card says "GLM usage unavailable" — never stale numbers.
+  var OPERATOR_TZ_H = 4;   // operator is in Abu Dhabi (UTC+4, no DST)
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  // ISO -> "Thu 14:30 UTC+4 (10:30 UTC)"; "" when absent/unparsable.
+  function fmtClockDual(iso) {
+    if (!iso) return "";
+    var t = Date.parse(String(iso));
+    if (isNaN(t)) return "";
+    var u = new Date(t), l = new Date(t + OPERATOR_TZ_H * 3600000);
+    var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    return DAYS[l.getUTCDay()] + " " + pad2(l.getUTCHours()) + ":" + pad2(l.getUTCMinutes()) + " UTC+" + OPERATOR_TZ_H
+      + " (" + pad2(u.getUTCHours()) + ":" + pad2(u.getUTCMinutes()) + " UTC)";
+  }
+  function fmtCount(n) { return n == null ? "—" : Number(n).toLocaleString("en-US"); }
+  function glmCard(g) {
+    if (!g) return "";
+    if (!g.available) {
+      return '<div class="poolrow poolcard stale glm" title="z.ai quota read failed — no numbers shown rather than stale ones">'
+        + '<div class="poolhead"><span class="poolchip stale">GLM (z.ai)</span>'
+        + '<span class="poolstatus">GLM usage unavailable</span></div></div>';
+    }
+    var ws = g.windows || [];
+    var worst = 0;
+    ws.forEach(function (w) { if (w.pct != null && w.pct > worst) worst = w.pct; });
+    var cls = poolLevel(worst);
+    var lvl = g.level ? String(g.level) : "";
+    var name = "GLM (z.ai" + (lvl ? " " + lvl.charAt(0).toUpperCase() + lvl.slice(1) : "") + ")";
+    var title = name + " Coding Plan" + ws.map(function (w) {
+      return " · " + w.label + ": " + fmtCount(w.used) + "/" + fmtCount(w.cap) + " (" + w.pct + "%)"
+        + (w.resets_at ? " resets " + fmtClockDual(w.resets_at) : "");
+    }).join("") + (g.age_s != null ? " · read " + fmtAge(g.age_s) + " ago" : "");
+    var rows = ws.map(function (w) {
+      var lv = poolLevel(w.pct);
+      var bw = w.pct == null ? 0 : Math.max(0, Math.min(100, Math.round(w.pct)));
+      var clock = fmtClockDual(w.resets_at);
+      return '<div class="poolwin ' + lv + '">'
+        + '<span class="poolwl">' + esc(w.label) + '</span>'
+        + '<span class="poolbar"><i style="width:' + bw + '%"></i></span>'
+        + '<b>' + (w.pct == null ? "—" : Math.round(w.pct) + "%") + '</b>'
+        + '<span class="poolreset">' + fmtCount(w.used) + '/' + fmtCount(w.cap) + '</span>'
+        + '<span class="poolreset">resets ' + (minutesToReset(w.resets_at) == null ? "—" : "in " + fmtReset(w.resets_at)) + '</span>'
+        + (clock ? '<span class="pooladv glmclock">' + esc(clock) + '</span>' : "")
+        + '</div>';
+    }).join("");
+    return '<div class="poolrow poolcard glm ' + cls + '" title="' + esc(title) + '">'
+      + '<div class="poolhead"><span class="poolchip ' + cls + '">' + esc(name) + '</span>'
+      + (lvl ? '<span class="poolstatus">plan ' + esc(lvl) + '</span>' : "")
+      + '</div>' + rows + '</div>';
+  }
+  function renderPoolUsage(rows, glm) {
     var el = $("poolUsage");
     if (!el) return;
-    el.innerHTML = (rows && rows.length) ? rows.map(poolChip).join("") : "";
+    el.innerHTML = ((rows && rows.length) ? rows.map(poolChip).join("") : "") + glmCard(glm);
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v67';
+  var APP_BUILD = 'fc-v68';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -1433,7 +1485,7 @@
     renderPulse(d.pulse || {});
     renderStat(d.pulse || {}, bloatCount);
     renderTopBloat(glance);
-    renderPoolUsage(d.pool_usage || []);
+    renderPoolUsage(d.pool_usage || [], d.glm_usage);
     renderNeeds(d.needs_you || []);
     renderCoordinators(d.coordinators || []);
     buildEntries(lanes, d.coordinators || []);
@@ -1834,7 +1886,7 @@
 
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, glmCard: glmCard, fmtClockDual: fmtClockDual, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel,
       poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup,
       mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,
