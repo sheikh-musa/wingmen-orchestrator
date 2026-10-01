@@ -324,6 +324,46 @@ def test_client_channel_ask_without_committed_date_does_not_change_chase_by(oper
     assert closed_at is None, "'ask' triage must never close a client-channel row"
 
 
+# ── bus #47349: chase_by cleared on 'not', restored on re-triage to 'ask' ────
+def test_triage_not_clears_chase_by_on_client_channel_row(operator_ledger_db):
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)  # chase_by = now() + 24h
+    n = at.triage(rid, "not")
+    assert n == 1
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT chase_by FROM operator_asks WHERE id=%s", (rid,))
+        (chase_by,) = cur.fetchone()
+    assert chase_by is None, (
+        "bus #47349: a row triaged not_an_ask must never keep a live chase "
+        "deadline, belt-and-suspenders alongside the chase query's own filter"
+    )
+
+
+def test_triage_ask_restores_chase_by_after_not_an_ask(operator_ledger_db):
+    """test (c)-3: re-triaging not_an_ask -> ask must restore the chase with
+    a fresh default window, not leave chase_by permanently NULL."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c:
+        rid = _insert_client_channel(c)
+    at.triage(rid, "not")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute("SELECT chase_by FROM operator_asks WHERE id=%s", (rid,))
+        (cleared,) = cur.fetchone()
+    assert cleared is None
+    at.triage(rid, "ask", summary="actually this WAS a real request")
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT chase_by, triage_state, closed_at FROM operator_asks WHERE id=%s", (rid,)
+        )
+        chase_by, triage_state, closed_at = cur.fetchone()
+    assert triage_state == "ask"
+    assert closed_at is None
+    assert chase_by is not None
+    from datetime import datetime, timezone
+    assert chase_by > datetime.now(timezone.utc), "restored chase_by must be a fresh future deadline"
+
+
 def test_client_channel_ask_with_committed_date_extends_chase_by(operator_ledger_db):
     import psycopg
     with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
