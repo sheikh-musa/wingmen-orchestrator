@@ -8,7 +8,7 @@ set -euo pipefail
 ORCH_DIR="$HOME/wingmen/orchestrator"
 cd "$ORCH_DIR"
 set -a; . ./.env; set +a
-export INGEST_CHANNELS="nazim-console,cosem-exams,cosem-caai,alderei,finance-console,hk-editor,cosem-tdu,angullia,oeh,mamadah"
+export INGEST_CHANNELS="nazim-console,cosem-exams,cosem-caai,alderei,finance-console,hk-editor,cosem-tdu,angullia,oeh,mamadah,coffeemedia"
 # wingmen-personal credential for the mamadah personal-routing split-write
 # (bus #47837 C3) — GUARDED file, deliberately NOT in .env (that's sourced
 # with `set -a`, which would export it to every fleet lane via
