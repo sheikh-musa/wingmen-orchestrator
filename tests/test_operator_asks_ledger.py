@@ -437,7 +437,11 @@ def test_maybe_track_client_ask_bare_ack_stays_open_but_not_an_ask(operator_ledg
     assert triage_state == "not_an_ask"
     assert triaged_by == "heuristic"
     assert closed_at is None, "a client ack stays reversible, never hard-closed"
-    assert chase_by is not None, "even a heuristic hit gets a real chase_by (required column)"
+    assert chase_by is None, (
+        "bus #47349: a not_an_ask row must never carry a live chase deadline "
+        "-- a bare ack staying OPEN for reversibility is not the same as it "
+        "needing to be chased"
+    )
 
 
 def test_maybe_track_client_ask_default_opened_at_is_now(operator_ledger_db):
@@ -471,11 +475,12 @@ def test_maybe_track_client_ask_opened_at_backdates_heuristic_row_too(operator_l
     rid = ol.maybe_track_client_ask(555005, "thanks", "cc-irsyad-coord", opened_at=three_days_ago)
     with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
         cur.execute(
-            "SELECT created_at, triage_state FROM operator_asks WHERE id=%s", (rid,)
+            "SELECT created_at, triage_state, chase_by FROM operator_asks WHERE id=%s", (rid,)
         )
-        created_at, triage_state = cur.fetchone()
+        created_at, triage_state, chase_by = cur.fetchone()
     assert abs((created_at - three_days_ago).total_seconds()) < 5
     assert triage_state == "not_an_ask"
+    assert chase_by is None, "bus #47349: not_an_ask never gets a chase_by, backdated or not"
 
 
 # ── migration 082 no-drop invariant (bus #45557 condition 5) ─────────────────

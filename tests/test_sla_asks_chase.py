@@ -314,3 +314,89 @@ def test_gated_dry_false_when_client_asks_chase_env_is_exact_1(monkeypatch):
 def test_gated_dry_manual_dry_run_wins_even_when_armed(monkeypatch):
     monkeypatch.setenv("SLA_ASKS_CHASE_ENABLED", "1")
     assert w._gated_dry(True, "SLA_ASKS_CHASE_ENABLED") is True
+
+
+# ── bus #47349: _fetch_client_chase_asks must filter on triage_state ─────────
+# A not_an_ask row stays OPEN (closed_at IS NULL) by design -- the heuristic
+# classifier's call is reversible via asks_triage.py -- but 193 such rows were
+# found live still carrying a chase_by with no triage_state filter in this
+# query at all. These round-trip against the real schema (operator_ledger_db,
+# tests/conftest.py) end-to-end through _fetch_client_chase_asks ->
+# client_chase_targets, never a live store.
+
+def test_not_an_ask_past_chase_by_does_not_page_end_to_end(operator_ledger_db):
+    """test (c)-1: a not_an_ask row past its chase_by must never reach the
+    due-check, let alone page."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, ask_surface, triage_state, chase_by) "
+            "VALUES ('lol thanks', 'client-channel', 'not_an_ask', now() - interval '1 hour')"
+        )
+        c.commit()
+    with psycopg.connect(operator_ledger_db) as conn:
+        rows = w._fetch_client_chase_asks(conn)
+    targets = w.client_chase_targets(rows, now=time.time(), chase_state={})
+    assert targets == []
+
+
+def test_ask_past_chase_by_pages_end_to_end(operator_ledger_db):
+    """test (c)-2: a genuine ask row past its chase_by must still page."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, ask_surface, triage_state, delegated_to, chase_by) "
+            "VALUES ('please ship it', 'client-channel', 'ask', 'cc-irsyad-coord', "
+            "        now() - interval '1 hour') RETURNING id"
+        )
+        rid = cur.fetchone()[0]
+        c.commit()
+    with psycopg.connect(operator_ledger_db) as conn:
+        rows = w._fetch_client_chase_asks(conn)
+    targets = w.client_chase_targets(rows, now=time.time(), chase_state={})
+    assert [t["id"] for t in targets] == [rid]
+
+
+def test_captured_past_chase_by_pages_end_to_end(operator_ledger_db):
+    """triage_state defaults to 'captured' (an untriaged row pending human
+    review) -- the chase net must still watch it, same as 'ask'; only
+    'not_an_ask' is excluded."""
+    import psycopg
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, ask_surface, delegated_to, chase_by) "
+            "VALUES ('untriaged row', 'client-channel', 'cc-irsyad-coord', "
+            "        now() - interval '1 hour') RETURNING id"
+        )
+        rid = cur.fetchone()[0]
+        c.commit()
+    with psycopg.connect(operator_ledger_db) as conn:
+        rows = w._fetch_client_chase_asks(conn)
+    targets = w.client_chase_targets(rows, now=time.time(), chase_state={})
+    assert [t["id"] for t in targets] == [rid]
+
+
+def test_retriaged_ask_after_not_an_ask_pages_again_end_to_end(operator_ledger_db):
+    """test (c)-3: re-triaging a heuristic miss from not_an_ask back to ask
+    restores the chase (scripts/asks_triage.py's restore-on-reopen), not a
+    permanently-excluded row."""
+    import psycopg
+    from scripts import asks_triage as at
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO operator_asks (ask, ask_surface, triage_state, delegated_to, chase_by) "
+            "VALUES ('please ship it', 'client-channel', 'not_an_ask', 'cc-irsyad-coord', NULL) "
+            "RETURNING id"
+        )
+        rid = cur.fetchone()[0]
+        c.commit()
+    at.triage(rid, "ask", summary="actually a real request", dsn=operator_ledger_db)
+    with psycopg.connect(operator_ledger_db) as c, c.cursor() as cur:
+        # the restore sets a fresh (not-yet-due) window -- backdate it here to
+        # exercise the due-check, same as a client ask that's been open a while.
+        cur.execute("UPDATE operator_asks SET chase_by = now() - interval '1 hour' WHERE id=%s", (rid,))
+        c.commit()
+    with psycopg.connect(operator_ledger_db) as conn:
+        rows = w._fetch_client_chase_asks(conn)
+    targets = w.client_chase_targets(rows, now=time.time(), chase_state={})
+    assert [t["id"] for t in targets] == [rid]

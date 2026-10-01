@@ -579,7 +579,16 @@ def maybe_track_client_ask(op_msg_id: int, text: str, owner_lane: str | None,
     SLA watchdog knows who to page.
 
     chase_by is REQUIRED here (unlike maybe_track_ask()'s optional chase_by
-    for the operator path) -- every client ask gets a deadline at open time.
+    for the operator path) -- every GENUINE client ask gets a deadline at
+    open time. EXCEPTION (bus #47349, orch-console): a row the classifier
+    labels 'not_an_ask' gets chase_by left NULL instead -- it still opens a
+    row (see below, no inbound is ever silently dropped) and stays OPEN for
+    the same one-command reversibility, but a bare ack/chatter row must never
+    carry a live chase deadline (the SLA chase net's own query also filters
+    triage_state as a second layer, but a not_an_ask row shouldn't have a
+    chase_by at all even in principle -- 193 such rows were found live with
+    one anyway). scripts/asks_triage.py restores chase_by with a fresh
+    default window on re-triage back to 'ask'.
     Unlike maybe_track_ask(), this NEVER auto-closes on a reply: an "in
     progress" reply must not close the ask or push chase_by out (bus #47110
     item 3) -- only an explicit dated commitment (scripts/asks_triage.py
@@ -608,14 +617,18 @@ def maybe_track_client_ask(op_msg_id: int, text: str, owner_lane: str | None,
         label = classify_client_ask(text)
         # stays OPEN (closed_at IS NULL) either way — a heuristic hit is
         # reversible via asks_triage.py, same convention as the operator path.
+        # chase_by is NULL for a not_an_ask label (bus #47349) — a bare
+        # ack/chatter row never gets a live chase deadline; asks_triage.py
+        # restores it with a fresh window on re-triage back to 'ask'.
         cur.execute(
             "INSERT INTO operator_asks "
             "  (ask, source_msg_id, ask_surface, delegated_to, created_at, chase_by, "
             "   triage_state, triaged_at, triaged_by) "
             "VALUES (%s,%s,'client-channel',%s, COALESCE(%s,now()), "
-            "        COALESCE(%s,now()) + (%s || ' hours')::interval, "
+            "        CASE WHEN %s = 'not_an_ask' THEN NULL "
+            "             ELSE COALESCE(%s,now()) + (%s || ' hours')::interval END, "
             "        %s, now(), 'heuristic') RETURNING id",
-            (text, op_msg_id, owner_lane, opened_at, opened_at, chase_hours, label),
+            (text, op_msg_id, owner_lane, opened_at, label, opened_at, chase_hours, label),
         )
         rid = cur.fetchone()[0]
         conn.commit()

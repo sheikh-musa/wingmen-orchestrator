@@ -1303,7 +1303,16 @@ def _fetch_client_chase_asks(conn):
     """Impure: OPEN ask_surface='client-channel' operator_asks rows with a
     chase_by set, plus epoch timestamps for the pure due-check above. AGE
     since the client asked is created_epoch (the row is opened the same turn
-    the client's inbound is captured — nervous_system/ingest.py's 3c block)."""
+    the client's inbound is captured — nervous_system/ingest.py's 3c block).
+
+    triage_state IN ('ask','captured') (bus #47349, orch-console): a row the
+    heuristic classifier (or a human) judged 'not_an_ask' stays OPEN by design
+    (operator_log.maybe_track_client_ask's reversibility convention — one
+    asks_triage.py command undoes a bad call) but must never page as if it
+    were a live request. Found live with 193 such rows carrying a chase_by
+    while this query had no triage_state filter at all -- flipping
+    SLA_CLIENT_ASKS_CHASE_ENABLED before this fix would have paged on every
+    one of them."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, ask, delegated_to, committed_date, "
@@ -1311,7 +1320,8 @@ def _fetch_client_chase_asks(conn):
             "  extract(epoch FROM created_at) AS created_epoch "
             "FROM operator_asks "
             "WHERE closed_at IS NULL AND ask_surface = 'client-channel' "
-            "  AND chase_by IS NOT NULL"
+            "  AND chase_by IS NOT NULL "
+            "  AND triage_state IN ('ask','captured')"
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]

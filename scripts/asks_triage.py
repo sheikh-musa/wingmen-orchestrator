@@ -27,7 +27,11 @@ Actions:
          plain "in progress" triage must not reschedule the chase net.
   not    not a real request (bare ack / approval / inline-answered
          question). Sets triage_state='not_an_ask', closed_at=now(),
-         closed_reason='not_a_request'.
+         closed_reason='not_a_request'. Also clears chase_by (bus #47349) --
+         a row judged not an ask must never carry a live chase deadline,
+         belt-and-suspenders alongside the chase query's own triage_state
+         filter. Restored with a fresh default window if later re-triaged
+         back to 'ask' with no chase_by already set.
   done   a real request that has already been delivered. Sets
          triage_state='done', closed_at=now(), closed_reason='done',
          optionally triage_evidence_ref.
@@ -144,9 +148,13 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                 params = (evidence, triaged_by, committed_date, outbound_msg_id, item_id)
             elif action == "ask":
                 # committed_date/outbound_msg_id are optional here: a plain "in
-                # progress" triage (neither given) leaves chase_by untouched; only a
-                # real dated commitment reschedules the chase net (extend, never
-                # shrink — GREATEST against any existing chase_by).
+                # progress" triage (neither given) leaves an EXISTING chase_by
+                # untouched; only a real dated commitment reschedules the chase
+                # net (extend, never shrink — GREATEST against any existing
+                # chase_by). bus #47349: a row with chase_by NULL (a prior
+                # not_an_ask insert/triage cleared it) gets a fresh default
+                # 24h window restored here on re-triage back to 'ask' — same
+                # default as operator_log.maybe_track_client_ask's chase_hours.
                 cur.execute(
                     "UPDATE operator_asks SET "
                     "  triage_state = 'ask', triage_summary = %(summary)s, "
@@ -157,6 +165,7 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                     "  outbound_msg_id = COALESCE(%(ob)s, outbound_msg_id), "
                     "  chase_by = CASE WHEN %(cd)s::timestamptz IS NOT NULL "
                     "                  THEN GREATEST(COALESCE(chase_by, %(cd)s::timestamptz), %(cd)s::timestamptz) "
+                    "                  WHEN chase_by IS NULL THEN now() + interval '24 hours' "
                     "                  ELSE chase_by END "
                     "WHERE id = %(id)s",
                     {"summary": summary, "delegated_to": delegated_to, "triaged_by": triaged_by,
@@ -167,6 +176,7 @@ def triage(item_id: int, action: str, *, summary: str | None = None,
                 sql = (
                     "UPDATE operator_asks SET "
                     "  triage_state = 'not_an_ask', closed_at = now(), closed_reason = 'not_a_request', "
+                    "  chase_by = NULL, "
                     "  triaged_at = now(), triaged_by = %s "
                     "WHERE id = %s AND closed_at IS NULL"
                 )
