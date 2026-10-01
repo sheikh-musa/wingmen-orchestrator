@@ -34,8 +34,10 @@ def ch():
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     """Every download resolves to a deterministic fake path — never the network."""
-    monkeypatch.setattr(ingest, "_download_media",
-                        lambda token, file_id, name=None: f"/media/{name or file_id}")
+    monkeypatch.setattr(
+        ingest, "_download_media",
+        lambda token, file_id, file_unique_id, channel_key, upd_id, name=None:
+            f"/media/{name or file_id}")
 
 
 @pytest.fixture
@@ -63,7 +65,8 @@ def test_sticker_logs_emoji_and_set_without_downloading(ch, monkeypatch):
 
 def test_video_with_caption_downloads_and_keeps_caption(ch):
     out = ingest.message_content(
-        ch, _msg(video={"file_id": "V1", "duration": 12, "file_name": "screen.mp4"},
+        ch, _msg(video={"file_id": "V1", "file_unique_id": "VU1", "duration": 12,
+                        "file_name": "screen.mp4"},
                  caption="here is the bug"), 2)
     assert out == "sent a VIDEO (12s) → /media/screen.mp4  | caption: here is the bug"
 
@@ -83,12 +86,13 @@ def test_location_logs_coordinates(ch):
 
 def test_video_note_animation_contact_dice_all_captured(ch):
     assert ingest.message_content(
-        ch, _msg(video_note={"file_id": "N1234567890AB", "duration": 5}), 5) \
+        ch, _msg(video_note={"file_id": "N1234567890AB", "file_unique_id": "NU1",
+                             "duration": 5}), 5) \
         == "sent a VIDEO NOTE (5s) → /media/videonote_N1234567890A.mp4"
     # animation must win over the backward-compat `document` Telegram also sets
     assert ingest.message_content(
-        ch, _msg(animation={"file_id": "A1", "file_name": "cat.mp4"},
-                 document={"file_id": "A1", "file_name": "cat.mp4"}), 6) \
+        ch, _msg(animation={"file_id": "A1", "file_unique_id": "AU1", "file_name": "cat.mp4"},
+                 document={"file_id": "A1", "file_unique_id": "AU1", "file_name": "cat.mp4"}), 6) \
         == "sent an ANIMATION/GIF → /media/cat.mp4"
     assert ingest.message_content(
         ch, _msg(contact={"first_name": "Hafiz", "phone_number": "+6591234567"}), 7) \

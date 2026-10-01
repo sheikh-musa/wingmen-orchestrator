@@ -112,20 +112,32 @@ _MEDIA_DIR = os.path.join(os.path.dirname(__file__), "..", "logs", "tg_media")
 def _tg_download_file(token: str, file_path: str, dest: str) -> str:
     """Stream api.telegram.org/file/<file_path> -> dest with retry+backoff.
     Telegram's file CDN intermittently resets mid-download (Errno 54); a bare
-    fetch silently lost the operator's DPA + ADCDA photos twice (2026-06-28)."""
+    fetch silently lost the operator's DPA + ADCDA photos twice (2026-06-28).
+
+    Opens with 'xb' (O_EXCL), never 'wb': dest is built by the caller from a
+    channel+update+file_unique_id key that is unique per actual piece of
+    content, so a FileExistsError here means dest already holds THIS file's
+    bytes (idempotent re-process or a concurrent download of the identical
+    update) — never a different client's content silently clobbered (bus
+    #47469: the old basename-only naming let one bot's getFile response
+    overwrite another bot's client media under the same name)."""
     url = f"https://api.telegram.org/file/bot{token}/{file_path}"
     last = None
     for i in range(4):
         try:
-            with urllib.request.urlopen(url, timeout=60) as r, open(dest, "wb") as f:
+            with urllib.request.urlopen(url, timeout=60) as r, open(dest, "xb") as f:
                 shutil.copyfileobj(r, f, length=65536)
             if os.path.getsize(dest) > 0:
                 return dest
             last = "empty download"
+        except FileExistsError:
+            if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                return dest
+            last = "dest exists but empty (lost a concurrent-write race)"
         except Exception as e:
             last = e
         try:
-            if os.path.exists(dest):
+            if os.path.exists(dest) and os.path.getsize(dest) == 0:
                 os.remove(dest)
         except OSError:
             pass
@@ -134,16 +146,31 @@ def _tg_download_file(token: str, file_path: str, dest: str) -> str:
     raise RuntimeError(f"telegram file download failed after 4 attempts: {last}")
 
 
-def _download_media(token: str, file_id: str, name: str | None = None) -> str:
+def _media_dest_name(channel_key: str, upd_id: int, file_unique_id: str,
+                      file_path: str, name: str | None) -> str:
+    """<channel>_<update_id>_<file_unique_id>.<ext> — collision-proof across
+    bots (channel_key) and across messages (update_id + file_unique_id, both
+    Telegram-assigned and unique per actual file). The old scheme used only
+    Telegram's own file_path basename (e.g. photos/file_6.jpg), which is
+    numbered PER BOT and let two different clients' bots collide on the same
+    local filename (bus #47469)."""
+    ext = os.path.splitext(file_path)[1] or (os.path.splitext(name)[1] if name else "")
+    safe_channel = "".join(c if (c.isalnum() or c in "._-") else "_" for c in channel_key) or "ch"
+    safe_unique = "".join(c if (c.isalnum() or c in "._-") else "_" for c in file_unique_id)
+    return f"{safe_channel}_{upd_id}_{safe_unique}{ext}"
+
+
+def _download_media(token: str, file_id: str, file_unique_id: str, channel_key: str,
+                     upd_id: int, name: str | None = None) -> str:
     with urllib.request.urlopen(
             f"https://api.telegram.org/bot{token}/getFile?file_id={file_id}", timeout=30) as r:
         fp = json.load(r)["result"]["file_path"]
     os.makedirs(_MEDIA_DIR, exist_ok=True)
-    if name:
-        safe = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in name).strip() or "file"
-    else:
-        safe = fp.replace("/", "_")
-    return _tg_download_file(token, fp, os.path.join(_MEDIA_DIR, safe))
+    safe = _media_dest_name(channel_key, upd_id, file_unique_id, fp, name)
+    dest = os.path.join(_MEDIA_DIR, safe)
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
+        return dest
+    return _tg_download_file(token, fp, dest)
 
 
 def _log_media_fail(ch: "Channel", kind: str, upd_id: int, e: Exception) -> None:
@@ -194,7 +221,9 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
     one thing that must always happen."""
     if msg.get("photo"):
         try:
-            path = _download_media(ch.token, msg["photo"][-1]["file_id"])
+            photo = msg["photo"][-1]
+            path = _download_media(ch.token, photo["file_id"], photo["file_unique_id"],
+                                    ch.key, upd_id)
             content = f"sent a SCREENSHOT → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "photo", upd_id, e)
@@ -206,7 +235,8 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
         anim = msg["animation"]
         try:
             name = anim.get("file_name") or f"anim_{anim['file_id'][:12]}.mp4"
-            path = _download_media(ch.token, anim["file_id"], name)
+            path = _download_media(ch.token, anim["file_id"], anim["file_unique_id"],
+                                    ch.key, upd_id, name)
             content = f"sent an ANIMATION/GIF → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "animation", upd_id, e)
@@ -214,7 +244,8 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
     elif msg.get("document"):
         doc = msg["document"]
         try:
-            path = _download_media(ch.token, doc["file_id"], doc.get("file_name"))
+            path = _download_media(ch.token, doc["file_id"], doc["file_unique_id"],
+                                    ch.key, upd_id, doc.get("file_name"))
             content = f"sent a FILE → {path}" + (f"  | caption: {text}" if text else "")
         except Exception as e:
             _log_media_fail(ch, "document", upd_id, e)
@@ -223,7 +254,8 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
         media = msg.get("voice") or msg.get("audio")
         try:
             name = media.get("file_name") or f"voice_{media['file_id'][:12]}.ogg"
-            path = _download_media(ch.token, media["file_id"], name)
+            path = _download_media(ch.token, media["file_id"], media["file_unique_id"],
+                                    ch.key, upd_id, name)
             dur = media.get("duration")
             content = (f"sent a VOICE note ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
@@ -237,7 +269,8 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
         vid = msg["video"]
         try:
             name = vid.get("file_name") or f"video_{vid['file_id'][:12]}.mp4"
-            path = _download_media(ch.token, vid["file_id"], name)
+            path = _download_media(ch.token, vid["file_id"], vid["file_unique_id"],
+                                    ch.key, upd_id, name)
             dur = vid.get("duration")
             content = (f"sent a VIDEO ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
@@ -247,8 +280,8 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
     elif msg.get("video_note"):
         note = msg["video_note"]
         try:
-            path = _download_media(ch.token, note["file_id"],
-                                   f"videonote_{note['file_id'][:12]}.mp4")
+            path = _download_media(ch.token, note["file_id"], note["file_unique_id"],
+                                    ch.key, upd_id, f"videonote_{note['file_id'][:12]}.mp4")
             dur = note.get("duration")
             content = (f"sent a VIDEO NOTE ({dur}s) → {path}"
                        + (f"  | caption: {text}" if text else ""))
@@ -558,6 +591,84 @@ def urgency(text: str) -> str:
     return "default"
 
 
+# ── Group-chat addressing (bus #47483) ────────────────────────────────────────
+# The busy/reassurance acks were written when every polled chat was effectively
+# 1:1 with the bot. In a GROUP (cosem-caai), every line any human types fires
+# `process_update`, so plain banter between two humans not addressed to the bot
+# at all ("Musa + Ray banter", op#24073/#24083) got the '📨 Got your message'
+# ack twice in 10 minutes. Fix: in a group, only ack when the bot was actually
+# addressed (an @mention, or a reply to one of the bot's own messages). DMs are
+# untouched — _is_group_chat is false there, so the gate is always a no-op.
+_bot_identity_cache: dict[str, dict] = {}
+
+
+def _bot_identity(token: str) -> dict:
+    """Cached getMe() -> {'id': int, 'username': str}. Best-effort: a lookup
+    failure returns {} and every caller here treats that as 'can't tell' —
+    never suppress an ack on an identity we failed to resolve (fail toward
+    the pre-fix delivery behavior, not toward new silence)."""
+    if token in _bot_identity_cache:
+        return _bot_identity_cache[token]
+    try:
+        me = tg_call(token, "getMe", {})
+        identity = {"id": me.get("id"), "username": me.get("username")}
+    except Exception:
+        identity = {}
+    _bot_identity_cache[token] = identity
+    return identity
+
+
+def _is_group_chat(msg: dict) -> bool:
+    return (msg.get("chat") or {}).get("type") in ("group", "supergroup")
+
+
+def _bot_is_addressed(ch: "Channel", msg: dict) -> bool:
+    """Only for a group chat: True if this specific message @mentions the bot
+    or replies to one of the bot's own messages. Unknown identity -> True
+    (don't suppress on an unknown, see _bot_identity)."""
+    identity = _bot_identity(ch.token)
+    bot_id, bot_username = identity.get("id"), identity.get("username")
+    if not bot_id and not bot_username:
+        return True
+    if (msg.get("reply_to_message") or {}).get("from", {}).get("id") == bot_id:
+        return True
+    if not bot_username:
+        return False
+    mention = f"@{bot_username}".lower()
+    text = msg.get("text") or msg.get("caption") or ""
+    for ent in (msg.get("entities") or []) + (msg.get("caption_entities") or []):
+        if ent.get("type") == "text_mention" and (ent.get("user") or {}).get("id") == bot_id:
+            return True
+        if ent.get("type") == "mention":
+            # Entity offset/length are UTF-16 code units; a Python-index slice
+            # can drift when astral-plane chars (emoji) precede the mention.
+            # Acceptable here — a miss just falls through to the substring
+            # check below, which still catches the common plain-ASCII mention.
+            off, length = ent.get("offset", 0), ent.get("length", 0)
+            if text[off:off + length].lower() == mention:
+                return True
+    return mention in text.lower()
+
+
+_chat_type_cache: dict[tuple[str, str], str] = {}
+
+
+def _chat_type(token: str, chat_id) -> str:
+    """Cached getChat().type. Best-effort: a lookup failure returns 'private'
+    — the pre-fix behavior (never suppress) for every channel this can't
+    resolve, not a new silent-failure mode."""
+    key = (token, str(chat_id))
+    if key in _chat_type_cache:
+        return _chat_type_cache[key]
+    try:
+        chat = tg_call(token, "getChat", {"chat_id": chat_id})
+        t = chat.get("type") or "private"
+    except Exception:
+        t = "private"
+    _chat_type_cache[key] = t
+    return t
+
+
 def throttled_busy_ack(conn, ch: "Channel") -> None:
     """Enqueue ONE 'got it, mid-task' ack per ACK_THROTTLE_SEC per channel (via
     the tg_out queue), so a deferred operator isn't left wondering."""
@@ -657,15 +768,36 @@ def reassure_if_unhandled(conn, ch: "Channel") -> None:
              "(Reply URGENT to bump it now.)")
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*), min(created_at), max(created_at) FROM operator_messages "
+            "SELECT count(*), min(created_at), max(created_at), "
+            "(array_agg(chat_id ORDER BY created_at DESC))[1] FROM operator_messages "
             "WHERE direction='inbound' AND tag=%s AND handled_at IS NULL",
             (ch.channel_tag,))
-        n, oldest, newest = cur.fetchone()
+        n, oldest, newest, chat_id = cur.fetchone()
         if not oldest:
             return
         cur.execute("SELECT now() - %s > make_interval(secs => %s)", (oldest, ACK_AFTER_SEC))
         if not cur.fetchone()[0]:
             return   # not stale enough yet — a fast reply needs no ack
+
+        # GROUP ADDRESSING (bus #47483): this is an AGGREGATE sweep with no live
+        # msg object, so it can't check entities/reply-to-bot per message like
+        # throttled_busy_ack does. Best effort: only suppress when we positively
+        # know (a) the chat is a group and (b) the bot's own username, AND no
+        # unhandled row's stored text mentions it — any lookup failure or
+        # unknown stays on the pre-fix behavior (ack fires), never new silence.
+        # A quoted reply-TO-the-bot can't be reconstructed from stored text
+        # alone once getUpdates has consumed the parent — an acknowledged,
+        # disclosed gap for this aggregate path only (throttled_busy_ack, which
+        # runs per-message with the live update, still catches that case).
+        if chat_id is not None and _chat_type(ch.token, chat_id) in ("group", "supergroup"):
+            bot_username = _bot_identity(ch.token).get("username")
+            if bot_username:
+                cur.execute(
+                    "SELECT 1 FROM operator_messages WHERE direction='inbound' AND tag=%s "
+                    "AND handled_at IS NULL AND text ILIKE %s LIMIT 1",
+                    (ch.channel_tag, f"%@{bot_username}%"))
+                if not cur.fetchone():
+                    return   # group, unhandled, nothing addressed to the bot — stay quiet
         cur.execute(
             "SELECT 1 FROM tg_out WHERE channel_key=%s AND text LIKE %s "
             "AND created_at > %s LIMIT 1",
@@ -908,6 +1040,10 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             _log_line(f"{ch.key}: BTW — logged, not nudged (drains at next idle)")
         elif urg == "urgent" or ch.nudge_when_busy or not pane_working(target):
             nudge_session(target, ch.key, unread_count(conn, ch))
+        elif _is_group_chat(msg) and not _bot_is_addressed(ch, msg):
+            # group banter not addressed to the bot (bus #47483): still logged
+            # + routed above, just no '📨 Got your message' ack into the group.
+            _log_line(f"{ch.key}: group chat, bot not addressed — busy ack suppressed")
         else:
             # target WORKING + default priority: DEFER (no interrupt). Delivery
             # then relies on the target running Option B unprocessed() each turn
