@@ -24,12 +24,25 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
   hash/length sink (shasum/sha*sum/md5(sum)?/openssl dgst/wc -c) with only cut/head/
   tr/awk trimming the hash afterward.
 
+  Rule D -- LANE-SCOPED human-owner cloud login / IAM mutation block (bus #48386, added
+  after a real incident 2026-10-01 18:14Z: a lane reached Musa's OWNER gcloud login,
+  shared via the OS user, and ran an IAM-mutating command on a client prod project).
+  Scoped to LANES only (CC_BASE_AGENT_ID set in the hook's own environment) -- the
+  console/hub legitimately uses human-owner cloud logins for operator-authorized work;
+  a lane never should. Blocks: a gcloud/firebase command naming or switching to a
+  human account (anything with '@' not ending in .gserviceaccount.com); any IAM/policy
+  mutation subcommand (add-iam-policy-binding, remove-iam-policy-binding, set-iam-policy,
+  projects create/delete, services disable) unconditionally for a lane, any account; and
+  print-access-token unless it explicitly names a service account (fail-closed on a
+  bare print-access-token with no --account -- the incident's own shape).
+
 Exit 2 + stderr = refused, the reason is shown to the model (same contract as the
 irsyad guard). Fail-closed on unparseable input.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -190,6 +203,58 @@ def check_rule_c(command: str) -> str | None:
     return None
 
 
+# ---- Rule D: lane-scoped human-owner cloud login / IAM mutation block (bus #48386) -
+
+CLOUD_CLI_LEADING_RE = re.compile(r"^(gcloud|firebase)\b")
+IAM_MUTATION_SUBCOMMAND_RE = re.compile(
+    r"\b(add-iam-policy-binding|remove-iam-policy-binding|set-iam-policy|"
+    r"projects\s+(create|delete)|services\s+disable)\b"
+)
+ACCOUNT_SWITCH_RE = re.compile(
+    r"\bgcloud\s+config\s+set\s+account\s+(\S+)|\bgcloud\s+auth\s+login\s+(\S+)"
+)
+PRINT_ACCESS_TOKEN_RE = re.compile(r"\bprint-access-token\b")
+OWNER_CLOUD_ACTION_MESSAGE = "owner-level cloud action: send the exact command to orch-console"
+
+
+def _is_human_account(value: str) -> bool:
+    value = value.strip().strip("'\"")
+    return "@" in value and not value.endswith(".gserviceaccount.com")
+
+
+def _account_flag_value(segment: str) -> str | None:
+    m = re.search(r"--account=(\S+)", segment) or re.search(r"--account\s+(\S+)", segment)
+    return m.group(1) if m else None
+
+
+def check_rule_d(command: str) -> str | None:
+    if not os.environ.get("CC_BASE_AGENT_ID"):
+        return None  # console/hub -- human-owner cloud logins are legitimately theirs
+    for statement in _split_statements(command):
+        for segment in _split_pipeline(statement):
+            lead = _leading_command(segment)
+            if not CLOUD_CLI_LEADING_RE.match(lead):
+                continue
+
+            acct = _account_flag_value(segment)
+            if acct and _is_human_account(acct):
+                return OWNER_CLOUD_ACTION_MESSAGE
+
+            m = ACCOUNT_SWITCH_RE.search(segment)
+            if m:
+                switched = m.group(1) or m.group(2)
+                if _is_human_account(switched):
+                    return OWNER_CLOUD_ACTION_MESSAGE
+
+            if IAM_MUTATION_SUBCOMMAND_RE.search(segment):
+                return OWNER_CLOUD_ACTION_MESSAGE
+
+            if PRINT_ACCESS_TOKEN_RE.search(segment):
+                if not acct or _is_human_account(acct):
+                    return OWNER_CLOUD_ACTION_MESSAGE
+    return None
+
+
 # ---- Rule B: secret values in a command -----------------------------------------
 
 SENSITIVE_VAR_RE = re.compile(
@@ -317,6 +382,11 @@ def main() -> int:
     reason = check_rule_a(text) or check_rule_c(text) or check_rule_b(text)
     if reason:
         sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {BLOCK_MESSAGE} ({reason})\n")
+        return 2
+
+    cloud_reason = check_rule_d(text)
+    if cloud_reason:
+        sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {cloud_reason}\n")
         return 2
     return 0
 

@@ -6,6 +6,7 @@ examples (bus #48293, #48312) -- not invented after the fact.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,22 +14,26 @@ from pathlib import Path
 HOOK = Path(__file__).parent.parent / "scripts" / "hooks" / "secrets_transcript_guard.py"
 
 
-def run_hook(tool_name: str, tool_input: dict) -> subprocess.CompletedProcess:
+def run_hook(tool_name: str, tool_input: dict, env: dict | None = None) -> subprocess.CompletedProcess:
     payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
+    full_env = dict(os.environ)
+    full_env.pop("CC_BASE_AGENT_ID", None)
+    if env:
+        full_env.update(env)
     return subprocess.run(
         [sys.executable, str(HOOK)],
-        input=payload, text=True, capture_output=True,
+        input=payload, text=True, capture_output=True, env=full_env,
     )
 
 
-def assert_blocked(tool_name: str, tool_input: dict):
-    r = run_hook(tool_name, tool_input)
+def assert_blocked(tool_name: str, tool_input: dict, env: dict | None = None):
+    r = run_hook(tool_name, tool_input, env=env)
     assert r.returncode == 2, f"expected BLOCK for {tool_input!r}, got exit {r.returncode}, stderr={r.stderr!r}"
     assert "secret would enter the transcript" in r.stderr
 
 
-def assert_allowed(tool_name: str, tool_input: dict):
-    r = run_hook(tool_name, tool_input)
+def assert_allowed(tool_name: str, tool_input: dict, env: dict | None = None):
+    r = run_hook(tool_name, tool_input, env=env)
     assert r.returncode == 0, f"expected ALLOW for {tool_input!r}, got exit {r.returncode}, stderr={r.stderr!r}"
 
 
@@ -197,6 +202,77 @@ def test_allows_set_minus_a_toggle_not_a_dump():
 
 def test_allows_unrelated_command():
     assert_allowed("Bash", {"command": "git status --short"})
+
+
+# ---- Rule D: lane-scoped human-owner cloud login / IAM mutation block (bus #48386) -
+# Corpus is the ask's own three required cases, verbatim.
+
+LANE_ENV = {"CC_BASE_AGENT_ID": "cc-cosem-tdu-coord"}
+
+
+def assert_cloud_blocked(tool_input: dict, env: dict):
+    r = run_hook("Bash", tool_input, env=env)
+    assert r.returncode == 2, f"expected BLOCK for {tool_input!r}, got exit {r.returncode}, stderr={r.stderr!r}"
+    assert "owner-level cloud action" in r.stderr
+
+
+def test_blocks_lane_iam_mutation_with_human_owner_login():
+    # the 2026-10-01 18:14Z incident shape: a lane, Musa's owner account, an IAM mutation
+    assert_cloud_blocked(
+        {"command": "gcloud projects add-iam-policy-binding cosem-prod "
+                     "--member=user:foo@example.com --role=roles/owner "
+                     "--account=musa@cosem.org.sg"},
+        env=LANE_ENV,
+    )
+
+
+def test_allows_consoles_own_use_of_the_same_command():
+    # no CC_BASE_AGENT_ID -- the console/hub's own use is exempt
+    assert_allowed(
+        "Bash",
+        {"command": "gcloud projects add-iam-policy-binding cosem-prod "
+                     "--member=user:foo@example.com --role=roles/owner "
+                     "--account=musa@cosem.org.sg"},
+        env={},
+    )
+
+
+def test_allows_lane_firebase_deploy_with_service_account():
+    assert_allowed(
+        "Bash",
+        {"command": "firebase deploy --project my-proj "
+                     "--account=cosem-deployer@my-proj.iam.gserviceaccount.com"},
+        env=LANE_ENV,
+    )
+
+
+def test_blocks_lane_gcloud_auth_login_switching_to_human_account():
+    assert_cloud_blocked(
+        {"command": "gcloud auth login musa@cosem.org.sg"},
+        env=LANE_ENV,
+    )
+
+
+def test_blocks_lane_print_access_token_with_no_account():
+    # fail-closed: can't confirm it's a service account
+    assert_cloud_blocked({"command": "gcloud auth print-access-token"}, env=LANE_ENV)
+
+
+def test_allows_lane_print_access_token_with_service_account():
+    assert_allowed(
+        "Bash",
+        {"command": "gcloud auth print-access-token "
+                     "--account=cosem-deployer@my-proj.iam.gserviceaccount.com"},
+        env=LANE_ENV,
+    )
+
+
+def test_blocks_lane_services_disable_regardless_of_account():
+    assert_cloud_blocked(
+        {"command": "gcloud services disable compute.googleapis.com "
+                     "--account=cosem-deployer@my-proj.iam.gserviceaccount.com"},
+        env=LANE_ENV,
+    )
 
 
 # ---- fail-closed on unparseable input ---------------------------------------------
