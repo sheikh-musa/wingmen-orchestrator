@@ -31,7 +31,13 @@ set -uo pipefail
 FH_DIR="$HOME/wingmen/fleet-health"
 ORCH_DIR="$HOME/wingmen/orchestrator"
 VENV_PY="$ORCH_DIR/.venv/bin/python3"
-MODEL="${MODEL:-claude-opus-4-8}"
+# MODEL — precedence: MODEL env > durable pin (.fleet-health_model) > opus-4-8.
+# The pin was previously INERT (orch-console #48930): this line was env-only, so a
+# relaunch ignored the operator's opus-5-5 pin. Revert a pin = `rm .fleet-health_model`.
+. "$ORCH_DIR/scripts/lib/singleton_model_pin.sh" || { echo "FATAL: singleton_model_pin.sh missing — refusing to boot on an unresolved model" >&2; exit 1; }
+IFS=$'\t' read -r MODEL MODEL_SRC < <(resolve_singleton_model "$ORCH_DIR/.fleet-health_model" "claude-opus-4-8")
+[ -n "${MODEL:-}" ] || { echo "FATAL: model resolved empty — refusing to boot" >&2; exit 1; }
+echo "[boot_fleet_health] model=$MODEL (source: $MODEL_SRC)" >&2
 AGENT_ID="cc-fleet-health"   # exact — singleton SRE node, never a sub-tag
 
 # .env (DSN, OAuth token) lives in the orchestrator; the SRE shares the substrate.
