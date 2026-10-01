@@ -97,12 +97,19 @@ def test_corrupt_map_degrades_to_loud_fallback_not_crash(monkeypatch, logs):
     assert any("fragile" in m.lower() for m in logs)
 
 
-# ── the shipped map: all three current hosts pinned (cai deploy condition) ────
+# ── the shipped map: both current hosts pinned (cai deploy condition) ────
 
-def test_shipped_map_has_all_three_current_hosts():
+def test_shipped_map_has_both_current_hosts():
     m = fhi._load_map()
-    for canon in ("Sheikhs-Mini", "gzbai", "wingmen-core"):
+    for canon in ("Sheikhs-Mini", "gzbai"):
         assert canon in m, f"fleet_hosts map missing current host {canon}: {list(m)}"
+
+
+def test_shipped_map_no_longer_carries_the_decommissioned_host():
+    # wingmen-core is CONFIRMED gone (host key changed, fleet-health #47235,
+    # backlog#66) -- its legacy row was removed, not left as dead weight.
+    m = fhi._load_map()
+    assert "wingmen-core" not in m
 
 
 def test_shipped_map_covers_the_mini_flap_aliases():
