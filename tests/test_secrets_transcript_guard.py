@@ -26,10 +26,10 @@ def run_hook(tool_name: str, tool_input: dict, env: dict | None = None) -> subpr
     )
 
 
-def assert_blocked(tool_name: str, tool_input: dict, env: dict | None = None):
+def assert_blocked(tool_name: str, tool_input: dict, env: dict | None = None, expect_substr: str = "secret would enter the transcript"):
     r = run_hook(tool_name, tool_input, env=env)
     assert r.returncode == 2, f"expected BLOCK for {tool_input!r}, got exit {r.returncode}, stderr={r.stderr!r}"
-    assert "secret would enter the transcript" in r.stderr
+    assert expect_substr in r.stderr
 
 
 def assert_allowed(tool_name: str, tool_input: dict, env: dict | None = None):
@@ -62,11 +62,13 @@ def test_blocks_cat_write_dsn():
 
 
 def test_blocks_read_tool_on_env_file():
-    assert_blocked("Read", {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/.env"})
+    assert_blocked("Read", {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/.env"},
+                   expect_substr="this path is a secret file")
 
 
 def test_blocks_read_tool_on_oauth_token():
-    assert_blocked("Read", {"file_path": "/Users/sheikhmusa/.wingmen/keys/musa-oauth-token"})
+    assert_blocked("Read", {"file_path": "/Users/sheikhmusa/.wingmen/keys/musa-oauth-token"},
+                   expect_substr="this path is a secret file")
 
 
 def test_blocks_sed_print_of_secret_file():
@@ -388,6 +390,104 @@ def test_allows_lane_secrets_version_access_with_service_account():
         {"command": "gcloud secrets versions access latest --secret=client-db-password "
                      "--account=cosem-deployer@my-proj.iam.gserviceaccount.com"},
         env=LANE_ENV,
+    )
+
+
+# ---- tool-path coverage (bus #48639/#48642, real incident 2026-10-01 14:37Z) -----
+# An Edit/MultiEdit/Write/NotebookEdit tool_result snippet can echo a secret file's
+# EXISTING content into the transcript the same way a `cat` would -- these are
+# PATH-ONLY tools, gated unconditionally on the target path, no sink exception.
+
+def test_blocks_edit_tool_on_env_file():
+    # the exact 14:37Z incident shape: an Edit on orchestrator/.env.
+    assert_blocked(
+        "Edit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/.env",
+         "old_string": "ANTHROPIC_API_KEY=old", "new_string": "ANTHROPIC_API_KEY=new"},
+        expect_substr="this path is a secret file",
+    )
+
+
+def test_blocks_multiedit_tool_on_env_file():
+    assert_blocked(
+        "MultiEdit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/.env",
+         "edits": [{"old_string": "A=1", "new_string": "A=2"}]},
+        expect_substr="this path is a secret file",
+    )
+
+
+def test_blocks_write_tool_on_env_file():
+    assert_blocked(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/.env", "content": "A=1\n"},
+        expect_substr="this path is a secret file",
+    )
+
+
+def test_blocks_notebookedit_tool_on_env_file():
+    assert_blocked(
+        "NotebookEdit",
+        {"notebook_path": "/Users/sheikhmusa/wingmen/orchestrator/.env", "new_source": "x"},
+        expect_substr="this path is a secret file",
+    )
+
+
+def test_blocks_edit_tool_under_dev_shm_wingmen_secrets():
+    assert_blocked(
+        "Edit",
+        {"file_path": "/dev/shm/wingmen-secrets/private/write_dsn.env",
+         "old_string": "a", "new_string": "b"},
+        expect_substr="this path is a secret file",
+    )
+
+
+def test_blocks_write_tool_under_wingmen_keys():
+    assert_blocked(
+        "Write",
+        {"file_path": os.path.expanduser("~/.wingmen/keys/some-new-key"), "content": "x"},
+        expect_substr="this path is a secret file",
+    )
+
+
+def test_blocks_edit_tool_under_dot_ssh():
+    assert_blocked(
+        "Edit",
+        {"file_path": os.path.expanduser("~/.ssh/gzb_to_mini"), "old_string": "a", "new_string": "b"},
+        expect_substr="this path is a secret file",
+    )
+
+
+def test_blocks_write_tool_on_service_account_json():
+    assert_blocked(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/creds/cosem-service-account.json", "content": "{}"},
+        expect_substr="this path is a secret file",
+    )
+
+
+def test_allows_edit_tool_on_ordinary_source_file():
+    assert_allowed(
+        "Edit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/scripts/foo.py",
+         "old_string": "a", "new_string": "b"},
+    )
+
+
+def test_allows_write_tool_on_ordinary_file():
+    assert_allowed(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md", "content": "hi"},
+    )
+
+
+def test_allows_env_set_sh_as_the_sanctioned_escape_hatch():
+    # scripts/env_set.sh only ever prints a sha1 fingerprint -- structurally a hash
+    # sink -- so feeding it a sensitively-named var via printf must resolve the same
+    # way `| shasum` does, not get blamed as an unresolved print trigger.
+    assert_allowed(
+        "Bash",
+        {"command": 'printf \'%s\' "$NEW_API_KEY" | scripts/env_set.sh orchestrator/.env API_KEY'},
     )
 
 

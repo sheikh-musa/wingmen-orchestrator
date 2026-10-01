@@ -28,6 +28,38 @@ def test_detects_telegram_bot_token():
     assert hits and hits[0][0] == "telegram-bot-token"
 
 
+def test_detects_telegram_bot_token_embedded_in_api_url():
+    # bus #48642 real incident (~2026-10-01 20:03Z): a Telegram Bot API URL embeds the
+    # token right after "bot" with NO word boundary (letters then digits is one
+    # continuous word-char run) -- the old \b\d{6,}... pattern never matched here.
+    hits = scanner.scan(
+        "curl https://api.telegram.org/bot123456789:AAFakeTokenShapeForTestingOnly1234/sendMessage"
+    )
+    assert hits and any(h[0] == "telegram-bot-token" for h in hits)
+
+
+def test_detects_github_fine_grained_oauth_token():
+    # bus #48642: only ghp_ (classic PAT) was covered; gho_/ghu_/ghs_/ghr_ slipped.
+    hits = scanner.scan("token=gho_" + "a" * 36)
+    assert hits and any(h[0] == "github-token" for h in hits)
+
+
+def test_detects_github_classic_pat_still_works():
+    hits = scanner.scan("token=ghp_" + "b" * 36)
+    assert hits and any(h[0] == "github-token" for h in hits)
+
+
+def test_detects_google_oauth_refresh_token():
+    hits = scanner.scan("refresh_token: 1//0" + "FakeRefreshTokenShapeForTestingOnly123")
+    assert hits and any(h[0] == "google-oauth-refresh-token" for h in hits)
+
+
+def test_detects_long_jwt_shaped_like_supabase_service_key():
+    fake_jwt = "eyJ" + "a" * 40 + "." + "b" * 90 + "." + "c" * 40
+    hits = scanner.scan(f"SUPABASE_SERVICE_ROLE_KEY={fake_jwt}")
+    assert hits and any(h[0] == "jwt" for h in hits)
+
+
 def test_detects_ssh_private_key():
     # cc-quality PR#245 review (bus #48441 MED #1): non-DSN secret files (SSH keys
     # other than gzb_to_mini) previously had no value-backstop at all.

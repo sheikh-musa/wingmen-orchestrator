@@ -31,11 +31,20 @@ import sys
 SECRET_PATTERNS = {
     "anthropic-api-key": re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
     "supabase-service-key": re.compile(r"sbp_[a-f0-9]{20,}"),
-    "telegram-bot-token": re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"),
+    # Dropped the LEADING \b (bus #48642 blind spot, real incident 2026-10-01 ~20:03Z):
+    # a Telegram Bot API URL embeds the token right after "bot" with no word boundary
+    # (https://api.telegram.org/bot123456789:AA.../sendMessage) -- "bot1234..." is one
+    # continuous word-char run, so \b\d{6,} never matched there. Anchored on the "AA"
+    # prefix real bot tokens use instead, to keep this specific and not over-broad.
+    "telegram-bot-token": re.compile(r"\d{8,10}:AA[A-Za-z0-9_-]{30,}\b"),
     "postgres-dsn": re.compile(r"postgres(?:ql)?://[^:\s]+:[^@\s]+@"),
     "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
     "vercel-token": re.compile(r"\bvcp_[A-Za-z0-9]{20,}\b"),
-    "github-token": re.compile(r"\bghp_[A-Za-z0-9]{30,}\b"),
+    # bus #48642: only ghp_ (classic PAT) was covered -- gh[ousr]_ (OAuth/user-to-server/
+    # server-to-server/refresh) tokens all slipped.
+    "github-token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
+    # bus #48642: Google OAuth refresh tokens ("1//0...").
+    "google-oauth-refresh-token": re.compile(r"\b1//0[A-Za-z0-9_-]{20,}\b"),
     "ssh-private-key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 }
 

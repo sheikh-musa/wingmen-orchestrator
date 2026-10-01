@@ -48,6 +48,20 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
 
 Exit 2 + stderr = refused, the reason is shown to the model (same contract as the
 irsyad guard). Fail-closed on unparseable input.
+
+Tool-path coverage (bus #48639/#48642, real incident 2026-10-01 14:37Z): a secret can
+enter the transcript through the Edit/MultiEdit/Write/Read/NotebookEdit tool_result
+snippet, not just Bash stdout -- an Edit on `.env` echoes the surrounding file content
+back into the transcript the same as a `cat` would. These five tools are PATH-ONLY:
+the tool_input is just a file path (plus, for Edit/MultiEdit, the replacement text,
+which is the AGENT's own new content, not a leak of what's already on disk -- the
+leak risk is specifically the snippet of EXISTING content the tool echoes back).
+Blocked unconditionally -- no sink exception, same as Rule A -- whenever the target
+path is a secret path: the existing Rule A filename patterns, OR a path under one of
+SECRET_DIR_PREFIXES (/dev/shm/wingmen-secrets/, ~/.wingmen/private/, ~/.wingmen/keys/,
+~/.ssh/), OR a client-credential-shaped filename (service-account JSON). The sanctioned
+way to change one key in a .env-shaped file is scripts/env_set.sh (reads the new value
+from stdin, edits by key name, prints only a sha1 fingerprint -- never the value).
 """
 from __future__ import annotations
 
@@ -58,6 +72,13 @@ import shlex
 import sys
 
 BLOCK_MESSAGE = "secret would enter the transcript -- hash it or use the value without printing."
+TOOL_SECRET_FILE_MESSAGE = (
+    "this path is a secret file -- Read/Edit/MultiEdit/Write/NotebookEdit on it would put "
+    "its contents into the transcript. For a .env-shaped file, change one key without "
+    "echoing via `scripts/env_set.sh <file> <KEY>` (reads the new value from stdin). For a "
+    "key/credential file (ssh keys, service-account JSON, the wingmen private store), make "
+    "the change outside the agent's tool loop."
+)
 
 # ---- Rule A: known secret files -------------------------------------------------
 
@@ -110,6 +131,32 @@ def _leading_command(segment: str) -> str:
 
 def _is_secret_file(token: str) -> bool:
     return bool(SECRET_FILE_RE.search(token))
+
+
+# bus #48639/#48642: path-prefix coverage for the PATH-ONLY tools (Read/Edit/MultiEdit/
+# Write/NotebookEdit), broader than SECRET_FILE_RE's filename patterns since these tools
+# take a real filesystem path, not shell text to re-parse -- a whole directory can be
+# named without the shell-tokenizing complexity Rule A's Bash matching needs.
+SECRET_DIR_PREFIXES = tuple(
+    os.path.expanduser(p) for p in (
+        "/dev/shm/wingmen-secrets/",
+        "~/.wingmen/private/",
+        "~/.wingmen/keys/",
+        "~/.ssh/",
+    )
+)
+CLIENT_CRED_FILE_RE = re.compile(r"service[-_]?account[\w.-]*\.json$|[\w-]*-sa\.json$", re.IGNORECASE)
+
+
+def _is_secret_path(path: str) -> bool:
+    if not path:
+        return False
+    expanded = os.path.expanduser(path)
+    if _is_secret_file(path) or _is_secret_file(expanded):
+        return True
+    if CLIENT_CRED_FILE_RE.search(path):
+        return True
+    return any(expanded.startswith(prefix) for prefix in SECRET_DIR_PREFIXES)
 
 
 def _segment_secret_file_token(segment: str) -> str | None:
@@ -389,9 +436,18 @@ SED_MASK_SINK_RE = re.compile(r"\bsed\b.*\bs[/#|].*[/#|].*(redact|\*\*\*)", re.I
 
 SAFE_AFTER_SINK_RE = re.compile(r"^(cut|head|tr|awk)\b")
 
+# scripts/env_set.sh (bus #48639/#48642 delta) only ever prints a sha1 FINGERPRINT of
+# the value it receives on stdin -- by construction, the raw value never reaches its
+# own stdout. Structurally identical to a hash sink, even though it isn't literally
+# `shasum` in this pipeline segment, so `printf '%s' "$VAR" | scripts/env_set.sh ...`
+# (the sanctioned way to use it) must resolve the same way `| shasum` does, not get
+# blamed by Rule B's own print-trigger for the printf feeding it.
+ENV_SET_SINK_RE = re.compile(r"\benv_set\.sh\b")
+
 
 def _is_sink(segment: str) -> bool:
-    return bool(HASH_SINK_RE.search(segment)) or bool(SED_MASK_SINK_RE.search(segment))
+    return (bool(HASH_SINK_RE.search(segment)) or bool(SED_MASK_SINK_RE.search(segment))
+            or bool(ENV_SET_SINK_RE.search(segment)))
 
 
 def _segment_dump_kind(segment: str, lead: str) -> bool:
@@ -461,10 +517,15 @@ def check_rule_b(command: str) -> str | None:
 
 # ---- entrypoint -------------------------------------------------------------------
 
+# bus #48639/#48642: these five tools are PATH-ONLY (tool_input is a file path, not
+# shell text) -- gated uniformly via _is_secret_path, unconditionally, no sink exception.
+PATH_ONLY_TOOLS = ("Read", "NotebookEdit", "Edit", "MultiEdit", "Write")
+
+
 def _command_text(tool_name: str, tool_input: dict) -> str | None:
     if tool_name == "Bash":
         return tool_input.get("command") or ""
-    if tool_name in ("Read", "NotebookEdit"):
+    if tool_name in PATH_ONLY_TOOLS:
         return tool_input.get("file_path") or tool_input.get("notebook_path") or ""
     if tool_name == "Grep":
         return json.dumps(tool_input)
@@ -487,9 +548,9 @@ def main() -> int:
     if not text:
         return 0
 
-    if tool_name == "Read":
-        if _is_secret_file(text):
-            sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {BLOCK_MESSAGE}\n")
+    if tool_name in PATH_ONLY_TOOLS:
+        if _is_secret_path(text):
+            sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {TOOL_SECRET_FILE_MESSAGE}\n")
             return 2
         return 0
 
