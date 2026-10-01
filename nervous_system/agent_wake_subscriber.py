@@ -1,17 +1,29 @@
 #!/usr/bin/env python3
-"""agent_wake_subscriber.py — the Mini-side realtime AUTO-WAKE subscriber (Gap B).
+"""agent_wake_subscriber.py — the realtime AUTO-WAKE subscriber (Gap B), HOST-SCOPED.
 
 Runs the existing CAI-259 #111 auto-wake doorbell as a standalone, WAKE-ONLY
-daemon on the Mac Mini, so a directed bus row (`agent_messages` INSERT) wakes the
-recipient Mini lane the INSTANT it lands — ending the manual-nudge stalls
-(cc-irsyad stalled ~5x/day on unread hub tasks).
+daemon, so a directed bus row (`agent_messages` INSERT) wakes the recipient lane
+the INSTANT it lands — ending the manual-nudge stalls (cc-irsyad stalled ~5x/day
+on unread hub tasks). ONE instance runs per host (the Mac Mini AND gzb).
 
 WHY A SEPARATE DAEMON (Gap B, per hub + CAI-706):
   * `agent_wake.wake_agent` does a LOCAL `tmux send-keys`, so the subscriber MUST
-    run on the same host as the lanes it wakes. This wakes MINI lanes only.
+    run on the same host as the lanes it wakes. A Mini-only subscriber wakes Mini
+    lanes only; gzb lanes (irsyad-coord etc.) need their OWN local subscriber.
   * `subscribe_agent_messages` IS wired into wingmen_orch.py (full mode: Telegram
     push + wake) — but wingmen_orch.py is not currently running, so the wake path
     is dormant. This daemon activates ONLY the wake, independent of that.
+
+HOST-SCOPE (multi-host partition — the fix that lets gzb run a peer safely):
+  Every INSERT is broadcast to EVERY subscriber. To stop the Mini and gzb
+  subscribers BOTH acting on one row, each is scoped to its own host: it wakes a
+  recipient ONLY when that recipient's registered agent_status.host matches THIS
+  host. The scope comes from AGENT_WAKE_HOST_SCOPE (explicit, set by the gzb
+  systemd unit to 'gzbai'), falling back to scripts/lib/fleet_host_id.fleet_host_id().
+  A lane with a KNOWN host is woken by exactly one subscriber; an unknown-host lane
+  falls back to the local-tmux has-session gate (only one host has its live pane).
+  If the scope can't be resolved we run UNSCOPED (legacy single-host behavior) and
+  log it LOUD — the local-tmux gate is then the only partition, as before.
 
 WAKE-ONLY (no Telegram side effects): we pass wake_only=True, so each INSERT runs
 the #111 doorbell and then returns BEFORE the Telegram-forward pipeline. That
@@ -20,13 +32,10 @@ The wake itself is a fixed content-free signal (CAI-255 #2), kill-switch gated
 (AUTO_WAKE_ENABLED), debounced (45s) and hard-capped (5/5min, fails loud) inside
 agent_wake — this daemon adds no policy.
 
-CAI-706 honesty: ONE subscriber, on ONE host (the Mini). It wakes Mini lanes
-only; it does NOT cover VPS/Studio lanes (they'd each need their own local
-subscriber). The kill-switch is AUTO_WAKE_ENABLED=0 in .env.
-
 Run: python3 -m nervous_system.agent_wake_subscriber
-Launchd: dev.wingmen.agent-wake-subscriber (KeepAlive), boot via
+Mini launchd: dev.wingmen.agent-wake-subscriber (KeepAlive), boot via
 scripts/boot_agent_wake_subscriber.sh.
+gzb systemd: wingmen-agent-wake-subscriber.service (AGENT_WAKE_HOST_SCOPE=gzbai).
 """
 from __future__ import annotations
 
@@ -61,6 +70,26 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(), logging.FileHandler(LOG_FILE)],
 )
 logger = logging.getLogger("wingmen.agent_wake_subscriber")
+
+
+def resolve_host_scope() -> "str | None":
+    """This subscriber's host scope for the multi-host wake partition. Priority:
+      1. AGENT_WAKE_HOST_SCOPE env (explicit — the gzb systemd unit sets 'gzbai').
+      2. scripts/lib/fleet_host_id.fleet_host_id() (the fleet's stable host identity).
+      3. None -> run UNSCOPED (legacy single-host behavior; local-tmux gate only), LOUD.
+    Never raises: a fleet_host_id failure degrades to unscoped-with-a-warning rather than
+    killing the doorbell (the local-tmux gate still prevents cross-host wakes)."""
+    scope = os.environ.get("AGENT_WAKE_HOST_SCOPE", "").strip()
+    if scope:
+        return scope
+    try:
+        from scripts.lib.fleet_host_id import fleet_host_id
+        return fleet_host_id()
+    except Exception as e:  # noqa: BLE001 — unscoped fallback, loudly
+        logger.warning(
+            "could not resolve host scope (AGENT_WAKE_HOST_SCOPE unset, fleet_host_id "
+            "failed: %s) — running UNSCOPED; the local-tmux gate is the only partition.", e)
+        return None
 
 
 def _heartbeat_payload(tracker: _LivenessTracker, now_epoch: float) -> str:
@@ -100,9 +129,10 @@ async def main() -> None:
     url = os.environ["SUPABASE_URL"]
     key = os.environ["SUPABASE_SERVICE_KEY"]
     supabase = await acreate_client(url, key)
+    host_scope = resolve_host_scope()
     logger.info(
-        "agent-wake-subscriber up — WAKE-ONLY, Mini host, AUTO_WAKE_ENABLED=%s",
-        agent_wake.auto_wake_enabled())
+        "agent-wake-subscriber up — WAKE-ONLY, host_scope=%s, AUTO_WAKE_ENABLED=%s",
+        host_scope or "UNSCOPED", agent_wake.auto_wake_enabled())
     # subscribe_agent_messages owns its own reconnect/resubscribe loop; we run it
     # alongside the heartbeat. If it ever returns/raises to here, log + let launchd
     # KeepAlive restart the process. The shared _LivenessTracker (5B) is written by
@@ -112,7 +142,7 @@ async def main() -> None:
     tracker = _LivenessTracker()
     await asyncio.gather(
         subscribe_agent_messages(supabase, bot=None, musa_chat_id=None,
-                                 wake_only=True, liveness=tracker),
+                                 wake_only=True, liveness=tracker, host_scope=host_scope),
         _heartbeat_loop(tracker),
     )
 

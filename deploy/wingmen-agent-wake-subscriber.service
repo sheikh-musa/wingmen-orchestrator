@@ -1,0 +1,54 @@
+# /etc/systemd/system/wingmen-agent-wake-subscriber.service
+# gzb-local realtime AUTO-WAKE subscriber — the #111 doorbell for gzb lanes.
+#
+# WHY (the gap this closes): agent_wake.wake_agent does a LOCAL `tmux send-keys`, so a
+# subscriber only wakes lanes on its OWN host. Today ONLY the Mini runs one (launchd
+# dev.wingmen.agent-wake-subscriber), so gzb lanes (cc-irsyad-coord, tabung-jumaat, …)
+# NEVER get the realtime doorbell — a directed bus row sits until the 5-min poll / the
+# gzb backstop sweep (wingmen-wake-backstop-sweep). This is the gzb peer of that Mini
+# subscriber; it is the realtime half, the backstop sweep is the reliability floor under it.
+#
+# TWO INSTANCES ARE SAFE (no double-wake) — HOST-SCOPED by AGENT_WAKE_HOST_SCOPE below:
+#   every INSERT is broadcast to both subscribers, but each wakes a recipient ONLY when that
+#   recipient's registered agent_status.host matches its own scope (agent_wake.host_scope_allows).
+#   A lane with a KNOWN host is woken by exactly one subscriber; an unknown-host lane falls back
+#   to the local-tmux has-session gate (only one host has its live pane). Mirrors the per-host
+#   partition the gzb backstop sweep already relies on.
+# Honors AUTO_WAKE_ENABLED (from the shared env) — observe-only when the kill-switch is off,
+# same arming as the Mini subscriber and the backstop sweep.
+#
+# STAGED, NOT ENABLED. The hub installs + enables + starts (Nazim-gated cutover):
+#   sudo cp deploy/wingmen-agent-wake-subscriber.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wingmen-agent-wake-subscriber
+#   systemctl status wingmen-agent-wake-subscriber   # expect "agent-wake-subscriber up ... host_scope=gzbai"
+#   journalctl -u wingmen-agent-wake-subscriber -f   # watch "realtime: subscribed ..." + per-row wake lines
+# Reversible: `sudo systemctl disable --now wingmen-agent-wake-subscriber`.
+#
+# HOST-PATH CHECK (hub, confirm before enable — I can't see gzb's FS): assumes the orch
+# checkout is $HOME/wingmen/orchestrator for User=gazzai and the fetch-secrets .env is at
+# /dev/shm/wingmen-secrets/.env (matching wingmen-wake-backstop-sweep.service / the autoscaler).
+# If either differs on gzb, adjust WorkingDirectory / the env path below. FAIL-LOUD: a missing
+# env file exits 1 BEFORE the daemon starts (it needs SUPABASE_URL/SERVICE_KEY + DATABASE_URL).
+[Unit]
+Description=Wingmen realtime auto-wake subscriber (gzb-local #111 doorbell) — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Wants=network-online.target
+Requires=wingmen-fetch-secrets.service
+
+[Service]
+Type=simple
+User=gazzai
+WorkingDirectory=/home/gazzai/wingmen/orchestrator
+# Pin this subscriber's wake partition to gzb — it wakes ONLY gzb-registered lanes, so it
+# never double-wakes a Mini lane the Mini subscriber owns. Explicit (not left to the
+# fleet_host_id fallback) so the scope is auditable in the unit.
+Environment=AGENT_WAKE_HOST_SCOPE=gzbai
+# Shared tmpfs .env (fetch-secrets) — SAME env source as the hub's other units — gives
+# SUPABASE_URL/SUPABASE_SERVICE_KEY (realtime WS) + DATABASE_URL (host lookup) + AUTO_WAKE_ENABLED.
+# Login shell so the venv resolves for gazzai. unset ANTHROPIC_API_KEY for parity with the hub units.
+ExecStart=/bin/bash -lc 'cd "$HOME/wingmen/orchestrator" && { [ -r /dev/shm/wingmen-secrets/.env ] || { echo "agent-wake-subscriber: secrets env missing at /dev/shm/wingmen-secrets/.env" >&2; exit 1; }; }; set -a; . /dev/shm/wingmen-secrets/.env; set +a; unset ANTHROPIC_API_KEY; exec .venv/bin/python3 -m nervous_system.agent_wake_subscriber'
+Restart=always
+RestartSec=6
+
+[Install]
+WantedBy=multi-user.target
