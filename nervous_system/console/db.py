@@ -154,10 +154,19 @@ def build_lanes_query() -> Tuple[str, list]:
         # desired_state to each instance (why cc-irsyad-2 showed 'down'). Preferring
         # lane==tmux_session gives each instance ITS OWN row; fall back to a
         # base_agent_id match for a lane whose session != its fleet_lanes.lane.
+        # The base fallback is taken ONLY when that base owns exactly ONE fleet_lanes
+        # row (2026-10-01, operator "no irsyad lanes"): for a multi-lane family
+        # (cc-irsyad has ~10 rows) a session-less instance used to inherit an
+        # ARBITRARY sibling's `lane` label (cc-irsyad-2 -> 'irsyad-worker-1'), and
+        # _dedupe_lanes_by_family then collapsed it INTO that sibling — one live
+        # irsyad body silently hidden behind another. Ambiguous -> no label.
         "LEFT JOIN LATERAL ("
         "  SELECT desired_state, lane, model FROM fleet_lanes fl "
-        "  WHERE fl.lane = s.tmux_session OR fl.base_agent_id = s.base_agent_id "
-        "  ORDER BY (fl.lane = s.tmux_session) DESC "
+        "  WHERE fl.lane = s.tmux_session "
+        "     OR (fl.base_agent_id = s.base_agent_id "
+        "         AND (SELECT count(*) FROM fleet_lanes f2 "
+        "              WHERE f2.base_agent_id = s.base_agent_id) = 1) "
+        "  ORDER BY (fl.lane = s.tmux_session) DESC NULLS LAST "
         "  LIMIT 1"
         ") l ON true "
         "LEFT JOIN LATERAL ("
@@ -385,6 +394,14 @@ def build_coordinators_query() -> Tuple[str, list]:
         "  (SELECT a.auth_account FROM agent_status a "
         "     WHERE a.base_agent_id = c.agent_id AND a.auth_fp IS NOT NULL "
         "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS auth_account, "
+        # The freshest self-registered current_task: a cross-host body (the hub on
+        # gzb) has no LOCAL process for _proc_models to read, so its OWN heartbeat
+        # stamps the live model it read from its process argv as a `model=<id>`
+        # token here (orch_lease renew, 2026-10-01 "I still don't see the hub's
+        # model"). app.py parses it; no token -> no model, never a guess.
+        "  (SELECT a.current_task FROM agent_status a "
+        "     WHERE a.base_agent_id = c.agent_id "
+        "     ORDER BY a.last_heartbeat DESC NULLS LAST LIMIT 1) AS current_task, "
         # Physical host for the 📍 host badge (mirrors auth_fp): the freshest
         # self-registered agent_status.host, falling back to the static hint in the
         # VALUES table for a body with no agent_status row (the cross-host hub is on

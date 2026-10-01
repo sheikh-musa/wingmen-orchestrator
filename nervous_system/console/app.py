@@ -648,12 +648,19 @@ def _apply_queue_watcher() -> None:
 #   (b) "boot"     — the boot string a lane self-registers in agent_status.
 #                    current_task ("session-launch model=<m> repo=…") — how gzb /
 #                    remote lanes (cc-irsyad-*) report, since their proc is off-box;
+#   (b2) "hb"      — a `model=<m>` token a CROSS-HOST body's own heartbeat stamps
+#                    into its current_task from ITS live process argv (the hub on gzb:
+#                    scripts/lib/orch_lease.py renew). Observed on the body's host,
+#                    reported via the DB — the only honest source off-box;
 #   (c) "registry" — fleet_lanes.model, the lane's registry default (lanes only);
-#   else None (coordinators: (a) then None — never invented).
+#   else None (coordinators: (a) > (b)/(b2) from their own row > None — never invented).
 # token_ground_truth shells `ps eww` + tmux and /api/fleet polls every ~8s, so the
 # proc read is CACHED module-level for ~20s (the /api/irsyad path calls it
 # uncached and is left alone). Never puts auth_fp in the model field.
 _BOOT_MODEL_RE = re.compile(r"session-launch model=(\S+)")
+# Whitespace-anchored, and the value must look like a model id, so a free-text
+# current_task can never be misread as a model. Mirrors hosted_view._HB_MODEL_RE.
+_HB_MODEL_RE = re.compile(r"(?:^|\s)model=((?:claude-|opus|sonnet|haiku)[^\s,;)]*)")
 _PROC_MODEL_TTL_S = 20.0
 # `at` is None until the first successful read: time.monotonic() is PROCESS-relative
 # on macOS (sub-second right after boot), so a 0.0 sentinel would read as "fresh"
@@ -691,6 +698,11 @@ def _boot_model(current_task) -> "str | None":
     return m.group(1) if m else None
 
 
+def _hb_model(current_task) -> "str | None":
+    m = _HB_MODEL_RE.search(current_task or "")
+    return m.group(1) if m else None
+
+
 def _resolve_model(session, current_task, registry_model, proc_models) -> tuple:
     """(model, model_src) per the precedence above; (None, None) when unknown."""
     if session and proc_models.get(session):
@@ -698,6 +710,9 @@ def _resolve_model(session, current_task, registry_model, proc_models) -> tuple:
     b = _boot_model(current_task)
     if b:
         return b, "boot"
+    h = _hb_model(current_task)
+    if h:
+        return h, "hb"
     if registry_model:
         return str(registry_model), "registry"
     return None, None
@@ -945,18 +960,97 @@ def _enrich_lanes_live(rows, live=None):
         if s and s in live and s not in owner:
             owner[s] = r.get("agent_id")
 
-    # 3) capture each owned live session ONCE; non-owners / no pane -> offline.
+    # 3) capture each owned live session ONCE; non-owners / no pane -> offline,
+    #    EXCEPT a CROSS-HOST lane (e.g. the irsyad family on gzb): this console can
+    #    never see its pane, so "no local pane" is not evidence it is down. It is
+    #    classified from its own fresh heartbeat instead (_remote_live) — else every
+    #    gzb lane read offline/dark and the operator saw "no irsyad lanes".
     cache = {}
+    local_host = _local_host_label()
     for r in rows:
         s = r.pop("_sess", None)
         if not s or s not in live or owner.get(s) != r.get("agent_id"):
-            r["live"] = {"running": False}
+            remote = _remote_live(r) if _is_cross_host(r, local_host) else None
+            r["live"] = remote or {"running": False}
             continue
         if s not in cache:
             state, _txt = panes.capture(s, live=live)
             cache[s] = state or {"running": False}
         r["live"] = cache[s]
     return rows
+
+
+# --- cross-host lanes (2026-10-01, operator: "I don't see any irsyad lanes") -----
+# The console's live-pane truth only covers sessions on THIS host's tmux server. A
+# lane on another host (the irsyad family runs on gzb) has no local pane, so it used
+# to classify offline — a working gzb lane rendered as a dead/dark tile, folded into
+# the collapsed group, or deduped away. For such a row the honest signal is its own
+# heartbeat: launch_dangerous_cc.sh's heartbeat loop beats every 300s and is killed
+# by the launcher's EXIT trap, so a FRESH heartbeat means the lane's launcher (and
+# the claude it waits on) is alive. Working vs idle is the same DB-only rule the
+# hosted console uses (bus activity within CONSOLE_ACTIVE_RECENT_S). A stale
+# heartbeat stays offline — never a guess.
+_REMOTE_HB_FRESH_S = int(os.environ.get("CONSOLE_REMOTE_HB_FRESH_S", "900"))
+_REMOTE_ACTIVE_RECENT_S = int(os.environ.get("CONSOLE_ACTIVE_RECENT_S", "1800"))
+_LOCAL_HOST_CACHE: dict = {}
+
+
+def _canon_host(h) -> "str | None":
+    """Canonical fleet label for a host string via the git-tracked alias map
+    (scripts/lib/fleet_hosts.json), so 'Sheikhs-Mac-mini.local' == 'Sheikhs-Mini'.
+    Lower-cased; None for empty. Never raises."""
+    h = str(h or "").strip()
+    if not h:
+        return None
+    try:
+        from scripts.lib import fleet_host_id as _fhi
+        h = _fhi._match_alias(h) or h
+    except Exception:  # noqa: BLE001 — map unreadable -> raw label
+        pass
+    return h.lower()
+
+
+def _local_host_label() -> "str | None":
+    """THIS console host's canonical label from the shared fleet_host_id resolver
+    (FLEET_HOST_ID pin > alias-match > hostname) — the SAME id lanes WRITE into
+    agent_status.host (launch_dangerous_cc.sh), so writer and reader agree by
+    construction. CONSOLE_HOST_LABEL is only a fallback (it historically held legacy
+    labels like 'Mini', which would mis-mark every local lane cross-host). Cached;
+    None if unresolvable (then only host-less rows can be judged cross-host)."""
+    if "v" not in _LOCAL_HOST_CACHE:
+        try:
+            from scripts.lib import fleet_host_id as _fhi
+            label = _fhi.fleet_host_id()
+        except Exception as e:  # noqa: BLE001 — never break /api/fleet on host id
+            logger.warning("console local host unresolvable via fleet_host_id: %s", e)
+            label = os.environ.get("CONSOLE_HOST_LABEL", "").strip()
+        _LOCAL_HOST_CACHE["v"] = _canon_host(label)
+    return _LOCAL_HOST_CACHE["v"]
+
+
+def _is_cross_host(row, local_host) -> bool:
+    """True when this row's lane cannot be on THIS host's tmux server:
+      * its self-registered host is known and differs from this console's host; or
+      * it registered NEITHER host NOR tmux_session (its boot stamp never landed —
+        e.g. a launch during the 2026-10-01 pooler breaker), so no local pane can
+        ever be bound to it and its heartbeat is the only signal there is.
+    A row with a session but no host stays pane-truth (a dead local lane must still
+    read dark)."""
+    host = _canon_host(row.get("host"))
+    if host:
+        return local_host is not None and host != local_host
+    return not row.get("tmux_session")
+
+
+def _remote_live(row) -> "dict | None":
+    """Heartbeat-derived live summary for a cross-host lane, or None when its
+    heartbeat is missing/stale (-> the caller keeps it offline)."""
+    hb = row.get("heartbeat_age_s")
+    if hb is None or hb > _REMOTE_HB_FRESH_S:
+        return None
+    act = row.get("activity_age_s")
+    state = "working" if act is not None and act < _REMOTE_ACTIVE_RECENT_S else "idle"
+    return {"running": True, "state": state, "remote": True, "via": "heartbeat"}
 
 
 # This console body's host label (matches agent_status.host, e.g. 'Mini' /
@@ -1595,7 +1689,10 @@ def _fleet_payload():
         sess = c.get("tmux_session")
         c["peekable"] = bool(sess and (sess in live or sess in _COORD_DB_PEEK))
         c["pool"] = pools.pool_for_fp(c.get("auth_fp"))
-        c["model"], c["model_src"] = _resolve_model(sess, None, None, _proc_models_by_sess)
+        # Cross-host bodies (the hub on gzb) have no local proc: fall back to the
+        # model their OWN heartbeat stamped (current_task), never a registry guess.
+        c["model"], c["model_src"] = _resolve_model(
+            sess, c.pop("current_task", None), None, _proc_models_by_sess)
         # Each coordinator card carries its OWN context readout (op#9088), from
         # the same source + thresholds as the context-bloat list. #25436: suppress a
         # frozen pre-reset ghost via SESSION SUPERSESSION (a recycled coordinator —
@@ -1762,7 +1859,10 @@ def _irsyad_payload():
     out = []
     for l in lanes:
         sess = l.get("tmux_session") or l.get("lane")
-        if _family_of(sess or "") != _IRSYAD_FAMILY:
+        # A row whose boot stamp never landed has no session/lane: fall back to its
+        # identity for the family test (same fallback as /api/fleet's `family`), so
+        # a live gzb irsyad body is never silently dropped from this page.
+        if _family_of(sess or l.get("base_agent_id") or l.get("agent_id") or "") != _IRSYAD_FAMILY:
             continue
         state, flagged = _lane_bucket(l)
         tt = tt_by_sess.get(sess) or {}
@@ -1786,7 +1886,10 @@ def _irsyad_payload():
             "off_account": bool(tt.get("mismatch")),
             "metered": bool(tt.get("metered")),
             "expected": tt.get("expected"),
-            "model": tt.get("model"),
+            # Local proc truth first; a cross-host (gzb) lane falls back to its own
+            # boot/heartbeat stamp, then the registry default — never invented.
+            "model": tt.get("model") or _resolve_model(
+                None, l.get("current_task"), l.get("registry_model"), {})[0],
             # Context window fill (of the model window), same green/amber/red as fleet.
             "ctx_pct": ctx.get("pct"),
             "ctx_level": ctx.get("level"),
