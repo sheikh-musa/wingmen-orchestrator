@@ -176,13 +176,20 @@ _fp_for_session() {
   "$VENV_PY" - "$1" <<'PY' 2>/dev/null || true
 import os, sys
 sys.path.insert(0, os.getcwd())
-from dotenv import load_dotenv
-load_dotenv(os.path.join(os.getcwd(), '.env'))
+sys.path.insert(0, os.path.join(os.getcwd(), 'scripts', 'lib'))
 try:
     import psycopg
 except ImportError:
     sys.exit(0)
-dsn = os.environ.get('DATABASE_URL') or os.environ.get('SUPABASE_DB_URL')
+# op#24342 FILE-FIRST: resolve DATABASE_URL from the .env FILE before the environment,
+# so a stale inherited DSN (a pre-rotation password held by the invoking shell) can
+# never be used to connect here (pre-kill read runs BEFORE the relaunch) — the
+# stale-env auth-fail class that tripped the substrate pooler breaker.
+from substrate_dsn import dsn_from_env_file
+try:
+    dsn = dsn_from_env_file(os.path.join(os.getcwd(), '.env'))
+except Exception:
+    dsn = os.environ.get('SUPABASE_DB_URL')
 if not dsn:
     sys.exit(0)
 sess = sys.argv[1]
@@ -370,9 +377,16 @@ BASE_OVERRIDE_CMD=''
 _BASE_ID="$(cd "$ORCH_DIR" && "$ORCH_DIR/.venv/bin/python3" - "$SESS" <<'PY' 2>/dev/null
 import os, sys
 sys.path.insert(0, os.getcwd())
+sys.path.insert(0, os.path.join(os.getcwd(), 'scripts', 'lib'))
 import psycopg
+# op#24342 FILE-FIRST: resolve DATABASE_URL from the .env FILE before the environment,
+# so a stale inherited DSN can never be used for this pre-relaunch read (breaker-safe).
+from substrate_dsn import dsn_from_env_file
 sess = sys.argv[1]
-dsn = os.environ.get("DATABASE_URL", "")
+try:
+    dsn = dsn_from_env_file(os.path.join(os.getcwd(), '.env'))
+except Exception:
+    dsn = ""
 if not dsn:
     sys.exit(0)
 with psycopg.connect(dsn, connect_timeout=10) as c:
