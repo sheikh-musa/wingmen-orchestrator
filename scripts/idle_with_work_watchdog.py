@@ -28,11 +28,25 @@ if ORCH_DIR not in sys.path:
 IDLE_SECONDS = 15 * 60
 PHASE1_LANES = ["cc-irsyad-coord", "cc-irsyad-1", "cc-irsyad-2"]
 COORD_LANES = {"cc-irsyad-coord"}
+# The REAL nudge tool: bash, POSITIONAL args (<tmux-session> "<message>"), verified-submit
+# with its own retry/ceiling. There is NO scripts/lane_nudge.py — a prior version called
+# one, which failed silently (cc-quality #48596). Mirror priority_sla_watchdog.py's shape.
+LANE_NUDGE = os.path.join(ORCH_DIR, "scripts", "lane_nudge.sh")
 
 
 def _dsn():
     from scripts.lib.substrate_dsn import dsn_from_env_file  # op#24342 file-first
     return dsn_from_env_file(os.path.join(ORCH_DIR, ".env"))
+
+
+def lane_map(conn) -> dict:
+    """base_agent_id -> tmux lane (from fleet_lanes). Mirrors priority_sla_watchdog.lane_map.
+    A lane absent here (e.g. cc-irsyad-1/cc-irsyad-2 have no fleet_lanes row) is UNREACHABLE
+    by this watchdog: _nudge treats it as a delivery failure and run_lane escalates — never
+    a silent skip."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT base_agent_id, lane FROM fleet_lanes WHERE base_agent_id IS NOT NULL")
+        return {a: l for a, l in cur.fetchall()}
 
 
 # ── pure core (unit-tested; no DB) ────────────────────────────────────────────
@@ -104,19 +118,43 @@ def lane_idle(cur, lane):
     return (secs is not None and secs >= IDLE_SECONDS), (float(secs) if secs is not None else None)
 
 
-def _nudge(lane, actionable, coord_unqueued, dry):
+def _nudge(lane, actionable, coord_unqueued, dry, lane_map):
+    """Deliver the idle-with-work nudge to LANE via the REAL lane_nudge.sh.
+
+    Returns True ONLY on a verified delivery (lane_nudge.sh rc==0). Returns False
+    for every failure mode — lane has no tmux-session mapping (unreachable), the
+    script returns non-zero (no such session / could not verify / parked / ceiling),
+    or the subprocess errors. The caller MUST treat False as a failed nudge and
+    escalate; a nudge that didn't land is never reported as success (cc-quality #48596).
+    """
     lines = ["[idle-with-work] You are idle but OWN %d actionable item(s):" % len(actionable)]
-    for w in actionable[:20]:
-        lines.append("  - %s: %s" % (w["ref"], (w.get("summary") or "")[:80]))
+    for it in actionable[:20]:
+        lines.append("  - %s: %s" % (it["ref"], (it.get("summary") or "")[:80]))
     if coord_unqueued:
         lines.append("QUEUE these into coord_dispatch_queue (not yet dispatched): "
-                     + ", ".join(w["ref"] for w in coord_unqueued[:20]))
+                     + ", ".join(it["ref"] for it in coord_unqueued[:20]))
     lines.append("Pick one up now, or set blocked_on (external dep + since-when) if truly blocked.")
     msg = "\n".join(lines)
     if dry:
-        print("[DRY nudge %s]\n%s" % (lane, msg)); return
-    subprocess.run([sys.executable, os.path.join(ORCH_DIR, "scripts", "lane_nudge.py"),
-                    "--lane", lane, "--message", msg], cwd=ORCH_DIR, timeout=60)
+        session = (lane_map or {}).get(lane, "<unmapped>")
+        print("[DRY nudge %s -> tmux:%s]\n%s" % (lane, session, msg)); return True
+    session = (lane_map or {}).get(lane)
+    if not session:
+        print("[idle-with-work] NUDGE FAILED: lane %s has no fleet_lanes tmux mapping — "
+              "unreachable, escalating" % lane, file=sys.stderr)
+        return False
+    try:
+        r = subprocess.run([LANE_NUDGE, session, msg],
+                           capture_output=True, text=True, cwd=ORCH_DIR, timeout=90)
+    except Exception as e:  # noqa: BLE001 — any failure is a failed delivery, surfaced loud
+        print("[idle-with-work] NUDGE FAILED: lane_nudge.sh raised for %s (tmux:%s): %r"
+              % (lane, session, e), file=sys.stderr)
+        return False
+    if r.returncode != 0:
+        print("[idle-with-work] NUDGE FAILED: lane_nudge.sh rc=%d for %s (tmux:%s) — %s"
+              % (r.returncode, lane, session, (r.stderr or "").strip()[:200]), file=sys.stderr)
+        return False
+    return True
 
 
 def _page(subject, body, dry):
@@ -128,7 +166,7 @@ def _page(subject, body, dry):
                    input=body.encode(), cwd=ORCH_DIR, timeout=30)
 
 
-def run_lane(cur, lane, dry=False):
+def run_lane(cur, lane, lane_map, dry=False):
     items = gather_owned_work(cur, lane)
     idle, idle_secs = lane_idle(cur, lane)
     c = classify(items, idle)
@@ -147,7 +185,15 @@ def run_lane(cur, lane, dry=False):
     tick = (row[1] + 1) if (row and row[0] == h) else 1
     coord_unqueued = [w for w in actionable if w.get("source") != "coord_dispatch_queue"] if lane in COORD_LANES else []
     if tick == 1:
-        _nudge(lane, actionable, coord_unqueued, dry); result["fired"] = "nudge"
+        if _nudge(lane, actionable, coord_unqueued, dry, lane_map):
+            result["fired"] = "nudge"
+        else:
+            # The nudge could NOT be delivered (lane_nudge.sh failed, or lane has no tmux
+            # mapping). Never a silent skip — fail LOUD and escalate to the operator now
+            # rather than reporting a phantom "nudge" and waiting a full extra tick.
+            _page("[idle-with-work] %s idle %dm with %d actionable — NUDGE UNDELIVERABLE, escalating" % (lane, (idle_secs or 0)//60, len(actionable)),
+                  "%s is idle and owns actionable work, but the tick-1 nudge could NOT be delivered (lane_nudge.sh returned non-zero, or the lane has no fleet_lanes tmux mapping). Escalating directly:\n%s" % (lane, "\n".join("  - %s: %s" % (w["ref"], (w.get("summary") or "")[:80]) for w in actionable)), dry)
+            result["fired"] = "nudge-failed->page"
     elif tick == 2:
         _page("[idle-with-work] %s idle %dm with %d actionable items — nudged, still idle" % (lane, (idle_secs or 0)//60, len(actionable)),
               "%s has been idle and owns actionable work after a nudge:\n%s" % (lane, "\n".join("  - %s: %s" % (w["ref"], (w.get("summary") or "")[:80]) for w in actionable)), dry)
@@ -174,9 +220,10 @@ def main(argv=None):
     out = []
     with psycopg.connect(_dsn()) as conn:
         conn.autocommit = not args.dry_run
+        lmap = lane_map(conn)
         with conn.cursor() as cur:
             for lane in args.lanes:
-                out.append(run_lane(cur, lane, dry=args.dry_run))
+                out.append(run_lane(cur, lane, lmap, dry=args.dry_run))
     for r in out:
         print(json.dumps(r))
     return 0
