@@ -125,14 +125,21 @@ def _page_orch_console(cls: str, tool_name: str) -> None:
         f"agent: {agent}. The matched text itself is never relayed. This is a backstop "
         f"detection (Musa op#24408) -- it cannot un-send anything already transmitted."
     )
+    # orch-console bus #48740: synthetic/demo replay runs (e.g. scratch_shape_replay.py)
+    # trigger this same real auto-redact path, paging a real P1 for every demo hit and
+    # diluting real pages. SECRETS_SCANNER_DEMO=1 (set only by demo/replay tooling, never
+    # in a live agent session) downgrades to a [DEMO]-tagged P3, no requires_response.
+    # The real-hit path (unset) is untouched -- still P1 + req.
+    is_demo = os.environ.get("SECRETS_SCANNER_DEMO") == "1"
+    subject = f"secrets_output_scanner: auto-redacted ({cls})"
+    args = [venv_py if os.path.exists(venv_py) else "python3", bus_send,
+            "--to", "orch-console", "--type", "update"]
+    if is_demo:
+        args += ["--subject", f"[DEMO] {subject}", "--priority", "P3"]
+    else:
+        args += ["--subject", subject, "--priority", "P1", "--req"]
     try:
-        subprocess.run(
-            [venv_py if os.path.exists(venv_py) else "python3", bus_send,
-             "--to", "orch-console", "--type", "update",
-             "--subject", f"secrets_output_scanner: auto-redacted ({cls})",
-             "--priority", "P1", "--req"],
-            input=body, text=True, cwd=orch_root, timeout=20,
-        )
+        subprocess.run(args, input=body, text=True, cwd=orch_root, timeout=20)
     except Exception:
         pass  # paging must never crash the hook / block the tool result
 

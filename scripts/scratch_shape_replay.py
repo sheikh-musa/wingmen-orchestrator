@@ -28,7 +28,10 @@ def run_scanner(tool_name, tool_input, tool_response, transcript_path):
         "tool_name": tool_name, "tool_input": tool_input,
         "tool_response": tool_response, "transcript_path": transcript_path,
     })
-    return subprocess.run([sys.executable, SCANNER], input=payload, text=True, capture_output=True)
+    # bus #48740: this is a synthetic replay, not a real agent session -- tag the
+    # scanner's auto-redact page as [DEMO]/P3 so it doesn't dilute real P1 pages.
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    return subprocess.run([sys.executable, SCANNER], input=payload, text=True, capture_output=True, env=env)
 
 
 results = []

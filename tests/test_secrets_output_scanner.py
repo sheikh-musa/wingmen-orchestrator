@@ -175,7 +175,11 @@ def test_main_catches_and_redacts_a_literal_dsn_in_the_tool_use_input(tmp_path):
         "tool_response": "SELECT 1",
         "transcript_path": str(transcript),
     })
-    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True)
+    # bus #48740: this is a test fixture, not a real leak -- SECRETS_SCANNER_DEMO=1
+    # keeps this from paging orch-console a real P1 on every suite run.
+    import os
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
     assert "secret-shaped content" in r.stderr
 
     after = transcript.read_text()
@@ -204,3 +208,49 @@ def test_redact_recent_lines_only_touches_the_window(tmp_path):
     assert after[0]["msg"] == "clean line far back"  # outside the window, untouched
     assert "REDACTED" in after[1]["msg"]
     assert "REDACTED" in after[2]["msg"]
+
+
+# ---- bus #48740: demo/replay runs must not page orch-console at real P1 ----
+
+def test_page_orch_console_demo_mode_tags_subject_and_drops_to_p3(monkeypatch):
+    import subprocess as subprocess_module
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setenv("SECRETS_SCANNER_DEMO", "1")
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+    scanner._page_orch_console("postgres-dsn", "Bash")
+
+    args = captured["args"]
+    subject_idx = args.index("--subject") + 1
+    priority_idx = args.index("--priority") + 1
+    assert args[subject_idx].startswith("[DEMO] ")
+    assert args[priority_idx] == "P3"
+    assert "--req" not in args
+
+
+def test_page_orch_console_real_mode_is_unchanged(monkeypatch):
+    import subprocess as subprocess_module
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.delenv("SECRETS_SCANNER_DEMO", raising=False)
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+    scanner._page_orch_console("postgres-dsn", "Bash")
+
+    args = captured["args"]
+    subject_idx = args.index("--subject") + 1
+    priority_idx = args.index("--priority") + 1
+    assert not args[subject_idx].startswith("[DEMO]")
+    assert args[priority_idx] == "P1"
+    assert "--req" in args
