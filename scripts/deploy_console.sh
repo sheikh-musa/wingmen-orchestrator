@@ -70,7 +70,7 @@ if [ -x .venv/bin/python3 ]; then
   # (backlog#68, #223/#232) refuses any pytest session that can see it. Run the tests in
   # the sanctioned no-DB mode (same as scripts/pytest_local.sh Option B); the render gate
   # below still uses the live DSN.
-  env -u DATABASE_URL -u SUPABASE_DB_URL PYTEST_NO_DB=1 \
+  env -u DATABASE_URL -u SUPABASE_DB_URL -u CONSOLE_DB_URL -u SHARE_STATUS_DB_URL PYTEST_NO_DB=1 \
     PYTHONPATH="$PWD" .venv/bin/python3 -m pytest tests/console/test_app.py -q >"$DIR/pytest.log" 2>&1 \
     || fail "console tests FAILED (see $DIR/pytest.log)." 4
   echo "        $(grep -oE '[0-9]+ passed[^,]*' "$DIR/pytest.log" | tail -1)"

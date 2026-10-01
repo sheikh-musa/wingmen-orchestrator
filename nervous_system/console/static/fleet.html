@@ -155,6 +155,9 @@
   .poolwin.good b { color: var(--good); } .poolwin.warn b { color: var(--warn); } .poolwin.bad b { color: var(--bad); }
   .poolreset { flex: none; color: var(--dim); white-space: nowrap; }
   .pooladvrow { display: flex; gap: 8px; flex-wrap: wrap; padding-left: 24px; } .pooladvrow:empty { display: none; }
+  /* op#24597: GLM (z.ai) card — wider label ("5h"/"wk"), reset clock in operator TZ + UTC. */
+  .poolcard.glm .poolwl { width: 18px; }
+  .poolcard.glm .glmclock { flex-basis: 100%; padding-left: 24px; }
 
   /* top-bloat glance (op#18542) — worst offenders across the whole fleet. */
   .topbloat { display: none; align-items: center; flex-wrap: wrap; gap: 4px 7px; margin-top: 9px;
@@ -577,7 +580,7 @@
       <span id="build" class="build" title="build running on this device"></span>
     </div>
     <div id="statRow" class="stat"></div>
-    <div id="poolUsage" class="pools" title="Max weekly-pool usage + pace (op#9770/#12617)"></div>
+    <div id="poolUsage" class="pools" title="Max weekly-pool usage + pace (op#9770/#12617) + GLM Coding Plan quota (op#24597)"></div>
     <div id="topBloat" class="topbloat"></div>
   </header>
 

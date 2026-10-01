@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from nervous_system.console import auth, db, docs, governance, media, panes, pii, pools
+from nervous_system.console import auth, db, docs, governance, glm_usage, media, panes, pii, pools
 from nervous_system.console.feed import Broadcaster, feeder
 from nervous_system.protected_agents import console_protected_identities
 # GAP-B: the shared family helper — the SAME one the token resolver uses to decide
@@ -1593,6 +1593,7 @@ def _fleet_payload():
         f_backlog = ex.submit(db.fetch_backlog)          # operator's "Your asks" tracker
         f_pane = ex.submit(db.fetch_pane_context)        # op#13050-B: FRESH pane-truth bloat feed
         f_pool = ex.submit(db.fetch_pool_usage)          # Max weekly-% per pool (op#9770)
+        f_glm = ex.submit(glm_usage.get_glm_usage)       # op#24597: GLM Coding Plan quota (5-min server cache)
         f_queue = ex.submit(db.fetch_queue)              # per-lane worklist (lane_tasks — the drain view)
         f_inbox = ex.submit(db.fetch_inbox_backlog)      # fc-v52: unhandled bus inbox per body (drain board)
         f_asks = ex.submit(db.fetch_asks)                # fc-v55: operator's LIVE "Your asks" (status derived in SQL)
@@ -1642,6 +1643,13 @@ def _fleet_payload():
         except Exception as e:
             logger.warning("pool_usage failed: %s", e)
             pool_usage = []
+        # op#24597: get_glm_usage never raises and never carries the key; the
+        # guard is belt-and-braces so a bug here can't blank the aggregate.
+        try:
+            glm = f_glm.result()
+        except Exception as e:
+            logger.warning("glm_usage failed: %s", type(e).__name__)
+            glm = {"available": False, "level": None, "windows": []}
         try:
             queue = f_queue.result()
         except Exception as e:
@@ -1784,6 +1792,8 @@ def _fleet_payload():
         # source (workers + coords), so the banner can never contradict the header.
         "bloat_glance": _jsonable(bloat_glance),
         "pool_usage": _jsonable(pool_usage),
+        # op#24597: GLM Coding Plan (z.ai) quota card, rendered beside the Max pools.
+        "glm_usage": _jsonable(glm),
         "queue": _jsonable(queue),
         # fc-v52: per-body live drain board (unhandled bus inbox + console-assigned
         # items), replacing the static "Your asks" backlog. `backlog` is retained
