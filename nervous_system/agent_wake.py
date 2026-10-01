@@ -280,17 +280,22 @@ def _candidate_sessions(agent_id: str) -> list[str]:
     """Registered tmux sessions for the agent, ITS OWN FIRST then its base family, freshest
     first, with a mild preference for non-offline rows.
 
-    OFFLINE HANDLING — TWO rules that must BOTH survive; do NOT collapse to one:
+    OFFLINE HANDLING — the rules that must survive; do NOT collapse them:
       * op#11297/#16880: the agent's OWN row (exact agent_id) is kept EVEN IF offline — an
         on-demand body that self-marks offline WHILE its pane is alive still yields its
         session; liveness is decided by the pane, not the status field. Dropping this is
         silent wake loss for such a body.
-      * 2026-09-16 (Nazim #40426): base-family SIBLING rows (base match, different agent_id)
-        are dropped WHEN offline. A stale offline sibling was HIJACKING wakes — the phantom
-        cc-orchestrator-1 (base=cc-orchestrator, offline, tmux=substrate-cleanup, a pool-move
-        drift row) made a wake for the hub resolve to cc-substrate's LIVE pane. An offline
-        sibling must never be a wake target.
-    Net: keep offline only for the EXACT self; require non-offline for base-family siblings."""
+      * tdu-coord recovery: base-family SIBLING rows are ALSO kept when offline. A bus row to
+        a BASE id (e.g. cc-cosem-tdu-coord) whose only instance (cc-cosem-tdu-coord-1) is
+        offline-with-stale-heartbeat-but-live-pane must still resolve to that live pane. The
+        old `status<>'offline'` sibling filter dropped it -> "no live session" -> no doorbell.
+      * 2026-09-16 (Nazim #40426): a stale offline sibling whose tmux_session is a DIFFERENT
+        live agent's pane (the phantom cc-orchestrator-1 -> cc-substrate's pane, a pool-move
+        drift row) must NEVER be woken. That guard is NOT dropped — it MOVES to resolve time
+        (_first_live_session's reverse-ownership check), so an offline drift row can be a
+        CANDIDATE here but is rejected before it becomes a wake target.
+    Net: include self AND base-family siblings regardless of status; the hijack guard is
+    applied at resolve time (live has-session AND not owned by a foreign non-offline agent)."""
     base = _base_family(agent_id)
     if not _DSN:
         return []
@@ -299,7 +304,7 @@ def _candidate_sessions(agent_id: str) -> list[str]:
             cur.execute(
                 "SELECT agent_id, tmux_session FROM agent_status "
                 "WHERE tmux_session IS NOT NULL "
-                "  AND (agent_id=%s OR (base_agent_id=%s AND status<>'offline')) "
+                "  AND (agent_id=%s OR base_agent_id=%s) "
                 "ORDER BY (status<>'offline') DESC, last_heartbeat DESC NULLS LAST LIMIT 8",
                 (agent_id, base))
             return rank_candidates(cur.fetchall(), agent_id)
@@ -307,13 +312,60 @@ def _candidate_sessions(agent_id: str) -> list[str]:
         return []
 
 
-def _first_live_session(candidates, has_session=None) -> str | None:
-    """Pure: the first candidate whose pane is actually live. Injectable has_session
-    for testing."""
+def _session_owners(session: str):
+    """(agent_id, status) rows in agent_status registered to `session`. DB-backed, injectable
+    via `owner_source` on the caller for testing. Empty on no-DSN/empty/error (fail-open: a
+    missing ownership read must not silently drop an otherwise-live wake — see guard below)."""
+    if not _DSN or not session:
+        return []
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT agent_id, status FROM agent_status WHERE tmux_session=%s", (session,))
+            return list(cur.fetchall())
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("wingmen.agent_wake").warning(
+            "reverse-ownership read failed for session %s: %s", session, e)
+        return []
+
+
+def _owned_by_foreign_live_agent(session: str, agent_id: str, owner_source=None) -> bool:
+    """#40426 guard. True iff a NON-OFFLINE agent OUTSIDE agent_id's base family holds
+    `session` in agent_status — i.e. this live pane really belongs to a different body, so
+    waking it would hijack that body (the phantom cc-orchestrator-1 -> live cc-substrate case).
+
+    Family-aware: a live SELF or same-family sibling legitimately owning the session is NOT a
+    hijack (op#11297 family fallback), so it is excluded from the check. Fail-open: if the
+    ownership read returns nothing (no DSN / error), this is False and the live session is
+    allowed through — a missing read must never silently suppress a genuine wake."""
+    src = owner_source or _session_owners
+    base = _base_family(agent_id)
+    for row in src(session) or []:
+        oid, status = (row[0], row[1]) if len(row) > 1 else (row[0], None)
+        if status == "offline":
+            continue
+        if _base_family(oid) == base:
+            continue  # self or same-family live sibling — legitimate owner, not a hijack
+        return True
+    return False
+
+
+def _first_live_session(candidates, has_session=None, agent_id=None,
+                        owner_source=None) -> str | None:
+    """The first candidate whose pane is actually live AND is not a foreign-owned hijack.
+    Injectable has_session (pane liveness) and owner_source (reverse-ownership) for testing.
+
+    When `agent_id` is given, each live candidate is additionally gated by the #40426
+    reverse-ownership guard: a session owned by a DIFFERENT non-offline agent is skipped so a
+    stale offline drift row cannot resolve a wake onto another live body. With agent_id=None
+    the guard is off (legacy/pure callers), preserving the original has-session-only behavior."""
     hs = has_session or _tmux_has_session
     for s in candidates:
-        if hs(s):
-            return s
+        if not hs(s):
+            continue
+        if agent_id is not None and _owned_by_foreign_live_agent(s, agent_id, owner_source):
+            continue
+        return s
     return None
 
 
@@ -323,8 +375,12 @@ def resolve_tmux_session(agent_id: str) -> str | None:
     spection. This closes all three miss-classes at once: offline-while-alive (status
     filtered the row), {*}-scoped fleet-wide roles (repo_scope={*} -> no cwd tokens ->
     the old fallback could never resolve them), and brand-new agents. Coverage is a
-    pure function of (registered session AND live pane), never a curated list."""
-    live = _first_live_session(_candidate_sessions(agent_id))
+    pure function of (registered session AND live pane), never a curated list.
+
+    The #40426 sibling-hijack guard rides along via `agent_id`: a live candidate owned by a
+    DIFFERENT non-offline agent is rejected, so including offline base-family rows (needed for
+    the tdu-coord offline-but-live-pane recovery) cannot resolve a wake onto another body."""
+    live = _first_live_session(_candidate_sessions(agent_id), agent_id=agent_id)
     if live:
         return live
     # FALLBACK: cwd introspection — only helps scoped agents from a login shell (not
