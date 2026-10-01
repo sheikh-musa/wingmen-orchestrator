@@ -62,6 +62,18 @@ SECRET_DIR_PREFIXES (/dev/shm/wingmen-secrets/, ~/.wingmen/private/, ~/.wingmen/
 ~/.ssh/), OR a client-credential-shaped filename (service-account JSON). The sanctioned
 way to change one key in a .env-shaped file is scripts/env_set.sh (reads the new value
 from stdin, edits by key name, prints only a sha1 fingerprint -- never the value).
+
+Rule E, Write/Edit/MultiEdit/NotebookEdit coverage (bus #48903/#48922, LOCK2
+follow-up): Rule E originally only scanned Bash command text, on the theory that a
+PATH-ONLY tool's own CONTENT (Write's `content`, Edit's `new_string`, MultiEdit's
+per-edit `new_string`, NotebookEdit's `new_source`) is the agent's own new text, not a
+leak of what's on disk -- true for Rule A's concern (echoing EXISTING content), but
+not for Rule E's: an agent can still type a literal secret-shaped VALUE into brand-new
+content exactly as it can into a Bash command, and that was only ever caught post-hoc
+by secrets_output_scanner.py (real example: cc-substrate op#24409, a fixture DSN typed
+into a Write'd test-payload file). Scanned unconditionally, same as the Bash case --
+no sink exception; a path already blocked by the secret-path check above never reaches
+this (it's blocked for Rule A first, same message either way).
 """
 from __future__ import annotations
 
@@ -577,6 +589,23 @@ def _command_text(tool_name: str, tool_input: dict) -> str | None:
     return None
 
 
+def _new_content_text(tool_name: str, tool_input: dict) -> str:
+    """The agent's own NEW content for a PATH-ONLY tool -- Rule E's concern (a secret
+    VALUE typed literally), independent of Rule A's (existing file content echoed
+    back). Returns "" for a tool/shape with no new-content field, never None, so
+    callers can check_rule_e() it unconditionally."""
+    if tool_name == "Write":
+        return tool_input.get("content") or ""
+    if tool_name == "Edit":
+        return tool_input.get("new_string") or ""
+    if tool_name == "MultiEdit":
+        edits = tool_input.get("edits") or []
+        return "\n".join(e.get("new_string") or "" for e in edits)
+    if tool_name == "NotebookEdit":
+        return tool_input.get("new_source") or ""
+    return ""
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -597,6 +626,12 @@ def main() -> int:
         if _is_secret_path(text):
             sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {TOOL_SECRET_FILE_MESSAGE}\n")
             return 2
+        content = _new_content_text(tool_name, tool_input)
+        if content:
+            literal_reason = check_rule_e(content)
+            if literal_reason:
+                sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {LITERAL_SECRET_MESSAGE} ({literal_reason})\n")
+                return 2
         return 0
 
     if tool_name == "Bash":

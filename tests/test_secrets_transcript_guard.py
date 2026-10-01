@@ -157,6 +157,79 @@ def test_allows_dsn_referenced_by_variable_not_literal():
     assert_allowed("Bash", {"command": 'psql "$DATABASE_URL" -c "select 1"'})
 
 
+# ---- must BLOCK: Rule E extended to Write/Edit/MultiEdit/NotebookEdit content ------
+# bus #48903/#48922 LOCK2 follow-up: real incident (cc-substrate op#24409) was a
+# fixture DSN typed into a Write'd file -- Rule E previously only scanned Bash command
+# text, so this only got caught post-hoc by secrets_output_scanner.py, never pre-empted.
+
+def test_blocks_literal_dsn_in_write_content():
+    assert_blocked(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md",
+         "content": 'psql "postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch"'},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_bearer_token_in_edit_new_string():
+    assert_blocked(
+        "Edit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md",
+         "old_string": "x", "new_string": "Authorization: Bearer FakeSyntheticToken1234567890abcdef"},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_dsn_in_one_of_several_multiedit_edits():
+    assert_blocked(
+        "MultiEdit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md",
+         "edits": [
+             {"old_string": "a", "new_string": "harmless change"},
+             {"old_string": "b", "new_string": 'postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch'},
+         ]},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_dsn_in_notebookedit_new_source():
+    assert_blocked(
+        "NotebookEdit",
+        {"notebook_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/scratch.ipynb",
+         "new_source": 'postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch'},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_allows_write_content_with_no_secret_shape():
+    assert_allowed(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md",
+         "content": "just some ordinary notes, no secrets here"},
+    )
+
+
+def test_allows_edit_new_string_referencing_var_by_name():
+    # the agent writing code that references $DATABASE_URL by name (not a literal
+    # value) must stay allowed -- same Rule E boundary as the Bash case.
+    assert_allowed(
+        "Edit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/scripts/foo.py",
+         "old_string": "a", "new_string": "dsn = os.environ['DATABASE_URL']"},
+    )
+
+
+def test_secret_path_block_takes_priority_over_content_scan_on_env_file():
+    # a secret PATH is blocked by Rule A's path check before content is ever scanned --
+    # confirms the new content check doesn't change or duplicate that existing message.
+    assert_blocked(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/.env",
+         "content": "ORDINARY_KEY=not-secret-shaped"},
+        expect_substr="this path is a secret file",
+    )
+
+
 def test_blocks_ps_eww_dump_without_sink():
     assert_blocked("Bash", {"command": "ps eww -p 123"})
 
