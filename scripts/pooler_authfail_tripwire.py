@@ -13,7 +13,7 @@ sees BOTH hosts via the Supabase Mgmt API (read-only HTTPS, never a pooler DB co
 and attributes fails per host by peer_ip, so a burst on EITHER host raises the tripwire.
 
 Every run (launchd, 15 min): count "password authentication failed" events in the last
-15 min from the Mgmt API postgres_logs, bucket them per host by peer_ip, compute each
+15 min from the Mgmt API logs, bucket them per host by peer_ip, compute each
 host's per-minute rate, and probe the breaker. BREACH = ANY host's rate > 5/min OR
 breaker tripped -> LOUD P1 to cc-fleet-health (self-wake) + orch-console naming the
 breached host(s). Below threshold: log per-host rates, no action. Fail LOUD if it cannot
@@ -69,7 +69,7 @@ def _fetch_authfail_rows():
         raise RuntimeError("SUPABASE_ACCESS_TOKEN absent — cannot measure")
     end = datetime.datetime.utcnow()
     start = end - datetime.timedelta(minutes=WINDOW_MIN)
-    sql = ("SELECT timestamp, event_message, log_attributes FROM postgres_logs "
+    sql = ("SELECT timestamp, event_message FROM logs "
            "WHERE event_message ILIKE '%password authentication failed%' "
            "ORDER BY timestamp DESC LIMIT 500")
     qs = urllib.parse.urlencode({
@@ -79,9 +79,24 @@ def _fetch_authfail_rows():
     })
     url = "https://api.supabase.com/v1/projects/%s/analytics/endpoints/logs?%s" % (REF, qs)
     req = urllib.request.Request(url, headers={"Authorization": "Bearer %s" % token})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        rows = json.load(r)
-    return rows.get("result", rows) if isinstance(rows, dict) else rows
+    # logflare intermittently returns {"error":"Table ... does not exist"} (wrong table) for a valid query
+    # (transient backend/rate issue — the same query succeeds on retry). Retry before failing.
+    import time
+    last = None
+    for attempt in range(3):
+        with urllib.request.urlopen(req, timeout=30) as r:
+            rows = json.load(r)
+        if isinstance(rows, dict) and isinstance(rows.get("result"), list):
+            return rows["result"]
+        if isinstance(rows, list):
+            return rows
+        last = rows
+        time.sleep(2)
+    # Shape-guard: Mgmt API returns {"result": [...]} on success, {"error": "..."} on a bad
+    # query (e.g. selecting the nested log_attributes column -> "Table ... does not exist").
+    # Return ONLY a result LIST; anything else RAISES so main fails LOUD (could-not-measure)
+    # rather than iterating a dict's string keys (the #256 'str' object has no attribute get).
+    raise RuntimeError("Mgmt API returned no result list after 3 tries: %s" % json.dumps(last)[:200])
 
 
 def _count_authfails_by_host(rows=None):
@@ -153,17 +168,22 @@ def main():
         tripped = _breaker_tripped()
     except Exception as e:
         # Fail LOUD, never silently green.
-        _log("COULD NOT MEASURE: %s — paging" % e)
+        _log("COULD NOT MEASURE: %s" % e)
+        if "--dry-run" in sys.argv:
+            print("DRY-RUN: COULD NOT MEASURE (%s) — would page (suppressed in dry-run)" % e)
+            return 2
         _page("[tripwire] COULD NOT MEASURE fleet auth-fail rate (op#24342)",
               "The pooler auth-fail tripwire could not measure (%s). Treat as UNKNOWN, not safe — "
-              "check manually (Mgmt API postgres_logs, peer_ip per host) and the breaker." % e)
+              "check manually (Mgmt API logs, peer_ip per host) and the breaker." % e)
         return 2
 
     breached = _breached_hosts(rates)
-    breach = bool(breached) or tripped
+    total = sum(counts.values())
+    total_rate = total / float(WINDOW_MIN)
+    breach = bool(breached) or (total_rate > RATE_THRESHOLD) or tripped
     rate_str = " ".join("%s=%d(%.2f/min)" % (h, counts.get(h, 0), rates[h]) for h in HOST_IPS)
-    _log("authfails_%dm %s unattributed=%d breaker_tripped=%s breach=%s breached_hosts=%s"
-         % (WINDOW_MIN, rate_str, counts.get("unattributed", 0), tripped, breach, ",".join(breached) or "-"))
+    _log("authfails_%dm %s unattributed=%d total=%.2f/min breaker_tripped=%s breach=%s breached_hosts=%s"
+         % (WINDOW_MIN, rate_str, counts.get("unattributed", 0), total_rate, tripped, breach, ",".join(breached) or "-"))
 
     if "--dry-run" in sys.argv:
         print("DRY-RUN: %s unattributed=%d breaker_tripped=%s breach=%s breached_hosts=%s "
