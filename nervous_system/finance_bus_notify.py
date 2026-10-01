@@ -34,13 +34,11 @@ SESSION = os.environ.get("FINANCE_TMUX_SESSION", "finance")
 
 
 def _dsn() -> str:
-    v = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
-    if v:
-        return v
-    for line in open(os.path.join(ORCH_DIR, ".env")):
-        if line.startswith(("DATABASE_URL=", "SUPABASE_DB_URL=")):
-            return line.split("=", 1)[1].strip()
-    raise SystemExit("finance_bus_notify: no DATABASE_URL")
+    # op#24342: file-first. A stale inherited DATABASE_URL (a pre-rotation password
+    # held by this long-lived poller) must NOT win — that is what hammers the pooler
+    # to ECIRCUITBREAKER after a rotation. The .env FILE is the rotation push-point.
+    from scripts.lib.substrate_dsn import dsn_from_env_file
+    return dsn_from_env_file(os.path.join(ORCH_DIR, ".env"))
 
 
 def _log(msg: str) -> None:
