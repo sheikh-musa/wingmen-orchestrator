@@ -35,7 +35,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-echo "== 1/4: restoring gazzai-readable key =="
+echo "== 1/5: restoring gazzai-readable key =="
 if [ -f "$NEW_KEY_PRIV" ]; then
     run cp -p "$NEW_KEY_PRIV" "$OLD_KEY_PRIV"
     run chown gazzai:gazzai "$OLD_KEY_PRIV"
@@ -45,13 +45,13 @@ else
     echo "NOTE: $NEW_KEY_PRIV absent -- nothing to restore from (is $OLD_KEY_PRIV already present?)"
 fi
 
-echo "== 2/4: removing sudoers grant =="
+echo "== 2/5: removing sudoers grant =="
 run rm -f "$SUDOERS_DST"
 
-echo "== 3/4: removing wrapper =="
+echo "== 3/5: removing wrapper =="
 run rm -f "$WRAPPER_DST"
 
-echo "== 4/4: restoring pre-LOCK-1 fetch-secrets.sh =="
+echo "== 4/5: restoring pre-LOCK-1 fetch-secrets.sh =="
 LATEST_BAK="$(ls -t "$GAZZAI_HOME"/fetch-secrets.sh.bak-lock1-* 2>/dev/null | head -1 || true)"
 if [ -n "$LATEST_BAK" ]; then
     run cp -p "$LATEST_BAK" "$FETCH_DST"
@@ -60,6 +60,18 @@ if [ -n "$LATEST_BAK" ]; then
     echo "restored from: $LATEST_BAK"
 else
     echo "WARN: no fetch-secrets.sh.bak-lock1-* backup found -- fetch-secrets.sh left AS-IS, check manually" >&2
+fi
+
+# cc-quality bus #48664 LOW (point 5): without this, a duplicate root:root copy of
+# the key survives the rollback -- not a security regression on its own (root already
+# had full access to everything), but incomplete relative to the true pre-install
+# state. Only removed AFTER step 1 above has confirmed gazzai's copy is restored.
+echo "== 5/5: removing the duplicate root-owned key copy =="
+if [ -f "$OLD_KEY_PRIV" ]; then
+    run rm -f "$NEW_KEY_PRIV" "$NEW_KEY_PUB"
+    echo "removed $NEW_KEY_PRIV (+ .pub if present) -- gazzai's restored copy is now the only one"
+else
+    echo "WARN: $OLD_KEY_PRIV not present after step 1 -- NOT removing $NEW_KEY_PRIV (would leave no copy of the key at all)" >&2
 fi
 
 if [ "$DRY_RUN" -eq 0 ]; then

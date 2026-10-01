@@ -5,6 +5,16 @@
 # permission bits, and pass/fail lines.
 set -uo pipefail
 
+# Where to find scripts/hooks/secret_shape_patterns.py for the step-7 pattern
+# scan. Override with --repo-dir if the tracked checkout lives elsewhere.
+REPO_DIR_FOR_SCAN="/home/gazzai/wingmen/orchestrator"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --repo-dir) REPO_DIR_FOR_SCAN="$2"; shift 2 ;;
+        *) echo "unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
+
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; }
 
@@ -58,7 +68,41 @@ else
     pass "wrapper rejects arguments"
 fi
 
-echo "== 7. the real fetch path still works end-to-end via the wrapper =="
+echo "== 7. sudo -n wrapper (direct, as gazzai) -> status line ONLY, no bundle on stdout =="
+# orch-console bus #48668: the whole point of the redesign is that a gazzai agent
+# running the wrapper DIRECTLY (not through fetch-secrets.sh) can never get a secret
+# value on stdout -- it can at most refresh /dev/shm. Call it exactly that way here.
+if sudo -u gazzai sudo -n /usr/local/sbin/gzb-fetch-secrets-wrapper.sh >/tmp/lock1_verify_direct.log 2>&1; then
+    BYTES="$(wc -c < /tmp/lock1_verify_direct.log | tr -d ' ')"
+    echo "    stdout+stderr: $(cat /tmp/lock1_verify_direct.log)"
+    echo "    byte count: $BYTES"
+    if [ "$BYTES" -lt 2000 ]; then
+        pass "direct sudo -n wrapper stdout is small ($BYTES bytes) -- shape-consistent with a status line, not a bundle dump"
+    else
+        fail "direct sudo -n wrapper stdout is $BYTES bytes -- too large for a status line, investigate before trusting this design"
+    fi
+    if command -v python3 >/dev/null 2>&1 && [ -f "$REPO_DIR_FOR_SCAN/scripts/hooks/secret_shape_patterns.py" ]; then
+        if python3 -c "
+import sys
+sys.path.insert(0, '$REPO_DIR_FOR_SCAN/scripts/hooks')
+from secret_shape_patterns import SECRET_VALUE_PATTERNS
+text = open('/tmp/lock1_verify_direct.log').read()
+hits = [cls for cls, pat in SECRET_VALUE_PATTERNS.items() if pat.search(text)]
+sys.exit(1 if hits else 0)
+"; then
+            pass "zero secret-shaped strings in the direct-wrapper output (scanned with the fleet's own pattern set)"
+        else
+            fail "the direct-wrapper output matched a secret-shaped pattern -- DO NOT PROCEED, investigate immediately"
+        fi
+    else
+        echo "    NOTE: could not run the pattern scan (python3 or secret_shape_patterns.py not found at $REPO_DIR_FOR_SCAN) -- byte-count check above still stands, but re-run with --repo-dir set correctly for the full proof"
+    fi
+else
+    fail "direct sudo -n wrapper call failed: $(cat /tmp/lock1_verify_direct.log)"
+fi
+rm -f /tmp/lock1_verify_direct.log
+
+echo "== 8. the real fetch path still works end-to-end via fetch-secrets.sh =="
 PRE_HASH="$(sha256sum /dev/shm/wingmen-secrets/.env 2>/dev/null | cut -d' ' -f1 || echo none)"
 if sudo -u gazzai /home/gazzai/fetch-secrets.sh >/tmp/lock1_verify_fetch.log 2>&1; then
     POST_HASH="$(sha256sum /dev/shm/wingmen-secrets/.env 2>/dev/null | cut -d' ' -f1 || echo none)"
@@ -67,12 +111,15 @@ if sudo -u gazzai /home/gazzai/fetch-secrets.sh >/tmp/lock1_verify_fetch.log 2>&
     echo "    post-hash: $POST_HASH"
     [ "$PRE_HASH" = "$POST_HASH" ] && pass "/dev/shm/.env byte-identical across the mechanism change" \
         || echo "    NOTE: hash differs -- expected if the upstream bundle content itself changed between runs"
+    OWNER="$(stat -c '%U:%G %a' /dev/shm/wingmen-secrets 2>/dev/null || echo MISSING)"
+    [ "$OWNER" = "gazzai:gazzai 700" ] && pass "/dev/shm/wingmen-secrets is gazzai:gazzai 700 post-swap (root-run wrapper correctly handed ownership back)" \
+        || fail "/dev/shm/wingmen-secrets perms/owner: $OWNER (expected gazzai:gazzai 700)"
 else
     fail "fetch-secrets.sh failed as gazzai: $(cat /tmp/lock1_verify_fetch.log)"
 fi
 rm -f /tmp/lock1_verify_fetch.log
 
-echo "== 8. service + one dependent lane still healthy =="
+echo "== 9. service + one dependent lane still healthy =="
 systemctl is-active --quiet wingmen-fetch-secrets.service && pass "wingmen-fetch-secrets.service active" \
     || fail "wingmen-fetch-secrets.service not active"
 for svc in wingmen-irsyad-coord wingmen-hub-self-recovery; do

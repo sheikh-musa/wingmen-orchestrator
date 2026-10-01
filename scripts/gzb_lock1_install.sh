@@ -114,6 +114,10 @@ if [ "$DRY_RUN" -eq 0 ]; then
     systemctl is-active --quiet wingmen-fetch-secrets.service || { echo "FATAL: service not active after restart" >&2; exit 1; }
     echo "service active: yes"
     echo "post-install /dev/shm/.env sha256: $(sha256sum /dev/shm/wingmen-secrets/.env 2>/dev/null | cut -d' ' -f1 || echo 'MISSING')"
+    # orch-console bus #48668: the wrapper now does the whole unpack as root and
+    # chowns the result to gazzai -- confirm that landed, not just that the service
+    # is "active" (a stuck-root-owned /dev/shm would still show the service active).
+    echo "post-install /dev/shm/wingmen-secrets owner: $(stat -c '%U:%G %a' /dev/shm/wingmen-secrets 2>/dev/null || echo 'MISSING')"
 fi
 
 echo "== done. Run scripts/gzb_lock1_verify.sh next for the full proof set. =="
