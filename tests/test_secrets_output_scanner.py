@@ -461,3 +461,66 @@ def test_main_passes_agent_id_and_type_from_payload_to_the_page(tmp_path):
     assert r.returncode == 0
     assert "security-reviewer" in body_file.read_text()
     assert "subagent_abc123" in body_file.read_text()
+
+
+def test_subagent_transcript_path_derives_sibling_file_from_agent_id():
+    # bus #49029/#49030: a subagent's own transcript lives at
+    # <session-dir>/subagents/agent-<agent_id>.jsonl, a SIBLING of the session-level
+    # transcript_path -- not something agent_id lets you compute from transcript_path's
+    # basename alone.
+    path = scanner._subagent_transcript_path(
+        "/Users/x/.claude/projects/-proj/abc-123.jsonl", "a4dab81df04b30025"
+    )
+    assert path == "/Users/x/.claude/projects/-proj/subagents/agent-a4dab81df04b30025.jsonl"
+
+
+def test_subagent_transcript_path_none_without_agent_id():
+    assert scanner._subagent_transcript_path("/some/session.jsonl", None) is None
+
+
+def test_subagent_transcript_path_none_without_transcript_path():
+    assert scanner._subagent_transcript_path(None, "abc123") is None
+
+
+def test_main_redacts_the_subagents_own_transcript_file_not_just_transcript_path(tmp_path, monkeypatch):
+    # bus #49029 real incident: the scanner paged, but the raw secret stayed readable
+    # because redact_recent_lines(transcript_path, ...) only ever touched the SESSION
+    # transcript -- the subagent's own <session>/subagents/agent-<id>.jsonl, where the
+    # actual tool_use/tool_result for that Bash call lives, was never opened at all.
+    import os
+    import subprocess
+
+    session_dir = tmp_path / "session-abc"
+    session_dir.mkdir()
+    session_transcript = session_dir / "abc.jsonl"
+    session_transcript.write_text(json.dumps({"type": "summary", "note": "unrelated"}) + "\n")
+
+    subagents_dir = session_dir / "subagents"
+    subagents_dir.mkdir()
+    sub_transcript = subagents_dir / "agent-a4dab81df04b30025.jsonl"
+    dsn = "postgres://orchuser:RealLooking9Zx@203.0.113.7:5432/orch"
+    sub_transcript.write_text(
+        json.dumps({"type": "tool_use", "name": "Bash", "input": {"command": f'echo "{dsn}"'}}) + "\n"
+        + json.dumps({"type": "tool_result", "toolUseResult": {"output": dsn}}) + "\n"
+    )
+
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    orch_root_dir = tmp_path / "orch_root"
+    orch_root_dir.mkdir()
+    orch_root = _fake_orch_root(orch_root_dir)
+    env["ORCH_ROOT"] = str(orch_root)
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": f'echo "{dsn}"'},
+        "tool_response": dsn,
+        "transcript_path": str(session_transcript),
+        "agent_id": "a4dab81df04b30025",
+        "agent_type": "general-purpose",
+    })
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    assert r.returncode == 0
+
+    redacted_sub_content = sub_transcript.read_text()
+    assert "RealLooking9Zx" not in redacted_sub_content
+    assert "REDACTED" in redacted_sub_content

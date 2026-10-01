@@ -124,6 +124,21 @@ def redact_last_line(transcript_path: str, cls: str, pattern: re.Pattern) -> boo
     return redact_recent_lines(transcript_path, cls, pattern, max_lines=1)
 
 
+def _subagent_transcript_path(transcript_path: str | None, agent_id: str | None) -> str | None:
+    """bus #48907/#49029/#49030: a subagent's OWN transcript is a SEPARATE on-disk file,
+    `<session-dir>/subagents/agent-<agent_id>.jsonl`, not a view onto whatever
+    `transcript_path` the hook payload carries for that call. The 2026-10-01 real leak
+    (bus #49029) proved this empirically: the scanner paged, `redact_recent_lines`
+    reported no error, yet the raw secret sat unredacted in the subagent's own file --
+    because `transcript_path` pointed at the session-level transcript, which never
+    contained that subagent's tool_use/tool_result lines to begin with. Redacting both
+    files is harmless when they happen to coincide (redaction is idempotent)."""
+    if not transcript_path or not agent_id:
+        return None
+    session_dir = os.path.dirname(transcript_path)
+    return os.path.join(session_dir, "subagents", f"agent-{agent_id}.jsonl")
+
+
 def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int = 3) -> bool:
     """Redact `pattern` matches in each of the last `max_lines` JSONL lines of
     transcript_path, in place. Returns True if any redaction was made. Never touches
@@ -248,6 +263,7 @@ def main() -> int:
     # not by (cls, match) pair, since two matches of the same class are still one leak
     # event worth reporting once. Redaction is unaffected -- it's idempotent per class
     # (a second call over an already-redacted line is a no-op), so only paging is deduped.
+    sub_transcript_path = _subagent_transcript_path(transcript_path, agent_id)
     seen_classes = set()
     for cls, match in hits:
         if transcript_path:
@@ -255,6 +271,10 @@ def main() -> int:
             # intervening line (observed in some transcript shapes); cheap and harmless
             # to widen since _redact_strings is a no-op on any line with no match.
             redact_recent_lines(transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
+        if sub_transcript_path and sub_transcript_path != transcript_path:
+            # bus #49029/#49030: this call originated inside a subagent -- also redact
+            # its own transcript file, which `transcript_path` above does not cover.
+            redact_recent_lines(sub_transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
         if cls in seen_classes:
             continue
         seen_classes.add(cls)

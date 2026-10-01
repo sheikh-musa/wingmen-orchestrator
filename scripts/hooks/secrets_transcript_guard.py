@@ -435,15 +435,22 @@ def check_rule_d(command: str) -> str | None:
 
 # ---- Rule B: secret values in a command -----------------------------------------
 
+#   _DSN/_TOKEN/_KEY carry a trailing `(?:_\w+)?` before the word boundary so a
+# qualifier SUFFIX on an otherwise-sensitive name (e.g. CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE)
+# still matches -- a bare trailing \b fails there because "N" and "_" are both \w, so no
+# boundary exists right after "TOKEN" (bus #49026/#49029/#49030: a real leak reached
+# prod because an ad-hoc masking sed matched "...TOKEN=" but not "...TOKEN_OVERRIDE=").
+# The suffix must itself start with "_" (not bare \w*) so this stays a pattern over
+# sensitive NAMES, not a substring match -- "TOKENIZER_PATH" must keep failing to match.
 SENSITIVE_VAR_RE = re.compile(
-    r"\$\{?(DATABASE_URL|WRITE_DSN|\w*_DSN|\w*_TOKEN|\w*_KEY|\w*SECRET\w*|\w*PASSWORD\w*|"
-    r"GOUMLYNE_\w*|API_KEY\w*)\b\}?"
+    r"\$\{?(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
+    r"\w*SECRET\w*|\w*PASSWORD\w*|GOUMLYNE_\w*|API_KEY\w*)\b\}?"
 )
 # same name alternation, bare (no $ / braces) -- for matching a NAME string literal
 # inside os.environ['NAME'] / ENVIRON["NAME"], not a shell variable reference.
 SENSITIVE_VAR_NAME_RE = re.compile(
-    r"^(DATABASE_URL|WRITE_DSN|\w*_DSN|\w*_TOKEN|\w*_KEY|\w*SECRET\w*|\w*PASSWORD\w*|"
-    r"GOUMLYNE_\w*|API_KEY\w*)$"
+    r"^(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
+    r"\w*SECRET\w*|\w*PASSWORD\w*|GOUMLYNE_\w*|API_KEY\w*)$"
 )
 
 PRINT_LEADING_RE = re.compile(r"^(echo|printf|print|tee|logger)\b")
@@ -502,9 +509,22 @@ SAFE_AFTER_SINK_RE = re.compile(r"^(cut|head|tr|awk)\b")
 ENV_SET_SINK_RE = re.compile(r"\benv_set\.sh\b")
 
 
-def _is_sink(segment: str) -> bool:
-    return (bool(HASH_SINK_RE.search(segment)) or bool(SED_MASK_SINK_RE.search(segment))
-            or bool(ENV_SET_SINK_RE.search(segment)))
+def _is_sink(segment: str, trigger_kind: str | None = None) -> bool:
+    if bool(HASH_SINK_RE.search(segment)) or bool(ENV_SET_SINK_RE.search(segment)):
+        return True
+    # bus #49026/#49029/#49030 real leak: a sed-mask sink is unverifiable against an
+    # UNBOUNDED "dumps the environment" trigger -- the real incident was exactly this: a
+    # sed masking `CLAUDE_CODE_OAUTH_TOKEN=` on a /proc/<pid>/environ dump silently let
+    # `CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE=` through raw, because no single hand-written sed
+    # pattern can be trusted to enumerate every sensitive name a dump might contain. A
+    # dump must resolve through an opaque hash/length sink instead, which redacts the
+    # whole blob without needing to know which names it holds. This does NOT extend to
+    # Rule A's grep-on-a-secret-FILE sink check (trigger_kind left as the None default
+    # there) or Rule B's "prints a secret env var" trigger (one named var, bounded) --
+    # both keep accepting sed-mask as already reviewed/accepted.
+    if trigger_kind == "dumps the environment":
+        return False
+    return bool(SED_MASK_SINK_RE.search(segment))
 
 
 def _segment_dump_kind(segment: str, lead: str) -> bool:
@@ -559,7 +579,7 @@ def check_rule_b(command: str) -> str | None:
             # a tee does not retroactively un-leak what tee already wrote.
             if i > trigger_index and TEE_LEADING_RE.match(_leading_command(seg)):
                 return f"{trigger_kind} and pipes it through tee (duplicates the raw value to another destination) before any hash sink"
-            if _is_sink(seg):
+            if _is_sink(seg, trigger_kind):
                 sink_index = i
                 break
         if sink_index is None:

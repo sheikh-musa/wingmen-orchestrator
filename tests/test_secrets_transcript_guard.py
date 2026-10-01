@@ -304,8 +304,53 @@ def test_allows_sed_mask_of_dsn_password():
     assert_allowed("Bash", {"command": 'echo "$DATABASE_URL" | sed -E \'s/:[^:@]+@/:***@/\''})
 
 
-def test_allows_env_dump_piped_to_sed_redact():
-    assert_allowed("Bash", {"command": "env | grep -i SUPABASE | sed -E 's/=.*/=<redacted>/'"})
+def test_blocks_echo_of_override_suffixed_token_var_with_no_sink():
+    # bus #49026/#49029/#49030 real leak: SENSITIVE_VAR_RE's old trailing \b meant
+    # CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE (and any other _TOKEN/_KEY/_DSN name with a
+    # qualifier suffix) never matched at all, so Rule B never even recognized this as a
+    # secret-printing command -- it was silently allowed outright, with no block AND no
+    # sink requirement.
+    name = "CLAUDE_CODE_OAUTH_TOKEN" + "_OVERRIDE"
+    assert_blocked("Bash", {"command": f'echo "${{{name}}}"'})
+
+
+def test_allows_echo_of_override_suffixed_token_var_through_hash_sink():
+    name = "CLAUDE_CODE_OAUTH_TOKEN" + "_OVERRIDE"
+    assert_allowed("Bash", {"command": f'echo "${{{name}}}" | shasum'})
+
+
+def test_blocks_echo_of_write_dsn_override_suffixed_var_with_no_sink():
+    assert_blocked("Bash", {"command": 'echo "$WRITE_DSN_OVERRIDE"'})
+
+
+def test_blocks_env_dump_piped_to_sed_redact():
+    # bus #49026/#49029/#49030 real leak: a sed-mask sink is no longer accepted for an
+    # UNBOUNDED "dumps the environment" trigger -- only a hash/length sink is, since a
+    # hand-written sed pattern can't be trusted to enumerate every sensitive name a dump
+    # might contain (this exact shape, with a specific-var-name sed, is what let
+    # CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE through raw while masking CLAUDE_CODE_OAUTH_TOKEN).
+    assert_blocked("Bash", {"command": "env | grep -i SUPABASE | sed -E 's/=.*/=<redacted>/'"})
+
+
+def test_allows_env_dump_piped_to_hash_sink():
+    assert_allowed("Bash", {"command": "env | grep -i SUPABASE | shasum"})
+
+
+def test_blocks_proc_environ_read_piped_to_sed_redact_real_incident_shape():
+    # bus #49026/#49029 real incident, reproduced: masking one named var in a
+    # /proc/<pid>/environ dump by sed left a DIFFERENT, suffixed var name
+    # (CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE) unmasked. The dump-level sink must now be a
+    # real hash/length sink, not a per-name sed pattern.
+    assert_blocked("Bash", {
+        "command": (
+            "cat /proc/668620/environ | tr '\\0' '\\n' | "
+            "sed -E 's/CLAUDE_CODE_OAUTH_TOKEN=.*/CLAUDE_CODE_OAUTH_TOKEN=***/'"
+        )
+    })
+
+
+def test_allows_proc_environ_read_piped_to_hash_sink():
+    assert_allowed("Bash", {"command": "cat /proc/668620/environ | tr '\\0' '\\n' | shasum"})
 
 
 def test_allows_curl_header_use_piped_to_unrelated_print():
