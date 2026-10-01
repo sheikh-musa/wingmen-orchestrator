@@ -16,7 +16,7 @@ set -uo pipefail
 
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ORCH_DIR/.venv/bin/python3"; [ -x "$PY" ] || PY="$(command -v python3)"
-WINDOW="${SECRET_SWEEP_WINDOW:-30 hours ago}"   # generous overlap so nothing between runs is missed
+WINDOW="${SECRET_SWEEP_WINDOW:-}"   # EMPTY = ALL dates (orch-console #48734: older transcripts hold secrets too; hash match is cheap). Set e.g. "30 hours ago" to window.
 BAK_ROOT="${SECRET_SWEEP_BAK_ROOT:-$HOME/secret-sweep-backups}"
 STAMP="$(date -u +%Y%m%dT%H%MZ)"
 
@@ -30,12 +30,18 @@ for g in "$HOME"/wingmen/orchestrator/.env "$HOME"/wingmen/orchestrator/.env.bak
 done
 [ "${#ENVS[@]}" -gt 0 ] || { echo "secret_sweep_run: no .env files found — REFUSE" >&2; exit 3; }
 
-# Transcripts touched within the window (live + recent).
+# Transcripts to scan: ALL by default (every date, incl. subagent dirs — find recurses);
+# only windowed when SECRET_SWEEP_WINDOW is set.
 # NB: bash 3.2 (macOS /bin/bash, what launchd runs) has no `mapfile` — build the array by hand.
 SCANS=()
-while IFS= read -r _f; do [ -n "$_f" ] && SCANS+=("$_f"); done \
-  < <(find "$HOME/.claude/projects" -name '*.jsonl' -newermt "$WINDOW" 2>/dev/null)
-[ "${#SCANS[@]}" -gt 0 ] || { echo "secret_sweep_run: no recent transcripts — nothing to do"; exit 0; }
+if [ -n "$WINDOW" ]; then
+  while IFS= read -r _f; do [ -n "$_f" ] && SCANS+=("$_f"); done \
+    < <(find "$HOME/.claude/projects" -name '*.jsonl' -newermt "$WINDOW" 2>/dev/null)
+else
+  while IFS= read -r _f; do [ -n "$_f" ] && SCANS+=("$_f"); done \
+    < <(find "$HOME/.claude/projects" -name '*.jsonl' 2>/dev/null)
+fi
+[ "${#SCANS[@]}" -gt 0 ] || { echo "secret_sweep_run: no transcripts — nothing to do"; exit 0; }
 
 REPORT="$("$PY" "$ORCH_DIR/scripts/secret_hash_sweep.py" --env "${ENVS[@]}" --scan "${SCANS[@]}" \
           $([ "${SECRET_SWEEP_ARM:-0}" = "1" ] && printf -- "--execute --backup-dir %s" "$BAK_ROOT/$STAMP" || printf -- "--dry-run") \
