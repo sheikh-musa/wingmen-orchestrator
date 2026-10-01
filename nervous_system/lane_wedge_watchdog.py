@@ -180,6 +180,14 @@ MIN_NUDGES_BEFORE_ESCALATE = _envint("LANE_WEDGE_MIN_NUDGES_BEFORE_ESCALATE", 1)
 REPEAT_K = _envint("LANE_WEDGE_REPEAT_K", 3)
 REPEAT_WINDOW_SEC = _envint("LANE_WEDGE_REPEAT_WINDOW_SEC", 6 * 3600)
 
+# bus #47588 follow-up: ALL singletons coming back 'uncovered' in one sweep suggests a
+# broken DSN on this monitor's own DB read (not evidence any agent is actually wedged/dead
+# — see singleton_liveness.agent_liveness's fail-open). Require it to hold for this many
+# CONSECUTIVE sweeps (same stability-floor shape as WEDGE_MIN_POLLS) before paging, so one
+# transient blip (or a single detect-only/test invocation with no persisted state) never
+# fires it — only a sustained, genuine DSN outage does.
+ALL_UNCOVERED_MIN_POLLS = _envint("LANE_WEDGE_ALL_UNCOVERED_MIN_POLLS", 2)
+
 # Dead-man's-switch: a scan starting more than this long after the previous
 # heartbeat means the watchdog was down/stalled — page once. 4x the 60s cadence
 # tolerates a normal skipped run; a real outage is far larger.
@@ -1566,6 +1574,7 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
         lane_dirs = lane_dirs or {}
 
     results: list[dict] = []
+    singleton_verdicts: list[str] = []
     for obs in observations:
         # GAP-2 LIVENESS PRECONDITION (Nazim 35141): a DEAD body is not wedged — never score or
         # nudge a corpse (the gap-2 root cause). Check liveness FIRST for a singleton; if DEAD,
@@ -1577,7 +1586,9 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
                 from nervous_system import singleton_liveness as _sl
             except ImportError:  # run-as-script: nervous_system dir on sys.path
                 import singleton_liveness as _sl
-            if _sl.agent_liveness(obs.agent) == "dead":
+            sl_verdict = _sl.agent_liveness(obs.agent)
+            singleton_verdicts.append(sl_verdict)
+            if sl_verdict == "dead":
                 line = {"agent": obs.agent, "kind": obs.kind, "session": obs.session,
                         "verdict": "dead", "unread": obs.bus.unread,
                         "action": ("DEAD (no tmux) — NOT wedged; skipped scoring, deferring page "
@@ -1735,6 +1746,28 @@ def run(mode: str = MODE_DETECT, alert: bool = False, as_json: bool = False,
             history.append(now)
         _recover(obs, entry, mode, alert, now, lane_dirs, line)
         results.append(line)
+
+    # bus #47588 follow-up: a per-agent "uncovered" is individually benign/expected, but
+    # EVERY singleton coming back "uncovered" in one sweep is how a broken DSN on the
+    # liveness monitor's own DB read would otherwise go silently unnoticed (singleton_liveness
+    # already WARN-logs the exception class, never the DSN, on that read failure). Requires
+    # ALL_UNCOVERED_MIN_POLLS consecutive sweeps (stability floor, see constant) before paging
+    # ONCE per episode — clears itself the moment coverage returns.
+    if singleton_verdicts and all(v == "uncovered" for v in singleton_verdicts):
+        streak = int(state.get("all_uncovered_streak", 0)) + 1
+        state["all_uncovered_streak"] = streak
+        if streak >= ALL_UNCOVERED_MIN_POLLS and not state.get("all_uncovered_alerted"):
+            msg = (f"\U0001f50c ALL {len(singleton_verdicts)} singleton(s) came back 'uncovered' "
+                   f"for {streak} consecutive sweeps — possible broken DSN on the liveness/wedge "
+                   f"watchdog's own DB read. Check nervous_system/singleton-liveness logs for a "
+                   f"WARN with the exception class (never the DSN itself).")
+            log(msg)
+            if alert:
+                _page(msg)
+            state["all_uncovered_alerted"] = now
+    else:
+        state["all_uncovered_streak"] = 0
+        state.pop("all_uncovered_alerted", None)
 
     if persist:
         save_state(state)
