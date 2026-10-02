@@ -1,0 +1,14 @@
+# token_fps.map: account name -> expected OAuth token fingerprint (sha256 of the token with its
+# trailing newline stripped, first 12 hex; the same fp the launchers stamp as auth_fp).
+#
+# THIS FILE IS THE ONE PLACE to update after an OAuth token rotation (orch-console #49107).
+# scripts/lib/token_file_guard.sh (launchers, switch tools, boot scripts) and
+# scripts/lib/token_file_guard.py (weekly_limit_monitor) both read it, so every reader of a key
+# file named <acct>-oauth-token refuses it if it does not hash to the fp below. A post-rotation
+# refusal therefore says "fp map out of date OR file mislabelled": update the line here.
+# Fingerprints are hashes, not secrets.
+#
+# <acct>   <fp12>
+musa       68142948c003
+musa2      e1dfa48eec85
+syed       582043088eae

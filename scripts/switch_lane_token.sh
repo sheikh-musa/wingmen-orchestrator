@@ -120,6 +120,9 @@ fi
 #   printf '%s' "$(cat <file>)" | shasum -a 256 | cut -c1-12
 # $(cat) strips the trailing newline so a file with/without one yields the same
 # fp the launcher stamps (launch_lane_as.sh reads the token via $(cat file)).
+# name<->fp check (#49107): refuse a mislabelled key file BEFORE touching any session.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/token_file_guard.sh" || { echo "ERROR: token_file_guard.sh missing" >&2; exit 4; }
+token_file_guard "$TOKFILE" || exit 4
 NEW_FP="$(printf '%s' "$(cat "$TOKFILE")" | shasum -a 256 2>/dev/null | cut -c1-12)"
 if [ -z "$NEW_FP" ] || [ "$NEW_FP" = "e3b0c44298fc" ]; then
   # e3b0c44298fc == sha256("") — an empty token file. Refuse: an empty token

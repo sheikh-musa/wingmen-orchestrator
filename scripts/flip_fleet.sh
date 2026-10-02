@@ -30,6 +30,8 @@
 #   scripts/flip_fleet.sh ~/.wingmen/keys/syed-oauth-token
 #   scripts/flip_fleet.sh --arm                 # ARM: actually flip the fleet to Syed
 #   scripts/flip_fleet.sh --arm ~/.wingmen/keys/musa-oauth-token   # flip back to Musa
+# NB gzb: key files live in /dev/shm/wingmen-secrets/keys/ there (NOT ~/.wingmen/keys); every
+# reader runs scripts/lib/token_file_guard.sh, so a mislabelled key file is refused (#49107).
 set -uo pipefail
 cd "$HOME/wingmen/orchestrator" || { echo "ERROR: orch dir missing" >&2; exit 9; }
 ORCH_DIR="$(pwd)"
@@ -48,6 +50,9 @@ for a in "$@"; do
   esac
 done
 [ -r "$TOKFILE" ] || { echo "ERROR: token file not readable: $TOKFILE" >&2; exit 3; }
+# name<->fp check (#49107): refuse a mislabelled key file BEFORE touching any session.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/token_file_guard.sh" || { echo "ERROR: token_file_guard.sh missing" >&2; exit 4; }
+token_file_guard "$TOKFILE" || exit 4
 TARGET_FP="$(printf '%s' "$(cat "$TOKFILE")" | shasum -a 256 2>/dev/null | cut -c1-12)"
 [ -n "$TARGET_FP" ] && [ "$TARGET_FP" != "e3b0c44298fc" ] || { echo "ERROR: empty/unreadable token file" >&2; exit 4; }
 

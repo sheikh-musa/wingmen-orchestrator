@@ -21,5 +21,8 @@ set -euo pipefail
 TOKFILE="${1:?usage: launch_lane_as.sh <token-file> [extra-args...]}"
 shift
 [ -r "$TOKFILE" ] || { echo "launch_lane_as: token file not readable: $TOKFILE" >&2; exit 1; }
+# name<->fp check (#49107): a file named <acct>-oauth-token must BE <acct>'s token.
+. "$HOME/wingmen/orchestrator/scripts/lib/token_file_guard.sh" || { echo "launch_lane_as: token_file_guard.sh missing" >&2; exit 1; }
+token_file_guard "$TOKFILE" || exit 1
 export CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE="$(cat "$TOKFILE")"
 exec "$HOME/wingmen/orchestrator/scripts/launch_dangerous_cc.sh" "$@"
