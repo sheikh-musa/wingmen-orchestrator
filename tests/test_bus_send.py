@@ -364,8 +364,54 @@ def test_live_instance_ids_empty_for_singleton_with_no_fanout(monkeypatch):
 
 def test_refuse_if_base_has_live_instances_raises_with_suggestion(monkeypatch):
     monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: ["cc-irsyad-1", "cc-irsyad-2"])
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:01:00 ago")
     with pytest.raises(SystemExit, match="Did you mean --to cc-irsyad-1"):
         bs.refuse_if_base_has_live_instances("cc-irsyad", False)
+
+
+def test_refuse_if_base_has_live_instances_includes_heartbeat_age_in_message(monkeypatch):
+    # bus #49675: a suggested instance can be dead by the time it's acted on --
+    # the refusal message must carry the DB-measured staleness so a future
+    # "it suggested a dead instance" report is self-diagnosing.
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: ["cc-irsyad-1"])
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=offline, heartbeat 17:04:00 ago")
+    with pytest.raises(SystemExit, match=r"\[status=offline, heartbeat 17:04:00 ago\]"):
+        bs.refuse_if_base_has_live_instances("cc-irsyad", False)
+
+
+def test_heartbeat_age_str_reports_status_and_age(monkeypatch):
+    import datetime
+    import psycopg2
+
+    cur = _FakeCursor([("offline", datetime.timedelta(hours=17, minutes=4))])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
+
+    result = bs._heartbeat_age_str("cc-irsyad-1", dsn="postgresql://unused")
+
+    assert result == "status=offline, heartbeat 17:04:00 ago"
+
+
+def test_heartbeat_age_str_handles_missing_row(monkeypatch):
+    import psycopg2
+
+    cur = _FakeCursor([None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
+
+    assert bs._heartbeat_age_str("cc-ghost-1", dsn="postgresql://unused") == "no agent_status row"
+
+
+def test_heartbeat_age_str_never_raises_on_db_error(monkeypatch):
+    import psycopg2
+
+    def _boom(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(psycopg2, "connect", _boom)
+
+    result = bs._heartbeat_age_str("cc-irsyad-1", dsn="postgresql://unused")
+    assert "heartbeat age unavailable" in result
 
 
 def test_refuse_if_base_has_live_instances_noop_when_none_live(monkeypatch):
@@ -392,6 +438,7 @@ def test_cli_refuses_on_base_with_live_instances_before_sending(monkeypatch):
     monkeypatch.setenv("CC_BASE_AGENT_ID", "orch-console")
     monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
     monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: ["cc-irsyad-1"])
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=idle, heartbeat 0:01:00 ago")
 
     def _boom(*a, **k):
         raise AssertionError("send() must not be called when the refusal fires")
