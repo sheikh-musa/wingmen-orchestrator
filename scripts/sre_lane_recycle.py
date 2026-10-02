@@ -40,6 +40,7 @@ sys.path.insert(0, str(_ORCH_DIR / "scripts" / "lib"))
 import fleet_health_boundaries as fhb  # noqa: E402
 import handoff_compaction_policy as hcp  # noqa: E402  (SSOT staged handoff compaction)
 import context_truth as _ct  # noqa: E402  (Gap-1: ONE gauge source, shared with the dead-man)
+import handoff_find as _hf  # noqa: E402  (ONE newest-handoff definition, CAI-1392 C)
 
 TMUX = os.environ.get("SRE_TMUX_BIN", "/usr/local/bin/tmux")
 _TMUX_TIMEOUT = 5
@@ -111,8 +112,8 @@ def gate_git_clean(worktree_path: "str | None") -> bool:
 
 
 def _newest_handoff_path(base_agent_id: str, notes: "str | None") -> "str | None":
-    """ABSOLUTE path of the newest matching handoff file, or None. Glob is
-    reports/<base>-handoff-*.md by default; a lane may override via a
+    """ABSOLUTE path of the newest matching handoff file, or None. Default is the shared
+    handoff_find (reports/[cc-]<short>-handoff-*.md, any case); a lane may override via a
     'handoff_glob=...' token in fleet_lanes.notes. Returned absolute so the boot
     string can name an EXACT file — a freshly-cleared lane's cwd is its project
     worktree, so a relative 'reports/' would resolve to the wrong tree (op#14539 fix 1)."""
@@ -123,8 +124,11 @@ def _newest_handoff_path(base_agent_id: str, notes: "str | None") -> "str | None
                 pattern = tok.split("=", 1)[1]
                 break
     if not pattern:
-        short = base_agent_id[3:] if base_agent_id.startswith("cc-") else base_agent_id
-        pattern = f"reports/{short}-handoff-*.md"
+        # Default: the shared finder — matches <short>-handoff-* AND cc-<short>-HANDOFF-*
+        # case-insensitively (the old case-sensitive <short>-only glob could not see
+        # cc-storefront-HANDOFF-20261002.md, 2026-10-02). One definition, shared with
+        # reset_auditor.sh, so the two cannot drift.
+        return _hf.newest_handoff(_ORCH_DIR / "reports", base_agent_id)
     files = glob.glob(str(_ORCH_DIR / pattern))
     if not files:
         return None
