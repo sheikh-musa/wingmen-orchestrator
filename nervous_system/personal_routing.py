@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # Tags whose message CONTENT must never land in the substrate. A tag not in
@@ -127,12 +128,60 @@ def write_personal_content(
         with urllib.request.urlopen(req, timeout=15) as resp:
             rows = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        raise PersonalRouteError(f"wingmen-personal insert failed: {e.code} {e.read().decode()[:300]}") from e
+        body = e.read().decode()
+        # Idempotent success, not a retriable failure (bus #49740/#49763): a
+        # duplicate-key 23505 on (channel, chat_id, tg_message_id) means this
+        # exact message was already safely written in an earlier attempt —
+        # most often a redelivered Telegram update_id for the same inner
+        # message. Treating it as a failure rolls back the caller's substrate
+        # envelope every cycle (ingest.py's C1 rollback-on-raise) and never
+        # advances the poll offset, so Telegram keeps redelivering the same
+        # update forever — the content is fine, only the envelope is stuck.
+        if e.code == 409 and "23505" in body and tg_message_id is not None:
+            existing_id = _find_existing_personal_content(
+                url, key, channel=channel, chat_id=chat_id, tg_message_id=tg_message_id,
+            )
+            if existing_id is not None:
+                return existing_id
+        raise PersonalRouteError(f"wingmen-personal insert failed: {e.code} {body[:300]}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise PersonalRouteError(f"wingmen-personal insert failed: {type(e).__name__}: {e}") from e
     if not rows:
         raise PersonalRouteError("wingmen-personal insert returned no row")
     return rows[0]["id"]
+
+
+def _find_existing_personal_content(
+    url: str, key: str, *, channel: str, chat_id, tg_message_id: int,
+) -> int | None:
+    """Looks up the row that already owns (channel, chat_id, tg_message_id)
+    after a duplicate-key insert — the row the dup-key error proves exists.
+    Returns None (never raises) on any lookup failure, so the caller falls
+    back to the original PersonalRouteError instead of masking a genuinely
+    different problem as idempotent success."""
+    chat_id_str = str(chat_id) if chat_id is not None else None
+    params = (
+        f"channel=eq.{urllib.parse.quote(str(channel))}"
+        f"&tg_message_id=eq.{tg_message_id}"
+        f"&select=id"
+    )
+    if chat_id_str is not None:
+        params += f"&chat_id=eq.{urllib.parse.quote(chat_id_str)}"
+    else:
+        params += "&chat_id=is.null"
+    req = urllib.request.Request(
+        f"{url}/rest/v1/mamadah_messages?{params}",
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            rows = json.loads(resp.read().decode())
+    except Exception:  # noqa: BLE001 — lookup is a best-effort confirmation, not the source of truth
+        return None
+    if len(rows) == 1:
+        return rows[0]["id"]
+    return None
 
 
 def read_personal_content(substrate_message_ids: list[int]) -> dict[int, dict]:
