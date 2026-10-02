@@ -47,6 +47,7 @@ REPORTS_DIR="${RESET_AUDITOR_REPORTS_DIR:-$ORCH_DIR/reports}"
 MAX_AGE="${RESET_AUDITOR_HANDOFF_MAX_AGE:-900}"
 LOGDIR="${RESET_AUDITOR_LOGDIR:-$ORCH_DIR/logs}"
 RESET_BY="${RESET_BY:-cc-fleet-health}"
+FORCED_GATES=""; BUSY_REASON=""   # recorded in the audit row (orch-console #49369)
 
 # ── 1. ALLOWLIST ─────────────────────────────────────────────────────────────
 case "${1:-}" in
@@ -79,6 +80,7 @@ fi
 if [ "$CC_BUSY" = 1 ]; then
   if [ "${RESET_FORCE:-0}" = "1" ]; then
     echo "WARNING: $BASE is BUSY — $CC_BUSY_REASON — RESET_FORCE=1, clearing ANYWAY (in-flight work DISCARDED)." >&2
+    FORCED_GATES="busy"; BUSY_REASON="$CC_BUSY_REASON"
   else
     echo "ERROR: $BASE is BUSY — $CC_BUSY_REASON — refusing to clear. RESET_FORCE=1 overrides (loud)." >&2
     exit 5
@@ -104,6 +106,7 @@ if "$TM" capture-pane -t "$PANE" -p 2>/dev/null | grep "Press up to edit queued 
   echo "[reset_auditor] QUEUED-COMPOSER GATE: FAIL — '$SESS' has a queued message (would jam the /clear)." >&2
   if [ "${RESET_FORCE:-0}" != 1 ]; then echo "REFUSING /clear (RESET_FORCE=1 to override)." >&2; exit 7; fi
   echo "[reset_auditor] RESET_FORCE=1 — proceeding despite queued composer." >&2
+  FORCED_GATES="${FORCED_GATES:+$FORCED_GATES,}queued"
 fi
 
 # ── RESET_DRYRUN — every gate above evaluated, nothing mutated ───────────────
@@ -113,6 +116,8 @@ if [ "${RESET_DRYRUN:-0}" = 1 ]; then
 fi
 
 # ── 7. ARM GATE — disarmed by default until cai's arm-sign ───────────────────
+# Comes AFTER the FORCE overrides above on purpose: RESET_FORCE only ever turns a gate's
+# refusal into a recorded override — it can never reach the keystrokes of a disarmed run.
 if [ "${RESET_AUDITOR_ARMED:-$ARMED_DEFAULT}" != 1 ]; then
   echo "[reset_auditor] DISARMED — reset_auditor.sh needs cai's arm-sign before first use (CAI-1392 C). Nothing cleared. Gates otherwise PASS; RESET_DRYRUN=1 shows them." >&2
   exit 4
@@ -120,10 +125,12 @@ fi
 
 # ── 8. PRE-CLEAR AUDIT ROW — no row, no /clear (dead-man's switch) ───────────
 _reason="${RESET_REASON:-auditor recycle (bloat/idle seam)}"
+_audit_args=(--by "$RESET_BY" --base "$BASE" --session "$SESS" --handoff "$HANDOFF" --reason "$_reason"
+             --forced-gates "${FORCED_GATES:-none}" --busy-reason "$BUSY_REASON")
 if [ -n "${RESET_AUDITOR_AUDIT_CMD:-}" ]; then
-  "$RESET_AUDITOR_AUDIT_CMD" --by "$RESET_BY" --base "$BASE" --session "$SESS" --handoff "$HANDOFF" --reason "$_reason"
+  "$RESET_AUDITOR_AUDIT_CMD" "${_audit_args[@]}"
 else
-  "$PY" "$_LIB/reset_audit_row.py" --by "$RESET_BY" --base "$BASE" --session "$SESS" --handoff "$HANDOFF" --reason "$_reason"
+  "$PY" "$_LIB/reset_audit_row.py" "${_audit_args[@]}"
 fi
 if [ $? -ne 0 ]; then
   echo "ERROR: could NOT write the pre-clear audit row — ABORTING. $BASE is untouched and still holds its context." >&2

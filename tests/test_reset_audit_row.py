@@ -60,3 +60,30 @@ def test_missing_dsn_is_nonzero(monkeypatch):
     monkeypatch.setattr(rar, "dsn_from_env_file", nodsn)
     assert rar.main(["--by", "cc-fleet-health", "--base", "cc-quality", "--session", "quality",
                      "--handoff", "/h", "--reason", "r"]) != 0
+
+
+def _capture(monkeypatch):
+    log = []
+    monkeypatch.setattr(rar, "dsn_from_env_file", lambda: "postgres://f")
+    monkeypatch.setattr(rar, "_connect", lambda dsn: _FakeConn(log))
+    return log
+
+
+def test_forced_reset_is_flagged_in_subject_and_body(monkeypatch):
+    log = _capture(monkeypatch)
+    rc = rar.main(["--by", "cc-fleet-health", "--base", "cc-storefront", "--session", "storefront",
+                   "--handoff", "/h", "--reason", "r", "--forced-gates", "busy,queued",
+                   "--busy-reason", "foreground turn in progress ('esc to interrupt')"])
+    assert rc == 0
+    _, params = [x for x in log if "INSERT" in x[0]][0]
+    assert "FORCED" in params[2]
+    assert "force=true" in params[3] and "busy,queued" in params[3]
+    assert "esc to interrupt" in params[3]
+
+
+def test_unforced_reset_says_force_false(monkeypatch):
+    log = _capture(monkeypatch)
+    assert rar.main(["--by", "cc-fleet-health", "--base", "cc-quality", "--session", "quality",
+                     "--handoff", "/h", "--reason", "r"]) == 0
+    _, params = [x for x in log if "INSERT" in x[0]][0]
+    assert "FORCED" not in params[2] and "force=false" in params[3]

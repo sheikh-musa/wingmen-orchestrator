@@ -29,11 +29,20 @@ def main(argv=None) -> int:
     ap.add_argument("--session", required=True)
     ap.add_argument("--handoff", required=True)
     ap.add_argument("--reason", required=True)
+    # RESET_FORCE bypasses the busy/queued gates and can discard an in-flight audit, so the
+    # row must say it was used, which gate(s) it overrode, and why (orch-console #49369).
+    ap.add_argument("--forced-gates", default="none", help="csv of gates FORCE overrode, or none")
+    ap.add_argument("--busy-reason", default="")
     a = ap.parse_args(argv)
-    subject = f"AUDITOR RESET (CAI-1392 C): in-place recycle of {a.base} (session {a.session})"
+    forced = a.forced_gates not in ("", "none")
+    subject = (f"{'FORCED ' if forced else ''}AUDITOR RESET (CAI-1392 C): in-place recycle of "
+               f"{a.base} (session {a.session})")
+    force_txt = (f"force=true — RESET_FORCE overrode: {a.forced_gates}"
+                 + (f" (busy reason: {a.busy_reason}); in-flight work DISCARDED" if a.busy_reason else "")
+                 if forced else "force=false — every gate passed on its own")
     body = (f"{a.by} is recycling auditor singleton {a.base} IN-PLACE via reset_auditor.sh "
-            f"(same pid: token + model preserved). Gates verified: allowlist, has-session, "
-            f"self-fire, busy, fresh handoff, queued-composer, armed. Handoff: {a.handoff}. "
+            f"(same pid: token + model preserved). Gates: allowlist, has-session, self-fire, "
+            f"busy, fresh handoff, queued-composer, armed. {force_txt}. Handoff: {a.handoff}. "
             f"Reason: {a.reason}")
     try:
         dsn = dsn_from_env_file()

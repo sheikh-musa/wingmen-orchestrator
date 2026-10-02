@@ -165,3 +165,55 @@ def test_script_never_targets_a_non_auditor_even_via_session_override(tmp_path):
     allowlist only (self_recycle's --session bypass is the cautionary tale)."""
     text = SCRIPT.read_text()
     assert "RESET_AUDITOR_SESSION" not in text
+
+
+# ── RESET_FORCE is audited and still requires ARMED (orch-console #49369) ───────
+# FORCE bypasses the busy + queued gates, i.e. it can discard an in-flight money audit.
+# It must never work in a disarmed run, and the pre-clear audit row must say it was used,
+# which gate(s) it overrode, and why the body was busy.
+BUSY_IDLE_RENDER = IDLE_PANE + "\n  esc to interrupt"          # busy marker + readable composer
+QUEUED_RENDER = IDLE_PANE + "\nPress up to edit queued messages"
+
+
+def _audit_line(keys):
+    return next(l for l in keys.splitlines() if l.startswith("AUDIT "))
+
+
+def test_force_on_a_busy_auditor_still_requires_arm(tmp_path):
+    _handoff(tmp_path / "reports")
+    r, keys = _run(tmp_path, "storefront", pane=BUSY_IDLE_RENDER, extra={"RESET_FORCE": "1"})
+    assert r.returncode == 4, r.stderr
+    assert keys == "", "a disarmed FORCE run wrote an audit row or typed into the pane"
+
+
+def test_forced_busy_override_is_recorded_in_the_audit_row(tmp_path):
+    _handoff(tmp_path / "reports")
+    r, keys = _run(tmp_path, "storefront", pane=BUSY_IDLE_RENDER,
+                   extra={"RESET_FORCE": "1", "RESET_AUDITOR_ARMED": "1"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    a = _audit_line(keys)
+    assert "--forced-gates busy" in a, a
+    assert "esc to interrupt" in a, f"busy reason not recorded: {a}"
+
+
+def test_forced_queued_override_is_recorded_in_the_audit_row(tmp_path):
+    _handoff(tmp_path / "reports")
+    r, keys = _run(tmp_path, "storefront", pane=QUEUED_RENDER,
+                   extra={"RESET_FORCE": "1", "RESET_AUDITOR_ARMED": "1"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "queued" in _audit_line(keys).split("--forced-gates ", 1)[1].split()[0]
+
+
+def test_unforced_run_records_no_forced_gates(tmp_path):
+    _handoff(tmp_path / "reports")
+    r, keys = _run(tmp_path, "storefront", extra={"RESET_AUDITOR_ARMED": "1"})
+    assert r.returncode == 0, r.stderr
+    assert "--forced-gates none" in _audit_line(keys)
+
+
+def test_force_on_an_idle_body_overrides_nothing(tmp_path):
+    """FORCE set but no gate actually needed overriding -> recorded as none, not 'busy'."""
+    _handoff(tmp_path / "reports")
+    r, keys = _run(tmp_path, "storefront", extra={"RESET_FORCE": "1", "RESET_AUDITOR_ARMED": "1"})
+    assert r.returncode == 0, r.stderr
+    assert "--forced-gates none" in _audit_line(keys)
