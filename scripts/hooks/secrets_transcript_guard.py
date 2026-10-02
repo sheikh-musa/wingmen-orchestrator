@@ -62,6 +62,18 @@ SECRET_DIR_PREFIXES (/dev/shm/wingmen-secrets/, ~/.wingmen/private/, ~/.wingmen/
 ~/.ssh/), OR a client-credential-shaped filename (service-account JSON). The sanctioned
 way to change one key in a .env-shaped file is scripts/env_set.sh (reads the new value
 from stdin, edits by key name, prints only a sha1 fingerprint -- never the value).
+
+Rule E, Write/Edit/MultiEdit/NotebookEdit coverage (bus #48903/#48922, LOCK2
+follow-up): Rule E originally only scanned Bash command text, on the theory that a
+PATH-ONLY tool's own CONTENT (Write's `content`, Edit's `new_string`, MultiEdit's
+per-edit `new_string`, NotebookEdit's `new_source`) is the agent's own new text, not a
+leak of what's on disk -- true for Rule A's concern (echoing EXISTING content), but
+not for Rule E's: an agent can still type a literal secret-shaped VALUE into brand-new
+content exactly as it can into a Bash command, and that was only ever caught post-hoc
+by secrets_output_scanner.py (real example: cc-substrate op#24409, a fixture DSN typed
+into a Write'd test-payload file). Scanned unconditionally, same as the Bash case --
+no sink exception; a path already blocked by the secret-path check above never reaches
+this (it's blocked for Rule A first, same message either way).
 """
 from __future__ import annotations
 
@@ -423,24 +435,95 @@ def check_rule_d(command: str) -> str | None:
 
 # ---- Rule B: secret values in a command -----------------------------------------
 
+#   _DSN/_TOKEN/_KEY carry a trailing `(?:_\w+)?` before the word boundary so a
+# qualifier SUFFIX on an otherwise-sensitive name (e.g. CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE)
+# still matches -- a bare trailing \b fails there because "N" and "_" are both \w, so no
+# boundary exists right after "TOKEN" (bus #49026/#49029/#49030: a real leak reached
+# prod because an ad-hoc masking sed matched "...TOKEN=" but not "...TOKEN_OVERRIDE=").
+# The suffix must itself start with "_" (not bare \w*) so this stays a pattern over
+# sensitive NAMES, not a substring match -- "TOKENIZER_PATH" must keep failing to match.
 SENSITIVE_VAR_RE = re.compile(
-    r"\$\{?(DATABASE_URL|WRITE_DSN|\w*_DSN|\w*_TOKEN|\w*_KEY|\w*SECRET\w*|\w*PASSWORD\w*|"
-    r"GOUMLYNE_\w*|API_KEY\w*)\b\}?"
+    r"\$\{?(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
+    r"\w*SECRET\w*|\w*PASSWORD\w*|GOUMLYNE_\w*|API_KEY\w*)\b\}?"
 )
 # same name alternation, bare (no $ / braces) -- for matching a NAME string literal
 # inside os.environ['NAME'] / ENVIRON["NAME"], not a shell variable reference.
 SENSITIVE_VAR_NAME_RE = re.compile(
-    r"^(DATABASE_URL|WRITE_DSN|\w*_DSN|\w*_TOKEN|\w*_KEY|\w*SECRET\w*|\w*PASSWORD\w*|"
-    r"GOUMLYNE_\w*|API_KEY\w*)$"
+    r"^(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
+    r"\w*SECRET\w*|\w*PASSWORD\w*|GOUMLYNE_\w*|API_KEY\w*)$"
 )
 
 PRINT_LEADING_RE = re.compile(r"^(echo|printf|print|tee|logger)\b")
-PS_DUMP_LEADING_RE = re.compile(r"^ps\s+e\w*\b")
+# cc-fleet-health bus #49064 probe, gaps (c)/(d): the real Sep-24 incident used BSD
+# `ps eww` (env-dump keyletter first, already matched), but two sibling shapes were
+# missed -- macOS's dash-prefixed `-E` env flag (NOT the lowercase `-e`/`-ef` GNU/BSD
+# "all processes" flag, which stays allowed -- it's ubiquitous and does not dump env),
+# and the no-dash BSD keyletter cluster with `e` anywhere in it, not only leading
+# (`ps auxe`, `ps wwe`), since BSD ps keyletters may be combined in any order.
+PS_DUMP_LEADING_RE = re.compile(r"^ps\s+(?:-\w*E\w*|(?!-)\w*e\w*)\b")
 PRINTENV_LEADING_RE = re.compile(r"^printenv\b")
 EXPORT_DUMP_LEADING_RE = re.compile(r"^export\s+-p\b")
 TMUX_DUMP_LEADING_RE = re.compile(r"^tmux\s+show-environment\b")
 PROC_ENVIRON_RE = re.compile(r"/proc/[0-9A-Za-z$*]+/environ")  # usually an ARGUMENT (e.g. to cat), not leading
 TEE_LEADING_RE = re.compile(r"^tee\b")
+
+# cc-fleet-health bus #49064 probe, gap (a): the real Sep-24 incident's actual dump
+# trigger (`ps eww`) was buried TWO quoting levels deep inside
+# `ssh hub-vps "sshpass ... ssh gazzai@<host> 'ps eww -u gazzai -o pid,command'"` --
+# invisible to a leading-command check on the OUTER segment, whose leading command is
+# `ssh`, never `ps`. `bash -c`/`sh -c`/`zsh -c` wrap a sub-shell script the same way.
+SSH_WRAPPER_LEADING_RE = re.compile(r"^(?:ssh|sshpass)\b")
+SHELL_DASH_C_LEADING_RE = re.compile(r"^(?:bash|sh|zsh)\s+(?:-\w*\s+)*-\w*c\w*\b")
+SSH_FLAGS_WITH_ARG = {"-p", "-i", "-o", "-l", "-F", "-J", "-L", "-R", "-D", "-c", "-m", "-w", "-B", "-b", "-E", "-e"}
+
+
+def _extract_remote_script(segment: str, lead: str) -> str | None:
+    """Best-effort extraction of the remote/sub-shell command text wrapped by
+    ssh/sshpass/bash -c/sh -c/zsh -c, whether it arrived as ONE quoted shell token
+    (`ssh host 'ps eww'`, the Sep-24 shape) or as several separate UNQUOTED words
+    (`ssh host ps eww ...`, bus #49064 gap #3) -- shlex has already stripped quoting
+    by the time we see tokens, so both shapes look identical: a run of tokens after
+    the host (or after `-c`) is the remote script, rejoined with spaces. Not a full
+    ssh-argv parser -- best-effort skip of ssh's own flags and their single-token
+    arguments, same documented-limitation posture as the rest of this file's shell
+    parsing."""
+    if not (SSH_WRAPPER_LEADING_RE.match(lead) or SHELL_DASH_C_LEADING_RE.match(lead)):
+        return None
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    if SHELL_DASH_C_LEADING_RE.match(lead):
+        last_c_flag = None
+        for i, tok in enumerate(tokens):
+            if tok.startswith("-") and "c" in tok:
+                last_c_flag = i
+        if last_c_flag is None or last_c_flag + 1 >= len(tokens):
+            return None
+        return " ".join(tokens[last_c_flag + 1:])
+    # ssh/sshpass: sshpass always wraps a real `ssh` invocation for our purposes --
+    # find that `ssh` token, skip its own flags (and single-token flag arguments) and
+    # the host argument; everything left is the remote command.
+    i = 0
+    n = len(tokens)
+    while i < n and tokens[i] != "ssh":
+        i += 1
+    if i >= n:
+        return None
+    i += 1
+    while i < n and tokens[i].startswith("-"):
+        flag = tokens[i]
+        i += 1
+        if flag in SSH_FLAGS_WITH_ARG and i < n:
+            i += 1
+    if i >= n:
+        return None
+    i += 1  # the host argument itself
+    if i >= n:
+        return None
+    return " ".join(tokens[i:])
 
 # cc-quality PR#245 review (bus #48441 LOW #3): non-shell print of a sensitive var by
 # NAME -- `python3 -c "print(os.environ['TOKEN'])"` / `awk 'BEGIN{print ENVIRON["TOKEN"]}'`
@@ -490,9 +573,22 @@ SAFE_AFTER_SINK_RE = re.compile(r"^(cut|head|tr|awk)\b")
 ENV_SET_SINK_RE = re.compile(r"\benv_set\.sh\b")
 
 
-def _is_sink(segment: str) -> bool:
-    return (bool(HASH_SINK_RE.search(segment)) or bool(SED_MASK_SINK_RE.search(segment))
-            or bool(ENV_SET_SINK_RE.search(segment)))
+def _is_sink(segment: str, trigger_kind: str | None = None) -> bool:
+    if bool(HASH_SINK_RE.search(segment)) or bool(ENV_SET_SINK_RE.search(segment)):
+        return True
+    # bus #49026/#49029/#49030 real leak: a sed-mask sink is unverifiable against an
+    # UNBOUNDED "dumps the environment" trigger -- the real incident was exactly this: a
+    # sed masking `CLAUDE_CODE_OAUTH_TOKEN=` on a /proc/<pid>/environ dump silently let
+    # `CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE=` through raw, because no single hand-written sed
+    # pattern can be trusted to enumerate every sensitive name a dump might contain. A
+    # dump must resolve through an opaque hash/length sink instead, which redacts the
+    # whole blob without needing to know which names it holds. This does NOT extend to
+    # Rule A's grep-on-a-secret-FILE sink check (trigger_kind left as the None default
+    # there) or Rule B's "prints a secret env var" trigger (one named var, bounded) --
+    # both keep accepting sed-mask as already reviewed/accepted.
+    if trigger_kind == "dumps the environment":
+        return False
+    return bool(SED_MASK_SINK_RE.search(segment))
 
 
 def _segment_dump_kind(segment: str, lead: str) -> bool:
@@ -518,6 +614,30 @@ def _segment_prints_secret(segment: str, lead: str) -> bool:
     return bool(PRINT_LEADING_RE.match(lead)) and bool(SENSITIVE_VAR_RE.search(segment))
 
 
+def _trigger_kind(segment: str, lead: str, _depth: int = 0) -> str | None:
+    """The Rule B trigger kind for this single pipeline segment, found either
+    directly (ps eww, printenv, ...) or nested one or more levels deep behind
+    ssh/sshpass/bash -c/sh -c/zsh -c (bus #49064: the real Sep-24 incident nested TWO
+    levels, an outer `ssh` wrapping `sshpass ... ssh` wrapping the actual `ps eww`).
+    Recurses until no further wrapper is found; `_depth` is a sanity backstop against
+    pathological input, not expected to ever bind in practice."""
+    if _segment_dump_kind(segment, lead):
+        return "dumps the environment"
+    if _segment_prints_secret(segment, lead):
+        return "prints a secret env var"
+    if _depth >= 6:
+        return None
+    inner = _extract_remote_script(segment, lead)
+    if inner is None:
+        return None
+    for inner_statement in _split_statements(inner):
+        for inner_seg in _split_pipeline(inner_statement):
+            kind = _trigger_kind(inner_seg, _leading_command(inner_seg), _depth + 1)
+            if kind:
+                return kind
+    return None
+
+
 def check_rule_b(command: str) -> str | None:
     # evaluated per STATEMENT (split on top-level ;, &&, ||, newline) so an unrelated
     # later statement in a multi-statement command can never be blamed for an earlier
@@ -529,11 +649,9 @@ def check_rule_b(command: str) -> str | None:
         trigger_kind = None
         for i, seg in enumerate(segments):
             lead = _leading_command(seg)
-            if _segment_dump_kind(seg, lead):
-                trigger_index, trigger_kind = i, "dumps the environment"
-                break
-            if _segment_prints_secret(seg, lead):
-                trigger_index, trigger_kind = i, "prints a secret env var"
+            kind = _trigger_kind(seg, lead)
+            if kind:
+                trigger_index, trigger_kind = i, kind
                 break
         if trigger_index is None:
             continue  # no trigger in this statement -- plain USE (psql/python/a script) is allowed
@@ -547,7 +665,7 @@ def check_rule_b(command: str) -> str | None:
             # a tee does not retroactively un-leak what tee already wrote.
             if i > trigger_index and TEE_LEADING_RE.match(_leading_command(seg)):
                 return f"{trigger_kind} and pipes it through tee (duplicates the raw value to another destination) before any hash sink"
-            if _is_sink(seg):
+            if _is_sink(seg, trigger_kind):
                 sink_index = i
                 break
         if sink_index is None:
@@ -577,6 +695,23 @@ def _command_text(tool_name: str, tool_input: dict) -> str | None:
     return None
 
 
+def _new_content_text(tool_name: str, tool_input: dict) -> str:
+    """The agent's own NEW content for a PATH-ONLY tool -- Rule E's concern (a secret
+    VALUE typed literally), independent of Rule A's (existing file content echoed
+    back). Returns "" for a tool/shape with no new-content field, never None, so
+    callers can check_rule_e() it unconditionally."""
+    if tool_name == "Write":
+        return tool_input.get("content") or ""
+    if tool_name == "Edit":
+        return tool_input.get("new_string") or ""
+    if tool_name == "MultiEdit":
+        edits = tool_input.get("edits") or []
+        return "\n".join(e.get("new_string") or "" for e in edits)
+    if tool_name == "NotebookEdit":
+        return tool_input.get("new_source") or ""
+    return ""
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -597,6 +732,12 @@ def main() -> int:
         if _is_secret_path(text):
             sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {TOOL_SECRET_FILE_MESSAGE}\n")
             return 2
+        content = _new_content_text(tool_name, tool_input)
+        if content:
+            literal_reason = check_rule_e(content)
+            if literal_reason:
+                sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {LITERAL_SECRET_MESSAGE} ({literal_reason})\n")
+                return 2
         return 0
 
     if tool_name == "Bash":

@@ -157,6 +157,79 @@ def test_allows_dsn_referenced_by_variable_not_literal():
     assert_allowed("Bash", {"command": 'psql "$DATABASE_URL" -c "select 1"'})
 
 
+# ---- must BLOCK: Rule E extended to Write/Edit/MultiEdit/NotebookEdit content ------
+# bus #48903/#48922 LOCK2 follow-up: real incident (cc-substrate op#24409) was a
+# fixture DSN typed into a Write'd file -- Rule E previously only scanned Bash command
+# text, so this only got caught post-hoc by secrets_output_scanner.py, never pre-empted.
+
+def test_blocks_literal_dsn_in_write_content():
+    assert_blocked(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md",
+         "content": 'psql "postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch"'},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_bearer_token_in_edit_new_string():
+    assert_blocked(
+        "Edit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md",
+         "old_string": "x", "new_string": "Authorization: Bearer FakeSyntheticToken1234567890abcdef"},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_dsn_in_one_of_several_multiedit_edits():
+    assert_blocked(
+        "MultiEdit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md",
+         "edits": [
+             {"old_string": "a", "new_string": "harmless change"},
+             {"old_string": "b", "new_string": 'postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch'},
+         ]},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_blocks_literal_dsn_in_notebookedit_new_source():
+    assert_blocked(
+        "NotebookEdit",
+        {"notebook_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/scratch.ipynb",
+         "new_source": 'postgres://orchuser:FakeSyntheticPass123@db.example.internal:5432/orch'},
+        expect_substr="types a secret VALUE literally",
+    )
+
+
+def test_allows_write_content_with_no_secret_shape():
+    assert_allowed(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/reports/notes.md",
+         "content": "just some ordinary notes, no secrets here"},
+    )
+
+
+def test_allows_edit_new_string_referencing_var_by_name():
+    # the agent writing code that references $DATABASE_URL by name (not a literal
+    # value) must stay allowed -- same Rule E boundary as the Bash case.
+    assert_allowed(
+        "Edit",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/scripts/foo.py",
+         "old_string": "a", "new_string": "dsn = os.environ['DATABASE_URL']"},
+    )
+
+
+def test_secret_path_block_takes_priority_over_content_scan_on_env_file():
+    # a secret PATH is blocked by Rule A's path check before content is ever scanned --
+    # confirms the new content check doesn't change or duplicate that existing message.
+    assert_blocked(
+        "Write",
+        {"file_path": "/Users/sheikhmusa/wingmen/orchestrator/.env",
+         "content": "ORDINARY_KEY=not-secret-shaped"},
+        expect_substr="this path is a secret file",
+    )
+
+
 def test_blocks_ps_eww_dump_without_sink():
     assert_blocked("Bash", {"command": "ps eww -p 123"})
 
@@ -231,8 +304,193 @@ def test_allows_sed_mask_of_dsn_password():
     assert_allowed("Bash", {"command": 'echo "$DATABASE_URL" | sed -E \'s/:[^:@]+@/:***@/\''})
 
 
-def test_allows_env_dump_piped_to_sed_redact():
-    assert_allowed("Bash", {"command": "env | grep -i SUPABASE | sed -E 's/=.*/=<redacted>/'"})
+def test_blocks_echo_of_override_suffixed_token_var_with_no_sink():
+    # bus #49026/#49029/#49030 real leak: SENSITIVE_VAR_RE's old trailing \b meant
+    # CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE (and any other _TOKEN/_KEY/_DSN name with a
+    # qualifier suffix) never matched at all, so Rule B never even recognized this as a
+    # secret-printing command -- it was silently allowed outright, with no block AND no
+    # sink requirement.
+    name = "CLAUDE_CODE_OAUTH_TOKEN" + "_OVERRIDE"
+    assert_blocked("Bash", {"command": f'echo "${{{name}}}"'})
+
+
+def test_allows_echo_of_override_suffixed_token_var_through_hash_sink():
+    name = "CLAUDE_CODE_OAUTH_TOKEN" + "_OVERRIDE"
+    assert_allowed("Bash", {"command": f'echo "${{{name}}}" | shasum'})
+
+
+def test_blocks_echo_of_write_dsn_override_suffixed_var_with_no_sink():
+    assert_blocked("Bash", {"command": 'echo "$WRITE_DSN_OVERRIDE"'})
+
+
+def test_blocks_env_dump_piped_to_sed_redact():
+    # bus #49026/#49029/#49030 real leak: a sed-mask sink is no longer accepted for an
+    # UNBOUNDED "dumps the environment" trigger -- only a hash/length sink is, since a
+    # hand-written sed pattern can't be trusted to enumerate every sensitive name a dump
+    # might contain (this exact shape, with a specific-var-name sed, is what let
+    # CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE through raw while masking CLAUDE_CODE_OAUTH_TOKEN).
+    assert_blocked("Bash", {"command": "env | grep -i SUPABASE | sed -E 's/=.*/=<redacted>/'"})
+
+
+def test_allows_env_dump_piped_to_hash_sink():
+    assert_allowed("Bash", {"command": "env | grep -i SUPABASE | shasum"})
+
+
+def test_blocks_proc_environ_read_piped_to_sed_redact_real_incident_shape():
+    # bus #49026/#49029 real incident, reproduced: masking one named var in a
+    # /proc/<pid>/environ dump by sed left a DIFFERENT, suffixed var name
+    # (CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE) unmasked. The dump-level sink must now be a
+    # real hash/length sink, not a per-name sed pattern.
+    assert_blocked("Bash", {
+        "command": (
+            "cat /proc/668620/environ | tr '\\0' '\\n' | "
+            "sed -E 's/CLAUDE_CODE_OAUTH_TOKEN=.*/CLAUDE_CODE_OAUTH_TOKEN=***/'"
+        )
+    })
+
+
+def test_allows_proc_environ_read_piped_to_hash_sink():
+    assert_allowed("Bash", {"command": "cat /proc/668620/environ | tr '\\0' '\\n' | shasum"})
+
+
+# ---- bus #49064 (cc-fleet-health root-cause probe, orch-console #49062 condition B):
+# the real Sep-24 at-rest leak (tool-results byz7cuxa2.txt) came from a command of
+# exactly this shape -- `ps eww` on a remote host, nested behind `sshpass ... ssh`,
+# itself nested behind an outer `ssh`, piped to a grep that kept whole matching lines
+# (every secret env var of every matching process) with no sink at all. Safe
+# reconstruction: same command SHAPE, fake host/user, no real secrets anywhere.
+
+def test_blocks_sep24_nested_ssh_sshpass_ps_eww_incident_shape():
+    assert_blocked("Bash", {
+        "command": (
+            "ssh hub-vps \"sshpass -p x ssh gazzai@gzb-host "
+            "'ps eww -u gazzai -o pid,command'\" | "
+            "grep -i 'musa2\\|CLAUDE_CODE_OAUTH' | head -20"
+        )
+    })
+
+
+def test_blocks_ssh_unquoted_remote_ps_eww_dump():
+    # bus #49064 gap #3: the remote command arrives as separate unquoted words rather
+    # than one quoted string -- must resolve the same way.
+    assert_blocked("Bash", {"command": "ssh gzb-host ps eww -u gazzai -o pid,command"})
+
+
+def test_blocks_ps_dash_capital_e_flag():
+    # bus #49064 gap #4: macOS's dash-prefixed `-E` env-display flag, distinct from the
+    # lowercase `-e`/`-ef` "all processes" flag (which must stay allowed -- see
+    # test_allows_ps_dash_e_all_processes_flag below).
+    assert_blocked("Bash", {"command": "ps -E -p 123"})
+
+
+def test_blocks_ps_env_keyletter_not_leading_in_cluster():
+    # bus #49064 gap #4 (second half): BSD keyletters can combine in any order, so the
+    # env-dump letter `e` need not be first (`ps eww`, already caught) -- `ps auxe` is
+    # the same dump, letter last.
+    assert_blocked("Bash", {"command": "ps auxe"})
+
+
+def test_allows_ps_dash_e_all_processes_flag():
+    # the ubiquitous GNU/BSD `-e` ("select all processes") must stay allowed -- it is
+    # not an env dump, and this shape is far too common to regress.
+    assert_allowed("Bash", {"command": "ps -ef"})
+
+
+def test_allows_ps_aux_no_env_letter():
+    assert_allowed("Bash", {"command": "ps aux | grep myproc"})
+
+
+def test_allows_ssh_remote_command_with_no_dump_trigger():
+    assert_allowed("Bash", {"command": "ssh gzb-host 'cat /etc/hostname'"})
+
+
+def test_blocks_bash_dash_c_wrapped_ps_eww():
+    assert_blocked("Bash", {"command": "bash -c 'ps eww -u gazzai'"})
+
+
+# ---- cc-fleet-health's own #49064/#49090 probe corpus, verbatim (orch-console #49085:
+# "add them ALL as regression tests ... so the wider ps-e/ssh recursion doesn't start
+# over-blocking normal work"). These are their exact case strings (hosts/paths/users
+# already anonymised by them), not reconstructions -- kept alongside the equivalent
+# tests above rather than replacing them.
+
+def test_fleet_health_probe_sep24_exact_shape_anonymised():
+    assert_blocked("Bash", {
+        "command": (
+            "ssh hostA \"sshpass -f /dev/stdin ssh -o StrictHostKeyChecking=no "
+            "user@10.0.0.1 'ps eww -u user -o pid,command' \" < /tmp/x 2>&1 | "
+            "grep -i \"musa2\\|CLAUDE_CODE_OAUTH\" | head -20"
+        )
+    })
+
+
+def test_fleet_health_probe_sep24_shape_no_ssh_wrapper():
+    assert_blocked("Bash", {
+        "command": "ps eww -u user -o pid,command | grep -i CLAUDE_CODE_OAUTH | head -20"
+    })
+
+
+def test_fleet_health_probe_ps_eww_alone():
+    assert_blocked("Bash", {"command": "ps eww -p 123"})
+
+
+def test_fleet_health_probe_ps_dash_capital_e():
+    assert_blocked("Bash", {"command": "ps -E -p 123"})
+
+
+def test_fleet_health_probe_environ_grep_sed_mask_missed_override():
+    assert_blocked("Bash", {
+        "command": (
+            "tr '\\0' '\\n' < /proc/123/environ | "
+            "grep -E '^(CLAUDE_CODE_OAUTH_TOKEN|AGENT_ID)' | sed -E 's/(TOKEN=).*/\\1<r>/'"
+        )
+    })
+
+
+def test_fleet_health_probe_verbatim_for_loop_environ_grep_sed_redacted():
+    # the exact shape from the second real incident -- a for-loop over child PIDs,
+    # each /proc/$p/environ dumped and sed-masked (missed CLAUDE_CODE_OAUTH_TOKEN
+    # *_OVERRIDE while masking the base name).
+    assert_blocked("Bash", {
+        "command": (
+            "for p in $(pgrep -P 1); do tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null | "
+            "grep -E '^(CLAUDE_CODE_OAUTH_TOKEN|WINGMEN_AUTH|AGENT_ID)' | "
+            "sed -E 's/(TOKEN=).{0,}/\\1<redacted>/'; done"
+        )
+    })
+
+
+def test_fleet_health_probe_ps_eww_via_ssh_unquoted():
+    assert_blocked("Bash", {"command": "ssh host ps eww -p 1 | grep TOKEN"})
+
+
+def test_fleet_health_probe_cat_dotenv():
+    assert_blocked("Bash", {"command": "cat ~/wingmen/orchestrator/.env"})
+
+
+def test_fleet_health_probe_env_pipe_grep_token():
+    assert_blocked("Bash", {"command": "env | grep TOKEN"})
+
+
+def test_fleet_health_probe_tmux_show_environment():
+    assert_blocked("Bash", {"command": "tmux show-environment -t lane"})
+
+
+def test_fleet_health_probe_safe_environ_hashed_as_last_step():
+    assert_allowed("Bash", {
+        "command": (
+            "tr '\\0' '\\n' < /proc/123/environ | grep '^CLAUDE_CODE_OAUTH_TOKEN=' | "
+            "cut -d= -f2- | tr -d '\\n' | sha256sum | cut -c1-12"
+        )
+    })
+
+
+def test_fleet_health_probe_safe_plain_ps_without_e():
+    assert_allowed("Bash", {"command": "ps -o pid,args -p 123"})
+
+
+def test_fleet_health_probe_safe_git_status():
+    assert_allowed("Bash", {"command": "git status --porcelain"})
 
 
 def test_allows_curl_header_use_piped_to_unrelated_print():

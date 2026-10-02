@@ -21,6 +21,21 @@ tests/test_secrets_output_scanner.py::test_redaction_preserves_transcript_struct
 for the proof this session doctor was asked for; an actual `claude --continue` replay
 is the final manual check at gate time (not automatable safely from inside this hook's
 own test suite).
+
+Paging is deduped per class per tool call (bus #48900/#48901/#48920): a single real
+event can match in both the tool_use input and the tool_response (e.g. a Write whose
+response echoes a preview of its own content), which previously produced two separate
+P1 pages for one leak. Redaction still runs for every match -- it's idempotent, so
+running it twice for the same class costs nothing -- only the page is deduped.
+
+Fixture allowlist (bus #48965/#48982): developing against THIS file's own test suite
+means editing/reading content that is intentionally secret-shaped, which otherwise
+pages orch-console for every fixture -- 20+ real P1 pages in ~25 minutes, burying real
+alerts. A narrow, explicit allowlist recognizes only this repo's own known fixture
+conventions (a handful of placeholder DSN hosts, a test-/fake-/example- token prefix,
+the Telegram test bot id, and the dedicated secrets-hook test files by path) -- never a
+broad heuristic that could mask a real leak. Redaction and the stderr note to the model
+still happen for an allowlisted hit; only the page to orch-console is skipped.
 """
 from __future__ import annotations
 
@@ -38,6 +53,62 @@ from secret_shape_patterns import SECRET_VALUE_PATTERNS  # noqa: E402
 SECRET_PATTERNS = SECRET_VALUE_PATTERNS
 
 REDACTION = "[REDACTED by secrets_output_scanner -- pattern:{cls}]"
+
+# fixture allowlist (bus #48965/#48982) -- see module docstring.
+FIXTURE_FILE_PATH_RE = re.compile(r"tests?/test_secrets_\w*\.py")
+# the postgres-dsn pattern matches only "scheme://user:pass@" (stops at "@"); the host
+# follows immediately after the match, so this is checked against the text AFTER the
+# match end, not the match itself.
+FIXTURE_DSN_HOST_RE = re.compile(
+    r"(?:[\w.-]*\.)?example(?:\.(?:com|internal))?(?::\d+)?[/\s]|"
+    r"localhost(?::\d+)?[/\s]|host(?::\d+)?[/\s]",
+    re.IGNORECASE,
+)
+FIXTURE_TOKEN_MARKER_RE = re.compile(r"(?:test|fake|example)-?", re.IGNORECASE)
+FIXTURE_TELEGRAM_BOT_ID = "123456789"
+
+# bus #49007/#49062: the file-path skip must never read tool_response -- a compound
+# Bash command (`cat .env; pytest tests/test_secrets_x.py`) can concatenate an
+# unrelated real secret's output with the dedicated test file's own path mention in
+# ONE response string, which previously suppressed the page for the real secret too.
+# A Bash command naming the fixture file must also be that command's ONLY statement --
+# chaining it with anything else via ;/&&/||/newline is exactly the shape that could
+# smuggle an unrelated secret past this skip, so it disqualifies the whole call.
+_STATEMENT_SEPARATOR_RE = re.compile(r";|&&|\|\||\n")
+
+
+def _mentions_fixture_file(tool_input) -> bool:
+    """True only if THIS CALL'S INPUT unambiguously targets one of this repo's
+    dedicated secrets-hook test files by path (bus #48982: "skip tests/test_secrets_*.py
+    by path") -- a direct file_path field (Write/Edit/.../NotebookEdit, no chaining risk
+    since the whole call is about that one file), or a Bash command that names it as its
+    sole statement."""
+    if not isinstance(tool_input, dict):
+        return False
+    file_path = tool_input.get("file_path")
+    if isinstance(file_path, str) and FIXTURE_FILE_PATH_RE.search(file_path):
+        return True
+    command = tool_input.get("command")
+    if isinstance(command, str) and not _STATEMENT_SEPARATOR_RE.search(command):
+        if FIXTURE_FILE_PATH_RE.search(command):
+            return True
+    return False
+
+
+def _is_fixture_hit(cls: str, match: re.Match) -> bool:
+    """True if a matched secret-shape is one of this repo's known test fixtures, not a
+    real credential. Deliberately narrow -- only the specific conventions this repo's
+    own tests use, never a substring match against arbitrary content."""
+    matched = match.group(0)
+    if FIXTURE_TOKEN_MARKER_RE.search(matched):
+        return True
+    if cls == "postgres-dsn":
+        tail = match.string[match.end():match.end() + 64]
+        if FIXTURE_DSN_HOST_RE.match(tail):
+            return True
+    if cls == "telegram-bot-token" and matched.startswith(FIXTURE_TELEGRAM_BOT_ID):
+        return True
+    return False
 
 
 def scan(text: str) -> list[tuple[str, re.Match]]:
@@ -65,6 +136,21 @@ def redact_last_line(transcript_path: str, cls: str, pattern: re.Pattern) -> boo
     """Redact `pattern` matches in the last JSONL line of transcript_path, in place.
     Returns True if a redaction was made. Never touches any other line."""
     return redact_recent_lines(transcript_path, cls, pattern, max_lines=1)
+
+
+def _subagent_transcript_path(transcript_path: str | None, agent_id: str | None) -> str | None:
+    """bus #48907/#49029/#49030: a subagent's OWN transcript is a SEPARATE on-disk file,
+    `<session-dir>/subagents/agent-<agent_id>.jsonl`, not a view onto whatever
+    `transcript_path` the hook payload carries for that call. The 2026-10-01 real leak
+    (bus #49029) proved this empirically: the scanner paged, `redact_recent_lines`
+    reported no error, yet the raw secret sat unredacted in the subagent's own file --
+    because `transcript_path` pointed at the session-level transcript, which never
+    contained that subagent's tool_use/tool_result lines to begin with. Redacting both
+    files is harmless when they happen to coincide (redaction is idempotent)."""
+    if not transcript_path or not agent_id:
+        return None
+    session_dir = os.path.dirname(transcript_path)
+    return os.path.join(session_dir, "subagents", f"agent-{agent_id}.jsonl")
 
 
 def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int = 3) -> bool:
@@ -108,7 +194,7 @@ def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max
     return changed
 
 
-def _page_orch_console(cls: str, tool_name: str) -> None:
+def _page_orch_console(cls: str, tool_name: str, agent_id: str | None = None, agent_type: str | None = None) -> None:
     import os
     import subprocess
 
@@ -119,6 +205,14 @@ def _page_orch_console(cls: str, tool_name: str) -> None:
         return
     host = os.environ.get("FLEET_HOST_ID", "unknown-host")
     agent = os.environ.get("AGENT_ID", os.environ.get("CC_BASE_AGENT_ID", "unknown-agent"))
+    # bus #48907: a tool call originating inside a SUBAGENT carries agent_id/agent_type
+    # in the hook payload (Claude Code hooks docs) -- without this, every subagent hit
+    # paged as the bare session identity above, or fell back to "unknown-agent" when
+    # even that was unset. There is no separate per-subagent transcript file (confirmed
+    # against the docs) -- transcript_path is the one shared session file regardless of
+    # origin, so redaction already lands correctly; this only fixes attribution.
+    if agent_type:
+        agent = f"{agent} (subagent: {agent_type}" + (f"/{agent_id})" if agent_id else ")")
     body = (
         f"secrets_output_scanner auto-redacted a secret-shaped match in the on-disk "
         f"session transcript. pattern class: {cls}; tool: {tool_name}; host: {host}; "
@@ -154,6 +248,9 @@ def main() -> int:
     tool_input = payload.get("tool_input")
     tool_response = payload.get("tool_response")
     transcript_path = payload.get("transcript_path")
+    # bus #48907: present only when this tool call originated inside a subagent.
+    agent_id = payload.get("agent_id")
+    agent_type = payload.get("agent_type")
 
     output_text = tool_response if isinstance(tool_response, str) else json.dumps(tool_response or "")
     # bus #48685/#48695: a secret typed LITERALLY into the command itself (not a $VAR
@@ -165,13 +262,39 @@ def main() -> int:
     if not hits:
         return 0
 
-    for cls, _match in hits:
+    # fixture allowlist (bus #48965/#48982): redaction + the stderr note below still run
+    # for a fixture hit -- cheap, idempotent, never wrong to do. Only the page is skipped,
+    # for either a known fixture shape (_is_fixture_hit) or a call that names one of the
+    # dedicated secrets-hook test files (_mentions_fixture_file), e.g. the fixture SSH-key
+    # header in test_detects_ssh_private_key, which carries no test-/fake-/example- marker
+    # of its own and is only identifiable by its file.
+    is_fixture_call = _mentions_fixture_file(tool_input)
+
+    # bus #48900/#48901/#48920: the same class can match in BOTH input_text and
+    # output_text for one tool call (e.g. a Write whose tool_response echoes back a
+    # preview of the content it just wrote) -- that produced two independent pages for
+    # a single real event. One hit across input+response is one page; dedupe by class,
+    # not by (cls, match) pair, since two matches of the same class are still one leak
+    # event worth reporting once. Redaction is unaffected -- it's idempotent per class
+    # (a second call over an already-redacted line is a no-op), so only paging is deduped.
+    sub_transcript_path = _subagent_transcript_path(transcript_path, agent_id)
+    seen_classes = set()
+    for cls, match in hits:
         if transcript_path:
             # window=3: covers the tool_use line and the tool_result line even with one
             # intervening line (observed in some transcript shapes); cheap and harmless
             # to widen since _redact_strings is a no-op on any line with no match.
             redact_recent_lines(transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
-        _page_orch_console(cls, tool_name)
+        if sub_transcript_path and sub_transcript_path != transcript_path:
+            # bus #49029/#49030: this call originated inside a subagent -- also redact
+            # its own transcript file, which `transcript_path` above does not cover.
+            redact_recent_lines(sub_transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
+        if cls in seen_classes:
+            continue
+        seen_classes.add(cls)
+        if is_fixture_call or _is_fixture_hit(cls, match):
+            continue
+        _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type)
 
     classes = ", ".join(cls for cls, _ in hits)
     sys.stderr.write(
