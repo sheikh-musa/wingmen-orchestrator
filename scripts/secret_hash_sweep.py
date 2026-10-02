@@ -133,12 +133,61 @@ def shape_secrets(data: bytes, known: Dict[bytes, str]) -> Dict[bytes, str]:
     return found
 
 
+# An env-style ORIGINAL filename: .env, .env.local, .env.production, <name>.env (not examples).
+_ENV_NAME_RE = re.compile(r"(^|/)(\.env(\.[\w.-]+)?|[\w.-]+\.env)$")
+_ENV_NAME_EXCLUDE_RE = re.compile(r"\.(example|sample|template)$")
+_origin_cache: Dict[str, Dict[str, str]] = {}
+
+
+def file_history_origin(path: str) -> str | None:
+    """The ORIGINAL file a ~/.claude/file-history/<session>/<backup>@vN snapshot was taken of,
+    read from that session's transcript (Claude Code records
+    "trackedFileBackups": {"<original path>": {"backupFileName": "<backup>@vN", ...}}).
+    None when it can't be resolved; callers must then treat the snapshot as a possible leak."""
+    norm = path.replace(os.sep, "/")
+    i = norm.rfind("/file-history/")
+    if i == -1:
+        return None
+    root = norm[:i]                                   # the ~/.claude dir
+    parts = norm[i + len("/file-history/"):].split("/")
+    if len(parts) != 2:
+        return None
+    sess, backup = parts
+    key = root + "\0" + sess
+    if key not in _origin_cache:
+        idx: Dict[str, str] = {}
+        # Two shapes Claude Code writes: {"<abs path>": {"backupFileName": …}} and
+        # {"trackingPath": "<abs path>", "backup": {"backupFileName": …}}. Only an ABSOLUTE path
+        # counts as an origin (so a JSON key like "backup" is never mistaken for one).
+        pat = re.compile(r'"(/(?:[^"\\]|\\.)+)"\s*:\s*\{\s*"backupFileName"\s*:\s*"([^"]+)"')
+        pat2 = re.compile(r'"trackingPath"\s*:\s*"(/(?:[^"\\]|\\.)+)"\s*,\s*"backup"\s*:\s*'
+                          r'\{\s*"backupFileName"\s*:\s*"([^"]+)"')
+        for tf in _glob.glob(os.path.join(root, "projects", "*", sess + ".jsonl")):
+            try:
+                with open(tf, "r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        if "backupFileName" in line:
+                            for m in pat.finditer(line):
+                                idx[m.group(2)] = m.group(1)
+                            for m in pat2.finditer(line):
+                                idx[m.group(2)] = m.group(1)
+            except OSError:
+                continue
+        _origin_cache[key] = idx
+    return _origin_cache[key].get(backup)
+
+
 def classify(path: str, data: bytes) -> str:
-    """'env-snapshot' = a Claude Code file-history backup of an env file (same trust boundary as
-    the .env itself, #49038: classify, never page, never edit). Any OTHER file-history snapshot
-    (a script, a doc) holding a secret is a real leak -> 'file-history'. Else 'transcript'."""
+    """'env-snapshot' = a Claude Code file-history backup OF AN ENV FILE (same trust boundary as
+    the .env itself, #49038: classify, never page, never edit). Requires BOTH identity (the
+    recorded original filename is env-named) AND shape (>=80% env lines). Shape alone is not
+    enough (cc-quality #49063: an export-heavy SCRIPT passes it and would hide a real leak), and
+    an unresolvable origin fails toward 'file-history' = a leak (pages, redacted). Else 'transcript'."""
     if "/file-history/" not in path.replace(os.sep, "/"):
         return "transcript"
+    origin = file_history_origin(path)
+    if not origin or not _ENV_NAME_RE.search(origin) or _ENV_NAME_EXCLUDE_RE.search(origin):
+        return "file-history"
     lines = [l for l in data.splitlines() if l.strip() and not l.lstrip().startswith(b"#")]
     if lines and sum(1 for l in lines if _ENV_LINE_RE.match(l)) >= 0.8 * len(lines):
         return "env-snapshot"

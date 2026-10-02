@@ -223,9 +223,26 @@ def test_jsonl_keeps_its_json_gate(tmp_path):
     assert rep["mode"] == "jsonl"
 
 
+def _fh(tmp_path, sess, name, content, orig=None):
+    """Build ~/.claude-shaped fixture: file-history/<sess>/<name> (+ the session transcript that
+    records which ORIGINAL file the backup snapshots, as Claude Code writes it)."""
+    root = tmp_path / ".claude"
+    f = root / "file-history" / sess / name; f.parent.mkdir(parents=True, exist_ok=True)
+    _write(f, content)
+    if orig is not None:
+        pj = root / "projects" / "-proj"; pj.mkdir(parents=True, exist_ok=True)
+        rec = {"type": "file-history-snapshot",
+               "snapshot": {"trackedFileBackups": {orig: {"backupFileName": name, "version": 1}}}}
+        with open(pj / (sess + ".jsonl"), "a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    return f
+
+
+ENV_BODY = "# orchestrator env\nANTHROPIC_API_KEY=%s\nPORT=5432\nMODE=prod\n" % FAKE_KEY
+
+
 def test_file_history_env_snapshot_is_classified_not_redacted(tmp_path):
-    f = tmp_path / "file-history" / "abc123" / "deadbeef@v3"; f.parent.mkdir(parents=True)
-    _write(f, "# orchestrator env\nANTHROPIC_API_KEY=%s\nPORT=5432\nMODE=prod\n" % FAKE_KEY)
+    f = _fh(tmp_path, "s1", "deadbeef@v3", ENV_BODY, orig="/Users/x/wingmen/orchestrator/.env")
     before = f.read_bytes()
     rep = s.sweep_file(str(f), _manifest(tmp_path), execute=True, ledger_path=str(tmp_path / "l"))
     assert rep["class"] == "env-snapshot"
@@ -233,17 +250,56 @@ def test_file_history_env_snapshot_is_classified_not_redacted(tmp_path):
     assert f.read_bytes() == before, "an .env snapshot is the same trust boundary as .env: never edited"
 
 
+def test_env_local_and_named_env_files_count_as_env(tmp_path):
+    for i, orig in enumerate(["/p/.env.local", "/k/irsyad-support-bot.env", "/p/.env.production"]):
+        f = _fh(tmp_path, "s%d" % i, "aa%d@v1" % i, ENV_BODY, orig=orig)
+        assert s.classify(str(f), f.read_bytes()) == "env-snapshot", orig
+
+
+def test_export_heavy_script_is_not_an_env_snapshot(tmp_path):
+    # cc-quality #49063: a deploy wrapper dominated by `export VAR=value` passes the 80% shape
+    # test, but it is a SCRIPT holding a secret = a real leak. Identity must decide, not shape.
+    script = ("#!/bin/bash\nset -euo pipefail\n# fetch secrets\n"
+              + "".join("export V%d=x\n" % i for i in range(9))
+              + "export TOKEN=%s\necho done\n" % FAKE_KEY)
+    f = _fh(tmp_path, "s9", "cafe@v1", script, orig="/Users/x/wingmen/orchestrator/scripts/fetch_secrets.sh")
+    assert s.classify(str(f), f.read_bytes()) == "file-history"
+    rep = s.sweep_file(str(f), _manifest(tmp_path), execute=True, ledger_path=str(tmp_path / "l"))
+    assert rep["matches_after"] == 0 and FAKE_KEY not in f.read_text()
+
+
+def test_trackingpath_record_shape_resolves(tmp_path):
+    # the 2nd shape Claude Code writes: {"trackingPath": "<path>", "backup": {"backupFileName": …}}
+    root = tmp_path / ".claude"
+    f = root / "file-history" / "sx" / "abc@v1"; f.parent.mkdir(parents=True); _write(f, ENV_BODY)
+    pj = root / "projects" / "-p"; pj.mkdir(parents=True)
+    rec = {"type": "file-history-snapshot", "snapshot": {"trackingPath": "/Users/x/wingmen/orchestrator/.env",
+           "backup": {"backupFileName": "abc@v1", "version": 1}}}
+    _write(pj / "sx.jsonl", json.dumps(rec, separators=(",", ":")) + "\n")
+    assert s.file_history_origin(str(f)) == "/Users/x/wingmen/orchestrator/.env"
+    assert s.classify(str(f), f.read_bytes()) == "env-snapshot"
+
+
+def test_unresolvable_origin_fails_toward_leak(tmp_path):
+    f = _fh(tmp_path, "s7", "beef@v1", ENV_BODY, orig=None)          # no session record
+    assert s.classify(str(f), f.read_bytes()) == "file-history"
+
+
+def test_env_named_but_not_env_shaped_is_a_leak(tmp_path):
+    f = _fh(tmp_path, "s8", "f00d@v1", "#!/bin/bash\ncurl -H 'k: %s' x\necho\n" % FAKE_KEY, orig="/p/.env")
+    assert s.classify(str(f), f.read_bytes()) == "file-history"
+
+
 def test_file_history_non_env_snapshot_still_counts_as_a_leak(tmp_path):
-    f = tmp_path / "file-history" / "abc123" / "cafe@v1"; f.parent.mkdir(parents=True)
-    _write(f, "#!/bin/bash\necho hello\ncurl -H 'x-api-key: %s' https://x\nexit 0\n" % FAKE_KEY)
+    f = _fh(tmp_path, "s2", "cafe@v1", "#!/bin/bash\necho hello\ncurl -H 'x-api-key: %s' https://x\nexit 0\n"
+            % FAKE_KEY, orig="/p/scripts/x.sh")
     rep = s.sweep_file(str(f), _manifest(tmp_path), execute=False)
     assert rep["class"] == "file-history"
 
 
 def test_main_pages_count_excludes_env_snapshots(tmp_path, capsys):
     env = tmp_path / ".env"; _write(env, "ANTHROPIC_API_KEY=%s\n" % FAKE_KEY)
-    snap = tmp_path / "file-history" / "s" / "x@v1"; snap.parent.mkdir(parents=True)
-    _write(snap, "ANTHROPIC_API_KEY=%s\nA=b\n" % FAKE_KEY)
+    snap = _fh(tmp_path, "s", "x@v1", "ANTHROPIC_API_KEY=%s\nA=b\n" % FAKE_KEY, orig="/p/.env")
     tr = tmp_path / "t.jsonl"; _write(tr, json.dumps({"o": FAKE_KEY}) + "\n")
     rc = s.main(["--env", str(env), "--scan", str(snap), str(tr), "--dry-run", "--report-json"])
     d = json.loads(capsys.readouterr().out)
