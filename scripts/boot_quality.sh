@@ -67,7 +67,9 @@ elif [ -r "$ORCH_DIR/.quality_default_token" ]; then
         # name<->fp check (#49107). A MISLABELLED file is refused LOUD and the boot stops: falling
         # back to .env could silently land on yet another account (the exact bug class).
         . "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { echo "[boot_quality] FATAL: token_file_guard.sh missing" >&2; exit 1; }
-        token_file_guard "$_QTOKF" || { echo "[boot_quality] FATAL: default token refused (see above); not booting on an unverified account" >&2; exit 1; }
+        if ! _tfg_reason="$(token_file_guard "$_QTOKF" 2>&1)"; then
+            token_guard_boot_refusal "$AGENT_ID" "$_QTOKF" "$_tfg_reason"; exit 1
+        fi
         export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_QTOKF")"
         echo "[boot_quality] durable token override applied (.quality_default_token -> $_QTOKF)" >&2
     fi

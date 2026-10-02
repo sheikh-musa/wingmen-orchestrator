@@ -52,3 +52,43 @@ token_file_guard() {
   : "$judged"
   return 0
 }
+
+# token_guard_boot_refusal <body> <token-path> <reason>: a SINGLETON boot refused its token. That is
+# an OUTAGE (Nazim #49143), so: (1) print the reason on the pane, (2) page orch-console on the bus
+# (P1, requires_response), (3) fire the UNGATED operator degrade-alert (nazim_send.sh: its own bot
+# token, so it works even when the refused body IS the console; never silenced by lease state),
+# (4) HOLD the pane so the reason stays readable, then return 1 so the caller exits. Paging is
+# best-effort but never silent: if both pages fail, the pane says so in capitals.
+# Overridable for tests: TOKEN_GUARD_BUS_CMD, TOKEN_GUARD_ALERT_CMD, TOKEN_GUARD_HOLD_S.
+token_guard_boot_refusal() {
+  local body="$1" path="$2" reason="$3" orch py bus alert paged=0 host
+  orch="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  py="$orch/.venv/bin/python3"; [ -x "$py" ] || py="python3"
+  host="$(hostname -s 2>/dev/null || hostname)"
+  echo "" >&2
+  echo "██ BOOT REFUSED: $body will NOT start on host $host. Its token file failed the name↔fp check:" >&2
+  echo "██ $reason" >&2
+  echo "██ Fix: update scripts/lib/token_fps.map (after a rotation) OR fix the mislabelled file; then re-run the boot." >&2
+  bus="${TOKEN_GUARD_BUS_CMD:-}"
+  if [ -n "$bus" ]; then
+    printf '%s\n' "$body boot REFUSED on $host: token file '$path' failed the name<->fp check, so the body is DOWN (an outage, not a warning)." "" "$reason" "" "Fix: after a rotation, update scripts/lib/token_fps.map (the ONE place); otherwise the file is mislabelled. Then re-run the boot. (#49107/#49143)" \
+      | "$bus" --to orch-console --type blocker --priority P1 --req --subject "BOOT REFUSED: $body is DOWN on $host (token file name/fp mismatch)" --from "$body" >/dev/null 2>&1 && paged=1
+  else
+    printf '%s\n' "$body boot REFUSED on $host: token file '$path' failed the name<->fp check, so the body is DOWN (an outage, not a warning)." "" "$reason" "" "Fix: after a rotation, update scripts/lib/token_fps.map (the ONE place); otherwise the file is mislabelled. Then re-run the boot. (#49107/#49143)" \
+      | "$py" "$orch/scripts/bus_send.py" --to orch-console --type blocker --priority P1 --req --subject "BOOT REFUSED: $body is DOWN on $host (token file name/fp mismatch)" --from "$body" >/dev/null 2>&1 && paged=1
+  fi
+  alert="${TOKEN_GUARD_ALERT_CMD:-$orch/scripts/nazim_send.sh}"
+  "$alert" "🚨 $body is DOWN on $host: its boot refused a mislabelled/unknown OAuth token file ($path). $reason" >/dev/null 2>&1 && paged=$((paged + 2))
+  case "$paged" in
+    3) echo "██ Paged orch-console (bus) + operator degrade-alert." >&2 ;;
+    1) echo "██ Paged orch-console on the bus; the operator degrade-alert FAILED." >&2 ;;
+    2) echo "██ Operator degrade-alert sent; the bus page FAILED." >&2 ;;
+    *) echo "██ COULD NOT PAGE ANYONE (bus + degrade-alert both failed). THIS BODY IS DOWN UNNOTICED. Tell orch-console." >&2 ;;
+  esac
+  local hold="${TOKEN_GUARD_HOLD_S:-21600}"
+  if [ "$hold" -gt 0 ] 2>/dev/null; then
+    echo "██ Holding this pane ${hold}s so the reason stays visible (Ctrl-C to close)." >&2
+    sleep "$hold"
+  fi
+  return 1
+}

@@ -56,7 +56,9 @@ elif [ -r "$ORCH_DIR/.fleet-health_default_token" ]; then
         # name<->fp check (#49107). A MISLABELLED file is refused LOUD and the boot stops: falling
         # back to .env could silently land on yet another account (the exact bug class).
         . "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { echo "[boot_fleet_health] FATAL: token_file_guard.sh missing" >&2; exit 1; }
-        token_file_guard "$_FHTOKF" || { echo "[boot_fleet_health] FATAL: default token refused (see above); not booting on an unverified account" >&2; exit 1; }
+        if ! _tfg_reason="$(token_file_guard "$_FHTOKF" 2>&1)"; then
+            token_guard_boot_refusal "$AGENT_ID" "$_FHTOKF" "$_tfg_reason"; exit 1
+        fi
         export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_FHTOKF")"
         echo "[boot_fleet_health] durable token override applied (.fleet-health_default_token -> $_FHTOKF)" >&2
     fi

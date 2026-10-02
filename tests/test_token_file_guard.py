@@ -109,3 +109,46 @@ def test_every_token_reader_calls_the_guard():
         src = (REPO / rel).read_text()
         assert "token_file_guard" in src, rel
     assert "token_file_guard" in (REPO / "nervous_system" / "weekly_limit_monitor.py").read_text()
+
+
+# ── Nazim #49143: a REFUSED singleton boot is an OUTAGE: page the bus AND the ungated operator
+# degrade-alert, and keep the reason visible on the pane. Stubs record the calls (no live sends).
+def _refusal(tmp_path, body="cc-quality"):
+    m, keys = _setup(tmp_path)
+    f = keys / "musa-oauth-token"; f.write_text(SYED)               # mislabelled
+    rec = tmp_path / "calls.log"
+    bus = tmp_path / "bus.sh"; bus.write_text('#!/bin/bash\n{ echo "BUS $*"; cat; } >> "%s"\n' % rec)
+    alert = tmp_path / "alert.sh"; alert.write_text('#!/bin/bash\necho "ALERT $*" >> "%s"\n' % rec)
+    bus.chmod(0o755); alert.chmod(0o755)
+    env = dict(os.environ, TOKEN_FPS_MAP=str(m), TOKEN_GUARD_BUS_CMD=str(bus), TOKEN_GUARD_ALERT_CMD=str(alert),
+               TOKEN_GUARD_HOLD_S="0")
+    r = subprocess.run(["/bin/bash", "-c",
+                        'set -uo pipefail; . "$1"; token_file_guard "$2" 2>/tmp/_tfg_reason_$$ || '
+                        'token_guard_boot_refusal "$3" "$2" "$(cat /tmp/_tfg_reason_$$)"; rc=$?; rm -f /tmp/_tfg_reason_$$; exit $rc',
+                        "_", str(LIB_SH), str(f), body], capture_output=True, text=True, env=env)
+    return r, (rec.read_text() if rec.exists() else "")
+
+
+def test_boot_refusal_pages_bus_and_operator_and_shows_reason(tmp_path):
+    r, calls = _refusal(tmp_path)
+    assert r.returncode == 1                                          # the boot STOPS
+    assert "BUS" in calls and "--to orch-console" in calls and "--priority P1" in calls
+    assert "ALERT" in calls and "cc-quality" in calls
+    assert "mislabelled" in calls and "(= syed)" in calls             # the reason travels with the page
+    assert "BOOT REFUSED" in r.stderr and "(= syed)" in r.stderr      # and is on the pane
+    assert SYED not in calls + r.stderr + r.stdout                    # never the token
+
+
+def test_boot_refusal_still_stops_if_both_pages_fail(tmp_path):
+    m, keys = _setup(tmp_path)
+    env = dict(os.environ, TOKEN_FPS_MAP=str(m), TOKEN_GUARD_BUS_CMD="/nonexistent/bus",
+               TOKEN_GUARD_ALERT_CMD="/nonexistent/alert", TOKEN_GUARD_HOLD_S="0")
+    r = subprocess.run(["/bin/bash", "-c", '. "$1"; token_guard_boot_refusal x /p "reason"', "_", str(LIB_SH)],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "COULD NOT PAGE" in r.stderr
+
+
+def test_singleton_boots_use_the_paging_refusal():
+    for rel in ["scripts/boot_cai.sh", "scripts/boot_fleet_health.sh", "scripts/boot_nazim.sh",
+                "scripts/boot_quality.sh", "scripts/boot_orch.sh"]:
+        assert "token_guard_boot_refusal" in (REPO / rel).read_text(), rel
