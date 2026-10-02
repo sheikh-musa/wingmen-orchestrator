@@ -152,3 +152,21 @@ def test_singleton_boots_use_the_paging_refusal():
     for rel in ["scripts/boot_cai.sh", "scripts/boot_fleet_health.sh", "scripts/boot_nazim.sh",
                 "scripts/boot_quality.sh", "scripts/boot_orch.sh"]:
         assert "token_guard_boot_refusal" in (REPO / rel).read_text(), rel
+
+
+# cc-quality #49148: exercise weekly_limit_monitor._load_token's REAL importlib wiring (the
+# existing weekly tests monkeypatch _load_token, so a break in that wiring would go unseen).
+def test_weekly_monitor_load_token_uses_the_guard(tmp_path, monkeypatch):
+    import importlib
+    m, keys = _setup(tmp_path)
+    monkeypatch.setenv("TOKEN_FPS_MAP", str(m))
+    wlm = importlib.import_module("nervous_system.weekly_limit_monitor")
+    good = keys / "musa-oauth-token"; good.write_text(MUSA + "\n")
+    assert wlm._load_token("file", str(good)) == MUSA
+    bad_dir = tmp_path / "bad"; bad_dir.mkdir()
+    bad = bad_dir / "musa-oauth-token"; bad.write_text(SYED)
+    import pytest
+    with pytest.raises(RuntimeError) as ei:
+        wlm._load_token("file", str(bad))
+    assert "(= syed)" in str(ei.value) and SYED not in str(ei.value)
+    assert wlm._load_token("file", str(tmp_path / "absent-oauth-token")) == ""
