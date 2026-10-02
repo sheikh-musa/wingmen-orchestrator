@@ -8,6 +8,9 @@ SRE blocker #49348 -> decision #49350).
 
 Contract under test (all against the tmux STUB — no real pane is touched):
   * only the three auditors are accepted; anything else refuses (exit 2), nothing sent
+  * CALLER-IDENTITY (CAI-RESP-1442): fires only for a caller sharing the target's own
+    pane tty (a detached runner the target itself spawns) -> exit 5 otherwise; no
+    --caller argument or env knob can assert identity instead
   * busy -> exit 5; stale / missing handoff -> exit 3; nothing sent
   * the handoff is found by the shared finder (cc-<short>-HANDOFF-* counts)
   * DISARMED BY DEFAULT: a real run without the arm refuses (exit 4) — the first use needs
@@ -27,6 +30,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "reset_auditor.sh"
 STUB = REPO / "tests" / "fixtures" / "stub_tmux.sh"
+TTY_STUB = REPO / "tests" / "fixtures" / "stub_tty.sh"
 
 NBSP = " "
 IDLE_PANE = f"Claude Code v2.1.300\n────────────\n❯{NBSP}\n────────────\n  ⏵⏵ bypass permissions on"
@@ -55,9 +59,9 @@ def _run(tmp_path, target, pane=IDLE_PANE, extra=None):
     env = {
         "TM": str(STUB),
         "TMUX_PANE": "%99",
-        "STUB_CALLER_SESS": "fleet-health",
         "STUB_CAPTURE_PANE_TEXT": pane,
         "STUB_SENDKEYS_LOG": str(log),
+        "RESET_AUDITOR_TTY_STUB": str(TTY_STUB),
         "FIRE_WINDOW_DIR": str(tmp_path / "fw"),
         "RESET_AUDITOR_REPORTS_DIR": str(tmp_path / "reports"),
         "RESET_AUDITOR_AUDIT_CMD": str(_audit_stub(tmp_path, log)),
@@ -99,11 +103,44 @@ def test_busy_auditor_is_refused(tmp_path):
     assert keys == ""
 
 
-def test_self_fire_is_refused(tmp_path):
+def test_target_self_call_matching_tty_is_allowed(tmp_path):
+    """The target's own detached runner shares its pane's controlling tty -- proven
+    via dry-run so no real pane is touched (CAI-RESP-1442 'target self-call -> allowed')."""
     _handoff(tmp_path / "reports")
-    r, keys = _run(tmp_path, "storefront", extra={"STUB_CALLER_SESS": "storefront"})
-    assert r.returncode == 5 and "SELF-FIRE" in r.stderr
+    r, keys = _run(tmp_path, "storefront", extra={
+        "RESET_DRYRUN": "1", "STUB_TARGET_TTY": "ttysABC", "STUB_CALLER_TTY": "ttysABC"})
+    assert r.returncode == 0, r.stderr
     assert keys == ""
+
+
+def test_caller_identity_mismatch_is_refused(tmp_path):
+    """A caller whose controlling tty differs from the target's own pane tty is
+    refused -- this is what stops cc-fleet-health (or anyone else) from firing
+    reset_auditor.sh directly; only a detached runner the TARGET itself spawns,
+    sharing its pane's tty, may pass (CAI-RESP-1442 'fleet-health caller -> refused',
+    and equally 'a runner whose parent isn't the target's process -> refused' --
+    ancestry doesn't survive the detached runner's reparenting, so tty is the
+    substitute OS-enforced identity; see the gate's own comment for why)."""
+    _handoff(tmp_path / "reports")
+    r, keys = _run(tmp_path, "storefront", extra={"STUB_CALLER_TTY": "ttys999"})
+    assert r.returncode == 5 and "CALLER-IDENTITY REFUSED" in r.stderr
+    assert keys == ""
+
+
+def test_unresolvable_target_pane_fails_closed(tmp_path):
+    _handoff(tmp_path / "reports")
+    r, keys = _run(tmp_path, "storefront", extra={"STUB_PANE_PID": ""})
+    assert r.returncode == 5 and "CALLER-IDENTITY REFUSED" in r.stderr
+    assert keys == ""
+
+
+def test_no_caller_override_knob_exists(tmp_path):
+    """No --caller flag or env knob lets a caller ASSERT its own identity -- only the
+    OS-level tty comparison decides (CAI-RESP-1442 'spoofing the target via an
+    argument -> refused': there must be no argument to spoof in the first place)."""
+    text = SCRIPT.read_text()
+    assert "--caller" not in text
+    assert "RESET_AUDITOR_CALLER" not in text
 
 
 def test_missing_handoff_is_refused(tmp_path):

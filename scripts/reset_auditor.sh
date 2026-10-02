@@ -17,9 +17,15 @@
 # (CAI-1170), and a relaunch would re-resolve both. Nothing here kills, respawns or relaunches.
 #
 # GATES, in order, all fail-closed, all BEFORE the first keystroke:
-#   allowlist (2) -> has-session (1) -> self-fire (5) -> busy (5) -> fresh handoff (3)
+#   allowlist (2) -> has-session (1) -> caller-identity (5) -> busy (5) -> fresh handoff (3)
 #   -> queued composer (7) -> [RESET_DRYRUN stops here, exit 0] -> ARMED (4)
 #   -> pre-clear audit row (10)
+#
+# CALLER-IDENTITY (CAI-RESP-1442): this script fires ONLY when invoked by the TARGET's
+# own live process (a detached runner it spawns itself) -- never by cc-fleet-health or
+# any other caller. #37396(i)/CAI-RESP-501 hold singleton-reset authority to the
+# singleton itself; the SRE detects + coordinates, it does not hold the authority to
+# fire this on someone else's behalf. See gate 3 below for the mechanism.
 # then the reset_cai.sh fire sequence: fire-window hold, composer capture+preserve, sized
 # wipe with the ghost rule, /clear, LAYER-2 dead-man verify (8, escalates LOUD), boot.
 #
@@ -61,15 +67,41 @@ BASE="cc-$SHORT"; SESS="$SHORT"; PANE="${SESS}:0.0"
 # ── 2. HAS-SESSION ───────────────────────────────────────────────────────────
 "$TM" has-session -t "=$SESS" 2>/dev/null || { echo "ERROR: tmux session '$SESS' not found on this host." >&2; exit 1; }
 
-# ── 3. SELF-FIRE GUARD (CAI-779 Tier-B, mirrors reset_cai.sh) ────────────────
-# From INSIDE the target session the send-keys below interleave with the caller's own live
-# turn (boot-before-clear half-state, op#11269/11271). Fail-open on a resolver hiccup.
-if [ -n "${TMUX_PANE:-}" ]; then
-  _caller_sess="$("$TM" display-message -p -t "${TMUX_PANE}" '#S' 2>/dev/null || echo)"
-  if [ "$_caller_sess" = "$SESS" ]; then
-    echo "[reset_auditor] SELF-FIRE REFUSED: invoked from INSIDE '$SESS' — a body cannot /clear its own live turn. Fire it EXTERNALLY." >&2
-    exit 5
-  fi
+# ── 3. CALLER-IDENTITY GUARD (CAI-RESP-1442, supersedes the old session-based
+#        self-fire guard) ────────────────────────────────────────────────────
+# Only the TARGET's own live process may fire this -- enforced from real OS process
+# state, never a passed-in flag or any value a non-target process could set (the
+# exact property cai named: not whether an argument SAYS "the target asked," but
+# whether the caller actually IS the target's own process).
+#
+# Why TTY, not PPID (ancestry does not work here): the only way for a target to
+# actually DETACH (a synchronous call would just deadlock the busy gate below, since
+# the live tool call itself would keep the pane showing "esc to interrupt" for the
+# whole run) is to background a runner from inside a live Bash tool call. That tool
+# call's own subprocess exits almost immediately once the backgrounding returns,
+# orphaning the runner -- by the time it actually fires, `ps` reports its ppid as 1
+# (reparented), so walking ppid upward finds nothing of the target. Verified directly
+# (nohup a job from inside a real tmux pane, forced the spawning shell to exit before
+# checking): ppid -> 1, but the runner's controlling TTY is unchanged -- nohup does
+# not call setsid, so it never detaches from the pane's pty. TTY survives reparenting;
+# PPID does not. Each tmux pane owns a distinct pty, so an unrelated caller (e.g.
+# cc-fleet-health, in its own separate pane) has a categorically different tty it
+# cannot forge -- this is an OS fact read fresh, not a value passed in.
+_tty_of() {  # pid role -> tty ("??"/empty = unknown/no controlling terminal).
+             # Stubbable (RESET_AUDITOR_TTY_STUB) for tests, which have no real tty.
+  if [ -n "${RESET_AUDITOR_TTY_STUB:-}" ]; then "$RESET_AUDITOR_TTY_STUB" "$1" "$2"; return; fi
+  ps -o tty= -p "$1" 2>/dev/null | tr -d ' '
+}
+_target_pane_pid="$("$TM" list-panes -t "=$SESS:0.0" -F '#{pane_pid}' 2>/dev/null)"
+if [ -z "$_target_pane_pid" ]; then
+  echo "[reset_auditor] CALLER-IDENTITY REFUSED: cannot resolve $BASE's own pane pid -- refusing to verify caller identity (fail closed)." >&2
+  exit 5
+fi
+_target_tty="$(_tty_of "$_target_pane_pid" target)"
+_caller_tty="$(_tty_of "$$" caller)"
+if [ -z "$_target_tty" ] || [ "$_target_tty" = "??" ] || [ -z "$_caller_tty" ] || [ "$_caller_tty" = "??" ] || [ "$_target_tty" != "$_caller_tty" ]; then
+  echo "[reset_auditor] CALLER-IDENTITY REFUSED: this process's controlling tty ('${_caller_tty:-none}') is not $BASE's own pane tty ('${_target_tty:-unknown}') — only $BASE's own live process may fire its reset. Have $BASE spawn its own detached runner, e.g. from inside its own turn: nohup bash -c 'sleep N; exec $0 $SHORT' >/tmp/${SHORT}_reset_runner.log 2>&1 & disown" >&2
+  exit 5
 fi
 
 # ── 4. BUSY GATE (shared pane_busy — one definition across the reset family) ─

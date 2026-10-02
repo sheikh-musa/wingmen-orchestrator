@@ -11,11 +11,16 @@
 #                      Lets a test inject a BUSY pane (e.g. 'esc to interrupt') so
 #                      the reset scripts' pane_busy gate can be exercised. Empty =
 #                      idle composer, preserving every pre-existing test's behaviour.
+#   STUB_PANE_PID      what `list-panes -F '#{pane_pid}'` returns (reset_auditor.sh's
+#                      caller-identity guard, CAI-RESP-1442). Unset -> realistic dummy
+#                      pid; explicitly SET TO EMPTY -> simulate an unresolvable pane
+#                      (the guard must fail closed), distinct from "unset".
 cmd="${1:-}"
 case "$cmd" in
   has-session)   exit 0 ;;                                   # session "exists"
   display-message) echo "${STUB_CALLER_SESS:-}"; exit 0 ;;   # '#S' -> caller session
   capture-pane)  printf '%s\n' "${STUB_CAPTURE_PANE_TEXT:-}"; exit 0 ;;  # injectable render (default empty)
   send-keys)     [ -n "${STUB_SENDKEYS_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_SENDKEYS_LOG"; exit 0 ;;
+  list-panes)    printf '%s\n' "${STUB_PANE_PID-424242}"; exit 0 ;;  # '-' not ':-': SET-EMPTY must stay empty
   *)             exit 0 ;;
 esac
