@@ -9,15 +9,36 @@
        (idle + git_clean + fresh_handoff [CAI-681 floor] + context_bloat>=80% [my
        trigger]) and, WHEN ARMED, recycles only the genuinely-bloated ones.
 
-       ⚠ STAGED DISARMED — DO NOT arm until the CAI-700 two-task control passes on a
-       real lane AND cc-fleet-health confirms its A+B (canonical per-lane pct +
-       worker-lane content-valid amber checkpoint) is live. As written this is
-       DETECT-ONLY: it logs what it WOULD recycle and touches nothing (no --arm, no
-       CTX_WD_LANE_ARM). Safe to load for visibility as the SRE's telemetry fills in.
+       RECONCILED 2026-10-02 (cc-fleet-health, orch-console #49586): this file had
+       drifted from the actually-running job (an untracked hand-edit in
+       ~/Library/LaunchAgents) AND its own comment was stale. Corrections:
+       1. The code's arm-bit (CAI-681 cond 5) has been STANDING-ARMED BY DEFAULT
+          since CAI-RESP-1382 (cai ruled the post-director-demo precondition was
+          met >1mo prior) — a bare invocation with NO flag now runs ARMED, the
+          OPPOSITE of what this file's old comment ("no --arm => detect-only")
+          claimed. --no-arm below is now REQUIRED to stay detect-only; it is not
+          optional decoration. The "CAI-700 two-task control" this file used to
+          cite is a DIFFERENT, unrelated decision (the lane_tasks auto-drain
+          pipeline, CAI-RESP-700) — not a gate on this mechanism at all.
+       2. Still genuinely NOT safe to arm, for two separate reasons (unrelated to
+          CAI-700): (a) Gap-1 — gate_context_bloat still approximates every
+          lane's window as 1M tokens; no canonical per-lane pct yet (see
+          sre_lane_recycle.py's own inline TODO). (b) the amber-checkpoint dedup
+          gap (memory ctx-health-amber-nudge-dedup-backlog) means a lane's
+          handoff can go stale for weeks while the nudge keeps firing — observed
+          live on cc-irsyad-coord (handoff untouched since Aug 20 despite daily
+          amber nudges). Neither is proven fixed; do not arm fleet-wide on the
+          strength of this reconciliation alone.
+       3. The LIVE copy (~/Library/LaunchAgents, hand-edited, untracked) was found
+          CRASH-LOOPING on every single 300s invocation (ModuleNotFoundError:
+          nervous_system — missing PYTHONPATH) — meaning detect-only coverage was
+          providing ZERO visibility, not just "disarmed." Fixed live + mirrored
+          the fix here. This explains the Musa cosem-port-at-1%-context miss.
 
-       TO ARM (only post-proof): add "--arm" to ProgramArguments below (the boundary
-       + CTX_WD_LANE_ARM still fail-closed independently) and kickstart. Singletons
-       (hub/cai/Nazim/SRE) are structurally excluded in code — never recyclable here.
+       TO ARM (only after Gap-1 + the dedup gap are closed and reported to cai):
+       remove --no-arm below (the boundary + CTX_WD_LANE_ARM still fail-closed
+       independently). Singletons (hub/cai/Nazim/SRE) are structurally excluded
+       in code — never recyclable here.
 
        Pairs with dev.wingmen.context-health-watchdog (--arm=amber, the WRITE-ONLY
        checkpoint that PRODUCES the fresh handoffs this half gates on). -->
@@ -25,21 +46,24 @@
   <key>ProgramArguments</key><array>
     <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
     <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/sre_lane_recycle.py</string>
-    <!-- DISARMED: no --arm => detect-only. Arm ONLY after the two-task control. -->
+    <string>--no-arm</string>
+    <!-- REQUIRED to stay detect-only — the code defaults to ARMED since CAI-RESP-1382. -->
   </array>
   <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
 
-  <!-- Off by default: not RunAtLoad, and left UNLOADED until we intentionally stage
-       it. When enabled, 600s cadence (context grows slowly; a reset is heavy). -->
-  <key>RunAtLoad</key><false/>
-  <key>StartInterval</key><integer>600</integer>
+  <!-- Matches the actually-running cadence/scope (reconciled, not a new decision):
+       worker-lanes-first staged exclusion (Nazim #37793) stays as-is here — dropping
+       any prefix from it is orch-console's governance call, not reconciled by this edit. -->
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
 
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>/Users/sheikhmusa</string>
     <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+    <key>SRE_LANE_EXCLUDE_PREFIXES</key><string>cc-irsyad,cc-cosem,cc-shipforge,cc-storefront</string>
     <!-- Trigger threshold overridable: CTX_WD_HARD (0.80), CONSOLE_CTX_WINDOW (1M).
-         The ARM switch is CTX_WD_LANE_ARM=1 (or --arm) — deliberately NOT set here. -->
+         The ARM switch is CTX_WD_LANE_ARM=1 (or dropping --no-arm) — NOT set here. -->
   </dict>
 
   <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/sre-lane-recycle.out.log</string>
