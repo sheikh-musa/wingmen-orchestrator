@@ -359,6 +359,37 @@ def test_main_skips_paging_entirely_for_dedicated_secrets_test_file_by_path(tmp_
     assert pages == 0
 
 
+def test_main_still_pages_real_secret_chained_with_fixture_test_file_in_same_command(tmp_path):
+    # bus #49007/#49062: orch-console's exact illustrative gap -- a real secret and a
+    # mention of the dedicated test file's path riding along in ONE compound command
+    # must NOT share the fixture skip. The path mention is disqualified because the
+    # command has a second statement (chained via ;), not because of where the secret
+    # match happens to land.
+    real_looking_dsn = "postgres://appuser:Zq9mPlKx2RzT7@203.0.113.42:5432/billing"
+    r, pages = _run_hook_count_pages(
+        tmp_path, "Bash",
+        {"command": f'psql "{real_looking_dsn}"; pytest tests/test_secrets_output_scanner.py'},
+        "SELECT 1\ntests/test_secrets_output_scanner.py::test_detects_ssh_private_key PASSED\n",
+    )
+    assert r.returncode == 0
+    assert pages == 1, "a real secret must still page even when chained with a fixture-test-file invocation"
+
+
+def test_main_skips_paging_for_fixture_file_mentioned_only_in_write_file_path(tmp_path):
+    # a structured file_path field (Write/Edit/...) has no chaining risk -- the whole
+    # call is about that one file, so the skip is safe regardless of command shape. Uses
+    # a DSN with NO fixture marker/host of its own, so pages==0 can only come from the
+    # file_path rule, not _is_fixture_hit.
+    real_looking_dsn = "postgres://appuser:Zq9mPlKx2RzT7@203.0.113.42:5432/billing"
+    r, pages = _run_hook_count_pages(
+        tmp_path, "Write",
+        {"file_path": "tests/test_secrets_output_scanner.py", "content": f'FAKE_DSN = "{real_looking_dsn}"'},
+        "",
+    )
+    assert r.returncode == 0
+    assert pages == 0
+
+
 def test_main_still_pages_a_real_looking_secret_with_no_fixture_marker(tmp_path):
     # regression guard: the allowlist must stay narrow -- a secret shape with none of the
     # fixture markers, hosts, bot id, or test-file path must still page as before.

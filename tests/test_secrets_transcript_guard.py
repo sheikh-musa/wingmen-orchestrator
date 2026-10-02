@@ -353,6 +353,61 @@ def test_allows_proc_environ_read_piped_to_hash_sink():
     assert_allowed("Bash", {"command": "cat /proc/668620/environ | tr '\\0' '\\n' | shasum"})
 
 
+# ---- bus #49064 (cc-fleet-health root-cause probe, orch-console #49062 condition B):
+# the real Sep-24 at-rest leak (tool-results byz7cuxa2.txt) came from a command of
+# exactly this shape -- `ps eww` on a remote host, nested behind `sshpass ... ssh`,
+# itself nested behind an outer `ssh`, piped to a grep that kept whole matching lines
+# (every secret env var of every matching process) with no sink at all. Safe
+# reconstruction: same command SHAPE, fake host/user, no real secrets anywhere.
+
+def test_blocks_sep24_nested_ssh_sshpass_ps_eww_incident_shape():
+    assert_blocked("Bash", {
+        "command": (
+            "ssh hub-vps \"sshpass -p x ssh gazzai@gzb-host "
+            "'ps eww -u gazzai -o pid,command'\" | "
+            "grep -i 'musa2\\|CLAUDE_CODE_OAUTH' | head -20"
+        )
+    })
+
+
+def test_blocks_ssh_unquoted_remote_ps_eww_dump():
+    # bus #49064 gap #3: the remote command arrives as separate unquoted words rather
+    # than one quoted string -- must resolve the same way.
+    assert_blocked("Bash", {"command": "ssh gzb-host ps eww -u gazzai -o pid,command"})
+
+
+def test_blocks_ps_dash_capital_e_flag():
+    # bus #49064 gap #4: macOS's dash-prefixed `-E` env-display flag, distinct from the
+    # lowercase `-e`/`-ef` "all processes" flag (which must stay allowed -- see
+    # test_allows_ps_dash_e_all_processes_flag below).
+    assert_blocked("Bash", {"command": "ps -E -p 123"})
+
+
+def test_blocks_ps_env_keyletter_not_leading_in_cluster():
+    # bus #49064 gap #4 (second half): BSD keyletters can combine in any order, so the
+    # env-dump letter `e` need not be first (`ps eww`, already caught) -- `ps auxe` is
+    # the same dump, letter last.
+    assert_blocked("Bash", {"command": "ps auxe"})
+
+
+def test_allows_ps_dash_e_all_processes_flag():
+    # the ubiquitous GNU/BSD `-e` ("select all processes") must stay allowed -- it is
+    # not an env dump, and this shape is far too common to regress.
+    assert_allowed("Bash", {"command": "ps -ef"})
+
+
+def test_allows_ps_aux_no_env_letter():
+    assert_allowed("Bash", {"command": "ps aux | grep myproc"})
+
+
+def test_allows_ssh_remote_command_with_no_dump_trigger():
+    assert_allowed("Bash", {"command": "ssh gzb-host 'cat /etc/hostname'"})
+
+
+def test_blocks_bash_dash_c_wrapped_ps_eww():
+    assert_blocked("Bash", {"command": "bash -c 'ps eww -u gazzai'"})
+
+
 def test_allows_curl_header_use_piped_to_unrelated_print():
     # bus #48312 replay false positive: sensitive var used (not printed) in one
     # segment, unrelated `print(...)` in a later segment -- must not cross-correlate

@@ -454,12 +454,76 @@ SENSITIVE_VAR_NAME_RE = re.compile(
 )
 
 PRINT_LEADING_RE = re.compile(r"^(echo|printf|print|tee|logger)\b")
-PS_DUMP_LEADING_RE = re.compile(r"^ps\s+e\w*\b")
+# cc-fleet-health bus #49064 probe, gaps (c)/(d): the real Sep-24 incident used BSD
+# `ps eww` (env-dump keyletter first, already matched), but two sibling shapes were
+# missed -- macOS's dash-prefixed `-E` env flag (NOT the lowercase `-e`/`-ef` GNU/BSD
+# "all processes" flag, which stays allowed -- it's ubiquitous and does not dump env),
+# and the no-dash BSD keyletter cluster with `e` anywhere in it, not only leading
+# (`ps auxe`, `ps wwe`), since BSD ps keyletters may be combined in any order.
+PS_DUMP_LEADING_RE = re.compile(r"^ps\s+(?:-\w*E\w*|(?!-)\w*e\w*)\b")
 PRINTENV_LEADING_RE = re.compile(r"^printenv\b")
 EXPORT_DUMP_LEADING_RE = re.compile(r"^export\s+-p\b")
 TMUX_DUMP_LEADING_RE = re.compile(r"^tmux\s+show-environment\b")
 PROC_ENVIRON_RE = re.compile(r"/proc/[0-9A-Za-z$*]+/environ")  # usually an ARGUMENT (e.g. to cat), not leading
 TEE_LEADING_RE = re.compile(r"^tee\b")
+
+# cc-fleet-health bus #49064 probe, gap (a): the real Sep-24 incident's actual dump
+# trigger (`ps eww`) was buried TWO quoting levels deep inside
+# `ssh hub-vps "sshpass ... ssh gazzai@<host> 'ps eww -u gazzai -o pid,command'"` --
+# invisible to a leading-command check on the OUTER segment, whose leading command is
+# `ssh`, never `ps`. `bash -c`/`sh -c`/`zsh -c` wrap a sub-shell script the same way.
+SSH_WRAPPER_LEADING_RE = re.compile(r"^(?:ssh|sshpass)\b")
+SHELL_DASH_C_LEADING_RE = re.compile(r"^(?:bash|sh|zsh)\s+(?:-\w*\s+)*-\w*c\w*\b")
+SSH_FLAGS_WITH_ARG = {"-p", "-i", "-o", "-l", "-F", "-J", "-L", "-R", "-D", "-c", "-m", "-w", "-B", "-b", "-E", "-e"}
+
+
+def _extract_remote_script(segment: str, lead: str) -> str | None:
+    """Best-effort extraction of the remote/sub-shell command text wrapped by
+    ssh/sshpass/bash -c/sh -c/zsh -c, whether it arrived as ONE quoted shell token
+    (`ssh host 'ps eww'`, the Sep-24 shape) or as several separate UNQUOTED words
+    (`ssh host ps eww ...`, bus #49064 gap #3) -- shlex has already stripped quoting
+    by the time we see tokens, so both shapes look identical: a run of tokens after
+    the host (or after `-c`) is the remote script, rejoined with spaces. Not a full
+    ssh-argv parser -- best-effort skip of ssh's own flags and their single-token
+    arguments, same documented-limitation posture as the rest of this file's shell
+    parsing."""
+    if not (SSH_WRAPPER_LEADING_RE.match(lead) or SHELL_DASH_C_LEADING_RE.match(lead)):
+        return None
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    if SHELL_DASH_C_LEADING_RE.match(lead):
+        last_c_flag = None
+        for i, tok in enumerate(tokens):
+            if tok.startswith("-") and "c" in tok:
+                last_c_flag = i
+        if last_c_flag is None or last_c_flag + 1 >= len(tokens):
+            return None
+        return " ".join(tokens[last_c_flag + 1:])
+    # ssh/sshpass: sshpass always wraps a real `ssh` invocation for our purposes --
+    # find that `ssh` token, skip its own flags (and single-token flag arguments) and
+    # the host argument; everything left is the remote command.
+    i = 0
+    n = len(tokens)
+    while i < n and tokens[i] != "ssh":
+        i += 1
+    if i >= n:
+        return None
+    i += 1
+    while i < n and tokens[i].startswith("-"):
+        flag = tokens[i]
+        i += 1
+        if flag in SSH_FLAGS_WITH_ARG and i < n:
+            i += 1
+    if i >= n:
+        return None
+    i += 1  # the host argument itself
+    if i >= n:
+        return None
+    return " ".join(tokens[i:])
 
 # cc-quality PR#245 review (bus #48441 LOW #3): non-shell print of a sensitive var by
 # NAME -- `python3 -c "print(os.environ['TOKEN'])"` / `awk 'BEGIN{print ENVIRON["TOKEN"]}'`
@@ -550,6 +614,30 @@ def _segment_prints_secret(segment: str, lead: str) -> bool:
     return bool(PRINT_LEADING_RE.match(lead)) and bool(SENSITIVE_VAR_RE.search(segment))
 
 
+def _trigger_kind(segment: str, lead: str, _depth: int = 0) -> str | None:
+    """The Rule B trigger kind for this single pipeline segment, found either
+    directly (ps eww, printenv, ...) or nested one or more levels deep behind
+    ssh/sshpass/bash -c/sh -c/zsh -c (bus #49064: the real Sep-24 incident nested TWO
+    levels, an outer `ssh` wrapping `sshpass ... ssh` wrapping the actual `ps eww`).
+    Recurses until no further wrapper is found; `_depth` is a sanity backstop against
+    pathological input, not expected to ever bind in practice."""
+    if _segment_dump_kind(segment, lead):
+        return "dumps the environment"
+    if _segment_prints_secret(segment, lead):
+        return "prints a secret env var"
+    if _depth >= 6:
+        return None
+    inner = _extract_remote_script(segment, lead)
+    if inner is None:
+        return None
+    for inner_statement in _split_statements(inner):
+        for inner_seg in _split_pipeline(inner_statement):
+            kind = _trigger_kind(inner_seg, _leading_command(inner_seg), _depth + 1)
+            if kind:
+                return kind
+    return None
+
+
 def check_rule_b(command: str) -> str | None:
     # evaluated per STATEMENT (split on top-level ;, &&, ||, newline) so an unrelated
     # later statement in a multi-statement command can never be blamed for an earlier
@@ -561,11 +649,9 @@ def check_rule_b(command: str) -> str | None:
         trigger_kind = None
         for i, seg in enumerate(segments):
             lead = _leading_command(seg)
-            if _segment_dump_kind(seg, lead):
-                trigger_index, trigger_kind = i, "dumps the environment"
-                break
-            if _segment_prints_secret(seg, lead):
-                trigger_index, trigger_kind = i, "prints a secret env var"
+            kind = _trigger_kind(seg, lead)
+            if kind:
+                trigger_index, trigger_kind = i, kind
                 break
         if trigger_index is None:
             continue  # no trigger in this statement -- plain USE (psql/python/a script) is allowed

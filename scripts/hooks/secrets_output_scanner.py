@@ -67,18 +67,32 @@ FIXTURE_DSN_HOST_RE = re.compile(
 FIXTURE_TOKEN_MARKER_RE = re.compile(r"(?:test|fake|example)-?", re.IGNORECASE)
 FIXTURE_TELEGRAM_BOT_ID = "123456789"
 
+# bus #49007/#49062: the file-path skip must never read tool_response -- a compound
+# Bash command (`cat .env; pytest tests/test_secrets_x.py`) can concatenate an
+# unrelated real secret's output with the dedicated test file's own path mention in
+# ONE response string, which previously suppressed the page for the real secret too.
+# A Bash command naming the fixture file must also be that command's ONLY statement --
+# chaining it with anything else via ;/&&/||/newline is exactly the shape that could
+# smuggle an unrelated secret past this skip, so it disqualifies the whole call.
+_STATEMENT_SEPARATOR_RE = re.compile(r";|&&|\|\||\n")
 
-def _mentions_fixture_file(tool_input, tool_response) -> bool:
-    """True if this tool call's input or response references one of the dedicated
-    secrets-hook test files by path (bus #48982: "skip tests/test_secrets_*.py by
-    path") -- covers both a direct file_path and a Bash/pytest invocation naming it."""
-    try:
-        text = (json.dumps(tool_input) if tool_input else "") + " " + (
-            tool_response if isinstance(tool_response, str) else json.dumps(tool_response or "")
-        )
-    except Exception:
+
+def _mentions_fixture_file(tool_input) -> bool:
+    """True only if THIS CALL'S INPUT unambiguously targets one of this repo's
+    dedicated secrets-hook test files by path (bus #48982: "skip tests/test_secrets_*.py
+    by path") -- a direct file_path field (Write/Edit/.../NotebookEdit, no chaining risk
+    since the whole call is about that one file), or a Bash command that names it as its
+    sole statement."""
+    if not isinstance(tool_input, dict):
         return False
-    return bool(FIXTURE_FILE_PATH_RE.search(text))
+    file_path = tool_input.get("file_path")
+    if isinstance(file_path, str) and FIXTURE_FILE_PATH_RE.search(file_path):
+        return True
+    command = tool_input.get("command")
+    if isinstance(command, str) and not _STATEMENT_SEPARATOR_RE.search(command):
+        if FIXTURE_FILE_PATH_RE.search(command):
+            return True
+    return False
 
 
 def _is_fixture_hit(cls: str, match: re.Match) -> bool:
@@ -254,7 +268,7 @@ def main() -> int:
     # dedicated secrets-hook test files (_mentions_fixture_file), e.g. the fixture SSH-key
     # header in test_detects_ssh_private_key, which carries no test-/fake-/example- marker
     # of its own and is only identifiable by its file.
-    is_fixture_call = _mentions_fixture_file(tool_input, tool_response)
+    is_fixture_call = _mentions_fixture_file(tool_input)
 
     # bus #48900/#48901/#48920: the same class can match in BOTH input_text and
     # output_text for one tool call (e.g. a Write whose tool_response echoes back a
