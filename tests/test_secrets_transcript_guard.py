@@ -408,6 +408,91 @@ def test_blocks_bash_dash_c_wrapped_ps_eww():
     assert_blocked("Bash", {"command": "bash -c 'ps eww -u gazzai'"})
 
 
+# ---- cc-fleet-health's own #49064/#49090 probe corpus, verbatim (orch-console #49085:
+# "add them ALL as regression tests ... so the wider ps-e/ssh recursion doesn't start
+# over-blocking normal work"). These are their exact case strings (hosts/paths/users
+# already anonymised by them), not reconstructions -- kept alongside the equivalent
+# tests above rather than replacing them.
+
+def test_fleet_health_probe_sep24_exact_shape_anonymised():
+    assert_blocked("Bash", {
+        "command": (
+            "ssh hostA \"sshpass -f /dev/stdin ssh -o StrictHostKeyChecking=no "
+            "user@10.0.0.1 'ps eww -u user -o pid,command' \" < /tmp/x 2>&1 | "
+            "grep -i \"musa2\\|CLAUDE_CODE_OAUTH\" | head -20"
+        )
+    })
+
+
+def test_fleet_health_probe_sep24_shape_no_ssh_wrapper():
+    assert_blocked("Bash", {
+        "command": "ps eww -u user -o pid,command | grep -i CLAUDE_CODE_OAUTH | head -20"
+    })
+
+
+def test_fleet_health_probe_ps_eww_alone():
+    assert_blocked("Bash", {"command": "ps eww -p 123"})
+
+
+def test_fleet_health_probe_ps_dash_capital_e():
+    assert_blocked("Bash", {"command": "ps -E -p 123"})
+
+
+def test_fleet_health_probe_environ_grep_sed_mask_missed_override():
+    assert_blocked("Bash", {
+        "command": (
+            "tr '\\0' '\\n' < /proc/123/environ | "
+            "grep -E '^(CLAUDE_CODE_OAUTH_TOKEN|AGENT_ID)' | sed -E 's/(TOKEN=).*/\\1<r>/'"
+        )
+    })
+
+
+def test_fleet_health_probe_verbatim_for_loop_environ_grep_sed_redacted():
+    # the exact shape from the second real incident -- a for-loop over child PIDs,
+    # each /proc/$p/environ dumped and sed-masked (missed CLAUDE_CODE_OAUTH_TOKEN
+    # *_OVERRIDE while masking the base name).
+    assert_blocked("Bash", {
+        "command": (
+            "for p in $(pgrep -P 1); do tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null | "
+            "grep -E '^(CLAUDE_CODE_OAUTH_TOKEN|WINGMEN_AUTH|AGENT_ID)' | "
+            "sed -E 's/(TOKEN=).{0,}/\\1<redacted>/'; done"
+        )
+    })
+
+
+def test_fleet_health_probe_ps_eww_via_ssh_unquoted():
+    assert_blocked("Bash", {"command": "ssh host ps eww -p 1 | grep TOKEN"})
+
+
+def test_fleet_health_probe_cat_dotenv():
+    assert_blocked("Bash", {"command": "cat ~/wingmen/orchestrator/.env"})
+
+
+def test_fleet_health_probe_env_pipe_grep_token():
+    assert_blocked("Bash", {"command": "env | grep TOKEN"})
+
+
+def test_fleet_health_probe_tmux_show_environment():
+    assert_blocked("Bash", {"command": "tmux show-environment -t lane"})
+
+
+def test_fleet_health_probe_safe_environ_hashed_as_last_step():
+    assert_allowed("Bash", {
+        "command": (
+            "tr '\\0' '\\n' < /proc/123/environ | grep '^CLAUDE_CODE_OAUTH_TOKEN=' | "
+            "cut -d= -f2- | tr -d '\\n' | sha256sum | cut -c1-12"
+        )
+    })
+
+
+def test_fleet_health_probe_safe_plain_ps_without_e():
+    assert_allowed("Bash", {"command": "ps -o pid,args -p 123"})
+
+
+def test_fleet_health_probe_safe_git_status():
+    assert_allowed("Bash", {"command": "git status --porcelain"})
+
+
 def test_allows_curl_header_use_piped_to_unrelated_print():
     # bus #48312 replay false positive: sensitive var used (not printed) in one
     # segment, unrelated `print(...)` in a later segment -- must not cross-correlate
