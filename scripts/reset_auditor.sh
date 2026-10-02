@@ -29,9 +29,12 @@
 # then the reset_cai.sh fire sequence: fire-window hold, composer capture+preserve, sized
 # wipe with the ghost rule, /clear, LAYER-2 dead-man verify (8, escalates LOUD), boot.
 #
-# DISARMED BY DEFAULT. First use needs cai's arm-sign (fleet-ops governance is cai's lane).
-# RESET_AUDITOR_ARMED=1 arms one run; setting it before cai has signed is a boundary
-# violation, not a shortcut. The arm-flip, once signed, is a reviewed commit of ARMED_DEFAULT.
+# STANDING ARMED (cai's arm-sign, 2026-10-02, bus #49648): CAI-RESP-1442's withheld
+# condition closed on PR #268 (caller-identity gate, cc-quality PASS + cai's own
+# independent review of the diff) — ARMED_DEFAULT flipped below by this commit, per
+# the SRE-owns-commit-of-approved-arming-edits process (the approval is cai's/Nazim's;
+# committing the mechanical flip is ops). RESET_AUDITOR_ARMED=0 force-disarms one run
+# (the deliberate-future-disarm path, same shape as sre_lane_recycle.py's arm bit).
 #
 # The target pane is derived from the allowlist ONLY — there is deliberately no session
 # override (self_recycle.sh's --session skipped its allowlist; that was the hole).
@@ -48,7 +51,7 @@ PY="$ORCH_DIR/.venv/bin/python3"; [ -x "$PY" ] || PY="$HOME/wingmen/orchestrator
 # shellcheck source=lib/composer_capture.sh
 . "$_LIB/composer_capture.sh" || { echo "ERROR: composer_capture.sh missing" >&2; exit 9; }
 
-ARMED_DEFAULT=0   # flipped to 1 ONLY by a reviewed commit after cai's arm-sign (CAI-1392 C)
+ARMED_DEFAULT=1   # STANDING ARMED since cai's arm-sign (bus #49648, 2026-10-02, CAI-RESP-1442 closed)
 REPORTS_DIR="${RESET_AUDITOR_REPORTS_DIR:-$ORCH_DIR/reports}"
 MAX_AGE="${RESET_AUDITOR_HANDOFF_MAX_AGE:-900}"
 LOGDIR="${RESET_AUDITOR_LOGDIR:-$ORCH_DIR/logs}"
@@ -147,11 +150,11 @@ if [ "${RESET_DRYRUN:-0}" = 1 ]; then
   exit 0
 fi
 
-# ── 7. ARM GATE — disarmed by default until cai's arm-sign ───────────────────
+# ── 7. ARM GATE — standing armed since cai's sign (bus #49648), force-disarmable ──
 # Comes AFTER the FORCE overrides above on purpose: RESET_FORCE only ever turns a gate's
 # refusal into a recorded override — it can never reach the keystrokes of a disarmed run.
 if [ "${RESET_AUDITOR_ARMED:-$ARMED_DEFAULT}" != 1 ]; then
-  echo "[reset_auditor] DISARMED — reset_auditor.sh needs cai's arm-sign before first use (CAI-1392 C). Nothing cleared. Gates otherwise PASS; RESET_DRYRUN=1 shows them." >&2
+  echo "[reset_auditor] DISARMED for this run (RESET_AUDITOR_ARMED=0 explicitly set). Nothing cleared. Gates otherwise PASS; RESET_DRYRUN=1 shows them." >&2
   exit 4
 fi
 

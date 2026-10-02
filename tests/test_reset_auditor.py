@@ -13,8 +13,9 @@ Contract under test (all against the tmux STUB — no real pane is touched):
     --caller argument or env knob can assert identity instead
   * busy -> exit 5; stale / missing handoff -> exit 3; nothing sent
   * the handoff is found by the shared finder (cc-<short>-HANDOFF-* counts)
-  * DISARMED BY DEFAULT: a real run without the arm refuses (exit 4) — the first use needs
-    cai's arm-sign; RESET_DRYRUN evaluates every gate without needing the arm
+  * STANDING ARMED (cai's sign, bus #49648, CAI-RESP-1442 closed by PR #268): a real run
+    with no arm env set now fires by default; RESET_AUDITOR_ARMED=0 force-disarms one run
+    (exit 4); RESET_DRYRUN evaluates every gate regardless of arm state
   * the audit row is written BEFORE the first keystroke; if it cannot be written the
     reset aborts (exit 10) with the body untouched (dead-man's switch)
   * in-place: the happy path sends /clear then a boot naming the ABSOLUTE handoff path —
@@ -164,11 +165,20 @@ def test_handoff_max_age_is_overridable(tmp_path):
     assert r.returncode == 0, r.stderr
 
 
-def test_disarmed_by_default_refuses_a_real_run(tmp_path):
-    _handoff(tmp_path / "reports")
+def test_standing_armed_by_default_now_fires(tmp_path):
+    """Post-cai-sign (bus #49648): a real run with NO arm env set fires by default."""
+    h = _handoff(tmp_path / "reports")
     r, keys = _run(tmp_path, "storefront")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert any("/clear" in l for l in keys.splitlines()), "no /clear sent"
+    assert str(h.resolve()) in keys
+
+
+def test_explicit_disarm_refuses_a_real_run(tmp_path):
+    _handoff(tmp_path / "reports")
+    r, keys = _run(tmp_path, "storefront", extra={"RESET_AUDITOR_ARMED": "0"})
     assert r.returncode == 4, r.stderr
-    assert "arm" in r.stderr.lower() and "cai" in r.stderr.lower()
+    assert "arm" in r.stderr.lower()
     assert keys == "", "a disarmed reset typed into the pane"
 
 
@@ -217,8 +227,10 @@ def _audit_line(keys):
 
 
 def test_force_on_a_busy_auditor_still_requires_arm(tmp_path):
+    """FORCE never reaches a keystroke on an explicitly-disarmed run, even post-standing-arm."""
     _handoff(tmp_path / "reports")
-    r, keys = _run(tmp_path, "storefront", pane=BUSY_IDLE_RENDER, extra={"RESET_FORCE": "1"})
+    r, keys = _run(tmp_path, "storefront", pane=BUSY_IDLE_RENDER,
+                   extra={"RESET_FORCE": "1", "RESET_AUDITOR_ARMED": "0"})
     assert r.returncode == 4, r.stderr
     assert keys == "", "a disarmed FORCE run wrote an audit row or typed into the pane"
 
