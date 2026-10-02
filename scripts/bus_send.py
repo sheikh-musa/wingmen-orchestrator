@@ -68,6 +68,52 @@ _MIN_BODY_BYTES = 40
 _HUB_AGENT = "cc-orchestrator"
 
 
+_LIVE_INSTANCE_WINDOW = "30 minutes"  # matches scripts/irsyad_autoscaler.py LIVE_HEARTBEAT_WINDOW
+
+
+def live_instance_ids(base_to: str, dsn: str | None = None) -> list[str]:
+    """bus #49220: agent_status rows whose base_agent_id matches `base_to` but
+    whose own agent_id differs (a real NN-suffixed instance, e.g. cc-irsyad-1
+    for base cc-irsyad -- not the base address reporting as its own row,
+    which singletons/solo coords do), seen live in the last 30 minutes.
+    Returns [] for a base id with no fanned-out instances (singletons, solo
+    coords) -- that case is a no-op by construction, not a special case."""
+    import psycopg2
+
+    conn = psycopg2.connect(dsn or dburl(os.environ))
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT agent_id FROM agent_status "
+        "WHERE base_agent_id=%s AND agent_id<>%s "
+        "AND status IN ('idle','working') "
+        f"AND last_heartbeat > now() - interval '{_LIVE_INSTANCE_WINDOW}' "
+        "ORDER BY agent_id",
+        (base_to, base_to),
+    )
+    instances = [r[0] for r in cur.fetchall()]
+    conn.close()
+    return instances
+
+
+def refuse_if_base_has_live_instances(to: str, to_base: bool, dsn: str | None = None) -> None:
+    """Refuse (not just warn) a send to a BASE id when live instance(s) exist,
+    unless the caller explicitly opts in via --to-base. Builder lanes poll
+    their own instance address, not the base -- orch-console lost 5 rows to
+    this on 2026-10-01 even with a memory rule in place (a promise doesn't
+    survive a context reset, same lesson as the --priority fix above)."""
+    if to_base:
+        return
+    instances = live_instance_ids(to, dsn=dsn)
+    if not instances:
+        return
+    raise SystemExit(
+        f"bus_send: REFUSED — '{to}' is a BASE id with live instance(s) "
+        f"({', '.join(instances)}); they poll their own instance address, not "
+        f"the base, so this row would sit unread. Did you mean --to {instances[0]}? "
+        "Pass --to-base to send to the base address anyway."
+    )
+
+
 def warn_if_below_hub_wake_floor(to: str, req: bool, priority: str, stream=None) -> None:
     """bus #44527: --to cc-orchestrator --req at a priority below P1 will NOT wake the
     hub (floor = P0/P1 AND requires_response — reference_hub_wake_floor_p1_rr). This is
@@ -129,6 +175,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--from", dest="from_agent", default=None, help="override identity (default: auto-resolve)")
     p.add_argument("--dry-run", action="store_true", help="resolve+validate, print the row, do not touch the DB")
+    p.add_argument(
+        "--to-base", action="store_true",
+        help="send to --to literally even if it's a BASE id with live instance(s) "
+             "(bus #49220) -- normally refused with the live instance address instead",
+    )
     return p
 
 
@@ -236,6 +287,8 @@ def main(argv: list[str] | None = None) -> int:
               f"priority={args.priority} req={args.req} subject={args.subject!r} "
               f"body_bytes={len(body)}")
         return 0
+
+    refuse_if_base_has_live_instances(args.to, args.to_base)
 
     row_id, thread_id = send(
         from_agent, args.to, args.type, args.subject, body, args.priority,
