@@ -165,7 +165,18 @@ def _load_token(kind: str, ref: str) -> str:
     if kind == "env":
         tok = os.environ.get(ref, "")
     else:
-        tok = Path(ref).read_text().strip() if Path(ref).exists() else ""
+        if not Path(ref).exists():
+            return ""
+        # name<->fp check (#49107): a key file named <acct>-oauth-token must BE that account's
+        # token, else this pool would silently report ANOTHER account's usage. Raise -> LOUD page.
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "_token_file_guard", str(Path(__file__).resolve().parents[1] / "scripts" / "lib" / "token_file_guard.py"))
+        _tfg = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_tfg)
+        ok, why = _tfg.check(ref)
+        if not ok:
+            raise RuntimeError(why)
+        tok = Path(ref).read_text().strip()
     return tok.strip()
 
 

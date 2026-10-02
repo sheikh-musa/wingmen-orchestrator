@@ -55,6 +55,8 @@
 #   e.g.  scripts/switch_singleton_token.sh --dry-run cc-fleet-health ~/.wingmen/keys/musa-oauth-token
 #         scripts/switch_singleton_token.sh cc-fleet-health ~/.wingmen/keys/musa-oauth-token
 #         scripts/switch_singleton_token.sh cai ~/.wingmen/keys/musa-oauth-token
+# NB gzb: key files live in /dev/shm/wingmen-secrets/keys/ there (NOT ~/.wingmen/keys); every
+# reader runs scripts/lib/token_file_guard.sh, so a mislabelled key file is refused (#49107).
 #
 # Fingerprints (2026-08-05): musa-oauth-token 68142948c003 · syed-oauth-token 582043088eae
 set -uo pipefail
@@ -157,6 +159,9 @@ TOKFILE_ABS="$(cd "$(dirname "$TOKFILE")" && pwd -P)/$_bn"
 
 # TARGET fingerprint — EXACTLY as the boot scripts derive it: the override is
 # $(cat <file>), which strips the trailing newline; sha256 of that, first 12 hex.
+# name<->fp check (#49107): refuse a mislabelled key file BEFORE touching any session.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/token_file_guard.sh" || { echo "ERROR: token_file_guard.sh missing" >&2; exit 4; }
+token_file_guard "$TOKFILE_ABS" || exit 4
 TARGET_FP="$(printf '%s' "$(cat "$TOKFILE_ABS")" | shasum -a 256 2>/dev/null | cut -c1-12)"
 if [ -z "$TARGET_FP" ] || [ "$TARGET_FP" = "$EMPTY_HASH" ]; then
   echo "ERROR: token file is empty/unreadable (fp resolves to the empty-string hash). Refusing." >&2

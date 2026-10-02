@@ -37,6 +37,10 @@ if [ -n "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
 elif [ -r "$ORCH_DIR/.nazim_default_token" ]; then
     _NZTOKF="$(tr -d '[:space:]' < "$ORCH_DIR/.nazim_default_token" 2>/dev/null || true)"
     if [ -n "${_NZTOKF:-}" ] && [ -r "$_NZTOKF" ]; then
+        # name<->fp check (#49107). A MISLABELLED file is refused LOUD and the boot stops: falling
+        # back to .env could silently land on yet another account (the exact bug class).
+        . "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { echo "[boot_nazim] FATAL: token_file_guard.sh missing" >&2; exit 1; }
+        token_file_guard "$_NZTOKF" || { echo "[boot_nazim] FATAL: default token refused (see above); not booting on an unverified account" >&2; exit 1; }
         export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_NZTOKF")"
         echo "[boot_nazim] token override applied (.nazim_default_token -> $_NZTOKF)" >&2
     fi

@@ -78,6 +78,10 @@ unset ANTHROPIC_API_KEY
 if [ -r "$ORCH_DIR/.orch_default_token" ]; then
     _ORCH_DEFAULT_TOKFILE="$(tr -d '[:space:]' < "$ORCH_DIR/.orch_default_token")"
     if [ -n "$_ORCH_DEFAULT_TOKFILE" ] && [ -r "$_ORCH_DEFAULT_TOKFILE" ]; then
+        # name<->fp check (#49107). A MISLABELLED file is refused LOUD (not the fail-safe .env
+        # fallback: that could silently land on yet another account, the exact bug class).
+        . "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { log "FATAL: token_file_guard.sh missing"; exit 1; }
+        token_file_guard "$_ORCH_DEFAULT_TOKFILE" || { log "FATAL: hub-default token refused (see above); not booting on an unverified account"; exit 1; }
         CLAUDE_CODE_OAUTH_TOKEN="$(cat "$_ORCH_DEFAULT_TOKFILE")"
         export CLAUDE_CODE_OAUTH_TOKEN
         log "hub-default OAuth account applied (pointer .orch_default_token -> $_ORCH_DEFAULT_TOKFILE)"

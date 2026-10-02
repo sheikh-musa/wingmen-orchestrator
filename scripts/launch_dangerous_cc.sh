@@ -163,6 +163,9 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE:-}" ]; then
     _LANE_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
     _LANE_DEFAULT_TOKFILE="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.lane_token_resolver --session "$_LANE_SESSION" 2>/dev/null || true)"
     if [ -n "$_LANE_DEFAULT_TOKFILE" ] && [ -r "$_LANE_DEFAULT_TOKFILE" ]; then
+        # name<->fp check (#49107): refuse a mislabelled key file rather than boot on the wrong account
+        . "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { echo "FATAL: token_file_guard.sh missing" >&2; exit 1; }
+        token_file_guard "$_LANE_DEFAULT_TOKFILE" || { echo "FATAL: lane-default token refused; not launching on an unverified account" >&2; exit 1; }
         export CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE="$(cat "$_LANE_DEFAULT_TOKFILE")"
         echo -e "\033[2m  lane-default OAuth account applied (session: ${_LANE_SESSION:-none}, pointer-resolved → ${_LANE_DEFAULT_TOKFILE})\033[0m" >&2
     fi
