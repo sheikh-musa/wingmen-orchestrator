@@ -280,6 +280,29 @@ def test_trackingpath_record_shape_resolves(tmp_path):
     assert s.classify(str(f), f.read_bytes()) == "env-snapshot"
 
 
+def test_relative_key_with_realparentdir_resolves(tmp_path):
+    # 3rd shape (seen on gzb 2026-10-02): trackedFileBackups keyed by a RELATIVE path, with the
+    # directory in "realParentDir". Must resolve to <realParentDir>/<key>.
+    root = tmp_path / ".claude"
+    f = root / "file-history" / "sr" / "f842@v2"; f.parent.mkdir(parents=True); _write(f, ENV_BODY)
+    pj = root / "projects" / "-p"; pj.mkdir(parents=True)
+    rec = {"type": "file-history-snapshot", "snapshot": {"trackedFileBackups": {".env": {
+        "backupFileName": "f842@v2", "version": 2, "realParentDir": "/home/x/wingmen/orchestrator"}}}}
+    _write(pj / "sr.jsonl", json.dumps(rec, separators=(",", ":")) + "\n")
+    assert s.file_history_origin(str(f)) == "/home/x/wingmen/orchestrator/.env"
+    assert s.classify(str(f), f.read_bytes()) == "env-snapshot"
+
+
+def test_relative_key_without_parentdir_stays_unresolved(tmp_path):
+    root = tmp_path / ".claude"
+    f = root / "file-history" / "sq" / "f843@v1"; f.parent.mkdir(parents=True); _write(f, ENV_BODY)
+    pj = root / "projects" / "-p"; pj.mkdir(parents=True)
+    rec = {"snapshot": {"trackedFileBackups": {".env": {"backupFileName": "f843@v1"}}}}
+    _write(pj / "sq.jsonl", json.dumps(rec) + "\n")
+    assert s.file_history_origin(str(f)) is None
+    assert s.classify(str(f), f.read_bytes()) == "file-history"
+
+
 def test_unresolvable_origin_fails_toward_leak(tmp_path):
     f = _fh(tmp_path, "s7", "beef@v1", ENV_BODY, orig=None)          # no session record
     assert s.classify(str(f), f.read_bytes()) == "file-history"
