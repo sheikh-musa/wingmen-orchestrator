@@ -139,6 +139,53 @@ _ENV_NAME_EXCLUDE_RE = re.compile(r"\.(example|sample|template)$")
 _origin_cache: Dict[str, Dict[str, str]] = {}
 
 
+def _index_session_backups(root: str, sess: str) -> Dict[str, str]:
+    """{backupFileName: absolute original path} from a session's transcript(s), by walking the
+    PARSED JSON (regex was too brittle: three record shapes exist). Shapes Claude Code writes:
+      1. {"<abs path>": {"backupFileName": …}}
+      2. {"trackingPath": "<abs path>", "backup": {"backupFileName": …}}
+      3. {"<relative path>": {"backupFileName": …, "realParentDir": "<abs dir>"}}  (gzb 10-02)
+    Only an ABSOLUTE result counts; anything else stays unresolved (=> treated as a leak)."""
+    idx: Dict[str, str] = {}
+
+    def add(name, origin):
+        if isinstance(name, str) and isinstance(origin, str) and origin.startswith("/"):
+            idx[name] = os.path.normpath(origin)
+
+    def walk(o):
+        if isinstance(o, dict):
+            tp, bk = o.get("trackingPath"), o.get("backup")
+            if isinstance(bk, dict) and "backupFileName" in bk and isinstance(tp, str):
+                if tp.startswith("/"):
+                    add(bk["backupFileName"], tp)
+                elif isinstance(bk.get("realParentDir"), str):
+                    add(bk["backupFileName"], os.path.join(bk["realParentDir"], tp))
+            for k, v in o.items():
+                if isinstance(v, dict) and "backupFileName" in v and k not in ("backup",):
+                    if k.startswith("/"):
+                        add(v["backupFileName"], k)
+                    elif isinstance(v.get("realParentDir"), str):
+                        add(v["backupFileName"], os.path.join(v["realParentDir"], k))
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    for tf in _glob.glob(os.path.join(root, "projects", "*", sess + ".jsonl")):
+        try:
+            with open(tf, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if "backupFileName" not in line:
+                        continue
+                    try:
+                        walk(json.loads(line))
+                    except ValueError:
+                        continue
+        except OSError:
+            continue
+    return idx
+
+
 def file_history_origin(path: str) -> str | None:
     """The ORIGINAL file a ~/.claude/file-history/<session>/<backup>@vN snapshot was taken of,
     read from that session's transcript (Claude Code records
@@ -155,25 +202,7 @@ def file_history_origin(path: str) -> str | None:
     sess, backup = parts
     key = root + "\0" + sess
     if key not in _origin_cache:
-        idx: Dict[str, str] = {}
-        # Two shapes Claude Code writes: {"<abs path>": {"backupFileName": …}} and
-        # {"trackingPath": "<abs path>", "backup": {"backupFileName": …}}. Only an ABSOLUTE path
-        # counts as an origin (so a JSON key like "backup" is never mistaken for one).
-        pat = re.compile(r'"(/(?:[^"\\]|\\.)+)"\s*:\s*\{\s*"backupFileName"\s*:\s*"([^"]+)"')
-        pat2 = re.compile(r'"trackingPath"\s*:\s*"(/(?:[^"\\]|\\.)+)"\s*,\s*"backup"\s*:\s*'
-                          r'\{\s*"backupFileName"\s*:\s*"([^"]+)"')
-        for tf in _glob.glob(os.path.join(root, "projects", "*", sess + ".jsonl")):
-            try:
-                with open(tf, "r", encoding="utf-8", errors="replace") as fh:
-                    for line in fh:
-                        if "backupFileName" in line:
-                            for m in pat.finditer(line):
-                                idx[m.group(2)] = m.group(1)
-                            for m in pat2.finditer(line):
-                                idx[m.group(2)] = m.group(1)
-            except OSError:
-                continue
-        _origin_cache[key] = idx
+        _origin_cache[key] = _index_session_backups(root, sess)
     return _origin_cache[key].get(backup)
 
 
