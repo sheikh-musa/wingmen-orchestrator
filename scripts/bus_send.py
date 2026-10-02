@@ -95,6 +95,31 @@ def live_instance_ids(base_to: str, dsn: str | None = None) -> list[str]:
     return instances
 
 
+def _heartbeat_age_str(agent_id: str, dsn: str | None = None) -> str:
+    """bus #49675: a suggested instance can go stale between query and read --
+    stamp the suggestion with the heartbeat age the DB measured at refusal time
+    (server-side now()-last_heartbeat, not a client clock) so a future "it
+    suggested a dead instance" report carries its own evidence instead of
+    requiring a live-re-query postmortem days later."""
+    import psycopg2
+
+    try:
+        conn = psycopg2.connect(dsn or dburl(os.environ))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT status, now() - last_heartbeat FROM agent_status WHERE agent_id=%s",
+            (agent_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row is None:
+            return "no agent_status row"
+        status, age = row
+        return f"status={status}, heartbeat {age} ago"
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- diagnostic text only, never block the refusal
+        return f"heartbeat age unavailable ({exc})"
+
+
 def refuse_if_base_has_live_instances(to: str, to_base: bool, dsn: str | None = None) -> None:
     """Refuse (not just warn) a send to a BASE id when live instance(s) exist,
     unless the caller explicitly opts in via --to-base. Builder lanes poll
@@ -106,11 +131,12 @@ def refuse_if_base_has_live_instances(to: str, to_base: bool, dsn: str | None = 
     instances = live_instance_ids(to, dsn=dsn)
     if not instances:
         return
+    age = _heartbeat_age_str(instances[0], dsn=dsn)
     raise SystemExit(
         f"bus_send: REFUSED — '{to}' is a BASE id with live instance(s) "
         f"({', '.join(instances)}); they poll their own instance address, not "
-        f"the base, so this row would sit unread. Did you mean --to {instances[0]}? "
-        "Pass --to-base to send to the base address anyway."
+        f"the base, so this row would sit unread. Did you mean --to {instances[0]} "
+        f"[{age}]? Pass --to-base to send to the base address anyway."
     )
 
 
