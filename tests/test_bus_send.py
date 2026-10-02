@@ -318,6 +318,107 @@ def test_send_with_link_ask_raises_on_bad_or_closed_id(monkeypatch):
     assert conn.closed is True
 
 
+# ---- BASE-vs-INSTANCE refusal (bus #49220): orch-console lost 5 rows on
+# 2026-10-01 by addressing the BASE id ('cc-irsyad') while only INSTANCE
+# addresses ('cc-irsyad-1') were being polled. REFUSE, not warn, unless the
+# caller explicitly passes --to-base.
+
+class _FakeInstanceCursor:
+    def __init__(self, rows):
+        self.executed = []
+        self._rows = rows
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+    def fetchall(self):
+        return self._rows
+
+
+def test_live_instance_ids_queries_base_agent_id_excluding_self(monkeypatch):
+    import psycopg2
+
+    cur = _FakeInstanceCursor([("cc-irsyad-1",)])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
+
+    result = bs.live_instance_ids("cc-irsyad", dsn="postgresql://unused")
+
+    assert result == ["cc-irsyad-1"]
+    sql, params = cur.executed[0]
+    assert "base_agent_id=%s" in sql
+    assert "agent_id<>%s" in sql
+    assert "status IN ('idle','working')" in sql
+    assert params == ("cc-irsyad", "cc-irsyad")
+
+
+def test_live_instance_ids_empty_for_singleton_with_no_fanout(monkeypatch):
+    import psycopg2
+
+    cur = _FakeInstanceCursor([])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
+
+    assert bs.live_instance_ids("cai", dsn="postgresql://unused") == []
+
+
+def test_refuse_if_base_has_live_instances_raises_with_suggestion(monkeypatch):
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: ["cc-irsyad-1", "cc-irsyad-2"])
+    with pytest.raises(SystemExit, match="Did you mean --to cc-irsyad-1"):
+        bs.refuse_if_base_has_live_instances("cc-irsyad", False)
+
+
+def test_refuse_if_base_has_live_instances_noop_when_none_live(monkeypatch):
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: [])
+    bs.refuse_if_base_has_live_instances("cc-irsyad", False)  # must not raise
+
+
+def test_to_base_flag_skips_the_live_instance_check_entirely(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("live_instance_ids must not be called when --to-base is set")
+
+    monkeypatch.setattr(bs, "live_instance_ids", _boom)
+    bs.refuse_if_base_has_live_instances("cc-irsyad", True)  # must not raise, must not query
+
+
+# dry-run never touches the DB at all (pre-existing contract, see
+# test_dry_run_end_to_end) -- the live-instance check runs AFTER the dry-run
+# early-return, so it never fires in --dry-run mode. These exercise the real
+# (non-dry-run) path instead, stubbing send() so no actual INSERT happens.
+
+def test_cli_refuses_on_base_with_live_instances_before_sending(monkeypatch):
+    import io
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "orch-console")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: ["cc-irsyad-1"])
+
+    def _boom(*a, **k):
+        raise AssertionError("send() must not be called when the refusal fires")
+
+    monkeypatch.setattr(bs, "send", _boom)
+    with pytest.raises(SystemExit, match="Did you mean --to cc-irsyad-1"):
+        bs.main([
+            "--to", "cc-irsyad", "--type", "decision", "--subject", "s",
+            "--priority", "P1",
+        ])
+
+
+def test_cli_to_base_bypasses_refusal_and_reaches_send(monkeypatch):
+    import io
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "orch-console")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: ["cc-irsyad-1"])
+    monkeypatch.setattr(bs, "send", lambda *a, **k: (4242, "th-uuid"))
+
+    rc = bs.main([
+        "--to", "cc-irsyad", "--type", "decision", "--subject", "s",
+        "--priority", "P1", "--to-base",
+    ])
+    assert rc == 0
+
+
 def test_send_without_link_ask_never_touches_operator_asks_on_a_reply(monkeypatch):
     # a reply_to riding an existing thread, still no --link-ask. The looked-up
     # thread_id is a full 36-char uuid so it skips the separate prefix-lookup
