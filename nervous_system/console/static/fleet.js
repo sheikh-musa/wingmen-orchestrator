@@ -331,9 +331,12 @@
       + '<div class="poolhead"><span class="poolchip ' + cls + '">' + esc(name) + '</span>'
       + (lvl ? '<span class="poolstatus">plan ' + esc(lvl) + '</span>' : "")
       + '</div>' + rows
-      // op#24626: the key is leak-flagged in the vault but the operator accepted
-      // continued use — keep that risk visible as a small muted line.
-      + (g.key_warning ? '<div class="glmwarn">⚠ ' + esc(g.key_warning) + '</div>' : "")
+      // op#24626/op#25357: the key is leak-flagged in the vault, operator accepted
+      // continued use — the persistent card banner is hidden per Musa's explicit
+      // request (op#25357), NOT because the risk is resolved: the backend still
+      // sets g.key_warning (API truth unchanged) and a held_commitment tracks the
+      // actual rotation reminder instead of a standing UI nag. Re-show this line
+      // if that tradeoff is ever revisited.
       + '</div>';
   }
   function renderPoolUsage(rows, glm) {

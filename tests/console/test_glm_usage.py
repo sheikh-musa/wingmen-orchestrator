@@ -68,7 +68,7 @@ def test_good_read_returns_numbers(fake_key, monkeypatch):
     out = glm_usage.get_glm_usage(now=1000.0)
     assert calls == [(glm_usage.QUOTA_URL, FAKE_KEY)]
     assert out["available"] is True and out["level"] == "pro"
-    w5, wk = out["windows"]   # shortest window first, whatever the wire order
+    wk, w5 = out["windows"]   # wk before 5h (op#25348), whatever the wire order
     assert (w5["label"], w5["used"], w5["cap"], w5["remaining"], w5["pct"]) == ("5h", 1650, 12000, 10349, 13.8)
     assert (wk["label"], wk["used"], wk["cap"], wk["pct"]) == ("wk", 1650, 60000, 2.8)
     assert w5["resets_at"].endswith("+00:00")
@@ -291,8 +291,8 @@ def test_api_fleet_carries_glm_numbers_and_never_the_key(fleet_server, fake_key,
         r = httpx.get(base + "/api/fleet", headers=AUTH, timeout=10)
     assert r.status_code == 200
     g = r.json()["glm_usage"]
-    assert g["available"] is True and [w["label"] for w in g["windows"]] == ["5h", "wk"]
-    assert g["windows"][0]["used"] == 1650 and g["windows"][0]["cap"] == 12000
+    assert g["available"] is True and [w["label"] for w in g["windows"]] == ["wk", "5h"]
+    assert g["windows"][0]["used"] == 1650 and g["windows"][0]["cap"] == 60000
     assert FAKE_KEY not in r.text
     assert all(FAKE_KEY not in rec.getMessage() for rec in caplog.records)
     access = tmp / "console_access.log"
