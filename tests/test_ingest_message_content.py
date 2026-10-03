@@ -101,6 +101,18 @@ def test_video_note_animation_contact_dice_all_captured(ch):
         == "sent a DICE 🎲 → 4"
 
 
+def test_migrate_to_chat_id_captures_old_and_new_ids(ch, logged):
+    # orch-console bus #50332: this must NOT fall through to the bare
+    # "[non-text update, keys: ...]" marker — the new chat_id is the one and
+    # only place Telegram ever sends it, and a key-names-only marker loses it
+    # exactly as unreconstructably as the 2026-07-26 incident this file guards.
+    out = ingest.message_content(
+        ch, _msg(migrate_to_chat_id=-100987654321), 14)
+    assert out == ("GROUP MIGRATED TO SUPERGROUP: chat_id -100 -> -100987654321 "
+                   "— bot_channels.allowed_chat_ids NOT auto-updated, needs orch-console action")
+    assert logged == []          # a handled shape must not also warn as unknown
+
+
 def test_venue_beats_location_and_keeps_the_title(ch):
     out = ingest.message_content(
         ch, _msg(venue={"title": "Masjid", "address": "Corniche",
