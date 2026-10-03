@@ -43,8 +43,14 @@ UID = "6760aba1-0000-0000-0000-000000000000"
 
 # ── is_qa_target: deny-by-default classification ─────────────────────────────
 
-def test_demo_project_is_qa():
-    assert is_qa_target(DEMO, QA_TARGETS) is True
+def test_demo_project_is_qa_only_with_an_explicit_allowlist():
+    # DEMO (ywrpttpxwfcoodovxhsr) was REMOVED from the default QA_TARGETS
+    # (CAI-RESP-1338, #81) once it started holding real client PII — it must
+    # NOT be treated as QA under the real, pinned default.
+    assert is_qa_target(DEMO, QA_TARGETS) is False
+    # The predicate itself still classifies correctly against a caller-
+    # supplied allowlist (this is what the wrapper test below exercises).
+    assert is_qa_target(DEMO, frozenset({DEMO})) is True
 
 
 @pytest.mark.parametrize("ref", [GOUMLYNE, IHSANOS, PERSONAL])
@@ -144,8 +150,12 @@ def _call(**over):
 
 
 def test_qa_target_allowed_without_grant_or_uid():
-    # Synthetic project: outside the freeze scope, permitted.
-    r = _call(target_ref=DEMO, expected_uid=None, grant_fn=_grant_deny)
+    # Synthetic project: outside the freeze scope, permitted. The real
+    # default QA_TARGETS is intentionally empty (CAI-RESP-1338) — exercise
+    # the bypass path via an explicit caller-supplied allowlist instead of
+    # relying on a ref that is no longer classified QA by default.
+    r = _call(target_ref=DEMO, expected_uid=None, grant_fn=_grant_deny,
+              qa_allowlist=frozenset({DEMO}))
     assert r.ok is True and "qa" in r.reason.lower()
 
 
