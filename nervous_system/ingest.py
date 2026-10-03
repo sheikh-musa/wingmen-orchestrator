@@ -330,6 +330,20 @@ def _media_content(ch: "Channel", msg: dict, upd_id: int, text: str) -> str:
     elif msg.get("dice"):
         dice = msg["dice"]
         content = f"sent a DICE {dice.get('emoji') or ''} → {dice.get('value')}".replace("  ", " ")
+    # GROUP->SUPERGROUP MIGRATION (orch-console bus #50332): Telegram sends this
+    # as a service message on the OLD chat_id, carrying the NEW one — the one
+    # and only place the new id ever appears. Capture it explicitly in the
+    # durable row instead of falling through to the bare "[non-text update,
+    # keys: ...]" marker, which names the key but not the value (op#22669's
+    # whole point: a value this load-bearing must never be lost to a shape-only
+    # marker). bot_channels.allowed_chat_ids is NOT auto-updated here — that's a
+    # security allowlist mutation and stays a human/orch-console action; see
+    # _page_migrate_to_chat_id_once (process_update) for the loud page.
+    elif msg.get("migrate_to_chat_id") is not None:
+        new_chat_id = msg["migrate_to_chat_id"]
+        old_chat_id = (msg.get("chat") or {}).get("id")
+        content = (f"GROUP MIGRATED TO SUPERGROUP: chat_id {old_chat_id} -> {new_chat_id} "
+                   f"— bot_channels.allowed_chat_ids NOT auto-updated, needs orch-console action")
     else:
         content = text or _unknown_marker(ch, msg, upd_id)
     return content
@@ -459,6 +473,38 @@ def _page_pinned_drift_once(conn, key: str, host: str) -> None:
               f"UPDATE bot_channels SET enabled=false WHERE channel_key='{key}'. "
               f"Page-once-ever for this channel+host; won't repeat unless this row is removed."),
         priority="P1", req=True, dsn=_dsn(),
+    )
+
+
+def _page_migrate_to_chat_id_once(conn, ch: Channel, old_chat_id, new_chat_id, upd_id: int) -> None:
+    """Page ONCE per (channel, old_chat_id, new_chat_id) — same durable
+    page-once-ever dedup as _page_pinned_drift_once (a marker substring in
+    `body`, not in-memory state). A group->supergroup migration is rare and
+    each one is a distinct, should-never-recur event, not a recurring metric.
+
+    bot_channels.allowed_chat_ids is deliberately NOT auto-rewritten here:
+    it is the gate's deny-by-default allowlist (CLAUDE.md fleet doctrine),
+    and silently widening a security gate from an inbound Telegram payload
+    is exactly the kind of auto-action that doctrine keeps human/orch-gated.
+    This page carries the exact fix so the gap (orch-console bus #50332:
+    the bot would otherwise go silently deaf with no way to recover the new
+    id after the fact) can be closed in one step."""
+    marker = f"MIGRATE-TO-CHAT-ID:{ch.key}:{old_chat_id}:{new_chat_id}"
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM agent_messages WHERE body LIKE %s LIMIT 1", (f"{marker}%",))
+        if cur.fetchone():
+            return
+    from scripts import bus_send
+    bus_send.send(
+        from_agent=PAGE_FROM_AGENT, to=PAGE_TO_AGENT, mtype="blocker",
+        subject=f"channel '{ch.key}' group migrated to supergroup — chat_id changed",
+        body=(f"{marker}: Telegram update {upd_id} on channel '{ch.key}' — chat_id "
+              f"{old_chat_id} -> {new_chat_id}. The bot goes silently deaf on this "
+              f"group once Telegram actually cuts over, unless the new id is added. "
+              f"Fix: UPDATE bot_channels SET allowed_chat_ids = allowed_chat_ids || "
+              f"'{{{new_chat_id}}}'::bigint[] WHERE channel_key='{ch.key}'. "
+              f"Page-once-ever for this old->new pair; won't repeat unless this row is removed."),
+        priority="P2", req=True, dsn=_dsn(),
     )
 
 
@@ -954,6 +1000,17 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
         # 2. LOG — durable first, always. Media is downloaded here so the row
         #    carries the local path (screenshot/doc), not a bare non-text marker.
         content = message_content(ch, msg, upd_id)
+        # GROUP->SUPERGROUP MIGRATION (orch-console bus #50332): the durable
+        # row above already captures the new chat_id (message_content), but a
+        # row sitting in the log is easy to miss. Page loudly too, same
+        # page-once-ever discipline as pinned-channel drift, so this doesn't
+        # go silently deaf once Telegram actually cuts the chat_id over.
+        if msg.get("migrate_to_chat_id") is not None:
+            try:
+                _page_migrate_to_chat_id_once(conn, ch, chat_id, msg["migrate_to_chat_id"], upd_id)
+            except Exception as e:
+                _log_line(f"{ch.key}: migrate_to_chat_id page failed "
+                          f"({type(e).__name__}: {e})")
         # PRIVATE-FAMILY routing (bus #47837 C1/C2): a personal-routed tag's
         # content must never reach the substrate. Skip classify() entirely —
         # its governance-fork branch would quote a matched phrase from the
