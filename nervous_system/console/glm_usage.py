@@ -189,7 +189,7 @@ def parse_quota(body: Dict[str, Any]) -> Dict[str, Any]:
         })
     if not windows:
         raise GlmUsageError("z.ai quota response had no usable limits")
-    windows.sort(key=lambda w: w.pop("_len_s"))   # shortest window (5h) first
+    windows.sort(key=lambda w: w.pop("_len_s"), reverse=True)   # wk before 5h (Musa op#25348, matches the Max-pool card template)
     return {"available": True, "level": str(data.get("level") or ""), "windows": windows}
 
 
