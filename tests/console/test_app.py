@@ -123,6 +123,33 @@ def test_static_index_served(server):
     assert "text/html" in r.headers.get("content-type", "")
 
 
+def test_fleet_dock_suppresses_overscroll_bounce(server):
+    """Musa op#25251: Telegram's iOS in-app browser has a confirmed, open
+    WKWebView bug (TelegramMessenger/Telegram-iOS#1748) where scrolling past
+    the end of the document elastically bounces the WHOLE page — dragging
+    position:fixed children of <body>, like the resting #dock ("Tap a lane to
+    act"), up off the true bottom so it appears to float mid-screen over
+    content. overscroll-behavior-y:none on the <html> scroller (the page's
+    single scroll container, per the fc-v51 comment just above it) suppresses
+    that local bounce; it does not touch the custom JS pull-to-refresh (#ptr
+    intercepts touchmove itself, never native rubber-banding). Source-text
+    lock so a future edit can't silently drop it."""
+    r = httpx.get(server + "/", timeout=5)
+    assert r.status_code == 200
+    assert "overscroll-behavior-y: none" in r.text
+
+
+def test_lanes_page_suppresses_overscroll_bounce(server):
+    """Same Telegram-iOS WKWebView bug (TelegramMessenger/Telegram-iOS#1748)
+    threatens lanes.html's own position:fixed .toast — cc-quality review of
+    PR fix/console-dock-float flagged that the fleet.html fix wasn't carried
+    here even though this page's build badge was bumped in the same deploy.
+    Source-text lock."""
+    r = httpx.get(server + "/lanes", timeout=5)
+    assert r.status_code == 200
+    assert "overscroll-behavior-y:none" in r.text.replace(" ", "")
+
+
 def test_x_forwarded_for_spoof_does_not_grant_access(server):
     """Regression test for the exact bug this change removes: the test
     client's real peer IP (127.0.0.1) is never in the allowlist here, and a
@@ -1207,6 +1234,13 @@ def test_build_asks_query_derives_every_status_live_in_sql():
     # ask_surface='operator' AND traceable to a real Musa inbound or --ask.
     assert "a.ask_surface = 'operator'" in low
     assert "a.source_msg_id is not null or a.waiting_on_operator" in low
+    # TRIAGED-ONLY (migration 082, Musa op#25251): triage_state is orthogonal to
+    # closed_at — only a judged 'ask' row is actionable. A raw 'captured'
+    # (never-triaged, the column default) row must never surface as an open
+    # ask; before this fix the query had no triage_state filter at all and
+    # "Your asks" silently showed untriaged noise (verified live: 133 of 173
+    # rows in-scope were 'captured', not 'ask').
+    assert "a.triage_state = 'ask'" in low
     # all six live-derived states present:
     for state in ("waiting_on_musa", "on_nazim", "needs_you", "delegate_done", "in_progress", "pending"):
         assert "'" + state + "'" in low, f"missing derived state {state}"
@@ -1306,8 +1340,15 @@ def test_console_assign_stamps_link_row_in_same_transaction(monkeypatch):
     assert existing_check[1] == (99, "ship the thing")
     link = cur.executed[3]
     assert "insert into operator_asks" in link[0].lower()
-    # the link row stores the SAME thread_id the directive returned, + the origin.
-    assert link[1] == ("ship the thing", 99, "th-uuid-abc", "cc-irsyad")
+    # the link row stores the SAME thread_id the directive returned, + the origin,
+    # + the triage stamp (Musa op#25251): a console assign traced to
+    # source_msg_id is a deliberate ask, so it is born triage_state='ask' —
+    # never the 'captured' default — exactly like scripts/asks_open.py's
+    # already-summarized asks, or it would silently vanish from "Your asks"
+    # once that board started requiring triage_state='ask'.
+    assert link[1] == ("ship the thing", 99, "th-uuid-abc", "cc-irsyad", "ship the thing")
+    assert "triage_state" in link[0].lower() and "'ask'" in link[0].lower()
+    assert "triage_summary" in link[0].lower()
     # never writes a status column (the whole point — status is derived live).
     assert "status" not in link[0].lower()
 
@@ -1345,7 +1386,12 @@ def test_console_assign_links_existing_row_instead_of_duplicating(monkeypatch):
     assert len(cur.executed) == 4
     update = cur.executed[3]
     assert "update operator_asks" in update[0].lower()
-    assert update[1] == ("th-uuid-abc", "cc-irsyad", 17)
+    # the re-delegate ALSO (re-)stamps triage_state='ask' (Musa op#25251): the
+    # existing row this links to may predate the triage column (or may be a
+    # stale 'captured' match), and a re-delegate is just as deliberate as a
+    # fresh assign — it must not stay/become invisible on "Your asks".
+    assert update[1] == ("th-uuid-abc", "cc-irsyad", "ship the thing", 17)
+    assert "triage_state='ask'" in update[0].lower().replace(" ", "")
     assert not any("insert into operator_asks" in e[0].lower() for e in cur.executed)
 
 
