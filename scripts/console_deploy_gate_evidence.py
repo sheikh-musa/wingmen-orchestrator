@@ -58,8 +58,20 @@ def build_evidence(content_hash: str, deploy_dir: Path) -> dict:
         # neither "FAILED" nor " failed" in it either, so the old "fail only if a
         # failure marker is present" logic scored an EMPTY log "pass" — require the
         # positive "N passed" signal too, not just the absence of a negative one.
-        ran_ok = re.search(r"\b\d+\s+passed\b", text) is not None
-        blew_up = "failed" in text.lower() or "error" in text.lower()
+        #
+        # cc-quality (PR#275 shadow-run, 2026-10-04): a WHOLE-LOG substring scan for
+        # "failed"/"error" false-positives on a benign, already-handled pytest
+        # UserWarning (e.g. "protected_agents: DB read failed (OperationalError(...))
+        # — falling back to the static floor") that has nothing to do with the test
+        # outcome — this fires on EVERY run on a host with no local Postgres socket,
+        # regardless of whether the tests actually passed. pytest's own final
+        # one-line summary (the true last non-blank line, always printed after any
+        # warnings section) is the authoritative outcome — scope the check to ONLY
+        # that line, not the whole log body.
+        lines = [l for l in text.splitlines() if l.strip()]
+        last_line = lines[-1] if lines else ""
+        ran_ok = re.search(r"\b\d+\s+passed\b", last_line) is not None
+        blew_up = re.search(r"\b\d+\s+(failed|error\w*)\b", last_line) is not None
         checks["unit-tests"] = "pass" if (ran_ok and not blew_up) else "fail"
 
     # G3 (mobile + desktop eyeball): render_console_pages.sh captures fleet.png +

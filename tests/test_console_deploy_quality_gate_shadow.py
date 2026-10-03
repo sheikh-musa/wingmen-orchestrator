@@ -187,6 +187,36 @@ def test_evidence_builder_reads_pytest_log(tmp_path):
     assert evidence["checks"]["unit-tests"] == "fail"
 
 
+def test_evidence_builder_unit_tests_ignores_benign_warning_text_containing_failed_or_error(tmp_path):
+    """cc-quality (PR#275 shadow-run, 2026-10-04): a real, all-green run on a host
+    with no local Postgres socket prints a handled UserWarning containing the
+    literal substring "failed" ("DB read failed (OperationalError(...)) — falling
+    back to the static floor") — this fires on every run on such a host regardless
+    of test outcome. A whole-log substring scan for "failed"/"error" wrongly scores
+    this "fail"; only pytest's own final summary line (the true last non-blank
+    line) is authoritative."""
+    (tmp_path / "pytest.log").write_text(
+        "nervous_system/protected_agents.py:194: UserWarning: protected_agents: "
+        "DB read failed (OperationalError('connection is bad: ... socket \"/tmp/"
+        ".s.PGSQL.5432\" failed: No such file or directory')) — falling back to "
+        "the static floor\n"
+        "  rows = _safe_registry_rows(dsn)\n"
+        "\n"
+        "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n"
+        "92 passed, 3 warnings in 117.61s (0:01:57)\n"
+    )
+    evidence = build_evidence("deadbeef00000000", tmp_path)
+    assert evidence["checks"]["unit-tests"] == "pass"
+
+    # a REAL failure on the summary line must still fail, warnings or not.
+    (tmp_path / "pytest.log").write_text(
+        "nervous_system/protected_agents.py:194: UserWarning: ... failed ...\n"
+        "3 failed, 89 passed, 5 warnings in 100.00s\n"
+    )
+    evidence = build_evidence("deadbeef00000000", tmp_path)
+    assert evidence["checks"]["unit-tests"] == "fail"
+
+
 def test_evidence_builder_unit_tests_requires_a_positive_passed_signal(tmp_path):
     """orch-console review (#45683), condition 2: the old logic scored 'pass'
     whenever neither 'FAILED' nor ' failed' appeared — which is also true of an
