@@ -751,7 +751,18 @@ def build_asks_query() -> Tuple[str, list]:
     OF Musa and must never reach this query, even if some future writer forgets to
     stamp ask_surface correctly — the traceability condition is a second,
     independent backstop. cc-fleet-health's op#23531 client-channel ledger rows
-    (ask_surface='client-channel') are a per-lane review view, never this board."""
+    (ask_surface='client-channel') are a per-lane review view, never this board.
+
+    TRIAGED-ONLY (Musa op#25251, migration 082): triage_state is an axis
+    ORTHOGONAL to closed_at — captured|ask|not_an_ask|done. Only a JUDGED
+    'ask' row is an actionable item; 'captured' (the column default — i.e.
+    never triaged) must never surface as if it were a live open ask. Before
+    this fix the query had no triage_state filter at all, so "Your asks"
+    silently included every untriaged 'captured' row too — verified live
+    (2026-10-04): of 173 rows matching the surface/traceability scope above,
+    only 40 were triage_state='ask'; the other 133 were raw 'captured' noise,
+    and the LIMIT 100 below was capping the badge at a flat "100 open" that
+    was neither the real actionable count nor an honest total."""
     sql = (
         "WITH latest AS ("
         "  SELECT DISTINCT ON (thread_id) "
@@ -779,6 +790,7 @@ def build_asks_query() -> Tuple[str, list]:
         "WHERE a.closed_at IS NULL "
         "  AND a.ask_surface = 'operator' "
         "  AND (a.source_msg_id IS NOT NULL OR a.waiting_on_operator) "
+        "  AND a.triage_state = 'ask' "
         "ORDER BY "
         "  CASE "
         "    WHEN a.waiting_on_operator                              THEN 0 "

@@ -44,7 +44,21 @@
      overflow-x on <html> only leaves <body> in normal flow (NOT a scroller);
      <html> is the document scroller, so window.scrollY is authoritative and
      everything is one clean vertical scroll. */
-  html { overflow-x: hidden; }
+  /* overscroll-behavior-y:none (Musa op#25251, fc-v70): Telegram's iOS in-app
+     browser has a confirmed, currently-open WKWebView bug where scrolling past
+     the end of the document triggers elastic/rubber-band overscroll that
+     shifts the WHOLE page — including position:fixed children of <body> like
+     #dock — upward, so the bottom dock visually "floats" mid-screen over
+     content instead of staying pinned to the true bottom
+     (TelegramMessenger/Telegram-iOS#1748, no official fix). This CSS property
+     is the standards-based way to suppress that local bounce; it has NO effect
+     on the custom JS-driven pull-to-refresh above (#ptr intercepts touchmove
+     itself and never relies on native rubber-banding) so nothing here changes.
+     iOS/WebKit support for it on the document-level scroller has historically
+     been inconsistent (improving on newer versions), but Android's Chromium
+     WebView (Telegram's in-app browser there) honours it fully, and it is a
+     zero-regression addition everywhere it's unsupported. */
+  html { overflow-x: hidden; overscroll-behavior-y: none; }
   html, body { margin: 0; }
   body {
     color: var(--txt);

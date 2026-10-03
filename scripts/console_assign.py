@@ -110,6 +110,20 @@ def assign(agent: str, ask: str, priority: str, source_msg_id: "int | None" = No
         # migration 084's unique index on that same pair is the backstop if this
         # check is ever bypassed. If operator_asks isn't applied yet, this
         # raises and the whole tx rolls back (no orphan bus row).
+        #
+        # TRIAGE STAMP (Musa op#25251, migration 082, cc-quality review of PR
+        # fix/console-dock-float): a console assign traced to source_msg_id is,
+        # by construction, a deliberate ask the operator just typed — the exact
+        # same "already-summarized, never a raw capture" category
+        # scripts/asks_open.py stamps triage_state='ask' for at INSERT time.
+        # Before this fix, this INSERT (and the retry/re-delegate UPDATE below)
+        # left triage_state at its column default 'captured', so once
+        # nervous_system/console/db.py's "Your asks" query started requiring
+        # triage_state='ask' (the same op#25251 fix — "Your asks" was showing a
+        # LIMIT-100-capped "100 open" that included 133 untriaged 'captured'
+        # rows), every console-delegated ask would have silently and
+        # permanently vanished from the operator's own board with nothing to
+        # ever promote it. Stamping it here closes that gap at the source.
         if source_msg_id is not None:
             cur.execute(
                 "SELECT id FROM operator_asks WHERE source_msg_id=%s AND ask=%s "
@@ -119,14 +133,18 @@ def assign(agent: str, ask: str, priority: str, source_msg_id: "int | None" = No
             existing = cur.fetchone()
             if existing:
                 cur.execute(
-                    "UPDATE operator_asks SET thread_id=%s, delegated_to=%s WHERE id=%s",
-                    (thread_id, agent, existing[0]),
+                    "UPDATE operator_asks SET thread_id=%s, delegated_to=%s, "
+                    "  triage_state='ask', triage_summary=%s, triaged_at=now(), "
+                    "  triaged_by='console_assign' "
+                    "WHERE id=%s",
+                    (thread_id, agent, ask, existing[0]),
                 )
             else:
                 cur.execute(
-                    "INSERT INTO operator_asks (ask, source_msg_id, thread_id, delegated_to) "
-                    "VALUES (%s, %s, %s, %s)",
-                    (ask, source_msg_id, thread_id, agent),
+                    "INSERT INTO operator_asks (ask, source_msg_id, thread_id, delegated_to, "
+                    "  triage_state, triage_summary, triaged_at, triaged_by) "
+                    "VALUES (%s, %s, %s, %s, 'ask', %s, now(), 'console_assign')",
+                    (ask, source_msg_id, thread_id, agent, ask),
                 )
         conn.commit()
     return new_id
