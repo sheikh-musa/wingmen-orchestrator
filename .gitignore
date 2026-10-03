@@ -70,6 +70,19 @@ reports/*.md
 reports/*.diff
 reports/*.py
 reports/console-deploy/**/*.png
+
+# console-deploy per-run EPHEMERAL evidence (cc-quality, PR#275 shadow-run gate-
+# calibration follow-up, 2026-10-04): pytest.log/render.log/quality-gate-verdict.json/
+# quality-gate.err are regenerate-on-demand run output, not a durable record — unlike
+# _fleet-harness.html/_fleet.json/_lanes-harness.html/_tt.json/cc-quality-review.md
+# (deliberately committed historically, e.g. 7a986cc/bf6d3f1), these 4 have NEVER
+# actually been committed and were just accumulating as permanently-untracked drift
+# on the live deploy host (74 porcelain lines found mid-session) — formalizing
+# existing practice, not changing it.
+reports/console-deploy/**/pytest.log
+reports/console-deploy/**/render.log
+reports/console-deploy/**/quality-gate-verdict.json
+reports/console-deploy/**/quality-gate.err
 .venv
 
 # Token POINTER backups written by switch_singleton_token.sh / lane token flips. The live
