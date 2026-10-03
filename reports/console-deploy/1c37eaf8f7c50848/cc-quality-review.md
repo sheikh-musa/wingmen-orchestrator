@@ -1,91 +1,31 @@
-# cc-quality review — content hash `1c37eaf8f7c50848`
+# cc-quality review — console content `1c37eaf8f7c50848`
 
-PR: `fix/console-dock-float` (Musa op#25251, two reported bugs: dock floats
-mid-screen; "Your asks" shows a suspicious "100 open").
+**Verdict: PASS** (ship-clear for `scripts/deploy_console.sh`; deploy is orch-console/Musa's to run — I do not deploy).
 
-Reviewer: `code-review` skill (high effort), run against the diff at
-`/Users/sheikhmusa/wingmen/orchestrator.wt-console-dock-fix` vs
-`origin/fable/substrate-safe-fixes`. The live fleet `cc-quality` lane was not
-reachable from this sandboxed task context, so the repo's `code-review` skill
-stood in as the independent reviewer — noted here for transparency; orch-console
-may want the fleet `cc-quality` lane to re-review before merge.
+- **Reviewer:** cc-quality (Head of Quality) — model `claude-sonnet-5` (op#24365/CAI-RESP-1440 arrangement). This is a non-FULL, non-money/PII/live-tenant review (console UI + internal ask-triage SQL), so the sonnet-advisory/opus-confirmation gate does not apply here.
+- **PR:** `sheikh-musa/wingmen-orchestrator#275`, `fix/console-dock-float` → `fable/substrate-safe-fixes`, head `fd5be86e` (Musa op#25251). Two reported bugs: the resting dock floats mid-screen in Telegram's iOS in-app browser; "Your asks" showed a flat, suspicious "100 open".
+- **Content hash:** recomputed myself via `console_deploy_files_rel`/`console_content_hash` against a fresh detached worktree at `fd5be86e` = **`1c37eaf8f7c50848`** — MATCHES the requested hash.
+- **Provenance note (for the record, per orch-console's ask):** a prior review at this same path/hash was written by the `code-review` skill standing in for the live `cc-quality` lane (that task's sandboxed context couldn't reach me) and said so itself. This file **replaces** that placeholder with an independent re-review by the actual lane — I read the stand-in's findings, then re-derived every substantive claim from source myself rather than co-signing it blind.
 
 ## Scope reviewed
 
-- `nervous_system/console/db.py` — `build_asks_query()` triage_state filter
-- `nervous_system/console/static/fleet.html` — `overscroll-behavior-y` fix + version bump
-- `nervous_system/console/static/fleet.js` — version bump only
-- `nervous_system/console/static/lanes.html` — version bump (+ follow-up fix below)
-- `nervous_system/console/static/sw.js` — version bump only
-- `tests/console/test_app.py` — new/updated assertions
+`nervous_system/console/db.py`, `static/fleet.html`, `static/fleet.js`, `static/lanes.html`, `static/sw.js`, `scripts/console_assign.py`, `tests/console/test_app.py` — the full diff vs `fable/substrate-safe-fixes` (111 insertions / 14 deletions across 7 files), confirmed via `git diff --stat`.
 
-## Findings
+## What I independently re-verified (not taken from the stand-in review's word)
 
-### 1. HIGH CONFIDENCE (fixed) — `triage_state='ask'` filter silently orphans console-assigned asks
+1. **`triage_state='ask'` filter in `build_asks_query()`.** Read migration 082 at source: `triage_state text NOT NULL DEFAULT 'captured' CHECK (... 'captured','ask','not_an_ask','done')` — confirms untriaged rows genuinely default to `'captured'` and the new filter is the correct fix, not a guess. Confirmed `scripts/asks_open.py` already stamps `triage_state='ask'` at insert for the same "already-summarized" category (grepped it directly) — the precedent cited is real.
+2. **The `console_assign.py` gap the stand-in review found and fixed.** Read the diff directly: both the fresh-INSERT and the existing-row re-delegate UPDATE now stamp `triage_state='ask', triage_summary=<ask text>, triaged_at=now(), triaged_by='console_assign'`. Traced the "existing" match clause (`source_msg_id=%s AND ask=%s AND closed_at IS NULL`, no triage_state constraint) — considered whether re-stamping an existing open row that happened to carry a prior human `'not_an_ask'`/`'done'` judgment could silently clobber it: concluded this is correct behavior, not a bug — a deliberate new console delegate on the exact same (source_msg_id, ask text) pair is itself fresh evidence this should be treated as a live ask now, and migration 082's backfill shows `not_an_ask`/`done` rows are normally closed anyway (narrow, non-blocking edge case either way).
+3. **The `lanes.html` carry-over fix.** Confirmed `lanes.html` had no `overscroll-behavior-y` before this PR (only `overflow-x:hidden`) and now carries `overscroll-behavior-y:none` alongside it, with the build badge correctly bumped `fc-v69`→`fc-v70` in lockstep with `fleet.js` `APP_BUILD` and `sw.js` `VERSION` (confirmed all three diffs directly — `fleet.js`/`sw.js` are genuinely version-bump-only, nothing else changed).
+4. **The PTR non-interaction claim.** Read `fleet.js`'s actual pull-to-refresh handler: it measures `touchstart`/`touchmove` deltas via `e.touches[0].clientY` directly and drives its own `height`/class state — it never reads scroll position or relies on native rubber-banding, so `overscroll-behavior-y:none` genuinely cannot interact with it. Confirmed `lanes.html` has no custom touch/scroll JS at all (grepped for `touchmove`/`touchstart`/`scroll` — zero hits outside the new comment).
+5. **Live-reproduced the "100 open" root cause myself**, not just re-quoted the PR's numbers: `SELECT count(*) FILTER (triage_state='ask') / ('captured')` against the exact scope clause in `build_asks_query()` → **175 total in scope, 40 `'ask'`, 135 `'captured'`** right now. The `'ask'` count (40) matches the PR's own verification exactly; the total/captured counts have drifted up by 2 since the PR was written (expected — this is a live, continuously-written table, and the drift is in the un-triaged `'captured'` bucket, not the fixed count that matters). Confirms the filter and the root-cause diagnosis are both real and current, not stale.
+6. **Test non-vacuousness.** Both new CSS-lock tests assert against the actual **served** HTML (`httpx.get(server + "/")` / `"/lanes"`, not a static file read). The SQL test asserts the literal clause text is present in the built query string. The `console_assign` tests assert exact parameter-tuple equality including the new triage fields — all would genuinely fail if the fix were reverted, not just exercise the code path.
+7. **Full verification run, myself, from a clean detached worktree** (not trusting the PR's own numbers): `tests/console/` full suite — **408 passed, 0 failed** (323s) — matches the stand-in review's count exactly. `tests/console/test_app.py` alone (the subset `deploy_console.sh`'s own Gate 2 actually runs) — **92 passed**. All 8 `tests/console/*.test.js` node suites — all passed. Ran the 5 migration-lint scripts' siblings is N/A here (no new `.sql` migration in this PR); not applicable.
 
-The new `AND a.triage_state = 'ask'` filter in `build_asks_query()` is correct
-per migration 082 doctrine, but `scripts/console_assign.py` — the console's
-own "+ ask" / assign feature, which creates exactly the kind of
-Musa-source-traced, deliberate ask this board exists to show — never stamped
-`triage_state` on insert (or on its retry/re-delegate UPDATE path), so those
-rows default to `'captured'` and, with no promotion mechanism, would have been
-silently and permanently excluded from "Your asks" going forward. This
-mirrors the precedent already set in `scripts/asks_open.py`, which *was*
-updated at migration-082 time to stamp `triage_state='ask'` for the same
-"already-summarized, never a raw capture" category.
+## Not flagged as blocking (carried from the prior review, still accurate on re-check)
 
-**Fix applied:** `scripts/console_assign.py` now stamps
-`triage_state='ask', triage_summary=<ask text>, triaged_at=now(),
-triaged_by='console_assign'` on both the fresh-INSERT path and the
-existing-row re-delegate UPDATE path. Tests
-`test_console_assign_stamps_link_row_in_same_transaction` and
-`test_console_assign_links_existing_row_instead_of_duplicating` updated to
-assert this.
-
-### 2. HIGH CONFIDENCE (fixed) — the WKWebView overscroll fix wasn't carried to lanes.html
-
-`fleet.html` got `overscroll-behavior-y: none` to suppress the Telegram-iOS
-WKWebView bug (TelegramMessenger/Telegram-iOS#1748) that drags
-`position:fixed` elements off the true bottom during overscroll, but
-`lanes.html` has its own `position:fixed` `.toast` and still only declared
-`overflow-x:hidden`, even though its build badge was bumped in the same
-deploy. An operator scrolling a long lane list in Telegram's in-app browser
-could see the same float on `.toast`.
-
-**Fix applied:** `lanes.html`'s `html,body` rule now also carries
-`overscroll-behavior-y:none`. Verified no custom touch/scroll JS exists on
-that page to interact with it. New test
-`test_lanes_page_suppresses_overscroll_bounce` locks it in.
-
-## Not flagged as blocking / left as-is
-
-- `LIMIT 100` in `build_asks_query()` remains — with the `triage_state='ask'`
-  filter the real count is 40 (verified live against the substrate DB), well
-  under the cap, so it doesn't currently manifest. Flagged to orch-console as
-  a known follow-up: `asks_open` is still `len(rows)` off a LIMIT-ed list, so
-  if genuine actionable backlog ever exceeds 100 the badge would again
-  silently under-report. Not fixed here to keep this PR to the two reported
-  bugs.
-- iOS/WebKit's own support for `overscroll-behavior` on the document-level
-  scroller is historically inconsistent; there is no complete upstream fix
-  (Telegram's own GitHub issue for this is open with none proposed). This
-  change is the correct, zero-regression mitigation available from our side,
-  not a claim that it fully eliminates the bug on every iOS version.
-
-## Verification run
-
-- `tests/console/` (Python): 408 passed, 0 failed.
-- `tests/console/*.test.js` (Node, all 8 suites): all passed.
-- Render gate: `fleet.png` + `lanes.png` rendered via Playwright (iPhone 13
-  emulation) against this exact content, live `/api/fleet` + `/api/token-truth`
-  data — both pages render without error, dock/toast pinned correctly in a
-  standard (non-buggy) engine, "Your asks" count visible (the harness replays
-  a pre-fetched API snapshot, so it still shows the server's live value at
-  fetch time, not a re-run of the fixed SQL — the SQL fix itself is verified
-  directly against the substrate DB and by `test_build_asks_query_derives_every_status_live_in_sql`).
+- `LIMIT 100` in `build_asks_query()` remains; real count (40) is well under it today. Live-reconfirmed, still non-blocking, still a known future-proofing follow-up if genuine backlog ever exceeds 100.
+- iOS/WebKit's `overscroll-behavior` support is historically inconsistent; this is the correct available mitigation, not a claim of a complete upstream fix (Telegram's own issue is still open).
 
 ## Verdict
 
-PASS. Two real findings from independent review, both fixed and tested before
-this review was written (this file documents the final, already-corrected
-state — it is not a pre-fix snapshot).
+**PASS.** Both fixes (the WKWebView CSS mitigation, carried to both pages, and the triage-state filter + its `console_assign.py` completeness fix) are correct, narrowly scoped, and covered by tests that would catch a regression. I independently re-derived every load-bearing claim from source and live data rather than co-signing the stand-in review — nothing it found was wrong, and I found nothing it missed.
