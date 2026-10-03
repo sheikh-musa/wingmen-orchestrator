@@ -20,8 +20,10 @@ LEAK FLAG — the vault refuses nothing itself; a leak-flagged secret is returne
 `leak_flagged=True` and this module fails CLOSED on it, EXCEPT for a name listed in
 ACCEPTED_LEAK_FLAG: an explicit, attributable, code-reviewed operator risk acceptance
 (never env-driven, never generic). The vault row is NOT touched — its design forbids
-clearing a leak flag without rotating — and the card shows a muted `key_warning` line
-for as long as the accepted-but-flagged key is in use, so the risk stays visible.
+clearing a leak flag without rotating. `key_warning` stays in this module's API output
+for as long as the accepted-but-flagged key is in use (so anything reading the API still
+sees the risk truthfully); fleet.js no longer renders it on the card (Musa op#25357 —
+he wants it tracked via a held_commitment reminder instead of a standing UI nag).
 
 HONESTY — a successful read is cached for CACHE_TTL_S (page loads must not hammer
 z.ai or the vault). When a refresh FAILS the card reads "unavailable": stale
