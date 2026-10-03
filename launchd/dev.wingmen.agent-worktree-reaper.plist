@@ -2,20 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- agent-worktree-reaper DETECT-ONLY. Reaps stale Claude-native agent worktrees
-       (project-local .claude/worktrees/agent-*, >=14d + git-clean + idle) the git-native,
-       reversible way. FIRES NOTHING in this config — it runs the detect-only sweep and logs
-       which worktrees it WOULD reap, to prove the clean-only gate over a week before it is
-       armed (Nazim 43534, observe-first ladder). TO ARM: append ' --apply' to the python
-       invocation below and reload (orch-console signs the diff first).
-       NOT loaded until orch-console signs. -->
+  <!-- agent-worktree-reaper ARMED (orch-console #50917, 2026-10-03, after a clean detect-only
+       review week — same 4 old/clean orchestrator .claude/worktrees proposed every run, no
+       false positives). Reaps stale Claude-native agent worktrees (project-local
+       .claude/worktrees/agent-*, >=14d + git-clean + idle) the git-native, reversible way:
+       `git worktree remove` WITHOUT --force, never rm -rf, never touches branches/commits. -->
   <key>Label</key>
   <string>dev.wingmen.agent-worktree-reaper</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.agent_worktree_reaper</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.agent_worktree_reaper --apply</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
