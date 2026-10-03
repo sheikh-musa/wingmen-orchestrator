@@ -116,4 +116,16 @@ assert.ok(s.indexOf('class="opadd"') >= 0);
 s = F.govStripHtml("irsyad", "channels", true, ["-1", "-2"]);
 assert.ok(s.indexOf('class="gch"') >= 0 && s.indexOf('value="-1, -2"') >= 0);
 
+// ---- fc-v65 bus #50221: Governance is section-collapsible via the shared
+// <details class="chatter"> shell, not a bare <section>, and defaults open (no
+// visibility regression). Source-text assertions (cc-quality #50265 fast-follow,
+// PASS-WITH-FINDING on coverage) — this suite is deliberately dep-free, so these
+// lock the structural claims a full DOM sim would otherwise need jsdom to catch.
+const HTML = fs.readFileSync(path.join(__dirname, "..", "..", "nervous_system", "console", "static", "fleet.html"), "utf8");
+assert.ok(/<details class="chatter" id="govSec" open>/.test(HTML),
+  "govSec must be a <details ...open> — collapsible, but visible by default");
+const rl = SRC.match(/\$\("govReload"\)[\s\S]{0,200}/);
+assert.ok(rl && /preventDefault\(\)/.test(rl[0]) && /stopPropagation\(\)/.test(rl[0]),
+  "govReload's click handler must suppress the native <details> toggle, or clicking reload also collapses Governance");
+
 console.log("fleet_governance.test.js: all assertions passed");
