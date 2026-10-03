@@ -20,16 +20,26 @@ set -uo pipefail
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
 
 # SSOT: the identical file set + content hash the deploy_console gate uses.
+# HAVE_MANIFEST=0 when the current branch's lineage predates the console-deploy-
+# gate feature (e.g. a branch based on `main`, which never received it) — gate 2
+# below degrades to a no-op message in that case instead of crashing, since there
+# is structurally no console-gate content on such a branch for it to protect.
+# Console files and this manifest always land together on the trunk, so a branch
+# that DOES carry console files also carries the manifest and still hits gate 2
+# normally — nothing real is weakened by this guard.
 MANIFEST="$ROOT/scripts/lib/console_deploy_manifest.sh"
-# shellcheck source=/dev/null
-. "$MANIFEST"
-
-# The gated file set as repo-relative pathspecs (served static + backend *.py + Dockerfile).
-# bash-3.2-safe array fill (no mapfile — macOS ships bash 3.2).
+HAVE_MANIFEST=0
 GATED=()
-while IFS= read -r _f; do
-  [ -n "$_f" ] && GATED+=("$_f")
-done < <(console_deploy_files_rel "$ROOT")
+if [ -f "$MANIFEST" ]; then
+  HAVE_MANIFEST=1
+  # shellcheck source=/dev/null
+  . "$MANIFEST"
+  # The gated file set as repo-relative pathspecs (served static + backend *.py + Dockerfile).
+  # bash-3.2-safe array fill (no mapfile — macOS ships bash 3.2).
+  while IFS= read -r _f; do
+    [ -n "$_f" ] && GATED+=("$_f")
+  done < <(console_deploy_files_rel "$ROOT")
+fi
 
 # Did any PUSHED commit touch a gated file? git streams one line per ref being pushed on
 # stdin: "<local_ref> <local_sha> <remote_ref> <remote_sha>". Enforce only when gated
@@ -62,7 +72,7 @@ while read -r _lref _lsha _rref _rsha; do
     fi
     [ -z "$base" ] && base="$EMPTY_TREE"      # safe default: unknown base -> conservative
   fi
-  if ! git diff --quiet "$base" "$_lsha" -- "${GATED[@]}" 2>/dev/null; then
+  if [ "$HAVE_MANIFEST" -eq 1 ] && ! git diff --quiet "$base" "$_lsha" -- "${GATED[@]}" 2>/dev/null; then
     changed=1
   fi
   # Did this push touch any Python? (`*.py` is a git pathspec — matches .py at any depth.)
@@ -98,6 +108,10 @@ if [ "$py_changed" -eq 1 ]; then
 fi
 
 # ── gate 2: console content needs a cc-quality review (op#12457) ──────────────────
+if [ "$HAVE_MANIFEST" -eq 0 ]; then
+  echo "⚠ pre-push: console-deploy-gate manifest absent on this branch — gate 2 (console review) not applicable here." >&2
+  exit 0
+fi
 [ "$changed" -eq 0 ] && exit 0
 
 # Console content changed in this push — require a cc-quality review for THIS exact content.
