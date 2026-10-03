@@ -1724,7 +1724,9 @@
       var project = card.getAttribute("data-project"), field = b.getAttribute("data-field");
       govOpenStrip(project, field, b.getAttribute("data-to") === "true");
     });
-    var rl = $("govReload"); if (rl) rl.addEventListener("click", function () { loadGov(true); toast("reloading governance…"); });
+    var rl = $("govReload"); if (rl) rl.addEventListener("click", function (e) {
+      e.preventDefault(); e.stopPropagation(); loadGov(true); toast("reloading governance…");
+    });
     var box = $("govConfirm");
     if (box) {
       box.addEventListener("input", function (e) { var st = e.target.closest ? e.target.closest(".cstrip") : null; if (st) govConfirmTyped(st); });

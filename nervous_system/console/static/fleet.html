@@ -356,6 +356,10 @@
   details.chatter > summary .chev { color: var(--faint); font: 11px var(--mono); transition: transform .15s; }
   details.chatter[open] > summary .chev { transform: rotate(90deg); }
   .chatter .cinner { padding: 2px 12px 10px; border-top: 1px solid var(--line); }
+  /* op#20702 Stage E / bus #50221: Governance's summary row reuses .sec-h (title +
+     count + reload button) inside the chatter collapse shell, so it needs to fill
+     the summary's flex row instead of sizing to content like a standalone .sec-h. */
+  details.chatter > summary .sec-h { flex: 1; margin: 0; }
 
   .sec-h .asbtn { margin-left: auto; font: 10px/1 var(--mono); color: var(--accent); padding: 7px 11px; border-radius: 999px;
     background: rgba(138,166,255,.12); border: 1px solid rgba(138,166,255,.28); cursor: pointer; -webkit-appearance: none; white-space: nowrap; }
@@ -602,6 +606,36 @@
   <div id="keyRoll" class="keyroll" aria-label="lanes + singletons per token pool"></div>
   <div id="lanes" class="grid"><div class="empty">Loading…</div></div>
 
+  <!-- GOVERNANCE (fc-v65, op#20702 Stage E): per-project registry rows — cai
+       on/off · operators (who authorizes build/scope) · money-clearance (default
+       OFF, loudest). Reads /api/governance; every write is an ARMED action
+       (armed key + typed project confirm + reason), audited by the DB trigger.
+       Collapsible via the same <details class="chatter"> pattern as Fleet
+       chatter / Governance audit (not fc-v55 — that comment is card-swipe
+       styling on individual ask rows, not a section-collapse mechanism; this
+       is the file's actual reusable section-collapse pattern). Moved above
+       "Your asks" per bus #50221. Defaults open so nothing already visible
+       goes dark on this change. -->
+  <section>
+    <details class="chatter" id="govSec" open>
+      <summary>
+        <div class="sec-h"><h2>Governance</h2><span id="govCount" class="count"></span>
+          <button id="govReload" class="asbtn" title="reload registry">↻ reload</button></div>
+        <span class="chev">▸</span>
+      </summary>
+      <div class="cinner">
+        <div id="gov"><div class="empty">Loading…</div></div>
+        <div id="govConfirm"></div>
+        <div id="govArmed" class="armedkey govkey"><label><span>armed key</span>
+          <input id="govArmedKey" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="required for any governance change" /></label></div>
+        <details class="chatter govlog" id="govLog">
+          <summary><span>Governance audit</span><span class="csub">(append-only · DB trigger)</span><span id="govLogCount" class="ccount"></span><span class="chev">▸</span></summary>
+          <div class="cinner"><div id="govAudit"><div class="empty">—</div></div></div>
+        </details>
+      </div>
+    </details>
+  </section>
+
   <!-- YOUR ASKS (fc-v55): the operator's live ask board. Status derived on the
        bus each poll — never a stored snapshot. Assign here to delegate a new ask. -->
   <section>
@@ -622,23 +656,6 @@
       <span class="g"></span>
       <span>status derived live from the bus on every refresh · never cached · pull to refresh</span>
     </div>
-  </section>
-
-  <!-- GOVERNANCE (fc-v65, op#20702 Stage E): per-project registry rows — cai
-       on/off · operators (who authorizes build/scope) · money-clearance (default
-       OFF, loudest). Reads /api/governance; every write is an ARMED action
-       (armed key + typed project confirm + reason), audited by the DB trigger. -->
-  <section id="govSec">
-    <div class="sec-h"><h2>Governance</h2><span id="govCount" class="count"></span>
-      <button id="govReload" class="asbtn" title="reload registry">↻ reload</button></div>
-    <div id="gov"><div class="empty">Loading…</div></div>
-    <div id="govConfirm"></div>
-    <div id="govArmed" class="armedkey govkey"><label><span>armed key</span>
-      <input id="govArmedKey" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="required for any governance change" /></label></div>
-    <details class="chatter govlog" id="govLog">
-      <summary><span>Governance audit</span><span class="csub">(append-only · DB trigger)</span><span id="govLogCount" class="ccount"></span><span class="chev">▸</span></summary>
-      <div class="cinner"><div id="govAudit"><div class="empty">—</div></div></div>
-    </details>
   </section>
 
   <!-- Fleet chatter: the old DRAIN BOARD, demoted to a collapsed SRE glance. -->
