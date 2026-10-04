@@ -296,7 +296,6 @@
     return DAYS[l.getUTCDay()] + " " + pad2(l.getUTCHours()) + ":" + pad2(l.getUTCMinutes()) + " UTC+" + OPERATOR_TZ_H
       + " (" + pad2(u.getUTCHours()) + ":" + pad2(u.getUTCMinutes()) + " UTC)";
   }
-  function fmtCount(n) { return n == null ? "—" : Number(n).toLocaleString("en-US"); }
   function glmCard(g) {
     if (!g) return "";
     if (!g.available) {
@@ -310,21 +309,19 @@
     var cls = poolLevel(worst);
     var lvl = g.level ? String(g.level) : "";
     var name = "GLM (z.ai" + (lvl ? " " + lvl.charAt(0).toUpperCase() + lvl.slice(1) : "") + ")";
+    // op#25562: standardized with the Claude pool cards: % + "resets in" only,
+    // no raw token/credit counts and no absolute reset clock (title included).
     var title = name + " Coding Plan" + ws.map(function (w) {
-      return " · " + w.label + ": " + fmtCount(w.used) + "/" + fmtCount(w.cap) + " (" + w.pct + "%)"
-        + (w.resets_at ? " resets " + fmtClockDual(w.resets_at) : "");
+      return " · " + w.label + ": " + (w.pct == null ? "—" : Math.round(w.pct) + "%");
     }).join("") + (g.age_s != null ? " · read " + fmtAge(g.age_s) + " ago" : "");
     var rows = ws.map(function (w) {
       var lv = poolLevel(w.pct);
       var bw = w.pct == null ? 0 : Math.max(0, Math.min(100, Math.round(w.pct)));
-      var clock = fmtClockDual(w.resets_at);
       return '<div class="poolwin ' + lv + '">'
         + '<span class="poolwl">' + esc(w.label) + '</span>'
         + '<span class="poolbar"><i style="width:' + bw + '%"></i></span>'
         + '<b>' + (w.pct == null ? "—" : Math.round(w.pct) + "%") + '</b>'
-        + '<span class="poolreset">' + fmtCount(w.used) + '/' + fmtCount(w.cap) + '</span>'
         + '<span class="poolreset">resets ' + (minutesToReset(w.resets_at) == null ? "—" : "in " + fmtReset(w.resets_at)) + '</span>'
-        + (clock ? '<span class="pooladv glmclock">' + esc(clock) + '</span>' : "")
         + '</div>';
     }).join("");
     return '<div class="poolrow poolcard glm ' + cls + '" title="' + esc(title) + '">'
@@ -346,7 +343,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v70';
+  var APP_BUILD = 'fc-v71';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
