@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.address-variant-miss-watchdog</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/sheikhmusa/wingmen/orchestrator/scripts/address_variant_miss_watchdog_run.sh</string></array>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/address-variant-miss-watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/address-variant-miss-watchdog.err.log</string>
+</dict>
+</plist>
