@@ -30,6 +30,12 @@ def _run_guard(text: str) -> subprocess.CompletedProcess:
     "I can't read your document, can you describe what it shows?",
     "Can't access the file right now",
     "could you describe it for me instead",
+    # cc-quality bus #51094 BLOCKING #1: "cannot"/"unable to" paired with
+    # read/access/view, not just "open" -- the earlier form missed all 4.
+    "cannot read your file",
+    "cannot access the attachment",
+    "unable to read this document",
+    "unable to access your spreadsheet",
 ])
 def test_blocked_phrases_refused(text):
     r = _run_guard(text)

@@ -1,17 +1,20 @@
 """test_stage_client_file.py — synthetic wet-prove for stage_client_file.py
-(orch-console bus #51060, Musa op#25437-25440).
+(orch-console bus #51060/#51085, Musa op#25437-25440; cc-quality bus #51094).
 
 SYNTHETIC ONLY — no real client data. Proves: (a) PII-shape scanning is
-COUNT-ONLY and never leaks a matched value into the rendered report, (b) the
-CLEAN/HOLD verdict is FAIL-CLOSED (any PII hit or person-record signal -> HOLD),
-(c) each format extractor (csv/xlsx/docx/pdf) produces the right structure, (d)
---export only ever writes on CLEAN, never on HOLD, and the exported file
-carries no raw value either.
+COUNT-ONLY and stdout never leaks a matched value, (b) the CLEAN/HOLD verdict
+is FAIL-CLOSED (any PII hit or person-record signal -> HOLD), (c) each format
+extractor (csv/xlsx/docx/pdf) produces the right structure, (d) --export only
+ever writes on CLEAN, never on HOLD, and when it does write, it carries the
+ACTUAL content (the whole point of staging a clean file) while stdout itself
+stays values-free regardless.
 """
 from __future__ import annotations
 
 import sys
 import pathlib
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -42,6 +45,48 @@ def test_scan_pii_counts_finds_phone_shaped_number():
 def test_scan_pii_counts_finds_long_number_not_already_a_phone():
     c = scf.scan_pii_counts("account 123456789012345")
     assert c.long_number == 1
+
+
+# cc-quality bus #51094 BLOCKING #2: bare unformatted local mobile numbers
+# (no separator, no country code, no parens) are a common real-world shape
+# in free-flowing PDF/DOCX text, and the original _PHONE_RE (needs a
+# mandatory separator) + _LONG_NUMBER_RE (12+ digit floor) both missed them.
+
+@pytest.mark.parametrize("text", [
+    "call 91234567 to confirm",       # bare SG 8-digit mobile
+    "call 9123 4567 to confirm",      # same number, single internal space
+    "mobile 0501234567 on file",      # bare UAE 10-digit mobile
+])
+def test_scan_pii_counts_finds_bare_unformatted_local_phone(text):
+    c = scf.scan_pii_counts(text)
+    assert c.phone == 1
+    assert c.long_number == 0  # not double-counted under the wrong category
+
+
+def test_scan_pii_counts_bare_phone_does_not_overlap_a_genuine_long_number():
+    c = scf.scan_pii_counts("account 123456789012345")
+    assert c.phone == 0
+    assert c.long_number == 1
+
+
+def test_scan_pii_counts_formatted_and_bare_phone_overlap_counts_once():
+    # +65 9123 4567 matches BOTH _PHONE_RE and (loosely) _BARE_LOCAL_PHONE_RE
+    # at overlapping spans -- must merge to one hit, not two.
+    c = scf.scan_pii_counts("call +65 9123 4567 now")
+    assert c.phone == 1
+
+
+def test_classify_holds_on_bare_phone_in_free_flowing_text():
+    # the exact scenario cc-quality named: PDF/DOCX prose has no header to
+    # fall back on, so a bare phone number must be caught by the regex alone.
+    structure = scf.FileStructure(
+        kind="pdf",
+        sheets=[scf.SheetStructure(name="(pdf text)", rows=1, cols=1, header=[])],
+        texts=["Please reach the coordinator at 91234567 for any questions."],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert v.pii.phone == 1
 
 
 def test_scan_pii_counts_zero_for_clean_text():
@@ -220,47 +265,94 @@ def test_extract_parse_error_never_leaks_content(tmp_path, monkeypatch):
     assert "synthetic-secret-value-should-never-appear" not in str(exc.value)
 
 
-# ── sanitize_op_id + export_report ───────────────────────────────────────────
+# ── sanitize_op_id + export_clean_file ───────────────────────────────────────
 
 def test_sanitize_op_id_strips_unsafe_characters():
     assert scf.sanitize_op_id("op#25437") == "op_25437"
     assert scf.sanitize_op_id("") == "unknown"
 
 
-def test_export_report_writes_under_sanitized_op_id_dir(tmp_path, monkeypatch):
+def test_render_content_renders_sheet_as_markdown_table():
+    structure = scf.FileStructure(
+        kind="csv",
+        sheets=[scf.SheetStructure(name="s1", rows=2, cols=2, header=["Screen", "Label"],
+                                    rows_data=[["home", "Welcome"], ["settings", "Preferences"]])],
+    )
+    rendered = scf.render_content(structure)
+    assert "Welcome" in rendered and "Preferences" in rendered
+    assert "| Screen | Label |" in rendered
+
+
+def test_render_content_renders_text_blocks():
+    structure = scf.FileStructure(kind="docx", text_blocks=[("document body", "hello world")])
+    assert "hello world" in scf.render_content(structure)
+
+
+def test_export_clean_file_writes_header_and_content_under_sanitized_op_id_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    out_path = scf.export_report("verdict: CLEAN\n...", "op#25437", "sample.csv")
+    structure = scf.FileStructure(
+        kind="csv",
+        sheets=[scf.SheetStructure(name="s1", rows=1, cols=1, header=["Label"], rows_data=[["Welcome"]])],
+    )
+    verdict = scf.StageVerdict(verdict="CLEAN")
+    out_path = scf.export_clean_file(verdict, structure, "op#25437", "sample.csv")
     assert out_path.resolve() == tmp_path / "reports" / "client-file-staging" / "op_25437" / "sample.md"
-    assert out_path.read_text(encoding="utf-8").startswith("verdict: CLEAN")
+    text = out_path.read_text(encoding="utf-8")
+    assert text.startswith("verdict: CLEAN")
+    assert "Welcome" in text
 
 
-# ── CLI main(): CLEAN exports, HOLD never writes anything ───────────────────
+# ── CLI main(): CLEAN exports the actual content, HOLD never writes anything ─
 
-def test_main_clean_csv_with_export_writes_report_and_exits_zero(tmp_path, monkeypatch, capsys):
+def test_main_clean_csv_with_export_writes_the_actual_content(tmp_path, monkeypatch, capsys):
+    # orch-console #51085: the export exists so a lane can READ a clean
+    # file's content without opening the raw file itself -- it must NOT be
+    # scrubbed down to structure-only, or it defeats the purpose.
     monkeypatch.chdir(tmp_path)
-    p = tmp_path / "clean.csv"
-    p.write_text("Date,Amount\n2026-01-01,100.00\n", encoding="utf-8")
+    p = tmp_path / "navmap.csv"
+    p.write_text("Screen,Label\nhome,Welcome\nsettings,Preferences\n", encoding="utf-8")
 
     rc = scf.main([str(p), "op25437", "--export"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "verdict: CLEAN" in out
-    exported = tmp_path / "reports" / "client-file-staging" / "op25437" / "clean.md"
+    # stdout itself stays values-free even on CLEAN.
+    assert "Welcome" not in out and "Preferences" not in out
+    exported = tmp_path / "reports" / "client-file-staging" / "op25437" / "navmap.md"
     assert exported.exists()
-    assert "100.00" not in exported.read_text(encoding="utf-8")  # structure/report only, never a raw cell
+    content = exported.read_text(encoding="utf-8")
+    assert "Welcome" in content and "Preferences" in content
 
 
-def test_main_hold_csv_never_exports_anything(tmp_path, monkeypatch, capsys):
+def test_main_hold_csv_never_exports_anything_pii_shape(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     p = tmp_path / "holdme.csv"
     p.write_text("Date,Contact\n2026-01-01,syn@example.test\n", encoding="utf-8")
 
-    rc = scf.main([str(p), "op25438"])
+    rc = scf.main([str(p), "op25438", "--export"])
     out = capsys.readouterr().out
     assert rc == 1
     assert "verdict: HOLD" in out
     assert "syn@example.test" not in out
     report_dir = tmp_path / "reports" / "client-file-staging" / "op25438"
+    assert not report_dir.exists()
+
+
+def test_main_hold_person_record_header_never_exports_anything(tmp_path, monkeypatch, capsys):
+    # orch-console #51085's explicit test ask: Name + Military ID header,
+    # 30 rows -> HOLD with no export file, even though no PII-shaped VALUE
+    # ever appears (the heuristic alone must be conservative enough).
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "roster.csv"
+    rows = "\n".join(f"Person {i},{1000 + i}" for i in range(30))
+    p.write_text(f"Name,Military ID\n{rows}\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op25440", "--export"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "verdict: HOLD" in out
+    assert "Person 0" not in out
+    report_dir = tmp_path / "reports" / "client-file-staging" / "op25440"
     assert not report_dir.exists()
 
 

@@ -94,9 +94,16 @@ class CantOpenFileRefusal(ValueError):
 # orch-console bus #51060: refuse "I can't open/read/access/view the file,
 # describe it" framing on CLIENT channels — the exact pattern that made Hariz
 # ask cc-cosem-exams to describe his own spreadsheet instead of being staged.
+# "open" stays its own unconditional alternative (no trailing object required
+# -- "can't open it"/"can't open" alone must still be caught); read/access/
+# view require the explicit object, covering "the"/"your"/"this"/etc (cc-
+# quality bus #51094 BLOCKING #1: the earlier can.?t-only form missed
+# "cannot read your file" / "unable to read this document" entirely --
+# "cannot"/"unable to" paired only with "open", never with read/access/view).
 _CANT_OPEN_FILE_RE = re.compile(
-    r"can.?t open|cannot open|unable to open|"
-    r"can.?t (read|access|view) (the |your )?(file|attachment|spreadsheet|document)|"
+    r"(can.?t|cannot|unable to) open|"
+    r"(can.?t|cannot|unable to) (read|access|view) (the |your |this |that |my |our )?"
+    r"(file|attachment|spreadsheet|document)|"
     r"describe (it|what it shows)",
     re.IGNORECASE,
 )

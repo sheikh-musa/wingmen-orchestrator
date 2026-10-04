@@ -36,6 +36,21 @@ def test_refuses_cant_open_phrasing_on_client_channel():
         tg_out._refuse_cant_open_file_framing(cur, "cosem-exams", "sorry, I can't open your file")
 
 
+@pytest.mark.parametrize("text", [
+    "cannot read your file",
+    "cannot access the attachment",
+    "unable to read this document",
+    "unable to access your spreadsheet",
+])
+def test_refuses_cannot_unable_to_variants_on_client_channel(text):
+    # cc-quality bus #51094 BLOCKING #1: the earlier regex paired "cannot"/
+    # "unable to" only with "open", never with read/access/view -- these 4
+    # all passed through unflagged before the fix.
+    cur = _FakeCursor(audience_row=("client",))
+    with pytest.raises(tg_out.CantOpenFileRefusal):
+        tg_out._refuse_cant_open_file_framing(cur, "cosem-exams", text)
+
+
 def test_passes_cant_open_phrasing_on_operator_channel():
     cur = _FakeCursor(audience_row=("operator",))
     tg_out._refuse_cant_open_file_framing(cur, "operator-orch", "heads up, I can't open the file you sent")

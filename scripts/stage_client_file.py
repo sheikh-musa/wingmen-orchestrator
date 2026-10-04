@@ -5,16 +5,27 @@ handing a file to a lane (orch-console bus #51060, Musa op#25437-25440: a lane
 must never tell a client "I can't open your file" — the file is staged here
 first, by a human, not by a lane reading raw cell values).
 
-Prints ONLY structure (sheets/dims/image count) + PII-shape COUNTS (never a
-matched value) + a CLEAN/HOLD verdict + the reason(s). On CLEAN with --export,
-writes the RENDERED REPORT (never raw cell values — this is a safe copy of the
-*inspection*, not of the file's content) as a markdown file under
-reports/client-file-staging/<op_id>/ and prints that path. On HOLD, writes
-nothing.
+STDOUT always stays values-free: structure (sheets/dims/image count) + PII-
+shape COUNTS (never a matched value) + the CLEAN/HOLD verdict + reason(s) —
+this is what any agent running the script sees. The exported FILE is
+different: on CLEAN with --export, it writes the ACTUAL readable content
+(sheets as markdown tables, docx/pdf prose as text) — that is the whole point
+of staging a CLEAN file, so a lane can read it without opening the raw file
+itself — preceded by the same values-free structural header. On HOLD, nothing
+is written, ever; only counts + reason print to stdout (orch-console bus
+#51060/#51085).
 
-Same safety invariants as scripts/lib/pii_safe_file_inspector.py: fail-closed
-(any PII-shape hit or person-record signal -> HOLD, never guessed clean),
-never print a matched value, a parse error carries no file content.
+Fail-closed (orch-console #51085): any PII-shape hit OR a person-record
+signal (header-keyword match OR >20 rows with a name-like column) forces
+HOLD, never guessed CLEAN — content export is gated entirely on CLEAN, so a
+person-record / PII-shaped file's content is never written anywhere. A parse
+error carries no file content.
+
+KNOWN GAP (cc-quality bus #51094, non-blocking): the ORIGINAL FILENAME is
+never itself scanned for a PII shape, and is echoed verbatim both in the
+stdout report and as the exported report's own filename. A file literally
+named with a client's NRIC (etc.) would carry that into the export untouched.
+Narrow (filenames rarely carry PII) — not fixed here, flag if it matters.
 """
 from __future__ import annotations
 
@@ -34,6 +45,21 @@ _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 # from a bare long digit run (caught separately by _LONG_NUMBER_RE below).
 _PHONE_RE = re.compile(
     r"(?<![\w.-])(?:\+\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]\d{3,4}[-.\s]?\d{3,4}(?![\w.-])"
+)
+# A BARE unformatted local mobile number (cc-quality bus #51094 BLOCKING #2):
+# SG mobiles are 8 digits, UAE mobiles 10 -- "91234567" or "0501234567" have
+# no separator/country-code/parens at all, so _PHONE_RE above (which requires
+# a mandatory separator between its first two digit groups) never matches
+# them, and _LONG_NUMBER_RE's 12+ floor is too high. Either a CONTIGUOUS
+# 8-10-digit run, or exactly one space-separated 3-4+3-4(+2-4) split (the
+# common "9123 4567" display convention) -- deliberately NOT dash-separated,
+# since an ISO date ("2026-01-01") or an Emirates ID fragment ("784-1990-...")
+# would otherwise false-positive (each is digit-DASH-digit, which the earlier,
+# looser `(?:\d[ -]?){8,10}` form matched by mistake). The negative look-
+# around on '.'/digit on both sides keeps it off a decimal amount or a
+# substring of a longer (12+) digit run.
+_BARE_LOCAL_PHONE_RE = re.compile(
+    r"(?<![\d.])(?:\d{8,10}|\d{3,4} \d{3,4}(?: \d{2,4})?)(?![\d.])"
 )
 # Any other long digit run (12+) — card/account/id-shaped numbers.
 _LONG_NUMBER_RE = re.compile(r"\b(?:\d[ -]?){12,}\b")
@@ -65,15 +91,35 @@ def _overlaps(span: tuple[int, int], others: list[tuple[int, int]]) -> bool:
     return any(s0 < e1 and s1 < e0 for s1, e1 in others)
 
 
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Overlap-collapse a list of (start, end) spans so a value matched by
+    TWO sub-patterns (e.g. a formatted and a bare-digit phone pattern both
+    matching the same number) counts once, not twice."""
+    if not spans:
+        return []
+    ordered = sorted(spans)
+    merged = [ordered[0]]
+    for s, e in ordered[1:]:
+        ls, le = merged[-1]
+        if s < le:
+            merged[-1] = (ls, max(le, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
 def scan_pii_counts(text: str) -> PiiCounts:
     """Count-only PII-shape scan of *text*. NEVER returns or prints a matched
     value — only how many of each shape were found. Checked most-specific
     first (nric/emirates/phone/email); a long_number match that overlaps one
     of those is NOT double-counted — it is the same underlying value, already
-    counted once under its more specific category."""
+    counted once under its more specific category. "phone" merges a formatted
+    match (_PHONE_RE) with a bare unformatted local-mobile match
+    (_BARE_LOCAL_PHONE_RE, cc-quality bus #51094 BLOCKING #2) so an overlap
+    between the two sub-patterns isn't counted twice either."""
     nric_spans = _spans(_NRIC_FIN_BC_RE, text)
     emirates_spans = _spans(_EMIRATES_ID_RE, text)
-    phone_spans = _spans(_PHONE_RE, text)
+    phone_spans = _merge_spans(_spans(_PHONE_RE, text) + _spans(_BARE_LOCAL_PHONE_RE, text))
     email_spans = _spans(_EMAIL_RE, text)
     specific_spans = nric_spans + emirates_spans + phone_spans + email_spans
     long_number = sum(
@@ -119,6 +165,10 @@ class SheetStructure:
     rows: int
     cols: int
     header: list[str] = field(default_factory=list)
+    # Actual cell values, stringified — NEVER rendered except by render_content()
+    # on a CLEAN --export, which only runs after classify() has already decided
+    # there is nothing sensitive here.
+    rows_data: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -129,6 +179,9 @@ class FileStructure:
     sheets: list[SheetStructure] = field(default_factory=list)
     image_count: int = 0
     texts: list[str] = field(default_factory=list)  # all extracted text, for PII scanning
+    # Non-tabular prose (docx body paragraphs, pdf page text) as (label, full_text)
+    # pairs — same export-only-on-CLEAN rule as SheetStructure.rows_data.
+    text_blocks: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -154,6 +207,39 @@ class StageVerdict:
         )
         lines.append(f"person_record_heuristic: {self.person_record}")
         return "\n".join(lines)
+
+
+def _render_markdown_table(header: list[str], rows: list[list[str]]) -> str:
+    if not header and not rows:
+        return "(empty)"
+    cols = len(header) if header else (len(rows[0]) if rows else 0)
+    head = header if header else [f"col{i + 1}" for i in range(cols)]
+    lines = [
+        "| " + " | ".join(h or "" for h in head) + " |",
+        "| " + " | ".join("---" for _ in head) + " |",
+    ]
+    for r in rows:
+        cells = list(r) + [""] * (cols - len(r))
+        lines.append("| " + " | ".join(str(c) if c is not None else "" for c in cells[:cols]) + " |")
+    return "\n".join(lines)
+
+
+def render_content(structure: FileStructure) -> str:
+    """Render the file's ACTUAL content as readable markdown/text. Sheets
+    render as markdown tables (SheetStructure.rows_data); free prose
+    (FileStructure.text_blocks) renders as plain text blocks.
+
+    MUST ONLY ever be called on the --export path after classify() returned
+    CLEAN — never for stdout, never for a HOLD verdict. This function itself
+    has no safety gate; the gate is "only call it when CLEAN" at the caller."""
+    parts = []
+    for s in structure.sheets:
+        if s.rows_data or s.header:
+            parts.append(f"## {s.name}\n\n" + _render_markdown_table(s.header, s.rows_data))
+    for label, text in structure.text_blocks:
+        if text.strip():
+            parts.append(f"## {label}\n\n{text}")
+    return "\n\n".join(parts) if parts else "(no content)"
 
 
 def classify(structure: FileStructure) -> StageVerdict:
@@ -189,7 +275,8 @@ def extract_csv(path: Path) -> FileStructure:
     texts = [",".join(r) for r in rows]
     return FileStructure(
         kind="csv",
-        sheets=[SheetStructure(name=path.name, rows=len(data_rows), cols=len(header), header=header)],
+        sheets=[SheetStructure(name=path.name, rows=len(data_rows), cols=len(header),
+                                header=header, rows_data=data_rows)],
         image_count=0,
         texts=texts,
     )
@@ -206,7 +293,9 @@ def extract_xlsx(path: Path) -> FileStructure:
         values = list(ws.iter_rows(values_only=True))
         header = [str(c) if c is not None else "" for c in values[0]] if values else []
         data_rows = values[1:] if values else []
-        sheets.append(SheetStructure(name=ws.title, rows=len(data_rows), cols=(ws.max_column or 0), header=header))
+        rows_data = [[str(c) if c is not None else "" for c in row] for row in data_rows]
+        sheets.append(SheetStructure(name=ws.title, rows=len(data_rows), cols=(ws.max_column or 0),
+                                      header=header, rows_data=rows_data))
         for row in values:
             texts.append(" ".join(str(c) for c in row if c is not None))
         image_count += len(getattr(ws, "_images", []))
@@ -223,7 +312,8 @@ def extract_docx(path: Path) -> FileStructure:
         rows = [[cell.text for cell in row.cells] for row in t.rows]
         header = rows[0] if rows else []
         data_rows = rows[1:] if rows else []
-        sheets.append(SheetStructure(name=f"table{i + 1}", rows=len(data_rows), cols=len(header), header=header))
+        sheets.append(SheetStructure(name=f"table{i + 1}", rows=len(data_rows), cols=len(header),
+                                      header=header, rows_data=data_rows))
         for r in rows:
             texts.append(" ".join(r))
     image_count = len(d.inline_shapes)
@@ -231,7 +321,11 @@ def extract_docx(path: Path) -> FileStructure:
         # No tables -- still report a pseudo-sheet so rows/cols aren't silently
         # absent from the structure summary.
         sheets.append(SheetStructure(name="(document body)", rows=len(d.paragraphs), cols=1, header=[]))
-    return FileStructure(kind="docx", sheets=sheets, image_count=image_count, texts=texts)
+    # Body prose is content too (orch-console #51085) -- a CLEAN export must
+    # carry it alongside any tables, not just the table data.
+    body_text = "\n".join(t for t in texts if t.strip())
+    text_blocks = [("document body", body_text)] if body_text else []
+    return FileStructure(kind="docx", sheets=sheets, image_count=image_count, texts=texts, text_blocks=text_blocks)
 
 
 def extract_pdf(path: Path) -> FileStructure:
@@ -239,20 +333,27 @@ def extract_pdf(path: Path) -> FileStructure:
 
     sheets: list[SheetStructure] = []
     texts: list[str] = []
+    text_blocks: list[tuple[str, str]] = []
     image_count = 0
     with pdfplumber.open(str(path)) as pdf:
         for i, page in enumerate(pdf.pages):
-            texts.append(page.extract_text() or "")
+            page_text = page.extract_text() or ""
+            texts.append(page_text)
+            if page_text.strip():
+                # Page prose is content too (orch-console #51085), alongside
+                # any tables found on the same page.
+                text_blocks.append((f"page {i + 1} text", page_text))
             image_count += len(page.images)
             for ti, table in enumerate(page.extract_tables() or []):
                 header = [str(h or "") for h in (table[0] if table else [])]
-                data_rows = table[1:] if table else []
+                data_rows = [[str(c or "") for c in row] for row in (table[1:] if table else [])]
                 sheets.append(SheetStructure(
-                    name=f"page{i + 1}-table{ti + 1}", rows=len(data_rows), cols=len(header), header=header,
+                    name=f"page{i + 1}-table{ti + 1}", rows=len(data_rows), cols=len(header),
+                    header=header, rows_data=data_rows,
                 ))
         if not sheets:
             sheets.append(SheetStructure(name="(pdf text)", rows=len(pdf.pages), cols=1, header=[]))
-    return FileStructure(kind="pdf", sheets=sheets, image_count=image_count, texts=texts)
+    return FileStructure(kind="pdf", sheets=sheets, image_count=image_count, texts=texts, text_blocks=text_blocks)
 
 
 _EXTRACTORS = {
@@ -286,11 +387,18 @@ def sanitize_op_id(op_id: str) -> str:
     return _OPID_SAFE_RE.sub("_", op_id) or "unknown"
 
 
-def export_report(report_text: str, op_id: str, original_name: str) -> Path:
+def export_clean_file(verdict: StageVerdict, structure: FileStructure, op_id: str, original_name: str) -> Path:
+    """Write a CLEAN file's ACTUAL content as a readable markdown copy —
+    sheets as tables, docx/pdf prose as text — preceded by the same
+    values-free structural header shown on stdout. Caller MUST have already
+    confirmed verdict.verdict == 'CLEAN'; this function does not re-check."""
+    header = verdict.render(structure)
+    content = render_content(structure)
+    full_text = f"{header}\n\n---\n\n{content}\n"
     out_dir = Path("reports/client-file-staging") / sanitize_op_id(op_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{Path(original_name).stem}.md"
-    out_path.write_text(report_text + "\n", encoding="utf-8")
+    out_path.write_text(full_text, encoding="utf-8")
     return out_path
 
 
@@ -298,7 +406,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("path", help="path to the client file (.xlsx/.csv/.docx/.pdf)")
     p.add_argument("op_id", help="op id this file is staged under (free-form string)")
-    p.add_argument("--export", action="store_true", help="on CLEAN, write a safe markdown report copy")
+    p.add_argument("--export", action="store_true",
+                   help="on CLEAN, write the actual readable content to reports/client-file-staging/<op_id>/; "
+                        "no-op on HOLD")
     return p
 
 
@@ -310,10 +420,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     structure = extract(path)
     verdict = classify(structure)
-    report = verdict.render(structure)
-    print(report)
+    print(verdict.render(structure))  # stdout: values-free, always
     if verdict.verdict == "CLEAN" and args.export:
-        out_path = export_report(report, args.op_id, path.name)
+        out_path = export_clean_file(verdict, structure, args.op_id, path.name)
         print(f"exported: {out_path}")
     return 0 if verdict.verdict == "CLEAN" else 1
 

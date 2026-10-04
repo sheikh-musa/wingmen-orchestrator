@@ -20,11 +20,18 @@
 # override precedent) — the operator's complaint is specifically about using
 # this framing AT ALL; a client-facing script needing to report a genuinely
 # corrupted file should ack + stage instead, never describe-it-yourself.
+#
+# "open" stays its own unconditional alternative (no trailing object
+# required); read/access/view require the explicit object, covering an
+# article/possessive/demonstrative before it (cc-quality bus #51094 BLOCKING
+# #1: the earlier can.?t-only form missed "cannot read your file" / "unable
+# to read this document" entirely -- MUST stay byte-identical to tg_out.py's
+# _CANT_OPEN_FILE_RE, the two are duplicated on purpose for now).
 _cant_open_file_guard() {
   local text="$1"
   local lc; lc="$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')"
   if printf '%s' "$lc" | grep -qE \
-      "can.?t open|cannot open|unable to open|can.?t (read|access|view) (the |your )?(file|attachment|spreadsheet|document)|describe (it|what it shows)"; then
+      "(can.?t|cannot|unable to) open|(can.?t|cannot|unable to) (read|access|view) (the |your |this |that |my |our )?(file|attachment|spreadsheet|document)|describe (it|what it shows)"; then
     echo "ERROR: client-bound message tells the client the file can't be opened / asks them to describe it (orch-console #51060)." >&2
     echo "Never open a client's raw file yourself and never put that framing on them — ack the client instead and route the file to orch-console for staging (scripts/stage_client_file.py)." >&2
     return 5
