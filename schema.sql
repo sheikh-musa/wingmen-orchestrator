@@ -606,3 +606,76 @@ select bt.id, bt.owner_agent, bt.created_by, bt.subject, bt.detail,
 from blocking_tasks bt
 left join strategic_decisions sd on sd.unblocks_task_id = bt.id
 where bt.status = 'open' and bt.is_test is not true;
+
+-- op#25626 / bus #51657/#51670/#51717: single source of truth for whether a
+-- store/org's rows are REAL or SYNTHETIC. Mirrors migrations/089_data_provenance.sql.
+-- NOTE: the boot_briefing 'data_provenance_flag' arm is deliberately NOT added
+-- here by hand — it is added to the LIVE view only via
+-- scripts/extend_boot_briefing_arm.py (built from pg_get_viewdef() at apply
+-- time, decision 962) and copied into this file verbatim from the live
+-- definition only after that script has actually run.
+create table if not exists data_provenance (
+  id              bigserial primary key,
+  project_ref     text not null,
+  org_id          text not null default '',  -- '' = the answer when a caller queries org_id=''
+                                               -- (no org given); NOT inherited by other orgs on the
+                                               -- same project_ref — an unseeded specific org still
+                                               -- resolves UNCLASSIFIED, not this row.
+                                               -- NOT null, because unique(project_ref, org_id) would not
+                                               -- dedupe multiple NULLs under standard SQL NULL semantics
+  org_name        text,
+  alias           text not null,        -- LAYER-VOCAB-001 human label, e.g. "cosem-platform demo/dev"
+  classification  text not null check (classification in ('REAL', 'SYNTHETIC', 'MIXED', 'MIXED_PENDING_REAL')),
+  evidence        text not null,        -- must cite a script/commit/migration/bus-message — never a slug or name
+  owner           text,
+  created_by      text not null,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),  -- NO auto-bump trigger: a caller UPDATE must
+                                                          -- set updated_at = now() explicitly, or the
+                                                          -- staleness signal classify() surfaces is wrong.
+  unique (project_ref, org_id)
+);
+
+-- GRANT-HYGIENE (cc-quality review, bus #51770, MEDIUM finding): explicit
+-- `FOR ALL TO service_role` + REVOKE ALL from anon/authenticated on every
+-- new object, per this store's CAI-1018 convention (migrations/049/068/088).
+-- A policy with no `TO` clause defaults to PUBLIC/FOR ALL regardless of name.
+alter table data_provenance enable row level security;
+drop policy if exists "service role full access" on data_provenance;
+create policy "service role full access" on data_provenance
+  for all to service_role using (true) with check (true);
+
+create index if not exists idx_data_provenance_project_ref on data_provenance(project_ref);
+create index if not exists idx_data_provenance_classification on data_provenance(classification);
+
+revoke all on data_provenance from public, anon, authenticated;
+
+-- classify(): the one sanctioned lookup. No row -> callers (scripts/data_truth.py)
+-- construct UNCLASSIFIED client-side and treat it as REAL (fail-safe direction,
+-- orch-console gate condition #2) — this function itself just returns nothing.
+create or replace function classify_data_provenance(p_project_ref text, p_org_id text default '')
+returns table (classification text, evidence text, owner text, alias text, updated_at timestamptz)
+language sql stable security definer
+set search_path = '' as $$
+  select classification, evidence, owner, alias, updated_at
+  from public.data_provenance
+  where project_ref = p_project_ref
+    and org_id = coalesce(p_org_id, '')
+  limit 1;
+$$;
+
+revoke all on function classify_data_provenance(text, text) from public, anon, authenticated;
+grant execute on function classify_data_provenance(text, text) to service_role;
+
+-- Lean boot-context arm (ARCH-019 doctrine: index only, no full dump): surfaces
+-- only the rows an agent actually needs to see unprompted — anything not a
+-- plain REAL/SYNTHETIC, since those are exactly the ones worth a second look
+-- before anyone raises or dismisses a data-security alarm. Consumed by the
+-- boot_briefing 'data_provenance_flag' arm (wired separately, see note above).
+create or replace view data_provenance_flags as
+select project_ref, org_id, org_name, alias, classification, evidence, owner, updated_at
+from data_provenance
+where classification in ('MIXED', 'MIXED_PENDING_REAL')
+order by project_ref, org_id;
+
+revoke all on data_provenance_flags from public, anon, authenticated;

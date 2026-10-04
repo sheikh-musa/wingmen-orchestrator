@@ -213,6 +213,39 @@ def warn_if_below_hub_wake_floor(to: str, req: bool, priority: str, stream=None)
         )
 
 
+_DATA_SECURITY_KEYWORDS = (
+    "pii", "real data", "real client data", "real trainee", "gov-pii",
+    "data leak", "data breach", "data exposure", "exposed data",
+    "data security", "sensitive data",
+)
+_PROVENANCE_CITATION_TOKENS = ("data_truth", "data_provenance", "classification:")
+
+
+def warn_if_missing_provenance_citation(priority: str, subject: str, body: str, stream=None) -> None:
+    """op#25626 / bus #51657/#51717 (orch-console gate condition #4, v1 = warn):
+    a P0/P1 message that raises a data-security claim must cite a data_truth.py
+    classification — the fleet already raised a false data-security P0 over
+    generated test data once. WARNING, not a refusal (mirrors
+    warn_if_below_hub_wake_floor's shape): a heuristic keyword match can
+    false-positive, and a blocked urgent safety message is worse than a missed
+    reminder. After a week in production, report firing/false-positive rate to
+    orch-console, who will decide whether to harden this to a refusal."""
+    if priority not in ("P0", "P1"):
+        return
+    text = f"{subject}\n{body}".lower()
+    if not any(k in text for k in _DATA_SECURITY_KEYWORDS):
+        return
+    if any(t in text for t in _PROVENANCE_CITATION_TOKENS):
+        return
+    print(
+        "bus_send: WARNING — this message raises a data-security concern at "
+        f"priority {priority} without citing a classification. Run "
+        "`scripts/data_truth.py classify <project_ref> [org_id]` first and cite "
+        "the result (see docs/DATA-PROVENANCE.md) — a slug/name is NOT evidence.",
+        file=stream or sys.stderr,
+    )
+
+
 # Re-exported for callers/tests that reach for bus_send.resolve_from_agent /
 # bus_send.IdentityError directly — the real logic now lives in
 # scripts/lib/agent_identity.py (bus #47221) so asks_triage.py, asks_open.py,
@@ -374,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     body = read_body(sys.stdin)
 
     warn_if_below_hub_wake_floor(args.to, args.req, args.priority)
+    warn_if_missing_provenance_citation(args.priority, args.subject, body)
 
     if args.dry_run:
         print(f"DRY RUN — would insert: from={from_agent} to={args.to} type={args.type} "

@@ -139,6 +139,40 @@ def test_no_warning_when_not_addressed_to_hub():
     assert stream.getvalue() == ""
 
 
+# op#25626 / bus #51657/#51717: a P0/P1 message raising a data-security
+# concern must cite a data_truth.py classification — WARNING (not a
+# refusal), same shape as the hub-wake-floor check above.
+
+def test_warns_on_data_security_claim_without_citation(capsys):
+    bs.warn_if_missing_provenance_citation("P1", "possible real data exposure", "found PII in the demo DB")
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "classification" in err
+
+
+def test_no_warning_when_citation_present():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_missing_provenance_citation(
+        "P1", "real data exposure?", "checked via data_truth.py — classification: SYNTHETIC", stream=stream,
+    )
+    assert stream.getvalue() == ""
+
+
+def test_no_warning_when_no_data_security_keyword():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_missing_provenance_citation("P1", "deploy status", "build is green", stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_no_warning_below_p1():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_missing_provenance_citation("P2", "real data exposure", "found PII", stream=stream)
+    assert stream.getvalue() == ""
+
+
 def test_dry_run_still_warns_below_hub_wake_floor(monkeypatch, capsys):
     import io
     monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
