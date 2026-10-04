@@ -30,6 +30,26 @@ def _row(instance_id, base_id, unread_age_min, base_read_age_min, unread_count=1
     }
 
 
+def test_fires_on_the_real_2026_10_04_scholar_incident():
+    """Replay of the actual bus #51166 incident (orch-console #51195 ask):
+    cc-scholar-1 had 5 unread rows #51058/51076/51099/51118/51156 created
+    11:17:08-11:59:53Z, all sitting unread until 12:04:16Z (the fix/re-nudge),
+    while cc-scholar (base) read #51081 (11:33:17) and #51095 (11:40:33) in
+    the same window -- proof it was awake, just blind to its own instance
+    address. Evaluated as of 12:00:00Z, mid-incident, before the 12:04:16 read."""
+    incident_now = datetime(2026, 10, 4, 12, 0, 0, tzinfo=timezone.utc)
+    row = {
+        "instance_id": "cc-scholar-1",
+        "base_agent_id": "cc-scholar",
+        "oldest_unread_created_at": datetime(2026, 10, 4, 11, 17, 8, tzinfo=timezone.utc),
+        "unread_count": 5,
+        "last_base_read_at": datetime(2026, 10, 4, 11, 40, 33, tzinfo=timezone.utc),
+    }
+    misses = find_address_variant_misses([row], now=incident_now)
+    assert len(misses) == 1
+    assert misses[0]["instance_id"] == "cc-scholar-1"
+
+
 def test_flags_the_precise_signature():
     rows = [_row("cc-shipforge-1", "cc-shipforge", unread_age_min=30, base_read_age_min=5)]
     misses = find_address_variant_misses(rows, now=NOW)
