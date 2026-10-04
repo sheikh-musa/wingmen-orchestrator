@@ -46,6 +46,12 @@ NOISE_PATTERNS = [p.lower() for p in (
     "chrome-extension",
     "moz-extension",
     "extension context invalidated",
+    # orch-console #51912/#51911 (2026-10-04): a wallet-extension (any brand, not
+    # just MetaMask) clashing over window.ethereum's getter-only property, stack
+    # entirely requestProvider.js (the extension's injected script, zero app
+    # frames) -- confirmed via the real Sentry stacktrace before adding this.
+    "property ethereum of",
+    "requestprovider.js",
 )]
 # Material-by-content: server/app failures we DO want the operator to see.
 SERVER_ERROR_PATTERNS = [p.lower() for p in (
