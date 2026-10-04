@@ -1,8 +1,8 @@
 # protected_sessions_guard.sh — shared bash helper: resolve the tmux sessions a
 # --live model flip (scripts/fleet_model.sh) must never touch, from the shared
 # nervous_system.protected_agents.protected_tmux_sessions() registry, MINUS
-# $AUDITOR_LANES (cc-quality/cc-storefront get their own separate opus-pin
-# carve-out, not a blanket core-brain skip). Kept in its own file, not inlined
+# $AUDITOR_LANES (cc-storefront gets its own separate opus-pin carve-out, not a
+# blanket core-brain skip — see lib/auditor_lanes.sh / CAI-RESP-1440). Kept in its own file, not inlined
 # in fleet_model.sh, so it is independently unit-testable via subprocess
 # (tests/test_fleet_model_core_lanes.py) without touching live tmux/DB state.
 #

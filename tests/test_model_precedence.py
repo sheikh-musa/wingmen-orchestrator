@@ -117,8 +117,12 @@ def test_empty_session_falls_to_fleet(orch):
 # launch with no .<session>_model pin + a Sonnet .fleet_model came up Sonnet
 # (cc-storefront did — a silent CAI-1170 regression). The clamp forces
 # claude-opus-4-8 for AUDITOR_LANES regardless of which tier won.
+#
+# CAI-RESP-1440 narrowed AUDITOR_LANES to storefront only: quality now resolves
+# through the normal cascade on its OWN .quality_model pin (sonnet-5), unclamped
+# — see test_quality_* below.
 
-@pytest.mark.parametrize("sess", ["storefront", "quality", "cc-storefront", "cc-quality"])
+@pytest.mark.parametrize("sess", ["storefront", "cc-storefront"])
 def test_auditor_clamped_to_opus_over_fleet_sonnet(orch, sess):
     """THE regression: a fresh auditor launch, no pin, .fleet_model=sonnet -> was Sonnet."""
     orch_dir, write = orch
@@ -157,3 +161,39 @@ def test_non_auditor_still_falls_to_fleet_sonnet(orch):
     orch_dir, write = orch
     write(".fleet_model", "claude-sonnet-5")
     assert _resolve("cosem-tdu", orch_dir) == ("claude-sonnet-5", ".fleet_model")
+
+
+# ── CAI-RESP-1440: quality moved OFF the opus clamp onto its own pin ──────────
+
+@pytest.mark.parametrize("sess", ["quality", "cc-quality"])
+def test_quality_honors_own_pin_unclamped(orch, sess):
+    """quality is no longer in AUDITOR_LANES: its .quality_model pin (sonnet-5)
+    must win, even with a Sonnet-flipping .fleet_model in play — no opus clamp.
+    Tier 2 keys off the LITERAL session arg (no cc- stripping), so write both
+    forms, same pattern as test_subagent_model_precedence's auditor tests."""
+    orch_dir, write = orch
+    write(f".{sess}_model", "claude-sonnet-5")
+    write(".fleet_model", "claude-opus-4-8")
+    model, tier = _resolve(sess, orch_dir)
+    assert model == "claude-sonnet-5"
+    assert tier == f".{sess}_model"
+
+
+def test_quality_no_pin_falls_to_fleet_unclamped(orch):
+    """quality with no session pin falls through to .fleet_model like any other
+    non-auditor lane — no CAI-1170 clamp forces it back to opus."""
+    orch_dir, write = orch
+    write(".fleet_model", "claude-sonnet-5")
+    model, tier = _resolve("quality", orch_dir)
+    assert model == "claude-sonnet-5"
+    assert tier == ".fleet_model"
+
+
+def test_storefront_still_clamped_after_1440(orch):
+    """storefront remains the sole FULL auditor: still clamped to opus-4-8
+    even with a Sonnet .fleet_model in play."""
+    orch_dir, write = orch
+    write(".fleet_model", "claude-sonnet-5")
+    model, tier = _resolve("storefront", orch_dir)
+    assert model == _OPUS
+    assert "AUDITOR" in tier or "1170" in tier, tier
