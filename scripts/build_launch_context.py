@@ -39,7 +39,18 @@ def _client():
     )
 
 
-def build(agent_id: str, dry_run: bool = False) -> str:
+def inbox_or_filter(agent_id: str, instance_id: str | None = None) -> str:
+    """PURE: the PostgREST .or_() filter string for an inbox read.
+
+    bus #51166: a lane's mail can be addressed to its instance id
+    (e.g. 'cc-shipforge-1'), not just its base ('cc-shipforge'). Match both,
+    not just base, or instance-addressed mail never surfaces at boot.
+    """
+    inbox_ids = [agent_id] if not instance_id or instance_id == agent_id else [agent_id, instance_id]
+    return ",".join([f"to_agent.eq.{i}" for i in inbox_ids] + ["to_agent.is.null"])
+
+
+def build(agent_id: str, instance_id: str | None = None, dry_run: bool = False) -> str:
     client = _client()
     now_ts = datetime.now(timezone.utc).isoformat()
     parts: list[str] = []
@@ -108,7 +119,7 @@ def build(agent_id: str, dry_run: bool = False) -> str:
     inbox = (
         client.table("agent_messages")
         .select("id,from_agent,to_agent,message_type,subject,body,requires_response,priority,created_at")
-        .or_(f"to_agent.eq.{agent_id},to_agent.is.null")
+        .or_(inbox_or_filter(agent_id, instance_id))
         .is_("read_at", "null")
         .order("priority", desc=False)
         .order("requires_response", desc=True)
@@ -194,7 +205,12 @@ def build(agent_id: str, dry_run: bool = False) -> str:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--agent", required=True, help="Agent ID (e.g. cc-ihsanos)")
+    parser.add_argument("--agent", required=True, help="Base agent ID (e.g. cc-ihsanos)")
+    parser.add_argument(
+        "--instance",
+        default=None,
+        help="Instance/sub-tag ID (e.g. cc-ihsanos-2), if this is a multi-instance lane",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -203,7 +219,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     try:
-        block = build(args.agent, dry_run=args.dry_run)
+        block = build(args.agent, instance_id=args.instance, dry_run=args.dry_run)
         print(block)
         return 0
     except Exception as e:
