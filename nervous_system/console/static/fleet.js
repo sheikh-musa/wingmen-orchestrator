@@ -69,11 +69,16 @@
   }
   // Per-lane key chip. `pool` wins (both consoles); an unknown-but-present fp
   // (local only) still shows its short id so an off-account lane is visible.
-  function tokChip(fp, pool) {
+  // `mismatch` (op#25671/orch-console #51875): the live-pid read disagreed with
+  // the stored agent_status snapshot — `pool` here is ALREADY the live value
+  // (backend prefers it), so the chip name is correct; the red styling + ⚠ is
+  // purely the "don't trust this silently" signal, never a second guess.
+  function tokChip(fp, pool, mismatch) {
     fp = fp || ""; pool = pool || "";
     var cls = POOL_CLS[pool];
-    if (cls) return '<span class="tok ' + cls + '" title="' + esc(fp || pool) + '">' + esc(pool) + '</span>';
-    return fp ? '<span class="tok other" title="' + esc(fp) + '">🔑 ' + esc(fp.slice(0, 6)) + '</span>' : '';
+    var title = mismatch ? "live=" + (fp || pool) + " — disagrees with the stored snapshot" : (fp || pool);
+    if (cls) return '<span class="tok ' + cls + (mismatch ? " mismatch" : "") + '" title="' + esc(title) + '">' + esc(pool) + (mismatch ? " ⚠" : "") + '</span>';
+    return fp ? '<span class="tok other' + (mismatch ? " mismatch" : "") + '" title="' + esc(title) + '">🔑 ' + esc(fp.slice(0, 6)) + (mismatch ? " ⚠" : "") + '</span>' : '';
   }
   // Per-row MODEL chip (Musa op#20716) — visible WITHOUT expanding, next to the key
   // chip on every tile + coordinator chip. `model` is the backend-resolved id,
@@ -363,7 +368,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v72';
+  var APP_BUILD = 'fc-v73';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -676,7 +681,7 @@
     var act = (live.running && live.activity) || l.activity || l.current_task || "";
     var picked = multiMode && selected[sess];
     var badge = (l.flagged && l.bucket === "offline") ? '<span class="badge">dark</span>' : "";
-    var pool = poolOf(l), tok = tokChip(l.auth_fp, pool), mdl = mdlChip(l.model, l.model_src);
+    var pool = poolOf(l), tok = tokChip(l.auth_fp, pool, l.auth_mismatch), mdl = mdlChip(l.model, l.model_src);
     // key roll-up filter (op#20684): a tile off the tapped pool dims, never hides —
     // the operator still sees the whole fleet, just with that key's lanes lit.
     var off = poolFilter && (poolFilter === "?" ? (pool || !l.auth_fp) : pool !== poolFilter);
@@ -755,7 +760,7 @@
     var sess = c.tmux_session || c.agent_id;
     var lvl = c.ctx_level || "";
     var cc = c.ctx_pct != null ? (c.ctx_pct + "% ctx") : (c.last_seen_s != null ? fmtAge(c.last_seen_s) : "quiet");
-    var pool = poolOf(c), pills = tokChip(c.auth_fp, pool) + mdlChip(c.model, c.model_src);
+    var pool = poolOf(c), pills = tokChip(c.auth_fp, pool, c.auth_mismatch) + mdlChip(c.model, c.model_src);
     var off = poolFilter && (poolFilter === "?" ? (pool || !c.auth_fp) : pool !== poolFilter);
     return '<div class="cchip' + (off ? " offpool" : "") + '" data-coord="' + esc(sess) + '" data-pool="' + esc(pool) + '"><div class="cn">' + esc(c.short || c.agent_id) + '</div>' +
       '<div class="cc ' + esc(lvl) + '">' + esc(cc) + '</div>' +

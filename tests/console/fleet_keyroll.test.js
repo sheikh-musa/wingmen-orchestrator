@@ -99,6 +99,19 @@ ok("backend pool wins over a stale/absent fp; unknown = no chip on hosted", func
   assert(h.indexOf('class="tok other"') >= 0 && h.indexOf("deadbe") >= 0, h);
 });
 
+ok("op#25671/orch-console #51875: auth_mismatch renders the chip red + ⚠, never silently", function () {
+  const live = tokChip("e1dfa48eec85", "musa2", true);
+  assert(live.indexOf('class="tok musa2 mismatch"') >= 0, live);           // pool class kept, mismatch ADDED
+  assert(live.indexOf("⚠") >= 0, live);                              // visible warn marker
+  assert(live.indexOf("disagrees with the stored snapshot") >= 0, live);  // title explains, never a silent swap
+  // no mismatch -> no red class, no warn marker, same chip as before this feature existed
+  const clean = tokChip("e1dfa48eec85", "musa2", false);
+  assert(clean.indexOf("mismatch") === -1 && clean.indexOf("⚠") === -1, clean);
+  // the unknown-fp ("other") chip path must also carry the mismatch styling when flagged
+  const otherMismatch = tokChip("deadbeef0000", "", true);
+  assert(otherMismatch.indexOf('class="tok other mismatch"') >= 0 && otherMismatch.indexOf("⚠") >= 0, otherMismatch);
+});
+
 ok("poolRollup counts ASSIGNED lanes per pool in canonical order, unknown last", function () {
   const lanes = [
     { bucket: "working", pool: "musa2" },

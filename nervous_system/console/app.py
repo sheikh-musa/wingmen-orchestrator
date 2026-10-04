@@ -669,9 +669,15 @@ _PROC_MODEL_CACHE = {"at": None, "by_session": {}}
 _PROC_MODEL_LOCK = threading.Lock()
 
 
-def _proc_models() -> dict:
-    """{tmux_session: model} from the live local process truth, cached ~20s.
-    Any failure -> the last good map (or {}), never an exception into /api/fleet."""
+def _proc_ground_truth() -> dict:
+    """{tmux_session: {model, account, fp, mismatch, expected}} from the live
+    local process truth (ONE panes.token_ground_truth() call), cached ~20s and
+    shared by both _proc_models() (model chip) and _proc_accounts() (op#25671/
+    orch-console #51875: "it says it's on syed" -- the agent_status auth_account/
+    auth_fp snapshot this used to read is a boot-time stamp that goes stale on
+    ANY in-place re-token, since only a TRUE process restart re-stamps it; the
+    live proc read never goes stale). Any failure -> the last good map (or {}),
+    never an exception into /api/fleet."""
     now = time.monotonic()
     with _PROC_MODEL_LOCK:
         at = _PROC_MODEL_CACHE["at"]
@@ -680,17 +686,38 @@ def _proc_models() -> dict:
     by_session = {}
     try:
         for r in panes.token_ground_truth(include_remote=False).get("rows", []):
-            sess, model = r.get("session"), r.get("model")
-            if sess and model and r.get("host") == "Mini":
-                by_session[sess] = str(model)
+            sess = r.get("session")
+            if sess and r.get("host") == "Mini":
+                by_session[sess] = {
+                    "model": str(r["model"]) if r.get("model") else None,
+                    "account": r.get("account") or None,
+                    "fp": r.get("fp") or None,
+                    "mismatch": bool(r.get("mismatch")),
+                    "expected": r.get("expected") or None,
+                }
     except Exception as e:  # noqa: BLE001 — the fleet payload must never depend on ps
-        logger.warning("proc model read failed: %s", e)
+        logger.warning("proc ground-truth read failed: %s", e)
         with _PROC_MODEL_LOCK:
             return dict(_PROC_MODEL_CACHE["by_session"])
     with _PROC_MODEL_LOCK:
         _PROC_MODEL_CACHE["at"] = now
         _PROC_MODEL_CACHE["by_session"] = by_session
     return dict(by_session)
+
+
+def _proc_models() -> dict:
+    """{tmux_session: model} — back-compat view over _proc_ground_truth()."""
+    return {sess: row["model"] for sess, row in _proc_ground_truth().items() if row.get("model")}
+
+
+def _proc_accounts() -> dict:
+    """{tmux_session: {account, fp, mismatch, expected}} — the live-verified
+    token identity per LOCAL lane, for the console's account/pool badge. A
+    session absent here is either cross-host or unreadable; the caller falls
+    back to the agent_status snapshot, labelled as a snapshot, never silently
+    presented as equally fresh."""
+    return {sess: {k: v for k, v in row.items() if k != "model"}
+            for sess, row in _proc_ground_truth().items()}
 
 
 def _boot_model(current_task) -> "str | None":
@@ -701,6 +728,21 @@ def _boot_model(current_task) -> "str | None":
 def _hb_model(current_task) -> "str | None":
     m = _HB_MODEL_RE.search(current_task or "")
     return m.group(1) if m else None
+
+
+def _resolve_auth_fp(session, snapshot_fp, proc_accounts) -> tuple:
+    """(resolved_fp, auth_mismatch) for a lane/coordinator's key badge
+    (op#25671/orch-console #51875 "it says it's on syed"): prefer the live-pid fp
+    over the agent_status SNAPSHOT when `proc_accounts` has one for `session` — the
+    snapshot is a boot-time stamp that goes stale after any in-place re-token
+    (CLAUDE_ACCOUNT_LABEL trap, PR#291). auth_mismatch is True when the SNAPSHOT
+    disagrees with the LIVE read (NOT panes.token_ground_truth()'s own `mismatch`
+    field, which means live-vs-configured-expected — a different, also real
+    signal, but not what the operator saw: the snapshot lying about the live
+    account). No live data for this session (cross-host, or unread) -> the
+    snapshot untouched, auth_mismatch False — never flagged on absence of signal."""
+    live_fp = (proc_accounts.get(session) or {}).get("fp")
+    return (live_fp or snapshot_fp), bool(live_fp and live_fp != snapshot_fp)
 
 
 def _resolve_model(session, current_task, registry_model, proc_models) -> tuple:
@@ -1693,10 +1735,12 @@ def _fleet_payload():
     # one key on both surfaces (the hosted view strips auth_fp; `pool` is safe).
     # Coordinators: proc truth only, else None — never a guess.
     _proc_models_by_sess = _proc_models()
+    _proc_accounts_by_sess = _proc_accounts()
     for c in coordinators:
         sess = c.get("tmux_session")
         c["peekable"] = bool(sess and (sess in live or sess in _COORD_DB_PEEK))
-        c["pool"] = pools.pool_for_fp(c.get("auth_fp"))
+        _fp, c["auth_mismatch"] = _resolve_auth_fp(sess, c.get("auth_fp"), _proc_accounts_by_sess)
+        c["pool"] = pools.pool_for_fp(_fp)
         # Cross-host bodies (the hub on gzb) have no local proc: fall back to the
         # model their OWN heartbeat stamped (current_task), never a registry guess.
         c["model"], c["model_src"] = _resolve_model(
@@ -1733,7 +1777,9 @@ def _fleet_payload():
         l["flagged"] = flagged
         # op#20684: pool NICKNAME alongside the fp — the same field the hosted
         # (fp-less) payload carries, so fleet.js reads one key on both consoles.
-        l["pool"] = pools.pool_for_fp(l.get("auth_fp"))
+        _fp, l["auth_mismatch"] = _resolve_auth_fp(
+            l.get("tmux_session") or l.get("lane"), l.get("auth_fp"), _proc_accounts_by_sess)
+        l["pool"] = pools.pool_for_fp(_fp)
         # op#20716: per-row MODEL chip — proc truth > boot string > registry default.
         l["model"], l["model_src"] = _resolve_model(
             l.get("tmux_session") or l.get("lane"), l.get("current_task"),
