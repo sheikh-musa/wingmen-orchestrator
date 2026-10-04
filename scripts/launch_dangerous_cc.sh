@@ -792,7 +792,6 @@ CC_HOST="$("$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_host_id.py" current || hostna
 # live on lane processes, not only the 3 brain boots). When .env carries the durable pin this
 # is a silent no-op re-export; when a host is unpinned it still propagates the resolved id.
 export FLEET_HOST_ID="$CC_HOST"
-CC_AUTH_LABEL="${CLAUDE_ACCOUNT_LABEL:-unlabelled}"
 CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/null | cut -c1-12)"
 # Two guards, because an empty token hashes to a REAL-LOOKING value. sha256("") starts
 # e3b0c44298fc — identical for every agent that computes it, so an unguarded stamp would show
@@ -800,6 +799,33 @@ CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/
 # as missing data, e3b0c442 reads as an answer. (Trap spotted by cc-caai, 2026-07-25.)
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || CC_AUTH_FP=""
 [ "$CC_AUTH_FP" = "e3b0c44298fc" ] && CC_AUTH_FP=""
+# CC_AUTH_LABEL derivation (2026-10-04, orch-console #51865): the label used to be a
+# single static fleet-wide $CLAUDE_ACCOUNT_LABEL, stamped onto EVERY lane's boot
+# regardless of which token it actually launched on — correct only for whichever one
+# account that env var happened to name, wrong (but confident-looking, not blank) for
+# every re-tokened lane until its next TRUE process restart (an in-place /clear does
+# NOT re-run this boot stamp, so switch_lane_token.sh leaves the label stale
+# indefinitely). Derive it from CC_AUTH_FP via the SAME map switch_lane_token.sh/
+# token_file_guard already trust (scripts/lib/token_fps.map) — the fp is the ground
+# truth we just computed above, not a second independent guess. Falls back to the
+# static label (then "unlabelled") only when the fp matches no known account, so an
+# unrecognized/rotated-but-unmapped token still gets labelled rather than guessed.
+CC_AUTH_LABEL="$("$VENV_PY" - "$CC_AUTH_FP" "$ORCH_DIR/scripts/lib" <<'PY' 2>/dev/null
+import sys
+sys.path.insert(0, sys.argv[2])
+try:
+    from token_file_guard import load_map
+    fp = sys.argv[1]
+    if fp:
+        for acct, mapped_fp in load_map().items():
+            if mapped_fp == fp:
+                print(acct)
+                break
+except Exception:
+    pass
+PY
+)"
+CC_AUTH_LABEL="${CC_AUTH_LABEL:-${CLAUDE_ACCOUNT_LABEL:-unlabelled}}"
 # Boot stamp via the ONE shared writer (2026-10-01): bounded retries + LOUD failure
 # (was a silent one-shot `except: pass` — the lost stamp that left cc-irsyad-2 and
 # cc-irsyad-coord-1 host-less/session-less/model-less on gzb). A populated host or
