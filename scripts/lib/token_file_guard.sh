@@ -16,6 +16,18 @@ _tfg_sha12() {   # stdin -> first 12 hex of sha256
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-12; else sha256sum | cut -c1-12; fi
 }
 
+# account_for_fp <fp> [map]: reverse lookup — the account whose fp in token_fps.map
+# matches <fp>, or empty if none (an unknown/rotated-but-unmapped token). Used at
+# launch to LABEL a lane's agent_status row from the fp it actually computed,
+# instead of trusting a static env var that can't know which token was really used
+# (orch-console #51865: a stale $CLAUDE_ACCOUNT_LABEL mislabeled a re-tokened lane
+# indefinitely, since an in-place /clear never re-stamps the boot-time label).
+account_for_fp() {
+  local fp="$1" map="${2:-${TOKEN_FPS_MAP:-$_TFG_MAP_DEFAULT}}"
+  [ -n "$fp" ] && [ -r "$map" ] || { printf ''; return 0; }
+  awk -v f="$fp" '!/^#/ && $2==f {print $1; exit}' "$map"
+}
+
 _tfg_acct_for_name() {   # basename -> account (echo) if it is <acct>-oauth-token
   case "$1" in *-oauth-token) printf '%s' "${1%-oauth-token}" ;; *) printf '' ;; esac
 }
