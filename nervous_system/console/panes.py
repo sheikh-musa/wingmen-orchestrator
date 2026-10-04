@@ -544,8 +544,20 @@ def _resolve_hub_ssh_target() -> Optional[str]:
     return hub_reach.hub_reach_for_holder(holder).get("ssh_target")
 # Linux box: sha256sum (not shasum). Fingerprint the token remote-side; print only
 # "<fp> <model>" — the raw token is read into $tok and never echoed.
+# orch-console #51921 (2026-10-04): `pgrep -f 'claude --dangerously'` is too broad --
+# it ALSO matches the tmux-server's own persistent `tmux new-session -d -s orch ...
+# claude --dangerously-skip-permissions ...` invocation (PPID=1, lives for the whole
+# session's lifetime, NOT the actual claude child; its OWN argv just happens to
+# contain that substring verbatim). With `head -1` picking by pid order, that
+# long-lived wrapper (lower pid, created once at the session's original boot) wins
+# over the real, possibly-since-retokened claude pid -- so the scan silently reports
+# whatever account the hub FIRST booted on, not its current live one. This surfaced
+# as a false "hub is on Musa" when the live process had long since moved to Syed.
+# Fix: resolve the pid from the orch tmux pane directly (its own pane_pid IS the
+# claude pid on a Linux host, no shell-wrapper layer to walk through), never a
+# host-wide name match. ORCH_TMUX_SESSION mirrors boot_orch.sh's own override var.
 _REMOTE_SCAN_SH = (
-    "pid=$(pgrep -f 'claude --dangerously' | head -1); "
+    "pid=$(tmux list-panes -t \"${ORCH_TMUX_SESSION:-orch}\" -F '#{pane_pid}' 2>/dev/null | head -1); "
     "[ -n \"$pid\" ] || exit 3; "
     "cmd=$(ps eww -p \"$pid\" -o command= 2>/dev/null); "
     "tok=$(printf '%s' \"$cmd\" | grep -oE 'CLAUDE_CODE_OAUTH_TOKEN=[^[:space:]]+' | head -1 | cut -d= -f2); "
