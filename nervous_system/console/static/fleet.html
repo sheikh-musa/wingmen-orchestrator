@@ -252,6 +252,9 @@
   .tile .tok, .cchip .tok { flex: none; font: 9px/1 var(--mono); font-weight: 700; padding: 4px 7px; border-radius: 999px; white-space: nowrap; }
   .tok.musa { color: #4ade80; background: rgba(55,211,154,.1); } .tok.musa2 { color: #7dd3fc; background: rgba(125,211,252,.1); }
   .tok.syed { color: #fbbf24; background: rgba(246,196,83,.12); } .tok.other { color: #94a3b8; background: rgba(148,163,184,.12); }
+  /* op#25671/orch-console #51875: the live-pid account disagreed with the stored
+     snapshot ("it says it's on syed") — never show that silently, flag it red. */
+  .tok.mismatch { color: var(--bad) !important; background: rgba(251,113,133,.14) !important; box-shadow: 0 0 0 1px rgba(251,113,133,.4) inset; }
   /* op#20716: MODEL chip next to the key chip — neutral, same pill size; ".approx"
      = declared (boot string / registry), not observed on the live process. */
   .tok.mdl { color: var(--dim); background: rgba(148,163,184,.09); font-weight: 600; }
