@@ -295,15 +295,15 @@ echo ""
 echo -e "${BOLD}▶ Building session context for ${CC_BASE_AGENT_ID}...${RESET}"
 # Stdout = context block (captured). Stderr = diagnostics (shown on terminal).
 #
-# Delta-v2 L3-A1 fix: pass CC_BASE_AGENT_ID, NOT CC_AGENT_ID. The context
-# builder is per-FAMILY, not per-instance:
+# Delta-v2 L3-A1 fix: agent_context + the agents-row heartbeat stay scoped to
+# CC_BASE_AGENT_ID — the context builder is per-FAMILY for those two:
 #   - scripts/build_launch_context.py L57 — agent_context.eq('agent_id', base)
-#   - scripts/build_launch_context.py L111 — inbox filter to_agent.eq.{base}
 #   - scripts/build_launch_context.py L187-189 — agents.update(...).eq('id', base)
-# Passing the sub-tag would land an empty agent_context row + hidden inbox
-# (sibling filter would match literal 'cc-ihsanos-3' while all inbox rows are
-# addressed to base 'cc-ihsanos' with '[cc-ihsanos-3]' tagged in body).
-LAUNCH_CONTEXT="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.build_launch_context --agent "$CC_BASE_AGENT_ID")" || {
+# bus #51166: the INBOX filter is the one exception — mail can be addressed
+# to the instance id directly (to_agent='cc-ihsanos-3'), not just tagged in
+# the body of a base-addressed row, so pass --instance too or instance-
+# addressed mail never surfaces at boot.
+LAUNCH_CONTEXT="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.build_launch_context --agent "$CC_BASE_AGENT_ID" --instance "$CC_AGENT_ID")" || {
     echo -e "${AMBER}⚠ build_launch_context failed. Continuing without injected context.${RESET}"
     LAUNCH_CONTEXT=""
 }
