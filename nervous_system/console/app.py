@@ -730,6 +730,21 @@ def _hb_model(current_task) -> "str | None":
     return m.group(1) if m else None
 
 
+def _resolve_auth_fp(session, snapshot_fp, proc_accounts) -> tuple:
+    """(resolved_fp, auth_mismatch) for a lane/coordinator's key badge
+    (op#25671/orch-console #51875 "it says it's on syed"): prefer the live-pid fp
+    over the agent_status SNAPSHOT when `proc_accounts` has one for `session` — the
+    snapshot is a boot-time stamp that goes stale after any in-place re-token
+    (CLAUDE_ACCOUNT_LABEL trap, PR#291). auth_mismatch is True when the SNAPSHOT
+    disagrees with the LIVE read (NOT panes.token_ground_truth()'s own `mismatch`
+    field, which means live-vs-configured-expected — a different, also real
+    signal, but not what the operator saw: the snapshot lying about the live
+    account). No live data for this session (cross-host, or unread) -> the
+    snapshot untouched, auth_mismatch False — never flagged on absence of signal."""
+    live_fp = (proc_accounts.get(session) or {}).get("fp")
+    return (live_fp or snapshot_fp), bool(live_fp and live_fp != snapshot_fp)
+
+
 def _resolve_model(session, current_task, registry_model, proc_models) -> tuple:
     """(model, model_src) per the precedence above; (None, None) when unknown."""
     if session and proc_models.get(session):
@@ -1724,17 +1739,8 @@ def _fleet_payload():
     for c in coordinators:
         sess = c.get("tmux_session")
         c["peekable"] = bool(sess and (sess in live or sess in _COORD_DB_PEEK))
-        # op#25671/orch-console #51875 ("it says it's on syed"): prefer the live-pid
-        # fp over the agent_status snapshot when we have one — the snapshot is a
-        # boot-time stamp that goes stale after any in-place re-token (CLAUDE_ACCOUNT_
-        # LABEL trap, PR#291). auth_mismatch flags the card RED when the SNAPSHOT
-        # disagrees with the LIVE read (not token_ground_truth's own `mismatch`,
-        # which means live-vs-configured-expected — a different, also real signal,
-        # but not what the operator saw: the snapshot lying about the live account).
-        _acct = _proc_accounts_by_sess.get(sess) or {}
-        _live_fp = _acct.get("fp")
-        c["auth_mismatch"] = bool(_live_fp and _live_fp != c.get("auth_fp"))
-        c["pool"] = pools.pool_for_fp(_live_fp or c.get("auth_fp"))
+        _fp, c["auth_mismatch"] = _resolve_auth_fp(sess, c.get("auth_fp"), _proc_accounts_by_sess)
+        c["pool"] = pools.pool_for_fp(_fp)
         # Cross-host bodies (the hub on gzb) have no local proc: fall back to the
         # model their OWN heartbeat stamped (current_task), never a registry guess.
         c["model"], c["model_src"] = _resolve_model(
@@ -1771,12 +1777,9 @@ def _fleet_payload():
         l["flagged"] = flagged
         # op#20684: pool NICKNAME alongside the fp — the same field the hosted
         # (fp-less) payload carries, so fleet.js reads one key on both consoles.
-        # Live-pid truth preferred over the agent_status snapshot (same reasoning
-        # + same snapshot-vs-live mismatch definition as the coordinator loop above).
-        _acct = _proc_accounts_by_sess.get(l.get("tmux_session") or l.get("lane")) or {}
-        _live_fp = _acct.get("fp")
-        l["auth_mismatch"] = bool(_live_fp and _live_fp != l.get("auth_fp"))
-        l["pool"] = pools.pool_for_fp(_live_fp or l.get("auth_fp"))
+        _fp, l["auth_mismatch"] = _resolve_auth_fp(
+            l.get("tmux_session") or l.get("lane"), l.get("auth_fp"), _proc_accounts_by_sess)
+        l["pool"] = pools.pool_for_fp(_fp)
         # op#20716: per-row MODEL chip — proc truth > boot string > registry default.
         l["model"], l["model_src"] = _resolve_model(
             l.get("tmux_session") or l.get("lane"), l.get("current_task"),

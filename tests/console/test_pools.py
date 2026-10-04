@@ -127,10 +127,16 @@ def test_hosted_cloned_payload_has_no_auth_fp_anywhere():
 
 def test_local_fleet_lane_rows_carry_pool_alongside_fp():
     """app.py: every finalised /api/fleet lane row gets `pool` from its auth_fp so
-    fleet.js reads ONE key on both consoles."""
+    fleet.js reads ONE key on both consoles. op#25671/orch-console #51875: the lane
+    (and coordinator) rows now resolve through _resolve_auth_fp() first, so `pool`
+    is derived from the LIVE-preferred fp, not the raw snapshot directly -- see
+    test_proc_ground_truth.py for the live-vs-snapshot behavior itself."""
     src = (pathlib.Path(__file__).resolve().parents[2] / "nervous_system" / "console" / "app.py").read_text()
-    assert 'l["pool"] = pools.pool_for_fp(l.get("auth_fp"))' in src
-    assert '"pool": pools.pool_for_fp(r.get("auth_fp"))' in src   # context_bloat rows too
+    assert '_fp, l["auth_mismatch"] = _resolve_auth_fp(' in src
+    assert 'l["pool"] = pools.pool_for_fp(_fp)' in src
+    assert '_fp, c["auth_mismatch"] = _resolve_auth_fp(' in src
+    assert 'c["pool"] = pools.pool_for_fp(_fp)' in src
+    assert '"pool": pools.pool_for_fp(r.get("auth_fp"))' in src   # context_bloat rows: unchanged, no live-proc signal there
 
 
 def test_fleet_html_carries_the_key_rollup_row():
