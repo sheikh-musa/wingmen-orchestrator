@@ -69,9 +69,13 @@ _HUB_AGENT = "cc-orchestrator"
 
 # Real, intentional send targets that are legitimately NEVER wake-eligible by
 # is_wake_eligible_recipient's definition (operator / human-opened addresses) --
-# never "undeliverable" below, despite having no live wake owner. Mirrors
-# scripts/fleet_health.py's _HUMAN_OPENED / _NEVER_ARCHIVE_ADDRS (small, stable
-# sets kept in sync by hand; worth a shared module if either grows).
+# never "undeliverable" below, despite having no live wake owner. Mirrors the
+# human/musa half of scripts/fleet_health.py's _HUMAN_OPENED / _NEVER_ARCHIVE_ADDRS
+# (that set also has "operator" and "substrate", omitted here: "operator" has zero
+# rows ever sent to it, and "substrate" is already rejected at the DB layer by
+# agent_messages_reject_pseudo_targets regardless of this check -- cc-quality
+# #50975 verified both empirically). Small, stable sets kept in sync by hand;
+# worth a shared module if either grows.
 _HUMAN_OPENED = frozenset({"cto-desktop"})
 _UNDELIVERABLE_EXEMPT = frozenset({"musa"}) | _HUMAN_OPENED
 
