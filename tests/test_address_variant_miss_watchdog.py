@@ -20,10 +20,11 @@ from scripts.address_variant_miss_watchdog import (
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 
 
-def _row(instance_id, base_id, unread_age_min, base_read_age_min, unread_count=1):
+def _row(instance_id, base_id, unread_age_min, base_read_age_min, unread_count=1, instance_status="working"):
     return {
         "instance_id": instance_id,
         "base_agent_id": base_id,
+        "instance_status": instance_status,
         "oldest_unread_created_at": NOW - timedelta(minutes=unread_age_min) if unread_age_min is not None else None,
         "unread_count": unread_count,
         "last_base_read_at": NOW - timedelta(minutes=base_read_age_min) if base_read_age_min is not None else None,
@@ -41,6 +42,7 @@ def test_fires_on_the_real_2026_10_04_scholar_incident():
     row = {
         "instance_id": "cc-scholar-1",
         "base_agent_id": "cc-scholar",
+        "instance_status": "working",  # scholar-1 was live and stuck, not retired
         "oldest_unread_created_at": datetime(2026, 10, 4, 11, 17, 8, tzinfo=timezone.utc),
         "unread_count": 5,
         "last_base_read_at": datetime(2026, 10, 4, 11, 40, 33, tzinfo=timezone.utc),
@@ -48,6 +50,19 @@ def test_fires_on_the_real_2026_10_04_scholar_incident():
     misses = find_address_variant_misses([row], now=incident_now)
     assert len(misses) == 1
     assert misses[0]["instance_id"] == "cc-scholar-1"
+
+
+def test_ignores_offline_instance_even_if_base_is_awake():
+    """cc-quality #51199's finding, closed: the live gap they found was
+    cc-quality-1 (base cc-quality) sitting status='offline' with a stale
+    last_heartbeat (~11h) -- a genuinely retired instance, not a live one
+    blind to its own inbox. A base being awake only proves the FAMILY is
+    awake, not that any specific past instance still exists. This replays
+    that exact identity shape with old unread mail to prove it would NOT
+    misfire now that instance_status is checked."""
+    row = _row("cc-quality-1", "cc-quality", unread_age_min=60, base_read_age_min=5,
+               instance_status="offline")
+    assert find_address_variant_misses([row], now=NOW) == []
 
 
 def test_flags_the_precise_signature():

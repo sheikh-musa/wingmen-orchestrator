@@ -69,7 +69,7 @@ def save_state(state: dict) -> None:
 
 QUERY = """
 WITH instances AS (
-    SELECT DISTINCT agent_id AS instance_id, base_agent_id
+    SELECT DISTINCT agent_id AS instance_id, base_agent_id, status AS instance_status
     FROM agent_status
     WHERE base_agent_id IS NOT NULL AND agent_id <> base_agent_id
 ),
@@ -87,7 +87,7 @@ recent_base_read AS (
     WHERE read_at IS NOT NULL
     GROUP BY to_agent
 )
-SELECT i.instance_id, i.base_agent_id,
+SELECT i.instance_id, i.base_agent_id, i.instance_status,
        u.oldest_unread_created_at, u.unread_count,
        r.last_base_read_at
 FROM instances i
@@ -105,13 +105,20 @@ def find_address_variant_misses(
 ) -> list[dict]:
     """PURE: rows -> the subset that are a genuine address-variant miss.
 
-    A row qualifies only when BOTH hold: its oldest unread-on-instance row is
+    A row qualifies only when ALL hold: its oldest unread-on-instance row is
     older than unread_min_age_min (not a race with mail that just landed),
-    AND its base id was read within base_read_recency_min (proof the lane is
-    awake and draining mail, not just generically idle/dead — that is a
-    different, already-covered failure class)."""
+    its base id was read within base_read_recency_min (proof the lane FAMILY
+    is awake and draining mail, not just generically idle/dead — that is a
+    different, already-covered failure class), AND the instance itself is
+    not offline (cc-quality #51199: a base being awake does not prove THIS
+    specific instance still exists — a retired instance with old unread
+    mail would otherwise be misdiagnosed as "awake but blind" when it is
+    simply dead; checked separately from base liveness on purpose, since a
+    base can outlive any one of its past instances)."""
     misses = []
     for r in rows:
+        if r.get("instance_status") == "offline":
+            continue
         oldest = r.get("oldest_unread_created_at")
         if oldest is None:
             continue
