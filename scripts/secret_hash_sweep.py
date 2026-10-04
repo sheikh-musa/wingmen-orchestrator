@@ -63,11 +63,26 @@ _PUBLIC_KEY_RE = re.compile(
     r'_TEAM_ID$|_MODE$|_REGION$|_ANON_KEY$|_ANON$|_BASE_URL$|^SUPABASE_URL$|_SUPABASE_URL$)',
     re.I)
 
+# orch-console #51379 (bus #51371/#51377): SEED_USER_ID -- a plain identifier, not a
+# credential -- hash-matched a current .env value (it legitimately reappears in prod query
+# results) and paged a P1. An *_ID/*_UUID/*_ORG-suffixed key names an IDENTIFIER by
+# convention (CLIENT_ID, ORG_ID, SEED_USER_ID, ...), never the secret itself, so it is
+# excluded here the same way *_TEAM_ID already was -- explicit, named, tested
+# (tests/test_secret_hash_sweep.py), not an ad hoc tweak to the key-name regex above.
+_IDENTIFIER_KEY_RE = re.compile(r'(_ID$|_UUID$|_ORG$)', re.I)
+
+# Value-shape exclusion, independent of key name: a bare UUID (8-4-4-4-12 hex) is never one
+# of our secret classes by itself, whatever the key is called -- defense in depth for an
+# identifier value under a key name _IDENTIFIER_KEY_RE doesn't happen to match.
+_UUID_VALUE_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+
 
 def _is_public_value(key: str, val: str) -> bool:
     """True when (key, val) is public config / a bare identifier / a filesystem path —
     anything that is NOT itself a credential."""
-    if _PUBLIC_KEY_RE.search(key):
+    if _PUBLIC_KEY_RE.search(key) or _IDENTIFIER_KEY_RE.search(key):
+        return True
+    if _UUID_VALUE_RE.match(val):
         return True
     # a plain http(s) URL with NO userinfo (`user:pass@`) in its authority is a public endpoint
     m = re.match(r'https?://([^/]*)', val)

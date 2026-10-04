@@ -336,3 +336,66 @@ def test_run_wrapper_uses_ledger_not_removed_backup_dir_flag():
     assert "--backup-dir" not in src, "the tool removed --backup-dir (#48678); armed runs would crash"
     assert "--ledger" in src
     assert "tool-results" in src, "recurring sweep must cover tool-results/*.txt (#49038)"
+
+
+# ---- orch-console #51379: identifier-shaped keys/values must not be treated as secrets ----
+# (SEED_USER_ID, a plain UUID identifier, false-positived the real incident this covers.)
+
+def test_is_public_value_excludes_id_suffixed_key():
+    assert s._is_public_value("SEED_USER_ID", "e9b3f7f9-36d0-4f4b-80d7-7529b6bdc2ea") is True
+    assert s._is_public_value("CLIENT_ID", "some-opaque-client-identifier-string") is True
+
+
+def test_is_public_value_excludes_uuid_suffixed_key():
+    assert s._is_public_value("SESSION_UUID", "e9b3f7f9-36d0-4f4b-80d7-7529b6bdc2ea") is True
+
+
+def test_is_public_value_excludes_org_suffixed_key():
+    assert s._is_public_value("DEFAULT_ORG", "some-org-slug-identifier-value") is True
+
+
+def test_is_public_value_excludes_bare_uuid_value_regardless_of_key_name():
+    # defense in depth: a UUID-shaped value is never a secret class, even under an
+    # unrelated-looking key name that none of the suffix rules would catch.
+    assert s._is_public_value("WEIRD_KEY_NAME", "e9b3f7f9-36d0-4f4b-80d7-7529b6bdc2ea") is True
+
+
+def test_is_public_value_excludes_by_key_name_even_if_the_value_looks_secret_shaped():
+    # the rule is intentionally name-based (matches orch-console's ask): a key accidentally
+    # named *_ID that happens to hold a real long opaque credential is STILL excluded here --
+    # there is no secondary "but does it look random enough" override. Documents that
+    # trade-off explicitly so a future change to the rule has to touch this test on purpose.
+    assert s._is_public_value("SEED_USER_ID", FAKE_KEY) is True
+
+
+def test_is_public_value_still_catches_a_real_secret_under_a_plain_key():
+    assert s._is_public_value("ANTHROPIC_API_KEY", FAKE_KEY) is False
+
+
+def test_build_secret_set_excludes_id_uuid_org_keys_and_bare_uuids(tmp_path):
+    env = tmp_path / ".env"
+    _write(env, "\n".join([
+        "SEED_USER_ID=e9b3f7f9-36d0-4f4b-80d7-7529b6bdc2ea",
+        "SESSION_UUID=f1a2b3c4-d5e6-7890-abcd-ef1234567890",
+        "DEFAULT_ORG=acme-corp-org-slug",
+        "RANDOM_FIELD=12345678-9abc-def0-1234-567890abcdef",  # bare UUID, unrelated key name
+        "ANTHROPIC_API_KEY=%s" % FAKE_KEY,
+        "",
+    ]))
+    secrets = s.build_secret_set([str(env)])
+    hashes = set(secrets.values())
+    assert s.hash8(FAKE_KEY.encode()) in hashes, "the real secret must still be caught"
+    assert len(secrets) == 1, "only the real secret should survive -- all 4 identifiers excluded"
+
+
+def test_sweep_file_does_not_flag_seed_user_id_appearing_in_a_transcript(tmp_path):
+    env = tmp_path / ".env"
+    seed_id = "e9b3f7f9-36d0-4f4b-80d7-7529b6bdc2ea"
+    _write(env, "SEED_USER_ID=%s\n" % seed_id)
+    secrets = s.build_secret_set([str(env)])
+    assert secrets == {}, "SEED_USER_ID must not enter the secret set at all"
+
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": "query result: %s appears here" % seed_id}) + "\n")
+    rep = s.sweep_file(str(tr), secrets, execute=False)
+    assert rep["matches_before"] == 0, "a dormant/excluded identifier must never page as a leak"
