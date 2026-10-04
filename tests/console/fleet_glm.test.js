@@ -5,7 +5,7 @@
 //  - an available read renders "GLM (z.ai Pro)", both windows with used/cap + %,
 //    a reset countdown, and the reset clock in UTC+4 next to UTC.
 //  - an unavailable read renders "GLM usage unavailable" and NO numbers.
-//  - fmtClockDual shifts by exactly +4h and labels both zones.
+//  - glmPace mirrors pool_pace.py (pace/projection) + week-to-date runway (op#25580).
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -61,19 +61,80 @@ function loadFleet() {
   return sandbox.module.exports;
 }
 
-const { glmCard, fmtClockDual } = loadFleet();
+const { glmCard, glmPace } = loadFleet();
 let passed = 0;
 function ok(name, fn) { fn(); passed++; console.log("  ok - " + name); }
 
 assert(typeof glmCard === "function", "fleet.js must export glmCard");
 
-ok("fmtClockDual shows UTC+4 next to UTC", () => {
-  // 2026-10-02T10:30:00Z is a Friday -> 14:30 in Abu Dhabi.
-  assert.strictEqual(fmtClockDual("2026-10-02T10:30:00+00:00"), "Fri 14:30 UTC+4 (10:30 UTC)");
-  // crossing midnight rolls the weekday
-  assert.strictEqual(fmtClockDual("2026-10-02T21:15:00+00:00"), "Sat 01:15 UTC+4 (21:15 UTC)");
-  assert.strictEqual(fmtClockDual(null), "");
-  assert.strictEqual(fmtClockDual("garbage"), "");
+const DAY = 86400000, NOW = Date.parse("2026-10-04T12:00:00Z");
+const at = (days) => new Date(NOW + days * DAY).toISOString().replace("Z", "+00:00");
+const near = (a, b, eps) => Math.abs(a - b) < (eps || 1e-9);
+
+ok("glmPace: mid-week maths match pool_pace.py", () => {
+  // 3.5d to reset -> elapsed 0.5; used 40% -> pace 0.8x, proj 80%, rate 40/3.5 %/d, runway 60/(40/3.5)=5.25d
+  const p = glmPace(40, at(3.5), NOW);
+  assert(near(p.pace, 0.8) && near(p.projected_pct, 80), JSON.stringify(p));
+  assert(near(p.runway_days, 5.25), JSON.stringify(p));
+});
+
+ok("glmPace: ahead of pace (screenshot case: 57% with 3d21h left)", () => {
+  const p = glmPace(57, at(3 + 21 / 24), NOW);
+  const ef = (7 - (3 + 21 / 24)) / 7;
+  assert(near(p.pace, 0.57 / ef) && near(p.projected_pct, 57 / ef), JSON.stringify(p));
+  assert(p.pace > 1 && p.projected_pct > 100, JSON.stringify(p));
+});
+
+ok("glmPace: elapsed == 0 (window just reset) -> no pace/proj/runway, no divide-by-zero", () => {
+  const p = glmPace(5, at(7), NOW);
+  assert(p.pace === null && p.projected_pct === null && p.runway_days === null, JSON.stringify(p));
+});
+
+ok("glmPace: reset further than 7d out clamps elapsed to 0 (same as pool_pace clamp)", () => {
+  const p = glmPace(5, at(9), NOW);
+  assert(p.pace === null && p.projected_pct === null, JSON.stringify(p));
+});
+
+ok("glmPace: 0% used -> pace 0, proj 0, runway hidden (not burning == pool_pace inf)", () => {
+  const p = glmPace(0, at(3.5), NOW);
+  assert(p.pace === 0 && p.projected_pct === 0 && p.runway_days === null, JSON.stringify(p));
+});
+
+ok("glmPace: >=100% used -> runway 0, never negative", () => {
+  const p = glmPace(120, at(3.5), NOW);
+  assert(p.runway_days === 0, JSON.stringify(p));
+});
+
+ok("glmPace: missing / past / unparsable reset or null pct -> null", () => {
+  assert.strictEqual(glmPace(40, null, NOW), null);
+  assert.strictEqual(glmPace(40, at(-0.1), NOW), null);
+  assert.strictEqual(glmPace(40, "garbage", NOW), null);
+  assert.strictEqual(glmPace(null, at(3), NOW), null);
+});
+
+ok("card shows ONE advisory line, from WK only, in the Claude-card format", () => {
+  const html = glmCard({ available: true, level: "pro", windows: [
+    { label: "wk", pct: 40, resets_at: new Date(Date.now() + 3.5 * DAY).toISOString() },
+    { label: "5h", pct: 90, resets_at: new Date(Date.now() + 1 * 3600000).toISOString() }] });
+  assert.strictEqual((html.match(/pooladvrow/g) || []).length, 1, html);
+  assert(/0\.8x · proj 80%/.test(html), html);
+  assert(/runway 5\.\dd/.test(html), html);
+});
+
+ok("runway shorter than days-to-reset is flagged warn (same rule as Claude cards)", () => {
+  // 1d to reset, elapsed 6/7, used 95%: rate 95/6 %/d -> runway 5/(95/6)=0.32d < 1d
+  const html = glmCard({ available: true, level: "pro", windows: [
+    { label: "wk", pct: 95, resets_at: new Date(Date.now() + 1 * DAY).toISOString() }] });
+  assert(html.includes('poolrun warn'), html);
+});
+
+ok("no WK window, or WK just reset -> no advisory line at all", () => {
+  const h1 = glmCard({ available: true, level: "pro", windows: [
+    { label: "5h", pct: 30, resets_at: new Date(Date.now() + 3600000).toISOString() }] });
+  assert(!h1.includes("pooladvrow"), h1);
+  const h2 = glmCard({ available: true, level: "pro", windows: [
+    { label: "wk", pct: 2, resets_at: new Date(Date.now() + 7 * DAY + 60000).toISOString() }] });
+  assert(!h2.includes("pooladvrow"), h2);
 });
 
 ok("available read renders % and resets-in only (op#25562: no counts, no clock)", () => {

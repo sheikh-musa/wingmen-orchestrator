@@ -284,17 +284,32 @@
   // Sits beside the Claude Max pool cards. Backend: nervous_system/console/
   // glm_usage.py (5-min server cache; the key never reaches the payload). When
   // the read failed the card says "GLM usage unavailable" — never stale numbers.
-  var OPERATOR_TZ_H = 4;   // operator is in Abu Dhabi (UTC+4, no DST)
-  function pad2(n) { return (n < 10 ? "0" : "") + n; }
-  // ISO -> "Thu 14:30 UTC+4 (10:30 UTC)"; "" when absent/unparsable.
-  function fmtClockDual(iso) {
-    if (!iso) return "";
-    var t = Date.parse(String(iso));
-    if (isNaN(t)) return "";
-    var u = new Date(t), l = new Date(t + OPERATOR_TZ_H * 3600000);
-    var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    return DAYS[l.getUTCDay()] + " " + pad2(l.getUTCHours()) + ":" + pad2(l.getUTCMinutes()) + " UTC+" + OPERATOR_TZ_H
-      + " (" + pad2(u.getUTCHours()) + ":" + pad2(u.getUTCMinutes()) + " UTC)";
+  // op#25580: pace/projection/runway for the GLM WK window, mirroring the Claude
+  // pool cards (nervous_system/pool_pace.py semantics): 7-day window ending at
+  // resets_at; elapsed fraction clamped to [0,1]; pace = (used/100)/elapsed and
+  // projected = used/elapsed, both null when elapsed <= 0. GLM has no stored
+  // trailing-24h reading pair, so runway uses the WEEK-TO-DATE average rate
+  // (used% / elapsed days) instead of pool_pace's trailing burn: null when not
+  // burning (rate <= 0 -> pool_pace's inf, which the Claude card also hides),
+  // never negative. Returns null when resets_at is missing/past (no window).
+  var GLM_WINDOW_DAYS = 7;
+  function glmPace(usedPct, resets_at, nowMs) {
+    if (usedPct == null || !resets_at) return null;
+    var t = Date.parse(String(resets_at));
+    if (isNaN(t)) return null;
+    var now = nowMs == null ? Date.now() : nowMs;
+    var dtr = (t - now) / 86400000;
+    if (!(dtr > 0)) return null;
+    var ef = Math.max(0, Math.min(1, (GLM_WINDOW_DAYS - dtr) / GLM_WINDOW_DAYS));
+    var used = Number(usedPct);
+    var out = { pace: null, projected_pct: null, runway_days: null, resets_at: resets_at };
+    if (ef > 0) {
+      out.pace = (used / 100) / ef;
+      out.projected_pct = used / ef;
+      var burn = used / (ef * GLM_WINDOW_DAYS);
+      if (burn > 0) out.runway_days = Math.max(0, (100 - used) / burn);
+    }
+    return out;
   }
   function glmCard(g) {
     if (!g) return "";
@@ -324,10 +339,15 @@
         + '<span class="poolreset">resets ' + (minutesToReset(w.resets_at) == null ? "—" : "in " + fmtReset(w.resets_at)) + '</span>'
         + '</div>';
     }).join("");
+    // Like the Claude cards: ONE advisory line, from the weekly window only (no 5H pace).
+    var wk = ws.filter(function (w) { return w.label === "wk"; })[0];
+    var pz = wk ? glmPace(wk.pct, wk.resets_at) : null;
+    var adv = pz ? paceAdvisory(pz) : "";
     return '<div class="poolrow poolcard glm ' + cls + '" title="' + esc(title) + '">'
       + '<div class="poolhead"><span class="poolchip ' + cls + '">' + esc(name) + '</span>'
       + (lvl ? '<span class="poolstatus">plan ' + esc(lvl) + '</span>' : "")
       + '</div>' + rows
+      + (adv ? '<div class="pooladvrow">' + adv + '</div>' : "")
       // op#24626/op#25357: the key is leak-flagged in the vault, operator accepted
       // continued use — the persistent card banner is hidden per Musa's explicit
       // request (op#25357), NOT because the risk is resolved: the backend still
@@ -343,7 +363,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v71';
+  var APP_BUILD = 'fc-v72';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -1892,7 +1912,7 @@
 
   // Node-only: expose the pure helpers for the unit tests (inert in the browser).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, glmCard: glmCard, fmtClockDual: fmtClockDual, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
+    module.exports = { pickTopBloat: pickTopBloat, coordCtxRows: coordCtxRows, poolChip: poolChip, glmCard: glmCard, glmPace: glmPace, paceAdvisory: paceAdvisory, hoursToReset: hoursToReset, minutesToReset: minutesToReset, fmtReset: fmtReset, next5hBoundary: next5hBoundary,
       ctxDisplayFrom: ctxDisplayFrom, idleLabel: idleLabel,
       poolOf: poolOf, tokChip: tokChip, poolRollup: poolRollup,
       mdlChip: mdlChip, shortModel: shortModel, routineSummary: routineSummary, collapsedHtml: collapsedHtml,
