@@ -508,6 +508,46 @@ def _page_migrate_to_chat_id_once(conn, ch: Channel, old_chat_id, new_chat_id, u
     )
 
 
+def is_staged_file_eligible(ch: "Channel", msg: dict) -> bool:
+    """True iff this inbound update is a real FILE/document (not a GIF —
+    Telegram sets `document` on animation messages too, same gotcha
+    _media_content already guards against) on a non-operator CLIENT channel
+    whose import pipeline isn't already owned by coord (orch-console #51060,
+    Musa op#25437-25440: lanes keep telling clients "I can't open your
+    file" instead of staging it — this auto-routes so nobody has to
+    remember to ask)."""
+    if not (msg.get("document") and not msg.get("animation")):
+        return False
+    return ch.audience == "client" and ch.owner_lane != "irsyad-coord"
+
+
+def _page_stage_file_once(conn, ch: "Channel", upd_id: int, op_msg_id: int,
+                           local_path: str, caption: str) -> None:
+    """Page ONCE per (channel, update) — same durable page-once dedup as
+    _page_pinned_drift_once / _page_migrate_to_chat_id_once (a marker
+    substring in `body`, not in-memory state). Auto-routes an inbound client
+    file to orch-console for staging: a lane must never open the file
+    itself and tell the client it "can't open" it — it waits for a STAGE
+    verdict (scripts/stage_client_file.py) instead."""
+    marker = f"STAGE-FILE:{ch.key}:{upd_id}"
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM agent_messages WHERE body LIKE %s LIMIT 1", (f"{marker}%",))
+        if cur.fetchone():
+            return
+    from scripts import bus_send
+    caption_note = f"caption: {caption}" if caption else "(no caption)"
+    bus_send.send(
+        from_agent=PAGE_FROM_AGENT, to=PAGE_TO_AGENT, mtype="blocker",
+        subject=f"STAGE: {ch.key} op#{op_msg_id} {local_path}",
+        body=(f"{marker}\nSTAGE: {ch.key} op#{op_msg_id} {local_path}\n{caption_note}\n\n"
+              f"Run scripts/stage_client_file.py {local_path} {op_msg_id} --export to check "
+              "it before handing anything to a lane — a lane's own outbound guard now "
+              "refuses a message that just says it can't open a client's file; it must "
+              "wait for this instead."),
+        priority="P1", req=True, dsn=_dsn(),
+    )
+
+
 def check_pinned_channels_not_enabled(conn, host: str | None = None) -> list[str]:
     """Loud log + page-once for every pinned channel currently enabled=true
     live. Returns the drifted keys (empty list = clean). Called once per
@@ -1144,6 +1184,23 @@ def process_update(conn, ch: Channel, upd: dict) -> bool:
             operator_log.maybe_track_client_ask(op_msg_id, content, ch.owner_lane)
         except Exception as e:  # noqa: BLE001
             _log_line(f"{ch.key}: client-ask tracking raised on update {upd_id} "
+                      f"({type(e).__name__}: {e}) — non-fatal")
+
+    # 3d. STAGE-FILE AUTO-ROUTE (orch-console #51060, Musa op#25437-25440): an
+    # inbound FILE (not a GIF) on a client channel auto-pages orch-console to
+    # stage it — lanes/humans no longer have to remember to ask. irsyad
+    # channels are excluded (coord's own import pipeline owns those).
+    # _download_media is idempotent on disk (_media_content already downloaded
+    # this exact file above), so this just resolves the same cached path, no
+    # re-download. Best-effort: a staging hiccup must not block routing.
+    if is_staged_file_eligible(ch, msg):
+        try:
+            doc = msg["document"]
+            local_path = _download_media(ch.token, doc["file_id"], doc["file_unique_id"],
+                                          ch.key, upd_id, doc.get("file_name"))
+            _page_stage_file_once(conn, ch, upd_id, op_msg_id, local_path, msg.get("caption") or "")
+        except Exception as e:  # noqa: BLE001
+            _log_line(f"{ch.key}: STAGE-FILE auto-route raised on update {upd_id} "
                       f"({type(e).__name__}: {e}) — non-fatal")
 
     # 4. ROUTE (transport only — A2) with busy-aware nudge policy (CAI-RESP-382).

@@ -40,6 +40,11 @@ _send_arg_guard "$TEXT" || exit 2
 source "$ORCH_DIR/scripts/lib/client_send_leak_guard.sh"
 _client_send_leak_guard "$TEXT" || exit 3
 
+# orch-console bus #51060 (Musa op#25437-25440, angry): never tell a client
+# "I can't open your file" / ask them to describe it — stage it instead.
+source "$ORCH_DIR/scripts/lib/cant_open_file_guard.sh"
+_cant_open_file_guard "$TEXT" || exit 5
+
 # A#9 (substrate audit 2026-09-16): lane_reply is the ONE sender that reaches CLIENT groups,
 # yet it had no redaction. Scrub secret patterns (pg DSNs, bot tokens, API keys) here, ONCE,
 # BEFORE the text reaches the DB — so the DRAFT the reviewer forwards, the operator_messages

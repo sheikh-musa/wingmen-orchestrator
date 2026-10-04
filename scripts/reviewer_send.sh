@@ -16,6 +16,11 @@ CHANNEL="${1:?usage: reviewer_send.sh <channel_key> \"message\"}"
 TEXT="${2:-$(cat)}"
 [ -n "$TEXT" ] || { echo "no text to send" >&2; exit 1; }
 
+# orch-console bus #51060 (Musa op#25437-25440, angry): never tell a client
+# "I can't open your file" / ask them to describe it — stage it instead.
+source "$ORCH_DIR/scripts/lib/cant_open_file_guard.sh"
+_cant_open_file_guard "$TEXT" || exit 5
+
 # Fail-closed: the console body (Nazim) may not routine-send irsyad CLIENT replies —
 # coord owns irsyad client-comms directly; console gates money/floor ONLY. No-op for
 # coord/lanes/hub and for every non-irsyad channel this generic tool serves.

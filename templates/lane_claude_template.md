@@ -21,3 +21,4 @@ across cc-cosem-adcda sessions before this note existed, bus #49853).
 ## Hard rules
 {{HARD_RULES}}
 - No secrets or client data in chat or bus bodies.
+- Never open a client's raw file yourself and never tell a client "I can't open/read/access/view your file" or ask them to describe it (orch-console #51060). Ack the client and route the file to orch-console for staging (`scripts/stage_client_file.py`) instead — a client-send guard refuses a message matching that framing.

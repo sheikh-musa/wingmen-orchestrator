@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -82,10 +83,48 @@ def chunk_text(text: str, limit: int = CHUNK) -> list[str]:
     return out
 
 
+class CantOpenFileRefusal(ValueError):
+    """Raised by enqueue() when a message to a CLIENT channel uses the "I
+    can't open your file" framing (orch-console bus #51060, Musa
+    op#25437-25440) — the sender must ack the client and route the file to
+    orch-console (scripts/stage_client_file.py) instead of saying it can't be
+    opened."""
+
+
+# orch-console bus #51060: refuse "I can't open/read/access/view the file,
+# describe it" framing on CLIENT channels — the exact pattern that made Hariz
+# ask cc-cosem-exams to describe his own spreadsheet instead of being staged.
+_CANT_OPEN_FILE_RE = re.compile(
+    r"can.?t open|cannot open|unable to open|"
+    r"can.?t (read|access|view) (the |your )?(file|attachment|spreadsheet|document)|"
+    r"describe (it|what it shows)",
+    re.IGNORECASE,
+)
+
+
+def _refuse_cant_open_file_framing(cur, channel_key: str, text: str | None) -> None:
+    """Scoped to audience='client' channels only — operator/internal channels
+    may legitimately need this phrasing (e.g. reporting a download failure to
+    the fleet). Looked up fresh per call (not cached) since a channel's
+    audience can change."""
+    if not text or not _CANT_OPEN_FILE_RE.search(text):
+        return
+    cur.execute("SELECT audience FROM bot_channels WHERE channel_key=%s", (channel_key,))
+    row = cur.fetchone()
+    if row and row[0] == "client":
+        raise CantOpenFileRefusal(
+            f"refusing to enqueue to client channel '{channel_key}': the message matches the "
+            "\"can't open/read/access the file\" framing. Ack the client and route the file to "
+            "orch-console (scripts/stage_client_file.py) instead — never tell a client you "
+            "can't open their file."
+        )
+
+
 def enqueue(channel_key: str, text: str | None = None, chat_id: int | None = None,
             file_path: str | None = None, reply_to: int | None = None) -> int:
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+        _refuse_cant_open_file_framing(cur, channel_key, text)
         cur.execute(
             "INSERT INTO tg_out (channel_key, chat_id, text, file_path, reply_to_operator_msg_id) "
             "VALUES (%s,%s,%s,%s,%s) RETURNING id",
