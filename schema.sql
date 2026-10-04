@@ -630,7 +630,9 @@ create table if not exists data_provenance (
   owner           text,
   created_by      text not null,
   created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),  -- NO auto-bump trigger: a caller UPDATE must
+                                                          -- set updated_at = now() explicitly, or the
+                                                          -- staleness signal classify() surfaces is wrong.
   unique (project_ref, org_id)
 );
 

@@ -16,7 +16,11 @@ trainee data is allowed back in:
 - [ ] Update the `data_provenance` row for `('ywrpttpxwfcoodovxhsr',
       '1478c9b2')` to `classification = 'REAL'`, with `evidence` citing the
       cutover commit/migration — via a normal UPDATE, owner `cosem`, not by
-      deleting and re-inserting the row (preserve the audit trail).
+      deleting and re-inserting the row (preserve the audit trail). The table
+      has **no auto-bump trigger on `updated_at`** — set it explicitly:
+      `UPDATE data_provenance SET classification = 'REAL', evidence = '...',
+      owner = 'cosem', updated_at = now() WHERE project_ref =
+      'ywrpttpxwfcoodovxhsr' AND org_id = '1478c9b2';`
 - [ ] Re-run `scripts/gen_data_store_registry.py` so
       `docs/data-store-registry.md` reflects the flip.
 

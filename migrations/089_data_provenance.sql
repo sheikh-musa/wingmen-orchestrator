@@ -65,7 +65,13 @@ create table if not exists data_provenance (
   owner           text,
   created_by      text not null,
   created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),  -- NO auto-bump trigger (cc-quality review,
+                                                          -- bus #51770/#51772 item 4): a caller doing
+                                                          -- `UPDATE data_provenance SET classification=...`
+                                                          -- MUST also set `updated_at = now()` explicitly,
+                                                          -- or the staleness signal classify() surfaces
+                                                          -- goes wrong. See docs/GO-LIVE-CHECKLIST.md's
+                                                          -- example UPDATE for the pattern to follow.
   unique (project_ref, org_id)
 );
 
