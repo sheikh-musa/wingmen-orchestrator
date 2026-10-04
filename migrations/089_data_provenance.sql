@@ -8,6 +8,18 @@
 -- assert: no_table_privilege authenticated public.data_provenance_flags SELECT
 -- assert: no_execute anon public.classify_data_provenance(text,text)
 -- assert: no_execute authenticated public.classify_data_provenance(text,text)
+-- assert: search_path public.classify_data_provenance(text,text)
+--
+-- SEARCH_PATH FIX (cc-storefront opus confirmation pass, bus #51791, F1 — LOW
+-- severity, required): classify_data_provenance() is SECURITY DEFINER with no
+-- `SET search_path` and referenced `data_provenance` unqualified. A SQL secdef
+-- function is not inlined and resolves unqualified names against the CALLER's
+-- search_path at call time — a shadowing relation earlier in that path would be
+-- read instead of the real table. Fixed to match this store's secdef convention
+-- (063/064, including the directly-comparable governance functions
+-- project_governance/cai_gate): `SET search_path = ''` + schema-qualified
+-- `public.data_provenance` in the body, verified by the `-- assert: search_path`
+-- line above.
 --
 -- GRANT-HYGIENE FIX (cc-quality review, bus #51770, MEDIUM finding on an
 -- earlier revision of this file): the RLS policy below had no `TO` clause,
@@ -90,9 +102,10 @@ revoke all on data_provenance from public, anon, authenticated;
 -- orch-console gate condition #2) — this function itself just returns nothing.
 create or replace function classify_data_provenance(p_project_ref text, p_org_id text default '')
 returns table (classification text, evidence text, owner text, alias text, updated_at timestamptz)
-language sql stable security definer as $$
+language sql stable security definer
+set search_path = '' as $$
   select classification, evidence, owner, alias, updated_at
-  from data_provenance
+  from public.data_provenance
   where project_ref = p_project_ref
     and org_id = coalesce(p_org_id, '')
   limit 1;

@@ -655,9 +655,10 @@ revoke all on data_provenance from public, anon, authenticated;
 -- orch-console gate condition #2) — this function itself just returns nothing.
 create or replace function classify_data_provenance(p_project_ref text, p_org_id text default '')
 returns table (classification text, evidence text, owner text, alias text, updated_at timestamptz)
-language sql stable security definer as $$
+language sql stable security definer
+set search_path = '' as $$
   select classification, evidence, owner, alias, updated_at
-  from data_provenance
+  from public.data_provenance
   where project_ref = p_project_ref
     and org_id = coalesce(p_org_id, '')
   limit 1;
