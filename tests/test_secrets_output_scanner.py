@@ -767,3 +767,77 @@ def test_main_logs_event_with_cwd_for_unknown_agent_session(tmp_path, monkeypatc
     assert record["agent"] == "unknown-agent"
     assert record["cwd"] == "/Users/sheikhmusa/wingmen/fleet-health"
     assert dsn not in log_path.read_text()
+
+
+# ---- cc-quality #51317 (BLOCKING): invalid UTF-8 in a persisted file must not crash ----
+# the hook before the main redact/log/page loop runs -- a crash there skipped EVERY
+# hit in that invocation, including real ones found via the normal (non-persisted)
+# tool_response/tool_input path.
+
+def test_scan_persisted_output_does_not_crash_on_invalid_utf8(tmp_path):
+    p = tmp_path / "spill.bin"
+    dsn = "postgres" + "://orchuser:RealLooking9Zx@203.0.113.21:5432/orch"
+    with open(p, "wb") as f:
+        f.write(b"before-binary\n")
+        f.write(b"\xff\xfe\x00\xff invalid utf-8 bytes here \xc0\xaf")
+        f.write(("\n" + dsn + "\n").encode("utf-8"))
+        f.write(b"\xff\xfe more invalid bytes")
+    hits = scanner.scan_persisted_output(str(p))  # must not raise
+    assert hits and any(h[0] == "postgres-dsn" for h in hits), \
+        "a secret-shaped match in the valid text around corrupted bytes must still be found"
+
+
+def test_redact_persisted_output_does_not_crash_on_invalid_utf8(tmp_path):
+    p = tmp_path / "spill.bin"
+    dsn = "postgres" + "://orchuser:RealLooking9Zx@203.0.113.22:5432/orch"
+    with open(p, "wb") as f:
+        f.write(b"\xff\xfe\x00\xff " + dsn.encode("utf-8") + b" \xc0\xaf more bytes")
+    changed = scanner.redact_persisted_output(str(p), "postgres-dsn", scanner.SECRET_PATTERNS["postgres-dsn"])
+    assert changed is True
+    after = p.read_text(encoding="utf-8", errors="replace")
+    assert dsn not in after
+    assert "REDACTED" in after
+
+
+def test_main_still_redacts_and_pages_a_real_inline_hit_when_the_persisted_file_is_binary(tmp_path):
+    # The exact failure mode cc-quality found: a crash in the persisted-file step must
+    # never suppress redaction/paging for a REAL hit found via the normal path.
+    import os
+    import subprocess
+
+    inline_dsn = "postgres" + "://orchuser:RealLooking9Zx@203.0.113.23:5432/orch"
+    spill = tmp_path / "spill.bin"
+    with open(spill, "wb") as f:
+        f.write(b"\xff\xfe\x00\xff invalid utf-8, no secret shape here \xc0\xaf")
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": f'echo "{inline_dsn}"'}}
+        ]}}) + "\n"
+        + json.dumps({"type": "tool_result", "toolUseResult": {
+            "stdout": inline_dsn, "persistedOutputPath": str(spill),
+        }}) + "\n"
+    )
+
+    env = dict(os.environ, SECRETS_SCANNER_DEMO="1")
+    orch_root_dir = tmp_path / "orch_root"
+    orch_root_dir.mkdir()
+    orch_root = _fake_orch_root(orch_root_dir)
+    env["ORCH_ROOT"] = str(orch_root)
+    counter = tmp_path / "page_calls.txt"
+    (orch_root / "scripts" / "bus_send.py").write_text(
+        f"import pathlib; pathlib.Path({str(counter)!r}).open('a').write('x\\n')\n"
+    )
+
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": f'echo "{inline_dsn}"'},
+        "tool_response": inline_dsn,
+        "transcript_path": str(transcript),
+    })
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    assert r.returncode == 0, f"must not crash; stderr={r.stderr}"
+    assert inline_dsn not in transcript.read_text()
+    assert "REDACTED" in transcript.read_text()
+    assert counter.exists() and counter.read_text().count("x") == 1

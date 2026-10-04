@@ -233,9 +233,18 @@ def _find_persisted_output_paths(transcript_path: str, max_lines: int = 3) -> li
 def scan_persisted_output(path: str) -> list[tuple[str, re.Match]]:
     """Scan a Claude-Code-persisted spilled-output file (plain text, not JSONL) for
     every secret pattern. Same return shape as scan(), so a hit here feeds the same
-    paging/fixture-allowlist logic as a normal tool_response/tool_input hit."""
+    paging/fixture-allowlist logic as a normal tool_response/tool_input hit.
+
+    cc-quality #51317 (BLOCKING, confirmed empirically): a large spilled output can
+    legitimately contain invalid UTF-8 (exactly the kind of output that gets spilled
+    past the inline cap in the first place) -- encoding="utf-8" with no errors=
+    handling raised an uncaught UnicodeDecodeError here, crashing the hook BEFORE the
+    main redact/log/page loop ran at all, which skipped redaction/paging for every hit
+    in that invocation, including real ones found in the normal tool_response/
+    tool_input. errors="replace" avoids the crash while still correctly matching a
+    secret shape in the surrounding valid text (verified)."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
     except OSError:
         return []
@@ -247,9 +256,9 @@ def redact_persisted_output(path: str, cls: str, pattern: re.Pattern) -> bool:
     string substitution -- there is no JSON structure to preserve here, unlike
     redact_recent_lines. Idempotent: a no-op if the pattern doesn't match (safe to call
     for every known class against every persisted path, not just the one it was found
-    in)."""
+    in). errors="replace" on read for the same reason as scan_persisted_output above."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
     except OSError:
         return False
