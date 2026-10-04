@@ -76,7 +76,7 @@ ok("fmtClockDual shows UTC+4 next to UTC", () => {
   assert.strictEqual(fmtClockDual("garbage"), "");
 });
 
-ok("available read renders numbers, % and both clocks", () => {
+ok("available read renders % and resets-in only (op#25562: no counts, no clock)", () => {
   const in2h = new Date(Date.now() + 2 * 3600000 + 60000).toISOString().replace("Z", "+00:00");
   const in5d = new Date(Date.now() + 5 * 86400000).toISOString().replace("Z", "+00:00");
   const html = glmCard({
@@ -88,12 +88,13 @@ ok("available read renders numbers, % and both clocks", () => {
   });
   assert(html.includes("GLM (z.ai Pro)"), html);
   assert(html.includes("plan pro"), html);
-  assert(html.includes("1,650/12,000"), html);
-  assert(html.includes("1,650/60,000"), html);
+  assert(!html.includes("1,650"), html);
+  assert(!html.includes("12,000") && !html.includes("60,000"), html);
   assert(html.includes(">14%<") && html.includes(">3%<"), html);
   assert(/resets in 2h \d+m/.test(html), html);
   assert(/resets in [45]d \d+h/.test(html), html);
-  assert(html.includes("UTC+4 (") && html.includes(" UTC)"), html);
+  assert(!html.includes("UTC+4") && !html.includes(" UTC)"), html);
+  assert(!html.includes("glmclock"), html);
   assert(!html.includes("unavailable"), html);
   assert(html.includes("poolcard glm good"), html);
 });
