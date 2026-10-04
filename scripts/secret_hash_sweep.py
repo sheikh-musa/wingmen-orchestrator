@@ -284,6 +284,22 @@ def _line_offsets(data: bytes) -> List[Tuple[int, int]]:
     return spans
 
 
+def _file_unchanged_since(path: str, size_before: int, mtime_ns_before: int) -> bool:
+    """orch-console #51400: Claude Code APPENDS to a live session's .jsonl continuously.
+    An in-place rewrite at an offset computed from a stale read could land on a file whose
+    earlier content shifted (or whose last line was mid-write when we read it). True only if
+    *path*'s (size, mtime) right now still match the snapshot taken at read time -- the
+    re-check happens immediately before the write in sweep_file, not at some earlier point,
+    so the window this closes is the smallest it can be. False (anything differs, or the
+    file is gone) means: abort this file for THIS cycle, no partial write -- the recurring
+    sweep re-scans every run, so a real secret here is caught again next cycle, not lost."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_size == size_before and st.st_mtime_ns == mtime_ns_before
+
+
 def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
                ledger_path: str | None = None, shape_match: bool = True) -> dict:
     """Detect (and, if execute, redact in place) secret spans in one file.
@@ -306,6 +322,7 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
     try:
         with open(path, "rb") as fh:
             data = fh.read()
+            st_before = os.fstat(fh.fileno())      # same fd as the read -- no separate race window
     except OSError as e:
         rep["error"] = "read failed: %s" % e.__class__.__name__
         return rep
@@ -348,6 +365,14 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
     if not execute or rep["class"] == "env-snapshot":
         rep["size_after"] = rep["size_before"]
         rep["matches_after"] = rep["matches_before"] if rep["class"] == "env-snapshot" else 0
+        return rep
+
+    if changes and not _file_unchanged_since(path, rep["size_before"], st_before.st_mtime_ns):
+        rep["error"] = "ABORTED: file changed since read (live-append race) — retry next cycle"
+        rep["size_after"] = rep["size_before"]
+        rep["matches_after"] = rep["matches_before"]
+        rep["lines_changed"] = 0
+        rep["spans_redacted"] = 0
         return rep
 
     if changes:
