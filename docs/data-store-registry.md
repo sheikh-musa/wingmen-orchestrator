@@ -8,6 +8,15 @@ style (cai enforcement). Per-tenant data residency (TENANT-RESIDENCY-001): a
 client's ROWS live in that client's designated store, always — shared code is
 fine, commingled data is not.
 
+**Per-org classification (generated section below):** whether a specific
+*org*'s rows within a store are REAL or SYNTHETIC data is tracked in the
+`data_provenance` table (migration 089), not here by hand — see
+[`DATA-PROVENANCE.md`](DATA-PROVENANCE.md) and the generated table under
+[Per-org classifications](#per-org-classifications-generated--do-not-hand-edit)
+below. Before raising or dismissing a data-exposure claim, run
+`scripts/data_truth.py classify <project_ref> [org_id]` — a slug or org name
+is NOT evidence of classification (op#25626).
+
 ## Supabase projects
 
 | Alias | Project ref | Tenant(s) / purpose | Region |
@@ -16,9 +25,15 @@ fine, commingled data is not.
 | **ihsanos multi-tenant DB** | `ceayjeamtmcyzzvqflus` | ihsanos + org-scoped sub-tenants (default home for tenants w/o a silo) | ap-southeast-1 (SG) |
 | **irsyad silo** (goumlyne) | `goumlynecruxrlmzlntp` | irsyad ONLY (tabung, DMS, school-fees, nasi-mandi donor data) — under Gazzabyte account | — |
 | **wingmen-personal** | `brrgastulcffamlbggyu` | operator life-graph + Zahidah second-brain (mamadah) | ap-southeast-1 (SG) |
-| **cosem-platform demo/dev** | `ywrpttpxwfcoodovxhsr` | shared DEMO + dev DB — meant synthetic-only, **NOT a home for real tenant data**. 🔴 **CAI-RESP-1340 VIOLATION (2026-08-31):** real ADCDA gov-PII (org `1478c9b2`, 69 real trainees — Emirates/military ID + DOB) has been living here since 2026-07-09, breaking CAI-525/711/809. CONTAINMENT in force: **no new real-PII writes to org `1478c9b2`** until a UAE-sovereign silo exists; reads/existing product op for the 69 NOT frozen; **no unilateral migrate/delete** (gated, mirrors CAI-812). Migration to a UAE-sovereign silo pending (investigation routed to orch-console). | ap-southeast-1 (SG) |
+| **cosem-platform demo/dev** | `ywrpttpxwfcoodovxhsr` | shared DEMO + dev DB — meant synthetic-only, **NOT a home for real tenant data**. 🔴 **CAI-RESP-1340 VIOLATION (2026-08-31):** real ADCDA gov-PII (org `1478c9b2`, 69 real trainees — Emirates/military ID + DOB) has been living here since 2026-07-09, breaking CAI-525/711/809. CONTAINMENT in force: **no new real-PII writes to org `1478c9b2`** until a UAE-sovereign silo exists; reads/existing product op for the 69 NOT frozen; **no unilateral migrate/delete** (gated, mirrors CAI-812). Migration to a UAE-sovereign silo pending (investigation routed to orch-console). **CORRECTION (op#25626, 2026-10-05):** this finding describes 2026-07-09; org `1478c9b2`'s *current* trainee rows are a later SYNTHETIC reseed (`scripts/reseed-adcda-groups.ts` commit `b7491a6`, 2026-07-22+) — see the generated per-org table below and the `data_provenance` row. Both facts are true, neither supersedes the other. Current classification: `MIXED_PENDING_REAL` (see [`GO-LIVE-CHECKLIST.md`](GO-LIVE-CHECKLIST.md)). Do not read this row alone as "still real today." | ap-southeast-1 (SG) |
 | **cosem-platform ADCDA silo** | _not yet provisioned — 🔴 migration target for the CAI-RESP-1340 real-PII in `ywrpttpxwfcoodovxhsr`_ | ADCDA real trainee data (Emirates-ID gov-PII) — MUST be its OWN UAE-**sovereign** silo (sovereignty ≠ region; AWS me-central-1 UAE only if sovereignty independently confirmed per CAI-809, never assumed from region name) before any further real write (TENANT-RESIDENCY-001). Migration plan + Musa sign-off on target pending. | UAE-sovereign (TBD) |
 | **cosem-platform TDU silo** | _designation pending_ | TDU real staff/asset data — dedicated SG production org, never the demo project | ap-southeast-1 (SG) |
+
+## Per-org classifications (generated — do not hand-edit)
+
+<!-- GENERATED:data_provenance:START -->
+Not yet generated — run `scripts/gen_data_store_registry.py` after migration 089 is applied.
+<!-- GENERATED:data_provenance:END -->
 
 **mamadah routing note (PR #240, cc-quality MEDIUM):** content routing for the
 `mamadah` channel to wingmen-personal is gated by
