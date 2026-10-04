@@ -54,9 +54,16 @@ def test_missing_map_fails_closed_to_empty_not_an_exception(tmp_path):
 
 
 def test_comment_lines_are_not_matched_as_a_fp(tmp_path):
+    """cc-quality's PR#292 mutation-test finding: a space-after-'#' fixture
+    ("# musa 68142948c003") stays green even with the comment-skip guard fully
+    deleted, because that spacing shifts awk's field 2 off the fp entirely --
+    vacuous. The real map convention (its own header row) is NO space after '#'.
+    This reproduces cc-quality's exact repro: a commented-out line carrying the
+    SAME fp as a real entry, appearing FIRST -- without the guard, awk's
+    first-match-wins would return the comment's field 1 ("#musa2") instead of
+    the real account below it."""
     p = tmp_path / "token_fps.map"
-    p.write_text("# musa 68142948c003\nmusa2 e1dfa48eec85\n")
-    assert _account_for_fp("68142948c003", str(p)) == ""
+    p.write_text("#musa2 e1dfa48eec85\nmusa2 e1dfa48eec85\n")
     assert _account_for_fp("e1dfa48eec85", str(p)) == "musa2"
 
 
