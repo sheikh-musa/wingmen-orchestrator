@@ -810,21 +810,9 @@ CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/
 # truth we just computed above, not a second independent guess. Falls back to the
 # static label (then "unlabelled") only when the fp matches no known account, so an
 # unrecognized/rotated-but-unmapped token still gets labelled rather than guessed.
-CC_AUTH_LABEL="$("$VENV_PY" - "$CC_AUTH_FP" "$ORCH_DIR/scripts/lib" <<'PY' 2>/dev/null
-import sys
-sys.path.insert(0, sys.argv[2])
-try:
-    from token_file_guard import load_map
-    fp = sys.argv[1]
-    if fp:
-        for acct, mapped_fp in load_map().items():
-            if mapped_fp == fp:
-                print(acct)
-                break
-except Exception:
-    pass
-PY
-)"
+# shellcheck source=scripts/lib/token_file_guard.sh
+. "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { echo "FATAL: token_file_guard.sh missing" >&2; exit 1; }
+CC_AUTH_LABEL="$(account_for_fp "$CC_AUTH_FP")"
 CC_AUTH_LABEL="${CC_AUTH_LABEL:-${CLAUDE_ACCOUNT_LABEL:-unlabelled}}"
 # Boot stamp via the ONE shared writer (2026-10-01): bounded retries + LOUD failure
 # (was a silent one-shot `except: pass` — the lost stamp that left cc-irsyad-2 and
