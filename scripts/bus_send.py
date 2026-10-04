@@ -67,6 +67,14 @@ _VALID_TYPES = (
 _MIN_BODY_BYTES = 40
 _HUB_AGENT = "cc-orchestrator"
 
+# Real, intentional send targets that are legitimately NEVER wake-eligible by
+# is_wake_eligible_recipient's definition (operator / human-opened addresses) --
+# never "undeliverable" below, despite having no live wake owner. Mirrors
+# scripts/fleet_health.py's _HUMAN_OPENED / _NEVER_ARCHIVE_ADDRS (small, stable
+# sets kept in sync by hand; worth a shared module if either grows).
+_HUMAN_OPENED = frozenset({"cto-desktop"})
+_UNDELIVERABLE_EXEMPT = frozenset({"musa"}) | _HUMAN_OPENED
+
 
 _LIVE_INSTANCE_WINDOW = "30 minutes"  # matches scripts/irsyad_autoscaler.py LIVE_HEARTBEAT_WINDOW
 
@@ -140,6 +148,54 @@ def refuse_if_base_has_live_instances(to: str, to_base: bool, dsn: str | None = 
     )
 
 
+def _undeliverable(to_agent: str | None) -> bool:
+    """A to_agent with NO possible live wake owner -- same SSOT definition as
+    scripts/fleet_health.py's _undeliverable: not eligible on agent_wake's most
+    permissive floor (P0 + requires_response), so a narrow-floor recipient (the
+    hub) is never misread as dead. Exempt addresses (operator / human-opened)
+    are real, intentional targets that are just never wake-eligible by design,
+    not a misroute -- never flagged here."""
+    if not to_agent or to_agent in _UNDELIVERABLE_EXEMPT:
+        return False
+    from nervous_system.agent_wake import is_wake_eligible_recipient
+
+    return not is_wake_eligible_recipient(to_agent, "P0", True)
+
+
+def refuse_if_undeliverable(
+    to: str, reply_to: int | None = None, allow_undeliverable: bool = False, stream=None,
+) -> None:
+    """Refuse a send to a structurally-undeliverable to_agent -- a write-only
+    producer with no live wake owner (commitment-sweeper, programme-stall-guard,
+    sla-watchdog, ...). Four real dead-letters (bus #50648/#50649/#50689/#50697)
+    were a previous console body "replying" to exactly this class of address --
+    a standing rule against it doesn't survive a context reset (orch-console
+    #50969), so this makes it structural.
+
+    This refuses regardless of --reply-to -- replying to a row FROM a write-only
+    producer must not create a new row TO it either; the correct action is to
+    STAMP the original row (a plain UPDATE, which --reply-to already does as a
+    side effect of a normal send), never to send anything. When reply_to is
+    known, the refusal message points at that exact row to close instead of a
+    generic one.
+
+    --allow-undeliverable is the explicit, logged escape hatch for a genuine
+    deliberate one-off: downgrades this to a warning and the send proceeds."""
+    if not _undeliverable(to):
+        return
+    close_id = str(reply_to) if reply_to else "<its row id>"
+    message = (
+        f"'{to}' has no wake owner (write-only producer?). To close one of its "
+        f"fire rows: UPDATE agent_messages SET read_at=now(), responded_at=now(), "
+        f"response_ref='...' WHERE id={close_id}."
+    )
+    if allow_undeliverable:
+        print(f"bus_send: WARNING — {message} (--allow-undeliverable set, sending anyway)",
+              file=stream or sys.stderr)
+        return
+    raise SystemExit(f"bus_send: REFUSED — {message}")
+
+
 def warn_if_below_hub_wake_floor(to: str, req: bool, priority: str, stream=None) -> None:
     """bus #44527: --to cc-orchestrator --req at a priority below P1 will NOT wake the
     hub (floor = P0/P1 AND requires_response — reference_hub_wake_floor_p1_rr). This is
@@ -206,6 +262,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="send to --to literally even if it's a BASE id with live instance(s) "
              "(bus #49220) -- normally refused with the live instance address instead",
     )
+    p.add_argument(
+        "--allow-undeliverable", action="store_true", dest="allow_undeliverable",
+        help="send anyway to a structurally-undeliverable --to (write-only producer, "
+             "no live wake owner) -- logs a warning instead of refusing; for a genuine "
+             "deliberate one-off, never the default",
+    )
     return p
 
 
@@ -222,7 +284,7 @@ def read_body(stream) -> str:
 def send(
     from_agent: str, to: str, mtype: str, subject: str, body: str, priority: str,
     req: bool = False, thread: str | None = None, reply_to: int | None = None,
-    link_ask: int | None = None, dsn: str | None = None,
+    link_ask: int | None = None, dsn: str | None = None, allow_undeliverable: bool = False,
 ) -> tuple[int, str]:
     """Do the actual INSERT. The one place the SQL lives — CLI (`main`) and
     every shim (`_bus_tmp.py`, `scratchpad/bus_send.py`) call this so there is
@@ -230,6 +292,7 @@ def send(
     path. `priority` has no default here either — callers must pass it."""
     if priority not in _VALID_PRIORITIES:
         raise ValueError(f"send(): priority must be one of {_VALID_PRIORITIES}, got {priority!r}")
+    refuse_if_undeliverable(to, reply_to=reply_to, allow_undeliverable=allow_undeliverable)
 
     import psycopg2
 
@@ -319,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     row_id, thread_id = send(
         from_agent, args.to, args.type, args.subject, body, args.priority,
         req=args.req, thread=args.thread, reply_to=args.reply_to,
-        link_ask=args.link_ask,
+        link_ask=args.link_ask, allow_undeliverable=args.allow_undeliverable,
     )
     print(f"SENT id={row_id} thread={thread_id} from={from_agent} to={args.to} "
           f"priority={args.priority} req={args.req}")

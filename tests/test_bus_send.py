@@ -476,3 +476,154 @@ def test_send_without_link_ask_never_touches_operator_asks_on_a_reply(monkeypatc
             "x" * bs._MIN_BODY_BYTES, "P1", req=True, reply_to=99,
             dsn="postgresql://unused")
     assert not any("operator_asks" in e[0].lower() for e in cur.executed)
+
+
+# ---- undeliverable-recipient refusal (orch-console #50969, bus #50648/#50649/
+# #50689/#50697): 4 real dead-letters from a previous console body "replying"
+# to write-only producers (commitment-sweeper, programme-stall-guard) that have
+# no live wake owner. A standing rule against this doesn't survive a context
+# reset -- enforce it in code, in send() itself (the one place the SQL lives),
+# so every shim that calls send() directly is covered too, not just the CLI.
+
+@pytest.mark.parametrize("to", ["commitment-sweeper", "programme-stall-guard", "sla-watchdog"])
+def test_undeliverable_true_for_write_only_producers(to):
+    assert bs._undeliverable(to) is True
+
+
+@pytest.mark.parametrize("to", ["musa", "cto-desktop"])
+def test_undeliverable_exempts_operator_and_human_opened(to):
+    assert bs._undeliverable(to) is False
+
+
+@pytest.mark.parametrize("to", ["cc-irsyad", "cai", "orch-console", "cc-orchestrator"])
+def test_undeliverable_false_for_real_wake_eligible_recipients(to):
+    # cc-orchestrator is eligible only on the P0/P1+rr floor -- _undeliverable
+    # checks on that most-permissive floor, so the hub must never be misread
+    # as a dead-letter sink (mirrors fleet_health.py's _undeliverable exactly).
+    assert bs._undeliverable(to) is False
+
+
+def test_undeliverable_false_for_none_or_empty():
+    assert bs._undeliverable(None) is False
+    assert bs._undeliverable("") is False
+
+
+def test_refuse_if_undeliverable_raises_for_write_only_producer():
+    with pytest.raises(SystemExit, match="has no wake owner"):
+        bs.refuse_if_undeliverable("commitment-sweeper")
+
+
+def test_refuse_if_undeliverable_message_uses_generic_id_placeholder_without_reply_to():
+    with pytest.raises(SystemExit, match=r"WHERE id=<its row id>"):
+        bs.refuse_if_undeliverable("commitment-sweeper")
+
+
+def test_refuse_if_undeliverable_message_uses_reply_to_id():
+    with pytest.raises(SystemExit, match=r"WHERE id=50648"):
+        bs.refuse_if_undeliverable("commitment-sweeper", reply_to=50648)
+
+
+def test_refuse_if_undeliverable_passes_for_real_recipient():
+    bs.refuse_if_undeliverable("cc-irsyad")  # must not raise
+
+
+def test_refuse_if_undeliverable_allow_flag_warns_instead_of_raising():
+    import io
+
+    stream = io.StringIO()
+    bs.refuse_if_undeliverable("commitment-sweeper", allow_undeliverable=True, stream=stream)
+    out = stream.getvalue()
+    assert "WARNING" in out
+    assert "--allow-undeliverable set" in out
+
+
+# ---- the refusal lives in send() itself, not just the CLI -- every shim
+# (_bus_tmp.py, gated_inbound_digest.py, ddl_coverage_watchdog.py, ingest.py,
+# operator_log.py) calls send() directly, bypassing main()'s argparse path.
+
+def test_send_refuses_before_any_db_connect_for_write_only_to(monkeypatch):
+    import psycopg2
+
+    def _boom(*a, **k):
+        raise AssertionError("psycopg2.connect must not be called when the refusal fires")
+
+    monkeypatch.setattr(psycopg2, "connect", _boom)
+    with pytest.raises(SystemExit, match="has no wake owner"):
+        bs.send("orch-console", "commitment-sweeper", "update", "s",
+                "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused")
+
+
+def test_send_reply_to_write_only_producer_still_refused_not_inserted(monkeypatch):
+    # The exact shape of the 4 real dead-letters: --reply-to a row FROM a
+    # write-only producer must not create a new row TO it either -- the
+    # correct action is to stamp the ORIGINAL row (a plain UPDATE), which this
+    # refusal's message points at, never a new INSERT.
+    import psycopg2
+
+    def _boom(*a, **k):
+        raise AssertionError("psycopg2.connect must not be called when the refusal fires")
+
+    monkeypatch.setattr(psycopg2, "connect", _boom)
+    with pytest.raises(SystemExit, match=r"WHERE id=50648"):
+        bs.send("orch-console", "commitment-sweeper", "update", "s",
+                "x" * bs._MIN_BODY_BYTES, "P2", reply_to=50648,
+                dsn="postgresql://unused")
+
+
+def test_send_allow_undeliverable_bypasses_refusal_and_inserts(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    row_id, thread_id = bs.send(
+        "orch-console", "commitment-sweeper", "update", "s",
+        "x" * bs._MIN_BODY_BYTES, "P2", allow_undeliverable=True,
+        dsn="postgresql://unused",
+    )
+    assert (row_id, thread_id) == (4242, "th-uuid-abc")
+    assert conn.committed is True
+
+
+def test_send_real_recipient_unaffected_by_the_new_guard(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    row_id, thread_id = bs.send(
+        "orch-console", "cc-irsyad", "update", "s",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+    )
+    assert (row_id, thread_id) == (4242, "th-uuid-abc")
+
+
+# ---- --allow-undeliverable CLI flag + end-to-end through main()
+
+def test_allow_undeliverable_flag_defaults_false():
+    args = bs.build_parser().parse_args([
+        "--to", "cc-orchestrator", "--type", "update",
+        "--subject", "s", "--priority", "P1",
+    ])
+    assert args.allow_undeliverable is False
+
+
+def test_allow_undeliverable_flag_parses():
+    args = bs.build_parser().parse_args([
+        "--to", "commitment-sweeper", "--type", "update",
+        "--subject", "s", "--priority", "P2", "--allow-undeliverable",
+    ])
+    assert args.allow_undeliverable is True
+
+
+def test_cli_refuses_write_only_to_via_send(monkeypatch):
+    import io
+    import psycopg2
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "orch-console")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+    # not a BASE-id question (bus #49220) -- give that earlier check an empty
+    # answer so it passes through to send(), where the refusal under test lives.
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: [])
+
+    def _boom(*a, **k):
+        raise AssertionError("psycopg2.connect must not be called when the refusal fires")
+
+    monkeypatch.setattr(psycopg2, "connect", _boom)
+    with pytest.raises(SystemExit, match="has no wake owner"):
+        bs.main([
+            "--to", "commitment-sweeper", "--type", "decision", "--subject", "s",
+            "--priority", "P1",
+        ])
