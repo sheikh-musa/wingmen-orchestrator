@@ -2,6 +2,28 @@
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 --
+-- assert: no_table_privilege anon public.data_provenance SELECT
+-- assert: no_table_privilege authenticated public.data_provenance SELECT
+-- assert: no_table_privilege anon public.data_provenance_flags SELECT
+-- assert: no_table_privilege authenticated public.data_provenance_flags SELECT
+-- assert: no_execute anon public.classify_data_provenance(text,text)
+-- assert: no_execute authenticated public.classify_data_provenance(text,text)
+--
+-- GRANT-HYGIENE FIX (cc-quality review, bus #51770, MEDIUM finding on an
+-- earlier revision of this file): the RLS policy below had no `TO` clause,
+-- which Postgres defaults to PUBLIC/FOR ALL — despite its name, it granted
+-- USING(true) to every role including anon/authenticated, converting
+-- "RLS + grant defense-in-depth" into no defense at all. Combined with this
+-- store's Supabase-seeded default privileges (anon/authenticated inherit
+-- SELECT/EXECUTE on every new object, migration 049's own doctrine note),
+-- the table, the data_provenance_flags view (owner-rights, bypasses RLS),
+-- and the SECURITY DEFINER classify function would all have been
+-- anon-readable on apply. Fixed per this store's own CAI-1018 convention
+-- (migrations/049, 068, 088): explicit `FOR ALL TO service_role`, then
+-- REVOKE ALL from anon/authenticated on every new object, verified by the
+-- `-- assert:` lines above (CAI-RESP-1397 #5 — an unverified REVOKE can be
+-- a silent no-op).
+--
 -- Musa directive (bus #51657/#51670, orch-console relay, 2026-10-05): a single
 -- source of truth for whether a store/org/tenant's rows are REAL client data or
 -- SYNTHETIC/test data — "a quran for agents". Triggered by a false data-security
@@ -28,7 +50,12 @@
 create table if not exists data_provenance (
   id              bigserial primary key,
   project_ref     text not null,
-  org_id          text not null default '',  -- '' = store-level default (applies to the whole project);
+  org_id          text not null default '',  -- '' = the answer when a caller queries org_id=''
+                                               -- (no org given); NOT inherited by other orgs on the
+                                               -- same project_ref — an unseeded specific org still
+                                               -- resolves UNCLASSIFIED, not this row (cc-quality
+                                               -- review, bus #51770: safe direction, but don't call
+                                               -- it a "store-level default that applies project-wide").
                                                -- NOT null, because unique(project_ref, org_id) would not
                                                -- dedupe multiple NULLs under standard SQL NULL semantics
   org_name        text,
@@ -43,11 +70,14 @@ create table if not exists data_provenance (
 );
 
 alter table data_provenance enable row level security;
+drop policy if exists "service role full access" on data_provenance;
 create policy "service role full access" on data_provenance
-  using (true) with check (true);
+  for all to service_role using (true) with check (true);
 
 create index if not exists idx_data_provenance_project_ref on data_provenance(project_ref);
 create index if not exists idx_data_provenance_classification on data_provenance(classification);
+
+revoke all on data_provenance from public, anon, authenticated;
 
 -- classify(): the one sanctioned lookup. No row -> callers (scripts/data_truth.py)
 -- construct UNCLASSIFIED client-side and treat it as REAL (fail-safe direction,
@@ -62,6 +92,9 @@ language sql stable security definer as $$
   limit 1;
 $$;
 
+revoke all on function classify_data_provenance(text, text) from public, anon, authenticated;
+grant execute on function classify_data_provenance(text, text) to service_role;
+
 -- Lean boot-context arm (ARCH-019 doctrine: index only, no full dump): surfaces
 -- only the rows an agent actually needs to see unprompted — anything not a
 -- plain REAL/SYNTHETIC, since those are exactly the ones worth a second look
@@ -72,6 +105,8 @@ select project_ref, org_id, org_name, alias, classification, evidence, owner, up
 from data_provenance
 where classification in ('MIXED', 'MIXED_PENDING_REAL')
 order by project_ref, org_id;
+
+revoke all on data_provenance_flags from public, anon, authenticated;
 
 -- Seed rows. orch-console gate condition #3 (bus #51717): on the irsyad silo
 -- (goumlynecruxrlmzlntp) and the ihsanos multi-tenant DB (ceayjeamtmcyzzvqflus),

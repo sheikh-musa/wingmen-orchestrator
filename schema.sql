@@ -617,7 +617,10 @@ where bt.status = 'open' and bt.is_test is not true;
 create table if not exists data_provenance (
   id              bigserial primary key,
   project_ref     text not null,
-  org_id          text not null default '',  -- '' = store-level default (applies to the whole project);
+  org_id          text not null default '',  -- '' = the answer when a caller queries org_id=''
+                                               -- (no org given); NOT inherited by other orgs on the
+                                               -- same project_ref — an unseeded specific org still
+                                               -- resolves UNCLASSIFIED, not this row.
                                                -- NOT null, because unique(project_ref, org_id) would not
                                                -- dedupe multiple NULLs under standard SQL NULL semantics
   org_name        text,
@@ -631,12 +634,19 @@ create table if not exists data_provenance (
   unique (project_ref, org_id)
 );
 
+-- GRANT-HYGIENE (cc-quality review, bus #51770, MEDIUM finding): explicit
+-- `FOR ALL TO service_role` + REVOKE ALL from anon/authenticated on every
+-- new object, per this store's CAI-1018 convention (migrations/049/068/088).
+-- A policy with no `TO` clause defaults to PUBLIC/FOR ALL regardless of name.
 alter table data_provenance enable row level security;
+drop policy if exists "service role full access" on data_provenance;
 create policy "service role full access" on data_provenance
-  using (true) with check (true);
+  for all to service_role using (true) with check (true);
 
 create index if not exists idx_data_provenance_project_ref on data_provenance(project_ref);
 create index if not exists idx_data_provenance_classification on data_provenance(classification);
+
+revoke all on data_provenance from public, anon, authenticated;
 
 -- classify(): the one sanctioned lookup. No row -> callers (scripts/data_truth.py)
 -- construct UNCLASSIFIED client-side and treat it as REAL (fail-safe direction,
@@ -651,6 +661,9 @@ language sql stable security definer as $$
   limit 1;
 $$;
 
+revoke all on function classify_data_provenance(text, text) from public, anon, authenticated;
+grant execute on function classify_data_provenance(text, text) to service_role;
+
 -- Lean boot-context arm (ARCH-019 doctrine: index only, no full dump): surfaces
 -- only the rows an agent actually needs to see unprompted — anything not a
 -- plain REAL/SYNTHETIC, since those are exactly the ones worth a second look
@@ -661,3 +674,5 @@ select project_ref, org_id, org_name, alias, classification, evidence, owner, up
 from data_provenance
 where classification in ('MIXED', 'MIXED_PENDING_REAL')
 order by project_ref, org_id;
+
+revoke all on data_provenance_flags from public, anon, authenticated;
