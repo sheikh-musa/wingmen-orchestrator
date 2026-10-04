@@ -1,8 +1,8 @@
-# auditor_lanes.sh — SSOT for the FULL-tier auditor lanes (CAI-RESP-1170).
+# auditor_lanes.sh — SSOT for the FULL-tier (opus-4-8-clamped) auditor lanes
+# (CAI-RESP-1170, narrowed by CAI-RESP-1440).
 #
-# cc-quality + cc-storefront render governance and MUST run on claude-opus-4-8 —
-# never a Sonnet cost-flip. This list is the SINGLE source of that fact, sourced by
-# BOTH:
+# cc-storefront renders governance verdicts and MUST run on claude-opus-4-8 — never a
+# Sonnet cost-flip. This list is the SINGLE source of that fact, sourced by BOTH:
 #   * scripts/fleet_model.sh          — the --live flip carve-out (skip a non-opus flip)
 #   * scripts/lib/model_precedence.sh — the LAUNCH-cascade clamp (force opus at launch)
 # so the carve-out can NEVER be enforced in one path but not the other. That split is
@@ -10,9 +10,16 @@
 # fresh auditor launch with no .<session>_model pin + a Sonnet .fleet_model resolved to
 # Sonnet through model_precedence.sh, silently violating CAI-1170 (cc-storefront did).
 #
-# Overridable via the environment (for tests); defaults to the two live auditors. Add a
-# new FULL auditor HERE — one edit reaches both the flip tool and the launch path.
-AUDITOR_LANES="${AUDITOR_LANES:-quality storefront}"
+# CAI-RESP-1440 (2026-10-01, Musa op#24365): cc-quality moved OFF this opus-4-8 clamp
+# and onto its own `.quality_model` pin (claude-sonnet-5) — it is no longer a FULL
+# auditor here. cc-storefront is now the SOLE opus-4-8 FULL auditor; cc-quality's
+# sonnet-5 verdicts require cc-storefront's opus confirmation pass before they count as
+# FULL-tier. (This reverts the transient quality->opus regression tracked at bus
+# #51743/#51747.)
+#
+# Overridable via the environment (for tests); defaults to the one live FULL auditor.
+# Add a new FULL auditor HERE — one edit reaches both the flip tool and the launch path.
+AUDITOR_LANES="${AUDITOR_LANES:-storefront}"
 
 # is_auditor_lane <session> — return 0 iff <session> is a FULL auditor lane, else 1.
 # THE shared matcher (cc-quality #32146 nit-1): both fleet_model.sh and
