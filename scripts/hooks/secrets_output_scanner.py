@@ -194,6 +194,124 @@ def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max
     return changed
 
 
+def _find_persisted_output_paths(transcript_path: str, max_lines: int = 3) -> list[str]:
+    """bus #51269/#51285/#51290: Claude Code caps the inline `toolUseResult.stdout` it
+    writes to the transcript at a fixed size and spills the FULL output to a separate
+    plain-text file (`toolUseResult.persistedOutputPath`) when a tool's output is large.
+    A secret-shaped value past that cap is invisible to both the normal tool_response
+    scan (payload.tool_response is the same capped copy) AND the existing JSON-line
+    redaction (which only ever edits transcript_path's own lines) -- confirmed
+    empirically with a synthetic fixture-marked DSN placed past the cap: zero hits, zero
+    redaction, the raw value sat untouched in the persisted file. This finds any such
+    path referenced in the last `max_lines` of transcript_path, so the caller can scan +
+    redact that file too, independently of whatever the capped tool_response contained."""
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    if not lines:
+        return []
+    window_start = max(0, len(lines) - max_lines)
+    paths = []
+    for line in lines[window_start:]:
+        stripped = line.rstrip("\n")
+        if not stripped:
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        tur = obj.get("toolUseResult")
+        if isinstance(tur, dict):
+            p = tur.get("persistedOutputPath")
+            if isinstance(p, str) and p:
+                paths.append(p)
+    return paths
+
+
+def scan_persisted_output(path: str) -> list[tuple[str, re.Match]]:
+    """Scan a Claude-Code-persisted spilled-output file (plain text, not JSONL) for
+    every secret pattern. Same return shape as scan(), so a hit here feeds the same
+    paging/fixture-allowlist logic as a normal tool_response/tool_input hit."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return []
+    return scan(content)
+
+
+def redact_persisted_output(path: str, cls: str, pattern: re.Pattern) -> bool:
+    """Redact `pattern` matches in a persisted spilled-output file, in place. Plain
+    string substitution -- there is no JSON structure to preserve here, unlike
+    redact_recent_lines. Idempotent: a no-op if the pattern doesn't match (safe to call
+    for every known class against every persisted path, not just the one it was found
+    in)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return False
+    new_content = pattern.sub(REDACTION.format(cls=cls), content)
+    if new_content == content:
+        return False
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+    except OSError:
+        return False
+    return True
+
+
+# bus #51285: the hook never persisted transcript_path/session/tool anywhere durable --
+# once a page was sent, the ORIGINATING event (which file, which tool, which session)
+# was unrecoverable. Confirmed empirically investigating #51269: an independent
+# fleet-wide search for the redaction marker found nothing at or before the page's
+# timestamp. This logs enough to locate a future event's transcript after the fact --
+# NEVER the matched value or a hash of it (a hash is still a fixed-size oracle for a
+# small credential-shaped space; not worth the forensic convenience).
+EVENT_LOG_PATH = os.path.join(
+    os.environ.get("ORCH_ROOT", os.path.expanduser("~/wingmen/orchestrator")),
+    "logs", "secrets_output_scanner_events.log",
+)
+
+
+def _log_event(cls: str, tool_name: str, transcript_path: str | None, sub_transcript_path: str | None,
+                session_id: str | None, agent_id: str | None, agent_type: str | None, agent: str,
+                cwd: str | None = None) -> None:
+    import datetime
+    import stat
+
+    record = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "cls": cls,
+        "tool_name": tool_name,
+        "transcript_path": transcript_path,
+        "sub_transcript_path": sub_transcript_path,
+        "session_id": session_id,
+        "agent": agent,
+        "agent_id": agent_id,
+        "agent_type": agent_type,
+        # bus #51293: a hit with no AGENT_ID/CC_BASE_AGENT_ID in the env (agent falls
+        # back to "unknown-agent") is otherwise unattributable after the fact -- cwd is
+        # the hook payload's own field, not derived, and is the best identity proxy
+        # available for exactly that case (confirmed: it pinned a real #51293 hit to a
+        # specific ad-hoc Bash session by its cwd alone).
+        "cwd": cwd,
+    }
+    try:
+        log_dir = os.path.dirname(EVENT_LOG_PATH)
+        os.makedirs(log_dir, exist_ok=True)
+        is_new = not os.path.exists(EVENT_LOG_PATH)
+        with open(EVENT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        if is_new:
+            os.chmod(EVENT_LOG_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 600
+    except OSError:
+        pass  # logging must never crash the hook / block the tool result
+
+
 def _page_orch_console(cls: str, tool_name: str, agent_id: str | None = None, agent_type: str | None = None) -> None:
     import os
     import subprocess
@@ -238,6 +356,13 @@ def _page_orch_console(cls: str, tool_name: str, agent_id: str | None = None, ag
         pass  # paging must never crash the hook / block the tool result
 
 
+def _session_id_from_transcript_path(transcript_path: str | None) -> str | None:
+    if not transcript_path:
+        return None
+    base = os.path.basename(transcript_path)
+    return base[:-len(".jsonl")] if base.endswith(".jsonl") else base
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -251,6 +376,7 @@ def main() -> int:
     # bus #48907: present only when this tool call originated inside a subagent.
     agent_id = payload.get("agent_id")
     agent_type = payload.get("agent_type")
+    cwd = payload.get("cwd")
 
     output_text = tool_response if isinstance(tool_response, str) else json.dumps(tool_response or "")
     # bus #48685/#48695: a secret typed LITERALLY into the command itself (not a $VAR
@@ -259,7 +385,27 @@ def main() -> int:
     input_text = json.dumps(tool_input) if tool_input else ""
 
     hits = scan(output_text) + scan(input_text)
-    if not hits:
+
+    sub_transcript_path = _subagent_transcript_path(transcript_path, agent_id)
+
+    # bus #51269/#51285/#51290: tool_response above can be a CAPPED copy of a large
+    # output -- a secret past that cap is scanned nowhere unless we also check the
+    # externally-persisted full-output file(s), independently of whether `hits` found
+    # anything at all (that's exactly the failure mode: it found nothing, because the
+    # capped copy never contained the match).
+    persisted_paths = []
+    if transcript_path:
+        persisted_paths += _find_persisted_output_paths(transcript_path)
+    if sub_transcript_path and sub_transcript_path != transcript_path:
+        persisted_paths += _find_persisted_output_paths(sub_transcript_path)
+    persisted_paths = list(dict.fromkeys(persisted_paths))  # de-dup, preserve order
+
+    persisted_hits = []
+    for p in persisted_paths:
+        persisted_hits += scan_persisted_output(p)
+
+    all_hits = hits + persisted_hits
+    if not all_hits:
         return 0
 
     # fixture allowlist (bus #48965/#48982): redaction + the stderr note below still run
@@ -269,6 +415,8 @@ def main() -> int:
     # header in test_detects_ssh_private_key, which carries no test-/fake-/example- marker
     # of its own and is only identifiable by its file.
     is_fixture_call = _mentions_fixture_file(tool_input)
+    session_id = _session_id_from_transcript_path(transcript_path)
+    agent = os.environ.get("AGENT_ID", os.environ.get("CC_BASE_AGENT_ID", "unknown-agent"))
 
     # bus #48900/#48901/#48920: the same class can match in BOTH input_text and
     # output_text for one tool call (e.g. a Write whose tool_response echoes back a
@@ -277,9 +425,8 @@ def main() -> int:
     # not by (cls, match) pair, since two matches of the same class are still one leak
     # event worth reporting once. Redaction is unaffected -- it's idempotent per class
     # (a second call over an already-redacted line is a no-op), so only paging is deduped.
-    sub_transcript_path = _subagent_transcript_path(transcript_path, agent_id)
     seen_classes = set()
-    for cls, match in hits:
+    for cls, match in all_hits:
         if transcript_path:
             # window=3: covers the tool_use line and the tool_result line even with one
             # intervening line (observed in some transcript shapes); cheap and harmless
@@ -289,14 +436,18 @@ def main() -> int:
             # bus #49029/#49030: this call originated inside a subagent -- also redact
             # its own transcript file, which `transcript_path` above does not cover.
             redact_recent_lines(sub_transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
+        for p in persisted_paths:
+            redact_persisted_output(p, cls, SECRET_PATTERNS[cls])
         if cls in seen_classes:
             continue
         seen_classes.add(cls)
+        _log_event(cls, tool_name, transcript_path, sub_transcript_path, session_id,
+                   agent_id, agent_type, agent, cwd=cwd)
         if is_fixture_call or _is_fixture_hit(cls, match):
             continue
         _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type)
 
-    classes = ", ".join(cls for cls, _ in hits)
+    classes = ", ".join(cls for cls, _ in all_hits)
     sys.stderr.write(
         f"secrets_output_scanner: this output contained secret-shaped content ({classes}); "
         "it has been redacted on disk and orch-console paged. Treat the underlying value "
