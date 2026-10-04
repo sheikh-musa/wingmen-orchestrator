@@ -399,3 +399,62 @@ def test_sweep_file_does_not_flag_seed_user_id_appearing_in_a_transcript(tmp_pat
     _write(tr, json.dumps({"o": "query result: %s appears here" % seed_id}) + "\n")
     rep = s.sweep_file(str(tr), secrets, execute=False)
     assert rep["matches_before"] == 0, "a dormant/excluded identifier must never page as a leak"
+
+
+# ---- orch-console #51400: live-append race protection before an in-place write ----
+
+def test_file_unchanged_since_true_when_nothing_changed(tmp_path):
+    f = tmp_path / "t.jsonl"
+    _write(f, "hello\n")
+    st = os.stat(f)
+    assert s._file_unchanged_since(str(f), st.st_size, st.st_mtime_ns) is True
+
+
+def test_file_unchanged_since_false_when_size_changed(tmp_path):
+    f = tmp_path / "t.jsonl"
+    _write(f, "hello\n")
+    st = os.stat(f)
+    _write(f, "hello world, appended\n")  # simulates a live session appending
+    assert s._file_unchanged_since(str(f), st.st_size, st.st_mtime_ns) is False
+
+
+def test_file_unchanged_since_false_when_file_missing(tmp_path):
+    f = tmp_path / "gone.jsonl"
+    assert s._file_unchanged_since(str(f), 0, 0) is False
+
+
+def test_sweep_file_aborts_execute_when_file_changes_between_read_and_write(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    _write(env, "ANTHROPIC_API_KEY=%s\n" % FAKE_KEY)
+    secrets = s.build_secret_set([str(env)])
+
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": FAKE_KEY}) + "\n")
+
+    # simulate a live append landing exactly between sweep_file's read and its pre-write
+    # re-check: make the very first _file_unchanged_since call (the one inside sweep_file)
+    # see a changed file, as if another process appended in that window.
+    monkeypatch.setattr(s, "_file_unchanged_since", lambda *a, **k: False)
+
+    before_bytes = tr.read_bytes()
+    rep = s.sweep_file(str(tr), secrets, execute=True, ledger_path=str(tmp_path / "ledger.jsonl"))
+
+    assert rep["error"] is not None and "ABORTED" in rep["error"]
+    assert tr.read_bytes() == before_bytes, "must not have written anything once aborted"
+    assert not (tmp_path / "ledger.jsonl").exists(), "must not have logged a ledger entry for an aborted write"
+    assert rep["matches_after"] == rep["matches_before"], "report must reflect nothing was redacted"
+
+
+def test_sweep_file_executes_normally_when_file_is_genuinely_unchanged(tmp_path):
+    env = tmp_path / ".env"
+    _write(env, "ANTHROPIC_API_KEY=%s\n" % FAKE_KEY)
+    secrets = s.build_secret_set([str(env)])
+
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": FAKE_KEY}) + "\n")
+
+    rep = s.sweep_file(str(tr), secrets, execute=True, ledger_path=str(tmp_path / "ledger.jsonl"))
+    assert rep["error"] is None
+    assert rep["matches_after"] == 0
+    assert FAKE_KEY not in tr.read_text()
+    assert (tmp_path / "ledger.jsonl").exists()
