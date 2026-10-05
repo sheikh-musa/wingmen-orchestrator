@@ -184,7 +184,8 @@ def operator_ledger_db(pg_dsn, monkeypatch):
                 enabled       boolean NOT NULL DEFAULT true,
                 inject_target text,
                 audience      text NOT NULL CHECK (audience IN ('operator','client','internal')),
-                owner_lane    text
+                owner_lane    text,
+                stage_file_to_agent text
             )
         """)
     return pg_dsn

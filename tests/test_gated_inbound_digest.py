@@ -23,12 +23,14 @@ from gated_inbound_digest import (  # noqa: E402
 MUSA = 286619815  # MUSA_TELEGRAM_ID (an operator id)
 
 
-def _chan(key, tag, chat_ids, usernames, audience="operator", owner_lane=None):
+def _chan(key, tag, chat_ids, usernames, audience="operator", owner_lane=None,
+          stage_file_to_agent=None):
     """Build a REAL Channel from a fixture tuple in Channel.COLS order
-    (migration 085 added audience/owner_lane as the final two columns)."""
+    (migration 085 added audience/owner_lane; migration 092 added
+    stage_file_to_agent as the final column)."""
     return Channel((key, None, "agent-session", key, None, None,
                     chat_ids, usernames, None, tag, "substrate", 0,
-                    audience, owner_lane))
+                    audience, owner_lane, stage_file_to_agent))
 
 
 # tag -> [Channel]; note operator-orch uses tag 'orch-channel' in prod
