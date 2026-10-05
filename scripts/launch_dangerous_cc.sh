@@ -814,6 +814,19 @@ CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/
 . "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { echo "FATAL: token_file_guard.sh missing" >&2; exit 1; }
 CC_AUTH_LABEL="$(account_for_fp "$CC_AUTH_FP")"
 CC_AUTH_LABEL="${CC_AUTH_LABEL:-${CLAUDE_ACCOUNT_LABEL:-unlabelled}}"
+# GLM PROVIDER override (cc-fleet-health bus #53191/#53189): a glm-* resolved model
+# runs this lane entirely on z.ai credentials (see the GLM PROVIDER block below,
+# which unsets every Anthropic credential) -- no Anthropic auth_fp applies, so
+# stamping the Claude token-file's fp here would mislabel this lane's billing
+# identity for the life of the process (BEAT_SQL only fills a NULL auth_fp, it
+# never corrects an already-stamped non-null one). Clear the fp and stamp a
+# distinct account label instead of leaving launch-argument residue in place.
+case "$RESOLVED_MODEL" in
+    glm-*)
+        CC_AUTH_FP=""
+        CC_AUTH_LABEL="glm:z.ai"
+        ;;
+esac
 # Boot stamp via the ONE shared writer (2026-10-01): bounded retries + LOUD failure
 # (was a silent one-shot `except: pass` — the lost stamp that left cc-irsyad-2 and
 # cc-irsyad-coord-1 host-less/session-less/model-less on gzb). A populated host or
