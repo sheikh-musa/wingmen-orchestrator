@@ -790,15 +790,23 @@ def token_ground_truth(include_remote: bool = False) -> dict:
     for sess, fallback_host in _REMOTE_BODIES.items():
         if sess in seen:
             continue
-        exp_fp = _expected_fp(sess)
-        # _expected_fp resolved only the CONSOLE's own (Mini-local) copy of
-        # .orch_default_token, which doesn't exist for a body that boots
-        # elsewhere (gzb) -- try the SAME SSH reach already used for the live
-        # scan below, read-only, before giving up to the generic .env default
-        # (orch-console #51982/#46625; never attempted when include_remote is
-        # False, same gating the live scan already uses).
+        # NOT _expected_fp(sess): that function ALREADY collapses a local-
+        # pointer miss into _env_default_fp() (correct for every OTHER
+        # session, where .env really is that body's own configured default).
+        # For a remote body the console's own .env is a DIFFERENT body's
+        # account entirely -- cc-orchestrator's real pointer lives on gzb, not
+        # here -- so collapsing straight to .env would always win over the
+        # remote scan below (bug caught live post-merge, orch-console
+        # #51982/#46625: cai/fleet-health cleared but the hub still showed
+        # expected=Musa). Resolve the LOCAL pointer path ourselves first so a
+        # genuine miss (path is None) can still try the SSH scan before ANY
+        # fallback is applied.
+        local_path = _resolve_lane_token_path(sess, orch_dir=_ORCH_DIR)
+        exp_fp = _read_token_fp(local_path) if local_path else None
         if exp_fp is None and include_remote:
             exp_fp = _remote_hub_expected_scan()
+        if exp_fp is None:
+            exp_fp = _env_default_fp()
         exp_account = (labels.get(exp_fp, "Max (unknown acct)") if exp_fp else _EXPECTED_ACCOUNT)
         host = _remote_body_host(sess, fallback_host) if include_remote else fallback_host
         # Source-of-truth regardless of host (op#10706 C): SSH-fingerprint the hub.
