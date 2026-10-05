@@ -53,11 +53,16 @@ Usage:
 `up` brings up the cluster, applies every layer in order, prints
 `DATABASE_URL=...` to stdout, appends the same line to $GITHUB_ENV if set
 (so a later CI step's `pytest` sees it), and writes connection/teardown
-state to --state-file (default: a fixed path under the OS temp dir — one CI
-job runs one bootstrap at a time, so a fixed name is fine). The pg_ctl
-server is already a detached background process; `up` does not block.
+state (incl. the WINGMEN_PG17_BIN it resolved at the time) to --state-file
+(default: a fixed path under the OS temp dir — one CI job runs one
+bootstrap at a time, so a fixed name is fine). The pg_ctl server is already
+a detached background process; `up` does not block.
 
-`down` reads --state-file and stops + cleans up the cluster it describes.
+`down` reads --state-file and stops + cleans up the cluster it describes,
+using the `pg_bin` IT recorded — not whatever WINGMEN_PG17_BIN happens to be
+set to in `down`'s own invoking step (the ci.yml Teardown step has no env:
+block; re-deriving from env there silently fell through to this script's
+macOS-default PG_BIN on the Linux runner, bus #53294).
 """
 from __future__ import annotations
 
@@ -246,6 +251,58 @@ _PSQL_BINDVAR_SUBSTITUTIONS = {
             "  -- held_commitments, so none of the 8 historical ids exist (not real drift).\n"
             "  if v_snapshot_count <> 8 and v_snapshot_count <> 0 then",
     },
+    # This file's own header says 3 of its 5 allowlist channel_keys
+    # (nazim-console, finance-console, war-room) are internal/operator console
+    # channels seeded by hand straight onto the live substrate -- same
+    # untracked-row class as a bedrock table, just DATA instead of schema, and
+    # confirmed by this exact script's own prior empirical walk: running `up`
+    # before this entry existed hit `RAISE EXCEPTION 'migration 091: allowlist
+    # channel_key % does not exist'` on a fresh bootstrap, because migration
+    # 014's own seed only ever created 'operator-orch' and 'cai-channel' (the
+    # other 2 of the 5). Inserting minimal rows for the 3 missing keys
+    # immediately ahead of this file's RAISE-on-missing check is the one point
+    # in the walk where bot_channels exists (migration 014, earlier in this
+    # same sorted walk) but the check hasn't run yet; ON CONFLICT DO NOTHING
+    # keeps re-apply idempotent. mode='log-and-route' needs no inject_target/
+    # responder_ref (unlike 'agent-session'/'ai-responder'), so this is the
+    # minimal valid row -- CI's job is schema realism for the allowlist check
+    # to find its 5 keys, not reproducing each channel's real production mode.
+    # audience is also supplied explicitly (matching migration 085's own
+    # backfill values for these exact 3 keys -- 'operator' for nazim-console,
+    # 'internal' for finance-console/war-room): migration 085 runs earlier in
+    # this same sorted walk and its `ALTER COLUMN audience SET NOT NULL` has
+    # already landed by the time 091 runs (085's own backfill UPDATEs are
+    # no-ops here since these 3 rows don't exist yet at that point) -- a bare
+    # INSERT without audience hit a real NotNullViolation on this exact walk.
+    ROOT / "migrations" / "091_bot_channels_sensitive_data.sql": {
+        "SET LOCAL lock_timeout = '5s';\n\nALTER TABLE public.bot_channels":
+            "SET LOCAL lock_timeout = '5s';\n\n"
+            "-- cp#83: bedrock-data seed for CI -- see _PSQL_BINDVAR_SUBSTITUTIONS\n"
+            "-- comment in ci_bootstrap_schema.py.\n"
+            "INSERT INTO public.bot_channels (channel_key, token_env_key, mode, channel_tag, audience, owner_lane)\n"
+            "VALUES\n"
+            "  ('nazim-console', 'NAZIM_BOT_TOKEN', 'log-and-route', 'nazim-console', 'operator', NULL),\n"
+            "  ('finance-console', 'FINANCE_BOT_TOKEN', 'log-and-route', 'finance-console', 'internal', 'finance'),\n"
+            "  ('war-room', 'WAR_ROOM_BOT_TOKEN', 'log-and-route', 'war-room', 'internal', NULL)\n"
+            "ON CONFLICT (channel_key) DO NOTHING;\n\n"
+            "ALTER TABLE public.bot_channels",
+    },
+    # Same bedrock-data class as the 091 entry above, one migration later in
+    # this same walk: 'cosem-exams' is a hand-seeded live client channel this
+    # repo's own migration chain never INSERTs, confirmed by this exact
+    # script's own empirical walk (RAISE EXCEPTION 'migration 092: channel_key
+    # ''cosem-exams'' does not exist'). audience='client'/owner_lane='exams'
+    # match migration 085's own backfill mapping for this exact channel_key.
+    ROOT / "migrations" / "092_bot_channels_stage_file_to_agent.sql": {
+        "ADD COLUMN IF NOT EXISTS stage_file_to_agent text;\n\nDO $$":
+            "ADD COLUMN IF NOT EXISTS stage_file_to_agent text;\n\n"
+            "-- cp#83: bedrock-data seed for CI -- see _PSQL_BINDVAR_SUBSTITUTIONS\n"
+            "-- comment in ci_bootstrap_schema.py.\n"
+            "INSERT INTO public.bot_channels (channel_key, token_env_key, mode, channel_tag, audience, owner_lane)\n"
+            "VALUES ('cosem-exams', 'COSEM_EXAMS_BOT_TOKEN', 'log-and-route', 'cosem-exams', 'client', 'exams')\n"
+            "ON CONFLICT (channel_key) DO NOTHING;\n\n"
+            "DO $$",
+    },
 }
 
 # schema.sql is a cumulative snapshot — some commits (e.g. 6963f27, [TASK-032])
@@ -329,6 +386,14 @@ BEGIN
   -- substrate before migration tracking existed.
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cto_desktop') THEN
     CREATE ROLE cto_desktop NOLOGIN;
+  END IF;
+  -- supabase_admin: the real platform's dashboard/superuser role. scripts/
+  -- rls_grant_lint.py casts it to ::regrole (role must EXIST, even though the
+  -- lint's own query against it is WARN-only / expected-zero-on-a-fresh-
+  -- cluster) -- confirmed by this exact script's own empirical walk
+  -- (psycopg.errors.UndefinedObject: role "supabase_admin" does not exist).
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_admin') THEN
+    CREATE ROLE supabase_admin NOLOGIN;
   END IF;
 END
 $$;
@@ -465,8 +530,8 @@ def bring_up_cluster() -> tuple[str, str, str, str]:
     return dsn, datadir, sockdir, port
 
 
-def tear_down_cluster(datadir: str, sockdir: str) -> None:
-    subprocess.run([_pg_bin("pg_ctl"), "-D", datadir, "-w", "stop"],
+def tear_down_cluster(datadir: str, sockdir: str, pg_bin: str = PG_BIN) -> None:
+    subprocess.run([os.path.join(pg_bin, "pg_ctl"), "-D", datadir, "-w", "stop"],
                    capture_output=True, env=PG_ENV)
     shutil.rmtree(datadir, ignore_errors=True)
     shutil.rmtree(sockdir, ignore_errors=True)
@@ -538,7 +603,7 @@ def cmd_up(state_file: Path) -> int:
 
     state_file.write_text(
         __import__("json").dumps(
-            {"dsn": dsn, "datadir": datadir, "sockdir": sockdir, "port": port}
+            {"dsn": dsn, "datadir": datadir, "sockdir": sockdir, "port": port, "pg_bin": PG_BIN}
         )
     )
     print(f"DATABASE_URL={dsn}")
@@ -554,7 +619,7 @@ def cmd_down(state_file: Path) -> int:
         print(f"no state file at {state_file} — nothing to tear down", file=sys.stderr)
         return 0
     state = __import__("json").loads(state_file.read_text())
-    tear_down_cluster(state["datadir"], state["sockdir"])
+    tear_down_cluster(state["datadir"], state["sockdir"], state.get("pg_bin", PG_BIN))
     state_file.unlink(missing_ok=True)
     return 0
 
