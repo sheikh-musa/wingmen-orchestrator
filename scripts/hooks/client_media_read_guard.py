@@ -55,10 +55,13 @@ def match_tg_media(path: str):
     them unguarded). *filename* is reduced to the basename, since
     stage_client_file.py keys its export by basename stem regardless of
     which subdirectory the file arrived in (Path(original_name).stem in
-    main())."""
+    main()). Resolves symlinks via realpath, not just normpath (cc-storefront
+    opus minors-lens F1, bus #52650): a symlink whose own path doesn't contain
+    logs/tg_media/ but points INTO it would otherwise evade the regex
+    entirely."""
     if not path:
         return None
-    normalized = os.path.normpath(path).replace(os.sep, "/")
+    normalized = os.path.realpath(path).replace(os.sep, "/")
     m = _TG_MEDIA_RE.match(normalized)
     if not m:
         return None

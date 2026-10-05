@@ -99,6 +99,16 @@ def test_blocks_media_in_nested_subdir_with_structure_only_export(tmp_path):
     assert_blocked("Read", {"file_path": str(f)})
 
 
+def test_blocks_unstaged_media_read_via_symlink_outside_tg_media(tmp_path):
+    # cc-storefront opus minors-lens F1 (bus #52650): a symlink whose own
+    # path does NOT contain logs/tg_media/ but points INTO it must not evade
+    # the regex -- normpath alone doesn't resolve symlinks, realpath does.
+    f = _make_media(tmp_path, name="gradebook_5_mno345.jpg", subdir="gazzabyte-irsyad")
+    link = tmp_path / "innocuous_link.jpg"
+    link.symlink_to(f)
+    assert_blocked("Read", {"file_path": str(link)})
+
+
 # ---- must ALLOW: staged CLEAN, console exemption, unrelated paths ----------
 
 def test_allows_staged_clean_media_read(tmp_path):
