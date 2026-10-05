@@ -517,3 +517,18 @@ def test_remote_hub_scan_unresolved_target_is_unverified(monkeypatch):
     monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: None)
     assert panes._remote_hub_scan(force=True) is None
     assert ran["called"] is False
+
+
+def test_remote_scan_sh_resolves_pid_via_tmux_not_a_broad_pgrep():
+    """orch-console #51921: `pgrep -f 'claude --dangerously'` matched the tmux
+    server's own long-lived `tmux new-session -d -s orch ... claude --dangerously...`
+    invocation (its argv literally contains that substring) instead of the real
+    claude child, so the hub's reported account silently froze at whatever it
+    booted on originally -- surfaced as a false "hub is on Musa" when live had
+    moved to Syed. Pins the fix at the source-text level (a full SSH round-trip
+    isn't CI-feasible): the script must resolve its target pid from the orch tmux
+    pane, and must NEVER fall back to a bare `pgrep -f 'claude`-style host-wide
+    match that a wrapper process's own argv could satisfy."""
+    assert "pgrep -f 'claude" not in panes._REMOTE_SCAN_SH
+    assert "tmux list-panes" in panes._REMOTE_SCAN_SH
+    assert "pane_pid" in panes._REMOTE_SCAN_SH
