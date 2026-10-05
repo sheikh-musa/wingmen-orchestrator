@@ -93,7 +93,12 @@ done
 if [ "$py_changed" -eq 1 ]; then
   PYTEST_PY="$ROOT/.venv/bin/python3"; [ -x "$PYTEST_PY" ] || PYTEST_PY="$(command -v python3 || true)"
   if [ -n "$PYTEST_PY" ] && "$PYTEST_PY" -c 'import pytest' >/dev/null 2>&1; then
-    if ! COLLECT="$("$PYTEST_PY" -m pytest -q --co -p no:cacheprovider tests/ 2>&1)"; then
+    # Collect-only needs no DB, but conftest.py's prod-DB guard still fires at
+    # pytest_configure time on whatever DATABASE_URL happens to be ambient in the
+    # pushing shell -- a lane's shell exports the real substrate DSN by default, so
+    # this scopes the subprocess env exactly like the documented safe local pattern
+    # (env -u DATABASE_URL PYTEST_NO_DB=1) instead of inheriting it and refusing.
+    if ! COLLECT="$(env -u DATABASE_URL -u SUPABASE_DB_URL PYTEST_NO_DB=1 "$PYTEST_PY" -m pytest -q --co -p no:cacheprovider tests/ 2>&1)"; then
       echo "" >&2
       echo "❌ pre-push BLOCKED — pytest collection FAILED; the test suite would not run." >&2
       printf '%s\n' "$COLLECT" | grep -E "ERROR|ModuleNotFoundError|Interrupted|error during collection" | head -20 >&2
