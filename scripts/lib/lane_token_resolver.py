@@ -50,9 +50,20 @@ _FORBIDDEN_TOKEN_FPS = {"13589de86f29"}
 # `_BODY_POINTER` and app.py `_TOKEN_POINTER_FOR`.
 _SESSION_POINTER = {"nazim": ".nazim_default_token", "cc-orchestrator": ".orch_default_token"}
 
-# Singletons that boot straight off the .env account (no pointer of any tier).
+# Singletons with no GROUP/fleet-default tier (they are not worker lanes).
 # Mirrors panes.py `_NO_POINTER_SINGLETONS` / app.py `_NO_TOKEN_POINTER`.
 _NO_POINTER_SINGLETONS = {"cai", "fleet-health"}
+
+# Each _NO_POINTER_SINGLETONS body DOES still have its own bespoke per-body
+# pointer file -- read directly in bash by boot_cai.sh / boot_fleet_health.sh,
+# NOT by this module (so it has zero effect on how they actually boot). This
+# module previously returned a bare None for them, which fed straight into
+# panes._expected_fp's .env fallback and made the console show "expected=Musa"
+# for a body that has ACTUALLY been pointer-pinned to Syed for a while (bus
+# #51982/#46625, the console's "3 remaining mismatches" P3). Resolving it here
+# too -- read-only, same fail-open shape as _SESSION_POINTER -- fixes the
+# DISPLAY by construction, via the one module both boot and console consult.
+_SINGLETON_OWN_POINTER = {"cai": ".cai_default_token", "fleet-health": ".fleet-health_default_token"}
 
 # The fleet-wide default pointer every worker lane falls back to (tier 4).
 _FLEET_DEFAULT_POINTER = ".lane_default_token"
@@ -153,9 +164,13 @@ def resolve_lane_token_path(session: str, orch_dir: Optional[str] = None) -> Opt
     if sp is not None:
         return _read_pointer_target(orch_dir, sp)
 
-    # Singletons boot off .env — no pointer of any tier.
+    # Singletons with no group/fleet tier -- but DO check their own bespoke
+    # pointer file first (see _SINGLETON_OWN_POINTER above); only an absent/
+    # unreadable own-pointer falls through to None (.env), same fail-open shape
+    # as tier 2.
     if session in _NO_POINTER_SINGLETONS:
-        return None
+        own = _SINGLETON_OWN_POINTER.get(session)
+        return _read_pointer_target(orch_dir, own) if own else None
 
     # Worker lane — Tier 3 (per-GROUP) then Tier 4 (fleet default).
     fam = family_of(session)

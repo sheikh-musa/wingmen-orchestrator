@@ -81,12 +81,39 @@ def test_session_pointer_wins_for_singleton_bodies(orch):
     assert R.resolve_lane_token_path("nazim", orch_dir=orch_dir) == naz
 
 
-def test_no_pointer_singletons_return_none(orch):
-    """cai + fleet-health boot off .env -> None (caller uses the .env account)."""
+def test_no_pointer_singletons_return_none_without_their_own_pointer(orch):
+    """cai + fleet-health have no GROUP/fleet tier; with no OWN pointer file
+    either (the fleet default here must NOT leak to them) -> None (.env)."""
     orch_dir, make_key, ptr = orch
     ptr(".lane_default_token", make_key("musa-oauth-token", "MUSA"))
     assert R.resolve_lane_token_path("cai", orch_dir=orch_dir) is None
     assert R.resolve_lane_token_path("fleet-health", orch_dir=orch_dir) is None
+
+
+def test_singleton_own_pointer_is_honored(orch):
+    """cai/fleet-health each have their OWN bespoke pointer file (read directly by
+    boot_cai.sh/boot_fleet_health.sh in bash) -- this module must resolve it too,
+    so the console's "expected" display matches what the body actually boots on
+    (bus #51982/#46625). A fleet default or the OTHER singleton's pointer must
+    never leak across."""
+    orch_dir, make_key, ptr = orch
+    fleet = make_key("musa-oauth-token", "MUSA")
+    cai_tok = make_key("syed-oauth-token", "SYED")
+    fh_tok = make_key("musa2-oauth-token", "MUSA2")
+    ptr(".lane_default_token", fleet)
+    ptr(".cai_default_token", cai_tok)
+    ptr(".fleet-health_default_token", fh_tok)
+    assert R.resolve_lane_token_path("cai", orch_dir=orch_dir) == cai_tok
+    assert R.resolve_lane_token_path("fleet-health", orch_dir=orch_dir) == fh_tok
+
+
+def test_singleton_own_pointer_absent_falls_through_to_none(orch):
+    """No .cai_default_token file at all -> None (.env) -- same shape as an absent
+    tier-2 session pointer; the resolver returns the raw pointer TARGET (even an
+    unreadable one) and leaves verifying it to the caller (panes._expected_fp /
+    boot_cai.sh), exactly like the existing session-pointer tier already does."""
+    orch_dir, _make_key, _ptr = orch
+    assert R.resolve_lane_token_path("cai", orch_dir=orch_dir) is None
 
 
 def test_nothing_configured_returns_none(orch):

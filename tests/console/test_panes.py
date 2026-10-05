@@ -326,6 +326,7 @@ def test_token_ground_truth_falls_back_to_self_report_when_ssh_unreachable(monke
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": "selffp123456", "stale": False})
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
                if r["session"] == "cc-orchestrator")
@@ -360,6 +361,7 @@ def test_token_ground_truth_stale_self_report_falls_back_to_plain_unverified(mon
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": None, "stale": True})
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
                if r["session"] == "cc-orchestrator")
@@ -376,6 +378,7 @@ def test_token_ground_truth_no_scan_no_self_report_is_plain_unverified(monkeypat
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": None, "stale": False})
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
                if r["session"] == "cc-orchestrator")
@@ -398,6 +401,7 @@ def test_token_ground_truth_ssh_verified_scan_wins_over_self_report(monkeypatch)
 
     monkeypatch.setattr(panes, "_self_reported_hub_account", _sr)
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {"sshfp000000": "Max (Musa)"})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
                if r["session"] == "cc-orchestrator")
@@ -441,6 +445,7 @@ def test_token_ground_truth_uses_resolved_host_not_hardcoded_literal(monkeypatch
                          lambda session: {"fp": "selffp123456", "stale": False})
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: "gzbai")
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
                if r["session"] == "cc-orchestrator")
@@ -456,6 +461,7 @@ def test_summary_self_reported_row_is_not_counted_as_unverified(monkeypatch):
                          lambda session: {"fp": "selffp123456", "stale": False})
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
     summary = panes.token_ground_truth(include_remote=True)["summary"]
     assert summary["self_reported"] == 1
@@ -469,6 +475,7 @@ def test_summary_stale_self_report_still_counts_as_unverified(monkeypatch):
                          lambda session: {"fp": None, "stale": True})
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {})
     summary = panes.token_ground_truth(include_remote=True)["summary"]
     assert summary["self_reported"] == 0
@@ -517,6 +524,84 @@ def test_remote_hub_scan_unresolved_target_is_unverified(monkeypatch):
     monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: None)
     assert panes._remote_hub_scan(force=True) is None
     assert ran["called"] is False
+
+
+# ---- _remote_hub_expected_scan(): orch-console #51982/#46625 -- the hub's
+# .orch_default_token POINTER lives on gzb, not the console's own (Mini) checkout,
+# so _expected_fp always misses it locally; this reads it over the SAME ssh reach.
+
+def test_remote_hub_expected_scan_returns_fp_on_success(monkeypatch):
+    monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: "gzb")
+    monkeypatch.setattr(panes.subprocess, "run", lambda *a, **k: _run(0, "582043088eae\n"))
+    assert panes._remote_hub_expected_scan(force=True) == "582043088eae"
+
+
+def test_remote_hub_expected_scan_bad_output_is_none(monkeypatch):
+    monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: "gzb")
+    monkeypatch.setattr(panes.subprocess, "run", lambda *a, **k: _run(0, "not-a-fingerprint\n"))
+    assert panes._remote_hub_expected_scan(force=True) is None
+
+
+def test_remote_hub_expected_scan_nonzero_exit_is_none(monkeypatch):
+    """exit 3/4/5 in _REMOTE_EXPECTED_SCAN_SH (no pointer / unreadable target / empty
+    token) must all degrade to None, never raise."""
+    monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: "gzb")
+    monkeypatch.setattr(panes.subprocess, "run", lambda *a, **k: _run(3, ""))
+    assert panes._remote_hub_expected_scan(force=True) is None
+
+
+def test_remote_hub_expected_scan_unresolved_target_is_none_no_ssh(monkeypatch):
+    ran = {"called": False}
+
+    def fake_run(argv, **kw):  # pragma: no cover - must NOT be reached
+        ran["called"] = True
+        raise AssertionError("ssh should not run for an unresolved target")
+
+    monkeypatch.setattr(panes.subprocess, "run", fake_run)
+    monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: None)
+    assert panes._remote_hub_expected_scan(force=True) is None
+    assert ran["called"] is False
+
+
+def test_remote_hub_expected_scan_ssh_exception_is_none(monkeypatch):
+    def _boom(*a, **k):
+        raise OSError("connection refused")
+    monkeypatch.setattr(panes, "_resolve_hub_ssh_target", lambda: "gzb")
+    monkeypatch.setattr(panes.subprocess, "run", _boom)
+    assert panes._remote_hub_expected_scan(force=True) is None
+
+
+def test_token_ground_truth_hub_expected_falls_back_to_remote_scan(monkeypatch):
+    """When the LOCAL .orch_default_token read misses (the real-world case on the
+    Mini, since the file lives on gzb) but the remote expected-scan succeeds, the
+    hub's 'expected' must reflect the REMOTE pointer, not the generic .env default
+    -- this is the exact bug orch-console reported (expected=Musa when gzb's own
+    pointer has long pinned Syed)."""
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: {"fp": "582043088eae", "model": None})
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)  # local miss
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: "582043088eae")
+    monkeypatch.setattr(panes, "_account_labels", lambda: {"582043088eae": "Max (Syed)"})
+    row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["expected"] == "Max (Syed)"
+    assert row["expected_fp"] == "582043088eae"
+    assert row["mismatch"] is False  # live fp == remote-expected fp
+
+
+def test_token_ground_truth_hub_expected_scan_not_attempted_without_include_remote(monkeypatch):
+    """include_remote=False must behave exactly as before -- no new SSH call."""
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+
+    def _boom(*a, **k):  # pragma: no cover - must NOT be reached
+        raise AssertionError("remote expected-scan must not run without include_remote")
+
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", _boom)
+    row = next(r for r in panes.token_ground_truth(include_remote=False)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["expected_fp"] is None
 
 
 def test_remote_scan_sh_resolves_pid_via_tmux_not_a_broad_pgrep():
