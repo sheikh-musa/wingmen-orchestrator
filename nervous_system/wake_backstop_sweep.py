@@ -45,6 +45,7 @@ import psycopg
 # import (not re-encode) the shared policy + wake primitive
 from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.path at runtime)
     _pane_busy,
+    _tmux_bin,
     auto_wake_enabled,
     clear_pending,
     is_wake_eligible_recipient,
@@ -309,6 +310,106 @@ def _pane_recently_active(agent, gap_s: float = 2.0) -> bool:
         return False
 
 
+_SLEEP_CMD_RE = re.compile(r"^sleep\s+(\d+(?:\.\d+)?)\b")
+
+
+def _etime_to_seconds(etime: str) -> "float | None":
+    """Parse a ps(1) ETIME field ('SS', 'MM:SS', 'HH:MM:SS', or 'DD-HH:MM:SS') to seconds.
+    None if unparseable (caller skips the line rather than guessing)."""
+    try:
+        etime = etime.strip()
+        days = 0
+        if "-" in etime:
+            d, etime = etime.split("-", 1)
+            days = int(d)
+        parts = [float(p) for p in etime.split(":")]
+        if not parts:
+            return None
+        while len(parts) < 3:
+            parts.insert(0, 0.0)
+        h, m, s = parts[-3], parts[-2], parts[-1]
+        return days * 86400 + h * 3600 + m * 60 + s
+    except Exception:  # noqa: BLE001 — unparseable -> None, never raise
+        return None
+
+
+def _has_bounded_sleep(ps_lines: "list[str]", max_wait_s: int = 900) -> bool:
+    """PURE: True if any line ('ETIME COMMAND...', ps(1) order) shows a `sleep N` (N <=
+    max_wait_s) still short of its own deadline -- a deliberate bounded wait (a CI/gate
+    poll: 'check back in ~10 minutes'), not a runaway or an unrelated long sleep. Each
+    line's first whitespace-separated token is ETIME, the rest is the command. Never
+    raises on a bad line -- skips it (fails toward 'not detected', so the caller falls
+    back to the existing busy/text-diff signals rather than guessing)."""
+    for line in ps_lines:
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        etime_s, command = parts
+        m = _SLEEP_CMD_RE.match(command.strip())
+        if not m:
+            continue
+        sleep_arg = float(m.group(1))
+        if sleep_arg > max_wait_s:
+            continue  # not a short CI-poll-style wait (e.g. an overnight sleep) -- skip it
+        elapsed = _etime_to_seconds(etime_s)
+        if elapsed is None:
+            continue
+        if elapsed < sleep_arg:
+            return True
+    return False
+
+
+def _pane_has_live_poll(agent, max_wait_s: int = 900) -> bool:
+    """True if the lane's pane has a LIVE descendant process mid a bounded `sleep N` wait
+    (N <= max_wait_s) -- the CI/gate-poll pattern. Fix for the 2026-10-05 false-positive
+    run (bus #53326/#53327): `_pane_recently_active` samples the pane 2s apart, but a lane
+    mid a `sleep 300` wait produces ZERO pane output for minutes at a stretch, so it reads
+    as BOTH stable-idle AND "not recently active" even though it is demonstrably still
+    working (ran a test suite / pushed a commit / kicked off CI, and is waiting to poll
+    the result) -- the exact cc-cosem-platform and cc-substrate-1 (x2) shape from that day.
+
+    Reads the FULL process table once (one `ps`, cheap) and walks the pane_pid's
+    descendants rather than diffing pane text repeatedly. Never raises; any failure (no
+    live session, no pane_pid, ps unavailable, unparseable output) -> False, so an
+    ambiguous read falls back to the EXISTING signals (busy footer / text-diff) instead of
+    silently masking a real stall -- same fail-toward-paging posture as pane_active."""
+    try:
+        sess = resolve_tmux_session(agent)
+        if not sess:
+            return False
+        pane_pid = subprocess.check_output(
+            [_tmux_bin(), "display-message", "-p", "-t", f"={sess}:0.0", "#{pane_pid}"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        if not pane_pid.isdigit():
+            return False
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,etime,command"], text=True, stderr=subprocess.DEVNULL)
+        by_pid: "dict[str, tuple[str, str, str]]" = {}
+        children_of: "dict[str, list[str]]" = {}
+        for ln in out.splitlines()[1:]:
+            parts = ln.split(None, 3)
+            if len(parts) < 4:
+                continue
+            pid, ppid, etime, command = parts
+            by_pid[pid] = (ppid, etime, command)
+            children_of.setdefault(ppid, []).append(pid)
+        descendants: "list[str]" = []
+        frontier = [pane_pid]
+        seen_pids = {pane_pid}
+        while frontier:
+            cur = frontier.pop()
+            for child in children_of.get(cur, []):
+                if child in seen_pids:
+                    continue
+                seen_pids.add(child)
+                descendants.append(child)
+                frontier.append(child)
+        ps_lines = [f"{by_pid[p][1]} {by_pid[p][2]}" for p in descendants if p in by_pid]
+        return _has_bounded_sleep(ps_lines, max_wait_s=max_wait_s)
+    except Exception:  # noqa: BLE001 — advisory; never break the sweep
+        return False
+
+
 def _mark_skipped(row_ids) -> list:
     """Set skipped_at on the given rows via CAS (`WHERE skipped_at IS NULL`) and RETURN the
     ids actually set. skipped_at quiesces the rows (the SQL excludes skipped_at IS NOT NULL)
@@ -418,7 +519,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                mark=_mark_skipped, escalate=_escalate_operator,
                matching_hbs=_matching_hbs, desired_state_of=_desired_state_of,
                base_of=_base_of, hub_lease_fresh=_default_hub_lease_fresh,
-               pane_state=_default_pane_state, pane_active=_pane_recently_active, stuck_rows=None,
+               pane_state=_default_pane_state, pane_active=_pane_recently_active,
+               pane_poll_active=_pane_has_live_poll, stuck_rows=None,
                stuck_page_age_s: int = STUCK_PAGE_AGE_S,
                stuck_page_max_age_s: int = STUCK_PAGE_MAX_AGE_S,
                stuck_ceiling_age_s: int = STUCK_PAGE_CEILING_S,
@@ -651,13 +753,15 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         if not _local(agent):   # the pane read below is LOCAL — never judge a foreign lane's pane
             continue
         state = pane_state(agent)
-        working = state == "busy" or pane_active(agent)
+        working = state == "busy" or pane_active(agent) or pane_poll_active(agent)
         over_ceiling = stuck_oldest_age.get(agent, 0.0) > stuck_ceiling_age_s
         # SUPPRESS a working lane (bus #44274): a busy footer ('esc to interrupt') OR recent tool
-        # activity (pane changed across two samples) means the lane is WORKING, not stuck — many
-        # lanes read their inbox without stamping read_at (cc-cosem-platform/-exams class), so an
-        # unread row + a working pane is normal. Do NOT burn the once-guard: if it later goes
-        # stable-idle with the row still unread, a subsequent sweep pages it.
+        # activity (pane changed across two samples) OR a live bounded-sleep poll under the pane
+        # (bus #53326/#53327 — a `sleep 300` CI/gate wait produces no pane output for minutes, so
+        # text-diff alone misses it) means the lane is WORKING, not stuck — many lanes read their
+        # inbox without stamping read_at (cc-cosem-platform/-exams class), so an unread row + a
+        # working pane is normal. Do NOT burn the once-guard: if it later goes stable-idle with
+        # the row still unread, a subsequent sweep pages it.
         # EXCEPT past the hard CEILING (bus #44313): change-detection can't tell working from
         # "hung but animating" (a ticking timer changes the pane every sample), so beyond
         # stuck_ceiling_age_s we page REGARDLESS — labelled active-but-not-draining.

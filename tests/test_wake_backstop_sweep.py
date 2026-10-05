@@ -581,6 +581,76 @@ def test_stuck_below_ceiling_still_suppressed_when_working():
     assert pages == [] and r["stuck_suppressed"] == ["cc-quality"]
 
 
+# ---- (C) live-poll-marker suppression (bus #53326/#53327): change-detection samples 2s
+# apart, but a lane mid a `sleep 300` CI/gate poll produces ZERO pane output for minutes at
+# a stretch -- it reads BOTH stable-idle AND "not recently active" even though it is
+# demonstrably still working. 2026-10-05 false-positived cc-cosem-platform and cc-substrate-1
+# (x2) on exactly this shape. Fix: a THIRD working-signal, pane_poll_active, detects a live
+# bounded `sleep N` descendant under the pane and suppresses the same way busy/pane_active do.
+
+def test_stuck_page_SUPPRESSED_when_pane_has_live_poll_53326():
+    # Stable-idle text (no busy footer, no 2-sample diff) but a live bounded sleep under the
+    # pane -- the cosem-platform/cc-substrate-1 shape -- must suppress, not page.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-substrate", 53303, age_s=2000)]
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(52)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+                       pane_state=lambda a: "idle", pane_active=lambda a: False,
+                       pane_poll_active=lambda a: True,   # live `sleep 300` detected under the pane
+                       mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and r["stuck_suppressed"] == ["cc-substrate"]
+
+
+def test_stuck_page_NOT_suppressed_when_no_poll_marker_and_stable_idle():
+    # The negative case: no busy footer, no text-diff, no live-poll marker -> genuinely stuck,
+    # still pages. Confirms the new signal only ADDS a suppression path, never removes one.
+    marked, pages, mark, page = _cas_collector()
+    seen = set()
+    stuck = [_row_ts("cc-quality", 303, age_s=2000)]
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+                       pane_state=lambda a: "idle", pane_active=lambda a: False,
+                       pane_poll_active=lambda a: False,
+                       mark=mark, escalate=page, escalated_seen=seen)
+    assert r["stuck_paged"] == ["cc-quality"] and r.get("stuck_suppressed") == []
+    assert len(pages) == 1 and "genuinely stuck" in pages[0][0]
+
+
+def test_stuck_ceiling_pages_even_with_live_poll_marker():
+    # The #44313 hard ceiling must override the new signal too -- a poll that's been "about to
+    # finish" for way past the ceiling is exactly the hung-but-animating case the ceiling exists
+    # for. Past the ceiling, page REGARDLESS of pane_poll_active.
+    marked, pages, mark, page = _cas_collector()
+    seen = set()
+    stuck = [_row_ts("cc-quality", 304, age_s=6000)]   # > ceiling (3*1800=5400)
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+                       pane_state=lambda a: "idle", pane_active=lambda a: False,
+                       pane_poll_active=lambda a: True,
+                       mark=mark, escalate=page, escalated_seen=seen)
+    assert r["stuck_paged"] == ["cc-quality"] and r.get("stuck_suppressed") == []
+    assert len(pages) == 1 and "active-but-not-draining" in pages[0][0]
+
+
+def test_has_bounded_sleep_detects_live_short_poll():
+    # PURE unit coverage for the parsing logic, independent of any real pane/process.
+    assert wbs._has_bounded_sleep(["04:20 sleep 300"]) is True          # mid-wait, short poll
+    assert wbs._has_bounded_sleep(["00:02 sleep 300"]) is True          # just started
+    assert wbs._has_bounded_sleep(["06:00 sleep 300"]) is False         # already past its own deadline
+    assert wbs._has_bounded_sleep(["1:04:20 sleep 300"]) is False       # (HH:MM:SS) way past deadline
+    assert wbs._has_bounded_sleep(["00:05 pytest -x"]) is False         # not a sleep at all
+    assert wbs._has_bounded_sleep(["bogus-not-etime sleep 300"]) is False  # unparseable etime -> skip
+    assert wbs._has_bounded_sleep([]) is False
+    assert wbs._has_bounded_sleep(["00:02 sleep 86400"], max_wait_s=900) is False  # overnight sleep, not a CI poll
+    assert wbs._has_bounded_sleep(["1-00:00:00 sleep 300"]) is False    # DD-HH:MM:SS, way past
+
+
+def test_pane_has_live_poll_fails_safe_on_unresolvable_agent():
+    # No live session for this agent -> False, never raises (ambiguous -> fall back to the
+    # existing signals, never silently mask a real stall).
+    assert wbs._pane_has_live_poll("cc-this-agent-does-not-exist-53326") is False
+
+
 def test_stuck_page_suppression_does_not_burn_once_guard():
     # Suppressing a working lane must be RE-EVALUABLE: if it later goes stable-idle and the row
     # is still unread, the next sweep DOES page (suppression never consumed the once-guard).
