@@ -17,10 +17,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from nervous_system import ingest  # noqa: E402
 
 
-def _channel(audience="client", owner_lane="some-lane", key="cosem-exams"):
+def _channel(audience="client", owner_lane="some-lane", key="cosem-exams",
+             stage_file_to_agent=None):
     row = (
         key, "SOME_TOKEN_ENV", "agent-session", "target", None, None,
-        [], [], {}, "tag", None, None, audience, owner_lane,
+        [], [], {}, "tag", None, None, audience, owner_lane, stage_file_to_agent,
     )
     return ingest.Channel(row)
 
@@ -139,3 +140,27 @@ def test_page_stage_file_once_without_caption_notes_no_caption(monkeypatch):
     ch = _channel(key="cosem-exams")
     ingest._page_stage_file_once(conn, ch, upd_id=1, op_msg_id=2, local_path="/tmp/x.csv", caption="")
     assert "(no caption)" in sent["body"]
+
+
+def test_page_stage_file_once_routes_to_channel_owner_when_set(monkeypatch):
+    # bus #53147/migration 092: cosem-exams opts into cc-cosem-exams owning
+    # its own STAGE-FILE handoff instead of the default orch-console relay.
+    cur = _FakeCursor(fetch_result=None)
+    conn = _FakeConn(cur)
+    sent = {}
+    monkeypatch.setattr("scripts.bus_send.send", lambda **kw: sent.update(kw) or (1, "t"))
+    ch = _channel(key="cosem-exams", stage_file_to_agent="cc-cosem-exams")
+    ingest._page_stage_file_once(conn, ch, upd_id=1, op_msg_id=2, local_path="/tmp/x.csv", caption="")
+    assert sent["to"] == "cc-cosem-exams"
+
+
+def test_page_stage_file_once_defaults_to_orch_console_when_unset(monkeypatch):
+    # every other channel (stage_file_to_agent NULL) is unaffected by the
+    # migration 092 column -- must keep paging orch-console exactly as today.
+    cur = _FakeCursor(fetch_result=None)
+    conn = _FakeConn(cur)
+    sent = {}
+    monkeypatch.setattr("scripts.bus_send.send", lambda **kw: sent.update(kw) or (1, "t"))
+    ch = _channel(key="oeh", stage_file_to_agent=None)
+    ingest._page_stage_file_once(conn, ch, upd_id=1, op_msg_id=2, local_path="/tmp/x.csv", caption="")
+    assert sent["to"] == "orch-console"

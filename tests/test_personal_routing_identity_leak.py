@@ -98,7 +98,7 @@ def _mamadah_channel():
     row = (
         "mamadah", "MAMADAH_BOT_TOKEN", "agent-session", "mamadah", None,
         None, [286619815], [], {}, "mamadah",
-        "substrate", 0, "family", "cc-mamadah",
+        "substrate", 0, "family", "cc-mamadah", None,
     )
     return ingest.Channel(row)
 
@@ -107,7 +107,7 @@ def _oeh_channel():
     row = (
         "oeh", "OEH_BOT_TOKEN", "agent-session", "oeh", None,
         None, [999], [], {}, "oeh",
-        "substrate", 0, "client", "cc-oeh",
+        "substrate", 0, "client", "cc-oeh", None,
     )
     return ingest.Channel(row)
 

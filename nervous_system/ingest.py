@@ -381,7 +381,8 @@ class Channel:
         (self.key, self.token_env_key, self.mode, self.inject_target,
          self.inject_prefix, self.responder_ref, self.allowed_chat_ids,
          self.allowed_usernames, self.group_routing, self.channel_tag,
-         self.log_target, self.poll_offset, self.audience, self.owner_lane) = row
+         self.log_target, self.poll_offset, self.audience, self.owner_lane,
+         self.stage_file_to_agent) = row
         self.token = os.environ.get(self.token_env_key or "", "")
         # Per-channel override (in the group_routing JSONB bag): nudge EVEN WHEN the
         # target reads WORKING, instead of busy-deferring (CAI-RESP-382). ON for the
@@ -392,7 +393,8 @@ class Channel:
 
     COLS = ("channel_key, token_env_key, mode, inject_target, inject_prefix, "
             "responder_ref, allowed_chat_ids, allowed_usernames, group_routing, "
-            "channel_tag, log_target, poll_offset, audience, owner_lane")
+            "channel_tag, log_target, poll_offset, audience, owner_lane, "
+            "stage_file_to_agent")
 
 
 def load_channels(conn) -> dict[str, Channel]:
@@ -526,9 +528,17 @@ def _page_stage_file_once(conn, ch: "Channel", upd_id: int, op_msg_id: int,
     """Page ONCE per (channel, update) — same durable page-once dedup as
     _page_pinned_drift_once / _page_migrate_to_chat_id_once (a marker
     substring in `body`, not in-memory state). Auto-routes an inbound client
-    file to orch-console for staging: a lane must never open the file
-    itself and tell the client it "can't open" it — it waits for a STAGE
-    verdict (scripts/stage_client_file.py) instead."""
+    file for staging: a lane must never open the file itself and tell the
+    client it "can't open" it — it waits for a STAGE verdict
+    (scripts/stage_client_file.py) instead.
+
+    Target is orch-console UNLESS this channel opts into a specific owning
+    lane via bot_channels.stage_file_to_agent (migration 092, bus #53147) —
+    e.g. cosem-exams -> cc-cosem-exams, which already owns staging+handling
+    Hariz's files end-to-end, making the console a redundant relay hop.
+    orch-console stays the reviewer for supervised client REPLIES on every
+    channel regardless — this override only moves the pre-read STAGING
+    handoff, a separate path this function does not touch."""
     marker = f"STAGE-FILE:{ch.key}:{upd_id}"
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM agent_messages WHERE body LIKE %s LIMIT 1", (f"{marker}%",))
@@ -536,8 +546,9 @@ def _page_stage_file_once(conn, ch: "Channel", upd_id: int, op_msg_id: int,
             return
     from scripts import bus_send
     caption_note = f"caption: {caption}" if caption else "(no caption)"
+    page_to = ch.stage_file_to_agent or PAGE_TO_AGENT
     bus_send.send(
-        from_agent=PAGE_FROM_AGENT, to=PAGE_TO_AGENT, mtype="blocker",
+        from_agent=PAGE_FROM_AGENT, to=page_to, mtype="blocker",
         subject=f"STAGE: {ch.key} op#{op_msg_id} {local_path}",
         body=(f"{marker}\nSTAGE: {ch.key} op#{op_msg_id} {local_path}\n{caption_note}\n\n"
               f"Run scripts/stage_client_file.py {local_path} {op_msg_id} --export to check "
