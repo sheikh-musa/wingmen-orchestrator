@@ -102,3 +102,25 @@ def test_hook_hash_equals_gate_content_hash_for_the_same_tree():
 def test_hook_parses_clean():
     r = subprocess.run(["bash", "-n", str(_HOOK)], capture_output=True, text=True)
     assert r.returncode == 0, f"pre-push has a syntax error: {r.stderr}"
+
+
+def test_blocked_message_prints_absolute_review_path():
+    # orch-console #52089/#52091/#52093: a bare "save the review to
+    # reports/console-deploy/<hash>/..." left it ambiguous WHICH checkout, so a reviewer
+    # following the message from a worktree saved it into the live checkout instead -- an
+    # untracked file that collided with the PR's own tracked copy on the next merge+pull.
+    # The message must print the path PREFIXED with $ROOT (git rev-parse --show-toplevel,
+    # i.e. THIS checkout/worktree), never the bare relative form alone.
+    code = _code_only(_hook_text())
+    assert "$ROOT/$REVIEW" in code, (
+        "the blocked-message must print an ABSOLUTE review path ($ROOT/$REVIEW), not a "
+        "bare relative one -- see orch-console #52089 (a worktree-based save landed in "
+        "the live checkout by mistake because the old message didn't say which checkout)"
+    )
+    # And it must warn that deploy_console.sh itself always targets the live checkout --
+    # the OTHER half of the same bug class (its own remediation suggestion was misleading
+    # from a worktree).
+    assert "always operates on" in code and "live checkout" in code, (
+        "the blocked-message must warn that scripts/deploy_console.sh always operates on "
+        "the live checkout, so running it from a worktree does not help"
+    )

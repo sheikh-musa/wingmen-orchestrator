@@ -122,11 +122,22 @@ if [ -z "$HASH" ]; then
 fi
 REVIEW="reports/console-deploy/$HASH/cc-quality-review.md"
 if [ ! -s "$REVIEW" ]; then
+  # ABSOLUTE, not bare-relative (orch-console #52093/#52089/#52091): a bare relative
+  # path left it ambiguous WHICH checkout "save the review here" meant, so a reviewer
+  # following this text from a worktree saved it into ~/wingmen/orchestrator (the live
+  # checkout) instead -- an untracked file that then collided with the PR's own tracked
+  # copy on the next merge+pull. $ROOT is already correctly THIS checkout/worktree
+  # (git rev-parse --show-toplevel, line 20 above); say so explicitly.
   echo "" >&2
   echo "❌ pre-push BLOCKED — console content changed but no cc-quality review for content $HASH." >&2
-  echo "   The design-verification gate is enforced in code (op#12457). Do:" >&2
-  echo "     scripts/deploy_console.sh   # renders + tells you exactly what to review" >&2
-  echo "   eyeball the renders, save the cc-quality review to $REVIEW, then push." >&2
+  echo "   The design-verification gate is enforced in code (op#12457). Save the review to" >&2
+  echo "   THIS EXACT PATH (in this checkout/worktree, $ROOT -- nowhere else):" >&2
+  echo "     $ROOT/$REVIEW" >&2
+  echo "   scripts/deploy_console.sh can render + eyeball for you, BUT it always operates on" >&2
+  echo "   \$HOME/wingmen/orchestrator (the live checkout) regardless of where you run it from --" >&2
+  echo "   only safe to use when \$ROOT IS that live checkout. From a worktree, review the diff" >&2
+  echo "   directly (git diff <merge-base> HEAD -- ${GATED[*]}) and save the review to the" >&2
+  echo "   absolute path above." >&2
   echo "   (Override ONLY in a genuine emergency: git push --no-verify — and say so.)" >&2
   exit 1
 fi
