@@ -104,3 +104,4 @@ pytest-timeout==2.4.0
 psycopg[binary]>=3.1
 psycopg2-binary>=2.9  # legacy psycopg2 API: many tests/scripts import psycopg2 directly; CI installs fresh from this file (local .venv already had it, masking the gap)
 PyYAML>=6.0
+pytesseract==0.3.13  # local OCR for stage_client_file.py image support (bus #52461) -- no network, no LLM. Requires the `tesseract` binary on PATH (brew install tesseract on macOS).
