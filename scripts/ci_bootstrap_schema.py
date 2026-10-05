@@ -53,11 +53,16 @@ Usage:
 `up` brings up the cluster, applies every layer in order, prints
 `DATABASE_URL=...` to stdout, appends the same line to $GITHUB_ENV if set
 (so a later CI step's `pytest` sees it), and writes connection/teardown
-state to --state-file (default: a fixed path under the OS temp dir — one CI
-job runs one bootstrap at a time, so a fixed name is fine). The pg_ctl
-server is already a detached background process; `up` does not block.
+state (incl. the WINGMEN_PG17_BIN it resolved at the time) to --state-file
+(default: a fixed path under the OS temp dir — one CI job runs one
+bootstrap at a time, so a fixed name is fine). The pg_ctl server is already
+a detached background process; `up` does not block.
 
-`down` reads --state-file and stops + cleans up the cluster it describes.
+`down` reads --state-file and stops + cleans up the cluster it describes,
+using the `pg_bin` IT recorded — not whatever WINGMEN_PG17_BIN happens to be
+set to in `down`'s own invoking step (the ci.yml Teardown step has no env:
+block; re-deriving from env there silently fell through to this script's
+macOS-default PG_BIN on the Linux runner, bus #53294).
 """
 from __future__ import annotations
 
@@ -525,8 +530,8 @@ def bring_up_cluster() -> tuple[str, str, str, str]:
     return dsn, datadir, sockdir, port
 
 
-def tear_down_cluster(datadir: str, sockdir: str) -> None:
-    subprocess.run([_pg_bin("pg_ctl"), "-D", datadir, "-w", "stop"],
+def tear_down_cluster(datadir: str, sockdir: str, pg_bin: str = PG_BIN) -> None:
+    subprocess.run([os.path.join(pg_bin, "pg_ctl"), "-D", datadir, "-w", "stop"],
                    capture_output=True, env=PG_ENV)
     shutil.rmtree(datadir, ignore_errors=True)
     shutil.rmtree(sockdir, ignore_errors=True)
@@ -598,7 +603,7 @@ def cmd_up(state_file: Path) -> int:
 
     state_file.write_text(
         __import__("json").dumps(
-            {"dsn": dsn, "datadir": datadir, "sockdir": sockdir, "port": port}
+            {"dsn": dsn, "datadir": datadir, "sockdir": sockdir, "port": port, "pg_bin": PG_BIN}
         )
     )
     print(f"DATABASE_URL={dsn}")
@@ -614,7 +619,7 @@ def cmd_down(state_file: Path) -> int:
         print(f"no state file at {state_file} — nothing to tear down", file=sys.stderr)
         return 0
     state = __import__("json").loads(state_file.read_text())
-    tear_down_cluster(state["datadir"], state["sockdir"])
+    tear_down_cluster(state["datadir"], state["sockdir"], state.get("pg_bin", PG_BIN))
     state_file.unlink(missing_ok=True)
     return 0
 

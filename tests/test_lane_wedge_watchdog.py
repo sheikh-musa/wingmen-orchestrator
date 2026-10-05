@@ -57,6 +57,16 @@ def recorder(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "HEARTBEAT_FILE", tmp_path / "hb")
     # A clean worktree so lane escalation would proceed if it ever got that far.
     monkeypatch.setattr(w, "_worktree_clean", lambda s, d: (True, "clean (stub)"))
+    # GAP-2 liveness precondition (run(), line ~1589) does its OWN real tmux+DB read for
+    # every singleton obs, bypassing the injected AgentObs entirely — the module docstring's
+    # "DB and tmux are bypassed entirely" claim didn't cover this seam. On a real fleet host
+    # a genuine `cai` tmux session makes this resolve "alive" for free; a bare CI runner has
+    # no such session (and, once DATABASE_URL went live for the ephemeral-schema bootstrap,
+    # no heartbeat row either) so the SAME code now resolves "dead" and short-circuits these
+    # tests before evaluate() ever runs (bus #53294). Default it to "alive" here so run()
+    # proceeds to the real wedge logic regardless of host/CI tmux state; tests that care about
+    # the liveness verdict itself (the all-uncovered sweep tests below) override this per-test.
+    monkeypatch.setattr("nervous_system.singleton_liveness.agent_liveness", lambda agent: "alive")
     return calls
 
 
