@@ -132,3 +132,81 @@ def test_tg_download_file_o_excl_never_truncates_existing_bytes(media_dir, monke
     out = ingest._tg_download_file("TOKEN", "whatever/path.jpg", dest)
     assert out == dest
     assert open(dest, "rb").read() == b"pre-existing-bytes"
+
+
+# ---- self-hosted Bot API server support (bus #53128/#53139/#53143), -------
+# ---- STAGED behind TELEGRAM_BOT_API_BASE_URL, default-off ------------------
+
+def test_default_base_url_is_unchanged_cloud_api():
+    """Unset env => byte-identical current behavior. This is the whole
+    point of staging the change behind a flag: nothing here may regress the
+    live cloud-API path until the var is explicitly set."""
+    assert ingest.TELEGRAM_BOT_API_BASE_URL == "https://api.telegram.org"
+
+
+def test_tg_call_uses_configured_base_url(monkeypatch):
+    monkeypatch.setattr(ingest, "TELEGRAM_BOT_API_BASE_URL", "http://127.0.0.1:8081")
+
+    def _urlopen(req, timeout=None):
+        assert req.full_url == "http://127.0.0.1:8081/botTOKEN/getMe"
+        return _FakeResponse(json.dumps({"ok": True, "result": {}}).encode())
+    monkeypatch.setattr(ingest.urllib.request, "urlopen", _urlopen)
+
+    ingest.tg_call("TOKEN", "getMe", {})
+
+
+def test_download_media_uses_configured_base_url_for_getfile(monkeypatch, media_dir):
+    monkeypatch.setattr(ingest, "TELEGRAM_BOT_API_BASE_URL", "http://127.0.0.1:8081")
+
+    def _urlopen(url, timeout=None):
+        assert url == "http://127.0.0.1:8081/botTOKEN/getFile?file_id=F1"
+        return _FakeResponse(json.dumps({"result": {"file_path": "photos/file_1.jpg"}}).encode())
+    monkeypatch.setattr(ingest.urllib.request, "urlopen", _urlopen)
+
+    def _tg_download_file(token, file_path, dest):
+        assert file_path == "photos/file_1.jpg"
+        with open(dest, "wb") as f:
+            f.write(b"bytes")
+        return dest
+    monkeypatch.setattr(ingest, "_tg_download_file", _tg_download_file)
+
+    path = ingest._download_media("TOKEN", "F1", "UNIQUE_C", "irsyad", 1)
+    assert open(path, "rb").read() == b"bytes"
+
+
+def test_local_mode_absolute_file_path_is_copied_not_http_fetched(tmp_path, media_dir, monkeypatch):
+    """A local telegram-bot-api server (--local) returns file_path as an
+    ABSOLUTE path already on this host's disk, not a relative CDN path --
+    this must be copied directly. urlopen must never be called; if it is,
+    that's the bug this test exists to catch (the file would 404 against a
+    cloud-shaped /file/bot<token>/<path> URL built from an absolute path)."""
+    src = tmp_path / "source" / "doc_1.pdf"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"local-server-bytes")
+
+    def _urlopen_must_not_be_called(url, timeout=None):
+        raise AssertionError(f"local-mode absolute path must not hit the network: {url}")
+    monkeypatch.setattr(ingest.urllib.request, "urlopen", _urlopen_must_not_be_called)
+
+    dest = os.path.join(str(media_dir), "landed.pdf")
+    os.makedirs(media_dir, exist_ok=True)
+    out = ingest._tg_download_file("TOKEN", str(src), dest)
+    assert out == dest
+    assert open(dest, "rb").read() == b"local-server-bytes"
+
+
+def test_local_mode_absolute_file_path_is_idempotent(tmp_path, media_dir, monkeypatch):
+    """Same idempotency guarantee as the xb/HTTP path: a dest that already
+    has bytes wins over a (possibly differently-named) re-copy."""
+    src = tmp_path / "source" / "doc_2.pdf"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"would-be-wrong-if-copied")
+
+    os.makedirs(media_dir, exist_ok=True)
+    dest = os.path.join(str(media_dir), "already_there2.pdf")
+    with open(dest, "wb") as f:
+        f.write(b"pre-existing-bytes")
+
+    out = ingest._tg_download_file("TOKEN", str(src), dest)
+    assert out == dest
+    assert open(dest, "rb").read() == b"pre-existing-bytes"

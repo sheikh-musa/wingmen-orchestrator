@@ -1,0 +1,49 @@
+# /etc/systemd/system/wingmen-tg-bot-api.service
+# Self-hosted Telegram Bot API server (TDLib telegram-bot-api, --local mode) — gzb.
+# bus #53128/#53139/#53143: lifts nervous_system/ingest.py's file-download cap from
+# the cloud Bot API's ~20MB hard limit to ~2GB (Musa's 24MB deck 400'd twice).
+#
+# STAGED, NOT ENABLED. Blocked on TWO things, both orch-console/Musa's to clear,
+# neither mine (cc-substrate) to work around):
+#   1. The build needs `sudo apt-get install cmake gperf` on gzb -- the gzb sudo
+#      password is vault leak-flagged / rotation-unconfirmed (bus #53052, ask
+#      #1610). Do NOT use the flagged cred for this. Run scripts/build_telegram_bot_api.sh
+#      once the password is rotated/accepted; it builds everything else without sudo.
+#   2. --api-id/--api-hash below are PLACEHOLDERS. They come from my.telegram.org
+#      (a user-account credential pair, distinct from the bot token ingest.py
+#      already uses) -- only Musa can generate them. They land in the shared
+#      secrets bundle the SAME way musa-oauth-token etc. do today (added on the
+#      wingmen-core/Mini side that fetch-secrets.sh pulls from -- gzb's puller
+#      script needs NO change, it already tars out whatever the bundle contains).
+#
+# Binds to 127.0.0.1 ONLY (--http-ip-address below): ingest.py runs on this same
+# host, so this server is never exposed past loopback.
+#
+# Install (hub-gated cutover, once both blockers above are clear):
+#   sudo cp deploy/wingmen-tg-bot-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wingmen-tg-bot-api
+#   systemctl status wingmen-tg-bot-api   # confirm active
+#   curl http://127.0.0.1:8081/botTEST/getMe   # sanity probe (expects a 401 JSON body, not a connection refused)
+# Reversible: `sudo systemctl disable --now wingmen-tg-bot-api` -- ingest.py is
+# UNAFFECTED either way until TELEGRAM_BOT_API_BASE_URL is also set (separate,
+# ingest-side cutover step -- see nervous_system/ingest.py).
+[Unit]
+Description=Self-hosted Telegram Bot API server (local mode, loopback-only) — gzb
+After=network-online.target wingmen-fetch-secrets.service
+Wants=network-online.target
+Requires=wingmen-fetch-secrets.service
+
+[Service]
+Type=simple
+User=gazzai
+WorkingDirectory=/home/gazzai
+# Storage dir for the server's own file cache -- separate from logs/tg_media
+# (ingest.py's own download destination); this is TDLib's internal working
+# directory for in-flight files, not the final client-media location.
+ExecStartPre=/bin/mkdir -p /home/gazzai/tg-bot-api-data
+ExecStart=/bin/bash -lc '{ [ -r /dev/shm/wingmen-secrets/.env ] || { echo "tg-bot-api: secrets env missing at /dev/shm/wingmen-secrets/.env" >&2; exit 1; }; }; set -a; . /dev/shm/wingmen-secrets/.env; set +a; : "${TELEGRAM_API_ID:?TELEGRAM_API_ID not in secrets bundle -- Musa must generate it at my.telegram.org}"; : "${TELEGRAM_API_HASH:?TELEGRAM_API_HASH not in secrets bundle}"; exec /home/gazzai/build/telegram-bot-api/bin/telegram-bot-api --local --http-ip-address=127.0.0.1 --http-port=8081 --dir=/home/gazzai/tg-bot-api-data --api-id="$TELEGRAM_API_ID" --api-hash="$TELEGRAM_API_HASH"'
+Restart=always
+RestartSec=6
+
+[Install]
+WantedBy=multi-user.target

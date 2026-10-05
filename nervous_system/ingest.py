@@ -79,6 +79,16 @@ ERROR_BACKOFF = 5          # seconds after a per-channel error
 CONFIG_REFRESH = 60        # seconds between bot_channels re-reads
 DB_ALERT_EVERY = 60        # throttle for the watchdog-visible DB-failure line
 
+# Self-hosted Telegram Bot API server support (bus #53128/#53139/#53143).
+# STAGED, NOT CUT OVER: unset (default) is byte-identical current behavior
+# against the cloud API. When set (e.g. http://127.0.0.1:8081 for a local
+# `telegram-bot-api --local` instance on this same host), getFile's
+# file_path comes back as an ABSOLUTE LOCAL FILESYSTEM PATH already on disk
+# (TDLib local-mode semantics, not a relative CDN path) -- _tg_download_file
+# below copies it directly instead of an HTTP round-trip to ourselves. Local
+# mode has no cloud 20MB cap (files up to ~2GB), which is the whole point.
+TELEGRAM_BOT_API_BASE_URL = os.environ.get("TELEGRAM_BOT_API_BASE_URL", "https://api.telegram.org").rstrip("/")
+
 
 def _dsn() -> str:
     return (os.environ.get("INGEST_DSN")
@@ -93,7 +103,7 @@ def _log_line(msg: str) -> None:
 # ── Telegram (stdlib, matching the bridge idiom — no SDK dependency) ──────────
 
 def tg_call(token: str, method: str, params: dict, timeout: int = POLL_TIMEOUT + 10):
-    url = f"https://api.telegram.org/bot{token}/{method}"
+    url = f"{TELEGRAM_BOT_API_BASE_URL}/bot{token}/{method}"
     data = urllib.parse.urlencode(params).encode()
     with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=timeout) as r:
         payload = json.loads(r.read().decode())
@@ -111,7 +121,7 @@ _MEDIA_DIR = os.path.join(os.path.dirname(__file__), "..", "logs", "tg_media")
 
 
 def _tg_download_file(token: str, file_path: str, dest: str) -> str:
-    """Stream api.telegram.org/file/<file_path> -> dest with retry+backoff.
+    """Stream <base>/file/bot<token>/<file_path> -> dest with retry+backoff.
     Telegram's file CDN intermittently resets mid-download (Errno 54); a bare
     fetch silently lost the operator's DPA + ADCDA photos twice (2026-06-28).
 
@@ -121,8 +131,20 @@ def _tg_download_file(token: str, file_path: str, dest: str) -> str:
     bytes (idempotent re-process or a concurrent download of the identical
     update) — never a different client's content silently clobbered (bus
     #47469: the old basename-only naming let one bot's getFile response
-    overwrite another bot's client media under the same name)."""
-    url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+    overwrite another bot's client media under the same name).
+
+    Local-mode short-circuit (TELEGRAM_BOT_API_BASE_URL set): a local
+    telegram-bot-api server returns file_path as an ABSOLUTE path already on
+    this host's disk, not a relative CDN path -- copy it directly rather than
+    HTTP-fetching it from ourselves. Same idempotency as the xb path below:
+    a dest that already has bytes is a prior/concurrent run of this exact
+    file, never overwritten."""
+    if os.path.isabs(file_path) and os.path.exists(file_path):
+        if os.path.exists(dest) and os.path.getsize(dest) > 0:
+            return dest
+        shutil.copy(file_path, dest)
+        return dest
+    url = f"{TELEGRAM_BOT_API_BASE_URL}/file/bot{token}/{file_path}"
     last = None
     for i in range(4):
         try:
@@ -164,7 +186,7 @@ def _media_dest_name(channel_key: str, upd_id: int, file_unique_id: str,
 def _download_media(token: str, file_id: str, file_unique_id: str, channel_key: str,
                      upd_id: int, name: str | None = None) -> str:
     with urllib.request.urlopen(
-            f"https://api.telegram.org/bot{token}/getFile?file_id={file_id}", timeout=30) as r:
+            f"{TELEGRAM_BOT_API_BASE_URL}/bot{token}/getFile?file_id={file_id}", timeout=30) as r:
         fp = json.load(r)["result"]["file_path"]
     os.makedirs(_MEDIA_DIR, exist_ok=True)
     safe = _media_dest_name(channel_key, upd_id, file_unique_id, fp, name)
