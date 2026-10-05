@@ -211,8 +211,50 @@ except Exception:
     pass
 PY
 }
+
+# Freshest auth_account for this session — same freshness ordering as
+# _fp_for_session above, but a SEPARATE query/connection rather than a shared
+# multi-column read: a provider-routed relaunch (bus #53357) clears auth_fp
+# to NULL by design (launch_dangerous_cc.sh's CC_AUTH_FP-clearing override),
+# so auth_fp can never flip to NEW_FP for those lanes — auth_account (the
+# CC_AUTH_LABEL the SAME boot stamp call writes, e.g. "glm:z.ai") is the only
+# DB-side proof that boot stamp actually ran for this relaunch.
+_account_for_session() {
+  "$VENV_PY" - "$1" <<'PY' 2>/dev/null || true
+import os, sys
+sys.path.insert(0, os.getcwd())
+sys.path.insert(0, os.path.join(os.getcwd(), 'scripts', 'lib'))
+try:
+    import psycopg
+except ImportError:
+    sys.exit(0)
+from substrate_dsn import dsn_from_env_file
+try:
+    dsn = dsn_from_env_file(os.path.join(os.getcwd(), '.env'))
+except Exception:
+    dsn = os.environ.get('SUPABASE_DB_URL')
+if not dsn:
+    sys.exit(0)
+sess = sys.argv[1]
+try:
+    with psycopg.connect(dsn, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT auth_account FROM agent_status WHERE tmux_session = %s "
+                "ORDER BY updated_at DESC NULLS LAST LIMIT 1",
+                (sess,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                print(row[0])
+except Exception:
+    pass
+PY
+}
 BEFORE_FP="$(_fp_for_session "$SESS")"
 BEFORE_FP="${BEFORE_FP//[$'\t\r\n ']/}"
+BEFORE_ACCOUNT="$(_account_for_session "$SESS")"
+BEFORE_ACCOUNT="${BEFORE_ACCOUNT//[$'\t\r\n ']/}"
 
 echo "[switch_lane_token] session=$SESS  worktree=$WORKTREE"
 echo "[switch_lane_token] BEFORE auth_fp=${BEFORE_FP:-<none>}  ->  target auth_fp=$NEW_FP"
@@ -230,6 +272,20 @@ fi
 _APPLY_MODEL=""
 if [ -r "$ORCH_DIR/.${SESS}_model" ]; then
   _APPLY_MODEL="$(tr -d '[:space:]' < "$ORCH_DIR/.${SESS}_model")"
+fi
+
+# bus #53357: a lane applying a PROVIDER-ROUTED model (glm-*, kimi-*, etc. —
+# anything scripts/lib/provider_routing.sh's _provider_for_model recognizes)
+# gets CC_AUTH_FP cleared to "" (-> NULL in agent_status) by design at boot,
+# so AFTER_FP can NEVER equal NEW_FP for it — that's not a wedge, it's the
+# override doing its job. Detect this UP FRONT so the verify loop below knows
+# to check auth_account instead of auth_fp for this one case; every existing
+# Anthropic-account switch/relaunch is completely unaffected (_EXPECT_PROVIDER
+# stays 0, same auth_fp-flip check as always).
+_EXPECT_PROVIDER=0
+if [ -n "$_APPLY_MODEL" ]; then
+  . "$_LIB/provider_routing.sh"
+  _provider_for_model "$_APPLY_MODEL" >/dev/null 2>&1 && _EXPECT_PROVIDER=1
 fi
 
 # ── DRY-RUN (op#10706 R3): print the plan, change NOTHING, exit 0. Proves the
@@ -433,6 +489,7 @@ fi
 echo "[switch_lane_token] verifying re-token (auto-answer resume menu + auth_fp flip + HEALTHY pane, up to ${POLL_S}s) ..."
 DEADLINE=$(( $(date -u +%s) + POLL_S ))
 AFTER_FP=""
+AFTER_ACCOUNT=""
 MENU_ANSWERED=0
 TRUST_ANSWERED=0
 PANE_HEALTHY=0
@@ -462,11 +519,35 @@ while [ "$(date -u +%s)" -lt "$DEADLINE" ]; do
   fi
   AFTER_FP="$(_fp_for_session "$SESS")"
   AFTER_FP="${AFTER_FP//[$'\t\r\n ']/}"
-  if [ "$AFTER_FP" = "$NEW_FP" ] && pane_up_healthy "$LAST_PANE"; then
-    PANE_HEALTHY=1
-    break
+  if [ "$_EXPECT_PROVIDER" = 1 ]; then
+    # auth_fp is cleared to NULL by design for this model (bus #53357) — it
+    # will never equal NEW_FP, so check auth_account (the SAME boot-stamp
+    # call's CC_AUTH_LABEL) instead: non-empty and not the generic fallback
+    # proves THIS relaunch's provider override actually ran.
+    AFTER_ACCOUNT="$(_account_for_session "$SESS")"
+    AFTER_ACCOUNT="${AFTER_ACCOUNT//[$'\t\r\n ']/}"
+    if [ -n "$AFTER_ACCOUNT" ] && [ "$AFTER_ACCOUNT" != "unlabelled" ] && pane_up_healthy "$LAST_PANE"; then
+      PANE_HEALTHY=1
+      break
+    fi
+  else
+    if [ "$AFTER_FP" = "$NEW_FP" ] && pane_up_healthy "$LAST_PANE"; then
+      PANE_HEALTHY=1
+      break
+    fi
   fi
 done
+
+# Single gate the rest of the script checks instead of a bare "$AFTER_FP" =
+# "$NEW_FP" everywhere — for a provider-routed relaunch (_EXPECT_PROVIDER=1)
+# the auth_fp comparison is categorically inapplicable (see above), so the
+# identity-flip criterion becomes the auth_account check instead.
+_FP_CHECK_OK=0
+if [ "$_EXPECT_PROVIDER" = 1 ]; then
+  [ -n "$AFTER_ACCOUNT" ] && [ "$AFTER_ACCOUNT" != "unlabelled" ] && _FP_CHECK_OK=1
+else
+  [ "$AFTER_FP" = "$NEW_FP" ] && _FP_CHECK_OK=1
+fi
 
 # ── 6.4 RESUME-VERIFY belt (op#12030 f/u): if a resume was EXPECTED, prove it TOOK ─
 # The health-verify cannot see a fresh boot (a fresh boot IS healthy) — the exact
@@ -476,7 +557,7 @@ done
 # newest session MUST == RESUME_ID; a fresh boot creates a NEW uuid. Only meaningful
 # once the pane is up (claude has written its session) — hence after the loop.
 RESUME_VERIFIED=1
-if [ -n "$RESUME_ID" ] && [ "$AFTER_FP" = "$NEW_FP" ] && [ "$PANE_HEALTHY" = "1" ]; then
+if [ -n "$RESUME_ID" ] && [ "$_FP_CHECK_OK" = 1 ] && [ "$PANE_HEALTHY" = "1" ]; then
   _RUNNING_SID="$(resolve_resume_session "$WORKTREE")"
   if session_resumed_ok "$WORKTREE" "$RESUME_ID"; then
     RESUME_VERIFIED=1
@@ -498,10 +579,10 @@ fi
 # a VERIFIED resume (op#12030 f/u): a menu-parked lane has the right fp but is
 # soft-wedged; a fresh boot has the right fp + a healthy pane but the wrong session.
 _SWITCH_RESULT="PASS"
-if [ "$AFTER_FP" != "$NEW_FP" ] || [ "$PANE_HEALTHY" != "1" ] || [ "$RESUME_VERIFIED" != "1" ]; then _SWITCH_RESULT="FAIL"; fi
+if [ "$_FP_CHECK_OK" != 1 ] || [ "$PANE_HEALTHY" != "1" ] || [ "$RESUME_VERIFIED" != "1" ]; then _SWITCH_RESULT="FAIL"; fi
 SWITCH_RESULT="$_SWITCH_RESULT" \
 SWITCH_ACTOR="${ACTOR:-cli}" SWITCH_BREAKGLASS="${BREAK_GLASS:-0}" SWITCH_ARMED="${ARMED:-0}" \
-SWITCH_SESS="$SESS" SWITCH_BEFORE="${BEFORE_FP:-none}" SWITCH_AFTER="${AFTER_FP:-none}" \
+SWITCH_SESS="$SESS" SWITCH_BEFORE="${BEFORE_FP:-none}" SWITCH_AFTER="${AFTER_FP:-none}${AFTER_ACCOUNT:+ (${AFTER_ACCOUNT})}" \
 SWITCH_TARGET="$NEW_FP" SWITCH_MODELAPPLY="$MODEL_APPLY" \
 "$VENV_PY" - <<'PYAUDIT' 2>>/dev/stderr || echo "WARNING: switch audit/alert emit FAILED (switch itself already completed above)" >&2
 import os
@@ -547,9 +628,16 @@ PYAUDIT
 
 echo "───────────────────────────────────────────────────────────"
 echo "  session:   $SESS"
-echo "  BEFORE fp: ${BEFORE_FP:-<none>}"
-echo "  AFTER  fp: ${AFTER_FP:-<not-yet-registered>}"
-echo "  target fp: $NEW_FP"
+if [ "$_EXPECT_PROVIDER" = 1 ]; then
+  echo "  provider:  model=${_APPLY_MODEL} is provider-routed (bus #53357) — auth_fp"
+  echo "             is cleared by design; verifying via auth_account instead."
+  echo "  BEFORE acct: ${BEFORE_ACCOUNT:-<none>}"
+  echo "  AFTER  acct: ${AFTER_ACCOUNT:-<not-yet-registered>}"
+else
+  echo "  BEFORE fp: ${BEFORE_FP:-<none>}"
+  echo "  AFTER  fp: ${AFTER_FP:-<not-yet-registered>}"
+  echo "  target fp: $NEW_FP"
+fi
 if [ -n "$RESUME_ID" ]; then
   echo "  mode:      RESUMED conversation ($RESUME_ID)"
 else
@@ -559,28 +647,34 @@ echo "  pane:      $( [ "$PANE_HEALTHY" = 1 ] && echo 'HEALTHY (composer ready /
 if [ -n "$RESUME_ID" ]; then
   echo "  resume:    $( [ "$RESUME_VERIFIED" = 1 ] && echo "VERIFIED (running session == $RESUME_ID)" || echo 'NOT VERIFIED (ran FRESH — context lost)' )"
 fi
-if [ "$AFTER_FP" = "$NEW_FP" ] && [ "$PANE_HEALTHY" = 1 ] && [ "$RESUME_VERIFIED" = 1 ]; then
-  echo "  RESULT:    PASS — lane re-tokened onto the new account, came up healthy$( [ -n "$RESUME_ID" ] && echo ', resume VERIFIED' )."
+if [ "$_FP_CHECK_OK" = 1 ] && [ "$PANE_HEALTHY" = 1 ] && [ "$RESUME_VERIFIED" = 1 ]; then
+  echo "  RESULT:    PASS — lane re-tokened/model-applied, came up healthy$( [ -n "$RESUME_ID" ] && echo ', resume VERIFIED' )."
   echo "───────────────────────────────────────────────────────────"
   exit 0
-elif [ "$AFTER_FP" = "$NEW_FP" ] && [ "$PANE_HEALTHY" = 1 ] && [ "$RESUME_VERIFIED" != 1 ]; then
-  # fp flipped + pane healthy, but the EXPECTED resume did NOT take — the lane
-  # relaunched FRESH (new session) and LOST its context. The exact false-PASS the
+elif [ "$_FP_CHECK_OK" = 1 ] && [ "$PANE_HEALTHY" = 1 ] && [ "$RESUME_VERIFIED" != 1 ]; then
+  # identity check passed + pane healthy, but the EXPECTED resume did NOT take — the
+  # lane relaunched FRESH (new session) and LOST its context. The exact false-PASS the
   # health-verify can't see (op#12030 f/u / irsyad-coord). LOUD, distinct exit.
   echo "  RESULT:    FAIL — re-tokened onto the new account and healthy, BUT it ran FRESH:"
   echo "             expected to RESUME session $RESUME_ID, context was NOT preserved."
   echo "             Recover: relaunch with an explicit --resume $RESUME_ID. Inspect: $TM attach -t $SESS"
   echo "───────────────────────────────────────────────────────────"
   exit 11
-elif [ "$AFTER_FP" = "$NEW_FP" ]; then
-  # fp flipped but the pane never reached a healthy state within POLL_S — most
-  # likely still PARKED at the resume menu (or crashed on boot). This is the
+elif [ "$_FP_CHECK_OK" = 1 ]; then
+  # identity check passed but the pane never reached a healthy state within POLL_S —
+  # most likely still PARKED at the resume menu (or crashed on boot). This is the
   # soft-wedge op#12030-f/u closes: LOUD, distinct exit — do NOT report "PASS".
   echo "  RESULT:    FAIL — re-tokened onto the new account BUT the pane is NOT healthy"
   echo "             within ${POLL_S}s (parked at the resume menu, or crashed on boot)."
   echo "             The lane is soft-wedged — inspect: $TM attach -t $SESS"
   echo "───────────────────────────────────────────────────────────"
   exit 10
+elif [ "$_EXPECT_PROVIDER" = 1 ]; then
+  echo "  RESULT:    FAIL — auth_account never got a provider label within ${POLL_S}s."
+  echo "             The relaunch may still be building context, or the provider"
+  echo "             override in launch_dangerous_cc.sh never ran. Check: $TM attach -t $SESS"
+  echo "───────────────────────────────────────────────────────────"
+  exit 8
 else
   echo "  RESULT:    FAIL — auth_fp has not flipped within ${POLL_S}s."
   echo "             The relaunch may still be building context (auth_fp is stamped"
