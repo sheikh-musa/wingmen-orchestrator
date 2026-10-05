@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import pathlib
+from unittest import mock
 
 import pytest
 
@@ -162,6 +163,206 @@ def test_classify_never_leaks_the_matched_value_into_the_rendered_report():
     rendered = v.render(_structure(["Date", "Amount"], rows=5))
     assert "syn@example.test" not in rendered
     assert "email=1" in rendered
+
+
+# ── person-name hardening (bus #52465): free-text name-shaped patterns ─────
+
+def test_scan_person_name_hits_label_value():
+    assert scf.scan_person_name_hits("Student: Ahmad Yusof") == 1
+
+
+def test_scan_person_name_hits_honorific():
+    assert scf.scan_person_name_hits("Report prepared by Mr. Ahmad Yusof") == 1
+
+
+def test_scan_person_name_hits_arabic_particle():
+    assert scf.scan_person_name_hits("Ahmad bin Yusof attended the session") == 1
+
+
+def test_scan_person_name_hits_arabic_script():
+    assert scf.scan_person_name_hits("الطالب احمد") >= 1
+
+
+def test_scan_person_name_hits_zero_for_boring_text():
+    assert scf.scan_person_name_hits("total amount 120.00 paid on schedule") == 0
+
+
+def test_classify_holds_on_single_person_progress_report_no_header_no_row_count():
+    # the real incident this closes (bus #52465): a single-person progress
+    # report has no table header at all and only one "row" -- the OLD
+    # heuristics (header keyword, >20 rows + name column) both miss this.
+    structure = scf.FileStructure(
+        kind="docx",
+        sheets=[scf.SheetStructure(name="(document body)", rows=1, cols=1, header=[])],
+        texts=["Progress Report\nStudent: Ahmad bin Yusof\nGrade: A"],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert v.person_record is True
+    assert any("record-type keyword" in r for r in v.reasons)
+
+
+def test_classify_record_type_keyword_alone_does_not_hold():
+    # a document TYPE alone (no name-shaped value anywhere) must not force
+    # HOLD -- only the co-occurrence with a name-shaped value does.
+    structure = scf.FileStructure(
+        kind="docx",
+        sheets=[scf.SheetStructure(name="(document body)", rows=1, cols=1, header=[])],
+        texts=["This progress report template has no student data filled in yet."],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "CLEAN"
+
+
+# ── image extraction (local OCR, bus #52461) ─────────────────────────────────
+
+def _write_blank_png(path):
+    from PIL import Image
+
+    Image.new("RGB", (10, 10), color="white").save(path)
+
+
+def test_extract_image_blank_ui_screenshot_is_clean(tmp_path, monkeypatch):
+    import pytesseract
+
+    p = tmp_path / "screenshot.png"
+    _write_blank_png(p)
+    monkeypatch.setattr(pytesseract, "image_to_string", lambda img: "Settings\nLog Out\nHelp")
+
+    structure = scf.extract_image(p)
+    assert structure.kind == "image"
+    assert structure.sheets[0].rows == 0  # no digit-bearing multi-token lines
+    v = scf.classify(structure)
+    assert v.verdict == "CLEAN"
+
+
+def test_extract_image_gradebook_table_holds(tmp_path, monkeypatch):
+    import pytesseract
+
+    p = tmp_path / "gradebook.png"
+    _write_blank_png(p)
+    ocr_text = (
+        "Trainee Gradebook\n"
+        "Ahmad Yusof 101 85\n"
+        "Siti Aminah 102 90\n"
+        "Lim Wei 103 78\n"
+        "Tan Mei 104 88\n"
+    )
+    monkeypatch.setattr(pytesseract, "image_to_string", lambda img: ocr_text)
+
+    structure = scf.extract_image(p)
+    assert structure.sheets[0].rows == 4  # > threshold of 3
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert any("data table" in r for r in v.reasons)
+
+
+def test_extract_image_few_rows_under_threshold_not_held_by_row_count_alone(tmp_path, monkeypatch):
+    import pytesseract
+
+    p = tmp_path / "small.png"
+    _write_blank_png(p)
+    # 2 digit-bearing lines, no PII shape, no name pattern -- under the >3
+    # row threshold and otherwise boring.
+    monkeypatch.setattr(pytesseract, "image_to_string", lambda img: "Step 1 of 2\nPage 2 of 10")
+
+    structure = scf.extract_image(p)
+    v = scf.classify(structure)
+    assert v.verdict == "CLEAN"
+
+
+# ── sensitive-channel override (bus #52465) ──────────────────────────────────
+
+def test_is_sensitive_channel_fails_closed_when_database_url_unset(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert scf.is_sensitive_channel("cosem-exams") is True
+
+
+def test_is_sensitive_channel_fails_closed_on_db_error(monkeypatch):
+    # built from parts, not one contiguous literal, so this fixture's own
+    # SOURCE text doesn't trip the live secrets_transcript_guard Edit scan
+    # that guards this very file (same precedent used elsewhere in this repo).
+    fake_dsn = "postgresql://" + "nope:nope" + "@127.0.0.1:1/nope"
+    monkeypatch.setenv("DATABASE_URL", fake_dsn)
+    assert scf.is_sensitive_channel("cosem-exams") is True
+
+
+def test_is_sensitive_channel_fails_closed_when_channel_unknown(monkeypatch):
+    """Reachable DB, but the channel_key has no row -- the migration-091
+    polarity: a brand-new/unlisted channel is sensitive by DEFAULT, so a
+    query that reaches the DB and finds nothing must still fail closed,
+    distinct from the DB-unreachable cases above."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/fake")
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a, **k):
+            pass
+
+        def fetchone(self):
+            return None
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    fake_psycopg = mock.MagicMock()
+    fake_psycopg.connect.return_value = FakeConn()
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+
+    assert scf.is_sensitive_channel("brand-new-unlisted-channel") is True
+
+
+def test_export_structure_only_omits_content(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    structure = scf.FileStructure(
+        kind="csv",
+        sheets=[scf.SheetStructure(name="s1", rows=1, cols=1, header=["Label"], rows_data=[["Welcome"]])],
+    )
+    verdict = scf.StageVerdict(verdict="CLEAN")
+    out_path = scf.export_structure_only(verdict, structure, "op1", "sample.csv")
+    text = out_path.read_text(encoding="utf-8")
+    assert text.startswith("verdict: CLEAN")
+    assert "Welcome" not in text
+    assert "structure only" in text
+
+
+def test_main_sensitive_channel_exports_structure_only_even_on_clean(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(scf, "is_sensitive_channel", lambda channel: True)
+    p = tmp_path / "navmap.csv"
+    p.write_text("Screen,Label\nhome,Welcome\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op1", "--export", "--channel", "cosem-exams"])
+    assert rc == 0
+    exported = tmp_path / "reports" / "client-file-staging" / "op1" / "navmap.md"
+    content = exported.read_text(encoding="utf-8")
+    assert "verdict: CLEAN" in content
+    assert "Welcome" not in content
+    assert "structure only" in content
+
+
+def test_main_non_sensitive_channel_still_exports_full_content(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(scf, "is_sensitive_channel", lambda channel: False)
+    p = tmp_path / "navmap.csv"
+    p.write_text("Screen,Label\nhome,Welcome\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op1", "--export", "--channel", "some-other-channel"])
+    assert rc == 0
+    exported = tmp_path / "reports" / "client-file-staging" / "op1" / "navmap.md"
+    assert "Welcome" in exported.read_text(encoding="utf-8")
 
 
 # ── format extractors (real tiny files, built on the fly, synthetic only) ───

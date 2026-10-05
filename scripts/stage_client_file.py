@@ -26,10 +26,38 @@ never itself scanned for a PII shape, and is echoed verbatim both in the
 stdout report and as the exported report's own filename. A file literally
 named with a client's NRIC (etc.) would carry that into the export untouched.
 Narrow (filenames rarely carry PII) — not fixed here, flag if it matters.
+
+Image support + person-name hardening (bus #52461/#52465, real incident
+2026-10-05): a lane Read a genuine UAE-gov trainee gradebook SCREENSHOT
+directly (no stager coverage for images at all), and separately this stager
+returned CLEAN on a single-person progress report whose only PII-shaped
+signal was a name + grades — no NRIC/phone/email shape, no 20+-row table, so
+neither existing heuristic fired. Images are staged via local OCR only (no
+network, no LLM — pytesseract/tesseract, same fail-closed posture as every
+other format here); a >3-"row" OCR text block is treated as a data table
+and forces HOLD the same way a >20-row sheet does for tabular formats, just
+at a much lower bar (an image table is usually a small gradebook/roster, not
+a 1000-row export). Person-name detection now also scans free TEXT (not just
+sheet headers) for name-shaped patterns: a label (Name/Student/Trainee/
+Candidate/Learner) followed by a value, an honorific + capitalised name, or
+an Arabic-script / name-particle (bin/binti/ibn) run — any hit forces HOLD
+regardless of row count, closing the single-person-record gap above.
+
+Per-channel sensitive override (bus #52465): --channel reads
+bot_channels.sensitive_data (migration 091; DEFAULT true -- fails CLOSED
+for every channel except an explicit internal-console allowlist
+(nazim-console, operator-orch, cai-channel, finance-console, war-room);
+an unknown channel or an
+unreachable DB is also treated as sensitive). A sensitive channel NEVER
+exports full content on --export, even on a CLEAN verdict — only the
+values-free structural header, so a gov/client-data channel (cosem-exams,
+gazzabyte-irsyad, cosem-tdu, ...) can't have content heuristics alone
+decide what leaves the raw file.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -67,6 +95,35 @@ _LONG_NUMBER_RE = re.compile(r"\b(?:\d[ -]?){12,}\b")
 _PERSON_HEADER_KEYWORDS = (
     "name", "military", "id", "phone", "mobile", "dob", "birth",
     "emirates", "nric", "email", "address", "nationality",
+    "student", "trainee", "candidate", "learner",
+)
+
+# ── person-name shape patterns, scanned over free TEXT (not just headers) ───
+# bus #52465: a single-person progress report ("Student: Ahmad bin Yusof")
+# has no 20+-row table and no header row at all — these catch the name
+# itself, wherever it appears in the extracted text.
+_PERSON_LABEL_VALUE_RE = re.compile(
+    r"\b(?:name|student|trainee|candidate|learner)\s*[:\-]\s*[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+)*",
+    re.IGNORECASE,
+)
+_HONORIFIC_NAME_RE = re.compile(
+    r"\b(?:Mr|Mrs|Ms|Mx|Dr|Ustaz|Ustazah|Hajjah|Haji|Sheikh)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*"
+)
+# "<Capitalised word> bin/binti/ibn/bint <...>" — common Malay/Arabic
+# patronymic name construction (e.g. "Ahmad bin Yusof").
+_ARABIC_NAME_PARTICLE_RE = re.compile(
+    r"\b[A-Z][a-z]+\s+(?:bin|binti|ibn|bint)\s+[A-Z][a-z]+\b"
+)
+# Arabic-script run (2+ letters) — a name rendered in Arabic script rather
+# than transliterated is still a name.
+_ARABIC_SCRIPT_RE = re.compile(r"[؀-ۿ]{2,}")
+
+# "progress report"/"transcript"/etc. ALONE is not sensitive (it's just a
+# document type) -- only flagged as an extra reason when it co-occurs with
+# an actual name-shaped value (scan_person_name_hits > 0), which already
+# forces HOLD on its own. This just makes the HOLD reason legible.
+_RECORD_TYPE_KEYWORDS_RE = re.compile(
+    r"\b(?:progress report|transcript|result slip|grade|score|student id)\b", re.IGNORECASE
 )
 
 
@@ -157,6 +214,27 @@ def is_person_record_header(headers: list[str]) -> bool:
 
 def has_name_like_column(headers: list[str]) -> bool:
     return any("name" in (h or "").strip().lower() for h in headers)
+
+
+def scan_person_name_hits(text: str) -> int:
+    """Count-only scan for a name-SHAPED value in free text (never returns
+    the matched text itself) — label+value, honorific+name, Malay/Arabic
+    patronymic particle, or an Arabic-script run. Any hit (>0) is a
+    person-record signal on its own, independent of row count or header
+    keywords (bus #52465 single-person-record gap)."""
+    return (
+        len(_PERSON_LABEL_VALUE_RE.findall(text))
+        + len(_HONORIFIC_NAME_RE.findall(text))
+        + len(_ARABIC_NAME_PARTICLE_RE.findall(text))
+        + len(_ARABIC_SCRIPT_RE.findall(text))
+    )
+
+
+# A data-table "row" detected in OCR'd image text, above which the image is
+# treated as a roster/gradebook rather than a UI screenshot (bus #52461) --
+# deliberately much lower than the 20-row tabular-format threshold, since an
+# image table worth holding is usually a small roster, not a bulk export.
+_IMAGE_DATA_ROW_HOLD_THRESHOLD = 3
 
 
 @dataclass
@@ -257,6 +335,22 @@ def classify(structure: FileStructure) -> StageVerdict:
         if s.rows > 20 and has_name_like_column(s.header):
             person_record = True
             reasons.append(f"sheet '{s.name}' has {s.rows} rows with a name-like column")
+        if structure.kind == "image" and s.rows > _IMAGE_DATA_ROW_HOLD_THRESHOLD:
+            person_record = True
+            reasons.append(
+                f"image text looks like a data table ({s.rows} rows, "
+                f"threshold {_IMAGE_DATA_ROW_HOLD_THRESHOLD})"
+            )
+    name_hits = sum(scan_person_name_hits(t) for t in structure.texts)
+    if name_hits > 0:
+        person_record = True
+        if any(_RECORD_TYPE_KEYWORDS_RE.search(t) for t in structure.texts):
+            reasons.append(
+                f"{name_hits} name-shaped value(s) found alongside a record-type keyword "
+                "(progress report/transcript/grade/score/student ID)"
+            )
+        else:
+            reasons.append(f"{name_hits} name-shaped value(s) detected")
     if pii.total() > 0:
         reasons.append(f"{pii.total()} PII-shaped value(s) detected")
     verdict = "HOLD" if (pii.total() > 0 or person_record) else "CLEAN"
@@ -356,11 +450,41 @@ def extract_pdf(path: Path) -> FileStructure:
     return FileStructure(kind="pdf", sheets=sheets, image_count=image_count, texts=texts, text_blocks=text_blocks)
 
 
+def extract_image(path: Path) -> FileStructure:
+    """Local OCR only (bus #52461) -- no network, no LLM. pytesseract shells
+    out to the local `tesseract` binary; the image bytes never leave this
+    process. A non-empty OCR line with >=2 whitespace-separated tokens AND
+    at least one digit is treated as a data "row" (a UI label/button reads
+    as 1-3 plain words; a gradebook/roster row reads as several
+    digit-bearing tokens across OCR's whitespace-collapsed columns) -- see
+    _IMAGE_DATA_ROW_HOLD_THRESHOLD and classify()."""
+    from PIL import Image
+    import pytesseract
+
+    with Image.open(path) as img:
+        text = pytesseract.image_to_string(img)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    def _is_row_like(line: str) -> bool:
+        tokens = line.split()
+        return len(tokens) >= 2 and any(re.search(r"\d", tok) for tok in tokens)
+
+    row_lines = [ln for ln in lines if _is_row_like(ln)]
+    rows_data = [ln.split() for ln in row_lines]
+    cols = max((len(r) for r in rows_data), default=0)
+    sheet = SheetStructure(name="(image text)", rows=len(rows_data), cols=cols, rows_data=rows_data)
+    text_blocks = [("image OCR text", text)] if text.strip() else []
+    return FileStructure(kind="image", sheets=[sheet], image_count=1, texts=[text], text_blocks=text_blocks)
+
+
 _EXTRACTORS = {
     ".csv": extract_csv,
     ".xlsx": extract_xlsx,
     ".docx": extract_docx,
     ".pdf": extract_pdf,
+    ".png": extract_image,
+    ".jpg": extract_image,
+    ".jpeg": extract_image,
 }
 
 
@@ -402,13 +526,51 @@ def export_clean_file(verdict: StageVerdict, structure: FileStructure, op_id: st
     return out_path
 
 
+def is_sensitive_channel(channel: str) -> bool:
+    """Look up bot_channels.sensitive_data for *channel* (bus #52465). Fails
+    CLOSED -- an unknown channel, a missing column/table, or an unreachable
+    DB is treated as sensitive, matching this script's existing
+    fail-closed-on-ambiguity design throughout (orch-console #51085). DSN
+    comes from the DATABASE_URL env var only — never a literal/CLI arg."""
+    try:
+        import psycopg
+
+        dsn = os.environ["DATABASE_URL"]
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT sensitive_data FROM bot_channels WHERE channel_key = %s", (channel,))
+                row = cur.fetchone()
+                if row is None:
+                    return True
+                return bool(row[0])
+    except Exception:
+        return True
+
+
+def export_structure_only(verdict: StageVerdict, structure: FileStructure, op_id: str, original_name: str) -> Path:
+    """Sensitive-channel export (bus #52465): the values-free structural
+    header only, never content — even on a CLEAN verdict. A sensitive
+    channel (every channel except the internal-console allowlist in
+    migration 091) never lets content-heuristics alone decide what leaves
+    the raw file."""
+    header = verdict.render(structure)
+    out_dir = Path("reports/client-file-staging") / sanitize_op_id(op_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{Path(original_name).stem}.md"
+    out_path.write_text(header + "\n\n(structure only — sensitive channel, content withheld)\n", encoding="utf-8")
+    return out_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("path", help="path to the client file (.xlsx/.csv/.docx/.pdf)")
+    p.add_argument("path", help="path to the client file (.xlsx/.csv/.docx/.pdf/.png/.jpg/.jpeg)")
     p.add_argument("op_id", help="op id this file is staged under (free-form string)")
     p.add_argument("--export", action="store_true",
                    help="on CLEAN, write the actual readable content to reports/client-file-staging/<op_id>/; "
                         "no-op on HOLD")
+    p.add_argument("--channel",
+                   help="bot_channels.channel_key this file arrived on; if flagged sensitive_data, --export "
+                        "writes structure only (never content), even on a CLEAN verdict (bus #52465)")
     return p
 
 
@@ -422,7 +584,10 @@ def main(argv: list[str] | None = None) -> int:
     verdict = classify(structure)
     print(verdict.render(structure))  # stdout: values-free, always
     if verdict.verdict == "CLEAN" and args.export:
-        out_path = export_clean_file(verdict, structure, args.op_id, path.name)
+        if args.channel and is_sensitive_channel(args.channel):
+            out_path = export_structure_only(verdict, structure, args.op_id, path.name)
+        else:
+            out_path = export_clean_file(verdict, structure, args.op_id, path.name)
         print(f"exported: {out_path}")
     return 0 if verdict.verdict == "CLEAN" else 1
 
