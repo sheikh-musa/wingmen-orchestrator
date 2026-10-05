@@ -568,6 +568,62 @@ _REMOTE_SCAN_SH = (
 )
 
 
+# orch-console #51982/#46625: cc-orchestrator's EXPECTED account via _expected_fp
+# is resolved from .orch_default_token UNDER _ORCH_DIR, which is the CONSOLE's own
+# (Mini) checkout -- but the hub boots on gzb, a separate host, and nothing syncs
+# that pointer file between the two (by design: *_default_token is .gitignore'd,
+# host-local). So the console always reads "pointer absent" for the hub and falls
+# to the .env default, showing e.g. "expected=Musa" even when gzb's own pointer has
+# long pinned Syed. Mirrors _REMOTE_SCAN_SH's shape exactly, but reads the POINTER
+# file (what the hub is CONFIGURED to boot on) instead of the live proc's env (what
+# it's ACTUALLY running on right now) -- same fingerprint-remote-side, raw-token-
+# never-leaves-the-host discipline.
+_REMOTE_EXPECTED_SCAN_SH = (
+    "f=\"$HOME/wingmen/orchestrator/.orch_default_token\"; "
+    "[ -r \"$f\" ] || exit 3; "
+    "tgt=$(tr -d '[:space:]' < \"$f\" 2>/dev/null); "
+    "[ -n \"$tgt\" ] && [ -r \"$tgt\" ] || exit 4; "
+    "tok=$(cat \"$tgt\" 2>/dev/null); "
+    "[ -n \"$tok\" ] || exit 5; "
+    "fp=$(printf '%s' \"$tok\" | sha256sum | cut -c1-12); "
+    "printf '%s\\n' \"$fp\""
+)
+_remote_hub_expected_cache = {"at": 0.0, "val": None}  # val = fp str | None
+
+
+def _remote_hub_expected_scan(force: bool = False) -> Optional[str]:
+    """SSH the hub's OWN host (gzb, via the same target _remote_hub_scan uses) and
+    fingerprint the token its .orch_default_token POINTER names, remote-side (raw
+    token never leaves that host). None on any unreachable/absent-pointer/failure
+    -- caller falls through to the .env-default label, same as any other
+    unresolved 'expected' (never a guess). Cached like _remote_hub_scan (positive
+    AND negative) so a down/unreachable host isn't hammered every poll."""
+    now = time.monotonic()
+    if not force and _remote_hub_expected_cache["at"] and (
+        now - _remote_hub_expected_cache["at"]) < _REMOTE_CACHE_TTL_S:
+        return _remote_hub_expected_cache["val"]
+    val = None
+    try:
+        target = _resolve_hub_ssh_target()
+        if target is None:
+            raise RuntimeError("hub ssh target unresolved (unknown holder)")
+        ssh_args = ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
+                    "-o", "StrictHostKeyChecking=accept-new"]
+        if "@" in target:
+            ssh_args += ["-i", _REMOTE_HUB_KEY]
+        ssh_args += [target, _REMOTE_EXPECTED_SCAN_SH]
+        r = subprocess.run(ssh_args, capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            fp = r.stdout.strip()
+            if re.fullmatch(r"[0-9a-f]{12}", fp):
+                val = fp
+    except Exception:
+        val = None
+    _remote_hub_expected_cache["at"] = now
+    _remote_hub_expected_cache["val"] = val
+    return val
+
+
 def _remote_hub_scan(force: bool = False) -> Optional[dict]:
     """SSH the VPS hub, fingerprint its running token REMOTE-SIDE (raw token never
     leaves the VPS), read its --model. {"fp","model"} or None on any timeout/failure
@@ -735,6 +791,14 @@ def token_ground_truth(include_remote: bool = False) -> dict:
         if sess in seen:
             continue
         exp_fp = _expected_fp(sess)
+        # _expected_fp resolved only the CONSOLE's own (Mini-local) copy of
+        # .orch_default_token, which doesn't exist for a body that boots
+        # elsewhere (gzb) -- try the SAME SSH reach already used for the live
+        # scan below, read-only, before giving up to the generic .env default
+        # (orch-console #51982/#46625; never attempted when include_remote is
+        # False, same gating the live scan already uses).
+        if exp_fp is None and include_remote:
+            exp_fp = _remote_hub_expected_scan()
         exp_account = (labels.get(exp_fp, "Max (unknown acct)") if exp_fp else _EXPECTED_ACCOUNT)
         host = _remote_body_host(sess, fallback_host) if include_remote else fallback_host
         # Source-of-truth regardless of host (op#10706 C): SSH-fingerprint the hub.
