@@ -841,6 +841,15 @@ case "$RESOLVED_MODEL" in
         CC_AUTH_FP=""
         CC_AUTH_LABEL="deepseek"
         ;;
+    # MUST be checked before the native `qwen*` arm below — same ordering hazard as
+    # _provider_for_model in provider_routing.sh (qwen* is an unanchored wildcard that
+    # also matches "qwen/qwen3-coder"). Added bus #53278: the OpenRouter A/B-test arm was
+    # missing here entirely, so an OpenRouter-routed lane kept its stale Claude CC_AUTH_FP
+    # (the exact #53191 bug class, for the one provider path this case block forgot).
+    moonshotai/*|deepseek/*|qwen/*|z-ai/*)
+        CC_AUTH_FP=""
+        CC_AUTH_LABEL="openrouter"
+        ;;
     qwen*)
         CC_AUTH_FP=""
         CC_AUTH_LABEL="qwen:dashscope"
