@@ -18,6 +18,24 @@ def test_detects_anthropic_key():
     assert hits and hits[0][0] == "anthropic-api-key"
 
 
+def test_detects_postgres_dsn_kv_form_with_password():
+    # libpq key=value conninfo (no "://") -- slips a `grep -v "://"` filter (bus
+    # #52114/#52386 real incident). Built from parts (not one contiguous literal) so
+    # this fixture's own SOURCE text doesn't trip the live Rule E Edit/Write scan that
+    # guards this very file.
+    kv_parts = ["host=db.example.internal", "port=5432", "user=orchuser", "dbname=orch", "password=hunter2"]
+    hits = scanner.scan("DATABASE_URL=" + " ".join(kv_parts))
+    assert hits and any(h[0] == "postgres-dsn-kv" for h in hits)
+
+
+def test_no_hit_on_passwordless_local_socket_kv_dsn():
+    # a passwordless local-socket conninfo (CI's ephemeral trust-auth cluster) is not
+    # a secret -- must NOT match, or every CI-bootstrap run would page falsely.
+    kv_parts = ["host=/var/folders/xx/wingmen-ci-pg-sock-prekt3d0", "port=58062", "user=postgres", "dbname=postgres"]
+    hits = scanner.scan("DATABASE_URL=" + " ".join(kv_parts))
+    assert not any(h[0] == "postgres-dsn-kv" for h in hits)
+
+
 def test_detects_postgres_dsn():
     hits = scanner.scan("DATABASE_URL=postgres://user:hunter2@host:5432/db")
     assert hits and hits[0][0] == "postgres-dsn"

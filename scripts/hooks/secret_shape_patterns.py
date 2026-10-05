@@ -24,6 +24,15 @@ SECRET_VALUE_PATTERNS = {
     # prefix real bot tokens use instead (bus #48642 real incident).
     "telegram-bot-token": re.compile(r"\d{8,10}:AA[A-Za-z0-9_-]{30,}\b"),
     "postgres-dsn": re.compile(r"postgres(?:ql)?://[^:\s]+:[^@\s]+@"),
+    # libpq key=value conninfo form (host=... port=... user=... dbname=... password=...),
+    # which has no "://" and so slips a `grep -v "://"` filter (bus #52114/#52386 real
+    # incident: a passwordless local-socket DATABASE_URL in this form leaked past that
+    # exact filter). Requires `password=` actually present in the run of tokens -- a
+    # passwordless local-socket conninfo (host=/var/..., no password= field) is not a
+    # secret and must NOT match, or every CI-bootstrap ephemeral-cluster line would page.
+    "postgres-dsn-kv": re.compile(
+        r"(?=[^\n]*\bpassword=\S+)(?:\b(?:host|port|user|dbname|password)=\S+\s*){3,}"
+    ),
     "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
     "vercel-token": re.compile(r"\bvcp_[A-Za-z0-9]{20,}\b"),
     "github-token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),

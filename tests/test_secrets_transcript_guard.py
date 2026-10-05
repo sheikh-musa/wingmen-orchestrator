@@ -152,9 +152,83 @@ def test_blocks_literal_bot_token_in_curl_url():
 
 
 def test_allows_dsn_referenced_by_variable_not_literal():
-    # the sanctioned idiom (`psql $DATABASE_URL`) must stay allowed -- Rule E only
-    # fires on the LITERAL value shape, never a bare $VAR reference.
-    assert_allowed("Bash", {"command": 'psql "$DATABASE_URL" -c "select 1"'})
+    # a bare $VAR reference passed to a non-print, non-postgres-CLI command (USE, not
+    # PRINT, per Rule B's own carve-out) must stay allowed -- Rule E only fires on the
+    # LITERAL value shape, never a bare $VAR reference, and Rule F (below) is scoped
+    # to pg_dump/pg_restore/pg_dumpall/psql specifically.
+    assert_allowed("Bash", {"command": "scripts/notify.sh --dsn $DATABASE_URL"})
+
+
+# ---- must BLOCK: Rule F -- pg_dump/pg_restore/pg_dumpall/psql given a DSN var as argv -
+# Real incident (bus #52114/#52348/#52387, 2026-10-05): the command text never had a
+# literal secret (Rule E doesn't fire), but the exec'd process's shell-expanded argv
+# did, and a background-task status read on a timed-out pg_dump surfaced it.
+# orch-console's #52393 explicitly overruled an earlier draft that carved psql out as
+# a "pre-existing sanctioned idiom for quick queries": any of the four can time out
+# into a background task and hit the same argv-exposure path.
+
+def test_blocks_pg_dump_with_dsn_var_positional_arg():
+    assert_blocked(
+        "Bash",
+        {"command": 'pg_dump "$DATABASE_URL" --schema-only --no-owner --no-privileges'},
+        expect_substr="pg_dump given a DSN-shaped variable as a positional argument",
+    )
+
+
+def test_blocks_pg_restore_with_dsn_var_and_absolute_path():
+    assert_blocked(
+        "Bash",
+        {"command": '/usr/local/opt/postgresql@17/bin/pg_restore "$WRITE_DSN" -d orch'},
+        expect_substr="pg_restore given a DSN-shaped variable as a positional argument",
+    )
+
+
+def test_blocks_pg_dumpall_with_dsn_var_positional_arg():
+    assert_blocked(
+        "Bash",
+        {"command": 'pg_dumpall "$DATABASE_URL" --globals-only'},
+        expect_substr="pg_dumpall given a DSN-shaped variable as a positional argument",
+    )
+
+
+def test_blocks_psql_with_dsn_var_positional_arg_supersedes_old_carveout():
+    # supersedes the old test_allows_dsn_referenced_by_variable_not_literal psql case
+    # (#52393) -- psql is no longer exempt.
+    assert_blocked(
+        "Bash",
+        {"command": 'psql "$DATABASE_URL" -c "select 1"'},
+        expect_substr="psql given a DSN-shaped variable as a positional argument",
+    )
+
+
+def test_blocks_psql_with_db_url_named_var():
+    # orch-console named the \\w*_DB_URL form explicitly (#52393), e.g. CONSOLE_DB_URL.
+    assert_blocked(
+        "Bash",
+        {"command": 'psql "$CONSOLE_DB_URL" -c "select 1"'},
+        expect_substr="psql given a DSN-shaped variable as a positional argument",
+    )
+
+
+def test_allows_pg_dump_with_pgpassword_env_and_component_flags():
+    # the sanctioned fix: PGPASSWORD + --host/--port/--username/--dbname, so the
+    # password never reaches pg_dump's own argv regardless of who lists it later.
+    # PGPASSWORD="$DB_PASSWORD" is the sanctioned decomposition idiom itself -- it is
+    # the leading VAR=val PREFIX, not part of pg_dump's own argv, so it must not trip
+    # Rule F (which scopes SENSITIVE_VAR_RE to the argv tokens only).
+    assert_allowed(
+        "Bash",
+        {"command": 'PGPASSWORD="$DB_PASSWORD" pg_dump --host=db.example.internal --port=5432 '
+                    '--username=orchuser --dbname=orch --schema-only'},
+    )
+
+
+def test_allows_psql_with_pgpassword_env_and_component_flags():
+    assert_allowed(
+        "Bash",
+        {"command": 'PGPASSWORD="$DB_PASSWORD" psql --host=db.example.internal --port=5432 '
+                    '--username=orchuser --dbname=orch -c "select 1"'},
+    )
 
 
 # ---- must BLOCK: Rule E extended to Write/Edit/MultiEdit/NotebookEdit content ------
@@ -514,8 +588,15 @@ def test_allows_independent_safe_statements_sharing_a_command():
 
 # ---- must ALLOW: USE (not PRINT) of a secret, per bus #48312 concern 1 -----------
 
-def test_allows_psql_with_database_url():
-    assert_allowed("Bash", {"command": 'psql "$DATABASE_URL" -c "select 1"'})
+def test_blocks_psql_with_database_url_superseded_by_rule_f():
+    # superseded by Rule F (bus #52393): psql is no longer exempt from the
+    # DSN-as-positional-argv block -- see test_blocks_psql_with_dsn_var_positional_arg_
+    # supersedes_old_carveout above for the full rationale.
+    assert_blocked(
+        "Bash",
+        {"command": 'psql "$DATABASE_URL" -c "select 1"'},
+        expect_substr="psql given a DSN-shaped variable as a positional argument",
+    )
 
 
 def test_allows_a_script_invocation_using_the_var():

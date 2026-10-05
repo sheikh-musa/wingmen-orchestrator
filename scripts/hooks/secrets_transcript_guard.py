@@ -46,6 +46,18 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
   CLOUDSDK_CONFIG with no human ADC reachable from a lane's OS user), tracked as
   separate work (bus #48469) -- do not treat that work as superseded by Rule D.
 
+  Rule F -- a postgres CLI tool (pg_dump/pg_restore/pg_dumpall/psql) given a DSN-shaped
+  variable as a positional argument (bus #52114/#52348/#52387/#52393, real incident
+  2026-10-05): any of the four can run long enough to exceed the tool timeout and get
+  moved to a background task, whose status/output read can surface a process-listing
+  snapshot of the live process's fully shell-expanded argv -- the password that was
+  never visible in the COMMAND TEXT becomes visible once the shell expands it into the
+  running process. Unconditional, same as Rule E -- this is enforcement, not a lane's
+  own practice (orch-console #52393). The fix is PGHOST/PGPORT/PGUSER/PGDATABASE/
+  PGPASSWORD env vars, not a sink after the fact (there is no sink for a process
+  listing nobody in this command's pipeline controls). A literal DSN in the command
+  text is Rule E's job, unconditionally, regardless of which tool it's an argument to.
+
 Exit 2 + stderr = refused, the reason is shown to the model (same contract as the
 irsyad guard). Fail-closed on unparseable input.
 
@@ -366,6 +378,57 @@ def check_rule_e(command: str) -> str | None:
     return None
 
 
+# ---- Rule F: a postgres CLI tool given a DSN as a positional arg (bus #52114/#52348/
+# #52387/#52393, real incident 2026-10-05): `pg_dump "$DATABASE_URL" --schema-only ...`
+# ran past the tool's 60s timeout and was moved to a background task; checking that
+# task's status later surfaced a process-listing snapshot showing the live pg_dump's
+# fully shell-expanded argv -- bash quoting "$VAR" protects against word splitting, not
+# against the exec'd process's argv containing the expanded value. That snapshot (not
+# this command itself) is what leaked into the transcript, so no sink downstream of
+# THIS command can fix it -- the only durable fix is to never let the password reach
+# the tool's argv at all.
+#
+# Covers pg_dump/pg_restore/pg_dumpall AND psql -- orch-console's #52393 explicitly
+# overruled an earlier draft that carved psql out as a "pre-existing sanctioned idiom
+# for quick queries": any of the four can time out into a background task and hit the
+# same argv-exposure path, so psql is in scope too.
+#
+# A literal DSN (postgres:// URL, or libpq key=value with password=) in the command
+# TEXT is already caught unconditionally by Rule E for every Bash command via
+# SECRET_VALUE_PATTERNS (postgres-dsn / postgres-dsn-kv) -- Rule E runs before Rule F
+# in main() and would block those forms first regardless of which tool they're an
+# argument to. Rule F's own, narrower job is the form Rule E CAN'T see: a bare $VAR
+# reference that only becomes a secret once the shell expands it into the exec'd
+# process's argv.
+
+PG_CLI_TOOLS = {"pg_dump", "pg_restore", "pg_dumpall", "psql"}
+PG_CLI_ARGV_MESSAGE = (
+    "its argv (and so its password) becomes visible to any process listing or "
+    "background-task status read -- use PGHOST/PGPORT/PGUSER/PGDATABASE/PGPASSWORD "
+    "env vars instead of a connection-string positional argument"
+)
+
+
+def check_rule_f(command: str) -> str | None:
+    for statement in _split_statements(command):
+        for segment in _split_pipeline(statement):
+            # _leading_command already strips a leading VAR=val PREFIX (e.g.
+            # `PGPASSWORD="$DB_PASSWORD" pg_dump ...`) -- that prefix is the sanctioned
+            # decomposition itself and must not be scanned for a sensitive-var match;
+            # only the tool's own ARGV (tokens after its own name) is in scope.
+            lead = _leading_command(segment)
+            tokens = lead.split()
+            if not tokens:
+                continue
+            basename = tokens[0].rsplit("/", 1)[-1]
+            if basename not in PG_CLI_TOOLS:
+                continue
+            argv = " ".join(tokens[1:])
+            if SENSITIVE_VAR_RE.search(argv):
+                return f"{basename} given a DSN-shaped variable as a positional argument -- {PG_CLI_ARGV_MESSAGE}"
+    return None
+
+
 # ---- Rule D: lane-scoped human-owner cloud login / IAM mutation block (bus #48386) -
 
 CLOUD_CLI_LEADING_RE = re.compile(r"^(gcloud|firebase)\b")
@@ -442,14 +505,18 @@ def check_rule_d(command: str) -> str | None:
 # prod because an ad-hoc masking sed matched "...TOKEN=" but not "...TOKEN_OVERRIDE=").
 # The suffix must itself start with "_" (not bare \w*) so this stays a pattern over
 # sensitive NAMES, not a substring match -- "TOKENIZER_PATH" must keep failing to match.
+#
+# \w*_DB_URL (bus #52393 -- orch-console named this form explicitly, e.g. CONSOLE_DB_URL)
+# added alongside \w*_DSN/DATABASE_URL so Rule F catches every DSN-shaped var name the
+# fleet actually uses, not just the one that happened to leak in the real incident.
 SENSITIVE_VAR_RE = re.compile(
-    r"\$\{?(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
+    r"\$\{?(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_DB_URL|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
     r"\w*SECRET\w*|\w*PASSWORD\w*|GOUMLYNE_\w*|API_KEY\w*)\b\}?"
 )
 # same name alternation, bare (no $ / braces) -- for matching a NAME string literal
 # inside os.environ['NAME'] / ENVIRON["NAME"], not a shell variable reference.
 SENSITIVE_VAR_NAME_RE = re.compile(
-    r"^(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
+    r"^(DATABASE_URL|WRITE_DSN|\w*_DSN(?:_\w+)?|\w*_DB_URL|\w*_TOKEN(?:_\w+)?|\w*_KEY(?:_\w+)?|"
     r"\w*SECRET\w*|\w*PASSWORD\w*|GOUMLYNE_\w*|API_KEY\w*)$"
 )
 
@@ -744,6 +811,10 @@ def main() -> int:
         literal_reason = check_rule_e(text)
         if literal_reason:
             sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {LITERAL_SECRET_MESSAGE} ({literal_reason})\n")
+            return 2
+        pg_dump_reason = check_rule_f(text)
+        if pg_dump_reason:
+            sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {pg_dump_reason}\n")
             return 2
 
     reason = (check_rule_a(text) or check_rule_c(text) or check_rule_b(text)
