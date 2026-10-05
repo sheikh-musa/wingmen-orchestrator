@@ -1,7 +1,7 @@
 """The BASH provider-routing cascade launch_dangerous_cc.sh uses to send a
 lane to a non-Anthropic model provider (Musa op#26108 A/B harness, bus
-#53237/#53267). Extracted into scripts/lib/provider_routing.sh so the SHIPPED
-path is testable (gate-test != shipped-path) — same pattern as
+#53237/#53267/#53278). Extracted into scripts/lib/provider_routing.sh so the
+SHIPPED path is testable (gate-test != shipped-path) — same pattern as
 model_precedence.sh / tests/test_model_precedence.py.
 
 This is the regression guard orch-console's GO (#53267) required: proof that
@@ -9,7 +9,13 @@ This is the regression guard orch-console's GO (#53267) required: proof that
 this change (no vars touched at all), (2) the already-shipped glm-* arm keeps
 its exact existing behavior, and (3) a vault-fetch failure fails CLOSED
 (exports nothing, non-zero exit) rather than silently falling back to
-Anthropic/metered billing.
+Anthropic/metered billing. bus #53278 re-scoped the A/B TEST phase to
+OpenRouter (one key, not three) and added a critical, easy-to-miss gotcha:
+the OpenRouter arm must EXPORT ANTHROPIC_API_KEY="" (set to empty), never
+leave it unset, or Claude Code can fall back to api.anthropic.com directly.
+"unset" and "exported empty" both read back as "" through a plain
+${VAR:-} dump, so this file also probes `${VAR+SET}` specifically for that
+var to prove the distinction actually holds.
 
 Drives the REAL bash function via subprocess, with a stub fetch_script (never
 the real nervous_system.vault) standing in for the vault read.
@@ -60,13 +66,23 @@ def _write_fetch_stub(tmp_path, *, key_by_vault_key=None, always=None):
     return str(path)
 
 
-_OVERRIDE_ENV_VARS = ("GLM_SMALL_MODEL", "MOONSHOT_SMALL_MODEL", "DEEPSEEK_SMALL_MODEL", "QWEN_SMALL_MODEL")
+_OVERRIDE_ENV_VARS = (
+    "GLM_SMALL_MODEL",
+    "MOONSHOT_SMALL_MODEL",
+    "DEEPSEEK_SMALL_MODEL",
+    "QWEN_SMALL_MODEL",
+    "OPENROUTER_SMALL_MODEL",
+)
 
 
 def _run(resolved_model, orch_dir, fetch_script, *, pre_env=None):
     """Source the lib, call apply_provider_routing, print rc + every
     tracked var (pipe-joined, in _TRACKED_VARS order) so the test can assert
-    on the exact post-call shell state in one subprocess round-trip.
+    on the exact post-call shell state in one subprocess round-trip. Also
+    appends one extra probe, `${ANTHROPIC_API_KEY+SET}`, which is "SET" when
+    the var is set (even to "") and "" when it is unset entirely — the plain
+    ${VAR:-} dump used for every other var cannot tell those two apart, but
+    the OpenRouter arm's correctness hinges on exactly that distinction.
 
     Scrubs every tracked/override var from the inherited environment first —
     this test process's OWN shell (and this repo's launch_dangerous_cc.sh
@@ -84,7 +100,7 @@ def _run(resolved_model, orch_dir, fetch_script, *, pre_env=None):
         f'source "{_LIB}"\n'
         + f'apply_provider_routing "{resolved_model}" "{orch_dir}" "{sys.executable}" "test-agent" "{fetch_script}"\n'
         + "echo \"RC=$?\"\n"
-        + f'printf "%s\\x1f" {var_dump}\n'
+        + f'printf "%s\\x1f" {var_dump} "${{ANTHROPIC_API_KEY+SET}}"\n'
     )
     out = subprocess.run(
         ["bash", "-c", script],
@@ -98,8 +114,9 @@ def _run(resolved_model, orch_dir, fetch_script, *, pre_env=None):
     # than rstrip, since rstrip("\x1f") would also eat genuinely-empty
     # trailing fields when every tracked var is unset (the fail-closed case).
     values = rest.rstrip("\n").split("\x1f")[:-1]
-    assert len(values) == len(_TRACKED_VARS), (values, out.stdout, out.stderr)
+    assert len(values) == len(_TRACKED_VARS) + 1, (values, out.stdout, out.stderr)
     env = dict(zip(_TRACKED_VARS, values))
+    env["ANTHROPIC_API_KEY_IS_SET"] = values[-1] == "SET"
     return rc, env, out.stderr
 
 
@@ -120,7 +137,9 @@ def test_claude_and_unknown_models_are_byte_identical_noop(model, tmp_path, fail
     rc, env, stderr = _run(model, str(tmp_path), failing_fetch)
     assert rc == 0
     # NOTHING is touched — not even cleared/emptied; truly absent, as if the
-    # cascade were never sourced.
+    # cascade were never sourced. ANTHROPIC_API_KEY must be truly UNSET, not
+    # merely read back as "" (which an exported empty string would also do).
+    assert env.pop("ANTHROPIC_API_KEY_IS_SET") is False, "no-op must leave ANTHROPIC_API_KEY untouched/unset, never export it empty"
     assert all(v == "" for v in env.values()), env
     assert stderr == ""
 
@@ -137,8 +156,11 @@ def test_glm_routes_to_zai_with_vault_key(tmp_path, glm_fetch):
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"  # documented small default
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5"
     assert env["PROVIDER_ROUTING_LABEL"] == "z.ai GLM"
-    # Anthropic creds scrubbed, never leaked to a non-Anthropic provider.
+    # Anthropic creds scrubbed, never leaked to a non-Anthropic provider. A
+    # native arm UNSETS ANTHROPIC_API_KEY (unlike the OpenRouter arm, which
+    # must export it empty — see test_openrouter_exports_empty_string_...).
     assert env["ANTHROPIC_API_KEY"] == ""
+    assert env["ANTHROPIC_API_KEY_IS_SET"] is False
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
     assert env["CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"] == ""
 
@@ -162,10 +184,10 @@ def test_glm_scrubs_preexisting_anthropic_creds(tmp_path, glm_fetch):
 # ── new providers route correctly (op#26108) ──────────────────────────────────
 
 @pytest.mark.parametrize("model,base_url,label", [
-    ("kimi-k2.7-code", "https://api.moonshot.ai/anthropic", "Moonshot Kimi"),
-    ("moonshot-v2", "https://api.moonshot.ai/anthropic", "Moonshot Kimi"),
-    ("deepseek-v4-pro", "https://api.deepseek.com/anthropic", "DeepSeek"),
-    ("qwen3.8-max", "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic", "Qwen (DashScope Coding Plan)"),
+    ("kimi-k2.7-code", "https://api.moonshot.ai/anthropic", "Moonshot Kimi (native)"),
+    ("moonshot-v2", "https://api.moonshot.ai/anthropic", "Moonshot Kimi (native)"),
+    ("deepseek-v4-pro", "https://api.deepseek.com/anthropic", "DeepSeek (native)"),
+    ("qwen3.8-max", "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic", "Qwen (DashScope Coding Plan, native)"),
 ])
 def test_new_providers_route_to_their_own_endpoint(model, base_url, label, tmp_path):
     fetch = _write_fetch_stub(tmp_path, always="provider-secret")
@@ -178,6 +200,7 @@ def test_new_providers_route_to_their_own_endpoint(model, base_url, label, tmp_p
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == model
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == model
     assert env["ANTHROPIC_API_KEY"] == ""
+    assert env["ANTHROPIC_API_KEY_IS_SET"] is False, "native arms must UNSET, not export-empty"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
 
 
@@ -211,14 +234,81 @@ def test_provider_small_model_override_env_honored_per_provider(tmp_path):
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-chat"
 
 
+# ── OpenRouter arm (bus #53278, Musa op#26140 re-scope): the active A/B TEST
+# path, one key for every vendor, selected by OpenRouter's own vendor/model
+# namespaced id strings rather than each vendor's native bare model id ──────
+
+@pytest.mark.parametrize("model", [
+    "moonshotai/kimi-k2",
+    "deepseek/deepseek-v3",
+    "qwen/qwen3-coder",
+    "z-ai/glm-4.7",
+])
+def test_openrouter_routes_every_vendor_through_one_endpoint_and_key(model, tmp_path):
+    fetch = _write_fetch_stub(tmp_path, always="or-secret-key")
+    rc, env, _ = _run(model, str(tmp_path), fetch)
+    assert rc == 0
+    assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "or-secret-key"
+    assert env["PROVIDER_ROUTING_LABEL"] == "OpenRouter"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == model
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == model
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == model
+
+
+def test_openrouter_exports_empty_string_api_key_never_unset(tmp_path):
+    """The one gotcha this whole arm hinges on, per OpenRouter's own docs
+    (bus #53278): ANTHROPIC_API_KEY must be the EMPTY STRING, not absent —
+    an unset/absent key lets Claude Code fall back to authenticating against
+    api.anthropic.com directly, silently defeating the whole A/B test."""
+    fetch = _write_fetch_stub(tmp_path, always="or-secret-key")
+    rc, env, _ = _run("moonshotai/kimi-k2", str(tmp_path), fetch)
+    assert rc == 0
+    assert env["ANTHROPIC_API_KEY"] == ""
+    assert env["ANTHROPIC_API_KEY_IS_SET"] is True, "OpenRouter arm must EXPORT ANTHROPIC_API_KEY=\"\", not leave it unset"
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+    assert env["CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"] == ""
+
+
+def test_openrouter_scrubs_preexisting_anthropic_creds_to_empty_not_unset(tmp_path):
+    fetch = _write_fetch_stub(tmp_path, always="or-secret-key")
+    rc, env, _ = _run(
+        "qwen/qwen3-coder", str(tmp_path), fetch,
+        pre_env={"ANTHROPIC_API_KEY": "sk-ant-leaky", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-leaky"},
+    )
+    assert rc == 0
+    assert env["ANTHROPIC_API_KEY"] == ""
+    assert env["ANTHROPIC_API_KEY_IS_SET"] is True
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+
+
+def test_openrouter_small_model_override_env_honored(tmp_path):
+    fetch = _write_fetch_stub(tmp_path, always="or-secret-key")
+    rc, env, _ = _run(
+        "deepseek/deepseek-v3", str(tmp_path), fetch,
+        pre_env={"OPENROUTER_SMALL_MODEL": "deepseek/deepseek-v3-haiku"},
+    )
+    assert rc == 0
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek/deepseek-v3-haiku"
+
+
+def test_openrouter_vault_fetch_failure_is_fail_closed(tmp_path, failing_fetch):
+    rc, env, stderr = _run("moonshotai/kimi-k2", str(tmp_path), failing_fetch)
+    assert rc == 1
+    assert env["ANTHROPIC_BASE_URL"] == ""
+    assert env["ANTHROPIC_API_KEY_IS_SET"] is False, "a failed fetch must abort before the api_key_mode=empty export runs"
+    assert "FATAL" in stderr
+
+
 # ── fail-closed: a vault-fetch failure must export NOTHING and exit non-zero ──
 
-@pytest.mark.parametrize("model", ["glm-5", "kimi-k2.7-code", "deepseek-v4-pro", "qwen3.8-max"])
+@pytest.mark.parametrize("model", ["glm-5", "kimi-k2.7-code", "deepseek-v4-pro", "qwen3.8-max", "moonshotai/kimi-k2"])
 def test_vault_fetch_failure_is_fail_closed_no_export_nonzero_exit(model, tmp_path, failing_fetch):
     rc, env, stderr = _run(model, str(tmp_path), failing_fetch)
     assert rc == 1
     assert env["ANTHROPIC_BASE_URL"] == "", "a failed vault fetch must never leave ANTHROPIC_BASE_URL pointed at a non-Anthropic host with no credential behind it"
     assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert env["ANTHROPIC_API_KEY_IS_SET"] is False
     assert "FATAL" in stderr
     assert "vault" in stderr.lower()
 
