@@ -43,8 +43,10 @@ def assert_allowed(tool_name: str, tool_input: dict, env: dict | None = None):
     assert r.returncode == 0, f"expected ALLOW for {tool_input!r}, got exit {r.returncode}, stderr={r.stderr!r}"
 
 
-def _make_media(tmp_path, name="cosem-exams_1_abc123.jpg"):
+def _make_media(tmp_path, name="cosem-exams_1_abc123.jpg", subdir=None):
     media_dir = tmp_path / "logs" / "tg_media"
+    if subdir:
+        media_dir = media_dir / subdir
     media_dir.mkdir(parents=True)
     f = media_dir / name
     f.write_bytes(b"fake-image-bytes")
@@ -55,6 +57,15 @@ def _stage_clean(tmp_path, stem, op_id="op1"):
     out_dir = tmp_path / "reports" / "client-file-staging" / op_id
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{stem}.md").write_text("verdict: CLEAN\n", encoding="utf-8")
+
+
+def _stage_structure_only(tmp_path, stem, op_id="op1"):
+    out_dir = tmp_path / "reports" / "client-file-staging" / op_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{stem}.md").write_text(
+        "verdict: CLEAN\n\n(structure only — sensitive channel, content withheld)\n",
+        encoding="utf-8",
+    )
 
 
 # ---- must BLOCK: unstaged raw client media, lane body ----------------------
@@ -70,10 +81,34 @@ def test_blocks_unstaged_media_even_with_unrelated_staged_file_present(tmp_path)
     assert_blocked("Read", {"file_path": str(f)})
 
 
+def test_blocks_unstaged_media_in_nested_project_subdir(tmp_path):
+    # cc-quality bus #52593/#52596: logs/tg_media/<project>/<file> is the
+    # real, standing layout (op#15741) -- a one-level-only match left all
+    # 13 project subdirectories (incl. gazzabyte-irsyad, cosem-adcda)
+    # completely unguarded.
+    f = _make_media(tmp_path, name="gradebook_2_def456.jpg", subdir="gazzabyte-irsyad")
+    assert_blocked("Read", {"file_path": str(f)})
+
+
+def test_blocks_media_in_nested_subdir_with_structure_only_export(tmp_path):
+    # cc-quality bus #52593/#52596, finding 2: a structure-only
+    # (sensitive-channel) export must NOT unlock the raw Read -- it exists
+    # specifically because content heuristics couldn't be trusted.
+    f = _make_media(tmp_path, name="progress_3_ghi789.jpg", subdir="cosem-adcda")
+    _stage_structure_only(tmp_path, stem="progress_3_ghi789")
+    assert_blocked("Read", {"file_path": str(f)})
+
+
 # ---- must ALLOW: staged CLEAN, console exemption, unrelated paths ----------
 
 def test_allows_staged_clean_media_read(tmp_path):
     f = _make_media(tmp_path)
+    _stage_clean(tmp_path, stem=f.stem)
+    assert_allowed("Read", {"file_path": str(f)})
+
+
+def test_allows_staged_clean_media_read_in_nested_subdir(tmp_path):
+    f = _make_media(tmp_path, name="navmap_4_jkl012.jpg", subdir="irsyad")
     _stage_clean(tmp_path, stem=f.stem)
     assert_allowed("Read", {"file_path": str(f)})
 

@@ -46,7 +46,8 @@ regardless of row count, closing the single-person-record gap above.
 Per-channel sensitive override (bus #52465): --channel reads
 bot_channels.sensitive_data (migration 091; DEFAULT true -- fails CLOSED
 for every channel except an explicit internal-console allowlist
-(nazim-console, operator-orch, cai-channel); an unknown channel or an
+(nazim-console, operator-orch, cai-channel, finance-console, war-room);
+an unknown channel or an
 unreachable DB is also treated as sensitive). A sensitive channel NEVER
 exports full content on --export, even on a CLEAN verdict — only the
 values-free structural header, so a gov/client-data channel (cosem-exams,

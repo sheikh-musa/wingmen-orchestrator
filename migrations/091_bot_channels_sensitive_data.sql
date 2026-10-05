@@ -19,13 +19,14 @@
 --
 -- New polarity: sensitive_data DEFAULT true (new/unlisted channels are
 -- sensitive unless explicitly cleared). FALSE is seeded only for an
--- explicit internal allowlist: the operator/agent console channels
--- (nazim-console, operator-orch, cai-channel). Every other existing
--- channel -- including cosem-exams, gazzabyte-irsyad, cosem-tdu,
--- nutri-study, finance-console, war-room, and all client groups -- stays
--- sensitive_data=true. finance-console/war-room were explicitly NOT added
--- to the allowlist here -- orch-console asked to decide those, not have it
--- assumed.
+-- explicit internal allowlist. First draft (orch-console #52583) seeded
+-- only the 3 operator/agent console channels and deliberately left
+-- finance-console/war-room out pending an explicit ruling rather than
+-- assuming; orch-console confirmed both (#52606) -- bot_channels marks
+-- both audience='internal', same tier as the other 3 -- so they're in the
+-- allowlist too. Every other existing channel -- including cosem-exams,
+-- gazzabyte-irsyad, cosem-tdu, nutri-study, and all client groups -- stays
+-- sensitive_data=true.
 --
 -- Each allowlist key is asserted to exist (RAISE on a missing/typo'd key --
 -- a typo must fail loudly, not silently no-op), and the final state is
@@ -41,7 +42,7 @@ ALTER TABLE public.bot_channels
 
 DO $$
 DECLARE
-  allowlist text[] := ARRAY['nazim-console', 'operator-orch', 'cai-channel'];
+  allowlist text[] := ARRAY['nazim-console', 'operator-orch', 'cai-channel', 'finance-console', 'war-room'];
   k text;
   n_matched int;
   n_cleared int;

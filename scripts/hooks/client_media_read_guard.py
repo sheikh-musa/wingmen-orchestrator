@@ -24,10 +24,13 @@ via Claude's Read tool, so this guard never sees its internal reads at all.
 marks CLEAN: it writes reports/client-file-staging/<op_id>/<stem>.md, and
 HOLD writes nothing, ever (fail-closed by construction in the stager itself)
 -- so an exported report with this file's exact stem anywhere under that
-tree is fail-closed proof a CLEAN run happened on it. No op_id plumbing
-needed: tg_media filenames are already collision-proof per-file
-(channel_updateid_fileuniqueid, bus #47469), so the stem alone is specific
-enough.
+tree is fail-closed proof a CLEAN run happened on it, UNLESS that report is
+itself a structure-only (sensitive-channel) export, which never counts (see
+is_staged_clean). No op_id plumbing needed: tg_media filenames are already
+collision-proof per-file (channel_updateid_fileuniqueid, bus #47469), so the
+stem alone is specific enough. Matches at ANY depth under tg_media/, not
+just directly inside it -- logs/tg_media/<project>/<file> is the real,
+standing layout (op#15741 per-project subdir routing).
 
 Exit 2 + stderr = the tool call is refused and the reason is shown to the model.
 """
@@ -37,7 +40,7 @@ import os
 import re
 import sys
 
-_TG_MEDIA_RE = re.compile(r"^(.*)/logs/tg_media/([^/]+)$")
+_TG_MEDIA_RE = re.compile(r"^(.*)/logs/tg_media/(.+)$")
 
 
 def is_console() -> bool:
@@ -45,20 +48,44 @@ def is_console() -> bool:
 
 
 def match_tg_media(path: str):
-    """Return (repo_root, filename) if *path* resolves under a tg_media dir, else None."""
+    """Return (repo_root, filename) if *path* resolves under a tg_media dir,
+    at ANY depth, else None (cc-quality bus #52593/#52596: logs/tg_media has
+    347 real files across 13 per-project subdirectories today -- irsyad,
+    gazzabyte-irsyad, cosem-adcda, ... -- a one-level-only match left all of
+    them unguarded). *filename* is reduced to the basename, since
+    stage_client_file.py keys its export by basename stem regardless of
+    which subdirectory the file arrived in (Path(original_name).stem in
+    main())."""
     if not path:
         return None
     normalized = os.path.normpath(path).replace(os.sep, "/")
     m = _TG_MEDIA_RE.match(normalized)
     if not m:
         return None
-    return m.group(1), m.group(2)
+    return m.group(1), os.path.basename(m.group(2))
 
 
 def is_staged_clean(repo_root: str, filename: str) -> bool:
+    """A CLEAN export must exist for *filename*'s stem, AND it must be a
+    FULL export, not a structure-only (sensitive-channel) one (cc-quality
+    bus #52593/#52596). Both export_to_markdown() and export_structure_only()
+    write to the identical reports/client-file-staging/<op_id>/<stem>.md
+    path, and export_structure_only() always writes the literal
+    "(structure only" sentinel -- its presence means content was
+    deliberately withheld on a sensitive channel, which must NOT be enough
+    to unlock a Read of the raw file; that would defeat the sensitive-
+    channel override's entire purpose the moment the two mechanisms meet."""
     stem = os.path.splitext(filename)[0]
     pattern = os.path.join(repo_root, "reports", "client-file-staging", "*", stem + ".md")
-    return len(glob.glob(pattern)) > 0
+    for match in glob.glob(pattern):
+        try:
+            content = open(match, encoding="utf-8").read()
+        except OSError:
+            continue
+        if "(structure only" in content:
+            continue
+        return True
+    return False
 
 
 def main() -> int:
