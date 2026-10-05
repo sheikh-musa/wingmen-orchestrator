@@ -214,26 +214,23 @@ create index idx_client_groups_chat on client_groups(group_chat_id);
 -- QA Findings Ingestion Pipeline
 -- ═══════════════════════════════════════════════════════════════
 
-create table if not exists qa_findings (
-  id bigint generated always as identity primary key,
-  repo_name text not null,
-  source text not null check (source in ('ci', 'e2e', 'lighthouse', 'manual', 'sentry')),
-  severity text not null default 'medium' check (severity in ('critical', 'high', 'medium', 'low')),
-  title text not null,
-  description text not null,
-  page_url text,
-  screenshot_url text,
-  raw_output text,
-  status text not null default 'new' check (status in ('new', 'bridged', 'ignored', 'duplicate')),
-  bug_report_id uuid references bug_reports(id),
-  created_at timestamptz not null default now()
-);
-alter table qa_findings enable row level security;
-create policy "service role full access" on qa_findings
-  using (true) with check (true);
-create index idx_qa_findings_status on qa_findings(status);
-create index idx_qa_findings_repo on qa_findings(repo_name);
-create index if not exists qa_findings_created_at_idx on qa_findings(created_at desc);
+-- cp#83: this block used to `create table if not exists qa_findings` with a
+-- repo_name/title/description/source design. pg_dump against the live substrate
+-- (2026-10-05) confirms that design was NEVER applied — the table that is actually
+-- live is a role/flow/pass-fail-flaky shape (predates this repo's migration
+-- tracking, same class as the phantom tables in migrations/infra/bedrock_substrate_core.sql,
+-- which now creates qa_findings with that live-faithful shape BEFORE this file runs).
+-- schema.sql's own boot_briefing view below (`open_qa_failure` arm) and
+-- supabase/migrations/20260416_bug013_qa_findings_created_at.sql's comment both
+-- already assumed the role/flow shape, not this one — the repo_name/title design
+-- appears to have been written here but never reconciled with production.
+-- FLAGGED SEPARATELY (not fixed here): nervous_system/qa_bridge.py and
+-- tests/test_qa_bridge.py are written against the repo_name/title/description/
+-- source shape, which does not exist on the live table — qa_bridge.py's poll loop
+-- is bridging bug reports into live columns that are not there, broadly caught and
+-- swallowed by its own try/except every ~5 min. Deciding which shape is canonical
+-- (migrate the live table back, or rewrite qa_bridge.py to the live shape) is a
+-- product call for cc-orchestrator/cai, not this CI-bootstrap task.
 
 -- Link bug_reports back to qa_findings + auto-fix tier
 alter table bug_reports add column if not exists qa_finding_id bigint references qa_findings(id);
@@ -295,9 +292,76 @@ create policy "service role full access" on strategic_decisions
 create index idx_strategic_decisions_ref on strategic_decisions(decision_ref);
 create index idx_strategic_decisions_source on strategic_decisions(source);
 create index idx_strategic_decisions_created on strategic_decisions(created_at desc);
+-- cp#83: live has UNIQUE(decision_ref) (named strategic_decisions_decision_ref_key,
+-- confirmed via pg_dump 2026-10-05) but it was never added anywhere in this file —
+-- supabase/migrations/20260419_arch035_three_channel_taxonomy.sql's
+-- `blocked_on_decision_ref ... REFERENCES strategic_decisions(decision_ref)` requires
+-- a unique constraint on the referenced column to exist first.
+alter table strategic_decisions add constraint strategic_decisions_decision_ref_key unique (decision_ref);
 alter table strategic_decisions add column if not exists category text
   check (category in ('governance', 'performance', 'qa', 'product', 'infra', 'pricing', 'islamic', 'operations'));
 alter table strategic_decisions add column if not exists parent_ref text;
+-- cp#83: the columns below were all live on the substrate (several consumed
+-- by the boot_briefing view/get_decision() further down this file) but never
+-- added anywhere in this file or in supabase/migrations|migrations/*.sql — a
+-- fresh schema.sql replay broke on the view definition before this was
+-- added. Types/defaults/NOT NULL match the live substrate verbatim
+-- (confirmed via pg_dump --schema-only -t public.strategic_decisions,
+-- 2026-10-05).
+alter table strategic_decisions add column if not exists domain text;
+alter table strategic_decisions add column if not exists decided_at timestamptz not null default now();
+alter table strategic_decisions add column if not exists decided_by text not null default 'musa';
+alter table strategic_decisions add column if not exists superseded_by bigint references strategic_decisions(id);
+alter table strategic_decisions add column if not exists council_session_id bigint;
+alter table strategic_decisions add column if not exists source_chat_url text;
+alter table strategic_decisions add column if not exists challenge_reason text;
+alter table strategic_decisions add column if not exists challenge_session_id bigint;
+alter table strategic_decisions add column if not exists challengeable_until timestamptz;
+alter table strategic_decisions add column if not exists implemented_at timestamptz;
+alter table strategic_decisions add column if not exists implemented_by_job_id bigint;
+alter table strategic_decisions add column if not exists built_by text;
+alter table strategic_decisions add column if not exists quranic_basis text;
+-- audit_tier is NOT NULL with NO default on the live substrate, and no
+-- trigger backfills it (confirmed via pg_get_functiondef on every trigger
+-- function attached to this table) -- any INSERT omitting it already fails
+-- against production today. ADD COLUMN ... NOT NULL with no default is only
+-- valid while this table is still empty, which it is at this point in a
+-- fresh bootstrap. Kept faithful rather than loosened so CI's schema
+-- matches real behavior; an INSERT that fails here would already be
+-- failing against the live substrate.
+alter table strategic_decisions add column if not exists audit_tier text not null;
+-- cp#83 round 2 (2026-10-05): re-diffed the FULL live column list against this file
+-- after the governance_hygiene_batch migration broke on a missing updated_at —
+-- the first pass above was not exhaustive. Same provenance/rationale as above.
+alter table strategic_decisions add column if not exists constraints text[];
+alter table strategic_decisions add column if not exists updated_at timestamptz not null default now();
+alter table strategic_decisions add column if not exists is_test boolean not null default false;
+alter table strategic_decisions add column if not exists cai_session_id text;
+alter table strategic_decisions add column if not exists posted_by_identity text;
+alter table strategic_decisions add column if not exists decided_by_verified boolean;
+alter table strategic_decisions add column if not exists parent_msg_id bigint references agent_messages(id) on delete restrict;
+alter table strategic_decisions add column if not exists announced_by_msg_id bigint references agent_messages(id) on delete set null;
+alter table strategic_decisions add column if not exists announce_to_agent text;
+alter table strategic_decisions add column if not exists announce_thread_id uuid;
+alter table strategic_decisions add column if not exists announce_requires_response boolean not null default false;
+alter table strategic_decisions add column if not exists superseded_by_decision_ref text references strategic_decisions(decision_ref) on delete restrict;
+alter table strategic_decisions add constraint strategic_decisions_no_self_supersede_check
+  check (superseded_by_decision_ref is null or superseded_by_decision_ref <> decision_ref);
+-- domain was added nullable above; live has it NOT NULL with no backfill trigger
+-- (same audit_tier situation: an INSERT omitting it already fails against
+-- production today, so CI matches rather than loosens).
+alter table strategic_decisions alter column domain set not null;
+alter table strategic_decisions add constraint strategic_decisions_domain_check
+  check (domain = any (array['pricing', 'architecture', 'islamic', 'sales', 'product', 'operations', 'renovation']));
+alter table strategic_decisions alter column challenge_status set default 'unchallenged';
+alter table strategic_decisions alter column challenge_status set not null;
+alter table strategic_decisions add constraint strategic_decisions_challenge_status_check
+  check (challenge_status = any (array['unchallenged', 'challenge_window', 'challenged', 'accepted', 'accepted_by_timeout', 'overridden', 'cai_review_requested', 'informational', 'implemented', 'superseded', 'accepted_by_audit']));
+alter table strategic_decisions alter column source set default 'claude_ai_session';
+alter table strategic_decisions add constraint strategic_decisions_source_check
+  check (source = any (array['council_session', 'claude_ai_session', 'musa_direct', 'claude_code_proposal']));
+alter table strategic_decisions add constraint strategic_decisions_decided_by_canon
+  check (decided_by is null or decided_by = any (array['musa', 'cai', 'cc-ihsanos', 'cc-orchestrator', 'cc-scholar', 'cc-cosem', 'cc-wing', 'substrate']));
 create index if not exists idx_strategic_decisions_category on strategic_decisions(category) where category is not null;
 create index if not exists idx_strategic_decisions_parent on strategic_decisions(parent_ref) where parent_ref is not null;
 -- SUBSTRATE-COHERENCE-001 D (cai #2001): lifecycle status; 'archived' is first-class.
