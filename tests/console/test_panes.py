@@ -325,7 +325,8 @@ def test_token_ground_truth_falls_back_to_self_report_when_ssh_unreachable(monke
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": "selffp123456", "stale": False})
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: None)
     monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
@@ -346,7 +347,8 @@ def test_token_ground_truth_self_reported_mismatch_is_still_red(monkeypatch):
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": "wrongfp0000", "stale": False})
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: "expectedfp99")
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: "/some/path")
+    monkeypatch.setattr(panes, "_read_token_fp", lambda path: "expectedfp99")
     monkeypatch.setattr(panes, "_account_labels", lambda: {})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
                if r["session"] == "cc-orchestrator")
@@ -360,7 +362,8 @@ def test_token_ground_truth_stale_self_report_falls_back_to_plain_unverified(mon
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": None, "stale": True})
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: None)
     monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
@@ -377,7 +380,8 @@ def test_token_ground_truth_no_scan_no_self_report_is_plain_unverified(monkeypat
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": None, "stale": False})
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: None)
     monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
@@ -400,7 +404,8 @@ def test_token_ground_truth_ssh_verified_scan_wins_over_self_report(monkeypatch)
         return {"fp": "shouldnotuse", "stale": False}
 
     monkeypatch.setattr(panes, "_self_reported_hub_account", _sr)
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: None)
     monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {"sshfp000000": "Max (Musa)"})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
@@ -444,7 +449,8 @@ def test_token_ground_truth_uses_resolved_host_not_hardcoded_literal(monkeypatch
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": "selffp123456", "stale": False})
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: "gzbai")
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: None)
     monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
@@ -460,7 +466,8 @@ def test_summary_self_reported_row_is_not_counted_as_unverified(monkeypatch):
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": "selffp123456", "stale": False})
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: None)
     monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {"selffp123456": "Max (Musa)"})
     summary = panes.token_ground_truth(include_remote=True)["summary"]
@@ -474,7 +481,8 @@ def test_summary_stale_self_report_still_counts_as_unverified(monkeypatch):
     monkeypatch.setattr(panes, "_self_reported_hub_account",
                          lambda session: {"fp": None, "stale": True})
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: None)
     monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: None)
     monkeypatch.setattr(panes, "_account_labels", lambda: {})
     summary = panes.token_ground_truth(include_remote=True)["summary"]
@@ -580,7 +588,7 @@ def test_token_ground_truth_hub_expected_falls_back_to_remote_scan(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
     monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: {"fp": "582043088eae", "model": None})
     monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)  # local miss
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)  # local miss
     monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: "582043088eae")
     monkeypatch.setattr(panes, "_account_labels", lambda: {"582043088eae": "Max (Syed)"})
     row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
@@ -590,10 +598,36 @@ def test_token_ground_truth_hub_expected_falls_back_to_remote_scan(monkeypatch):
     assert row["mismatch"] is False  # live fp == remote-expected fp
 
 
+def test_token_ground_truth_hub_remote_scan_wins_over_a_real_env_default(monkeypatch):
+    """cc-quality's mutation-testing finding (review of 171db24798a9d299): every
+    OTHER test in this file mocks _env_default_fp to None, which can never
+    distinguish the fix from the exact bug that already shipped (_expected_fp's
+    internal env-default collapse winning over the remote scan, because the real
+    .env always resolves to a REAL fp, never None, on a live body). This pins the
+    actual precedence with a REALISTIC non-None env default standing in for it:
+    local miss + a working remote scan + a real (different) env-default fp ->
+    the remote scan's fp must win. Reverting the fix back to
+    `exp_fp = _expected_fp(sess)` makes this fail (env-default wins instead)."""
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
+    monkeypatch.setattr(panes, "_remote_hub_scan", lambda *a, **k: {"fp": "582043088eae", "model": None})
+    monkeypatch.setattr(panes, "_remote_body_host", lambda session, fallback: fallback)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)  # local miss
+    monkeypatch.setattr(panes, "_remote_hub_expected_scan", lambda *a, **k: "582043088eae")  # Syed
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: "68142948c003")  # Musa -- REAL, not None
+    monkeypatch.setattr(panes, "_account_labels",
+                         lambda: {"582043088eae": "Max (Syed)", "68142948c003": "Max (Musa)"})
+    row = next(r for r in panes.token_ground_truth(include_remote=True)["rows"]
+               if r["session"] == "cc-orchestrator")
+    assert row["expected"] == "Max (Syed)"
+    assert row["expected_fp"] == "582043088eae"
+    assert row["mismatch"] is False
+
+
 def test_token_ground_truth_hub_expected_scan_not_attempted_without_include_remote(monkeypatch):
     """include_remote=False must behave exactly as before -- no new SSH call."""
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _run(0, ""))
-    monkeypatch.setattr(panes, "_expected_fp", lambda session: None)
+    monkeypatch.setattr(panes, "_resolve_lane_token_path", lambda session, orch_dir=None: None)
+    monkeypatch.setattr(panes, "_env_default_fp", lambda: None)
 
     def _boom(*a, **k):  # pragma: no cover - must NOT be reached
         raise AssertionError("remote expected-scan must not run without include_remote")
