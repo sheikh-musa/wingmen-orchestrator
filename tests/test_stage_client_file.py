@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import pathlib
+from unittest import mock
 
 import pytest
 
@@ -284,6 +285,43 @@ def test_is_sensitive_channel_fails_closed_on_db_error(monkeypatch):
     fake_dsn = "postgresql://" + "nope:nope" + "@127.0.0.1:1/nope"
     monkeypatch.setenv("DATABASE_URL", fake_dsn)
     assert scf.is_sensitive_channel("cosem-exams") is True
+
+
+def test_is_sensitive_channel_fails_closed_when_channel_unknown(monkeypatch):
+    """Reachable DB, but the channel_key has no row -- the migration-091
+    polarity: a brand-new/unlisted channel is sensitive by DEFAULT, so a
+    query that reaches the DB and finds nothing must still fail closed,
+    distinct from the DB-unreachable cases above."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/fake")
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a, **k):
+            pass
+
+        def fetchone(self):
+            return None
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    fake_psycopg = mock.MagicMock()
+    fake_psycopg.connect.return_value = FakeConn()
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+
+    assert scf.is_sensitive_channel("brand-new-unlisted-channel") is True
 
 
 def test_export_structure_only_omits_content(tmp_path, monkeypatch):

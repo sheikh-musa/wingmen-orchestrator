@@ -9,20 +9,55 @@
 -- export_structure_only in stage_client_file.py) -- heuristics alone must
 -- never decide what leaves a raw file on a gov/client-data channel.
 --
--- Seeded TRUE for cosem-exams and cosem-adcda (the two channels named in the
--- real incident this closes -- a trainee gradebook screenshot and a progress
--- report, both exam/assessment data). Default FALSE for every other
--- existing row -- this is an opt-IN override on top of the stager's own
--- content heuristics, not a replacement for them.
+-- REVISED per orch-console #52583 (first draft was reviewed and rejected
+-- before being applied): the original DEFAULT false + seed-true-for-two
+-- polarity would have OPENED UP every other channel -- including
+-- gazzabyte-irsyad (minors) and cosem-tdu (NRIC fragments) -- the moment
+-- the column existed. It also seeded a channel_key ('cosem-adcda') that
+-- does not exist -- the real ADCDA group is cosem-caai -- so that seed
+-- would have silently matched nothing.
+--
+-- New polarity: sensitive_data DEFAULT true (new/unlisted channels are
+-- sensitive unless explicitly cleared). FALSE is seeded only for an
+-- explicit internal allowlist: the operator/agent console channels
+-- (nazim-console, operator-orch, cai-channel). Every other existing
+-- channel -- including cosem-exams, gazzabyte-irsyad, cosem-tdu,
+-- nutri-study, finance-console, war-room, and all client groups -- stays
+-- sensitive_data=true. finance-console/war-room were explicitly NOT added
+-- to the allowlist here -- orch-console asked to decide those, not have it
+-- assumed.
+--
+-- Each allowlist key is asserted to exist (RAISE on a missing/typo'd key --
+-- a typo must fail loudly, not silently no-op), and the final state is
+-- asserted post-apply: count(sensitive_data=false) must equal the
+-- allowlist size exactly.
 
 BEGIN;
 
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE public.bot_channels
-  ADD COLUMN IF NOT EXISTS sensitive_data BOOLEAN NOT NULL DEFAULT false;
+  ADD COLUMN IF NOT EXISTS sensitive_data BOOLEAN NOT NULL DEFAULT true;
 
-UPDATE public.bot_channels SET sensitive_data = true WHERE channel_key = 'cosem-exams';
-UPDATE public.bot_channels SET sensitive_data = true WHERE channel_key = 'cosem-adcda';
+DO $$
+DECLARE
+  allowlist text[] := ARRAY['nazim-console', 'operator-orch', 'cai-channel'];
+  k text;
+  n_matched int;
+  n_cleared int;
+BEGIN
+  FOREACH k IN ARRAY allowlist LOOP
+    IF NOT EXISTS (SELECT 1 FROM public.bot_channels WHERE channel_key = k) THEN
+      RAISE EXCEPTION 'migration 091: allowlist channel_key % does not exist in bot_channels -- fix the allowlist, do not let this no-op', k;
+    END IF;
+  END LOOP;
+
+  UPDATE public.bot_channels SET sensitive_data = false WHERE channel_key = ANY(allowlist);
+
+  SELECT count(*) INTO n_cleared FROM public.bot_channels WHERE sensitive_data = false;
+  IF n_cleared != array_length(allowlist, 1) THEN
+    RAISE EXCEPTION 'migration 091: post-apply count(sensitive_data=false)=% does not equal allowlist size=% -- aborting', n_cleared, array_length(allowlist, 1);
+  END IF;
+END $$;
 
 COMMIT;

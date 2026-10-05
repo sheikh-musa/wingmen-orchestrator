@@ -44,12 +44,14 @@ an Arabic-script / name-particle (bin/binti/ibn) run — any hit forces HOLD
 regardless of row count, closing the single-person-record gap above.
 
 Per-channel sensitive override (bus #52465): --channel reads
-bot_channels.sensitive_data (migration add; fails CLOSED — an unknown
-channel or an unreachable DB is treated as sensitive). A sensitive channel
-NEVER exports full content on --export, even on a CLEAN verdict — only the
+bot_channels.sensitive_data (migration 091; DEFAULT true -- fails CLOSED
+for every channel except an explicit internal-console allowlist
+(nazim-console, operator-orch, cai-channel); an unknown channel or an
+unreachable DB is also treated as sensitive). A sensitive channel NEVER
+exports full content on --export, even on a CLEAN verdict — only the
 values-free structural header, so a gov/client-data channel (cosem-exams,
-cosem-adcda, ...) can't have content heuristics alone decide what leaves
-the raw file.
+gazzabyte-irsyad, cosem-tdu, ...) can't have content heuristics alone
+decide what leaves the raw file.
 """
 from __future__ import annotations
 
@@ -547,8 +549,9 @@ def is_sensitive_channel(channel: str) -> bool:
 def export_structure_only(verdict: StageVerdict, structure: FileStructure, op_id: str, original_name: str) -> Path:
     """Sensitive-channel export (bus #52465): the values-free structural
     header only, never content — even on a CLEAN verdict. A sensitive
-    channel (cosem-exams, cosem-adcda, ...) never lets content-heuristics
-    alone decide what leaves the raw file."""
+    channel (every channel except the internal-console allowlist in
+    migration 091) never lets content-heuristics alone decide what leaves
+    the raw file."""
     header = verdict.render(structure)
     out_dir = Path("reports/client-file-staging") / sanitize_op_id(op_id)
     out_dir.mkdir(parents=True, exist_ok=True)
