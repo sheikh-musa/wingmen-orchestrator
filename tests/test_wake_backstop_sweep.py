@@ -523,6 +523,56 @@ def test_stuck_row_to_alive_agent_paged_once_with_pane_state_43063():
     assert marked == []                                # stuck-page never quiesces (already quiesced)
     assert len(pages) == 1 and "idle" in pages[0][0]   # pane state surfaced in the page
     assert "201" in pages[0][1] and r1["stuck_paged"] == ["cc-quality"]
+
+
+# ---- offline-status veto (orch-console #54066/#54081, 2026-10-06) ----
+
+def test_offline_status_vetoes_stuck_page_even_within_gone_window():
+    # cc-quality-1 class: agent_status.status='offline' but last_heartbeat only ~1h43m stale
+    # (well inside the 2h gone_window) -- the OLD _alive() read this as alive (heartbeat-recency
+    # only) and false-paged "active-but-not-draining" off a LEFTOVER pane. is_offline_stale=True
+    # must veto _alive() outright, so the stuck-page pass skips it (same as a dead agent) instead
+    # of paging.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-quality-1", 54024, age_s=2000)]
+    kw = dict(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+              now_dt=_NOW, matching_hbs=lambda a: [_hb(6218)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+              pane_state=lambda a: "idle", pane_active=lambda a: False,
+              mark=mark, escalate=page, escalated_seen=set(),
+              is_offline_stale=lambda a, **k: True)
+    r = wbs.sweep_once(**kw)
+    assert pages == [] and r["stuck_paged"] == []      # no false "active-but-not-draining" page
+
+
+def test_offline_status_routes_capped_rows_to_dead_foreign_not_live_stuck():
+    # Same class, the OTHER path: a row past cap to cc-quality-1, heartbeat fresh enough that the
+    # OLD _alive() would defer it to live_stuck (just re-poke later) instead of quiescing it now.
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-quality-1", 53910, age_s=_PAST_CAP)]
+    kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
+              now_dt=_NOW, cap_age_s=390, gone_window_s=7200,
+              matching_hbs=lambda a: [_hb(6218)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+              desired_state_of=lambda a: "down", base_of=lambda a: "cc-quality",
+              is_offline_stale=lambda a, **k: True,
+              mark=mark, escalate=page, escalated_seen=set())
+    res = wbs.sweep_once(rows=rows, **kw)
+    assert marked == [53910]
+    assert res["dead_foreign"] == ["cc-quality-1"]
+    assert res["live_stuck"] == []                      # not deferred as "alive, re-poke later"
+
+
+def test_offline_status_within_grace_window_does_not_veto():
+    # A status flip to 'offline' <10min ago is given grace -- NOT treated as a confident-dead
+    # veto, so a just-recovered body's fresh heartbeat (still within gone_window) keeps it alive.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-quality-1", 1, age_s=2000)]
+    kw = dict(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+              now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
+              pane_state=lambda a: "idle", pane_active=lambda a: False,
+              mark=mark, escalate=page, escalated_seen=set(),
+              is_offline_stale=lambda a, **k: False)    # e.g. offline for only 2min
+    r = wbs.sweep_once(**kw)
+    assert r["stuck_paged"] == ["cc-quality-1"]          # still treated as alive -> normal stuck-page
     r2 = wbs.sweep_once(**kw)
     assert len(pages) == 1                             # once-guarded: no re-page on the 2nd sweep
 
