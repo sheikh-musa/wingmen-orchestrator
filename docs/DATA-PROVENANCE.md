@@ -11,6 +11,16 @@ for agents."*
 python3 scripts/data_truth.py classify <project_ref> [org_id]
 ```
 
+**`org_id` is the FULL UUID** (the actual column value every real caller
+has in hand — e.g. cosem-platform's `org_id UUID NOT NULL` column), not the
+8-char short form this doc and bus messages use in prose for readability
+(`1478c9b2` below means `1478c9b2-ff44-4091-a67e-a1391303c4ce`). Querying
+with the short form will not match a registered row and silently falls
+through to `UNCLASSIFIED` — exactly the false "unregistered" report
+migration 093 fixed (bus #53416). `data_provenance.org_id` has a CHECK
+constraint (migration 093) enforcing this: `''` (store-level default) or a
+full UUID, nothing else.
+
 This reads the `data_provenance` table (migration 089, orchestrator substrate
 `tscuymavysscrvoberrr`) — see [`data-store-registry.md`](data-store-registry.md),
 whose per-org table is generated FROM this table
@@ -19,10 +29,12 @@ whose per-org table is generated FROM this table
 ## The trap this exists to close
 
 **A slug or org name is NOT evidence of classification.** Cosem org `1478c9b2`
-has slug `demo-academy` — no `-synthetic` suffix — and is the org intended to
-hold REAL client data at go-live. Its *current* trainee rows are synthetic
+(`1478c9b2-ff44-4091-a67e-a1391303c4ce`) has slug `demo-academy` — no
+`-synthetic` suffix — and is the org intended to hold REAL client data at
+go-live. Its *current* trainee rows are synthetic
 (`scripts/reseed-adcda-groups.ts`, commit `b7491a6`, cosem-platform repo).
-Org `ba98da04`, slug `demo-academy-synthetic`, actually is fully synthetic.
+Org `ba98da04` (`ba98da04-2a5e-46ba-97f8-387f17753bcc`), slug
+`demo-academy-synthetic`, actually is fully synthetic.
 Guessing from the name alone gets both of these backwards in opposite
 directions. Classification comes only from a `data_provenance.evidence` field
 that cites a concrete script/commit/migration/bus-message — never a string
