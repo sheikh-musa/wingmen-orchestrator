@@ -45,6 +45,7 @@ import psycopg
 # import (not re-encode) the shared policy + wake primitive
 from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.path at runtime)
     _pane_busy,
+    _tmux_bin,
     auto_wake_enabled,
     clear_pending,
     is_wake_eligible_recipient,
@@ -106,6 +107,49 @@ STUCK_PAGE_CEILING_S = int(os.environ.get("WAKE_SWEEP_STUCK_PAGE_CEILING_S", str
 # longer than fleet_health STALE_MIN (30m) ON PURPOSE — a dead heartbeat DAEMON is not a dead
 # PANE, and quiescing a live-but-stale lane silently drops its directed message.
 GONE_WINDOW_S = int(os.environ.get("WAKE_SWEEP_GONE_WINDOW_S", "7200"))  # 2h
+
+# OFFLINE-STATUS veto (orch-console #54066 cc-irsyad-2 + #54081 cc-quality-1, 2026-10-06): an
+# EXPLICIT agent_status.status='offline' is a STRONGER signal than raw heartbeat age and should
+# short-circuit _alive() rather than wait out the full GONE_WINDOW_S. This does NOT reintroduce
+# the "dead heartbeat daemon != dead pane" false-positive the 2h window guards against above:
+# scripts/fleet_health.py only ever flips a row to 'offline' AFTER its own OBSERVED-ACTIVITY gate
+# (recent bus send OR a live co-located pane) comes up empty (fleet_health.py:223-237) — so by
+# the time status='offline' is readable here, it already passed a pane+bus-corroborated check,
+# not a bare heartbeat-staleness guess. GRACE_S is just a small buffer past that flip for a
+# just-recovered body's fresh heartbeat to land before this veto trusts it.
+OFFLINE_ALIVE_GRACE_S = int(os.environ.get("WAKE_SWEEP_OFFLINE_GRACE_S", "600"))  # 10 min
+
+
+def _is_offline_stale(agent, grace_s: int = OFFLINE_ALIVE_GRACE_S, now_dt=None) -> bool:
+    """True iff EVERY agent_status row matching `agent` (base-inclusive: agent_id=agent OR
+    base_agent_id=agent) is status='offline' and has held that status for >= grace_s. False
+    (never veto) on no DSN, a DB error, no matching row, or any non-offline row — fail-SAFE
+    exactly like this module's other liveness helpers, so this can only make _alive() STRICTER
+    on a clean, confident read, never looser or wrong on an ambiguous one."""
+    if not _DSN:
+        return False
+    try:
+        with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, updated_at FROM agent_status WHERE agent_id=%s OR base_agent_id=%s",
+                (agent, agent))
+            rows = cur.fetchall()
+    except Exception:  # noqa: BLE001 — unreadable -> never veto
+        return False
+    if not rows:
+        return False
+    now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
+    for status, upd in rows:
+        if status != "offline":
+            return False  # a live (or unknown-status) base-inclusive sibling -> don't veto
+        if upd is None:
+            return False
+        try:
+            if (now_dt - upd).total_seconds() < grace_s:
+                return False  # flipped too recently -- give it the grace window
+        except Exception:  # noqa: BLE001 — un-ageable -> never veto
+            return False
+    return True
 
 # CROSS-HOST liveness (Nazim #42994 (2) — replaces the old per-instance HOST-OWNERSHIP SCOPE).
 # resolve_tmux_session enumerates only THIS host's panes, but the sweep runs one-instance-per-
@@ -309,6 +353,106 @@ def _pane_recently_active(agent, gap_s: float = 2.0) -> bool:
         return False
 
 
+_SLEEP_CMD_RE = re.compile(r"^sleep\s+(\d+(?:\.\d+)?)\b")
+
+
+def _etime_to_seconds(etime: str) -> "float | None":
+    """Parse a ps(1) ETIME field ('SS', 'MM:SS', 'HH:MM:SS', or 'DD-HH:MM:SS') to seconds.
+    None if unparseable (caller skips the line rather than guessing)."""
+    try:
+        etime = etime.strip()
+        days = 0
+        if "-" in etime:
+            d, etime = etime.split("-", 1)
+            days = int(d)
+        parts = [float(p) for p in etime.split(":")]
+        if not parts:
+            return None
+        while len(parts) < 3:
+            parts.insert(0, 0.0)
+        h, m, s = parts[-3], parts[-2], parts[-1]
+        return days * 86400 + h * 3600 + m * 60 + s
+    except Exception:  # noqa: BLE001 — unparseable -> None, never raise
+        return None
+
+
+def _has_bounded_sleep(ps_lines: "list[str]", max_wait_s: int = 900) -> bool:
+    """PURE: True if any line ('ETIME COMMAND...', ps(1) order) shows a `sleep N` (N <=
+    max_wait_s) still short of its own deadline -- a deliberate bounded wait (a CI/gate
+    poll: 'check back in ~10 minutes'), not a runaway or an unrelated long sleep. Each
+    line's first whitespace-separated token is ETIME, the rest is the command. Never
+    raises on a bad line -- skips it (fails toward 'not detected', so the caller falls
+    back to the existing busy/text-diff signals rather than guessing)."""
+    for line in ps_lines:
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        etime_s, command = parts
+        m = _SLEEP_CMD_RE.match(command.strip())
+        if not m:
+            continue
+        sleep_arg = float(m.group(1))
+        if sleep_arg > max_wait_s:
+            continue  # not a short CI-poll-style wait (e.g. an overnight sleep) -- skip it
+        elapsed = _etime_to_seconds(etime_s)
+        if elapsed is None:
+            continue
+        if elapsed < sleep_arg:
+            return True
+    return False
+
+
+def _pane_has_live_poll(agent, max_wait_s: int = 900) -> bool:
+    """True if the lane's pane has a LIVE descendant process mid a bounded `sleep N` wait
+    (N <= max_wait_s) -- the CI/gate-poll pattern. Fix for the 2026-10-05 false-positive
+    run (bus #53326/#53327): `_pane_recently_active` samples the pane 2s apart, but a lane
+    mid a `sleep 300` wait produces ZERO pane output for minutes at a stretch, so it reads
+    as BOTH stable-idle AND "not recently active" even though it is demonstrably still
+    working (ran a test suite / pushed a commit / kicked off CI, and is waiting to poll
+    the result) -- the exact cc-cosem-platform and cc-substrate-1 (x2) shape from that day.
+
+    Reads the FULL process table once (one `ps`, cheap) and walks the pane_pid's
+    descendants rather than diffing pane text repeatedly. Never raises; any failure (no
+    live session, no pane_pid, ps unavailable, unparseable output) -> False, so an
+    ambiguous read falls back to the EXISTING signals (busy footer / text-diff) instead of
+    silently masking a real stall -- same fail-toward-paging posture as pane_active."""
+    try:
+        sess = resolve_tmux_session(agent)
+        if not sess:
+            return False
+        pane_pid = subprocess.check_output(
+            [_tmux_bin(), "display-message", "-p", "-t", f"={sess}:0.0", "#{pane_pid}"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        if not pane_pid.isdigit():
+            return False
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,etime,command"], text=True, stderr=subprocess.DEVNULL)
+        by_pid: "dict[str, tuple[str, str, str]]" = {}
+        children_of: "dict[str, list[str]]" = {}
+        for ln in out.splitlines()[1:]:
+            parts = ln.split(None, 3)
+            if len(parts) < 4:
+                continue
+            pid, ppid, etime, command = parts
+            by_pid[pid] = (ppid, etime, command)
+            children_of.setdefault(ppid, []).append(pid)
+        descendants: "list[str]" = []
+        frontier = [pane_pid]
+        seen_pids = {pane_pid}
+        while frontier:
+            cur = frontier.pop()
+            for child in children_of.get(cur, []):
+                if child in seen_pids:
+                    continue
+                seen_pids.add(child)
+                descendants.append(child)
+                frontier.append(child)
+        ps_lines = [f"{by_pid[p][1]} {by_pid[p][2]}" for p in descendants if p in by_pid]
+        return _has_bounded_sleep(ps_lines, max_wait_s=max_wait_s)
+    except Exception:  # noqa: BLE001 — advisory; never break the sweep
+        return False
+
+
 def _mark_skipped(row_ids) -> list:
     """Set skipped_at on the given rows via CAS (`WHERE skipped_at IS NULL`) and RETURN the
     ids actually set. skipped_at quiesces the rows (the SQL excludes skipped_at IS NOT NULL)
@@ -418,7 +562,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                mark=_mark_skipped, escalate=_escalate_operator,
                matching_hbs=_matching_hbs, desired_state_of=_desired_state_of,
                base_of=_base_of, hub_lease_fresh=_default_hub_lease_fresh,
-               pane_state=_default_pane_state, pane_active=_pane_recently_active, stuck_rows=None,
+               pane_state=_default_pane_state, pane_active=_pane_recently_active,
+               pane_poll_active=_pane_has_live_poll, stuck_rows=None,
                stuck_page_age_s: int = STUCK_PAGE_AGE_S,
                stuck_page_max_age_s: int = STUCK_PAGE_MAX_AGE_S,
                stuck_ceiling_age_s: int = STUCK_PAGE_CEILING_S,
@@ -427,7 +572,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                now_dt=None, dry_run: bool = False,
                deliveries=_deliveries_of, cap_deliveries: int = WAKE_SWEEP_CAP_DELIVERIES,
                agent_host_rows=_agent_host_rows, this_host=None,
-               pending_rows=None, pending_ids=None, clear_pending=clear_pending) -> dict:
+               pending_rows=None, pending_ids=None, clear_pending=clear_pending,
+               is_offline_stale=_is_offline_stale) -> dict:
     """One pass. FRESH (under-cap) rotting rows drive a wake of each eligible recipient (the
     doorbell backstop). A row PAST cap_age_s is a give-up candidate. ONLY backstop-eligible
     recipients (should_backstop_wake — never a human/operator or a P3/test row) are classified;
@@ -520,6 +666,16 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             capped_by_agent.setdefault(_to_agent(r), []).append(_row_id(r))
 
     def _alive(agent) -> bool:  # base-inclusive fresh heartbeat, or (for the hub) a fresh lease
+        # EXPLICIT offline status, held past the grace window, vetoes aliveness outright —
+        # trust agent_status over a stale-but-under-2h heartbeat (orch-console #54066/#54081).
+        # Never applied to the hub: it is lease-tracked, not heartbeat/status-tracked, and
+        # fleet_health.py's protected_agents list exempts it from ever being marked offline.
+        if agent != HUB_AGENT:
+            try:
+                if is_offline_stale(agent, now_dt=now_dt):
+                    return False
+            except Exception:  # noqa: BLE001 — an unprovable veto never shortcuts to "dead"
+                pass
         for hb in (matching_hbs(agent) or []):
             try:
                 if (now_dt - hb).total_seconds() < gone_window_s:
@@ -651,13 +807,15 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         if not _local(agent):   # the pane read below is LOCAL — never judge a foreign lane's pane
             continue
         state = pane_state(agent)
-        working = state == "busy" or pane_active(agent)
+        working = state == "busy" or pane_active(agent) or pane_poll_active(agent)
         over_ceiling = stuck_oldest_age.get(agent, 0.0) > stuck_ceiling_age_s
         # SUPPRESS a working lane (bus #44274): a busy footer ('esc to interrupt') OR recent tool
-        # activity (pane changed across two samples) means the lane is WORKING, not stuck — many
-        # lanes read their inbox without stamping read_at (cc-cosem-platform/-exams class), so an
-        # unread row + a working pane is normal. Do NOT burn the once-guard: if it later goes
-        # stable-idle with the row still unread, a subsequent sweep pages it.
+        # activity (pane changed across two samples) OR a live bounded-sleep poll under the pane
+        # (bus #53326/#53327 — a `sleep 300` CI/gate wait produces no pane output for minutes, so
+        # text-diff alone misses it) means the lane is WORKING, not stuck — many lanes read their
+        # inbox without stamping read_at (cc-cosem-platform/-exams class), so an unread row + a
+        # working pane is normal. Do NOT burn the once-guard: if it later goes stable-idle with
+        # the row still unread, a subsequent sweep pages it.
         # EXCEPT past the hard CEILING (bus #44313): change-detection can't tell working from
         # "hung but animating" (a ticking timer changes the pane every sample), so beyond
         # stuck_ceiling_age_s we page REGARDLESS — labelled active-but-not-draining.
@@ -783,14 +941,26 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
                       nudge=_default_nudge, warn=_default_warn_fleet_health, now_dt=None,
                       nudge_age_s: int = IDLE_UNREAD_NUDGE_AGE_S,
                       warn_age_s: int = IDLE_UNREAD_WARN_AGE_S,
-                      nudged_seen=None, warned_seen=None) -> dict:
+                      nudged_seen=None, warned_seen=None,
+                      is_offline_stale=_is_offline_stale, mark=_mark_skipped) -> dict:
     """For each recipient (is_wake_eligible_recipient — never a human/operator, the hub only
     on ITS OWN wake floor which this age-only signal never satisfies so the hub is simply
     never nudged here) whose pane is IDLE (never busy — 'esc to interrupt') but has directed
     row(s) unread past nudge_age_s: nudge it ONCE per distinct unread-id-set via the normal
     doorbell, naming the ids. If the SAME situation persists past warn_age_s, warn
     cc-fleet-health ONCE per distinct id-set. A recipient with no live LOCAL session is a
-    different watchdog's job (dead/foreign-host) — skipped here, never nudged."""
+    different watchdog's job (dead/foreign-host) — skipped here, never nudged.
+
+    AUTO-QUIESCE (orch-console #54066 cc-irsyad-2 + #54081 cc-quality-1, 2026-10-06): before
+    even attempting pane resolution, a recipient with an EXPLICIT agent_status.status='offline'
+    held past OFFLINE_ALIVE_GRACE_S is never nudged OR warned — ALL its directed rows (not just
+    the ones past nudge_age_s) are quiesced (skipped_at) in one shot, since nothing will ever
+    read them under that identity. This is what closes the self-referential loop: resolve_session
+    could (and did, for cc-quality-1 reusing its base's tmux session name, and for cc-irsyad-2 via
+    the cwd-substring fallback — see [[resolve-tmux-session-cwd-fallback-sibling-misattribution]])
+    mis-resolve a dead instance onto a LIVE sibling's pane, defeating the old skipped_dead check;
+    agent_status.status is the authoritative signal per fleet_health.py's own observed-activity
+    gate, so it is checked FIRST and wins outright."""
     if rows is None:
         rows = _fetch_idle_unread_rows(nudge_age_s)
     now_dt = now_dt if now_dt is not None else datetime.now(timezone.utc)
@@ -804,8 +974,19 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
             continue
         by_agent.setdefault(agent, []).append((rid, created_at))
 
-    nudged, warned, skipped_busy, skipped_dead = [], [], [], []
+    nudged, warned, skipped_busy, skipped_dead, auto_quiesced = [], [], [], [], []
     for agent, entries in by_agent.items():
+        try:
+            offline = is_offline_stale(agent, now_dt=now_dt)
+        except Exception:  # noqa: BLE001 — an unprovable veto never auto-quiesces
+            offline = False
+        if offline:
+            newly = mark([rid for rid, _ca in entries])
+            if newly:
+                auto_quiesced.append(agent)
+            nudged_seen.pop(agent, None)
+            warned_seen.pop(agent, None)
+            continue
         session = resolve_session(agent)
         if not session:
             skipped_dead.append(agent)          # gone/foreign-host — not this check's job
@@ -838,7 +1019,7 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
                 warned.append(agent)
 
     return {"nudged": nudged, "warned": warned, "skipped_busy": skipped_busy,
-            "skipped_dead": skipped_dead}
+            "skipped_dead": skipped_dead, "auto_quiesced": auto_quiesced}
 
 
 def _ts() -> str:
@@ -862,9 +1043,10 @@ def main() -> int:
                       f"woke={res['woke']} dry={eff_dry}", flush=True)
             if not eff_dry:
                 idle_res = idle_unread_sweep()
-                if idle_res["nudged"] or idle_res["warned"]:
+                if idle_res["nudged"] or idle_res["warned"] or idle_res["auto_quiesced"]:
                     print(f"{_ts()} idle-unread: nudged={idle_res['nudged']} "
-                          f"warned={idle_res['warned']}", flush=True)
+                          f"warned={idle_res['warned']} "
+                          f"auto_quiesced={idle_res['auto_quiesced']}", flush=True)
         except Exception as e:  # fail LOUD to the log, keep the floor alive (KeepAlive re-runs)
             print(f"{_ts()} sweep ERROR: {e!r}", file=sys.stderr, flush=True)
         if once:

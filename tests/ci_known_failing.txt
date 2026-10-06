@@ -88,22 +88,26 @@ tests/test_synthetic_filter_integration.py::test_shadow_mode_writes_notification
 # scope here).
 tests/test_vault.py::test_put_fails_with_actionable_kek_error_for_unbootstrapped_host
 # Added 2026-10-06 (bus #53294, PR#308; comment corrected 2026-10-06 per cc-quality
-# review #54127 — the original comment here was copy-pasted from the wrong entry).
-# Both of the following are confirmed BY RUNNING THEM individually against a fresh
-# ephemeral bootstrap, not inferred: the schema replay (schema.sql + migrations/*)
-# doesn't reproduce certain hand-seeded "bedrock data" rows that exist on the real
-# substrate — same class as the bot_channels seeds this PR already adds in
-# ci_bootstrap_schema.py for migrations 091/092, just for two OTHER tables this PR
-# does not also seed.
+# review #54127 — the original comment here was copy-pasted from the wrong entry and
+# wrongly lumped the 3 unrelated tests below under it). The test above is only
+# @_needs_db-gated, not also @_needs_mini-gated, despite asserting macOS-Keychain-
+# specific error-message substrings ("wingmen-vault-kek", "security add-generic-
+# password"). nervous_system/vault.py's platform dispatch is correct — on Linux CI
+# it raises KekNotFoundError via _linux_kek() with a DIFFERENT (also-correct)
+# message, so the right exception fires but these macOS-only substrings aren't in
+# it. A pre-existing test gap (should be @_needs_mini too), newly exposed now that
+# DATABASE_URL is live in CI, not caused by the pgvector diff.
 tests/test_wake_backstop_sweep.py::test_sql_predicate_selects_rotting_and_quiesces_on_read
 # ^ psycopg.errors.ForeignKeyViolation: agent_messages.from_agent='cc-fleet-health' has
 # no row in `agents` — the ephemeral bootstrap never seeds `agents`, only
-# agent_status/bot_channels.
+# agent_status/bot_channels. Confirmed by running it individually against a fresh
+# ephemeral bootstrap, not inferred.
 tests/test_watchdog_phase_b_integration.py::test_cc_family_interactive_pre_registered_never_killed
 # ^ AssertionError: no `long_running_claude_callers` row for
 # caller_name='cc-scholar-interactive' — CC-FAMILY-INTERACTIVE-SESSIONS-001's
 # pre-registration is a manual seed on the real substrate, not created by any
-# migration replayed here.
+# migration replayed here. Confirmed by running it individually against a fresh
+# ephemeral bootstrap, not inferred.
 #
 # Added 2026-10-06 (bus #53294, PR#315; a 2nd correction of the #54127 comment —
 # I initially (wrongly) removed the entry below as a "confirmed-passing false

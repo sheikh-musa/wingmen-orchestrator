@@ -814,6 +814,47 @@ CC_AUTH_FP="$(printf '%s' "${CLAUDE_CODE_OAUTH_TOKEN:-}" | shasum -a 256 2>/dev/
 . "$ORCH_DIR/scripts/lib/token_file_guard.sh" || { echo "FATAL: token_file_guard.sh missing" >&2; exit 1; }
 CC_AUTH_LABEL="$(account_for_fp "$CC_AUTH_FP")"
 CC_AUTH_LABEL="${CC_AUTH_LABEL:-${CLAUDE_ACCOUNT_LABEL:-unlabelled}}"
+# PROVIDER override (cc-fleet-health bus #53191/#53189; generalized for the
+# op#26108 A/B harness, bus #53237/#53267): a resolved model matching a known
+# non-Anthropic provider prefix runs this lane entirely on THAT provider's
+# credentials (see PROVIDER ROUTING below, which unsets every Anthropic
+# credential) -- no Anthropic auth_fp applies, so stamping the Claude
+# token-file's fp here would mislabel this lane's billing identity for the
+# life of the process (BEAT_SQL only fills a NULL auth_fp, it never corrects
+# an already-stamped non-null one). Clear the fp and stamp a distinct account
+# label instead of leaving launch-argument residue in place. This case's
+# prefixes must stay in sync with _provider_for_model in provider_routing.sh
+# (kept inline+duplicated rather than sourcing that file early, same as the
+# original GLM-only block did -- the auth-labeling step runs well before the
+# routing/vault-fetch step, and duplicating a handful of glob prefixes here is
+# simpler than restructuring sourcing order for it).
+case "$RESOLVED_MODEL" in
+    glm-*)
+        CC_AUTH_FP=""
+        CC_AUTH_LABEL="glm:z.ai"
+        ;;
+    kimi-*|moonshot-*)
+        CC_AUTH_FP=""
+        CC_AUTH_LABEL="kimi:moonshot"
+        ;;
+    deepseek-*)
+        CC_AUTH_FP=""
+        CC_AUTH_LABEL="deepseek"
+        ;;
+    # MUST be checked before the native `qwen*` arm below — same ordering hazard as
+    # _provider_for_model in provider_routing.sh (qwen* is an unanchored wildcard that
+    # also matches "qwen/qwen3-coder"). Added bus #53278: the OpenRouter A/B-test arm was
+    # missing here entirely, so an OpenRouter-routed lane kept its stale Claude CC_AUTH_FP
+    # (the exact #53191 bug class, for the one provider path this case block forgot).
+    moonshotai/*|deepseek/*|qwen/*|z-ai/*)
+        CC_AUTH_FP=""
+        CC_AUTH_LABEL="openrouter"
+        ;;
+    qwen*)
+        CC_AUTH_FP=""
+        CC_AUTH_LABEL="qwen:dashscope"
+        ;;
+esac
 # Boot stamp via the ONE shared writer (2026-10-01): bounded retries + LOUD failure
 # (was a silent one-shot `except: pass` — the lost stamp that left cc-irsyad-2 and
 # cc-irsyad-coord-1 host-less/session-less/model-less on gzb). A populated host or
@@ -879,44 +920,38 @@ fi
 # blocks the launch over a settings-write).
 "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$CALLER_DIR" --deny AskUserQuestion || true
 
+# PROACTIVE secrets-in-transcript guard, enforced in CODE rather than left to each
+# host's hand-maintained user-global ~/.claude/settings.json (bus #53680/#53678):
+# a new host, a disk recovery, or a new OS user previously got zero PreToolUse
+# coverage until someone remembered to hand-copy the dotfile. Every lane now gets
+# it from the shared launcher instead — additive to (never a replacement for) the
+# existing user-global wiring. Best-effort + fail-loud, same as the deny above.
+"$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_secrets_guard.py" --cwd "$CALLER_DIR" || true
+
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
 echo ""
 
-# GLM PROVIDER (Musa op#24283/24299/24541: GLM Pro trial on cosem-platform). A resolved
-# model of `glm-*` (e.g. `.cosem-port_model` = glm-5) routes this lane to z.ai's
-# Anthropic-compatible endpoint instead of Anthropic. Runs LAST, after the token cascade
-# and the subagent cascade, so it overrides both:
-#   - the GLM key comes from the fleet vault (GLM_CODING_KEY), never .env, never printed;
-#   - the Anthropic OAuth token + API key are UNSET so no Anthropic credential can ever be
-#     sent to z.ai;
-#   - every model slot (main, opus/sonnet/haiku defaults, subagents) is a glm model, since
-#     z.ai rejects claude-* ids.
-# FAIL-CLOSED: if the key can't be fetched we refuse to boot rather than silently fall
-# back to Anthropic (a GLM lane on Claude would quietly invalidate the trial).
-case "$RESOLVED_MODEL" in
-    glm-*)
-        _GLM_KEY="$(cd "$ORCH_DIR" && AGENT_ID="${CC_AGENT_ID:-$CC_BASE_AGENT_ID}" "$VENV_PY" -c '
-import sys
-from nervous_system.vault import vault
-s = vault.get("GLM_CODING_KEY", reason="launch_dangerous_cc: GLM provider for lane boot")
-sys.stdout.write(s.value)' 2>/dev/null || true)"
-        if [ -z "$_GLM_KEY" ]; then
-            echo -e "${RED}FATAL: model ${RESOLVED_MODEL} needs GLM_CODING_KEY from the vault and it could not be read. Refusing to boot (no silent fallback to Anthropic).${RESET}" >&2
-            exit 1
-        fi
-        unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE ANTHROPIC_API_KEY
-        export ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
-        export ANTHROPIC_AUTH_TOKEN="$_GLM_KEY"
-        unset _GLM_KEY
-        _GLM_SMALL="${GLM_SMALL_MODEL:-glm-4.7}"
-        export ANTHROPIC_DEFAULT_OPUS_MODEL="$RESOLVED_MODEL"
-        export ANTHROPIC_DEFAULT_SONNET_MODEL="$RESOLVED_MODEL"
-        export ANTHROPIC_DEFAULT_HAIKU_MODEL="$_GLM_SMALL"
-        export CLAUDE_CODE_SUBAGENT_MODEL="$RESOLVED_MODEL"
-        echo -e "${BOLD}${TEAL}▶ Provider: z.ai GLM (${RESOLVED_MODEL}, small=${_GLM_SMALL}); Anthropic credentials unset${RESET}"
-        ;;
-esac
+# PROVIDER ROUTING (Musa op#24283/24299/24541 GLM Pro trial; generalized for
+# op#26108 A/B harness, bus #53237/#53267). A resolved model matching a known
+# non-Anthropic provider prefix (glm-*, kimi-*/moonshot-*, deepseek-*, qwen*)
+# routes this lane to that provider's Anthropic-compatible endpoint instead of
+# Anthropic. Runs LAST, after the token cascade and the subagent cascade, so
+# it overrides both. The cascade itself lives in scripts/lib/provider_routing.sh
+# (TESTED path: tests/test_provider_routing.py) so this is the shipped routing,
+# not a transcription of it — same pattern as model_precedence.sh above.
+# FAIL-CLOSED: if the provider's vault key can't be fetched, apply_provider_
+# routing exports nothing and returns non-zero; we exit rather than silently
+# fall back to Anthropic (a provider lane on Claude would quietly invalidate
+# the A/B comparison / the GLM trial).
+# shellcheck source=scripts/lib/provider_routing.sh
+source "$ORCH_DIR/scripts/lib/provider_routing.sh"
+if ! apply_provider_routing "$RESOLVED_MODEL" "$ORCH_DIR" "$VENV_PY" "${CC_AGENT_ID:-$CC_BASE_AGENT_ID}"; then
+    exit 1
+fi
+if [ -n "$PROVIDER_ROUTING_LABEL" ]; then
+    echo -e "${BOLD}${TEAL}▶ Provider: ${PROVIDER_ROUTING_LABEL} (${RESOLVED_MODEL}, small=${PROVIDER_ROUTING_SMALL}); Anthropic credentials unset${RESET}"
+fi
 
 # Restore caller's directory for the actual claude session
 cd "$CALLER_DIR"

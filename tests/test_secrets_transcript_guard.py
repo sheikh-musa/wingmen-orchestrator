@@ -908,6 +908,89 @@ def test_allows_env_set_sh_as_the_sanctioned_escape_hatch():
     )
 
 
+# ---- Rule G: raw DDL against a PRODUCTION_SILOS store, bypassing apply_migration.py's
+# --gate (bus #44135, re-raised live by #53758/#53764) -----------------------------
+
+# ywrpttpxwfcoodovxhsr is the real cosem-platform PRODUCTION_SILOS member, already a
+# hardcoded literal in scripts/apply_migration.py and docs/data-store-registry.md --
+# a project ref, not a credential, same convention as those two files.
+_PROD_REF = "ywrpttpxwfcoodovxhsr"
+_NONPROD_REF = "some-dev-ref-not-production"
+# every env var check_rule_g might resolve, forced empty -- a test asserting ALLOW
+# must not accidentally inherit a real production DSN from the host running the suite.
+_NEUTRAL_PG_ENV = {"DATABASE_URL": "", "PGHOST": "", "PGDATABASE": "", "PGUSER": "", "PGSERVICE": "", "PROD_DSN": ""}
+
+
+def test_blocks_ddl_against_production_silo_via_sensitive_var_name_resolution():
+    # a non-psql-CLI shape (Rule F only covers pg_dump/pg_restore/pg_dumpall/psql) that
+    # still references a $VAR by name and mentions psycopg -- exercises the
+    # SENSITIVE_VAR_RE env-resolution path in _resolved_values_for_silo_check directly,
+    # independent of the PG_CONNECT_ENV_VARS and os.environ[...] paths covered below.
+    assert_blocked(
+        "Bash",
+        {"command": "TARGET=$PROD_DSN python3 -c \"import psycopg; psycopg.connect(TARGET).execute('CREATE TABLE x(y int)')\""},
+        env={**_NEUTRAL_PG_ENV, "PROD_DSN": "host=db-" + _PROD_REF + "-pooler.example"},
+        expect_substr="raw DDL against a PRODUCTION_SILOS store",
+    )
+
+
+def test_blocks_psql_ddl_against_production_silo_via_ambient_pghost():
+    # psql connects via PGHOST with NO var named anywhere in the command text at all --
+    # the shape Rule F's own argv-exposure fix pushed everyone toward.
+    assert_blocked(
+        "Bash",
+        {"command": 'psql -c "DROP TABLE foo"'},
+        env={**_NEUTRAL_PG_ENV, "PGHOST": "db-" + _PROD_REF + "-pooler.example"},
+        expect_substr="raw DDL against a PRODUCTION_SILOS store",
+    )
+
+
+def test_blocks_psycopg_ddl_via_os_environ_reference():
+    assert_blocked(
+        "Bash",
+        {"command": "python3 -c \"import os,psycopg; psycopg.connect(os.environ['DATABASE_URL']).execute('ALTER TABLE x ADD COLUMN y int')\""},
+        env={**_NEUTRAL_PG_ENV, "DATABASE_URL": "host=db-" + _PROD_REF + "-pooler.example"},
+        expect_substr="raw DDL against a PRODUCTION_SILOS store",
+    )
+
+
+def test_allows_apply_migration_py_invocation_even_with_ddl_and_prod_ref():
+    # the sanctioned, gated path -- must never be the thing this rule blocks, even
+    # with a prod-silo DSN ambiently set and a DDL-shaped silo ref in the command.
+    assert_allowed(
+        "Bash",
+        {"command": "python3 scripts/apply_migration.py 100 --silo " + _PROD_REF + " --gate 123"},
+        env={**_NEUTRAL_PG_ENV, "DATABASE_URL": "host=db-" + _PROD_REF + "-pooler.example"},
+    )
+
+
+def test_allows_readonly_psql_against_production_silo():
+    # ambient PGHOST resolves to a production silo, but there's no DDL keyword --
+    # a plain read is not what apply_migration.py's gate exists to protect.
+    assert_allowed(
+        "Bash",
+        {"command": 'psql -c "SELECT * FROM foo"'},
+        env={**_NEUTRAL_PG_ENV, "PGHOST": "db-" + _PROD_REF + "-pooler.example"},
+    )
+
+
+def test_allows_ddl_against_nonproduction_ref():
+    assert_allowed(
+        "Bash",
+        {"command": 'psql -c "CREATE TABLE foo (id int)"'},
+        env={**_NEUTRAL_PG_ENV, "PGHOST": "db-" + _NONPROD_REF},
+    )
+
+
+def test_allows_ddl_keyword_with_no_pg_tool_or_psycopg_reference():
+    # a DDL-shaped word with no psql/psycopg involvement at all isn't this rule's job.
+    assert_allowed(
+        "Bash",
+        {"command": 'echo "CREATE TABLE foo (id int)"'},
+        env=_NEUTRAL_PG_ENV,
+    )
+
+
 # ---- fail-closed on unparseable input ---------------------------------------------
 
 def test_fails_closed_on_bad_json():

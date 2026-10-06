@@ -140,6 +140,67 @@ def test_skips_a_dead_agent_no_live_session():
     assert nudged == [] and res["skipped_dead"] == ["cc-oeh"]
 
 
+# ---- auto-quiesce on an explicit offline status (orch-console #54066/#54081, 2026-10-06) ----
+
+def test_auto_quiesces_offline_instance_without_resolving_a_session():
+    # cc-quality-1 class: agent_status says offline, but resolve_tmux_session would (and did,
+    # live) mis-resolve onto a LIVE SIBLING's reused session name -- so the offline check must
+    # run and win BEFORE resolve_session/pane_busy are even consulted, not after.
+    calls = []
+    def resolve_session(a):
+        calls.append(a)
+        return "sess"                        # would read as alive if ever consulted
+    marked = []
+    def mark(ids):
+        marked.extend(ids)
+        return list(ids)
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(rows=[_row(54024, "cc-quality-1", 1000)],
+                                resolve_session=resolve_session, pane_busy=lambda s: False,
+                                nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+                                is_offline_stale=lambda a, **k: a == "cc-quality-1", mark=mark)
+    assert calls == []                                  # resolve_session never called
+    assert nudged == [] and warned == []
+    assert marked == [54024]
+    assert res["auto_quiesced"] == ["cc-quality-1"]
+
+
+def test_auto_quiesce_marks_every_unread_row_not_only_nudge_age_ones():
+    # A fresh (< nudge_age) row for an already-offline-stale instance is quiesced too -- there's
+    # no reason to wait once agent_status has already settled the liveness question.
+    marked = []
+    def mark(ids):
+        marked.extend(ids)
+        return list(ids)
+    nudged, warned, nudge, warn = _collector()
+    res = wbs.idle_unread_sweep(
+        rows=[_row(1, "cc-quality-1", 1000), _row(2, "cc-quality-1", 30)],  # 2nd is ~30s old
+        resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+        nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+        is_offline_stale=lambda a, **k: True, mark=mark)
+    assert sorted(marked) == [1, 2]
+    assert res["auto_quiesced"] == ["cc-quality-1"]
+
+
+def test_auto_quiesce_does_not_re_mark_once_already_skipped():
+    # mark() mirrors _mark_skipped's CAS contract: it returns only the ids it ACTUALLY set.
+    # A 2nd sweep over the same (now-already-skipped) rows must not report a repeat auto_quiesce.
+    def mark(ids, _won={"once": False}):
+        if _won["once"]:
+            return []                        # CAS already won by the first sweep
+        _won["once"] = True
+        return list(ids)
+    nudged, warned, nudge, warn = _collector()
+    kw = dict(rows=[_row(1, "cc-quality-1", 1000)], resolve_session=lambda a: "sess",
+              pane_busy=lambda s: False, nudge=nudge, warn=warn, now_dt=_NOW,
+              nudged_seen={}, warned_seen={}, is_offline_stale=lambda a, **k: True, mark=mark)
+    res1 = wbs.idle_unread_sweep(**kw)
+    res2 = wbs.idle_unread_sweep(**kw)
+    assert res1["auto_quiesced"] == ["cc-quality-1"]
+    assert res2["auto_quiesced"] == []        # lost the CAS the 2nd time -> not re-reported
+    assert nudged == [] and warned == []      # never nudged/warned either sweep
+
+
 # ---- recipient eligibility (the ONE shared definition) ----
 
 def test_skips_ineligible_recipients_human_and_operator():
