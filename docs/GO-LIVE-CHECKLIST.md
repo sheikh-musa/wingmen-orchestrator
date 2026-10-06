@@ -14,13 +14,16 @@ trainee data is allowed back in:
 - [ ] Confirm no synthetic trainee rows remain commingled with real ones at
       cutover (a clean reseed-then-cutover, not a gradual real/synthetic mix).
 - [ ] Update the `data_provenance` row for `('ywrpttpxwfcoodovxhsr',
-      '1478c9b2')` to `classification = 'REAL'`, with `evidence` citing the
-      cutover commit/migration — via a normal UPDATE, owner `cosem`, not by
-      deleting and re-inserting the row (preserve the audit trail). The table
-      has **no auto-bump trigger on `updated_at`** — set it explicitly:
-      `UPDATE data_provenance SET classification = 'REAL', evidence = '...',
-      owner = 'cosem', updated_at = now() WHERE project_ref =
-      'ywrpttpxwfcoodovxhsr' AND org_id = '1478c9b2';`
+      '1478c9b2-ff44-4091-a67e-a1391303c4ce')` to `classification = 'REAL'`,
+      with `evidence` citing the cutover commit/migration — via a normal
+      UPDATE, owner `cosem`, not by deleting and re-inserting the row
+      (preserve the audit trail). The table has **no auto-bump trigger on
+      `updated_at`** — set it explicitly: `UPDATE data_provenance SET
+      classification = 'REAL', evidence = '...', owner = 'cosem', updated_at
+      = now() WHERE project_ref = 'ywrpttpxwfcoodovxhsr' AND org_id =
+      '1478c9b2-ff44-4091-a67e-a1391303c4ce';` — the FULL UUID (migration
+      093), not the `1478c9b2` short form used in prose elsewhere in this
+      doc; `org_id` has a CHECK constraint requiring it since 093.
 - [ ] Re-run `scripts/gen_data_store_registry.py` so
       `docs/data-store-registry.md` reflects the flip.
 
