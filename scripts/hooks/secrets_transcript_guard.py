@@ -58,6 +58,13 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
   listing nobody in this command's pipeline controls). A literal DSN in the command
   text is Rule E's job, unconditionally, regardless of which tool it's an argument to.
 
+  Rule G -- raw DDL against a PRODUCTION_SILOS store via psql/psycopg, bypassing
+  apply_migration.py's --gate entirely (op#22669 item 3 / bus #44135, re-raised live by
+  #53758/#53764). Not a secrets-exposure rule -- no value is printed -- the risk is an
+  UNGATED PRODUCTION WRITE. Unconditional, no body carve-out: there is no legitimate
+  reason to bypass the gate. ddl_coverage_watchdog.py remains the detect-after-the-fact
+  backstop for whatever this heuristic still misses.
+
 Exit 2 + stderr = refused, the reason is shown to the model (same contract as the
 irsyad guard). Fail-closed on unparseable input.
 
@@ -426,6 +433,110 @@ def check_rule_f(command: str) -> str | None:
             argv = " ".join(tokens[1:])
             if SENSITIVE_VAR_RE.search(argv):
                 return f"{basename} given a DSN-shaped variable as a positional argument -- {PG_CLI_ARGV_MESSAGE}"
+    return None
+
+
+# ---- Rule G: raw DDL against a PRODUCTION_SILOS store, bypassing apply_migration.py's
+# --gate (op#22669 item 3 / bus #44135/#44139/#44140, re-raised live by #53758, filed as
+# a backlog item at #53764). apply_migration.py's own --gate enforcement only fires for
+# an apply that goes THROUGH it -- nothing stops a lane running DDL directly against a
+# PRODUCTION_SILOS member via raw psql/psycopg instead. ddl_coverage_watchdog.py is the
+# existing DETECT-ONLY backstop for this same gap (a schema-fingerprint diff, after the
+# fact); this is the missing PROACTIVE half, the same "enforce in code, not detect
+# after" pairing as #53680's launcher-coverage fix for this hook itself.
+#
+# Not a secrets-exposure rule like A/B/E/F above -- no value is being printed here. The
+# risk is an UNGATED PRODUCTION WRITE, closer in kind to Rule D's "dangerous shape,
+# block outright" than to the sink-gated rules, which is why it's unconditional (no
+# CC_BASE_AGENT_ID carve-out the way Rule D has for consoles's legitimate cloud logins
+# -- there is no body for which bypassing a production-DDL gate is legitimate; the gate
+# itself already has its own --gate-owner allowance for who may AUTHOR the gate row).
+#
+# Heuristic, not a SQL parser (same documented limitation as the rest of this file):
+# flags a DDL-shaped keyword in a command that (a) invokes psql or references psycopg,
+# (b) resolves -- via the literal command text, any SENSITIVE_VAR_RE-matching var name
+# the command references (resolved through THIS process's own environment, which the
+# Bash tool about to run will inherit), or, for a psql/pg_* invocation specifically, the
+# ambient PGHOST/PGDATABASE/PGUSER/DATABASE_URL/PGSERVICE env vars psql connects with
+# even with NO var named in the command text at all -- to a PRODUCTION_SILOS ref
+# string, and (c) does not itself invoke apply_migration.py (the sanctioned, gated
+# path). False-negative-tolerant by design (same stance as Rule F): a determined
+# bypass can still slip past this; it closes the DEFAULT-PATH bypass the real
+# incidents actually used, not every conceivable obfuscation -- ddl_coverage_watchdog.py
+# remains the backstop regardless.
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from apply_migration import PRODUCTION_SILOS  # noqa: E402
+
+DDL_KEYWORD_RE = re.compile(
+    r"\b(CREATE|ALTER|DROP|TRUNCATE)\s+(TABLE|INDEX|POLICY|FUNCTION|TRIGGER|EXTENSION|"
+    r"SCHEMA|VIEW|SEQUENCE|TYPE|ROLE|MATERIALIZED)\b"
+    r"|\b(GRANT|REVOKE)\b[^;]{0,120}\bON\b",
+    re.IGNORECASE,
+)
+PSYCOPG_REF_RE = re.compile(r"\bpsycopg2?\b")
+APPLY_MIGRATION_REF_RE = re.compile(r"\bapply_migration\.py\b")
+PG_CONNECT_ENV_VARS = ("PGHOST", "PGDATABASE", "PGUSER", "DATABASE_URL", "PGSERVICE")
+# a psycopg caller never references a shell $VAR (SENSITIVE_VAR_RE's shape) -- it names
+# the var as a Python string literal, `os.environ['NAME']` / `os.environ.get("NAME")`.
+# Deliberately NOT anchored to a `print(`/sink prefix the way PYTHON_PRINT_ENVIRON_RE is
+# above -- any os.environ reference to a sensitive-shaped name is a candidate DSN here,
+# not just one that's about to be printed.
+OS_ENVIRON_REF_RE = re.compile(
+    r"os\.environ(?:\[\s*['\"]([^'\"]+)['\"]\s*\]|\.get\(\s*['\"]([^'\"]+)['\"])"
+)
+RULE_G_MESSAGE = (
+    "raw DDL against a PRODUCTION_SILOS store, bypassing apply_migration.py's --gate -- "
+    "run this through scripts/apply_migration.py --silo <ref> --gate <bus-id> instead "
+    "(op#22669 item 3 / bus #44135/#53764; ddl_coverage_watchdog.py only catches this "
+    "AFTER the fact)."
+)
+
+
+def _resolved_values_for_silo_check(command: str, include_pg_connect_env: bool) -> list[str]:
+    values = [command]
+    for m in SENSITIVE_VAR_RE.finditer(command):
+        val = os.environ.get(m.group(1))
+        if val:
+            values.append(val)
+    for m in OS_ENVIRON_REF_RE.finditer(command):
+        name = m.group(1) or m.group(2)
+        if name and SENSITIVE_VAR_NAME_RE.match(name):
+            val = os.environ.get(name)
+            if val:
+                values.append(val)
+    if include_pg_connect_env:
+        for name in PG_CONNECT_ENV_VARS:
+            val = os.environ.get(name)
+            if val:
+                values.append(val)
+    return values
+
+
+def check_rule_g(command: str) -> str | None:
+    if APPLY_MIGRATION_REF_RE.search(command):
+        return None  # the sanctioned, gated path -- never what this rule exists to catch
+    if not DDL_KEYWORD_RE.search(command):
+        return None
+
+    uses_pg_cli = False
+    uses_psycopg = False
+    for statement in _split_statements(command):
+        for segment in _split_pipeline(statement):
+            lead = _leading_command(segment)
+            tokens = lead.split()
+            basename = tokens[0].rsplit("/", 1)[-1] if tokens else ""
+            if basename in PG_CLI_TOOLS:
+                uses_pg_cli = True
+            if PSYCOPG_REF_RE.search(segment):
+                uses_psycopg = True
+    if not (uses_pg_cli or uses_psycopg):
+        return None
+
+    for value in _resolved_values_for_silo_check(command, include_pg_connect_env=uses_pg_cli):
+        for ref in PRODUCTION_SILOS:
+            if ref in value:
+                return RULE_G_MESSAGE
     return None
 
 
@@ -815,6 +926,10 @@ def main() -> int:
         pg_dump_reason = check_rule_f(text)
         if pg_dump_reason:
             sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {pg_dump_reason}\n")
+            return 2
+        ddl_reason = check_rule_g(text)
+        if ddl_reason:
+            sys.stderr.write(f"BLOCKED by secrets_transcript_guard: {ddl_reason}\n")
             return 2
 
     reason = (check_rule_a(text) or check_rule_c(text) or check_rule_b(text)
