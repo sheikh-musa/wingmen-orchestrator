@@ -63,7 +63,10 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
   #53758/#53764). Not a secrets-exposure rule -- no value is printed -- the risk is an
   UNGATED PRODUCTION WRITE. Unconditional, no body carve-out: there is no legitimate
   reason to bypass the gate. ddl_coverage_watchdog.py remains the detect-after-the-fact
-  backstop for whatever this heuristic still misses.
+  backstop for whatever this heuristic still misses. The apply_migration.py import this
+  rule needs is LAZY (bus #53806 review) -- paid only once the DDL+pg-tool/psycopg
+  gates already matched, not on every tool call, and fails soft to an inline-literal
+  PRODUCTION_SILOS copy rather than locking out Bash fleet-wide if that import breaks.
 
 Exit 2 + stderr = refused, the reason is shown to the model (same contract as the
 irsyad guard). Fail-closed on unparseable input.
@@ -465,8 +468,33 @@ def check_rule_f(command: str) -> str | None:
 # incidents actually used, not every conceivable obfuscation -- ddl_coverage_watchdog.py
 # remains the backstop regardless.
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from apply_migration import PRODUCTION_SILOS  # noqa: E402
+# Deliberately NOT imported at module scope (cc-fleet-health review, bus #53806): this
+# hook loads on EVERY tool call, every body, every host, as a fresh process with no
+# sys.modules cache reuse -- an eager `from apply_migration import PRODUCTION_SILOS`
+# pays psycopg's ~0.4s import cost on every call, not just DDL-shaped Bash ones, and
+# worse, turns any host/worktree whose venv can't import psycopg into a total Bash
+# lockout (hook fails to LOAD -> fail-closed -> every Bash call blocked, not just a
+# false-positive on one command). Imported lazily inside check_rule_g, after the DDL +
+# pg-tool/psycopg gates already matched (the rare hot case), and wrapped fail-soft: a
+# broken import degrades Rule G to this same literal list (already hand-synced with
+# docs/data-store-registry.md) instead of locking out Bash fleet-wide.
+_PRODUCTION_SILOS_FALLBACK = frozenset({
+    "tscuymavysscrvoberrr",  # orchestrator substrate (the monolith)
+    "ceayjeamtmcyzzvqflus",  # ihsanos multi-tenant DB
+    "goumlynecruxrlmzlntp",  # irsyad silo (goumlyne)
+    "brrgastulcffamlbggyu",  # wingmen-personal
+    "ywrpttpxwfcoodovxhsr",  # cosem-platform (ADCDA gov-PII)
+})
+
+
+def _production_silos() -> frozenset[str]:
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from apply_migration import PRODUCTION_SILOS
+        return PRODUCTION_SILOS
+    except Exception:
+        return _PRODUCTION_SILOS_FALLBACK
+
 
 DDL_KEYWORD_RE = re.compile(
     r"\b(CREATE|ALTER|DROP|TRUNCATE)\s+(TABLE|INDEX|POLICY|FUNCTION|TRIGGER|EXTENSION|"
@@ -534,7 +562,7 @@ def check_rule_g(command: str) -> str | None:
         return None
 
     for value in _resolved_values_for_silo_check(command, include_pg_connect_env=uses_pg_cli):
-        for ref in PRODUCTION_SILOS:
+        for ref in _production_silos():
             if ref in value:
                 return RULE_G_MESSAGE
     return None
