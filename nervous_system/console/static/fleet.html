@@ -259,6 +259,15 @@
      = declared (boot string / registry), not observed on the live process. */
   .tok.mdl { color: var(--dim); background: rgba(148,163,184,.09); font-weight: 600; }
   .tok.mdl.approx { color: var(--faint); }
+  /* fc-v75: model-family accent — same colour language as the virtual office so an
+     agent reads identically in both views. A soft tinted pill, never shouting. */
+  .tok.mdl.mdl-opus   { color: #c88cff; background: rgba(200,140,255,.11); }
+  .tok.mdl.mdl-sonnet { color: #6fb3ff; background: rgba(111,179,255,.11); }
+  .tok.mdl.mdl-haiku  { color: #5fd0b0; background: rgba(95,208,176,.11); }
+  .tok.mdl.mdl-fable  { color: #ff9ec4; background: rgba(255,158,196,.11); }
+  .tok.mdl.mdl-glm    { color: #ffc36b; background: rgba(255,195,107,.11); }
+  .tok.mdl.approx.mdl-opus, .tok.mdl.approx.mdl-sonnet, .tok.mdl.approx.mdl-haiku,
+  .tok.mdl.approx.mdl-fable, .tok.mdl.approx.mdl-glm { opacity: .7; }
   .tile .pills { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 0; }
   .cchip .ck2 { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 3px; }
   .cchip.offpool { opacity: .3; filter: saturate(.4); }
@@ -296,6 +305,11 @@
   .cchip .cn { font: 700 11px/1 var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cchip .cc { margin-top: 4px; font: 9px/1 var(--mono); font-weight: 700; color: var(--dim); }
   .cchip .cc.green { color: var(--good); } .cchip .cc.amber { color: var(--warn); } .cchip .cc.red { color: var(--bad); }
+  /* fc-v75: coordinator card spine tinted by model family — the same agent reads
+     the same colour here and in the virtual office. */
+  .cchip.mdl-opus   { border-left-color: #c88cff; } .cchip.mdl-sonnet { border-left-color: #6fb3ff; }
+  .cchip.mdl-haiku  { border-left-color: #5fd0b0; } .cchip.mdl-fable  { border-left-color: #ff9ec4; }
+  .cchip.mdl-glm    { border-left-color: #ffc36b; }
 
   /* backlog "Your asks" — collapsible + swipe (unchanged behaviour) */
   section { padding: 0 16px; }
@@ -733,6 +747,9 @@
 <div id="toast" class="toast"></div>
 
 <script src="/static/fleet.js"></script>
+<!-- op#26594: 2D virtual office — a self-contained overlay that reuses /api/fleet.
+     Injects its own launch button + overlay; touches no existing section. -->
+<script src="/static/office.js"></script>
 <script>
   (function () {
     if (!('serviceWorker' in navigator)) return;

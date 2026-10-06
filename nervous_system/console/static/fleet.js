@@ -48,6 +48,18 @@
     clearTimeout(t._h); t._h = setTimeout(function () { t.className = "toast"; }, 3600);
   }
   function shortModel(m) { return m ? String(m).replace(/^claude-/, "") : ""; }
+  // Model-family accent (fc-v75): mirrors the virtual office's colour language so
+  // an agent reads the same in both views — opus=violet, sonnet=blue, haiku=teal,
+  // fable=pink, glm=amber. Returns a CSS suffix for .tok.mdl, "" when unknown.
+  function modelFamily(m) {
+    m = (m || "").toLowerCase();
+    if (m.indexOf("opus") >= 0) return "opus";
+    if (m.indexOf("sonnet") >= 0) return "sonnet";
+    if (m.indexOf("haiku") >= 0) return "haiku";
+    if (m.indexOf("fable") >= 0) return "fable";
+    if (m.indexOf("glm") >= 0) return "glm";
+    return "";
+  }
 
   // fp-prefix -> pool nickname. auth_fp = sha256(OAuth token)[:12]. SSOT for the
   // set = nervous_system/console/pools.py (backend) — keep this + irsyad.js
@@ -91,7 +103,8 @@
     var m = shortModel(model);
     if (!m) return "";
     var approx = src !== "proc";
-    return '<span class="tok mdl' + (approx ? " approx" : "") + '" title="' + esc(MODEL_SRC_TITLE[src] || "model") + '">' +
+    var fam = modelFamily(model);
+    return '<span class="tok mdl' + (fam ? " mdl-" + fam : "") + (approx ? " approx" : "") + '" title="' + esc(MODEL_SRC_TITLE[src] || "model") + '">' +
       (approx ? "~" : "") + esc(m) + '</span>';
   }
   // CAI-RESP-1434: the operator's ARMED key — the second factor app.py now requires
@@ -368,7 +381,7 @@
   }
 
   // ---- build identity + version gate (op#3640) — verbatim from fc-v49 --------
-  var APP_BUILD = 'fc-v73';
+  var APP_BUILD = 'fc-v75';
   function verNum(v) { var m = /^fc-v(\d+)$/.exec(String(v == null ? "" : v)); return m ? parseInt(m[1], 10) : null; }
   function renderBuild(serverVersion, serverSha) {
     var el = $("build");
@@ -762,7 +775,8 @@
     var cc = c.ctx_pct != null ? (c.ctx_pct + "% ctx") : (c.last_seen_s != null ? fmtAge(c.last_seen_s) : "quiet");
     var pool = poolOf(c), pills = tokChip(c.auth_fp, pool, c.auth_mismatch) + mdlChip(c.model, c.model_src);
     var off = poolFilter && (poolFilter === "?" ? (pool || !c.auth_fp) : pool !== poolFilter);
-    return '<div class="cchip' + (off ? " offpool" : "") + '" data-coord="' + esc(sess) + '" data-pool="' + esc(pool) + '"><div class="cn">' + esc(c.short || c.agent_id) + '</div>' +
+    var fam = modelFamily(c.model);  // fc-v75: card spine carries the model colour (echoes the office desks)
+    return '<div class="cchip' + (off ? " offpool" : "") + (fam ? " mdl-" + fam : "") + '" data-coord="' + esc(sess) + '" data-pool="' + esc(pool) + '"><div class="cn">' + esc(c.short || c.agent_id) + '</div>' +
       '<div class="cc ' + esc(lvl) + '">' + esc(cc) + '</div>' +
       (pills ? '<div class="ck2">' + pills + '</div>' : "") + '</div>';
   }
