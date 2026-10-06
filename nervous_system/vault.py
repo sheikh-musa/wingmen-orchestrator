@@ -98,7 +98,14 @@ class SecretNotFoundError(VaultError):
 
 class WrongHostError(VaultError):
     """Raised when a secret is wrapped for a KEK host other than the one
-    calling get() -- this host structurally cannot decrypt it."""
+    calling get() AND no vault_secret_host_wraps row exists for this host
+    either -- this host structurally cannot decrypt it (yet)."""
+
+
+class DekMismatchError(VaultError):
+    """Raised by wrap_for_host() when the handed-over plaintext DEK does not
+    decrypt the secret's existing ciphertext -- a corrupted or wrong-secret
+    handoff, caught before it is ever persisted."""
 
 
 @dataclass(frozen=True)
@@ -273,12 +280,27 @@ class Vault:
             ciphertext, wrapped_dek, kek_host, leak_flagged, leak_reason = row
             local_host = _local_host_id()
             if kek_host != local_host:
-                _audit(conn, name, reason, success=False)
-                conn.commit()
-                raise WrongHostError(
-                    f"vault: secret {name!r} is wrapped for kek_host={kek_host!r}, "
-                    f"this host is {local_host!r} -- cannot decrypt here."
-                )
+                # Fast path doesn't apply to this host -- fall back to a
+                # per-host re-wrap (vault_secret_host_wraps, migration 094)
+                # before giving up. Written only by wrap_for_host(), running
+                # ON this host; never a cross-host KEK read.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT wrapped_dek FROM public.vault_secret_host_wraps "
+                        "WHERE secret_name = %s AND kek_host = %s",
+                        (name, local_host),
+                    )
+                    host_row = cur.fetchone()
+                if host_row is None:
+                    _audit(conn, name, reason, success=False)
+                    conn.commit()
+                    raise WrongHostError(
+                        f"vault: secret {name!r} is wrapped for kek_host={kek_host!r}, "
+                        f"this host is {local_host!r}, and no vault_secret_host_wraps "
+                        f"row exists for this host either -- cannot decrypt here. "
+                        f"Bootstrap with vault.wrap_for_host() run ON this host."
+                    )
+                wrapped_dek = host_row[0]
 
             kek = _local_kek(local_host)
             dek = _aead_decrypt(kek, bytes(wrapped_dek))
@@ -287,6 +309,109 @@ class Vault:
             _audit(conn, name, reason, success=True)
             conn.commit()
             return VaultSecret(value=plaintext, leak_flagged=bool(leak_flagged), leak_reason=leak_reason)
+        finally:
+            conn.close()
+
+    def export_dek(self, name: str, reason: str) -> bytes:
+        """Returns the plaintext DEK for `name`, decrypted under THIS host's
+        own KEK (same read path as get(), minus the final value-decrypt
+        step). Exists only to feed wrap_for_host() on a DIFFERENT host over
+        whatever secure channel the caller already uses to move secrets
+        between hosts (SSH, same trust level as get()'s own return value) --
+        never a KEK, never logged, never printed to a transcript. The caller
+        is responsible for not doing any of those things with the result,
+        same contract as VaultSecret.value."""
+        if not reason:
+            raise VaultError("vault.export_dek() requires a non-empty reason (goes to the audit log).")
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT wrapped_dek, kek_host FROM public.vault_secrets WHERE name = %s",
+                    (name,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                _audit(conn, name, reason, success=False)
+                conn.commit()
+                raise SecretNotFoundError(f"vault: no secret named {name!r}.")
+
+            wrapped_dek, kek_host = row
+            local_host = _local_host_id()
+            if kek_host != local_host:
+                _audit(conn, name, reason, success=False)
+                conn.commit()
+                raise WrongHostError(
+                    f"vault: secret {name!r} is wrapped for kek_host={kek_host!r}, "
+                    f"this host is {local_host!r} -- export_dek() only reads this "
+                    "host's own primary wrap, never another host's."
+                )
+
+            kek = _local_kek(local_host)
+            dek = _aead_decrypt(kek, bytes(wrapped_dek))
+            _audit(conn, name, reason, success=True)
+            conn.commit()
+            return dek
+        finally:
+            conn.close()
+
+    def wrap_for_host(self, name: str, plaintext_dek: bytes, reason: str) -> None:
+        """Runs ON the target host. Wraps a hand-delivered plaintext DEK (from
+        export_dek() on a host that already has primary read access) under
+        THIS host's own local KEK, and upserts the result into
+        vault_secret_host_wraps -- never reads another host's KEK, never
+        touches vault_secrets.ciphertext. Sanity-checks the DEK against the
+        secret's existing ciphertext before writing anything, so a wrong or
+        corrupted handoff fails loud instead of persisting a broken wrap."""
+        if not reason:
+            raise VaultError("vault.wrap_for_host() requires a non-empty reason (goes to the audit log).")
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ciphertext FROM public.vault_secrets WHERE name = %s",
+                    (name,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                raise SecretNotFoundError(f"vault: no secret named {name!r}.")
+
+            (ciphertext,) = row
+            try:
+                _aead_decrypt(plaintext_dek, bytes(ciphertext))
+            except Exception as exc:  # noqa: BLE001 -- re-raised typed below
+                raise DekMismatchError(
+                    f"vault: the handed-over DEK does not decrypt {name!r}'s stored "
+                    "ciphertext -- refusing to persist a broken host-wrap."
+                ) from exc
+
+            local_host = _local_host_id()
+            kek = _local_kek(local_host)
+            wrapped_dek = _aead_encrypt(kek, plaintext_dek)
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.vault_secret_host_wraps
+                        (secret_name, kek_host, wrapped_dek, created_by_agent)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (secret_name, kek_host) DO UPDATE SET
+                        wrapped_dek = EXCLUDED.wrapped_dek,
+                        created_at = now(),
+                        created_by_agent = EXCLUDED.created_by_agent
+                    """,
+                    (name, local_host, wrapped_dek, _agent_id()),
+                )
+            _audit(conn, name, reason, success=True)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+                _audit(conn, name, reason, success=False)
+                conn.commit()
+            except Exception:
+                pass
+            raise
         finally:
             conn.close()
 

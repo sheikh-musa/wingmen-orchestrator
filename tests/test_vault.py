@@ -20,7 +20,10 @@ import pytest
 from dotenv import load_dotenv
 
 from nervous_system.vault import (
+    DekMismatchError,
     KekNotFoundError,
+    SecretNotFoundError,
+    WrongHostError,
     _aead_decrypt,
     _aead_encrypt,
     _local_host_id,
@@ -84,6 +87,10 @@ def _cleanup_test_secret():
     conn = psycopg.connect(dsn)
     try:
         with conn.cursor() as cur:
+            # vault_secret_host_wraps rows cascade on the vault_secrets delete
+            # below (migration 094's FK); deleted explicitly too so this
+            # cleanup doesn't depend on that ordering.
+            cur.execute("DELETE FROM public.vault_secret_host_wraps WHERE secret_name = %s", (TEST_SECRET_NAME,))
             cur.execute("DELETE FROM public.vault_secrets WHERE name = %s", (TEST_SECRET_NAME,))
             cur.execute("DELETE FROM public.vault_access_log WHERE secret_name = %s", (TEST_SECRET_NAME,))
         conn.commit()
@@ -177,3 +184,84 @@ def test_leak_flagged_surfaces_and_rotate_clears_it(monkeypatch):
     assert secret.value == "new-value"
     assert secret.leak_flagged is False
     assert secret.leak_reason is None
+
+
+@_needs_db
+def test_wrap_for_host_lets_a_second_host_read_via_fallback(monkeypatch):
+    """The op#26219 scenario end to end: a secret primary-wrapped for host A is
+    unreadable on host B (WrongHostError) until wrap_for_host() runs ON host B
+    with the plaintext DEK host A exported -- after which get() on host B
+    succeeds via the vault_secret_host_wraps fallback (migration 094), and
+    the secret's ciphertext/primary wrap are never touched (host A's own
+    get() still works unchanged -- the fast path)."""
+    import nervous_system.vault as vault_mod
+
+    host_a, host_b = "vault-test-host-a", "vault-test-host-b"
+    kek_a, kek_b = os.urandom(32), os.urandom(32)
+
+    def fake_kek(host_id):
+        return {host_a: kek_a, host_b: kek_b}[host_id]
+
+    monkeypatch.setattr(vault_mod, "_local_kek", fake_kek)
+
+    # Host A puts the secret (primary wrap, kek_host='vault-test-host-a').
+    monkeypatch.setattr(vault_mod, "_local_host_id", lambda: host_a)
+    vault.put(TEST_SECRET_NAME, "cross-host-value", reason="self-test (host A put)")
+
+    # Host B cannot read it yet -- no fallback row exists.
+    monkeypatch.setattr(vault_mod, "_local_host_id", lambda: host_b)
+    with pytest.raises(WrongHostError):
+        vault.get(TEST_SECRET_NAME, reason="self-test (host B, pre-wrap)")
+
+    # Host A exports the plaintext DEK (its own primary read path).
+    monkeypatch.setattr(vault_mod, "_local_host_id", lambda: host_a)
+    dek = vault.export_dek(TEST_SECRET_NAME, reason="self-test (host A export)")
+
+    # Host B wraps the hand-delivered DEK under its OWN local KEK -- never
+    # reads host A's KEK.
+    monkeypatch.setattr(vault_mod, "_local_host_id", lambda: host_b)
+    vault.wrap_for_host(TEST_SECRET_NAME, dek, reason="self-test (host B wrap)")
+
+    # Host B now reads it via the fallback path.
+    secret = vault.get(TEST_SECRET_NAME, reason="self-test (host B, post-wrap)")
+    assert secret.value == "cross-host-value"
+
+    # Host A's own fast path is unchanged.
+    monkeypatch.setattr(vault_mod, "_local_host_id", lambda: host_a)
+    secret = vault.get(TEST_SECRET_NAME, reason="self-test (host A, post-wrap)")
+    assert secret.value == "cross-host-value"
+
+
+@_needs_db
+def test_wrap_for_host_rejects_mismatched_dek(monkeypatch):
+    """A wrong/corrupted DEK handoff must fail loud before anything is
+    persisted -- never silently write a broken host-wrap row."""
+    import nervous_system.vault as vault_mod
+
+    fake_key = os.urandom(32)
+    monkeypatch.setattr(vault_mod, "_local_kek", lambda host_id: fake_key)
+
+    vault.put(TEST_SECRET_NAME, "some-value", reason="self-test (put)")
+
+    wrong_dek = os.urandom(32)
+    with pytest.raises(DekMismatchError):
+        vault.wrap_for_host(TEST_SECRET_NAME, wrong_dek, reason="self-test (wrong dek)")
+
+    dsn = os.environ.get("DATABASE_URL")
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM public.vault_secret_host_wraps WHERE secret_name = %s",
+                (TEST_SECRET_NAME,),
+            )
+            (count,) = cur.fetchone()
+    finally:
+        conn.close()
+    assert count == 0
+
+
+@_needs_db
+def test_export_dek_fails_for_nonexistent_secret():
+    with pytest.raises(SecretNotFoundError):
+        vault.export_dek("vault_selftest_definitely_does_not_exist_op21338", reason="self-test")
