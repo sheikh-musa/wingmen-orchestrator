@@ -8,13 +8,20 @@ proposing → new demand sits until someone manually prompts. That is exactly th
 prompted" complaint. The elastic contract is: wind down → session GOES AWAY → pool shrinks →
 autoscaler re-proposes on the next demand. This reaper is the missing "session goes away" step.
 
-Reaps ONLY a spun elastic worker (tmux session 'irsyad-worker-<N>') that is BOTH:
+Reaps ONLY a spun elastic worker (tmux session 'irsyad-worker-<N>') that is ALL of:
   (a) idle — its tmux pane is NOT busy (composer_capture: no active turn / not 'Waiting for
       background agents'); a re-engaged worker is never reaped; AND
   (b) wound down — its LATEST bus post (from its own agent_id) is a WIND-DOWN, at least
-      REAP_GRACE_MIN old (so a just-wound-down worker gets a grace window to be re-tasked).
+      REAP_GRACE_MIN old (so a just-wound-down worker gets a grace window to be re-tasked); AND
+  (c) idle-proof — it has NO pending order: no unresponded `requires_response` bus row
+      addressed to it (a HOLD/direct-dispatch from orch-console or cc-irsyad-coord included),
+      and no `coord_dispatch_queue` row it has claimed that isn't done yet. "No bus activity
+      FROM it" is not sufficient proof of idle — a worker can go quiet while an order TO it
+      sits unacked (bus #54606: the reaper killed cc-irsyad-2 despite an unacked HOLD posted
+      to it 2 min earlier). (c) closes that gap.
 Never touches standing lanes (tabung), coord, or a working worker. Fail-safe: any ambiguity
-(pane unreadable, no clear wind-down signal) => SKIP (leave it running).
+(pane unreadable, no clear wind-down signal, pending-order check errors) => SKIP (leave it
+running).
 
 Reap = tmux kill-session + fleet_lanes[session].desired_state='down' + delete its agent_status
 row + a P3 log to orch-console.
@@ -44,13 +51,16 @@ def is_worker_session(session: str) -> bool:
     return bool(WORKER_SESSION_RE.match(session or ""))
 
 
-def should_reap(session_is_worker: bool, pane_busy, wound_down_past_grace: bool) -> bool:
+def should_reap(session_is_worker: bool, pane_busy, wound_down_past_grace: bool,
+                has_pending_order: bool = False) -> bool:
     """PURE reap decision (unit-testable). Reap iff ALL hold:
       - it is a spun worker session (standing lanes/coord excluded),
       - the pane is IDLE — pane_busy is exactly False (True=working, None=unknown => NEVER reap),
-      - it wound down at least the grace ago (a just-wound-down worker is left for re-tasking).
+      - it wound down at least the grace ago (a just-wound-down worker is left for re-tasking),
+      - it has NO pending order (bus #54606 idle-proof gap — see module docstring (c)).
     Fail-safe by construction: any ambiguity leaves the worker running."""
-    return bool(session_is_worker) and pane_busy is False and bool(wound_down_past_grace)
+    return (bool(session_is_worker) and pane_busy is False and bool(wound_down_past_grace)
+            and not bool(has_pending_order))
 
 
 def _dsn() -> str:
@@ -108,6 +118,32 @@ def _wound_down_since(conn, agent_id: str, grace_min: int) -> bool:
         return bool(cur.fetchone()[0])
 
 
+def _has_pending_order(conn, agent_id: str) -> bool:
+    """True iff this worker has a PENDING ORDER — idle-proof (c), bus #54606. Checks:
+      (a)/(b) an unresponded requires_response bus row addressed TO it (a HOLD/direct-dispatch
+          from orch-console or cc-irsyad-coord, or any other sender — "no bus activity FROM it"
+          does not prove idle when an order TO it is still unacked); and
+      (c) a `coord_dispatch_queue` row it has claimed (claimed_by=agent_id) that is not done.
+    Fail-safe: a query error => treat as pending (never reap on ambiguity)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM agent_messages WHERE to_agent=%s AND requires_response=true "
+                "AND responded_at IS NULL LIMIT 1", (agent_id,))
+            if cur.fetchone():
+                return True
+            cur.execute(
+                "SELECT 1 FROM coord_dispatch_queue WHERE claimed_by=%s AND done_at IS NULL "
+                "LIMIT 1", (agent_id,))
+            if cur.fetchone():
+                return True
+        return False
+    except Exception as exc:
+        print(f"  [worker-reaper] WARN: pending-order check failed for {agent_id} ({exc}) "
+              "-> fail-safe, treating as pending")
+        return True
+
+
 def _reap(conn, agent_id: str, session: str, dry: bool) -> None:
     if dry:
         print(f"  [dry-run] would reap {agent_id} ({session}): kill-session + fleet_lanes down + clear status")
@@ -137,9 +173,10 @@ def run_once(grace_min: int, dry: bool) -> int:
         for agent_id, session in workers:
             busy = _pane_busy(session)
             wd = _wound_down_since(conn, agent_id, grace_min)
-            if not should_reap(is_worker_session(session), busy, wd):
+            pending = _has_pending_order(conn, agent_id)
+            if not should_reap(is_worker_session(session), busy, wd, pending):
                 print(f"[worker-reaper] {agent_id} ({session}) SKIP (worker={is_worker_session(session)} "
-                      f"busy={busy} wound_down_past_grace={wd})")
+                      f"busy={busy} wound_down_past_grace={wd} has_pending_order={pending})")
                 continue
             print(f"[worker-reaper] {agent_id} ({session}) idle + wound-down > {grace_min}m -> reaping")
             _reap(conn, agent_id, session, dry)

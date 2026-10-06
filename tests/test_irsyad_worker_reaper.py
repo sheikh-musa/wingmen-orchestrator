@@ -1,9 +1,11 @@
 """Reaper safety proof (Nazim #40850 ruling 2). The reaper tears down WOUND-DOWN elastic workers
-so the autoscaler pool shrinks — but it must NEVER reap a working worker or a standing lane. The
-reap decision is a PURE function `should_reap(session_is_worker, pane_busy, wound_down_past_grace)`
-so the four required cases are unit-testable with no DB/tmux (same discipline as the autoscaler).
+so the autoscaler pool shrinks — but it must NEVER reap a working worker, a standing lane, or a
+worker with a pending order. The reap decision is a PURE function
+`should_reap(session_is_worker, pane_busy, wound_down_past_grace, has_pending_order=False)` so the
+required cases are unit-testable with no DB/tmux (same discipline as the autoscaler).
 
   pane_busy: True = working, False = idle, None = unknown (fail-safe).
+  has_pending_order: True = an unacked order/claim is outstanding (bus #54606 idle-proof gap).
 """
 import sys
 from pathlib import Path
@@ -50,3 +52,22 @@ def test_worker_session_regex():
     assert is_worker_session("irsyad-worker-") is False   # no number
     assert is_worker_session("irsyad-workerx-1") is False
     assert is_worker_session("") is False
+
+
+# ── idle-proof gap fix (bus #54606): a pending order blocks reap even if otherwise eligible ──
+def test_pending_order_blocks_reap_even_when_otherwise_eligible():
+    # idle + wound-down-past-grace would normally reap, but an unacked order addressed to it
+    # (or a claimed-and-not-done coord_dispatch_queue row) must hold it back -> op#54606 fix
+    assert should_reap(session_is_worker=True, pane_busy=False, wound_down_past_grace=True,
+                        has_pending_order=True) is False
+
+
+def test_no_pending_order_still_reaps():
+    # default (no pending order) preserves prior behavior -> reap proceeds
+    assert should_reap(session_is_worker=True, pane_busy=False, wound_down_past_grace=True,
+                        has_pending_order=False) is True
+
+
+def test_has_pending_order_default_preserves_prior_callers():
+    # callers that don't pass has_pending_order (pre-#54606 call sites) are unaffected
+    assert should_reap(session_is_worker=True, pane_busy=False, wound_down_past_grace=True) is True
