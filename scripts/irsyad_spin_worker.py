@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
-"""irsyad spin-actuator — boot ONE elastic pool worker, ONLY on Nazim's confirm.
+"""irsyad spin-actuator — boot ONE elastic pool worker, via Nazim's confirm OR the autoscaler's
+own 'auto' authority.
 
-This is the ACTUATION step the armed autoscaler (scripts/irsyad_autoscaler.py, SUPERVISED-
-propose) deliberately does NOT do. Flow (Nazim #40427/#40443):
+This is the ACTUATION step the autoscaler (scripts/irsyad_autoscaler.py) itself never performs:
+'supervised' mode only proposes; 'auto' mode invokes THIS script with --auto. Two flows:
 
-  autoscaler tick -> demand>=1 & pool<MAX_LANES -> posts a deduped P1 rr "[irsyad-autoscaler]
-  SPIN proposal" bus row to orch-console -> Nazim CONFIRMS on the bus -> the hub runs THIS to
-  boot a cc-irsyad-<N> worker that claims from public.coord_dispatch_queue.
+  CONFIRM path (Nazim #40427/#40443): autoscaler tick -> demand>=1 & pool<MAX_LANES -> posts a
+  deduped P1 rr "[irsyad-autoscaler] SPIN proposal" bus row to orch-console -> Nazim CONFIRMS on
+  the bus -> the hub runs THIS with --proposal-id to boot a cc-irsyad-<N> worker.
+  AUTO path (Nazim #40850, bus #54534/#54535): autoscaler tick -> would_spin & not ambiguous ->
+  this script runs itself with --auto (no confirm) -> re-checks would_spin + MAX_LANES here
+  before claiming a slot.
+  Either worker claims from public.coord_dispatch_queue once booted.
 
-FAIL-CLOSED: without a valid confirm row for the given proposal it refuses. It also refuses to
-exceed MAX_LANES. The worker BOOT is /home/gazzai/irsyad_worker_supervisor.sh (musa2 via the
-session name's irsyad family; identity cc-irsyad-<N> via CC_BASE_OVERRIDE=cc-irsyad).
+Both paths claim a pool slot number under the IRSYAD_WORKER_SLOT_ALLOC advisory-xact-lock
+(CAI-RESP-422 atomic check-and-claim; docs/lock-namespace.md) around the read-live-slots ->
+allocate -> register-fleet_lanes-row sequence, so two concurrent invocations (the --auto cron
+racing a --proposal-id confirm run, or either racing a manual/stopgap fleet_lanes insert) can
+never pick and register the same slot number.
+
+FAIL-CLOSED: without a valid confirm row for the given proposal (--proposal-id path) it refuses.
+It also refuses to exceed MAX_LANES, refuses if the slot-allocation lock is already held by
+another invocation, and re-checks the autoscaler's own would_spin right before claiming (so a
+stale proposal/tick can't double-spin once demand is already covered). The worker BOOT is
+/home/gazzai/irsyad_worker_supervisor.sh (musa2 via the session name's irsyad family; identity
+cc-irsyad-<N> via CC_BASE_OVERRIDE=cc-irsyad).
 
 CONFIRM CONTRACT (what counts as Nazim's go for proposal <PID>): a bus row
   from_agent='orch-console', to_agent='cc-orchestrator',
@@ -43,6 +57,13 @@ IHSANOS_REPO = Path.home() / "wingmen" / "projects" / "ihsanos"
 WORKER_SUPERVISOR = Path.home() / "irsyad_worker_supervisor.sh"
 POOL_LANE_PREFIX = "irsyad-worker-"     # fleet_lanes pool registry the actuator owns
 CONFIRM_RE_TMPL = r"confirm\s+spin\s+{pid}\b"
+
+# Atomic check-and-claim (CAI-RESP-422): serializes the read-live-slots -> allocate ->
+# register-fleet_lanes-row sequence across concurrent invocations of this script (the --auto
+# cron tick racing a --proposal-id confirm run, or either racing a manual/stopgap fleet_lanes
+# insert) so two processes can never pick and register the same pool slot number.
+# See docs/lock-namespace.md — registered as IRSYAD_WORKER_SLOT_ALLOC.
+IRSYAD_WORKER_SLOT_ALLOC = 1002
 
 
 def _dsn() -> str:
@@ -213,6 +234,20 @@ def main(argv=None) -> int:
                 print("[spin] REFUSING — autoscaler would_spin=False now (demand already covered / "
                       "pool at cap incl. standing lanes). No double-spin.")
                 return 4
+
+        # ATOMIC CHECK-AND-CLAIM (CAI-RESP-422): serialize the read-live-slots -> allocate ->
+        # register sequence below. pg_try_advisory_xact_lock is non-blocking and auto-releases at
+        # this transaction's commit (in _register_pool_row) or at connection close on any early
+        # return — so a losing concurrent invocation fails closed instantly rather than risking a
+        # double-claim of the same slot number, and the next cron tick simply retries.
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (IRSYAD_WORKER_SLOT_ALLOC,))
+            got_lock = cur.fetchone()[0]
+        if not got_lock:
+            print("[spin] REFUSING — slot-allocation lock (IRSYAD_WORKER_SLOT_ALLOC) is held by "
+                  "another invocation right now; refusing rather than risk a double-claim. The "
+                  "next tick will retry.")
+            return 6
 
         live = _live_pool_slots(conn)
         n = _allocate_slot(live)

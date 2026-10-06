@@ -33,7 +33,10 @@ States per lane row: `down → claimed(spinning) → up(working) → draining �
 
 ## 5. Wind-down + HARD INTERLOCKS (Nazim's bar — fail-safe by construction)
 - **Never kill mid-work — idle-proof BEFORE wind-down:** a lane is wind-down-eligible only if ALL hold: no claimed/active work item, no bus activity within an idle-grace, no active job, agent_status not mid-turn. Reuse `scripts/lib/lane_winddown.py` as the actuator; the idle-proof is the gate in front of it.
-- **Max-lane cap:** `MAX_LANES` (v1: 2, per Musa op19217) — the autoscaler never spins beyond it; no unbounded spin / token-burn. A separate absolute kill-switch (`desired_state`-level disable) stops all autoscaler action instantly.
+- **Max-lane cap:** `MAX_LANES` (v1: 2, per Musa op19217; raised to 4 2026-10-07 per Musa's
+  velocity ask op#26577-79/bus #54580 — the v1 cap was observed blocking real queued demand) —
+  the autoscaler never spins beyond it; no unbounded spin / token-burn. A separate absolute
+  kill-switch (`desired_state`-level disable) stops all autoscaler action instantly.
 - **PROTECTED-from-auto-kill set:** coord, any client-poller lane, any money-path lane, singletons — hard-excluded from the wind-down candidate query by construction (allow-list of auto-killable lanes, not a deny-list).
 - **Atomic check-and-claim** (§4) on every spin AND kill.
 - **Fail-safe:** on ANY ambiguity (can't prove idle, can't claim, signal source unreadable, cap unknown) → DO NOTHING (never spin, never kill). Detection + a degrade-alert stay ungated so a safety page is never silenced by autoscaler state (mirrors the SRE watchdog shape).
