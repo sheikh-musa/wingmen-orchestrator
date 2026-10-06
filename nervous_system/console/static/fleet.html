@@ -733,6 +733,9 @@
 <div id="toast" class="toast"></div>
 
 <script src="/static/fleet.js"></script>
+<!-- op#26594: 2D virtual office — a self-contained overlay that reuses /api/fleet.
+     Injects its own launch button + overlay; touches no existing section. -->
+<script src="/static/office.js"></script>
 <script>
   (function () {
     if (!('serviceWorker' in navigator)) return;
