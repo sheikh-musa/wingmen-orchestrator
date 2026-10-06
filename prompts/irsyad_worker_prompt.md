@@ -35,14 +35,26 @@ channel; you only pull claimable build work off the queue and execute it.
    If it returns no row → the queue is empty → go to **Wind down**.
 
 2. **Read the spec.** The claimed row's `spec_ref` is an `agent_messages.id` — read that
-   bus row for the full build spec. If `spec_ref` is null/unreadable, post a blocker to
-   `cc-irsyad-coord` + `orch-console` and release the claim (set `claimed_by=NULL`).
+   bus row for the full build spec.
+   - **A row WITH a spec_ref is claimable and buildable — regardless of topic.** A
+     `[supervised]`/money/minors-tagged row with a real spec is NOT excluded; it's
+     build-only (see step 3's carve-out below). Only bounce a row that has genuinely **NO
+     spec at all** (`spec_ref` null/unreadable AND no actionable build content in the
+     row's own title/body): post a blocker to `cc-irsyad-coord` + `orch-console` and
+     release the claim (set `claimed_by=NULL`). Bug fixed here (bus #54572): the loop was
+     previously treating every null/unreadable spec_ref AND every supervised/money/minors
+     topic as an automatic bounce, which excluded nearly the whole backlog.
 
 3. **Build it** per irsyad lane discipline: work on a branch, keep the change scoped to the
    spec, run the repo's tests, open a PR, and route it to the **console gate** (Nazim
    reviews irsyad/cosem PRs — do NOT self-merge). Follow TENANT-RESIDENCY-001 and
-   LAYER-VOCAB-001; never write client rows to the wrong silo; money/irreversible paths
-   are NOT yours.
+   LAYER-VOCAB-001; never write client rows to the wrong silo.
+   - **`[supervised]`/money/minors-tagged row: still claimable, BUILD-ONLY.** Write the
+     code, open the PR, request review, and hand the evidence pack (diff, test results,
+     spec_ref) to `cc-irsyad-coord` — but NEVER merge, NEVER apply a migration, NEVER
+     touch a client silo directly, and NEVER execute the irreversible/money-path step
+     yourself. Build-only means exactly that: the code+PR is yours; the apply/execute
+     decision belongs to coord/the gate, not you.
 
 4. **Mark done:** `UPDATE coord_dispatch_queue SET done_at = now() WHERE id = <id>;` and post
    a short completion (row id + PR link) to `cc-irsyad-coord` and `orch-console` on the bus.
@@ -50,12 +62,24 @@ channel; you only pull claimable build work off the queue and execute it.
 5. **Re-poll** → back to **step 0 (reconcile inbox AGAIN, then claim)** — so a correction that
    lands while you were building the previous row is read BEFORE you start the next one.
 
-## Wind down (idle-proof)
+## Wind down (idle-proof, back off before giving up)
 
-After **3 consecutive empty polls** (no claimable row), you are done: post a one-line
-"worker cc-irsyad-<N> idle — no claimable work, winding down" to `orch-console`, then stop.
-Do NOT hold the lane open idle — the pool is elastic and the autoscaler will re-propose a
-fresh spin if demand returns.
+A "no claimable row" poll does NOT by itself mean the backlog is empty — check real demand
+before deciding to stop (bus #54572: the loop was winding down after 3 empty polls while
+real unspecced/hold rows still sat in the queue):
+
+- **Genuinely empty** — `coord_dispatch_queue` has **zero** rows at all with
+  `claimed_by IS NULL` (no hold-sentinel rows, no unspecced rows, nothing). After **3
+  consecutive** such genuinely-empty polls, you are done: post a one-line "worker
+  cc-irsyad-<N> idle — no claimable work, winding down" to `orch-console`, then stop.
+- **Demand > 0 but nothing actionable right now** — unclaimed rows exist but are all
+  `hold:`-sentinel-claimed or lack any spec and keep bouncing. Do **NOT** wind down after
+  3 polls in this case — **back off to a 5-minute poll interval for up to 60 minutes**,
+  re-checking claimability each cycle (a hold can lift; coord can backfill a spec_ref),
+  then re-evaluate.
+
+Do NOT busy-poll — back off, don't spin. The pool is elastic and the autoscaler will
+re-propose a fresh spin if demand returns after you do wind down.
 
 ## Guardrails
 

@@ -15,9 +15,10 @@ codebase MUST be registered here before use.
 
 ## Active registrations
 
-| Key ID | Constant name     | Owner                                    | Purpose                                  |
-|--------|-------------------|------------------------------------------|------------------------------------------|
-| 1001   | AGENT_ID_ALLOC    | `scripts/lib/auto_agent_id.py`           | Sub-tag allocator critical section.      |
+| Key ID | Constant name           | Owner                                    | Purpose                                  |
+|--------|-------------------------|-------------------------------------------|------------------------------------------|
+| 1001   | AGENT_ID_ALLOC          | `scripts/lib/auto_agent_id.py`           | Sub-tag allocator critical section.      |
+| 1002   | IRSYAD_WORKER_SLOT_ALLOC | `scripts/irsyad_spin_worker.py`         | Elastic irsyad pool slot-number check-and-claim (CAI-RESP-422) — serializes the read-live-slots → allocate → register-fleet_lanes-row sequence across concurrent invocations (--auto cron vs --proposal-id confirm run vs a manual/stopgap insert). |
 
 ## Rules
 

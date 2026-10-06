@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
-"""irsyad-autoscaler — INERT detect+log, plus a SUPERVISED-PROPOSE arm (no actuation).
+"""irsyad-autoscaler — detect+log (INERT), propose-then-confirm (SUPERVISED), or actuate
+directly (AUTO) for the irsyad elastic worker pool.
 
-Design: docs/irsyad-autoscaler-design-v1.md. Two modes, selected by IRSYAD_AUTOSCALER_MODE
+Design: docs/irsyad-autoscaler-design-v1.md. Three modes, selected by IRSYAD_AUTOSCALER_MODE
 (default 'inert') or --mode:
   * 'inert'      — §6 rollout step 1: MEASURE demand, COMPUTE the would-spin / would-kill decision
                    under the §5 hard interlocks, LOG one row per tick to fleet_lane_autoscale_log.
                    Never spins/kills, never calls lanes.sh, never invokes lane_winddown as an actuator.
   * 'supervised' — Nazim #40401 gate. Everything 'inert' does, PLUS: when the pure decision says
                    would_spin, POST one deduped propose-then-confirm bus row to orch-console (P1 rr)
-                   and stop. It STILL never spins and never kills — spin execution is a separate
-                   Nazim-confirm-gated, wet-proved step (the elastic cc-irsyad-<N> worker-boot path
-                   does not exist yet; actuating blind would be unsafe). So 'supervised' is the SAFE
-                   half of the arm: detection + proposal. It emits nothing while the coord queue is
-                   absent (demand=0). Kill stays idle-proof DETECT-ONLY in both modes.
+                   and stop. It never spins or kills itself here — spin execution happens only on
+                   Nazim's confirm, via a separate `irsyad_spin_worker.py --proposal-id <id>` run.
+  * 'auto'       — Nazim #40850 fully-auto arm (bus #54534/#54535, PR#120/d1cf72e). The elastic
+                   cc-irsyad-<N> worker-boot path IS live: when the pure decision says would_spin
+                   and the signal is unambiguous, this tick actuates directly — no confirm — by
+                   invoking `irsyad_spin_worker.py --auto` as a subprocess (see run_tick below).
+                   That actuator re-checks would_spin + MAX_LANES itself right before booting (so
+                   a stale tick can't double-spin), then claims a pool slot under an advisory-lock-
+                   guarded check-and-claim (CAI-RESP-422; IRSYAD_WORKER_SLOT_ALLOC, see
+                   irsyad_spin_worker.py / docs/lock-namespace.md) before registering the
+                   fleet_lanes row and booting.
+  Kill stays idle-proof DETECT-ONLY in ALL three modes — this module never kills; it only decides
+  and (in 'auto') invokes the spin actuator. scripts/irsyad_worker_reaper.py is the only wind-down
+  actuator and is untouched/out of scope here. All three modes emit nothing beyond the INERT log
+  row while the coord queue is absent (demand=0).
 
 Two layers, deliberately separated so the interlocks are testable without a DB or a tmux server:
   * `decide(...)` is a PURE function over injected observations. All of tests/test_irsyad_autoscaler.py
@@ -30,7 +41,7 @@ Two layers, deliberately separated so the interlocks are testable without a DB o
     so a later wet-prove can compare it against the coord signal.
 
 §5 INTERLOCKS enforced inside `decide`:
-  * MAX_LANES cap (2) — never propose a spin that would exceed it.
+  * MAX_LANES cap (see the MAX_LANES constant below) — never propose a spin that would exceed it.
   * SPIN_THRESHOLD (1) — spin only when demand >= threshold.
   * PROTECTED set as an ALLOW-LIST of auto-killable lanes (never a deny-list): only distinct-
     identity `cc-irsyad-<worker>` lanes are eligible; coord, the bare `cc-irsyad` client agent,
@@ -38,7 +49,10 @@ Two layers, deliberately separated so the interlocks are testable without a DB o
     BY CONSTRUCTION and can never enter the would-kill set.
   * idle-proof — a lane is a would-kill candidate only if provably IDLE; unprovable => skipped.
   * demand-pending holdoff — never propose shrinking the pool while demand is pending.
-  * atomic check-and-claim is the ACTUATION primitive (not exercised here); noted only.
+  * atomic check-and-claim is the ACTUATION primitive — NOT exercised inside `decide()` (which is
+    pure and never touches fleet_lanes); enforced where actuation actually happens, in
+    irsyad_spin_worker.py's slot allocation, via the IRSYAD_WORKER_SLOT_ALLOC advisory lock
+    (CAI-RESP-422, docs/lock-namespace.md).
   * FAIL-SAFE — on ANY ambiguity (demand signal unreadable) decide NOTHING (no spin, no kill).
 """
 from __future__ import annotations
@@ -58,7 +72,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 # ── §5 constants ────────────────────────────────────────────────────────────────────────
-MAX_LANES = 2               # design §5 / Musa op19217 — hard cap on the elastic pool
+MAX_LANES = 4                # design §5 / Musa op19217 set v1 cap=2; raised 2->4 2026-10-07 per
+                              # Musa's explicit velocity ask (op#26577-79, bus #54580) — the pool
+                              # was observed capped at 2/2 (both workers busy) with 9 unclaimed
+                              # coord_dispatch_queue items sitting idle, unable to spin further
+                              # (fleet_lane_autoscale_log id=1714, 2026-10-06 19:00:03Z).
 SPIN_THRESHOLD = 1          # design §5 / §2 — spin when unclaimed demand >= this
 CLAIM_GRACE_SECONDS = 120   # "past a short grace" — ignore work younger than this (§2)
 
@@ -85,13 +103,17 @@ COORD_QUEUE_TABLE = os.environ.get("IRSYAD_COORD_QUEUE_TABLE", "coord_dispatch_q
 
 LIVE_HEARTBEAT_WINDOW = "30 minutes"  # what counts as a live lane in agent_status
 
-# ── §6 SUPERVISED arm — PROPOSE layer (Nazim #40401 gate) ─────────────────────────────────
+# ── §6 mode arm — SUPERVISED-propose (Nazim #40401) + AUTO (Nazim #40850) ────────────────
 # Mode selector. Default 'inert' = the original detect+log behaviour, ZERO change. 'supervised'
 # adds ONE thing: when the pure decision says would_spin, POST a deduped propose-then-confirm
-# bus row to orch-console (P1 rr) and STOP. It NEVER auto-spins and NEVER kills — spin execution
-# stays a Nazim-confirm-gated, separately-wet-proved step (the elastic cc-irsyad-<N> worker-boot
-# path does not exist yet; actuating blind would be unsafe). So 'supervised' is the safe half of
-# the arm: detection + proposal. While the coord queue is absent (demand=0) it emits nothing.
+# bus row to orch-console (P1 rr) and STOP — it never spins or kills itself; a human CONFIRM
+# triggers a separate `irsyad_spin_worker.py --proposal-id` run. 'auto' goes one step further:
+# it actuates the spin directly from this tick (see run_tick) by invoking
+# `irsyad_spin_worker.py --auto` — the worker-boot path is live (PR#120/d1cf72e), gated by the
+# actuator's own demand-gate + MAX_LANES re-check + IRSYAD_WORKER_SLOT_ALLOC atomic claim
+# (CAI-RESP-422), not by a human confirm. This module itself still never spins or kills in any
+# mode; it only decides and, in 'auto', invokes the actuator subprocess. While the coord queue is
+# absent (demand=0) all three modes emit nothing beyond the INERT log row.
 AUTOSCALER_MODE = os.environ.get("IRSYAD_AUTOSCALER_MODE", "inert").strip().lower()
 # Dedup window: never re-propose while a proposal to orch-console is still outstanding.
 PROPOSAL_TTL_MIN = int(os.environ.get("IRSYAD_PROPOSAL_TTL_MIN", "60"))
