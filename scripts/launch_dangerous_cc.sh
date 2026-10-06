@@ -920,6 +920,14 @@ fi
 # blocks the launch over a settings-write).
 "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$CALLER_DIR" --deny AskUserQuestion || true
 
+# PROACTIVE secrets-in-transcript guard, enforced in CODE rather than left to each
+# host's hand-maintained user-global ~/.claude/settings.json (bus #53680/#53678):
+# a new host, a disk recovery, or a new OS user previously got zero PreToolUse
+# coverage until someone remembered to hand-copy the dotfile. Every lane now gets
+# it from the shared launcher instead — additive to (never a replacement for) the
+# existing user-global wiring. Best-effort + fail-loud, same as the deny above.
+"$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_secrets_guard.py" --cwd "$CALLER_DIR" || true
+
 echo -e "${BOLD}${TEAL}▶ Launching claude --dangerously-skip-permissions in: ${CALLER_DIR}${RESET}"
 echo -e "${DIM}  Heartbeat loop: PID ${HEARTBEAT_PID} (5-min intervals)${RESET}"
 echo ""
