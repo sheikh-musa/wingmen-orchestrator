@@ -87,13 +87,43 @@ tests/test_synthetic_filter_integration.py::test_shadow_mode_writes_notification
 # caused by the pgvector diff, and not fixable without reprovisioning real CI creds (out of
 # scope here).
 tests/test_vault.py::test_put_fails_with_actionable_kek_error_for_unbootstrapped_host
-# Added 2026-10-06 (bus #53294, PR#308): only @_needs_db-gated, not also @_needs_mini-gated,
-# despite asserting macOS-Keychain-specific error-message substrings ("wingmen-vault-kek",
-# "security add-generic-password"). nervous_system/vault.py's platform dispatch is correct —
-# on Linux CI it raises KekNotFoundError via _linux_kek() with a DIFFERENT (also-correct)
-# message, so the right exception fires but these macOS-only substrings aren't in it. A
-# pre-existing test gap (should be @_needs_mini too), newly exposed now that DATABASE_URL is
-# live in CI, not caused by the pgvector diff.
+# Added 2026-10-06 (bus #53294, PR#308; comment corrected 2026-10-06 per cc-quality
+# review #54127 — the original comment here was copy-pasted from the wrong entry).
+# Both of the following are confirmed BY RUNNING THEM individually against a fresh
+# ephemeral bootstrap, not inferred: the schema replay (schema.sql + migrations/*)
+# doesn't reproduce certain hand-seeded "bedrock data" rows that exist on the real
+# substrate — same class as the bot_channels seeds this PR already adds in
+# ci_bootstrap_schema.py for migrations 091/092, just for two OTHER tables this PR
+# does not also seed.
 tests/test_wake_backstop_sweep.py::test_sql_predicate_selects_rotting_and_quiesces_on_read
-tests/test_watchdog_monitored_callers.py::test_boot_briefing_view_has_watchdog_monitored_callers_arm
+# ^ psycopg.errors.ForeignKeyViolation: agent_messages.from_agent='cc-fleet-health' has
+# no row in `agents` — the ephemeral bootstrap never seeds `agents`, only
+# agent_status/bot_channels.
 tests/test_watchdog_phase_b_integration.py::test_cc_family_interactive_pre_registered_never_killed
+# ^ AssertionError: no `long_running_claude_callers` row for
+# caller_name='cc-scholar-interactive' — CC-FAMILY-INTERACTIVE-SESSIONS-001's
+# pre-registration is a manual seed on the real substrate, not created by any
+# migration replayed here.
+#
+# Added 2026-10-06 (bus #53294, PR#315; a 2nd correction of the #54127 comment —
+# I initially (wrongly) removed the entry below as a "confirmed-passing false
+# positive" based on 3x STANDALONE passes. A full-suite run then showed it FAILING,
+# contradicting that. Root-caused this time by direct reproduction (not re-guessed):
+# this is a REAL, PRE-EXISTING, order-dependent bug, not a bedrock-data gap. It is
+# CC-SUBSTRATE-VIEW-INTEGRITY-001 (see CLAUDE.md), reproduced live by a test rather
+# than the Supabase CLI shadow-diff path. tests/test_boot_briefing_substrate_visibility.py
+# ::test_migration_assertion_gate_passes re-executes supabase/migrations/
+# 20260509_boot_briefing_substrate_visibility.sql's raw SQL (incl. its own
+# `CREATE OR REPLACE VIEW boot_briefing`) against the shared DATABASE_URL to verify
+# that migration's assertion-gate NOTICE behavior. That migration's view body
+# predates the `watchdog_monitored_callers` arm (added 2 weeks later by
+# 20260523_watchdog_monitored_callers.sql), so reapplying it permanently strips the
+# arm from the live view for every test that runs afterward in the same process —
+# confirmed by running these two test files together on a fresh bootstrap (fails),
+# then again with test_migration_assertion_gate_passes deselected (passes). The
+# migration embeds its own `COMMIT;`, so it is self-committing and escapes a
+# wrapping-transaction rollback guard. The real fix is isolating
+# test_migration_assertion_gate_passes onto its own schema/connection (or restoring
+# the view afterward) rather than mutating shared state — out of scope for this
+# already-late PR; tracked as a follow-up, not silently papered over.
+tests/test_watchdog_monitored_callers.py::test_boot_briefing_view_has_watchdog_monitored_callers_arm

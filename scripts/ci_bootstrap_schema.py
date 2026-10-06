@@ -531,8 +531,19 @@ def bring_up_cluster() -> tuple[str, str, str, str]:
 
 
 def tear_down_cluster(datadir: str, sockdir: str, pg_bin: str = PG_BIN) -> None:
-    subprocess.run([os.path.join(pg_bin, "pg_ctl"), "-D", datadir, "-w", "stop"],
-                   capture_output=True, env=PG_ENV)
+    result = subprocess.run([os.path.join(pg_bin, "pg_ctl"), "-D", datadir, "-w", "stop"],
+                             capture_output=True, env=PG_ENV)
+    if result.returncode != 0:
+        # "-w stop" (smart shutdown) didn't bring the server down — don't silently
+        # rmtree the data directory out from under a server that might still be
+        # alive (cc-quality review #54127 on PR#315). Escalate to immediate
+        # shutdown before cleaning up; this is a disposable CI cluster, so losing
+        # the data directory's consistency on an immediate stop is fine.
+        print(f"pg_ctl -w stop failed (rc={result.returncode}): "
+              f"{result.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+        print("falling back to pg_ctl -m immediate", file=sys.stderr)
+        subprocess.run([os.path.join(pg_bin, "pg_ctl"), "-D", datadir, "-m", "immediate", "stop"],
+                        capture_output=True, env=PG_ENV)
     shutil.rmtree(datadir, ignore_errors=True)
     shutil.rmtree(sockdir, ignore_errors=True)
 
