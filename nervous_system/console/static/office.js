@@ -257,7 +257,8 @@
     S.plan = layout(agents);
     S.seatsFlat = [];
     S.plan.rooms.forEach(function (r) { r.seats.forEach(function (s) { S.seatsFlat.push(s); }); });
-    el.count.textContent = agents.length + " at their desks · " + S.plan.rooms.length + " rooms";
+    var working = agents.filter(function (a) { return moodOf(a) === "working"; }).length;
+    el.count.textContent = agents.length + " agents · " + working + " working · " + S.plan.rooms.length + " rooms";
     if (first || !S.fitted) { fit(); S.fitted = true; }
     // keep an open panel in sync with the fresh snapshot
     if (S.selected) {
@@ -676,7 +677,22 @@
       if (s) { S.selected = idOf(s.agent); renderPanel(s.agent); return idOf(s.agent); }
       return null;
     },
-    agentCount: function () { return S.seatsFlat.length; }
+    agentCount: function () { return S.seatsFlat.length; },
+    // zoom onto the first room that has a working agent, so a render can show the
+    // speech bubbles (hidden at fit-zoom by design to avoid clutter).
+    zoomToBubbles: function () {
+      if (!S.plan) return;
+      var room = S.plan.rooms.filter(function (r) {
+        return r.seats.some(function (s) { return moodOf(s.agent) === "working"; });
+      })[0] || S.plan.rooms[0];
+      if (!room) return;
+      var r = el.canvas.getBoundingClientRect();
+      S.cam.z = Math.min(S.max, 1.2);
+      var cx = (room.x + room.w / 2) * TILE, cy = (room.y + room.h / 2) * TILE;
+      S.cam.x = r.width / 2 - cx * S.cam.z;
+      S.cam.y = r.height / 2 - cy * S.cam.z;
+      draw();
+    }
   };
 
   // ---- boot -----------------------------------------------------------------

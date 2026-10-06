@@ -89,6 +89,11 @@ with sync_playwright() as p:
     print(f"  desktop: office opened, {n} agents")
     page.wait_for_timeout(1600)
     shoot(page, "office-desktop-floor.png")
+    # zoomed view so the speech bubbles (current_task) are visible — hidden at
+    # fit-zoom by design; this answers the "bubbles were empty" eyeball nit.
+    page.evaluate("window.__officeAPI.zoomToBubbles()")
+    page.wait_for_timeout(700)
+    shoot(page, "office-desktop-bubbles.png")
     page.evaluate("window.__officeAPI.tapFirst()")
     page.wait_for_timeout(500)
     shoot(page, "office-desktop-panel.png")
