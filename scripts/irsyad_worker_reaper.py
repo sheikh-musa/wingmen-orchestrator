@@ -163,28 +163,45 @@ def _stale_rr_only_skip(conn, agent_id: str, stale_hours: int = 24) -> list[int]
 
 
 def _already_surfaced_recently(conn, agent_id: str, within_hours: int = 24) -> bool:
-    """Dedup: one surfaced row per worker per within_hours, not one per reaper tick."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM agent_messages WHERE from_agent='cc-orchestrator' "
-            "AND to_agent='cc-irsyad-coord' AND subject LIKE %s "
-            "AND created_at > now() - (%s * interval '1 hour') LIMIT 1",
-            (f"stale requires_response blocking reap: {agent_id}%", within_hours))
-        return cur.fetchone() is not None
+    """Dedup: one surfaced row per worker per within_hours, not one per reaper tick.
+    LIKE prefix is anchored on the ' (' that always follows agent_id in the subject
+    (cc-quality #58499 finding 1) -- an unanchored trailing '%' let a shorter id
+    (cc-irsyad-3) falsely match a longer sibling's row (cc-irsyad-31), suppressing
+    its own nudge for up to 24h. Fail-safe: a query error => treat as already
+    surfaced (suppress this tick's nudge rather than risk crashing the reaper loop
+    over a nudge-only feature -- cc-quality #58499 finding 2)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM agent_messages WHERE from_agent='cc-orchestrator' "
+                "AND to_agent='cc-irsyad-coord' AND subject LIKE %s "
+                "AND created_at > now() - (%s * interval '1 hour') LIMIT 1",
+                (f"stale requires_response blocking reap: {agent_id} (%", within_hours))
+            return cur.fetchone() is not None
+    except Exception as exc:
+        print(f"  [worker-reaper] WARN: surfaced-recently check failed for {agent_id} ({exc}) "
+              "-> fail-safe, suppressing this tick's nudge")
+        return True
 
 
 def _surface_stale_rr_to_coord(conn, agent_id: str, session: str, row_ids: list[int]) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
-            "requires_response,priority) VALUES ('cc-orchestrator','cc-irsyad-coord','update',%s,%s,false,'P2')",
-            (f"stale requires_response blocking reap: {agent_id} ({session})",
-             f"{agent_id} ({session}) is idle + wound-down past grace, but reap is held back "
-             f"solely by unresponded requires_response row(s) older than 24h: "
-             f"{', '.join(str(i) for i in row_ids)}. The reap decision does not change with age "
-             "-- an unacked order still blocks reap -- this is a surface-only nudge so coord can "
-             "clear or re-ack it. Deduped: at most one of these per worker per 24h."))
-    conn.commit()
+    """Fail-safe: a failed insert must never crash the reaper loop over a nudge-only
+    feature (cc-quality #58499 finding 2) -- the reap decision above this call has
+    already run and is unaffected."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+                "requires_response,priority) VALUES ('cc-orchestrator','cc-irsyad-coord','update',%s,%s,false,'P2')",
+                (f"stale requires_response blocking reap: {agent_id} ({session})",
+                 f"{agent_id} ({session}) is idle + wound-down past grace, but reap is held back "
+                 f"solely by unresponded requires_response row(s) older than 24h: "
+                 f"{', '.join(str(i) for i in row_ids)}. The reap decision does not change with age "
+                 "-- an unacked order still blocks reap -- this is a surface-only nudge so coord can "
+                 "clear or re-ack it. Deduped: at most one of these per worker per 24h."))
+        conn.commit()
+    except Exception as exc:
+        print(f"  [worker-reaper] WARN: stale-rr surface failed for {agent_id} ({exc})")
 
 
 def _reap(conn, agent_id: str, session: str, dry: bool) -> None:

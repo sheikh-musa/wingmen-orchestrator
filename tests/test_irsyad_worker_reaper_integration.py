@@ -158,3 +158,28 @@ def test_stale_rr_check_failure_fails_safe_to_empty(reaper_db, monkeypatch):
     with psycopg.connect(reaper_db) as conn:
         conn.close()
         assert _stale_rr_only_skip(conn, "cc-irsyad-3") == []
+
+
+def test_already_surfaced_recently_does_not_collide_on_id_prefix(reaper_db):
+    # cc-quality #58499 finding 1: an unanchored LIKE '...{agent_id}%' let a shorter id
+    # falsely match a longer sibling's surfaced row (cc-irsyad-3 vs cc-irsyad-31)
+    with psycopg.connect(reaper_db) as conn:
+        _surface_stale_rr_to_coord(conn, "cc-irsyad-31", "irsyad-worker-31", [201])
+        assert _already_surfaced_recently(conn, "cc-irsyad-31") is True
+        assert _already_surfaced_recently(conn, "cc-irsyad-3") is False
+
+
+def test_already_surfaced_recently_fails_safe_to_true_on_connection_error(reaper_db):
+    # cc-quality #58499 finding 2: a query error here must suppress this tick's nudge,
+    # not crash the reaper loop
+    with psycopg.connect(reaper_db) as conn:
+        conn.close()
+        assert _already_surfaced_recently(conn, "cc-irsyad-3") is True
+
+
+def test_surface_stale_rr_to_coord_fails_safe_on_connection_error(reaper_db):
+    # cc-quality #58499 finding 2: a failed insert must not raise -- the reap decision
+    # above this call has already run and is unaffected by this nudge-only failure
+    with psycopg.connect(reaper_db) as conn:
+        conn.close()
+        _surface_stale_rr_to_coord(conn, "cc-irsyad-3", "irsyad-worker-3", [101])  # must not raise
