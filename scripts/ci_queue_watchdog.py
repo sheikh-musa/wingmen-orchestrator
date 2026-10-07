@@ -134,7 +134,11 @@ def _list_field(data: dict, field: str, path: str, complete: bool = True) -> lis
     if not isinstance(v, list):
         raise WatchdogError(f"gh api {path}: response missing list field {field!r} (keys={sorted(data)})")
     total = data.get("total_count")
-    if complete and isinstance(total, int) and total > len(v):
+    # Truncation only if the page came back FULL. GitHub's status-filtered lists can
+    # report total_count above the items actually returned for a moment (count lags the
+    # list; seen live 2026-10-07: "total_count=3 > page size 2"); a short page means
+    # nothing was cut off, so that must not fail the run.
+    if complete and isinstance(total, int) and total > len(v) and len(v) >= PER_PAGE:
         # Not silent truncation: say so loudly. >100 active runs/jobs on one repo
         # would itself be an anomaly worth a human look.
         raise WatchdogError(
