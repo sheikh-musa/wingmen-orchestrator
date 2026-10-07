@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -260,6 +261,121 @@ def warn_if_weekday_date_mismatch(subject: str, body: str, stream=None) -> None:
               "message not checked.", file=out)
 
 
+# bus #58159 item 2 (stamp-or-die + evidence flag, WARN mode only -- the REFUSE flip
+# is a separate PR once the 48h soak below has a count). Every warn below is logged
+# so the soak has real numbers instead of vibes.
+WARN_LOG_PATH = os.path.join(
+    os.environ.get("ORCH_ROOT", os.path.expanduser("~/wingmen/orchestrator")),
+    "logs", "bus_send_warnings.log",
+)
+
+
+def _log_warn(warn_type: str, **fields) -> None:
+    """Append one JSONL record per WARN fired below, same shape/posture as
+    secrets_output_scanner.py's _log_event: never block or crash the send over a
+    logging failure, 600-perm the file on first write."""
+    import datetime
+    import json
+    import stat
+
+    record = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "warn_type": warn_type,
+        **fields,
+    }
+    try:
+        log_dir = os.path.dirname(WARN_LOG_PATH)
+        os.makedirs(log_dir, exist_ok=True)
+        is_new = not os.path.exists(WARN_LOG_PATH)
+        with open(WARN_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        if is_new:
+            os.chmod(WARN_LOG_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 600
+    except OSError:
+        pass  # logging must never block or crash a send
+
+
+def _open_rr_from(to_agent: str, addressed_to: str, dsn: str | None = None) -> tuple[int, str] | None:
+    """The most recent open (requires_response=true, responded_at IS NULL) row FROM
+    `to_agent` TO `addressed_to` -- the row this send might be silently answering
+    without linking via --reply-to. None when there is no such open row."""
+    import psycopg2
+
+    conn = psycopg2.connect(dsn or dburl(os.environ))
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, now() - created_at FROM agent_messages "
+        "WHERE from_agent=%s AND to_agent=%s AND requires_response=true "
+        "AND responded_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        (to_agent, addressed_to),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return (row[0], str(row[1])) if row else None
+
+
+def warn_if_answering_rr_without_reply_to(
+    from_agent: str, to: str, reply_to: int | None, dsn: str | None = None, stream=None,
+) -> None:
+    """bus #58159 item 2 ("stamp-or-die", WARN mode): a reply sent as a fresh row
+    instead of via --reply-to never stamps the original RR's responded_at -- it keeps
+    showing as unanswered to triage/asks tooling forever, even though a reply went
+    out. Skipped outright when --reply-to is already given (nothing to warn about);
+    a DB error degrades to a warning of its own rather than blocking the send (this
+    check must never be the reason a real send fails)."""
+    if reply_to:
+        return
+    try:
+        found = _open_rr_from(to, from_agent, dsn=dsn)
+    except Exception as e:  # noqa: BLE001 -- a guard bug must never block a send
+        print(
+            f"bus_send: WARNING — stamp-or-die RR check could not run ({type(e).__name__}); "
+            "not checked.",
+            file=stream or sys.stderr,
+        )
+        return
+    if not found:
+        return
+    rr_id, age = found
+    print(
+        f"bus_send: WARNING — '{to}' has an open requires_response row addressed to "
+        f"{from_agent} (id={rr_id}, sent {age} ago) and this send has no --reply-to. "
+        f"If this IS your answer, pass --reply-to {rr_id} or it stays marked "
+        "unanswered (stamp-or-die soak, bus #58159 item 2).",
+        file=stream or sys.stderr,
+    )
+    _log_warn("rr_without_reply_to", from_agent=from_agent, to=to, open_rr_id=rr_id)
+
+
+# identical/verified/clean/byte-identical/PASS, word-bounded + case-insensitive so
+# "password" never matches "pass" (bus #58159 item 2's own exact keyword list).
+_CLAIM_KEYWORDS_RE = re.compile(r"\b(identical|verified|clean|byte-identical|pass)\b", re.IGNORECASE)
+
+
+def warn_if_unevidenced_claim(mtype: str, subject: str, body: str, evidence: str | None, stream=None) -> None:
+    """bus #58159 item 2 (evidence flag, WARN mode): a review_request/update that
+    claims identical/verified/clean/byte-identical/PASS without a --evidence
+    comparator (sha256:<file> | text:<doc> | probe:<sql|cmd>=<count>) is exactly the
+    failure class this fleet keeps getting burned by -- an assertion standing in for
+    a check. Only review_request/update carry this kind of claim; --evidence present
+    at all satisfies it in WARN mode (format enforcement, if any, is the REFUSE-flip
+    PR's call)."""
+    if mtype not in ("review_request", "update"):
+        return
+    if evidence:
+        return
+    m = _CLAIM_KEYWORDS_RE.search(f"{subject}\n{body}")
+    if not m:
+        return
+    print(
+        f"bus_send: WARNING — this {mtype} claims {m.group(1)!r} without "
+        "--evidence <comparator> (sha256:<file> | text:<doc> | probe:<sql|cmd>=<count>) "
+        "-- an assertion is not a check (bus #58159 item 2, WARN-mode soak).",
+        file=stream or sys.stderr,
+    )
+    _log_warn("unevidenced_claim", mtype=mtype, subject=subject, matched_keyword=m.group(1))
+
+
 # Re-exported for callers/tests that reach for bus_send.resolve_from_agent /
 # bus_send.IdentityError directly — the real logic now lives in
 # scripts/lib/agent_identity.py (bus #47221) so asks_triage.py, asks_open.py,
@@ -307,6 +423,13 @@ def build_parser() -> argparse.ArgumentParser:
              "(Musa op#23554, bus #46353)",
     )
     p.add_argument("--from", dest="from_agent", default=None, help="override identity (default: auto-resolve)")
+    p.add_argument(
+        "--evidence", default=None,
+        help="comparator backing a claim like identical/verified/clean/PASS -- "
+             "sha256:<file> | text:<doc> | probe:<sql|cmd>=<count> (bus #58159 item 2, "
+             "WARN mode: its absence on a claiming review_request/update warns, does "
+             "not refuse)",
+    )
     p.add_argument("--dry-run", action="store_true", help="resolve+validate, print the row, do not touch the DB")
     p.add_argument(
         "--to-base", action="store_true",
@@ -423,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
     warn_if_below_hub_wake_floor(args.to, args.req, args.priority)
     warn_if_missing_provenance_citation(args.priority, args.subject, body)
     warn_if_weekday_date_mismatch(args.subject, body)
+    warn_if_unevidenced_claim(args.type, args.subject, body, args.evidence)
 
     if args.dry_run:
         print(f"DRY RUN — would insert: from={from_agent} to={args.to} type={args.type} "
@@ -431,6 +555,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     refuse_if_base_has_live_instances(args.to, args.to_base)
+    warn_if_answering_rr_without_reply_to(from_agent, args.to, args.reply_to)
 
     row_id, thread_id = send(
         from_agent, args.to, args.type, args.subject, body, args.priority,
