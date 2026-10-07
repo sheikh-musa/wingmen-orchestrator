@@ -68,6 +68,15 @@ def test_has_pending_order_false_for_done_dispatch_row(reaper_db):
         assert _has_pending_order(conn, "cc-irsyad-3") is False
 
 
+def test_has_pending_order_forced_connection_error_fails_safe_to_true(reaper_db):
+    # the module's own contract (docstring): "Fail-safe: a query error => treat as
+    # pending (never reap on ambiguity)" -- orch-console #58489 flagged this as the
+    # one case missing from the first pass.
+    with psycopg.connect(reaper_db) as conn:
+        conn.close()
+        assert _has_pending_order(conn, "cc-irsyad-3") is True
+
+
 def test_has_pending_order_ignores_rows_to_other_agents(reaper_db):
     with psycopg.connect(reaper_db) as conn, conn.cursor() as cur:
         cur.execute(
