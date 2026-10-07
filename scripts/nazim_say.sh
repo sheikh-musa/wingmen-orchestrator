@@ -19,6 +19,10 @@ TOK=$(grep '^NAZIM_BOT_TOKEN=' "$ORCH_DIR/.env" | cut -d= -f2-)
 CHAT="${TG_CHAT_OVERRIDE:-$(grep '^MUSA_TELEGRAM_ID=' "$ORCH_DIR/.env" | cut -d= -f2-)}"
 [ -n "${TOK:-}" ] && [ -n "${CHAT:-}" ] || { echo "nazim_say: NAZIM_BOT_TOKEN/MUSA_TELEGRAM_ID missing" >&2; exit 1; }
 
+# orch-console #57970/#58047: refuse a weekday paired with the wrong date. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$TEXT" || exit 6
+
 WAV=$(mktemp -t nazim_say).wav
 M4A="${WAV%.wav}.m4a"
 trap 'rm -f "$WAV" "$M4A"' EXIT

@@ -31,6 +31,9 @@ source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
 _send_arg_guard "$CAP" || exit 2
 source "$ORCH_DIR/scripts/lib/client_send_leak_guard.sh"
 _client_send_leak_guard "$CAP" || exit 3
+# orch-console #57970/#58047: refuse a weekday paired with the wrong date in the caption. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$CAP" || exit 6
 
 # Resolve token_env_key + chat_id from bot_channels (single source of truth), via
 # scripts/bus_send.dburl (PR#214/#219): the .env FILE wins over the inherited env, so

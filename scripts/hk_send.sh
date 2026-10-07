@@ -17,6 +17,11 @@ CHAT_ID="${HK_CHAT_ID:--5377033587}"                 # HK group (Musa + Afifah +
 TOK="${HK_EDIT_BOT_TOKEN:?HK_EDIT_BOT_TOKEN not set in .env}"
 TEXT="${1:?usage: hk_send.sh \"<message>\"}"
 
+# orch-console #57970/#58047: refuse a weekday paired with the wrong date. Fail-closed.
+ORCH_DIR="$HOME/wingmen/orchestrator"
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$TEXT" || exit 6
+
 resp="$(curl -sS -X POST "https://api.telegram.org/bot${TOK}/sendMessage" \
   --data-urlencode "chat_id=${CHAT_ID}" \
   --data-urlencode "text=${TEXT}")"

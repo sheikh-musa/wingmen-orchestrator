@@ -20,6 +20,10 @@ CAP="${2:-}"
 
 # bus #44576: a real filename can contain ',' or ';', both special to curl's own
 # -F parser — route through a syntax-safe staged path instead of @${IMG} directly.
+# orch-console #57970/#58047: refuse a weekday paired with the wrong date in the caption. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$CAP" || exit 6
+
 source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
 tg_safe_upload_stage photo "$IMG" || { echo "nazim_send_photo: could not stage upload for $IMG" >&2; exit 1; }
 trap '[ -n "${TG_SAFE_UPLOAD_TMPDIR:-}" ] && rm -rf "$TG_SAFE_UPLOAD_TMPDIR"' EXIT
