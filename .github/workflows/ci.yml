@@ -99,7 +99,9 @@ jobs:
         # actually run in CI instead of skipping unconditionally.
         env:
           WINGMEN_PG17_BIN: /usr/lib/postgresql/17/bin
-        run: python scripts/ci_bootstrap_schema.py up
+        # --state-file is per-JOB ($RUNNER_TEMP, distinct per runner) so two concurrent
+        # jobs can't share one state file and tear down each other's cluster (bus #58575).
+        run: python scripts/ci_bootstrap_schema.py up --state-file "$RUNNER_TEMP/wingmen-ci-bootstrap-schema-state.json"
 
       - name: Test (unit + integration, against the ephemeral schema)
         # WINGMEN_PG17_BIN points the migration fixture (tests/migrations/*, a
@@ -129,4 +131,6 @@ jobs:
         # Always run, even on test failure, so a dead runner never leaks the
         # pg_ctl background process past this job.
         if: always()
-        run: python scripts/ci_bootstrap_schema.py down
+        # Same per-JOB --state-file as `up`, so `down` tears down only THIS job's cluster
+        # (bus #58575). The script also refuses to tear down a cluster stamped by another job.
+        run: python scripts/ci_bootstrap_schema.py down --state-file "$RUNNER_TEMP/wingmen-ci-bootstrap-schema-state.json"

@@ -54,9 +54,11 @@ Usage:
 `DATABASE_URL=...` to stdout, appends the same line to $GITHUB_ENV if set
 (so a later CI step's `pytest` sees it), and writes connection/teardown
 state (incl. the WINGMEN_PG17_BIN it resolved at the time) to --state-file
-(default: a fixed path under the OS temp dir — one CI job runs one
-bootstrap at a time, so a fixed name is fine). The pg_ctl server is already
-a detached background process; `up` does not block.
+(default: a PER-JOB path under $RUNNER_TEMP when set, else the OS temp dir —
+see DEFAULT_STATE_FILE. A fixed SHARED path raced once a 2nd self-hosted
+runner went live: two concurrent jobs sharing one /tmp clobbered each other's
+state and tore down each other's live cluster — bus #58575). The pg_ctl
+server is already a detached background process; `up` does not block.
 
 `down` reads --state-file and stops + cleans up the cluster it describes,
 using the `pg_bin` IT recorded — not whatever WINGMEN_PG17_BIN happens to be
@@ -85,7 +87,28 @@ ROOT = Path(__file__).resolve().parent.parent
 BEDROCK_CORE = ROOT / "migrations" / "infra" / "bedrock_substrate_core.sql"
 BEDROCK_DEFERRED = ROOT / "migrations" / "infra" / "bedrock_substrate_deferred.sql"
 
-DEFAULT_STATE_FILE = Path(tempfile.gettempdir()) / "wingmen-ci-bootstrap-schema-state.json"
+# Per-JOB state path. `down` reads this file to learn which cluster to stop + rmtree,
+# so two CI jobs MUST NOT share one file: when a 2nd self-hosted runner went live the
+# two concurrent jobs shared one /tmp, and each `down` tore down the OTHER job's live
+# cluster (socket vanished mid-run) — bus #58575. Default under $RUNNER_TEMP, which
+# GitHub Actions sets per-job (distinct per runner); both `up` and `down` of the SAME
+# job see the same $RUNNER_TEMP, while two concurrent jobs see different ones. Falls
+# back to the OS temp dir for manual/local use (one bootstrap at a time there).
+DEFAULT_STATE_FILE = (
+    Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
+    / "wingmen-ci-bootstrap-schema-state.json"
+)
+
+
+def _job_owner_id() -> str:
+    """A stable per-JOB identity every step of ONE GitHub Actions job observes
+    identically, and that two concurrent jobs differ on. Belt to the per-job state
+    path: `down` refuses to tear down a cluster stamped by a DIFFERENT job, so even a
+    mis-shared state file can never clobber another job's live Postgres (bus #58575).
+    Empty when run outside Actions (manual/local) -> the guard is a no-op."""
+    return ":".join(
+        os.environ.get(k, "") for k in ("RUNNER_NAME", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")
+    )
 
 PG_BIN = os.environ.get("WINGMEN_PG17_BIN", "/usr/local/opt/postgresql@17/bin")
 PG_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
@@ -614,7 +637,8 @@ def cmd_up(state_file: Path) -> int:
 
     state_file.write_text(
         __import__("json").dumps(
-            {"dsn": dsn, "datadir": datadir, "sockdir": sockdir, "port": port, "pg_bin": PG_BIN}
+            {"dsn": dsn, "datadir": datadir, "sockdir": sockdir, "port": port,
+             "pg_bin": PG_BIN, "owner": _job_owner_id()}
         )
     )
     print(f"DATABASE_URL={dsn}")
@@ -630,6 +654,20 @@ def cmd_down(state_file: Path) -> int:
         print(f"no state file at {state_file} — nothing to tear down", file=sys.stderr)
         return 0
     state = __import__("json").loads(state_file.read_text())
+    recorded_owner = state.get("owner", "")
+    expected_owner = _job_owner_id()
+    if recorded_owner and recorded_owner != expected_owner:
+        # Defense in depth (bus #58575): this state file describes a cluster owned by a
+        # DIFFERENT job. Refuse to stop/rmtree it — that cross-job clobber is exactly what
+        # the per-job state path prevents. Leave the file + cluster for their real owner's
+        # `down`. Loud on stderr (visible in the CI log); return 0 so an otherwise-green
+        # job is not failed by this belt firing.
+        print(
+            f"ci_bootstrap_schema: REFUSING teardown — state file {state_file} is owned by "
+            f"'{recorded_owner}', not this job '{expected_owner}'. Not touching another job's cluster.",
+            file=sys.stderr,
+        )
+        return 0
     tear_down_cluster(state["datadir"], state["sockdir"], state.get("pg_bin", PG_BIN))
     state_file.unlink(missing_ok=True)
     return 0
