@@ -26,17 +26,33 @@ class _FakeCursor:
     def execute(self, sql, params=None):
         s = " ".join(sql.split())
         if "FROM coord_dispatch_queue q" in s:
-            # unposted bug-report rows = queue rows minus those in the marker set
+            # unposted bug-report rows = queue rows minus those in the marker set.
+            # race_select simulates the window where a tick's SELECT ran BEFORE a
+            # concurrent tick committed its claim — the row still appears here.
             self._result = [
                 {"queue_id": qid, "spec_ref": spec}
                 for qid, spec in self.db.queue
-                if qid not in self.db.posted
+                if qid not in self.db.posted or qid in self.db.race_select
             ]
         elif "FROM bug_reports WHERE id" in s:
             bug_id = params[0]
             self._result = [self.db.bugs.get(bug_id)] if bug_id in self.db.bugs else [None]
         elif "INSERT INTO bug_report_channel_posts" in s:
-            self.db.posted[params[0]] = {"bug_id": params[1], "tg_out_id": params[2] if len(params) > 2 else None}
+            # claim-first: ON CONFLICT DO NOTHING RETURNING queue_id — a row already
+            # claimed returns nothing (the loser); a fresh claim records + returns the id.
+            qid = params[0]
+            if qid in self.db.posted:
+                self._result = []
+            else:
+                self.db.posted[qid] = {"bug_id": params[1], "note": params[2], "tg_out_id": None}
+                self._result = [{"queue_id": qid}]
+        elif "UPDATE bug_report_channel_posts SET tg_out_id" in s:
+            tg_id, qid = params
+            if qid in self.db.posted:
+                self.db.posted[qid]["tg_out_id"] = tg_id
+            self._result = []
+        elif "DELETE FROM bug_report_channel_posts" in s:
+            self.db.posted.pop(params[0], None)
             self._result = []
         elif "INSERT INTO agent_messages" in s:
             self.db.alerts.append(params)
@@ -74,6 +90,7 @@ class _FakeDB:
         self.bugs = bugs              # {bug_id: {page_url, description}}
         self.posted = {}              # queue_id -> marker row
         self.alerts = []              # agent_messages inserts
+        self.race_select = set()      # queue_ids SELECT returns even if already claimed (race sim)
         self.commits = 0
 
 
@@ -171,3 +188,21 @@ def test_enqueue_failure_fails_loud_and_does_not_stamp(wired):
     # fail-loud: exactly one console alert, its body naming the failed row
     assert len(db.alerts) == 1
     assert "queue 104" in db.alerts[0][1]
+
+
+def test_concurrent_claim_loser_does_not_enqueue(wired):
+    """cc-quality #57189 LOW: if a concurrent tick already claimed the row (marker
+    present) but this tick's stale SELECT still returns it, the claim-first INSERT
+    returns no row and this tick must NOT enqueue (no duplicate Telegram send)."""
+    qid = 105
+    db = _FakeDB(
+        queue=[(qid, "bug-report:44444444-4444-4444-8444-444444444444")],
+        bugs={"44444444-4444-4444-8444-444444444444": {"page_url": "/z", "description": "dup"}},
+    )
+    db.posted[qid] = {"bug_id": None, "note": None, "tg_out_id": 1}  # claimed by the other tick
+    db.race_select.add(qid)                                          # but our SELECT still sees it
+    calls = []
+    wired(db, calls)
+    rc = brc.sweep(fire=True)
+    assert rc == 0
+    assert calls == []            # lost the claim -> did NOT enqueue (no double-send)

@@ -129,29 +129,43 @@ def sweep(fire: bool = False, conn_factory=None) -> int:
                     )
                     detail = cur.fetchone()
 
-            if detail is None:
-                # Malformed spec_ref or missing bug row — mark handled so we don't
-                # spin on it forever; nothing is posted.
-                if fire:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO bug_report_channel_posts (queue_id, bug_id, tg_out_id, note) "
-                            "VALUES (%s,%s,NULL,%s) ON CONFLICT (queue_id) DO NOTHING",
-                            (queue_id, bug_id or None, "no bug_reports row for spec_ref"),
-                        )
-                    conn.commit()
+            text = compose(detail["page_url"], detail["description"]) if detail else None
+            note = None if detail else "no bug_reports row for spec_ref"
+
+            if not fire:
+                print(f"[dry-run] queue={queue_id} bug={bug_id}: {text or '(skip: '+note+')'}")
+                continue
+
+            # CLAIM-FIRST (cc-quality #57189 LOW): insert the marker BEFORE the send, so
+            # the marker INSERT — not the Telegram call — is the serialization point. Two
+            # overlapping ticks (or the interim hand-post path B racing a sweep) can't both
+            # enqueue: only the winner's ON CONFLICT ... RETURNING yields a row.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO bug_report_channel_posts (queue_id, bug_id, note) "
+                    "VALUES (%s,%s,%s) ON CONFLICT (queue_id) DO NOTHING RETURNING queue_id",
+                    (queue_id, bug_id or None, note),
+                )
+                claimed = cur.fetchone()
+            conn.commit()
+            if not claimed:
+                skipped += 1
+                print(f"skip queue={queue_id} (already claimed by another tick)")
+                continue
+
+            if text is None:
+                # Malformed spec_ref / missing bug row — claimed with a note so it leaves
+                # the next sweep's SELECT; nothing is posted.
                 skipped += 1
                 print(f"skip queue={queue_id} (no bug_reports row for '{spec_ref}')")
                 continue
 
-            text = compose(detail["page_url"], detail["description"])
-            if not fire:
-                print(f"[dry-run] queue={queue_id} bug={bug_id}: {text}")
-                continue
-
             try:
                 tg_id = tg_out.enqueue(CHANNEL, text)
-            except Exception as exc:  # noqa: BLE001 — fail loud, don't stamp, retry next tick
+            except Exception as exc:  # noqa: BLE001 — fail loud; UN-CLAIM so the row retries
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM bug_report_channel_posts WHERE queue_id = %s", (queue_id,))
+                conn.commit()
                 errors += 1
                 _alert_console(dsn, f"enqueue failed for queue {queue_id} bug {bug_id}: {exc}")
                 print(f"ERROR queue={queue_id}: {exc}", file=sys.stderr)
@@ -159,9 +173,8 @@ def sweep(fire: bool = False, conn_factory=None) -> int:
 
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO bug_report_channel_posts (queue_id, bug_id, tg_out_id) "
-                    "VALUES (%s,%s,%s) ON CONFLICT (queue_id) DO NOTHING",
-                    (queue_id, bug_id or None, tg_id),
+                    "UPDATE bug_report_channel_posts SET tg_out_id = %s WHERE queue_id = %s",
+                    (tg_id, queue_id),
                 )
             conn.commit()
             posted += 1
