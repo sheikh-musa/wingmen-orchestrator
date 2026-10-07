@@ -70,6 +70,12 @@ def build_evidence(content_hash: str, deploy_dir: Path) -> dict:
         # already matches) — a real failure/error always shows up there as a count
         # ("3 failed, 89 passed" / "5 errors in 1.23s"), so this still catches a genuine
         # failure exactly as before, just never an incidental word inside unrelated log text.
+        # Takes the LAST matching line (cc-quality PR#327 review): assumes a single
+        # pytest invocation per log. A nested pytest subprocess whose raw stdout
+        # landed in the same pytest.log ahead of the real final summary could in
+        # principle mask an earlier failure this way — not live in this repo today
+        # (no test here spawns a nested pytest subprocess), but worth knowing if
+        # that ever changes.
         summary_lines = re.findall(r"^.*\b\d+\s+passed\b.*$", text, re.MULTILINE)
         summary_line = summary_lines[-1] if summary_lines else ""
         ran_ok = bool(summary_line)
