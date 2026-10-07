@@ -28,6 +28,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
 import psycopg
 
@@ -35,6 +36,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import bus_send  # noqa: E402 — reuse its dburl() so DSN resolution has one owner
 
 UNCLASSIFIED = "UNCLASSIFIED"
+REPOS_JSON = Path(__file__).resolve().parent.parent / "REPOS.json"
 
 
 @dataclass
@@ -72,20 +74,43 @@ def _from_row(project_ref: str, org_id: str, row: tuple | None) -> Classificatio
     )
 
 
+def _resolve_project_ref(project_ref: str) -> str:
+    """Resolve a REPOS.json repo NAME (e.g. "cosem-platform") to its registered
+    data-store project_ref (e.g. "ywrpttpxwfcoodovxhsr") -- data_provenance rows
+    are keyed by the raw store ref, but a caller reading REPOS.json/AGENTS.md
+    for context often only has the repo name in hand, so an exact-match lookup
+    silently fell through to UNCLASSIFIED (bus #59033). This is NOT the
+    name-inference classify() bars (that's about guessing a CLASSIFICATION from
+    a slug) -- it's resolving an identifier via the one authoritative registry
+    before the exact-match lookup, same direction as LAYER-VOCAB-001's "name
+    the exact store + project ref". A project_ref that's already a store ref,
+    or a repo with no registered supabase_project_ref, passes through
+    unchanged -- this never invents a ref, only translates a known alias."""
+    try:
+        repos = json.loads(REPOS_JSON.read_text()).get("repos", [])
+    except (OSError, json.JSONDecodeError):
+        return project_ref
+    for repo in repos:
+        if repo.get("name") == project_ref and repo.get("supabase_project_ref"):
+            return repo["supabase_project_ref"]
+    return project_ref
+
+
 def classify(project_ref: str, org_id: str | None = None, *, dsn: str | None = None) -> Classification:
     """The one sanctioned lookup. Queries data_provenance via classify_data_provenance().
     org_id=None/'' both mean "store-level default" — matches the table's own
     convention (org_id is NOT NULL DEFAULT '' there, for the same dedup reason)."""
     org_id = org_id or ""
+    resolved_ref = _resolve_project_ref(project_ref)
     dsn = dsn or bus_send.dburl(os.environ)
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "select classification, evidence, owner, alias, updated_at "
             "from classify_data_provenance(%s, %s)",
-            (project_ref, org_id),
+            (resolved_ref, org_id),
         )
         row = cur.fetchone()
-    return _from_row(project_ref, org_id, row)
+    return _from_row(resolved_ref, org_id, row)
 
 
 def main(argv: list[str] | None = None) -> int:
