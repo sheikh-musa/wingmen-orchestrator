@@ -211,15 +211,20 @@ def save_state(s: Dict) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--apply", action="store_true", help="act (default is dry-run)")
+    ap.add_argument("--exclude", action="append", default=[], metavar="SESSION",
+            help="hold this lane back this run (e.g. mid-merge/deploy); repeatable")
     a = ap.parse_args(argv)
     now = dt.datetime.now(dt.timezone.utc)
 
     glm = read_glm()
     musa = read_musa()
     d = decide(glm["wk"], glm["5h"], musa["7d"], musa["5h"])
-    lanes = glm_lanes(ORCH_DIR)
+    held = [s for s in glm_lanes(ORCH_DIR) if s in set(a.exclude)]
+    lanes = [s for s in glm_lanes(ORCH_DIR) if s not in set(a.exclude)]
     print(f"{now:%H:%M:%SZ} GLM wk={glm['wk']:.1f}% 5h={glm['5h']:.1f}% | Musa 7d={musa['7d']:.0f}% "
           f"5h={musa['5h']:.0f}% | glm lanes={len(lanes)} | {d['action']}: {d['reason']}")
+    if held:
+        print(f"  HELD this run (--exclude): {', '.join(held)}")
 
     state = load_state()
     if d["action"] in ("page_5h_only", "page_musa_high"):
