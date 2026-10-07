@@ -130,7 +130,12 @@ _FORBIDDEN_SCH = {"medical_notes", "custody_court_order_ref", "custody_under_cou
 # sch_student_parents FLOOR (never opened): has_legal_custody = the FORMAL legal-custody flag; mig350
 # is explicitly NOT the legal model, so this stays P0-on-nonzero. Excluded from the link
 # fail-closed-unknown enumeration (checked explicitly).
-_FORBIDDEN_PA = {"has_legal_custody"}
+# restricted (mig426, Nazim gate #1029 / Shuq director-direct op#26757, divorce-case toggle):
+# AUTHORIZED at its NOT-NULL-DEFAULT-FALSE state (every row is non-null by schema, so a generic
+# IS NOT NULL check false-positives on 100% of rows — found 2026-10-07, coord #56215). Checked
+# explicitly as TRUE-only below, same shape as has_legal_custody/custody_under_court_order: the
+# toggle itself is allowed, an ACTUAL restriction is the thing worth a human look.
+_FORBIDDEN_PA = {"has_legal_custody", "restricted"}
 
 # RESIDUE-NO-GROW GUARD (Nazim #40069): the LIVE-scope above is blind to SOFT-DELETED rows, so a
 # populate-then-soft-delete could hide deep PII. This baseline is the KNOWN reverted-dupe residue
@@ -257,6 +262,11 @@ def count_forbidden(cur, org_id: str = ORG_ID) -> Dict[str, Optional[int]]:
     # mig350 is explicitly NOT the legal model). Link EXISTENCE (row count) + marital_status are now
     # AUTHORIZED (CAI-1030 expansion, Nazim #41335/#41337) so are NO LONGER forbidden here.
     f[f"{PA}.has_legal_custody"] = _count(cur, f"SELECT count(*) FROM {PA} WHERE org_id=%(o)s AND has_legal_custody IS TRUE", org_id)
+    # restricted (mig426, Nazim #1029/op#26757): NOT-NULL-DEFAULT-FALSE boolean, authorized at
+    # false (the toggle existing is fine); count only an ACTUAL TRUE-set, same shape as the
+    # custody checks above. Found 2026-10-07 (coord #56215): a generic IS NOT NULL check trips on
+    # every row the moment the column exists, regardless of its value -- that was the bug.
+    f[f"{PA}.restricted"] = _count(cur, f"SELECT count(*) FROM {PA} WHERE org_id=%(o)s AND restricted IS TRUE", org_id)
     # sch_student_parents FAIL-CLOSED-UNKNOWN: any link col not authorized/ignored/floor is
     # out-of-envelope -> P0-on-nonzero (a NEW unclassified link col fails CLOSED, never silent-green).
     for c in sorted(_present_columns(cur, PA)):

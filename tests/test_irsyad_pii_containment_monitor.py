@@ -337,6 +337,9 @@ _ST_PARENTS_COLS = (
     "id uuid PRIMARY KEY", "org_id uuid", "parent_person_id uuid", "student_id uuid",
     "relationship text", "is_primary_contact boolean", "created_at timestamptz",
     "updated_at timestamptz", "marital_status text", "has_legal_custody boolean",
+    # mig426 (Nazim gate #1029 / op#26757): NOT NULL DEFAULT false, exactly as in prod, so the
+    # default-false row (the 2026-10-07 100%-false-positive case, coord #56215) is exercised.
+    "restricted boolean NOT NULL DEFAULT false",
 )
 
 
@@ -409,6 +412,7 @@ def test_cai1030_floor_still_trips_p0_each(monkeypatch, pg_dsn):
         ("_sre_students2", "custody_court_order_ref", "'ref'"),
         ("_sre_students2", "custody_under_court_order", "TRUE"),
         ("_sre_parents2", "has_legal_custody", "TRUE"),
+        ("_sre_parents2", "restricted", "TRUE"),   # mig426: an ACTUAL restriction still trips
     ]
     for table, col, val in floor:
         conn = _cai1030_conn(pg_dsn); cur = conn.cursor()

@@ -86,4 +86,6 @@ def test_boot_one_still_refuses_a_running_or_existing_session_before_booting():
     body = m.group(0)
     assert 'echo "SKIP $name — dir missing: $dir"' in body
     assert 'dir_has_claude "$dir"' in body
-    assert 'tmux has-session -t "$name"' in body
+    # '=' = tmux EXACT target match (bus #56370): a bare -t "$name" prefix-matched
+    # 'cosem-tdu' onto the running 'cosem-tdu-coord' and blocked the builder lane's boot.
+    assert 'tmux has-session -t "=$name"' in body

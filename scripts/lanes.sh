@@ -109,7 +109,11 @@ boot_one() {
   local name="$1" dir="$2" base_agent_id="${3:-}"
   if [ ! -d "$dir" ]; then echo "SKIP $name — dir missing: $dir"; return; fi
   if dir_has_claude "$dir"; then echo "SKIP $name — claude already running in $dir"; return; fi
-  if tmux has-session -t "$name" 2>/dev/null; then
+  # '=' forces tmux's EXACT target match (bus #56370): a bare -t "$name" does
+  # PREFIX matching, so e.g. 'cosem-tdu' matched the running 'cosem-tdu-coord'
+  # session and this guard false-positived SKIP, permanently blocking the
+  # builder lane from ever booting while the coord lane was up.
+  if tmux has-session -t "=$name" 2>/dev/null; then
     echo "SKIP $name — tmux session already exists (attach with: lanes.sh attach $name)"; return
   fi
   # Pin identity to the row's own base_agent_id (op#22448/bus#43342): launch_dangerous_cc.sh

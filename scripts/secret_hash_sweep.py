@@ -45,7 +45,13 @@ import stat
 import sys
 from typing import Dict, List, Tuple
 
-MIN_SECRET_LEN = 16          # exact matches shorter than this risk hitting benign text
+MIN_SECRET_LEN = 16          # floor for CREDENTIAL-shaped keys (_TOKEN/_KEY/_SECRET/_PASSWORD/_DSN)
+# bus #56377 (NAZIM_MODEL "claude-fable-5-1", 16 chars, redacted as if a secret): a
+# non-credential key's value must clear a HIGHER bar before it's secret-eligible --
+# short config strings (model ids, role names, session names) are common and real
+# credentials are essentially never this short anyway. Credential-shaped keys keep
+# the lower MIN_SECRET_LEN floor (see _CREDENTIAL_KEY_RE below).
+MIN_SECRET_LEN_NONCRED = 20
 MIN_DSN_PW_LEN = 8           # DSN passwords are real secrets even when a bit shorter
 _DSN_RE = re.compile(rb"postgres(?:ql)?://[^\s:@/]+:([^\s@/]+)@")
 # ANY real-length Anthropic credential (OAuth sk-ant-oat…, API sk-ant-api…), manifest or not
@@ -60,8 +66,22 @@ _ENV_LINE_RE = re.compile(rb"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=")
 # because it is caught by its own `@`-authority test below, not by key name.
 _PUBLIC_KEY_RE = re.compile(
     r'(^NEXT_PUBLIC_|_PROJECT_REF$|^SUPABASE_PROJECT_REF$|_BIN$|_IPS$|_FROM$|'
-    r'_TEAM_ID$|_MODE$|_REGION$|_ANON_KEY$|_ANON$|_BASE_URL$|^SUPABASE_URL$|_SUPABASE_URL$)',
+    r'_TEAM_ID$|_MODE$|_REGION$|_ANON_KEY$|_ANON$|_BASE_URL$|^SUPABASE_URL$|_SUPABASE_URL$|'
+    # bus #56377: a *_MODEL value (e.g. NAZIM_MODEL=claude-fable-5-1) is a public model
+    # id, never a credential; *_ROLE/*_SESSION/*_PATH/*_DIR name a config string or
+    # filesystem location, same trust class as the _BIN/_IPS entries above.
+    r'_MODEL$|_ROLE$|_SESSION$|_PATH$|_DIR$)',
     re.I)
+
+# orch-console #56377: a known-credential key name is the ONLY thing that justifies the
+# LOWER MIN_SECRET_LEN floor for a short-ish value; everything else must clear
+# MIN_SECRET_LEN_NONCRED. Named explicitly (not inferred from absence of a public-key
+# match) so a brand-new, unrecognized key defaults to the SAFER higher floor.
+_CREDENTIAL_KEY_RE = re.compile(r'(_TOKEN$|_KEY$|_SECRET$|_PASSWORD$|_DSN$)', re.I)
+
+# bus #56377: a bare boolean/int config value (AUTO_WAKE_ENABLED=true, CONSOLE_PORT=8787)
+# is never a credential, whatever its key is called or how long it happens to be.
+_BOOL_INT_VALUE_RE = re.compile(r'^(true|false|[0-9]+)$', re.I)
 
 # orch-console #51379 (bus #51371/#51377): SEED_USER_ID -- a plain identifier, not a
 # credential -- hash-matched a current .env value (it legitimately reappears in prod query
@@ -83,6 +103,8 @@ def _is_public_value(key: str, val: str) -> bool:
     if _PUBLIC_KEY_RE.search(key) or _IDENTIFIER_KEY_RE.search(key):
         return True
     if _UUID_VALUE_RE.match(val):
+        return True
+    if _BOOL_INT_VALUE_RE.match(val):
         return True
     # a plain http(s) URL with NO userinfo (`user:pass@`) in its authority is a public endpoint
     m = re.match(r'https?://([^/]*)', val)
@@ -133,7 +155,8 @@ def build_secret_set(env_paths: List[str]) -> Dict[bytes, str]:
             if _is_public_value(key, val):
                 continue
             vb = val.encode("utf-8")
-            if len(vb) >= MIN_SECRET_LEN:
+            floor = MIN_SECRET_LEN if _CREDENTIAL_KEY_RE.search(key) else MIN_SECRET_LEN_NONCRED
+            if len(vb) >= floor:
                 secrets[vb] = hash8(vb)
     return secrets
 
@@ -403,6 +426,136 @@ def sweep_file(path: str, secrets: Dict[bytes, str], execute: bool,
     return rep
 
 
+def load_ledger_spans(ledger_path: str, hash8: str) -> Dict[str, List[Tuple[int, int]]]:
+    """{file: [(offset, length), ...]} for every ledger record matching *hash8*,
+    de-duplicated. Never reads a value — the ledger holds none."""
+    by_file: Dict[str, set] = {}
+    with open(ledger_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if rec.get("hash8") != hash8:
+                continue
+            by_file.setdefault(rec["file"], set()).add((rec["offset"], rec["length"]))
+    return {f: sorted(s) for f, s in by_file.items()}
+
+
+def reverse_file(path: str, spans: List[Tuple[int, int]], value: bytes, h8: str,
+                  execute: bool) -> dict:
+    """Restore *value* at each (offset, length) in *spans* inside *path*, IFF the byte
+    span currently holds exactly the marker `marker_for(value, h8)` produced it with —
+    anything else (already restored, or genuinely different content) is left alone and
+    counted, never forced. Same invariants as sweep_file: size-preserving, in-place at
+    existing offsets, live-append-race-guarded, JSON-parse-gated for .jsonl, no plaintext
+    backup (the ledger IS the audit trail; the value being restored here is, by
+    construction, NOT a secret — that's the whole false-positive this undoes)."""
+    rep = {"file": path, "spans_total": len(spans), "restored": 0, "already_ok": 0,
+           "mismatched": 0, "error": None, "size_before": 0, "size_after": 0,
+           "size_preserved": True, "parses_ok": True,
+           "mode": "jsonl" if path.endswith(".jsonl") else "plaintext"}
+    marker = marker_for(value, h8)
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+            st_before = os.fstat(fh.fileno())
+    except OSError as e:
+        rep["error"] = "read failed: %s" % e.__class__.__name__
+        return rep
+    rep["size_before"] = len(data)
+
+    writes: List[Tuple[int, bytes]] = []
+    touched_lines: set = set()
+    line_spans = _line_offsets(data) if rep["mode"] == "jsonl" else [(0, len(data))]
+    for off, length in spans:
+        if off < 0 or off + length > len(data):
+            rep["mismatched"] += 1
+            continue
+        cur = data[off:off + length]
+        if cur == value:
+            rep["already_ok"] += 1
+            continue
+        if cur != marker:
+            rep["mismatched"] += 1
+            continue
+        writes.append((off, value))
+        for (s, e) in line_spans:
+            if s <= off < e:
+                touched_lines.add((s, e))
+                break
+
+    if rep["mismatched"]:
+        rep["error"] = "%d span(s) hold neither the expected marker nor the restore value — ABORT file, no writes" % rep["mismatched"]
+        rep["size_after"] = rep["size_before"]
+        return rep
+
+    if not writes:
+        rep["size_after"] = rep["size_before"]
+        return rep
+
+    if rep["mode"] == "jsonl":
+        buf = bytearray(data)
+        for off, val in writes:
+            buf[off:off + len(val)] = val
+        for (s, e) in touched_lines:
+            try:
+                json.loads(bytes(buf[s:e]).rstrip(b"\n"))
+            except Exception:
+                rep["error"] = "restored line no longer valid JSON — ABORT file, no writes"
+                rep["size_after"] = rep["size_before"]
+                return rep
+
+    if not execute:
+        rep["restored"] = len(writes)   # verify-only: what WOULD be restored
+        rep["size_after"] = rep["size_before"]
+        return rep
+
+    if not _file_unchanged_since(path, rep["size_before"], st_before.st_mtime_ns):
+        rep["error"] = "ABORTED: file changed since read (live-append race) — retry next pass"
+        rep["size_after"] = rep["size_before"]
+        return rep
+
+    with open(path, "r+b") as fh:
+        for off, val in writes:
+            fh.seek(off)
+            fh.write(val)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    with open(path, "rb") as fh:
+        after = fh.read()
+    rep["size_after"] = len(after)
+    rep["size_preserved"] = (rep["size_after"] == rep["size_before"])
+    rep["restored"] = sum(1 for off, val in writes if after[off:off + len(val)] == val)
+    if rep["restored"] != len(writes):
+        rep["error"] = "post-write readback mismatch — some span(s) did not take"
+    return rep
+
+
+def detect_false_positive_shapes(reports: List[dict], value_len_by_hash8: Dict[str, int],
+                                  min_spans: int = 50, min_files: int = 3,
+                                  max_len: int = 20) -> List[Tuple[str, int, int, int]]:
+    """bus #56377: a single SHORT value hitting a LARGE number of spans across MANY
+    files is the false-positive shape (a short, common config string that leaked into
+    the manifest), not a real leak -- a genuine credential is long and appears in a
+    handful of places at most. Returns [(hash8, spans, files, length), ...] for every
+    hash8 whose aggregate across *reports* trips all three thresholds. Shape-matched
+    sk-ant- hits (not in value_len_by_hash8) are always long and never trip this."""
+    spans: Dict[str, int] = {}
+    files: Dict[str, set] = {}
+    for r in reports:
+        for h, c in r["by_hash"].items():
+            spans[h] = spans.get(h, 0) + c
+            files.setdefault(h, set()).add(r["file"])
+    suspects = []
+    for h, n in spans.items():
+        length = value_len_by_hash8.get(h)
+        if length is not None and length < max_len and n > min_spans and len(files[h]) > min_files:
+            suspects.append((h, n, len(files[h]), length))
+    return suspects
+
+
 def _expand(globs: List[str]) -> List[str]:
     out: List[str] = []
     for g in globs:
@@ -417,20 +570,76 @@ def _expand(globs: List[str]) -> List[str]:
     return uniq
 
 
+def _main_reverse(args) -> int:
+    if not args.ledger:
+        print("secret_hash_sweep --reverse: --ledger is required", file=sys.stderr)
+        return 2
+    value = args.restore_value.encode("utf-8")
+    computed = hash8(value)
+    if computed != args.restore_hash8:
+        print("secret_hash_sweep --reverse: REFUSE — sha256(--restore-value)[:8]=%s != "
+              "--restore-hash8=%s. Wrong value for this hash; nothing touched."
+              % (computed, args.restore_hash8), file=sys.stderr)
+        return 2
+
+    by_file = load_ledger_spans(args.ledger, args.restore_hash8)
+    if not by_file:
+        print("secret_hash_sweep --reverse: no ledger entries for hash8=%s" % args.restore_hash8)
+        return 0
+
+    reports = [reverse_file(f, spans, value, args.restore_hash8, execute=args.reverse_execute)
+               for f, spans in sorted(by_file.items())]
+    restored = sum(r["restored"] for r in reports)
+    already_ok = sum(r["already_ok"] for r in reports)
+    mismatched = sum(r["mismatched"] for r in reports)
+    errors = [r for r in reports if r["error"]]
+
+    mode = "EXECUTE" if args.reverse_execute else "VERIFY-ONLY"
+    print("secret_hash_sweep --reverse [%s]: hash8=%s across %d file(s)."
+          % (mode, args.restore_hash8, len(reports)))
+    for r in reports:
+        if r["restored"] or r["mismatched"] or r["error"]:
+            print("  %s | spans=%d restored=%d already_ok=%d mismatched=%d size_preserved=%s%s"
+                  % (r["file"], r["spans_total"], r["restored"], r["already_ok"], r["mismatched"],
+                     r["size_preserved"], (" ERROR=%s" % r["error"]) if r["error"] else ""))
+    print("  TOTAL restored=%d already_ok=%d mismatched=%d files=%d errors=%d"
+          % (restored, already_ok, mismatched, len(reports), len(errors)))
+    return 4 if errors else 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="hash-identified exact-span secret redaction sweep")
-    ap.add_argument("--env", nargs="+", required=True, help="env file(s)/glob(s) holding real secret values")
-    ap.add_argument("--scan", nargs="+", required=True,
+    ap.add_argument("--env", nargs="+", help="env file(s)/glob(s) holding real secret values")
+    ap.add_argument("--scan", nargs="+",
                     help="file(s)/glob(s) to sweep: .jsonl transcripts (JSON-gated) or plaintext (e.g. tool-results/*.txt)")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--dry-run", action="store_true", help="detect + report only (default)")
     g.add_argument("--execute", action="store_true", help="redact in place (requires --ledger)")
+    g.add_argument("--reverse", action="store_true",
+                   help="undo a false-positive redaction from the ledger: restore --restore-value "
+                        "at every --restore-hash8 span. Verify-only unless --reverse-execute is also given.")
     ap.add_argument("--ledger", help="append-only audit ledger (offset+length+hash8, NEVER values); "
-                                     "required with --execute")
+                                     "required with --execute or --reverse")
+    ap.add_argument("--restore-hash8", help="--reverse: the hash8 identifying the false-positive span")
+    ap.add_argument("--restore-value", help="--reverse: the ORIGINAL (non-secret, by construction) "
+                                             "value to restore; verified against --restore-hash8 before any write")
+    ap.add_argument("--reverse-execute", action="store_true",
+                    help="--reverse: actually write; without this, --reverse only verifies + reports counts")
     ap.add_argument("--report-json", action="store_true", help="emit the per-file report as JSON")
     ap.add_argument("--no-shape-match", action="store_true",
                     help="manifest values only; skip the any-real-length sk-ant- token matcher")
     args = ap.parse_args(argv)
+
+    if args.reverse:
+        if not args.restore_hash8 or args.restore_value is None:
+            print("secret_hash_sweep --reverse: --restore-hash8 and --restore-value are required",
+                  file=sys.stderr)
+            return 2
+        return _main_reverse(args)
+
+    if not args.env or not args.scan:
+        print("secret_hash_sweep: --env and --scan are required outside --reverse mode", file=sys.stderr)
+        return 2
 
     if args.execute and not args.ledger:
         print("secret_hash_sweep: --execute requires --ledger (audit trail; no plaintext backups)",
@@ -445,8 +654,31 @@ def main(argv=None) -> int:
         return 3
 
     scan_files = _expand(args.scan)
-    reports = [sweep_file(p, secrets, args.execute, args.ledger, shape_match=not args.no_shape_match)
-               for p in scan_files]
+    guard_tripped: List[Tuple[str, int, int, int]] = []
+    if args.execute:
+        # bus #56377: measure the shape BEFORE committing to --execute. A detect-only
+        # pre-pass costs a second read of each file but never risks writing on a shape
+        # that looks like a false positive (see detect_false_positive_shapes).
+        detect_reports = [sweep_file(p, secrets, False, None, shape_match=not args.no_shape_match)
+                           for p in scan_files]
+        value_len_by_hash8 = {h: len(v) for v, h in secrets.items()}
+        guard_tripped = detect_false_positive_shapes(detect_reports, value_len_by_hash8)
+        if guard_tripped:
+            reports = detect_reports
+        else:
+            reports = [sweep_file(p, secrets, True, args.ledger, shape_match=not args.no_shape_match)
+                       for p in scan_files]
+    else:
+        reports = [sweep_file(p, secrets, False, None, shape_match=not args.no_shape_match)
+                   for p in scan_files]
+
+    if guard_tripped:
+        print("secret_hash_sweep: EXECUTE REFUSED — false-positive shape detected, falling back "
+              "to DETECT:", file=sys.stderr)
+        for h, n, nf, length in guard_tripped:
+            print("  hash8=%s spans=%d files=%d length=%d (>%d spans, >%d files, <%d chars — "
+                  "looks like a short config value, not a leak)"
+                  % (h, n, nf, length, 50, 3, 20), file=sys.stderr)
 
     total_before = sum(r["matches_before"] for r in reports)
     paging = [r for r in reports if r["class"] != "env-snapshot"]
@@ -459,9 +691,10 @@ def main(argv=None) -> int:
         print(json.dumps({"env_files": len(env_files), "secrets_in_manifest": len(secrets),
                           "scanned": len(scan_files), "total_before": total_before,
                           "total_after": total_after, "total_paging": total_paging,
-                          "env_snapshot_hits": env_snapshot_hits, "reports": reports}, indent=2))
+                          "env_snapshot_hits": env_snapshot_hits, "guard_tripped": guard_tripped,
+                          "reports": reports}, indent=2))
     else:
-        mode = "EXECUTE" if args.execute else "DRY-RUN"
+        mode = "EXECUTE-REFUSED(guard)" if guard_tripped else ("EXECUTE" if args.execute else "DRY-RUN")
         print("secret_hash_sweep [%s]: %d secret value(s) in manifest from %d env file(s); "
               "scanned %d transcript(s)." % (mode, len(secrets), len(env_files), len(scan_files)))
         for r in reports:
@@ -477,6 +710,8 @@ def main(argv=None) -> int:
     # exit non-zero if anything failed, or (on execute) if any secret survived
     if errors:
         return 4
+    if guard_tripped:
+        return 6
     if args.execute and total_after != 0:
         return 5
     return 0

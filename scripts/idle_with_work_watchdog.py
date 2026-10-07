@@ -26,7 +26,11 @@ ORCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ORCH_DIR not in sys.path:
     sys.path.insert(0, ORCH_DIR)  # so `from scripts.lib...` resolves whether run as -m or as a path
 IDLE_SECONDS = 15 * 60
-PHASE1_LANES = ["cc-irsyad-coord", "cc-irsyad-1", "cc-irsyad-2"]
+PHASE1_LANES = ["cc-irsyad-coord", "cc-irsyad-1"]  # cc-irsyad-2 permanently reaped by the hub
+# (#53964, 2026-10-06) -- autoscaler respins fresh worker ids on demand, never this one again.
+# Removed per orch-console #54066 (de-register at the source, don't keep papering nudges to
+# a dead instance). If a future cc-irsyad-N needs phase-1 idle-with-work coverage, add it
+# explicitly here -- don't reintroduce a reaped id.
 COORD_LANES = {"cc-irsyad-coord"}
 # The REAL nudge tool: bash, POSITIONAL args (<tmux-session> "<message>"), verified-submit
 # with its own retry/ceiling. There is NO scripts/lane_nudge.py — a prior version called
