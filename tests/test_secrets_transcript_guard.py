@@ -1130,6 +1130,33 @@ def test_exec_prod_invocation_detected_with_interpreter_and_path(tmp_path):
     assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
 
 
+def test_fake_heredoc_opener_inside_quotes_does_not_blind_the_scan(tmp_path):
+    # cc-quality #56920 finding 1: a quoted string containing a redirect-looking
+    # substring with an arbitrary word, and NO later line matching that word, must not
+    # swallow the real ungated exec_prod DDL call on the next line.
+    f = tmp_path / "mig.sql"
+    f.write_text("ALTER TABLE foo ADD COLUMN bar int;")
+    cmd = "echo 'note: data <<MAGIC here' && " + _exec_prod_cmd(f)
+    assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+
+
+def test_unterminated_heredoc_opener_does_not_blind_the_scan(tmp_path):
+    f = tmp_path / "mig.sql"
+    f.write_text("DROP TABLE foo;")
+    cmd = "cat <<NEVERENDS\n" + _exec_prod_cmd(f)
+    assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+
+
+def test_env_assignment_prefix_does_not_hide_exec_prod_program(tmp_path):
+    # cc-quality #56920 finding 2: `env NAME=value python3 .../exec_prod.py` and the bare
+    # `NAME=value python3 ...` form must still resolve the program to exec_prod.py.
+    f = tmp_path / "mig.sql"
+    f.write_text("CREATE TABLE foo (id int);")
+    base = ' wingmen-irsyad/scripts/db/exec_prod.py --project-ref ' + _PROD_REF + ' --inner-file ' + str(f) + ' --reason "x"'
+    assert_blocked("Bash", {"command": "env PGOPTIONS=-c python3" + base}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+    assert_blocked("Bash", {"command": "PGOPTIONS=-c FOO=bar python3" + base}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+
+
 _DDL_VECTORS_PATH = Path(__file__).parent.parent / "scripts" / "hooks" / "ddl_detect_vectors.json"
 _DDL_VECTORS = json.loads(_DDL_VECTORS_PATH.read_text())
 

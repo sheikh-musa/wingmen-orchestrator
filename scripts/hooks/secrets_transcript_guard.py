@@ -655,10 +655,17 @@ def _segment_is_messaging_send(segment: str) -> bool:
 _LAUNCHER_RE = re.compile(r"^(?:python(?:3(?:\.\d+)?)?|node|nice|env|sudo|command|time|nohup|timeout|caffeinate)$")
 
 
+_ASSIGNMENT_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
 def _program_basename(segment: str) -> str:
     tokens = _leading_tokens(segment)
-    for i, tok in enumerate(tokens[:_LEADING_TOKENS_TO_INSPECT + 2]):
+    for tok in tokens[:_LEADING_TOKENS_TO_INSPECT + 4]:
         if tok.startswith("-"):
+            continue
+        if _ASSIGNMENT_TOKEN_RE.match(tok):
+            # `env NAME=value cmd` / `NAME=value cmd` (cc-quality #56920 finding 2):
+            # an assignment is never the program.
             continue
         base = _basename(tok)
         if _LAUNCHER_RE.match(base):
@@ -683,21 +690,47 @@ _HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
 def _strip_heredoc_bodies(command: str) -> str:
+    # cc-quality #56920 finding 1: a redirect-looking substring inside an ordinary
+    # quoted string, or an opener whose delimiter never appears, must NOT swallow the
+    # rest of the command. A body is removed only when the opener is OUTSIDE quotes
+    # on its line AND a later line is exactly the delimiter; otherwise the line stays
+    # in the scan untouched (fail closed).
     lines = command.split("\n")
     out: list[str] = []
     i = 0
     while i < len(lines):
         line = lines[i]
         out.append(line)
-        m = _HEREDOC_OPEN_RE.search(line)
+        m = _heredoc_opener_outside_quotes(line)
         if m:
             delim = m.group(2)
-            i += 1
-            while i < len(lines) and lines[i].strip() != delim:
-                i += 1
-            # drop the terminator line too; keep anything after it on later lines
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == delim), None)
+            if end is not None:
+                i = end  # skip body + terminator
         i += 1
     return "\n".join(out)
+
+
+def _heredoc_opener_outside_quotes(line: str):
+    """Return the first heredoc-opener match that sits outside single/double quotes
+    on this line, else None. A single-pass quote tracker, same idea as ddl_detect's."""
+    in_single = in_double = False
+    for m in _HEREDOC_OPEN_RE.finditer(line):
+        in_single = in_double = False
+        esc = False
+        for ch in line[: m.start()]:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\" and not in_single:
+                esc = True
+            elif ch == "'" and not in_double:
+                in_single = not in_single
+            elif ch == '"' and not in_single:
+                in_double = not in_double
+        if not in_single and not in_double:
+            return m
+    return None
 
 
 def _check_exec_prod_segment(segment: str) -> str | None:
