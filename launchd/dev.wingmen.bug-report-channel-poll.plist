@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.wingmen.bug-report-channel-poll — Musa op#27000/#27004, orch-console #57120/#57143.
+  Posts new in-app bug reports (coord_dispatch_queue rows with spec_ref LIKE 'bug-report:%',
+  written by ihsanOS /api/bug-report PR#1064) to the gazzabyte-irsyad Telegram channel so
+  Shuq/Wan see + act on them. Idempotent via the bug_report_channel_posts marker (migration
+  095): each row posts exactly once.
+
+  LOADED + OWNED by cc-fleet-health (ops) AFTER orch-console gates + merges the PR — that
+  install/load step is the one ops-charter piece of this feature. Until then the interim
+  path (B), coord posting by hand on drain, stands. DO NOT load this from a build lane.
+
+  PATHS ARE FOR THE MINI (user sheikhmusa), where the launchd daemons run. IF YOU LOAD THIS
+  FROM A DIFFERENT HOST, RE-VERIFY EVERY PATH FIRST — the residency_sweep precedent hardcoded
+  a /Users path that did not exist on the running host and sat dead for six weeks.
+
+  RunAtLoad TRUE deliberately: an unexercised trigger is not a trigger — loading it fires it
+  once so "loaded" and "has run" are established in the same act. StartInterval 300s: bug
+  volume is tiny (~1 irsyad report in months), and the poller is idempotent, so a tick with
+  nothing new costs one cheap query. NOT StartCalendarInterval — a client should see a report
+  near when it was filed, not up to a day late.
+
+  NEVER put the DSN or the channel bot token in this 0644 plist: bug_report_channel_poll.py
+  calls load_dotenv(ROOT/'.env') (0600) at import for exactly that reason, and the channel
+  token is resolved from bot_channels by tg_out at send time. launchd inherits nothing.
+-->
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.wingmen.bug-report-channel-poll</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>-m</string>
+    <string>nervous_system.bug_report_channel_poll</string>
+    <string>--fire</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/bug-report-channel-poll.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/bug-report-channel-poll.out.log</string>
+</dict></plist>
