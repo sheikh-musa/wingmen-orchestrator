@@ -41,6 +41,10 @@ fi
 # orch-console #57970/#58047: refuse a weekday paired with the wrong date in the caption. Fail-closed.
 source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
 _date_weekday_guard "$CAPTION" || exit 6
+# fable audit 2026-10-06 D1/D2: refuse a rendered file carrying a placeholder leak
+# or fleet-internal vocabulary. Fail-closed on a confirmed hit, fail-open on a crash.
+source "$ORCH_DIR/scripts/lib/client_artifact_scan.sh"
+_client_artifact_scan "$FILE" || exit 7
 
 source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
 tg_safe_upload_stage document "$FILE" || { echo "tg_send_file: could not stage upload for $FILE" >&2; exit 1; }
