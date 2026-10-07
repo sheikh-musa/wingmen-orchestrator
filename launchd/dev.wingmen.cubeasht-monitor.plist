@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.cubeasht-monitor</string>
+  <!-- cc-fleet-health cubeasht resource + temperature monitor (orch-console #58069/#58243,
+       Musa op#27169). Every 5 min: one read-only ssh sample of Musa's Windows desktop
+       (GPU/NVMe temp, CPU load, RAM, disk C:, WSL runner service, GitHub runner status;
+       CPU temp slot for LibreHardwareMonitor), one host_metrics row (migration 096),
+       alert evaluation, deduped P1 rr pages to orch-console (60 min/alert key), 30-day
+       retention prune. Fail-LOUD: monitor errors exit non-zero. The wrapper sources .env
+       for GH_TOKEN + DATABASE_URL and sets PATH for /usr/local/bin/gh (no secrets here).
+       NOT loaded/symlinked yet — scheduling is wired after review AND migration 096 apply. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_cubeasht_monitor.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/cubeasht-monitor.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/cubeasht-monitor.err.log</string>
+</dict>
+</plist>
