@@ -111,16 +111,89 @@ def test_chunked_send_passes_clean_text(monkeypatch):
     assert len(posted) == 1
 
 
-def test_chunked_send_fails_closed_if_guard_cannot_load(monkeypatch, tmp_path):
+# ---- guard CRASH -> FAIL OPEN (send proceeds) + page orch-console (#58089) ----------
+
+@pytest.fixture
+def crash_env(monkeypatch, tmp_path):
+    """A guard file that crashes on import; pages go to a dry-run file (never the bus)."""
+    broken = tmp_path / "broken_guard.py"
+    broken.write_text("raise RuntimeError('guard exploded on import')\n")
+    pages = tmp_path / "pages.jsonl"
+    monkeypatch.setenv("WEEKDAY_GUARD_PAGE_DRYRUN", str(pages))
+    monkeypatch.setenv("WEEKDAY_GUARD_STATE_DIR", str(tmp_path / "state"))
+    return broken, pages
+
+
+def _chunked(monkeypatch, text):
     m = importlib.import_module("scripts._tg_chunked_send")
     posted = []
-    monkeypatch.setattr(m, "send_with_resilience", lambda *a, **k: posted.append(a) or {"ok": True})
+    monkeypatch.setattr(m, "send_with_resilience",
+                        lambda *a, **k: posted.append(a) or {"ok": True, "message_id": 1})
     monkeypatch.setattr(m, "duplicate_of", lambda chat, text: None)
-    monkeypatch.setattr(m, "_GUARD_PATH", tmp_path / "missing.py")
-    for k, v in {"TG_TOK": "tok", "TG_CHAT": "chat", "TG_TEXT": "Friday 9 October 2026"}.items():
+    for k, v in {"TG_TOK": "tok", "TG_CHAT": "chat", "TG_TEXT": text}.items():
         monkeypatch.setenv(k, v)
-    assert m.main() == 1
-    assert posted == []
+    monkeypatch.delenv("TG_MSGID_OUT", raising=False)
+    return m, posted
+
+
+def test_chunked_send_guard_crash_still_sends_and_pages(monkeypatch, crash_env):
+    broken, pages = crash_env
+    m, posted = _chunked(monkeypatch, BAD)
+    monkeypatch.setattr(m, "_GUARD_PATH", broken)
+    assert m.main() == 0
+    assert len(posted) == 1                                   # SENT (fail open)
+    page = pages.read_text()
+    assert "weekday guard CRASHED — sent unguarded:" in page
+    assert "guard exploded on import" in page
+
+
+def test_chunked_send_guard_missing_still_sends(monkeypatch, crash_env, tmp_path):
+    m, posted = _chunked(monkeypatch, "Friday 9 October 2026")
+    monkeypatch.setattr(m, "_GUARD_PATH", tmp_path / "missing.py")
+    assert m.main() == 0 and len(posted) == 1
+
+
+def test_chunked_send_page_failure_still_sends(monkeypatch, crash_env, tmp_path):
+    broken, _ = crash_env
+    m, posted = _chunked(monkeypatch, "Friday 9 October 2026")
+    monkeypatch.setattr(m, "_GUARD_PATH", broken)
+    monkeypatch.setattr(m, "_PAGER_PATH", tmp_path / "no_pager.py")   # pager can't even load
+    assert m.main() == 0 and len(posted) == 1
+
+
+def test_tg_group_send_guard_crash_proceeds_to_send(monkeypatch, crash_env):
+    broken, pages = crash_env
+    tg = importlib.import_module("scripts.lib.tg_group_send")
+    monkeypatch.setattr(tg, "_GUARD_PATH", broken)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://must-not-connect.invalid/x")
+
+    class Reached(Exception):
+        pass
+
+    import psycopg
+
+    def reached(*a, **k):
+        raise Reached()
+    monkeypatch.setattr(psycopg, "connect", reached)
+    with pytest.raises(Reached):                 # got PAST the guard, into the send path
+        tg.main(["some-channel", BAD])
+    assert "sent unguarded" in pages.read_text()
+
+
+def test_tg_out_enqueue_guard_crash_proceeds(monkeypatch, crash_env):
+    broken, pages = crash_env
+    tg_out = importlib.import_module("nervous_system.tg_out")
+    monkeypatch.setattr(tg_out, "_GUARD_PATH", broken)
+
+    class Reached(Exception):
+        pass
+
+    def reached():
+        raise Reached()
+    monkeypatch.setattr(tg_out, "_dsn", reached)
+    with pytest.raises(Reached):
+        tg_out.enqueue("operator-orch", BAD)
+    assert "sent unguarded" in pages.read_text()
 
 
 def test_tg_group_send_refuses_before_db(monkeypatch):

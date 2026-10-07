@@ -17,6 +17,7 @@ The token is resolved from .env and NEVER printed or written to the DB (unchange
 from __future__ import annotations
 
 import json
+import os
 import socket
 
 
@@ -110,6 +111,41 @@ def send_via_http(conn_factory, host: str, path: str, body: bytes, headers: dict
 
 # ── CLI: resolve channel -> token/chat_id, send with the NO-DUPE policy, log, report ──────────
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_GUARD_PATH = os.path.join(_HERE, "date_weekday_guard.py")
+_PAGER_PATH = os.path.join(_HERE, "weekday_guard_pager.py")
+
+
+def _load_by_path(path, name):
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod   # @dataclass resolves its module via sys.modules
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _weekday_guard(text: str, source: str = "tg_group_send.py"):
+    """Refusal string for a CONFIRMED weekday/date mismatch, else None. A guard crash
+    returns None (send proceeds — fail OPEN, #58089) after a loud warning + page. Never raises."""
+    import sys
+    try:
+        return _load_by_path(_GUARD_PATH, "_date_weekday_guard").refusal_text(text)
+    except Exception as e:  # noqa: BLE001 — fail OPEN + page
+        import traceback
+        tb = traceback.format_exc()
+        err = f"{type(e).__name__}: {e}"
+        print(f"WARNING: weekday/date guard CRASHED in {source} ({err}) — sending UNGUARDED; "
+              "paging orch-console.", file=sys.stderr)
+        try:
+            _load_by_path(_PAGER_PATH, "_weekday_guard_pager").page_guard_crash(source, err, tb)
+        except BaseException as pe:  # noqa: BLE001 — a paging failure never blocks the send
+            print(f"WARNING: could not page orch-console about the guard crash "
+                  f"({type(pe).__name__}: {pe}); sending anyway.", file=sys.stderr)
+        return None
+
+
 def _actionable_ambiguous_message(tag: str, chat_id: str, text: str) -> str:
     preview = (text[:60] + "…") if len(text) > 60 else text
     return (
@@ -141,19 +177,10 @@ def main(argv=None) -> int:
     channel, text = argv[0], argv[1]
 
     # Weekday/date guard (orch-console #57970/#58047): refuse "Thursday 9 October" when
-    # 9 Oct is a Friday, BEFORE touching the DB or Telegram. Fail-CLOSED if it can't run.
-    # Exit 6 = the same code the shell send scripts use for this refusal.
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "_date_weekday_guard", str(Path(__file__).resolve().parent / "date_weekday_guard.py"))
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = mod   # @dataclass resolves its module via sys.modules
-        spec.loader.exec_module(mod)
-        refusal = mod.refusal_text(text)
-    except Exception as e:  # noqa: BLE001 — fail CLOSED
-        refusal = (f"FAIL-CLOSED — weekday/date guard could not run "
-                   f"({type(e).__name__}: {e}); NOT sending.")
+    # 9 Oct is a Friday, BEFORE touching the DB or Telegram. Exit 6 = the same code the
+    # shell send scripts use. Only a CONFIRMED mismatch refuses (#58089): a guard crash
+    # fails OPEN (send proceeds) and pages orch-console.
+    refusal = _weekday_guard(text)
     if refusal:
         print(refusal, file=sys.stderr)
         return 6
