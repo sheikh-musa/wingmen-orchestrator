@@ -9,7 +9,14 @@ on:
 jobs:
   quality:
     name: Lint & Test
-    runs-on: ubuntu-latest
+    # CI-kill programme (op#26617/26622, hc#320): this job carries NO secrets (the
+    # DATABASE_URL step below is an ephemeral local pg17, never a repo secret), so
+    # it is eligible for the Windows-hermetic runner pool (cubeasht via WSL2/Ubuntu)
+    # the same trust-boundary invariant already governs ihsanos's heavy-build jobs
+    # on [self-hosted, heavy-build, win-wsl]. DO NOT MERGE until that runner is
+    # actually registered + proven green here -- until then this must stay
+    # ubuntu-latest (see the rollback note below) or every PR/push red-lines.
+    runs-on: [self-hosted, heavy-build, win-wsl]
 
     # NO DATABASE_URL job-env. It used to be `${{ secrets.DATABASE_URL }}`, but the
     # 09-28 rotation pointed that secret at the PRODUCTION substrate, so every CI run
