@@ -27,6 +27,10 @@ _cant_open_file_guard "$TEXT" || exit 5
 source "$ORCH_DIR/scripts/lib/console_irsyad_client_send_gate.sh"
 _console_irsyad_client_send_gate "$CHANNEL" || exit 4
 
+# 2026-10-07 (orch-console #57970): refuse a weekday paired with the wrong date. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$TEXT" || exit 6
+
 # Resolve token_env_key + chat_id from bot_channels (single source of truth), via
 # scripts/bus_send.dburl (PR#214/#219): the .env FILE wins over the inherited env, so
 # a long-running caller that's still holding a pre-rotation DATABASE_URL doesn't fail

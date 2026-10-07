@@ -33,6 +33,10 @@ _send_tag_shape_guard "$TAG" || exit 2
 source "$ORCH_DIR/scripts/lib/client_send_leak_guard.sh"
 _client_send_leak_guard "$TEXT" || exit 3
 
+# 2026-10-07 (orch-console #57970): refuse a weekday paired with the wrong date. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$TEXT" || exit 6
+
 # Send (chunked at Telegram's 4096-char limit so long replies aren't truncated).
 # token/chat/text passed via env, never argv — keeps the token out of `ps`.
 if TG_TOK="$TOK" TG_CHAT="$CHAT" TG_TEXT="$TEXT" \

@@ -70,6 +70,10 @@ if REDACTED="$(printf '%s' "$TEXT" | PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin
   TEXT="$REDACTED"
 fi
 
+# 2026-10-07 (orch-console #57970): refuse a weekday paired with the wrong date. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$TEXT" || exit 6
+
 # Resolve {{SECRET}} for the SEND ONLY (bus #44378). TEXT (used for the
 # durable log below) keeps the placeholder — the resolved value lives only in
 # SEND_TEXT, passed to the sender via env (never argv, never the log).

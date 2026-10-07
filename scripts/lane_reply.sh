@@ -55,6 +55,10 @@ if REDACTED="$(printf '%s' "$TEXT" | PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin
   TEXT="$REDACTED"
 fi
 
+# 2026-10-07 (orch-console #57970): refuse a weekday paired with the wrong date. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$TEXT" || exit 6
+
 ORCH_DIR="$ORCH_DIR" PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" - "$CHANNEL" "$TEXT" <<'PY'
 import os, re, sys, shutil, subprocess, psycopg
 
