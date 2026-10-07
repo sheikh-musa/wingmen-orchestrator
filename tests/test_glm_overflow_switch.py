@@ -87,3 +87,38 @@ def test_apply_live_lane_pending_when_still_on_glm(tmp_path, monkeypatch):
     r = g.switch_lane("exams", tmp_path, apply=True, run=lambda *a, **k: CP())
     # pointer stays moved so the next run (or any relaunch) lands on Musa; never restored to GLM
     assert r["result"] == "PENDING" and not (tmp_path / ".exams_model").exists()
+
+
+# ── retry of PENDING lanes (found live 2026-10-07: pass 1 left 5 lanes on GLM and the
+#    next run could not see them because their pointers had already moved) ──────────
+def test_pending_lane_is_retried_after_pointer_moved(tmp_path):
+    (tmp_path / ".cosem-port_model.bak-glmoverflow-20261007T124545Z").write_text("glm-5.3")
+    (tmp_path / ".exams_model.bak-glmoverflow-20261007T124545Z").write_text("glm-5.3")
+    argv = {"cosem-port": "glm-5.3", "exams": "claude-sonnet-5"}.get
+    assert g.pending_lanes(tmp_path, argv) == ["cosem-port"]   # exams already switched
+
+
+def test_pending_ignored_when_pointer_restored_or_lane_down(tmp_path):
+    (tmp_path / ".a_model.bak-glmoverflow-20261007T1Z").write_text("glm-5.3")
+    (tmp_path / ".a_model").write_text("claude-opus-4-8")             # operator re-pointed it
+    (tmp_path / ".b_model.bak-glmoverflow-20261007T1Z").write_text("glm-5.3")  # lane down
+    assert g.pending_lanes(tmp_path, {"a": "glm-5.3", "b": None}.get) == []
+
+
+def test_lanes_to_switch_unions_and_dedupes(tmp_path):
+    (tmp_path / ".cosem-adcda-urgent_model").write_text("glm-5.3")
+    (tmp_path / ".cosem-port_model.bak-glmoverflow-20261007T1Z").write_text("glm-5.3")
+    (tmp_path / ".cosem-port_model.bak-glmoverflow-20261007T2Z").write_text("glm-5.3")  # 2 passes
+    got = g.lanes_to_switch(tmp_path, lambda s: "glm-5.3")
+    assert got == ["cosem-adcda-urgent", "cosem-port"]
+
+
+def test_switch_lane_on_pending_lane_relaunches_without_pointer(tmp_path, monkeypatch):
+    monkeypatch.setattr(g, "tmux_up", lambda s: True)
+    monkeypatch.setattr(g, "lane_argv_model", lambda s: "claude-sonnet-5")
+    calls = []
+
+    class CP:
+        returncode, stdout, stderr = 0, "PASS", ""
+    r = g.switch_lane("cosem-port", tmp_path, apply=True, run=lambda *a, **k: (calls.append(a), CP())[1])
+    assert r["result"] == "OK" and calls and not list(tmp_path.glob(".cosem-port_model*"))
