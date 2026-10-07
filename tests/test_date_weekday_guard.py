@@ -171,51 +171,158 @@ def test_cli_warn_only_exits_zero_but_warns(tmp_path):
     assert "17 October 2026 is a Saturday" in r.stderr
 
 
-# ---- shell helper: refuse on mismatch, FAIL CLOSED on crash ------------------
+# ---- shell helper: refuse ONLY a confirmed mismatch; a guard crash FAILS OPEN + pages ----
+# orch-console #58089: a broken safety check must never become an outage of every send.
 
-def _helper(text, orch_dir):
+def _helper(text, orch_dir, tmp_path):
+    """Run a stub SENDER: guard, then 'send' (append to sent.txt). Returns (proc, sent, state)."""
+    sent = tmp_path / "sent.txt"
+    state = tmp_path / "state"
     script = (f'source "{_ROOT}/scripts/lib/date_weekday_guard.sh"\n'
-              '_date_weekday_guard "$1"; echo "rc=$?"')
-    env = dict(os.environ, ORCH_DIR=str(orch_dir), DATE_WEEKDAY_GUARD_TODAY="2026-10-07")
-    return subprocess.run(["/bin/bash", "-c", script, "bash", text],
-                          capture_output=True, text=True, env=env)
+              '_date_weekday_guard "$1" || { echo "rc=$?"; exit 0; }\n'
+              f'printf "%s\\n" "$1" >> "{sent}"; echo "rc=0"')
+    env = dict(os.environ, ORCH_DIR=str(orch_dir), DATE_WEEKDAY_GUARD_TODAY="2026-10-07",
+               WEEKDAY_GUARD_STATE_DIR=str(state),
+               WEEKDAY_GUARD_PAGE_DRYRUN=str(tmp_path / "pages.jsonl"))
+    r = subprocess.run(["/bin/bash", "-c", script, "bash", text],
+                       capture_output=True, text=True, env=env)
+    return r, sent, state
+
+
+def _wait_for(path, secs=10.0):
+    import time
+    end = time.time() + secs
+    while time.time() < end:
+        if path.exists() and path.read_text().strip():
+            return path.read_text()
+        time.sleep(0.1)
+    return ""
 
 
 @pytest.fixture
 def fake_orch(tmp_path):
     """A stand-in ORCH_DIR whose .venv/bin/python3 is this interpreter and whose
     scripts/ is the worktree under test."""
-    (tmp_path / ".venv" / "bin").mkdir(parents=True)
-    (tmp_path / ".venv" / "bin" / "python3").symlink_to(sys.executable)
-    (tmp_path / "scripts").symlink_to(_ROOT / "scripts")
-    return tmp_path
+    orch = tmp_path / "orch"
+    (orch / ".venv" / "bin").mkdir(parents=True)
+    (orch / ".venv" / "bin" / "python3").symlink_to(sys.executable)
+    (orch / "scripts").symlink_to(_ROOT / "scripts")
+    return orch
 
 
-def test_shell_helper_passes_clean(fake_orch):
-    r = _helper("Friday 9 October", fake_orch)
+@pytest.fixture
+def crashing_orch(tmp_path):
+    """ORCH_DIR whose guard module CRASHES on import, with the real pager next to it."""
+    orch = tmp_path / "orch"
+    lib = orch / "scripts" / "lib"
+    lib.mkdir(parents=True)
+    (orch / ".venv" / "bin").mkdir(parents=True)
+    (orch / ".venv" / "bin" / "python3").symlink_to(sys.executable)
+    (lib / "date_weekday_guard.py").write_text("raise RuntimeError('guard exploded on import')\n")
+    (lib / "weekday_guard_pager.py").symlink_to(_ROOT / "scripts" / "lib" / "weekday_guard_pager.py")
+    return orch
+
+
+def test_shell_helper_passes_clean(fake_orch, tmp_path):
+    r, sent, _ = _helper("Friday 9 October", fake_orch, tmp_path)
     assert "rc=0" in r.stdout, r.stderr
+    assert sent.read_text() == "Friday 9 October\n"
 
 
-def test_shell_helper_refuses_mismatch(fake_orch):
-    r = _helper("Thursday 9 October", fake_orch)
+def test_shell_helper_refuses_mismatch_and_does_not_send(fake_orch, tmp_path):
+    r, sent, _ = _helper("Thursday 9 October", fake_orch, tmp_path)
     assert "rc=6" in r.stdout
     assert "REFUSED" in r.stderr
+    assert not sent.exists()
 
 
-def test_shell_helper_fails_closed_when_python_missing(tmp_path):
-    r = _helper("Friday 9 October", tmp_path)   # no .venv/bin/python3 here
-    assert "rc=6" in r.stdout
-    assert "FAIL-CLOSED" in r.stderr
+def test_shell_helper_guard_crash_sends_and_pages(crashing_orch, tmp_path):
+    r, sent, _ = _helper("Friday 9 October", crashing_orch, tmp_path)
+    assert "rc=0" in r.stdout, r.stderr
+    assert sent.read_text() == "Friday 9 October\n"          # the message WAS sent
+    assert "UNGUARDED" in r.stderr
+    page = _wait_for(tmp_path / "pages.jsonl")                # page attempted (background)
+    assert "weekday guard CRASHED — sent unguarded:" in page
+    assert "guard exploded on import" in page
 
 
-def test_shell_helper_fails_closed_when_module_missing(tmp_path):
-    # python exists but the guard module does not: `python -m` exits 1 too — must be
-    # reported as a crash (FAIL-CLOSED), still blocking, never as a pass.
-    (tmp_path / ".venv" / "bin").mkdir(parents=True)
-    (tmp_path / ".venv" / "bin" / "python3").symlink_to(sys.executable)
-    r = _helper("Friday 9 October", tmp_path)
-    assert "rc=6" in r.stdout
-    assert "FAIL-CLOSED" in r.stderr
+def test_shell_helper_python_missing_sends_and_warns(tmp_path):
+    orch = tmp_path / "orch"
+    orch.mkdir()                                              # no .venv/bin/python3 at all
+    r, sent, state = _helper("Thursday 9 October", orch, tmp_path)
+    assert "rc=0" in r.stdout, r.stderr
+    assert sent.exists()                                      # sent anyway (fail OPEN)
+    assert "UNGUARDED" in r.stderr
+    assert "rc=127" in (state / "weekday_guard_crash.log").read_text()
+
+
+def test_shell_helper_module_missing_sends_and_warns(tmp_path):
+    orch = tmp_path / "orch"
+    (orch / ".venv" / "bin").mkdir(parents=True)
+    (orch / ".venv" / "bin" / "python3").symlink_to(sys.executable)
+    r, sent, _ = _helper("Friday 9 October", orch, tmp_path)
+    assert "rc=0" in r.stdout and sent.exists()
+    assert "UNGUARDED" in r.stderr
+
+
+def test_cli_crash_exits_3_not_1(monkeypatch, capsys):
+    monkeypatch.setattr(g, "find_mismatches", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+    assert g.main(["--text", "Thursday 9 October"]) == 3
+    assert "CRASHED" in capsys.readouterr().err
+
+
+# ---- pager: best-effort, bounded, deduped, never raises ----------------------
+
+from scripts.lib import weekday_guard_pager as pager  # noqa: E402
+
+
+def test_pager_sends_the_specified_bus_row(tmp_path):
+    calls = []
+    st = pager.page_guard_crash("tg_send.sh", "RuntimeError: boom", "Traceback...\n",
+                                state_dir=tmp_path, sender=lambda **kw: calls.append(kw) or (1, "t"))
+    assert st == "paged"
+    kw = calls[0]
+    assert kw["from_agent"] == "cc-fleet-health" and kw["to"] == "orch-console"
+    assert kw["priority"] == "P1" and kw["req"] is True
+    assert kw["subject"].startswith("weekday guard CRASHED — sent unguarded:")
+    assert "tg_send.sh" in kw["subject"] and "Traceback" in kw["body"]
+
+
+def test_pager_dedups_15_minutes_per_source(tmp_path):
+    calls = []
+    send = lambda **kw: calls.append(kw) or (1, "t")  # noqa: E731
+    assert pager.page_guard_crash("a.sh", "E", "", state_dir=tmp_path, sender=send) == "paged"
+    assert pager.page_guard_crash("a.sh", "E", "", state_dir=tmp_path, sender=send) == "deduped"
+    assert pager.page_guard_crash("b.sh", "E", "", state_dir=tmp_path, sender=send) == "paged"
+    assert len(calls) == 2
+
+
+def test_pager_failure_never_raises_and_is_logged(tmp_path):
+    def boom(**kw):
+        raise SystemExit("no DATABASE_URL")
+    st = pager.page_guard_crash("a.sh", "E", "", state_dir=tmp_path, sender=boom)
+    assert st.startswith("failed")
+    assert "no DATABASE_URL" in (tmp_path / "weekday_guard_crash.log").read_text()
+    # a failed page does not stamp the dedup window -> the next crash retries
+    calls = []
+    assert pager.page_guard_crash("a.sh", "E", "", state_dir=tmp_path,
+                                  sender=lambda **kw: calls.append(kw) or (1, "t")) == "paged"
+
+
+def test_pager_is_time_bounded(tmp_path):
+    import time
+    t0 = time.time()
+    st = pager.page_guard_crash("a.sh", "E", "", state_dir=tmp_path, timeout=0.5,
+                                sender=lambda **kw: time.sleep(5))
+    assert st == "timeout"
+    assert time.time() - t0 < 2.0
+
+
+def test_pager_truncates_traceback(tmp_path):
+    calls = []
+    pager.page_guard_crash("a.sh", "E", "x" * 50000, state_dir=tmp_path,
+                           sender=lambda **kw: calls.append(kw) or (1, "t"))
+    assert len(calls[0]["body"]) < 4000
 
 
 # ---- bus_send: WARN only, never raises / blocks ------------------------------

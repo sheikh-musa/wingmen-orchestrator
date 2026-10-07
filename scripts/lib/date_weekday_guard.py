@@ -21,7 +21,10 @@ year's).
 
 API:  find_mismatches(text, today=None) -> list[Finding]
 CLI:  python3 -m scripts.lib.date_weekday_guard [--warn-only] [--text TEXT]   (else stdin)
-      exit 0 clean / 1 mismatch (REFUSED) / 3 guard crashed. --warn-only: always 0.
+      exit 0 clean / 1 mismatch (REFUSED) / 3 guard crashed or timed out (5s).
+      --warn-only: always 0.
+Rule (orch-console #58089): ONLY a confirmed mismatch refuses a send. A guard crash fails
+OPEN (the send proceeds) and pages orch-console via scripts/lib/weekday_guard_pager.py.
       DATE_WEEKDAY_GUARD_TODAY=YYYY-MM-DD overrides "today" (tests only).
 Shell: scripts/lib/date_weekday_guard.sh  (_date_weekday_guard "$TEXT" || exit 6)
 """
@@ -36,6 +39,7 @@ from datetime import date, datetime, timedelta
 
 TZ_NAME = "Asia/Dubai"
 RECENT_PAST_DAYS = 14
+CLI_TIMEOUT_SEC = 5   # a hung guard is a crash (exit 3), never a hung send
 
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _WD_ALIASES = {
@@ -155,12 +159,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--warn-only", action="store_true", help="print warnings but exit 0")
     p.add_argument("--text", default=None, help="message text (default: read stdin)")
     args = p.parse_args(argv)
+    import signal
+    import traceback
+
+    def _timeout(signum, frame):
+        raise TimeoutError(f"guard exceeded {CLI_TIMEOUT_SEC}s")
+
+    if hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(CLI_TIMEOUT_SEC)
     try:
         text = args.text if args.text is not None else sys.stdin.read()
         findings = find_mismatches(text)
     except Exception as e:  # noqa: BLE001 — a guard crash must be distinguishable from a refusal
         print(f"date_weekday_guard: CRASHED ({type(e).__name__}: {e})", file=sys.stderr)
+        print(traceback.format_exc()[-1500:], file=sys.stderr)
         return 0 if args.warn_only else 3
+    finally:
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
     if not findings:
         return 0
     label = "WARNING" if args.warn_only else "REFUSED"
