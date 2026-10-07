@@ -214,7 +214,10 @@ def test_roster_lookup_failure_503_fail_closed(hosted, upstream, monkeypatch):
 
 
 def test_upstream_unreachable_is_502_not_a_crash(hosted, upstream, monkeypatch):
-    monkeypatch.setenv("CONSOLE_UPSTREAM_URL", "http://127.0.0.1:9")   # closed port
+    # RFC 6761 .invalid never resolves, so this fails fast on every runner. A closed
+    # loopback port (the old 127.0.0.1:9) HANGS instead of refusing under WSL mirrored
+    # networking (cubeasht self-hosted runner, hc#320) -> httpx.ReadTimeout.
+    monkeypatch.setenv("CONSOLE_UPSTREAM_URL", "http://console-upstream.invalid:9")
     r = httpx.post(hosted + "/api/lane-boot", headers=H(), json={"session": "cosem-tdu", "confirm": "cosem-tdu"}, timeout=10)
     assert r.status_code == 502 and "unreachable" in r.json()["error"]
 
