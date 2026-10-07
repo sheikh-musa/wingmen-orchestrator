@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1086,6 +1087,28 @@ def test_exec_prod_matches_the_shared_ddl_detect_vectors(tmp_path, vector):
         assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
     else:                    # DML-only -> no gate needed
         assert_allowed("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV)
+
+
+def test_vendored_ddl_detect_matches_its_own_pinned_hash():
+    # cc-quality's non-blocking hardening suggestion (#56797): nothing previously
+    # caught a hand-edit of the vendored copy drifting from the hash recorded next
+    # to the import. Extracts the pinned hash straight out of the comment (never
+    # hardcoded here a second time, so this test can't itself go stale against a
+    # legitimate re-sync) and asserts the LIVE vendored file still matches it.
+    import hashlib
+
+    hook_src = HOOK.read_text()
+    m = re.search(r"sha256 ([0-9a-f]{64})\)", hook_src)
+    assert m, "no sha256 pin comment found near the ddl_detect import -- did it move?"
+    pinned_hash = m.group(1)
+
+    vendored_path = HOOK.parent / "ddl_detect.py"
+    live_hash = hashlib.sha256(vendored_path.read_bytes()).hexdigest()
+    assert live_hash == pinned_hash, (
+        f"scripts/hooks/ddl_detect.py has drifted from its pinned hash "
+        f"(live={live_hash}, pinned={pinned_hash}) -- re-copy verbatim from ihsanos "
+        f"and update the pin comment, never hand-edit the vendored copy"
+    )
 
 
 def test_apply_migration_exemption_unchanged_when_exec_prod_also_mentioned():
