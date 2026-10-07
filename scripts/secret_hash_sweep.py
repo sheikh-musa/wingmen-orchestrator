@@ -77,7 +77,10 @@ _PUBLIC_KEY_RE = re.compile(
 # LOWER MIN_SECRET_LEN floor for a short-ish value; everything else must clear
 # MIN_SECRET_LEN_NONCRED. Named explicitly (not inferred from absence of a public-key
 # match) so a brand-new, unrecognized key defaults to the SAFER higher floor.
-_CREDENTIAL_KEY_RE = re.compile(r'(_TOKEN$|_KEY$|_SECRET$|_PASSWORD$|_DSN$)', re.I)
+# orch-console #56425: _ARMED$ added after auditing the ledger's OTHER hash8s turned up
+# STOREFRONT_CONFIRM_PAID_ARMED (65 chars) -- a money-path arming TOKEN, not a boolean,
+# despite the flag-shaped name. Ruled: stay credential-shaped, never allowlisted by name.
+_CREDENTIAL_KEY_RE = re.compile(r'(_TOKEN$|_KEY$|_SECRET$|_PASSWORD$|_DSN$|_ARMED$)', re.I)
 
 # bus #56377: a bare boolean/int config value (AUTO_WAKE_ENABLED=true, CONSOLE_PORT=8787)
 # is never a credential, whatever its key is called or how long it happens to be.

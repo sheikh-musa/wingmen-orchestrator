@@ -613,3 +613,15 @@ def test_reverse_file_verify_only_does_not_write(tmp_path):
     rep = s.reverse_file(str(tr), [(offset, len(value))], value, h8, execute=False)
     assert rep["restored"] == 1   # reports what WOULD happen
     assert tr.read_bytes() == before, "verify-only must never write"
+
+
+def test_armed_suffixed_key_stays_credential_shaped(tmp_path):
+    """orch-console #56425: STOREFRONT_CONFIRM_PAID_ARMED is a money-path arming
+    TOKEN despite the flag-shaped name -- _ARMED$ must stay on the credential floor,
+    never get the higher non-credential length floor (which could exclude a short
+    future arming token the same way NAZIM_MODEL was wrongly excluded before)."""
+    assert s._CREDENTIAL_KEY_RE.search("STOREFRONT_CONFIRM_PAID_ARMED")
+    env = tmp_path / ".env"
+    _write(env, "STOREFRONT_CONFIRM_PAID_ARMED=exactly16chars!!\n")  # 16 chars -> would fail the 20-floor
+    secrets = s.build_secret_set([str(env)])
+    assert b"exactly16chars!!" in secrets
