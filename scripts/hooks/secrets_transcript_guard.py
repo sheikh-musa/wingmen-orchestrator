@@ -69,14 +69,24 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
   PRODUCTION_SILOS copy rather than locking out Bash fleet-wide if that import breaks.
 
   Rule G exemption #2 -- exec_prod (irsyad's sanctioned production path: mgmt-API
-  transport + agent-actor guard, no direct silo DSNs by design -- bus #56599/#56607,
-  2026-10-07). apply_migration.py is not irsyad's path; exec_prod needs the SAME
-  --gate contract. A command invoking exec_prod (basename `exec_prod`, or a script
-  path ending `exec_prod.py`) carrying `--gate <digits>` is exempt outright, mirroring
-  APPLY_MIGRATION_REF_RE's unconditional exemption. Without `--gate`, a DDL-shaped
-  exec_prod invocation still blocks -- exec_prod targets a PRODUCTION_SILOS member BY
-  DESIGN, so unlike the raw-psql/psycopg branch above this does not also need to
-  textually detect a silo ref to know it's hitting one.
+  transport + agent-actor guard, no direct silo DSNs by design -- bus
+  #56599/#56607/#56672/#56684/#56752, 2026-10-07). apply_migration.py is not
+  irsyad's path; exec_prod needs the SAME --gate contract, but a FLAT "block
+  every ungated exec_prod call" (an earlier version of this branch) would ALSO
+  wrongly block the DML-only calls (backfills, dry-runs) exec_prod's own contract
+  never requires a gate for -- re-creating the conflict from the other side
+  (orch-console #56684). So this branch actually CLASSIFIES the SQL, same as
+  exec_prod itself does: `--gate <digits>` present -> exempt outright (trust
+  exec_prod's own bus-validated gate, mirrors APPLY_MIGRATION_REF_RE). Otherwise,
+  parse `--inner-file <path>` from argv (exec_prod's real shape passes SQL via a
+  FILE, never inline -- confirmed against cc-irsyad-coord's actual invocation,
+  bus #56672) and classify its CONTENT via `ddl_detect.is_ddl_shaped` -- the ONE
+  detector shared with exec_prod.py itself (cc-irsyad-2, bus #56752, q#206),
+  vendored verbatim/sha256-pinned above rather than cross-imported, so the hook
+  and exec_prod can never disagree on the same SQL. DDL-shaped -> blocks; DML-only
+  -> allowed. No `--inner-file`, or the file is missing/unreadable, or inline SQL
+  arrives via some other flag -> fail-closed, same posture as every other branch
+  in this file.
 
   Documented limitation (orch-console review, bus #56642): EXEC_PROD_REF_RE is a
   substring match anywhere in the command text, same style as APPLY_MIGRATION_REF_RE
@@ -124,9 +134,23 @@ import os
 import re
 import shlex
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 from secret_shape_patterns import SECRET_VALUE_PATTERNS  # noqa: E402
+# ddl_detect.py: vendored verbatim, sha256-pinned, from sheikh-musa/ihsanos
+# scripts/db/lib/ddl_detect.py (branch feat/q206-exec-prod-gate-contract, commit
+# 4cecf9ef, sha256 a0895e0370751f113fc14dbde3611df53a3360700419ffecf7f3ef3630f9ae25)
+# -- the ONE DDL-shape classifier shared with exec_prod.py itself (cc-irsyad-2,
+# bus #56752, q#206), so the hook and exec_prod's own --gate requirement can never
+# disagree on the same SQL. Vendored rather than cross-imported: importing across
+# repos would depend on where ihsanos happens to be checked out on a given host,
+# which differs between the Mini and gzb. Stdlib-only, zero deps -- cheap enough to
+# import eagerly like secret_shape_patterns, unlike apply_migration.py's lazy
+# psycopg-bearing import below. Re-sync by re-copying ddl_detect.py verbatim +
+# updating this comment's pinned hash if ihsanos's copy ever changes; never
+# hand-edit the vendored copy to diverge from theirs.
+from ddl_detect import is_ddl_shaped  # noqa: E402
 
 BLOCK_MESSAGE = "secret would enter the transcript -- hash it or use the value without printing."
 LITERAL_SECRET_MESSAGE = (
@@ -531,6 +555,10 @@ APPLY_MIGRATION_REF_RE = re.compile(r"\bapply_migration\.py\b")
 EXEC_PROD_REF_RE = re.compile(r"\bexec_prod(?:\.py)?\b")
 # argparse's `type=int` accepts both `--gate 123` and `--gate=123`.
 GATE_FLAG_RE = re.compile(r"--gate[=\s]+\d+")
+# exec_prod's real invocation (cc-irsyad-coord, bus #56672): the SQL is a FILE path,
+# never inline. `\S+` (not a quote-aware parser -- same heuristic-not-parser stance
+# as the rest of this file): good enough for this fleet's unquoted tmp-file paths.
+INNER_FILE_FLAG_RE = re.compile(r"--inner-file[=\s]+(\S+)")
 PG_CONNECT_ENV_VARS = ("PGHOST", "PGDATABASE", "PGUSER", "DATABASE_URL", "PGSERVICE")
 # a psycopg caller never references a shell $VAR (SENSITIVE_VAR_RE's shape) -- it names
 # the var as a Python string literal, `os.environ['NAME']` / `os.environ.get("NAME")`.
@@ -576,14 +604,31 @@ def check_rule_g(command: str) -> str | None:
     if APPLY_MIGRATION_REF_RE.search(command):
         return None  # the sanctioned, gated path -- never what this rule exists to catch
     if EXEC_PROD_REF_RE.search(command):
-        # irsyad's OWN sanctioned path (bus #56599/#56607) -- same --gate contract,
-        # mirrored. Unlike the raw-psql/psycopg branch below, exec_prod targets a
-        # PRODUCTION_SILOS member BY DESIGN, so a DDL-shaped call through it with no
-        # --gate blocks on DDL-shape alone -- no separate silo-ref/pg-tool detection
-        # needed (and exec_prod deliberately carries no raw DSN for that to match on).
+        # irsyad's OWN sanctioned path (bus #56599/#56607/#56684). --gate present ->
+        # trust exec_prod's own bus-validated gate, same as apply_migration.py.
+        # Otherwise: a flat "block every ungated exec_prod call" would ALSO wrongly
+        # block legitimate DML-only calls (backfills, dry-runs) that exec_prod's own
+        # contract (PR#1051) never requires a gate for (orch-console #56684) -- so
+        # the hook has to actually look at what the SQL does, same as exec_prod
+        # itself does. The SQL lives in --inner-file, never inline (cc-irsyad-coord,
+        # bus #56672), so this reads that file and classifies its CONTENT via
+        # ddl_detect.is_ddl_shaped -- the ONE detector shared with exec_prod.py
+        # itself (cc-irsyad-2, bus #56752, q#206), vendored here sha256-pinned (see
+        # ddl_detect.py's own header) rather than cross-imported from another repo's
+        # checkout, so this never depends on where ihsanos happens to be checked out
+        # on a given host. Fail-CLOSED (same posture as every other branch in this
+        # file) on anything this can't classify with confidence: no --inner-file at
+        # all (inline SQL via some other flag), or the file is missing/unreadable.
         if GATE_FLAG_RE.search(command):
             return None
-        if DDL_KEYWORD_RE.search(command):
+        m = INNER_FILE_FLAG_RE.search(command)
+        if not m:
+            return RULE_G_EXEC_PROD_MESSAGE
+        try:
+            inner_sql = Path(m.group(1)).read_text(encoding="utf-8")
+        except OSError:
+            return RULE_G_EXEC_PROD_MESSAGE
+        if is_ddl_shaped(inner_sql):
             return RULE_G_EXEC_PROD_MESSAGE
         return None
     if not DDL_KEYWORD_RE.search(command):

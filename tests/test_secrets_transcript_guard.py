@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 HOOK = Path(__file__).parent.parent / "scripts" / "hooks" / "secrets_transcript_guard.py"
 
 
@@ -992,55 +994,98 @@ def test_allows_ddl_keyword_with_no_pg_tool_or_psycopg_reference():
 
 
 # ---- Rule G exemption #2: exec_prod + --gate (irsyad's sanctioned path, bus
-# #56599/#56607) -- mirrors the apply_migration.py exemption above --------------------
+# #56599/#56607/#56672/#56684/#56752) -- mirrors the apply_migration.py exemption
+# above, but CLASSIFIES the SQL rather than blocking every ungated call outright:
+# a flat block would also wrongly catch exec_prod's DML-only calls (backfills,
+# dry-runs), which never need a gate under exec_prod's own contract (#56684).
+# Real invocation shape per cc-irsyad-coord (#56672): the SQL is a FILE
+# (--inner-file), never inline -- these tests write real temp files and point
+# real exec_prod-shaped commands at them, not synthetic inline SQL.
 
-def test_allows_exec_prod_ddl_against_prod_silo_with_gate_flag():
-    assert_allowed(
-        "Bash",
-        {"command": "python3 scripts/exec_prod.py --silo " + _PROD_REF
-                     + " --sql \"ALTER TABLE foo ADD COLUMN bar int\" --gate 56599"},
-        env=_NEUTRAL_PG_ENV,
-    )
+_EXEC_PROD_BIN = "python3 wingmen-irsyad/scripts/db/exec_prod.py --project-ref " + _PROD_REF
 
 
-def test_allows_exec_prod_ddl_with_gate_flag_equals_form():
+def _exec_prod_cmd(inner_file: str, gate: str = "") -> str:
+    return (_EXEC_PROD_BIN + ' --inner-file ' + str(inner_file)
+            + ' --reason "test" --pr 1051 --migration 435' + gate)
+
+
+def test_allows_exec_prod_ddl_file_with_gate_flag(tmp_path):
+    f = tmp_path / "mig435.sql"
+    f.write_text("ALTER TABLE foo ADD COLUMN bar int;")
+    assert_allowed("Bash", {"command": _exec_prod_cmd(f, " --gate 56599")}, env=_NEUTRAL_PG_ENV)
+
+
+def test_allows_exec_prod_ddl_file_with_gate_flag_equals_form(tmp_path):
     # argparse's `type=int` also accepts `--gate=123`.
-    assert_allowed(
-        "Bash",
-        {"command": "python3 scripts/exec_prod.py --silo " + _PROD_REF
-                     + " --sql \"CREATE TABLE foo (id int)\" --gate=56599"},
-        env=_NEUTRAL_PG_ENV,
-    )
+    f = tmp_path / "mig435.sql"
+    f.write_text("CREATE TABLE foo (id int);")
+    assert_allowed("Bash", {"command": _exec_prod_cmd(f, " --gate=56599")}, env=_NEUTRAL_PG_ENV)
 
 
-def test_blocks_exec_prod_ddl_against_prod_silo_without_gate_flag():
+def test_blocks_exec_prod_ddl_file_without_gate_flag(tmp_path):
+    # THE regression this suite exists to pin: no DDL keyword appears anywhere on
+    # the COMMAND LINE (the SQL is in --inner-file) -- the block must come from
+    # actually reading and classifying the file's content, not from scanning argv.
+    f = tmp_path / "mig435.sql"
+    f.write_text("ALTER TABLE foo ADD COLUMN bar int;")
+    assert_blocked("Bash", {"command": _exec_prod_cmd(f)}, env=_NEUTRAL_PG_ENV,
+                   expect_substr="exec_prod needs --gate")
+
+
+def test_allows_exec_prod_dml_only_file_without_gate(tmp_path):
+    # the exact case a flat "block every ungated exec_prod call" would have broken
+    # -- a DML-only backfill/dry-run needs no gate under exec_prod's own contract.
+    f = tmp_path / "backfill.sql"
+    f.write_text("UPDATE foo SET bar = 1 WHERE id = 2;")
+    assert_allowed("Bash", {"command": _exec_prod_cmd(f)}, env=_NEUTRAL_PG_ENV)
+
+
+def test_blocks_exec_prod_missing_inner_file_without_gate(tmp_path):
+    missing = tmp_path / "does-not-exist.sql"
+    assert_blocked("Bash", {"command": _exec_prod_cmd(missing)}, env=_NEUTRAL_PG_ENV,
+                   expect_substr="exec_prod needs --gate")
+
+
+def test_blocks_exec_prod_with_no_inner_file_flag_at_all():
+    # inline SQL via some other flag (or a malformed invocation) -- no --inner-file
+    # to read at all -- fail-closed, same posture as every other branch here.
     assert_blocked(
         "Bash",
-        {"command": "python3 scripts/exec_prod.py --silo " + _PROD_REF
-                     + " --sql \"ALTER TABLE foo ADD COLUMN bar int\""},
+        {"command": _EXEC_PROD_BIN + ' --sql "ALTER TABLE foo ADD COLUMN bar int" --reason "x"'},
         env=_NEUTRAL_PG_ENV,
         expect_substr="exec_prod needs --gate",
     )
 
 
-def test_blocks_bare_exec_prod_basename_ddl_without_gate():
+def test_blocks_bare_exec_prod_basename_ddl_file_without_gate(tmp_path):
     # basename invocation (no .py), per orch-console's exact phrasing.
+    f = tmp_path / "x.sql"
+    f.write_text("DROP TABLE foo;")
     assert_blocked(
         "Bash",
-        {"command": "exec_prod --silo " + _PROD_REF + " --sql \"DROP TABLE foo\""},
+        {"command": "exec_prod --project-ref " + _PROD_REF + " --inner-file " + str(f) + ' --reason "x"'},
         env=_NEUTRAL_PG_ENV,
         expect_substr="exec_prod needs --gate",
     )
 
 
-def test_allows_exec_prod_non_ddl_without_gate():
-    # a plain read through exec_prod isn't what this rule protects, gate or not --
-    # same shape as test_allows_readonly_psql_against_production_silo above.
-    assert_allowed(
-        "Bash",
-        {"command": "python3 scripts/exec_prod.py --silo " + _PROD_REF + " --sql \"SELECT 1\""},
-        env=_NEUTRAL_PG_ENV,
-    )
+_DDL_VECTORS_PATH = Path(__file__).parent.parent / "scripts" / "hooks" / "ddl_detect_vectors.json"
+_DDL_VECTORS = json.loads(_DDL_VECTORS_PATH.read_text())
+
+
+@pytest.mark.parametrize("vector", _DDL_VECTORS, ids=lambda v: v["label"])
+def test_exec_prod_matches_the_shared_ddl_detect_vectors(tmp_path, vector):
+    # the SAME 14 vectors exec_prod.py's own test suite loads (cc-irsyad-2, #56752)
+    # -- proves the hook's classification can never drift from exec_prod's, because
+    # it IS the same module, not a second implementation that happens to agree today.
+    f = tmp_path / "v.sql"
+    f.write_text(vector["sql"])
+    cmd = _exec_prod_cmd(f)
+    if vector["expected"]:   # DDL-shaped -> needs a gate
+        assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+    else:                    # DML-only -> no gate needed
+        assert_allowed("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV)
 
 
 def test_apply_migration_exemption_unchanged_when_exec_prod_also_mentioned():
