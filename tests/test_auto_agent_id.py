@@ -1002,3 +1002,21 @@ def test_integration_sticky_and_agents_registration():
     with psycopg.connect(DSN, autocommit=True) as c, c.cursor() as cur:
         cur.execute("SELECT id, status FROM agents WHERE id LIKE 'cc-test-family-%%' ORDER BY id")
         assert cur.fetchall() == [("cc-test-family-1", "active"), ("cc-test-family-2", "active")]
+
+
+def test_launcher_resolves_session_and_host_before_allocation():
+    """#57914: launch_dangerous_cc.sh must resolve the tmux session + host BEFORE the
+    auto_agent_id call and pass them, and must not re-assign them afterwards."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "scripts" / "launch_dangerous_cc.sh").read_text()
+    alloc = src.index("-m scripts.lib.auto_agent_id")
+    assert src.index('_ALLOC_TMUX_SESSION="$(resolve_lane_session)"') < alloc
+    assert src.index('CC_HOST="$(') < alloc
+    assert '${_ALLOC_TMUX_SESSION:+--tmux-session "$_ALLOC_TMUX_SESSION"}' in src
+    assert '${_ALLOC_HOST:+--host "$_ALLOC_HOST"}' in src
+    # single assignment site each (reused later, never recomputed)
+    assert src.count('CC_HOST="$(') == 1
+    assert src.count("CC_TMUX_SESSION=\"$_ALLOC_TMUX_SESSION\"") == 1
+    assert 'CC_TMUX_SESSION="${_BODY_MODEL_SESSION:-}"' not in src
+    # the untargeted display-message fallback must NOT feed the allocator
+    assert "_ALLOC_TMUX_SESSION=\"$(tmux display-message" not in src
