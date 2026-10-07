@@ -18,6 +18,10 @@ CHANNEL="${1:?usage: dev_group_edit.sh <channel_key> <message_id> \"<new_text>\"
 MSG_ID="${2:?message_id required}"
 TEXT="${3:?text required}"
 
+# orch-console #57970/#58047: refuse a weekday paired with the wrong date. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$TEXT" || exit 6
+
 ORCH_DIR="$ORCH_DIR" PYTHONPATH="$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" - "$CHANNEL" "$MSG_ID" "$TEXT" <<'PY'
 import os, re, sys, json, urllib.request, urllib.parse, psycopg
 channel, msg_id, text = sys.argv[1], sys.argv[2], sys.argv[3]

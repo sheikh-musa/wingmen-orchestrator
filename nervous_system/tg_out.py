@@ -127,8 +127,50 @@ def _refuse_cant_open_file_framing(cur, channel_key: str, text: str | None) -> N
         )
 
 
+class DateWeekdayRefusal(ValueError):
+    """Raised by enqueue() when the text pairs a weekday with the wrong date
+    ("Thursday 9 October" when 9 Oct 2026 is a Friday — orch-console #57970/#58047).
+    Only a CONFIRMED mismatch raises: a guard crash fails OPEN + pages (#58089)."""
+
+
+_GUARD_LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "lib")
+_GUARD_PATH = os.path.join(_GUARD_LIB, "date_weekday_guard.py")
+_PAGER_PATH = os.path.join(_GUARD_LIB, "weekday_guard_pager.py")
+
+
+def _load_by_path(path, name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod   # @dataclass resolves its module via sys.modules
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _refuse_weekday_date_mismatch(text: str | None, source: str = "tg_out.enqueue") -> None:
+    if not text:
+        return
+    try:
+        refusal = _load_by_path(_GUARD_PATH, "_date_weekday_guard").refusal_text(text)
+    except Exception as e:  # noqa: BLE001 — fail OPEN + page, never block the enqueue
+        import traceback
+        tb = traceback.format_exc()
+        err = f"{type(e).__name__}: {e}"
+        print(f"WARNING: weekday/date guard CRASHED in {source} ({err}) — sending UNGUARDED; "
+              "paging orch-console.", file=sys.stderr)
+        try:
+            _load_by_path(_PAGER_PATH, "_weekday_guard_pager").page_guard_crash(source, err, tb)
+        except BaseException as pe:  # noqa: BLE001
+            print(f"WARNING: could not page orch-console about the guard crash "
+                  f"({type(pe).__name__}: {pe}); sending anyway.", file=sys.stderr)
+        return
+    if refusal:
+        raise DateWeekdayRefusal(refusal)
+
+
 def enqueue(channel_key: str, text: str | None = None, chat_id: int | None = None,
             file_path: str | None = None, reply_to: int | None = None) -> int:
+    _refuse_weekday_date_mismatch(text)
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
         _refuse_cant_open_file_framing(cur, channel_key, text)
