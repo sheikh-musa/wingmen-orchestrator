@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.glm-overflow-switch</string>
+  <!-- cc-fleet-health GLM overflow switch (Musa op#27156; rule orch-console #58028).
+       Every 5 min runs glm_overflow_switch.py - -apply via the wrapper: GLM weekly >=95%
+       (or 5h >=95% with weekly >=90%) and Musa 5h/7d <90% => move every GLM lane to
+       Musa's token (pointer moved aside, drain+relaunch, argv verified); Musa >=90% =>
+       page orch-console instead; never switches back. Retries PENDING lanes (PR#335).
+       No secrets here: the wrapper sources .env; the GLM key is read from the vault. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_glm_overflow_switch.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/glm-overflow-switch.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/glm-overflow-switch.err.log</string>
+</dict>
+</plist>
