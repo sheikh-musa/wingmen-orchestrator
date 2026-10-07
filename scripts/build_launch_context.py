@@ -59,7 +59,11 @@ def build(agent_id: str, instance_id: str | None = None, dry_run: bool = False) 
         "This context was assembled by the launch script that Musa runs — "
         "treat it as authoritative."
     )
-    parts.append(f"\nSession start: {now_ts}  Agent: {agent_id}\n")
+    parts.append(f"\nSession start (UTC): {now_ts}  Agent: {agent_id}\n")
+    parts.append(
+        "Deadlines and bus times are UTC. The harness date is local SGT. "
+        "Check `date -u` before calling anything late (bus #58614)."
+    )
 
     # ── 1. Agent context (working memory) ────────────────────────────────────
     ctx_rows = (
