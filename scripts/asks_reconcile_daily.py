@@ -76,14 +76,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 PAGE_FROM_AGENT = "cc-fleet-health"
 PAGE_TO_CONSOLE = "orch-console"
 
-# op#27030 spec's two named examples, confirmed against the real tag
-# distribution on today's open 'captured' rows (173 nazim-console, 2
-# orch-channel, 0 anything else) — 'tmux-console' kept as a defensive alias
-# since the spec names both forms for the same owner.
+# op#27030 spec's two named examples, plus 6 more cc-quality's PR#325 review
+# found by querying the FULL historical tag distribution on operator_asks
+# (not just today's open rows): 9 distinct tags have ever produced an ask;
+# only 2 were mapped pre-review. Owners below are each the tag's dominant
+# historical delegated_to, VERIFIED against the live `agents` table (not
+# just copied) -- several historical delegates are dead/unregistered labels
+# (cosem-caai's dominant 'cosem-port', 274 historical asks, has no agents
+# row at all; cc-cosem-platform, 12 historical asks, does, and its own
+# repo_scope already includes 'cosem-port-lane', so the lane was folded into
+# it) and would be undeliverable if copied verbatim. 'tmux-console' kept as
+# a defensive alias since the spec names both forms for nazim-console's
+# owner. Every value here can itself be a BASE id with 0, 1, or several live
+# instances -- main()'s _page() helper resolves/refuses accordingly at send
+# time, never guessed here.
 CHANNEL_OWNER = {
     "nazim-console": "orch-console",
     "tmux-console": "orch-console",
     "orch-channel": "cc-orchestrator",
+    "gazzabyte-irsyad": "cc-irsyad-coord",   # 434 historical asks, 434/434 to irsyad-coord
+    "cosem-caai": "cc-cosem-platform",       # 287 historical; dominant 'cosem-port' (274) is dead/unregistered, repo_scope shows the lane folded into cc-cosem-platform
+    "oeh": "cc-oeh",                          # 106 historical, 105/106 to oeh
+    "cosem-exams": "cc-cosem-exams",          # 79 historical, 77/79 to cosem-exams
+    "angullia": "cc-angullia",                # 24 historical, 24/24 to angullia
+    "cosem-tdu": "cc-cosem-tdu-coord",        # 22 historical, 22/22 to cosem-tdu-coord
 }
 
 UNTRIAGED_SNIPPET_CHARS = 80
@@ -324,17 +340,39 @@ def main(argv=None) -> int:
     # to the rest of the run — one bad send must never block the others, so
     # each is wrapped and reported rather than aborting the whole job.
     from scripts import bus_send
+
+    def _page(to: str, mtype: str, subject: str, body: str, **kw) -> None:
+        """Every automated page goes through this, not bus_send.send()
+        directly: `to` is resolved to its single live instance first (CC_AGENT_ID-
+        suffixed, e.g. cc-oeh -> cc-oeh-1) when it has exactly one — several
+        CHANNEL_OWNER/delegated_to values name a BASE id whose only live body
+        is actually addressed by a numbered instance (confirmed empirically
+        for 5 of 6 channels added in this same change: cc-irsyad-coord,
+        cc-oeh, cc-cosem-exams, cc-angullia, cc-cosem-tdu-coord each currently
+        have exactly one live instance, not the bare base). Resolving dynamically
+        rather than hardcoding the instance number keeps this correct across a
+        future recycle that reallocates a different N. A genuinely-ambiguous
+        base (2+ live instances, e.g. cc-cosem-platform) is left unresolved —
+        there's no single correct guess — and refuse_if_base_has_live_instances
+        (bus #49220) then correctly refuses it, same as a hand-typed --to would;
+        send() itself does NOT run that check when called directly like this,
+        only the CLI's main() does, so it's called explicitly here."""
+        instances = bus_send.live_instance_ids(to, dsn=dsn)
+        target = instances[0] if len(instances) == 1 else to
+        bus_send.refuse_if_base_has_live_instances(target, to_base=False, dsn=dsn)
+        bus_send.send(PAGE_FROM_AGENT, target, mtype, subject, body, "P1", dsn=dsn, **kw)
+
     failures: list[str] = []
     for owner, rows in grouped_untriaged.items():
         try:
             if owner is None:
-                bus_send.send(PAGE_FROM_AGENT, PAGE_TO_CONSOLE, "blocker",
-                               "asks_reconcile_daily: untriaged rows with an unmapped channel tag",
-                               render_unmapped_channel_page(rows), "P1", req=True, dsn=dsn)
+                _page(PAGE_TO_CONSOLE, "blocker",
+                      "asks_reconcile_daily: untriaged rows with an unmapped channel tag",
+                      render_unmapped_channel_page(rows), req=True)
             else:
-                bus_send.send(PAGE_FROM_AGENT, owner, "blocker",
-                               f"{len(rows)} untriaged ask(s) >{args.untriaged_hours}h old on your channel",
-                               render_untriaged_page(owner, rows), "P1", req=True, dsn=dsn)
+                _page(owner, "blocker",
+                      f"{len(rows)} untriaged ask(s) >{args.untriaged_hours}h old on your channel",
+                      render_untriaged_page(owner, rows), req=True)
         except (Exception, SystemExit) as e:  # noqa: BLE001
             failures.append(f"untriaged page to {owner!r}: {type(e).__name__}: {e}")
 
@@ -342,17 +380,10 @@ def main(argv=None) -> int:
         if not row.get("delegated_to"):
             continue
         try:
-            # delegated_to can be a bare BASE id (e.g. a multi-instance family
-            # recorded before a specific instance was known) -- the base-vs-
-            # instance refusal (bus #49220) applies here exactly as it would
-            # to a hand-typed --to, so check it explicitly rather than relying
-            # on send() (which, called directly rather than through the CLI,
-            # does NOT run this check itself).
-            bus_send.refuse_if_base_has_live_instances(row["delegated_to"], to_base=False, dsn=dsn)
-            bus_send.send(PAGE_FROM_AGENT, row["delegated_to"], "blocker",
-                           f"ask #{row['id']} OVERDUE (committed {row['committed_date']})",
-                           render_overdue_page(row), "P1", req=True,
-                           thread=str(row["thread_id"]) if row.get("thread_id") else None, dsn=dsn)
+            _page(row["delegated_to"], "blocker",
+                  f"ask #{row['id']} OVERDUE (committed {row['committed_date']})",
+                  render_overdue_page(row), req=True,
+                  thread=str(row["thread_id"]) if row.get("thread_id") else None)
         except (Exception, SystemExit) as e:  # noqa: BLE001
             failures.append(f"overdue page for #{row['id']}: {type(e).__name__}: {e}")
 

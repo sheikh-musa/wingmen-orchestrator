@@ -396,6 +396,7 @@ def test_main_apply_closes_drift_and_sends_summary(operator_ledger_db, monkeypat
     import scripts.bus_send as bs
     monkeypatch.setattr(bs, "send", _fake_send)
     monkeypatch.setattr(bs, "refuse_if_base_has_live_instances", lambda *a, **k: None)
+    monkeypatch.setattr(bs, "live_instance_ids", lambda *a, **k: [])
 
     with psycopg.connect(operator_ledger_db) as c:
         rid = _insert_ask(c, triage_state="done", closed_at=None)
@@ -422,6 +423,7 @@ def test_main_apply_pages_untriaged_owner(operator_ledger_db, monkeypatch):
     import scripts.bus_send as bs
     monkeypatch.setattr(bs, "send", _fake_send)
     monkeypatch.setattr(bs, "refuse_if_base_has_live_instances", lambda *a, **k: None)
+    monkeypatch.setattr(bs, "live_instance_ids", lambda *a, **k: [])
 
     with psycopg.connect(operator_ledger_db) as c:
         msg = _insert_message(c, tag="nazim-console")
@@ -434,6 +436,37 @@ def test_main_apply_pages_untriaged_owner(operator_ledger_db, monkeypatch):
     assert len(pages) == 1
 
 
+def test_main_apply_resolves_owner_to_its_single_live_instance(operator_ledger_db, monkeypatch):
+    """The real gap this fixes: CHANNEL_OWNER maps a tag to a BASE id
+    (e.g. cc-oeh), but several of those bases currently have exactly one
+    live NN-suffixed instance (cc-oeh-1) and NOT the bare base itself --
+    sending to the unresolved base would hit the exact base-vs-instance
+    refusal (bus #49220) this same script already guards against for
+    OVERDUE. _page() must resolve to the single live instance automatically."""
+    sent = []
+
+    def _fake_send(from_agent, to, mtype, subject, body, priority, **kw):
+        sent.append(to)
+        return 1, "thread-uuid"
+
+    def _fake_live_instances(base_to, dsn=None):
+        return ["cc-oeh-1"] if base_to == "cc-oeh" else []
+
+    import scripts.bus_send as bs
+    monkeypatch.setattr(bs, "send", _fake_send)
+    monkeypatch.setattr(bs, "live_instance_ids", _fake_live_instances)
+    monkeypatch.setattr(bs, "refuse_if_base_has_live_instances", lambda *a, **k: None)
+
+    with psycopg.connect(operator_ledger_db) as c:
+        msg = _insert_message(c, tag="oeh")
+        _insert_ask(c, triage_state="captured", source_msg_id=msg, created_at=_ago(hours=30))
+
+    rc = ard.main(["--apply"])
+    assert rc == 0
+    assert "cc-oeh-1" in sent
+    assert "cc-oeh" not in sent
+
+
 def test_main_apply_pages_unmapped_channel_to_console_and_flags_in_subject(operator_ledger_db, monkeypatch):
     sent = []
 
@@ -444,6 +477,7 @@ def test_main_apply_pages_unmapped_channel_to_console_and_flags_in_subject(opera
     import scripts.bus_send as bs
     monkeypatch.setattr(bs, "send", _fake_send)
     monkeypatch.setattr(bs, "refuse_if_base_has_live_instances", lambda *a, **k: None)
+    monkeypatch.setattr(bs, "live_instance_ids", lambda *a, **k: [])
 
     with psycopg.connect(operator_ledger_db) as c:
         msg = _insert_message(c, tag="some-unmapped-tag")
@@ -468,6 +502,7 @@ def test_main_apply_one_send_failure_does_not_block_the_others(operator_ledger_d
     import scripts.bus_send as bs
     monkeypatch.setattr(bs, "send", _flaky_send)
     monkeypatch.setattr(bs, "refuse_if_base_has_live_instances", lambda *a, **k: None)
+    monkeypatch.setattr(bs, "live_instance_ids", lambda *a, **k: [])
 
     with psycopg.connect(operator_ledger_db) as c:
         msg = _insert_message(c, tag="some-unmapped-tag")  # routes the blocker to orch-console
@@ -499,6 +534,7 @@ def test_main_apply_overdue_page_checked_against_base_instance_refusal(operator_
 
     import scripts.bus_send as bs
     monkeypatch.setattr(bs, "refuse_if_base_has_live_instances", _fake_refuse)
+    monkeypatch.setattr(bs, "live_instance_ids", lambda *a, **k: [])
     monkeypatch.setattr(bs, "send", _fake_send)
 
     with psycopg.connect(operator_ledger_db) as c:
@@ -518,6 +554,7 @@ def test_main_apply_overdue_page_skips_cleanly_when_base_has_live_instances(oper
         raise SystemExit(f"bus_send: REFUSED — '{to}' is a BASE id with live instance(s)")
 
     monkeypatch.setattr(bs, "refuse_if_base_has_live_instances", _refuse)
+    monkeypatch.setattr(bs, "live_instance_ids", lambda *a, **k: [])
     monkeypatch.setattr(bs, "send", lambda *a, **k: (1, "t"))
 
     with psycopg.connect(operator_ledger_db) as c:
