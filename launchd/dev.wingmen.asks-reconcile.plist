@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.asks-reconcile</string>
+  <key>ProgramArguments</key><array><string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string><string>/Users/sheikhmusa/wingmen/orchestrator/scripts/asks_reconcile_daily.py</string><string>--apply</string></array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <!-- Musa op#27030 (bus #57235): daily operator_asks ledger reconciliation,
+       scheduled BEFORE dev.wingmen.asks-daily-digest.plist's 09:00 Abu Dhabi
+       slot so a day's close/flag pass always lands ahead of the digest the
+       operator reads. Target: 04:30 UTC. StartCalendarInterval fires in the
+       HOST's local time zone, which is Asia/Singapore (UTC+8) on this Mac
+       Mini -- NOT UTC (same host-TZ gotcha as bus #44286 on the digest plist
+       itself: 04:30 UTC = 12:30 SGT -> Hour=12/Minute=30 below, 30 minutes
+       ahead of the digest's Hour=13/Minute=0). If this host's system clock
+       is ever moved to a different zone, recompute Hour/Minute here too
+       (and check tests/test_launchd_uae_calendar_hours.py's sibling
+       coverage). Loaded + owned by cc-fleet-health (ops-charter ledger
+       upkeep, same shape as fleet_health.py's agent_status sweep) --
+       landing this file alone does NOT make it live; a separate go-live
+       step loads it. --apply is baked into ProgramArguments deliberately:
+       this plist IS the go-live decision, there is no separate "dry-run
+       cron" to maintain -- dry-run stays available for a manual
+       `asks_reconcile_daily.py` re-run any time. -->
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/asks-reconcile.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/asks-reconcile.log</string>
+</dict>
+</plist>
