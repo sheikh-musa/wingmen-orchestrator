@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -149,6 +150,57 @@ def refuse_if_base_has_live_instances(to: str, to_base: bool, dsn: str | None = 
         f"({', '.join(instances)}); they poll their own instance address, not "
         f"the base, so this row would sit unread. Did you mean --to {instances[0]} "
         f"[{age}]? Pass --to-base to send to the base address anyway."
+    )
+
+
+def _agent_status_row(agent_id: str, dsn: str | None = None) -> tuple | None:
+    """(base_agent_id, is_live) for one agent_status row, or None if it has none.
+    `is_live` uses the same floor as live_instance_ids: status IN ('idle','working')
+    and a heartbeat inside _LIVE_INSTANCE_WINDOW."""
+    import psycopg2
+
+    conn = psycopg2.connect(dsn or dburl(os.environ))
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT base_agent_id, "
+        f"(status IN ('idle','working') AND last_heartbeat > now() - interval '{_LIVE_INSTANCE_WINDOW}') "
+        "FROM agent_status WHERE agent_id=%s",
+        (agent_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def refuse_if_instance_stale_and_base_live(to: str, dsn: str | None = None) -> None:
+    """Mirror of refuse_if_base_has_live_instances, inverted (bus #58614 item 1).
+    Motivating case: bus row #58568 (cc-irsyad-3 -> cc-quality-1, an urgent review
+    request) was stranded because cc-quality-1 had gone stale while its base
+    cc-quality was the live singleton actually polling -- a numbered instance id
+    can retire (per the ORCH-TOPOLOGY-001/op#27235 relaunch pattern) without the
+    sender knowing. Refuses and points at the live base instead of silently
+    forwarding -- same shape as the base-has-live-instances guard, so a sender
+    always gets an explicit, correctable address rather than a guess.
+
+    Cheap pre-check: only a to_agent shaped like a numbered instance (ends in
+    -<digits>) can possibly be this case -- skips the DB round-trip for every
+    other address, including write-only producers (commitment-sweeper, ...)
+    that refuse_if_undeliverable already handles with zero DB calls."""
+    if not re.search(r"-\d+$", to or ""):
+        return
+    row = _agent_status_row(to, dsn=dsn)
+    if row is None:
+        return  # no status row at all -- not this guard's concern
+    base_agent_id, to_is_live = row
+    if not base_agent_id or base_agent_id == to or to_is_live:
+        return  # `to` IS the base, or the instance itself is live -- nothing stranded
+    base_row = _agent_status_row(base_agent_id, dsn=dsn)
+    if base_row is None or not base_row[1]:
+        return  # the base isn't live either -- no live address to redirect to
+    age = _heartbeat_age_str(to, dsn=dsn)
+    raise SystemExit(
+        f"bus_send: REFUSED — '{to}' is a retired/stale instance [{age}]; its base "
+        f"'{base_agent_id}' is the live singleton now. Use --to {base_agent_id} instead."
     )
 
 
@@ -431,6 +483,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     refuse_if_base_has_live_instances(args.to, args.to_base)
+    refuse_if_instance_stale_and_base_live(args.to)
 
     row_id, thread_id = send(
         from_agent, args.to, args.type, args.subject, body, args.priority,
