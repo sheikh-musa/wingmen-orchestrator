@@ -213,6 +213,137 @@ def pick_sub_tag(base: str, active: list[str]) -> str:
     return f"{base}-{n}"
 
 
+def _parse_sub_tag_n(base: str, agent_id: str | None) -> int | None:
+    """Return N for '{base}-{N}' (1.._MAX_SUB_TAGS_PER_BASE), else None."""
+    prefix = f"{base}-"
+    if not agent_id or not agent_id.startswith(prefix):
+        return None
+    suffix = agent_id[len(prefix):]
+    if not suffix.isdigit():
+        return None
+    n = int(suffix)
+    if n < 1 or n > _MAX_SUB_TAGS_PER_BASE:
+        return None
+    return n
+
+
+def choose_sticky_sub_tag(
+    base: str,
+    tmux_session: str | None,
+    session_rows: list[str],
+    live_rows: list[tuple[str, str | None]],
+) -> str | None:
+    """Sticky instance id per tmux session (orch-console bus #57914). Pure — no DB.
+
+    A lane that relaunches (token switch / reset / model change → `claude --resume`
+    in the SAME tmux session) must get its OLD `<base>-N` back: the resumed
+    conversation still believes it is that id. Before this, the allocator handed out
+    whatever N was smallest-free, so ids swapped between lanes (2026-10-07:
+    cosem-platform-adhoc -5 → -3, cosem-platform-author -6 → -5, and bus rows for -5
+    reached the wrong lane).
+
+    Args:
+        session_rows: agent_ids of agent_status rows whose tmux_session == ours
+            (same host when known), MOST RECENT heartbeat first, any age/status.
+        live_rows: (agent_id, tmux_session) of LIVE rows of this base (fresh
+            heartbeat, status != 'offline').
+
+    Returns the most recent parsable session row's id iff its N is not held by a
+    LIVE row belonging to a DIFFERENT tmux session (a live row with NULL session
+    counts as different — it cannot be proven to be us). Only the most recent
+    parsable row is considered: we never fall through to an OLDER id this session
+    held, because the conversation only remembers the latest one. None → caller
+    falls back to smallest-free.
+    """
+    if not tmux_session:
+        return None
+    candidate = None
+    for aid in session_rows:
+        if _parse_sub_tag_n(base, aid) is not None:
+            candidate = aid
+            break
+        # unparsable / out-of-range ids (foreign prefix family, e.g. cc-cosem vs
+        # cc-cosem-platform-3) are skipped, not treated as the latest claim
+    if candidate is None:
+        return None
+    for aid, sess in live_rows:
+        if aid == candidate and sess != tmux_session:
+            return None
+    return candidate
+
+
+def alive_session_claims(
+    base: str,
+    claim_rows: list[tuple[str, str | None, str | None]],
+    tmux_session: str | None,
+    host: str | None,
+    alive_sessions: set[str],
+) -> list[str]:
+    """Ids a still-ALIVE other tmux session believes it owns. Pure — no DB.
+
+    claim_rows: (agent_id, tmux_session, host) of this base's agent_status rows
+    (any age/status). alive_sessions: tmux session names currently alive on THIS
+    host. An id counts as claimed iff its row names a session that is (a) not ours,
+    (b) in alive_sessions, and (c) on this host — a row whose host differs from a
+    KNOWN host of ours is a same-named session elsewhere and is NOT a claim; an
+    unknown host on either side is treated conservatively as a claim (the cost is
+    only skipping one N). Rows with NULL session never claim.
+    """
+    out: list[str] = []
+    if not alive_sessions:
+        return out
+    for aid, sess, row_host in claim_rows:
+        if not sess or sess == tmux_session or sess not in alive_sessions:
+            continue
+        if host and row_host and row_host != host:
+            continue
+        if _parse_sub_tag_n(base, aid) is None:
+            continue
+        out.append(aid)
+    return out
+
+
+def pick_sub_tag_for_session(
+    base: str,
+    live_rows: list[tuple[str, str | None]],
+    session_rows: list[str],
+    claim_rows: list[tuple[str, str | None, str | None]],
+    tmux_session: str | None,
+    host: str | None,
+    alive_sessions: set[str],
+) -> tuple[str, bool]:
+    """Full allocation decision. Pure — no DB. Returns (sub_tag, sticky_reused).
+
+    No tmux_session → byte-identical to pick_sub_tag over the live ids (today's
+    behaviour). With a session: sticky reuse first; else smallest-free, ALSO
+    skipping any N an alive other session still believes it owns.
+    """
+    live_ids = [aid for aid, _ in live_rows]
+    if not tmux_session:
+        return pick_sub_tag(base, live_ids), False
+    sticky = choose_sticky_sub_tag(base, tmux_session, session_rows, live_rows)
+    if sticky is not None:
+        return sticky, True
+    claimed = alive_session_claims(base, claim_rows, tmux_session, host, alive_sessions)
+    return pick_sub_tag(base, live_ids + claimed), False
+
+
+def list_alive_tmux_sessions() -> set[str]:
+    """Names of tmux sessions alive on this host. FAIL-SAFE: tmux missing / no
+    server / timeout / any error → empty set (the claim check then degrades to
+    today's behaviour). Must never crash the launcher."""
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#S"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return set()
+        return {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    except Exception:  # noqa: BLE001 — advisory input only, never state-changing
+        return set()
+
+
 class LockTimeoutError(RuntimeError):
     """Raised when pg_try_advisory_xact_lock fails to acquire within retry budget.
 
@@ -227,6 +358,7 @@ class AllocResult:
     """Result of allocate_sub_tag_and_register: chosen sub-tag + siblings seen pre-allocation."""
     sub_tag: str
     siblings: list[str]  # active siblings *before* this allocation
+    sticky: bool = False  # True iff the tmux session's previous id was reused (#57914)
 
 
 def allocate_sub_tag_and_register(
@@ -234,6 +366,9 @@ def allocate_sub_tag_and_register(
     dsn: str,
     repo: str,
     stale_cutoff_minutes: int = 30,
+    tmux_session: str | None = None,
+    host: str | None = None,
+    alive_sessions: set[str] | None = None,
 ) -> AllocResult:
     """Atomically: acquire global advisory lock, scan active siblings of `base`,
     pick next-free N, UPSERT agent_status for the picked sub-tag with GUC set.
@@ -262,6 +397,18 @@ def allocate_sub_tag_and_register(
         repo: repo name for scope_repos (single-element array for now).
         stale_cutoff_minutes: rows whose last_heartbeat is older than this
             count as reclaimable (their N is considered free).
+        tmux_session: the launching lane's tmux session (#57914). When given,
+            the allocation is STICKY: the session's most recent id is reused
+            unless a live row in a different session holds it; the fallback
+            also skips ids an alive other session still claims. None → today's
+            smallest-free behaviour, byte-identical.
+        host: this host's fleet id; scopes the sticky lookup + claim check.
+        alive_sessions: tmux session names alive on this host (claim check).
+
+    The allocated instance id is also registered in `agents` (idempotent,
+    ON CONFLICT DO NOTHING) in the same TX: agent_messages.to_agent has an FK
+    to agents.id, and an unregistered instance (cc-cosem-adcda-4, 2026-10-07)
+    makes every bus send to it fail with ForeignKeyViolation.
 
     Returns:
         AllocResult(sub_tag, siblings_seen_before_alloc).
@@ -344,15 +491,56 @@ def allocate_sub_tag_and_register(
 
             cur.execute(
                 """
-                SELECT agent_id FROM agent_status
+                SELECT agent_id, tmux_session FROM agent_status
                  WHERE agent_id LIKE %s
                    AND last_heartbeat > now() - (%s * interval '1 minute')
                    AND status != 'offline'
                 """,
                 (f"{base}-%", stale_cutoff_minutes),
             )
-            siblings = [r[0] for r in cur.fetchall()]
-            sub_tag = pick_sub_tag(base, siblings)
+            live_rows = [(r[0], r[1]) for r in cur.fetchall()]
+            siblings = [aid for aid, _ in live_rows]
+
+            session_rows: list[str] = []
+            claim_rows: list[tuple[str, str | None, str | None]] = []
+            if tmux_session:
+                # #57914 sticky lookup — same TX, lock held. Any age, any status;
+                # most recent first. Host-scoped when known (a same-named session
+                # on another host is a different lane).
+                sql = (
+                    "SELECT agent_id FROM agent_status"
+                    " WHERE base_agent_id = %s AND agent_id LIKE %s"
+                    " AND tmux_session = %s"
+                )
+                params: tuple = (base, f"{base}-%", tmux_session)
+                if host:
+                    sql += " AND host = %s"
+                    params += (host,)
+                sql += " ORDER BY last_heartbeat DESC NULLS LAST"
+                cur.execute(sql, params)
+                session_rows = [r[0] for r in cur.fetchall()]
+                cur.execute(
+                    "SELECT agent_id, tmux_session, host FROM agent_status"
+                    " WHERE base_agent_id = %s AND agent_id LIKE %s"
+                    " AND tmux_session IS NOT NULL",
+                    (base, f"{base}-%"),
+                )
+                claim_rows = [(r[0], r[1], r[2]) for r in cur.fetchall()]
+
+            sub_tag, sticky = pick_sub_tag_for_session(
+                base, live_rows, session_rows, claim_rows,
+                tmux_session, host, alive_sessions or set(),
+            )
+
+            # #57914 follow-up: register the instance id in `agents` so the
+            # agent_messages.to_agent FK accepts bus rows addressed to it.
+            # Matches the hand-registered instance rows (repo_scope '{}' default
+            # → the single-owner repo_scope trigger is a no-op; status 'active').
+            cur.execute(
+                "INSERT INTO agents (id, display_name, status)"
+                " VALUES (%s, %s, 'active') ON CONFLICT (id) DO NOTHING",
+                (sub_tag, f"{sub_tag} -- auto-registered instance (launcher)"),
+            )
 
             # Still inside TX with lock held — UPSERT agent_status.
             # GUC must equal NEW.agent_id (sub-tag) per ARCH-035 trigger.
@@ -385,7 +573,7 @@ def allocate_sub_tag_and_register(
             )
         conn.commit()  # releases advisory lock
 
-    return AllocResult(sub_tag=sub_tag, siblings=siblings)
+    return AllocResult(sub_tag=sub_tag, siblings=siblings, sticky=sticky)
 
 
 def scan_overlap_siblings(
@@ -500,6 +688,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="skip pwd→family resolution, use this base (test hook only)",
     )
+    parser.add_argument(
+        "--tmux-session",
+        default=None,
+        help="launching lane's tmux session; makes the allocation sticky per session (#57914)",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="this host's fleet id (scopes the sticky lookup); optional",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -530,12 +728,20 @@ def main(argv: list[str] | None = None) -> int:
     # isolated — never blocks the launch). Complements the watchdog global sweep.
     reap_stale_family(base, args.dsn)
 
+    tmux_session = (args.tmux_session or "").strip() or None
+    host = (args.host or "").strip() or None
+    # Only probe tmux when a session was given — no session = today's behaviour.
+    alive_sessions = list_alive_tmux_sessions() if tmux_session else set()
+
     try:
         result = allocate_sub_tag_and_register(
             base=base,
             dsn=args.dsn,
             repo=args.repo,
             stale_cutoff_minutes=args.stale_minutes,
+            tmux_session=tmux_session,
+            host=host,
+            alive_sessions=alive_sessions,
         )
     except LockTimeoutError as e:
         sys.stderr.write(f"LockTimeoutError: {e}\n")
@@ -555,6 +761,8 @@ def main(argv: list[str] | None = None) -> int:
             "base": base,
             "override_used": override_used,  # CAI-RESP-258 audit: provenance of identity
             "siblings": list(result.siblings),
+            "sticky": bool(getattr(result, "sticky", False)),  # #57914 provenance
+            "tmux_session": tmux_session,
             # list of [agent_id, heartbeat_age_s] pairs (JSON-serialised tuples).
             "overlap_warnings": [[aid, age] for (aid, age) in overlaps],
         },

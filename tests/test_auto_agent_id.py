@@ -34,6 +34,9 @@ def _clean_test_family_rows():
         with psycopg.connect(DSN, autocommit=True) as c:
             with c.cursor() as cur:
                 cur.execute("DELETE FROM agent_status WHERE agent_id LIKE 'cc-test-family-%%'")
+                # #57914 follow-up: allocation now also auto-registers the instance
+                # id in `agents` (agent_messages.to_agent FK) — purge those too.
+                cur.execute("DELETE FROM agents WHERE id LIKE 'cc-test-family-%%'")
     def _ensure_family():
         with psycopg.connect(DSN, autocommit=True) as c:
             with c.cursor() as cur:
@@ -637,3 +640,365 @@ def test_base_override_refuses_unknown_cc_family():
 
 def test_base_override_accepts_known_cc_family():
     assert auto_agent_id.validate_base_override("cc-reviewer", _KNOWN) == "cc-reviewer"
+
+
+# ── Sticky instance ids per tmux session (orch-console bus #57914) ────────────
+# Incident 2026-10-07: tmux session cosem-platform-adhoc was cc-cosem-platform-5,
+# relaunched (claude --resume, SAME session) and was handed -3 (smallest free);
+# cosem-platform-author then took -5. The resumed conversation still believed it was
+# -5, so bus rows addressed to -5 went to the wrong lane. Allocation must be sticky
+# per tmux session.
+
+B = "cc-cosem-platform"
+
+
+class TestChooseStickySubTag:
+    def test_reuses_most_recent_session_row(self):
+        # adhoc's last row was -5 (stale/offline after relaunch); nobody else holds -5.
+        got = auto_agent_id.choose_sticky_sub_tag(
+            B, "cosem-platform-adhoc",
+            session_rows=[f"{B}-5", f"{B}-2"],
+            live_rows=[(f"{B}-1", "cosem-port"), (f"{B}-3", "cosem-platform-calendar")],
+        )
+        assert got == f"{B}-5"
+
+    def test_reuses_when_held_live_by_same_session(self):
+        # Relaunch within the 30-min live window: the old row is still 'working' and
+        # fresh, but it belongs to OUR session — that's us, reuse it.
+        got = auto_agent_id.choose_sticky_sub_tag(
+            B, "cosem-platform-adhoc",
+            session_rows=[f"{B}-5"],
+            live_rows=[(f"{B}-5", "cosem-platform-adhoc")],
+        )
+        assert got == f"{B}-5"
+
+    def test_refused_when_held_live_by_different_session(self):
+        got = auto_agent_id.choose_sticky_sub_tag(
+            B, "cosem-platform-adhoc",
+            session_rows=[f"{B}-5"],
+            live_rows=[(f"{B}-5", "cosem-platform-author")],
+        )
+        assert got is None
+
+    def test_refused_when_held_live_by_sessionless_row(self):
+        # A live holder with NULL tmux_session cannot be proven to be us — refuse.
+        got = auto_agent_id.choose_sticky_sub_tag(
+            B, "cosem-platform-adhoc",
+            session_rows=[f"{B}-5"],
+            live_rows=[(f"{B}-5", None)],
+        )
+        assert got is None
+
+    def test_no_session_rows_returns_none(self):
+        assert auto_agent_id.choose_sticky_sub_tag(B, "s", [], []) is None
+
+    def test_no_session_given_returns_none(self):
+        assert auto_agent_id.choose_sticky_sub_tag(B, None, [f"{B}-5"], []) is None
+        assert auto_agent_id.choose_sticky_sub_tag(B, "", [f"{B}-5"], []) is None
+
+    def test_only_most_recent_parsable_row_considered(self):
+        # Foreign-family / unparsable ids are skipped; the first PARSABLE row wins,
+        # and if it is refused we do NOT fall through to an older row.
+        got = auto_agent_id.choose_sticky_sub_tag(
+            "cc-cosem", "s",
+            session_rows=["cc-cosem-platform-3", "cc-cosem-7", "cc-cosem-2"],
+            live_rows=[],
+        )
+        assert got == "cc-cosem-7"
+        got = auto_agent_id.choose_sticky_sub_tag(
+            B, "s",
+            session_rows=[f"{B}-7", f"{B}-2"],
+            live_rows=[(f"{B}-7", "other")],
+        )
+        assert got is None
+
+    def test_out_of_namespace_n_refused(self):
+        got = auto_agent_id.choose_sticky_sub_tag(B, "s", [f"{B}-0", f"{B}-21"], [])
+        assert got is None
+
+
+class TestAliveSessionClaims:
+    def test_alive_other_session_claims_its_n(self):
+        claimed = auto_agent_id.alive_session_claims(
+            B,
+            claim_rows=[(f"{B}-1", "cosem-port", "Sheikhs-Mini"),
+                        (f"{B}-2", "dead-session", "Sheikhs-Mini")],
+            tmux_session="new-lane", host="Sheikhs-Mini",
+            alive_sessions={"cosem-port", "new-lane"},
+        )
+        assert claimed == [f"{B}-1"]
+
+    def test_own_session_not_a_claim(self):
+        claimed = auto_agent_id.alive_session_claims(
+            B, [(f"{B}-1", "me", "h")], tmux_session="me", host="h", alive_sessions={"me"},
+        )
+        assert claimed == []
+
+    def test_other_host_same_name_not_a_claim(self):
+        # alive_sessions are THIS host's tmux sessions; a row on gzb with the same
+        # session name is a different session.
+        claimed = auto_agent_id.alive_session_claims(
+            B, [(f"{B}-1", "lane", "gzb")], tmux_session="me", host="Sheikhs-Mini",
+            alive_sessions={"lane"},
+        )
+        assert claimed == []
+
+    def test_unknown_host_is_conservative(self):
+        # Row host NULL, or our host unknown -> treat a live-named session as a claim.
+        assert auto_agent_id.alive_session_claims(
+            B, [(f"{B}-1", "lane", None)], "me", "Sheikhs-Mini", {"lane"}) == [f"{B}-1"]
+        assert auto_agent_id.alive_session_claims(
+            B, [(f"{B}-1", "lane", "gzb")], "me", None, {"lane"}) == [f"{B}-1"]
+
+    def test_null_session_rows_never_claim(self):
+        assert auto_agent_id.alive_session_claims(
+            B, [(f"{B}-1", None, "h")], "me", "h", {"lane"}) == []
+
+    def test_empty_alive_set_no_claims(self):
+        assert auto_agent_id.alive_session_claims(
+            B, [(f"{B}-1", "lane", "h")], "me", "h", set()) == []
+
+
+class TestPickSubTagForSession:
+    def test_sticky_reuse(self):
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B,
+            live_rows=[(f"{B}-1", "cosem-port"), (f"{B}-2", "cal")],
+            session_rows=[f"{B}-5"],
+            claim_rows=[],
+            tmux_session="cosem-platform-adhoc", host="Sheikhs-Mini", alive_sessions=set(),
+        )
+        assert (sub, sticky) == (f"{B}-5", True)
+
+    def test_sticky_refused_falls_back_to_smallest_free(self):
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B,
+            live_rows=[(f"{B}-1", "cosem-port"), (f"{B}-5", "cosem-platform-author")],
+            session_rows=[f"{B}-5"],
+            claim_rows=[],
+            tmux_session="cosem-platform-adhoc", host="Sheikhs-Mini", alive_sessions=set(),
+        )
+        assert (sub, sticky) == (f"{B}-2", False)
+
+    def test_fallback_skips_n_claimed_by_alive_other_session(self):
+        # -2's row is stale (not live) but its tmux session is still alive on this
+        # host — that lane still believes it is -2. Do NOT hand -2 out.
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B,
+            live_rows=[(f"{B}-1", "cosem-port")],
+            session_rows=[],
+            claim_rows=[(f"{B}-1", "cosem-port", "Sheikhs-Mini"),
+                        (f"{B}-2", "cosem-platform-calendar", "Sheikhs-Mini"),
+                        (f"{B}-3", "long-dead", "Sheikhs-Mini")],
+            tmux_session="brand-new", host="Sheikhs-Mini",
+            alive_sessions={"cosem-port", "cosem-platform-calendar", "brand-new"},
+        )
+        assert (sub, sticky) == (f"{B}-3", False)
+
+    def test_incident_replay(self):
+        # 2026-10-07: adhoc held -5, author held -6. Both relaunch. Each must keep its N.
+        claim = [(f"{B}-1", "cosem-port", "M"), (f"{B}-2", "cal", "M"),
+                 (f"{B}-4", "cal2", "M"),
+                 (f"{B}-5", "cosem-platform-adhoc", "M"),
+                 (f"{B}-6", "cosem-platform-author", "M")]
+        live = [(f"{B}-1", "cosem-port"), (f"{B}-2", "cal"), (f"{B}-4", "cal2")]
+        alive = {"cosem-port", "cal", "cal2", "cosem-platform-adhoc", "cosem-platform-author"}
+        a = auto_agent_id.pick_sub_tag_for_session(
+            B, live, [f"{B}-5"], claim, "cosem-platform-adhoc", "M", alive)
+        b = auto_agent_id.pick_sub_tag_for_session(
+            B, live, [f"{B}-6"], claim, "cosem-platform-author", "M", alive)
+        assert a == (f"{B}-5", True)
+        assert b == (f"{B}-6", True)
+
+    @pytest.mark.parametrize("live", [
+        [], [f"{B}-1"], [f"{B}-1", f"{B}-2", f"{B}-4"], [f"{B}-2", "cc-other-1"],
+    ])
+    def test_no_session_identical_to_pick_sub_tag(self, live):
+        rows = [(a, "some-session") for a in live]
+        claims = [(f"{B}-{n}", "alive-sess", "M") for n in range(1, 6)]
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B, rows, [f"{B}-9"], claims, None, "M", {"alive-sess"})
+        assert sub == auto_agent_id.pick_sub_tag(B, live)
+        assert sticky is False
+
+
+# ── allocate_sub_tag_and_register SQL wiring (fake psycopg, no DB) ────────────
+
+class _ScriptedCur:
+    """Fake cursor: answers each SELECT by substring match, records every execute."""
+
+    def __init__(self, answers):
+        self.answers = answers  # list of (substring, rows)
+        self.executed = []
+        self._last = []
+
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+
+    def execute(self, sql, params=None):
+        self.executed.append((" ".join(sql.split()), params))
+        self._last = []
+        for needle, rows in self.answers:
+            if needle in sql:
+                self._last = rows
+                break
+
+    def fetchone(self):
+        return self._last[0] if self._last else None
+
+    def fetchall(self):
+        return list(self._last)
+
+
+class _ScriptedConn:
+    def __init__(self, cur): self.cur = cur; self.committed = False
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+    def cursor(self): return self.cur
+    def commit(self): self.committed = True
+
+
+def _run_alloc(monkeypatch, answers, **kw):
+    import psycopg
+    cur = _ScriptedCur([("pg_try_advisory_xact_lock", [(True,)])] + answers)
+    conn = _ScriptedConn(cur)
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: conn)
+    res = auto_agent_id.allocate_sub_tag_and_register(
+        base=B, dsn="fake", repo="cosem-platform", **kw)
+    assert conn.committed
+    return res, cur
+
+
+def test_alloc_registers_instance_in_agents_table(monkeypatch):
+    """#57914 follow-up: cc-cosem-adcda-4 was allocated but never registered in
+    `agents`, so every bus send to it hit agent_messages_to_agent_fkey. The
+    allocation TX must INSERT the instance id into agents (idempotent)."""
+    res, cur = _run_alloc(monkeypatch, [("AND status != 'offline'", [(f"{B}-1", "x")])])
+    assert res.sub_tag == f"{B}-2"
+    ins = [(s, p) for s, p in cur.executed if s.startswith("INSERT INTO agents")]
+    assert len(ins) == 1
+    sql, params = ins[0]
+    assert "ON CONFLICT (id) DO NOTHING" in sql
+    assert params[0] == f"{B}-2"
+    assert params[1] == f"{B}-2 -- auto-registered instance (launcher)"
+    assert "'active'" in sql
+    # registered BEFORE the agent_status upsert, inside the same (locked) TX
+    order = [s.split()[2] for s, _ in cur.executed if s.startswith("INSERT INTO")]
+    assert order == ["agents", "agent_status"]
+
+
+def test_alloc_without_session_issues_no_sticky_queries(monkeypatch):
+    res, cur = _run_alloc(monkeypatch, [("AND status != 'offline'", [])])
+    assert res.sub_tag == f"{B}-1"
+    assert res.sticky is False
+    assert not any("tmux_session =" in s for s, _ in cur.executed)
+
+
+def test_alloc_with_session_reuses_sticky_n(monkeypatch):
+    res, cur = _run_alloc(
+        monkeypatch,
+        [
+            ("AND status != 'offline'", [(f"{B}-1", "cosem-port")]),
+            ("AND tmux_session = %s", [(f"{B}-5",)]),
+            ("AND tmux_session IS NOT NULL", [(f"{B}-5", "cosem-platform-adhoc", "M")]),
+        ],
+        tmux_session="cosem-platform-adhoc", host="M", alive_sessions={"cosem-platform-adhoc"},
+    )
+    assert res.sub_tag == f"{B}-5"
+    assert res.sticky is True
+    sticky_q = [(s, p) for s, p in cur.executed if "AND tmux_session = %s" in s]
+    assert sticky_q and sticky_q[0][1][-1] == "M"  # host-scoped when host known
+    assert "ORDER BY last_heartbeat DESC" in sticky_q[0][0]
+
+
+def test_cli_passes_tmux_session_and_host(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(auto_agent_id, "load_family_map", lambda dsn: {"orchestrator": "cc-orchestrator"})
+    monkeypatch.setattr(auto_agent_id, "resolve_base_agent_id", lambda pwd, m: "cc-orchestrator")
+    monkeypatch.setattr(auto_agent_id, "reap_stale_family", lambda base, dsn: None)
+    monkeypatch.setattr(auto_agent_id, "scan_overlap_siblings", lambda **k: [])
+    monkeypatch.setattr(auto_agent_id, "list_alive_tmux_sessions", lambda: {"a", "b"})
+
+    def _alloc(**k):
+        seen.update(k)
+        return auto_agent_id.AllocResult(sub_tag="cc-orchestrator-3", siblings=[], sticky=True)
+    monkeypatch.setattr(auto_agent_id, "allocate_sub_tag_and_register", _alloc)
+    rc = auto_agent_id.main(["--pwd", "/x", "--repo", "orchestrator", "--dsn", "d",
+                             "--tmux-session", "lane-a", "--host", "M"])
+    assert rc == 0
+    assert seen["tmux_session"] == "lane-a"
+    assert seen["host"] == "M"
+    assert seen["alive_sessions"] == {"a", "b"}
+
+
+def test_cli_without_session_does_not_probe_tmux(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(auto_agent_id, "load_family_map", lambda dsn: {})
+    monkeypatch.setattr(auto_agent_id, "resolve_base_agent_id", lambda pwd, m: "cc-orchestrator")
+    monkeypatch.setattr(auto_agent_id, "reap_stale_family", lambda base, dsn: None)
+    monkeypatch.setattr(auto_agent_id, "scan_overlap_siblings", lambda **k: [])
+
+    def _boom():
+        raise AssertionError("tmux probed without --tmux-session")
+    monkeypatch.setattr(auto_agent_id, "list_alive_tmux_sessions", _boom)
+
+    def _alloc(**k):
+        seen.update(k)
+        return auto_agent_id.AllocResult(sub_tag="cc-orchestrator-1", siblings=[])
+    monkeypatch.setattr(auto_agent_id, "allocate_sub_tag_and_register", _alloc)
+    assert auto_agent_id.main(["--pwd", "/x", "--repo", "o", "--dsn", "d"]) == 0
+    assert seen.get("tmux_session") is None
+
+
+def test_list_alive_tmux_sessions_fails_safe(monkeypatch):
+    def _raise(*a, **k):
+        raise FileNotFoundError("tmux")
+    monkeypatch.setattr(auto_agent_id.subprocess, "run", _raise)
+    assert auto_agent_id.list_alive_tmux_sessions() == set()
+
+    class _R:
+        returncode = 1
+        stdout = ""
+    monkeypatch.setattr(auto_agent_id.subprocess, "run", lambda *a, **k: _R())
+    assert auto_agent_id.list_alive_tmux_sessions() == set()
+
+    class _R2:
+        returncode = 0
+        stdout = "a\nb\n\n"
+    monkeypatch.setattr(auto_agent_id.subprocess, "run", lambda *a, **k: _R2())
+    assert auto_agent_id.list_alive_tmux_sessions() == {"a", "b"}
+
+
+@pytestmark_integration
+def test_integration_sticky_and_agents_registration():
+    """Live-DB: a relaunch in the same tmux session gets its old N back, and the
+    instance id lands in `agents`."""
+    import psycopg
+    r1 = auto_agent_id.allocate_sub_tag_and_register(
+        base="cc-test-family", dsn=DSN, repo="orchestrator",
+        tmux_session="test-sticky-A", host="test-host", alive_sessions=set())
+    r2 = auto_agent_id.allocate_sub_tag_and_register(
+        base="cc-test-family", dsn=DSN, repo="orchestrator",
+        tmux_session="test-sticky-B", host="test-host", alive_sessions=set())
+    assert (r1.sub_tag, r2.sub_tag) == ("cc-test-family-1", "cc-test-family-2")
+    # stamp tmux_session/host the way agent_status_stamp.py would at boot
+    with psycopg.connect(DSN, autocommit=True) as c, c.cursor() as cur:
+        for sub, sess in ((r1.sub_tag, "test-sticky-A"), (r2.sub_tag, "test-sticky-B")):
+            cur.execute("SELECT set_config('app.current_agent_id', %s, false)", (sub,))
+            cur.execute("UPDATE agent_status SET tmux_session=%s, host='test-host' "
+                        "WHERE agent_id=%s", (sess, sub))
+        # lane A goes offline (relaunch)
+        cur.execute("SELECT set_config('app.current_agent_id', %s, false)", (r1.sub_tag,))
+        cur.execute("UPDATE agent_status SET status='offline' WHERE agent_id=%s", (r1.sub_tag,))
+    # A relaunches — must get -1 back even though smallest-free would also be -1;
+    # make it non-trivial: B relaunching must get -2, not the free -1.
+    with psycopg.connect(DSN, autocommit=True) as c, c.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id', %s, false)", (r2.sub_tag,))
+        cur.execute("UPDATE agent_status SET status='offline' WHERE agent_id=%s", (r2.sub_tag,))
+    rb = auto_agent_id.allocate_sub_tag_and_register(
+        base="cc-test-family", dsn=DSN, repo="orchestrator",
+        tmux_session="test-sticky-B", host="test-host", alive_sessions=set())
+    assert rb.sub_tag == "cc-test-family-2" and rb.sticky is True
+    with psycopg.connect(DSN, autocommit=True) as c, c.cursor() as cur:
+        cur.execute("SELECT id, status FROM agents WHERE id LIKE 'cc-test-family-%%' ORDER BY id")
+        assert cur.fetchall() == [("cc-test-family-1", "active"), ("cc-test-family-2", "active")]
