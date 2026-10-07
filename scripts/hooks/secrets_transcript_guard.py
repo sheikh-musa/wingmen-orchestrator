@@ -68,6 +68,16 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
   gates already matched, not on every tool call, and fails soft to an inline-literal
   PRODUCTION_SILOS copy rather than locking out Bash fleet-wide if that import breaks.
 
+  Rule G exemption #2 -- exec_prod (irsyad's sanctioned production path: mgmt-API
+  transport + agent-actor guard, no direct silo DSNs by design -- bus #56599/#56607,
+  2026-10-07). apply_migration.py is not irsyad's path; exec_prod needs the SAME
+  --gate contract. A command invoking exec_prod (basename `exec_prod`, or a script
+  path ending `exec_prod.py`) carrying `--gate <digits>` is exempt outright, mirroring
+  APPLY_MIGRATION_REF_RE's unconditional exemption. Without `--gate`, a DDL-shaped
+  exec_prod invocation still blocks -- exec_prod targets a PRODUCTION_SILOS member BY
+  DESIGN, so unlike the raw-psql/psycopg branch above this does not also need to
+  textually detect a silo ref to know it's hitting one.
+
 Exit 2 + stderr = refused, the reason is shown to the model (same contract as the
 irsyad guard). Fail-closed on unparseable input.
 
@@ -504,6 +514,13 @@ DDL_KEYWORD_RE = re.compile(
 )
 PSYCOPG_REF_RE = re.compile(r"\bpsycopg2?\b")
 APPLY_MIGRATION_REF_RE = re.compile(r"\bapply_migration\.py\b")
+# bus #56599/#56607: irsyad's sanctioned production path. Matches a bare `exec_prod`
+# basename invocation OR any `exec_prod.py` path reference, same literal-substring
+# style as APPLY_MIGRATION_REF_RE (not anchored to leading-command position -- this
+# heuristic doesn't parse the pipeline, it looks for the name anywhere in the text).
+EXEC_PROD_REF_RE = re.compile(r"\bexec_prod(?:\.py)?\b")
+# argparse's `type=int` accepts both `--gate 123` and `--gate=123`.
+GATE_FLAG_RE = re.compile(r"--gate[=\s]+\d+")
 PG_CONNECT_ENV_VARS = ("PGHOST", "PGDATABASE", "PGUSER", "DATABASE_URL", "PGSERVICE")
 # a psycopg caller never references a shell $VAR (SENSITIVE_VAR_RE's shape) -- it names
 # the var as a Python string literal, `os.environ['NAME']` / `os.environ.get("NAME")`.
@@ -518,6 +535,10 @@ RULE_G_MESSAGE = (
     "run this through scripts/apply_migration.py --silo <ref> --gate <bus-id> instead "
     "(op#22669 item 3 / bus #44135/#53764; ddl_coverage_watchdog.py only catches this "
     "AFTER the fact)."
+)
+RULE_G_EXEC_PROD_MESSAGE = (
+    "exec_prod needs --gate <bus-id> for DDL -- same contract as apply_migration.py's "
+    "--gate (op#22669 item 3; mirrored for exec_prod per bus #56599/#56607)."
 )
 
 
@@ -544,6 +565,17 @@ def _resolved_values_for_silo_check(command: str, include_pg_connect_env: bool) 
 def check_rule_g(command: str) -> str | None:
     if APPLY_MIGRATION_REF_RE.search(command):
         return None  # the sanctioned, gated path -- never what this rule exists to catch
+    if EXEC_PROD_REF_RE.search(command):
+        # irsyad's OWN sanctioned path (bus #56599/#56607) -- same --gate contract,
+        # mirrored. Unlike the raw-psql/psycopg branch below, exec_prod targets a
+        # PRODUCTION_SILOS member BY DESIGN, so a DDL-shaped call through it with no
+        # --gate blocks on DDL-shape alone -- no separate silo-ref/pg-tool detection
+        # needed (and exec_prod deliberately carries no raw DSN for that to match on).
+        if GATE_FLAG_RE.search(command):
+            return None
+        if DDL_KEYWORD_RE.search(command):
+            return RULE_G_EXEC_PROD_MESSAGE
+        return None
     if not DDL_KEYWORD_RE.search(command):
         return None
 

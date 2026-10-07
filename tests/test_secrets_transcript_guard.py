@@ -991,6 +991,69 @@ def test_allows_ddl_keyword_with_no_pg_tool_or_psycopg_reference():
     )
 
 
+# ---- Rule G exemption #2: exec_prod + --gate (irsyad's sanctioned path, bus
+# #56599/#56607) -- mirrors the apply_migration.py exemption above --------------------
+
+def test_allows_exec_prod_ddl_against_prod_silo_with_gate_flag():
+    assert_allowed(
+        "Bash",
+        {"command": "python3 scripts/exec_prod.py --silo " + _PROD_REF
+                     + " --sql \"ALTER TABLE foo ADD COLUMN bar int\" --gate 56599"},
+        env=_NEUTRAL_PG_ENV,
+    )
+
+
+def test_allows_exec_prod_ddl_with_gate_flag_equals_form():
+    # argparse's `type=int` also accepts `--gate=123`.
+    assert_allowed(
+        "Bash",
+        {"command": "python3 scripts/exec_prod.py --silo " + _PROD_REF
+                     + " --sql \"CREATE TABLE foo (id int)\" --gate=56599"},
+        env=_NEUTRAL_PG_ENV,
+    )
+
+
+def test_blocks_exec_prod_ddl_against_prod_silo_without_gate_flag():
+    assert_blocked(
+        "Bash",
+        {"command": "python3 scripts/exec_prod.py --silo " + _PROD_REF
+                     + " --sql \"ALTER TABLE foo ADD COLUMN bar int\""},
+        env=_NEUTRAL_PG_ENV,
+        expect_substr="exec_prod needs --gate",
+    )
+
+
+def test_blocks_bare_exec_prod_basename_ddl_without_gate():
+    # basename invocation (no .py), per orch-console's exact phrasing.
+    assert_blocked(
+        "Bash",
+        {"command": "exec_prod --silo " + _PROD_REF + " --sql \"DROP TABLE foo\""},
+        env=_NEUTRAL_PG_ENV,
+        expect_substr="exec_prod needs --gate",
+    )
+
+
+def test_allows_exec_prod_non_ddl_without_gate():
+    # a plain read through exec_prod isn't what this rule protects, gate or not --
+    # same shape as test_allows_readonly_psql_against_production_silo above.
+    assert_allowed(
+        "Bash",
+        {"command": "python3 scripts/exec_prod.py --silo " + _PROD_REF + " --sql \"SELECT 1\""},
+        env=_NEUTRAL_PG_ENV,
+    )
+
+
+def test_apply_migration_exemption_unchanged_when_exec_prod_also_mentioned():
+    # defensive: apply_migration.py's own exemption must still short-circuit first,
+    # even if the command text also happens to mention exec_prod (e.g. in a comment).
+    assert_allowed(
+        "Bash",
+        {"command": "python3 scripts/apply_migration.py 100 --silo " + _PROD_REF
+                     + " --gate 123  # supersedes the old exec_prod rehearsal"},
+        env=_NEUTRAL_PG_ENV,
+    )
+
+
 # ---- fail-closed on unparseable input ---------------------------------------------
 
 def test_fails_closed_on_bad_json():
