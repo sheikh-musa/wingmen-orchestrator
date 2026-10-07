@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.ci-queue-watchdog</string>
+  <!-- cc-fleet-health CI queued-job watchdog (orch-console bus #57952). Pages
+       orch-console (P1 rr, deduped 60 min/finding) when a job on the self-hosted
+       'cubeasht' runner label has been QUEUED >30 min, or when the cubeasht runner is
+       OFFLINE while a cubeasht job is queued (offline + nothing queued = log only).
+       Fail-LOUD: any gh error exits non-zero. The wrapper sources .env for GH_TOKEN
+       (gh's stored keyring token is not valid under launchd) + DATABASE_URL, and sets
+       PATH so /usr/local/bin/gh is found (no secrets in this plist).
+       NOT loaded/symlinked yet — scheduling is wired after review. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/run_ci_queue_watchdog.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/ci-queue-watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/ci-queue-watchdog.err.log</string>
+</dict>
+</plist>
