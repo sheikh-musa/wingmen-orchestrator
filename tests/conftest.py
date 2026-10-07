@@ -191,6 +191,44 @@ def operator_ledger_db(pg_dsn, monkeypatch):
     return pg_dsn
 
 
+@pytest.fixture
+def reaper_db(pg_dsn):
+    """Ephemeral Postgres carrying the real agent_messages/coord_dispatch_queue columns
+    scripts/irsyad_worker_reaper.py's DB-querying helpers (_has_pending_order,
+    _stale_rr_only_skip, _already_surfaced_recently, _surface_stale_rr_to_coord) need --
+    same reuse-the-session-scoped-cluster idiom as operator_ledger_db, kept separate
+    because the reaper's schema slice doesn't overlap that fixture's (bus #58159 item
+    #339 fast-follow). Schema is dropped and recreated per-test."""
+    assert_dsn_is_not_production(pg_dsn)
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("""
+            CREATE TABLE agent_messages (
+                id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                from_agent        text NOT NULL,
+                to_agent          text NOT NULL,
+                message_type      text NOT NULL,
+                subject           text NOT NULL,
+                body              text NOT NULL,
+                requires_response boolean NOT NULL DEFAULT false,
+                responded_at      timestamptz,
+                priority          text NOT NULL,
+                created_at        timestamptz NOT NULL DEFAULT now()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE coord_dispatch_queue (
+                id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                title       text NOT NULL,
+                claimed_by  text,
+                done_at     timestamptz,
+                created_at  timestamptz NOT NULL DEFAULT now()
+            )
+        """)
+    return pg_dsn
+
+
 def mock_supabase_chain(final_data=None, *, count=None):
     """Build a MagicMock that mimics supabase chained query builder.
 

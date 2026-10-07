@@ -144,6 +144,49 @@ def _has_pending_order(conn, agent_id: str) -> bool:
         return True
 
 
+def _stale_rr_only_skip(conn, agent_id: str, stale_hours: int = 24) -> list[int]:
+    """Ids of unresponded requires_response rows addressed to agent_id older than
+    stale_hours (bus #58316). Deliberately separate from _has_pending_order: this never
+    feeds the reap decision (age must NOT shrink the idle-proof gap, bus fleet-health
+    #58271 -- an instance-addressed row stays pending no matter how old). It only tells
+    the caller whether a SKIP is attributable to a stale order, so coord can be nudged."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM agent_messages WHERE to_agent=%s AND requires_response=true "
+                "AND responded_at IS NULL AND created_at < now() - (%s * interval '1 hour')",
+                (agent_id, stale_hours))
+            return [r[0] for r in cur.fetchall()]
+    except Exception as exc:
+        print(f"  [worker-reaper] WARN: stale-rr check failed for {agent_id} ({exc})")
+        return []
+
+
+def _already_surfaced_recently(conn, agent_id: str, within_hours: int = 24) -> bool:
+    """Dedup: one surfaced row per worker per within_hours, not one per reaper tick."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM agent_messages WHERE from_agent='cc-orchestrator' "
+            "AND to_agent='cc-irsyad-coord' AND subject LIKE %s "
+            "AND created_at > now() - (%s * interval '1 hour') LIMIT 1",
+            (f"stale requires_response blocking reap: {agent_id}%", within_hours))
+        return cur.fetchone() is not None
+
+
+def _surface_stale_rr_to_coord(conn, agent_id: str, session: str, row_ids: list[int]) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,"
+            "requires_response,priority) VALUES ('cc-orchestrator','cc-irsyad-coord','update',%s,%s,false,'P2')",
+            (f"stale requires_response blocking reap: {agent_id} ({session})",
+             f"{agent_id} ({session}) is idle + wound-down past grace, but reap is held back "
+             f"solely by unresponded requires_response row(s) older than 24h: "
+             f"{', '.join(str(i) for i in row_ids)}. The reap decision does not change with age "
+             "-- an unacked order still blocks reap -- this is a surface-only nudge so coord can "
+             "clear or re-ack it. Deduped: at most one of these per worker per 24h."))
+    conn.commit()
+
+
 def _reap(conn, agent_id: str, session: str, dry: bool) -> None:
     if dry:
         print(f"  [dry-run] would reap {agent_id} ({session}): kill-session + fleet_lanes down + clear status")
@@ -177,6 +220,12 @@ def run_once(grace_min: int, dry: bool) -> int:
             if not should_reap(is_worker_session(session), busy, wd, pending):
                 print(f"[worker-reaper] {agent_id} ({session}) SKIP (worker={is_worker_session(session)} "
                       f"busy={busy} wound_down_past_grace={wd} has_pending_order={pending})")
+                if is_worker_session(session) and busy is False and wd and pending:
+                    stale_ids = _stale_rr_only_skip(conn, agent_id)
+                    if stale_ids and not _already_surfaced_recently(conn, agent_id):
+                        _surface_stale_rr_to_coord(conn, agent_id, session, stale_ids)
+                        print(f"  [worker-reaper] surfaced {len(stale_ids)} stale requires_response "
+                              f"row(s) for {agent_id} to cc-irsyad-coord")
                 continue
             print(f"[worker-reaper] {agent_id} ({session}) idle + wound-down > {grace_min}m -> reaping")
             _reap(conn, agent_id, session, dry)
