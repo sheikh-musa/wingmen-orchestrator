@@ -781,8 +781,8 @@ fi
 #   CLAUDE_CODE_SUBAGENT_MODEL env > .<session>_subagent_model > .fleet_subagent_model > (unset)
 # DEFAULT-OFF by construction: no env + no marker + no fleet file -> the var is never
 # exported -> subagents inherit the lane's main model (byte-identical to today). CAI-1170
-# (CAI-RESP-1440: storefront-only; cc-quality moved to its own sonnet-5 pin, unclamped):
-# the FULL auditor (cc-storefront) REFUSES every tier and its subagent var is
+# (op#27235/#58436: clamp re-pointed storefront -> cc-quality; cc-storefront now unclamped):
+# the FULL auditor (cc-quality) REFUSES every tier and its subagent var is
 # explicitly UNSET (scrubs an inherited value too), and an UNRESOLVED session fails CLOSED
 # (unset + loud warn) — both from the #152 review. apply_subagent_model is SOURCED (it
 # export/unsets in THIS shell), keyed on the shared-resolver session above.

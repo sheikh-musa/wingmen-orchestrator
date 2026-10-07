@@ -27,15 +27,15 @@ VENV_PY="$ORCH_DIR/.venv/bin/python3"
 # core brains, pass --all to include; nazim/fleet-health/fleet-console = Mini
 # infrastructure bodies, never engineer lanes) is computed LAZILY inside the --live
 # block below (op#42896/#42909 P1) — it reads the shared protected_tmux_sessions()
-# registry via a tiny CLI instead of its own copy, MINUS $AUDITOR_LANES (cc-storefront
-# gets its own, more nuanced carve-out right below, not a blanket skip).
+# registry via a tiny CLI instead of its own copy, MINUS $AUDITOR_LANES (the FULL
+# auditor gets its own, more nuanced carve-out right below, not a blanket skip).
 # Deferred to the --live block so a plain `fleet_model.sh <model>` (no --live) never
 # needs the DB at all.
-# FULL-tier auditor (cai CAI-RESP-1170, narrowed to storefront-only by CAI-RESP-1440):
-# cc-storefront renders governance verdicts on money-path / live-tenant work, which
-# requires being PINNED to claude-opus-4-8 EXACTLY (cc-quality moved to its own
-# .quality_model sonnet-5 pin per op#24365 — its verdicts now need cc-storefront's
-# opus confirmation pass). A blanket `fleet_model.sh sonnet --live` conservation flip
+# FULL-tier auditor (cai CAI-RESP-1170; confirm role re-pointed storefront -> cc-quality
+# by op#27235/#58436): the FULL auditor renders governance verdicts on money-path /
+# live-tenant work, which requires being PINNED to claude-opus-4-8 EXACTLY. cc-quality
+# now holds that clamp (SSOT below); cc-storefront moved OFF it onto .fleet_model
+# sonnet-5. A blanket `fleet_model.sh sonnet --live` conservation flip
 # once swept the auditors to sonnet silently and downgraded a live money-path audit
 # (2026-08-19 incident). Carve-out: a
 # --live flip whose target is NOT exactly claude-opus-4-8 SKIPS these lanes — refusing BOTH a
