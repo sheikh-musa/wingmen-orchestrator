@@ -353,3 +353,15 @@ def test_main_send_failure_exits_nonzero(monkeypatch, tmp_path, capsys):
     assert w.main(["--state-file", str(sf)]) != 0
     assert "db down" in capsys.readouterr().err
     assert not sf.exists() or json.loads(sf.read_text()) == {}
+
+
+# ── truncation check (live false FAIL-LOUD 2026-10-07: "total_count=3 > page size 2") ──
+def test_short_page_with_lagging_total_count_is_not_truncation():
+    data = {"total_count": 3, "workflow_runs": [{"id": 1}, {"id": 2}]}
+    assert w._list_field(data, "workflow_runs", "p") == [{"id": 1}, {"id": 2}]
+
+
+def test_full_page_with_more_remaining_still_fails_loud():
+    data = {"total_count": w.PER_PAGE + 5, "workflow_runs": [{"id": i} for i in range(w.PER_PAGE)]}
+    with pytest.raises(w.WatchdogError, match="pagination not"):
+        w._list_field(data, "workflow_runs", "p")
