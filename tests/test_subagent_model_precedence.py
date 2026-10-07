@@ -150,10 +150,11 @@ def test_apply_unresolved_session_scrubs_inherited_env(orch):
 
 
 # ── #152 review test (b) + auditor clamp: real exported env is ABSENT ─────────────
-# CAI-RESP-1440 narrowed AUDITOR_LANES to storefront only — quality is no longer
-# clamped here (see the quality-specific tests below).
+# op#27235/#58436 re-pointed AUDITOR_LANES storefront -> quality: quality is the
+# clamped auditor now, storefront is no longer clamped here (see the storefront-
+# specific tests below).
 
-@pytest.mark.parametrize("sess", ["storefront", "cc-storefront"])
+@pytest.mark.parametrize("sess", ["quality", "cc-quality"])
 def test_apply_auditor_marker_not_exported(orch, sess):
     orch_dir, write = orch
     write(f".{sess}_subagent_model", _HAIKU)
@@ -166,7 +167,7 @@ def test_apply_auditor_scrubs_inherited_env(orch):
     """THE #152 (b): auditor session + CLAUDE_CODE_SUBAGENT_MODEL pre-set in the PARENT env
     -> the child env must NOT inherit it (explicit unset), with a loud clamp warning."""
     orch_dir, _ = orch
-    childval, err = _apply_childenv("storefront", orch_dir, env_model=_HAIKU)
+    childval, err = _apply_childenv("quality", orch_dir, env_model=_HAIKU)
     assert childval == "__ABSENT__", f"auditor inherited {childval!r} from parent env — clamp bypassed"
     assert "1170" in err or "AUDITOR" in err, f"clamp must warn LOUD; stderr={err!r}"
 
@@ -174,15 +175,15 @@ def test_apply_auditor_scrubs_inherited_env(orch):
 def test_apply_auditor_fleet_not_exported(orch):
     orch_dir, write = orch
     write(".fleet_subagent_model", _HAIKU)
-    childval, _err = _apply_childenv("storefront", orch_dir)
+    childval, _err = _apply_childenv("quality", orch_dir)
     assert childval == "__ABSENT__"
 
 
-# ── CAI-RESP-1440: quality is no longer clamped — behaves like any non-auditor ────
+# ── op#27235/#58436: storefront is no longer clamped — behaves like any non-auditor ─
 
-@pytest.mark.parametrize("sess", ["quality", "cc-quality"])
-def test_apply_quality_marker_exported_unclamped(orch, sess):
-    """quality is OFF AUDITOR_LANES now: its own subagent-model marker must export
+@pytest.mark.parametrize("sess", ["storefront", "cc-storefront"])
+def test_apply_storefront_marker_exported_unclamped(orch, sess):
+    """storefront is OFF AUDITOR_LANES now: its own subagent-model marker must export
     normally, not get scrubbed by the CAI-1170 clamp."""
     orch_dir, write = orch
     write(f".{sess}_subagent_model", _HAIKU)
@@ -190,9 +191,9 @@ def test_apply_quality_marker_exported_unclamped(orch, sess):
     assert childval == _HAIKU, f"{sess} should export {_HAIKU!r}, got {childval!r}"
 
 
-def test_apply_quality_inherited_env_no_longer_scrubbed(orch):
-    """THE inverse of test_apply_auditor_scrubs_inherited_env: proves the fix took
-    effect — quality's pre-set parent env is now preserved (escape hatch), not scrubbed."""
+def test_apply_storefront_inherited_env_no_longer_scrubbed(orch):
+    """THE inverse of test_apply_auditor_scrubs_inherited_env: proves the re-point took
+    effect — storefront's pre-set parent env is now preserved (escape hatch), not scrubbed."""
     orch_dir, _ = orch
-    childval, _err = _apply_childenv("quality", orch_dir, env_model=_HAIKU)
-    assert childval == _HAIKU, f"quality should inherit {_HAIKU!r} unclamped, got {childval!r}"
+    childval, _err = _apply_childenv("storefront", orch_dir, env_model=_HAIKU)
+    assert childval == _HAIKU, f"storefront should inherit {_HAIKU!r} unclamped, got {childval!r}"

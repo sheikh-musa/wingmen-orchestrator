@@ -879,3 +879,114 @@ def test_cli_warns_on_rr_without_reply_to_before_sending(monkeypatch):
         "--priority", "P2",
     ])
     assert rc == 0
+
+
+# ---- STALE-INSTANCE-vs-LIVE-BASE refusal (bus #58614 item 1): the mirror of the
+# base-vs-instance guard above. Bus row #58568 (cc-irsyad-3 -> cc-quality-1, an
+# urgent review request) was stranded because cc-quality-1 had gone stale while
+# its base cc-quality was the live singleton -- a sender addressing a retired
+# numbered instance id gets no warning. REFUSE and point at the live base,
+# never silently forward (same shape as refuse_if_base_has_live_instances).
+
+def test_agent_status_row_queries_base_agent_id_and_liveness(monkeypatch):
+    import psycopg2
+
+    cur = _FakeCursor([("cc-quality", False)])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
+
+    result = bs._agent_status_row("cc-quality-1", dsn="postgresql://unused")
+
+    assert result == ("cc-quality", False)
+    sql, params = cur.executed[0]
+    assert "base_agent_id" in sql
+    assert "status IN ('idle','working')" in sql
+    assert params == ("cc-quality-1",)
+
+
+def test_agent_status_row_returns_none_for_unknown_agent(monkeypatch):
+    import psycopg2
+
+    cur = _FakeCursor([None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
+
+    assert bs._agent_status_row("cc-ghost-1", dsn="postgresql://unused") is None
+
+
+def test_refuse_if_instance_stale_and_base_live_raises_with_suggestion(monkeypatch):
+    rows = [("cc-quality", False), ("cc-quality", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=offline, heartbeat 1:00:00 ago")
+    with pytest.raises(SystemExit, match="Use --to cc-quality instead"):
+        bs.refuse_if_instance_stale_and_base_live("cc-quality-1")
+
+
+def test_refuse_if_instance_stale_and_base_live_noop_when_instance_itself_live(monkeypatch):
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+    bs.refuse_if_instance_stale_and_base_live("cc-quality-1")  # must not raise
+
+
+def test_refuse_if_instance_stale_and_base_live_noop_when_to_is_the_base(monkeypatch):
+    # a singleton/solo-coord row reports base_agent_id == its own agent_id.
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", False))
+    bs.refuse_if_instance_stale_and_base_live("cc-quality")  # must not raise
+
+
+def test_refuse_if_instance_stale_and_base_live_noop_when_base_also_stale(monkeypatch):
+    rows = [("cc-quality", False), ("cc-quality", False)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    bs.refuse_if_instance_stale_and_base_live("cc-quality-1")  # must not raise
+
+
+def test_refuse_if_instance_stale_and_base_live_noop_when_base_has_no_row(monkeypatch):
+    rows = [("cc-quality", False), None]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    bs.refuse_if_instance_stale_and_base_live("cc-quality-1")  # must not raise
+
+
+def test_refuse_if_instance_stale_and_base_live_noop_when_no_status_row(monkeypatch):
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: None)
+    bs.refuse_if_instance_stale_and_base_live("cc-ghost-1")  # must not raise
+
+
+def test_cli_refuses_on_stale_instance_with_live_base_before_sending(monkeypatch):
+    import io
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-3")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: [])
+    rows = [("cc-quality", False), ("cc-quality", True)]
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: rows.pop(0))
+    monkeypatch.setattr(bs, "_heartbeat_age_str", lambda agent_id, dsn=None: "status=offline, heartbeat 1:00:00 ago")
+
+    def _boom(*a, **k):
+        raise AssertionError("send() must not be called when the refusal fires")
+
+    monkeypatch.setattr(bs, "send", _boom)
+    with pytest.raises(SystemExit, match="Use --to cc-quality instead"):
+        bs.main([
+            "--to", "cc-quality-1", "--type", "review_request", "--subject", "s",
+            "--priority", "P1",
+        ])
+
+
+def test_cli_reaches_send_when_instance_is_live(monkeypatch):
+    import io
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-3")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: [])
+    monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+    # test_cli_reaches_send_when_instance_is_live targets the stale-instance
+    # guard specifically -- stub the unrelated stamp-or-die RR check too, so
+    # this test never attempts a real DB connect (bus #58685/op#22517-class
+    # leak risk: dburl() prefers the real .env DATABASE_URL over any mock).
+    monkeypatch.setattr(bs, "_open_rr_from", lambda *a, **k: None)
+    monkeypatch.setattr(bs, "send", lambda *a, **k: (4242, "th-uuid"))
+
+    rc = bs.main([
+        "--to", "cc-quality-1", "--type", "review_request", "--subject", "s",
+        "--priority", "P1",
+    ])
+    assert rc == 0
