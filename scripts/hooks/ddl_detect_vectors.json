@@ -1,0 +1,72 @@
+[
+  {
+    "label": "top_level_create_table",
+    "sql": "CREATE TABLE sms_send_batches (id uuid PRIMARY KEY);",
+    "expected": true
+  },
+  {
+    "label": "top_level_grant",
+    "sql": "GRANT SELECT ON sms_send_batches TO authenticated;",
+    "expected": true
+  },
+  {
+    "label": "top_level_revoke",
+    "sql": "REVOKE ALL ON sms_send_batches FROM anon;",
+    "expected": true
+  },
+  {
+    "label": "top_level_alter",
+    "sql": "ALTER TABLE t ADD COLUMN x int;",
+    "expected": true
+  },
+  {
+    "label": "top_level_drop",
+    "sql": "DROP TABLE t;",
+    "expected": true
+  },
+  {
+    "label": "top_level_truncate",
+    "sql": "TRUNCATE t;",
+    "expected": true
+  },
+  {
+    "label": "ddl_word_in_line_comment_ignored",
+    "sql": "-- this used to CREATE a table\nSELECT 1;",
+    "expected": false
+  },
+  {
+    "label": "ddl_word_in_string_literal_ignored",
+    "sql": "INSERT INTO log(note) VALUES ('mentions CREATE TABLE');",
+    "expected": false
+  },
+  {
+    "label": "literal_ddl_inside_do_block",
+    "sql": "DO $$\nBEGIN\n  CREATE TABLE t AS SELECT 1;\nEND\n$$;",
+    "expected": true
+  },
+  {
+    "label": "dynamic_execute_ddl_string_inside_do_block",
+    "sql": "DO $$\nDECLARE v_name text := 'x';\nBEGIN\n  EXECUTE format('CREATE TABLE %I (id int)', v_name);\nEND\n$$;",
+    "expected": true
+  },
+  {
+    "label": "pure_dml_do_block",
+    "sql": "DO $$\nBEGIN\n  UPDATE sms_send_batches SET status = 'sent';\nEND\n$$;",
+    "expected": false
+  },
+  {
+    "label": "plain_select",
+    "sql": "SELECT 1;",
+    "expected": false
+  },
+  {
+    "label": "plain_delete",
+    "sql": "DELETE FROM t WHERE id = 1;",
+    "expected": false
+  },
+  {
+    "label": "do_block_set_config_only",
+    "sql": "DO $$ BEGIN PERFORM set_config('x','y',true); END $$;",
+    "expected": false
+  }
+]
