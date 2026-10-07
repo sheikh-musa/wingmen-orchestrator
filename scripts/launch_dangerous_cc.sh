@@ -200,6 +200,31 @@ if [ -z "$DSN" ]; then
     exit 1
 fi
 
+# STICKY INSTANCE ID (orch-console bus #57914): resolve this lane's tmux session + host
+# BEFORE identity allocation, so auto_agent_id can hand a lane that RELAUNCHES in the same
+# tmux session (token switch / reset / model change -> `claude --resume`) its OLD <base>-N
+# back. Previously the allocator only knew "smallest free N", so ids swapped between lanes
+# while each resumed conversation still believed its old id (2026-10-07: cosem-platform-adhoc
+# -5 -> -3, cosem-platform-author -6 -> -5; bus rows for -5 reached the wrong lane).
+# CC_TMUX_SESSION / CC_HOST are resolved HERE once and REUSED below (boot stamp + heartbeat).
+#
+# Only the ROBUST pane-targeted resolver (lane_session.sh) feeds the allocator. The
+# untargeted `display-message` fallback is kept for the agent_status stamp (unchanged
+# behaviour) but is NOT passed to the allocator: outside a tmux client it returns the
+# server's CURRENT session (= another lane), and sticky reuse keyed on another lane's
+# session would hand us THAT lane's id. Empty -> no --tmux-session -> today's behaviour.
+# shellcheck source=scripts/lib/lane_session.sh
+source "$ORCH_DIR/scripts/lib/lane_session.sh"
+_ALLOC_TMUX_SESSION="$(resolve_lane_session)"
+CC_TMUX_SESSION="$_ALLOC_TMUX_SESSION"
+[ -n "$CC_TMUX_SESSION" ] || CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+# Stable host identity (CAI-RESP-1436) — see the AUTH ATTRIBUTION block below for why the
+# resolver's stderr is deliberately NOT silenced. Moved up from there (#57914) so the sticky
+# lookup is host-scoped; `|| hostname -s || echo unknown` keeps the launcher unbreakable.
+CC_HOST="$("$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_host_id.py" current || hostname -s 2>/dev/null || echo unknown)"
+_ALLOC_HOST="$CC_HOST"
+if [ "$_ALLOC_HOST" = "unknown" ]; then _ALLOC_HOST=""; fi
+
 # CC_BASE_OVERRIDE (CAI-RESP-258): spawn_reviewer.sh sets this so auto_agent_id
 # allocates cc-reviewer-N regardless of pwd. The CLI hard-refuses authority/
 # system identities + default-denies unknown / non-cc-* families (exits non-zero).
@@ -207,6 +232,8 @@ ALLOC_JSON="$(cd "$ORCH_DIR" && "$VENV_PY" -m scripts.lib.auto_agent_id \
     --pwd "$CALLER_DIR" \
     --repo "$REPO_NAME" \
     ${CC_BASE_OVERRIDE:+--base-override "$CC_BASE_OVERRIDE"} \
+    ${_ALLOC_TMUX_SESSION:+--tmux-session "$_ALLOC_TMUX_SESSION"} \
+    ${_ALLOC_HOST:+--host "$_ALLOC_HOST"} \
     --dsn "$DSN" 2>/tmp/cc_alloc_err.log)" || {
     echo -e "\033[31mERROR: identity allocation failed\033[0m" >&2
     cat /tmp/cc_alloc_err.log >&2
@@ -771,8 +798,8 @@ apply_subagent_model "$_BODY_MODEL_SESSION" "$ORCH_DIR"
 # Prefer the shared TMUX_PANE-targeted resolver (_BODY_MODEL_SESSION, above): the bare
 # untargeted display-message can return EMPTY on a detached launch (how every gzb
 # supervisor boots its lane), which used to store tmux_session=NULL.
-CC_TMUX_SESSION="${_BODY_MODEL_SESSION:-}"
-[ -n "$CC_TMUX_SESSION" ] || CC_TMUX_SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+# CC_TMUX_SESSION is resolved ONCE, before identity allocation (#57914, see the STICKY
+# INSTANCE ID block above) with this same resolver-then-fallback chain, and reused here.
 
 # AUTH ATTRIBUTION (op#7094, migration 033): stamp WHICH MACHINE and WHICH CLAUDE ACCOUNT this
 # session actually authenticated with. The fleet console used to display every lane as the
@@ -787,7 +814,8 @@ CC_TMUX_SESSION="${_BODY_MODEL_SESSION:-}"
 # Do NOT 2>/dev/null the resolver: its stderr is the OBSERVABILITY signal — a lane running
 # unpinned/on-alias-match must be VISIBLE, not silent (cai CAI-RESP-1436 2nd-lens F1). The
 # 2>/dev/null on `hostname -s` (the last-resort fallback) is fine — that's not the resolver.
-CC_HOST="$("$VENV_PY" "$ORCH_DIR/scripts/lib/fleet_host_id.py" current || hostname -s 2>/dev/null || echo unknown)"
+# CC_HOST is resolved ONCE, before identity allocation (#57914, see the STICKY INSTANCE ID
+# block above), with exactly this resolver chain, and reused here.
 # EXPORT so this lane AND its child CC body inherit the pin (cai F2: FLEET_HOST_ID must be
 # live on lane processes, not only the 3 brain boots). When .env carries the durable pin this
 # is a silent no-op re-export; when a host is unpinned it still propagates the resolved id.
