@@ -95,3 +95,63 @@ def test_cli_classify_unregistered_exits_nonzero(capsys):
     assert rc == 1
     assert "UNCLASSIFIED" in out
     assert "treat_as_real()=True" in out
+
+
+def test_resolve_project_ref_translates_known_repo_name():
+    # cosem-platform's REPOS.json entry registers supabase_project_ref
+    # ywrpttpxwfcoodovxhsr -- the same store data_provenance's rows are keyed
+    # by (bus #59033: an agent passed the repo name and got a silent miss).
+    assert dt._resolve_project_ref("cosem-platform") == "ywrpttpxwfcoodovxhsr"
+
+
+def test_resolve_project_ref_passthrough_for_a_store_ref():
+    # already the raw store ref, not a REPOS.json repo name -- unchanged.
+    assert dt._resolve_project_ref("ywrpttpxwfcoodovxhsr") == "ywrpttpxwfcoodovxhsr"
+
+
+def test_resolve_project_ref_passthrough_for_unknown_name():
+    assert dt._resolve_project_ref("totally-unknown-repo-xyz") == "totally-unknown-repo-xyz"
+
+
+def test_resolve_project_ref_degrades_on_missing_repos_json(monkeypatch, tmp_path):
+    monkeypatch.setattr(dt, "REPOS_JSON", tmp_path / "does-not-exist.json")
+    assert dt._resolve_project_ref("cosem-platform") == "cosem-platform"
+
+
+def test_classify_resolves_repo_name_before_querying_the_store_ref():
+    import psycopg
+
+    captured = {}
+
+    class _FakeCursor:
+        def execute(self, sql, params):
+            captured["params"] = params
+
+        def fetchone(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    orig_connect = psycopg.connect
+    psycopg.connect = lambda *a, **k: _FakeConn()
+    try:
+        result = dt.classify("cosem-platform", "1478c9b2-ff44-4091-a67e-a1391303c4ce", dsn="postgresql://fake")
+    finally:
+        psycopg.connect = orig_connect
+
+    assert captured["params"] == ("ywrpttpxwfcoodovxhsr", "1478c9b2-ff44-4091-a67e-a1391303c4ce")
+    assert result.project_ref == "ywrpttpxwfcoodovxhsr"
