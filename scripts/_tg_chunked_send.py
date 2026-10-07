@@ -211,22 +211,39 @@ def _record_msgid(msgid: int) -> None:
 # ── Weekday/date guard backstop (orch-console #57970/#58047) ──────────────────────────
 # Messages said "Thursday 9 October" when 9 Oct 2026 is a Friday; one reached a client.
 # Every *_send.sh that funnels here is guarded even if it forgets the shell-level call.
-# Fail-CLOSED: if the guard cannot load or run, nothing is sent.
-_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "date_weekday_guard.py")
+# Rule (#58089): ONLY a confirmed mismatch refuses. If the guard cannot load or run, the
+# send proceeds (fail OPEN) and orch-console is paged (best-effort, <=~4s, deduped).
+_LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+_GUARD_PATH = os.path.join(_LIB, "date_weekday_guard.py")
+_PAGER_PATH = os.path.join(_LIB, "weekday_guard_pager.py")
 
 
-def weekday_date_refusal(text: str):
-    """Refusal string (send must NOT happen) or None. Never raises."""
+def _load_by_path(path, name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod   # @dataclass resolves its module via sys.modules
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def weekday_date_refusal(text: str, source: str = "_tg_chunked_send.py"):
+    """Refusal string for a CONFIRMED mismatch (send must NOT happen), else None.
+    A guard crash returns None (send proceeds) after a loud warning + page. Never raises."""
     try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("_date_weekday_guard", str(_GUARD_PATH))
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = mod   # @dataclass resolves its module via sys.modules
-        spec.loader.exec_module(mod)
-        return mod.refusal_text(text)
-    except Exception as e:  # noqa: BLE001 — fail CLOSED
-        return (f"FAIL-CLOSED — weekday/date guard could not run "
-                f"({type(e).__name__}: {e}); NOT sending.")
+        return _load_by_path(_GUARD_PATH, "_date_weekday_guard").refusal_text(text)
+    except Exception as e:  # noqa: BLE001 — fail OPEN + page
+        import traceback
+        tb = traceback.format_exc()
+        err = f"{type(e).__name__}: {e}"
+        print(f"WARNING: weekday/date guard CRASHED in {source} ({err}) — sending UNGUARDED; "
+              "paging orch-console.", file=sys.stderr)
+        try:
+            _load_by_path(_PAGER_PATH, "_weekday_guard_pager").page_guard_crash(source, err, tb)
+        except BaseException as pe:  # noqa: BLE001 — a paging failure never blocks the send
+            print(f"WARNING: could not page orch-console about the guard crash "
+                  f"({type(pe).__name__}: {pe}); sending anyway.", file=sys.stderr)
+        return None
 
 
 def main() -> int:
