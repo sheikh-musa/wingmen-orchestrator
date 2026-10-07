@@ -82,8 +82,9 @@ _resolve_lane_model_raw() {
 }
 
 # resolve_lane_model — PUBLIC entry. Runs the tiered cascade, then applies the
-# CAI-1170 FULL-AUDITOR CLAMP (CAI-RESP-1440: storefront-only now; cc-quality moved to
-# its own .quality_model sonnet-5 pin, unclamped): cc-storefront renders governance and
+# CAI-1170 FULL-AUDITOR CLAMP (op#27235/#58436: cc-quality is the clamped FULL auditor
+# now; cc-storefront moved OFF the clamp onto the normal cascade .fleet_model sonnet-5):
+# the FULL-tier auditor renders governance and
 # must NEVER launch on non-opus-4-8, regardless of which tier won (an explicit MODEL env, a
 # .<session>_model pin, a group default, or a fleet-wide Sonnet flip). The flip tool
 # (fleet_model.sh) already refuses to flip an auditor to Sonnet; this makes the LAUNCH
