@@ -58,8 +58,28 @@ def build_evidence(content_hash: str, deploy_dir: Path) -> dict:
         # neither "FAILED" nor " failed" in it either, so the old "fail only if a
         # failure marker is present" logic scored an EMPTY log "pass" — require the
         # positive "N passed" signal too, not just the absence of a negative one.
-        ran_ok = re.search(r"\b\d+\s+passed\b", text) is not None
-        blew_up = "failed" in text.lower() or "error" in text.lower()
+        #
+        # orch-console bus #57372 (fc-v77/af3dbc38, shadow-only — caught before G1 was
+        # ever enforced): the old blew_up check scanned the WHOLE log text for the bare
+        # substrings "failed"/"error" anywhere, which false-triggers on unrelated text
+        # that happens to contain those words — e.g. nervous_system/protected_agents.py's
+        # own fallback UserWarning literally reads "DB read failed (OperationalError(...))"
+        # on every run without a live local Postgres socket (normal/expected in this
+        # sandbox, not a test failure), which scored a 92-passed/0-failed run as G1 "fail".
+        # Scope blew_up to pytest's own FINAL summary line instead (the same line ran_ok
+        # already matches) — a real failure/error always shows up there as a count
+        # ("3 failed, 89 passed" / "5 errors in 1.23s"), so this still catches a genuine
+        # failure exactly as before, just never an incidental word inside unrelated log text.
+        # Takes the LAST matching line (cc-quality PR#327 review): assumes a single
+        # pytest invocation per log. A nested pytest subprocess whose raw stdout
+        # landed in the same pytest.log ahead of the real final summary could in
+        # principle mask an earlier failure this way — not live in this repo today
+        # (no test here spawns a nested pytest subprocess), but worth knowing if
+        # that ever changes.
+        summary_lines = re.findall(r"^.*\b\d+\s+passed\b.*$", text, re.MULTILINE)
+        summary_line = summary_lines[-1] if summary_lines else ""
+        ran_ok = bool(summary_line)
+        blew_up = re.search(r"\b\d+\s+(failed|errors?)\b", summary_line) is not None
         checks["unit-tests"] = "pass" if (ran_ok and not blew_up) else "fail"
 
     # G3 (mobile + desktop eyeball): render_console_pages.sh captures fleet.png +
