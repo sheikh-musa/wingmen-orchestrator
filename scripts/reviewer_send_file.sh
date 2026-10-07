@@ -34,6 +34,10 @@ _client_send_leak_guard "$CAP" || exit 3
 # orch-console #57970/#58047: refuse a weekday paired with the wrong date in the caption. Fail-closed.
 source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
 _date_weekday_guard "$CAP" || exit 6
+# fable audit 2026-10-06 D1/D2: refuse a rendered file carrying a placeholder leak
+# or fleet-internal vocabulary. Fail-closed on a confirmed hit, fail-open on a crash.
+source "$ORCH_DIR/scripts/lib/client_artifact_scan.sh"
+_client_artifact_scan "$FILE" || exit 7
 
 # Resolve token_env_key + chat_id from bot_channels (single source of truth), via
 # scripts/bus_send.dburl (PR#214/#219): the .env FILE wins over the inherited env, so
