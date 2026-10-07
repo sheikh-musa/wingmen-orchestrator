@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.pooler-breaker-snapshot</string>
+  <!-- Incidents #45495/#45978: catch the episodic substrate-pooler ECIRCUITBREAKER
+       hammer IN THE ACT. Every 60s it test-connects to read the breaker state; on a
+       FRESH trip (clear->tripped) it snapshots every pooler connection on BOTH hosts
+       and P1+rr pages the SRE with the caught set. Triggers ONLY on a real trip, so
+       no valid-DSN-variant false positives (the flaw in plain fp-drift). No secrets
+       in the plist (DATABASE_URL from .env). -->
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/scripts/pooler_breaker_snapshot.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PYTHONPATH</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/pooler-breaker-snapshot.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/pooler-breaker-snapshot.log</string>
+</dict>
+</plist>
