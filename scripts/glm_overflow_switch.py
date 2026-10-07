@@ -84,6 +84,32 @@ def glm_lanes(orch_dir: Path) -> List[str]:
     return out
 
 
+def pending_lanes(orch_dir: Path, argv_model: Callable[[str], Optional[str]]) -> List[str]:
+    """Lanes a PREVIOUS run already re-pointed (a .bak-glmoverflow-* exists and no live
+    pointer) whose running process is STILL on glm-* (the relaunch was refused: busy lane).
+    Without this, a PENDING lane is invisible to glm_lanes() once its pointer moved, so it
+    would never be retried (found live 2026-10-07: 5 lanes stuck on GLM after pass 1)."""
+    out = []
+    for f in sorted(glob.glob(str(orch_dir / ".*_model.bak-glmoverflow-*"))):
+        session = os.path.basename(f)[1:].split("_model.bak-glmoverflow-")[0]
+        if session in out or (orch_dir / f".{session}_model").exists():
+            continue
+        live = argv_model(session)
+        if live and live.startswith("glm-"):
+            out.append(session)
+    return out
+
+
+def lanes_to_switch(orch_dir: Path, argv_model: Callable[[str], Optional[str]]) -> List[str]:
+    """glm-pointer lanes plus previously-PENDING lanes, de-duplicated, stable order."""
+    seen, out = set(), []
+    for s in glm_lanes(orch_dir) + pending_lanes(orch_dir, argv_model):
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
 def pct(v: Optional[float]) -> float:
     """Normalise a utilisation to percent (Anthropic headers are 0-1 fractions)."""
     if v is None:
@@ -219,8 +245,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     glm = read_glm()
     musa = read_musa()
     d = decide(glm["wk"], glm["5h"], musa["7d"], musa["5h"])
-    held = [s for s in glm_lanes(ORCH_DIR) if s in set(a.exclude)]
-    lanes = [s for s in glm_lanes(ORCH_DIR) if s not in set(a.exclude)]
+    candidates = lanes_to_switch(ORCH_DIR, lane_argv_model)
+    held = [s for s in candidates if s in set(a.exclude)]
+    lanes = [s for s in candidates if s not in set(a.exclude)]
     print(f"{now:%H:%M:%SZ} GLM wk={glm['wk']:.1f}% 5h={glm['5h']:.1f}% | Musa 7d={musa['7d']:.0f}% "
           f"5h={musa['5h']:.0f}% | glm lanes={len(lanes)} | {d['action']}: {d['reason']}")
     if held:
