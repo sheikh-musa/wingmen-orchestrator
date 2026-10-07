@@ -82,6 +82,32 @@ def test_identity_refuses_rather_than_guesses_when_nothing_resolves():
         bs.resolve_from_agent({})
 
 
+# ---- resolve_sub_tag: per-instance attribution without widening from_agent's
+# base-only contract (bus #57180/#57183, cc-cosem-platform scaling to 5
+# concurrent instances exposed that bus_send.py never captured CC_AGENT_ID).
+
+def test_resolve_sub_tag_uses_cc_agent_id_when_distinct_from_base():
+    env = {"CC_AGENT_ID": "cc-cosem-platform-4"}
+    assert bs.resolve_sub_tag("cc-cosem-platform", env) == "cc-cosem-platform-4"
+
+
+def test_resolve_sub_tag_none_when_absent():
+    assert bs.resolve_sub_tag("cc-fleet-health", {}) is None
+
+
+def test_resolve_sub_tag_none_when_equal_to_from_agent():
+    # --from already named the instance explicitly (orch-console's workaround)
+    # -- sub_tag would just duplicate it.
+    env = {"CC_AGENT_ID": "cc-cosem-platform-4"}
+    assert bs.resolve_sub_tag("cc-cosem-platform-4", env) is None
+
+
+def test_resolve_sub_tag_none_for_singleton_with_no_sub_tag_env():
+    # A daemon/singleton body (no CC_AGENT_ID at all) must never fabricate one.
+    env = {"AGENT_ID": "cc-fleet-health"}
+    assert bs.resolve_sub_tag("cc-fleet-health", env) is None
+
+
 # ---- empty-body guard (Nazim shipped 3 blank rows on 2026-09-05) -----------
 
 def test_read_body_refuses_short_body():
@@ -324,6 +350,30 @@ def test_send_never_creates_a_new_operator_asks_row(monkeypatch):
     assert (row_id, thread_id) == (4242, "th-uuid-abc")
     assert conn.committed is True
     assert not any("operator_asks" in e[0].lower() for e in cur.executed)
+
+
+def test_send_passes_sub_tag_through_to_the_insert(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send(
+        "cc-cosem-platform", "orch-console", "update", "status",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+        sub_tag="cc-cosem-platform-4",
+    )
+    insert = next(e for e in cur.executed if "insert into agent_messages" in e[0].lower())
+    assert "sub_tag" in insert[0].lower()
+    assert insert[1][-1] == "cc-cosem-platform-4"
+
+
+def test_send_sub_tag_defaults_to_none(monkeypatch):
+    # No sub_tag passed (singleton/daemon caller) — the column still gets an
+    # explicit NULL, never omitted/positionally-misaligned.
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[(4242, "th-uuid-abc")])
+    bs.send(
+        "cc-fleet-health", "orch-console", "update", "status",
+        "x" * bs._MIN_BODY_BYTES, "P2", dsn="postgresql://unused",
+    )
+    insert = next(e for e in cur.executed if "insert into agent_messages" in e[0].lower())
+    assert insert[1][-1] is None
 
 
 def test_send_with_link_ask_updates_the_existing_row(monkeypatch):

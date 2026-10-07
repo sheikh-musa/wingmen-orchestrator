@@ -253,6 +253,33 @@ def warn_if_missing_provenance_citation(priority: str, subject: str, body: str, 
 resolve_from_agent = resolve_agent_id
 
 
+def resolve_sub_tag(from_agent: str, env: dict) -> str | None:
+    """Per-instance attribution for a multi-instance family (bus #57180/#57183).
+
+    from_agent stays base-only by design (agent_messages.from_agent is the
+    FK-enforced family id, per the dual-identity convention in
+    scripts/lib/auto_agent_id.py) -- this does NOT change that. But
+    launch_dangerous_cc.sh exports CC_AGENT_ID (the full per-instance sub-tag,
+    e.g. cc-cosem-platform-4) alongside CC_BASE_AGENT_ID, and bus_send.py was
+    the only sanctioned agent_messages writer that never captured it: every
+    lane using the default auto-resolve (or an explicit --from) left `sub_tag`
+    NULL, so once a family scales to 3+ concurrent instances (cc-cosem-platform
+    hit 5 live), nothing in the row said WHICH instance actually sent it --
+    orch-console worked around this by hand-passing --from with the full
+    instance id instead, which duplicates the id into from_agent rather than
+    recording it where the schema already has a column for exactly this.
+
+    Returns CC_AGENT_ID when present and distinct from from_agent (the normal
+    multi-instance case); None when absent (daemons/singletons with no
+    sub-tag) or equal to from_agent (an explicit --from already named the
+    instance, so sub_tag would be pure duplication).
+    """
+    sub_tag = env.get("CC_AGENT_ID")
+    if not sub_tag or sub_tag == from_agent:
+        return None
+    return sub_tag
+
+
 def dburl(env: dict) -> str:
     # The .env FILE wins over the inherited environment: a long-running session
     # keeps the DATABASE_URL it was launched with, so after a password rotation
@@ -322,6 +349,7 @@ def send(
     from_agent: str, to: str, mtype: str, subject: str, body: str, priority: str,
     req: bool = False, thread: str | None = None, reply_to: int | None = None,
     link_ask: int | None = None, dsn: str | None = None, allow_undeliverable: bool = False,
+    sub_tag: str | None = None,
 ) -> tuple[int, str]:
     """Do the actual INSERT. The one place the SQL lives — CLI (`main`) and
     every shim (`_bus_tmp.py`, `scratchpad/bus_send.py`) call this so there is
@@ -357,10 +385,10 @@ def send(
     cur.execute(
         """INSERT INTO agent_messages
              (from_agent, to_agent, message_type, subject, body,
-              priority, requires_response, thread_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+              priority, requires_response, thread_id, sub_tag)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id, thread_id""",
-        (from_agent, to, mtype, subject, body, priority, req, thread),
+        (from_agent, to, mtype, subject, body, priority, req, thread, sub_tag),
     )
     row_id, thread_id = cur.fetchone()
 
@@ -417,13 +445,16 @@ def main(argv: list[str] | None = None) -> int:
 
     refuse_if_base_has_live_instances(args.to, args.to_base)
 
+    sub_tag = resolve_sub_tag(from_agent, os.environ)
     row_id, thread_id = send(
         from_agent, args.to, args.type, args.subject, body, args.priority,
         req=args.req, thread=args.thread, reply_to=args.reply_to,
         link_ask=args.link_ask, allow_undeliverable=args.allow_undeliverable,
+        sub_tag=sub_tag,
     )
     print(f"SENT id={row_id} thread={thread_id} from={from_agent} to={args.to} "
-          f"priority={args.priority} req={args.req}")
+          f"priority={args.priority} req={args.req}"
+          + (f" sub_tag={sub_tag}" if sub_tag else ""))
     return 0
 
 
