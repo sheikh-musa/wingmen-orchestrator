@@ -1071,6 +1071,92 @@ def test_blocks_bare_exec_prod_basename_ddl_file_without_gate(tmp_path):
     )
 
 
+# ---- Rule G false-positive regression (bus #56900): the exec_prod branch must only
+# fire on a segment that actually INVOKES exec_prod, and messaging-send segments
+# (bus/operator messages) are not SQL carriers at all -----------------------------
+
+
+def test_allows_command_that_merely_mentions_exec_prod_in_text():
+    # the exact repro from #56900: a read-only grep over the hook's own source.
+    assert_allowed(
+        "Bash",
+        {"command": "grep -c exec_prod scripts/hooks/secrets_transcript_guard.py"},
+        env=_NEUTRAL_PG_ENV,
+    )
+
+
+def test_allows_bus_send_body_quoting_exec_prod_and_ddl_words_with_prod_ref():
+    # a status message that quotes a PR title, DDL words and a silo ref, piped as a
+    # heredoc into bus_send.py -- five of these were blocked in the hour after #321.
+    body = ("Re PR#321 Rule G exec_prod + --gate exemption: REVOKE SELECT ON organizations "
+            "and ALTER DEFAULT PRIVILEGES on " + _PROD_REF + "; python psycopg heredoc mentioned.")
+    cmd = "python3 scripts/bus_send.py --to cc-x --type update --subject 's' --priority P2 <<'EOF'\n" + body + "\nEOF"
+    assert_allowed("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV)
+
+
+def test_allows_nazim_send_text_with_ddl_words():
+    assert_allowed(
+        "Bash",
+        {"command": 'scripts/nazim_send.sh "we will REVOKE anon SELECT ON organizations via exec_prod later" "@tag"'},
+        env={**_NEUTRAL_PG_ENV, "DATABASE_URL": "host=db-" + _PROD_REF + "-pooler.example"},
+    )
+
+
+def test_messaging_exclusion_is_per_segment_not_per_command():
+    # the bus_send segment is excluded, but the psql DDL segment after && still blocks.
+    cmd = ("python3 scripts/bus_send.py --to cc-x --type update --subject 's' --priority P2 <<'EOF'\nhello\nEOF\n"
+           "&& psql -c \"DROP TABLE foo\"")
+    assert_blocked(
+        "Bash",
+        {"command": cmd},
+        env={**_NEUTRAL_PG_ENV, "PGHOST": "db-" + _PROD_REF + "-pooler.example"},
+        expect_substr="raw DDL against a PRODUCTION_SILOS store",
+    )
+
+
+def test_exec_prod_branch_reads_flags_from_its_own_segment_only(tmp_path):
+    # --gate appearing in a DIFFERENT segment must not exempt the exec_prod segment.
+    f = tmp_path / "mig.sql"
+    f.write_text("ALTER TABLE foo ADD COLUMN bar int;")
+    cmd = "echo '--gate 1' && " + _exec_prod_cmd(f)
+    assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+
+
+def test_exec_prod_invocation_detected_with_interpreter_and_path(tmp_path):
+    f = tmp_path / "mig.sql"
+    f.write_text("CREATE INDEX ix ON foo(bar);")
+    cmd = (".venv/bin/python -I /home/x/wingmen-irsyad/scripts/db/exec_prod.py --project-ref " + _PROD_REF
+           + " --inner-file " + str(f) + ' --reason "r"')
+    assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+
+
+def test_fake_heredoc_opener_inside_quotes_does_not_blind_the_scan(tmp_path):
+    # cc-quality #56920 finding 1: a quoted string containing a redirect-looking
+    # substring with an arbitrary word, and NO later line matching that word, must not
+    # swallow the real ungated exec_prod DDL call on the next line.
+    f = tmp_path / "mig.sql"
+    f.write_text("ALTER TABLE foo ADD COLUMN bar int;")
+    cmd = "echo 'note: data <<MAGIC here' && " + _exec_prod_cmd(f)
+    assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+
+
+def test_unterminated_heredoc_opener_does_not_blind_the_scan(tmp_path):
+    f = tmp_path / "mig.sql"
+    f.write_text("DROP TABLE foo;")
+    cmd = "cat <<NEVERENDS\n" + _exec_prod_cmd(f)
+    assert_blocked("Bash", {"command": cmd}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+
+
+def test_env_assignment_prefix_does_not_hide_exec_prod_program(tmp_path):
+    # cc-quality #56920 finding 2: `env NAME=value python3 .../exec_prod.py` and the bare
+    # `NAME=value python3 ...` form must still resolve the program to exec_prod.py.
+    f = tmp_path / "mig.sql"
+    f.write_text("CREATE TABLE foo (id int);")
+    base = ' wingmen-irsyad/scripts/db/exec_prod.py --project-ref ' + _PROD_REF + ' --inner-file ' + str(f) + ' --reason "x"'
+    assert_blocked("Bash", {"command": "env PGOPTIONS=-c python3" + base}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+    assert_blocked("Bash", {"command": "PGOPTIONS=-c FOO=bar python3" + base}, env=_NEUTRAL_PG_ENV, expect_substr="exec_prod needs --gate")
+
+
 _DDL_VECTORS_PATH = Path(__file__).parent.parent / "scripts" / "hooks" / "ddl_detect_vectors.json"
 _DDL_VECTORS = json.loads(_DDL_VECTORS_PATH.read_text())
 

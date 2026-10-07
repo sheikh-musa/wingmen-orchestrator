@@ -600,55 +600,202 @@ def _resolved_values_for_silo_check(command: str, include_pg_connect_env: bool) 
     return values
 
 
-def check_rule_g(command: str) -> str | None:
-    if APPLY_MIGRATION_REF_RE.search(command):
-        return None  # the sanctioned, gated path -- never what this rule exists to catch
-    if EXEC_PROD_REF_RE.search(command):
-        # irsyad's OWN sanctioned path (bus #56599/#56607/#56684). --gate present ->
-        # trust exec_prod's own bus-validated gate, same as apply_migration.py.
-        # Otherwise: a flat "block every ungated exec_prod call" would ALSO wrongly
-        # block legitimate DML-only calls (backfills, dry-runs) that exec_prod's own
-        # contract (PR#1051) never requires a gate for (orch-console #56684) -- so
-        # the hook has to actually look at what the SQL does, same as exec_prod
-        # itself does. The SQL lives in --inner-file, never inline (cc-irsyad-coord,
-        # bus #56672), so this reads that file and classifies its CONTENT via
-        # ddl_detect.is_ddl_shaped -- the ONE detector shared with exec_prod.py
-        # itself (cc-irsyad-2, bus #56752, q#206), vendored here sha256-pinned (see
-        # ddl_detect.py's own header) rather than cross-imported from another repo's
-        # checkout, so this never depends on where ihsanos happens to be checked out
-        # on a given host. Fail-CLOSED (same posture as every other branch in this
-        # file) on anything this can't classify with confidence: no --inner-file at
-        # all (inline SQL via some other flag), or the file is missing/unreadable.
-        if GATE_FLAG_RE.search(command):
-            return None
-        m = INNER_FILE_FLAG_RE.search(command)
-        if not m:
-            return RULE_G_EXEC_PROD_MESSAGE
-        try:
-            inner_sql = Path(m.group(1)).read_text(encoding="utf-8")
-        except OSError:
-            return RULE_G_EXEC_PROD_MESSAGE
-        if is_ddl_shaped(inner_sql):
-            return RULE_G_EXEC_PROD_MESSAGE
+# bus #56900 (cc-fleet-health, 2026-10-07): the first cut of exemption #2 entered the
+# exec_prod branch on a bare substring match over the WHOLE command text, so any
+# command that merely TALKED about exec_prod (a bus message quoting a PR title, a
+# `grep exec_prod` over this very file) was blocked outright. Rule G now reasons per
+# pipeline SEGMENT: a segment is an exec_prod INVOCATION only when one of the first
+# few tokens of its leading command is the exec_prod program itself (bare basename
+# or a path ending in exec_prod.py, with or without an interpreter in front); and
+# segments whose leading command is a fleet MESSAGING sender (bus_send.py,
+# nazim_send.sh, tg_send.sh, *_support_send.sh, ...) are not SQL carriers at all --
+# their heredoc bodies routinely quote DDL words, silo refs and the word psycopg
+# when agents discuss migrations -- so they are excluded from Rule G entirely (five
+# false positives on orch-console + coord within an hour of #321 landing). A
+# `bus_send.py ... && psql -c "DROP TABLE"` compound still gets its psql segment
+# checked, because the exclusion is per segment, never per command.
+EXEC_PROD_BASENAMES = {"exec_prod", "exec_prod.py"}
+MESSAGING_SEND_BASENAMES = {
+    "bus_send.py", "nazim_send.sh", "nazim_send_photo.sh", "tg_send.sh", "tg_send_file.sh",
+    "log_console_msg.sh", "nudge_cai.sh", "cosem_tdu_support_send.sh",
+    "cosem_exams_support_send.sh", "irsyad_support_send.sh",
+}
+MESSAGING_SEND_SUFFIX_RE = re.compile(r"_send(?:_photo|_file)?\.(?:sh|py)$")
+# how many leading tokens may precede the program name: `python3 x.py`,
+# `.venv/bin/python -I scripts/db/x.py`, `nice -n 5 python3 x.py` all fit in 4.
+_LEADING_TOKENS_TO_INSPECT = 4
+
+
+def _leading_tokens(segment: str) -> list[str]:
+    lead = _leading_command(segment)
+    try:
+        tokens = shlex.split(lead)
+    except ValueError:
+        tokens = lead.split()
+    return tokens
+
+
+def _basename(token: str) -> str:
+    return token.rsplit("/", 1)[-1]
+
+
+def _segment_is_messaging_send(segment: str) -> bool:
+    tokens = _leading_tokens(segment)
+    for tok in tokens[:_LEADING_TOKENS_TO_INSPECT]:
+        base = _basename(tok)
+        if base in MESSAGING_SEND_BASENAMES or MESSAGING_SEND_SUFFIX_RE.search(base):
+            return True
+    return False
+
+
+# tokens that may legitimately precede the PROGRAM in a segment: interpreters,
+# launchers and their flags. The program is the first token that is none of these --
+# so `grep -c exec_prod file` resolves to program=grep (exec_prod is an ARGUMENT),
+# while `python3 -I scripts/db/exec_prod.py ...` resolves to program=exec_prod.py.
+_LAUNCHER_RE = re.compile(r"^(?:python(?:3(?:\.\d+)?)?|node|nice|env|sudo|command|time|nohup|timeout|caffeinate)$")
+
+
+_ASSIGNMENT_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _program_basename(segment: str) -> str:
+    tokens = _leading_tokens(segment)
+    for tok in tokens[:_LEADING_TOKENS_TO_INSPECT + 4]:
+        if tok.startswith("-"):
+            continue
+        if _ASSIGNMENT_TOKEN_RE.match(tok):
+            # `env NAME=value cmd` / `NAME=value cmd` (cc-quality #56920 finding 2):
+            # an assignment is never the program.
+            continue
+        base = _basename(tok)
+        if _LAUNCHER_RE.match(base):
+            # `timeout 30 x`, `nice -n 5 x`: a numeric operand follows these launchers
+            continue
+        if re.fullmatch(r"\d+[smhd]?", tok):
+            continue
+        return base
+    return ""
+
+
+def _segment_invokes_exec_prod(segment: str) -> bool:
+    return _program_basename(segment) in EXEC_PROD_BASENAMES
+
+
+# heredoc bodies (`<<EOF ... EOF`, `<<'EOF'`, `<<-EOF`) are DATA handed to the program
+# on stdin -- message text, SQL destined for a gated tool, test fixtures. Rule G scans
+# the COMMAND, not stdin data, so bodies are removed before segmenting; a heredoc fed
+# to psql still gets its psql segment checked for DDL on the command line, and the
+# exec_prod branch reads --inner-file content regardless (that is its whole point).
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    # cc-quality #56920 finding 1: a redirect-looking substring inside an ordinary
+    # quoted string, or an opener whose delimiter never appears, must NOT swallow the
+    # rest of the command. A body is removed only when the opener is OUTSIDE quotes
+    # on its line AND a later line is exactly the delimiter; otherwise the line stays
+    # in the scan untouched (fail closed).
+    lines = command.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        m = _heredoc_opener_outside_quotes(line)
+        if m:
+            delim = m.group(2)
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == delim), None)
+            if end is not None:
+                i = end  # skip body + terminator
+        i += 1
+    return "\n".join(out)
+
+
+def _heredoc_opener_outside_quotes(line: str):
+    """Return the first heredoc-opener match that sits outside single/double quotes
+    on this line, else None. A single-pass quote tracker, same idea as ddl_detect's."""
+    in_single = in_double = False
+    for m in _HEREDOC_OPEN_RE.finditer(line):
+        in_single = in_double = False
+        esc = False
+        for ch in line[: m.start()]:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\" and not in_single:
+                esc = True
+            elif ch == "'" and not in_double:
+                in_single = not in_single
+            elif ch == '"' and not in_single:
+                in_double = not in_double
+        if not in_single and not in_double:
+            return m
+    return None
+
+
+def _check_exec_prod_segment(segment: str) -> str | None:
+    # irsyad's OWN sanctioned path (bus #56599/#56607/#56684). --gate present ->
+    # trust exec_prod's own bus-validated gate, same as apply_migration.py.
+    # Otherwise: a flat "block every ungated exec_prod call" would ALSO wrongly
+    # block legitimate DML-only calls (backfills, dry-runs) that exec_prod's own
+    # contract (PR#1051) never requires a gate for (orch-console #56684) -- so
+    # the hook has to actually look at what the SQL does, same as exec_prod
+    # itself does. The SQL lives in --inner-file, never inline (cc-irsyad-coord,
+    # bus #56672), so this reads that file and classifies its CONTENT via
+    # ddl_detect.is_ddl_shaped -- the ONE detector shared with exec_prod.py
+    # itself (cc-irsyad-2, bus #56752, q#206), vendored here sha256-pinned (see
+    # ddl_detect.py's own header). Fail-CLOSED on anything this can't classify
+    # with confidence: no --inner-file at all (inline SQL via some other flag),
+    # or the file is missing/unreadable.
+    if GATE_FLAG_RE.search(segment):
         return None
-    if not DDL_KEYWORD_RE.search(command):
+    m = INNER_FILE_FLAG_RE.search(segment)
+    if not m:
+        return RULE_G_EXEC_PROD_MESSAGE
+    try:
+        inner_sql = Path(m.group(1)).read_text(encoding="utf-8")
+    except OSError:
+        return RULE_G_EXEC_PROD_MESSAGE
+    if is_ddl_shaped(inner_sql):
+        return RULE_G_EXEC_PROD_MESSAGE
+    return None
+
+
+def check_rule_g(command: str) -> str | None:
+    command = _strip_heredoc_bodies(command)
+    scan_segments: list[str] = []
+    for statement in _split_statements(command):
+        for segment in _split_pipeline(statement):
+            if not segment:
+                continue
+            if _segment_is_messaging_send(segment):
+                continue  # a message body is not SQL (bus #56900)
+            if APPLY_MIGRATION_REF_RE.search(segment):
+                continue  # the sanctioned, gated path -- never what this rule exists to catch
+            if _segment_invokes_exec_prod(segment):
+                verdict = _check_exec_prod_segment(segment)
+                if verdict:
+                    return verdict
+                continue
+            scan_segments.append(segment)
+
+    scan = "\n".join(scan_segments)
+    if not DDL_KEYWORD_RE.search(scan):
         return None
 
     uses_pg_cli = False
     uses_psycopg = False
-    for statement in _split_statements(command):
-        for segment in _split_pipeline(statement):
-            lead = _leading_command(segment)
-            tokens = lead.split()
-            basename = tokens[0].rsplit("/", 1)[-1] if tokens else ""
-            if basename in PG_CLI_TOOLS:
-                uses_pg_cli = True
-            if PSYCOPG_REF_RE.search(segment):
-                uses_psycopg = True
+    for segment in scan_segments:
+        tokens = _leading_tokens(segment)
+        basename = _basename(tokens[0]) if tokens else ""
+        if basename in PG_CLI_TOOLS:
+            uses_pg_cli = True
+        if PSYCOPG_REF_RE.search(segment):
+            uses_psycopg = True
     if not (uses_pg_cli or uses_psycopg):
         return None
 
-    for value in _resolved_values_for_silo_check(command, include_pg_connect_env=uses_pg_cli):
+    for value in _resolved_values_for_silo_check(scan, include_pg_connect_env=uses_pg_cli):
         for ref in _production_silos():
             if ref in value:
                 return RULE_G_MESSAGE
