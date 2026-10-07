@@ -25,6 +25,9 @@ source "$ORCH_DIR/scripts/lib/send_arg_guard.sh"
 _send_arg_guard "$CAP" || exit 2
 source "$ORCH_DIR/scripts/lib/client_send_leak_guard.sh"
 _client_send_leak_guard "$CAP" || exit 3
+# orch-console #57970/#58047: refuse a weekday paired with the wrong date in the caption. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$CAP" || exit 6
 
 source "$ORCH_DIR/scripts/lib/tg_safe_upload.sh"
 tg_safe_upload_stage photo "$IMG" || { echo "oeh_send_photo: could not stage upload for $IMG" >&2; exit 1; }

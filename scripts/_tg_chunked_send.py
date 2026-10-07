@@ -208,12 +208,38 @@ def _record_msgid(msgid: int) -> None:
         pass
 
 
+# ── Weekday/date guard backstop (orch-console #57970/#58047) ──────────────────────────
+# Messages said "Thursday 9 October" when 9 Oct 2026 is a Friday; one reached a client.
+# Every *_send.sh that funnels here is guarded even if it forgets the shell-level call.
+# Fail-CLOSED: if the guard cannot load or run, nothing is sent.
+_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "date_weekday_guard.py")
+
+
+def weekday_date_refusal(text: str):
+    """Refusal string (send must NOT happen) or None. Never raises."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_date_weekday_guard", str(_GUARD_PATH))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod   # @dataclass resolves its module via sys.modules
+        spec.loader.exec_module(mod)
+        return mod.refusal_text(text)
+    except Exception as e:  # noqa: BLE001 — fail CLOSED
+        return (f"FAIL-CLOSED — weekday/date guard could not run "
+                f"({type(e).__name__}: {e}); NOT sending.")
+
+
 def main() -> int:
     tok = os.environ.get("TG_TOK", "")
     chat = os.environ.get("TG_CHAT", "")
     text = os.environ.get("TG_TEXT", "")
     if not (tok and chat and text):
         print("missing TG_TOK/TG_CHAT/TG_TEXT", file=sys.stderr)
+        return 1
+    refusal = weekday_date_refusal(text)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        _record_failure({"status": "refused", "description": f"weekday/date guard: {refusal}"})
         return 1
     dup = duplicate_of(chat, text)
     if dup:

@@ -127,8 +127,34 @@ def _refuse_cant_open_file_framing(cur, channel_key: str, text: str | None) -> N
         )
 
 
+class DateWeekdayRefusal(ValueError):
+    """Raised by enqueue() when the text pairs a weekday with the wrong date
+    ("Thursday 9 October" when 9 Oct 2026 is a Friday — orch-console #57970/#58047).
+    Also raised (fail-CLOSED) if the guard itself cannot run."""
+
+
+def _refuse_weekday_date_mismatch(text: str | None) -> None:
+    if not text:
+        return
+    try:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "lib",
+                            "date_weekday_guard.py")
+        spec = importlib.util.spec_from_file_location("_date_weekday_guard", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod   # @dataclass resolves its module via sys.modules
+        spec.loader.exec_module(mod)
+        refusal = mod.refusal_text(text)
+    except Exception as e:  # noqa: BLE001 — fail CLOSED
+        refusal = (f"FAIL-CLOSED — weekday/date guard could not run "
+                   f"({type(e).__name__}: {e}); NOT enqueueing.")
+    if refusal:
+        raise DateWeekdayRefusal(refusal)
+
+
 def enqueue(channel_key: str, text: str | None = None, chat_id: int | None = None,
             file_path: str | None = None, reply_to: int | None = None) -> int:
+    _refuse_weekday_date_mismatch(text)
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
         _refuse_cant_open_file_framing(cur, channel_key, text)

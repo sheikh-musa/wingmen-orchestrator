@@ -140,6 +140,24 @@ def main(argv=None) -> int:
         return 1
     channel, text = argv[0], argv[1]
 
+    # Weekday/date guard (orch-console #57970/#58047): refuse "Thursday 9 October" when
+    # 9 Oct is a Friday, BEFORE touching the DB or Telegram. Fail-CLOSED if it can't run.
+    # Exit 6 = the same code the shell send scripts use for this refusal.
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_date_weekday_guard", str(Path(__file__).resolve().parent / "date_weekday_guard.py"))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod   # @dataclass resolves its module via sys.modules
+        spec.loader.exec_module(mod)
+        refusal = mod.refusal_text(text)
+    except Exception as e:  # noqa: BLE001 — fail CLOSED
+        refusal = (f"FAIL-CLOSED — weekday/date guard could not run "
+                   f"({type(e).__name__}: {e}); NOT sending.")
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 6
+
     orch_dir = Path(__file__).resolve().parent.parent.parent  # scripts/lib -> orchestrator
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:

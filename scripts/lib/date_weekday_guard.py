@@ -154,6 +154,16 @@ def find_mismatches(text: str, today: date | None = None) -> list[Finding]:
     return findings
 
 
+def refusal_text(text: str, today: date | None = None) -> str | None:
+    """One-string refusal for the Python send paths (_tg_chunked_send, tg_group_send,
+    tg_out.enqueue), or None when clean. Exceptions propagate — callers fail CLOSED."""
+    findings = find_mismatches(text, today)
+    if not findings:
+        return None
+    return "; ".join(f"REFUSED: {f.message()}" for f in findings) + (
+        " — weekday/date mismatch, fix the weekday or the date and resend. Nothing was sent.")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Refuse text pairing a weekday with the wrong date.")
     p.add_argument("--warn-only", action="store_true", help="print warnings but exit 0")
