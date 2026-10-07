@@ -78,6 +78,16 @@ Two separate rule sets, because orch-console drew this line explicitly (bus #483
   DESIGN, so unlike the raw-psql/psycopg branch above this does not also need to
   textually detect a silo ref to know it's hitting one.
 
+  Documented limitation (orch-console review, bus #56642): EXEC_PROD_REF_RE is a
+  substring match anywhere in the command text, same style as APPLY_MIGRATION_REF_RE
+  -- it is not anchored to the leading command. A raw psql/psycopg DDL command that
+  merely MENTIONS "exec_prod" (e.g. in a shell comment) plus a decorative `--gate 1`
+  would pass this exemption too. Accepted under this file's stated false-negative-
+  tolerant stance: exec_prod itself validates the --gate row against the fleet bus
+  before executing anything, and ddl_coverage_watchdog.py remains the detect-after-
+  the-fact backstop for whatever this heuristic still misses -- same posture as every
+  other rule in this file, not a new gap.
+
 Exit 2 + stderr = refused, the reason is shown to the model (same contract as the
 irsyad guard). Fail-closed on unparseable input.
 
