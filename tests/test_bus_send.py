@@ -663,6 +663,224 @@ def test_cli_refuses_write_only_to_via_send(monkeypatch):
         ])
 
 
+# ---- stamp-or-die + evidence flag (bus #58159 item 2, WARN mode -- the REFUSE
+# flip is a separate PR after the 48h soak this logging exists to measure).
+
+def test_log_warn_writes_a_jsonl_record(tmp_path, monkeypatch):
+    import json
+
+    log_path = tmp_path / "bus_send_warnings.log"
+    monkeypatch.setattr(bs, "WARN_LOG_PATH", str(log_path))
+    bs._log_warn("unevidenced_claim", mtype="update", subject="s", matched_keyword="clean")
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["warn_type"] == "unevidenced_claim"
+    assert record["mtype"] == "update"
+    assert record["matched_keyword"] == "clean"
+    assert "ts" in record
+
+
+def test_log_warn_sets_600_perms_on_first_write(tmp_path, monkeypatch):
+    import stat
+
+    log_path = tmp_path / "sub" / "bus_send_warnings.log"
+    monkeypatch.setattr(bs, "WARN_LOG_PATH", str(log_path))
+    bs._log_warn("rr_without_reply_to", from_agent="a", to="b", open_rr_id=1)
+    mode = stat.S_IMODE(log_path.stat().st_mode)
+    assert mode == stat.S_IRUSR | stat.S_IWUSR
+
+
+def test_log_warn_never_raises_on_oserror(monkeypatch):
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bs.os, "makedirs", _boom)
+    bs._log_warn("unevidenced_claim", mtype="update")  # must not raise
+
+
+def test_open_rr_from_queries_expected_shape(monkeypatch):
+    import datetime
+    import psycopg2
+
+    cur = _FakeCursor([(123, datetime.timedelta(hours=2))])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
+
+    result = bs._open_rr_from("cc-irsyad", "orch-console", dsn="postgresql://unused")
+
+    assert result == (123, str(datetime.timedelta(hours=2)))
+    sql, params = cur.executed[0]
+    assert "requires_response=true" in sql
+    assert "responded_at IS NULL" in sql
+    assert params == ("cc-irsyad", "orch-console")
+
+
+def test_open_rr_from_none_when_no_open_row(monkeypatch):
+    import psycopg2
+
+    cur = _FakeCursor([None])
+    conn = _FakeConn(cur)
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: conn)
+
+    assert bs._open_rr_from("cc-irsyad", "orch-console", dsn="postgresql://unused") is None
+
+
+def test_warn_if_answering_rr_without_reply_to_warns_and_logs(monkeypatch):
+    logged = []
+    monkeypatch.setattr(bs, "_open_rr_from", lambda to, addressed_to, dsn=None: (123, "2:00:00"))
+    monkeypatch.setattr(bs, "_log_warn", lambda warn_type, **f: logged.append((warn_type, f)))
+
+    import io
+    stream = io.StringIO()
+    bs.warn_if_answering_rr_without_reply_to("orch-console", "cc-irsyad", None, stream=stream)
+
+    out = stream.getvalue()
+    assert "WARNING" in out
+    assert "id=123" in out
+    assert "--reply-to" in out
+    assert logged == [("rr_without_reply_to", {"from_agent": "orch-console", "to": "cc-irsyad", "open_rr_id": 123})]
+
+
+def test_warn_if_answering_rr_without_reply_to_silent_with_reply_to(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("_open_rr_from must not be queried when --reply-to is given")
+
+    monkeypatch.setattr(bs, "_open_rr_from", _boom)
+    import io
+    stream = io.StringIO()
+    bs.warn_if_answering_rr_without_reply_to("orch-console", "cc-irsyad", 99, stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_warn_if_answering_rr_without_reply_to_silent_when_no_open_row(monkeypatch):
+    monkeypatch.setattr(bs, "_open_rr_from", lambda to, addressed_to, dsn=None: None)
+    import io
+    stream = io.StringIO()
+    bs.warn_if_answering_rr_without_reply_to("orch-console", "cc-irsyad", None, stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_warn_if_answering_rr_without_reply_to_degrades_on_db_error(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(bs, "_open_rr_from", _boom)
+    import io
+    stream = io.StringIO()
+    bs.warn_if_answering_rr_without_reply_to("orch-console", "cc-irsyad", None, stream=stream)
+    assert "WARNING" in stream.getvalue()
+    assert "could not run" in stream.getvalue()
+
+
+@pytest.mark.parametrize("keyword,text", [
+    ("identical", "the two files are identical"),
+    ("verified", "verified against prod"),
+    ("clean", "scan came back clean"),
+    ("byte-identical", "outputs are byte-identical"),
+    ("pass", "all tests PASS"),
+])
+def test_warn_if_unevidenced_claim_warns_on_each_keyword(keyword, text, monkeypatch):
+    logged = []
+    monkeypatch.setattr(bs, "_log_warn", lambda warn_type, **f: logged.append((warn_type, f)))
+    import io
+    stream = io.StringIO()
+    bs.warn_if_unevidenced_claim("update", "s", text, None, stream=stream)
+    out = stream.getvalue()
+    assert "WARNING" in out
+    assert "--evidence" in out
+    assert logged and logged[0][0] == "unevidenced_claim"
+
+
+def test_warn_if_unevidenced_claim_silent_with_evidence_present():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_unevidenced_claim("update", "s", "verified clean", "sha256:report.txt", stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_warn_if_unevidenced_claim_silent_without_a_claim_keyword():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_unevidenced_claim("update", "deploy status", "build is green", None, stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_warn_if_unevidenced_claim_silent_for_non_claiming_message_types():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_unevidenced_claim("question", "is this clean?", "verified identical?", None, stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_warn_if_unevidenced_claim_does_not_match_password_as_pass():
+    import io
+    stream = io.StringIO()
+    bs.warn_if_unevidenced_claim("update", "s", "rotated the password successfully", None, stream=stream)
+    assert stream.getvalue() == ""
+
+
+def test_evidence_flag_parses():
+    args = bs.build_parser().parse_args([
+        "--to", "cc-orchestrator", "--type", "update", "--subject", "s",
+        "--priority", "P1", "--evidence", "sha256:report.txt",
+    ])
+    assert args.evidence == "sha256:report.txt"
+
+
+def test_evidence_flag_defaults_none():
+    args = bs.build_parser().parse_args([
+        "--to", "cc-orchestrator", "--type", "update", "--subject", "s", "--priority", "P1",
+    ])
+    assert args.evidence is None
+
+
+def test_cli_warns_on_unevidenced_claim_in_dry_run(monkeypatch, capsys):
+    import io
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("verified clean, all " + "x" * bs._MIN_BODY_BYTES))
+    rc = bs.main([
+        "--to", "cc-orchestrator", "--type", "update", "--subject", "s",
+        "--priority", "P1", "--dry-run",
+    ])
+    assert rc == 0
+    assert "--evidence" in capsys.readouterr().err
+
+
+def test_cli_rr_without_reply_to_check_runs_after_dry_run_never_touches_db(monkeypatch):
+    import io
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+
+    def _boom(*a, **k):
+        raise AssertionError("_open_rr_from must not run in --dry-run mode")
+
+    monkeypatch.setattr(bs, "_open_rr_from", _boom)
+    rc = bs.main([
+        "--to", "cc-orchestrator", "--type", "update", "--subject", "s",
+        "--priority", "P1", "--dry-run",
+    ])
+    assert rc == 0
+
+
+def test_cli_warns_on_rr_without_reply_to_before_sending(monkeypatch):
+    import io
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "orch-console")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+    monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: [])
+    monkeypatch.setattr(bs, "_open_rr_from", lambda to, addressed_to, dsn=None: (55, "1:00:00"))
+    monkeypatch.setattr(bs, "send", lambda *a, **k: (4242, "th-uuid"))
+
+    rc = bs.main([
+        "--to", "cc-irsyad", "--type", "update", "--subject", "s",
+        "--priority", "P2",
+    ])
+    assert rc == 0
+
+
 # ---- STALE-INSTANCE-vs-LIVE-BASE refusal (bus #58614 item 1): the mirror of the
 # base-vs-instance guard above. Bus row #58568 (cc-irsyad-3 -> cc-quality-1, an
 # urgent review request) was stranded because cc-quality-1 had gone stale while
@@ -760,6 +978,11 @@ def test_cli_reaches_send_when_instance_is_live(monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
     monkeypatch.setattr(bs, "live_instance_ids", lambda to, dsn=None: [])
     monkeypatch.setattr(bs, "_agent_status_row", lambda *a, **k: ("cc-quality", True))
+    # test_cli_reaches_send_when_instance_is_live targets the stale-instance
+    # guard specifically -- stub the unrelated stamp-or-die RR check too, so
+    # this test never attempts a real DB connect (bus #58685/op#22517-class
+    # leak risk: dburl() prefers the real .env DATABASE_URL over any mock).
+    monkeypatch.setattr(bs, "_open_rr_from", lambda *a, **k: None)
     monkeypatch.setattr(bs, "send", lambda *a, **k: (4242, "th-uuid"))
 
     rc = bs.main([
