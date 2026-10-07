@@ -9,7 +9,19 @@ on:
 jobs:
   quality:
     name: Lint & Test
-    runs-on: ubuntu-latest
+    # CI-kill programme (op#26617/26622, hc#320): this job carries NO secrets (the
+    # DATABASE_URL step below is an ephemeral local pg17, never a repo secret), so
+    # it is eligible for the no-secret cubeasht runner (WSL2/Ubuntu, repo-scoped
+    # registration `cubeasht-orchestrator`, labels cubeasht + win-wsl). NEVER add a
+    # secret-bearing step to this job while it runs there (residual accepted risk,
+    # orch-console #56509: apt/dpkg run as root on that box). DO NOT MERGE until
+    # proven green here -- until then this must stay ubuntu-latest (see the
+    # rollback note below) or every PR/push red-lines.
+    runs-on: [self-hosted, cubeasht]
+    # In-repo branches only (orch-console #57880). Defence in depth: a fork PR runs
+    # the fork's OWN copy of this file, so the real fork control is the repo setting
+    # fork-pr-contributor-approval=all_external_contributors (set 2026-10-07).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
 
     # NO DATABASE_URL job-env. It used to be `${{ secrets.DATABASE_URL }}`, but the
     # 09-28 rotation pointed that secret at the PRODUCTION substrate, so every CI run
@@ -22,6 +34,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Runner identity (must be non-root, no sudo)
+        # cubeasht's runner user has NO root by design (orch-console #57880); fail
+        # loudly if that ever stops being true on a self-hosted runner.
+        if: runner.environment == 'self-hosted'
+        run: |
+          id
+          if [ "$(id -u)" = 0 ]; then echo "::error::runner is root"; exit 1; fi
+          if sudo -n true 2>/dev/null; then echo "::error::runner has passwordless sudo"; exit 1; fi
+          echo "OK: non-root, no sudo"
 
       - uses: actions/setup-python@v5
         with:
@@ -42,7 +64,13 @@ jobs:
         # vector` in ci_bootstrap_schema.py's platform shim (mamadah_notes.embedding
         # is a real public.vector(1024) column, not a shim) — see that script's
         # comment pointing back at this step.
+        # cubeasht has pg17 + pgvector pre-installed by root at setup time (its runner
+        # user has no sudo), so skip the install when the binaries are already there.
         run: |
+          if [ -x /usr/lib/postgresql/17/bin/postgres ] && [ -f /usr/share/postgresql/17/extension/vector.control ]; then
+            echo "pg17 + pgvector already present: $(/usr/lib/postgresql/17/bin/postgres --version)"
+            exit 0
+          fi
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
             -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
