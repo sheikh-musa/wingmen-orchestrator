@@ -15,7 +15,11 @@ One run (launchd, every 5 min):
          counters, LibreHardwareMonitor CPU temp (if installed), vmmem WS
        - one WSL call (scripts/cubeasht_collect_wsl.sh): runner service state,
          `free -m` inside the distro
-       - GitHub API: runner online/offline + busy (busy = a CI job is running)
+       - GitHub API: online/offline + busy for EVERY runner carrying the
+         'cubeasht' label (busy = a CI job is running). Two runners since
+         2026-10-07 (cubeasht-orchestrator, cubeasht-orchestrator-2; orch-console
+         #58379). metrics.runners = all of them; metrics.runner = backward-compat
+         summary (first by name) so pre-2-runner rows/readers keep working.
   2. INSERT one host_metrics row (migration 096). An unreachable desktop is
      DATA: it is stored as ok=false so the "unreachable >30 min" window works.
   3. EVALUATE alerts over the recent window ("sustained" = every sample in the
@@ -32,7 +36,9 @@ Thresholds (see THRESHOLDS below):
                                         early warning well below throttle)
   disk_c     <  15 % free              (latest reachable sample)
   ram        >  90 % used sustained 15 min
-  runner_offline   GitHub says offline for 30 min WHILE ssh works
+  runner_offline   ALL 'cubeasht' runners not-online for 30 min WHILE ssh works (P1)
+  runner_degraded  SOME (not all) runners not-online for 30 min while ssh works
+                   (P2, no rr, own key) — CI still runs, at reduced capacity
   unreachable      every sample in the last 30 min failed to connect
 
 CPU temperature: no sensor is exposed on cubeasht today (MSAcpi thermal zone
@@ -71,7 +77,8 @@ HOST = "cubeasht"
 SSH_TARGET = "cubeasht"
 WSL_DISTRO = "ci-orchestrator"
 GH_REPO = "sheikh-musa/wingmen-orchestrator"
-RUNNER_NAME = "cubeasht-orchestrator"
+RUNNER_NAME = "cubeasht-orchestrator"   # legacy single-runner summary name
+RUNNER_LABEL = "cubeasht"
 FROM_AGENT = "cc-fleet-health"
 TO_AGENT = "orch-console"
 
@@ -202,7 +209,7 @@ def parse_wsl_output(text: str) -> dict:
     text = text.replace("\0", "")
     if "CUBEMON_WSL_BEGIN" not in text or "CUBEMON_WSL_END" not in text:
         raise ProbeParseError(f"WSL probe output has no CUBEMON_WSL markers: {text[:300]!r}")
-    out: dict = {}
+    out: dict = {"runner_services": {}}
     in_free = False
     for raw in text.splitlines():
         line = raw.strip()
@@ -224,6 +231,9 @@ def parse_wsl_output(text: str) -> dict:
             k, v = line.split("=", 1)
             if k == "runner_service":
                 out["runner_service"] = v.strip() or "unknown"
+            elif k == "runner_unit" and "=" in v:
+                unit, state = v.rsplit("=", 1)
+                out["runner_services"][unit.strip()] = state.strip() or "unknown"
             elif k == "uptime_s":
                 out["uptime_s"] = _num(v)
             elif k == "loadavg":
@@ -243,8 +253,32 @@ def runner_from_api(data: dict, name: str = RUNNER_NAME) -> dict:
     return {"name": name, "status": "not_registered", "busy": False}
 
 
+def _labels(r: dict) -> list:
+    return [(l.get("name") if isinstance(l, dict) else l) for l in (r.get("labels") or [])]
+
+
+def runners_from_api(data: dict, label: str = RUNNER_LABEL) -> list[dict]:
+    """GitHub /actions/runners response → [{name, status, busy}] for every runner
+    carrying `label`, sorted by name. [] = no runner registered for the label."""
+    runners = data.get("runners")
+    if not isinstance(runners, list):
+        raise MonitorError(f"GitHub runners response missing 'runners' list (keys={sorted(data)})")
+    out = [{"name": r.get("name"), "status": r.get("status"), "busy": bool(r.get("busy"))}
+           for r in runners if label in _labels(r)]
+    return sorted(out, key=lambda r: str(r["name"]))
+
+
+def runner_summary(runners: list[dict]) -> dict:
+    """Backward-compatible single `runner` field: the first runner by name, or a
+    'not_registered' placeholder when no runner carries the label."""
+    if runners:
+        return dict(runners[0])
+    return {"name": RUNNER_NAME, "status": "not_registered", "busy": False}
+
+
 def build_metrics(ps: dict, wsl: Optional[dict], runner: Optional[dict],
-                  probe_errors: Optional[dict] = None) -> dict:
+                  probe_errors: Optional[dict] = None,
+                  runners: Optional[list[dict]] = None) -> dict:
     """Normalise one reachable sample into the stored metrics shape."""
     errs = dict(probe_errors or {})
     for k in ("os_error", "cpu_error", "disk_error", "gpu_error", "disks_error", "lhm_error", "vmmem_error"):
@@ -300,8 +334,15 @@ def build_metrics(ps: dict, wsl: Optional[dict], runner: Optional[dict],
     m["last_boot"] = ps.get("last_boot")
     vm = _num(ps.get("vmmem_ws_bytes"))
     m["vmmem_ws_mb"] = round(vm / 1048576) if vm is not None else None
+    wsl_used = (wsl or {}).get("mem_used_mb")
+    # vmmem working set minus what WSL processes actually use ≈ Linux page cache
+    # held by the WSL VM (reclaimable). e.g. 2026-10-07: vmmem 12.2 GB vs used 1.7 GB.
+    m["vmmem_minus_wsl_used_mb"] = (round(m["vmmem_ws_mb"] - wsl_used)
+                                    if m["vmmem_ws_mb"] is not None and wsl_used is not None else None)
     m["wsl"] = wsl
     m["runner"] = runner
+    if runners is not None:
+        m["runners"] = runners
     m["probe_errors"] = errs
     return m
 
@@ -349,6 +390,23 @@ def _window_vals(samples: list[dict], now: datetime, window_min: float, field: s
             if _m(s).get(field) is not None]
 
 
+def runner_list(s: dict) -> list[dict]:
+    """Every recorded runner for a sample. New rows carry metrics.runners; legacy
+    single-runner rows only metrics.runner. [] = unknown (gh failed) — never
+    treated as offline. An empty `runners` (no runner registered for the label)
+    falls back to the not_registered summary, which IS down."""
+    m = _m(s)
+    rs = m.get("runners")
+    if rs:
+        return [r for r in rs if isinstance(r, dict)]
+    r = m.get("runner")
+    return [r] if isinstance(r, dict) else []
+
+
+def _down(r: dict) -> bool:
+    return r.get("status") is not None and r.get("status") != "online"
+
+
 def evaluate_alerts(samples: list[dict], now: datetime, th: dict = THRESHOLDS) -> list[dict]:
     """samples: [{ts: datetime, ok: bool, metrics: dict, error: str|None}] (any order).
     → findings [{kind, key, ...detail}]."""
@@ -377,18 +435,35 @@ def evaluate_alerts(samples: list[dict], now: datetime, th: dict = THRESHOLDS) -
         return bool(s.get("ok")) and v is not None and v > th["ram_used_pct"]
     if sustained(samples, now, th["ram_window_min"], ram_hi):
         vals = _window_vals(samples, now, th["ram_window_min"], "ram_used_pct")
+        lm = _m(ok_samples[-1])
         out.append({"kind": "ram", "key": f"{HOST}:ram", "threshold": th["ram_used_pct"],
-                    "window_min": th["ram_window_min"], "latest": vals[-1], "peak": max(vals)})
+                    "window_min": th["ram_window_min"], "latest": vals[-1], "peak": max(vals),
+                    "vmmem_ws_mb": lm.get("vmmem_ws_mb"),
+                    "wsl_used_mb": (lm.get("wsl") or {}).get("mem_used_mb"),
+                    "vmmem_minus_wsl_used_mb": lm.get("vmmem_minus_wsl_used_mb")})
 
-    def runner_down(s: dict) -> bool:
-        r = _m(s).get("runner") or {}
-        return bool(s.get("ok")) and r.get("status") is not None and r.get("status") != "online"
-    if sustained(samples, now, th["runner_offline_window_min"], runner_down):
-        r = _m(ok_samples[-1]).get("runner") or {}
-        wsl = _m(ok_samples[-1]).get("wsl") or {}
-        out.append({"kind": "runner_offline", "key": f"{HOST}:runner_offline",
-                    "window_min": th["runner_offline_window_min"], "runner": r.get("name"),
-                    "status": r.get("status"), "runner_service": wsl.get("runner_service")})
+    def all_down(s: dict) -> bool:
+        rs = runner_list(s)
+        return bool(s.get("ok")) and bool(rs) and all(_down(r) for r in rs)
+
+    def some_down(s: dict) -> bool:
+        rs = runner_list(s)
+        return bool(s.get("ok")) and any(_down(r) for r in rs) and not all(_down(r) for r in rs)
+
+    win_r = th["runner_offline_window_min"]
+    for kind, pred, prio in (("runner_offline", all_down, "P1"), ("runner_degraded", some_down, "P2")):
+        if sustained(samples, now, win_r, pred):
+            rs = runner_list(ok_samples[-1])
+            wsl = _m(ok_samples[-1]).get("wsl") or {}
+            out.append({"kind": kind, "key": f"{HOST}:{kind}", "priority": prio, "req": prio == "P1",
+                        "window_min": win_r, "label": RUNNER_LABEL,
+                        "runners": rs, "total": len(rs),
+                        "offline": [r.get("name") for r in rs if _down(r)],
+                        "online": [r.get("name") for r in rs if not _down(r)],
+                        "runner": rs[0].get("name") if rs else None,
+                        "status": rs[0].get("status") if rs else None,
+                        "runner_service": wsl.get("runner_service"),
+                        "runner_services": wsl.get("runner_services") or {}})
 
     def unreachable(s: dict) -> bool:
         return (not s.get("ok")) and _m(s).get("reachable") is False
@@ -481,17 +556,47 @@ def render_page(f: dict) -> tuple[str, str]:
             "WHAT TO DO: see what is using memory (Task Manager; WSL shows up as 'vmmem'). A stuck CI "
             "job or a forgotten app is the usual cause."
         )
-    elif k == "runner_offline":
-        subj = f"CI runner {f['runner']} offline for {f['window_min']}+ min while cubeasht is ON"
-        body = (
-            f"TL;DR: the desktop is on and answering, but GitHub says our CI runner {f['runner']} "
-            f"has been '{f['status']}' for {f['window_min']}+ minutes.\n\n"
-            f"WHAT: ssh to cubeasht works on every sample, GitHub runner status = {f['status']}; "
-            f"WSL runner service state = {f.get('runner_service') or 'unknown'}.\n\n"
-            "WHY IT MATTERS: CI jobs for wingmen-orchestrator will sit queued; PRs do not get tested.\n\n"
-            "WHAT TO DO: restart the runner service inside WSL (distro ci-orchestrator, "
-            "`systemctl restart actions.runner.*`), or check the runner's registration on GitHub."
-        )
+        if f.get("vmmem_ws_mb") is not None and f.get("vmmem_minus_wsl_used_mb") is not None:
+            cache_gb = max(f["vmmem_minus_wsl_used_mb"], 0) / 1024
+            body = body.replace("\n\nWHY IT MATTERS", (
+                f"\nWSL's VM (vmmem) holds {f['vmmem_ws_mb'] / 1024:.1f} GB, of which ~{cache_gb:.1f} GB is "
+                f"WSL cache (Linux page cache, reclaimable); WSL processes themselves use "
+                f"{(f.get('wsl_used_mb') or 0) / 1024:.1f} GB. If the cache is most of it, the fix is "
+                "dropping WSL's cache (or `wsl --shutdown` when CI is idle), not hunting a leak."
+                "\n\nWHY IT MATTERS"), 1)
+    elif k in ("runner_offline", "runner_degraded"):
+        n, off = f.get("total", 1), f.get("offline") or [f.get("runner")]
+        states = ", ".join(f"{r.get('name')}={r.get('status')}" for r in f.get("runners") or []) \
+            or f"{f.get('runner')}={f.get('status')}"
+        svcs = ", ".join(f"{u.replace('actions.runner.sheikh-musa-wingmen-orchestrator.', '')}={st}"
+                         for u, st in sorted((f.get("runner_services") or {}).items())) \
+            or f"runner service={f.get('runner_service') or 'unknown'}"
+        what = (f"WHAT: ssh to cubeasht works on every sample. GitHub runner status: {states}. "
+                f"WSL systemd units: {svcs}.\n\n")
+        if k == "runner_offline":
+            subj = (f"CI: all {n} '{f.get('label', RUNNER_LABEL)}' runner(s) offline "
+                    f"{f['window_min']}+ min while cubeasht is ON")
+            body = (
+                f"TL;DR: the desktop is on and answering, but GitHub says ALL {n} of our cubeasht CI "
+                f"runner(s) ({', '.join(map(str, off))}) have been offline for {f['window_min']}+ minutes.\n\n"
+                + what +
+                "WHY IT MATTERS: CI jobs for wingmen-orchestrator will sit queued; PRs do not get tested.\n\n"
+                "WHAT TO DO: restart the runner services inside WSL (distro ci-orchestrator, "
+                "`systemctl restart actions.runner.*`), or check the runners' registration on GitHub."
+            )
+        else:
+            subj = (f"CI degraded: {len(off)}/{n} cubeasht runners offline {f['window_min']}+ min "
+                    f"({', '.join(map(str, off))})")
+            body = (
+                f"TL;DR: {len(off)} of our {n} cubeasht CI runners ({', '.join(map(str, off))}) has been "
+                f"offline for {f['window_min']}+ minutes; the other(s) still run CI, just with less "
+                "capacity. Lower urgency (P2).\n\n"
+                + what +
+                "WHY IT MATTERS: CI still works but jobs queue longer; if the remaining runner drops too, "
+                "CI stops (that pages separately at P1).\n\n"
+                "WHAT TO DO: when convenient, restart the offline runner's systemd unit inside WSL "
+                "(distro ci-orchestrator), or check its registration on GitHub."
+            )
     elif k == "unreachable":
         subj = f"cubeasht unreachable for {f['window_min']}+ min (likely asleep or off)"
         body = (
@@ -516,7 +621,8 @@ def _send_page(f: dict) -> int:
 
     subj, body = render_page(f)
     row_id, _thread = send(from_agent=FROM_AGENT, to=TO_AGENT, mtype="update",
-                           subject=subj, body=body, priority="P1", req=True)
+                           subject=subj, body=body, priority=f.get("priority", "P1"),
+                           req=f.get("req", True))
     return row_id
 
 
@@ -546,8 +652,10 @@ def summarize(samples: list[dict], day: date, tz: str = "UTC") -> dict:
     def vals(rows, field):
         return [float(_m(s)[field]) for s in rows if _m(s).get(field) is not None]
 
-    busy = [s for s in ok if (_m(s).get("runner") or {}).get("busy") is True]
-    idle = [s for s in ok if (_m(s).get("runner") or {}).get("busy") is False]
+    # CI busy = ANY recorded runner busy (2 runners since 2026-10-07); idle = all
+    # known runners idle; samples with no runner data (gh failed) are neither.
+    busy = [s for s in ok if any(r.get("busy") is True for r in runner_list(s))]
+    idle = [s for s in ok if runner_list(s) and all(r.get("busy") is False for r in runner_list(s))]
     out = {
         "host": HOST, "date": day.isoformat(), "tz": tz,
         "samples": len(inday), "reachable_samples": len(ok),
@@ -629,7 +737,7 @@ def _ssh(remote_cmd: str, stdin_path: Path, timeout: int) -> subprocess.Complete
         cp.stderr.replace(b"\0", b"").decode("utf-8", "replace"))
 
 
-def fetch_runner() -> dict:
+def fetch_runners() -> list[dict]:
     path = f"repos/{GH_REPO}/actions/runners?per_page=100"
     try:
         cp = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
@@ -644,31 +752,32 @@ def fetch_runner() -> dict:
         data = json.loads(cp.stdout)
     except json.JSONDecodeError as e:
         raise MonitorError(f"gh api {path} unparseable: {cp.stdout[:200]!r}") from e
-    return runner_from_api(data)
+    return runners_from_api(data)
 
 
 def collect() -> tuple[bool, dict, Optional[str], list[str]]:
     """→ (ok, metrics, error, loud_errors). Never raises for an unreachable host."""
     loud: list[str] = []
     try:
-        runner = fetch_runner()
+        runners = fetch_runners()
+        runner = runner_summary(runners)
     except MonitorError as e:
-        runner = None
+        runners, runner = None, None
         loud.append(f"runner status: {e}")
 
     try:
         cp = _ssh("powershell -NoProfile -ExecutionPolicy Bypass -Command -", PS_SCRIPT, PS_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return False, {"reachable": False, "runner": runner}, \
+        return False, {"reachable": False, "runner": runner, "runners": runners}, \
             f"ssh/powershell timed out after {PS_TIMEOUT_S}s", loud
     if cp.returncode == 255:  # ssh's own failure code: connect/auth/network
-        return False, {"reachable": False, "runner": runner}, \
+        return False, {"reachable": False, "runner": runner, "runners": runners}, \
             f"ssh unreachable (rc=255): {cp.stderr.strip()[-200:]}", loud
     try:
         ps = parse_ps_output(cp.stdout)
     except ProbeParseError as e:
         loud.append(str(e))
-        return False, {"reachable": True, "runner": runner}, \
+        return False, {"reachable": True, "runner": runner, "runners": runners}, \
             f"probe output unparseable (rc={cp.returncode}): {e}"[:500], loud
 
     probe_errors: dict = {}
@@ -680,7 +789,7 @@ def collect() -> tuple[bool, dict, Optional[str], list[str]]:
         probe_errors["wsl"] = f"wsl probe timed out after {WSL_TIMEOUT_S}s"
     except ProbeParseError as e:  # distro stopped/missing: data, not a monitor bug
         probe_errors["wsl"] = str(e)[:300]
-    return True, build_metrics(ps, wsl, runner, probe_errors), None, loud
+    return True, build_metrics(ps, wsl, runner, probe_errors, runners), None, loud
 
 
 # ---------------------------------------------------------------- main
@@ -693,8 +802,13 @@ def _brief(m: dict) -> str:
     return (f"cpu={m.get('cpu_load_pct')}% cpu_temp={m.get('cpu_temp_c')}({m.get('cpu_temp_source')}) "
             f"gpu={m.get('gpu_temp_c')}C/{m.get('gpu_util_pct')}% nvme={m.get('nvme_temp_c')}C "
             f"ram={m.get('ram_used_pct')}% diskC_free={m.get('disk_c_free_pct')}% "
-            f"wsl_mem={w.get('mem_used_pct')}% runner={r.get('status')}/busy={r.get('busy')} "
-            f"svc={w.get('runner_service')}")
+            f"wsl_mem={w.get('mem_used_pct')}% vmmem={m.get('vmmem_ws_mb')}MB "
+            f"(cache~{m.get('vmmem_minus_wsl_used_mb')}MB) runners="
+            + (",".join(f"{x.get('name')}:{x.get('status')}/busy={x.get('busy')}"
+                        for x in (m.get("runners") or ([r] if r else []))) or "?")
+            + " units=" + (",".join(f"{u.split('.')[-2]}={st}"
+                                    for u, st in sorted((w.get("runner_services") or {}).items()))
+                           or str(w.get("runner_service"))))
 
 
 def build_parser() -> argparse.ArgumentParser:
