@@ -458,3 +458,170 @@ def test_sweep_file_executes_normally_when_file_is_genuinely_unchanged(tmp_path)
     assert rep["matches_after"] == 0
     assert FAKE_KEY not in tr.read_text()
     assert (tmp_path / "ledger.jsonl").exists()
+
+
+# ── bus #56377 regressions: NAZIM_MODEL ("claude-fable-5-1", 16 chars) false-positived ──
+
+def test_model_role_session_path_dir_keys_excluded(tmp_path):
+    env = tmp_path / ".env"
+    _write(env, "\n".join([
+        "NAZIM_MODEL=claude-fable-5-1",          # 16 chars, the real incident value
+        "ORCH_BODY_ROLE=console-manager-role",   # _ROLE
+        "ORCH_TMUX_SESSION=nazim-session-name",  # _SESSION
+        "SOME_CONFIG_PATH=relative/non/abs/path",  # _PATH, not absolute (shape check wouldn't catch it)
+        "SOME_WORK_DIR=relative/non/abs/dir",      # _DIR
+    ]))
+    secrets = s.build_secret_set([str(env)])
+    vals = set(secrets)
+    assert b"claude-fable-5-1" not in vals
+    assert b"console-manager-role" not in vals
+    assert b"nazim-session-name" not in vals
+    assert b"relative/non/abs/path" not in vals
+    assert b"relative/non/abs/dir" not in vals
+
+
+def test_bool_int_values_excluded(tmp_path):
+    env = tmp_path / ".env"
+    _write(env, "\n".join([
+        "AUTO_WAKE_ENABLED=true",
+        "CONSOLE_PORT=87878787878787",   # digits-only, long -> still excluded (shape, not length)
+    ]))
+    secrets = s.build_secret_set([str(env)])
+    vals = set(secrets)
+    assert b"true" not in vals
+    assert b"87878787878787" not in vals
+
+
+def test_length_floor_noncred_vs_credential_key(tmp_path):
+    env = tmp_path / ".env"
+    _write(env, "\n".join([
+        "RANDOM_LABEL=exactlysixteench",    # 16 chars, no credential-shaped key -> excluded (< 20 floor)
+        "SOME_API_KEY=exactlysixteench",    # same 16-char VALUE, but _KEY key -> kept (credential floor=16)
+    ]))
+    secrets = s.build_secret_set([str(env)])
+    vals = set(secrets)
+    assert b"exactlysixteench" in vals   # kept via SOME_API_KEY
+    # only ONE value in the dict either way (same bytes) -- assert the credential path is what let it in
+    assert s._CREDENTIAL_KEY_RE.search("SOME_API_KEY")
+    assert not s._CREDENTIAL_KEY_RE.search("RANDOM_LABEL")
+
+
+def test_model_id_shaped_value_yields_zero_spans_end_to_end(tmp_path):
+    """The exact unit test orch-console asked for (#56377 item 2): a NAZIM_MODEL-shaped
+    .env value must produce 0 redacted spans scanning a transcript that contains it."""
+    env = tmp_path / ".env"
+    _write(env, "NAZIM_MODEL=claude-fable-5-1\n")
+    secrets = s.build_secret_set([str(env)])
+
+    tr = tmp_path / "t.jsonl"
+    _write(tr, json.dumps({"o": "booted with --model claude-fable-5-1 ok"}) + "\n")
+
+    rep = s.sweep_file(str(tr), secrets, execute=False)
+    assert rep["matches_before"] == 0
+
+
+def test_detect_false_positive_shapes_flags_short_widespread_hash():
+    value_len_by_hash8 = {"f8064a23": 16, "deadbeef": 64}
+    reports = []
+    for i in range(5):
+        reports.append({"by_hash": {"f8064a23": 20}, "file": "/t/f%d.jsonl" % i})
+    reports.append({"by_hash": {"deadbeef": 500}, "file": "/t/real-secret.jsonl"})
+    suspects = s.detect_false_positive_shapes(reports, value_len_by_hash8)
+    hashes = {h for (h, *_rest) in suspects}
+    assert "f8064a23" in hashes          # 100 spans / 5 files / len16 -> trips
+    assert "deadbeef" not in hashes      # long value, real-secret shape -> never trips
+
+
+def test_detect_false_positive_shapes_does_not_trip_below_thresholds():
+    value_len_by_hash8 = {"abc12345": 16}
+    reports = [{"by_hash": {"abc12345": 5}, "file": "/t/only-one-file.jsonl"}]
+    assert s.detect_false_positive_shapes(reports, value_len_by_hash8) == []
+
+
+# ── bus #56377 reversal: load_ledger_spans / reverse_file ──
+
+def test_load_ledger_spans_filters_by_hash8_and_dedups(tmp_path):
+    ledger = tmp_path / "ledger.jsonl"
+    _write(ledger, "\n".join([
+        json.dumps({"file": "/a.jsonl", "offset": 10, "length": 16, "hash8": "f8064a23"}),
+        json.dumps({"file": "/a.jsonl", "offset": 10, "length": 16, "hash8": "f8064a23"}),  # dup
+        json.dumps({"file": "/a.jsonl", "offset": 40, "length": 16, "hash8": "f8064a23"}),
+        json.dumps({"file": "/b.jsonl", "offset": 5, "length": 8, "hash8": "deadbeef"}),    # other hash
+    ]))
+    spans = s.load_ledger_spans(str(ledger), "f8064a23")
+    assert spans == {"/a.jsonl": [(10, 16), (40, 16)]}
+
+
+def test_reverse_file_restores_redacted_span(tmp_path):
+    value = b"claude-fable-5-1"
+    h8 = s.hash8(value)
+    marker = s.marker_for(value, h8)
+    assert marker == b"*" * len(value)   # the tag doesn't fit in 16 bytes -> all-stars marker
+
+    tr = tmp_path / "t.jsonl"
+    line = json.dumps({"o": "pre " + marker.decode() + " post"}) + "\n"
+    _write(tr, line)
+    offset = line.encode().index(marker)
+
+    rep = s.reverse_file(str(tr), [(offset, len(value))], value, h8, execute=True)
+    assert rep["error"] is None
+    assert rep["restored"] == 1
+    assert rep["mismatched"] == 0
+    assert value in tr.read_bytes()
+    assert json.loads(tr.read_text().rstrip("\n"))["o"] == "pre claude-fable-5-1 post"
+
+
+def test_reverse_file_is_idempotent_on_already_restored_span(tmp_path):
+    value = b"claude-fable-5-1"
+    h8 = s.hash8(value)
+    tr = tmp_path / "t.jsonl"
+    line = json.dumps({"o": "pre " + value.decode() + " post"}) + "\n"
+    _write(tr, line)
+    offset = line.encode().index(value)
+
+    rep = s.reverse_file(str(tr), [(offset, len(value))], value, h8, execute=True)
+    assert rep["error"] is None
+    assert rep["restored"] == 0
+    assert rep["already_ok"] == 1
+
+
+def test_reverse_file_aborts_on_unexpected_content_no_writes(tmp_path):
+    value = b"claude-fable-5-1"
+    h8 = s.hash8(value)
+    tr = tmp_path / "t.jsonl"
+    line = json.dumps({"o": "pre SOMETHING-ELSE-16b post"}) + "\n"
+    _write(tr, line)
+    offset = line.encode().index(b"SOMETHING-ELSE-16b")
+
+    before = tr.read_bytes()
+    rep = s.reverse_file(str(tr), [(offset, len(value))], value, h8, execute=True)
+    assert rep["error"] is not None
+    assert rep["mismatched"] == 1
+    assert tr.read_bytes() == before, "must not write anything when content doesn't match"
+
+
+def test_reverse_file_verify_only_does_not_write(tmp_path):
+    value = b"claude-fable-5-1"
+    h8 = s.hash8(value)
+    marker = s.marker_for(value, h8)
+    tr = tmp_path / "t.jsonl"
+    line = json.dumps({"o": "pre " + marker.decode() + " post"}) + "\n"
+    _write(tr, line)
+    offset = line.encode().index(marker)
+
+    before = tr.read_bytes()
+    rep = s.reverse_file(str(tr), [(offset, len(value))], value, h8, execute=False)
+    assert rep["restored"] == 1   # reports what WOULD happen
+    assert tr.read_bytes() == before, "verify-only must never write"
+
+
+def test_armed_suffixed_key_stays_credential_shaped(tmp_path):
+    """orch-console #56425: STOREFRONT_CONFIRM_PAID_ARMED is a money-path arming
+    TOKEN despite the flag-shaped name -- _ARMED$ must stay on the credential floor,
+    never get the higher non-credential length floor (which could exclude a short
+    future arming token the same way NAZIM_MODEL was wrongly excluded before)."""
+    assert s._CREDENTIAL_KEY_RE.search("STOREFRONT_CONFIRM_PAID_ARMED")
+    env = tmp_path / ".env"
+    _write(env, "STOREFRONT_CONFIRM_PAID_ARMED=exactly16chars!!\n")  # 16 chars -> would fail the 20-floor
+    secrets = s.build_secret_set([str(env)])
+    assert b"exactly16chars!!" in secrets
