@@ -44,3 +44,61 @@ SECRET_VALUE_PATTERNS = {
     # an export of the header value).
     "bearer-token": re.compile(r"\bBearer\s+[A-Za-z0-9\-_.=]{15,}\b", re.IGNORECASE),
 }
+
+# Cheap, SOUND prefilter: a tuple of literal substrings at least one of which MUST be
+# present for the class's full pattern to have any chance of matching -- a plain `in`
+# check costs microseconds even on a multi-MB text, vs. a full regex .search() that can
+# cost orders of magnitude more (bus #54580/#54643: profiling scripts/hooks/
+# secrets_output_scanner.py on a 1.6MB representative clean tool output found
+# postgres-dsn-kv alone at ~1.5s -- ~40x every other pattern -- because its
+# `(?=[^\n]*\bpassword=\S+)` lookahead reruns from every candidate `host|port|...=`
+# position; the other ~10 patterns were each ~30-40ms just from the base cost of one
+# full-text regex .search()). Checking these literals FIRST skips the regex entirely
+# for the overwhelming majority of real calls, which contain none of these substrings.
+# A missing-anchor class (not a key here) always falls through to the full pattern --
+# fail open to scanning, never fail open to skipping. bearer-token has NO entry: its
+# pattern is case-INSENSITIVE, so no fixed-case literal substring is a sound anchor
+# (a mixed-case "BeArEr" would be missed), and its own base cost is unremarkable
+# (~40ms/1.6MB) -- not worth risking a detection gap to save it.
+SECRET_VALUE_ANCHORS: dict[str, tuple[str, ...]] = {
+    "anthropic-api-key": ("sk-ant-",),
+    "supabase-service-key": ("sbp_",),
+    "telegram-bot-token": (":AA",),
+    "postgres-dsn": ("postgres://", "postgresql://"),
+    # the pattern's own lookahead already requires `password=` -- this is not a looser
+    # approximation, it is the exact same necessary condition, just checked BEFORE the
+    # expensive lookahead/quantifier instead of inside it.
+    "postgres-dsn-kv": ("password=",),
+    "jwt": ("eyJ",),
+    "vercel-token": ("vcp_",),
+    "github-token": ("ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+    "google-oauth-refresh-token": ("1//0",),
+    "ssh-private-key": ("PRIVATE KEY-----",),
+}
+
+
+def has_candidate(text: str, cls: str) -> bool:
+    """True if `cls`'s full pattern could possibly match `text`. False is a SOUND skip
+    (the full pattern provably cannot match, so never run it); True is only permission
+    to try, not a guarantee of a match. A class with no registered anchor (not vetted,
+    or -- like bearer-token -- has no sound literal anchor) always returns True: fail
+    open to running the full regex, never fail open to skipping it."""
+    anchors = SECRET_VALUE_ANCHORS.get(cls)
+    if anchors is None:
+        return True
+    return any(a in text for a in anchors)
+
+
+def find_hits(text: str, patterns: dict[str, re.Pattern] = SECRET_VALUE_PATTERNS) -> list[tuple[str, re.Match]]:
+    """Anchor-prefiltered scan over every class in `patterns`, in the same iteration
+    order `dict(patterns).items()` would give -- same hits, same first-match-wins order,
+    as a plain `[(cls, m) for cls, p in patterns.items() if (m := p.search(text))]`; the
+    only difference is how many of those regexes actually run."""
+    hits = []
+    for cls, pattern in patterns.items():
+        if not has_candidate(text, cls):
+            continue
+        m = pattern.search(text)
+        if m:
+            hits.append((cls, m))
+    return hits

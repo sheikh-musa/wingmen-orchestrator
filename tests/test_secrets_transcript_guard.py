@@ -1213,3 +1213,37 @@ def test_apply_migration_exemption_unchanged_when_exec_prod_also_mentioned():
 def test_fails_closed_on_bad_json():
     r = subprocess.run([sys.executable, str(HOOK)], input="not json", text=True, capture_output=True)
     assert r.returncode == 2
+
+
+# ---- check_rule_e perf regression guard (bus #54580/#54643, Thu 10-08 06:00Z item 1) -
+# "same for secrets_transcript_guard if they share code" -- Rule E now goes through the
+# same anchor-prefiltered find_hits() the scanner uses (see
+# tests/test_secret_shape_patterns.py for the prefilter's own tests), with NO byte cap
+# (capping a pre-execution BLOCK would be a real prevention gap, not a safe
+# optimization). Imported directly (not via subprocess) so this measures only the
+# regex-scan cost, not Python interpreter startup.
+
+import importlib.util as _importlib_util  # noqa: E402
+
+_spec = _importlib_util.spec_from_file_location("secrets_transcript_guard", HOOK)
+_guard_mod = _importlib_util.module_from_spec(_spec)
+sys.modules["secrets_transcript_guard"] = _guard_mod
+_spec.loader.exec_module(_guard_mod)
+
+
+def test_check_rule_e_is_fast_on_large_kv_keyword_dense_clean_command():
+    import time
+
+    lines = [f"host port user dbname line{i} no equals signs here at all" for i in range(20000)]
+    command = "\n".join(lines)
+    t0 = time.perf_counter()
+    result = _guard_mod.check_rule_e(command)
+    elapsed = time.perf_counter() - t0
+    assert result is None
+    assert elapsed < 0.25, f"check_rule_e() on {len(command)} bytes of clean text took {elapsed:.3f}s"
+
+
+def test_check_rule_e_still_detects_a_literal_dsn_shaped_value():
+    inline_dsn = "postgres" + "://orchuser:RealLooking9Zx@203.0.113.40:5432/orch"
+    result = _guard_mod.check_rule_e(f'psql "{inline_dsn}"')
+    assert result is not None and "postgres-dsn" in result

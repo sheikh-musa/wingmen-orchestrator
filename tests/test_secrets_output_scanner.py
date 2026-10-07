@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 HOOK_PATH = Path(__file__).parent.parent / "scripts" / "hooks" / "secrets_output_scanner.py"
@@ -859,3 +860,85 @@ def test_main_still_redacts_and_pages_a_real_inline_hit_when_the_persisted_file_
     assert inline_dsn not in transcript.read_text()
     assert "REDACTED" in transcript.read_text()
     assert counter.exists() and counter.read_text().count("x") == 1
+
+
+# ---- perf regression guards (bus #54580/#54643, Thu 10-08 06:00Z item 1) ----------
+# Profiling found scan() on a representative ~1.6MB clean tool output cost ~1.78s,
+# ~83% of it inside postgres-dsn-kv's backtracking lookahead. The fix is the anchor
+# prefilter in secret_shape_patterns.find_hits (see tests/test_secret_shape_patterns.py
+# for the prefilter's own correctness/perf tests) plus MAX_SCAN_BYTES. These assert the
+# fix holds at the scanner's own entry points, so a future change can't quietly
+# reintroduce the cost or weaken detection within the capped window.
+
+
+def test_scan_is_fast_on_large_kv_keyword_dense_clean_text():
+    lines = [f"host port user dbname line{i} no equals signs here at all" for i in range(20000)]
+    text = "\n".join(lines)
+    t0 = time.perf_counter()
+    hits = scanner.scan(text)
+    elapsed = time.perf_counter() - t0
+    assert hits == []
+    assert elapsed < 0.25, f"scan() on {len(text)} bytes of clean text took {elapsed:.3f}s -- perf regression"
+
+
+def test_scan_detects_a_hit_within_the_byte_cap():
+    inline_dsn = "postgres" + "://orchuser:RealLooking9Zx@203.0.113.30:5432/orch"
+    text = inline_dsn + "\n" + ("x" * (scanner.MAX_SCAN_BYTES * 3))
+    hits = scanner.scan(text)
+    assert hits and any(h[0] == "postgres-dsn" for h in hits)
+
+
+def test_scan_caps_bytes_scanned_so_huge_clean_text_stays_fast():
+    text = ("x" * (scanner.MAX_SCAN_BYTES * 50))
+    t0 = time.perf_counter()
+    hits = scanner.scan(text)
+    elapsed = time.perf_counter() - t0
+    assert hits == []
+    assert elapsed < 0.25, f"scan() on a {len(text)}-byte text took {elapsed:.3f}s -- byte cap not applied"
+
+
+def test_tail_sha256_none_when_text_not_truncated():
+    assert scanner._tail_sha256("short clean text") is None
+
+
+def test_tail_sha256_set_and_stable_when_text_truncated():
+    import hashlib
+
+    text = "a" * scanner.MAX_SCAN_BYTES + "TAIL-CONTENT-PAST-THE-CAP"
+    h = scanner._tail_sha256(text)
+    expected = hashlib.sha256(text[scanner.MAX_SCAN_BYTES:].encode("utf-8")).hexdigest()
+    assert h == expected
+
+
+def test_read_capped_with_tail_hash_matches_direct_read(tmp_path):
+    import hashlib
+
+    p = tmp_path / "big.txt"
+    body = "clean line\n" * 10000 + "tail marker content past the cap\n" * 2000
+    p.write_text(body)
+    prefix, tail_hash = scanner._read_capped_with_tail_hash(str(p), cap=scanner.MAX_SCAN_BYTES)
+    full = p.read_text()
+    assert prefix == full[: scanner.MAX_SCAN_BYTES]
+    if len(full) > scanner.MAX_SCAN_BYTES:
+        assert tail_hash == hashlib.sha256(full[scanner.MAX_SCAN_BYTES :].encode("utf-8")).hexdigest()
+    else:
+        assert tail_hash is None
+
+
+def test_scan_persisted_output_is_fast_on_a_multi_mb_clean_file(tmp_path):
+    p = tmp_path / "huge_spill.txt"
+    lines = [f"host port user dbname line{i} no equals signs here at all" for i in range(60000)]
+    p.write_text("\n".join(lines))
+    t0 = time.perf_counter()
+    hits = scanner.scan_persisted_output(str(p))
+    elapsed = time.perf_counter() - t0
+    assert hits == []
+    assert elapsed < 0.5, f"scan_persisted_output() on a {p.stat().st_size}-byte file took {elapsed:.3f}s"
+
+
+def test_scan_persisted_output_still_finds_a_hit_within_the_byte_cap(tmp_path):
+    inline_dsn = "postgres" + "://orchuser:RealLooking9Zx@203.0.113.31:5432/orch"
+    p = tmp_path / "spill_with_hit.txt"
+    p.write_text(inline_dsn + "\n" + ("y" * (scanner.MAX_SCAN_BYTES * 3)))
+    hits = scanner.scan_persisted_output(str(p))
+    assert hits and any(h[0] == "postgres-dsn" for h in hits)
