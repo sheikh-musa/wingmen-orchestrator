@@ -246,6 +246,20 @@ def warn_if_missing_provenance_citation(priority: str, subject: str, body: str, 
     )
 
 
+def warn_if_weekday_date_mismatch(subject: str, body: str, stream=None) -> None:
+    """2026-10-07 (orch-console bus #57970): flag a weekday paired with the wrong date
+    ("Thursday 9 October" when 9 Oct 2026 is a Friday). The send scripts REFUSE on this;
+    the bus only WARNS — never blocks, never raises (a guard bug must not stop a bus post)."""
+    out = stream or sys.stderr
+    try:
+        from scripts.lib import date_weekday_guard as _dwg
+        for f in _dwg.find_mismatches(f"{subject}\n{body}"):
+            print(f"bus_send: WARNING — weekday/date mismatch: {f.message()}", file=out)
+    except Exception as e:  # noqa: BLE001 — warn-only path, must never block a bus send
+        print(f"bus_send: WARNING — weekday/date guard could not run ({type(e).__name__}); "
+              "message not checked.", file=out)
+
+
 # Re-exported for callers/tests that reach for bus_send.resolve_from_agent /
 # bus_send.IdentityError directly — the real logic now lives in
 # scripts/lib/agent_identity.py (bus #47221) so asks_triage.py, asks_open.py,
@@ -408,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
 
     warn_if_below_hub_wake_floor(args.to, args.req, args.priority)
     warn_if_missing_provenance_citation(args.priority, args.subject, body)
+    warn_if_weekday_date_mismatch(args.subject, body)
 
     if args.dry_run:
         print(f"DRY RUN — would insert: from={from_agent} to={args.to} type={args.type} "

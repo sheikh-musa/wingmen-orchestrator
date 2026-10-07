@@ -14,6 +14,10 @@ cd "$ORCH_DIR"
 CHANNEL="${1:?usage: dev_group_send.sh <channel_key> \"<text>\"}"
 TEXT="${2:?text required}"
 
+# 2026-10-07 (orch-console #57970): refuse a weekday paired with the wrong date. Fail-closed.
+source "$ORCH_DIR/scripts/lib/date_weekday_guard.sh"
+_date_weekday_guard "$TEXT" || exit 6
+
 # Send via the tested NO-DUPE module (scripts/lib/tg_group_send.py): split connect/read timeouts,
 # retry ONLY provably-pre-ack failures, and fail LOUD+actionable on an ambiguous read-timeout rather
 # than risk a double-post to the partner group (Nazim 38090/38094). Token stays .env-only, never
