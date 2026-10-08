@@ -685,3 +685,49 @@ def test_main_refuses_missing_file(tmp_path, capsys):
     rc = scf.main([str(tmp_path / "nope.csv"), "op1"])
     assert rc == 2
     assert "no such file" in capsys.readouterr().err
+
+
+# ── _ensure_orch_runtime: re-exec / fail-loud when parsers missing (#59485) ──
+
+def test_ensure_runtime_noop_when_parsers_present():
+    # In the test env the orch-venv parsers are importable -> return without
+    # raising and WITHOUT attempting a re-exec.
+    with mock.patch("os.execv") as execv:
+        assert scf._ensure_orch_runtime() is None
+        execv.assert_not_called()
+
+
+def test_ensure_runtime_reexecs_under_orch_venv_when_parsers_missing(monkeypatch):
+    # Simulate a bare system python3: parsers not importable, not yet re-exec'd.
+    monkeypatch.delenv("_STAGE_CLIENT_REEXEC", raising=False)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    monkeypatch.setattr("os.path.exists", lambda p: True)
+    called = {}
+
+    def fake_execv(path, argv):
+        called["path"], called["argv"] = path, argv
+        raise OSError("execv blocked in test")  # force fall-through to loud exit
+
+    monkeypatch.setattr("os.execv", fake_execv)
+    with pytest.raises(SystemExit) as ei:
+        scf._ensure_orch_runtime()
+    assert ei.value.code == 3
+    # re-exec targeted the orch venv, carrying the script path as argv[0..1]
+    assert called["path"] == scf._ORCH_VENV_PY
+    assert called["argv"][0] == scf._ORCH_VENV_PY
+    import os as _os
+    _os.environ.pop("_STAGE_CLIENT_REEXEC", None)  # tidy the raw-set loop guard
+
+
+def test_ensure_runtime_fails_loud_without_relooping(monkeypatch, capsys):
+    # Already re-exec'd once and parsers STILL missing: must NOT exec again,
+    # must exit 3 with the exact command to use.
+    monkeypatch.setenv("_STAGE_CLIENT_REEXEC", "1")
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    with mock.patch("os.execv") as execv:
+        with pytest.raises(SystemExit) as ei:
+            scf._ensure_orch_runtime()
+        execv.assert_not_called()
+    assert ei.value.code == 3
+    err = capsys.readouterr().err
+    assert ".venv/bin/python3" in err and "not importable" in err

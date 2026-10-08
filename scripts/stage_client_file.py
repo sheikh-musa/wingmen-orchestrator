@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """stage_client_file.py — deterministic, no-LLM structural + PII-shape inspection
-of an inbound client file (xlsx/csv/docx/pdf), for orch-console to run BEFORE
+of an inbound client file (xlsx/csv/docx/pdf/image — .png/.jpg/.jpeg via local
+OCR, see "Image support" below), for orch-console to run BEFORE
 handing a file to a lane (orch-console bus #51060, Musa op#25437-25440: a lane
 must never tell a client "I can't open your file" — the file is staged here
 first, by a human, not by a lane reading raw cell values).
@@ -62,6 +63,54 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# The per-format parsers below are imported LAZILY, deep in each format's path,
+# and they live in the orchestrator .venv. _ensure_orch_runtime() (called first
+# in main) re-execs under that venv — or fails LOUD — when they are missing, so
+# a bare system python3 can never silently mis-conclude "can't open this file".
+_ORCH_VENV_PY = os.path.expanduser("~/wingmen/orchestrator/.venv/bin/python3")
+_HEAVY_DEPS = ("pdfplumber", "PIL", "pytesseract", "openpyxl", "docx")
+
+
+def _ensure_orch_runtime() -> None:
+    """Guarantee the per-format parsers (pdfplumber / PIL+pytesseract for
+    images / openpyxl / python-docx) are importable before any scanning begins.
+
+    They import LAZILY, deep in each format's path, so under a bare system
+    python3 the script does NOT fail at startup — it fails mid-scan: a client
+    JPG reaches ``from PIL import Image`` and dies ModuleNotFoundError, which a
+    caller then misreads as "images can't be staged" and silently drops the
+    client content (orch-console #59485, real coord incident on a client JPG).
+
+    Fail LOUD and self-heal: if any parser is missing, re-exec ONCE under the
+    orch venv python (env guard stops an exec loop); if even that cannot be
+    done, exit non-zero with the exact command to run — never a cryptic
+    traceback partway through a scan. No-op (returns immediately) whenever the
+    parsers are already importable, e.g. under the orch venv or in tests."""
+    import importlib.util
+
+    missing = []
+    for mod in _HEAVY_DEPS:
+        try:
+            if importlib.util.find_spec(mod) is None:
+                missing.append(mod)
+        except Exception:
+            missing.append(mod)
+    if not missing:
+        return
+    if os.environ.get("_STAGE_CLIENT_REEXEC") != "1" and os.path.exists(_ORCH_VENV_PY):
+        os.environ["_STAGE_CLIENT_REEXEC"] = "1"
+        try:
+            os.execv(_ORCH_VENV_PY, [_ORCH_VENV_PY, os.path.abspath(__file__), *sys.argv[1:]])
+        except OSError:
+            pass  # fall through to the loud exit below
+    print(
+        "stage_client_file: required parsers not importable "
+        f"({', '.join(missing)}). Run with: {_ORCH_VENV_PY} {os.path.abspath(__file__)} ...",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
+
 
 # ── PII-shape patterns (COUNT-ONLY — never used to extract/print a value) ────
 # Singapore NRIC/FIN/birth-cert shape: letter + 7 digits + letter.
@@ -619,6 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _ensure_orch_runtime()  # re-exec under the orch venv (or fail loud) BEFORE any scan (#59485)
     args = build_parser().parse_args(argv)
     path = Path(args.path)
     if not path.is_file():
