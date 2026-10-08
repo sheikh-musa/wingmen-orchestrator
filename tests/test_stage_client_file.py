@@ -557,6 +557,84 @@ def test_main_hold_person_record_header_never_exports_anything(tmp_path, monkeyp
     assert not report_dir.exists()
 
 
+# ── --structure-only: values-free structural export on ANY verdict ───────────
+
+def test_render_lists_column_header_labels_but_no_row_values():
+    # column header LABELS are structure (field names), not PII values -- a
+    # lane needs them to build from a layout; render() must emit them while
+    # never carrying a row data value.
+    structure = scf.FileStructure(
+        kind="csv",
+        sheets=[scf.SheetStructure(name="s1", rows=2, cols=3, header=["Name", "Score", "Competency 1"],
+                                    rows_data=[["Ahmad", "85", "Pass"], ["Siti", "90", "Pass"]])],
+    )
+    verdict = scf.classify(structure)  # HOLD -- "name" header keyword
+    rendered = verdict.render(structure)
+    assert "columns: Name | Score | Competency 1" in rendered
+    # row data values never appear in the values-free structural render
+    assert "Ahmad" not in rendered and "Siti" not in rendered and "85" not in rendered
+
+
+def test_main_structure_only_on_hold_exports_headers_without_row_values(tmp_path, monkeypatch, capsys):
+    # the whole point of the flag (bus #52465 follow-up): a HELD file is
+    # normally unexportable, so a lane can't even see a blank template's
+    # column/field LAYOUT. --structure-only --export emits the column HEADERS
+    # (structure) but NEVER a row data value, regardless of the HOLD verdict.
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "skills.csv"
+    p.write_text("Name,Score,Competency 1\nAhmad,85,Pass\nSiti,90,Pass\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27571", "--export", "--structure-only"])
+    out = capsys.readouterr().out
+    assert rc == 1  # verdict is still HOLD; exit code reflects the verdict
+    assert "verdict: HOLD" in out
+    assert "exported (structure only, HELD file — no values):" in out
+    exported = tmp_path / "reports" / "client-file-staging" / "op27571" / "skills.md"
+    assert exported.exists()
+    content = exported.read_text(encoding="utf-8")
+    # (a) column headers present ...
+    assert "columns: Name | Score | Competency 1" in content
+    # ... and the structure-only marker ...
+    assert "structure only" in content
+    # ... but NO row data values, anywhere.
+    for value in ("Ahmad", "Siti", "85", "90", "Pass"):
+        assert value not in content, f"row value {value!r} leaked into structure-only export"
+
+
+def test_main_structure_only_on_clean_still_exports_structure_not_content(tmp_path, monkeypatch, capsys):
+    # --structure-only forces structure-only even on a CLEAN verdict (e.g. a
+    # lane that only wants the layout) -- no row values, "HELD file" label
+    # omitted since the verdict is CLEAN.
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "navmap.csv"
+    p.write_text("Screen,Label\nhome,Welcome\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27572", "--export", "--structure-only"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "exported (structure only — no values):" in out  # no "HELD file" on CLEAN
+    exported = tmp_path / "reports" / "client-file-staging" / "op27572" / "navmap.md"
+    content = exported.read_text(encoding="utf-8")
+    assert "columns: Screen | Label" in content
+    assert "Welcome" not in content
+
+
+def test_main_plain_export_on_hold_still_writes_nothing_with_structure_only_flag_present(tmp_path, monkeypatch, capsys):
+    # guard: the NEW flag is the ONLY thing that changes HOLD behaviour --
+    # plain --export on HOLD (flag absent) must still export absolutely
+    # nothing, exactly as before.
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "skills.csv"
+    p.write_text("Name,Score\nAhmad,85\nSiti,90\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27573", "--export"])  # NO --structure-only
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "verdict: HOLD" in out
+    assert "exported" not in out
+    assert not (tmp_path / "reports" / "client-file-staging" / "op27573").exists()
+
+
 def test_main_without_export_never_writes_even_on_clean(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     p = tmp_path / "clean.csv"

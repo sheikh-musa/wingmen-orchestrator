@@ -53,6 +53,15 @@ exports full content on --export, even on a CLEAN verdict — only the
 values-free structural header, so a gov/client-data channel (cosem-exams,
 gazzabyte-irsyad, cosem-tdu, ...) can't have content heuristics alone
 decide what leaves the raw file.
+
+Structure-only on a HELD file (--structure-only, bus #52465 follow-up): a
+HOLD verdict normally exports NOTHING, which leaves a lane unable to see even
+a blank template's column/field LAYOUT to build a feature from. Passing
+--structure-only with --export forces the values-free structural export
+(export_structure_only) REGARDLESS of verdict — the column headers / sheet
+names / row+col counts / kind only, NEVER a single row data value — so a lane
+can get a HELD file's shape safely. Plain --export is unchanged: full content
+on CLEAN, nothing on HOLD.
 """
 from __future__ import annotations
 
@@ -278,6 +287,12 @@ class StageVerdict:
         lines.append("sheets:")
         for s in structure.sheets:
             lines.append(f"  - {s.name}: {s.rows} rows x {s.cols} cols")
+            # Column HEADER LABELS are structure (field names like "Name",
+            # "Score"), not PII values — a lane needs them to build from a
+            # file's layout, and they are safe to emit even on a HELD file
+            # (never any row data value). Only the header row, never rows_data.
+            if s.header:
+                lines.append("    columns: " + " | ".join(h or "" for h in s.header))
         lines.append(
             "pii_shape_counts (counts only, no values): "
             f"nric_fin_bc={self.pii.nric_fin_bc} emirates_id={self.pii.emirates_id} "
@@ -548,16 +563,26 @@ def is_sensitive_channel(channel: str) -> bool:
 
 
 def export_structure_only(verdict: StageVerdict, structure: FileStructure, op_id: str, original_name: str) -> Path:
-    """Sensitive-channel export (bus #52465): the values-free structural
-    header only, never content — even on a CLEAN verdict. A sensitive
-    channel (every channel except the internal-console allowlist in
-    migration 091) never lets content-heuristics alone decide what leaves
-    the raw file."""
+    """Values-free structural export: the structural header only (kind, sheet
+    names, row+col counts, COLUMN HEADER LABELS), never any row data value.
+
+    Two callers (both bus #52465):
+      - a sensitive channel on a CLEAN verdict — content-heuristics alone must
+        not decide what leaves the raw file (migration 091 allowlist);
+      - the --structure-only flag on ANY verdict, including HOLD — so a lane
+        can get a HELD file's column/field LAYOUT without any data escaping.
+    The structural header this emits is the SAME values-free header shown on
+    stdout, so it never carries a row value regardless of verdict."""
     header = verdict.render(structure)
     out_dir = Path("reports/client-file-staging") / sanitize_op_id(op_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{Path(original_name).stem}.md"
-    out_path.write_text(header + "\n\n(structure only — sensitive channel, content withheld)\n", encoding="utf-8")
+    if verdict.verdict == "HOLD":
+        note = ("(structure only — HELD file, content withheld; column headers / "
+                "sheet names / shape only, no data values)")
+    else:
+        note = "(structure only — sensitive channel, content withheld)"
+    out_path.write_text(header + "\n\n" + note + "\n", encoding="utf-8")
     return out_path
 
 
@@ -567,7 +592,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("op_id", help="op id this file is staged under (free-form string)")
     p.add_argument("--export", action="store_true",
                    help="on CLEAN, write the actual readable content to reports/client-file-staging/<op_id>/; "
-                        "no-op on HOLD")
+                        "no-op on HOLD (unless --structure-only is also passed)")
+    p.add_argument("--structure-only", action="store_true",
+                   help="with --export, write only the values-free structural header (kind, sheet names, "
+                        "row+col counts, column header LABELS — never a row data value) REGARDLESS of the "
+                        "CLEAN/HOLD verdict, so a lane can get a HELD file's column/field layout safely")
     p.add_argument("--channel",
                    help="bot_channels.channel_key this file arrived on; if flagged sensitive_data, --export "
                         "writes structure only (never content), even on a CLEAN verdict (bus #52465)")
@@ -583,7 +612,15 @@ def main(argv: list[str] | None = None) -> int:
     structure = extract(path)
     verdict = classify(structure)
     print(verdict.render(structure))  # stdout: values-free, always
-    if verdict.verdict == "CLEAN" and args.export:
+    if args.export and args.structure_only:
+        # Values-free structural export on ANY verdict (CLEAN or HOLD): only
+        # the structural header leaves — column header LABELS / shape, never a
+        # row data value — so a lane can build from a HELD file's layout
+        # without any data escaping.
+        out_path = export_structure_only(verdict, structure, args.op_id, path.name)
+        held = ", HELD file" if verdict.verdict == "HOLD" else ""
+        print(f"exported (structure only{held} — no values): {out_path}")
+    elif verdict.verdict == "CLEAN" and args.export:
         if args.channel and is_sensitive_channel(args.channel):
             out_path = export_structure_only(verdict, structure, args.op_id, path.name)
         else:
