@@ -239,6 +239,29 @@ def scan_person_name_hits(text: str) -> int:
     )
 
 
+_HEADER_REDACTION = "⟨redacted⟩"  # ⟨redacted⟩
+
+
+def structural_label_or_redacted(cell: str) -> str:
+    """Make ONE column-header cell safe to emit in the values-free structural
+    render. A header cell is normally a field LABEL ("Name", "Score") =
+    structure, safe. BUT extract_csv/extract_xlsx set header = row 0
+    UNCONDITIONALLY — there is no real-header detection — so for a HEADERLESS
+    file the "header" is actually a DATA row. Scrub each cell through the SAME
+    value-shape detectors used for row content: a cell carrying any PII-shape
+    (phone/nric/emirates_id/email/long_number) or a name-SHAPE (label+value,
+    honorific, Malay/Arabic particle, Arabic script) is a data VALUE, not a
+    label, and is redacted — never emitted. Genuine labels carry none of those
+    shapes and pass through verbatim. Keeps the structural render's contract
+    ("never a row data value") true even for a headerless file."""
+    c = (cell or "").strip()
+    if not c:
+        return ""
+    if scan_pii_counts(c).total() > 0 or scan_person_name_hits(c) > 0:
+        return _HEADER_REDACTION
+    return c
+
+
 # A data-table "row" detected in OCR'd image text, above which the image is
 # treated as a roster/gradebook rather than a UI screenshot (bus #52461) --
 # deliberately much lower than the 20-row tabular-format threshold, since an
@@ -289,10 +312,14 @@ class StageVerdict:
             lines.append(f"  - {s.name}: {s.rows} rows x {s.cols} cols")
             # Column HEADER LABELS are structure (field names like "Name",
             # "Score"), not PII values — a lane needs them to build from a
-            # file's layout, and they are safe to emit even on a HELD file
-            # (never any row data value). Only the header row, never rows_data.
+            # file's layout. Only the header row, never rows_data. BUT header
+            # = row 0 unconditionally (no real-header detection), so a
+            # HEADERLESS file's "header" is a DATA row — scrub each cell
+            # through the value-shape detectors so a data value can never leak
+            # here (structural_label_or_redacted); genuine labels pass through.
             if s.header:
-                lines.append("    columns: " + " | ".join(h or "" for h in s.header))
+                safe_cols = [structural_label_or_redacted(h) for h in s.header]
+                lines.append("    columns: " + " | ".join(safe_cols))
         lines.append(
             "pii_shape_counts (counts only, no values): "
             f"nric_fin_bc={self.pii.nric_fin_bc} emirates_id={self.pii.emirates_id} "
