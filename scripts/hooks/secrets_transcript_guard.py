@@ -137,7 +137,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
-from secret_shape_patterns import SECRET_VALUE_PATTERNS  # noqa: E402
+from secret_shape_patterns import SECRET_VALUE_PATTERNS, find_hits  # noqa: E402
 # ddl_detect.py: vendored verbatim, sha256-pinned, from sheikh-musa/ihsanos
 # scripts/db/lib/ddl_detect.py (branch feat/q206-exec-prod-gate-contract, commit
 # 4cecf9ef, sha256 a0895e0370751f113fc14dbde3611df53a3360700419ffecf7f3ef3630f9ae25)
@@ -426,9 +426,15 @@ def check_rule_c(command: str) -> str | None:
 
 
 def check_rule_e(command: str) -> str | None:
-    for cls, pattern in SECRET_VALUE_PATTERNS.items():
-        if pattern.search(command):
-            return f"a literal {cls}-shaped value in the command text"
+    # anchor-prefiltered (bus #54580/#54643) -- same patterns, same first-match-wins
+    # order, just skips a class's regex when a sound literal substring check proves it
+    # can't match. Deliberately NO byte cap here unlike the scanner's backstop: this is
+    # the pre-execution BLOCK, not a backstop -- capping it would create a real
+    # prevention gap on a long command, not a safe optimization.
+    hits = find_hits(command, SECRET_VALUE_PATTERNS)
+    if hits:
+        cls, _m = hits[0]
+        return f"a literal {cls}-shaped value in the command text"
     return None
 
 

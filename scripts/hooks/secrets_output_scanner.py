@@ -45,7 +45,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from secret_shape_patterns import SECRET_VALUE_PATTERNS  # noqa: E402
+from secret_shape_patterns import SECRET_VALUE_PATTERNS, find_hits  # noqa: E402
 
 # kept as SECRET_PATTERNS (the pre-existing name tests/this module reference) --
 # sourced from the shared module so the guard's Rule E and this scanner can't drift
@@ -53,6 +53,19 @@ from secret_shape_patterns import SECRET_VALUE_PATTERNS  # noqa: E402
 SECRET_PATTERNS = SECRET_VALUE_PATTERNS
 
 REDACTION = "[REDACTED by secrets_output_scanner -- pattern:{cls}]"
+
+# PERF (bus #54580/#54643, fleet-health measured this hook at 61.8%+33.8% CPU on gzbai
+# during ordinary lane tool-output scanning): profiling on a representative 1.6MB clean
+# tool output found scan() cost scales with text size (~1.1 microseconds/byte dominated
+# by postgres-dsn-kv's backtracking lookahead) with no bound on tool-output size -- a
+# 32MB output (e.g. a large file Read or persisted spill) measured ~36s of pure regex
+# work. 64 KiB is comfortably bigger than any real single-line secret shape and keeps
+# the worst-case cost (every pattern's anchor present, text adversarially dense) in the
+# tens-of-milliseconds range instead of unbounded. This is a backstop scanner, not the
+# pre-execution guard: per orch-console's ask, detection may weaken PAST this cap -- it
+# must not weaken WITHIN it, which it doesn't (the cap only truncates what scan() sees,
+# never which patterns run or how they match).
+MAX_SCAN_BYTES = 65536
 
 # fixture allowlist (bus #48965/#48982) -- see module docstring.
 FIXTURE_FILE_PATH_RE = re.compile(r"tests?/test_secrets_\w*\.py")
@@ -112,12 +125,21 @@ def _is_fixture_hit(cls: str, match: re.Match) -> bool:
 
 
 def scan(text: str) -> list[tuple[str, re.Match]]:
-    hits = []
-    for cls, pattern in SECRET_PATTERNS.items():
-        m = pattern.search(text)
-        if m:
-            hits.append((cls, m))
-    return hits
+    scanned = text if len(text) <= MAX_SCAN_BYTES else text[:MAX_SCAN_BYTES]
+    return find_hits(scanned, SECRET_PATTERNS)
+
+
+def _tail_sha256(text: str, cap: int = MAX_SCAN_BYTES) -> str | None:
+    """sha256 of the content PAST the scan cap, for forensics only -- never the matched
+    value itself (a far smaller, crackable oracle space); this hashes bulk unscanned
+    content so a future investigation can confirm whether a specific known blob was the
+    truncated tail, without this hook ever having read it closely. None when `text`
+    wasn't actually truncated."""
+    if len(text) <= cap:
+        return None
+    import hashlib
+
+    return hashlib.sha256(text[cap:].encode("utf-8", errors="replace")).hexdigest()
 
 
 def _redact_strings(obj, pattern: re.Pattern, cls: str):
@@ -230,6 +252,31 @@ def _find_persisted_output_paths(transcript_path: str, max_lines: int = 3) -> li
     return paths
 
 
+def _read_capped_with_tail_hash(path: str, cap: int = MAX_SCAN_BYTES) -> tuple[str, str | None]:
+    """Read at most `cap` bytes of `path` for scanning, and sha256 everything after
+    that point WITHOUT ever holding the tail in memory at once -- a persisted spill
+    file can be arbitrarily large (bus #54580/#54643), so this bounds the read/decode
+    cost the same way scan()'s own cap bounds the regex cost, rather than reading a
+    multi-MB-or-larger file fully just to throw most of it away. Returns (prefix_text,
+    tail_sha256_or_None); the hash is None iff the file was not actually truncated."""
+    import hashlib
+
+    try:
+        with open(path, "rb") as f:
+            head = f.read(cap)
+            hasher = hashlib.sha256()
+            truncated = False
+            while True:
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    break
+                truncated = True
+                hasher.update(chunk)
+    except OSError:
+        return "", None
+    return head.decode("utf-8", errors="replace"), (hasher.hexdigest() if truncated else None)
+
+
 def scan_persisted_output(path: str) -> list[tuple[str, re.Match]]:
     """Scan a Claude-Code-persisted spilled-output file (plain text, not JSONL) for
     every secret pattern. Same return shape as scan(), so a hit here feeds the same
@@ -241,14 +288,13 @@ def scan_persisted_output(path: str) -> list[tuple[str, re.Match]]:
     handling raised an uncaught UnicodeDecodeError here, crashing the hook BEFORE the
     main redact/log/page loop ran at all, which skipped redaction/paging for every hit
     in that invocation, including real ones found in the normal tool_response/
-    tool_input. errors="replace" avoids the crash while still correctly matching a
-    secret shape in the surrounding valid text (verified)."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-    except OSError:
+    tool_input. errors="replace" (now applied to just the capped prefix, decoded from
+    bytes read by _read_capped_with_tail_hash) avoids the crash while still correctly
+    matching a secret shape in the surrounding valid text (verified)."""
+    prefix_text, _tail_hash = _read_capped_with_tail_hash(path)
+    if not prefix_text:
         return []
-    return scan(content)
+    return scan(prefix_text)
 
 
 def redact_persisted_output(path: str, cls: str, pattern: re.Pattern) -> bool:
@@ -288,7 +334,7 @@ EVENT_LOG_PATH = os.path.join(
 
 def _log_event(cls: str, tool_name: str, transcript_path: str | None, sub_transcript_path: str | None,
                 session_id: str | None, agent_id: str | None, agent_type: str | None, agent: str,
-                cwd: str | None = None) -> None:
+                cwd: str | None = None, tail_sha256: str | None = None) -> None:
     import datetime
     import stat
 
@@ -308,6 +354,9 @@ def _log_event(cls: str, tool_name: str, transcript_path: str | None, sub_transc
         # available for exactly that case (confirmed: it pinned a real #51293 hit to a
         # specific ad-hoc Bash session by its cwd alone).
         "cwd": cwd,
+        # PERF byte-cap forensics (bus #54580/#54643): None unless this event's source
+        # text was longer than MAX_SCAN_BYTES -- see scan()/_tail_sha256 docstrings.
+        "tail_sha256": tail_sha256,
     }
     try:
         log_dir = os.path.dirname(EVENT_LOG_PATH)
@@ -394,6 +443,11 @@ def main() -> int:
     input_text = json.dumps(tool_input) if tool_input else ""
 
     hits = scan(output_text) + scan(input_text)
+    # forensics for the byte cap (bus #54580/#54643): None unless output_text was
+    # actually longer than MAX_SCAN_BYTES, in which case this is a fingerprint of the
+    # unscanned remainder -- lets a future investigation confirm whether a specific
+    # known blob was the truncated tail, without this hook having scanned it closely.
+    output_tail_hash = _tail_sha256(output_text)
 
     sub_transcript_path = _subagent_transcript_path(transcript_path, agent_id)
 
@@ -451,7 +505,7 @@ def main() -> int:
             continue
         seen_classes.add(cls)
         _log_event(cls, tool_name, transcript_path, sub_transcript_path, session_id,
-                   agent_id, agent_type, agent, cwd=cwd)
+                   agent_id, agent_type, agent, cwd=cwd, tail_sha256=output_tail_hash)
         if is_fixture_call or _is_fixture_hit(cls, match):
             continue
         _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type)
