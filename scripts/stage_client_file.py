@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """stage_client_file.py — deterministic, no-LLM structural + PII-shape inspection
-of an inbound client file (xlsx/csv/docx/pdf), for orch-console to run BEFORE
+of an inbound client file (xlsx/csv/docx/pdf/image — .png/.jpg/.jpeg via local
+OCR, see "Image support" below), for orch-console to run BEFORE
 handing a file to a lane (orch-console bus #51060, Musa op#25437-25440: a lane
 must never tell a client "I can't open your file" — the file is staged here
 first, by a human, not by a lane reading raw cell values).
@@ -62,6 +63,54 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# The per-format parsers below are imported LAZILY, deep in each format's path,
+# and they live in the orchestrator .venv. _ensure_orch_runtime() (called first
+# in main) re-execs under that venv — or fails LOUD — when they are missing, so
+# a bare system python3 can never silently mis-conclude "can't open this file".
+_ORCH_VENV_PY = os.path.expanduser("~/wingmen/orchestrator/.venv/bin/python3")
+_HEAVY_DEPS = ("pdfplumber", "PIL", "pytesseract", "openpyxl", "docx")
+
+
+def _ensure_orch_runtime() -> None:
+    """Guarantee the per-format parsers (pdfplumber / PIL+pytesseract for
+    images / openpyxl / python-docx) are importable before any scanning begins.
+
+    They import LAZILY, deep in each format's path, so under a bare system
+    python3 the script does NOT fail at startup — it fails mid-scan: a client
+    JPG reaches ``from PIL import Image`` and dies ModuleNotFoundError, which a
+    caller then misreads as "images can't be staged" and silently drops the
+    client content (orch-console #59485, real coord incident on a client JPG).
+
+    Fail LOUD and self-heal: if any parser is missing, re-exec ONCE under the
+    orch venv python (env guard stops an exec loop); if even that cannot be
+    done, exit non-zero with the exact command to run — never a cryptic
+    traceback partway through a scan. No-op (returns immediately) whenever the
+    parsers are already importable, e.g. under the orch venv or in tests."""
+    import importlib.util
+
+    missing = []
+    for mod in _HEAVY_DEPS:
+        try:
+            if importlib.util.find_spec(mod) is None:
+                missing.append(mod)
+        except Exception:
+            missing.append(mod)
+    if not missing:
+        return
+    if os.environ.get("_STAGE_CLIENT_REEXEC") != "1" and os.path.exists(_ORCH_VENV_PY):
+        os.environ["_STAGE_CLIENT_REEXEC"] = "1"
+        try:
+            os.execv(_ORCH_VENV_PY, [_ORCH_VENV_PY, os.path.abspath(__file__), *sys.argv[1:]])
+        except OSError:
+            pass  # fall through to the loud exit below
+    print(
+        "stage_client_file: required parsers not importable "
+        f"({', '.join(missing)}). Run with: {_ORCH_VENV_PY} {os.path.abspath(__file__)} ...",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
+
 
 # ── PII-shape patterns (COUNT-ONLY — never used to extract/print a value) ────
 # Singapore NRIC/FIN/birth-cert shape: letter + 7 digits + letter.
@@ -236,6 +285,41 @@ def scan_person_name_hits(text: str) -> int:
 # image table worth holding is usually a small roster, not a bulk export.
 _IMAGE_DATA_ROW_HOLD_THRESHOLD = 3
 
+# Minimum extracted text characters PER PAGE below which a PDF/doc is treated
+# as effectively image-only / un-inspectable (orch-console #59182, Musa
+# op#27345). A scanned / image-only PDF (or a doc that is just an embedded
+# scanned image) has NO extractable text layer: the text scanners above see
+# ~nothing, so the OLD code returned CLEAN with all PII counts 0 -- a FALSE
+# assurance, because the content was never actually inspected (a scanned NRIC
+# / gradebook would sail straight through). Below this bar, co-occurring with
+# at least one embedded image (the tell-tale of a scan rather than a blank
+# page), we FAIL CLOSED to HOLD for human visual review instead of guessing
+# CLEAN from near-zero extracted content. 24 is deliberately low -- a real
+# text layer, even a sparse one (a title + a line), clears it easily; a
+# scanned page yields 0 (or a few chars of OCR-noise pdfplumber grabbed) --
+# so this catches ONLY the genuinely un-inspected case, not a terse-but-real
+# text PDF. The image gate keys the rule on content that EXISTS but wasn't
+# read (a scan always carries an image), so a genuinely blank/empty PDF with
+# nothing to leak is NOT force-held.
+_MIN_INSPECTABLE_CHARS_PER_PAGE = 24
+
+
+def assess_inspection_coverage(structure: FileStructure) -> tuple[bool, int, int, int]:
+    """For a format that CAN be image-only (pdf/docx), decide whether the
+    content was effectively un-inspectable -- i.e. there is embedded image
+    content but the extracted text layer is far below what the page count
+    implies. Returns (uninspectable, pages, images, extracted_chars). Pure,
+    count-only; never touches a raw value. (orch-console #59182.)"""
+    if structure.kind not in ("pdf", "docx"):
+        return (False, 0, structure.image_count, 0)
+    extracted = sum(len(t.strip()) for t in structure.texts)
+    # extract_pdf appends one text entry per page, so len(texts) == page count;
+    # python-docx exposes no page count, so a doc is treated as a single unit.
+    pages = max(len(structure.texts), 1) if structure.kind == "pdf" else 1
+    images = structure.image_count
+    uninspectable = images > 0 and extracted < _MIN_INSPECTABLE_CHARS_PER_PAGE * pages
+    return (uninspectable, pages, images, extracted)
+
 
 @dataclass
 class SheetStructure:
@@ -353,7 +437,16 @@ def classify(structure: FileStructure) -> StageVerdict:
             reasons.append(f"{name_hits} name-shaped value(s) detected")
     if pii.total() > 0:
         reasons.append(f"{pii.total()} PII-shaped value(s) detected")
-    verdict = "HOLD" if (pii.total() > 0 or person_record) else "CLEAN"
+    # Fail-closed on an image-only / un-inspectable PDF or doc: a CLEAN verdict
+    # from near-zero extracted content is a false assurance -- the content was
+    # never actually inspected (orch-console #59182). HOLD for human eyes.
+    uninspectable, pages, images, extracted = assess_inspection_coverage(structure)
+    if uninspectable:
+        reasons.append(
+            f"needs human visual review (image-only / no text layer — "
+            f"{pages} page(s), {images} image(s), only {extracted} extracted char(s))"
+        )
+    verdict = "HOLD" if (pii.total() > 0 or person_record or uninspectable) else "CLEAN"
     return StageVerdict(verdict=verdict, reasons=reasons, pii=pii, person_record=person_record)
 
 
@@ -575,6 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _ensure_orch_runtime()  # re-exec under the orch venv (or fail loud) BEFORE any scan (#59485)
     args = build_parser().parse_args(argv)
     path = Path(args.path)
     if not path.is_file():
