@@ -820,7 +820,7 @@ def test_recycle_window_session_monitored_via_base_fallback(monkeypatch):
     monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({"cosem-exams": "cc-cosem-exams"}, {}))
     monkeypatch.setattr(w, "agent_status_base_fallback", lambda conn: {"exams": "cc-cosem-exams"})
     monkeypatch.setattr(w, "protected_agent_ids", lambda conn: set())
-    monkeypatch.setattr(w, "read_bus_signal", lambda a, c: w.BusSignal(0, 0.0, float("inf")))
+    monkeypatch.setattr(w, "read_bus_signal", lambda a, c, session=None: w.BusSignal(0, 0.0, float("inf")))
     state = {}
     obs = w.gather_observations(None, state=state, alert=False)
     assert "exams" in _obs_sessions(obs), "recycle-window session must be MONITORED via base fallback"
@@ -836,7 +836,7 @@ def test_session_with_no_agent_status_row_still_surfaces_as_gap(monkeypatch):
     monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({"cosem-exams": "cc-cosem-exams"}, {}))
     monkeypatch.setattr(w, "agent_status_base_fallback", lambda conn: {})
     monkeypatch.setattr(w, "protected_agent_ids", lambda conn: set())
-    monkeypatch.setattr(w, "read_bus_signal", lambda a, c: w.BusSignal(0, 0.0, float("inf")))
+    monkeypatch.setattr(w, "read_bus_signal", lambda a, c, session=None: w.BusSignal(0, 0.0, float("inf")))
     state = {}
     obs = w.gather_observations(None, state=state, alert=False)
     assert "ghost" not in _obs_sessions(obs)
@@ -853,7 +853,7 @@ def test_fallback_base_not_a_known_lane_still_surfaces(monkeypatch):
     monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({"cosem-exams": "cc-cosem-exams"}, {}))
     monkeypatch.setattr(w, "agent_status_base_fallback", lambda conn: {"rogue": "cc-not-a-lane"})
     monkeypatch.setattr(w, "protected_agent_ids", lambda conn: set())
-    monkeypatch.setattr(w, "read_bus_signal", lambda a, c: w.BusSignal(0, 0.0, float("inf")))
+    monkeypatch.setattr(w, "read_bus_signal", lambda a, c, session=None: w.BusSignal(0, 0.0, float("inf")))
     state = {}
     obs = w.gather_observations(None, state=state, alert=False)
     assert "rogue" not in _obs_sessions(obs)

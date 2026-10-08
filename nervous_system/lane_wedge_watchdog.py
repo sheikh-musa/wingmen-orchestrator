@@ -103,6 +103,7 @@ from scripts.lib import fleet_health_lease  # noqa: E402
 from scripts.lib import orch_lease  # noqa: E402  (reuse _me() host-label shape)
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 from scripts.lib import pane_busy  # noqa: E402  (footer-scoped busy check)
+from scripts.lib.inbox_ids import inbox_ids  # noqa: E402  (base+instance inbox id set — bus #51166/#58271)
 # CAI-786 wake predicate — the ONE source of "would this row wake the recipient",
 # reused here so the hub's page gate applies the exact CAI-451 narrow floor.
 from nervous_system import agent_wake  # noqa: E402
@@ -434,7 +435,26 @@ class AgentObs:
     reason: str = ""
 
 
-def read_bus_signal(agent: str, conn) -> BusSignal:
+def _resolve_instance_id(cur, session, base):
+    """THIS pane's instance/sub-tag id for `base`, from agent_status matched on the
+    tmux session (self-registered at boot, migration 005); freshest heartbeat wins.
+    Session-specific — never resolves a SIBLING instance. None when no session or no
+    distinct instance row (-> inbox_ids falls back to base-only, unchanged)."""
+    if not session or not base:
+        return None
+    try:
+        cur.execute(
+            "SELECT agent_id FROM agent_status "
+            "WHERE tmux_session=%s AND base_agent_id=%s AND agent_id IS NOT NULL "
+            "ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1",
+            (session, base))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def read_bus_signal(agent: str, conn, session: str | None = None) -> BusSignal:
     """Signal A: unread pileup + quiet, straight off the substrate. Host-agnostic
     — works for the VPS hub with no SSH. 'Actionable' unread = created in the
     [MIN_AGE, MAX_AGE] window (fresh stall, not chronic backlog), excluding test
@@ -449,19 +469,27 @@ def read_bus_signal(agent: str, conn) -> BusSignal:
     (this watchdog's own cai/cc-irsyad flags were partly that). Only rows that
     arrived AFTER the agent's last activity and were never responded-to count."""
     with conn.cursor() as cur:
+        # bus #51166/#58271: `agent` is the lane's BASE id; mail addressed to its
+        # instance/sub-tag id (e.g. 'cc-cosem-adcda-2', run under CC_BASE_OVERRIDE) must
+        # count toward the pileup too. Match to_agent IN (base, instance) — instance
+        # resolved session-specifically so a SIBLING's mail is never pulled in. The
+        # from_agent activity/exclude-answered checks stay on `agent` (the base): a lane
+        # ALWAYS writes from its base id (FK-enforced), so its "wrote a later message"
+        # signal is base-keyed regardless of which address the inbound row used.
+        _ids = inbox_ids(agent, _resolve_instance_id(cur, session, agent))
         # Fetch the windowed unread rows (not just counts) so wake-eligibility is decided
         # by the ONE shared predicate agent_wake.should_auto_wake — never forked into SQL.
         cur.execute(
             "SELECT am.priority, am.requires_response, am.message_type, "
             "       EXTRACT(epoch FROM now() - am.created_at) "
             "  FROM agent_messages am "
-            " WHERE am.to_agent = %s AND am.read_at IS NULL AND am.is_test IS NOT TRUE "
+            " WHERE am.to_agent = ANY(%s) AND am.read_at IS NULL AND am.is_test IS NOT TRUE "
             "   AND am.created_at <= now() - (%s * interval '1 second') "
             "   AND am.created_at >= now() - (%s * interval '1 second') "
             "   AND am.responded_at IS NULL "
             "   AND NOT EXISTS (SELECT 1 FROM agent_messages r "
             "                    WHERE r.from_agent = %s AND r.created_at > am.created_at)",
-            (agent, UNREAD_MIN_AGE_SEC, UNREAD_MAX_AGE_SEC, agent))
+            (_ids, UNREAD_MIN_AGE_SEC, UNREAD_MAX_AGE_SEC, agent))
         rows = cur.fetchall()
         unread = len(rows)
         oldest = max((float(r[3]) for r in rows if r[3] is not None), default=0.0)
@@ -1286,7 +1314,7 @@ def gather_observations(conn, state: Optional[dict] = None,
                       # singleton, and its episode state is keyed on `base`. `protected`
                       # is the fail-closed protected_agents registry (Nazim 37645 amd C).
         try:
-            bus = read_bus_signal(base, conn)
+            bus = read_bus_signal(base, conn, session=sess)
         except Exception as e:
             log(f"bus read failed for lane {sess}/{base}: {e}")
             continue
@@ -1491,7 +1519,7 @@ def menu_parked_scan(conn, state: dict, now: float, menu_alert: bool, alert: boo
         paged = False
         if menu_alert and alert and not entry.get("menu_alerted") and not _lane_snoozed(sess):
             try:
-                bus = read_bus_signal(base, conn)
+                bus = read_bus_signal(base, conn, session=sess)
             except Exception:
                 bus = BusSignal(0, 0.0, float("inf"))
             obs = AgentObs(agent=base, kind="lane", session=sess, bus=bus,
