@@ -73,10 +73,30 @@ def is_governance_console(sess: str) -> bool:
     return sess in GOVERNANCE_CONSOLES or sess.startswith(GOVERNANCE_PREFIXES)
 
 
+def inbox_ids(base: str, instance: str | None) -> list[str]:
+    """PURE: the id set an idle lane's inbox nudge must cover — its BASE agent id
+    AND, when the lane runs as a distinct sub-tag/instance, that INSTANCE id too.
+
+    bus #51166 / #58271 / orch-console #59675 regression class: adcda/platform
+    instances relaunch with CC_BASE_OVERRIDE=cc-cosem-adcda, so they run UNDER the
+    base identity yet register a distinct sub-tag (e.g. 'cc-cosem-adcda-2'). Mail
+    addressed to that instance id ('cc-cosem-adcda-2') must be counted too, or an
+    idle lane sits blind to it (operator rows — a client export fix, an Arabic
+    correction — were lost exactly this way). Base-first + deduped; a SINGLETON
+    lane (no distinct instance) returns exactly [base], byte-identical to the old
+    base-only path (cc-quality / cai / any single-identity body unaffected)."""
+    if instance and instance != base:
+        return [base, instance]
+    return [base]
+
+
 def unread_bus_work(sess: str) -> int:
-    """Count UNREAD agent_messages addressed to this lane's base agent. An
-    IDLE-CLEAN lane with unread dispatched work has stalled without picking it
-    up — the overnight-stall class. Maps tmux session → fleet_lanes.base_agent_id."""
+    """Count UNREAD agent_messages addressed to this lane — its BASE id AND, when
+    the lane runs as a distinct instance/sub-tag, its INSTANCE id too (see
+    inbox_ids / bus #51166 / #58271). An IDLE-CLEAN lane with unread dispatched
+    work has stalled without picking it up — the overnight-stall class. Maps tmux
+    session → fleet_lanes.base_agent_id, and session → agent_status.agent_id for
+    the instance id of THIS pane."""
     try:
         sys.path.insert(0, str(ORCH))
         from dotenv import load_dotenv
@@ -88,6 +108,21 @@ def unread_bus_work(sess: str) -> int:
             row = cur.fetchone()
             if not row or not row[0]:
                 return 0
+            base = row[0]
+            # Resolve THIS session's instance/sub-tag id. Session-specific on
+            # purpose: we match on tmux_session (a lane self-registers it at boot,
+            # migration 005) so we never count a SIBLING instance's mail — the
+            # cross-instance trap agent_wake._candidate_sessions warns about (a wake
+            # for cc-irsyad-2 must not resolve onto cc-irsyad-4). Freshest heartbeat
+            # for this base on this session wins. No row → instance=None → base-only,
+            # exactly as before (singletons / unmapped lanes unaffected).
+            cur.execute(
+                "SELECT agent_id FROM agent_status "
+                "WHERE tmux_session=%s AND base_agent_id=%s AND agent_id IS NOT NULL "
+                "ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1",
+                (sess, base))
+            irow = cur.fetchone()
+            ids = inbox_ids(base, irow[0] if irow else None)
             # RECENT + ACTIONABLE unread only. Lanes rarely mark_read, so their
             # unread backlog is huge (97+) regardless of priority — counting all of
             # it would nudge every idle lane forever. The stall class is: fresh work
@@ -95,9 +130,9 @@ def unread_bus_work(sess: str) -> int:
             # window (watchdog runs every 5min) prevents a 30min blip becoming a 7h
             # stall, without re-nudging on stale backlog.
             cur.execute(
-                "SELECT count(*) FROM agent_messages WHERE to_agent=%s AND read_at IS NULL "
+                "SELECT count(*) FROM agent_messages WHERE to_agent = ANY(%s) AND read_at IS NULL "
                 "AND (requires_response OR priority='P1') "
-                "AND created_at > now() - interval '45 minutes'", (row[0],))
+                "AND created_at > now() - interval '45 minutes'", (ids,))
             return cur.fetchone()[0]
     except Exception as e:
         log(f"unread-bus-work-failed {sess}: {e}")
