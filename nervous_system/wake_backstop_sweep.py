@@ -869,6 +869,11 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
 IDLE_UNREAD_NUDGE_AGE_S = int(os.environ.get("IDLE_UNREAD_NUDGE_AGE_S", "900"))    # 15 min
 IDLE_UNREAD_WARN_AGE_S = int(os.environ.get("IDLE_UNREAD_WARN_AGE_S", "1800"))     # 30 min
 
+# The from_agent the sweep stamps on its OWN nudge rows. ONE source so the self-feed exclusion
+# below (idle_unread_sweep) can never drift from what _default_nudge actually posts — a mismatch
+# would re-open the self-perpetuation it exists to close.
+_IDLE_NUDGE_FROM = "cc-fleet-health"
+
 # Process-level dedupe state (mirrors _ESCALATED_SEEN's shape): agent -> frozenset(ids) of
 # the LAST batch nudged/warned. A repeat of the identical situation is never re-sent; a
 # genuinely NEW unread row (a different id-set) fires again. Survives between sweeps,
@@ -886,7 +891,7 @@ def _fetch_idle_unread_rows(nudge_age_s: int):
         return []
     with psycopg.connect(_DSN) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, to_agent, created_at FROM agent_messages "
+            "SELECT id, to_agent, created_at, from_agent FROM agent_messages "
             "WHERE read_at IS NULL AND skipped_at IS NULL AND is_test IS NOT TRUE "
             "AND created_at < now() - make_interval(secs => %s) "
             "ORDER BY to_agent, created_at", (nudge_age_s,))
@@ -914,7 +919,7 @@ def _default_nudge(agent: str, ids: list, wake=wake_agent) -> "int | None":
     doorbell (agent_wake.wake_agent) — never a raw pane injection."""
     ids_str = ", ".join(f"#{i}" for i in ids)
     row_id = _bus_insert(
-        "cc-fleet-health", agent, "update", "P2",
+        _IDLE_NUDGE_FROM, agent, "update", "P2",
         f"[idle-unread] {len(ids)} row(s) sitting unread while you're idle",
         f"Your pane is idle but {len(ids)} directed row(s) are still unread: {ids_str}. "
         f"If you're standing by for one of these, it may already be here — reconcile your "
@@ -970,18 +975,19 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
     by_agent: dict = {}
     for r in rows:
         rid, agent, created_at = r[0], r[1], r[2]
+        frm = r[3] if len(r) > 3 else None
         if not is_wake_eligible_recipient(agent):
             continue
-        by_agent.setdefault(agent, []).append((rid, created_at))
+        by_agent.setdefault(agent, []).append((rid, created_at, frm))
 
-    nudged, warned, skipped_busy, skipped_dead, auto_quiesced = [], [], [], [], []
+    nudged, warned, skipped_busy, skipped_dead, auto_quiesced, skipped_own = [], [], [], [], [], []
     for agent, entries in by_agent.items():
         try:
             offline = is_offline_stale(agent, now_dt=now_dt)
         except Exception:  # noqa: BLE001 — an unprovable veto never auto-quiesces
             offline = False
         if offline:
-            newly = mark([rid for rid, _ca in entries])
+            newly = mark([rid for rid, _ca, _frm in entries])
             if newly:
                 auto_quiesced.append(agent)
             nudged_seen.pop(agent, None)
@@ -995,13 +1001,22 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
             skipped_busy.append(agent)          # mid-turn — will drain its own inbox
             continue
 
+        # SELF-FEED KILLER (facet d, Nazim #60531): the sweep's OWN nudge rows are themselves
+        # directed unread rows. If counted, each nudge becomes the next tick's "unread row" and
+        # the sweep nudges about its own nudge forever (the cc-cosem-platform-1 runaway,
+        # 2026-10-08). EXCLUDE them from the unread count AND auto-skip them so they drain.
+        own_ids = [rid for rid, _ca, frm in entries if frm == _IDLE_NUDGE_FROM]
+        genuine = [(rid, ca) for rid, ca, frm in entries if frm != _IDLE_NUDGE_FROM]
+        if own_ids and mark(own_ids):
+            skipped_own.append(agent)
+
         def _age_s(ca):
             try:
                 return (now_dt - ca).total_seconds()
             except Exception:  # noqa: BLE001 — un-ageable -> treat as not-yet-due
                 return -1.0
 
-        nudge_ids = sorted(rid for rid, ca in entries if ca is not None and _age_s(ca) >= nudge_age_s)
+        nudge_ids = sorted(rid for rid, ca in genuine if ca is not None and _age_s(ca) >= nudge_age_s)
         if not nudge_ids:
             continue
         ids_key = frozenset(nudge_ids)
@@ -1010,7 +1025,7 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
             nudged_seen[agent] = ids_key
             nudged.append(agent)
 
-        warn_ids = sorted(rid for rid, ca in entries if ca is not None and _age_s(ca) >= warn_age_s)
+        warn_ids = sorted(rid for rid, ca in genuine if ca is not None and _age_s(ca) >= warn_age_s)
         if warn_ids:
             wkey = frozenset(warn_ids)
             if warned_seen.get(agent) != wkey:
@@ -1019,7 +1034,8 @@ def idle_unread_sweep(*, rows=None, resolve_session=resolve_tmux_session, pane_b
                 warned.append(agent)
 
     return {"nudged": nudged, "warned": warned, "skipped_busy": skipped_busy,
-            "skipped_dead": skipped_dead, "auto_quiesced": auto_quiesced}
+            "skipped_dead": skipped_dead, "auto_quiesced": auto_quiesced,
+            "skipped_own": skipped_own}
 
 
 def _ts() -> str:
