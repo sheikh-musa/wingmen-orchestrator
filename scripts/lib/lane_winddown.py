@@ -28,6 +28,7 @@ from typing import Callable, Optional, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from nervous_system.protected_agents import protected_tmux_sessions  # noqa: E402
+from scripts.lib.inbox_ids import inbox_ids  # noqa: E402  (base+instance inbox id set — bus #51166/#58271)
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -146,15 +147,27 @@ def _agent_for_session(session: str) -> Optional[str]:
 
 
 def live_unread_count(session: str) -> Optional[int]:
-    agent = _agent_for_session(session)
-    if not agent:
-        return None
     try:
         import psycopg
+        from dotenv import load_dotenv
+        load_dotenv(_REPO / ".env")
         dsn = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM agent_messages WHERE to_agent=%s AND read_at IS NULL "
-                        "AND coalesce(is_test,false)=false", (agent,))
+            # bus #51166/#58271: resolve BOTH ids for this pane. agent_status.agent_id is
+            # the instance/sub-tag; base_agent_id is the family. A wind-down gate that
+            # counts only one address would let a lane be wound down with mail still
+            # unread on the other (base-addressed OR instance-addressed). Count
+            # to_agent IN (base, instance) for THIS session. No row -> 'could not
+            # measure' (None), which the gate treats as refuse (fail-closed).
+            cur.execute("SELECT agent_id, base_agent_id FROM agent_status "
+                        "WHERE tmux_session=%s ORDER BY updated_at DESC LIMIT 1", (session,))
+            row = cur.fetchone()
+            if not row or not (row[0] or row[1]):
+                return None
+            instance, base = row[0], row[1]
+            ids = inbox_ids(base or instance, instance)
+            cur.execute("SELECT count(*) FROM agent_messages WHERE to_agent = ANY(%s) "
+                        "AND read_at IS NULL AND coalesce(is_test,false)=false", (ids,))
             return int(cur.fetchone()[0])
     except Exception:
         return None

@@ -34,6 +34,7 @@ ORCH = Path(os.path.expanduser("~/wingmen/orchestrator"))
 sys.path.insert(0, str(ORCH))
 from scripts.lib import fire_window  # noqa: E402  (quiesce during a recycle fire window)
 from scripts.lib import pane_busy  # noqa: E402  (footer-scoped busy check)
+from scripts.lib.inbox_ids import inbox_ids  # noqa: E402  (base+instance inbox id set — bus #51166/#58271)
 STATE_FILE = ORCH / "logs" / "lane_watchdog_state.json"
 LOG_FILE = ORCH / "logs" / "lane_watchdog.log"
 
@@ -71,23 +72,6 @@ _escalation_count = 0       # escalations posted THIS scan (escalate() increment
 
 def is_governance_console(sess: str) -> bool:
     return sess in GOVERNANCE_CONSOLES or sess.startswith(GOVERNANCE_PREFIXES)
-
-
-def inbox_ids(base: str, instance: str | None) -> list[str]:
-    """PURE: the id set an idle lane's inbox nudge must cover — its BASE agent id
-    AND, when the lane runs as a distinct sub-tag/instance, that INSTANCE id too.
-
-    bus #51166 / #58271 / orch-console #59675 regression class: adcda/platform
-    instances relaunch with CC_BASE_OVERRIDE=cc-cosem-adcda, so they run UNDER the
-    base identity yet register a distinct sub-tag (e.g. 'cc-cosem-adcda-2'). Mail
-    addressed to that instance id ('cc-cosem-adcda-2') must be counted too, or an
-    idle lane sits blind to it (operator rows — a client export fix, an Arabic
-    correction — were lost exactly this way). Base-first + deduped; a SINGLETON
-    lane (no distinct instance) returns exactly [base], byte-identical to the old
-    base-only path (cc-quality / cai / any single-identity body unaffected)."""
-    if instance and instance != base:
-        return [base, instance]
-    return [base]
 
 
 def unread_bus_work(sess: str) -> int:

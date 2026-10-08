@@ -94,7 +94,7 @@ def test_run_lane_tick1_nudge_failure_escalates_to_page_not_silent(monkeypatch):
     # The bug: run_lane set fired="nudge" even when the nudge never reached the lane.
     # With the real lane_nudge.sh failing (bogus session), run_lane MUST page, not
     # report a silent nudge success.
-    monkeypatch.setattr(w, "gather_owned_work", lambda cur, lane: _W)
+    monkeypatch.setattr(w, "gather_owned_work", lambda cur, lane, session=None: _W)
     monkeypatch.setattr(w, "lane_idle", lambda cur, lane: (True, 1800.0))
     paged = []
     monkeypatch.setattr(w, "_page", lambda subject, body, dry: paged.append(subject))
@@ -106,7 +106,7 @@ def test_run_lane_tick1_nudge_failure_escalates_to_page_not_silent(monkeypatch):
 
 def test_run_lane_dry_does_not_invoke_lane_nudge(monkeypatch):
     # dry-run stays observation-only: no subprocess, reports the intended nudge.
-    monkeypatch.setattr(w, "gather_owned_work", lambda cur, lane: _W)
+    monkeypatch.setattr(w, "gather_owned_work", lambda cur, lane, session=None: _W)
     monkeypatch.setattr(w, "lane_idle", lambda cur, lane: (True, 1800.0))
     res = w.run_lane(_FakeCur(), "cc-irsyad-coord",
                      lane_map={"cc-irsyad-coord": "irsyad-coord"}, dry=True)

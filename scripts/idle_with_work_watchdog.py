@@ -25,6 +25,7 @@ import sys
 ORCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ORCH_DIR not in sys.path:
     sys.path.insert(0, ORCH_DIR)  # so `from scripts.lib...` resolves whether run as -m or as a path
+from scripts.lib.inbox_ids import inbox_ids  # noqa: E402  (base+instance inbox id set — bus #51166/#58271)
 IDLE_SECONDS = 15 * 60
 PHASE1_LANES = ["cc-irsyad-coord", "cc-irsyad-1"]  # cc-irsyad-2 permanently reaped by the hub
 # (#53964, 2026-10-06) -- autoscaler respins fresh worker ids on demand, never this one again.
@@ -77,7 +78,7 @@ def items_hash(actionable):
 
 
 # ── gathering (DB) ────────────────────────────────────────────────────────────
-def gather_owned_work(cur, lane):
+def gather_owned_work(cur, lane, session=None):
     items = []
     cur.execute("SELECT id, title, blocked_on FROM held_commitments "
                 "WHERE owner_agent=%s AND status IN ('pending','fired')", (lane,))
@@ -97,12 +98,38 @@ def gather_owned_work(cur, lane):
     for i, ask, bo in cur.fetchall():
         items.append({"ref": "backlog#%s" % i, "summary": ask, "blocked_on": bo,
                       "source": "operator_backlog"})
+    # bus #51166/#58271: `lane` is the BASE agent id; a lane addressed by its
+    # instance/sub-tag id (e.g. 'cc-cosem-adcda-2', run under CC_BASE_OVERRIDE) must
+    # have that mail counted too. Resolve THIS pane's instance id from agent_status
+    # matched on the tmux session (session-specific so a SIBLING instance's mail is
+    # never pulled in); no session / no instance row -> base-only, unchanged.
+    instance = _resolve_instance_id(cur, session, lane)
+    ids = inbox_ids(lane, instance)
     cur.execute("SELECT id, subject FROM agent_messages "
-                "WHERE to_agent=%s AND read_at IS NULL", (lane,))
+                "WHERE to_agent = ANY(%s) AND read_at IS NULL", (ids,))
     for i, subj in cur.fetchall():
         items.append({"ref": "bus#%s" % i, "summary": subj, "blocked_on": None,
                       "source": "agent_messages"})
     return items
+
+
+def _resolve_instance_id(cur, session, base):
+    """THIS pane's instance/sub-tag id for `base`, from agent_status matched on the
+    tmux session (self-registered at boot, migration 005); freshest heartbeat wins.
+    Session-specific on purpose — never resolves a sibling instance. None when no
+    session or no distinct instance row (-> inbox_ids falls back to base-only)."""
+    if not session or not base:
+        return None
+    try:
+        cur.execute(
+            "SELECT agent_id FROM agent_status "
+            "WHERE tmux_session=%s AND base_agent_id=%s AND agent_id IS NOT NULL "
+            "ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1",
+            (session, base))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None  # resolution failure -> base-only, never crash the sweep
 
 
 def lane_idle(cur, lane):
@@ -171,7 +198,7 @@ def _page(subject, body, dry):
 
 
 def run_lane(cur, lane, lane_map, dry=False):
-    items = gather_owned_work(cur, lane)
+    items = gather_owned_work(cur, lane, (lane_map or {}).get(lane))
     idle, idle_secs = lane_idle(cur, lane)
     c = classify(items, idle)
     actionable = c["actionable"]

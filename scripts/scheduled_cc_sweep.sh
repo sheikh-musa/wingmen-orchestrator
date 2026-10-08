@@ -71,9 +71,21 @@ if not (family and dsn):
     sys.exit(1)
 with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as c:
     with c.cursor() as cur:
+        # bus #51166/#58271: a family's mail can be addressed to the BASE id OR to any
+        # of its instance/sub-tag ids (e.g. 'cc-cosem-adcda-2', run under
+        # CC_BASE_OVERRIDE). This is a FAMILY sweep (spawn a session when the family
+        # has unread/unresponded work), so — unlike the per-pane watchdogs — the whole
+        # family's instance set is in scope, not one pane's. Count to_agent across the
+        # base AND every registered instance of it.
         cur.execute(
-            "SELECT count(*) FROM agent_messages WHERE to_agent=%s AND read_at IS NULL",
-            (family,)
+            "SELECT agent_id FROM agent_status "
+            "WHERE base_agent_id=%s AND agent_id IS NOT NULL AND agent_id<>%s",
+            (family, family)
+        )
+        fam_ids = [family] + [r[0] for r in cur.fetchall()]
+        cur.execute(
+            "SELECT count(*) FROM agent_messages WHERE to_agent = ANY(%s) AND read_at IS NULL",
+            (fam_ids,)
         )
         unread = cur.fetchone()[0]
         # CAI-RESP-296: read-but-UNANSWERED requires_response asks must also
@@ -95,7 +107,7 @@ with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as c:
         # sweep prompt: scheduled_sweep:dialogue_pending:<self>:<msg_id>:<bucket>
         cur.execute(
             "SELECT count(*) FROM agent_messages m "
-            "WHERE m.to_agent=%s AND m.requires_response=true "
+            "WHERE m.to_agent = ANY(%s) AND m.requires_response=true "
             "AND m.responded_at IS NULL "
             "AND NOT EXISTS ("
             "  SELECT 1 FROM notification_log n "
@@ -103,13 +115,13 @@ with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as c:
             "  AND n.dedup_key LIKE 'scheduled_sweep:dialogue_pending:' "
             "      || m.to_agent || ':' || m.id::text || ':%%'"
             ")",
-            (family,)
+            (fam_ids,)
         )
         unresponded = cur.fetchone()[0]
         cur.execute(
             "SELECT count(*) FROM inbox_sla_violations "
-            "WHERE agent=%s AND priority IN ('P1','P2') AND created_at >= %s",
-            (family, CUTOFF)
+            "WHERE agent = ANY(%s) AND priority IN ('P1','P2') AND created_at >= %s",
+            (fam_ids, CUTOFF)
         )
         sla = cur.fetchone()[0]
 print(f"{unread},{unresponded},{sla}")
