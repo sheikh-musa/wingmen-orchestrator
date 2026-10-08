@@ -271,6 +271,120 @@ def test_extract_image_few_rows_under_threshold_not_held_by_row_count_alone(tmp_
     assert v.verdict == "CLEAN"
 
 
+# ── image-only / un-inspectable PDF-or-doc guard (orch-console #59182) ───────
+# A scanned / image-only PDF (or doc) has NO extractable text layer: the text
+# scanners see ~nothing and the OLD code emitted CLEAN with all PII counts 0 --
+# a FALSE assurance (the content was never actually inspected). A scanned
+# NRIC/gradebook would sail straight through. Fail CLOSED to HOLD instead.
+
+def test_classify_holds_on_image_only_pdf_with_no_text_layer():
+    # one page, one embedded image, ZERO extracted text -> un-inspectable.
+    structure = scf.FileStructure(
+        kind="pdf",
+        sheets=[scf.SheetStructure(name="(pdf text)", rows=1, cols=1, header=[])],
+        image_count=1,
+        texts=[""],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert any("visual review" in r for r in v.reasons)
+    assert v.pii.total() == 0  # the point: HOLD despite NOTHING being extracted
+
+
+def test_classify_holds_on_multipage_scanned_pdf():
+    structure = scf.FileStructure(
+        kind="pdf",
+        sheets=[scf.SheetStructure(name="(pdf text)", rows=3, cols=1, header=[])],
+        image_count=3,
+        texts=["", "", ""],  # 3 scanned pages, no text layer on any
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert any("3 page" in r and "3 image" in r for r in v.reasons)
+
+
+def test_classify_holds_on_image_only_docx():
+    structure = scf.FileStructure(
+        kind="docx",
+        sheets=[scf.SheetStructure(name="(document body)", rows=1, cols=1, header=[])],
+        image_count=1,
+        texts=[""],  # an embedded scanned image, empty paragraph text
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert any("visual review" in r for r in v.reasons)
+
+
+def test_classify_text_pdf_with_a_logo_image_and_real_text_stays_clean():
+    # over-gating guard: a normal text PDF that merely contains a logo image
+    # has a real text layer -> it WAS inspected -> must NOT be force-held by
+    # the new image-only rule (only CLEAN because the text itself is boring).
+    structure = scf.FileStructure(
+        kind="pdf",
+        sheets=[scf.SheetStructure(name="(pdf text)", rows=1, cols=1, header=[])],
+        image_count=1,
+        texts=["Invoice total amount paid 120.00 on schedule, thank you for your business."],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "CLEAN"
+
+
+def test_classify_empty_textless_imageless_pdf_is_not_force_held():
+    # a blank PDF (no text, no images) has no un-inspected content to leak --
+    # the guard keys on image_count>0, so this stays CLEAN, not a false HOLD.
+    structure = scf.FileStructure(
+        kind="pdf",
+        sheets=[scf.SheetStructure(name="(pdf text)", rows=1, cols=1, header=[])],
+        image_count=0,
+        texts=[""],
+    )
+    v = scf.classify(structure)
+    assert v.verdict == "CLEAN"
+
+
+def _write_image_only_pdf(path):
+    """Synthetic scanned-style PDF: a page whose only content is a rendered
+    raster image, with NO text layer at all. SYNTHETIC -- no real client data."""
+    import fitz
+    from PIL import Image
+
+    img_path = str(path) + ".scan.png"
+    Image.new("RGB", (400, 300), color="white").save(img_path)
+    doc = fitz.open()
+    page = doc.new_page(width=420, height=320)
+    page.insert_image(fitz.Rect(10, 10, 410, 310), filename=img_path)
+    doc.save(str(path))
+    doc.close()
+
+
+def test_extract_and_classify_image_only_pdf_holds(tmp_path):
+    # end-to-end wet-prove on a real synthetic image-only PDF (the shipped path).
+    p = tmp_path / "scanned.pdf"
+    _write_image_only_pdf(p)
+    structure = scf.extract_pdf(p)
+    assert structure.image_count >= 1
+    assert sum(len(t.strip()) for t in structure.texts) == 0  # no text layer
+    v = scf.classify(structure)
+    assert v.verdict == "HOLD"
+    assert any("visual review" in r for r in v.reasons)
+
+
+def test_extract_and_classify_normal_text_pdf_stays_clean(tmp_path):
+    # the before-behaviour must be preserved: a real text PDF with boring
+    # content and no image still classifies CLEAN.
+    fitz = __import__("fitz")
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "total amount paid 120.00 on schedule thank you")
+    p = tmp_path / "textual.pdf"
+    doc.save(str(p))
+    doc.close()
+
+    structure = scf.extract_pdf(p)
+    v = scf.classify(structure)
+    assert v.verdict == "CLEAN"
+
+
 # ── sensitive-channel override (bus #52465) ──────────────────────────────────
 
 def test_is_sensitive_channel_fails_closed_when_database_url_unset(monkeypatch):

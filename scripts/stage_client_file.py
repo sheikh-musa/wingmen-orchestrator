@@ -236,6 +236,41 @@ def scan_person_name_hits(text: str) -> int:
 # image table worth holding is usually a small roster, not a bulk export.
 _IMAGE_DATA_ROW_HOLD_THRESHOLD = 3
 
+# Minimum extracted text characters PER PAGE below which a PDF/doc is treated
+# as effectively image-only / un-inspectable (orch-console #59182, Musa
+# op#27345). A scanned / image-only PDF (or a doc that is just an embedded
+# scanned image) has NO extractable text layer: the text scanners above see
+# ~nothing, so the OLD code returned CLEAN with all PII counts 0 -- a FALSE
+# assurance, because the content was never actually inspected (a scanned NRIC
+# / gradebook would sail straight through). Below this bar, co-occurring with
+# at least one embedded image (the tell-tale of a scan rather than a blank
+# page), we FAIL CLOSED to HOLD for human visual review instead of guessing
+# CLEAN from near-zero extracted content. 24 is deliberately low -- a real
+# text layer, even a sparse one (a title + a line), clears it easily; a
+# scanned page yields 0 (or a few chars of OCR-noise pdfplumber grabbed) --
+# so this catches ONLY the genuinely un-inspected case, not a terse-but-real
+# text PDF. The image gate keys the rule on content that EXISTS but wasn't
+# read (a scan always carries an image), so a genuinely blank/empty PDF with
+# nothing to leak is NOT force-held.
+_MIN_INSPECTABLE_CHARS_PER_PAGE = 24
+
+
+def assess_inspection_coverage(structure: FileStructure) -> tuple[bool, int, int, int]:
+    """For a format that CAN be image-only (pdf/docx), decide whether the
+    content was effectively un-inspectable -- i.e. there is embedded image
+    content but the extracted text layer is far below what the page count
+    implies. Returns (uninspectable, pages, images, extracted_chars). Pure,
+    count-only; never touches a raw value. (orch-console #59182.)"""
+    if structure.kind not in ("pdf", "docx"):
+        return (False, 0, structure.image_count, 0)
+    extracted = sum(len(t.strip()) for t in structure.texts)
+    # extract_pdf appends one text entry per page, so len(texts) == page count;
+    # python-docx exposes no page count, so a doc is treated as a single unit.
+    pages = max(len(structure.texts), 1) if structure.kind == "pdf" else 1
+    images = structure.image_count
+    uninspectable = images > 0 and extracted < _MIN_INSPECTABLE_CHARS_PER_PAGE * pages
+    return (uninspectable, pages, images, extracted)
+
 
 @dataclass
 class SheetStructure:
@@ -353,7 +388,16 @@ def classify(structure: FileStructure) -> StageVerdict:
             reasons.append(f"{name_hits} name-shaped value(s) detected")
     if pii.total() > 0:
         reasons.append(f"{pii.total()} PII-shaped value(s) detected")
-    verdict = "HOLD" if (pii.total() > 0 or person_record) else "CLEAN"
+    # Fail-closed on an image-only / un-inspectable PDF or doc: a CLEAN verdict
+    # from near-zero extracted content is a false assurance -- the content was
+    # never actually inspected (orch-console #59182). HOLD for human eyes.
+    uninspectable, pages, images, extracted = assess_inspection_coverage(structure)
+    if uninspectable:
+        reasons.append(
+            f"needs human visual review (image-only / no text layer — "
+            f"{pages} page(s), {images} image(s), only {extracted} extracted char(s))"
+        )
+    verdict = "HOLD" if (pii.total() > 0 or person_record or uninspectable) else "CLEAN"
     return StageVerdict(verdict=verdict, reasons=reasons, pii=pii, person_record=person_record)
 
 
