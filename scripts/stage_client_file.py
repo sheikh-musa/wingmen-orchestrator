@@ -62,6 +62,44 @@ a blank template's column/field LAYOUT to build a feature from. Passing
 names / row+col counts / kind only, NEVER a single row data value — so a lane
 can get a HELD file's shape safely. Plain --export is unchanged: full content
 on CLEAN, nothing on HOLD.
+
+Operator-attested content export on a HELD file (--operator-attested <op_msg_id>,
+orch-console): a sanctioned, auditable way for a lane to get the ACTUAL readable
+content of a file EVEN WHEN the verdict is HOLD, used when the operator (Musa)
+has explicitly authorized working from that file's content (e.g. "update the
+existing skill sheets with the changes in these files"). With --export, passing
+--operator-attested <op_msg_id> (an operator_messages row id) exports the full
+content (the SAME writer as a CLEAN --export, export_clean_file) on ANY verdict
+including HOLD, and logs every such export to an append-only audit file.
+
+  WHY THIS IS SAFE (a deliberate, narrow loosening of the "agents don't open
+  client files" floor). It is NOT a blanket bypass; it is a sanctioned
+  alternative to an agent reaching for an un-audited `cat`/Bash bypass when the
+  operator genuinely wants the content used. The loosening is made safe by four
+  things an agent cannot forge on its own:
+    1. a REAL operator-authorization ROW in operator_messages whose
+       from_user_id == MUSA_TELEGRAM_ID — an agent, a relay, or a mis-targeted
+       send-keys cannot fabricate an inbound message from Musa's own Telegram id
+       (same trust anchor as require_verified_authorization.py);
+    2. RECENCY — the cited row must be within the last 48h
+       (_OPERATOR_ATTESTED_MAX_AGE_HOURS), so an old authorization can't be
+       replayed indefinitely;
+    3. FAIL-CLOSED verification — no row, wrong from_user_id, too old, no
+       MUSA_TELEGRAM_ID, or an UNREACHABLE DB all REFUSE (exit 2, write
+       nothing); there is no "assume yes" path (matches is_sensitive_channel
+       and require_verified_authorization — fail-closed on every uncertainty);
+    4. an APPEND-ONLY AUDIT LOG — every operator-attested export (CLEAN or HOLD)
+       appends one line to reports/client-file-staging/_operator_attested_exports.log
+       (ISO timestamp, op_id, source basename, cited op_msg_id, verified
+       from_user_id, verdict), so every use is reviewable after the fact.
+
+  KNOWN LIMITATION (stated plainly, by design): this gate verifies that the
+  cited row is a RECENT message from Musa — it does NOT verify that the row
+  SEMANTICALLY authorizes THIS SPECIFIC file. The CALLER (console) is
+  accountable for citing a row that genuinely authorizes the file in question;
+  the audit log is what makes a wrong/over-broad citation reviewable. Plain
+  --export (full content on CLEAN, nothing on HOLD), --structure-only, and the
+  sensitive-channel structure-only path are all UNCHANGED by this flag.
 """
 from __future__ import annotations
 
@@ -70,6 +108,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ── PII-shape patterns (COUNT-ONLY — never used to extract/print a value) ────
@@ -613,6 +652,137 @@ def export_structure_only(verdict: StageVerdict, structure: FileStructure, op_id
     return out_path
 
 
+# ── operator-attested content export (orch-console) ─────────────────────────
+# A deliberate, narrow loosening of the "agents don't open client files" floor,
+# made safe by a REAL operator-authorization row an agent cannot forge, recency,
+# fail-closed verification, and an append-only audit log. See the module
+# docstring ("Operator-attested content export") for the full rationale and the
+# stated limitation.
+
+# How recent the cited operator_messages row must be, in hours. Configurable
+# here so the recency floor is a single, obvious constant.
+_OPERATOR_ATTESTED_MAX_AGE_HOURS = 48
+
+# Append-only audit log of every operator-attested export (CLEAN or HOLD).
+_OPERATOR_ATTESTED_AUDIT_LOG = (
+    Path("reports/client-file-staging") / "_operator_attested_exports.log"
+)
+
+
+@dataclass
+class AttestationResult:
+    """Outcome of verify_operator_attestation. ok=False is always fail-closed:
+    the caller must write nothing and refuse. from_user_id is the id the row
+    verified against (for the audit log) only when ok is True."""
+    ok: bool
+    from_user_id: str | None = None
+    reason: str = ""
+
+
+def _as_aware_utc(ts) -> datetime | None:
+    """Normalize a timestamp (datetime or ISO-8601 string, as psycopg or a
+    monkeypatched row may hand back) to an aware UTC datetime; None if it can't
+    be parsed (caller treats as fail-closed)."""
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    if isinstance(ts, str):
+        s = ts.strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def verify_operator_attestation(
+    op_msg_id: int, *, max_age_hours: int = _OPERATOR_ATTESTED_MAX_AGE_HOURS
+) -> AttestationResult:
+    """Verify a cited operator_messages row authorizes using a HELD file's
+    content, FAIL-CLOSED. Returns AttestationResult(ok=False, ...) — refuse,
+    write nothing — unless ALL hold:
+      - a row with id=op_msg_id exists in operator_messages,
+      - its from_user_id == MUSA_TELEGRAM_ID (the operator's real Telegram id —
+        an agent/relay cannot forge an inbound message from Musa's own id),
+      - it was created within the last `max_age_hours` (default 48h).
+
+    DB access uses psycopg with the DSN from DATABASE_URL (the SAME env-only
+    pattern as is_sensitive_channel — never a literal/CLI DSN). Any uncertainty
+    — MUSA_TELEGRAM_ID unset, DATABASE_URL unset, an UNREACHABLE DB, a missing
+    row, a wrong from_user_id, an unparseable/too-old created_at — all REFUSE.
+    There is no "assume yes" path.
+
+    This verifies the row is a RECENT Musa message; it does NOT verify the row
+    semantically authorizes THIS file — see the module docstring's KNOWN
+    LIMITATION. The audit log makes every use reviewable."""
+    musa_id = os.environ.get("MUSA_TELEGRAM_ID", "").strip()
+    if not musa_id:
+        return AttestationResult(False, reason="MUSA_TELEGRAM_ID unset — cannot verify — fail-closed")
+    try:
+        import psycopg
+
+        dsn = os.environ["DATABASE_URL"]
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT from_user_id, created_at FROM operator_messages WHERE id = %s",
+                    (op_msg_id,),
+                )
+                row = cur.fetchone()
+    except Exception as e:  # unreachable DB / no DATABASE_URL / query error -> DENY
+        return AttestationResult(
+            False, reason=f"attestation DB check failed ({type(e).__name__}) — fail-closed"
+        )
+    if row is None:
+        return AttestationResult(
+            False, reason=f"no operator_messages row id={op_msg_id} — fail-closed"
+        )
+    from_user_id, created_at = row[0], row[1]
+    if str(from_user_id or "") != musa_id:
+        return AttestationResult(
+            False,
+            reason=f"operator_messages id={op_msg_id} from_user_id does not match "
+                   "MUSA_TELEGRAM_ID — fail-closed",
+        )
+    created = _as_aware_utc(created_at)
+    if created is None:
+        return AttestationResult(
+            False, reason=f"operator_messages id={op_msg_id} has no parseable created_at — fail-closed"
+        )
+    age = datetime.now(timezone.utc) - created
+    if age > timedelta(hours=max_age_hours):
+        return AttestationResult(
+            False,
+            reason=f"operator_messages id={op_msg_id} is older than {max_age_hours}h "
+                   f"(age {age}) — fail-closed",
+        )
+    return AttestationResult(True, from_user_id=str(from_user_id),
+                             reason=f"verified recent Musa authorization op_msg id={op_msg_id}")
+
+
+def append_operator_attested_audit(
+    *, op_id: str, source_basename: str, op_msg_id: int, from_user_id: str, verdict: str
+) -> None:
+    """Append ONE line to the append-only operator-attested export audit log —
+    ISO timestamp, op_id, source basename, cited op_msg_id, the verified
+    from_user_id, and the verdict. Called on EVERY operator-attested export,
+    whether the file was CLEAN or HOLD, so every use of the loosened path is
+    reviewable after the fact. Open mode 'a' only — never truncates."""
+    _OPERATOR_ATTESTED_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    line = "\t".join([
+        datetime.now(timezone.utc).isoformat(),
+        op_id,
+        source_basename,
+        str(op_msg_id),
+        str(from_user_id),
+        verdict,
+    ])
+    with open(_OPERATOR_ATTESTED_AUDIT_LOG, "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("path", help="path to the client file (.xlsx/.csv/.docx/.pdf/.png/.jpg/.jpeg)")
@@ -627,11 +797,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--channel",
                    help="bot_channels.channel_key this file arrived on; if flagged sensitive_data, --export "
                         "writes structure only (never content), even on a CLEAN verdict (bus #52465)")
+    p.add_argument("--operator-attested", type=int, metavar="OP_MSG_ID", default=None,
+                   help="operator_messages row id in which Musa (from_user_id == MUSA_TELEGRAM_ID, within the "
+                        "last 48h) authorized using this file's content. With --export, exports the ACTUAL "
+                        "content on ANY verdict INCLUDING HOLD (fail-closed verification; every export is "
+                        "appended to reports/client-file-staging/_operator_attested_exports.log). Requires "
+                        "--export. The caller is accountable for citing a row that genuinely authorizes this file.")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    # --operator-attested only means anything WITH --export; it is an error on
+    # its own (parser.error exits 2), so an attestation can never be cited
+    # without the export it gates.
+    if args.operator_attested is not None and not args.export:
+        parser.error("--operator-attested requires --export")
     path = Path(args.path)
     if not path.is_file():
         print(f"stage_client_file: no such file: {path}", file=sys.stderr)
@@ -639,6 +821,29 @@ def main(argv: list[str] | None = None) -> int:
     structure = extract(path)
     verdict = classify(structure)
     print(verdict.render(structure))  # stdout: values-free, always
+    if args.operator_attested is not None:
+        # Operator-attested content export (orch-console): on ANY verdict,
+        # INCLUDING HOLD, export the ACTUAL content IFF a fail-closed check of
+        # the cited operator_messages row passes (recent, from Musa's TG id).
+        # Any failure writes NOTHING and exits 2. Every export (CLEAN or HOLD)
+        # is appended to the append-only audit log. See the module docstring.
+        res = verify_operator_attestation(args.operator_attested)
+        if not res.ok:
+            print(f"stage_client_file: operator attestation REFUSED — {res.reason}", file=sys.stderr)
+            return 2
+        out_path = export_clean_file(verdict, structure, args.op_id, path.name)
+        append_operator_attested_audit(
+            op_id=args.op_id,
+            source_basename=path.name,
+            op_msg_id=args.operator_attested,
+            from_user_id=res.from_user_id,
+            verdict=verdict.verdict,
+        )
+        print(
+            f"exported (OPERATOR-ATTESTED content, verdict={verdict.verdict}, "
+            f"attested by op_msg {args.operator_attested}): {out_path}"
+        )
+        return 0 if verdict.verdict == "CLEAN" else 1
     if args.export and args.structure_only:
         # Values-free structural export on ANY verdict (CLEAN or HOLD): only
         # the structural header leaves — column header LABELS / shape, never a
