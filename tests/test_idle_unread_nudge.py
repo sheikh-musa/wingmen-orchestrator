@@ -28,9 +28,11 @@ import wake_backstop_sweep as wbs  # noqa: E402
 _NOW = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _row(rid, agent, age_s):
-    """(id, to_agent, created_at) — age_s seconds before _NOW."""
-    return (rid, agent, _NOW - timedelta(seconds=age_s))
+def _row(rid, agent, age_s, frm="cc-peer"):
+    """(id, to_agent, created_at, from_agent) — age_s seconds before _NOW.
+    from_agent defaults to a genuine non-fleet-health peer (so existing tests keep asserting
+    that a GENUINE directed row still nudges — the regression guard for the self-feed fix)."""
+    return (rid, agent, _NOW - timedelta(seconds=age_s), frm)
 
 
 def _collector():
@@ -314,6 +316,45 @@ def test_no_raw_send_keys_anywhere_in_the_module():
     import inspect
     src = inspect.getsource(wbs)
     assert "send-keys" not in src
+
+
+# ---- self-feed killer: exclude + auto-skip the sweep's OWN nudge rows (facet d, Nazim #60531) ----
+# The idle-unread sweep posts its nudges FROM cc-fleet-health. Those nudge rows are themselves
+# directed unread rows, so an un-fixed sweep re-counts them next tick, nudges about its own
+# nudge, grows the id-set, defeats the warn once-guard, and re-wakes forever (the live runaway
+# on cc-cosem-platform-1, 2026-10-08). Fix: exclude from_agent='cc-fleet-health' rows from the
+# unread count AND auto-skip them so they drain.
+
+SELF = "cc-fleet-health"
+
+
+def test_excludes_own_nudge_rows_from_the_unread_count():
+    nudged, warned, nudge, warn = _collector()
+    marked = []
+    res = wbs.idle_unread_sweep(
+        rows=[_row(1, "cc-oeh", 1000, frm="cc-peer"),     # genuine directed row
+              _row(2, "cc-oeh", 1000, frm=SELF)],          # the sweep's OWN prior nudge
+        resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+        nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+        mark=lambda ids: (marked.extend(ids) or list(ids)))
+    assert nudged == [("cc-oeh", (1,))]        # only the GENUINE id — never the own-nudge id 2
+    assert 2 in marked                         # the own nudge is auto-skipped (drained)
+
+
+def test_no_nudge_or_warn_when_only_own_nudge_rows_are_unread():
+    # cc-cosem-platform-1 after its genuine FYIs were handled: the only unread rows left are the
+    # sweep's OWN nudges. It must NOT nudge/warn (nothing genuine) and must auto-skip them.
+    nudged, warned, nudge, warn = _collector()
+    marked = []
+    res = wbs.idle_unread_sweep(
+        rows=[_row(10, "cc-cosem-platform-1", 2000, frm=SELF),
+              _row(11, "cc-cosem-platform-1", 1900, frm=SELF)],
+        resolve_session=lambda a: "sess", pane_busy=lambda s: False,
+        nudge=nudge, warn=warn, now_dt=_NOW, nudged_seen={}, warned_seen={},
+        mark=lambda ids: (marked.extend(ids) or list(ids)))
+    assert nudged == [] and warned == []
+    assert sorted(marked) == [10, 11]
+    assert res["skipped_own"] == ["cc-cosem-platform-1"]
 
 
 # ---- wired into the daemon loop ("near the wake-backstop sweep") ----

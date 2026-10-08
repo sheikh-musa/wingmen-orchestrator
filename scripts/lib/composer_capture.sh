@@ -334,7 +334,7 @@ _cc_extract() {
 # is real QUEUED work, never a ghost, so it must never be flagged.
 _cc_text_busy() {
   printf '%s\n' "${1-}" | tail -4  | LC_ALL=C grep -q 'esc to interrupt' && return 0
-  printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*Waiting for [0-9]+ background agents' && return 0
+  printf '%s\n' "${1-}" | tail -12 | LC_ALL=C grep -qE '^[^[:space:]].*Waiting for [0-9]+ background agents?' && return 0
   # EXTENDED-THINKING turn (op#11774, found dogfooding a reset): a col-0 spinner line
   # with an active-turn parenthetical — '✻ Manifesting… (7m 6s · ↓ 20.9k tokens)' or
   # '(thinking with high effort)' — shows NO 'esc to interrupt', so the two checks

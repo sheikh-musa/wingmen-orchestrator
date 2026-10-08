@@ -162,6 +162,34 @@ def test_python_helper_reads_a_background_agents_turn_as_busy():
     assert pb.is_busy_text(BG_AGENTS_PANE) is True
 
 
+# SINGULAR background agent (facet-d, Nazim #60542): when exactly ONE bg agent runs the footer
+# reads "Waiting for 1 background agent to finish" (SINGULAR) — the common case. The pattern
+# required the plural "agents", so a 1-agent lane read IDLE and the idle-unread sweep nudged a
+# genuinely-busy lane (cc-cosem-platform-1 on PR#344, 2026-10-08). Fix = optional 's'.
+SINGLE_BG_AGENT_PANE = (
+    "✻ Waiting for 1 background agent to finish\n"
+    "────────────────────────────\n"
+    "❯ \n"
+    "────────────────────────────\n"
+    + IDLE_FOOTER
+)
+
+
+def test_shell_helper_reads_a_single_background_agent_turn_as_busy():
+    assert _busy(SINGLE_BG_AGENT_PANE) is True
+
+
+def test_python_helper_reads_a_single_background_agent_turn_as_busy():
+    assert pb.is_busy_text(SINGLE_BG_AGENT_PANE) is True
+
+
+def test_a_plain_idle_pane_stays_idle_after_the_single_agent_fix():
+    # Fail-closed guard (#60542 cond 4): the fix ADDS the singular-agent busy case ONLY — a pane
+    # with NO background-agent text must still read idle, in both the shell and python helpers.
+    assert _busy("some output\n" + IDLE_FOOTER) is False
+    assert pb.is_busy_text("some output\n" + IDLE_FOOTER) is False
+
+
 # The LIVE pane_busy(session) path must keep the op#11774 LIVENESS gate: a thinking spinner that
 # ANIMATES (timer ticks between two captures) is busy; a FROZEN one is stale (so a dead 'thinking'
 # pane can still be recycled instead of blocking self_recycle to MAX_WAIT). This is the case a
