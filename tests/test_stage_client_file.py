@@ -679,3 +679,267 @@ def test_main_refuses_missing_file(tmp_path, capsys):
     rc = scf.main([str(tmp_path / "nope.csv"), "op1"])
     assert rc == 2
     assert "no such file" in capsys.readouterr().err
+
+
+# ── operator-attested content export (orch-console) ──────────────────────────
+# A deliberate, auditable loosening of the "agents don't open client files"
+# floor: with --export --operator-attested <op_msg_id>, the ACTUAL content of a
+# HELD file is exported IFF a fail-closed check of the cited operator_messages
+# row passes (a recent message from Musa's own TG id), and every export is
+# appended to an append-only audit log. SYNTHETIC ONLY — the DB verify is driven
+# by a fake psycopg or a monkeypatched helper; no real client data, no real DB.
+
+_MUSA_ID = "286619815"  # synthetic stand-in for MUSA_TELEGRAM_ID in these tests
+
+
+def _fake_psycopg_returning(row):
+    """Build a fake `psycopg` module whose cursor.fetchone() returns *row*
+    (a (from_user_id, created_at) tuple, or None for 'no such row') — mirrors
+    the fake-psycopg shape the sensitive-channel tests above use."""
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a, **k):
+            pass
+
+        def fetchone(self):
+            return row
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    fake = mock.MagicMock()
+    fake.connect.return_value = FakeConn()
+    return fake
+
+
+def _install_fake_db(monkeypatch, row, *, musa_id=_MUSA_ID):
+    monkeypatch.setenv("MUSA_TELEGRAM_ID", musa_id)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/fake")
+    monkeypatch.setitem(sys.modules, "psycopg", _fake_psycopg_returning(row))
+
+
+# ── verify_operator_attestation: the fail-closed verification core ───────────
+
+def test_verify_attestation_ok_for_recent_musa_row(monkeypatch):
+    import datetime as _dt
+
+    recent = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)
+    _install_fake_db(monkeypatch, (_MUSA_ID, recent))
+    res = scf.verify_operator_attestation(27634)
+    assert res.ok is True
+    assert res.from_user_id == _MUSA_ID
+
+
+def test_verify_attestation_refuses_when_no_row(monkeypatch):
+    _install_fake_db(monkeypatch, None)
+    res = scf.verify_operator_attestation(999999)
+    assert res.ok is False
+    assert "no operator_messages row" in res.reason
+
+
+def test_verify_attestation_refuses_wrong_from_user_id(monkeypatch):
+    import datetime as _dt
+
+    recent = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)
+    # a real, recent row — but from someone who is NOT Musa.
+    _install_fake_db(monkeypatch, ("111111111", recent))
+    res = scf.verify_operator_attestation(27634)
+    assert res.ok is False
+    assert "from_user_id does not match" in res.reason
+
+
+def test_verify_attestation_refuses_too_old(monkeypatch):
+    import datetime as _dt
+
+    old = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=72)  # > 48h floor
+    _install_fake_db(monkeypatch, (_MUSA_ID, old))
+    res = scf.verify_operator_attestation(27634)
+    assert res.ok is False
+    assert "older than 48h" in res.reason
+
+
+def test_verify_attestation_fails_closed_when_musa_id_unset(monkeypatch):
+    monkeypatch.delenv("MUSA_TELEGRAM_ID", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/fake")
+    res = scf.verify_operator_attestation(27634)
+    assert res.ok is False
+    assert "MUSA_TELEGRAM_ID unset" in res.reason
+
+
+def test_verify_attestation_fails_closed_when_database_url_unset(monkeypatch):
+    monkeypatch.setenv("MUSA_TELEGRAM_ID", _MUSA_ID)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    res = scf.verify_operator_attestation(27634)
+    assert res.ok is False
+    assert "DB check failed" in res.reason  # KeyError on os.environ[...] -> fail-closed
+
+
+def test_verify_attestation_fails_closed_on_db_error(monkeypatch):
+    monkeypatch.setenv("MUSA_TELEGRAM_ID", _MUSA_ID)
+    # built from parts so this fixture's own SOURCE text doesn't trip the live
+    # secrets scanner (same precedent the sensitive-channel test above uses).
+    fake_dsn = "postgresql://" + "nope:nope" + "@127.0.0.1:1/nope"
+    monkeypatch.setenv("DATABASE_URL", fake_dsn)
+    monkeypatch.delitem(sys.modules, "psycopg", raising=False)
+    res = scf.verify_operator_attestation(27634)
+    assert res.ok is False
+    assert "DB check failed" in res.reason
+
+
+# ── main(): (a) valid attestation exports the ACTUAL content + audit line ────
+
+def test_main_operator_attested_exports_actual_content_of_a_held_file(tmp_path, monkeypatch, capsys):
+    # the real use case: a HELD skill-sheet file whose content Musa authorized
+    # using. --export --operator-attested exports the ACTUAL content even though
+    # the verdict is HOLD, and appends one audit line.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(scf, "verify_operator_attestation",
+                        lambda op_msg_id: scf.AttestationResult(True, from_user_id=_MUSA_ID, reason="ok"))
+    p = tmp_path / "skills.csv"
+    p.write_text("Name,Score,Competency 1\nAhmad,85,Pass\nSiti,90,Pass\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27572", "--export", "--operator-attested", "27634"])
+    out = capsys.readouterr().out
+    # verdict is HOLD (a name-like header) -> exit reflects the verdict ...
+    assert rc == 1
+    assert "verdict: HOLD" in out
+    # ... stdout itself stays values-free, as always.
+    assert "Ahmad" not in out and "Siti" not in out
+    assert "exported (OPERATOR-ATTESTED content, verdict=HOLD, attested by op_msg 27634):" in out
+    # the exported FILE carries the ACTUAL content (the whole point).
+    exported = tmp_path / "reports" / "client-file-staging" / "op27572" / "skills.md"
+    content = exported.read_text(encoding="utf-8")
+    for value in ("Ahmad", "Siti", "85", "90", "Pass"):
+        assert value in content
+    # and exactly one audit line was appended, carrying the required fields.
+    audit = tmp_path / "reports" / "client-file-staging" / "_operator_attested_exports.log"
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    fields = lines[0].split("\t")
+    # ISO ts, op_id, source basename, cited op_msg_id, verified from_user_id, verdict
+    assert fields[1] == "op27572"
+    assert fields[2] == "skills.csv"
+    assert fields[3] == "27634"
+    assert fields[4] == _MUSA_ID
+    assert fields[5] == "HOLD"
+
+
+def test_main_operator_attested_on_clean_file_also_audits(tmp_path, monkeypatch, capsys):
+    # the audit log records CLEAN attested exports too (verdict=CLEAN line).
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(scf, "verify_operator_attestation",
+                        lambda op_msg_id: scf.AttestationResult(True, from_user_id=_MUSA_ID, reason="ok"))
+    p = tmp_path / "navmap.csv"
+    p.write_text("Screen,Label\nhome,Welcome\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27572", "--export", "--operator-attested", "27634"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "exported (OPERATOR-ATTESTED content, verdict=CLEAN, attested by op_msg 27634):" in out
+    exported = tmp_path / "reports" / "client-file-staging" / "op27572" / "navmap.md"
+    assert "Welcome" in exported.read_text(encoding="utf-8")
+    audit = (tmp_path / "reports" / "client-file-staging" / "_operator_attested_exports.log").read_text()
+    assert audit.strip().split("\t")[5] == "CLEAN"
+
+
+# ── main(): (b) refused attestation -> exit 2, nothing written, no audit ─────
+
+@pytest.mark.parametrize("reason", [
+    "no operator_messages row id=999 — fail-closed",             # no row
+    "operator_messages id=27634 from_user_id does not match ...",  # wrong sender
+    "operator_messages id=27634 is older than 48h ...",            # too old
+])
+def test_main_operator_attested_refused_writes_nothing(tmp_path, monkeypatch, capsys, reason):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(scf, "verify_operator_attestation",
+                        lambda op_msg_id: scf.AttestationResult(False, reason=reason))
+    p = tmp_path / "skills.csv"
+    p.write_text("Name,Score\nAhmad,85\nSiti,90\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27572", "--export", "--operator-attested", "27634"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "operator attestation REFUSED" in err
+    # nothing written: no export file, no audit log
+    assert not (tmp_path / "reports" / "client-file-staging" / "op27572").exists()
+    assert not (tmp_path / "reports" / "client-file-staging" / "_operator_attested_exports.log").exists()
+
+
+# ── main(): (c) DB unreachable -> fail closed (real verify, fake-broken DB) ───
+
+def test_main_operator_attested_db_unreachable_fails_closed(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MUSA_TELEGRAM_ID", _MUSA_ID)
+    fake_dsn = "postgresql://" + "nope:nope" + "@127.0.0.1:1/nope"
+    monkeypatch.setenv("DATABASE_URL", fake_dsn)
+    monkeypatch.delitem(sys.modules, "psycopg", raising=False)
+    p = tmp_path / "skills.csv"
+    p.write_text("Name,Score\nAhmad,85\nSiti,90\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27572", "--export", "--operator-attested", "27634"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "REFUSED" in err and "DB check failed" in err
+    assert not (tmp_path / "reports" / "client-file-staging" / "op27572").exists()
+    assert not (tmp_path / "reports" / "client-file-staging" / "_operator_attested_exports.log").exists()
+
+
+def test_main_operator_attested_without_export_is_an_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "skills.csv"
+    p.write_text("Name,Score\nAhmad,85\n", encoding="utf-8")
+    # argparse parser.error exits 2 and writes to stderr; nothing is staged.
+    with pytest.raises(SystemExit) as exc:
+        scf.main([str(p), "op27572", "--operator-attested", "27634"])  # NO --export
+    assert exc.value.code == 2
+    assert "--operator-attested requires --export" in capsys.readouterr().err
+    assert not (tmp_path / "reports").exists()
+
+
+# ── main(): (d) regression — plain --export and --structure-only UNCHANGED ───
+
+def test_main_plain_export_on_hold_unchanged_without_attestation(tmp_path, monkeypatch, capsys):
+    # the attestation flag is the ONLY thing that exports a HELD file's content;
+    # plain --export on HOLD (no flag) still writes absolutely nothing.
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "skills.csv"
+    p.write_text("Name,Score\nAhmad,85\nSiti,90\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27573", "--export"])  # NO --operator-attested
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "verdict: HOLD" in out
+    assert "OPERATOR-ATTESTED" not in out and "exported" not in out
+    assert not (tmp_path / "reports" / "client-file-staging" / "op27573").exists()
+    assert not (tmp_path / "reports" / "client-file-staging" / "_operator_attested_exports.log").exists()
+
+
+def test_main_structure_only_unchanged_with_attestation_absent(tmp_path, monkeypatch, capsys):
+    # --structure-only on a HELD file still emits structure-only (no row values,
+    # no OPERATOR-ATTESTED line, no audit log) when attestation is not cited.
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "skills.csv"
+    p.write_text("Name,Score,Competency 1\nAhmad,85,Pass\nSiti,90,Pass\n", encoding="utf-8")
+
+    rc = scf.main([str(p), "op27571", "--export", "--structure-only"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "exported (structure only, HELD file — no values):" in out
+    assert "OPERATOR-ATTESTED" not in out
+    content = (tmp_path / "reports" / "client-file-staging" / "op27571" / "skills.md").read_text()
+    assert "columns: Name | Score | Competency 1" in content
+    for value in ("Ahmad", "Siti", "85", "90", "Pass"):
+        assert value not in content
+    assert not (tmp_path / "reports" / "client-file-staging" / "_operator_attested_exports.log").exists()
