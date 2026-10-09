@@ -122,3 +122,37 @@ def test_switch_lane_on_pending_lane_relaunches_without_pointer(tmp_path, monkey
         returncode, stdout, stderr = 0, "PASS", ""
     r = g.switch_lane("cosem-port", tmp_path, apply=True, run=lambda *a, **k: (calls.append(a), CP())[1])
     assert r["result"] == "OK" and calls and not list(tmp_path.glob(".cosem-port_model*"))
+
+
+# ── empty-GLM page gate (orch-console #61687: cut recurring empty-GLM noise) ──
+def _spy_page(monkeypatch):
+    calls = []
+    monkeypatch.setattr(g, "page", lambda subject, body, apply: calls.append(subject))
+    return calls
+
+
+def _stub_env(monkeypatch, glm_wk, lanes):
+    # GLM over the weekly trigger; Musa 7d high -> decide() => page_musa_high
+    monkeypatch.setattr(g, "read_glm", lambda: {"wk": glm_wk, "5h": 10.0, "wk_reset": "r", "5h_reset": "r"})
+    monkeypatch.setattr(g, "read_musa", lambda: {"7d": 90.0, "5h": 7.0, "idle": 0.0})
+    monkeypatch.setattr(g, "lanes_to_switch", lambda od, fn: list(lanes))
+    monkeypatch.setattr(g, "load_state", lambda: {})
+    monkeypatch.setattr(g, "save_state", lambda s: None)
+
+
+def test_empty_glm_is_log_only_no_page(monkeypatch):
+    """GLM over threshold but ZERO lanes on GLM = nothing to protect -> log-only, no P1+RR page."""
+    calls = _spy_page(monkeypatch)
+    _stub_env(monkeypatch, glm_wk=97.2, lanes=[])
+    rc = g.main(["--apply"])
+    assert calls == [], f"should NOT page when 0 lanes on GLM, but paged: {calls}"
+    assert rc == 0
+
+
+def test_lane_on_glm_still_pages(monkeypatch):
+    """A lane IS on GLM + can't switch (Musa high) -> the P1+RR page is PRESERVED (re-escalation)."""
+    calls = _spy_page(monkeypatch)
+    _stub_env(monkeypatch, glm_wk=97.2, lanes=["cosem-exams"])
+    rc = g.main(["--apply"])
+    assert len(calls) == 1, f"should page when a lane is on GLM, got {calls}"
+    assert rc == 0
