@@ -255,6 +255,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     state = load_state()
     if d["action"] in ("page_5h_only", "page_musa_high"):
+        if not lanes:
+            # orch-console #61687: GLM is over its threshold but ZERO lanes are on GLM,
+            # so there is nothing to switch or protect — a P1+RR page here is pure noise
+            # (fired 3x in one night with nothing to act on). Downgrade to LOG-ONLY while
+            # GLM is empty. This RE-ESCALATES to the full P1+RR page automatically the moment
+            # a lane lands on GLM (lanes becomes non-empty), so residency protection is intact.
+            print(f"  log-only: {d['action']} but 0 lanes on GLM — nothing to switch, not paging "
+                  f"(re-escalates to P1+RR when a lane lands on GLM). {d['reason']}")
+            return 0
         last = state.get(f"page_{d['action']}", 0)
         if now.timestamp() - last >= PAGE_COOLDOWN_S:
             page(f"GLM overflow: {d['action'].replace('_', ' ')}: {d['reason'][:120]}",
