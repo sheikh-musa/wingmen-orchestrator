@@ -41,6 +41,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 
 GB = 1 << 30
 MB = 1 << 20
@@ -57,6 +58,20 @@ RECLAIM_NAMES = tuple(n for n in os.environ.get(
     "NM_REAPER_RECLAIM_NAMES", "node_modules:.next").split(":") if n)
 LSOF_TIMEOUT_S = int(os.environ.get("NM_REAPER_LSOF_TIMEOUT_S", "30"))
 GIT_TIMEOUT_S = int(os.environ.get("NM_REAPER_GIT_TIMEOUT_S", "30"))
+# A worktree with ANY build-indicator dir modified more recently than this is treated as having
+# an ACTIVE BUILD and is SPARED ENTIRELY. WHY (#61165 regression, orch-console #61169 steer): the
+# lsof-cwd gate is not enough — a live lane can build CROSS-WORKTREE (cwd in wt-calendar, `npm run
+# build` in wt-tablet-onboarding), so "no cwd in the tree" does NOT mean abandoned. The reaper
+# wiped a just-reinstalled node_modules out from under a live APK build. The fix (per #61169) is a
+# PER-TREE recent-activity check on build outputs — reclaims genuinely-idle trees even while the
+# project's other lanes are busy, but protects any tree with a live/recent build.
+MIN_AGE_H = float(os.environ.get("NM_REAPER_MIN_AGE_H", "12"))
+MIN_AGE_S = MIN_AGE_H * 3600
+# Dir names whose recent mtime signals an active build (checked at the tree root AND under apps/*).
+INDICATOR_NAMES = tuple(n for n in os.environ.get(
+    "NM_REAPER_INDICATOR_NAMES",
+    "node_modules:.next:dist:build:out:android:.gradle:.turbo",
+).split(":") if n)
 
 
 def log(msg: str) -> None:
@@ -64,15 +79,19 @@ def log(msg: str) -> None:
 
 
 # ---- pure decision (fully unit-testable; no I/O) -------------------------------
-def classify(*, has_git: bool, in_use: bool) -> str:
+def classify(*, has_git: bool, in_use: bool, recently_active: bool) -> str:
     """Verdict for ONE worktree. Cheapest/safest gate first.
     - no-git: the family glob matched a non-worktree dir — do NOT touch (report it).
     - in-use: a live process holds a cwd at/under it (kill-time protection). SPARE.
-    - clear:  idle worktree → its gitignored node_modules/.next are reclaimable."""
+    - active: a build-indicator dir was modified recently — a live/recent build (possibly from a
+      lane cwd'd in a SIBLING worktree, #61165) is using this tree. SPARE the whole tree.
+    - clear:  idle worktree, no recent build → its gitignored node_modules/.next are reclaimable."""
     if not has_git:
         return "skip:no-git"
     if in_use:
         return "skip:in-use"
+    if recently_active:
+        return "skip:active"
     return "clear"
 
 
@@ -138,6 +157,37 @@ def _is_ignored(wt: pathlib.Path, d: pathlib.Path) -> bool:
         return False
 
 
+def _indicator_dirs(wt: pathlib.Path, names=INDICATOR_NAMES):
+    """Build-indicator dirs to check for recent activity: each name at the tree root and under
+    every apps/* subdir (monorepos build in apps/<x>/). Cheap, bounded — no full-tree walk."""
+    roots = [wt]
+    apps = wt / "apps"
+    if apps.is_dir():
+        try:
+            roots += [p for p in apps.iterdir() if p.is_dir()]
+        except OSError:
+            pass
+    out = []
+    for r in roots:
+        for n in names:
+            out.append(r / n)
+    return out
+
+
+def _tree_recently_active(wt: pathlib.Path, min_age_s: float, *, names=INDICATOR_NAMES) -> bool:
+    """True if ANY build-indicator dir in the tree has mtime newer than min_age_s (an active or
+    recent build — e.g. a just-reinstalled node_modules or a fresh build output). SPARE the whole
+    tree when so (#61165). FAIL-SAFE: if a stat raises, treat THAT dir as fresh (return True)."""
+    now = time.time()
+    for d in _indicator_dirs(wt, names):
+        try:
+            if d.exists() and (now - d.stat().st_mtime) < min_age_s:
+                return True
+        except OSError:
+            return True  # cannot verify → assume active → spare
+    return False
+
+
 def find_reclaimable_dirs(wt: pathlib.Path, names=RECLAIM_NAMES):
     """All `node_modules`/`.next` dirs within `wt` (pruned — does not descend into a match).
     Best-effort walk; unreadable subtrees are skipped."""
@@ -181,7 +231,10 @@ def reap_one(wt: pathlib.Path, *, dry_run: bool):
     rep = {"worktree": str(wt), "verdict": None, "freed": 0, "cleared": [], "errors": []}
     has_git = _has_git(wt)
     in_use = _lsof_cwd_in_use(wt) if has_git else False
-    verdict = classify(has_git=has_git, in_use=in_use)
+    # PER-TREE recent-activity gate (#61165/#61169): only check if cheaper gates haven't spared it
+    recently_active = (_tree_recently_active(wt, MIN_AGE_S)
+                       if (has_git and not in_use) else False)
+    verdict = classify(has_git=has_git, in_use=in_use, recently_active=recently_active)
     rep["verdict"] = verdict
     if verdict != "clear":
         return rep
