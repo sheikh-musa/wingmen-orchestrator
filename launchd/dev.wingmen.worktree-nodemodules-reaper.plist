@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- worktree-nodemodules-reaper ARMED (orch-console #61047, 2026-10-09). Routine Tier-1
+       hygiene: every 30 min, clears ONLY gitignored node_modules/.next from cosem-platform.wt-*
+       PR worktrees that have NO live process cwd'd in them (lsof-protected, kill-time re-verified).
+       Reversible (regenerable, git state untouched); NEVER removes worktrees and NEVER deletes a
+       tracked/non-ignored dir. WHY armed, not detect-first: the exact clear was wet-proven live
+       the same day (manual 5.8GB clear, 88%->86%) + unit + CLI wet-proof. Reversible: launchctl
+       bootout this label. To widen scope, set NM_REAPER_FAMILIES in the ProgramArguments. -->
+  <key>Label</key>
+  <string>dev.wingmen.worktree-nodemodules-reaper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.worktree_nodemodules_reaper --apply</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/worktree_nodemodules_reaper.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/worktree_nodemodules_reaper.log</string>
+</dict>
+</plist>
