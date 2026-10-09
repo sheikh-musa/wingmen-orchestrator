@@ -41,8 +41,23 @@ GB = 1 << 30
 MB = 1 << 20
 
 # --- tunables (env-overridable) ---
-MIN_AGE_DAYS = int(os.environ.get("AGENT_WT_MIN_AGE_DAYS", "14"))
-MIN_AGE_S = MIN_AGE_DAYS * 86400
+# Liveness is the real signal, not age (orch-console #61706/#61712): a worktree whose
+# agent PROCESS is gone (no process with a cwd or open file under it — see _lsof_in_use,
+# which `lsof +D` reports including cwd) and that is clean is DONE and safe to reap, even if
+# only hours old. The old 14-DAY mtime floor let 33 completed worktrees pile up (600MB-1.4GB
+# each) before the reaper would touch them. The in-use + dirty gates are the REAL liveness
+# protection (an alive-but-idle agent still has a process whose cwd/open-file lsof sees -> spared
+# regardless of age); MIN_AGE is now just a short floor (default 6h, orch-console #61718) that
+# stops a just-spawned/recently-active worktree being reaped before it's clearly done, NOT a
+# multi-day age requirement. Override precedence: MINUTES > HOURS > DAYS.
+if os.environ.get("AGENT_WT_MIN_AGE_MINUTES") is not None:
+    MIN_AGE_S = int(float(os.environ["AGENT_WT_MIN_AGE_MINUTES"]) * 60)
+elif os.environ.get("AGENT_WT_MIN_AGE_HOURS") is not None:
+    MIN_AGE_S = int(float(os.environ["AGENT_WT_MIN_AGE_HOURS"]) * 3600)
+elif os.environ.get("AGENT_WT_MIN_AGE_DAYS") is not None:
+    MIN_AGE_S = int(float(os.environ["AGENT_WT_MIN_AGE_DAYS"]) * 86400)
+else:
+    MIN_AGE_S = 6 * 3600   # 6h floor (was 14 DAYS — orch-console #61718)
 # Roots to scan; each root's immediate child dirs are candidate projects. Both cover the fleet
 # layout (~/wingmen/<project> and ~/wingmen/projects/<project>); paths are de-duplicated.
 SCAN_ROOTS = [pathlib.Path(os.path.expanduser(p)) for p in filter(None, os.environ.get(

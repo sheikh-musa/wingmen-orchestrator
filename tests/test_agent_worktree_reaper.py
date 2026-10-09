@@ -124,3 +124,36 @@ def test_scan_end_to_end_reaps_only_old_clean(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ── liveness-based gate: dead+clean reaps regardless of age (orch-console #61706/#61712) ──
+HOUR = 3600
+GRACE = 6 * HOUR  # the 6h floor default (orch-console #61718)
+
+
+def test_default_gate_is_short_grace_not_14_days():
+    # #61706: the 14-DAY default let 33 completed worktrees pile up. Default must now be a
+    # short creation-race grace (liveness is the real gate), not a multi-day age requirement.
+    assert r.MIN_AGE_S < 24 * HOUR, f"default MIN_AGE_S still days-scale: {r.MIN_AGE_S}s"
+    assert r.MIN_AGE_S == GRACE
+
+
+def test_dead_clean_worktree_reaped_even_when_only_hours_old():
+    # A worktree whose agent is GONE (in_use=False) + clean, 7h old, IS reapable now
+    # (it would have been spared for 14 days under the old gate). "dead+clean is the signal."
+    assert r.classify_worktree(has_git=True, mtime=NOW - 7 * HOUR, now=NOW, min_age_s=GRACE,
+                               porcelain="", in_use=False) == "reap"
+
+
+def test_live_agent_spared_regardless_of_age():
+    # An ALIVE agent (process has cwd/open-file under the worktree -> in_use=True) is SPARED
+    # even if old — liveness beats age, the safety guarantee.
+    assert r.classify_worktree(has_git=True, mtime=NOW - 5 * DAY, now=NOW, min_age_s=GRACE,
+                               porcelain="", in_use=True) == "skip:in-use"
+
+
+def test_creation_race_grace_spares_just_spawned():
+    # A worktree younger than the grace is spared so a just-created one isn't reaped before
+    # its agent process has attached (lsof wouldn't see it yet) — the race guard, not an age gate.
+    assert r.classify_worktree(has_git=True, mtime=NOW - 5 * 60, now=NOW, min_age_s=GRACE,
+                               porcelain="", in_use=False) == "skip:recent"
