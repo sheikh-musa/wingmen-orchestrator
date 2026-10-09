@@ -59,9 +59,12 @@ echo "== deploy_console gate (content $HASH) =="
 SW=$(grep -oE 'const VERSION = "fc-v[0-9]+"' "$STATIC/sw.js" | grep -oE 'fc-v[0-9]+' | head -1)
 FL=$(grep -oE "APP_BUILD = 'fc-v[0-9]+'" "$STATIC/fleet.js" | grep -oE 'fc-v[0-9]+' | head -1)
 LB=$(grep 'id="build"' "$STATIC/lanes.html" | grep -oE 'fc-v[0-9]+' | tail -1)
-echo "  [1/4] version-sync: sw.js=$SW fleet.js=$FL lanes.html=$LB"
-{ [ -n "$SW" ] && [ "$SW" = "$FL" ] && [ "$SW" = "$LB" ]; } || \
-  fail "version constants OUT OF SYNC (sw=$SW fleet=$FL lanes=$LB) — bump all three in sync." 3
+# op#61107: asks.html joined the gated set (its own page, lanes.html pattern) —
+# same hardcoded-badge convention as lanes.html, so it gets the same check.
+AB=$(grep 'id="build"' "$STATIC/asks.html" | grep -oE 'fc-v[0-9]+' | tail -1)
+echo "  [1/4] version-sync: sw.js=$SW fleet.js=$FL lanes.html=$LB asks.html=$AB"
+{ [ -n "$SW" ] && [ "$SW" = "$FL" ] && [ "$SW" = "$LB" ] && [ "$SW" = "$AB" ]; } || \
+  fail "version constants OUT OF SYNC (sw=$SW fleet=$FL lanes=$LB asks=$AB) — bump all four in sync." 3
 
 # ---- GATE 2: tests ----
 echo "  [2/4] console tests..."
@@ -77,11 +80,11 @@ if [ -x .venv/bin/python3 ]; then
 else echo "        (.venv missing — skipped, but flagging)"; fi
 
 # ---- GATE 3: render (auto; must succeed) ----
-echo "  [3/4] render fleet+lanes with live data..."
+echo "  [3/4] render fleet+lanes+asks with live data..."
 bash scripts/render_console_pages.sh "$DIR" >"$DIR/render.log" 2>&1 \
   || fail "RENDER failed (see $DIR/render.log) — a page that won't render must not ship." 5
-[ -s "$DIR/fleet.png" ] && [ -s "$DIR/lanes.png" ] || fail "render produced no PNGs." 5
-echo "        renders: $DIR/fleet.png + $DIR/lanes.png  <-- EYEBALL THESE"
+[ -s "$DIR/fleet.png" ] && [ -s "$DIR/lanes.png" ] && [ -s "$DIR/asks.png" ] || fail "render produced no PNGs." 5
+echo "        renders: $DIR/fleet.png + $DIR/lanes.png + $DIR/asks.png  <-- EYEBALL THESE"
 
 # ---- GATE 4: cc-quality review for THIS content ----
 REVIEW="$DIR/cc-quality-review.md"
@@ -95,7 +98,7 @@ if [ ! -s "$REVIEW" ]; then
    build without a design/quality review of exactly what you're shipping.
 
    DO THIS:
-     1. EYEBALL the renders:  $DIR/fleet.png   $DIR/lanes.png
+     1. EYEBALL the renders:  $DIR/fleet.png   $DIR/lanes.png   $DIR/asks.png
      2. Run cc-quality on the FULL console diff — static AND backend:
            git diff -- $GATED_PATHS
         (the hash now covers the console backend package, so a backend-only

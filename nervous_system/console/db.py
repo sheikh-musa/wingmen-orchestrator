@@ -811,6 +811,70 @@ def fetch_asks() -> List[dict]:
     return _query(sql, params)
 
 
+def build_fleet_asks_query() -> Tuple[str, list]:
+    """The FLEET-WIDE asks board (op#61107, operator's "#1 anti-drop ask" — a single
+    source of truth for EVERY open delegated ask, not just the operator's own
+    `ask_surface='operator'` subset `build_asks_query()` already serves on /fleet).
+
+    Same base facts as `build_asks_query()` (triage_state='ask', closed_at IS NULL,
+    status derived LIVE from the thread — never stored, so it can't go stale) but
+    WITHOUT the ask_surface/traceability restriction: this board is cross-fleet, every
+    surface (operator asks AND client-channel asks), grouped by OWNER (`delegated_to`,
+    NULL = not yet delegated) so the operator/any agent can see who owes what.
+
+    `wait_kind` is the coarse BUILD-TIME vs EXTERNAL-WAIT split the spec asked for.
+    The schema only has ONE structured "waiting on a specific named person" field —
+    `waiting_on_operator` (Musa) — there's no general "waiting on <any other person>"
+    column (`chase_by` is a date to chase by, not a name). So `external_wait` means
+    "waiting on Musa" specifically; everything else (in the fleet's own hands,
+    whatever its internal status) is `build_time`. Documented here rather than
+    silently overloading `chase_by`/`deferred_reason` as a person-name guess.
+
+    Display text is ALWAYS `COALESCE(triage_summary, ask)` — the spec's own
+    "never raw captured text" rule — falling back to the raw ask only for the rare
+    untriaged-summary row (verified live: 263/264 open 'ask' rows already have one)."""
+    sql = (
+        "WITH latest AS ("
+        "  SELECT DISTINCT ON (thread_id) "
+        "         thread_id, from_agent, to_agent, requires_response, "
+        "         responded_at, read_at, created_at "
+        "  FROM agent_messages "
+        "  WHERE thread_id IS NOT NULL AND is_test IS NOT TRUE "
+        "  ORDER BY thread_id, id DESC"
+        ") "
+        "SELECT a.id, COALESCE(a.triage_summary, a.ask) AS text, a.delegated_to, "
+        "  a.ask_surface, a.waiting_on_operator, a.chase_by, a.deferred_reason, "
+        "  CASE WHEN a.waiting_on_operator THEN 'external_wait' ELSE 'build_time' END AS wait_kind, "
+        "  CASE "
+        "    WHEN a.waiting_on_operator                              THEN 'waiting_on_musa' "
+        "    WHEN a.thread_id IS NULL                                THEN 'on_nazim' "
+        "    WHEN l.from_agent <> 'orch-console' "
+        "         AND l.to_agent = 'orch-console' "
+        "         AND l.requires_response AND l.responded_at IS NULL THEN 'needs_you' "
+        "    WHEN l.responded_at IS NOT NULL                         THEN 'delegate_done' "
+        "    WHEN l.read_at IS NOT NULL                              THEN 'in_progress' "
+        "    ELSE                                                         'pending' "
+        "  END AS status, "
+        "  round(extract(epoch FROM (now() - COALESCE(l.created_at, a.created_at))))::int AS updated_age_s, "
+        "  round(extract(epoch FROM (now() - a.created_at)))::int AS asked_age_s "
+        "FROM operator_asks a "
+        "LEFT JOIN latest l ON l.thread_id = a.thread_id "
+        "WHERE a.closed_at IS NULL "
+        "  AND a.triage_state = 'ask' "
+        "ORDER BY "
+        "  CASE WHEN a.waiting_on_operator THEN 0 ELSE 1 END, "
+        "  COALESCE(a.delegated_to, 'zzz_unassigned'), "
+        "  COALESCE(l.created_at, a.created_at) DESC "
+        "LIMIT 400"
+    )
+    return sql, []
+
+
+def fetch_fleet_asks() -> List[dict]:
+    sql, params = build_fleet_asks_query()
+    return _query(sql, params)
+
+
 def build_inbox_backlog_query() -> Tuple[str, list]:
     """The DRAIN-BOARD data source (fc-v52): every body's UNHANDLED bus inbox.
 

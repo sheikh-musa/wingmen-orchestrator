@@ -2088,6 +2088,11 @@ def _make_handler(feedloop: "_FeedLoop"):
             if path == "/media" or path == "/media/" or path.startswith("/media/"):
                 return self._serve_static("media.html", path)
 
+            # ASKS BOARD (op#61107): the fleet-wide SSOT asks board, lanes.html
+            # pattern (its own page, not folded into the busy Fleet view).
+            if path in ("/asks", "/asks/"):
+                return self._serve_static("asks.html", path)
+
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
                 return self._serve_static(name, path)
@@ -2195,6 +2200,15 @@ def _make_handler(feedloop: "_FeedLoop"):
                         return self._json(503, {"error": "governance registry unavailable"})
                     auth.audit(self._client(), path, "200")
                     return self._json(200, data)
+
+                if path == "/api/asks-board":
+                    # Fleet-wide SSOT asks board (op#61107) — every open delegated
+                    # ask, every surface, status derived live (see db.py's own
+                    # build_fleet_asks_query comment). No PII columns on this
+                    # table; nothing to redact (same as /api/lanes).
+                    rows = db.fetch_fleet_asks()
+                    auth.audit(self._client(), path, "200")
+                    return self._json(200, _jsonable(rows))
 
                 if path == "/api/docs":
                     # Catalog of all fleet docs, grouped by repo/vertical.
