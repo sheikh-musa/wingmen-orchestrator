@@ -5,8 +5,13 @@
   <!-- agent-worktree-reaper ARMED (orch-console #50917, 2026-10-03, after a clean detect-only
        review week — same 4 old/clean orchestrator .claude/worktrees proposed every run, no
        false positives). Reaps stale Claude-native agent worktrees (project-local
-       .claude/worktrees/agent-*, >=14d + git-clean + idle) the git-native, reversible way:
-       `git worktree remove` WITHOUT --force, never rm -rf, never touches branches/commits. -->
+       .claude/worktrees/agent-*: agent-process-DEAD (liveness via lsof) + git-clean + past the
+       6h floor, orch-console #61718) the git-native, reversible way:
+       `git worktree remove` WITHOUT --force, never rm -rf, never touches branches/commits.
+       CADENCE: every 6h via StartInterval (was daily 09:15) — the fleet does bursty parallel
+       work (~15-20 worktrees/day × ~800MB), so a daily sweep let a day's accumulation build to
+       the disk P1; 6h reaping of dead+clean worktrees caps that (orch-console #61731). Low cost:
+       the in_use/liveness guard still spares every live agent. -->
   <key>Label</key>
   <string>dev.wingmen.agent-worktree-reaper</string>
   <key>ProgramArguments</key>
@@ -15,13 +20,8 @@
     <string>-lc</string>
     <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.agent_worktree_reaper --apply</string>
   </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>9</integer>
-    <key>Minute</key>
-    <integer>15</integer>
-  </dict>
+  <key>StartInterval</key>
+  <integer>21600</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
