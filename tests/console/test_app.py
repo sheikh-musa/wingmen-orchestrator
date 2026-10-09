@@ -51,6 +51,21 @@ def server(monkeypatch, tmp_path):
              "display_name": "Ihsanos lane"},
         ],
     )
+    monkeypatch.setattr(
+        db, "fetch_fleet_asks",
+        lambda: [
+            {"id": 1, "text": "waiting item", "delegated_to": "orch-console",
+             "ask_surface": "operator", "waiting_on_operator": True,
+             "chase_by": None, "deferred_reason": None,
+             "wait_kind": "external_wait", "status": "waiting_on_musa",
+             "updated_age_s": 10, "asked_age_s": 10},
+            {"id": 2, "text": "build-time item", "delegated_to": "cc-ihsanos",
+             "ask_surface": "client-channel", "waiting_on_operator": False,
+             "chase_by": None, "deferred_reason": None,
+             "wait_kind": "build_time", "status": "pending",
+             "updated_age_s": 20, "asked_age_s": 20},
+        ],
+    )
     srv = console_app.make_server(host="127.0.0.1", port=0)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -115,6 +130,32 @@ def test_no_service_key_in_any_response(server):
         r = httpx.get(server + path, headers=H(), timeout=5)
         assert "SUPABASE_SERVICE_KEY" not in r.text
         assert "service_role" not in r.text.lower()
+
+
+def test_api_asks_board_requires_auth(server):
+    r = httpx.get(server + "/api/asks-board", timeout=5)
+    assert r.status_code == 401
+
+
+def test_api_asks_board_shape(server):
+    r = httpx.get(server + "/api/asks-board", headers=H(), timeout=5)
+    assert r.status_code == 200
+    rows = r.json()
+    assert len(rows) == 2
+    assert rows[0]["wait_kind"] == "external_wait"
+    assert rows[0]["status"] == "waiting_on_musa"
+    assert rows[1]["wait_kind"] == "build_time"
+    assert rows[1]["delegated_to"] == "cc-ihsanos"
+
+
+def test_asks_page_serves(server):
+    # The page shell is pre-auth open (same tier as /, /lanes, /docs, /media —
+    # it fetches /api/asks-board with the stored bearer token client-side).
+    r = httpx.get(server + "/asks", timeout=5)
+    assert r.status_code == 200
+    assert "Asks board" in r.text
+    r2 = httpx.get(server + "/static/asks.js", timeout=5)
+    assert r2.status_code == 200
 
 
 def test_static_index_served(server):

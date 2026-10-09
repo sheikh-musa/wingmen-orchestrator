@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Asks board · Fleet</title>
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<style>
+  /* op#61107 — fleet-wide SSOT asks board. Same design tokens + header chrome as
+     lanes.html (Calm Command), same .ask card language as fleet.html's "Your
+     asks" (reused verbatim, not reinvented) — this page's only new idea is the
+     grouping: a pinned "waiting on Musa" hero, then every other open ask
+     grouped by OWNER (delegated_to), so "who owes what" is readable at a glance
+     instead of one flat list. */
+  :root{
+    --bg:#090b10; --bg-2:#0c0f16;
+    --surface:#12161e; --surface-2:#171c26; --surface-3:#1d2430;
+    --hair:rgba(255,255,255,.06); --hair-2:rgba(255,255,255,.10);
+    --txt:#e8ebf1; --dim:#949cac; --faint:#5c6472;
+    --jade:#37d39a; --jade-dim:#1f9e77; --jade-soft:rgba(55,211,154,.13);
+    --rose:#fb7185; --rose-soft:rgba(251,113,133,.13);
+    --amber:#f6c453; --amber-soft:rgba(246,196,83,.13);
+    --indigo:#8aa6ff; --indigo-soft:rgba(138,166,255,.14);
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    --r-lg:18px; --r:14px; --r-sm:10px;
+    --shadow:0 1px 0 rgba(255,255,255,.045) inset, 0 10px 30px -12px rgba(0,0,0,.7);
+    --panel:var(--surface); --accent:var(--indigo); --good:var(--jade); --warn:var(--amber); --bad:var(--rose);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;overflow-x:hidden;overscroll-behavior-y:none}
+  body{color:var(--txt); font:15px/1.5 var(--sans); letter-spacing:-.01em;
+    -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(120% 60% at 50% -8%, rgba(55,211,154,.06), transparent 60%),
+      radial-gradient(90% 50% at 50% 0%, rgba(138,166,255,.05), transparent 55%),
+      linear-gradient(180deg,var(--bg-2),var(--bg) 40%);
+    background-attachment:fixed;}
+  .wrap{max-width:640px;margin:0 auto;padding:0 16px calc(40px + env(safe-area-inset-bottom))}
+  header{position:sticky;top:0;z-index:15;margin:0 -16px 0;
+    padding:calc(11px + env(safe-area-inset-top)) 18px 13px;
+    background:linear-gradient(180deg,rgba(12,15,22,.92),rgba(9,11,16,.72));
+    backdrop-filter:saturate(140%) blur(14px);-webkit-backdrop-filter:saturate(140%) blur(14px);
+    border-bottom:1px solid var(--hair)}
+  .top{display:flex;align-items:center;gap:10px}
+  .back{color:var(--dim);text-decoration:none;font-size:15px;font-weight:600;flex:none}
+  h1{font-size:19px;margin:0;font-weight:700;letter-spacing:-.02em}
+  .build{margin-left:auto;font:11px/1 var(--mono);color:var(--faint);
+    padding:5px 9px;border-radius:999px;background:var(--surface);border:1px solid var(--hair);white-space:nowrap}
+  .build .d{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--jade);
+    margin-right:5px;box-shadow:0 0 6px var(--jade);vertical-align:middle}
+  .refresh{flex:none;border:1px solid var(--hair);background:var(--surface);
+    color:var(--dim);font-size:15px;padding:0;width:34px;height:34px;border-radius:11px;
+    display:inline-flex;align-items:center;justify-content:center;margin-left:8px}
+  .refresh:active{background:var(--surface-2)}
+  .sub{margin-top:12px;color:var(--dim);font:12px/1.4 var(--mono);
+    display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+
+  .freshbar{display:flex;align-items:center;gap:7px;padding:14px 2px 0;margin-bottom:4px;font:11px/1 var(--mono);color:var(--faint)}
+  .freshbar .g{width:6px;height:6px;border-radius:50%;background:var(--good);box-shadow:0 0 8px var(--good);flex:none}
+
+  /* ── hero: waiting on Musa — pinned top, unmissable ── */
+  .hero{margin:16px 0 4px;padding:14px 15px;border-radius:var(--r);
+    border:1px solid rgba(251,113,133,.35);
+    background:linear-gradient(180deg, rgba(251,113,133,.09), var(--surface) 65%);
+    box-shadow:var(--shadow)}
+  .hero-h{display:flex;align-items:center;gap:8px;font:800 11px/1 var(--sans);
+    text-transform:uppercase;letter-spacing:.1em;color:var(--rose);margin:0 0 10px}
+  .hero-h .n{font:11px var(--mono);color:var(--dim);text-transform:none;letter-spacing:0}
+
+  .owngroup{margin:10px 0 0;border:1px solid var(--hair);border-radius:var(--r-sm);
+    background:var(--surface-2);overflow:hidden}
+  .owngroup[open]{background:transparent;border-color:transparent}
+  .owngroup > summary{list-style:none;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .owngroup > summary::-webkit-details-marker{display:none}
+  .owngroup[open] > summary{margin-bottom:9px}
+  .pin{font:10px/1 var(--mono);text-transform:uppercase;letter-spacing:.12em;color:var(--faint);
+    margin:0;padding:13px 14px;display:flex;align-items:center;gap:9px}
+  .pin::before{content:"›";flex:none;font:16px/1 var(--sans);color:var(--faint);transition:transform .18s ease}
+  .owngroup[open] .pin::before{transform:rotate(90deg)}
+  .pin::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--hair),transparent)}
+  .pin .owner{color:var(--txt);font-weight:700;letter-spacing:0;text-transform:none;font:13px var(--sans)}
+  .pin .n{color:var(--dim);font:11px var(--mono);background:var(--surface-3);padding:3px 8px;border-radius:999px}
+  .owngroup-body{padding:0 2px}
+
+  /* ── ask card — reused verbatim from fleet.html's "Your asks" ── */
+  .ask{position:relative;margin-bottom:8px;display:flex;gap:11px;align-items:flex-start;
+    padding:12px 13px;border-radius:var(--r-sm);border:1px solid var(--hair-2);
+    background:var(--surface);box-shadow:var(--shadow)}
+  .ask.needs{border-color:rgba(251,113,133,.45);background:linear-gradient(180deg, rgba(251,113,133,.06), var(--surface) 60%)}
+  .ask .atag{flex:none;font:10px/1 var(--mono);font-weight:700;text-transform:uppercase;letter-spacing:.4px;
+    padding:5px 7px;border-radius:999px;margin-top:1px}
+  .atag.needs{color:var(--bad);background:rgba(251,113,133,.16)}
+  .atag.prog {color:var(--warn);background:rgba(240,180,41,.14)}
+  .atag.pend {color:var(--dim);background:rgba(148,156,172,.14)}
+  .atag.rev  {color:var(--good);background:rgba(55,211,154,.14)}
+  .atag.naz  {color:var(--accent);background:rgba(138,166,255,.14)}
+  .ask .abody{min-width:0;flex:1}
+  .ask .atxt{font:600 13.5px/1.35 var(--sans);overflow-wrap:anywhere}
+  .ask .ameta{margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font:11px/1.3 var(--mono);color:var(--faint)}
+  .ask .ameta .ato{color:var(--dim)} .ask .ameta .ato b{color:var(--accent);font-weight:700}
+  .ask .ameta .adot{color:var(--faint)}
+  .ask .ameta .aage.warnage{color:var(--warn)}
+  .ask .surf{flex:none;font:9px/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--faint);
+    padding:4px 7px;border-radius:999px;background:var(--surface-2);border:1px solid var(--hair)}
+
+  .empty{color:var(--faint);text-align:center;padding:40px 0;font:13px var(--mono)}
+  .stamp{color:var(--faint);text-align:center;margin-top:18px;font:11px var(--mono)}
+  .err{color:var(--rose);text-align:center;padding:20px 0;font:12px var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="top">
+      <a class="back" href="/">‹ Fleet</a>
+      <h1>Asks board</h1>
+      <span id="build" class="build"><span class="d"></span>fc-v78</span>
+      <button id="refresh" class="refresh">↻</button>
+    </div>
+    <div id="sub" class="sub">Loading ground-truth…</div>
+  </header>
+  <div id="freshbar" class="freshbar" style="display:none"><span class="g"></span><span id="freshTxt"></span></div>
+  <div id="hero"></div>
+  <div id="groups"></div>
+  <div id="stamp" class="stamp"></div>
+</div>
+<script src="/static/asks.js"></script>
+</body>
+</html>
