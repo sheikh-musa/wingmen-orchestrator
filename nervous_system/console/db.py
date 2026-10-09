@@ -830,9 +830,11 @@ def build_fleet_asks_query() -> Tuple[str, list]:
     whatever its internal status) is `build_time`. Documented here rather than
     silently overloading `chase_by`/`deferred_reason` as a person-name guess.
 
-    Display text is ALWAYS `COALESCE(triage_summary, ask)` — the spec's own
-    "never raw captured text" rule — falling back to the raw ask only for the rare
-    untriaged-summary row (verified live: 263/264 open 'ask' rows already have one)."""
+    Display text NEVER falls back to the raw captured `ask` — the spec's own "never
+    raw captured text" rule (cc-quality #61117: 2/268 open rows had a NULL
+    triage_summary, both ask_surface='client-channel', so a COALESCE-to-ask fallback
+    was surfacing raw client-captured text on the board). An untriaged row instead
+    shows a neutral '(awaiting triage)' placeholder."""
     sql = (
         "WITH latest AS ("
         "  SELECT DISTINCT ON (thread_id) "
@@ -842,7 +844,10 @@ def build_fleet_asks_query() -> Tuple[str, list]:
         "  WHERE thread_id IS NOT NULL AND is_test IS NOT TRUE "
         "  ORDER BY thread_id, id DESC"
         ") "
-        "SELECT a.id, COALESCE(a.triage_summary, a.ask) AS text, a.delegated_to, "
+        "SELECT a.id, "
+        "  CASE WHEN a.triage_summary IS NOT NULL THEN a.triage_summary "
+        "       ELSE '(awaiting triage)' END AS text, "
+        "  a.delegated_to, "
         "  a.ask_surface, a.waiting_on_operator, a.chase_by, a.deferred_reason, "
         "  CASE WHEN a.waiting_on_operator THEN 'external_wait' ELSE 'build_time' END AS wait_kind, "
         "  CASE "
