@@ -26,6 +26,8 @@ Usage:
   python3 scripts/sentry_new_error_watch.py --selftest   # prove eval logic (no network)
   python3 scripts/sentry_new_error_watch.py --dry-run    # poll + decide, print, no send/state
   python3 scripts/sentry_new_error_watch.py --json       # machine-readable
+  python3 scripts/sentry_new_error_watch.py --quiet-since <ISO-ts> [--project cosem-adcda] [--org ihsanos]
+      # MERGE-GATE check: exit 0=no new issues since ts (quiet), 1=new issues (+summary), 2=could-not-check
   python3 scripts/sentry_new_error_watch.py              # live (only sends when ENABLED)
 Env: SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT (+ DATABASE_URL for sends).
 """
@@ -279,8 +281,89 @@ def _selftest() -> int:
     chk([i["id"] for i in d3["escalate"]] == ["10"], "decide: re-escalate on fresh spike")
     d4 = decide(d["state"], [])   # 10 resolved -> pruned
     chk("10" not in d4["state"]["reported_ids"] and "10" not in d4["state"]["escalated"], "decide: prune reopened")
+    # quiet-check: new_material_since (firstSeen >= ts + noise excluded)
+    import datetime as _dt
+    t0 = _dt.datetime(2026, 10, 11, 12, 0, 0, tzinfo=_dt.timezone.utc).timestamp()
+    qi = [{"id": "1", "title": "audit-log write failed", "culprit": "/x", "level": "error", "count": 1, "firstSeen": "2026-10-11T13:00:00Z"},
+          {"id": "2", "title": "old issue", "culprit": "/y", "level": "error", "count": 1, "firstSeen": "2026-10-11T09:00:00Z"},
+          {"id": "3", "title": "Failed to connect to MetaMask", "culprit": "/z", "level": "error", "count": 1, "firstSeen": "2026-10-11T14:00:00Z"}]
+    chk([i["id"] for i in new_material_since(qi, t0)] == ["1"], "quiet: new-since-ts excludes old + noise")
+    future = _dt.datetime(2026, 10, 11, 20, 0, 0, tzinfo=_dt.timezone.utc).timestamp()
+    chk(new_material_since(qi, future) == [], "quiet: nothing after a future ts")
+    chk(abs(_iso_to_epoch("2026-10-11T13:00:00Z") - _iso_to_epoch("2026-10-11T13:00:00.000+00:00")) < 1, "quiet: iso parse Z==+00:00")
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
+
+
+# ── ADCDA deploy quiet-check (op#28966/#62822): a CLI the merge gates call ──
+# "No NEW cosem-adcda Sentry issue since <deploy ts>?" exit 0=quiet, 1=new(+summary),
+# 2=could-not-check (dead-man: a merge gate must NEVER silently pass when the check
+# couldn't run). Same org/token/base as the watcher — cosem-adcda was consolidated into
+# org `ihsanos` (op#29063; EU INGEST but the API is sentry.io, de.sentry.io is ingest-only),
+# so the existing SENTRY_AUTH_TOKEN reads it (verified /issues/=200).
+def _iso_to_epoch(ts: str) -> float:
+    import datetime
+    return datetime.datetime.fromisoformat(ts.strip().replace("Z", "+00:00")).timestamp()
+
+
+def new_material_since(issues: list, since_epoch: float) -> list:
+    """PURE: non-noise issues whose firstSeen >= since_epoch (new since the deploy)."""
+    out = []
+    for it in issues:
+        if is_noise(it.get("title"), it.get("culprit")):
+            continue
+        fs = it.get("firstSeen")
+        if not fs:
+            continue
+        try:
+            if _iso_to_epoch(fs) >= since_epoch:
+                out.append(it)
+        except (ValueError, TypeError):
+            out.append(it)  # unparseable firstSeen -> treat as new (fail-safe: don't hide it)
+    return out
+
+
+def _fetch_project_issues(org: str, proj: str, stats_period: str = "14d") -> list:
+    """GET a project's unresolved issues over stats_period. Raises on failure -> caller exits 2."""
+    import urllib.request
+    import json as _json
+    tok = os.environ.get("SENTRY_AUTH_TOKEN")
+    if not (tok and org and proj):
+        raise RuntimeError("SENTRY_AUTH_TOKEN/org/project not all set")
+    url = (f"https://sentry.io/api/0/projects/{org}/{proj}/issues/"
+           f"?query=is:unresolved&statsPeriod={stats_period}&limit=100&sort=new")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 (trusted host)
+        data = _json.loads(r.read().decode())
+    if not isinstance(data, list):
+        raise RuntimeError(f"unexpected Sentry response: {str(data)[:200]}")
+    return [{"id": str(i.get("id")), "title": i.get("title"), "culprit": i.get("culprit"),
+             "level": i.get("level"), "count": i.get("count"), "permalink": i.get("permalink"),
+             "firstSeen": i.get("firstSeen"), "lastSeen": i.get("lastSeen")} for i in data]
+
+
+def quiet_since(ts_iso: str, org: str, proj: str) -> int:
+    """Merge-gate check. 0=quiet, 1=new issues (summary to stdout), 2=could-not-check (LOUD)."""
+    try:
+        since = _iso_to_epoch(ts_iso)
+    except (ValueError, TypeError) as e:
+        print(f"[sentry-quiet] COULD NOT CHECK: bad --quiet-since timestamp {ts_iso!r}: {e}", file=sys.stderr)
+        return 2
+    try:
+        issues = _fetch_project_issues(org, proj)
+    except Exception as e:  # noqa: BLE001 — fail-closed LOUD for a gate; never silent-pass
+        print(f"[sentry-quiet] COULD NOT CHECK {org}/{proj}: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    new = new_material_since(issues, since)
+    if not new:
+        print(f"[sentry-quiet] QUIET — no new {org}/{proj} Sentry issues since {ts_iso} "
+              f"({len(issues)} unresolved scanned)")
+        return 0
+    print(f"[sentry-quiet] NEW ISSUES since {ts_iso} in {org}/{proj}: {len(new)}")
+    for it in new:
+        print(f"  - [{it.get('level')}] {str(it.get('title'))[:100]} "
+              f"(count={it.get('count')}, firstSeen={it.get('firstSeen')})\n    {it.get('permalink') or ''}")
+    return 1
 
 
 def main() -> int:
@@ -289,6 +372,17 @@ def main() -> int:
     args = sys.argv[1:]
     if "--selftest" in args:
         return _selftest()
+    if "--quiet-since" in args:
+        def _opt(flag, default):
+            i = args.index(flag) if flag in args else -1
+            return args[i + 1] if 0 <= i and i + 1 < len(args) else default
+        ts = _opt("--quiet-since", None)
+        if not ts:
+            print("usage: --quiet-since <ISO-ts> [--project <slug>] [--org <slug>]", file=sys.stderr)
+            return 2
+        proj = _opt("--project", "cosem-adcda")
+        org = _opt("--org", os.environ.get("SENTRY_ORG") or "ihsanos")
+        return quiet_since(ts, org, proj)
     if "--json" in args:
         import json
         d = run(dry=True)
