@@ -33,17 +33,49 @@ fleet default — it NEVER raises. Forbidden-fp REFUSAL: a group pointer whose t
 token fingerprints to a forbidden account (the gazzabyte consumer Max, fp
 13589de86f29, CAI-729) is NOT honored — it falls through to the fleet default, so a
 group pin can never boot a lane onto a forbidden token.
+
+MUSA-PERSONAL FREEZE (operator directive Musa op#28857): while `$ORCH_DIR/
+.musa_personal_freeze` is active, a WORKER LANE that would boot on the Musa-personal
+OAuth token is redirected to Syed (fail-closed if no valid Syed substitute — it never
+silently returns Musa). The freeze is liftable (delete the flag) + auto-expiring (an
+ISO-8601 UTC expiry line); with NO flag the resolution is byte-identical to before.
+See `_musa_freeze_active` / `_apply_musa_freeze`.
 """
 from __future__ import annotations
 
 import hashlib
 import os
-from typing import Optional
+import sys
+from datetime import datetime, timezone
+from typing import Dict, Optional
 
 # The gazzabyte consumer Max token is FORBIDDEN fleet-wide (CAI-729). A group
 # pointer resolving to this fingerprint is refused (falls through). Kept in sync
 # with app.py `_FORBIDDEN_TOKEN_FPS` / panes.py — same short sha256[:12] scheme.
 _FORBIDDEN_TOKEN_FPS = {"13589de86f29"}
+
+# ── Musa-personal-pool FREEZE guard (operator directive Musa op#28857) ────────
+# While a freeze is ACTIVE, NO worker lane may boot on the Musa-PERSONAL OAuth
+# token: a lane that would resolve to Musa-personal is redirected to Syed (loudly
+# logged), and we NEVER silently return Musa. The freeze is liftable + auto-
+# expiring (see `_musa_freeze_active`). With NO flag file present the resolution
+# is byte-identical to the pre-op#28857 behaviour (fail-OPEN on the flag's absence).
+_MUSA_FREEZE_FLAG = ".musa_personal_freeze"   # $ORCH_DIR/<this> — one line: ISO-8601 UTC expiry
+_MUSA_ACCOUNT = "musa"                        # the Musa-PERSONAL account (token_fps.map `musa`)
+_SYED_ACCOUNT = "syed"                        # the donor the freeze substitutes in
+_SYED_TOKEN_FILENAME = "syed-oauth-token"     # convention: <keys_dir>/<account>-oauth-token
+
+# Sentinel returned when the freeze is active, a lane WOULD boot on Musa-personal,
+# and NO valid Syed substitute can be found. It is NEVER a real path and NEVER
+# None — because None means "fall through to the .env default", and the .env
+# default IS Musa-personal, i.e. exactly what the freeze forbids. The CLI shim
+# turns this sentinel into an empty stdout + a distinct non-zero exit (42) so the
+# launcher can ABORT the boot instead of booting on the .env Musa account.
+_MUSA_FREEZE_REFUSE = "__MUSA_PERSONAL_FREEZE_REFUSE__"
+
+# token_fps.map is the ONE place updated after an OAuth rotation (orch-console
+# #49107); TOKEN_FPS_MAP env overrides, exactly like token_file_guard.{sh,py}.
+_DEFAULT_FP_MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "token_fps.map")
 
 # Bodies with their OWN per-session token pointer (they are NOT worker lanes, so
 # the group + fleet-default tiers do not apply to them). Mirrors panes.py
@@ -147,6 +179,113 @@ def _token_fp_at(path: str) -> Optional[str]:
         return None
 
 
+def _load_fp_map(map_path: Optional[str] = None) -> Dict[str, str]:
+    """account -> fp map from token_fps.map (TOKEN_FPS_MAP env overrides). Never
+    raises: a missing/unreadable map yields an empty dict (fail-open)."""
+    p = map_path or os.environ.get("TOKEN_FPS_MAP") or _DEFAULT_FP_MAP
+    out: Dict[str, str] = {}
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and not parts[0].startswith("#"):
+                    out[parts[0]] = parts[1]
+    except Exception:
+        return {}
+    return out
+
+
+def account_for_fp(fp: Optional[str], map_path: Optional[str] = None) -> Optional[str]:
+    """Reverse-lookup an OAuth fingerprint -> its account name via token_fps.map
+    (map-driven so a rotation is handled with no code change). None for a falsy or
+    unmapped fp. Never raises (fail-open). Mirrors token_file_guard.sh account_for_fp."""
+    if not fp:
+        return None
+    for acct, mapped in _load_fp_map(map_path).items():
+        if mapped == fp:
+            return acct
+    return None
+
+
+def _parse_iso_utc(s: str) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp to an aware UTC datetime, or None if unparseable.
+    A trailing 'Z' is normalised (py3.9 fromisoformat does not accept it); a naive
+    value is assumed UTC. Never raises."""
+    try:
+        t = s.strip()
+        if not t:
+            return None
+        if t[-1] in ("Z", "z"):
+            t = t[:-1] + "+00:00"
+        dt = datetime.fromisoformat(t)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _musa_freeze_active(orch_dir: str) -> bool:
+    """Is the Musa-personal freeze ACTIVE? True iff `$ORCH_DIR/.musa_personal_freeze`
+    EXISTS and (its expiry line is empty/unparseable OR now_utc < expiry). An absent/
+    unreadable flag => False (fail-OPEN: no freeze == byte-identical old behaviour).
+    A present-but-EXPIRED flag => False. Never raises."""
+    try:
+        with open(os.path.join(orch_dir, _MUSA_FREEZE_FLAG), "r") as f:
+            raw = f.read().strip()
+    except Exception:
+        return False                       # absent / unreadable => NOT active
+    if not raw:
+        return True                        # present, no expiry => active indefinitely
+    expiry = _parse_iso_utc(raw.splitlines()[0])
+    if expiry is None:
+        return True                        # unparseable expiry => active (can't prove expired)
+    return datetime.now(timezone.utc) < expiry   # expired => NOT active
+
+
+def _apply_musa_freeze(resolved: Optional[str], session: str, orch_dir: str) -> Optional[str]:
+    """Enforce the Musa-personal freeze on a WORKER-LANE resolution (op#28857).
+
+    Freeze INACTIVE, or the resolved account is not Musa-personal => return `resolved`
+    UNCHANGED (byte-identical back-compat). Freeze ACTIVE + the lane would boot on
+    Musa-personal (an explicit Musa path, OR None which falls to the .env Musa
+    default) => substitute `<keys_dir>/syed-oauth-token` after verifying it hashes to
+    the `syed` account; if no valid Syed substitute exists, FAIL-CLOSED with the
+    refuse sentinel — NEVER the Musa path and NEVER None.
+
+    Applied to worker lanes only: the console (nazim/cc-orchestrator, reserved ON
+    Musa by design) and the no-pointer singletons boot via their own launchers that
+    do not consult this resolver's CLI, so redirecting them here would only create a
+    display-vs-boot divergence — and the directive is about LANES."""
+    if not _musa_freeze_active(orch_dir):
+        return resolved
+
+    if resolved is None:
+        would_boot_musa = True             # None => caller falls to .env == Musa-personal
+        keys_dir = None
+    else:
+        would_boot_musa = account_for_fp(_token_fp_at(resolved)) == _MUSA_ACCOUNT
+        keys_dir = os.path.dirname(os.path.abspath(os.path.expanduser(resolved.strip())))
+
+    if not would_boot_musa:
+        return resolved                    # Syed (or any non-Musa) target -> unchanged
+
+    # Would boot Musa-personal under an ACTIVE freeze -> substitute Syed, verified.
+    if keys_dir is not None:
+        cand = os.path.join(keys_dir, _SYED_TOKEN_FILENAME)
+        if account_for_fp(_token_fp_at(cand)) == _SYED_ACCOUNT:
+            sys.stderr.write(
+                "[lane_token_resolver] MUSA-FREEZE active: session %r would boot on "
+                "Musa-personal; substituting Syed (%s)\n" % (session, cand))
+            return cand
+
+    # FAIL-CLOSED: no valid Syed substitute (the None/.env edge has no keys dir, or
+    # syed-oauth-token is missing/unreadable/mislabelled). Refuse — never Musa/None.
+    sys.stderr.write(
+        "[lane_token_resolver] MUSA-FREEZE active: session %r would boot on Musa-personal "
+        "and NO valid Syed substitute exists -> REFUSING (fail-closed; NOT falling through "
+        "to the .env Musa account)\n" % (session,))
+    return _MUSA_FREEZE_REFUSE
+
+
 def resolve_lane_token_path(session: str, orch_dir: Optional[str] = None) -> Optional[str]:
     """Resolve `session` -> ABSOLUTE PATH of the token key file it is CONFIGURED to
     boot on, honoring tiers 2 (per-session) → 3 (per-group) → 4 (fleet default), or
@@ -174,6 +313,7 @@ def resolve_lane_token_path(session: str, orch_dir: Optional[str] = None) -> Opt
 
     # Worker lane — Tier 3 (per-GROUP) then Tier 4 (fleet default).
     fam = family_of(session)
+    resolved: Optional[str] = None
     if fam:
         group_target = _read_pointer_target(orch_dir, "%s.%s" % (_GROUP_POINTER_PREFIX, fam))
         if group_target:
@@ -182,11 +322,15 @@ def resolve_lane_token_path(session: str, orch_dir: Optional[str] = None) -> Opt
             # token. An unreadable/empty target OR a forbidden fp -> fall through to
             # the fleet default (fail-open + refusal), never the .env floor.
             if fp is not None and fp not in _FORBIDDEN_TOKEN_FPS:
-                return group_target
+                resolved = group_target
 
-    # Tier 4 — fleet default (returned as-is; the caller's readability guard is the
+    # Tier 4 — fleet default (used as-is; the caller's readability guard is the
     # tier-5 .env fallback, byte-identical to the pre-GAP-B fleet-default handling).
-    return _read_pointer_target(orch_dir, _FLEET_DEFAULT_POINTER)
+    if resolved is None:
+        resolved = _read_pointer_target(orch_dir, _FLEET_DEFAULT_POINTER)
+
+    # Musa-personal FREEZE guard (op#28857): worker lanes only, no-op when no flag.
+    return _apply_musa_freeze(resolved, session, orch_dir)
 
 
 def _main(argv=None) -> int:
@@ -194,7 +338,6 @@ def _main(argv=None) -> int:
     (or NOTHING for a None resolution) and exit 0. Prints ONLY the path on stdout —
     no log noise — so the caller can `$(...)` it directly."""
     import argparse
-    import sys
 
     ap = argparse.ArgumentParser(description="Resolve a lane's configured token key file path (GAP-B).")
     ap.add_argument("--session", default="", help="tmux session / lane name (e.g. irsyad-coord)")
@@ -205,6 +348,15 @@ def _main(argv=None) -> int:
     except Exception:
         # Fail-open at the boundary too: never let a resolver error break a launch.
         path = None
+    # Musa-personal FREEZE refusal (op#28857): print NOTHING (so the launcher never
+    # gets a path to boot Musa on) and exit with a DISTINCT non-zero code (42) that a
+    # launcher can test to ABORT the boot rather than fall through to the .env Musa
+    # account. `_apply_musa_freeze` already logged the loud reason to stderr.
+    if path == _MUSA_FREEZE_REFUSE:
+        sys.stderr.write(
+            "[lane_token_resolver] REFUSE(42): Musa-personal freeze active and no Syed "
+            "substitute for session %r.\n" % (args.session,))
+        return 42
     if path:
         sys.stdout.write(path + "\n")
     return 0
