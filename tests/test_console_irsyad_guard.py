@@ -72,3 +72,71 @@ def test_non_console_touching_goumlyne_passes(monkeypatch, role_env):
     payload = json.dumps({"tool_input": {"command": "psql goumlynecruxrlmzlntp"}})
     rc = _run(monkeypatch, env=role_env, stdin_text=payload)
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# bus #62942: the console MUST be able to bus-post a gate RULING that names the
+# irsyad store to cc-irsyad-coord (coord's exec_prod validator, LAYER-VOCAB-001,
+# requires the store ref). Narrow, FAIL-CLOSED allow-exception: ONLY a console
+# Bash call that is exactly a `scripts/bus_send.py --to cc-irsyad-coord[-N]` post
+# with benign flags, no shell chaining, no command substitution/redirect, no
+# second subprocess. Everything else stays blocked.
+# ---------------------------------------------------------------------------
+def _bash(command):
+    return json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+
+
+def test_console_bus_post_to_coord_with_store_ref_is_allowed(monkeypatch):
+    cmd = (
+        '.venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord '
+        '--subject "PR#1086 gate ruling" '
+        '--body "ACCEPT conditional: prove goumlynecruxrlmzlntp store leak-guard by construction"'
+    )
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 0
+
+
+def test_console_bus_post_to_coord_instance_variant_is_allowed(monkeypatch):
+    cmd = (
+        'python3 scripts/bus_send.py --to cc-irsyad-coord-1 '
+        '--body "mig452 GO: GOUMLYNE_ store, leak-guard proven" --requires-response'
+    )
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 0
+
+
+def test_console_bus_post_to_coord_chained_psql_is_blocked(monkeypatch, capsys):
+    cmd = (
+        '.venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --body "x" '
+        '; psql goumlynecruxrlmzlntp'
+    )
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 2
+
+
+def test_console_bus_post_to_coord_command_substitution_is_blocked(monkeypatch):
+    cmd = (
+        '.venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord '
+        '--body "$(psql goumlynecruxrlmzlntp -c \'select 1\')"'
+    )
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 2
+
+
+def test_console_bus_post_to_other_agent_with_alias_is_blocked(monkeypatch):
+    cmd = '.venv/bin/python3 scripts/bus_send.py --to cc-irsyad-1 --body "GOUMLYNE_ store"'
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 2
+
+
+def test_console_non_bash_tool_touching_goumlyne_still_blocked(monkeypatch):
+    payload = json.dumps({"tool_name": "Read", "tool_input": {"file_path": "/x/GOUMLYNE_env"}})
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=payload)
+    assert rc == 2
+
+
+def test_console_bash_non_bussend_touching_goumlyne_still_blocked(monkeypatch):
+    # A Bash call that is NOT a bus_send to coord must stay blocked even if it names coord.
+    cmd = "psql goumlynecruxrlmzlntp  # posting for cc-irsyad-coord"
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 2
