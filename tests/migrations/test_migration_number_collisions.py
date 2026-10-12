@@ -44,7 +44,18 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+import pytest
+
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent.parent / "migrations"
+
+# The Mac Mini's live checkout -- the directory multiple launchd jobs apply
+# migrations FROM every few minutes, independent of any branch/PR. A
+# migration can land there (applied to the substrate, ledgered) without ever
+# being committed to git -- see 2026-10-12 (orch-console bus #63425):
+# 103_front_desk.sql's build picked leading number 097, unaware that
+# 097-102 already existed, untracked, in this directory, already applied.
+# Not present on other hosts/CI -- scanned best-effort, skipped if absent.
+LIVE_CHECKOUT_MIGRATIONS_DIR = Path.home() / "wingmen" / "orchestrator" / "migrations"
 
 # Historic collisions, ratified after the fact — see module docstring. A
 # number in this set is allowed to have more than one file in MIGRATIONS_DIR
@@ -84,6 +95,50 @@ def test_no_new_migration_number_collisions():
         "renumber the new one before it ships. If this collision is "
         "deliberate and ratified (like 072's), add its number to "
         "_ALLOWED_HISTORIC_COLLISIONS in this file, in a PR that says why."
+    )
+
+
+def _numbers_in(directory: Path) -> dict[str, list[str]]:
+    by_number: dict[str, list[str]] = defaultdict(list)
+    for path in sorted(directory.glob("*.sql")):
+        m = _NUMBER_RE.match(path.name)
+        if not m:
+            continue
+        by_number[m.group(1)].append(path.name)
+    return by_number
+
+
+def test_no_collision_with_live_checkout_untracked_migrations():
+    """Catches the 097-102 class of bug directly: a migration applied to the
+    live substrate but never committed to git, colliding with a new branch's
+    choice of the same leading number for unrelated work. A plain git-branch
+    scan (test_no_new_migration_number_collisions above) cannot see this --
+    the colliding file was never tracked. Best-effort: skipped when the live
+    checkout isn't present on this host (CI, other machines)."""
+    if not LIVE_CHECKOUT_MIGRATIONS_DIR.is_dir():
+        pytest.skip(f"live checkout not present at {LIVE_CHECKOUT_MIGRATIONS_DIR}")
+
+    branch_numbers = _migration_numbers()
+    live_numbers = _numbers_in(LIVE_CHECKOUT_MIGRATIONS_DIR)
+
+    unexpected = {}
+    for number, live_files in live_numbers.items():
+        if number in _ALLOWED_HISTORIC_COLLISIONS:
+            continue
+        branch_files = branch_numbers.get(number, [])
+        extra_branch = [f for f in branch_files if f not in live_files]
+        extra_live = [f for f in live_files if f not in branch_files]
+        if extra_branch and extra_live:
+            unexpected[number] = {"branch": extra_branch, "live_checkout": extra_live}
+
+    assert not unexpected, (
+        "migration number collision between THIS branch and the live "
+        f"checkout's untracked migrations: {unexpected}. A file sitting in "
+        f"{LIVE_CHECKOUT_MIGRATIONS_DIR} may already be applied/ledgered "
+        "against the live substrate under this number even though it was "
+        "never committed -- renumber the new file in this branch, or if it "
+        "is in fact the same migration, land it into git under its "
+        "existing live-checkout name instead of inventing a new one."
     )
 
 
