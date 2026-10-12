@@ -59,6 +59,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.lib.agent_identity import IdentityError, resolve_agent_id  # noqa: E402
+from scripts.lib.bus_pii_redact import redact_pii  # noqa: E402
 
 _VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
 _VALID_TYPES = (
@@ -427,6 +428,34 @@ def warn_if_unevidenced_claim(mtype: str, subject: str, body: str, evidence: str
     _log_warn("unevidenced_claim", mtype=mtype, subject=subject, matched_keyword=m.group(1))
 
 
+# fable-audit E-client-lanes-quality.md item 5 / hc#359 (bus #64729): hash
+# Emirates-ID/NRIC/3-token-Arabic-name/non-system-email shapes out of the
+# BODY before insert — a bus row is durable and widely SELECT-able, unlike a
+# vault page there is no later "generated mirror" step to catch this at, so
+# it has to happen here, at send time. --allow-pii <reason> is a logged
+# escape, never a silent bypass.
+def apply_pii_redaction(
+    body: str, allow_pii: str | None, *, from_agent: str, to: str, subject: str, stream=None,
+) -> str:
+    if allow_pii:
+        _log_warn("pii_escape_used", reason=allow_pii, from_agent=from_agent, to=to, subject=subject)
+        print(
+            f"bus_send: PII escape used (--allow-pii {allow_pii!r}) — body sent unredacted, logged.",
+            file=stream or sys.stderr,
+        )
+        return body
+    redacted, counts = redact_pii(body)
+    if counts:
+        summary = ", ".join(f"{k}:{v}" for k, v in sorted(counts.items()))
+        print(
+            f"bus_send: redacted {sum(counts.values())} PII value(s) before insert ({summary}) — "
+            "pass --allow-pii <reason> to send unredacted (logged).",
+            file=stream or sys.stderr,
+        )
+        _log_warn("pii_redacted", counts=counts, from_agent=from_agent, to=to, subject=subject)
+    return redacted
+
+
 # Re-exported for callers/tests that reach for bus_send.resolve_from_agent /
 # bus_send.IdentityError directly — the real logic now lives in
 # scripts/lib/agent_identity.py (bus #47221) so asks_triage.py, asks_open.py,
@@ -503,6 +532,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="send anyway to a structurally-undeliverable --to (write-only producer, "
              "no live wake owner) -- logs a warning instead of refusing; for a genuine "
              "deliberate one-off, never the default",
+    )
+    p.add_argument(
+        "--allow-pii", default=None, metavar="REASON", dest="allow_pii",
+        help="skip the Emirates-ID/NRIC/Arabic-name/email hash-redaction pass and send the "
+             "body as-is -- REQUIRES a reason, logged (never a silent bypass). Default "
+             "behavior redacts those shapes before insert (fable-audit E item 5, hc#359).",
     )
     return p
 
@@ -663,6 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     body = resolve_body(args, sys.stdin)
+    body = apply_pii_redaction(body, args.allow_pii, from_agent=from_agent, to=args.to, subject=args.subject)
 
     warn_if_below_hub_wake_floor(args.to, args.req, args.priority)
     warn_if_missing_provenance_citation(args.priority, args.subject, body)
