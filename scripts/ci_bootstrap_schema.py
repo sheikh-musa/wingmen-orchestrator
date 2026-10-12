@@ -394,7 +394,14 @@ _DEAD_MIGRATION_TARGETS = {
 # check_required_assertions() would refuse (see PR that introduced this set for
 # the exact script); schema.sql and bedrock_substrate_core.sql are baseline
 # snapshots of already-live state, not migrations, so they predate the convention
-# by construction. Any FUTURE file lands here only if it is ALSO pre-existing debt
+# by construction. One entry, 062_fleet_lane_autoscale_log.sql, is NOT a predates-
+# the-convention case — it was written AFTER 058 and still shipped without its
+# required asserts, the same class of miss as 103. It's grandfathered here only
+# because it's already applied/ledgered live (re-litigating an already-shipped
+# migration would break CI on debt this fix isn't meant to touch), not because it
+# predates anything; flagged honestly as a standing gap, not silently folded in
+# with the genuinely pre-convention files above (orch-console correction, bus
+# #64645). Any FUTURE file lands here only if it is ALSO pre-existing debt
 # discovered the same way — never add a new migration to this set to silence this
 # check; fix the migration's asserts instead (that's the whole point of #64418).
 _PRE_1397_ASSERT_EXEMPT = frozenset((
@@ -430,6 +437,7 @@ _PRE_1397_ASSERT_EXEMPT = frozenset((
     ROOT / "migrations" / "052_escalator_anon_execute_revoke.sql",
     ROOT / "migrations" / "055_close_anon_read_on_five_rls_off_tables.sql",
     ROOT / "migrations" / "056_anon_reachable_views_security_invoker.sql",
+    # 062 = post-convention miss, grandfathered because already applied (see note above).
     ROOT / "migrations" / "062_fleet_lane_autoscale_log.sql",
 ))
 
