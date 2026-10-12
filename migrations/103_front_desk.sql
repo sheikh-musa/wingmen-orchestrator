@@ -23,6 +23,19 @@
 -- All additive (new column + new table + index only). REVERT:
 --   ALTER TABLE operator_messages DROP COLUMN front_desk_acked_at;
 --   DROP TABLE front_desk_latency;
+--
+-- CAI-RESP-1397 #5: the REVOKE ALL below needs assertions or
+-- apply_migration.py refuses outright (a REVOKE with no way to check it
+-- stuck is unverifiable by construction) -- same shape as migration 068's
+-- own REVOKE assertions.
+-- assert: no_table_privilege anon public.front_desk_latency SELECT
+-- assert: no_table_privilege anon public.front_desk_latency INSERT
+-- assert: no_table_privilege anon public.front_desk_latency UPDATE
+-- assert: no_table_privilege anon public.front_desk_latency DELETE
+-- assert: no_table_privilege authenticated public.front_desk_latency SELECT
+-- assert: no_table_privilege authenticated public.front_desk_latency INSERT
+-- assert: no_table_privilege authenticated public.front_desk_latency UPDATE
+-- assert: no_table_privilege authenticated public.front_desk_latency DELETE
 
 BEGIN;
 
