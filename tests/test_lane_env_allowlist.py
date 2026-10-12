@@ -59,6 +59,7 @@ def test_safe_essentials_and_part_a_vars_pass():
         GOOGLE_APPLICATION_CREDENTIALS="/lane/.no-prod-adc",   # Part-A sentinel path
         CLOUDSDK_CONFIG="/lane/gcloud",
         CC_BASE_AGENT_ID="cc-x",
+        FLEET_HOST_ID="Sheikhs-Mini",
         TMUX="SENTINEL-tmux-ctx",
     )
     pairs = _scrub("cc-x", env)
@@ -67,6 +68,7 @@ def test_safe_essentials_and_part_a_vars_pass():
     assert pairs.get("GOOGLE_APPLICATION_CREDENTIALS") == "/lane/.no-prod-adc"
     assert pairs.get("CLOUDSDK_CONFIG") == "/lane/gcloud"
     assert pairs.get("CC_BASE_AGENT_ID") == "cc-x"
+    assert pairs.get("FLEET_HOST_ID") == "Sheikhs-Mini"  # host-aware scripts need it (not a secret)
     assert pairs.get("TMUX")  # claude needs tmux context
 
 
