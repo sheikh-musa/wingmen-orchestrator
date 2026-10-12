@@ -130,8 +130,44 @@ def find_stale_id_reads(rows: list[dict], reads: list[dict], now: dt.datetime,
     return out
 
 
+def find_runtime_identity_divergence(session_identities, now=None):
+    """(c) RUNTIME-identity divergence (op#29023/#63312) — a live body whose REPORTED identity
+    (what it actually posts/polls as) differs from its session-sticky agent_status id. The
+    agent_status-only classifiers (a)/(b) CANNOT see this: on 2026-10-12 tmux cosem-adcda-urgent
+    kept a CORRECT agent_status row (cc-cosem-adcda-2) while its post-reset body ran as
+    cc-cosem-adcda-1, colliding with the hotfix session — invisible here until now.
+
+    Pure over [{tmux_session, host, sticky_id, reported_id}]. `reported_id` comes from the LIVE
+    PROBE (see _probe_session_reported_ids). Flags any session whose body reports a different id
+    than its sticky registration (attributed -> pageable)."""
+    findings = []
+    for si in session_identities or []:
+        sticky = si.get("sticky_id")
+        reported = si.get("reported_id")
+        if sticky and reported and sticky != reported:
+            findings.append({
+                "kind": "runtime_divergence", "tmux_session": si.get("tmux_session"),
+                "host": si.get("host"), "sticky_id": sticky, "reported_id": reported,
+                "attributed": True,
+                "key": f"runtime_divergence:{si.get('host')}:{si.get('tmux_session')}:{reported}",
+            })
+    return findings
+
+
+def _probe_session_reported_ids(rows, now):
+    """LIVE-PROBE HOOK for (c). Must return [{tmux_session, host, sticky_id, reported_id}] where
+    reported_id is what each live body ACTUALLY believes it is. NOTE: agent_messages.posted_by_
+    identity is the DB role ('postgres'), NOT session-granular, so a bus-only attribution is
+    impossible — a real probe reads the body's self-reported id per session (a tmux pane-probe of
+    the lane's boot/identity line, or a per-session boot-stamped CC_AGENT_ID marker) and pairs it
+    with the session-sticky id from `rows`. UNWIRED by design in this PR (needs the pane/stamp
+    source + its own review); returns [] so the classifier is INERT live until the probe lands.
+    The classifier + its tests prove the detection; wiring the probe is the follow-on."""
+    return []
+
+
 def pageable(findings: list[dict]) -> list[dict]:
-    """dup_live always pages; stale_read only when attributed (see module docstring)."""
+    """dup_live always pages; stale_read / runtime_divergence only when attributed."""
     return [f for f in findings if f["kind"] == "dup_live" or f.get("attributed")]
 
 
@@ -157,6 +193,17 @@ def render_page(f: dict) -> tuple[str, str]:
                 "(the 2026-10-07 cosem-platform -5/-3 swap, orch-console #57914).\n"
                 "What to do: pane-probe the session, ask the lane which id it believes it is, and "
                 "offline the id it is NOT (admin_mark_offline) so the bus routes to one owner.")
+    elif f["kind"] == "runtime_divergence":
+        subject = (f"Runtime identity divergence: tmux {f['tmux_session']} ({f['host']}) is "
+                   f"registered {f['sticky_id']} but its body runs as {f['reported_id']}")
+        tldr = (f"TL;DR: session {f['tmux_session']} ({f['host']}) heartbeats as {f['sticky_id']} "
+                f"but its live body posts/polls as {f['reported_id']} — a second body is claiming "
+                f"an id it should not (op#29023/#63312).")
+        what = ("Why it matters: two bodies resolving to one instance id read+act on the same "
+                "bus mail -> duplicate work on a (often client) lane; agent_status looks clean so "
+                "the other dup checks miss it.\n"
+                f"What to do: pane-probe {f['tmux_session']}, confirm its intended id, and "
+                f"relaunch it so auto_agent_id re-pins {f['sticky_id']} (or wind it down if spent).")
     else:
         live = ", ".join(f["live_ids"])
         subject = (f"Lane {f['tmux_session']} (now {live}) is reading bus mail for its old id "
@@ -227,7 +274,9 @@ def _jsonable(f: dict) -> dict:
 
 def run(dry_run: bool, state_path: Path = STATE_FILE) -> int:
     rows, reads, now = fetch(_dsn())
-    findings = find_duplicate_live_claims(rows, now) + find_stale_id_reads(rows, reads, now)
+    findings = (find_duplicate_live_claims(rows, now)
+                + find_stale_id_reads(rows, reads, now)
+                + find_runtime_identity_divergence(_probe_session_reported_ids(rows, now), now))
     to_page = pageable(findings)
     print(json.dumps({"now": now.isoformat(), "dry_run": dry_run,
                       "findings": [_jsonable(f) for f in findings],

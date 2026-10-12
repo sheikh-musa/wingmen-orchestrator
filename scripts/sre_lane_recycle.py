@@ -366,6 +366,79 @@ def discover_lanes(conn, lane: "str | None" = None) -> list:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def live_sessions_for_base(conn, base_agent_id) -> list:
+    """Distinct live tmux sessions sharing this base (the grouping discover_lanes collapses on
+    via DISTINCT ON). >1 => sibling ambiguity: a --lane target cannot be safely resolved to one
+    session without an explicit --session (op#29023 / #63312)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT tmux_session FROM agent_status "
+            "WHERE base_agent_id = %s AND tmux_session IS NOT NULL "
+            "AND last_heartbeat > now() - interval '30 minutes' ORDER BY tmux_session",
+            [base_agent_id])
+        return [r[0] for r in cur.fetchall()]
+
+
+def pick_session(lane, candidate_sessions, explicit_session=None):
+    """Resolve a lane to exactly ONE live tmux session, FAIL-CLOSED on ambiguity.
+
+    candidate_sessions = the live tmux sessions sharing this lane's base. op#29023 / #63312:
+    a bare shared base (e.g. cc-cosem-adcda with sibling sessions cosem-adcda / -urgent /
+    -photos) let the old DISTINCT-ON-base path silently pick the freshest-heartbeat sibling
+    and red-reset the WRONG one. Returns (session, None) on a unique resolution, else
+    (None, error-string). [[resolve-tmux-session-cwd-fallback-sibling-misattribution]]"""
+    cands = [s for s in (candidate_sessions or []) if s]
+    if explicit_session:
+        if explicit_session in cands:
+            return explicit_session, None
+        return None, (f"--session {explicit_session!r} is not a live session for lane "
+                      f"{lane!r} (live: {sorted(cands) if cands else 'none'})")
+    if len(cands) == 1:
+        return cands[0], None
+    if not cands:
+        return None, f"lane {lane!r} has no live tmux session — nothing to target"
+    return None, (f"lane {lane!r} maps to {len(cands)} live sibling sessions "
+                  f"({', '.join(sorted(cands))}) — refusing to guess which to recycle; pass "
+                  f"--session <name> to pick one (op#29023 sibling-misresolution guard)")
+
+
+def self_recycle_refused(invoker_agent, invoker_session, target_agent, target_session,
+                         armed, i_mean_it):
+    """A lane running the recycler ON ITSELF while ARMED must carry an explicit --i-mean-it,
+    else REFUSE — a 'self-check' must never silently red-reset (op#29023 / #63326). Returns
+    True = refuse. Disarmed (detect-only) or a different target is never refused here."""
+    if not armed or i_mean_it:
+        return False
+    return bool((invoker_session and invoker_session == target_session)
+                or (invoker_agent and invoker_agent == target_agent))
+
+
+def pick_instance_id(session, status_rows, fallback_base):
+    """Return the INSTANCE agent_id registered for `session` (first match = freshest, caller
+    orders by heartbeat), else fallback_base. op#29023/#63312: nudges must address the lane's
+    instance id (cc-<base>-N) for THAT session, not the bare base — a base-addressed nudge to a
+    multi-sibling family is declined by every sibling and never drains.
+    [[address-worker-instance-not-base-id]]"""
+    if session:
+        for row in status_rows or []:
+            aid = row[0] if isinstance(row, (list, tuple)) else row
+            sess = row[1] if isinstance(row, (list, tuple)) and len(row) > 1 else None
+            if aid and sess == session:
+                return aid
+    return fallback_base
+
+
+def instance_id_for_session(cur, session, fallback_base):
+    """DB wrapper for pick_instance_id — the live instance agent_id for `session`."""
+    if not session:
+        return fallback_base
+    cur.execute(
+        "SELECT agent_id, tmux_session FROM agent_status "
+        "WHERE tmux_session = %s AND last_heartbeat > now() - interval '30 minutes' "
+        "ORDER BY last_heartbeat DESC", [session])
+    return pick_instance_id(session, cur.fetchall(), fallback_base)
+
+
 def _excluded_prefixes() -> list:
     """Base-agent-id prefixes the executor's ACTION scope excludes, from SRE_LANE_EXCLUDE_PREFIXES
     (comma-separated). Empty when unset — the all-lanes end-state (Musa 37752). Worker-lanes-first
@@ -442,6 +515,12 @@ def main() -> int:
                     help="force-DISARM this run (detect-only) — the explicit deliberate-disarm "
                          "path that survives the CAI-RESP-1382 default flip. Same as CTX_WD_LANE_ARM=0.")
     ap.add_argument("--lane", help="restrict to one lane (by fleet_lanes.lane)")
+    ap.add_argument("--session", help="explicit tmux session — REQUIRED to disambiguate when a "
+                    "--lane's base maps to multiple live sibling sessions (op#29023 guard).")
+    ap.add_argument("--i-mean-it", dest="i_mean_it", action="store_true",
+                    help="required to let a lane run an ARMED recycle ON ITSELF — a bare "
+                         "self-invocation is otherwise REFUSED so a 'self-check' can never "
+                         "silently red-reset (op#29023 / #63326).")
     ap.add_argument("--ignore-context", action="store_true",
                     help="skip the >=80%% context-bloat trigger (manual wedged-lane "
                          "recycle path). The idle+git_clean+fresh_handoff safety floor "
@@ -471,6 +550,11 @@ def main() -> int:
     all_lanes = discover_lanes(conn, args.lane)
     lanes = apply_lane_scope(all_lanes, exclude)
 
+    # op#29023/#63312/#63326: who is invoking (a lane running this on itself?). Named env vars
+    # only — never an environ dump.
+    invoker_agent = os.environ.get("CC_AGENT_ID") or os.environ.get("CC_BASE_AGENT_ID")
+    invoker_session = os.environ.get("CC_TMUX_SESSION")
+
     require_bloat = not args.ignore_context
     scope = f"worker-only (excluding {','.join(exclude)})" if exclude else "all lanes"
     print(f"SRE lane-recycle — {'ARMED' if armed else 'DETECT-ONLY (disarmed)'} — "
@@ -478,6 +562,17 @@ def main() -> int:
           f"scope={scope} — {len(lanes)}/{len(all_lanes)} lane(s) · {datetime.now(timezone.utc).isoformat()}")
     acted = 0
     for lr in lanes:
+        base = lr.get("base_agent_id") or lr.get("lane")
+        # op#29023/#63312: a --lane target whose base has >1 live sibling session is
+        # FAIL-CLOSED unless --session disambiguates — never guess which sibling to reset.
+        if args.lane:
+            cands = live_sessions_for_base(conn, base)
+            sess, serr = pick_session(args.lane, cands, explicit_session=args.session)
+            if serr:
+                print(f"  [skip] {base:22s} session=AMBIGUOUS")
+                print(f"            reason: {serr}")
+                continue
+            lr["tmux_session"] = sess
         p = plan(conn, lr, armed, require_bloat=require_bloat,
                  handoff_ref_epoch=args.handoff_after)
         base = p["base"]
@@ -490,6 +585,14 @@ def main() -> int:
             continue
         if not armed:
             print("            would recycle (disarmed — not touching it)")
+            continue
+        # op#29023/#63326: a lane running this ARMED ON ITSELF must pass --i-mean-it — a bare
+        # self-invocation is refused so a "self-check" can never silently red-reset.
+        if self_recycle_refused(invoker_agent, invoker_session, p["base"], p["session"],
+                                armed, args.i_mean_it):
+            print(f"            REFUSED: armed self-recycle of session {p['session']} by "
+                  f"{invoker_agent or invoker_session} without --i-mean-it "
+                  f"(op#29023/#63326 self-check guard)")
             continue
         # ARMED + permitted: audit BEFORE clear (cond 4), then reset_lane.sh — via the shared
         # armed_recycle action (re-verifies the floor at the moment of action).

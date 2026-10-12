@@ -147,6 +147,12 @@ class _WireCur:
         # dedup query -> return None (not recently nudged) so a send can proceed
         return None
 
+    def fetchall(self):
+        # op#29023: instance_id_for_session() queries agent_status for the session's instance.
+        # Default [] -> resolver falls back to the base; a test can set _instance_rows to
+        # exercise instance-addressing.
+        return getattr(self, "_instance_rows", [])
+
 
 class _WireConn:
     def __init__(self, cur):
@@ -243,3 +249,33 @@ def test_run_never_targets_a_singleton(monkeypatch):
 def fhb_boundary_error():
     from scripts.lib import fleet_health_boundaries as fhb
     return fhb.BoundaryViolation
+
+
+# ── op#29023/#63284/#63300/#63312 — instance-addressing + stale-gauge age-gate ──
+def test_run_nudges_the_instance_id_not_the_bare_base(monkeypatch):
+    """A base with a live instance for the session nudges the INSTANCE id, not the bare base
+    (a base-addressed nudge is declined by every sibling)."""
+    cur = _WireCur()
+    cur._instance_rows = [("cc-cosem-adcda-2", "cosem-adcda-urgent")]
+    conn = _WireConn(cur)
+    lanes = [{"lane": "cosem-adcda-urgent", "base_agent_id": "cc-cosem-adcda",
+              "tmux_session": "cosem-adcda-urgent"}]
+    _wire(monkeypatch, lanes=lanes, gauge_pct={"cc-cosem-adcda": 91}, enabled=True, dry=False)
+    pn.run(conn, dry=False)
+    assert len(cur.inserts) == 1
+    assert cur.inserts[0][0] == "cc-cosem-adcda-2"     # instance id, NOT bare cc-cosem-adcda
+
+
+def test_run_skips_nudge_on_stale_high_gauge(monkeypatch):
+    """A stale-high gauge (age > tight cutoff) with a blind pane re-samples to UNKNOWN -> NO
+    nudge (the false-fire class that paged orch-console 6x)."""
+    cur = _WireCur()
+    conn = _WireConn(cur)
+    lanes = [{"lane": "cosem-platform-author", "base_agent_id": "cc-cosem-platform",
+              "tmux_session": "cosem-platform-author"}]
+    _wire(monkeypatch, lanes=lanes, gauge_pct={"cc-cosem-platform": 86}, enabled=True, dry=False)
+    # override the gauge to be STALE (age beyond the tight nudge cutoff); pane already blind
+    monkeypatch.setattr(dm, "_gauge",
+                        lambda cur, base: (int(0.86 * 1_000_000), pn.NUDGE_GAUGE_STALE_S + 900))
+    pn.run(conn, dry=False)
+    assert len(cur.inserts) == 0                        # stale-high gauge must NOT nudge

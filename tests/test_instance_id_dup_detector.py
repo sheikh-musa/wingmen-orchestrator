@@ -124,3 +124,33 @@ def test_page_subject_is_one_line_tldr():
     assert "\n" not in subj and len(subj) <= 200
     assert f"{B}-6" in subj and "cosem-platform-author" in subj
     assert len(body) >= 40 and body.splitlines()[0].startswith("TL;DR")
+
+
+# ── op#29023/#63312 — runtime-identity divergence (the inverse of base fan-out) ──
+def test_runtime_divergence_flags_body_running_as_wrong_id():
+    """Replays 2026-10-12: tmux cosem-adcda-urgent registered cc-cosem-adcda-2 but its post-reset
+    body runs as cc-cosem-adcda-1 -> a divergence finding (attributed -> pageable)."""
+    sids = [
+        {"tmux_session": "cosem-adcda-urgent", "host": "Sheikhs-Mini",
+         "sticky_id": "cc-cosem-adcda-2", "reported_id": "cc-cosem-adcda-1"},
+        {"tmux_session": "cosem-adcda", "host": "Sheikhs-Mini",
+         "sticky_id": "cc-cosem-adcda-1", "reported_id": "cc-cosem-adcda-1"},  # consistent
+    ]
+    findings = d.find_runtime_identity_divergence(sids, NOW)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["kind"] == "runtime_divergence"
+    assert f["tmux_session"] == "cosem-adcda-urgent"
+    assert f["sticky_id"] == "cc-cosem-adcda-2" and f["reported_id"] == "cc-cosem-adcda-1"
+    assert d.pageable(findings) == findings            # attributed -> pageable
+    subj, body = d.render_page(f)
+    assert "divergence" in subj.lower() and "cc-cosem-adcda-1" in subj
+
+def test_runtime_divergence_none_when_all_consistent():
+    sids = [{"tmux_session": "s", "host": "h", "sticky_id": "cc-x-1", "reported_id": "cc-x-1"}]
+    assert d.find_runtime_identity_divergence(sids, NOW) == []
+
+def test_runtime_divergence_probe_hook_inert_by_default():
+    """The live-probe hook is UNWIRED (returns []) so the classifier is inert live until a real
+    per-session identity probe lands."""
+    assert d._probe_session_reported_ids([], NOW) == []

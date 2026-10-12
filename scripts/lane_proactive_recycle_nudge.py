@@ -58,6 +58,11 @@ MAX_NUDGES = int(os.environ.get("PROACTIVE_MAX_NUDGES", "3"))       # cap/episod
 COOLDOWN_MIN = int(os.environ.get("PROACTIVE_COOLDOWN_MIN", str(GRACE_S // 60)))  # cross-tier dedup window
 DEADMAN_PCT = dm.HARD_PCT                                           # 85 — the backstop bar, for the message
 ENABLED = os.environ.get("PROACTIVE_RECYCLE_NUDGE_ENABLED") == "1"  # arm flag: deploys INERT until set
+# op#29023/#63284/#63300: a NUDGE must never fire on a STALE-high gauge. Re-sample the lane
+# with a TIGHT (~10min) staleness cutoff — older than this, resolve_lane_pct falls back to the
+# live PANE (or UNKNOWN), so a stale cost-writer can't drive a false nudge. The dead-man PAGE
+# keeps its own looser cutoff; this only governs the courtesy nudge.
+NUDGE_GAUGE_STALE_S = int(os.environ.get("PROACTIVE_NUDGE_GAUGE_STALE_S", "600"))
 
 STATE_PATH = _ORCH_DIR / "state" / "lane_proactive_recycle_nudge.json"
 SUBJECT_PREFIX = "[proactive-recycle-nudge]"       # this tier's dedup anchor — keep STABLE
@@ -208,7 +213,8 @@ def run(conn, dry: bool = False) -> int:
             session = lr.get("tmux_session")
             tokens, age_s = dm._gauge(cur, base)
             pane_pct, pane_hint_k = dm._pane(session) if session else (None, None)
-            known, pct, _last_known, reason = dm.resolve_lane_pct(tokens, age_s, pane_pct, pane_hint_k)
+            known, pct, _last_known, reason = dm.resolve_lane_pct(
+                tokens, age_s, pane_pct, pane_hint_k, max_gauge_age_s=NUDGE_GAUGE_STALE_S)
             episode = state.get(base)
             verdict, new_ep = evaluate_proactive_nudge(known, pct, episode, now)
             if new_ep is None:
@@ -226,8 +232,9 @@ def run(conn, dry: bool = False) -> int:
                     print(f"            skip {lr['lane']}: cross-tier dedup (nudged within {COOLDOWN_MIN}m)")
                     continue
                 subj, body = proactive_nudge_message(lr["lane"], pct, nudge_n=new_ep["nudges"])
-                _send_nudge(cur, conn, base, subj, body)
-                print(f"            NUDGED lane '{base}' ({verdict}, ~{pct_s})")
+                target = slr.instance_id_for_session(cur, session, base)
+                _send_nudge(cur, conn, target, subj, body)
+                print(f"            NUDGED lane '{target}' ({verdict}, ~{pct_s})")
                 nudged += 1
 
     if send_live:  # persist episode timers ONLY when armed + holder (inert/dry never mutates state)
