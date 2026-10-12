@@ -129,6 +129,11 @@ _CHANNEL_TAGS = {
     "gazzabyte-irsyad": (DELEGATE_HUB_PEN, R_IRSYAD, "irsyad", 0.8),
 }
 
+# Irsyad domain keywords — PUBLIC (op#27563: irsyad status never goes to Musa
+# directly; front_desk.py reuses this exact pattern to exclude irsyad-tagged
+# asks from anything it answers Musa, so the two stay in sync by construction).
+IRSYAD_DOMAIN_RE = re.compile(r"\b(irsyad|gazzabyte|elly|tabung\s+fajr)\b", re.IGNORECASE)
+
 # Domain keyword heuristics (no tag): ordered list of (compiled-regex, category,
 # route, domain). First match wins. Lower confidence than an explicit tag.
 _KEYWORD_RULES = [
@@ -140,7 +145,7 @@ _KEYWORD_RULES = [
      DELEGATE_LANE, R_QR, "qr"),
     (r"\b(shipforge|clone\s+(the\s+)?site|website\s+clone|site\s+cloner|redesign)\b",
      DELEGATE_LANE, R_SHIPFORGE, "shipforge"),
-    (r"\b(irsyad|gazzabyte|elly|tabung\s+fajr)\b",
+    (IRSYAD_DOMAIN_RE.pattern,
      DELEGATE_HUB_PEN, R_IRSYAD, "irsyad"),
     (r"\b(scholar|mizan|quran|hifz|tajweed|tarbiyah)\b",
      DELEGATE_LANE, R_SCHOLAR, "scholar"),
