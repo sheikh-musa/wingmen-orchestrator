@@ -380,6 +380,59 @@ _DEAD_MIGRATION_TARGETS = {
     ROOT / "migrations" / "011_substrate_post_journal_lockdown.sql": "UndefinedFunction",
 }
 
+# CAI-RESP-1397 #5 (apply_migration.py's check_required_assertions): a REVOKE or
+# DROP FUNCTION with zero `-- assert:` header lines is unverifiable by construction
+# and apply_migration.py refuses it outright on a real apply. This bootstrap now
+# runs that same check (bus #64418 option (a), after migration 103 shipped through
+# a fully green CI suite missing its required asserts — the gap this closes) for
+# every file it applies, which would make CI fail on every migration written
+# BEFORE the convention existed. These files predate CAI-RESP-1397 #5 (introduced
+# at migration 058, msg 37751) and are already applied/ledgered against the live
+# orchestrator substrate without asserts — re-litigating them here would just
+# break CI on historical debt this fix isn't meant to touch. Computed via a one-
+# time walk of every file apply_full_schema() applies, flagging each one
+# check_required_assertions() would refuse (see PR that introduced this set for
+# the exact script); schema.sql and bedrock_substrate_core.sql are baseline
+# snapshots of already-live state, not migrations, so they predate the convention
+# by construction. Any FUTURE file lands here only if it is ALSO pre-existing debt
+# discovered the same way — never add a new migration to this set to silence this
+# check; fix the migration's asserts instead (that's the whole point of #64418).
+_PRE_1397_ASSERT_EXEMPT = frozenset((
+    ROOT / "schema.sql",
+    ROOT / "migrations" / "infra" / "bedrock_substrate_core.sql",
+    ROOT / "supabase" / "migrations" / "20260424_batch1_structural_integrity.sql",
+    ROOT / "migrations" / "010_substrate_secdef_lockdown.sql",
+    ROOT / "migrations" / "011_substrate_post_journal_lockdown.sql",
+    ROOT / "migrations" / "013_substrate_rls_grant_lockdown.sql",
+    ROOT / "migrations" / "014_bot_channels_ingest.sql",
+    ROOT / "migrations" / "016_orch_lease.sql",
+    ROOT / "migrations" / "017_console_memory_backup.sql",
+    ROOT / "migrations" / "018_finance_subscriptions.sql",
+    ROOT / "migrations" / "022_opportunities_ledger.sql",
+    ROOT / "migrations" / "023_fleet_health_lease.sql",
+    ROOT / "migrations" / "024_quality_gate_runs.sql",
+    ROOT / "migrations" / "030_rls_lockdown_3_tables.sql",
+    ROOT / "migrations" / "031_anon_write_truncate_lockdown.sql",
+    ROOT / "migrations" / "032_anon_write_revoke_nontelemetry.sql",
+    ROOT / "migrations" / "035_operator_backlog.sql",
+    ROOT / "migrations" / "036_pool_usage.sql",
+    ROOT / "migrations" / "037_admin_mark_offline.sql",
+    ROOT / "migrations" / "037_pool_pace.sql",
+    ROOT / "migrations" / "038_admin_mark_offline_scoped_reapers.sql",
+    ROOT / "migrations" / "039_governance_tables_revoke_default_dml.sql",
+    ROOT / "migrations" / "040_drop_sweep_stale_agents_and_lock_audit_insert.sql",
+    ROOT / "migrations" / "041_body_activity_verdict.sql",
+    ROOT / "migrations" / "042_pane_context.sql",
+    ROOT / "migrations" / "043_agents_single_owner_repo_scope_guard.sql",
+    ROOT / "migrations" / "044_operator_asks.sql",
+    ROOT / "migrations" / "045_share_lane_status.sql",
+    ROOT / "migrations" / "049_invariant_assertion_runs.sql",
+    ROOT / "migrations" / "052_escalator_anon_execute_revoke.sql",
+    ROOT / "migrations" / "055_close_anon_read_on_five_rls_off_tables.sql",
+    ROOT / "migrations" / "056_anon_reachable_views_security_invoker.sql",
+    ROOT / "migrations" / "062_fleet_lane_autoscale_log.sql",
+))
+
 PLATFORM_SHIM_SQL = """
 -- Platform-object shim (cc-orchestrator ask, bus #47147): standard Supabase
 -- roles/schemas/extensions this repo's migrations assume exist, which a
@@ -590,11 +643,20 @@ def tear_down_cluster(datadir: str, sockdir: str, pg_bin: str = PG_BIN) -> None:
     shutil.rmtree(sockdir, ignore_errors=True)
 
 
-def _apply_sql(dsn: str, sql_text: str, label: str, *, tolerate: str | None = None) -> None:
+def _apply_sql(dsn: str, sql_text: str, label: str, *, tolerate: str | None = None,
+                assertions: list[dict] | None = None) -> None:
     body = am.strip_txn_control(sql_text)
     try:
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute(body)
+            # bus #64418 option (a): run the `-- assert:` checks THEMSELVES against
+            # this ephemeral cluster, same as a real apply_migration() call would —
+            # catches a REVOKE that has assert lines but didn't actually stick, not
+            # just a REVOKE that is missing them outright (that half is
+            # check_required_assertions, enforced in _apply_file below before this
+            # function is ever called).
+            if assertions:
+                am.run_assertions(cur, assertions)
     except Exception as e:
         if tolerate and type(e).__name__ == tolerate:
             print(f"  (tolerating known {tolerate} in {label}: {e})", file=sys.stderr)
@@ -607,7 +669,19 @@ def _apply_file(dsn: str, path: Path) -> None:
     for needle, replacement in _PSQL_BINDVAR_SUBSTITUTIONS.get(path, {}).items():
         sql_text = sql_text.replace(needle, replacement)
     tolerate = _KNOWN_SCHEMA_SQL_OVERLAP.get(path) or _DEAD_MIGRATION_TARGETS.get(path)
-    _apply_sql(dsn, sql_text, str(path.relative_to(ROOT)), tolerate=tolerate)
+
+    # bus #64418 option (a): mirror apply_migration.py's own CAI-RESP-1397 #5 gate
+    # here, so a migration with an unasserted REVOKE/DROP FUNCTION fails CI the same
+    # way it would fail a real production apply — this is exactly the gap that let
+    # migration 103 ship through a fully green CI suite without its required
+    # asserts. Deliberately NOT covered by `tolerate` above: an unasserted REVOKE/
+    # DROP is a defect in the migration itself, not a CI-only artifact of an empty
+    # database, so it must hard-fail the job, not be silently swallowed.
+    assertions = am.parse_assert_lines(sql_text)
+    if path not in _PRE_1397_ASSERT_EXEMPT:
+        am.check_required_assertions(am.strip_txn_control(sql_text), assertions)
+
+    _apply_sql(dsn, sql_text, str(path.relative_to(ROOT)), tolerate=tolerate, assertions=assertions)
 
 
 def apply_platform_shim(dsn: str) -> None:
