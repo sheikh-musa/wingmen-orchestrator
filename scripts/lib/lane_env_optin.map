@@ -1,0 +1,12 @@
+# lane_env_optin.map — per-lane env allow-list EXTRAS (op#29348 part b).
+# Least-privilege default (scripts/lib/lane_env_allowlist.sh) drops all secrets
+# except the fleet-wide essentials. A lane that genuinely needs a scoped secret
+# opts in HERE, on the record. Format (whitespace-separated):
+#   <base_agent_id>  <ENV_NAME> [<ENV_NAME> ...]
+# Lines starting with # and blank lines are ignored.
+#
+# Start EMPTY (Nazim #64260: start minimal). Add a lane only after VERIFYING it
+# genuinely needs the secret in its process env (not readable on-demand from .env).
+# Examples (commented — enable only when verified):
+#   cc-cosem-adcda      VERCEL_TOKEN VERCEL_TEAM_ID   # if a deploy-verify runs claude-side
+#   cc-substrate        SUPABASE_ACCESS_TOKEN         # if it runs supabase CLI migrations
