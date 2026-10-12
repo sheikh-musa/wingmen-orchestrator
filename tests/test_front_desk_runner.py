@@ -458,3 +458,57 @@ def test_kill_switch_flips_off_mid_run_without_restart(monkeypatch, tmp_path):
     _write_env_file(env_file, FRONT_DESK_ENABLED="0")
     fdr._tick()
     assert connect_calls == [1]  # unchanged -- the very next tick did nothing
+
+
+# ── DB-error logging (orch-console bus #64412): the old except-clause logged
+# EVERY psycopg.Error as "substrate DB unreachable", which misdiagnosed a
+# schema-mismatch (UndefinedColumn, migration 103 unapplied) as a
+# connectivity outage. The new line logs the real type/sqlstate/server
+# message, and must never surface the DSN. ───────────────────────────────────
+
+class _FakeDiag:
+    def __init__(self, message_primary):
+        self.message_primary = message_primary
+
+
+def test_tick_logs_real_error_class_sqlstate_and_server_message(monkeypatch, tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    _write_env_file(env_file, FRONT_DESK_ENABLED="1")
+    monkeypatch.setattr(fdr, "_ENV_PATH", str(env_file))
+    monkeypatch.setattr(fdr, "_dsn", lambda: "postgresql://fake")
+
+    class _UndefinedColumn(fdr.psycopg.Error):
+        @property
+        def diag(self):
+            return _FakeDiag('column "front_desk_acked_at" does not exist')
+
+    err = _UndefinedColumn("boom")
+    err.sqlstate = "42703"
+
+    def _boom(*a, **k):
+        raise err
+    monkeypatch.setattr(fdr.psycopg, "connect", _boom)
+    fdr._tick()
+    out = capsys.readouterr().out
+    assert "sqlstate=42703" in out
+    assert 'column "front_desk_acked_at" does not exist' in out
+    assert "substrate DB unreachable" not in out  # old, misdiagnosing message is gone
+
+
+def test_tick_logs_type_only_and_never_a_credential_on_a_bare_connection_error(monkeypatch, tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    _write_env_file(env_file, FRONT_DESK_ENABLED="1")
+    monkeypatch.setattr(fdr, "_ENV_PATH", str(env_file))
+    secret_marker = "sekrit-credential-marker-should-never-be-logged"
+    monkeypatch.setattr(fdr, "_dsn", lambda: secret_marker)
+
+    class _OperationalError(fdr.psycopg.Error):
+        pass
+
+    def _boom(*a, **k):
+        raise _OperationalError(secret_marker)  # a real driver may embed the DSN in str(e)
+    monkeypatch.setattr(fdr.psycopg, "connect", _boom)
+    fdr._tick()
+    out = capsys.readouterr().out
+    assert "_OperationalError" in out
+    assert secret_marker not in out
