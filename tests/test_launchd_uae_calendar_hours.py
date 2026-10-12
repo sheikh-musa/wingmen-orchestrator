@@ -78,6 +78,16 @@ def test_programme_stall_digest_hour_matches_9am_uae_in_host_tz():
     )
 
 
+def test_cubeasht_daily_digest_hour_matches_9am_uae_in_host_tz():
+    interval = _load_start_calendar_interval("dev.wingmen.cubeasht-daily-digest.plist")
+    expected = _expected_host_hour(9)
+    assert interval["Hour"] == expected, (
+        f"cubeasht-daily-digest.plist fires at Hour={interval['Hour']} host-local "
+        f"({HOST_TZ.key}); 09:00 Asia/Dubai converts to Hour={expected} in "
+        f"{HOST_TZ.key} (ask#2207; same bus #44286 host-TZ gotcha)"
+    )
+
+
 def test_programme_stall_digest_still_fires_monday():
     """Weekday is not a TZ-dependent field here, but a Hour fix that silently
     dropped Weekday would defeat the whole 'Monday digest' intent."""
