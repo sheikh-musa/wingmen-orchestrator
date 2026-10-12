@@ -2,19 +2,20 @@
 -- ledger: silo=tscuymavysscrvoberrr
 -- (orchestrator substrate)
 --
--- Front desk v1 (op#29128, bus #63359/#63381/#63383): an instant-ack + narrow
--- whitelist-answer layer in front of Nazim's nazim-console DMs, running as its
--- own process (nervous_system/front_desk_runner.py), same isolation pattern as
+-- Front desk v1 (op#29128, bus #63359/#63381/#63383, orch-console gate fixes
+-- bus #63427): a narrow whitelist-answer layer in front of Nazim's
+-- nazim-console DMs, running as its own process
+-- (nervous_system/front_desk_runner.py), same isolation pattern as
 -- responder_runner.py — it reads operator_messages, never gates/blocks
 -- ingest.py's own path.
 --
 -- front_desk_acked_at is DELIBERATELY SEPARATE from handled_at (CAI-RESP-277's
--- cursor): an ack means "the operator was told someone's on it", not "this is
--- answered" — Nazim still owns and must answer the row (operator_log.
--- unprocessed() keeps surfacing it, since that only filters on handled_at).
--- Only the narrow whitelist-answer path sets BOTH columns, in the same
--- transaction, so a single drain pass can never leave a row acked-and-answered
--- out of sync.
+-- cursor): touching it never marks a row handled — Nazim still owns and must
+-- answer every row himself (operator_log.unprocessed() keeps surfacing it,
+-- since that only filters on handled_at). This holds for BOTH the plain-ack
+-- and the whitelist-answer path (#63427 item 7 — an auto-answer is a
+-- courtesy, not a resolution): front_desk_runner.py never sets handled_at at
+-- all, in either branch.
 --
 -- front_desk_latency is a thin audit trail (not used for any gating), one row
 -- per message front desk touched (either kind), for the "<10s" latency report.

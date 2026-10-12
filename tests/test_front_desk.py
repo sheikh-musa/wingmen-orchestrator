@@ -73,6 +73,39 @@ def test_is_irsyad_row_handles_missing_fields():
     assert not fd.is_irsyad_row({})
 
 
+# ── is_irsyad_row strengthening (#63427 item 6) ─────────────────────────────
+
+def test_is_irsyad_row_true_on_delegated_to_structural_prefix_without_keyword():
+    # Structural signal: the lane identity alone is enough, even with text
+    # that never says "irsyad" literally.
+    assert fd.is_irsyad_row({"delegated_to": "cc-irsyad-receipt-1", "ask": "numbering question"})
+
+
+def test_is_irsyad_row_true_on_wan_mention():
+    assert fd.is_irsyad_row({"ask": "chase Wan on the receipt numbering decision"})
+
+
+def test_is_irsyad_row_true_on_shuq_mention():
+    assert fd.is_irsyad_row({"triage_summary": "Shuq asked about the monthly billing build"})
+
+
+def test_is_irsyad_row_true_on_goumlyne_mention():
+    assert fd.is_irsyad_row({"ask": "repoint the goumlyne silo migration"})
+
+
+def test_is_irsyad_row_true_on_dms_tag():
+    assert fd.is_irsyad_row({"ask": "[dms] confirm the receipt sequence"})
+
+
+def test_is_irsyad_row_true_on_sms_tag():
+    assert fd.is_irsyad_row({"ask": "[sms] follow up on the void flow"})
+
+
+def test_is_irsyad_row_false_on_unrelated_row_with_similar_but_distinct_words():
+    # "wane"/"shuqran"/"demise" must not false-positive the \b-bounded match.
+    assert not fd.is_irsyad_row({"ask": "the demand will wane, shuqran is unrelated noise, demise of the old flow"})
+
+
 def test_filter_irsyad_drops_only_irsyad_rows():
     rows = [
         {"id": 1, "ask": "ship cosem exams export"},
