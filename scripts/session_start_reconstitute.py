@@ -16,6 +16,22 @@ other body (hub, a lane in an orchestrator worktree) gets NOTHING — the hub re
 its own handoff, lanes have their own boot. On `resume`/`compact` it stays silent:
 context is retained there, so re-injecting the handoff would only bloat the window.
 
+LANE EXEMPTION (bus #63378, op#29128 mixup): this hook fires for ANY session
+started inside an orchestrator checkout, worktrees included — a lane booted in
+`orchestrator.wt-*` inherits the SAME SessionStart hook. `_body_role()` falls back
+to reading `.env`'s ORCH_BODY_ROLE when the env var isn't set in-process, and this
+repo's `.env` carries `ORCH_BODY_ROLE=console` as the live checkout's default — so
+a lane that never set ORCH_BODY_ROLE itself fell through to that default and got
+told "You are Nazim / console body." Worse: `console_irsyad_guard.py` exempts any
+session WITH `CC_BASE_AGENT_ID` set (the lane discriminator — see
+reference_lane_vs_console_discriminator_is_cc_base_agent_id), so a lane that
+*believed* it was the console wasn't covered by the guard that stops the console
+from posting irsyad gate rulings. cc-substrate hit exactly this: answered
+orch-console's inbox and posted a bogus irsyad floor-gate "approval" (#63372,
+retracted #63375). Fix: `CC_BASE_AGENT_ID` presence is checked FIRST, before the
+`.env` fallback even runs — a lane always gets a short identity notice instead of
+the console handoff, regardless of what `.env` says.
+
 OUTPUT: SessionStart additionalContext JSON (per the hooks contract). Fail-safe —
 any error prints nothing and exits 0 so a hook fault never blocks a boot.
 """
@@ -34,6 +50,38 @@ ORCH_DIR = os.path.expanduser("~/wingmen/orchestrator")
 RECONSTITUTE_SOURCES = {"startup", "clear"}
 _HANDOFF_GLOB = os.path.join(ORCH_DIR, "reports", "nazim-handoff-*.md")
 _MAX_HANDOFF_CHARS = 24000  # bound the injection; the newest handoff is ~6KB
+
+
+def _cc_base_agent_id() -> str:
+    """The lane discriminator (reference_lane_vs_console_discriminator_is_cc_base_agent_id,
+    same signal console_irsyad_guard.py's is_console() uses). Present => this
+    process is a lane (builder, coord, cc-substrate, ...), never the console's
+    own boot (boot_nazim.sh never sets this)."""
+    return os.environ.get("CC_BASE_AGENT_ID", "").strip()
+
+
+def _lane_identity_notice(base_agent_id: str, instance_agent_id: str) -> str:
+    """Pure: the short identity-correction notice a lane session gets instead of
+    the console handoff. `instance_agent_id` empty or equal to `base_agent_id`
+    means no distinct instance (a singleton/solo lane) — mirrors my_inbox.py's
+    my_ids()."""
+    ids = f"'{base_agent_id}'"
+    if instance_agent_id and instance_agent_id != base_agent_id:
+        ids = f"'{base_agent_id}' or '{instance_agent_id}'"
+    who = f"lane `{base_agent_id}`"
+    if instance_agent_id and instance_agent_id != base_agent_id:
+        who += f" (instance `{instance_agent_id}`)"
+    return (
+        f"ℹ️ SessionStart identity: this session is {who}. "
+        "It is NOT the console/Nazim body, regardless of any other boot text you "
+        "see (the .env default ORCH_BODY_ROLE=console is for the live checkout's "
+        "own boot, not for lanes). Your own inbox is agent_messages where "
+        f"to_agent = {ids} — read it with `python3 scripts/lib/my_inbox.py`, "
+        "never by querying `to_agent='orch-console'`. Do not reply via "
+        "scripts/nazim_send.sh, do not reconcile operator_log/operator_messages "
+        "as if you were the operator's console, and do not post gate rulings "
+        "reserved for orch-console/cai (op#29128 mixup, bus #63372/#63375/#63378)."
+    )
 
 
 def _body_role() -> str:
@@ -137,10 +185,25 @@ def main() -> int:
 
     source = (payload.get("source") or "startup").strip()
 
-    # Fail-closed scoping: console body, fresh-context events only.
-    if _body_role() != "console":
-        return 0
     if source not in RECONSTITUTE_SOURCES:
+        return 0
+
+    # Lane check FIRST, before the console .env-fallback even runs (bus #63378):
+    # CC_BASE_AGENT_ID present means this is a lane, full stop, regardless of
+    # what ORCH_BODY_ROLE resolves to.
+    base_agent_id = _cc_base_agent_id()
+    if base_agent_id:
+        instance_agent_id = os.environ.get("CC_AGENT_ID", "").strip()
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": _lane_identity_notice(base_agent_id, instance_agent_id),
+            }
+        }))
+        return 0
+
+    # Fail-closed scoping: console body only, past this point.
+    if _body_role() != "console":
         return 0
 
     exp_fp = _expected_token_fp()
