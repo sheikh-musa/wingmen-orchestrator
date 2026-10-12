@@ -1041,3 +1041,55 @@ def test_no_body_flag_falls_back_to_stdin():
     # back-compat: existing heredoc callers (no --body/--body-file) still read stdin.
     args = _parse([])
     assert bs.resolve_body(args, _io.StringIO("y" * 40)) == "y" * 40
+
+
+# ── PII redaction (hc#359, bus #64729) ────────────────────────────────────
+
+def test_dry_run_redacts_pii_by_default(monkeypatch, capsys):
+    import io
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    body = "Trainer EID is 784-1988-1234567-1, flagged on the roster. " + "x" * 10
+    monkeypatch.setattr(sys, "stdin", io.StringIO(body))
+    rc = bs.main([
+        "--to", "cc-orchestrator", "--type", "update", "--subject", "s",
+        "--priority", "P1", "--dry-run",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "784-1988-1234567-1" not in captured.out
+    assert "784-1988-1234567-1" not in captured.err
+    assert "redacted 1 PII value" in captured.err
+    # body_bytes in the printed summary reflects the REDACTED body, not the raw one.
+    redacted_body, _ = bs.redact_pii(body)
+    assert f"body_bytes={len(redacted_body)}" in captured.out
+
+
+def test_dry_run_allow_pii_sends_unredacted_and_logs(monkeypatch, capsys):
+    import io
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    logged = []
+    monkeypatch.setattr(bs, "_log_warn", lambda warn_type, **f: logged.append((warn_type, f)))
+    body = "Trainer EID is 784-1988-1234567-1, flagged on the roster. " + "x" * 10
+    monkeypatch.setattr(sys, "stdin", io.StringIO(body))
+    rc = bs.main([
+        "--to", "cc-orchestrator", "--type", "update", "--subject", "s",
+        "--priority", "P1", "--dry-run", "--allow-pii", "debugging the redactor itself",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"body_bytes={len(body)}" in out  # unredacted -- original length, not the hashed one
+    assert logged and logged[0][0] == "pii_escape_used"
+    assert logged[0][1]["reason"] == "debugging the redactor itself"
+
+
+def test_clean_body_dry_run_has_no_redaction_notice(monkeypatch, capsys):
+    import io
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * bs._MIN_BODY_BYTES))
+    rc = bs.main([
+        "--to", "cc-orchestrator", "--type", "update", "--subject", "s",
+        "--priority", "P1", "--dry-run",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "redacted" not in captured.err
