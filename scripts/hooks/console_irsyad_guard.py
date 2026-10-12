@@ -46,9 +46,15 @@ def is_console() -> bool:
 # can appear ONLY inside the post's own args (text going to coord) -- never in anything
 # that executes against the silo. Anything that does not match returns False and falls
 # through to the BLOCKED checks (fail-closed).
+# Aligned to the REAL scripts/bus_send.py flags (PR#370 follow-up): --req (NOT the
+# fictional --requires-response), plus the benign routing-metadata flags. --from is
+# DELIBERATELY excluded: the console must not post under another identity; bus_send
+# auto-resolves from_agent fail-closed. A drift test asserts the canonical allowed
+# shape actually parses on bus_send.build_parser() so this list can't drift again.
 _ALLOWED_BUS_FLAGS = frozenset({
-    "--to", "--subject", "--type", "--priority",
-    "--body", "--body-file", "--requires-response", "--from",
+    "--to", "--type", "--subject", "--priority",
+    "--body", "--body-file", "--req",
+    "--thread", "--reply-to", "--link-ask",
 })
 # A token that is ENTIRELY these chars is a shell control operator (;, &, &&, |, ||,
 # <, >, (, ) and any run of them) -> a second command / redirect -> reject.

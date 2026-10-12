@@ -990,3 +990,54 @@ def test_cli_reaches_send_when_instance_is_live(monkeypatch):
         "--priority", "P1",
     ])
     assert rc == 0
+
+
+# ---- --body / --body-file body sources (bus #62942 follow-up) ----------------
+# bus_send historically read the body from stdin only (heredoc). Add flag sources
+# for one-line callers (e.g. the console's coord gate-ruling via the irsyad guard),
+# mutually exclusive with each other and with piped stdin; same >=40-byte floor.
+import io as _io
+
+_BASE_ARGS = ["--to", "cc-irsyad-coord", "--type", "decision", "--subject", "s", "--priority", "P1"]
+_OK_BODY = "x" * 40  # exactly the _MIN_BODY_BYTES floor (>=40 passes)
+
+
+def _parse(extra):
+    return bs.build_parser().parse_args(_BASE_ARGS + extra)
+
+
+def test_body_flag_resolves():
+    args = _parse(["--body", _OK_BODY])
+    assert bs.resolve_body(args, _io.StringIO("")) == _OK_BODY
+
+
+def test_body_file_flag_resolves(tmp_path):
+    f = tmp_path / "ruling.txt"
+    f.write_text(_OK_BODY)
+    args = _parse(["--body-file", str(f)])
+    assert bs.resolve_body(args, _io.StringIO("")) == _OK_BODY
+
+
+def test_body_and_body_file_both_refused():
+    args = _parse(["--body", _OK_BODY, "--body-file", "/tmp/whatever"])
+    with pytest.raises(SystemExit):
+        bs.resolve_body(args, _io.StringIO(""))
+
+
+def test_body_flag_and_piped_stdin_refused(monkeypatch):
+    args = _parse(["--body", _OK_BODY])
+    monkeypatch.setattr(bs, "_stdin_has_data", lambda s: True)
+    with pytest.raises(SystemExit):
+        bs.resolve_body(args, _io.StringIO("piped body text that is also present"))
+
+
+def test_body_under_min_bytes_refused():
+    args = _parse(["--body", "too short"])
+    with pytest.raises(SystemExit):
+        bs.resolve_body(args, _io.StringIO(""))
+
+
+def test_no_body_flag_falls_back_to_stdin():
+    # back-compat: existing heredoc callers (no --body/--body-file) still read stdin.
+    args = _parse([])
+    assert bs.resolve_body(args, _io.StringIO("y" * 40)) == "y" * 40

@@ -86,22 +86,27 @@ def _bash(command):
     return json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
 
 
-def test_console_bus_post_to_coord_with_store_ref_is_allowed(monkeypatch):
-    cmd = (
-        '.venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord '
-        '--subject "PR#1086 gate ruling" '
-        '--body "ACCEPT conditional: prove goumlynecruxrlmzlntp store leak-guard by construction"'
-    )
-    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+# The canonical allowed shape — REAL bus_send.py flags (PR#370 follow-up): --type +
+# --priority required, body via --body, --req (not --requires-response). The drift test
+# below asserts this parses on bus_send.build_parser(), so guard/tool can't drift.
+_CANON_BODY = "mig452 ACCEPT: goumlynecruxrlmzlntp store leak-guard proven by construction"
+_CANON_CMD = (
+    '.venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --type decision '
+    f'--subject "mig452 ruling" --priority P1 --body "{_CANON_BODY}"'
+)
+_CANON_CMD_INSTANCE = (
+    'python3 scripts/bus_send.py --to cc-irsyad-coord-1 --type decision '
+    f'--subject "mig452 ruling" --priority P1 --req --body "{_CANON_BODY}"'
+)
+
+
+def test_console_canonical_coord_post_is_allowed(monkeypatch):
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(_CANON_CMD))
     assert rc == 0
 
 
-def test_console_bus_post_to_coord_instance_variant_is_allowed(monkeypatch):
-    cmd = (
-        'python3 scripts/bus_send.py --to cc-irsyad-coord-1 '
-        '--body "mig452 GO: GOUMLYNE_ store, leak-guard proven" --requires-response'
-    )
-    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+def test_console_canonical_coord_post_instance_variant_is_allowed(monkeypatch):
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(_CANON_CMD_INSTANCE))
     assert rc == 0
 
 
@@ -194,5 +199,47 @@ _BYPASS_WITH_SILO = [
 
 @pytest.mark.parametrize("cmd", _BYPASS_WITH_SILO)
 def test_console_bypass_with_silo_token_is_blocked_via_main(monkeypatch, cmd):
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# DRIFT-PROOF (PR#370 follow-up): the guard's allowed shape must ACTUALLY parse on
+# the REAL scripts/bus_send.py. The first cut allowlisted a fictional CLI (--body
+# didn't exist; --requires-response/--from not real), so a real coord post could not
+# pass the guard. Import the real tool and assert the canonical allowed shape parses
+# + its body resolves -> this test fails loudly if guard and tool ever drift again.
+# ---------------------------------------------------------------------------
+import shlex as _shlex  # noqa: E402
+import sys as _sys  # noqa: E402
+
+_sys.path.insert(0, str(_MOD_PATH.parents[2] / "scripts"))
+import bus_send as _bus  # noqa: E402
+
+
+def test_canonical_allowed_shape_parses_on_real_bus_send():
+    argv = _shlex.split(_CANON_CMD)[2:] + ["--dry-run"]  # drop interpreter + script path
+    args = _bus.build_parser().parse_args(argv)  # must NOT raise ("unrecognized arguments")
+    assert args.to == "cc-irsyad-coord"
+    assert args.type == "decision"
+    assert args.priority == "P1"
+    assert _bus.resolve_body(args, io.StringIO("")) == _CANON_BODY  # --body resolves, >=40B
+
+
+def test_canonical_instance_shape_parses_on_real_bus_send():
+    argv = _shlex.split(_CANON_CMD_INSTANCE)[2:] + ["--dry-run"]
+    args = _bus.build_parser().parse_args(argv)
+    assert args.to == "cc-irsyad-coord-1"
+    assert args.req is True
+    assert _bus.resolve_body(args, io.StringIO("")) == _CANON_BODY
+
+
+def test_console_coord_post_with_from_flag_is_blocked(monkeypatch):
+    # --from is NOT allowlisted (console must not post under another identity); the
+    # store ref in the body then falls through to the BLOCKED silo check -> rc 2.
+    cmd = (
+        '.venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --type decision '
+        f'--subject "x" --priority P1 --from cc-orchestrator --body "{_CANON_BODY}"'
+    )
     rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
     assert rc == 2
