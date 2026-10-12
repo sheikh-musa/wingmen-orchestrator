@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.cubeasht-daily-digest</string>
+  <key>ProgramArguments</key><array><string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string><string>/Users/sheikhmusa/wingmen/orchestrator/scripts/cubeasht_daily_digest.py</string></array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <!-- cc-fleet-health cubeasht DAILY HEALTH DIGEST (operator ask#2207, Nazim bus
+       #64620/#64628). Once a day it summarizes the PRIOR complete UTC day of
+       cubeasht host_metrics (temps / CPU load busy-vs-idle / RAM) and posts a
+       calm roll-up to the bus (orch-console). The 5-min dev.wingmen.cubeasht-monitor
+       job PAGES on breaches; this is the quiet backstop so slow drift surfaces.
+       The script load_dotenv's $ORCH/.env for DATABASE_URL and posts via
+       scripts/bus_send.send() (cc-fleet-health has no TG pen) -- no secrets here.
+       Dedup is one-digest-per-summarized-date in logs/cubeasht_daily_digest_state.json.
+
+       TIME: targets 09:00 Asia/Dubai (the operator's morning, same slot as
+       asks-daily-digest). StartCalendarInterval's Hour fires in the HOST's
+       local zone, which is Asia/Singapore (UTC+8) on this Mac Mini -- NOT UTC
+       and NOT UAE (bus #44286: asks-daily-digest once fired 8h off by assuming
+       a UTC host clock). 09:00 Asia/Dubai = 05:00 UTC = 13:00 SGT -> Hour=13
+       below (Minute=5 staggers it off asks-daily-digest's :00). At 05:00 UTC
+       the prior UTC day is fully complete, so the default "yesterday UTC"
+       summary always has a whole day of samples. tests/
+       test_launchd_uae_calendar_hours.py recomputes this from zoneinfo and
+       fails loud if the Hour drifts. If this host's clock ever moves zones,
+       recompute Hour there and here.
+
+       NOT launchctl-loaded by landing this file -- a separate go-live step
+       `launchctl load`s it (and can `kickstart` the first fire). -->
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>5</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/cubeasht-daily-digest.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/cubeasht-daily-digest.log</string>
+</dict>
+</plist>
