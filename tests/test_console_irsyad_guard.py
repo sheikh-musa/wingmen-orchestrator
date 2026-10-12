@@ -140,3 +140,59 @@ def test_console_bash_non_bussend_touching_goumlyne_still_blocked(monkeypatch):
     cmd = "psql goumlynecruxrlmzlntp  # posting for cc-irsyad-coord"
     rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
     assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# PR#370 review: the first cut was fail-OPEN on 5 vectors (plain shlex.split keeps a
+# GLUED operator as one token; newline check was per-token; program/script match was
+# basename-only). The helper must now reject each. These assert the helper DIRECTLY
+# (the real security property) AND via main() with a silo token (rc 2 = correctly
+# falls through to the BLOCKED silo check instead of being allowed).
+# ---------------------------------------------------------------------------
+_BYPASS_EXACT = [  # the reviewer's exact cases + glued operator variants
+    "python3 scripts/bus_send.py --to cc-irsyad-coord --subject x;whoami",        # glued ;
+    "python3 scripts/bus_send.py --to cc-irsyad-coord --subject a&&whoami",        # glued &&
+    "python3 scripts/bus_send.py --to cc-irsyad-coord --subject x\nwhoami",        # literal newline
+    "python3 /tmp/x/bus_send.py --to cc-irsyad-coord",                             # any bus_send.py
+    "/tmp/python3 scripts/bus_send.py --to cc-irsyad-coord",                       # any python3
+    "python3 scripts/bus_send.py --to cc-irsyad-coord --subject x|y",             # glued |
+    "python3 scripts/bus_send.py --to cc-irsyad-coord --subject x>f",             # glued >
+    "python3 scripts/bus_send.py --to cc-irsyad-coord --subject x<f",             # glued <
+    "python3 scripts/bus_send.py --to cc-irsyad-coord --subject x&",              # glued &
+]
+
+
+@pytest.mark.parametrize("cmd", _BYPASS_EXACT)
+def test_allow_helper_rejects_each_bypass_directly(cmd):
+    assert guard._is_allowed_coord_bus_post({"tool_name": "Bash", "tool_input": {"command": cmd}}) is False
+
+
+def test_allow_helper_accepts_legit_coord_post_directly():
+    cmd = (
+        ".venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord "
+        '--body "ACCEPT: goumlynecruxrlmzlntp store leak-guard proven"'
+    )
+    assert guard._is_allowed_coord_bus_post({"tool_name": "Bash", "tool_input": {"command": cmd}}) is True
+    cmd1 = "python3 scripts/bus_send.py --to cc-irsyad-coord-1 --body-file /tmp/ruling.txt"
+    assert guard._is_allowed_coord_bus_post({"tool_name": "Bash", "tool_input": {"command": cmd1}}) is True
+
+
+# Same vectors carrying a silo token -> main() must return 2 (helper rejects -> BLOCKED
+# silo check fires), i.e. the bypass can no longer smuggle a goumlyne-touching command.
+_BYPASS_WITH_SILO = [
+    ".venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --subject goumlynecruxrlmzlntp;whoami",
+    ".venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --subject goumlynecruxrlmzlntp&&whoami",
+    ".venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --subject goumlynecruxrlmzlntp\nwhoami",
+    ".venv/bin/python3 /tmp/x/bus_send.py --to cc-irsyad-coord --body goumlynecruxrlmzlntp",
+    "/tmp/python3 scripts/bus_send.py --to cc-irsyad-coord --body goumlynecruxrlmzlntp",
+    ".venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --subject goumlynecruxrlmzlntp|whoami",
+    ".venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --subject goumlynecruxrlmzlntp>f",
+    ".venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --subject goumlynecruxrlmzlntp<f",
+    ".venv/bin/python3 scripts/bus_send.py --to cc-irsyad-coord --subject goumlynecruxrlmzlntp&",
+]
+
+
+@pytest.mark.parametrize("cmd", _BYPASS_WITH_SILO)
+def test_console_bypass_with_silo_token_is_blocked_via_main(monkeypatch, cmd):
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+    assert rc == 2

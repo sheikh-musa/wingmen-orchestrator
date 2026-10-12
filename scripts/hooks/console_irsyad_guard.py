@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import sys
+from pathlib import Path
 
 BLOCKED = [
     (r"goumlynecruxrlmzlntp|GOUMLYNE_", "irsyad silo (goumlyne)"),
@@ -49,7 +50,15 @@ _ALLOWED_BUS_FLAGS = frozenset({
     "--to", "--subject", "--type", "--priority",
     "--body", "--body-file", "--requires-response", "--from",
 })
-_SHELL_OPS = frozenset({";", "&", "&&", "|", "||", ">", ">>", "<", "<<", "(", ")", "\n"})
+# A token that is ENTIRELY these chars is a shell control operator (;, &, &&, |, ||,
+# <, >, (, ) and any run of them) -> a second command / redirect -> reject.
+_OP_CHARS = frozenset(";&|<>()")
+# EXACT program/script allowlist (no basename matching — /tmp/python3 and
+# /tmp/x/bus_send.py must NOT pass). Resolved against THIS guard's repo root so an
+# absolute `.venv/bin/python3` / `scripts/bus_send.py` invocation is accepted too.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ALLOWED_PY = frozenset({str(_REPO_ROOT / ".venv" / "bin" / "python3"), ".venv/bin/python3", "python3"})
+_ALLOWED_BUS = frozenset({str(_REPO_ROOT / "scripts" / "bus_send.py"), "scripts/bus_send.py"})
 
 
 def _is_allowed_coord_bus_post(payload) -> bool:
@@ -58,23 +67,35 @@ def _is_allowed_coord_bus_post(payload) -> bool:
     cmd = (payload.get("tool_input") or {}).get("command")
     if not isinstance(cmd, str) or not cmd.strip():
         return False
-    # Command substitution / backticks are invisible to shlex-as-tokens; reject on the
-    # raw string so a `$(...)`/backtick can never smuggle an executing subcommand.
+    # (b) No newline/CR anywhere -> a multi-line body MUST use --body-file, never an
+    # inline newline that could smuggle a second command line past the tokeniser.
+    if "\n" in cmd or "\r" in cmd:
+        return False
+    # (d) Command substitution / backticks are invisible to token inspection; reject on
+    # the raw string so a `$(...)`/backtick can never smuggle an executing subcommand.
     if "$(" in cmd or "`" in cmd:
         return False
+    # (a) Operator-AWARE tokenise: punctuation_chars splits GLUED operators so
+    # "x;whoami" -> ["x", ";", "whoami"] (plain shlex.split keeps it as one token).
+    # commenters='' so '#' is literal (never truncates analysis). Fail closed on any
+    # tokeniser error (unbalanced quotes etc).
     try:
-        toks = shlex.split(cmd)
+        lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        toks = list(lexer)
     except ValueError:
-        return False  # unbalanced quotes etc -> fail closed
+        return False
     if len(toks) < 2:
         return False
-    # Any shell control-operator token = a second command / redirect -> refuse.
-    if any(t in _SHELL_OPS for t in toks):
+    # Reject if ANY token is entirely operator chars (catches ; && || | < > ( ) and
+    # glued forms broken out by (a): x;whoami, a&&whoami, x|y, x>f, x<f, x&, ...).
+    if any(t and all(c in _OP_CHARS for c in t) for t in toks):
         return False
-    # toks[0] must be a python interpreter; toks[1] must be scripts/bus_send.py.
-    if toks[0].rsplit("/", 1)[-1] not in ("python", "python3"):
+    # (c) EXACT program + script match — NO basename fallback.
+    if toks[0] not in _ALLOWED_PY:
         return False
-    if toks[1].rsplit("/", 1)[-1] != "bus_send.py":
+    if toks[1] not in _ALLOWED_BUS:
         return False
     # Every --flag must be in the allowlist; --to must resolve to cc-irsyad-coord[-N].
     rest = toks[2:]
