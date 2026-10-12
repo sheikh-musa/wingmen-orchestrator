@@ -219,7 +219,22 @@ def _tick() -> None:
         with psycopg.connect(_dsn()) as conn:
             drain_once(conn)
     except psycopg.Error as e:
-        _log_line(f"WATCHDOG: substrate DB unreachable from front_desk_runner ({type(e).__name__})")
+        # Log the real error class/sqlstate/server message (orch-console
+        # bus #64412): the old message said "substrate DB unreachable" for
+        # EVERY psycopg.Error, which misdiagnosed a schema-mismatch
+        # (UndefinedColumn, migration 103 unapplied) as a connectivity
+        # outage. `diag.message_primary` is server-side diagnostic text
+        # (no connection info) -- a connection-level failure (no `.diag`)
+        # still logs type/sqlstate only, never str(e), which can carry the
+        # DSN for some driver/connect-failure shapes.
+        detail = type(e).__name__
+        sqlstate = getattr(e, "sqlstate", None)
+        if sqlstate:
+            detail += f" sqlstate={sqlstate}"
+        msg = getattr(getattr(e, "diag", None), "message_primary", None)
+        if msg:
+            detail += f": {msg}"
+        _log_line(f"WATCHDOG: front_desk_runner DB error ({detail})")
 
 
 def main() -> int:
