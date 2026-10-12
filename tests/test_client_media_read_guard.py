@@ -10,6 +10,9 @@ stager against the raw file in the first place).
 """
 from __future__ import annotations
 
+import datetime
+import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -17,6 +20,12 @@ import sys
 from pathlib import Path
 
 HOOK = Path(__file__).parent.parent / "scripts" / "hooks" / "client_media_read_guard.py"
+
+# Import the guard as a module too, so the pure decision helper can be unit-
+# tested directly (fast red→green), alongside the subprocess end-to-end tests.
+_spec = importlib.util.spec_from_file_location("client_media_read_guard", HOOK)
+guard = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(guard)
 
 
 def run_hook(tool_name: str, tool_input: dict, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -155,3 +164,121 @@ def test_allows_non_read_tool_even_against_unstaged_media(tmp_path):
 
 def test_allows_when_tool_input_missing_file_path():
     assert_allowed("Read", {})
+
+
+# ── irsyad-coord read-attestation allow-path (Musa op#20593) ─────────────────
+# cc-irsyad-coord may Read a gazzabyte-irsyad_ media file ONLY IF a READ-ATTEST
+# entry exists for that EXACT realpath whose stored sha256 == the file's CURRENT
+# sha256, written within READ_ATTEST_TTL_MIN (15) minutes. The sha256 binding
+# means a file swapped after the attest cannot ride a stale attest. Every other
+# case stays denied; the console-only exemption is untouched.
+
+def _sha256_file(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _write_read_attest(tmp_path, file_realpath, sha256, *, age_min=1, agent="cc-irsyad-coord"):
+    ts = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=age_min)
+    out_dir = tmp_path / "reports" / "client-file-staging"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    line = "\t".join(["READ-ATTEST", ts.isoformat(), agent, file_realpath, sha256,
+                      "build the irsyad media annotator feature", "op#20593"])
+    with open(out_dir / "_operator_attested_exports.log", "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+_COORD = {"CC_BASE_AGENT_ID": "cc-irsyad-coord"}
+
+
+# ---- (a) ALLOW: coord + gazzabyte + fresh matching attest -------------------
+
+def test_coord_allowed_with_fresh_matching_read_attest(tmp_path):
+    f = _make_media(tmp_path, name="gazzabyte-irsyad_7_pqr.jpg", subdir="gazzabyte-irsyad")
+    _write_read_attest(tmp_path, os.path.realpath(str(f)), _sha256_file(f), age_min=1)
+    assert_allowed("Read", {"file_path": str(f)}, env=_COORD)
+
+
+# ---- (b) DENY: coord + gazzabyte + no attest --------------------------------
+
+def test_coord_denied_without_any_attest(tmp_path):
+    f = _make_media(tmp_path, name="gazzabyte-irsyad_7_pqr.jpg", subdir="gazzabyte-irsyad")
+    assert_blocked("Read", {"file_path": str(f)}, env=_COORD)
+
+
+# ---- (c) DENY: coord + a DIFFERENT channel's file, even with an attest ------
+
+def test_coord_denied_for_other_channel_even_with_attest(tmp_path):
+    f = _make_media(tmp_path, name="cosem-adcda_8_stu.jpg", subdir="cosem-adcda")
+    # an attest exists for this exact file+sha, but the channel prefix is wrong
+    _write_read_attest(tmp_path, os.path.realpath(str(f)), _sha256_file(f), age_min=1)
+    assert_blocked("Read", {"file_path": str(f)}, env=_COORD)
+
+
+# ---- (d) DENY: a DIFFERENT lane base, even with an attest -------------------
+
+def test_other_base_denied_even_with_attest(tmp_path):
+    f = _make_media(tmp_path, name="gazzabyte-irsyad_7_pqr.jpg", subdir="gazzabyte-irsyad")
+    _write_read_attest(tmp_path, os.path.realpath(str(f)), _sha256_file(f), age_min=1)
+    assert_blocked("Read", {"file_path": str(f)}, env={"CC_BASE_AGENT_ID": "cc-substrate"})
+
+
+# ---- (e) DENY: stale attest (> 15 min old) ----------------------------------
+
+def test_coord_denied_with_stale_attest(tmp_path):
+    f = _make_media(tmp_path, name="gazzabyte-irsyad_7_pqr.jpg", subdir="gazzabyte-irsyad")
+    _write_read_attest(tmp_path, os.path.realpath(str(f)), _sha256_file(f), age_min=20)
+    assert_blocked("Read", {"file_path": str(f)}, env=_COORD)
+
+
+# ---- (f) DENY: sha-mismatch (file swapped after the attest) -----------------
+
+def test_coord_denied_on_sha_mismatch(tmp_path):
+    f = _make_media(tmp_path, name="gazzabyte-irsyad_7_pqr.jpg", subdir="gazzabyte-irsyad")
+    # attest records the OLD sha; then the file is swapped (new bytes, new sha)
+    _write_read_attest(tmp_path, os.path.realpath(str(f)), "0" * 64, age_min=1)
+    assert_blocked("Read", {"file_path": str(f)}, env=_COORD)
+
+
+# ---- regression: an ADCDA/UAE channel file is unaffected by the new path ----
+
+def test_adcda_file_unaffected_by_new_allow_path(tmp_path):
+    # no coord base, no attest — the pre-existing deny for an unstaged adcda
+    # media file is exactly as before.
+    f = _make_media(tmp_path, name="cosem-adcda_8_stu.jpg", subdir="cosem-adcda")
+    assert_blocked("Read", {"file_path": str(f)})
+
+
+# ---- pure helper: _has_fresh_read_attestation -------------------------------
+
+def _entry(file_path, sha256, age_min):
+    ts = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=age_min)
+    return {"ts": ts, "agent_id": "cc-irsyad-coord", "file_path": file_path, "sha256": sha256}
+
+
+def test_helper_true_for_fresh_path_and_sha_match():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    entries = [_entry("/r/f.jpg", "abc", age_min=1)]
+    assert guard._has_fresh_read_attestation("/r/f.jpg", "abc", now, entries) is True
+
+
+def test_helper_false_for_sha_mismatch():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    entries = [_entry("/r/f.jpg", "abc", age_min=1)]
+    assert guard._has_fresh_read_attestation("/r/f.jpg", "DIFFERENT", now, entries) is False
+
+
+def test_helper_false_for_path_mismatch():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    entries = [_entry("/r/other.jpg", "abc", age_min=1)]
+    assert guard._has_fresh_read_attestation("/r/f.jpg", "abc", now, entries) is False
+
+
+def test_helper_false_for_stale_entry():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    entries = [_entry("/r/f.jpg", "abc", age_min=guard.READ_ATTEST_TTL_MIN + 5)]
+    assert guard._has_fresh_read_attestation("/r/f.jpg", "abc", now, entries) is False
+
+
+def test_helper_false_for_empty_log():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    assert guard._has_fresh_read_attestation("/r/f.jpg", "abc", now, []) is False
