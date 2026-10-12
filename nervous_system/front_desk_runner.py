@@ -35,14 +35,23 @@ front_desk_acked_at IS NULL, Musa's own DM only):
      the row untouched for the next pass — no reply is ever sent for a row
      whose stamp failed (stamp happens before send, never after).
 
-HOST/ROLE GUARD (item 1): main() refuses to start unless this is the Mac Mini
-(this fleet has exactly one Mac — nervous_system/vault.py's _local_host_id()
-convention) AND ORCH_BODY_ROLE == "console". Fail-closed: any error reading
+HOST/ROLE GUARD (item 1, corrected per orch-console bus #63503): main()
+refuses to start unless fleet_host_id.fleet_host_id() resolves to the Mini's
+own canonical label (scripts/lib/fleet_hosts.json, CAI-RESP-1436) AND
+ORCH_BODY_ROLE == "console" — a bare Darwin check also passes on a MacBook,
+which the first cut of this guard missed. Fail-closed: any error reading
 either signal is treated as "not ok".
 
-KILL SWITCH (item 2): FRONT_DESK_ENABLED is re-read every drain pass inside
-the loop (_tick()), not once at startup — flipping it off takes effect within
-one DRAIN_INTERVAL, no restart needed. Fail-closed: unreadable => disabled.
+KILL SWITCH (item 2, corrected per orch-console bus #63503): enabled() is
+called every drain pass inside the loop (_tick()), not once at startup, and
+re-PARSES THE .ENV FILE FROM DISK each time via dotenv_values() rather than
+reading os.environ — a long-running process's os.environ is seeded once at
+start (boot_front_desk.sh sources .env before exec'ing) and never changes
+afterward, so the first cut's os.environ re-read was a no-op in practice:
+flipping FRONT_DESK_ENABLED in .env did nothing without a restart. Reading
+the file directly means a flip on disk takes effect within one
+DRAIN_INTERVAL, no restart needed. Fail-closed: unreadable/missing =>
+disabled.
 
 Run: .venv/bin/python3 -m nervous_system.front_desk_runner
   (launchd: dev.wingmen.front-desk — WorkingDirectory the Mac Mini's live
@@ -52,37 +61,56 @@ Run: .venv/bin/python3 -m nervous_system.front_desk_runner
 from __future__ import annotations
 
 import os
-import platform
 import time
 
 import psycopg
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from nervous_system import front_desk, operator_log, tg_out
+from scripts.lib import fleet_host_id
 
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+load_dotenv(_ENV_PATH)
 
 DRAIN_INTERVAL = 3
 CHANNEL_TAG = "nazim-console"
 CHANNEL_KEY = "nazim-console"
 
+# The canonical fleet label for the Mac Mini (scripts/lib/fleet_hosts.json) --
+# the ONE physical box this process is allowed to run on.
+_MINI_HOST_ID = "Sheikhs-Mini"
+
 
 def enabled() -> bool:
+    """Fail-closed kill switch (#63427 item 2, orch-console correction bus
+    #63503): re-parses the .env FILE from disk on every call. os.environ is
+    seeded ONCE at process start (boot_front_desk.sh sources .env before
+    exec'ing) and never changes afterward for a long-running process, so
+    checking os.environ here would silently ignore every later edit without
+    a restart -- the exact bug orch-console caught. dotenv_values() re-reads
+    the file fresh each call without mutating os.environ, so a flip on disk
+    takes effect on the very next tick."""
     try:
-        return os.environ.get("FRONT_DESK_ENABLED", "").strip().lower() in ("1", "true", "yes")
+        values = dotenv_values(_ENV_PATH) or {}
     except Exception:
         return False  # fail-closed: unreadable => disabled
+    return (values.get("FRONT_DESK_ENABLED") or "").strip().lower() in ("1", "true", "yes")
 
 
 def host_role_ok() -> tuple[bool, str]:
-    """Fail-closed host/role guard (#63427 item 1). Any error reading either
-    signal is treated as a refusal, never a pass-through."""
+    """Fail-closed host/role guard (#63427 item 1, orch-console correction
+    bus #63503): Darwin + ORCH_BODY_ROLE=console also passes on a MacBook,
+    not just the Mini -- fleet_host_id.fleet_host_id() is the one stable
+    resolver that distinguishes this fleet's physical hosts (CAI-RESP-1436),
+    so this checks the Mini's own canonical label, not just its OS family.
+    Any error reading either signal is treated as a refusal, never a
+    pass-through."""
     try:
-        system = platform.system()
+        host = fleet_host_id.fleet_host_id()
     except Exception as e:
-        return False, f"platform.system() unreadable: {type(e).__name__}: {e}"
-    if system != "Darwin":
-        return False, f"host check failed: platform.system()={system!r}, expected Darwin (the Mini)"
+        return False, f"fleet_host_id() unreadable: {type(e).__name__}: {e}"
+    if host != _MINI_HOST_ID:
+        return False, f"host check failed: fleet_host_id()={host!r}, expected {_MINI_HOST_ID!r}"
     try:
         role = os.environ.get("ORCH_BODY_ROLE", "").strip().lower()
     except Exception as e:

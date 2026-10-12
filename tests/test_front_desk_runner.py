@@ -333,26 +333,29 @@ def test_drain_once_send_failure_after_stamp_does_not_cause_resend(wired, monkey
     assert touched_again == 0
 
 
-# ── Host/role guard (item 1) ─────────────────────────────────────────────────
+# ── Host/role guard (item 1, corrected per orch-console bus #63503: a bare
+# Darwin check also passes on a MacBook, not just the Mini) ────────────────
 
-def test_host_role_ok_true_on_darwin_console(monkeypatch):
-    monkeypatch.setattr(fdr.platform, "system", lambda: "Darwin")
+def test_host_role_ok_true_on_the_mini_console(monkeypatch):
+    monkeypatch.setattr(fdr.fleet_host_id, "fleet_host_id", lambda: "Sheikhs-Mini")
     monkeypatch.setenv("ORCH_BODY_ROLE", "console")
     ok, reason = fdr.host_role_ok()
     assert ok is True
     assert reason == ""
 
 
-def test_host_role_ok_false_on_non_darwin(monkeypatch):
-    monkeypatch.setattr(fdr.platform, "system", lambda: "Linux")
+def test_host_role_ok_false_on_a_different_mac_e_g_a_macbook(monkeypatch):
+    # The exact gap orch-console caught: Darwin alone is not enough -- a
+    # MacBook is also Darwin but is NOT the Mini.
+    monkeypatch.setattr(fdr.fleet_host_id, "fleet_host_id", lambda: "Sheikhs-MacBook")
     monkeypatch.setenv("ORCH_BODY_ROLE", "console")
     ok, reason = fdr.host_role_ok()
     assert ok is False
-    assert "Darwin" in reason
+    assert "Sheikhs-Mini" in reason
 
 
 def test_host_role_ok_false_when_not_console(monkeypatch):
-    monkeypatch.setattr(fdr.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(fdr.fleet_host_id, "fleet_host_id", lambda: "Sheikhs-Mini")
     monkeypatch.setenv("ORCH_BODY_ROLE", "hub")
     ok, reason = fdr.host_role_ok()
     assert ok is False
@@ -360,14 +363,24 @@ def test_host_role_ok_false_when_not_console(monkeypatch):
 
 
 def test_host_role_ok_false_when_role_unset(monkeypatch):
-    monkeypatch.setattr(fdr.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(fdr.fleet_host_id, "fleet_host_id", lambda: "Sheikhs-Mini")
     monkeypatch.delenv("ORCH_BODY_ROLE", raising=False)
     ok, reason = fdr.host_role_ok()
     assert ok is False
 
 
+def test_host_role_ok_fail_closed_when_fleet_host_id_raises(monkeypatch):
+    def _boom():
+        raise RuntimeError("gethostname unavailable")
+    monkeypatch.setattr(fdr.fleet_host_id, "fleet_host_id", _boom)
+    monkeypatch.setenv("ORCH_BODY_ROLE", "console")
+    ok, reason = fdr.host_role_ok()
+    assert ok is False
+    assert "unreadable" in reason
+
+
 def test_main_refuses_to_start_off_host(monkeypatch):
-    monkeypatch.setattr(fdr.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(fdr.fleet_host_id, "fleet_host_id", lambda: "Sheikhs-MacBook")
     monkeypatch.setenv("ORCH_BODY_ROLE", "console")
     connect_calls = []
     monkeypatch.setattr(fdr.psycopg, "connect", lambda *a, **k: connect_calls.append(1))
@@ -375,27 +388,46 @@ def test_main_refuses_to_start_off_host(monkeypatch):
     assert connect_calls == []
 
 
-# ── Kill switch (item 2 — re-read every pass, not just at startup) ─────────
+# ── Kill switch (item 2, corrected per orch-console bus #63503: a long-
+# running process's os.environ is seeded once at start and never changes --
+# enabled() must re-parse the .ENV FILE FROM DISK every call, so these tests
+# write/rewrite a real file on disk rather than monkeypatch.setenv, which
+# would prove nothing about the actual bug) ─────────────────────────────────
 
-def test_enabled_accepts_true_variants(monkeypatch):
+def _write_env_file(path, **kv):
+    path.write_text("".join(f"{k}={v}\n" for k, v in kv.items()))
+
+
+def test_enabled_accepts_true_variants(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(fdr, "_ENV_PATH", str(env_file))
     for val in ("1", "true", "True", "yes"):
-        monkeypatch.setenv("FRONT_DESK_ENABLED", val)
+        _write_env_file(env_file, FRONT_DESK_ENABLED=val)
         assert fdr.enabled() is True
     for val in ("0", "false", "", "no"):
-        monkeypatch.setenv("FRONT_DESK_ENABLED", val)
+        _write_env_file(env_file, FRONT_DESK_ENABLED=val)
         assert fdr.enabled() is False
 
 
-def test_tick_noop_when_disabled(monkeypatch):
-    monkeypatch.delenv("FRONT_DESK_ENABLED", raising=False)
+def test_enabled_fail_closed_when_env_file_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(fdr, "_ENV_PATH", str(tmp_path / "does-not-exist.env"))
+    assert fdr.enabled() is False
+
+
+def test_tick_noop_when_disabled(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    _write_env_file(env_file, FRONT_DESK_ENABLED="0")
+    monkeypatch.setattr(fdr, "_ENV_PATH", str(env_file))
     connect_calls = []
     monkeypatch.setattr(fdr.psycopg, "connect", lambda *a, **k: connect_calls.append(1))
     fdr._tick()
     assert connect_calls == []
 
 
-def test_tick_connects_when_enabled(monkeypatch):
-    monkeypatch.setenv("FRONT_DESK_ENABLED", "1")
+def test_tick_connects_when_enabled(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    _write_env_file(env_file, FRONT_DESK_ENABLED="1")
+    monkeypatch.setattr(fdr, "_ENV_PATH", str(env_file))
     db = _FakeDB(messages=[])
     monkeypatch.setattr(fdr, "_dsn", lambda: "postgresql://fake")
     connect_calls = []
@@ -404,19 +436,25 @@ def test_tick_connects_when_enabled(monkeypatch):
     assert connect_calls == [1]
 
 
-def test_kill_switch_flips_off_mid_run_without_restart(monkeypatch):
-    # item 2: the kill switch is re-read every _tick(), not cached from a
-    # single check at startup -- flipping it off between two ticks must
-    # silence the very next one, with no process restart.
+def test_kill_switch_flips_off_mid_run_without_restart(monkeypatch, tmp_path):
+    # item 2: the kill switch is re-read every _tick() straight from the
+    # .env FILE ON DISK, not cached from a single check at startup and not
+    # read from os.environ (which never changes for a running process) --
+    # flipping the REAL FILE between two ticks must silence the very next
+    # one, with no process restart.
+    env_file = tmp_path / ".env"
+    _write_env_file(env_file, FRONT_DESK_ENABLED="1")
+    monkeypatch.setattr(fdr, "_ENV_PATH", str(env_file))
+
     db = _FakeDB(messages=[])
     monkeypatch.setattr(fdr, "_dsn", lambda: "postgresql://fake")
     connect_calls = []
     monkeypatch.setattr(fdr.psycopg, "connect", lambda *a, **k: (connect_calls.append(1), _FakeConn(db))[1])
 
-    monkeypatch.setenv("FRONT_DESK_ENABLED", "1")
     fdr._tick()
     assert connect_calls == [1]
 
-    monkeypatch.setenv("FRONT_DESK_ENABLED", "0")
+    # Flip the REAL FILE mid-run, exactly as an operator editing .env would.
+    _write_env_file(env_file, FRONT_DESK_ENABLED="0")
     fdr._tick()
-    assert connect_calls == [1]  # unchanged -- second tick made no new connection
+    assert connect_calls == [1]  # unchanged -- the very next tick did nothing
