@@ -168,11 +168,29 @@ def _subagent_transcript_path(transcript_path: str | None, agent_id: str | None)
     reported no error, yet the raw secret sat unredacted in the subagent's own file --
     because `transcript_path` pointed at the session-level transcript, which never
     contained that subagent's tool_use/tool_result lines to begin with. Redacting both
-    files is harmless when they happen to coincide (redaction is idempotent)."""
+    files is harmless when they happen to coincide (redaction is idempotent).
+
+    op#29348 (2026-10-12, 34-secret leak): the earlier `dirname(transcript_path)`
+    derivation was WRONG for the current Claude Code layout, where the session
+    transcript is `<proj>/<session-id>.jsonl` and the subagents dir is
+    `<proj>/<session-id>/subagents/` (under a SESSION-ID subdir = the transcript path
+    minus its `.jsonl`), NOT `<proj>/subagents/`. So the computed path did not exist,
+    `redact_recent_lines` hit OSError and no-op'd, and the subagent's 34 inherited-env
+    secrets sat unredacted in the REAL file (verified empirically). Try the session-dir
+    layout first, fall back to the legacy dirname layout, and PREFER whichever actually
+    exists on disk so both layouts are covered."""
     if not transcript_path or not agent_id:
         return None
-    session_dir = os.path.dirname(transcript_path)
-    return os.path.join(session_dir, "subagents", f"agent-{agent_id}.jsonl")
+    candidates = []
+    if transcript_path.endswith(".jsonl"):
+        # <proj>/<session-id>.jsonl -> <proj>/<session-id>/subagents/agent-<id>.jsonl
+        candidates.append(os.path.join(transcript_path[:-len(".jsonl")], "subagents", f"agent-{agent_id}.jsonl"))
+    # Legacy / coincident layout: subagents dir a sibling of the transcript FILE.
+    candidates.append(os.path.join(os.path.dirname(transcript_path), "subagents", f"agent-{agent_id}.jsonl"))
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
 
 
 def redact_recent_lines(transcript_path: str, cls: str, pattern: re.Pattern, max_lines: int = 3) -> bool:

@@ -513,15 +513,34 @@ def test_main_passes_agent_id_and_type_from_payload_to_the_page(tmp_path):
     assert "subagent_abc123" in body_file.read_text()
 
 
-def test_subagent_transcript_path_derives_sibling_file_from_agent_id():
-    # bus #49029/#49030: a subagent's own transcript lives at
-    # <session-dir>/subagents/agent-<agent_id>.jsonl, a SIBLING of the session-level
-    # transcript_path -- not something agent_id lets you compute from transcript_path's
-    # basename alone.
+def test_subagent_transcript_path_uses_session_id_subdir_when_nothing_on_disk():
+    # op#29348: the current Claude Code layout puts the subagents dir under a
+    # SESSION-ID subdir = the transcript path minus its .jsonl
+    # (<proj>/<session-id>/subagents/agent-<id>.jsonl), NOT <proj>/subagents/.
+    # When neither candidate exists on disk, the session-id layout is the default.
     path = scanner._subagent_transcript_path(
         "/Users/x/.claude/projects/-proj/abc-123.jsonl", "a4dab81df04b30025"
     )
-    assert path == "/Users/x/.claude/projects/-proj/subagents/agent-a4dab81df04b30025.jsonl"
+    assert path == "/Users/x/.claude/projects/-proj/abc-123/subagents/agent-a4dab81df04b30025.jsonl"
+
+
+def test_subagent_transcript_path_prefers_the_file_that_exists(tmp_path):
+    # Regression for the 2026-10-12 34-secret leak: the old code returned
+    # dirname(transcript_path)/subagents/... which did not exist, so redaction no-op'd.
+    # With a REAL session-id-subdir layout on disk, the resolver must return THAT path.
+    proj = tmp_path / "-proj"
+    proj.mkdir()
+    transcript = proj / "sess-xyz.jsonl"
+    transcript.write_text("{}\n")
+    real_subdir = proj / "sess-xyz" / "subagents"
+    real_subdir.mkdir(parents=True)
+    real_file = real_subdir / "agent-abc123.jsonl"
+    real_file.write_text("{}\n")
+
+    got = scanner._subagent_transcript_path(str(transcript), "abc123")
+    assert got == str(real_file)  # the existing session-id-subdir file, not <proj>/subagents/
+    legacy = proj / "subagents" / "agent-abc123.jsonl"
+    assert got != str(legacy)
 
 
 def test_subagent_transcript_path_none_without_agent_id():
