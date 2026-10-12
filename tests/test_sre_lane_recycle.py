@@ -264,3 +264,77 @@ def test_excluded_prefixes_parses_env(monkeypatch):
 def test_excluded_prefixes_unset_is_empty(monkeypatch):
     monkeypatch.delenv("SRE_LANE_EXCLUDE_PREFIXES", raising=False)
     assert slr._excluded_prefixes() == []
+
+
+# ── op#29023 / #63312 / #63326 — identity-recycle GUARDS ──────────────────────
+# Tonight a `--arm --ignore-context --lane cosem-adcda` self-check run BY
+# cc-cosem-adcda-1 mis-resolved `--lane cosem-adcda` to a SIBLING session
+# (cosem-adcda-urgent, freshest heartbeat under the shared bare base) and fired a
+# REAL red-reset on it -> two-bodies-as-one collision on a live client lane.
+
+def test_pick_session_single_candidate_returns_it():
+    assert slr.pick_session("cosem-adcda", ["cosem-adcda"]) == ("cosem-adcda", None)
+
+def test_pick_session_ambiguous_fails_closed_naming_siblings():
+    """A base with >1 live sibling session must NOT silently pick one -- fail closed."""
+    session, err = slr.pick_session(
+        "cosem-adcda", ["cosem-adcda", "cosem-adcda-urgent", "cosem-adcda-photos"])
+    assert session is None
+    assert err is not None
+    # names the ambiguous siblings + points at the disambiguator
+    assert "cosem-adcda-urgent" in err and "cosem-adcda-photos" in err
+    assert "--session" in err
+
+def test_pick_session_explicit_disambiguates():
+    session, err = slr.pick_session(
+        "cosem-adcda", ["cosem-adcda", "cosem-adcda-urgent"], explicit_session="cosem-adcda-urgent")
+    assert session == "cosem-adcda-urgent" and err is None
+
+def test_pick_session_explicit_not_live_fails():
+    session, err = slr.pick_session(
+        "cosem-adcda", ["cosem-adcda"], explicit_session="cosem-adcda-urgent")
+    assert session is None and err is not None and "cosem-adcda-urgent" in err
+
+def test_pick_session_no_live_session_fails():
+    session, err = slr.pick_session("ghost-lane", [])
+    assert session is None and err is not None
+
+def test_self_recycle_refused_when_armed_self_without_i_mean_it():
+    """A lane running the recycler ON ITSELF, armed, with no --i-mean-it -> REFUSE
+    (a 'self-check' must never silently red-reset). #63326."""
+    assert slr.self_recycle_refused(
+        invoker_agent="cc-cosem-adcda-1", invoker_session="cosem-adcda",
+        target_agent="cc-cosem-adcda-1", target_session="cosem-adcda",
+        armed=True, i_mean_it=False) is True
+
+def test_self_recycle_allowed_with_i_mean_it():
+    assert slr.self_recycle_refused(
+        invoker_agent="cc-cosem-adcda-1", invoker_session="cosem-adcda",
+        target_agent="cc-cosem-adcda-1", target_session="cosem-adcda",
+        armed=True, i_mean_it=True) is False
+
+def test_self_recycle_other_lane_not_refused():
+    """Recycling a DIFFERENT lane is normal SRE action -- never refused by this guard."""
+    assert slr.self_recycle_refused(
+        invoker_agent="cc-fleet-health", invoker_session="fleet-health",
+        target_agent="cc-cosem-adcda-1", target_session="cosem-adcda",
+        armed=True, i_mean_it=False) is False
+
+def test_self_recycle_disarmed_not_refused():
+    """Disarmed (detect-only) self-run is harmless -- no refusal needed."""
+    assert slr.self_recycle_refused(
+        invoker_agent="cc-cosem-adcda-1", invoker_session="cosem-adcda",
+        target_agent="cc-cosem-adcda-1", target_session="cosem-adcda",
+        armed=False, i_mean_it=False) is False
+
+
+def test_pick_instance_id_returns_registered_instance_for_session():
+    rows = [("cc-cosem-adcda-2", "cosem-adcda-urgent"),
+            ("cc-cosem-adcda-1", "cosem-adcda")]
+    assert slr.pick_instance_id("cosem-adcda-urgent", rows, "cc-cosem-adcda") == "cc-cosem-adcda-2"
+
+def test_pick_instance_id_falls_back_to_base_when_no_match():
+    assert slr.pick_instance_id("ghost", [("cc-x-1", "other")], "cc-x") == "cc-x"
+
+def test_pick_instance_id_falls_back_when_no_session():
+    assert slr.pick_instance_id(None, [("cc-x-1", "s")], "cc-x") == "cc-x"

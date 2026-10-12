@@ -34,6 +34,10 @@ if str(_ORCH_DIR) not in sys.path:
 # recycler's 80% fire bar — the dead-man only fires when the recycler has already had a chance
 # and failed to bring the lane down.
 HARD_PCT = int(os.environ.get("DEADMAN_HARD_PCT", "85"))
+# op#29023/#63284/#63300: the lane-facing NUDGE (not the PAGE) must re-sample on a TIGHT
+# (~10min) gauge-staleness cutoff so a stale-high gauge can't drive a false self-recycle nudge.
+# The PAGE keeps its own looser GAUGE_STALE_S (safety net, unchanged).
+NUDGE_GAUGE_STALE_S = int(os.environ.get("DEADMAN_NUDGE_GAUGE_STALE_S", "600"))
 SUSTAIN_S = int(os.environ.get("DEADMAN_SUSTAIN_S", "1800"))  # 30 min at >= HARD with no drop
 # The dead-man's OWN gauge-staleness cutoff — DELIBERATELY well above the executor's 30-min fire
 # cutoff and above the gauge's real per-lane refresh. The cost-writer only advances a lane's
@@ -286,7 +290,7 @@ def main() -> int:
         print("no DATABASE_URL", file=sys.stderr)
         return 2
 
-    from scripts.sre_lane_recycle import discover_lanes
+    from scripts.sre_lane_recycle import discover_lanes, instance_id_for_session
 
     now = time.time()
     conn = psycopg.connect(dsn)
@@ -324,8 +328,19 @@ def main() -> int:
                 # self-recycle itself (the missing half — external recycle can't touch a busy
                 # lane). The page to orch-console STAYS the backstop unchanged; this is an
                 # additional benign message-send to the lane, deduped per lane per day.
-                if _nudge(cur, conn, lr["lane"], lr["base_agent_id"], args.dry_run) == "nudged":
-                    nudged += 1
+                # op#29023/#63284/#63300: age-gate the NUDGE on a TIGHT cutoff (re-sample; a
+                # stale-high gauge must not nudge) and address the lane's INSTANCE id, not the
+                # bare base (a base-addressed nudge is declined by every sibling).
+                n_known, n_pct, _nlk, _nr = resolve_lane_pct(
+                    tokens, age_s, pane_pct, pane_hint_k, max_gauge_age_s=NUDGE_GAUGE_STALE_S)
+                if n_known and n_pct is not None and n_pct >= HARD_PCT:
+                    target = instance_id_for_session(cur, session, lr["base_agent_id"])
+                    if _nudge(cur, conn, lr["lane"], target, args.dry_run) == "nudged":
+                        nudged += 1
+                else:
+                    print(f"            nudge SKIPPED (stale/re-sampled below bar: "
+                          f"{n_pct if n_pct is not None else 'UNKNOWN'}% @ tight {NUDGE_GAUGE_STALE_S}s) "
+                          f"— page stands as backstop")
 
     if not args.dry_run:
         _stamp_heartbeat(state, now)

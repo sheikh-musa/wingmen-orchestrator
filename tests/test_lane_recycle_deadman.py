@@ -222,6 +222,7 @@ class _FakeCur:
     def __exit__(self, *a): return False
     def execute(self, *a, **k): pass
     def fetchone(self): return None
+    def fetchall(self): return getattr(self, "_instance_rows", [])  # op#29023 instance resolver
 
 
 class _FakeConn:
@@ -248,7 +249,7 @@ def test_page_verdict_cofires_nudge_and_ok_does_not(monkeypatch):
     monkeypatch.setattr(dm, "_save_state", lambda st: None)
     # cc-hot -> a paging verdict; cc-cool -> ok
     monkeypatch.setattr(dm, "resolve_lane_pct",
-                        lambda t, a, pp, ph: (True, 90, 90, "r") if t == 900_000 else (True, 10, 10, "r"))
+                        lambda t, a, pp, ph, **kw: (True, 90, 90, "r") if t == 900_000 else (True, 10, 10, "r"))
 
     def fake_eval(known, pct, first_over, now, **kw):
         return ("page_sustained", first_over) if pct == 90 else ("ok", None)
@@ -265,3 +266,31 @@ def test_page_verdict_cofires_nudge_and_ok_does_not(monkeypatch):
     assert nudged == [("cc-hot", "cc-hot")]   # the paging lane got nudged (by base_agent_id)
     assert paged == ["cc-hot"]                 # ...and paged — the backstop stays
     # cc-cool (ok) was neither paged nor nudged
+
+
+def test_page_fires_but_nudge_skips_on_stale_resampled_gauge(monkeypatch):
+    """op#29023/#63284: when the tight re-sample drops below bar (stale-high gauge), the NUDGE
+    is skipped while the PAGE (safety net) still fires."""
+    import scripts.sre_lane_recycle as slr
+    monkeypatch.setenv("DATABASE_URL", "postg://fake")
+    monkeypatch.setattr(sys, "argv", ["lane_recycle_deadman.py", "--dry-run"])
+    lanes = [{"lane": "cc-stale", "base_agent_id": "cc-stale", "tmux_session": "stale"}]
+    monkeypatch.setattr(slr, "discover_lanes", lambda conn: lanes)
+    import psycopg
+    monkeypatch.setattr(psycopg, "connect", lambda dsn: _FakeConn())
+    monkeypatch.setattr(dm, "_gauge", lambda cur, base: (900_000, 1500))   # stale-high
+    monkeypatch.setattr(dm, "_pane", lambda s: (None, None))
+    monkeypatch.setattr(dm, "_load_state", lambda: {})
+    monkeypatch.setattr(dm, "_save_state", lambda st: None)
+    # PAGE path (default cutoff) sees it as over-bar; tight nudge re-sample sees it as stale->low
+    def fake_resolve(t, a, pp, ph, max_gauge_age_s=3600):
+        return (True, 90, 90, "page-reading") if max_gauge_age_s >= 3600 else (False, None, 90, "stale")
+    monkeypatch.setattr(dm, "resolve_lane_pct", fake_resolve)
+    monkeypatch.setattr(dm, "evaluate_deadman",
+                        lambda known, pct, fo, now, **kw: ("page_sustained", fo))
+    nudged, paged = [], []
+    monkeypatch.setattr(dm, "_nudge", lambda cur, conn, disp, base, dry: nudged.append(base) or "would-nudge")
+    monkeypatch.setattr(dm, "_page", lambda cur, conn, lane, v, r, dry: paged.append(lane) or "would-page")
+    assert dm.main() == 0
+    assert paged == ["cc-stale"]   # backstop page still fires
+    assert nudged == []            # nudge skipped (stale re-sample below bar)
