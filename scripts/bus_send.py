@@ -378,7 +378,13 @@ def warn_if_answering_rr_without_reply_to(
         return
     try:
         found = _open_rr_from(to, from_agent, dsn=dsn)
-    except Exception as e:  # noqa: BLE001 -- a guard bug must never block a send
+    except (Exception, SystemExit) as e:  # noqa: BLE001 -- a guard bug must never block a
+        # send. dburl() raises bare SystemExit (not Exception) when no DATABASE_URL
+        # resolves -- that escaped this catch, crashed the guard, and let pytest's
+        # failure introspection dump the live os.environ (incl. real secrets) from
+        # dburl()'s frame into the on-disk transcript (bus #64769/#64771, caught by
+        # secrets_output_scanner). Same fix shape as line ~132's existing
+        # `except (Exception, SystemExit)`.
         print(
             f"bus_send: WARNING — stamp-or-die RR check could not run ({type(e).__name__}); "
             "not checked.",

@@ -773,6 +773,22 @@ def test_warn_if_answering_rr_without_reply_to_degrades_on_db_error(monkeypatch)
     assert "could not run" in stream.getvalue()
 
 
+def test_warn_if_answering_rr_without_reply_to_degrades_on_systemexit(monkeypatch):
+    # dburl() raises bare SystemExit (not Exception) when no DATABASE_URL resolves.
+    # SystemExit used to escape this guard's `except Exception` and crash the send
+    # -- which also let pytest's failure introspection dump the live os.environ
+    # (real secrets) into the on-disk transcript (bus #64769/#64771).
+    def _boom(*a, **k):
+        raise SystemExit("no DATABASE_URL: set it in the environment or .env")
+
+    monkeypatch.setattr(bs, "_open_rr_from", _boom)
+    import io
+    stream = io.StringIO()
+    bs.warn_if_answering_rr_without_reply_to("orch-console", "cc-irsyad", None, stream=stream)
+    assert "WARNING" in stream.getvalue()
+    assert "could not run" in stream.getvalue()
+
+
 @pytest.mark.parametrize("keyword,text", [
     ("identical", "the two files are identical"),
     ("verified", "verified against prod"),
