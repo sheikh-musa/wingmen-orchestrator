@@ -268,6 +268,26 @@ export CC_AGENT_ID
 export CC_BASE_AGENT_ID
 export SCOPE_REPO="$REPO_NAME"
 
+# ── PROD-DATA WALL, Part A (op#29348) ────────────────────────────────────────
+# Worker-lane shells inherit THREE ambient paths to cosem-adcda PROD data from
+# the operator's own user config: (1) gcloud's per-user `default` config
+# (core.project=cosem-adcda-cb6d9 + prod SA account), (2)
+# GOOGLE_APPLICATION_CREDENTIALS in ~/.zshenv, and (3) the readable prod SA key
+# file. This neuters (1)+(2) FOR THIS LANE ONLY: unset GOOGLE_APPLICATION_
+# CREDENTIALS and point CLOUDSDK_CONFIG at a per-lane gcloud config with NO
+# project / NO account, so gcloud/ADC has no implicit prod project (prod then
+# needs an explicit --project + creds, which the PreToolUse lane_prod_key_guard
+# refuses for a lane). Gated on worker-lane == base present AND base !=
+# orch-console; the console boots via boot_nazim.sh (never this launcher) and CI
+# has no CC_BASE_AGENT_ID, so both are untouched. FAIL-LOUD, not silent: the lib
+# unsets GAC first (primary vector), and a config-seed failure returns non-zero
+# so we warn LOUDLY rather than swallow it (the guard is the hard backstop).
+# shellcheck source=scripts/lib/lane_gcloud_isolation.sh
+. "$ORCH_DIR/scripts/lib/lane_gcloud_isolation.sh" || { echo "FATAL: lane_gcloud_isolation.sh missing" >&2; exit 1; }
+if ! apply_lane_gcloud_isolation "$CC_BASE_AGENT_ID" "$CC_AGENT_ID"; then
+    echo -e "\033[31m⚠ SECURITY[prod-wall/op#29348]: could not seed this lane's isolated gcloud config (CLOUDSDK_CONFIG). GOOGLE_APPLICATION_CREDENTIALS is unset, but gcloud/ADC may still resolve the per-user default cosem-adcda project. The PreToolUse lane_prod_key_guard remains the hard enforcement; investigate ~/.wingmen/lane-gcloud writability.\033[0m" >&2
+fi
+
 # Legacy alias: some blocks below still reference $AGENT_ID. Retain a local
 # only for readability; every write site specifies sub-tag vs base explicitly.
 AGENT_ID="$CC_AGENT_ID"
