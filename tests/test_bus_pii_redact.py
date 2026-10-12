@@ -1,11 +1,22 @@
 """test_bus_pii_redact.py — scripts/lib/bus_pii_redact.py (hc#359, bus #64729,
-fable-audit E-client-lanes-quality.md item 5).
+fable-audit E-client-lanes-quality.md item 5; phone shapes + HMAC tokens
+added per orch-console bus #64805).
 """
+import hashlib
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.lib.bus_pii_redact import redact_pii  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _hmac_key(monkeypatch):
+    # Deterministic, non-secret test key -- real deploys set this from the
+    # environment and never commit the value.
+    monkeypatch.setenv("BUS_PII_HMAC_KEY", "test-only-key-not-a-real-secret")
 
 
 def test_emirates_id_is_hashed():
@@ -74,3 +85,68 @@ def test_redaction_is_idempotent():
     twice, counts2 = redact_pii(once)
     assert once == twice
     assert counts2 == {}
+
+
+def test_emirates_id_no_separators_is_hashed():
+    body = "Second mention, no dashes: 784199012345671 on the form."
+    out, counts = redact_pii(body)
+    assert "784199012345671" not in out
+    assert counts["emirates_id"] == 1
+
+
+def test_emirates_id_space_separators_is_hashed():
+    body = "Mentioned again as 784 1990 1234567 1 on the scan."
+    out, counts = redact_pii(body)
+    assert "784 1990 1234567 1" not in out
+    assert counts["emirates_id"] == 1
+
+
+def test_uae_local_phone_is_hashed():
+    body = "Reach the trainer at 0564863069 before the session."
+    out, counts = redact_pii(body)
+    assert "0564863069" not in out
+    assert counts["phone"] == 1
+
+
+def test_uae_intl_plus_and_00_prefix_are_both_hashed():
+    out1, counts1 = redact_pii("Call +971 56 486 3069 today.")
+    out2, counts2 = redact_pii("Call 00971564863069 today.")
+    assert "971 56 486 3069" not in out1
+    assert "00971564863069" not in out2
+    assert counts1["phone"] == 1
+    assert counts2["phone"] == 1
+
+
+def test_sg_mobile_and_intl_are_hashed():
+    out1, counts1 = redact_pii("Ping 91234567 when you land.")
+    out2, counts2 = redact_pii("Ping +65 9123 4567 when you land.")
+    assert counts1["phone"] == 1
+    assert counts2["phone"] == 1
+
+
+def test_phone_does_not_fire_on_unrelated_ids():
+    body = "Thread id abc-123 and bus message #64805 reference op#29494."
+    out, counts = redact_pii(body)
+    assert out == body
+    assert "phone" not in counts
+
+
+def test_token_is_hmac_not_plain_sha256_bruteforce_resistant():
+    value = "784-1988-1234567-1"
+    body = f"EID {value} on file."
+    out, _ = redact_pii(body)
+    token = out[out.index("[REDACTED:"):].split("]")[0]
+    plain_sha256_10 = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    assert plain_sha256_10 not in token
+
+
+def test_missing_hmac_key_falls_back_to_bare_marker_not_plain_hash(monkeypatch):
+    monkeypatch.delenv("BUS_PII_HMAC_KEY", raising=False)
+    value = "784-1988-1234567-1"
+    body = f"EID {value} on file."
+    out, counts = redact_pii(body)
+    assert value not in out
+    assert counts["emirates_id"] == 1
+    assert "[REDACTED:emirates_id]" in out
+    plain_sha256_10 = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    assert plain_sha256_10 not in out
