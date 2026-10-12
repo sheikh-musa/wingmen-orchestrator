@@ -26,6 +26,12 @@ BLOCKED = [
     (r"write_dsn\.env|WRITE_DSN_ALLOWED", "client-silo write DSN"),
     (r"sheikh-musa/ihsanos\b", "ihsanos repo (irsyad code)"),
     (r"wingmen/projects/ihsanos", "ihsanos checkout (irsyad code)"),
+    # --body-file would let the console post ANY local file's contents (e.g. .env
+    # secrets, a data dump) into a coord bus row = a secrets-exfil path through the
+    # coord-post exception. The console's coord rulings are short inline --body text,
+    # so --body-file is BLOCKED here (it stays in bus_send.py for other callers, which
+    # this console-only guard does not gate). bus #62942/#63261.
+    (r"--body-file\b", "console --body-file (secrets-exfil path — post a short inline --body ruling, never a file)"),
 ]
 
 
@@ -46,9 +52,15 @@ def is_console() -> bool:
 # can appear ONLY inside the post's own args (text going to coord) -- never in anything
 # that executes against the silo. Anything that does not match returns False and falls
 # through to the BLOCKED checks (fail-closed).
+# Aligned to the REAL scripts/bus_send.py flags (PR#370 follow-up): --req (NOT the
+# fictional --requires-response), plus the benign routing-metadata flags. --from is
+# DELIBERATELY excluded: the console must not post under another identity; bus_send
+# auto-resolves from_agent fail-closed. A drift test asserts the canonical allowed
+# shape actually parses on bus_send.build_parser() so this list can't drift again.
 _ALLOWED_BUS_FLAGS = frozenset({
-    "--to", "--subject", "--type", "--priority",
-    "--body", "--body-file", "--requires-response", "--from",
+    "--to", "--type", "--subject", "--priority",
+    "--body", "--req",
+    "--thread", "--reply-to", "--link-ask",
 })
 # A token that is ENTIRELY these chars is a shell control operator (;, &, &&, |, ||,
 # <, >, (, ) and any run of them) -> a second command / redirect -> reject.

@@ -465,6 +465,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="REQUIRED, no default. Hub action-now asks MUST use P1 (or P0) "
              "with --req — see reference_hub_wake_floor_p1_rr.",
     )
+    p.add_argument(
+        "--body", default=None,
+        help="message body as a string (alternative to the default stdin/heredoc). "
+             "Mutually exclusive with --body-file AND with piped stdin; same "
+             f">= {_MIN_BODY_BYTES}-byte minimum applies.",
+    )
+    p.add_argument(
+        "--body-file", default=None, dest="body_file",
+        help="read the message body from this file (alternative to stdin). Mutually "
+             "exclusive with --body AND with piped stdin; same minimum applies.",
+    )
     p.add_argument("--req", action="store_true", help="requires_response=true")
     p.add_argument("--thread", default=None, help="uuid or prefix of an existing thread")
     p.add_argument("--reply-to", type=int, default=None, help="id of the row being answered")
@@ -504,6 +515,65 @@ def read_body(stream) -> str:
             "Did you forget the heredoc?"
         )
     return body
+
+
+def _read_body_file(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as e:
+        raise SystemExit(f"bus_send: REFUSED — cannot read --body-file {path!r}: {e}")
+
+
+def _stdin_has_data(stream) -> bool:
+    """True iff piped/redirected stdin actually carries bytes right now. Never blocks:
+    a tty has no pending body; otherwise peek via select(timeout=0) and only then read
+    (safe — the only caller is about to refuse, so consuming stdin is harmless)."""
+    try:
+        if stream.isatty():
+            return False
+    except (OSError, ValueError):
+        return False
+    try:
+        import select
+        ready, _, _ = select.select([stream], [], [], 0.0)
+    except (OSError, ValueError):
+        return False
+    if not ready:
+        return False
+    try:
+        return bool(stream.read().strip())
+    except Exception:
+        return False
+
+
+def resolve_body(args, stream) -> str:
+    """Resolve the message body from EXACTLY ONE source: --body, --body-file, or stdin
+    (default/back-compat for existing heredoc callers). More than one source -> refuse.
+    The >= _MIN_BODY_BYTES floor applies to every source."""
+    if args.body is not None and args.body_file is not None:
+        raise SystemExit(
+            "bus_send: REFUSED — pass only ONE of --body / --body-file (both were given)."
+        )
+    flag_body = None
+    if args.body is not None:
+        flag_body = args.body
+    elif args.body_file is not None:
+        flag_body = _read_body_file(args.body_file)
+    if flag_body is not None:
+        if _stdin_has_data(stream):
+            raise SystemExit(
+                "bus_send: REFUSED — body supplied via flag AND piped stdin; use exactly "
+                "ONE source (drop the heredoc, or drop --body/--body-file)."
+            )
+        if len(flag_body) < _MIN_BODY_BYTES:
+            raise SystemExit(
+                f"bus_send: REFUSED — body is {len(flag_body)} bytes (<{_MIN_BODY_BYTES}); "
+                f"need >= {_MIN_BODY_BYTES}."
+            )
+        return flag_body
+    # No body flag -> read stdin (existing heredoc callers unchanged).
+    return read_body(stream)
 
 
 def send(
@@ -592,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"bus_send: {e}", file=sys.stderr)
         return 2
 
-    body = read_body(sys.stdin)
+    body = resolve_body(args, sys.stdin)
 
     warn_if_below_hub_wake_floor(args.to, args.req, args.priority)
     warn_if_missing_provenance_citation(args.priority, args.subject, body)
