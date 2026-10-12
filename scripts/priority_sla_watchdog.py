@@ -733,17 +733,35 @@ def audit(conn, subject: str, body: str, priority: str = "P3") -> None:
             pass
 
 
+def _subject_is_prior_page(subject: str, mid: int) -> bool:
+    """PURE: does this sla-watchdog bus subject denote a prior page/escalation
+    for message `mid`? Matches BOTH forms this daemon emits for a stall:
+      * operator-page audit subject: '[sla-watchdog] PAGED operator re msg #<mid>...'
+      * internal (CAI-600) escalation subject: 'SLA stall: <agent> #<mid> (<pri>, <m>m)'
+    The ' #<mid> (' guard (leading space, trailing ' (') prevents a substring
+    false-match on a longer id (e.g. #963850 must not match 63850). This exists
+    because the internal-escalation branch — the one that actually fires for an
+    agent-queue stall — never wrote the audit subject, so the old audit-only
+    dedup re-paged the same row every scan (#63877/#63880 on #63850, Nazim #63881)."""
+    if not subject:
+        return False
+    if subject.startswith(f"[sla-watchdog] PAGED operator re msg #{mid}"):
+        return True
+    return f" #{mid} (" in subject
+
+
 def already_paged_on_bus(conn, mid: int) -> bool:
     """Belt-and-suspenders page dedup: even if the state file is lost, never
-    double-page — check the durable bus audit log for a prior PAGE row."""
+    double-page — check the durable bus log for a prior PAGE *or* internal
+    escalation row (see _subject_is_prior_page)."""
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM agent_messages WHERE from_agent='sla-watchdog' "
-                "AND subject LIKE %s LIMIT 1",
-                (f"[sla-watchdog] PAGED operator re msg #{mid}%",),
+                "SELECT subject FROM agent_messages WHERE from_agent='sla-watchdog' "
+                "AND subject LIKE %s",
+                (f"%#{mid}%",),
             )
-            return cur.fetchone() is not None
+            return any(_subject_is_prior_page(r[0] or "", mid) for r in cur.fetchall())
     except Exception as e:
         log(f"bus-page-dedup-check-failed #{mid}: {e}")
         return False  # fail-open toward paging (a rare double-page beats a miss)
@@ -778,24 +796,44 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT read_at IS NOT NULL, responded_at IS NOT NULL "
+                "SELECT read_at IS NOT NULL, responded_at IS NOT NULL, thread_id, created_at "
                 "FROM agent_messages WHERE id=%s",
                 (mid,),
             )
             row = cur.fetchone()
             if not row:
                 return False
-            is_read, is_resp = row
-            if is_resp:
-                return True
-            if violation_type == "unread" and is_read:
-                return True
-            if agent in HUB_SESSIONS and is_read:
-                return True
-            return False
+            is_read, is_resp, thread_id, created_at = row
+            # SAME-THREAD REPLY (Nazim #63881): the recipient posted in THIS item's
+            # thread AFTER it -> engaging even if read_at is stamped late. SAME thread
+            # only, so an old-topic reply cannot mask a genuinely-unread P0.
+            same_thread_reply_after = False
+            if agent and thread_id is not None and created_at is not None:
+                cur.execute(
+                    "SELECT 1 FROM agent_messages WHERE from_agent=%s AND thread_id=%s "
+                    "AND created_at > %s LIMIT 1",
+                    (agent, thread_id, created_at),
+                )
+                same_thread_reply_after = cur.fetchone() is not None
+            return _attended_decision(is_read, is_resp, violation_type, agent,
+                                      same_thread_reply_after, HUB_SESSIONS)
     except Exception as e:
         log(f"attended-recheck-failed #{mid}: {e}")
         return False
+
+
+def _attended_decision(is_read, is_resp, violation_type, agent,
+                       same_thread_reply_after, hub_sessions) -> bool:
+    """PURE attended-recheck decision (see attended_for for the full rationale)."""
+    if is_resp:
+        return True
+    if violation_type == "unread" and is_read:
+        return True
+    if agent in hub_sessions and is_read:
+        return True
+    if same_thread_reply_after:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
