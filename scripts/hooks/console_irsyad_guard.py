@@ -26,6 +26,12 @@ BLOCKED = [
     (r"write_dsn\.env|WRITE_DSN_ALLOWED", "client-silo write DSN"),
     (r"sheikh-musa/ihsanos\b", "ihsanos repo (irsyad code)"),
     (r"wingmen/projects/ihsanos", "ihsanos checkout (irsyad code)"),
+    # --body-file would let the console post ANY local file's contents (e.g. .env
+    # secrets, a data dump) into a coord bus row = a secrets-exfil path through the
+    # coord-post exception. The console's coord rulings are short inline --body text,
+    # so --body-file is BLOCKED here (it stays in bus_send.py for other callers, which
+    # this console-only guard does not gate). bus #62942/#63261.
+    (r"--body-file\b", "console --body-file (secrets-exfil path — post a short inline --body ruling, never a file)"),
 ]
 
 
@@ -53,7 +59,7 @@ def is_console() -> bool:
 # shape actually parses on bus_send.build_parser() so this list can't drift again.
 _ALLOWED_BUS_FLAGS = frozenset({
     "--to", "--type", "--subject", "--priority",
-    "--body", "--body-file", "--req",
+    "--body", "--req",
     "--thread", "--reply-to", "--link-ask",
 })
 # A token that is ENTIRELY these chars is a shell control operator (;, &, &&, |, ||,

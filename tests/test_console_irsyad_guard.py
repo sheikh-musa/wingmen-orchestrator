@@ -147,6 +147,21 @@ def test_console_bash_non_bussend_touching_goumlyne_still_blocked(monkeypatch):
     assert rc == 2
 
 
+def test_console_bus_post_body_file_is_blocked_exfil(monkeypatch):
+    # --body-file would let the console post ANY local file's contents (e.g. .env secrets)
+    # into a coord bus row -> secrets-exfil through the coord-post exception. The console's
+    # coord rulings are short inline --body text; --body-file is NOT allowlisted and is
+    # actively BLOCKED. Note: removing it from the allowlist alone is INSUFFICIENT (the guard
+    # is default-allow and the path carries no silo token) -- it must hit a BLOCKED pattern.
+    for target in (".env", "/Users/sheikhmusa/wingmen/orchestrator/.env"):
+        cmd = (
+            "python3 scripts/bus_send.py --to cc-irsyad-coord --type decision "
+            f"--subject r --priority P1 --body-file {target}"
+        )
+        rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
+        assert rc == 2, target
+
+
 # ---------------------------------------------------------------------------
 # PR#370 review: the first cut was fail-OPEN on 5 vectors (plain shlex.split keeps a
 # GLUED operator as one token; newline check was per-token; program/script match was
@@ -178,8 +193,13 @@ def test_allow_helper_accepts_legit_coord_post_directly():
         '--body "ACCEPT: goumlynecruxrlmzlntp store leak-guard proven"'
     )
     assert guard._is_allowed_coord_bus_post({"tool_name": "Bash", "tool_input": {"command": cmd}}) is True
-    cmd1 = "python3 scripts/bus_send.py --to cc-irsyad-coord-1 --body-file /tmp/ruling.txt"
+    # cc-irsyad-coord-1 instance variant with an inline --body is also accepted:
+    cmd1 = 'python3 scripts/bus_send.py --to cc-irsyad-coord-1 --body "ACCEPT: goumlynecruxrlmzlntp store ruling proven"'
     assert guard._is_allowed_coord_bus_post({"tool_name": "Bash", "tool_input": {"command": cmd1}}) is True
+    # --body-file is NOT accepted by the helper (secrets-exfil path; bus #63261) -- the
+    # console posts short inline --body rulings, never a file; main() then BLOCKS it.
+    cmd2 = "python3 scripts/bus_send.py --to cc-irsyad-coord-1 --body-file /tmp/ruling.txt"
+    assert guard._is_allowed_coord_bus_post({"tool_name": "Bash", "tool_input": {"command": cmd2}}) is False
 
 
 # Same vectors carrying a silo token -> main() must return 2 (helper rejects -> BLOCKED
