@@ -1030,6 +1030,20 @@ fi
 #      processes the prompt with tools + exits. Bounded by --max-turns
 #      (typically passed via CLAUDE_PASSTHROUGH from scheduled_cc_sweep.sh)
 #      and the launchd plist ExitTimeOut. Section E Phase 3.
+
+# op#29348 part b (Nazim #64245/#64260): launch claude from a LEAST-PRIVILEGE env so
+# the lane + every subagent it spawns do NOT inherit the whole orchestrator .env
+# (~38 secrets — the 2026-10-12 leak vector, where a build subagent's emulator logged
+# its inherited env). Build the allow-listed NAME=VALUE pairs (scripts/lib/
+# lane_env_allowlist.sh: non-secret essentials + minimal substrate creds + GH_TOKEN +
+# per-lane opt-in) and exec claude via `env -i` so everything else is DROPPED
+# (default-deny: a new secret in .env is auto-excluded). Part-A vars
+# (GOOGLE_APPLICATION_CREDENTIALS / CLOUDSDK_CONFIG) are allow-listed so the prod-wall
+# survives the scrub. NUL-delimited read so values with spaces/newlines stay intact.
+. "$ORCH_DIR/scripts/lib/lane_env_allowlist.sh"
+_LANE_ENV_PAIRS=()
+while IFS= read -r -d '' _lp; do _LANE_ENV_PAIRS+=("$_lp"); done < <(lane_env_scrubbed_pairs0 "${CC_BASE_AGENT_ID:-}")
+
 if [ -n "$SCHEDULED_PROMPT_FILE" ]; then
     PROMPT_PATH="$ORCH_DIR/$SCHEDULED_PROMPT_FILE"
     if [ ! -f "$PROMPT_PATH" ]; then
@@ -1038,9 +1052,9 @@ if [ -n "$SCHEDULED_PROMPT_FILE" ]; then
     fi
     echo -e "${TEAL}  Scheduled-sweep mode: reading prompt from $SCHEDULED_PROMPT_FILE${RESET}"
     PROMPT_TEXT="$(cat "$PROMPT_PATH")"
-    "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" -p "$PROMPT_TEXT" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+    env -i "${_LANE_ENV_PAIRS[@]+"${_LANE_ENV_PAIRS[@]}"}" "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" -p "$PROMPT_TEXT" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
 else
     # Always launch interactively. Context (if staged above) arrives via the
     # SessionStart hook as a system-reminder, not via stdin.
-    "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
+    env -i "${_LANE_ENV_PAIRS[@]+"${_LANE_ENV_PAIRS[@]}"}" "$CLAUDE_BIN" --dangerously-skip-permissions --model "$RESOLVED_MODEL" "${CLAUDE_PASSTHROUGH[@]+"${CLAUDE_PASSTHROUGH[@]}"}"
 fi
