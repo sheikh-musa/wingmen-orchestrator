@@ -6,6 +6,7 @@ wake floor — reference_hub_wake_floor_p1_rr): make it structural, never a
 promise. These are PURE-LOGIC / argparse tests — no live DB, no psycopg
 connection (matches the style of test_operator_log_scope.py).
 """
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +15,21 @@ import pytest
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "scripts"))
 import bus_send as bs  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_secrets(monkeypatch):
+    """This module is pure-logic (no live DB, per the module docstring) but
+    several tests drive bs.main()/dburl() paths that read the real process
+    os.environ -- which, in a real dev/lane shell, holds real secrets (bot
+    tokens, DSNs). A test that fails unexpectedly on one of those paths gets
+    pytest's assertion introspection dumping local variables, including that
+    environ, into the on-disk transcript -- a real COSEM_CAAI_BOT_TOKEN leaked
+    this way (bus #64769/#64771). Blank the environ for every test in this
+    file so there is nothing real left to leak; tests still monkeypatch.setenv
+    whatever they individually need on top of this empty baseline.
+    """
+    monkeypatch.setattr(os, "environ", {})
 
 
 # ---- --priority is REQUIRED, no default ------------------------------------
