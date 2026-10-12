@@ -104,6 +104,7 @@ including HOLD, and logs every such export to an append-only audit file.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -783,6 +784,126 @@ def append_operator_attested_audit(
         fh.write(line + "\n")
 
 
+# ── read-attestation for an irsyad media file (Musa op#20593) ────────────────
+# A lane (cc-irsyad-coord ONLY) must sometimes Read a gazzabyte-irsyad_ media
+# file directly to build an irsyad feature, which client_media_read_guard.py
+# otherwise refuses (bus #52461). `attest-read` is the sanctioned, auditable way
+# to arm exactly ONE such Read: it appends a READ-ATTEST record to the SAME
+# append-only audit log as the operator-attested exports, and the read guard
+# then allows the Read only while a matching, sha256-bound, <15-min record
+# exists. The record stores ONLY metadata — ts, the RESOLVED agent_id, the
+# file's realpath, its sha256, the stated purpose, and the directive — NEVER the
+# file's bytes. The sha256 binds the attest to the exact file contents, so a
+# file swapped after the attest cannot ride the stale record.
+
+# Distinguishes a READ-ATTEST record from an operator-attested export line (whose
+# first field is an ISO timestamp) in the shared append-only log.
+_READ_ATTEST_RECORD_TAG = "READ-ATTEST"
+# The ONLY base agent id allowed to attest a read (resolved from CC_BASE_AGENT_ID,
+# never from a flag) and the ONLY channel prefix it may attest.
+_READ_ATTEST_REQUIRED_BASE = "cc-irsyad-coord"
+_IRSYAD_CHANNEL_PREFIX = "gazzabyte-irsyad_"
+# A purpose must be a real sentence, not a rubber-stamp token.
+_READ_ATTEST_MIN_PURPOSE_CHARS = 15
+
+
+def sha256_file(path: Path) -> str:
+    """Stream-hash a file to its hex sha256, reading bytes only to hash them
+    (never to emit content). Used both to bind a read-attest record to the exact
+    file contents and, in the read guard, to re-check the file hasn't changed."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def append_read_attest_audit(
+    *, agent_id: str, file_path: str, sha256: str, purpose: str, directive: str
+) -> None:
+    """Append ONE READ-ATTEST record to the shared append-only audit log —
+    tag, ISO timestamp, the resolved agent_id, the file's realpath, its sha256,
+    the (whitespace-collapsed) purpose, and the directive. Open mode 'a' only —
+    never truncates. Stores ONLY these metadata fields; the file's bytes are
+    never written here."""
+    _OPERATOR_ATTESTED_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    safe_purpose = re.sub(r"\s+", " ", purpose).strip()
+    line = "\t".join([
+        _READ_ATTEST_RECORD_TAG,
+        datetime.now(timezone.utc).isoformat(),
+        agent_id,
+        file_path,
+        sha256,
+        safe_purpose,
+        directive,
+    ])
+    with open(_OPERATOR_ATTESTED_AUDIT_LOG, "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+def build_attest_read_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="stage_client_file.py attest-read",
+        description="Append one READ-ATTEST record so cc-irsyad-coord may Read a "
+                    "gazzabyte-irsyad_ media file once, within 15 min, bound to its sha256.",
+    )
+    p.add_argument("--file", required=True, help="path to the gazzabyte-irsyad_ media file to attest")
+    p.add_argument("--purpose", required=True,
+                   help="why this read is needed (non-empty, >= 15 chars; recorded in the audit log)")
+    p.add_argument("--directive", required=True, help="the authorizing directive, e.g. op#20593")
+    return p
+
+
+def attest_read_main(argv: list[str]) -> int:
+    """`stage_client_file.py attest-read` subcommand. REFUSES (exit 2, writes
+    nothing) unless ALL hold: the RESOLVED base agent (CC_BASE_AGENT_ID, never a
+    flag) == cc-irsyad-coord, the file exists, its basename begins with the
+    gazzabyte-irsyad_ channel prefix, and purpose is non-empty and >= 15 chars.
+    On success, appends exactly one READ-ATTEST record (metadata only)."""
+    args = build_attest_read_parser().parse_args(argv)
+    agent_id = (os.environ.get("CC_BASE_AGENT_ID") or "").strip()
+    if agent_id != _READ_ATTEST_REQUIRED_BASE:
+        print(
+            f"stage_client_file attest-read: REFUSED — resolved base agent "
+            f"{agent_id or '(unset)'!r} is not {_READ_ATTEST_REQUIRED_BASE!r} "
+            "(resolved from CC_BASE_AGENT_ID, never a flag) — fail-closed",
+            file=sys.stderr,
+        )
+        return 2
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"stage_client_file attest-read: no such file: {path}", file=sys.stderr)
+        return 2
+    if not path.name.startswith(_IRSYAD_CHANNEL_PREFIX):
+        print(
+            f"stage_client_file attest-read: REFUSED — {path.name!r} is not a "
+            f"{_IRSYAD_CHANNEL_PREFIX!r} channel file — fail-closed",
+            file=sys.stderr,
+        )
+        return 2
+    purpose = (args.purpose or "").strip()
+    if len(purpose) < _READ_ATTEST_MIN_PURPOSE_CHARS:
+        print(
+            f"stage_client_file attest-read: REFUSED — purpose must be non-empty and "
+            f">= {_READ_ATTEST_MIN_PURPOSE_CHARS} characters (got {len(purpose)}) — fail-closed",
+            file=sys.stderr,
+        )
+        return 2
+    sha = sha256_file(path)
+    append_read_attest_audit(
+        agent_id=agent_id,
+        file_path=os.path.realpath(str(path)),
+        sha256=sha,
+        purpose=purpose,
+        directive=args.directive,
+    )
+    print(
+        f"read-attest recorded: {path.name} (sha256 {sha[:12]}…, agent {agent_id}, "
+        f"directive {args.directive}) — valid for 15 min, bound to this exact file"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("path", help="path to the client file (.xlsx/.csv/.docx/.pdf/.png/.jpg/.jpeg)")
@@ -807,6 +928,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    # `attest-read` is a distinct subcommand (Musa op#20593). Dispatch on it
+    # explicitly so the long-standing flat `path op_id [flags]` interface — and
+    # every existing caller of it — is left completely unchanged.
+    if argv and argv[0] == "attest-read":
+        return attest_read_main(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     # --operator-attested only means anything WITH --export; it is an error on

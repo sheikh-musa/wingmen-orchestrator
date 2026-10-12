@@ -11,6 +11,7 @@ stays values-free regardless.
 """
 from __future__ import annotations
 
+import os
 import sys
 import pathlib
 from unittest import mock
@@ -943,3 +944,142 @@ def test_main_structure_only_unchanged_with_attestation_absent(tmp_path, monkeyp
     for value in ("Ahmad", "Siti", "85", "90", "Pass"):
         assert value not in content
     assert not (tmp_path / "reports" / "client-file-staging" / "_operator_attested_exports.log").exists()
+
+
+# ── attest-read subcommand (irsyad media read-attestation, Musa op#20593) ────
+# A NEW CLI subcommand: `stage_client_file.py attest-read --file <path>
+# --purpose "<text>" --directive op#20593` appends ONE READ-ATTEST entry to the
+# SAME append-only audit log, so the read guard can later allow cc-irsyad-coord
+# a single, sha256-bound, time-boxed Read of a gazzabyte-irsyad_ media file.
+# The entry stores ONLY metadata (ts, agent_id, path, sha256, purpose,
+# directive) — NEVER the file's bytes. Refuses unless: resolved base
+# (CC_BASE_AGENT_ID, never a flag) == cc-irsyad-coord, the file's channel prefix
+# == gazzabyte-irsyad_, and purpose is non-empty and >= 15 chars. SYNTHETIC.
+import hashlib as _hashlib
+
+
+def _sha256_of(path) -> str:
+    return _hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+
+def _make_irsyad_media(tmp_path, name="gazzabyte-irsyad_123_abc.jpg", body=b"fake-image-bytes"):
+    p = tmp_path / name
+    p.write_bytes(body)
+    return p
+
+
+def _read_attest_lines(tmp_path):
+    log = tmp_path / "reports" / "client-file-staging" / "_operator_attested_exports.log"
+    if not log.exists():
+        return []
+    return [ln for ln in log.read_text(encoding="utf-8").splitlines()
+            if ln.split("\t")[0] == scf._READ_ATTEST_RECORD_TAG]
+
+
+def test_attest_read_coord_gazzabyte_valid_writes_one_entry(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    p = _make_irsyad_media(tmp_path)
+    rc = scf.main(["attest-read", "--file", str(p),
+                   "--purpose", "build the irsyad media annotator feature",
+                   "--directive", "op#20593"])
+    assert rc == 0
+    lines = _read_attest_lines(tmp_path)
+    assert len(lines) == 1
+    fields = lines[0].split("\t")
+    # tag, ts, agent_id, file_path(realpath), sha256, purpose, directive
+    assert fields[0] == "READ-ATTEST"
+    assert fields[2] == "cc-irsyad-coord"
+    assert fields[3] == os.path.realpath(str(p))
+    assert fields[4] == _sha256_of(p)
+    assert fields[5] == "build the irsyad media annotator feature"
+    assert fields[6] == "op#20593"
+    # ONLY metadata — the file's bytes never appear in the log
+    assert "fake-image-bytes" not in lines[0]
+
+
+def test_attest_read_agent_id_comes_from_env_not_a_flag(tmp_path, monkeypatch):
+    # there is NO --agent flag; the agent_id is resolved from CC_BASE_AGENT_ID.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    p = _make_irsyad_media(tmp_path)
+    with pytest.raises(SystemExit):
+        scf.main(["attest-read", "--file", str(p), "--purpose", "x" * 20,
+                  "--directive", "op#20593", "--agent", "cc-substrate"])
+
+
+def test_attest_read_refuses_non_coord_base(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    p = _make_irsyad_media(tmp_path)
+    rc = scf.main(["attest-read", "--file", str(p),
+                   "--purpose", "build the irsyad media annotator feature",
+                   "--directive", "op#20593"])
+    assert rc == 2
+    assert "cc-irsyad-coord" in capsys.readouterr().err
+    assert _read_attest_lines(tmp_path) == []
+
+
+def test_attest_read_refuses_non_gazzabyte_channel_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    p = _make_irsyad_media(tmp_path, name="cosem-adcda_9_xyz.jpg")
+    rc = scf.main(["attest-read", "--file", str(p),
+                   "--purpose", "build the irsyad media annotator feature",
+                   "--directive", "op#20593"])
+    assert rc == 2
+    assert "gazzabyte-irsyad_" in capsys.readouterr().err
+    assert _read_attest_lines(tmp_path) == []
+
+
+def test_attest_read_refuses_empty_purpose(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    p = _make_irsyad_media(tmp_path)
+    rc = scf.main(["attest-read", "--file", str(p), "--purpose", "   ",
+                   "--directive", "op#20593"])
+    assert rc == 2
+    assert "purpose" in capsys.readouterr().err.lower()
+    assert _read_attest_lines(tmp_path) == []
+
+
+def test_attest_read_refuses_short_purpose(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    p = _make_irsyad_media(tmp_path)
+    rc = scf.main(["attest-read", "--file", str(p), "--purpose", "too short",  # 9 chars
+                   "--directive", "op#20593"])
+    assert rc == 2
+    assert "purpose" in capsys.readouterr().err.lower()
+    assert _read_attest_lines(tmp_path) == []
+
+
+def test_attest_read_refuses_missing_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    rc = scf.main(["attest-read", "--file", str(tmp_path / "gazzabyte-irsyad_1_nope.jpg"),
+                   "--purpose", "build the irsyad media annotator feature",
+                   "--directive", "op#20593"])
+    assert rc == 2
+    assert _read_attest_lines(tmp_path) == []
+
+
+def test_attest_read_coexists_with_operator_attested_lines_in_same_log(tmp_path, monkeypatch):
+    # the READ-ATTEST record shares the SAME append-only log as the
+    # operator-attested export lines; the tag column distinguishes them so both
+    # record types coexist without either parser mis-reading the other.
+    monkeypatch.chdir(tmp_path)
+    scf.append_operator_attested_audit(
+        op_id="op27572", source_basename="skills.csv", op_msg_id=27634,
+        from_user_id="286619815", verdict="HOLD",
+    )
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-irsyad-coord")
+    p = _make_irsyad_media(tmp_path)
+    scf.main(["attest-read", "--file", str(p),
+              "--purpose", "build the irsyad media annotator feature",
+              "--directive", "op#20593"])
+    all_lines = (tmp_path / "reports" / "client-file-staging"
+                 / "_operator_attested_exports.log").read_text().splitlines()
+    assert len(all_lines) == 2
+    tags = {ln.split("\t")[0] for ln in all_lines}
+    assert "READ-ATTEST" in tags  # the operator-attested line's first field is an ISO ts
