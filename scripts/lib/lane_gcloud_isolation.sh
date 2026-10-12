@@ -16,11 +16,22 @@
 #       ambient-default side).
 #
 # This function neuters (1) + (2) FOR WORKER-LANE SHELLS ONLY by:
-#   - `unset GOOGLE_APPLICATION_CREDENTIALS`  (drops the ambient prod-key ADC)
+#   - SETTING `GOOGLE_APPLICATION_CREDENTIALS` to a guaranteed-NON-EXISTENT
+#     per-lane sentinel path (`<lane_cfg>/.no-prod-adc`) — NOT unsetting it.
+#     WHY NOT UNSET (reviewer's hole, op#29348): when GAC is UNSET, Node's ADC
+#     resolution FALLS BACK to the well-known per-user `$HOME/.config/gcloud`
+#     ADC (application_default_credentials.json / credentials.db / …) and it
+#     IGNORES CLOUDSDK_CONFIG entirely. So merely unsetting GAC does NOT stop
+#     `initializeApp({})` from silently picking up the operator's PROD ADC. By
+#     pointing GAC at a non-existent sentinel, ADC uses THAT file exclusively
+#     and FAILS CLOSED with a credentials error — it never consults the
+#     well-known prod path. (Part B's guard denies re-pointing GAC / reading the
+#     well-known files, as a hard backstop.)
 #   - pointing CLOUDSDK_CONFIG at a PER-LANE gcloud config dir seeded with a
 #     clean, minimal active config that has NO project and NO account — so
-#     gcloud/ADC has no implicit prod project. Prod then needs an EXPLICIT
-#     `--project` + explicit creds, which Part B refuses for a lane.
+#     `gcloud` (which DOES honour CLOUDSDK_CONFIG) has no implicit prod project.
+#     Prod then needs an EXPLICIT `--project` + explicit creds, which Part B
+#     refuses for a lane.
 #
 # SCOPE — worker lanes ONLY. NOT ~/.zshenv (that stays as the operator's own
 # default), NOT the console, NOT CI:
@@ -37,10 +48,11 @@
 # CALLER's shell (it is SOURCED by launch_dangerous_cc.sh), so the launched
 # claude child inherits the isolated env.
 #
-# FAIL-LOUD, never silent: GOOGLE_APPLICATION_CREDENTIALS is unset FIRST (that
-# cannot fail and removes the primary prod-key vector); if the per-lane config
-# dir cannot be seeded, the function returns non-zero so the launcher can warn
-# LOUDLY — it does not swallow the failure behind `|| true`.
+# FAIL-LOUD, never silent: GOOGLE_APPLICATION_CREDENTIALS is pointed at the
+# non-existent sentinel FIRST (that cannot fail and fails-closed the primary
+# prod-key / well-known-ADC vector); if the per-lane config dir cannot be
+# seeded, the function returns non-zero so the launcher can warn LOUDLY — it
+# does not swallow the failure behind `|| true`.
 
 # apply_lane_gcloud_isolation <base_agent_id> <lane_id> [config_root]
 #   base_agent_id : CC_BASE_AGENT_ID (the family); the gate reads this.
@@ -59,19 +71,27 @@ apply_lane_gcloud_isolation() {
         return 0
     fi
 
-    # (2) Drop the ambient prod-key ADC first. `unset` cannot fail; this closes
-    # the primary vector even if the config seeding below fails.
-    unset GOOGLE_APPLICATION_CREDENTIALS
-
     # (1) Per-lane gcloud config dir with NO project / NO account. Name it by
-    # the instance id when present (true per-lane), else the family.
+    # the instance id when present (true per-lane), else the family. This is
+    # pure string construction (no I/O) so it cannot fail — we need lane_cfg to
+    # derive the sentinel GAC path below, which must be set BEFORE any seeding
+    # can fail.
     local lane_tag="${lane_id:-$base_agent_id}"
     local lane_cfg="$config_root/$lane_tag"
+
+    # (2) FAIL CLOSED, not unset. Point GAC at a guaranteed-non-existent
+    # per-lane sentinel. If we merely UNSET it, Node's ADC falls back to the
+    # well-known $HOME/.config/gcloud prod ADC (ignoring CLOUDSDK_CONFIG); with
+    # GAC pointed at a missing file, ADC errors out instead. We never create
+    # this file. Setting a var cannot fail, so this closes the primary vector
+    # even if the config seeding below fails.
+    export GOOGLE_APPLICATION_CREDENTIALS="$lane_cfg/.no-prod-adc"
 
     if ! mkdir -p "$lane_cfg/configurations" 2>/dev/null; then
         # Could not build the isolation dir — do NOT point CLOUDSDK_CONFIG at a
         # dir we don't control, and do NOT fall back silently to the per-user
-        # prod default. GAC is already unset; signal the partial failure LOUDLY.
+        # prod default. GAC is already pointed at the fail-closed sentinel;
+        # signal the partial failure LOUDLY.
         return 1
     fi
     # Seed a clean minimal active config: an empty [core] section — no project,

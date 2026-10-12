@@ -6,7 +6,12 @@ transcription (same tested-cascade pattern as test_model_precedence.py /
 test_provider_routing.py).
 
 The isolation must, FOR A WORKER LANE ONLY:
-  - unset GOOGLE_APPLICATION_CREDENTIALS (drop the ambient prod-key ADC), and
+  - SET GOOGLE_APPLICATION_CREDENTIALS to a guaranteed-non-existent sentinel
+    path (NOT unset it). WHY: Node's ADC resolution, when GAC is UNSET, falls
+    back to the well-known per-user ~/.config/gcloud ADC (and IGNORES
+    CLOUDSDK_CONFIG). So unsetting leaves the prod ADC reachable. Pointing GAC
+    at a non-existent sentinel makes ADC FAIL CLOSED (credentials error) instead
+    of silently resolving the well-known prod creds. And
   - export CLOUDSDK_CONFIG pointing at a per-lane gcloud config that has NO
     project and NO account (so gcloud/ADC has no implicit cosem-adcda prod
     project).
@@ -55,12 +60,18 @@ def _drive(base, lane_id, config_root):
 
 # ── worker lane: isolated ─────────────────────────────────────────────────────
 
-def test_worker_lane_unsets_gac_and_points_cloudsdk_at_no_project_config(tmp_path):
+def test_worker_lane_sets_sentinel_gac_and_points_cloudsdk_at_no_project_config(tmp_path):
     root = str(tmp_path / "cfg")
     res = _drive("cc-cosem-platform", "cc-cosem-platform-3", root)
     assert res["RC"] == "0", res
-    # (2) ambient prod-key ADC dropped.
-    assert res["GAC"] == "<UNSET>", "worker lane must unset GOOGLE_APPLICATION_CREDENTIALS"
+    # (2) ambient prod-key ADC dropped AND replaced with a FAIL-CLOSED sentinel:
+    # GAC points at a guaranteed-non-existent path under the per-lane dir, so
+    # ADC errors rather than falling back to the well-known prod ADC.
+    assert res["GAC"] != "<UNSET>", "worker lane must SET a sentinel GAC (not unset — unset lets Node ADC fall back to the well-known prod creds)"
+    assert res["GAC"] != _AMBIENT_GAC, "worker lane must not keep the ambient prod GAC"
+    assert res["GAC"].endswith("/.no-prod-adc"), res["GAC"]
+    assert res["GAC"].startswith(root), res["GAC"]
+    assert not os.path.exists(res["GAC"]), "the sentinel GAC path must NOT exist, so ADC fails closed"
     # (1) CLOUDSDK_CONFIG points at a per-lane dir under our root (NOT the
     # per-user ~/.config/gcloud prod default).
     assert res["CLOUDSDK"].startswith(root), res["CLOUDSDK"]
@@ -78,7 +89,8 @@ def test_worker_lane_falls_back_to_base_when_no_instance_id(tmp_path):
     root = str(tmp_path / "cfg")
     res = _drive("cc-cosem-platform", "", root)
     assert res["RC"] == "0", res
-    assert res["GAC"] == "<UNSET>"
+    assert res["GAC"].endswith("/.no-prod-adc"), res["GAC"]
+    assert not os.path.exists(res["GAC"]), res["GAC"]
     assert res["CLOUDSDK"].endswith("cc-cosem-platform"), res["CLOUDSDK"]
 
 
@@ -101,9 +113,9 @@ def test_empty_base_ci_or_bare_shell_is_untouched(tmp_path):
     assert res["CLOUDSDK"] == "<UNSET>"
 
 
-# ── fail-loud: GAC dropped even if the config dir cannot be seeded ────────────
+# ── fail-loud: GAC fail-closed even if the config dir cannot be seeded ─────────
 
-def test_unseedable_config_root_still_drops_gac_and_returns_nonzero(tmp_path):
+def test_unseedable_config_root_still_fails_gac_closed_and_returns_nonzero(tmp_path):
     # Point config_root at a path whose parent is a FILE -> mkdir -p fails.
     blocker = tmp_path / "blocker"
     blocker.write_text("i am a file, not a dir")
@@ -111,7 +123,13 @@ def test_unseedable_config_root_still_drops_gac_and_returns_nonzero(tmp_path):
     res = _drive("cc-cosem-platform", "cc-cosem-platform-3", root)
     # Returns non-zero so the launcher surfaces it LOUDLY (not swallowed)...
     assert res["RC"] == "1", res
-    # ...but the primary vector (ambient prod-key ADC) is STILL closed.
-    assert res["GAC"] == "<UNSET>", "GAC must be unset before any seeding can fail"
+    # ...but the primary vector (ambient prod-key ADC) is STILL closed: GAC is
+    # set to the non-existent sentinel BEFORE any seeding can fail, so ADC fails
+    # closed rather than keeping the ambient prod key OR falling back to the
+    # well-known prod ADC.
+    assert res["GAC"] != "<UNSET>", "GAC must be the fail-closed sentinel, not unset"
+    assert res["GAC"] != _AMBIENT_GAC, "the ambient prod GAC must be overwritten even on seed failure"
+    assert res["GAC"].endswith("/.no-prod-adc"), res["GAC"]
+    assert not os.path.exists(res["GAC"]), "sentinel must not exist (fail closed)"
     # And we did NOT point CLOUDSDK at an uncontrolled / prod-default dir.
     assert res["CLOUDSDK"] == "<UNSET>", res["CLOUDSDK"]

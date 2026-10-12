@@ -10,13 +10,22 @@ prod SA key, or pointing ADC back at it.
 
 It REFUSES (fail-closed, exit 2 + stderr) any Bash or Read tool call from a
 worker lane that:
-  (i)  touches a prod SA key file under ~/.wingmen/keys matching *cosem* (the
-       cosem-adcda prod service-account key `cosem-sa.json` and the
-       `cosem-adcda-bot.env` prod bot creds — both match the *cosem* family),
-       in ANY path form ($HOME / ~ / absolute / relative / symlink); OR
-  (ii) contains `GOOGLE_APPLICATION_CREDENTIALS=` or `--key-file` in the Bash
-       command text — a lane re-pointing ADC / activating an SA key is the exact
-       prod-reach we are closing, regardless of which path follows.
+  (i)   touches a prod SA key file under ~/.wingmen/keys matching *cosem* (the
+        cosem-adcda prod service-account key `cosem-sa.json` and the
+        `cosem-adcda-bot.env` prod bot creds — both match the *cosem* family),
+        in ANY path form ($HOME / ~ / absolute / relative / symlink); OR
+  (ii)  touches the WELL-KNOWN per-user gcloud ADC under ~/.config/gcloud —
+        `application_default_credentials.json`, `credentials.db`,
+        `access_tokens.db`, or anything under `legacy_credentials/`. This is the
+        reviewer's hole (op#29348): Node's ADC falls back to this path when
+        GOOGLE_APPLICATION_CREDENTIALS is unset and IGNORES CLOUDSDK_CONFIG, so
+        Part A points GAC at a dead sentinel and THIS guard denies the lane
+        reading the well-known files directly. Matched in any path form incl.
+        symlink; OR
+  (iii) contains `GOOGLE_APPLICATION_CREDENTIALS=`, `CLOUDSDK_CONFIG=`, or
+        `--key-file` in the Bash command text — a lane re-pointing ADC /
+        re-pointing the gcloud config / activating an SA key is the exact
+        prod-reach we are closing, regardless of which path follows.
 
 Scope / discriminator — a WORKER LANE is `CC_BASE_AGENT_ID` present AND base
 != 'orch-console' (identical shape to console_irsyad_guard / client_media_read_
@@ -39,8 +48,24 @@ import sys
 # relative-from-home. Case-insensitive is harmless and defends a mixed-case ref.
 _KEYS_DIR = os.path.join(os.path.expanduser("~"), ".wingmen", "keys")
 _PROD_KEY_RE = re.compile(r"\.wingmen/keys/[^\s'\"]*cosem", re.IGNORECASE)
-# A lane re-pointing ADC or activating an SA key — refuse the mechanism itself.
+# The well-known per-user gcloud ADC dir + its credential-bearing targets. ADC
+# resolution falls back HERE when GAC is unset (and ignores CLOUDSDK_CONFIG), so
+# a lane must not read these either (op#29348 — the reviewer's hole).
+_GCLOUD_DIR = os.path.join(os.path.expanduser("~"), ".config", "gcloud")
+_WELLKNOWN_ADC_RE = re.compile(
+    r"\.config/gcloud/(?:application_default_credentials\.json|credentials\.db|"
+    r"access_tokens\.db|legacy_credentials)",
+    re.IGNORECASE,
+)
+_WELLKNOWN_BASENAMES = (
+    "application_default_credentials.json",
+    "credentials.db",
+    "access_tokens.db",
+)
+# A lane re-pointing ADC, re-pointing the gcloud config, or activating an SA key
+# — refuse the mechanism itself, regardless of the path that follows.
 _GAC_ASSIGN_RE = re.compile(r"GOOGLE_APPLICATION_CREDENTIALS\s*=")
+_CLOUDSDK_ASSIGN_RE = re.compile(r"CLOUDSDK_CONFIG\s*=")
 _KEYFILE_FLAG_RE = re.compile(r"(?:^|\s)--key-file\b")
 
 
@@ -76,6 +101,43 @@ def _resolves_to_prod_key(path: str) -> bool:
     rp = rp.replace(os.sep, "/")
     kd = _KEYS_DIR.replace(os.sep, "/")
     return rp.startswith(kd + "/") and "cosem" in os.path.basename(rp).lower()
+
+
+def _text_references_wellknown_adc(text: str) -> bool:
+    """A well-known per-user gcloud ADC path appears anywhere in *text* (raw,
+    and with $HOME/~ expanded so an expanded-abs form is caught too)."""
+    if not text:
+        return False
+    if _WELLKNOWN_ADC_RE.search(text):
+        return True
+    try:
+        expanded = os.path.expanduser(os.path.expandvars(text))
+    except Exception:
+        expanded = text
+    return bool(_WELLKNOWN_ADC_RE.search(expanded))
+
+
+def _resolves_to_wellknown_adc(path: str) -> bool:
+    """*path* resolves (via realpath — follows symlinks) to a well-known ADC
+    credential file/dir under ~/.config/gcloud. Covers a symlink whose own
+    spelling does not contain `.config/gcloud/`."""
+    if not path:
+        return False
+    try:
+        rp = os.path.realpath(os.path.expanduser(os.path.expandvars(path)))
+    except Exception:
+        return False
+    rp = rp.replace(os.sep, "/")
+    gd = _GCLOUD_DIR.replace(os.sep, "/")
+    if not rp.startswith(gd + "/"):
+        return False
+    rel = rp[len(gd) + 1:].lower()
+    base = os.path.basename(rp).lower()
+    return (
+        base in _WELLKNOWN_BASENAMES
+        or rel == "legacy_credentials"
+        or rel.startswith("legacy_credentials/")
+    )
 
 
 def _bash_tokens(cmd: str):
@@ -116,19 +178,25 @@ def main() -> int:
         path = tool_input.get("file_path") or ""
         if _text_references_prod_key(path) or _resolves_to_prod_key(path):
             return _deny("this Read touches a prod SA key file.")
+        if _text_references_wellknown_adc(path) or _resolves_to_wellknown_adc(path):
+            return _deny("this Read touches the well-known per-user gcloud ADC (prod creds).")
         return 0
 
     if tool == "Bash":
         cmd = tool_input.get("command") or ""
         if _GAC_ASSIGN_RE.search(cmd):
             return _deny("this command sets GOOGLE_APPLICATION_CREDENTIALS (re-points ADC at prod creds).")
+        if _CLOUDSDK_ASSIGN_RE.search(cmd):
+            return _deny("this command sets CLOUDSDK_CONFIG (re-points gcloud/ADC at the per-user prod config).")
         if _KEYFILE_FLAG_RE.search(cmd):
             return _deny("this command passes --key-file (activates a service-account key).")
         if _text_references_prod_key(cmd):
             return _deny("this command touches a prod SA key path.")
+        if _text_references_wellknown_adc(cmd):
+            return _deny("this command touches the well-known per-user gcloud ADC (prod creds).")
         for tok in _bash_tokens(cmd):
-            if _resolves_to_prod_key(tok):
-                return _deny("this command touches a prod SA key path (resolved via symlink).")
+            if _resolves_to_prod_key(tok) or _resolves_to_wellknown_adc(tok):
+                return _deny("this command touches a prod cred path (resolved via symlink).")
         return 0
 
     # Any other tool is out of scope for this guard.

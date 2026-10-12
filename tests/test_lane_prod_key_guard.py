@@ -26,6 +26,16 @@ _KEY_HOME = "$HOME/.wingmen/keys/cosem-sa.json"
 _KEY_REL = ".wingmen/keys/cosem-sa.json"
 _BOT = "~/.wingmen/keys/cosem-adcda-bot.env"
 
+# Well-known per-user ADC paths (the reviewer's hole): Node's ADC falls back
+# here when GOOGLE_APPLICATION_CREDENTIALS is unset, and IGNORES CLOUDSDK_CONFIG.
+# A worker lane must not reach these either.
+_ADC_JSON = "~/.config/gcloud/application_default_credentials.json"
+_ADC_JSON_ABS = "/Users/sheikhmusa/.config/gcloud/application_default_credentials.json"
+_ADC_JSON_HOME = "$HOME/.config/gcloud/application_default_credentials.json"
+_CRED_DB = "~/.config/gcloud/credentials.db"
+_ACCESS_DB = "~/.config/gcloud/access_tokens.db"
+_LEGACY = "~/.config/gcloud/legacy_credentials/cosem-adcda-bot@cosem-adcda-cb6d9.iam.gserviceaccount.com/adc.json"
+
 
 def run_hook(tool_name, tool_input, env=None):
     payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
@@ -115,6 +125,73 @@ def test_lane_read_prod_key_via_symlink_denied(tmp_path):
     assert_denied("Read", {"file_path": str(link)}, env=env)
 
 
+# ── DENY: worker lane reaching the well-known per-user ADC (reviewer's hole) ──
+
+def test_lane_read_wellknown_adc_json_denied():
+    assert_denied("Read", {"file_path": _ADC_JSON})
+
+
+def test_lane_read_wellknown_adc_json_abs_denied():
+    assert_denied("Read", {"file_path": _ADC_JSON_ABS})
+
+
+def test_lane_bash_cat_wellknown_adc_json_denied():
+    assert_denied("Bash", {"command": f"cat {_ADC_JSON}"})
+
+
+def test_lane_bash_cat_wellknown_adc_json_home_var_denied():
+    assert_denied("Bash", {"command": f"cat {_ADC_JSON_HOME}"})
+
+
+def test_lane_read_wellknown_credentials_db_denied():
+    assert_denied("Read", {"file_path": _CRED_DB})
+
+
+def test_lane_bash_cat_credentials_db_denied():
+    assert_denied("Bash", {"command": f"sqlite3 {_CRED_DB} '.tables'"})
+
+
+def test_lane_read_wellknown_access_tokens_db_denied():
+    assert_denied("Read", {"file_path": _ACCESS_DB})
+
+
+def test_lane_bash_cat_access_tokens_db_denied():
+    assert_denied("Bash", {"command": f"cat {_ACCESS_DB}"})
+
+
+def test_lane_read_wellknown_legacy_credentials_denied():
+    # legacy_credentials/** — any file under the dir is refused.
+    assert_denied("Read", {"file_path": _LEGACY})
+
+
+def test_lane_bash_cat_legacy_credentials_denied():
+    assert_denied("Bash", {"command": f"cat {_LEGACY}"})
+
+
+def test_lane_bash_cloudsdk_config_assignment_denied():
+    # A lane re-pointing CLOUDSDK_CONFIG back at the per-user prod config is the
+    # mechanism we close — refused regardless of the path after it.
+    assert_denied("Bash", {"command": "CLOUDSDK_CONFIG=~/.config/gcloud gcloud config list"})
+
+
+def test_lane_bash_export_cloudsdk_config_any_path_denied():
+    assert_denied("Bash", {"command": "export CLOUDSDK_CONFIG=/tmp/whatever"})
+
+
+def test_lane_read_wellknown_adc_via_symlink_denied(tmp_path):
+    # Symlink whose own spelling has no `.config/gcloud/` but points at the
+    # well-known ADC under HOME — resolved via realpath.
+    gdir = tmp_path / ".config" / "gcloud"
+    gdir.mkdir(parents=True)
+    real = gdir / "application_default_credentials.json"
+    real.write_text("{}")
+    link = tmp_path / "innocuous.json"
+    link.symlink_to(real)
+    env = dict(_LANE_ENV)
+    env["HOME"] = str(tmp_path)
+    assert_denied("Read", {"file_path": str(link)}, env=env)
+
+
 # ── ALLOW: console / CI unaffected ───────────────────────────────────────────
 
 def test_console_body_cat_prod_key_allowed():
@@ -131,6 +208,18 @@ def test_console_export_gac_allowed():
     # The console's own config-write / prod-ops path stays UNAFFECTED.
     assert_allowed(
         "Bash", {"command": f"export GOOGLE_APPLICATION_CREDENTIALS={_KEY}"},
+        env={"ORCH_BODY_ROLE": "console"},
+    )
+
+
+def test_console_read_wellknown_adc_allowed():
+    # The console legitimately runs prod ops off the per-user ADC.
+    assert_allowed("Read", {"file_path": _ADC_JSON}, env={"ORCH_BODY_ROLE": "console"})
+
+
+def test_console_cloudsdk_config_assignment_allowed():
+    assert_allowed(
+        "Bash", {"command": "export CLOUDSDK_CONFIG=~/.config/gcloud"},
         env={"ORCH_BODY_ROLE": "console"},
     )
 
@@ -153,6 +242,19 @@ def test_lane_non_cosem_keyfile_in_keys_dir_allowed():
 
 def test_lane_benign_gcloud_without_keyfile_allowed():
     assert_allowed("Bash", {"command": "gcloud config configurations list"})
+
+
+def test_lane_gcloud_configurations_dir_not_overblocked():
+    # The per-lane gcloud config dir (Part A) lives under .config/gcloud-style
+    # paths but is NOT a credential file — the guard must not over-block a lane
+    # reading its OWN seeded config.
+    assert_allowed("Read", {"file_path": "~/.config/gcloud/configurations/config_default"})
+
+
+def test_lane_bash_mention_cloudsdk_config_var_read_allowed():
+    # Reading the var (not assigning it) is fine — only the `=` assignment that
+    # re-points it is the mechanism we close.
+    assert_allowed("Bash", {"command": "echo $CLOUDSDK_CONFIG"})
 
 
 def test_lane_other_tool_out_of_scope_allowed():
