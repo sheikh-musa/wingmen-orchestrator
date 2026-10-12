@@ -501,6 +501,25 @@ CREATE EXTENSION IF NOT EXISTS dblink;
 -- Homebrew locally (`brew install pgvector`) / the postgresql-17-pgvector
 -- apt package in CI (see .github/workflows/ci.yml).
 CREATE EXTENSION IF NOT EXISTS vector;
+
+-- storage.buckets: Supabase Storage's bucket registry -- a platform-managed
+-- table on a real project, not something this repo's own chain creates.
+-- migrations/101_tablet_telemetry_screenshots_bucket.sql does a bare
+-- `INSERT ... ON CONFLICT (id) DO NOTHING` into it (PR #375, bus #63503),
+-- which CI's vanilla Postgres rejected with "relation storage.buckets does
+-- not exist" -- the migration itself must stay byte-identical to what was
+-- already applied live, so the shim goes here instead. Minimal: `id` as the
+-- ON CONFLICT target plus exactly the columns that INSERT populates; nothing
+-- in this repo's test suite reads storage.objects or any other Storage
+-- internals.
+CREATE SCHEMA IF NOT EXISTS storage;
+CREATE TABLE IF NOT EXISTS storage.buckets (
+    id text PRIMARY KEY,
+    name text NOT NULL,
+    public boolean DEFAULT false,
+    file_size_limit bigint,
+    allowed_mime_types text[]
+);
 """.strip()
 
 
