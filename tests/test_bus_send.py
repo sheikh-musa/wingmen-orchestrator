@@ -34,15 +34,34 @@ def _no_inherited_secrets(monkeypatch):
 
 # ---- --priority is REQUIRED, no default ------------------------------------
 
-def test_priority_is_required(monkeypatch):
+@pytest.mark.parametrize("drop", ["--to", "--type", "--subject", "--priority"])
+def test_send_missing_each_required_arg_refuses_before_any_db(monkeypatch, drop):
     # Enforced in main() (refuse_if_send_args_missing) since --stamp mode made
     # the four send flags argparse-optional — same refusal, one level later.
+    # orch-console #66367's fail-closed ask, made structural the file's usual
+    # way: the refusal must fire BEFORE any DB work — psycopg2.connect never
+    # called, so no row can silently land at the P2 table default below the
+    # hub wake floor (bus #43651, the entire reason --priority was
+    # argparse-required). The --priority param IS the original
+    # test_priority_is_required case, now with the no-insert half asserted.
+    import psycopg2
+
+    def _boom(*a, **k):
+        raise AssertionError(
+            f"psycopg2.connect must not be called when {drop} is missing — "
+            "a send missing a required flag must refuse before any DB work"
+        )
+
+    monkeypatch.setattr(psycopg2, "connect", _boom)
     monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
-    with pytest.raises(SystemExit, match="--priority"):
-        bs.main([
-            "--to", "cc-orchestrator", "--type", "update",
-            "--subject", "s", "--req",
-        ])
+    full = [
+        "--to", "cc-orchestrator", "--type", "update",
+        "--subject", "s", "--priority", "P1", "--req",
+    ]
+    pairs = list(zip(full[0::2], full[1::2]))
+    argv = [x for pair in pairs for x in pair if pair[0] != drop]
+    with pytest.raises(SystemExit, match=drop):
+        bs.main(argv)
 
 
 def test_priority_rejects_unknown_value():
