@@ -65,7 +65,13 @@
 _provider_for_model() {
     case "$1" in
         glm-*)
-            echo "z.ai GLM|https://api.z.ai/api/anthropic|GLM_CODING_KEY|glm-4.7|GLM_SMALL_MODEL|unset"
+            # small_default is glm-5.3 (NOT glm-4.7): claude-code runs summarisation/
+            # auto-compaction through the SMALL/fast slot, and glm-4.7's 131K window made
+            # that slot overflow and wedge ("Not logged in") even when the main pointer was
+            # bigger. glm-5.3 is a 1M-context model on the Coding Plan (verified: /context
+            # reports a 1m auto-compact window; direct API accepts a 787K-token input), so
+            # both the main pointer and this small slot must be glm-5.3. (op#29665, #65656.)
+            echo "z.ai GLM|https://api.z.ai/api/anthropic|GLM_CODING_KEY|glm-5.3|GLM_SMALL_MODEL|unset"
             ;;
         kimi-*|moonshot-*)
             # api.moonshot.ai/anthropic confirmed (platform.kimi.ai docs + CC

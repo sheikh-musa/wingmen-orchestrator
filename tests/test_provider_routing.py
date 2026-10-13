@@ -153,7 +153,7 @@ def test_glm_routes_to_zai_with_vault_key(tmp_path, glm_fetch):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "glm-secret-key"
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5"
-    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"  # documented small default
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.3"  # small default = glm-5.3 (1M), NOT glm-4.7 (131K) — op#29665
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5"
     assert env["PROVIDER_ROUTING_LABEL"] == "z.ai GLM"
     # Anthropic creds scrubbed, never leaked to a non-Anthropic provider. A
@@ -163,6 +163,20 @@ def test_glm_routes_to_zai_with_vault_key(tmp_path, glm_fetch):
     assert env["ANTHROPIC_API_KEY_IS_SET"] is False
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
     assert env["CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE"] == ""
+
+
+def test_glm53_resolves_main_and_small_both_to_glm53(tmp_path, glm_fetch):
+    # op#29665 / #65656: a lane pointed at glm-5.3 must route BOTH the main slot
+    # (opus/sonnet/subagent) AND the small/fast slot (haiku) to glm-5.3. The small
+    # slot is what claude-code uses for summarisation/auto-compaction; if it stayed
+    # the 131K glm-4.7, compaction would overflow and wedge ("Not logged in") even
+    # with a 1M main pointer. glm-5.3 is 1M on the Coding Plan, so no cliff.
+    rc, env, _ = _run("glm-5.3", str(tmp_path), glm_fetch)
+    assert rc == 0
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.3"   # the compaction small slot — MUST be 1M too
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.3"
 
 
 def test_glm_small_model_env_override_honored(tmp_path, glm_fetch):
