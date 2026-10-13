@@ -189,4 +189,17 @@ echo "▶ Launching claude --dangerously-skip-permissions --model $MODEL in $CAI
 # best-effort, never blocks the launch).
 "$VENV_PY" "$ORCH_DIR/scripts/lib/ensure_lane_deny.py" --cwd "$CAI_DIR" || true
 cd "$CAI_DIR"
+# PROVIDER ROUTING (op#29782 part 3): mirror the lane path (launch_dangerous_cc.sh) so a glm-*
+# (or any non-Anthropic provider) MODEL pin routes to that provider. For a claude-* MODEL,
+# apply_provider_routing returns 0 and exports NOTHING — byte-identical to pre-this-change, so
+# cai's Anthropic boot (CLAUDE_CODE_OAUTH_TOKEN kept + ANTHROPIC_API_KEY unset above) is
+# unchanged. Activation is gated on the .cai_model pointer being set to a provider id; until then
+# this is inert. Placed AFTER this script's own OAuth/API_KEY handling so routing wins for glm
+# (it unsets CLAUDE_CODE_OAUTH_TOKEN + sets ANTHROPIC_BASE_URL/AUTH_TOKEN from the vault).
+. "$ORCH_DIR/scripts/lib/provider_routing.sh" || { echo "[boot_cai] FATAL: provider_routing.sh missing — refusing to boot" >&2; exit 1; }
+if ! apply_provider_routing "$MODEL" "$ORCH_DIR" "$ORCH_DIR/.venv/bin/python3" "$AGENT_ID"; then
+    echo "[boot_cai] FATAL: provider routing failed for model $MODEL — refusing to boot (no silent Anthropic fallback)" >&2
+    exit 1
+fi
+[ -n "${PROVIDER_ROUTING_LABEL:-}" ] && echo "[boot_cai] provider-routed: $PROVIDER_ROUTING_LABEL (model $MODEL)" >&2
 claude --dangerously-skip-permissions --model "$MODEL"
