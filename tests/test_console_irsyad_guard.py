@@ -21,6 +21,7 @@ _spec.loader.exec_module(guard)
 def _run(monkeypatch, *, env, stdin_text):
     monkeypatch.delenv("ORCH_BODY_ROLE", raising=False)
     monkeypatch.delenv("CC_BASE_AGENT_ID", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)  # clean slate for the provider-routed discriminator
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(guard.sys, "stdin", io.StringIO(stdin_text))
@@ -263,3 +264,51 @@ def test_console_coord_post_with_from_flag_is_blocked(monkeypatch):
     )
     rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash(cmd))
     assert rc == 2
+
+
+# ── CAI-1225 belt (2026-10-14): the guard ALSO fires for a PROVIDER-ROUTED body ──
+# A non-Anthropic-routed cai or GLM lane must stay off the goumlyne/ihsanos client silos
+# even without the console role — it inferences on a third-party endpoint.
+_ZAI = {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"}
+
+
+def _bash(cmd):
+    return json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+
+
+def test_provider_routed_blocks_silo_cred(monkeypatch, capsys):
+    rc = _run(monkeypatch, env=dict(_ZAI), stdin_text=_bash('psql "$GOUMLYNE_DATABASE_URL" -c "select 1"'))
+    assert rc == 2
+    assert "goumlyne" in capsys.readouterr().err.lower()
+
+
+def test_provider_routed_blocks_write_dsn_env(monkeypatch, capsys):
+    rc = _run(monkeypatch, env=dict(_ZAI), stdin_text=_bash("cat ~/.wingmen/private/write_dsn.env"))
+    assert rc == 2
+    assert "client-silo write dsn" in capsys.readouterr().err.lower()
+
+
+def test_console_still_blocks_silo_cred(monkeypatch, capsys):
+    # the original console trigger is unchanged
+    rc = _run(monkeypatch, env={"ORCH_BODY_ROLE": "console"}, stdin_text=_bash('psql "$IHSANOS_PROD_DATABASE_URL" -c "select 1"'))
+    assert rc == 2
+    assert "ceayj" in capsys.readouterr().err.lower()
+
+
+def test_provider_routed_benign_cmd_allowed(monkeypatch):
+    # guard applies (routed) but nothing matches a silo pattern -> allow
+    rc = _run(monkeypatch, env=dict(_ZAI), stdin_text=_bash("echo hi && pwd"))
+    assert rc == 0
+
+
+def test_plain_anthropic_lane_is_exempt(monkeypatch):
+    # not console, not provider-routed -> exempt, even for a silo-cred command
+    rc = _run(monkeypatch, env={}, stdin_text=_bash('psql "$GOUMLYNE_DATABASE_URL" -c "select 1"'))
+    assert rc == 0
+
+
+def test_anthropic_host_base_url_is_not_routed(monkeypatch):
+    # an anthropic.com base URL is NOT provider-routed -> exempt
+    rc = _run(monkeypatch, env={"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
+              stdin_text=_bash('cat ~/.wingmen/private/write_dsn.env'))
+    assert rc == 0

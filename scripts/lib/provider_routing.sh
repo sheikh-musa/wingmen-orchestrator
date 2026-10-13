@@ -142,6 +142,16 @@ apply_provider_routing() {
     fi
 
     unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN_OVERRIDE
+    # RESIDENCY (CAI-1225 / TENANT-RESIDENCY-001): a non-Anthropic-routed body must NOT carry
+    # raw CLIENT-SILO write-DSN credentials into a context that inferences on the provider —
+    # same logic as stripping the Anthropic LLM creds above (no client-silo credential reaches
+    # a non-Anthropic endpoint). boot_cai sources ~/.wingmen/private/write_dsn.env (the live-write
+    # GOUMLYNE/ceayj silos) with no env -i wall, so without this a GLM-routed cai could connect to
+    # a client silo and pull raw PII into z.ai context. GENERIC + safe: a no-op for every lane
+    # that never sourced write_dsn.env (these vars are simply unset). DATABASE_URL (the shared
+    # substrate/bus DSN) is deliberately KEPT — it is orchestration, not a client silo, and every
+    # routed lane needs the bus; dropping it would break all GLM lanes.
+    unset GOUMLYNE_DATABASE_URL IHSANOS_PROD_DATABASE_URL WRITE_DSN_ALLOWED
     if [ "$api_key_mode" = "empty" ]; then
         export ANTHROPIC_API_KEY=""
     else

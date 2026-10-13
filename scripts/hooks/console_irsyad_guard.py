@@ -6,10 +6,13 @@ design, code review and data access belong to cc-irsyad-coord + its musa2 lanes.
 only irsyad role is a yes/no floor ruling on coord's EVIDENCE PACK, which arrives over the bus
 (agent_messages) — so the console never needs the irsyad silos or the ihsanos code.
 
-Scope: blocks ONLY when the claude process itself is the console — ORCH_BODY_ROLE=console AND no
-CC_BASE_AGENT_ID. Lanes (coord included) carry CC_BASE_AGENT_ID and are exempt. The hook reads the
-claude process env it inherits, so a command that re-sources .env cannot change the verdict
-(see reference_lane_vs_console_discriminator_is_cc_base_agent_id).
+Scope: blocks when the claude process is the console — ORCH_BODY_ROLE=console AND no
+CC_BASE_AGENT_ID — OR when the body is PROVIDER-ROUTED (ANTHROPIC_BASE_URL on a non-Anthropic
+host; CAI-1225 belt, 2026-10-14): a provider-routed cai or GLM lane inferences on a third-party
+endpoint, so raw access to the goumlyne/ihsanos client silos from it is a residency breach too.
+A normal Anthropic lane (coord included) carries CC_BASE_AGENT_ID, is not console, and has no
+provider base URL — exempt. The hook reads the claude process env it inherits, so a command that
+re-sources .env cannot change the verdict (see reference_lane_vs_console_discriminator_is_cc_base_agent_id).
 
 Exit 2 + stderr = the tool call is refused and the reason is shown to the model.
 """
@@ -19,6 +22,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 BLOCKED = [
     (r"goumlynecruxrlmzlntp|GOUMLYNE_", "irsyad silo (goumlyne)"),
@@ -37,6 +41,31 @@ BLOCKED = [
 
 def is_console() -> bool:
     return os.environ.get("ORCH_BODY_ROLE") == "console" and not os.environ.get("CC_BASE_AGENT_ID")
+
+
+def _is_anthropic_host(host: str) -> bool:
+    host = (host or "").strip().lower().split(":", 1)[0]
+    return host == "anthropic.com" or host == "api.anthropic.com" or host.endswith(".anthropic.com")
+
+
+def is_provider_routed() -> bool:
+    """True when this body is routed to a NON-Anthropic provider (ANTHROPIC_BASE_URL set to a
+    non-empty value whose host is not an anthropic.com host). Mirrors glm_image_read_guard's
+    discriminator; fail-closed (a set-but-unparseable base URL is treated as routed). WHY it
+    gates this guard too (CAI-1225 / TENANT-RESIDENCY-001): the console is not the only body
+    that must stay off the goumlyne/ihsanos client silos — ANY provider-routed body (cai, or a
+    GLM lane) inferences on a third-party endpoint, so raw client-silo access from it is a
+    cross-border residency breach. Belt to the provider_routing.sh credential strip."""
+    url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    if not url:
+        return False
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        return True
+    if not host:
+        return True
+    return not _is_anthropic_host(host)
 
 
 # --- Narrow, FAIL-CLOSED allow-exception (bus #62942) -----------------------
@@ -125,7 +154,10 @@ def _is_allowed_coord_bus_post(payload) -> bool:
 
 
 def main() -> int:
-    if not is_console():
+    # Gate: fire for the console body (its original scope) OR for ANY provider-routed body
+    # (CAI-1225 belt — a non-Anthropic-routed cai/lane must also stay off the client silos even
+    # if a credential survived the provider_routing.sh strip). Everything else is a no-op.
+    if not (is_console() or is_provider_routed()):
         return 0
     try:
         payload = json.load(sys.stdin)

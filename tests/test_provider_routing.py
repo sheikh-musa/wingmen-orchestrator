@@ -414,3 +414,50 @@ def test_routed_vars_survive_the_env_i_allowlist_scrub(tmp_path, glm_fetch):
         f"claude: {missing} -> add them to scripts/lib/lane_env_allowlist.sh. "
         f"(routed NAMES that did survive: {routed_survivors}; stderr={out.stderr!r})"
     )
+
+
+# ── CAI-1225 / TENANT-RESIDENCY-001: a provider-routed boot drops client-silo write-DSN
+#    creds, but KEEPS DATABASE_URL (the shared substrate/bus DSN) ─────────────────────
+_SILO_VARS = ("GOUMLYNE_DATABASE_URL", "IHSANOS_PROD_DATABASE_URL", "WRITE_DSN_ALLOWED")
+_SEED = {"GOUMLYNE_DATABASE_URL": "x", "IHSANOS_PROD_DATABASE_URL": "y",
+         "WRITE_DSN_ALLOWED": "1", "DATABASE_URL": "z"}
+
+
+def _run_silo(resolved_model, orch_dir, fetch_script, pre_env):
+    """Like _run but seeds + reads back the client-silo vars + DATABASE_URL via ${VAR+SET}
+    (SET even when empty, "" when truly unset) so we can assert unset-vs-kept precisely."""
+    keys = _SILO_VARS + ("DATABASE_URL",)
+    env = dict(os.environ)
+    for k in _TRACKED_VARS + _OVERRIDE_ENV_VARS + keys:
+        env.pop(k, None)
+    for k, v in pre_env.items():
+        env[k] = v
+    dump = " ".join(f'"${{{v}+SET}}"' for v in keys)
+    script = (
+        f'source "{_LIB}"\n'
+        f'apply_provider_routing "{resolved_model}" "{orch_dir}" "{sys.executable}" "test-agent" "{fetch_script}"\n'
+        'echo "RC=$?"\n'
+        f'printf "%s\\x1f" {dump}\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, cwd=_ROOT, env=env)
+    rc_line, _, rest = out.stdout.partition("\n")
+    rc = int(rc_line.split("=", 1)[1])
+    vals = rest.rstrip("\n").split("\x1f")[:-1]
+    assert len(vals) == len(keys), (vals, out.stdout, out.stderr)
+    return rc, {k: (v == "SET") for k, v in zip(keys, vals)}, out.stderr
+
+
+def test_glm_route_strips_client_silo_creds_keeps_database_url(tmp_path, glm_fetch):
+    rc, is_set, stderr = _run_silo("glm-5.3", str(tmp_path), glm_fetch, _SEED)
+    assert rc == 0, stderr
+    assert is_set["GOUMLYNE_DATABASE_URL"] is False, "goumlyne silo DSN must be stripped on a provider route"
+    assert is_set["IHSANOS_PROD_DATABASE_URL"] is False, "ihsanos silo DSN must be stripped on a provider route"
+    assert is_set["WRITE_DSN_ALLOWED"] is False, "write-DSN allow-flag must be stripped on a provider route"
+    assert is_set["DATABASE_URL"] is True, "DATABASE_URL (bus/substrate) must be KEPT — not a client silo"
+
+
+def test_claude_noop_keeps_client_silo_creds(tmp_path, failing_fetch):
+    rc, is_set, stderr = _run_silo("claude-opus-4-8", str(tmp_path), failing_fetch, _SEED)
+    assert rc == 0, stderr
+    assert all(is_set[k] for k in _SILO_VARS), "no-op (claude-*) path must leave silo creds untouched"
+    assert is_set["DATABASE_URL"] is True
