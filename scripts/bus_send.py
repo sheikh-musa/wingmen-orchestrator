@@ -38,6 +38,14 @@ Usage:
     three blank bus rows on 2026-09-05 by forgetting the heredoc)
     EOF
 
+    scripts/bus_send.py --stamp <row-id> [--from <agent_id>] [--dry-run]
+    # standalone mode (orch-console approval #66344, proposal #66340): mark ONE
+    # directed row read WITHOUT sending anything — sets read_at (+ responded_at
+    # on requires_response rows), zero insert. The only read_at writer used to
+    # be --reply-to, which mechanically forced every closure ack to beget a
+    # counter-row; this ends that ack-tail loop. Refuses rows not addressed to
+    # you (base or instance id) — never another lane's mail.
+
 Identity: --from is resolved automatically if omitted, in this order:
     1. CC_BASE_AGENT_ID   (interactive fleet lane / this Claude Code session)
     2. AGENT_ID           (daemon/watchdog launchers)
@@ -492,13 +500,21 @@ def dburl(env: dict) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--to", required=True, help="to_agent")
-    p.add_argument("--type", required=True, choices=_VALID_TYPES, help="message_type")
-    p.add_argument("--subject", required=True)
     p.add_argument(
-        "--priority", required=True, choices=_VALID_PRIORITIES,
-        help="REQUIRED, no default. Hub action-now asks MUST use P1 (or P0) "
-             "with --req — see reference_hub_wake_floor_p1_rr.",
+        "--stamp", type=int, default=None, metavar="ROW_ID",
+        help="standalone mode (orch-console #66344): mark ONE directed row read WITHOUT "
+             "sending anything — sets read_at (+ responded_at on requires_response rows), "
+             "zero insert, refuses rows not addressed to you. Mutually exclusive with "
+             "every send-shaping flag; only --from and --dry-run may ride along.",
+    )
+    p.add_argument("--to", default=None, help="to_agent (required for a send)")
+    p.add_argument("--type", default=None, choices=_VALID_TYPES, help="message_type (required for a send)")
+    p.add_argument("--subject", default=None, help="(required for a send)")
+    p.add_argument(
+        "--priority", default=None, choices=_VALID_PRIORITIES,
+        help="REQUIRED for a send, no default (enforced in main so --stamp needs none). "
+             "Hub action-now asks MUST use P1 (or P0) with --req — see "
+             "reference_hub_wake_floor_p1_rr.",
     )
     p.add_argument(
         "--body", default=None,
@@ -694,6 +710,114 @@ def send(
     return row_id, str(thread_id)
 
 
+def stamping_identity_set(from_agent: str | None, env: dict) -> list[str]:
+    """The ids whose mail this identity may stamp: base (CC_BASE_AGENT_ID or
+    AGENT_ID) + instance (CC_AGENT_ID) — exactly the set scripts/lib/my_inbox.py
+    shows as yours — plus an explicit --from if it names yet another id. A row
+    addressed to anything else is another lane's mail: refused (fleet bus
+    reconcile — never mark a sibling-instance row read)."""
+    base = env.get("CC_BASE_AGENT_ID") or env.get("AGENT_ID")
+    ids: list[str] = []
+    if base:
+        ids.append(base)
+    instance = env.get("CC_AGENT_ID")
+    if instance and instance != base:
+        ids.append(instance)
+    if from_agent and from_agent not in ids:
+        ids.append(from_agent)
+    return ids
+
+
+def stamp(row_id: int, from_agent: str, dsn: str | None = None) -> tuple[bool, str]:
+    """Mark one directed agent_messages row read WITHOUT inserting anything
+    (orch-console approval #66344, proposal #66340). Contract: UPDATE
+    read_at=coalesce(read_at,now()) and, only on requires_response rows,
+    responded_at=coalesce(responded_at,now()) — at-least-once preserved
+    (coalesce never clobbers a first stamp), audit trail unchanged (the row's
+    own read_at/responded_at; no response_ref — there is no reply row to point
+    at). Returns (was_already_read, to_agent). REFUSES (SystemExit) a row that
+    doesn't exist or whose to_agent is outside stamping_identity_set()."""
+    import psycopg2
+
+    conn = psycopg2.connect(dsn or dburl(os.environ))
+    cur = conn.cursor()
+    cur.execute("SELECT set_config('app.current_agent_id', %s, true)", (from_agent,))
+    cur.execute("SELECT to_agent, read_at FROM agent_messages WHERE id=%s", (row_id,))
+    row = cur.fetchone()
+    if row is None:
+        conn.close()
+        raise SystemExit(f"bus_send: REFUSED — no agent_messages row with id={row_id}.")
+    to_agent, was_read = row[0], row[1] is not None
+    allowed = stamping_identity_set(from_agent, os.environ)
+    if to_agent not in allowed:
+        conn.close()
+        raise SystemExit(
+            f"bus_send: REFUSED — row {row_id} is addressed to '{to_agent}', not to "
+            f"{allowed} — never mark another lane's row read (fleet bus reconcile)."
+        )
+    cur.execute(
+        "UPDATE agent_messages SET read_at=coalesce(read_at, now()), "
+        "responded_at=CASE WHEN requires_response THEN coalesce(responded_at, now()) "
+        "ELSE responded_at END WHERE id=%s",
+        (row_id,),
+    )
+    conn.commit()
+    conn.close()
+    return was_read, to_agent
+
+
+# --stamp is a standalone mode: no row is sent, so every send-shaping flag is a
+# mode error. (dest, flag) pairs checked via getattr — same shape as the manual
+# send-args validation in main().
+_STAMP_EXCLUSIVE_FLAGS = (
+    ("to", "--to"), ("type", "--type"), ("subject", "--subject"),
+    ("priority", "--priority"), ("req", "--req"), ("thread", "--thread"),
+    ("reply_to", "--reply-to"), ("link_ask", "--link-ask"), ("body", "--body"),
+    ("body_file", "--body-file"), ("evidence", "--evidence"),
+    ("allow_pii", "--allow-pii"), ("to_base", "--to-base"),
+    ("allow_undeliverable", "--allow-undeliverable"),
+)
+
+
+def _main_stamp(args, from_agent: str) -> int:
+    clashes = [flag for dest, flag in _STAMP_EXCLUSIVE_FLAGS
+               if getattr(args, dest) not in (None, False)]
+    if clashes:
+        raise SystemExit(
+            f"bus_send: REFUSED — --stamp is a standalone mode (no row is sent); "
+            f"drop {', '.join(clashes)}."
+        )
+    if args.dry_run:
+        print(f"DRY RUN — would stamp row {args.stamp} read as {from_agent} "
+              "(read_at, + responded_at if requires_response; no insert).")
+        return 0
+    was_read, to_agent = stamp(args.stamp, from_agent)
+    note = " — was already read; coalesce keeps the original read_at" if was_read else ""
+    print(f"STAMPED id={args.stamp} to={to_agent} by={from_agent} — read_at set, "
+          f"zero rows inserted{note}.")
+    return 0
+
+
+def refuse_if_send_args_missing(args) -> None:
+    """A send still requires --to/--type/--subject/--priority (bus #43651's
+    original guard, moved from argparse required=True so --stamp mode can parse
+    without them). --priority stays default-less: a missing priority must
+    refuse, never fall to the table default 'P2' below the hub wake floor."""
+    missing = [
+        flag for dest, flag in (("to", "--to"), ("type", "--type"),
+                                ("subject", "--subject"), ("priority", "--priority"))
+        if getattr(args, dest) is None
+    ]
+    if not missing:
+        return
+    raise SystemExit(
+        f"bus_send: REFUSED — a send requires --to, --type, --subject and "
+        f"--priority (missing: {', '.join(missing)}). --priority has no default "
+        "(hub action-now asks MUST use P1, bus #43651). The only send-less mode "
+        "is --stamp <row-id>."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -702,6 +826,11 @@ def main(argv: list[str] | None = None) -> int:
     except IdentityError as e:
         print(f"bus_send: {e}", file=sys.stderr)
         return 2
+
+    if args.stamp is not None:
+        return _main_stamp(args, from_agent)
+
+    refuse_if_send_args_missing(args)
 
     body = resolve_body(args, sys.stdin)
     body = apply_pii_redaction(body, args.allow_pii, from_agent=from_agent, to=args.to, subject=args.subject)

@@ -34,9 +34,12 @@ def _no_inherited_secrets(monkeypatch):
 
 # ---- --priority is REQUIRED, no default ------------------------------------
 
-def test_priority_is_required():
-    with pytest.raises(SystemExit):
-        bs.build_parser().parse_args([
+def test_priority_is_required(monkeypatch):
+    # Enforced in main() (refuse_if_send_args_missing) since --stamp mode made
+    # the four send flags argparse-optional — same refusal, one level later.
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    with pytest.raises(SystemExit, match="--priority"):
+        bs.main([
             "--to", "cc-orchestrator", "--type", "update",
             "--subject", "s", "--req",
         ])
@@ -1125,3 +1128,124 @@ def test_clean_body_dry_run_has_no_redaction_notice(monkeypatch, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "redacted" not in captured.err
+
+
+# ---- --stamp (orch-console #66344, proposal #66340): mark one directed row
+# read with ZERO insert — the ack-tail killer. Fake psycopg2 connection (the
+# _FakeCursor/_FakeConn/_fake_send pattern from the --link-ask section) so the
+# REAL SQL stamp() builds is exercised, never a stand-in, and no live DB is
+# ever touched.
+
+def test_stamping_identity_set_base_plus_instance():
+    env = {"CC_BASE_AGENT_ID": "cc-substrate", "CC_AGENT_ID": "cc-substrate-4"}
+    assert bs.stamping_identity_set(None, env) == ["cc-substrate", "cc-substrate-4"]
+
+
+def test_stamping_identity_set_base_only_when_no_instance():
+    assert bs.stamping_identity_set(None, {"AGENT_ID": "cai"}) == ["cai"]
+
+
+def test_stamping_identity_set_appends_explicit_from():
+    env = {"CC_BASE_AGENT_ID": "cc-cosem-platform", "CC_AGENT_ID": "cc-cosem-platform-3"}
+    assert bs.stamping_identity_set("cc-cosem-platform-3", env) == \
+        ["cc-cosem-platform", "cc-cosem-platform-3"]
+
+
+def test_stamping_identity_set_no_env_still_allows_explicit_from():
+    assert bs.stamping_identity_set("orch-console", {}) == ["orch-console"]
+
+
+def test_stamp_flips_read_at_and_responded_at_on_rr_row(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[("cc-substrate-4", None)])
+    was_read, to_agent = bs.stamp(501, "cc-substrate-4", dsn="postgresql://unused")
+    assert (was_read, to_agent) == (False, "cc-substrate-4")
+    assert conn.committed is True
+    update = next(e for e in cur.executed if "UPDATE agent_messages" in e[0])
+    assert "read_at=coalesce(read_at, now())" in update[0]
+    # responded_at moves ONLY on requires_response rows (the #66344 contract's
+    # "+responded_at where RR") — the CASE pins that; non-RR rows keep NULL.
+    assert "WHEN requires_response THEN coalesce(responded_at, now())" in update[0]
+    assert "ELSE responded_at END" in update[0]
+    assert update[1] == (501,)
+
+
+def test_stamp_yields_zero_new_rows(monkeypatch):
+    # The #66344 contract's core: NO agent_messages insert, no operator_asks
+    # touch — the read_at flip is the whole effect.
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[("cc-substrate-4", None)])
+    bs.stamp(501, "cc-substrate-4", dsn="postgresql://unused")
+    assert not any("INSERT INTO agent_messages" in e[0] for e in cur.executed)
+    assert not any("operator_asks" in e[0].lower() for e in cur.executed)
+
+
+def test_stamp_is_idempotent_on_an_already_read_row(monkeypatch):
+    import datetime
+    cur, conn = _fake_send(
+        monkeypatch, fetch_queue=[("cc-substrate-4", datetime.datetime(2026, 10, 13, 12, 0, 0))],
+    )
+    was_read, _ = bs.stamp(501, "cc-substrate-4", dsn="postgresql://unused")
+    assert was_read is True
+    assert conn.committed is True  # still commits: an RR row read-early but
+    # responded-never can still get its responded_at on the re-stamp; coalesce
+    # keeps the ORIGINAL read_at either way.
+    update = next(e for e in cur.executed if "UPDATE agent_messages" in e[0])
+    assert "read_at=coalesce(read_at, now())" in update[0]
+
+
+def test_stamp_refuses_missing_row(monkeypatch):
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[None])
+    with pytest.raises(SystemExit, match="no agent_messages row with id=999"):
+        bs.stamp(999, "cc-substrate-4", dsn="postgresql://unused")
+    assert conn.committed is False
+
+
+def test_stamp_refuses_row_addressed_to_another_lane(monkeypatch):
+    # env is blank (autouse fixture) so the allowed set is just the explicit
+    # from_agent — a sibling instance's mail must never be stampable.
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[("cc-cosem-platform-1", None)])
+    with pytest.raises(SystemExit, match="never mark another lane's row read"):
+        bs.stamp(501, "cc-substrate-4", dsn="postgresql://unused")
+    assert conn.committed is False
+
+
+def test_stamp_mode_parses_without_any_send_args():
+    args = bs.build_parser().parse_args(["--stamp", "501"])
+    assert args.stamp == 501
+
+
+@pytest.mark.parametrize("extra", [
+    ["--to", "cc-orchestrator", "--type", "update", "--subject", "s", "--priority", "P3"],
+    ["--reply-to", "501"],
+    ["--body", "x" * 60],
+])
+def test_stamp_rejects_every_send_shaping_flag(monkeypatch, extra):
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    with pytest.raises(SystemExit, match="standalone mode"):
+        bs.main(["--stamp", "4242"] + extra)
+
+
+def test_stamp_dry_run_never_touches_db(monkeypatch, capsys):
+    import psycopg2
+
+    def _boom(*a, **k):
+        raise AssertionError("psycopg2.connect must not be called in --stamp --dry-run")
+
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate")
+    monkeypatch.setattr(psycopg2, "connect", _boom)
+    rc = bs.main(["--stamp", "501", "--dry-run"])
+    assert rc == 0
+    assert "DRY RUN" in capsys.readouterr().out
+
+
+def test_stamp_end_to_end_via_main(monkeypatch, capsys):
+    # main() -> stamp() resolves the DSN via dburl(); the blanked test env has
+    # no DATABASE_URL and this worktree has no .env file, so give it the same
+    # inert placeholder the direct-dsn tests use — psycopg2.connect is faked.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
+    cur, conn = _fake_send(monkeypatch, fetch_queue=[("cc-substrate-4", None)])
+    monkeypatch.setenv("CC_BASE_AGENT_ID", "cc-substrate-4")
+    rc = bs.main(["--stamp", "501"])
+    assert rc == 0
+    assert "STAMPED id=501" in capsys.readouterr().out
+    assert conn.committed is True
+    assert not any("INSERT INTO agent_messages" in e[0] for e in cur.executed)
