@@ -157,6 +157,15 @@ apply_provider_routing() {
     export ANTHROPIC_DEFAULT_OPUS_MODEL="$resolved_model"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="$resolved_model"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="$small"
+    # ANTHROPIC_SMALL_FAST_MODEL is the LEGACY name for the small/background
+    # slot that claude-code uses for its login/quota micro-check + background
+    # calls + auto-compaction. Newer CC reads ANTHROPIC_DEFAULT_HAIKU_MODEL for
+    # that slot and treats SMALL_FAST as legacy; OLDER CC reads only the legacy
+    # var. Unset, the slot falls back to an UNROUTED Claude model id -> called
+    # against the provider base with no Anthropic creds -> "Not logged in ·
+    # Please run /login" on the first turn (substrate-1 wedge, bus #65856).
+    # Export BOTH to $small so every CC version routes the small slot.
+    export ANTHROPIC_SMALL_FAST_MODEL="$small"
     export CLAUDE_CODE_SUBAGENT_MODEL="$resolved_model"
 
     PROVIDER_ROUTING_LABEL="$label"
