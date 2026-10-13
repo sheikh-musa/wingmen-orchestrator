@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.wingmen.cc-finance-monthly-burn</string>
+  <key>ProgramArguments</key><array><string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string><string>/Users/sheikhmusa/wingmen/orchestrator/scripts/monthly_burn_snapshot.py</string></array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/sheikhmusa</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <!-- Nazim's spec (agent_messages 65369, 2026-10-13): "1st of month 01:00 UTC,
+       posts a bus row to orch-console." StartCalendarInterval fires in the
+       HOST's local time zone, not UTC (same gotcha as
+       dev.wingmen.asks-daily-digest.plist, bus #44286 -- that file's comment
+       has the full story). This host (`date` checked 2026-10-13) runs
+       Asia/Singapore, UTC+8. 01:00 UTC = 09:00 SGT -> Day=1, Hour=9 below.
+       If this host's system clock zone ever changes, recompute Hour (same
+       class of drift that bit asks-daily-digest). NOT launchctl-loaded by
+       this PR -- landing this file alone does not make it live; Nazim loads
+       it at go-live (his call, not mine -- agent_messages 65369). -->
+  <key>StartCalendarInterval</key><dict><key>Day</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/cc-finance-monthly-burn.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/cc-finance-monthly-burn.log</string>
+</dict>
+</plist>
