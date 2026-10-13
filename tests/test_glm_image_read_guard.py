@@ -182,3 +182,36 @@ def test_claude_lane_unparseable_stdin_is_noop():
         input="not json", text=True, capture_output=True, env=env,
     )
     assert r.returncode == 0, r.stderr
+
+
+# ── Crash-hardening: _run() outer wrapper fails CLOSED on a routed lane and stays
+#    a pure no-op on a Claude lane (a PreToolUse exit != 0/2 is NON-blocking in CC,
+#    so an unhandled crash on a routed lane would otherwise let the image through).
+def _load_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("glm_guard_mod", str(HOOK))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_crash_on_routed_lane_fails_closed(monkeypatch):
+    mod = _load_module()
+
+    def boom():
+        raise RuntimeError("unexpected guard failure")
+
+    monkeypatch.setattr(mod, "main", boom)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
+    assert mod._run() == 2  # routed + crash -> BLOCK (fail-closed)
+
+
+def test_crash_on_claude_lane_is_noop(monkeypatch):
+    mod = _load_module()
+
+    def boom():
+        raise RuntimeError("unexpected guard failure")
+
+    monkeypatch.setattr(mod, "main", boom)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    assert mod._run() == 0  # claude + crash -> NO-OP (never block a normal lane)

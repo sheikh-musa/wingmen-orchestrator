@@ -184,5 +184,29 @@ def main() -> int:
     return 0
 
 
+def _run() -> int:
+    """Outer fail-closed wrapper. A PreToolUse hook that exits with a code OTHER
+    than 0 (allow) or 2 (block) is a NON-blocking error in Claude Code — the tool
+    call PROCEEDS. For a data-residency wall that is the wrong default on a crash:
+    an unexpected exception on a ROUTED lane must fail CLOSED (exit 2), never let
+    the image through. A Claude lane must stay a pure no-op even on a crash, so we
+    only convert to a block when the lane is actually routed."""
+    try:
+        return main()
+    except Exception:
+        try:
+            routed = is_provider_routed()
+        except Exception:
+            routed = True  # cannot even classify the lane -> fail closed
+        if routed:
+            sys.stderr.write(
+                "BLOCKED by glm_image_read_guard: the guard hit an unexpected error and "
+                "this lane is routed to a non-Anthropic provider; refusing the tool call "
+                "(fail-closed — an image must never slip through on a guard crash).\n"
+            )
+            return 2
+        return 0  # Claude lane: crash is a pure no-op, never block a normal lane
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run())
