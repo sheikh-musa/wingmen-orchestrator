@@ -75,11 +75,20 @@ def fetch_burn_totals(conn) -> dict:
 
 def render_full_report(rows: list, totals: dict, month: str) -> str:
     """The full per-line markdown report, written to ledger/reports/."""
+    # finance_burn's SUM()-based columns come back NULL (not absent) once no
+    # row qualifies — e.g. upcoming_burn after the last 'upcoming' row got
+    # cancelled (lived 2026-10-13: do-vps-sgp1 cancelled, upcoming_burn went
+    # NULL). `.get(key, 0)` only covers a MISSING key, not a present-but-None
+    # value, so every numeric field here is defensively coerced.
+    active_burn = totals.get("active_burn") or 0
+    active_burn_confirmed = totals.get("active_burn_confirmed") or 0
+    unconfirmed_rows = totals.get("unconfirmed_rows") or 0
+    upcoming_burn = totals.get("upcoming_burn") or 0
     lines = [f"# Fleet monthly burn — {month} (auto-snapshot)", ""]
-    lines.append(f"Active burn: S${totals.get('active_burn', 0)}/mo "
-                 f"(S${totals.get('active_burn_confirmed', 0)} confirmed, "
-                 f"{totals.get('unconfirmed_rows', 0)} unconfirmed rows). "
-                 f"Upcoming: S${totals.get('upcoming_burn', 0)}/mo.")
+    lines.append(f"Active burn: S${active_burn}/mo "
+                 f"(S${active_burn_confirmed} confirmed, "
+                 f"{unconfirmed_rows} unconfirmed rows). "
+                 f"Upcoming: S${upcoming_burn}/mo.")
     lines.append("")
     lines.append("| Name | Vendor | Category | Status | S$/mo | Confirmed | Owner |")
     lines.append("|---|---|---|---|---|---|---|")
@@ -97,9 +106,9 @@ def render_bus_summary(rows: list, totals: dict, month: str) -> str:
     """Short version for the agent_messages bus row — Nazim relays what matters."""
     unconfirmed = [r for r in rows if not r["confirmed"] and r["status"] == "active"]
     lines = [
-        f"📊 Monthly burn snapshot ({month}): S${totals.get('active_burn', 0)}/mo active "
-        f"(S${totals.get('active_burn_confirmed', 0)} confirmed, "
-        f"{totals.get('unconfirmed_rows', 0)} unconfirmed rows)."
+        f"📊 Monthly burn snapshot ({month}): S${totals.get('active_burn') or 0}/mo active "
+        f"(S${totals.get('active_burn_confirmed') or 0} confirmed, "
+        f"{totals.get('unconfirmed_rows') or 0} unconfirmed rows)."
     ]
     if unconfirmed:
         names = ", ".join(r["name"] for r in unconfirmed)
