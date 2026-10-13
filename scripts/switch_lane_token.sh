@@ -87,6 +87,14 @@ RESUME_MODE="${SWITCH_RESUME_MODE:-summary}"   # default SUMMARY (#34, bus 22582
 DRAIN="${SWITCH_DRAIN:-0}"
 RELAUNCH="${SWITCH_RELAUNCH:-0}"
 DRAIN_TIMEOUT="${SWITCH_DRAIN_TIMEOUT:-240}"
+# --fresh (op#29665): force a NO-RESUME relaunch by skipping resume-session resolution,
+# so the lane boots a CLEAN context (no `-- --resume <id>` forwarded). For a deliberate
+# clean-context move — e.g. flipping a lane onto a text-only GLM model, where resuming a
+# Claude transcript (image blocks + Claude-specific thinking/tool artifacts) is wrong and
+# would burn the whole old context at provider rates every turn. A fresh relaunch LOSES
+# the live conversation, so it WARNS LOUDLY that a pre-written handoff is the only
+# reconstitution source.
+FRESH="${SWITCH_FRESH:-0}"
 SESS=""
 TOKFILE=""
 for a in "$@"; do
@@ -98,11 +106,12 @@ for a in "$@"; do
     --full) RESUME_MODE=full ;;
     --drain) DRAIN=1 ;;
     --relaunch) RELAUNCH=1 ;;   # same-account restart for identity/env repair (op#20540 CC_BASE_OVERRIDE drift)
+    --fresh) FRESH=1 ;;         # op#29665: force NO-RESUME relaunch (clean context) — skip resume resolution
     *) if [ -z "$SESS" ]; then SESS="$a"; elif [ -z "$TOKFILE" ]; then TOKFILE="$a"; fi ;;
   esac
 done
-[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] <tmux-session> <token-file>" >&2; exit 2; }
-[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$SESS" ]    || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] [--fresh] <tmux-session> <token-file>" >&2; exit 2; }
+[ -n "$TOKFILE" ] || { echo "usage: switch_lane_token.sh [--force] [--dry-run] [--summary] [--drain] [--fresh] <tmux-session> <token-file>" >&2; exit 2; }
 
 # ── 1. Token-file validation (fail-closed, loud) ─────────────────────────────
 [ -r "$TOKFILE" ] || { echo "ERROR: token file not readable: $TOKFILE" >&2; exit 3; }
@@ -165,11 +174,22 @@ fi
 # replaced only '/', so a DOTTED worktree found NO session and relaunched FRESH,
 # silently LOSING the lane's context (the irsyad-coord incident this fixes).
 # Resolve BEFORE the kill. No session found → RESUME_ID empty → FRESH (logged loud).
-RESUME_ID="$(resolve_resume_session "$WORKTREE")"
-if [ -n "$RESUME_ID" ]; then
-  echo "[switch_lane_token] active session resolved: $RESUME_ID (will RESUME on the new account)"
+if [ "$FRESH" = "1" ]; then
+  # --fresh (op#29665): deliberately DO NOT resolve/resume a session — force a clean
+  # context. RESUME_ID stays empty so the launch path forwards NO `-- --resume <id>`.
+  # A fresh relaunch LOSES the live conversation, so warn LOUDLY: a pre-written handoff
+  # is the ONLY reconstitution source (the caller's procedure writes one at a clean seam
+  # before invoking --fresh; verify it exists).
+  RESUME_ID=""
+  echo "[switch_lane_token] ⚠⚠ --fresh: forcing a NO-RESUME relaunch of '$SESS' — the live conversation will NOT be resumed and its context is LOST. The lane must boot from a FRESH HANDOFF; ensure one was written at this seam BEFORE this run (op#29665 clean GLM-move procedure)." >&2
 else
-  echo "[switch_lane_token] ⚠ no active claude session found for worktree $WORKTREE — will relaunch FRESH (context NOT preserved)"
+  # Resolve BEFORE the kill. No session found → RESUME_ID empty → FRESH (logged loud).
+  RESUME_ID="$(resolve_resume_session "$WORKTREE")"
+  if [ -n "$RESUME_ID" ]; then
+    echo "[switch_lane_token] active session resolved: $RESUME_ID (will RESUME on the new account)"
+  else
+    echo "[switch_lane_token] ⚠ no active claude session found for worktree $WORKTREE — will relaunch FRESH (context NOT preserved)"
+  fi
 fi
 
 # ── 3. Capture BEFORE fingerprint from agent_status ──────────────────────────
@@ -302,6 +322,8 @@ if [ "$DRY" = "1" ]; then
   fi
   if [ -n "$RESUME_ID" ]; then
     echo "  would RESUME conversation: $RESUME_ID  (prior turns replay; identity + context preserved)"
+  elif [ "$FRESH" = "1" ]; then
+    echo "  would relaunch FRESH (--fresh FORCED): NO --resume — clean context; the lane MUST boot from a fresh handoff (context not preserved)"
   else
     echo "  would relaunch FRESH: no prior session found to resume for this worktree"
   fi
