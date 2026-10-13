@@ -5,10 +5,20 @@ keep track of our monthly burn. add the glm costs as well.")
 
 Reads finance_subscriptions + the finance_burn view (substrate DB), renders a
 plain-text snapshot, writes the full version to
-~/wingmen/projects/finance/ledger/reports/monthly-burn-<YYYY-MM>.md, and posts
-a short summary as a bus row (agent_messages, from_agent='cc-finance',
+~/wingmen/projects/finance/ledger/reports/monthly-burn-<YYYY-MM>-snapshot.md
+(the "-snapshot" suffix deliberately avoids colliding with a hand-built
+monthly-burn-<YYYY-MM>.md, e.g. the first version at
+ledger/reports/monthly-burn-2026-10.md — a --force run must never overwrite
+a hand-built methodology doc the snapshot itself links to), and posts a
+short summary as a bus row via scripts/bus_send.py (from_agent='cc-finance',
 to_agent='orch-console') — per Nazim's ruling, this goes to HIM, never
 directly to Musa; he relays what's worth surfacing.
+
+Posts via scripts/bus_send.py, never a hand-written INSERT INTO
+agent_messages (CLAUDE.md, bus #43651 — a hand-written INSERT once left
+`priority` off the column list and the row silently landed at the table
+default, below the hub's wake floor; bus_send.py makes --priority a required
+argument so that mistake can't recur silently).
 
 Deliberately simple, same shape as scripts/asks_daily_digest.py: at most one
 post per calendar month (a persisted month-stamp in
@@ -113,7 +123,7 @@ def render_bus_summary(rows: list, totals: dict, month: str) -> str:
     if unconfirmed:
         names = ", ".join(r["name"] for r in unconfirmed)
         lines.append(f"Still unconfirmed: {names}.")
-    lines.append(f"Full table: projects/finance/ledger/reports/monthly-burn-{month}.md")
+    lines.append(f"Full table: projects/finance/ledger/reports/monthly-burn-{month}-snapshot.md")
     return " ".join(lines)
 
 
@@ -133,16 +143,25 @@ def _mark_posted(month: str) -> None:
         pass
 
 
-def post_bus_row(conn, summary: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO agent_messages "
-            "(from_agent, to_agent, message_type, subject, body, requires_response, priority, posted_by_identity) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            ("cc-finance", "orch-console", "update",
-             "Monthly burn snapshot (automated, op#29595)", summary, False, "P3", "cc-finance"),
-        )
-    conn.commit()
+def post_bus_row(summary: str) -> None:
+    """Posts via scripts/bus_send.py — NEVER a hand-written INSERT INTO
+    agent_messages (CLAUDE.md, bus #43651). Shelled out (not imported) so
+    this script stays decoupled from bus_send.py's internals, same pattern
+    asks_daily_digest.py uses for its own send via nazim_send.sh."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            sys.executable, str(ORCH / "scripts" / "bus_send.py"),
+            "--to", "orch-console", "--type", "update",
+            "--subject", "Monthly burn snapshot (automated, op#29595)",
+            "--priority", "P3", "--from", "cc-finance",
+            "--body", summary,
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"bus_send.py failed: {result.stderr.strip()}")
 
 
 def main(argv=None) -> int:
@@ -174,13 +193,17 @@ def main(argv=None) -> int:
             print(render_bus_summary(rows, totals, month))
             return 0
 
-        report_path = FINANCE_REPO / "ledger" / "reports" / f"monthly-burn-{month}.md"
+        report_path = FINANCE_REPO / "ledger" / "reports" / f"monthly-burn-{month}-snapshot.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(render_full_report(rows, totals, month))
 
         summary = render_bus_summary(rows, totals, month)
-        post_bus_row(conn, summary)
 
+    # bus_send.py opens its own connection — outside the `with` block above
+    # so the read connection is released first; a bus_send failure raises
+    # (not caught here) so _mark_posted below is skipped and a retry next
+    # run will actually re-post, not silently believe it already happened.
+    post_bus_row(summary)
     _mark_posted(month)
     print(f"monthly_burn_snapshot: posted for {month}, wrote {report_path}")
     return 0
