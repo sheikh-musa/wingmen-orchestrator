@@ -103,10 +103,10 @@ def main():
         elif not last:
             new_lines.append(f"origin/{br} BASELINE set at {head[:8]} — no prior state, future commits will be flagged.")
 
-    # write state
-    STATE.write_text("\n".join(f"{b} {s}" for b, s in updated.items()) + "\n")
-
+    state_text = "\n".join(f"{b} {s}" for b, s in updated.items()) + "\n"
     if not new_lines:
+        # nothing to post — advancing watermarks now cannot lose anything
+        STATE.write_text(state_text)
         print(f"[adcda_watch] {ts}: no new commits on {WATCHED_BRANCHES}")
         return
 
@@ -115,6 +115,9 @@ def main():
             "add the ones that belong in the platform to the port backlog, and report which to orch-console. "
             "This is DETECTION; the port-fit judgement is yours.\n\n" + "\n\n".join(new_lines))
     rid = _post_bus(env, "cc-cosem-platform", "ADCDA app changed — assess new commits for porting", body)
+    # advance watermarks only AFTER the post succeeded — a failed post leaves the old
+    # state so the next run re-emits these commits (at-least-once, bus #66195)
+    STATE.write_text(state_text)
     print(f"[adcda_watch] {ts}: posted {len(new_lines)} branch-delta(s) to cc-cosem-platform as #{rid}")
 
 
