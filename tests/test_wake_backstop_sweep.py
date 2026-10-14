@@ -886,3 +886,102 @@ def test_h_pending_row_not_cleared_when_wake_still_fails():
                    agent_host_rows=_local_rows(), this_host="Sheikhs-Mini",
                    mark=lambda ids: [], escalate=lambda s, b: None, escalated_seen=set())
     assert woke_cleared == []         # still pending: retried next pass
+
+
+# ---- quiet switch, SWEEP side (bus#66792/#66802, gate #67032, held_commitment #440) ----
+# PR#401 gated the REALTIME doorbell on agent_wake.is_wake_suppressed_by_pause but left this
+# separate KeepAlive sweep untouched: it re-woke ANY eligible cc-* target on every grace cycle
+# regardless of fleet_lanes.desired_state, defeating the pause. These tests lock that the sweep
+# now runs every wake target through the SAME canonical predicate (never a forked policy) right
+# before the wake loop, with the identical P0-override / fail-open invariants as realtime.
+
+def test_paused_lane_with_fresh_p2_row_is_not_woken_by_sweep():
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-cosem-adcda-1", 1, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: "paused")
+    assert calls == []                                  # the wake keystroke never fires
+    assert res["woke"] == [] and res["targets"] == []
+    assert res["paused_suppressed"] == ["cc-cosem-adcda-1"]
+
+
+def test_paused_lane_with_fresh_p0_row_still_woken_by_sweep():
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-cosem-adcda-1", 2, priority="P0")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: "paused")
+    assert calls == ["cc-cosem-adcda-1"]                 # P0 is an unconditional override
+    assert res["woke"] == ["cc-cosem-adcda-1"]
+    assert res["paused_suppressed"] == []
+
+
+def test_paused_lane_p0_overrides_even_alongside_an_unread_p2_to_the_same_agent():
+    # a paused lane with BOTH a P2 and a P0 fresh row -> still woken (any P0 present overrides).
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-cosem-adcda-1", 10, priority="P2"), _row("cc-cosem-adcda-1", 11, priority="P0")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: "paused")
+    assert calls == ["cc-cosem-adcda-1"]
+    assert res["paused_suppressed"] == []
+
+
+def test_desired_state_lookup_error_fails_open_sweep_still_wakes():
+    # (3) a fleet_lanes read error/timeout must fail OPEN here too — a DB hiccup must never
+    # silently turn into a permanent, unexplained non-wake. is_wake_suppressed_by_pause owns
+    # this contract; the sweep supplies only the (failing) lookup.
+    def boom(agent):
+        raise RuntimeError("db unavailable")
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-quality", 3, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=boom)
+    assert calls == ["cc-quality"]
+    assert res["paused_suppressed"] == []
+
+
+def test_lane_not_found_fails_open_sweep_still_wakes():
+    # no fleet_lanes row at all (agent not registered as a lane) -> not suppressed.
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-brand-new", 4, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: None)
+    assert calls == ["cc-brand-new"]
+    assert res["paused_suppressed"] == []
+
+
+def test_up_lane_wakes_normally_through_the_same_sweep_veto():
+    calls = []
+    def fake_wake(agent, reason="", dry_run=False, now=None, row_id=None):
+        calls.append(agent)
+        return {"woke": True}
+    rows = [_row("cc-quality", 5, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=fake_wake, desired_state_of=lambda a: "up")
+    assert calls == ["cc-quality"]
+    assert res["paused_suppressed"] == []
+
+
+def test_paused_wake_veto_does_not_disturb_quiesce_logic_for_other_agents():
+    # a paused-but-fresh row to one agent, alongside a capped-and-dead row to ANOTHER agent in
+    # the same pass: the pause veto must only ever touch the wake decision, never the
+    # independent capped/quiesce classification below it.
+    marked, pages, mark, page = _collector()
+    rows = [_row_ts("cc-cosem-adcda-1", 20, age_s=0, priority="P2"),
+            _row_ts("cc-cosem-platform", 21, age_s=10_000, priority="P2")]
+    res = wbs.sweep_once(rows=rows, wake=lambda a, **k: {"woke": False, "why": "no live session"},
+                         now_dt=_NOW, cap_age_s=390, mark=mark, escalate=page,
+                         matching_hbs=lambda a: [], desired_state_of=lambda a: (
+                             "paused" if a == "cc-cosem-adcda-1" else "down"),
+                         base_of=lambda a: None, escalated_seen=set())
+    assert res["paused_suppressed"] == ["cc-cosem-adcda-1"]   # the fresh paused row: wake vetoed
+    assert res["dead_foreign"] == ["cc-cosem-platform"]       # the capped row: quiesce unaffected
+    assert marked == [21]

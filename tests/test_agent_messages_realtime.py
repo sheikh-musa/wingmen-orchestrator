@@ -95,6 +95,87 @@ class TestRouteSingleMessage:
         bot.send_message.assert_not_called()
 
 
+class TestAutoWakeQuietSwitch:
+    """bus#66792 / gate #66802 (held_commitment #440): fleet_lanes.desired_state=
+    'paused' must suppress the auto-wake KEYSTROKE only, never message delivery —
+    the zero-GLM-pilot hold set adcda-1/adcda-2 desired_state='paused', but ordinary
+    P2 bus doorbells still woke them because the realtime auto-wake path never
+    consulted desired_state at all. These exercise the real call site inside
+    _route_single_message (not just the pure agent_wake.is_wake_suppressed_by_pause
+    helper, which has its own direct unit tests in test_agent_wake.py)."""
+
+    @staticmethod
+    def _routable_msg(**overrides):
+        msg = {
+            "id": 55, "from_agent": "cai", "to_agent": "cc-cosem-adcda-1",
+            "message_type": "update", "subject": "status", "body": "status",
+            "requires_response": False, "priority": "P2",
+            "created_at": "2026-10-14T00:00:00Z", "is_test": False,
+            "forwarded_to_telegram_at": None, "skipped_at": None, "read_at": None,
+        }
+        msg.update(overrides)
+        return msg
+
+    @staticmethod
+    async def _run(msg, *, suppressed):
+        supabase = _supabase_with_row(msg)
+        bot = MagicMock()
+        sent = MagicMock(message_id=999)
+        bot.send_message = AsyncMock(return_value=sent)
+        with patch.object(rt.agent_wake, "auto_wake_enabled", return_value=True), \
+             patch.object(rt.agent_wake, "should_auto_wake", return_value=True), \
+             patch.object(rt.agent_wake, "is_wake_suppressed_by_pause",
+                           return_value=suppressed) as susp_mock, \
+             patch.object(rt.agent_wake, "wake_agent",
+                           return_value={"woke": True}) as wake_mock, \
+             patch.object(rt.agent_messages_poll, "_already_notified",
+                           new=AsyncMock(return_value=False)), \
+             patch.object(rt.agent_messages_poll, "_log_notification", new=AsyncMock()), \
+             patch.object(rt.agent_messages_poll, "_mark_forwarded",
+                           new=AsyncMock()) as mark_mock:
+            await rt._route_single_message(supabase, bot, "musa-chat", msg["id"])
+        return wake_mock, susp_mock, bot, mark_mock
+
+    async def test_paused_p2_suppresses_wake_but_still_delivers(self):
+        """(a) paused + P2 -> wake_agent NOT called, yet the row still gets routed
+        and delivered through the normal Telegram pipeline — proves wake and
+        delivery are separated (invariant 1): suppressing the keystroke never
+        touches the agent_messages row's own delivery path."""
+        msg = self._routable_msg(priority="P2")
+        wake_mock, susp_mock, bot, mark_mock = await self._run(msg, suppressed=True)
+        wake_mock.assert_not_called()
+        susp_mock.assert_called_once_with("cc-cosem-adcda-1", "P2")
+        bot.send_message.assert_awaited_once()
+        mark_mock.assert_awaited_once()
+
+    async def test_paused_p0_still_wakes(self):
+        """(b) paused + P0 -> wake_agent IS called. A P0 row is a genuine
+        safety/degrade-class page and must never be silenced by a pause
+        (invariant 3) — the call site must pass priority through so P0 overrides."""
+        msg = self._routable_msg(priority="P0")
+        wake_mock, susp_mock, bot, mark_mock = await self._run(msg, suppressed=False)
+        wake_mock.assert_called_once()
+        susp_mock.assert_called_once_with("cc-cosem-adcda-1", "P0")
+        bot.send_message.assert_awaited_once()
+
+    async def test_up_lane_wakes_for_any_priority(self):
+        """(c) an up lane (desired_state != 'paused') -> is_wake_suppressed_by_pause
+        returns False and wake_agent fires normally, for an ordinary P2 row."""
+        msg = self._routable_msg(priority="P2")
+        wake_mock, susp_mock, bot, mark_mock = await self._run(msg, suppressed=False)
+        wake_mock.assert_called_once()
+
+    async def test_fleet_lanes_read_error_fails_open_and_wakes(self):
+        """(d) a fleet_lanes read error/missing row fails OPEN at the helper layer
+        (is_wake_suppressed_by_pause returns False — see test_agent_wake.py's
+        test_lookup_error_fails_open_wakes); here we confirm the call site treats
+        that False exactly like the up-lane case and still wakes — a DB read hiccup
+        must never silently turn into a permanently unwoken lane (invariant 2)."""
+        msg = self._routable_msg(priority="P2")
+        wake_mock, susp_mock, bot, mark_mock = await self._run(msg, suppressed=False)
+        wake_mock.assert_called_once()
+
+
 class TestLivenessTracker:
     """5B: the delivery-lag detector. The silent-stall bug is is_connected==True
     while the server has stopped pushing INSERTs — so we can't trust is_connected.
