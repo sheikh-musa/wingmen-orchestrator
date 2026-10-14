@@ -49,6 +49,7 @@ from agent_wake import (  # noqa: E402  (same-dir module; nervous_system on sys.
     auto_wake_enabled,
     clear_pending,
     is_wake_eligible_recipient,
+    is_wake_suppressed_by_pause,
     pending_rows,
     resolve_tmux_session,
     should_backstop_wake,
@@ -603,6 +604,18 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
       LOOKUP-FAILED (amend C fail-closed) — the desired_state veto lookup errored/ambiguous →
         NEVER quiesce on an unprovable check; escalate for a human. Once-guarded.
 
+    QUIET SWITCH (bus#66792/#66802/#67032, held_commitment #440): before any wake(), each
+    eligible_recipients(fresh) target is run through the SAME canonical predicate the realtime
+    doorbell uses — agent_wake.is_wake_suppressed_by_pause — so a fleet_lanes.desired_state=
+    'paused' lane is not re-woken by this separate KeepAlive daemon either (the gap the gate
+    review (#67032) found: this sweep bypassed the quiet switch entirely). A target with ANY
+    fresh P0 row is never checked (P0 is an unconditional override, same invariant as realtime);
+    otherwise the pause check reuses THIS module's own injectable `desired_state_of` (same lane-
+    or-base_agent_id match as agent_wake's default) so the sweep stays hermetically testable with
+    no new DB dependency. is_wake_suppressed_by_pause fails OPEN (wakes) on any lookup error —
+    the sweep does not re-implement that; it only supplies the lookup. Suppressing the wake never
+    touches delivery, quiesce, or the stuck-page machinery below — those are untouched by this.
+
     The two NON-quiescing escalations (re-address, lookup-failed) share one process-level guard
     keyed (kind, agent) — see _ESCALATED_SEEN. Injectable deps make it unit-testable without
     DB/tmux; dry_run classifies but mutates nothing (honors AUTO_WAKE_ENABLED)."""
@@ -636,6 +649,33 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
     fresh = [r for r in rows if not is_capped(r, now_dt, cap_age_s, deliveries, cap_deliveries)]
 
     targets = eligible_recipients(fresh)
+    # QUIET SWITCH (held_commitment #440, gate #67032): a target is dropped from `targets` (never
+    # woken) iff agent_wake.is_wake_suppressed_by_pause says so for it — the SAME canonical
+    # predicate the realtime doorbell gates on, never a forked/reimplemented check here. A target
+    # with any fresh P0 row skips the check entirely (P0 is an unconditional override, so there is
+    # nothing it could be suppressed by); for every other target we pass a representative non-P0
+    # priority from its own fresh rows (the predicate only distinguishes P0 from everything else,
+    # so any one of them yields the same answer) and this module's own `desired_state_of` lookup,
+    # which already fails CLOSED for the quiesce veto above but is wrapped by
+    # is_wake_suppressed_by_pause in a try/except that fails OPEN (wakes) for THIS check — the
+    # fail-open contract lives in agent_wake, not duplicated here.
+    _fresh_priorities: dict = {}
+    for r in fresh:
+        _fresh_priorities.setdefault(_to_agent(r), []).append(_rf(r, 4, "priority"))
+    paused_suppressed: list = []
+    if targets:
+        _kept: list = []
+        for a in targets:
+            prios = _fresh_priorities.get(a, [])
+            if any(p == "P0" for p in prios):
+                _kept.append(a)                     # P0 present -> unconditional override
+                continue
+            rep_prio = next((p for p in prios if p), "P2")
+            if is_wake_suppressed_by_pause(a, rep_prio, desired_state_of=desired_state_of):
+                paused_suppressed.append(a)
+            else:
+                _kept.append(a)
+        targets = _kept
     # Per-row ceiling (Nazim #43063): key each agent's wake to a STABLE representative row —
     # its oldest (min id) fresh unread row. If that same stale row keeps driving the wake,
     # lane_nudge's per-row ceiling bounds re-delivery across successive sweeps (the storm
@@ -851,7 +891,8 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             "dead_foreign": dead_foreign, "live_stuck": live_stuck, "readdress": readdress,
             "vetoed": vetoed, "lookup_failed": lookup_failed, "stuck_paged": stuck_paged,
             "stuck_suppressed": stuck_suppressed, "escalations": escalations,
-            "foreign_live": foreign_live, "pending_retried": pending_retried}
+            "foreign_live": foreign_live, "pending_retried": pending_retried,
+            "paused_suppressed": paused_suppressed}
 
 
 # ── idle-while-unread nudge (Fable audit follow-up, orch-console bus #46860 item 2) ──
