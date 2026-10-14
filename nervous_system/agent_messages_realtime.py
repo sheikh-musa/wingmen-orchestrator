@@ -173,22 +173,34 @@ async def _route_single_message(
         bool(msg.get("requires_response")), msg.get("priority", "P2"),
         bool(msg.get("is_test")),
     ):
-        try:
-            # row_id → per-row delivery ceiling + PENDING-RETRY marker on a transient outcome
-            # (Fable audit 2026-09-30 B-1 (iii)): a busy/debounced/rc=3 doorbell is no longer a
-            # single dropped attempt — the backstop sweep retries the row before its grace.
-            res = await asyncio.to_thread(agent_wake.wake_agent, msg["to_agent"], f"msg #{msg_id}",
-                                          row_id=msg_id)
-            logger.info(f"realtime: auto-wake {msg.get('to_agent')} for #{msg_id}: {res}")
-            if res.get("alert_due") and bot and musa_chat_id:
-                await bot.send_message(
-                    chat_id=musa_chat_id,
-                    text=(f"⚠️ wake cap: {msg['to_agent']} hit {res.get('count')} wakes/5min "
-                          f"— possible loop. Auto-wake paused for it; msg #{msg_id} still on the bus."),
-                )
-        except Exception as e:
-            logger.error(f"realtime: auto-wake failed for #{msg_id}: {e}")
-            track_exception("agent_messages_realtime.auto_wake", e)
+        # Quiet switch (bus#66792/#66802, held_commitment #440): fleet_lanes.
+        # desired_state='paused' suppresses ONLY the wake keystroke below — the row
+        # itself already landed via the plain INSERT and the rest of this function
+        # (Telegram routing/delivery) runs unchanged either way. P0 always overrides
+        # (see agent_wake.is_wake_suppressed_by_pause); any desired_state read error
+        # fails OPEN (treated as not-paused, so the wake still fires).
+        if agent_wake.is_wake_suppressed_by_pause(msg.get("to_agent"), msg.get("priority", "P2")):
+            logger.info(
+                f"realtime: auto-wake suppressed for {msg.get('to_agent')} on #{msg_id} "
+                f"(desired_state=paused, priority={msg.get('priority', 'P2')})"
+            )
+        else:
+            try:
+                # row_id → per-row delivery ceiling + PENDING-RETRY marker on a transient outcome
+                # (Fable audit 2026-09-30 B-1 (iii)): a busy/debounced/rc=3 doorbell is no longer a
+                # single dropped attempt — the backstop sweep retries the row before its grace.
+                res = await asyncio.to_thread(agent_wake.wake_agent, msg["to_agent"], f"msg #{msg_id}",
+                                              row_id=msg_id)
+                logger.info(f"realtime: auto-wake {msg.get('to_agent')} for #{msg_id}: {res}")
+                if res.get("alert_due") and bot and musa_chat_id:
+                    await bot.send_message(
+                        chat_id=musa_chat_id,
+                        text=(f"⚠️ wake cap: {msg['to_agent']} hit {res.get('count')} wakes/5min "
+                              f"— possible loop. Auto-wake paused for it; msg #{msg_id} still on the bus."),
+                    )
+            except Exception as e:
+                logger.error(f"realtime: auto-wake failed for #{msg_id}: {e}")
+                track_exception("agent_messages_realtime.auto_wake", e)
 
     # WAKE-ONLY (Gap B): the standalone Mini subscriber (agent_wake_subscriber.py)
     # does ONLY the #111 doorbell and MUST NOT run the Telegram-forward pipeline
