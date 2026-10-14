@@ -1010,11 +1010,46 @@ cd "$CALLER_DIR"
 # CLAUDE_PASSTHROUGH was populated by the single-pass arg parser at the top of
 # this script; use it directly.
 
-if [ -n "$LAUNCH_CONTEXT" ] && [ ${#CLAUDE_PASSTHROUGH[@]} -eq 0 ]; then
+# bus #58267/#58273 (held_commitment #360) fix: this USED to gate on
+# `[ ${#CLAUDE_PASSTHROUGH[@]} -eq 0 ]` — i.e. "skip the injection whenever
+# ANY passthrough arg is present." That was written (BUG-011, pre-dates
+# --scheduled-prompt existing as its own flag) back when the only passthrough
+# case in practice was the scheduled-sweep's non-interactive `-p` call, and the
+# comment at the time ("Resume / passthrough mode — context already in
+# session, no -p injection") conflated "has passthrough args" with "is a
+# resumed/non-interactive session that doesn't need it."
+#
+# That conflation is the bug: `-- --resume <id>` is ALSO passthrough (it's how
+# an operator or switch_lane_token.sh's conversation-preserving re-token
+# relaunches a lane), but a resumed session's PRIOR conversation does NOT
+# contain mail that landed, or was address-variant-missed, between sessions —
+# "context already in session" is false for exactly the unread-inbox rows this
+# mechanism exists to surface. Every `--resume` relaunch was silently skipping
+# the injection entirely, stranding that mail (verified: Claude Code's
+# SessionStart hook DOES fire on `--resume`/`--continue`, with `source=resume`,
+# and an empty matcher — ours — matches every source, so there is no hook-side
+# reason to skip it on resume).
+#
+# The one passthrough case that genuinely should NOT get this injection is
+# scheduled-sweep mode, and the script already has a precise, authoritative
+# signal for that: $SCHEDULED_PROMPT_FILE (set only by the explicit
+# --scheduled-prompt flag scheduled_cc_sweep.sh passes — see the parser at the
+# top of this file). Scheduled mode doesn't need it: skills/scheduled-sweep-
+# prompt.md Step 1 already runs its own (more careful, dedup/priority-aware,
+# read_at/responded_at-disciplined) unread-inbox query, and the sweep is
+# turn-bounded (--max-turns 20) so prepending the full world-state/governance
+# block would burn turns on a budget that query doesn't need. So gate on
+# $SCHEDULED_PROMPT_FILE directly instead of inferring it from passthrough
+# shape — this also means a bare manual `-- -p "..."` one-off (no
+# --scheduled-prompt) now gets the injection too, same as a fresh interactive
+# launch; that's a strict improvement, not a behavior this fix needs to avoid.
+if [ -n "$LAUNCH_CONTEXT" ] && [ -z "$SCHEDULED_PROMPT_FILE" ]; then
     # BUG-011 fix: write context to temp file. The SessionStart hook in
     # ~/.claude/settings.local.json reads and deletes the file, injecting it
     # as a system-reminder on startup. Piping via stdin (or -p) makes claude
     # exit after processing the input — the session would not be interactive.
+    # Fires for a resumed session too (source=resume on an empty matcher), so
+    # this now correctly covers `--resume` relaunches, not just fresh boots.
     echo "$LAUNCH_CONTEXT" > /tmp/cc_launch_ctx.txt
     echo -e "${TEAL}  Context staged → /tmp/cc_launch_ctx.txt (SessionStart hook will inject)${RESET}"
 fi
