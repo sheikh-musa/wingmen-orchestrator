@@ -20,12 +20,25 @@ Detect-only by default (--dry-run implied unless --page is passed). A page
 is an agent_messages row to orch-console, deduped per instance via a JSON
 state file (re-page at most once per PAGE_COOLDOWN_MIN while the condition
 persists) — never a silent monitor (CLAUDE.md dead-man's-switch discipline).
+
+bus#58273 (held_commitment #360): paging orch-console alone still routes the
+fix through a human (console relays it) even though the affected LANE is
+demonstrably alive right now (that's the whole precondition for this
+detector firing) and could just be told directly. So on a --page run this
+ALSO nudges the affected lane's own tmux session via the fleet's sanctioned
+verified-submit wrapper (scripts/lane_nudge.sh) — telling it in its own pane
+to check `to_agent IN (base, instance)`. The console page stays (kept for
+observability / in case the lane doesn't act), the lane nudge is additive.
+Lane-nudge failure (no tmux_session on record, no live session, menu-parked,
+etc.) is logged loud and does NOT block or roll back the console page — the
+two are independent, best-effort deliveries of the same finding.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -69,7 +82,8 @@ def save_state(state: dict) -> None:
 
 QUERY = """
 WITH instances AS (
-    SELECT DISTINCT agent_id AS instance_id, base_agent_id, status AS instance_status
+    SELECT DISTINCT agent_id AS instance_id, base_agent_id, status AS instance_status,
+           tmux_session
     FROM agent_status
     WHERE base_agent_id IS NOT NULL AND agent_id <> base_agent_id
 ),
@@ -87,7 +101,7 @@ recent_base_read AS (
     WHERE read_at IS NOT NULL
     GROUP BY to_agent
 )
-SELECT i.instance_id, i.base_agent_id, i.instance_status,
+SELECT i.instance_id, i.base_agent_id, i.instance_status, i.tmux_session,
        u.oldest_unread_created_at, u.unread_count,
        r.last_base_read_at
 FROM instances i
@@ -188,6 +202,60 @@ def _page(conn, miss: dict) -> bool:
         return False
 
 
+def lane_nudge_message(miss: dict) -> str:
+    """PURE: the short, pane-facing nudge text for a given miss row.
+
+    Distinct from _page's console body — this is typed directly into the
+    affected lane's OWN terminal, so it's shorter and talks to the lane in
+    second person rather than describing it to an observer.
+    """
+    return (
+        f"[address-variant-miss] you have {miss['unread_count']} unread "
+        f"message(s) addressed to your instance id ({miss['instance_id']}), "
+        f"oldest since {miss['oldest_unread_created_at']} — your inbox reader "
+        f"looks like it's filtering to_agent=eq.{miss['base_agent_id']} only. "
+        f"Check your inbox filter matches to_agent IN (base, instance), not "
+        f"base alone (bus #51166 regression class), then drain the backlog."
+    )
+
+
+def _nudge_lane(miss: dict, *, lane_nudge_bin: Path | None = None) -> bool:
+    """Best-effort direct nudge of the affected lane's own tmux session.
+
+    Uses scripts/lane_nudge.sh (the fleet's ONE sanctioned verified-submit
+    wrapper — same tool priority_sla_watchdog.py uses for the analogous
+    stale-mail-re-nudge case) rather than a raw tmux send-keys, so this gets
+    the same menu-parked / unreadable-pane / verified-submit protections for
+    free. Returns False (never raises) on any failure — a missing
+    tmux_session, no live session, a refused delivery, or a subprocess error
+    — all logged loud. This is additive to _page, never a substitute: a
+    failed lane nudge must not suppress or roll back the console page.
+    """
+    instance_id = miss["instance_id"]
+    session = miss.get("tmux_session")
+    if not session:
+        log(f"lane-nudge-skip {instance_id}: no tmux_session on record")
+        return False
+    bin_path = lane_nudge_bin or (ORCH / "scripts" / "lane_nudge.sh")
+    msg = lane_nudge_message(miss)
+    try:
+        r = subprocess.run(
+            [str(bin_path), session, msg],
+            capture_output=True, text=True, timeout=90,
+        )
+        if r.returncode == 0:
+            log(f"LANE-NUDGED {instance_id} (session={session})")
+            return True
+        log(
+            f"lane-nudge-failed {instance_id} (session={session}) "
+            f"rc={r.returncode}: {(r.stderr or r.stdout).strip()[:300]}"
+        )
+        return False
+    except Exception as e:
+        log(f"lane-nudge-failed {instance_id} (session={session}): {e!r}")
+        return False
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", default=True,
@@ -223,6 +291,11 @@ def main(argv: list[str]) -> int:
             continue
         if _page(conn, m):
             state.setdefault(iid, {})["last_paged_ts"] = now_ts
+        # Additive, independent of the console page above: nudge the
+        # affected lane directly too (bus#58273). Dedup/cooldown is shared
+        # with the console page via `due` — this fires exactly when a fresh
+        # console page does, not on its own separate cadence.
+        _nudge_lane(m)
 
     if not args.dry_run:
         save_state(state)
