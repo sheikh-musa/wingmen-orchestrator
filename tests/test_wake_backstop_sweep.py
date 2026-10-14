@@ -400,19 +400,21 @@ def test_desired_state_lookup_error_fails_closed_escalates_not_quiesced_amendC()
 
 def test_dead_foreign_quiesced_once_escalated_once_second_sweep_noop_amendD():
     # (5) the whole point: a row past cap to an agent gone on EVERY host (no matching hb) and
-    # not wanted-up -> quiesce (CAS) + ONE escalation naming the agent, ids and evidence; a 2nd
-    # sweep over the same (now-marked) rows does nothing (skipped_at is the once-guard).
+    # not wanted-up (and NOT explicitly desired_state='down' — see the silent-down test below)
+    # -> quiesce (CAS) + ONE escalation naming the agent, ids and evidence; a 2nd sweep over the
+    # same (now-marked) rows does nothing (skipped_at is the once-guard).
     marked, pages, mark, page = _cas_collector()
     rows = [_row_ts("cc-cosem-platform", 501, age_s=_PAST_CAP),
             _row_ts("cc-cosem-platform", 502, age_s=_PAST_CAP)]
     kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
               now_dt=_NOW, cap_age_s=390, gone_window_s=7200,
               matching_hbs=lambda a: [],           # gone on every host
-              desired_state_of=lambda a: "down",   # not wanted-up
+              desired_state_of=lambda a: None,     # not wanted-up, not explicitly parked down
               base_of=lambda a: None, mark=mark, escalate=page, escalated_seen=set())
     res1 = wbs.sweep_once(rows=rows, **kw)
     assert set(marked) == {501, 502}               # both rows quiesced
     assert res1["dead_foreign"] == ["cc-cosem-platform"]
+    assert res1["quiesced_silent"] == []            # NOT the silent-down class
     assert len(pages) == 1                          # ONE page for the dead agent, not per-row
     subj, body = pages[0]
     assert "cc-cosem-platform" in subj
@@ -422,6 +424,30 @@ def test_dead_foreign_quiesced_once_escalated_once_second_sweep_noop_amendD():
     res2 = wbs.sweep_once(rows=rows, **kw)
     assert set(marked) == {501, 502}               # unchanged
     assert len(pages) == 1                          # NOT re-escalated
+
+
+def test_dead_foreign_desired_state_down_is_quiesced_silently_held_commitment_430():
+    # (Nazim #66506/op#27235, held_commitment #430) desired_state='down' means the operator
+    # INTENTIONALLY parked the lane (e.g. second-brain's nightly-regen handoff target) — the
+    # dead-foreign quiesce still fires (stop re-poking a gone agent) but must NOT escalate: a
+    # deliberately-down lane re-firing nightly is a false page, not a finding. Without this
+    # branch the escalation would repeat every sweep for a state that is not a surprise.
+    marked, pages, mark, page = _cas_collector()
+    rows = [_row_ts("cc-second-brain", 601, age_s=_PAST_CAP)]
+    kw = dict(wake=lambda a, **k: {"woke": False, "why": "no live session"},
+              now_dt=_NOW, cap_age_s=390, gone_window_s=7200,
+              matching_hbs=lambda a: [],            # gone on every host
+              desired_state_of=lambda a: "down",    # INTENTIONALLY parked
+              base_of=lambda a: None, mark=mark, escalate=page, escalated_seen=set())
+    res1 = wbs.sweep_once(rows=rows, **kw)
+    assert marked == [601]                          # still quiesced — stop re-poking it
+    assert res1["dead_foreign"] == ["cc-second-brain"]
+    assert res1["quiesced_silent"] == ["cc-second-brain"]
+    assert pages == []                              # but NEVER escalated — silent by policy
+    # 2nd sweep over the SAME (now-marked) row: CAS no-op, still silent
+    res2 = wbs.sweep_once(rows=rows, **kw)
+    assert marked == [601]
+    assert pages == []
 
 
 def test_dead_foreign_matches_base_exactly_not_by_prefix():

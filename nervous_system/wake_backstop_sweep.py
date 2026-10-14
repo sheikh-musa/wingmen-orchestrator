@@ -595,8 +595,16 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
 
       DEAD-FOREIGN — gone on EVERY host (no base-inclusive heartbeat < gone_window_s, hub lease
         not fresh, and no live base) AND desired_state is not 'up' → quiesce all its capped rows
-        via CAS + escalate ONCE naming agent, ids, evidence. Any instance may do this; the CAS
-        (mark returns only the ids IT set) makes it exactly-once. Clearing skipped_at re-delivers.
+        via CAS (any instance may do this; the CAS — mark returns only the ids IT set — makes it
+        exactly-once; clearing skipped_at re-delivers). Whether this ALSO escalates depends on
+        desired_state (Nazim #66506/op#27235, held_commitment #430):
+          - desired_state='down' (operator INTENTIONALLY parked the lane) → quiesce SILENTLY,
+            no console escalation. The trigger case was the second-brain nightly-regen handoff
+            re-firing into a deliberately-down lane every night — escalating every cycle for a
+            lane the operator put down on purpose is a false page, not a finding.
+          - anything else not-'up' (None/unregistered/other) → escalate ONCE naming agent, ids,
+            evidence, same as before — an unexplained gone-and-not-explicitly-parked agent is
+            still worth a human look.
 
       VETOED (amend C) — gone but desired_state='up' → NOT quiesced (a wanted-up-but-dark lane is
         a singleton/lane-watchdog page, never a delivery-drop here).
@@ -756,6 +764,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         return True
 
     dead_foreign, live_stuck, readdress, vetoed, lookup_failed = [], [], [], [], []
+    quiesced_silent: list = []   # dead-foreign + desired_state='down' — quiesced, no escalation
     foreign_live: list = []
     escalations: list[dict] = []
     for agent, ids in capped_by_agent.items():
@@ -806,6 +815,13 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
         newly = mark(ids)                                # CAS: only the ids we actually set
         if newly:                                        # escalate ONLY if we won the CAS
             dead_foreign.append(agent)
+            # desired_state='down' = the operator INTENTIONALLY parked this lane (Nazim
+            # #66506/op#27235, held_commitment #430) — quiesce SILENTLY, no console page.
+            # Without this branch a lane deliberately held down (e.g. second-brain's nightly
+            # regen handoff) re-escalates every sweep for a state that is not a finding.
+            if str(ds or "").lower() == "down":
+                quiesced_silent.append(agent)
+                continue
             escalate(
                 f"[wake-backstop] directed rows rotting to dead agent {agent} — quiesced once",
                 f"TL;DR: {len(newly)} directed row(s) to {agent} (ids={newly}) are past the "
@@ -892,7 +908,7 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
             "vetoed": vetoed, "lookup_failed": lookup_failed, "stuck_paged": stuck_paged,
             "stuck_suppressed": stuck_suppressed, "escalations": escalations,
             "foreign_live": foreign_live, "pending_retried": pending_retried,
-            "paused_suppressed": paused_suppressed}
+            "paused_suppressed": paused_suppressed, "quiesced_silent": quiesced_silent}
 
 
 # ── idle-while-unread nudge (Fable audit follow-up, orch-console bus #46860 item 2) ──
