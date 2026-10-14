@@ -1,15 +1,23 @@
-# Governance Floors — SINGLE SOURCE OF TRUTH (SSOT)
+# Substrate SSOT — Governance Floors, Topology, Routing & Logs (SINGLE SOURCE OF TRUTH)
 
-> **THIS FILE IS AUTHORITATIVE.** It is the ONE canonical "who signs what" record for the
-> substrate. Where a `CLAUDE.md` line, a handoff note, a memory card, or any prose anywhere
-> disagrees with a row below, **THIS FILE WINS** and the prose is stale — fix the prose, do
-> not re-assert the stale floor.
+> **THIS FILE IS AUTHORITATIVE.** It is the ONE canonical record for the substrate's
+> *stable governance doctrine*: who signs what (floors), which ROLE owns which pen/lease
+> (topology), how tags & channels route, and which log holds what. Where a `CLAUDE.md` line, a
+> handoff note, a memory card, or any prose anywhere disagrees with a row below, **THIS FILE
+> WINS** and the prose is stale — fix the prose, do not re-assert the stale rule.
 >
-> **Scope split (two SSOTs, no overlap):** this file is the SSOT for *who signs what* (floors,
-> owner-sign, escalation). For the exact DATA store `project ref` of any client, defer to the
-> other SSOT, **`docs/data-store-registry.md`** (LAYER-VOCAB-001). This file names the store by
-> its **layer + alias** and points at the registry for the ref — it never inlines a client-silo
-> ref (that keeps the floors doc safe to author/read from any body).
+> **DOCTRINE ONLY — NEVER LIVE STATE (read this before adding anything).** Every section below
+> records *rules that do not change turn-to-turn* — ownership rules, routing maps, log purposes.
+> It MUST NOT bake in **live state**: the current lease holder, a token fingerprint, the lane
+> roster, open gates, or who is on shift. Live state is DB-queried at the moment you need it
+> (read the lease row, query the registry) — baking it into prose is exactly how stale-assertion
+> happens ([[feedback_a_verification_has_an_expiry]]). Each section restates this rule at its top.
+>
+> **Scope split (SSOTs, no overlap):** this file is the SSOT for *stable governance doctrine*.
+> For the exact DATA store `project ref` of any client, defer to the other SSOT,
+> **`docs/data-store-registry.md`** (LAYER-VOCAB-001). This file names a store by its
+> **layer + alias** and points at the registry for the ref — it never inlines a client-silo ref
+> (that keeps this doc safe to author/read from any body). See *§4 Data-store-registry pointer*.
 >
 > **CONSULT-BEFORE-ASSERT (enforced in code).** Before you assert a governance floor or a
 > sign-off authority — in a bus row, an operator reply, a handoff, or a doc — you MUST have
@@ -25,7 +33,23 @@
 
 ---
 
-## How to read a row
+## Section index
+
+1. **Governance floors** — who signs what (the original SSOT; unchanged).
+2. **Org-chart / body-topology** — which ROLE owns which singleton pen / lease.
+3. **Tag → routing + per-channel owner map** — how @tags and channels resolve.
+4. **Which log for what** — the canonical map of the 7+ substrate logs.
+5. **Data-store-registry pointer** — where client-silo refs live (the 2nd SSOT).
+6. **Vault ↔ SSOT links** — the memory card that is each rule's "why".
+
+---
+
+## 1. Floors
+
+> *Section rule — doctrine only.* Floors and owner-sign below are STABLE. The current lease
+> holder, the live gate backlog, and who is on shift are LIVE STATE — never inline them here.
+
+### How to read a row
 
 Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION TARGET → BINDING cai-ratified constants**.
 
@@ -33,10 +57,6 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 - **OWNER-SIGN** = whose request/approval IS the authorization once the floor is met.
 - **ESCALATION TARGET** = who you go to for a floor-LIFT or a real money/authority sign — and, critically, who you do **NOT** go to.
 - **BINDING cai-ratified constants** = hard-nevers that hold regardless of owner-sign; the responsible body applies them itself.
-
----
-
-## Floors
 
 ### irsyad — client project (Gazzabyte; Shuq=SMS, Wan=DMS)
 
@@ -53,8 +73,6 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 > Shuq/Wan owner-sign, cai-OFF**. Asserting "cai+Nazim" for irsyad over-asserts a stale floor
 > and wrongly pulls cai into a cai-off project.
 
----
-
 ### cosem — client project (ADCDA / TDU; answers route to Hariz; ADCDA → ca-things group)
 
 | Axis | Value |
@@ -64,8 +82,6 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 | **OWNER-SIGN** | the cosem project operator (per channel) — not Musa, not cai. |
 | **ESCALATION TARGET** | **MUSA** for a floor-lift / money-sign. **NOT cai.** |
 | **BINDING cai-ratified constants** | Still bind, console applies them itself: **ADCDA residency** (real trainee gov-PII → own UAE-sovereign silo before any further real write; CAI-RESP-1340 containment — no new real-PII writes to the flagged ADCDA org), **Google-exposure containment**, CAI-1034 (no raw client-data). No agent writes to real ADCDA prod, even synthetic test docs (CAI-1340). |
-
----
 
 ### fleet money / gov — NON-client (the substrate itself)
 
@@ -77,8 +93,6 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 | **ESCALATION TARGET** | cai (governance), with Musa for anything cai+Nazim cannot jointly sign. |
 | **BINDING cai-ratified constants** | CAI-898 bar; standing fleet gates. This is the ONLY domain where "cai+Nazim" is the correct money-sign phrase. |
 
----
-
 ### Residency — TENANT-RESIDENCY-001 (cross-cutting, ALL client data paths)
 
 | Axis | Value |
@@ -89,9 +103,7 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 | **ESCALATION TARGET** | cai (for a residency exception grant); Musa for client-specific sign. |
 | **BINDING cai-ratified constants** | **Standing pre-live residency gate:** verify the write-target silo BEFORE any client data path goes live. **Name the store + `project ref`** (LAYER-VOCAB-001) per `docs/data-store-registry.md`. Layer-ambiguity in a data-path spec is a review FINDING. |
 
----
-
-## Quick-reference matrix
+### Quick-reference matrix
 
 | Domain | Floor (does not drop) | Owner-sign | Escalate to | cai in governance? |
 |---|---|---|---|---|
@@ -99,6 +111,167 @@ Each row is: **DOMAIN → FLOOR (who/what gates) → OWNER-SIGN → ESCALATION T
 | **cosem** go-live/money/gov | console safety-floor (CAI-898 + deny-proofs + wet-prove) | cosem project operator | **Musa** (lift/money only) | **NO — cai OFF since 2026-09-13** |
 | **fleet** money/gov | cai gate @ CAI-898 bar | **cai + Nazim** | cai, then Musa | **YES** |
 | **residency** (any client data) | designated store, always; pre-live gate | joint operator + cai (for exceptions, expiring) | cai / Musa | YES (for exception grants) |
+
+---
+
+## 2. Org-chart / body-topology (OWNERSHIP RULES, not holders)
+
+> *Section rule — doctrine only.* This section says **which ROLE owns which pen/lease**, not who
+> holds it right now. To find the CURRENT holder, **READ THE LEASE ROW** (`orch_lease`,
+> `fleet_health_lease`) — never assume a host from this doc. The holder is LIVE STATE; the
+> ownership rule is doctrine. (ORCH-TOPOLOGY-001, cai #6521/#6523, 2026-07-04; CAI-RESP-501,
+> 2026-07-22.)
+
+**Multiple orch bodies exist.** Determine YOUR body before touching any pen — `ORCH_BODY_ROLE`
+in `.env`. The two bodies:
+
+- **console = Nazim** — the operator's CTO. Runs on the **Mac Mini**, tmux session `nazim`,
+  `ORCH_BODY_ROLE=console`. Has his OWN sanctioned operator voice `scripts/nazim_send.sh`
+  (@nazim_cto_bot / `NAZIM_BOT_TOKEN`, channel `nazim-console`) — structurally distinct from the
+  hub's operator channel (CAI-RESP-426). The console body is fail-closed OUT of the hub's
+  `tg_send` pen.
+- **hub = lease-holder doctrine** — `hub`/unset `ORCH_BODY_ROLE`. The hub is the pure operator
+  bridge (operator talks to it, it delegates to lanes) and holds the pens below *only as the
+  lease holder*, never by virtue of being a particular machine.
+
+### The two leases and the pens they gate
+
+| Pen | Owned by (ROLE / lease row) | Doctrine |
+|---|---|---|
+| **(i) Drain `cc-orchestrator` bus rows** (mark `to_agent='cc-orchestrator'`) | `orch_lease` holder (**"orch-hub"**) | Singleton — only the lease holder drains. |
+| **(ii) Lane prompt submission** | `orch_lease` holder (**"orch-hub"**) | Singleton — only the lease holder submits lane prompts. |
+| **(iii) Watchdog** (self-healing executor) | **`fleet_health_lease` holder (`"fleet-health"`)** | MOVED off `orch_lease` by CAI-RESP-501. Default holder `cc-fleet-health` (Mac Mini SRE), which TAKES at boot & RENEWS in heartbeat. |
+| **(iv) `tg_send`/tg-out + operator declarations** | `orch_lease` holder (**"orch-hub"**) | Singleton. The console body is fail-closed OUT of this pen and uses `nazim_send.sh` on `nazim-console` instead. |
+| **(v) Fleet-status assertions** | **`fleet_health_lease` holder (`"fleet-health"`)** | MOVED off `orch_lease` by CAI-RESP-501. Same holder as (iii). |
+
+- **CAI-RESP-501 — watchdog + fleet-status on a SEPARATE single-owner lease.** Pens (iii) and (v)
+  belong to the `fleet_health_lease` holder, NOT the `orch_lease` holder. On the SRE's lease
+  EXPIRY (death/stall, TTL 900s) the **hub RECLAIMS** these two pens via
+  `fleet_health_lease.py reclaim --reason` (CAS on expiry — dead-man's fallback). **NEVER two
+  concurrent holders:** the CAS in `take` serializes ownership; every other body fail-closes.
+- **DR takeover** = `orch_lease.py take --reason` (CAS, loud) only when the hub is genuinely dead.
+  A failed-over hub inherits the PENS, NOT the dead machine's tmux lanes.
+- **Enforced in code, not by promise:** `scripts/lib/orch_lease.py` gates `tg_send`/`tg_send_file`
+  fail-closed; `scripts/lib/fleet_health_lease.py` gates the watchdog/fleet-status actions
+  (`context_health_watchdog.py`, `priority_sla_watchdog.py`) — fail-safe-for-holder /
+  fail-closed-for-known-non-holder. Detection + the operator degrade-alert stay UNGATED so a
+  safety page is never silenced by lease state.
+- **Hard boundaries for cc-fleet-health** (`scripts/lib/fleet_health_boundaries.py`, CAI-RESP-501):
+  (a) **NO singleton-body reset authority** — the destructive `--arm=red` /clear stays a separate
+  CAI-500-gated executor the SRE NEVER drives (`assert_no_sre_red_reset` fail-closes); and
+  (b) **OPS, NOT GOVERNANCE** — uses its own `agent_id`, NEVER writes `strategic_decisions` or
+  grant rows (`assert_ops_only` fail-closes).
+
+> **Live-state reminder:** the default holders named above (`cc-orchestrator@...` for orch-hub,
+> `cc-fleet-health` for fleet-health) are DEFAULTS, not a running assertion of who holds the lease
+> this minute. Always read the lease row.
+
+---
+
+## 3. Tag → routing + per-channel owner map
+
+> *Section rule — doctrine only.* The tag list and the channel-owner map are STABLE. Which lane
+> is up, who is on shift, and open threads are LIVE STATE — query them, don't bake them here.
+
+### @tags — CONTEXT, not routing
+
+A tag tells you the **context** of a message; it does **NOT** route it away from you. The
+receiving body still **owns the conversation and delegates**. Echo the context you assumed (e.g.
+lead a reply with `[cosem-tdu]`) so a wrong guess is correctable.
+
+| Tag(s) | Context |
+|---|---|
+| `@adcda` / `@tdu` / `@cosem` | cosem project (ADCDA / TDU surfaces). |
+| `@ihsanos` / `@irsyad` | ihsanos storefront / irsyad (Gazzabyte) project. |
+| `@scholar` / `@mizan` | scholar / mizan surfaces. |
+| `@qr` | branditqr / QR surface. |
+| `@fleet` / `@console` | fleet-internal / console (Nazim) context. |
+| `@cai` | strategic / governance (cai) context. |
+
+### Per-channel operator-thread ownership
+
+Whichever body the operator opened a thread with **owns the reply/close**; the other body stays
+OFF that thread. A terminal-only reply does NOT reach the operator's phone — answer on the
+channel the operator used.
+
+| Operator channel | Reply owner | Reply via |
+|---|---|---|
+| `nazim-console` | **Nazim (console)** | `scripts/nazim_send.sh` (@nazim_cto_bot) |
+| `orch-channel` | **the hub** (`orch_lease` holder, pen iv) | `scripts/tg_send.sh` (@wingmennorchbot) |
+| `tmux-console` | **orch-console** (operator typed into the console tmux) | log-first via `scripts/log_console_msg.sh`, then reply on the channel the operator uses |
+
+### Triage-owner map (migration 082)
+
+`operator_asks.triage_state` is owned per channel so the daily digest shows only judged summaries:
+
+| Channel | Triage owner |
+|---|---|
+| `nazim-console` / `tmux-console` | **orch-console** |
+| `orch-channel` | **cc-orchestrator** |
+
+---
+
+## 4. Which log for what (the canonical map)
+
+> *Section rule — doctrine only.* This maps each log to its PURPOSE. The current *rows* in any log
+> are LIVE STATE — read them from the DB (`operator_log.unprocessed()`, `boot_briefing`, etc.);
+> never transcribe row contents into this doc.
+
+| Log / table | Purpose | How to write / read it |
+|---|---|---|
+| **`operator_messages` / `operator_log`** | Operator comms, **both directions**, scoped by body. The durable source of truth keeping live-you and rebooted-you coherent (CAI-RESP-277). | Read `operator_log.unprocessed()` at turn start; answer; `operator_log.mark_handled([ids])` exactly the ids you answered (never the deprecated high-water stamp). Inbound logged by `nervous_system/ingest.py`; outbound by `tg_send.sh`/`nazim_send.sh`/`tg_out`. |
+| **`agent_messages`** | The inter-agent **"bus"** — attributable agent-to-agent testimony and task routing. | **Always via `scripts/bus_send.py`**, never a hand-written INSERT (bus #43651: a hand INSERT once dropped `priority` to the `'P2'` default below the hub wake floor). `--priority` is required; hub action-now = `--priority P1 --req`. |
+| **`held_commitments`** | Commitments + due-date tracking (what was promised, by when). | Let the identity column assign the id (never write an explicit id into a serial/identity insert — bus #65636). The commitment sweeper reads it. |
+| **`operator_asks`** | The operator **ask ledger** + triage (`triage_state`: `captured`/`ask`/`not_an_ask`/`done`, orthogonal to `closed_at`). | After answering, triage via `scripts/asks_triage.py <id> ask|not|done` (never leave `captured`). Per-channel triage owner in §3. |
+| **`build_log`** | Build operations (every build logged). | Log all build ops here. |
+| **`work_outputs`** | Audit deliverables — build specs, diffs, test results, deploy URLs. | Repo files alone are NOT sufficient; the deliverable must land here. |
+| **`strategic_decisions`** | Fleet strategic decisions + reasoning. | **NEVER `SELECT *`.** Use the `boot_briefing` index + `get_decision('<ref>')` on demand. |
+| **`audit_log`** | INSERT-only irreversible-grant **hash chain** (append-only; each grant forks the chain). | INSERT-only; never update/delete. Used for irreversible-op authorization provenance. |
+
+> **Coherence-debt note (interim SSOT).** This sprawl — **7+ distinct logs** — is itself the
+> coherence debt the Paperclip reverse-engineering flagged (a single *Activity log* was the
+> target). This map is the **interim SSOT** for "which log for what" until the logs are unified;
+> when they are, this section collapses to the unified store and the rest become views.
+
+---
+
+## 5. Data-store-registry pointer (the 2nd SSOT)
+
+> *Section rule — doctrine only.* This doc NEVER inlines a client-silo `project ref`. Refs change
+> (provisioning, migration) and are effectively live state w.r.t. this doc — they live in one
+> place.
+
+Exact client-silo and substrate `project ref`s live in **`docs/data-store-registry.md`**
+(LAYER-VOCAB-001) — the second SSOT. This file names a store by its **layer + alias only** (e.g.
+"irsyad silo (goumlyne)", "ihsanos multi-tenant DB", "cosem demo/dev") and defers to the registry
+for the ref. Bare product names ("ihsanos", "cosem") are INVALID as data references — always name
+the **layer** (frontend vs data) and, for data, the **exact store + `project ref`** from the
+registry. Layer-ambiguity in a data-path spec is a review FINDING, not style.
+
+---
+
+## 6. Vault ↔ SSOT links (the "why" behind each rule)
+
+> *Section rule — doctrine only, PROPOSAL.* This section records which memory-vault card carries
+> the reasoning ("why") for each rule, as `[[card-name]]` links. The vault cards themselves are
+> edited by the console body — this doc does not edit the vault.
+
+| This doc's rule | Memory-vault "why" card |
+|---|---|
+| irsyad floor / owner-sign = Shuq/Wan, cai-OUT | [[feedback_irsyad_signoff_is_shuq_wan_never_musa]], [[feedback_cai_not_involved_in_irsyad_dev]] |
+| cosem floor / cai-OFF | [[feedback_cai_not_involved_in_cosem]] |
+| fleet money-sign = cai + Nazim | [[feedback_operator_delegates_money_sign_to_cai_nazim]], [[reference_money_gate_bar_cai898]] |
+| run money/gov gates through cai | [[feedback_always_run_gates_through_cai]] |
+| Residency / TENANT-RESIDENCY-001 | [[reference_console_holds_client_silo_write_path]] (console has silo WRITE; hub RO) |
+| Body-topology / lease ownership (§2) | the ORCH-TOPOLOGY-001 / CAI-RESP-501 card (fleet-mechanics index) |
+| console = Nazim, own operator voice | [[feedback_nazim_replies_via_nazim_send]], [[feedback_nazim_hub_thread_ownership]] |
+| console never drives irsyad execution | [[feedback_console_never_drives_irsyad_execution]] |
+| per-channel reply ownership (§3) | [[feedback_nazim_hub_thread_ownership]], [[feedback_nazim_reconcile_both_inboxes]] |
+| bus writes via `bus_send.py` only | [[reference_hub_wake_floor_p1_rr]] |
+| `audit_log` INSERT-only hash chain | [[reference_audit_log_insert_only_grant_forks_hash_chain]] |
+| enforce-in-code, not by promise | [[feedback_enforce_process_in_code_not_promises]] |
+| a verification expires (Last-verified) | [[feedback_a_verification_has_an_expiry]] |
+| data-store registry / LAYER-VOCAB-001 (§5) | [[reference_global_google_creds_env_is_a_client_sa]] (registry context) + the data-store-registry doc |
 
 ---
 
