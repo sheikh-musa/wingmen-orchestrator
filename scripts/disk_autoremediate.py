@@ -231,6 +231,69 @@ def _augmented_env():
     return env
 
 
+# ---- Chrome cache reclaimer -----------------------------------------------------
+# Operator-authorized 2026-10-14 (Musa: "go ahead ... add it to the list of clearable
+# things in future so you never have to ask"). ALL targets regenerate: HTTP/code/GPU/
+# shader caches, Service Worker CacheStorage/ScriptCache, and OptGuideOnDeviceModel
+# (Chrome re-downloads the on-device model on demand). NEVER touches profile/credential
+# data (Cookies, Login Data, History, Bookmarks, Preferences) — only the cache whitelist.
+# The _lsof_in_use guard skips any dir a running Chrome holds open, so this is safe even
+# during a live fleet browser task.
+_CHROME_ROOT = pathlib.Path(os.path.expanduser(
+    "~/Library/Application Support/Google/Chrome"))
+_CHROME_PROFILE_CACHE_SUBPATHS = [
+    "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache",
+    "DawnGraphiteCache", "DawnWebGPUCache",
+    "Service Worker/CacheStorage", "Service Worker/ScriptCache",
+]
+_CHROME_TOPLEVEL_CACHES = [
+    "OptGuideOnDeviceModel", "ShaderCache", "GrShaderCache", "GraphiteDawnCache",
+    "component_crx_cache",
+]
+
+
+def chrome_cache_candidates():
+    """Regenerable Chrome cache dirs (per-profile + top-level); never profile/credential
+    data. Empty list if Chrome isn't installed. fs read only."""
+    if not _CHROME_ROOT.is_dir():
+        return []
+    out = []
+    for prof in _CHROME_ROOT.iterdir():
+        if not prof.is_dir():
+            continue
+        if prof.name in ("Default", "Guest Profile", "System Profile") \
+                or prof.name.startswith("Profile"):
+            for sub in _CHROME_PROFILE_CACHE_SUBPATHS:
+                d = prof / sub
+                if d.is_dir():
+                    out.append(d)
+    for name in _CHROME_TOPLEVEL_CACHES:
+        d = _CHROME_ROOT / name
+        if d.is_dir():
+            out.append(d)
+    return out
+
+
+def _reclaim_chrome_cache(dry_run):
+    """Clear regenerable Chrome caches. Mirrors _reclaim_next_cache's lsof-guarded rmtree
+    so a running Chrome's open cache dirs are skipped (never corrupt a live session)."""
+    freed = 0
+    for d in chrome_cache_candidates():
+        sz = _dir_size(d)
+        if dry_run:
+            freed += sz
+            continue
+        if _lsof_in_use(d):  # KILL-TIME re-verify — skip if Chrome is using it
+            log(f"    chrome-cache {d} in use (lsof) — skipped")
+            continue
+        try:
+            shutil.rmtree(d)
+            freed += sz
+        except OSError as e:
+            raise RuntimeError(f"rmtree {d} failed: {e}") from e
+    return freed
+
+
 def build_reclaimers():
     """Ordered safest/highest-known-yield first. npm/brew reclaimers are added only
     when the tool resolves to an absolute path — a missing tool is SKIPPED LOUDLY
@@ -259,6 +322,7 @@ def build_reclaimers():
         log("    brew not found on PATH or in known bin dirs — brew-cleanup reclaimer unavailable")
 
     reclaimers.append({"name": "next-cache", "apply": _reclaim_next_cache})
+    reclaimers.append({"name": "chrome-cache", "apply": _reclaim_chrome_cache})
     return reclaimers
 
 
