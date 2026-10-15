@@ -3,19 +3,29 @@
 <plist version="1.0">
 <dict>
   <!-- worktree-nodemodules-reaper ARMED (orch-console #61047, 2026-10-09). Routine Tier-1
-       hygiene: every 30 min, clears ONLY gitignored node_modules/.next from cosem-platform.wt-*
-       PR worktrees that have NO live process cwd'd in them (lsof-protected, kill-time re-verified).
+       hygiene: every 30 min, clears ONLY gitignored node_modules/.next from PR worktrees that
+       have NO live process cwd'd in them (lsof-protected, kill-time re-verified).
        Reversible (regenerable, git state untouched); NEVER removes worktrees and NEVER deletes a
        tracked/non-ignored dir. WHY armed, not detect-first: the exact clear was wet-proven live
        the same day (manual 5.8GB clear, 88%->86%) + unit + CLI wet-proof. Reversible: launchctl
-       bootout this label. To widen scope, set NM_REAPER_FAMILIES in the ProgramArguments. -->
+       bootout this label.
+       WIDENED (bus #68390, 2026-10-15): scope was cosem-platform.wt-* only; disk kept
+       warn-flapping (88-89%) because 4 OTHER large worktree families (ihsanos-irsyad.wt-*,
+       cosem-adcda.wt-*, cosem-port-lane.wt-*, cosem-tdu.wt-*) were never covered. A manual
+       detect+apply pass against those 4 found/freed ~5GB of genuinely-idle node_modules/.next
+       (same safety gates: 3 tracked ops/node_modules dirs correctly spared as NOT-IGNORED) with
+       0 errors. Added them to NM_REAPER_FAMILIES here so the recurring consumer self-clears
+       going forward instead of requiring another manual pass. Deliberately NOT included:
+       cosem-video-pipeline (operator-held pending migration decommission, see
+       [[hands-off-path]]-equivalent note in stale-worktree-reaper memory) and any non-`.wt-*`
+       base checkout (those are live primary checkouts, not disposable PR worktrees). -->
   <key>Label</key>
   <string>dev.wingmen.worktree-nodemodules-reaper</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.worktree_nodemodules_reaper --apply</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; export NM_REAPER_FAMILIES="$HOME/wingmen/projects/cosem-platform.wt-*:$HOME/wingmen/projects/ihsanos-irsyad.wt-*:$HOME/wingmen/projects/cosem-adcda.wt-*:$HOME/wingmen/projects/cosem-port-lane.wt-*:$HOME/wingmen/projects/cosem-tdu.wt-*" &amp;&amp; exec .venv/bin/python3 -m scripts.worktree_nodemodules_reaper --apply</string>
   </array>
   <key>StartInterval</key>
   <integer>1800</integer>
