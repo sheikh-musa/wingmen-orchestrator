@@ -268,6 +268,24 @@ export CC_AGENT_ID
 export CC_BASE_AGENT_ID
 export SCOPE_REPO="$REPO_NAME"
 
+# ── per-worktree identity marker (bus #68342) ────────────────────────────────
+# A Claude Code PreToolUse/PostToolUse hook subprocess does not reliably
+# inherit CC_BASE_AGENT_ID from this process's environment (reported:
+# cc-irsyad-coord's attest-read allow-path in client_media_read_guard.py
+# resolved base_agent_id() to empty inside the hook, even though it is
+# exported right here). Env inheritance into a hook subprocess is outside
+# this script's control, so give hooks a filesystem-only fallback instead:
+# drop the resolved identity into THIS worktree's git-dir (never tracked,
+# always present, keyed by `cwd` which hooks DO reliably receive via their
+# JSON payload -- see scripts/lib/agent_identity.py:resolve_base_agent_id_for_hook).
+# Best-effort: a write failure must never block the launch.
+_LANE_IDENTITY_GITDIR="$(git -C "$CALLER_DIR" rev-parse --absolute-git-dir 2>/dev/null || true)"
+if [ -n "$_LANE_IDENTITY_GITDIR" ]; then
+    printf '{"base_agent_id":"%s","agent_id":"%s","written_at":"%s"}\n' \
+        "$CC_BASE_AGENT_ID" "$CC_AGENT_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > "$_LANE_IDENTITY_GITDIR/cc-lane-identity.json" 2>/dev/null || true
+fi
+
 # ── PROD-DATA WALL, Part A (op#29348) ────────────────────────────────────────
 # Worker-lane shells inherit THREE ambient paths to cosem-adcda PROD data from
 # the operator's own user config: (1) gcloud's per-user `default` config

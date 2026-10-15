@@ -28,8 +28,13 @@ guard = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(guard)
 
 
-def run_hook(tool_name: str, tool_input: dict, env: dict | None = None) -> subprocess.CompletedProcess:
-    payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
+def run_hook(
+    tool_name: str, tool_input: dict, env: dict | None = None, cwd: str | None = None,
+) -> subprocess.CompletedProcess:
+    payload_dict = {"tool_name": tool_name, "tool_input": tool_input}
+    if cwd is not None:
+        payload_dict["cwd"] = cwd
+    payload = json.dumps(payload_dict)
     full_env = dict(os.environ)
     full_env.pop("CC_BASE_AGENT_ID", None)
     full_env.pop("ORCH_BODY_ROLE", None)
@@ -41,14 +46,14 @@ def run_hook(tool_name: str, tool_input: dict, env: dict | None = None) -> subpr
     )
 
 
-def assert_blocked(tool_name: str, tool_input: dict, env: dict | None = None):
-    r = run_hook(tool_name, tool_input, env=env)
+def assert_blocked(tool_name: str, tool_input: dict, env: dict | None = None, cwd: str | None = None):
+    r = run_hook(tool_name, tool_input, env=env, cwd=cwd)
     assert r.returncode == 2, f"expected BLOCK for {tool_input!r}, got exit {r.returncode}, stderr={r.stderr!r}"
     assert "client_media_read_guard" in r.stderr
 
 
-def assert_allowed(tool_name: str, tool_input: dict, env: dict | None = None):
-    r = run_hook(tool_name, tool_input, env=env)
+def assert_allowed(tool_name: str, tool_input: dict, env: dict | None = None, cwd: str | None = None):
+    r = run_hook(tool_name, tool_input, env=env, cwd=cwd)
     assert r.returncode == 0, f"expected ALLOW for {tool_input!r}, got exit {r.returncode}, stderr={r.stderr!r}"
 
 
@@ -237,6 +242,42 @@ def test_coord_denied_on_sha_mismatch(tmp_path):
     # attest records the OLD sha; then the file is swapped (new bytes, new sha)
     _write_read_attest(tmp_path, os.path.realpath(str(f)), "0" * 64, age_min=1)
     assert_blocked("Read", {"file_path": str(f)}, env=_COORD)
+
+
+# ---- (g) ALLOW via the per-worktree marker fallback (bus #68342) -----------
+# The hook subprocess does not reliably inherit CC_BASE_AGENT_ID -- when it's
+# absent, base_agent_id() falls back to the launch_dangerous_cc.sh marker,
+# keyed by the hook's own reported `cwd` (not CC_BASE_AGENT_ID at all here).
+
+def test_coord_allowed_via_marker_fallback_when_env_absent(tmp_path):
+    f = _make_media(tmp_path, name="gazzabyte-irsyad_7_pqr.jpg", subdir="gazzabyte-irsyad")
+    _write_read_attest(tmp_path, os.path.realpath(str(f)), _sha256_file(f), age_min=1)
+    worktree = tmp_path / "coord_worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+    r = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True, check=True,
+    )
+    with open(f"{r.stdout.strip()}/cc-lane-identity.json", "w", encoding="utf-8") as fh:
+        fh.write('{"base_agent_id": "cc-irsyad-coord", "agent_id": "cc-irsyad-coord"}')
+    # no CC_BASE_AGENT_ID in env at all -- only the marker + cwd resolve it.
+    assert_allowed("Read", {"file_path": str(f)}, env={}, cwd=str(worktree))
+
+
+def test_marker_fallback_does_not_allow_wrong_base(tmp_path):
+    f = _make_media(tmp_path, name="gazzabyte-irsyad_7_pqr.jpg", subdir="gazzabyte-irsyad")
+    _write_read_attest(tmp_path, os.path.realpath(str(f)), _sha256_file(f), age_min=1)
+    worktree = tmp_path / "other_worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+    r = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True, check=True,
+    )
+    with open(f"{r.stdout.strip()}/cc-lane-identity.json", "w", encoding="utf-8") as fh:
+        fh.write('{"base_agent_id": "cc-substrate", "agent_id": "cc-substrate"}')
+    assert_blocked("Read", {"file_path": str(f)}, env={}, cwd=str(worktree))
 
 
 # ---- regression: an ADCDA/UAE channel file is unaffected by the new path ----

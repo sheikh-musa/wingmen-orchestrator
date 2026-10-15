@@ -55,6 +55,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+from scripts.lib.agent_identity import resolve_base_agent_id_for_hook  # noqa: E402
+
 _TG_MEDIA_RE = re.compile(r"^(.*)/logs/tg_media/(.+)$")
 
 # ── read-attestation allow-path (Musa op#20593) ─────────────────────────────
@@ -75,11 +78,14 @@ def is_console() -> bool:
     return os.environ.get("ORCH_BODY_ROLE") == "console" and not os.environ.get("CC_BASE_AGENT_ID")
 
 
-def base_agent_id() -> str:
-    """The lane's resolved base agent id, from CC_BASE_AGENT_ID — the same
-    discriminator is_console() keys off, and the same env var stage_client_file.py
-    resolves the attesting agent from."""
-    return (os.environ.get("CC_BASE_AGENT_ID") or "").strip()
+def base_agent_id(cwd: str | None = None) -> str:
+    """The lane's resolved base agent id. Tries CC_BASE_AGENT_ID first (the
+    same discriminator is_console() keys off, and the same env var
+    stage_client_file.py resolves the attesting agent from); when the hook
+    subprocess doesn't inherit it (bus #68342 — confirmed recurring for
+    cc-irsyad-coord's attest-read allow-path below), falls back to the
+    per-worktree marker keyed by *cwd* (see resolve_base_agent_id_for_hook)."""
+    return resolve_base_agent_id_for_hook(cwd)
 
 
 def sha256_file(path: str):
@@ -219,7 +225,7 @@ def main() -> int:
     # READ-ATTEST record for this exact file. All three conditions must hold;
     # any other base, channel, or a missing/stale/mismatched record falls
     # through to the unchanged deny below.
-    if base_agent_id() == _READ_ATTEST_REQUIRED_BASE and filename.startswith(_IRSYAD_CHANNEL_PREFIX):
+    if base_agent_id(payload.get("cwd")) == _READ_ATTEST_REQUIRED_BASE and filename.startswith(_IRSYAD_CHANNEL_PREFIX):
         real = os.path.realpath(path)
         current_sha = sha256_file(real)
         if current_sha is not None:
