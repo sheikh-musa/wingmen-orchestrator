@@ -199,6 +199,14 @@ def audit(mem_dir: pathlib.Path) -> dict:
     # orphan. So the pointer is checked, not assumed.
     tail_unreachable = split and TAIL_INDEX not in index_text
     present = {p.name for p in files}
+    # TAIL_INDEX is deliberately excluded from `files`/`present` above — it is infra, not a
+    # content memory, so it must never be suggested as an orphan needing its own index line.
+    # But a dir that correctly links to it with real markdown syntax (`[x](MEMORY-INDEX.md)`,
+    # the recommended split-index pattern) then had that same exclusion make the link register
+    # as DANGLING — "points at a file that is gone" — even though the tail file is sitting
+    # right there on disk. Only count it present for the dangling check, and only when it
+    # truly exists: a link to a tail that is NOT on disk is still a genuine broken promise.
+    dangling_present = present | ({TAIL_INDEX} if split else set())
 
     return {
         "dir": mem_dir,
@@ -207,7 +215,7 @@ def audit(mem_dir: pathlib.Path) -> dict:
         # Exists on disk, nothing points at it -> never loaded, invisible.
         "orphans": sorted(present - linked),
         # Index points at a file that is gone -> a promise the index cannot keep.
-        "dangling": sorted(linked - present),
+        "dangling": sorted(linked - dangling_present),
         # Only MEMORY.md is auto-loaded, so only its size is the boot cost being guarded.
         "size": len(index_text.encode("utf-8")),
         "split": split,
