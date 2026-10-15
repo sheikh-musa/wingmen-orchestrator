@@ -48,9 +48,10 @@ def test_send_client_ask_chase_accepts_decimal_created_epoch():
     ok = s._send_client_ask_chase(conn, "cosem-port", row)
     assert ok is True
     assert conn.committed is True
-    # two inserts: the owning lane + the orch-console CC (bus #47110 item 3b)
+    # one insert to the owning lane only -- console is no longer CC'd per-ask,
+    # it gets a periodic summary instead (bus#67841/#67965, same day)
     insert_sqls = [p for sql, p in conn.executed if "INSERT INTO agent_messages" in sql]
-    assert len(insert_sqls) == 2
+    assert len(insert_sqls) == 1
 
 
 def test_send_client_ask_chase_handles_missing_created_epoch():
