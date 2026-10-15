@@ -11,8 +11,8 @@
 # that mechanism, built in code, not a promise to remember.
 #
 # WHAT: checks the DATA volume every run.
-#   - WARN  (>= WARN_PCT, default 85): nudge orch-console on the bus so NAZIM
-#           clears regenerable space (npm/.next/caches) BEFORE it's critical.
+#   - WARN  (>= WARN_PCT, default 85): nudge cc-fleet-health on the bus to assess
+#           + prune regenerable space (npm/.next/caches) BEFORE it's critical.
 #   - CRIT  (>= CRIT_PCT, default 93): bus nudge + a direct ELI5 Telegram alert
 #           to the operator (nazim_send.sh) — at this point action is urgent.
 #   - Healthy (< WARN_PCT): clears the dedup flags.
@@ -20,8 +20,19 @@
 # the full volume the flag write may fail — acceptable: worst case a duplicate
 # CRIT alert, which for a full disk is the right failure direction.
 #
-# Scoped to the console body: it writes an orch-console bus row + (crit only)
-# the operator's nazim-console voice. It NEVER touches lanes or the hub pen.
+# ROUTING (bus #68342/#68390, 2026-10-15): WARN used to nudge orch-console,
+# which meant Nazim's own inbox got re-paged every time usage flapped across
+# the 89% line near its ~86% legitimate baseline — noise, once cc-fleet-health
+# actively owns resource health (CLAUDE.md §4.6). WARN now goes to
+# cc-fleet-health instead: assess + prune, same as any other routine health
+# signal, escalating to orch-console only if a prune can't clear it. CRIT
+# (the real operator-facing floor, ~94%) is UNCHANGED — that's still urgent
+# enough to reach Nazim directly via nazim_send.sh regardless of who else
+# gets paged first.
+#
+# Scoped to the console body: it writes the bus row (routed per above) +
+# (crit only) the operator's nazim-console voice. It NEVER touches lanes or
+# the hub pen.
 set -uo pipefail
 
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,11 +59,12 @@ stamp() { echo "$(date): $1" >> "$LOG"; }
 # 1-per-hour dedup: fire if no flag OR flag older than 60min
 should_fire() { local f="$1"; [ ! -f "$f" ] || [ -n "$(find "$f" -mmin +60 2>/dev/null)" ]; }
 
-bus_nudge() {  # $1=priority $2=subject $3=body
+bus_nudge() {  # $1=priority $2=subject $3=body $4=to_agent (default orch-console)
   # MUST use the venv python (has psycopg2); launchd's bare python3 does not.
   "$ORCH_DIR/.venv/bin/python3" - "$@" <<'PY' 2>>"$LOG"
 import sys, psycopg2
 pri, subj, body = sys.argv[1], sys.argv[2], sys.argv[3]
+to_agent = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else 'orch-console'
 import os
 url=None
 with open(os.path.expanduser('~/wingmen/orchestrator/.env')) as f:
@@ -65,7 +77,7 @@ with open(os.path.expanduser('~/wingmen/orchestrator/.env')) as f:
 conn=psycopg2.connect(url); cur=conn.cursor()
 cur.execute("SET app.current_agent_id='orch-console'")
 cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-  VALUES ('orch-console','orch-console','blocker',%s,%s,%s)""",(pri,subj,body))
+  VALUES ('orch-console',%s,'blocker',%s,%s,%s)""",(to_agent,pri,subj,body))
 conn.commit(); cur.close(); conn.close()
 PY
 }
@@ -81,7 +93,8 @@ if [ "$USED_PCT" -ge "$CRIT_PCT" ]; then
 elif [ "$USED_PCT" -ge "$WARN_PCT" ]; then
   if should_fire "$WARN_FLAG"; then
     bus_nudge "P2" "DISK WARN: ${DATA_VOL} at ${USED_PCT}% (${AVAIL_H} free)" \
-      "Mac Mini DATA volume at ${USED_PCT}% (${AVAIL_H} free) — above the ${WARN_PCT}% warn line. Clear regenerable space before it gets critical: npm cache clean --force; .next caches under ~/wingmen/projects; ~/.cache; brew cleanup -s. Operator NOT alerted yet (console handles the warn tier)."
+      "Mac Mini DATA volume at ${USED_PCT}% (${AVAIL_H} free) — above the ${WARN_PCT}% warn line. Assess + prune regenerable space (worktree node_modules/.next, npm cache, build caches) before it gets critical. Operator not paged at this tier." \
+      "cc-fleet-health"
     touch "$WARN_FLAG"; stamp "WARN nudge sent — ${USED_PCT}% (${AVAIL_H} free)"
   fi
 else
