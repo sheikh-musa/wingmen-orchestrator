@@ -1374,7 +1374,12 @@ def _send_client_ask_chase(conn, owner: str, row: dict) -> bool:
     ask_text = (row.get("ask") or "")[:200]
     owner = owner or "orch-console"
     created_epoch = row.get("created_epoch")
-    age_str = f"{int((time.time() - created_epoch) // 60)}m" if created_epoch is not None else "unknown"
+    # created_epoch comes from psycopg2's extract(epoch FROM ...) as a decimal.Decimal
+    # (SQL numeric), never a float -- float - Decimal raises TypeError. This path is
+    # only reached when apply=True (chase_client_asks skips it entirely in dry mode),
+    # so the 60h observe-only soak before arming hc#312 never exercised it live;
+    # caught on the first-ever ARMED run (2026-10-15T12:25:43Z).
+    age_str = f"{int((time.time() - float(created_epoch)) // 60)}m" if created_epoch is not None else "unknown"
     if row.get("committed_date") is not None:
         subj = f"[client-asks-chase] operator_asks #{aid} — committed date MISSED"
         detail = "a dated commitment was sent to the client and has now passed with the ask still open"
