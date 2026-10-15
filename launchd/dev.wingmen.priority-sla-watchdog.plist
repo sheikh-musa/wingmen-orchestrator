@@ -29,6 +29,26 @@
          excludes all pre-existing backlog; per-scan cap 3; lease-gated; dead-man
          stamp-on-success-only. Flip to 0 to disarm. -->
     <key>SLA_AGED_REPAGE_ENABLED</key><string>1</string>
+    <!-- ARMING CALENDAR hc#312/#313 (audit-20261006 B4/B-fix3, B4/C3; re-sequenced via
+         orch-console #58089), fired+verified 2026-10-15: 60h+ continuous observe soak
+         (log start 2026-10-12T23:59Z), ZERO errors across 2265 asks-chase + 1820
+         captured-triage scans, spot-checked targets (#654/#728/#1812/#3249) all
+         genuinely still-open/stale in operator_asks. All three nets post ONLY to
+         internal fleet bus recipients (owning lane + orch-console) via agent_messages
+         -- never a client, never the operator directly -- capped at 3 new chases/scan
+         with per-ask dead-man's-switch dedup (never double-sent). SLA_ASKS_CHASE_ENABLED
+         arms BOTH op#22669's operator-asks-chase net (migration 072) AND migration 082's
+         captured-triage aggregate page (ONE P1/run, never per-row) -- same gate, by
+         design (see priority_sla_watchdog.py comments at both call sites), not two
+         decisions. SLA_CLIENT_ASKS_CHASE_ENABLED arms migration 085's client-channel
+         net (hc#312) -- EVERY_MIN explicitly set to 1440 (24h) below to match hc#312's
+         pre-cleared rate-limit; the code's bare default (240min/4h, inherited from the
+         unrelated operator net) would have been MORE aggressive than what was soak-
+         tested, so it is overridden rather than relied on. Flip either back to 0/unset
+         to disarm. -->
+    <key>SLA_ASKS_CHASE_ENABLED</key><string>1</string>
+    <key>SLA_CLIENT_ASKS_CHASE_ENABLED</key><string>1</string>
+    <key>SLA_CLIENT_ASKS_CHASE_EVERY_MIN</key><string>1440</string>
     <!-- Escalation thresholds / guards are read from these (defaults shown).
          Uncomment to override without editing code.
     <key>SLA_MAX_VIOLATION_AGE_MIN</key><string>1440</string>
