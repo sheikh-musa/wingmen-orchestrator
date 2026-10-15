@@ -401,6 +401,51 @@ def test_sweep_file_does_not_flag_seed_user_id_appearing_in_a_transcript(tmp_pat
     assert rep["matches_before"] == 0, "a dormant/excluded identifier must never page as a leak"
 
 
+# ---- orch-console #67453 (bus#67397 ledger review): Firebase web-client config keys must
+# not be treated as secrets, whatever framework-public prefix (or none) wraps them. Real
+# incident: VITE_FIREBASE_API_KEY (23 chars -- short, but still clears _CREDENTIAL_KEY_RE's
+# _KEY$-driven MIN_SECRET_LEN floor) got swept and redacted on cosem-adcda-wt-urgent. ----
+
+def test_is_public_value_excludes_firebase_web_config_keys():
+    assert s._is_public_value("VITE_FIREBASE_API_KEY", "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe") is True
+    assert s._is_public_value("VITE_FIREBASE_AUTH_DOMAIN", "example-app.firebaseapp.com") is True
+    assert s._is_public_value("VITE_FIREBASE_STORAGE_BUCKET", "example-app.appspot.com") is True
+    assert s._is_public_value("VITE_FIREBASE_PROJECT_ID", "example-app-prod") is True
+    assert s._is_public_value("VITE_FIREBASE_MESSAGING_SENDER_ID", "1234567890123") is True
+    assert s._is_public_value("VITE_FIREBASE_APP_ID", "1:1234567890123:web:abc123def456") is True
+    assert s._is_public_value("VITE_FIREBASE_MEASUREMENT_ID", "G-ABCDEF1234") is True
+
+
+def test_is_public_value_excludes_firebase_keys_under_any_framework_prefix():
+    # suffix-anchored, not tied to one framework's public-env convention -- Next.js/CRA/bare
+    # all name the same genuinely-public Firebase fields.
+    assert s._is_public_value("NEXT_PUBLIC_FIREBASE_API_KEY", "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe") is True
+    assert s._is_public_value("REACT_APP_FIREBASE_API_KEY", "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe") is True
+    assert s._is_public_value("FIREBASE_API_KEY", "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe") is True
+
+
+def test_is_public_value_does_not_blanket_allow_vite_prefix():
+    # intentional non-coverage: a REAL secret mistakenly shipped under VITE_ (a client-bundle
+    # exposure bug, arguably worse than a server-only leak) must still be caught -- the fix is
+    # named Firebase-key suffixes, not a blanket `^VITE_` allowlist that would mask that bug.
+    assert s._is_public_value("VITE_STRIPE_SECRET_KEY", FAKE_KEY) is False
+
+
+def test_build_secret_set_excludes_firebase_web_config(tmp_path):
+    env = tmp_path / ".env"
+    _write(env, "\n".join([
+        "VITE_FIREBASE_API_KEY=AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe",
+        "VITE_FIREBASE_AUTH_DOMAIN=example-app.firebaseapp.com",
+        "VITE_FIREBASE_STORAGE_BUCKET=example-app.appspot.com",
+        "ANTHROPIC_API_KEY=%s" % FAKE_KEY,
+        "",
+    ]))
+    secrets = s.build_secret_set([str(env)])
+    hashes = set(secrets.values())
+    assert s.hash8(FAKE_KEY.encode()) in hashes, "the real secret must still be caught"
+    assert len(secrets) == 1, "only the real secret should survive -- all 3 Firebase keys excluded"
+
+
 # ---- orch-console #51400: live-append race protection before an in-place write ----
 
 def test_file_unchanged_since_true_when_nothing_changed(tmp_path):
