@@ -200,11 +200,12 @@ def test_client_row_within_cadence_of_last_chase_is_suppressed():
 
 def test_client_chase_is_capped_per_scan():
     targets = [client_row(id=100 + i, chase_by_epoch=0) for i in range(10)]
-    n = w.chase_client_asks(
+    n, sent_list = w.chase_client_asks(
         targets, dry=False, now=1000 * MIN, chase_state={},
         send_chase=lambda owner, t: True, max_chases=3,
     )
     assert n == 3
+    assert len(sent_list) == 3
 
 
 def test_client_chase_stamps_state_only_on_success():
@@ -226,10 +227,12 @@ def test_client_chase_dry_run_sends_nothing_and_stamps_nothing():
     assert sent["n"] == 0 and state == {}
 
 
-def test_client_ask_chase_pages_both_owner_and_orch_console(monkeypatch):
-    """The dual-recipient behavior lives in _send_client_ask_chase — verify it
-    inserts an agent_messages row for BOTH the owning lane and orch-console,
-    not just one (bus #47110 item 3b)."""
+def test_client_ask_chase_pages_only_the_owner_not_console(monkeypatch):
+    """bus#67841/#67965, 2026-10-15: a first-flush backlog drain turned the old
+    dual-recipient (owner + orch-console CC) behavior into a 52-then-27-ask
+    storm on console. _send_client_ask_chase now pages ONLY the owner;
+    console visibility is the periodic summary (see TestClientAskChaseSummary
+    below), never a per-ask CC."""
     sent_to = []
 
     class FakeCursor:
@@ -254,7 +257,7 @@ def test_client_ask_chase_pages_both_owner_and_orch_console(monkeypatch):
     ok = w._send_client_ask_chase(FakeConn(), "cc-irsyad-coord",
                                    client_row(id=42, created_epoch=time.time() - 60))
     assert ok is True
-    assert set(sent_to) == {"cc-irsyad-coord", "orch-console"}
+    assert sent_to == ["cc-irsyad-coord"]
 
 
 def test_client_ask_chase_owner_is_orch_console_deduplicates_to_one_send(monkeypatch):
