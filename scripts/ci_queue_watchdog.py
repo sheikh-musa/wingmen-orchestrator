@@ -35,10 +35,23 @@ on a genuine stall, ONE collapsed page per (repo, label):
   offline + one online-busy is degraded capacity, which is mentioned in the
   not_draining page and is NOT paged on its own while the queue drains.
 
-  The offline / stuck / no-runner cases only fire once the oldest queued job is
-  older than --grace-min (default 5), so a job queued seconds ago while the
-  runner reconnects or picks it up doesn't page. Offline with nothing queued is
-  only LOGGED, because the desktop being off overnight is expected.
+  The stuck/no-runner cases fire once the oldest queued job is older than
+  --grace-min (default 5), so a job queued seconds ago while the runner
+  reconnects or picks it up doesn't page. Offline with nothing queued is only
+  LOGGED, because the desktop being off overnight is expected.
+
+  runner_offline THROTTLE (bus #68485/#68486, 2026-10-15): a routine
+  overnight/asleep-desktop wait paged Nazim for 2 non-urgent post-merge
+  trunk-push jobs that weren't blocking any PR. runner_offline now pages only
+  when BOTH hold: oldest queued age > --offline-grace-min (default 30, not 5
+  — "a real threshold"), AND at least one queued job belongs to an OPEN PR
+  (via the run's `pull_requests` field — empty for a push on the trunk
+  branch itself). A push-triggered re-validation run queuing behind an
+  offline desktop is exactly the "routine overnight wait" case Nazim
+  doesn't want paged; a PR run queuing behind it is exactly the case that
+  still needs a human to flip the desktop on. no_runner (no runner
+  registered for the label at all — a config break, not a sleepy desktop)
+  is unchanged: still --grace-min, still pages regardless of PR status.
 
 Age field: job `created_at` (when GitHub enqueued it). On a still-queued job
 `started_at` is null or a placeholder, so it can't measure queue wait.
@@ -75,6 +88,7 @@ DEFAULT_REPO = "sheikh-musa/wingmen-orchestrator"
 DEFAULT_LABEL = "cubeasht"
 DEFAULT_THRESHOLD_MIN = 30
 DEFAULT_GRACE_MIN = 5
+DEFAULT_OFFLINE_GRACE_MIN = 30
 DEFAULT_COOLDOWN_MIN = 60
 FALLBACK_AVG_MIN = 8.0
 AVG_SAMPLE = 10
@@ -145,7 +159,16 @@ def _list_field(data: dict, field: str, path: str, complete: bool = True) -> lis
 
 
 def fetch_label_jobs(repo: str) -> list[dict]:
-    """All jobs of every queued/in_progress run in `repo` (unfiltered)."""
+    """All jobs of every queued/in_progress run in `repo` (unfiltered).
+
+    Each job dict gets an extra `_pr_numbers` key (list[int], possibly empty):
+    the run's `pull_requests` field (bus #68485/#68486) — open PRs whose head
+    matches this run. GitHub only populates this for pull_request(_target)
+    events; a push-triggered run on the trunk branch itself (e.g. the
+    validation run after a squash-merge) always has an empty list here. This
+    is the signal runner_offline's throttle uses to tell "a PR actually needs
+    this to merge" apart from a routine post-merge trunk re-check.
+    """
     jobs: list[dict] = []
     seen_runs: set[int] = set()
     for status in RUN_STATUSES:
@@ -157,8 +180,13 @@ def fetch_label_jobs(repo: str) -> list[dict]:
             if rid in seen_runs:
                 continue
             seen_runs.add(rid)
+            pr_numbers = [pr.get("number") for pr in (run.get("pull_requests") or [])
+                          if isinstance(pr, dict) and isinstance(pr.get("number"), int)]
             jpath = f"repos/{repo}/actions/runs/{rid}/jobs?per_page={PER_PAGE}"
-            jobs.extend(_list_field(gh_api(jpath), "jobs", jpath))
+            run_jobs = _list_field(gh_api(jpath), "jobs", jpath)
+            for j in run_jobs:
+                j["_pr_numbers"] = pr_numbers
+            jobs.extend(run_jobs)
     return jobs
 
 
@@ -231,9 +259,16 @@ def _minutes_since_last_activity(active: list[dict], completed: list[dict],
     return (now - max(stamps)).total_seconds() / 60
 
 
+def _queued_pr_numbers(queued: list[dict]) -> list[int]:
+    out: set[int] = set()
+    for j in queued:
+        out.update(j.get("_pr_numbers") or [])
+    return sorted(out)
+
+
 def evaluate(repo: str, label: str, active: list[dict], runners: list[dict],
              completed: list[dict], threshold_min: int, grace_min: int,
-             now: datetime) -> list[dict]:
+             now: datetime, offline_grace_min: int = DEFAULT_OFFLINE_GRACE_MIN) -> list[dict]:
     """→ [] or ONE collapsed finding for (repo, label)."""
     queued = queued_label_jobs(active, label)
     if not queued:
@@ -244,6 +279,7 @@ def evaluate(repo: str, label: str, active: list[dict], runners: list[dict],
         key=lambda x: x["age_min"], reverse=True,
     )
     oldest = jobs[0]["age_min"]
+    pr_numbers = _queued_pr_numbers(queued)
     mine = [r for r in runners if label in _runner_labels(r)]
     online = [r for r in mine if r.get("status") == "online"]
     base = {
@@ -252,6 +288,7 @@ def evaluate(repo: str, label: str, active: list[dict], runners: list[dict],
         "runners": [f"{r.get('name')}:{r.get('status')}{'/busy' if r.get('busy') else ''}"
                     for r in mine],
         "threshold_min": threshold_min, "grace_min": grace_min,
+        "offline_grace_min": offline_grace_min, "pr_numbers": pr_numbers,
         "total_runners": len(mine), "online_runners": len(online),
         "offline_runner_names": [r.get("name") for r in mine if r.get("status") != "online"],
     }
@@ -259,7 +296,12 @@ def evaluate(repo: str, label: str, active: list[dict], runners: list[dict],
     if not mine:
         return [dict(base, kind="no_runner")] if oldest > grace_min else []
     if not online:
-        return [dict(base, kind="runner_offline")] if oldest > grace_min else []
+        # runner_offline THROTTLE (bus #68485/#68486): only a real stall (past
+        # offline_grace_min, not the short general grace) AND only when an open
+        # PR is actually waiting on it — a routine post-merge trunk re-check
+        # queuing behind an asleep desktop is not worth paging for.
+        return ([dict(base, kind="runner_offline")]
+                if oldest > offline_grace_min and pr_numbers else [])
     if any(not r.get("busy") for r in online):
         quiet = _minutes_since_last_activity(active, completed, label, now)
         if oldest > grace_min and quiet > grace_min:
@@ -359,17 +401,20 @@ def render_page(f: dict) -> tuple[str, str]:
             "just volume, consider cancelling superseded runs or adding runner capacity."
         )
     elif f["kind"] == "runner_offline":
-        subj = (f"CI stuck: {repo_short} '{lbl}' runner offline (desktop may be off/asleep) "
-                f"— {n} job(s) queued, oldest {oldest} min")
+        prs = f.get("pr_numbers") or []
+        pr_s = ", ".join(f"#{p}" for p in prs)
+        subj = (f"CI stuck: {repo_short} '{lbl}' runner offline past "
+                f"{f['offline_grace_min']}min — PR {pr_s} can't merge, oldest {oldest} min")
         body = (
-            f"TL;DR: the self-hosted '{lbl}' CI runner is offline while {n} job(s) wait "
-            "for it.\n\n"
+            f"TL;DR: the self-hosted '{lbl}' CI runner is offline while PR {pr_s} waits "
+            "for it to merge.\n\n"
             "WHY: Musa's Windows desktop may be off or asleep, or the WSL runner service "
-            "stopped. GitHub does not fail these jobs; it waits. CI is waiting, so PRs are "
-            "not being tested.\n\n"
+            "stopped. GitHub does not fail these jobs; it waits. CI is waiting, so this PR "
+            "is not being tested.\n\n"
             "WHAT TO DO: wake/turn on the desktop and confirm the runner shows Idle/Active in "
-            f"https://github.com/{f['repo']}/settings/actions/runners . Offline with nothing "
-            "queued is expected overnight and is NOT paged."
+            f"https://github.com/{f['repo']}/settings/actions/runners . Offline past "
+            f"{f['offline_grace_min']}min with ONLY non-PR jobs queued (e.g. a post-merge "
+            "trunk re-check) is NOT paged — only a job an open PR actually needs to merge is."
         )
     elif f["kind"] == "stuck_pickup":
         quiet = f.get("quiet_min")
@@ -423,7 +468,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threshold-min", type=int, default=DEFAULT_THRESHOLD_MIN,
                    help="busy runner: page when oldest queued age > ETA + this (default 30)")
     p.add_argument("--grace-min", type=int, default=DEFAULT_GRACE_MIN,
-                   help="offline/idle/no-runner: minimum oldest-queued age before paging (default 5)")
+                   help="idle/no-runner: minimum oldest-queued age before paging (default 5)")
+    p.add_argument("--offline-grace-min", type=int, default=DEFAULT_OFFLINE_GRACE_MIN,
+                   help="runner_offline: minimum oldest-queued age before paging, AND only "
+                        "if an open PR is queued (default 30)")
     p.add_argument("--cooldown-min", type=int, default=DEFAULT_COOLDOWN_MIN)
     p.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
     p.add_argument("--dry-run", action="store_true", help="print what would page; send nothing, write nothing")
@@ -458,8 +506,14 @@ def main(argv: list[str] | None = None) -> int:
             if not queued and any(r.get("status") != "online" for r in mine):
                 print("  runner offline but nothing queued — expected (log only, no page)")
             f = evaluate(repo, args.label, active, runners, completed,
-                         args.threshold_min, args.grace_min, now)
-            if queued and not f:
+                         args.threshold_min, args.grace_min, now, args.offline_grace_min)
+            online_mine = [r for r in mine if r.get("status") == "online"]
+            if queued and not f and mine and not online_mine:
+                prs = _queued_pr_numbers(queued)
+                print(f"  runner offline, {len(queued)} queued, no open PR waiting on them "
+                      "(or still within offline-grace) — no page" if not prs else
+                      "  runner offline but still within offline-grace — no page")
+            elif queued and not f:
                 print("  queue is draining / within grace — no page")
             findings += f
 
