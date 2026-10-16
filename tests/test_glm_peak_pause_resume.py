@@ -13,8 +13,8 @@ g = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(g)
 
 
-def _utc(h, m=0):
-    return dt.datetime(2026, 10, 15, h, m, tzinfo=dt.timezone.utc)
+def _utc(h, m=0, day=15):
+    return dt.datetime(2026, 10, day, h, m, tzinfo=dt.timezone.utc)
 
 
 @pytest.mark.parametrize("hour,minute,expected", [
@@ -22,6 +22,17 @@ def _utc(h, m=0):
 ])
 def test_in_peak_window(hour, minute, expected):
     assert g.in_peak_window(_utc(hour, minute)) is expected
+
+
+@pytest.mark.parametrize("day,expected_weekday", [(17, "Saturday"), (18, "Sunday")])
+def test_in_peak_window_skips_weekends_even_during_peak_hours(day, expected_weekday):
+    assert _utc(7, 30, day=day).strftime("%A") == expected_weekday
+    assert g.in_peak_window(_utc(7, 30, day=day)) is False
+
+
+def test_in_peak_window_true_on_weekday_at_peak_hour():
+    assert _utc(7, 30, day=16).strftime("%A") == "Friday"
+    assert g.in_peak_window(_utc(7, 30, day=16)) is True
 
 
 def test_is_hard_excluded_covers_the_standing_never_list():

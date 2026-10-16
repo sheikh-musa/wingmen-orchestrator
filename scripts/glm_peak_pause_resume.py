@@ -68,7 +68,15 @@ HARD_EXCLUDE_PREFIXES = ("irsyad", "hub", "console", "orch-console")
 
 # ── pure decisions (testable without touching tmux/DB/subprocess) ─────────────
 def in_peak_window(now: dt.datetime) -> bool:
-    """06:00-10:00 UTC, inclusive start / exclusive end."""
+    """06:00-10:00 UTC, inclusive start / exclusive end, weekdays only.
+
+    z.ai peak (14:00-18:00 UTC+8) is Mon-Fri only -- confirmed against z.ai's
+    own docs + twice-observed burn (bus #68623). The 06:00-10:00 UTC window
+    never crosses a UTC+8 midnight, so the UTC weekday and the UTC+8 weekday
+    are always the same calendar day here -- no timezone conversion needed.
+    """
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
     return PEAK_START_HOUR <= now.hour < PEAK_END_HOUR
 
 
