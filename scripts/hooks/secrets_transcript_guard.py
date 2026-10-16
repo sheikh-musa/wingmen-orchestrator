@@ -913,6 +913,18 @@ TMUX_DUMP_LEADING_RE = re.compile(r"^tmux\s+show-environment\b")
 PROC_ENVIRON_RE = re.compile(r"/proc/[0-9A-Za-z$*]+/environ")  # usually an ARGUMENT (e.g. to cat), not leading
 TEE_LEADING_RE = re.compile(r"^tee\b")
 
+# bus #68892/#68884 (2026-10-16, cc-cosem-adcda-2's triage, real incident): `pgrep -fl
+# "npm run dev"` leaked a real DATABASE_URL + GH_TOKEN. Confirmed via `man pgrep`: "-l
+# ... If used in conjunction with -f, print the process ID and the FULL ARGUMENT LIST
+# for each matching process" -- -f alone (bare PIDs) and -l alone (process name only)
+# are each safe; only the COMBINATION prints a matching process's entire command line,
+# which can include ambient secrets a launcher embedded as literal argv (confirmed
+# empirically here: lane dev-server launches echo CC_AGENT_ID=.../DATABASE_URL=.../
+# GH_TOKEN=... straight into their own argv, visible to any full-argv listing). This
+# was memory-only ("use pgrep -f, no -l") with zero code enforcement before this --
+# exactly how it recurred. pkill shares pgrep's flag semantics.
+PGREP_LEADING_RE = re.compile(r"^(?:pgrep|pkill)\b")
+
 # cc-fleet-health bus #49064 probe, gap (a): the real Sep-24 incident's actual dump
 # trigger (`ps eww`) was buried TWO quoting levels deep inside
 # `ssh hub-vps "sshpass ... ssh gazzai@<host> 'ps eww -u gazzai -o pid,command'"` --
@@ -1032,9 +1044,33 @@ def _is_sink(segment: str, trigger_kind: str | None = None) -> bool:
     # Rule A's grep-on-a-secret-FILE sink check (trigger_kind left as the None default
     # there) or Rule B's "prints a secret env var" trigger (one named var, bounded) --
     # both keep accepting sed-mask as already reviewed/accepted.
-    if trigger_kind == "dumps the environment":
+    # startswith, not ==: the pgrep/pkill -f+-l trigger (bus #68892) returns a longer,
+    # more specific message that still OPENS with this exact phrase on purpose, so it
+    # gets the same no-sed-mask-escape-hatch treatment as every other dump trigger.
+    if trigger_kind and trigger_kind.startswith("dumps the environment"):
         return False
     return bool(SED_MASK_SINK_RE.search(segment))
+
+
+def _pgrep_full_long_dump(lead: str) -> bool:
+    """pgrep/pkill with BOTH -f (full argument list matching) and -l (long output) --
+    see PGREP_LEADING_RE's comment for why only the combination is dangerous. Token-
+    split so flag characters inside a QUOTED PATTERN argument (e.g. `pgrep -f "fl"`)
+    are never mistaken for actual -f/-l switches -- collection stops at the first
+    non-flag token, which is the pattern itself."""
+    if not PGREP_LEADING_RE.match(lead):
+        return False
+    try:
+        tokens = shlex.split(lead)
+    except ValueError:
+        return False
+    flag_chars = set()
+    for tok in tokens[1:]:
+        if tok.startswith("-"):
+            flag_chars.update(tok.lstrip("-"))
+        else:
+            break
+    return "f" in flag_chars and "l" in flag_chars
 
 
 def _segment_dump_kind(segment: str, lead: str) -> bool:
@@ -1067,6 +1103,16 @@ def _trigger_kind(segment: str, lead: str, _depth: int = 0) -> str | None:
     levels, an outer `ssh` wrapping `sshpass ... ssh` wrapping the actual `ps eww`).
     Recurses until no further wrapper is found; `_depth` is a sanity backstop against
     pathological input, not expected to ever bind in practice."""
+    if _pgrep_full_long_dump(lead):
+        # Distinct, actionable message (orch-console #68914: "make the safe-form
+        # message clear") -- "dumps the environment..." PREFIX is unchanged so
+        # _is_sink's exact string-prefix check below still requires a hash sink here
+        # too (same unbounded-content reasoning as ps/env/proc-environ: no sed-mask
+        # escape hatch), while the full text actually tells the caller what to do.
+        return ("dumps the environment -- pgrep/pkill -f combined with -l prints each "
+                "matching process's FULL COMMAND LINE, which can carry secrets a "
+                "launcher embedded as literal argv. Use -f alone (bare PIDs) or -l "
+                "alone (name only, no -f), or pipe through awk/cut to show only PID+name")
     if _segment_dump_kind(segment, lead):
         return "dumps the environment"
     if _segment_prints_secret(segment, lead):
