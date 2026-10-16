@@ -298,6 +298,27 @@ def resolve_owner(label: str, known_agents) -> "str | None":
     return cand if cand in set(known_agents) else None
 
 
+def is_cross_host_orphan(label: str, known_agents, host_of: dict, current_host: "str | None") -> bool:
+    """True iff `label`'s resolved owner is a real registered agent whose CURRENT host
+    (agent_status.host) differs from `current_host` -- bus #68556/#68833 (cc-orchestrator),
+    same recurring class as #59069/#59570: a project moved hosts (e.g. the hub Mini -> gzb)
+    and left its old memory-dir behind on the original host. It is never read by anyone --
+    the live agent boots from its NEW host's `~/.claude/projects/...` path -- so paging
+    ANYONE about its size/structure is pure noise, confirmed dead each time it recurs.
+
+    Conservative on purpose: only true when the owner resolves to a REAL known agent AND
+    that agent's host is actually recorded (non-None/non-empty) AND it mismatches. An
+    unresolvable label or an owner with no recorded host is never suppressed this way --
+    this only fires on a positive, specific cross-host confirmation, not an absence."""
+    if not host_of or not current_host:
+        return False
+    owner = resolve_owner(label, known_agents)
+    if not owner:
+        return False
+    owner_host = host_of.get(owner)
+    return bool(owner_host) and owner_host != current_host
+
+
 def plan_alerts(entries, state: dict, known_agents, sre_agent: str = SRE_AGENT):
     """PURE dedup + routing (Nazim 38293). `entries` = [(label, hard_flags, advisory_flags)] for the
     dirs flagged THIS run; `state` = prior alert memory ({label: {"near_limit": True}}). Returns
@@ -450,11 +471,13 @@ def _dispatch_alerts(problems: list, connect=None, dsn: "str | None" = None) -> 
     persisted state. Never takes down the checker — a dispatch failure only warns."""
     try:
         sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+        import socket
         import psycopg
         from dotenv import load_dotenv
         load_dotenv(pathlib.Path(__file__).resolve().parent.parent / ".env")
         dsn = dsn or os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
         connect = connect or psycopg.connect
+        current_host = os.environ.get("CC_HOST_OVERRIDE") or socket.gethostname()
 
         rmap = {label: r for (label, hard, advisory, r) in problems}
         entries = [(label, hard, advisory) for (label, hard, advisory, r) in problems]
@@ -467,8 +490,26 @@ def _dispatch_alerts(problems: list, connect=None, dsn: "str | None" = None) -> 
                     known_agents = {row[0] for row in cur.fetchall()}
                 except Exception:
                     known_agents = set()  # owner unresolvable -> SRE fallback, never crash
+                try:
+                    cur.execute("SELECT agent_id, host FROM agent_status")
+                    host_of = {row[0]: row[1] for row in cur.fetchall()}
+                except Exception:
+                    host_of = {}  # unavailable -> no cross-host suppression, never crash
 
-            posts, new_state = plan_alerts(entries, state, known_agents)
+            # cross-host orphans (bus #68556/#68833, same class as #59069/#59570): a leftover
+            # memory-dir from before a project's host-move, confirmed dead by its owner every
+            # time it recurs. Filter BEFORE plan_alerts so dedup/hard-vs-advisory routing stays
+            # untouched for every dir that IS live — this only drops entries proven stale.
+            live_entries = []
+            for label, hard, advisory in entries:
+                if is_cross_host_orphan(label, known_agents, host_of, current_host):
+                    owner = resolve_owner(label, known_agents)
+                    print(f"SKIPPED cross-host orphan (owner {owner} is on {host_of.get(owner)}, "
+                          f"this is {current_host}): {label}")
+                    continue
+                live_entries.append((label, hard, advisory))
+
+            posts, new_state = plan_alerts(live_entries, state, known_agents)
             if not posts:
                 print("all flagged dirs already alerted (deduped) — no new page")
             else:
