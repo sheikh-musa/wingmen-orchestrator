@@ -43,6 +43,7 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from secret_shape_patterns import SECRET_VALUE_PATTERNS, find_hits  # noqa: E402
@@ -506,19 +507,42 @@ def main() -> int:
     # not by (cls, match) pair, since two matches of the same class are still one leak
     # event worth reporting once. Redaction is unaffected -- it's idempotent per class
     # (a second call over an already-redacted line is a no-op), so only paging is deduped.
+    # bus #68892 (cc-cosem-adcda-2 triage, 2026-10-16): the stderr message below used to
+    # claim "redacted on disk" UNCONDITIONALLY -- the return values of redact_recent_lines/
+    # redact_persisted_output were never checked. A real incident showed the hook paging
+    # correctly (a hit WAS found) while the raw value sat unredacted on disk -- the claim
+    # was false and nobody could tell from the hook's own output. VERIFY, don't assert:
+    # track whether any redact_* call actually changed a file, and if a hit was found but
+    # NOTHING was actually redacted anywhere, say so loudly instead of lying.
+    #
+    # RETRY, bounded: a transcript write can plausibly still be in flight relative to this
+    # PostToolUse hook's own invocation (the harness's write-to-disk and this hook's
+    # execution are not provably ordered from in here), so a same-content line that isn't
+    # on disk YET would make the first attempt a correct no-op, not a bug. Retry the same
+    # redact_* calls a few times with a short sleep before concluding redaction truly
+    # failed -- cheap (the tool call already completed; this hook's own latency is the
+    # only cost) and never produces a WRONG success claim either way.
     seen_classes = set()
+    any_redacted = False
     for cls, match in all_hits:
-        if transcript_path:
-            # window=3: covers the tool_use line and the tool_result line even with one
-            # intervening line (observed in some transcript shapes); cheap and harmless
-            # to widen since _redact_strings is a no-op on any line with no match.
-            redact_recent_lines(transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
-        if sub_transcript_path and sub_transcript_path != transcript_path:
-            # bus #49029/#49030: this call originated inside a subagent -- also redact
-            # its own transcript file, which `transcript_path` above does not cover.
-            redact_recent_lines(sub_transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
-        for p in persisted_paths:
-            redact_persisted_output(p, cls, SECRET_PATTERNS[cls])
+        redacted_this_hit = False
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.15)
+            if transcript_path:
+                # window=3: covers the tool_use line and the tool_result line even with one
+                # intervening line (observed in some transcript shapes); cheap and harmless
+                # to widen since _redact_strings is a no-op on any line with no match.
+                redacted_this_hit |= redact_recent_lines(transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
+            if sub_transcript_path and sub_transcript_path != transcript_path:
+                # bus #49029/#49030: this call originated inside a subagent -- also redact
+                # its own transcript file, which `transcript_path` above does not cover.
+                redacted_this_hit |= redact_recent_lines(sub_transcript_path, cls, SECRET_PATTERNS[cls], max_lines=3)
+            for p in persisted_paths:
+                redacted_this_hit |= redact_persisted_output(p, cls, SECRET_PATTERNS[cls])
+            if redacted_this_hit:
+                break
+        any_redacted |= redacted_this_hit
         if cls in seen_classes:
             continue
         seen_classes.add(cls)
@@ -529,11 +553,21 @@ def main() -> int:
         _page_orch_console(cls, tool_name, agent_id=agent_id, agent_type=agent_type)
 
     classes = ", ".join(cls for cls, _ in all_hits)
-    sys.stderr.write(
-        f"secrets_output_scanner: this output contained secret-shaped content ({classes}); "
-        "it has been redacted on disk and orch-console paged. Treat the underlying value "
-        "as potentially exposed going forward.\n"
-    )
+    if any_redacted:
+        sys.stderr.write(
+            f"secrets_output_scanner: this output contained secret-shaped content ({classes}); "
+            "it has been redacted on disk and orch-console paged. Treat the underlying value "
+            "as potentially exposed going forward.\n"
+        )
+    else:
+        # The one thing the old message must never do: claim success it didn't verify.
+        sys.stderr.write(
+            f"secrets_output_scanner: this output contained secret-shaped content ({classes}) "
+            "and orch-console was paged, but NO ON-DISK REDACTION ACTUALLY LANDED after retries "
+            "-- the raw value may still be sitting in the transcript or a persisted-output file. "
+            "This is the backstop failing to close the loop, not just the original leak -- "
+            "treat it as still fully exposed and investigate why redaction didn't take.\n"
+        )
     return 0
 
 

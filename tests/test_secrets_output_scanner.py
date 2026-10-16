@@ -209,6 +209,82 @@ def test_main_catches_and_redacts_a_literal_dsn_in_the_tool_use_input(tmp_path):
     assert json.loads(after_lines[1])["toolUseResult"]["output"] == "SELECT 1"
 
 
+# ---- bus #68892: redaction-verification -- a hit must never be claimed "redacted on
+# disk" unless something actually changed on disk; a real incident showed the hook
+# paging correctly while the raw value sat unredacted, with the old message claiming
+# success regardless. ------------------------------------------------------------------
+
+def test_main_reports_honest_failure_when_redaction_never_lands(tmp_path):
+    import subprocess
+
+    # A hit the scan finds via input_text, but transcript_path's own content has NO
+    # matching line in its redact window -- redact_recent_lines legitimately returns
+    # False every attempt, and there is no persisted-output path, so nothing anywhere
+    # can be redacted. This is the exact shape of a hit that pages but can't be fixed.
+    # Built via concatenation, not a contiguous literal, same fixture family used
+    # elsewhere in this file (postgres DSN, TEST-NET-3 host).
+    fake_dsn = "postgres://orchuser:" + "Zq9mPlKx2Rz" + "@203.0.113.77:5432/orchdb"
+    transcript = tmp_path / "session.jsonl"
+    with open(transcript, "w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "echo unrelated"}}
+        ]}}) + "\n")
+        f.write(json.dumps({"type": "tool_result", "toolUseResult": {"output": "unrelated output, no secret here"}}) + "\n")
+    original_transcript_text = transcript.read_text()
+
+    cmd = "psql " + json.dumps(fake_dsn)  # the hit: only in input_text, never written to transcript
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": cmd},
+        "tool_response": "unrelated output, no secret here",
+        "transcript_path": str(transcript),
+    })
+    env = dict(__import__("os").environ, SECRETS_SCANNER_DEMO="1")
+    r = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload, text=True, capture_output=True, env=env)
+    assert r.returncode == 0
+    assert "NO ON-DISK REDACTION ACTUALLY LANDED" in r.stderr
+    assert "it has been redacted on disk" not in r.stderr  # the old, now-forbidden false claim
+    assert transcript.read_text() == original_transcript_text  # genuinely untouched, matching the honest message
+
+
+def test_main_retries_before_giving_up_and_succeeds_on_a_later_attempt(monkeypatch):
+    # Simulates the hypothesized race (the transcript line isn't on disk yet on the
+    # first read): redact_recent_lines fails twice then succeeds on the 3rd call for
+    # the SAME hit. The honest-success path must still fire (and paging must still
+    # happen) -- a transient miss that self-resolves within the retry budget is not a
+    # backstop failure.
+    import io
+
+    calls = {"n": 0}
+
+    def flaky_redact(path, cls, pattern, max_lines=3):
+        calls["n"] += 1
+        return calls["n"] >= 3  # False, False, True
+
+    monkeypatch.setattr(scanner, "redact_recent_lines", flaky_redact)
+    monkeypatch.setattr(scanner.time, "sleep", lambda s: None)  # don't actually wait in tests
+    monkeypatch.setenv("SECRETS_SCANNER_DEMO", "1")
+
+    marker = "fake-" + "abcdefghijklmnopqrstuvwxyz123456"  # recognized fixture, never pages
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo " + marker},
+        "tool_response": "Bearer " + marker,
+        "transcript_path": "/dev/null",  # content irrelevant -- redact_recent_lines is mocked
+    })
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+
+    captured_stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_stderr)
+
+    scanner.main()
+
+    assert calls["n"] == 3, "must retry up to 3 attempts, stopping as soon as one succeeds"
+    out = captured_stderr.getvalue()
+    assert "it has been redacted on disk" in out
+    assert "NO ON-DISK REDACTION ACTUALLY LANDED" not in out
+
+
 def test_redact_recent_lines_only_touches_the_window(tmp_path):
     p = tmp_path / "t.jsonl"
     lines = [
