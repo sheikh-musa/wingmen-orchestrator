@@ -281,9 +281,14 @@ def test_lane_bash_benign_python_with_ambient_prod_gac_denied():
 
 
 def test_lane_bash_benign_node_with_ambient_prod_gac_abs_denied():
+    # realpath-resolution-based, so it must be portable to WHATEVER machine
+    # runs the test (the hardcoded mac-specific _KEY_ABS does not resolve
+    # under the keys dir on a Linux CI runner's own $HOME) — build the path
+    # from the live home dir exactly as the guard itself does.
+    real_abs_key = os.path.join(os.path.expanduser("~"), ".wingmen", "keys", "cosem-sa.json")
     assert_denied(
         "Bash", {"command": "node some_unrelated_script.js"},
-        env={**_LANE_ENV, "GOOGLE_APPLICATION_CREDENTIALS": _KEY_ABS},
+        env={**_LANE_ENV, "GOOGLE_APPLICATION_CREDENTIALS": real_abs_key},
     )
 
 
