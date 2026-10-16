@@ -42,6 +42,11 @@ def run_hook(tool_name, tool_input, env=None):
     full_env = dict(os.environ)
     full_env.pop("CC_BASE_AGENT_ID", None)
     full_env.pop("ORCH_BODY_ROLE", None)
+    # Deterministic baseline for the env-STATE check (op#29348 round 2): the
+    # invoking shell's OWN ambient GOOGLE_APPLICATION_CREDENTIALS/CLOUDSDK_CONFIG
+    # must never leak into a test that doesn't explicitly set them.
+    full_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    full_env.pop("CLOUDSDK_CONFIG", None)
     if env:
         full_env.update(env)
     return subprocess.run(
@@ -259,6 +264,75 @@ def test_lane_bash_mention_cloudsdk_config_var_read_allowed():
 
 def test_lane_other_tool_out_of_scope_allowed():
     assert_allowed("Grep", {"pattern": "cosem", "path": _KEY})
+
+
+# ── DENY: ambient ADC env state at tool-call time (op#29348 reviewer's hole,
+# round 2 — platform-1 #69530): a library-based GCP client inside an
+# interpreter invocation (no gcloud/firebase/credential text in the visible
+# command) silently picks up a REAL prod credential already present in the
+# inherited env. The guard must catch the ENV STATE, not just command text. ──
+
+def test_lane_bash_benign_python_with_ambient_prod_gac_denied():
+    # The exact shape of the incident: no telltale text in the command at all.
+    assert_denied(
+        "Bash", {"command": "python3 scripts/appissues_bus_poller.py --once --dry-run"},
+        env={**_LANE_ENV, "GOOGLE_APPLICATION_CREDENTIALS": _KEY},
+    )
+
+
+def test_lane_bash_benign_node_with_ambient_prod_gac_abs_denied():
+    # realpath-resolution-based, so it must be portable to WHATEVER machine
+    # runs the test (the hardcoded mac-specific _KEY_ABS does not resolve
+    # under the keys dir on a Linux CI runner's own $HOME) — build the path
+    # from the live home dir exactly as the guard itself does.
+    real_abs_key = os.path.join(os.path.expanduser("~"), ".wingmen", "keys", "cosem-sa.json")
+    assert_denied(
+        "Bash", {"command": "node some_unrelated_script.js"},
+        env={**_LANE_ENV, "GOOGLE_APPLICATION_CREDENTIALS": real_abs_key},
+    )
+
+
+def test_lane_bash_ambient_wellknown_adc_denied():
+    # GAC unset, but the well-known per-user ADC file itself is ambiently
+    # reachable (the ORIGINAL reviewer's hole) — same env-state class.
+    assert_denied(
+        "Bash", {"command": "python3 unrelated.py"},
+        env={**_LANE_ENV, "GOOGLE_APPLICATION_CREDENTIALS": _ADC_JSON},
+    )
+
+
+def test_lane_bash_ambient_sentinel_gac_allowed():
+    # Part A's own fail-closed sentinel (guaranteed non-existent, non-prod) must
+    # NOT trip this check — that is the CORRECT isolated state, not a danger.
+    assert_allowed(
+        "Bash", {"command": "python3 unrelated.py"},
+        env={**_LANE_ENV, "GOOGLE_APPLICATION_CREDENTIALS": "/Users/sheikhmusa/.wingmen/lane-gcloud/cc-cosem-platform-1/.no-prod-adc"},
+    )
+
+
+def test_lane_bash_ambient_gac_unset_allowed():
+    # No ambient GAC at all (the ordinary/expected case for a lane that never
+    # had Part A misfire) is fine.
+    assert_allowed("Bash", {"command": "python3 unrelated.py"}, env=_LANE_ENV)
+
+
+def test_lane_bash_ambient_gac_nonprod_path_allowed():
+    # A real, EXISTING file that simply isn't a cosem prod key / well-known ADC
+    # path must not false-positive (e.g. a lane's own unrelated creds file).
+    assert_allowed(
+        "Bash", {"command": "python3 unrelated.py"},
+        env={**_LANE_ENV, "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/some-other-unrelated-file.json"},
+    )
+
+
+def test_console_unaffected_by_ambient_gac_check():
+    # The console legitimately runs prod ops — this new check must stay
+    # worker-lane-scoped like every other check in this guard.
+    r = run_hook(
+        "Bash", {"command": "python3 unrelated.py"},
+        env={"GOOGLE_APPLICATION_CREDENTIALS": _KEY},
+    )
+    assert r.returncode == 0, r.stderr
 
 
 # ── DENY: fail-closed on unreadable input (worker lane) ──────────────────────

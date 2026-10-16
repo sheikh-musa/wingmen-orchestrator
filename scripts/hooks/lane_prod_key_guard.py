@@ -25,7 +25,22 @@ worker lane that:
   (iii) contains `GOOGLE_APPLICATION_CREDENTIALS=`, `CLOUDSDK_CONFIG=`, or
         `--key-file` in the Bash command text — a lane re-pointing ADC /
         re-pointing the gcloud config / activating an SA key is the exact
-        prod-reach we are closing, regardless of which path follows.
+        prod-reach we are closing, regardless of which path follows; OR
+  (iv)  for a Bash call: the INHERITED environment's own GOOGLE_APPLICATION_
+        CREDENTIALS already resolves to a prod SA key or the well-known ADC
+        file RIGHT NOW, at tool-call time — regardless of the command's own
+        text. Round 2 of the reviewer's hole (op#29348, platform-1 #69524/
+        #69530): a plain `python3 some_script.py` that internally constructs a
+        GCP client library with no explicit credential silently inherits
+        whatever ambient GAC is already present and authenticates with it —
+        no gcloud/firebase/credential keyword appears anywhere in the visible
+        command text, so checks (i)-(iii) never see it. This check reads the
+        SAME env the hook itself inherits (same mechanism as is_worker_lane's
+        CC_BASE_AGENT_ID read) and refuses ANY Bash call outright if that env
+        is already in the dangerous state, independent of what the command
+        says — catching the danger regardless of which script is run or how
+        it is written. Part A's own fail-closed sentinel path is explicitly
+        exempt (that is the correct isolated state, not a danger).
 
 Scope / discriminator — a WORKER LANE is `CC_BASE_AGENT_ID` present AND base
 != 'orch-console' (identical shape to console_irsyad_guard / client_media_read_
@@ -140,6 +155,22 @@ def _resolves_to_wellknown_adc(path: str) -> bool:
     )
 
 
+def _ambient_env_has_prod_adc() -> bool:
+    """True when THIS process's own inherited GOOGLE_APPLICATION_CREDENTIALS
+    already resolves to a prod SA key or the well-known per-user gcloud ADC
+    file, right now — the env-STATE check (op#29348 round 2, platform-1
+    #69530), independent of the Bash command's own text. Part A's fail-closed
+    sentinel (a guaranteed-non-existent per-lane path) is the correct isolated
+    state and must NOT trip this — _resolves_to_prod_key/_resolves_to_wellknown_
+    adc only match a path that actually resolves under the real prod dirs, so
+    a non-existent sentinel path (which resolves nowhere real) already fails
+    both checks naturally."""
+    gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not gac:
+        return False
+    return _resolves_to_prod_key(gac) or _resolves_to_wellknown_adc(gac)
+
+
 def _bash_tokens(cmd: str):
     """Best-effort tokenise for per-token symlink resolution; empty on error."""
     try:
@@ -184,6 +215,13 @@ def main() -> int:
 
     if tool == "Bash":
         cmd = tool_input.get("command") or ""
+        if _ambient_env_has_prod_adc():
+            return _deny(
+                "the inherited GOOGLE_APPLICATION_CREDENTIALS already resolves to a prod "
+                "credential right now, regardless of this command's own text — any "
+                "interpreter invocation in this shell could silently authenticate to prod "
+                "via a library's own ADC resolution (op#29348 round 2)."
+            )
         if _GAC_ASSIGN_RE.search(cmd):
             return _deny("this command sets GOOGLE_APPLICATION_CREDENTIALS (re-points ADC at prod creds).")
         if _CLOUDSDK_ASSIGN_RE.search(cmd):
