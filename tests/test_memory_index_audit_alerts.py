@@ -59,6 +59,32 @@ def test_resolve_owner_unknown_is_none():
     assert mia.resolve_owner("-totally-foreign-slug", AGENTS) is None
 
 
+# ── is_cross_host_orphan: bus #68556/#68833, same class as #59069/#59570 ────────────────────
+def test_cross_host_orphan_true_when_owner_host_mismatches():
+    host_of = {"cc-ihsanos": "gzbai"}
+    assert mia.is_cross_host_orphan(IHSANOS, AGENTS, host_of, "Sheikhs-Mini") is True
+
+
+def test_cross_host_orphan_false_when_owner_host_matches():
+    host_of = {"cc-ihsanos": "Sheikhs-Mini"}
+    assert mia.is_cross_host_orphan(IHSANOS, AGENTS, host_of, "Sheikhs-Mini") is False
+
+
+def test_cross_host_orphan_false_when_owner_host_unknown():
+    # owner resolves but has no recorded host -- conservative: never suppress on an absence
+    assert mia.is_cross_host_orphan(IHSANOS, AGENTS, {}, "Sheikhs-Mini") is False
+
+
+def test_cross_host_orphan_false_when_owner_unresolvable():
+    host_of = {"cc-ihsanos": "gzbai"}
+    assert mia.is_cross_host_orphan("-totally-foreign-slug", AGENTS, host_of, "Sheikhs-Mini") is False
+
+
+def test_cross_host_orphan_false_when_current_host_unknown():
+    host_of = {"cc-ihsanos": "gzbai"}
+    assert mia.is_cross_host_orphan(IHSANOS, AGENTS, host_of, None) is False
+
+
 # ── plan_alerts: the load-bearing dedup + routing ────────────────────────────────────────────
 def test_c_fresh_near_limit_pages_owner_once():
     posts, state = mia.plan_alerts([(IHSANOS, [], [NEAR])], {}, AGENTS, sre_agent=SRE)
@@ -111,12 +137,15 @@ def test_dir_with_both_hard_and_advisory_routes_each_correctly():
 
 # ── _dispatch_alerts shell: state persistence + owner-routing + dedup across runs, no real DB ──
 class _FakeCur:
-    def __init__(self, agents, inserts):
+    def __init__(self, agents, inserts, host_of=None):
         self._agents, self._inserts, self._rows = agents, inserts, []
+        self._host_of = host_of or {}
     def __enter__(self): return self
     def __exit__(self, *a): return False
     def execute(self, sql, params=None):
-        if "FROM agents" in sql:
+        if "FROM agent_status" in sql:
+            self._rows = list(self._host_of.items())
+        elif "FROM agents" in sql:
             self._rows = [(a,) for a in self._agents]
         elif sql.strip().upper().startswith("INSERT"):
             self._inserts.append((sql, params))
@@ -124,10 +153,11 @@ class _FakeCur:
 
 
 class _FakeConn:
-    def __init__(self, agents, inserts): self._agents, self._inserts = agents, inserts
+    def __init__(self, agents, inserts, host_of=None):
+        self._agents, self._inserts, self._host_of = agents, inserts, host_of
     def __enter__(self): return self
     def __exit__(self, *a): return False
-    def cursor(self): return _FakeCur(self._agents, self._inserts)
+    def cursor(self): return _FakeCur(self._agents, self._inserts, self._host_of)
 
 
 def _r_full(**kw):
@@ -159,3 +189,41 @@ def test_dispatch_persists_state_dedups_advisory_keeps_hard(tmp_path, monkeypatc
     # run 2: advisory DEDUPED (state persisted), hard STILL pages every run
     assert ("cc-ihsanos", "advisory") not in run2
     assert ("cc-fleet-health", "hard") in run2
+
+
+def test_dispatch_suppresses_cross_host_orphan_hard_and_advisory(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(mia, "_STATE_DIR", tmp_path)
+    monkeypatch.setattr(mia, "ALERT_STATE_PATH", tmp_path / "alerts.json")
+    monkeypatch.setenv("CC_HOST_OVERRIDE", "Sheikhs-Mini")
+    inserts = []
+
+    def fake_connect(dsn, autocommit=True):
+        # cc-ihsanos is registered on a DIFFERENT host than this run -- a leftover dir, not
+        # its live boot-read index. Mirrors the real cc-orchestrator/gzbai case (#68833).
+        return _FakeConn(["cc-ihsanos", "cc-fleet-health"], inserts, host_of={"cc-ihsanos": "gzbai"})
+
+    problems = [
+        (IHSANOS, ["NO-INDEX", "ORPHANED=1"], [], _r_full(missing_index=True, files=1, orphans=["x.md"])),
+    ]
+    mia._dispatch_alerts(problems, connect=fake_connect, dsn="fake")
+
+    assert inserts == []  # no page to anyone -- confirmed-dead cross-host dir, not a real hard flag
+    assert "SKIPPED cross-host orphan" in capsys.readouterr().out
+
+
+def test_dispatch_does_not_suppress_when_host_matches(tmp_path, monkeypatch):
+    monkeypatch.setattr(mia, "_STATE_DIR", tmp_path)
+    monkeypatch.setattr(mia, "ALERT_STATE_PATH", tmp_path / "alerts.json")
+    monkeypatch.setenv("CC_HOST_OVERRIDE", "Sheikhs-Mini")
+    inserts = []
+
+    def fake_connect(dsn, autocommit=True):
+        return _FakeConn(["cc-ihsanos", "cc-fleet-health"], inserts, host_of={"cc-ihsanos": "Sheikhs-Mini"})
+
+    problems = [
+        (IHSANOS, ["NO-INDEX", "ORPHANED=1"], [], _r_full(missing_index=True, files=1, orphans=["x.md"])),
+    ]
+    mia._dispatch_alerts(problems, connect=fake_connect, dsn="fake")
+
+    run1 = [(p[1][0], "advisory" if "'update'" in p[0] else "hard") for p in inserts]
+    assert ("cc-fleet-health", "hard") in run1   # same host -> genuinely live, pages as before
