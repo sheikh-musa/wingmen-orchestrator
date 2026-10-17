@@ -380,7 +380,7 @@ def replay_once_then_purge(conn) -> dict:
         with conn.cursor() as cur:
             cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
             cur.execute(
-                "SELECT id, channel_key, chat_id, text, file_path, "
+                "SELECT id, channel_key, chat_id, text, file_path, created_at, "
                 "now() - created_at > make_interval(hours => %s) AS is_stale "
                 "FROM tg_out WHERE status='dead' ORDER BY id",
                 (DEAD_ROW_AGE_CAP_HOURS,))
@@ -388,11 +388,20 @@ def replay_once_then_purge(conn) -> dict:
         conn.commit()
 
         replayed = purged = 0
-        for rid, channel_key, chat_id, text, file_path, is_stale in rows:
-            if _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale):
+        # orch-console finding (bus #70262): a bulk age-cap drain can purge
+        # hundreds of rows in one pass -- collect those into stale_batch and
+        # post ONE summary bus note after the loop instead of one per row.
+        # A fresh-failure purge (is_stale=False) is rare and keeps its own
+        # immediate note.
+        stale_batch: list[dict] = []
+        for rid, channel_key, chat_id, text, file_path, created_at, is_stale in rows:
+            if _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale,
+                            created_at=created_at, stale_batch=stale_batch):
                 replayed += 1
             else:
                 purged += 1
+        if stale_batch:
+            _post_stale_batch_summary(stale_batch)
         return {"replayed": replayed, "purged": purged, "total": len(rows)}
     finally:
         with conn.cursor() as cur:
@@ -400,17 +409,20 @@ def replay_once_then_purge(conn) -> dict:
         conn.commit()
 
 
-def _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale: bool = False) -> bool:
+def _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale: bool = False,
+                 created_at=None, stale_batch: list | None = None) -> bool:
     """One more delivery attempt for a dead row — UNLESS it is past the age
     cap, in which case it is purged WITHOUT ever attempting delivery (a
     months-old row re-sending to a LIVE channel is the harm this guards
     against; the bus note still records what was dropped). True on success
     ('sent'), False on failure or age-cap purge (row deleted + bus note
-    posted)."""
+    posted, or appended to stale_batch for a batched summary note — see
+    _purge_dead_row)."""
     if is_stale:
         _log_line(f"dead row {rid} purged (age cap: older than "
                   f"{DEAD_ROW_AGE_CAP_HOURS}h, NOT replayed — backlog, not a fresh failure)")
-        _purge_dead_row(conn, rid, channel_key, text, file_path, None, stale=True)
+        _purge_dead_row(conn, rid, channel_key, text, file_path, None, stale=True,
+                         created_at=created_at, stale_batch=stale_batch)
         return False
     try:
         token, default_chat, tag = _resolve(conn, channel_key)
@@ -439,7 +451,22 @@ def _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale: bool
         return False
 
 
-def _purge_dead_row(conn, rid, channel_key, text, file_path, err, stale: bool = False) -> None:
+def _purge_dead_row(conn, rid, channel_key, text, file_path, err, stale: bool = False,
+                     created_at=None, stale_batch: list | None = None) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+        cur.execute("DELETE FROM tg_out WHERE id=%s", (rid,))
+    conn.commit()
+
+    if stale and stale_batch is not None:
+        # Bulk age-cap drain (orch-console finding, bus #70262): don't send a
+        # bus note per row here -- the caller (replay_once_then_purge) collects
+        # these and posts ONE summary note after the whole pass, so a
+        # hundreds-of-rows backlog drain doesn't flood orch-console's inbox
+        # with near-identical receipts. The row is still deleted above.
+        stale_batch.append({"rid": rid, "channel_key": channel_key, "created_at": created_at})
+        return
+
     snippet = (text or (f"[file] {file_path}" if file_path else "") or "")[:300]
     if stale:
         detail = (f"older than the {DEAD_ROW_AGE_CAP_HOURS}h age cap, so this pass "
@@ -455,10 +482,6 @@ def _purge_dead_row(conn, rid, channel_key, text, file_path, err, stale: bool = 
         "purged by the tg_out.dead consumer (held_commitment #314).\n\n"
         f"Content snippet:\n{snippet}"
     )
-    with conn.cursor() as cur:
-        cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
-        cur.execute("DELETE FROM tg_out WHERE id=%s", (rid,))
-    conn.commit()
 
     # CLAUDE.md forbids a hand-written `INSERT INTO agent_messages` (bus #43651).
     # This purge note goes through scripts/bus_send.py's send() instead, with
@@ -473,6 +496,36 @@ def _purge_dead_row(conn, rid, channel_key, text, file_path, err, stale: bool = 
         from_agent="tg-out-dead-replay", to="orch-console", mtype="update",
         subject=f"tg_out dead row #{rid} purged ('{channel_key}')", body=body,
         priority="P3", req=False, dsn=_dsn(),
+    )
+
+
+def _post_stale_batch_summary(batch: list) -> None:
+    """One bus note for an entire age-cap backlog drain, instead of the one-
+    per-row receipt _purge_dead_row posts for a (rare) fresh-failure purge.
+    orch-console finding, bus #70262: a one-time backlog drain was firing
+    hundreds of near-identical P3 receipts, each tripping a reconcile nudge
+    and drowning the inbox-signal the nudge exists to protect."""
+    channels = sorted({b["channel_key"] for b in batch})
+    timestamps = [b["created_at"] for b in batch if b["created_at"] is not None]
+    ids = sorted(b["rid"] for b in batch)
+    oldest = min(timestamps) if timestamps else "unknown"
+    newest = max(timestamps) if timestamps else "unknown"
+    id_range = f"{ids[0]}..{ids[-1]}" if ids else "none"
+    body = (
+        f"tg_out.dead age-cap drain: purged {len(batch)} row(s) in this pass "
+        f"WITHOUT attempting a replay (all older than the {DEAD_ROW_AGE_CAP_HOURS}h "
+        "age cap — backlog accumulation, not fresh failures; see bus #69991). "
+        "replayed=0 for this batch.\n\n"
+        f"Channels affected: {', '.join(channels) if channels else 'none'}\n"
+        f"Oldest created_at: {oldest}\n"
+        f"Newest created_at: {newest}\n"
+        f"Row ids: {id_range} ({len(ids)} total)"
+    )
+    from scripts import bus_send
+    bus_send.send(
+        from_agent="tg-out-dead-replay", to="orch-console", mtype="update",
+        subject=f"tg_out.dead age-cap drain: {len(batch)} row(s) purged (batched receipt, bus #70262)",
+        body=body, priority="P3", req=False, dsn=_dsn(),
     )
 
 

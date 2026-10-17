@@ -167,17 +167,90 @@ def test_replay_one_stale_row_purged_without_sending(monkeypatch):
     assert "bus #69991" in sent[0]["body"]
 
 
+# ---- batched stale-drain receipt (orch-console finding, bus #70262) ----------
+
+def test_replay_once_then_purge_batches_stale_purges_into_one_summary(monkeypatch):
+    monkeypatch.setattr(tg_out, "_resolve", lambda conn, ck: ("tok", 111, "tag1"))
+    monkeypatch.setattr(tg_out, "_send_text", lambda *a: (_ for _ in ()).throw(
+        AssertionError("a stale row must NEVER attempt delivery")))
+
+    sent = []
+
+    class _FakeBusSend:
+        @staticmethod
+        def send(**kwargs):
+            sent.append(kwargs)
+            return (1, "thread")
+
+    import scripts
+    monkeypatch.setattr(scripts, "bus_send", _FakeBusSend, raising=False)
+
+    conn = FakeConn(dead_rows=[
+        (101, "c1", None, "t1", None, "2026-08-01T00:00:00", True),
+        (102, "c2", None, "t2", None, "2026-08-05T00:00:00", True),
+        (103, "c1", None, "t3", None, "2026-08-10T00:00:00", True),
+    ])
+    result = tg_out.replay_once_then_purge(conn)
+
+    assert result == {"replayed": 0, "purged": 3, "total": 3}
+    delete_ids = sorted(p[0] for s, p in conn.executed if "DELETE FROM tg_out" in s)
+    assert delete_ids == [101, 102, 103]
+    # one summary note for the whole batch, not three near-identical receipts
+    assert len(sent) == 1
+    call = sent[0]
+    assert call["priority"] == "P3" and call["req"] is False
+    assert "bus #70262" in call["subject"]
+    assert "c1" in call["body"] and "c2" in call["body"]
+    assert "101" in call["body"] and "103" in call["body"]
+    assert "2026-08-01" in call["body"] and "2026-08-10" in call["body"]
+    assert "replayed=0" in call["body"]
+
+
+def test_replay_once_then_purge_keeps_fresh_failures_per_row_not_batched(monkeypatch):
+    monkeypatch.setattr(tg_out, "_resolve", lambda conn, ck: ("tok", 111, "tag1"))
+
+    def _boom(token, chat, text):
+        raise RuntimeError("telegram still down")
+    monkeypatch.setattr(tg_out, "_send_text", _boom)
+
+    sent = []
+
+    class _FakeBusSend:
+        @staticmethod
+        def send(**kwargs):
+            sent.append(kwargs)
+            return (1, "thread")
+
+    import scripts
+    monkeypatch.setattr(scripts, "bus_send", _FakeBusSend, raising=False)
+
+    conn = FakeConn(dead_rows=[
+        (201, "c1", None, "fresh1", None, "2026-10-17T00:00:00", False),
+        (202, "c1", None, "fresh2", None, "2026-10-17T00:00:00", False),
+    ])
+    result = tg_out.replay_once_then_purge(conn)
+
+    assert result == {"replayed": 0, "purged": 2, "total": 2}
+    # fresh failures are rare — unlike a bulk age-cap drain, each still gets
+    # its own immediate receipt rather than being folded into a batch
+    assert len(sent) == 2
+    subjects = [c["subject"] for c in sent]
+    assert any("#201" in s for s in subjects)
+    assert any("#202" in s for s in subjects)
+
+
 def test_replay_once_then_purge_queries_with_age_cap_and_skips_stale_rows(monkeypatch):
     calls = []
 
-    def _fake_replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale):
+    def _fake_replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale,
+                          created_at=None, stale_batch=None):
         calls.append((rid, is_stale))
         return not is_stale
     monkeypatch.setattr(tg_out, "_replay_one", _fake_replay_one)
 
     conn = FakeConn(dead_rows=[
-        (1, "c1", None, "fresh", None, False),
-        (2, "c2", None, "stale", None, True),
+        (1, "c1", None, "fresh", None, "2026-10-17T00:00:00", False),
+        (2, "c2", None, "stale", None, "2026-10-01T00:00:00", True),
     ])
     result = tg_out.replay_once_then_purge(conn)
 
@@ -192,12 +265,16 @@ def test_replay_once_then_purge_queries_with_age_cap_and_skips_stale_rows(monkey
 def test_replay_once_then_purge_processes_all_rows_and_aggregates(monkeypatch):
     calls = []
 
-    def _fake_replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale):
+    def _fake_replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale,
+                          created_at=None, stale_batch=None):
         calls.append(rid)
         return rid == 1
     monkeypatch.setattr(tg_out, "_replay_one", _fake_replay_one)
 
-    conn = FakeConn(dead_rows=[(1, "c1", None, "t1", None, False), (2, "c2", None, "t2", None, False)])
+    conn = FakeConn(dead_rows=[
+        (1, "c1", None, "t1", None, "2026-10-17T00:00:00", False),
+        (2, "c2", None, "t2", None, "2026-10-17T00:00:00", False),
+    ])
     result = tg_out.replay_once_then_purge(conn)
 
     assert calls == [1, 2]
