@@ -340,6 +340,17 @@ def drain_once(conn) -> int:
 
 _DEAD_REPLAY_LOCK_KEY = 0x74675F6F  # arbitrary; just needs to be stable
 
+# orch-console change-request (bus #69991, after mig107's read-back): the
+# first real run found 353 dead rows spanning 2026-07-08..10-09, 290 of them
+# on nazim-console -- whose token (@nazim_cto_bot) resolves LIVE today, so a
+# bare replay-once would succeed and re-deliver ~290 three-month-old messages
+# to the operator's phone (plus 290 stale operator_messages audit rows).
+# replay-once is correct for a FRESH transient failure, not a backlog that
+# accumulated because the daemon was never running this consumer — a row
+# older than this cap is purged WITHOUT a replay attempt (still gets the
+# attributable bus note) so the operator is never re-sent a stale backlog.
+DEAD_ROW_AGE_CAP_HOURS = 48
+
 
 def replay_once_then_purge(conn) -> dict:
     """A 'dead' row (MAX_ATTEMPTS exhausted) used to just sit there forever —
@@ -348,7 +359,10 @@ def replay_once_then_purge(conn) -> dict:
     same as a normal send ('sent' + the operator_messages audit row); failure
     deletes the row (a further attempt would fail the same way) and posts one
     attributable bus note to orch-console recording what was dropped, so the
-    loss is visible instead of silent.
+    loss is visible instead of silent. A row older than DEAD_ROW_AGE_CAP_HOURS
+    skips the replay attempt entirely (see the constant's comment) — it is
+    purged the same way a failed replay would be, just without ever dialing
+    Telegram.
 
     Single-flight via a session advisory lock: this runs as its own
     low-frequency pass (CLI / launchd), not inside drain_once's hot loop, and
@@ -366,14 +380,16 @@ def replay_once_then_purge(conn) -> dict:
         with conn.cursor() as cur:
             cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
             cur.execute(
-                "SELECT id, channel_key, chat_id, text, file_path FROM tg_out "
-                "WHERE status='dead' ORDER BY id")
+                "SELECT id, channel_key, chat_id, text, file_path, "
+                "now() - created_at > make_interval(hours => %s) AS is_stale "
+                "FROM tg_out WHERE status='dead' ORDER BY id",
+                (DEAD_ROW_AGE_CAP_HOURS,))
             rows = cur.fetchall()
         conn.commit()
 
         replayed = purged = 0
-        for rid, channel_key, chat_id, text, file_path in rows:
-            if _replay_one(conn, rid, channel_key, chat_id, text, file_path):
+        for rid, channel_key, chat_id, text, file_path, is_stale in rows:
+            if _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale):
                 replayed += 1
             else:
                 purged += 1
@@ -384,9 +400,18 @@ def replay_once_then_purge(conn) -> dict:
         conn.commit()
 
 
-def _replay_one(conn, rid, channel_key, chat_id, text, file_path) -> bool:
-    """One more delivery attempt for a dead row. True on success ('sent'),
-    False on failure (row deleted + bus note posted)."""
+def _replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale: bool = False) -> bool:
+    """One more delivery attempt for a dead row — UNLESS it is past the age
+    cap, in which case it is purged WITHOUT ever attempting delivery (a
+    months-old row re-sending to a LIVE channel is the harm this guards
+    against; the bus note still records what was dropped). True on success
+    ('sent'), False on failure or age-cap purge (row deleted + bus note
+    posted)."""
+    if is_stale:
+        _log_line(f"dead row {rid} purged (age cap: older than "
+                  f"{DEAD_ROW_AGE_CAP_HOURS}h, NOT replayed — backlog, not a fresh failure)")
+        _purge_dead_row(conn, rid, channel_key, text, file_path, None, stale=True)
+        return False
     try:
         token, default_chat, tag = _resolve(conn, channel_key)
         target = chat_id or default_chat
@@ -414,13 +439,21 @@ def _replay_one(conn, rid, channel_key, chat_id, text, file_path) -> bool:
         return False
 
 
-def _purge_dead_row(conn, rid, channel_key, text, file_path, err) -> None:
+def _purge_dead_row(conn, rid, channel_key, text, file_path, err, stale: bool = False) -> None:
     snippet = (text or (f"[file] {file_path}" if file_path else "") or "")[:300]
+    if stale:
+        detail = (f"older than the {DEAD_ROW_AGE_CAP_HOURS}h age cap, so this pass "
+                  "purged it WITHOUT attempting a replay (orch-console change-request "
+                  "bus #69991 — a dead row this old is backlog accumulation, not a "
+                  "fresh transient failure; replaying it risks re-sending a months-old "
+                  "message to a LIVE channel)")
+    else:
+        detail = (f"exhausted MAX_ATTEMPTS, then failed its one replay.\n"
+                  f"Replay error: {type(err).__name__}: {err}")
     body = (
-        f"tg_out row #{rid} on channel '{channel_key}' never delivered (exhausted "
-        "MAX_ATTEMPTS, then failed its one replay); purged by the tg_out.dead "
-        "consumer (held_commitment #314).\n"
-        f"Replay error: {type(err).__name__}: {err}\n\nContent snippet:\n{snippet}"
+        f"tg_out row #{rid} on channel '{channel_key}' never delivered ({detail}); "
+        "purged by the tg_out.dead consumer (held_commitment #314).\n\n"
+        f"Content snippet:\n{snippet}"
     )
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")

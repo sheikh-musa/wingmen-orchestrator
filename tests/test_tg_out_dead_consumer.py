@@ -72,7 +72,7 @@ def test_replay_one_success_marks_sent_and_logs_operator_message(monkeypatch):
     monkeypatch.setattr(tg_out, "_send_text", lambda token, chat, text: sent.append((chat, text)))
 
     conn = FakeConn()
-    ok = tg_out._replay_one(conn, 5, "c1", None, "hello", None)
+    ok = tg_out._replay_one(conn, 5, "c1", None, "hello", None, False)
 
     assert ok is True
     assert sent == [(111, "hello")]
@@ -101,7 +101,7 @@ def test_replay_one_failure_deletes_row_and_posts_bus_note(monkeypatch):
     monkeypatch.setattr(scripts, "bus_send", _FakeBusSend, raising=False)
 
     conn = FakeConn()
-    ok = tg_out._replay_one(conn, 7, "c1", None, "undeliverable text", None)
+    ok = tg_out._replay_one(conn, 7, "c1", None, "undeliverable text", None, False)
 
     assert ok is False
     delete = [p for s, p in conn.executed if "DELETE FROM tg_out" in s]
@@ -131,10 +131,60 @@ def test_replay_one_no_chat_target_is_treated_as_failure(monkeypatch):
     monkeypatch.setattr(scripts, "bus_send", _FakeBusSend, raising=False)
 
     conn = FakeConn()
-    ok = tg_out._replay_one(conn, 9, "c1", None, "hi", None)
+    ok = tg_out._replay_one(conn, 9, "c1", None, "hi", None, False)
 
     assert ok is False
     assert any("DELETE FROM tg_out" in s for s, _ in conn.executed)
+
+
+# ---- age cap (orch-console change-request, bus #69991) -----------------------
+
+def test_replay_one_stale_row_purged_without_sending(monkeypatch):
+    monkeypatch.setattr(tg_out, "_resolve", lambda conn, ck: ("tok", 111, "tag1"))
+    monkeypatch.setattr(tg_out, "_send_text", lambda *a: (_ for _ in ()).throw(
+        AssertionError("a stale row must NEVER attempt delivery")))
+
+    sent = []
+
+    class _FakeBusSend:
+        @staticmethod
+        def send(**kwargs):
+            sent.append(kwargs)
+            return (1, "thread")
+
+    import scripts
+    monkeypatch.setattr(scripts, "bus_send", _FakeBusSend, raising=False)
+
+    conn = FakeConn()
+    ok = tg_out._replay_one(conn, 11, "nazim-console", 222, "three months old", None, True)
+
+    assert ok is False
+    delete = [p for s, p in conn.executed if "DELETE FROM tg_out" in s]
+    assert delete == [(11,)]
+    assert len(sent) == 1
+    assert "age cap" in sent[0]["body"]
+    assert "three months old" in sent[0]["body"]
+    assert "bus #69991" in sent[0]["body"]
+
+
+def test_replay_once_then_purge_queries_with_age_cap_and_skips_stale_rows(monkeypatch):
+    calls = []
+
+    def _fake_replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale):
+        calls.append((rid, is_stale))
+        return not is_stale
+    monkeypatch.setattr(tg_out, "_replay_one", _fake_replay_one)
+
+    conn = FakeConn(dead_rows=[
+        (1, "c1", None, "fresh", None, False),
+        (2, "c2", None, "stale", None, True),
+    ])
+    result = tg_out.replay_once_then_purge(conn)
+
+    assert calls == [(1, False), (2, True)]
+    assert result == {"replayed": 1, "purged": 1, "total": 2}
+    sql = _executed_sql(conn)
+    assert any("make_interval(hours" in s and "status='dead'" in s for s in sql)
 
 
 # ---- replay_once_then_purge ---------------------------------------------------
@@ -142,12 +192,12 @@ def test_replay_one_no_chat_target_is_treated_as_failure(monkeypatch):
 def test_replay_once_then_purge_processes_all_rows_and_aggregates(monkeypatch):
     calls = []
 
-    def _fake_replay_one(conn, rid, channel_key, chat_id, text, file_path):
+    def _fake_replay_one(conn, rid, channel_key, chat_id, text, file_path, is_stale):
         calls.append(rid)
         return rid == 1
     monkeypatch.setattr(tg_out, "_replay_one", _fake_replay_one)
 
-    conn = FakeConn(dead_rows=[(1, "c1", None, "t1", None), (2, "c2", None, "t2", None)])
+    conn = FakeConn(dead_rows=[(1, "c1", None, "t1", None, False), (2, "c2", None, "t2", None, False)])
     result = tg_out.replay_once_then_purge(conn)
 
     assert calls == [1, 2]
