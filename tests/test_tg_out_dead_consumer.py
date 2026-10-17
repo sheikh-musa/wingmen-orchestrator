@@ -111,7 +111,7 @@ def test_replay_one_failure_deletes_row_and_posts_bus_note(monkeypatch):
     call = sent[0]
     assert call["from_agent"] == "tg-out-dead-replay"
     assert call["to"] == "orch-console"
-    assert call["priority"] == "P2" and call["req"] is False
+    assert call["priority"] == "P3" and call["req"] is False
     assert "#7" in call["subject"] and "c1" in call["subject"]
     assert "RuntimeError: telegram still down" in call["body"]
     assert "undeliverable text" in call["body"]
