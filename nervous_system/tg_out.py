@@ -11,6 +11,7 @@ Enqueue (from any agent/process, incl. headless):
     tg_out.enqueue("mamadah", "answer", chat_id=12345)          # explicit chat
 CLI (drop-in for the send scripts during migration):
     .venv/bin/python3 -m nervous_system.tg_out send <channel_key> "text"
+    .venv/bin/python3 -m nervous_system.tg_out replay-dead      # held_commitment #314
 Daemon (launchd dev.wingmen.tg-out):
     .venv/bin/python3 -m nervous_system.tg_out
 
@@ -18,6 +19,15 @@ Delivery: chunked at Telegram's 4096-char limit (the b48bfe5 lesson), token via
 the channel's token_env_key (never argv, never the DB), MAX_ATTEMPTS then 'dead'
 (never silently dropped — dead rows are a watchdog surface). Every delivered
 chunk-set is logged once, full text, to operator_messages (outbound, channel_tag).
+
+Dead-row consumer (fable-audit-substrate-20261006 finding, held_commitment #314):
+'dead' rows used to just accumulate (352 rows, +11/week) with nothing reading
+them. replay_once_then_purge() (launchd dev.wingmen.tg-out-dead-replay) gives
+each one exactly one more delivery attempt; a success is bookkept identically
+to a normal send, a failure deletes the row (another attempt would fail the
+same way) and posts one attributable bus note to orch-console recording what
+was dropped — so the loss is visible instead of silent, without letting dead
+rows pile up forever.
 """
 from __future__ import annotations
 
@@ -326,6 +336,103 @@ def drain_once(conn) -> int:
     return len(rows)
 
 
+# ── Dead-row consumer (held_commitment #314) ──────────────────────────────────
+
+_DEAD_REPLAY_LOCK_KEY = 0x74675F6F  # arbitrary; just needs to be stable
+
+
+def replay_once_then_purge(conn) -> dict:
+    """A 'dead' row (MAX_ATTEMPTS exhausted) used to just sit there forever —
+    nothing consumed it (352 rows, +11/week, fable-audit-substrate-20261006).
+    Give each one exactly one more delivery attempt: success is bookkept the
+    same as a normal send ('sent' + the operator_messages audit row); failure
+    deletes the row (a further attempt would fail the same way) and posts one
+    attributable bus note to orch-console recording what was dropped, so the
+    loss is visible instead of silent.
+
+    Single-flight via a session advisory lock: this runs as its own
+    low-frequency pass (CLI / launchd), not inside drain_once's hot loop, and
+    'dead' has no atomic-claim status of its own (migration 015's CHECK only
+    allows queued/sending/sent/failed/dead) — the lock is what keeps two
+    overlapping runs from each grabbing the same row.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_DEAD_REPLAY_LOCK_KEY,))
+        got = cur.fetchone()[0]
+    if not got:
+        _log_line("replay_once_then_purge: another run holds the lock, skipping")
+        return {"replayed": 0, "purged": 0, "total": 0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+            cur.execute(
+                "SELECT id, channel_key, chat_id, text, file_path FROM tg_out "
+                "WHERE status='dead' ORDER BY id")
+            rows = cur.fetchall()
+        conn.commit()
+
+        replayed = purged = 0
+        for rid, channel_key, chat_id, text, file_path in rows:
+            if _replay_one(conn, rid, channel_key, chat_id, text, file_path):
+                replayed += 1
+            else:
+                purged += 1
+        return {"replayed": replayed, "purged": purged, "total": len(rows)}
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (_DEAD_REPLAY_LOCK_KEY,))
+        conn.commit()
+
+
+def _replay_one(conn, rid, channel_key, chat_id, text, file_path) -> bool:
+    """One more delivery attempt for a dead row. True on success ('sent'),
+    False on failure (row deleted + bus note posted)."""
+    try:
+        token, default_chat, tag = _resolve(conn, channel_key)
+        target = chat_id or default_chat
+        if target is None:
+            raise LookupError(f"no chat target for '{channel_key}' (empty allowlist, no override)")
+        if text:
+            _send_text(token, target, text)
+        if file_path:
+            _send_file(token, target, file_path)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tg_out SET status='sent', sent_at=now(), attempts=attempts+1 WHERE id=%s",
+                (rid,))
+            cur.execute(
+                "INSERT INTO operator_messages (direction, channel, chat_id, tag, text, delivered) "
+                "VALUES ('outbound','telegram',%s,%s,%s,true)",
+                (str(target), tag, text or f"[file] {file_path}"),
+            )
+        conn.commit()
+        _log_line(f"dead row {rid} REPLAYED ok on '{channel_key}'")
+        return True
+    except Exception as e:
+        _log_line(f"dead row {rid} purged (replay failed: {type(e).__name__}: {e})")
+        _purge_dead_row(conn, rid, channel_key, text, file_path, e)
+        return False
+
+
+def _purge_dead_row(conn, rid, channel_key, text, file_path, err) -> None:
+    snippet = (text or (f"[file] {file_path}" if file_path else "") or "")[:300]
+    body = (
+        f"tg_out row #{rid} on channel '{channel_key}' never delivered (exhausted "
+        "MAX_ATTEMPTS, then failed its one replay); purged by the tg_out.dead "
+        "consumer (held_commitment #314).\n"
+        f"Replay error: {type(err).__name__}: {err}\n\nContent snippet:\n{snippet}"
+    )
+    with conn.cursor() as cur:
+        cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
+        cur.execute("DELETE FROM tg_out WHERE id=%s", (rid,))
+        cur.execute(
+            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
+            "VALUES ('cc-orchestrator','orch-console','update',%s,%s,'P2',false)",
+            (f"tg_out dead row #{rid} purged ('{channel_key}')", body),
+        )
+    conn.commit()
+
+
 def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "send":
         rid = enqueue(sys.argv[2], sys.argv[3])
@@ -343,6 +450,12 @@ def main() -> int:
                 time.sleep(1)
         print(f"tg_out #{rid}: {status}" + (f" ({err})" if err else ""))
         return 0 if status == "sent" else 1
+    if len(sys.argv) >= 2 and sys.argv[1] == "replay-dead":
+        with psycopg.connect(_dsn()) as conn:
+            result = replay_once_then_purge(conn)
+        print(f"tg_out replay-dead: {result['replayed']} replayed, "
+              f"{result['purged']} purged, {result['total']} total")
+        return 0
     _log_line("outbound gateway daemon starting")
     while True:
         try:
