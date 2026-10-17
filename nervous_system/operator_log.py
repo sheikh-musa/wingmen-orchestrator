@@ -171,7 +171,12 @@ _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 # Zahidah's behalf.
 # `coffeemedia` JOINED 2026-10-01 (op#24578/24592): cc-coffeemedia, the Coffee Media GLM lane, talks to
 # Musa directly over @wingmendevbot and reconciles its own tag, like mamadah.
-_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor", "mamadah", "coffeemedia")
+# `brandit-coffeemedia` JOINED 2026-10-17 (op#31405/#31416, bus #70415/#70423, migration 111):
+# the same-token sibling testbed row proving one-bot-many-clients routing (coffeemedia vs.
+# brandit-coffeemedia by chat_id, zero cross-wire) -- mode='log-and-route', no inject_target,
+# audience='internal', Musa's own throwaway 2-member chat with himself. Nothing for the console
+# to reconcile on anyone's behalf, same as coffeemedia.
+_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor", "mamadah", "coffeemedia", "brandit-coffeemedia")
 
 # Client channels the Mini's nazim-ingest actually POLLS (scripts/boot_nazim_ingest.sh
 # INGEST_CHANNELS) that the CONSOLE body (not a dedicated lane, not the hub) reconciles.
