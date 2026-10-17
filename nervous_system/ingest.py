@@ -612,6 +612,59 @@ def gate_allows(ch: Channel, chat_id: int, username: str | None) -> bool:
     return False
 
 
+# ── Token groups: one-bot-many-clients (op#31298/31307, one getUpdates loop per
+# UNIQUE token, not per channel_key — the dual-poller 409 fix) ────────────────
+
+def group_by_token(channels: dict[str, Channel]) -> dict[str, list[Channel]]:
+    """Channels sharing one token_env_key poll together. Sorted by channel_key
+    for a deterministic first-match order (see match_channel_in_group)."""
+    groups: dict[str, list[Channel]] = {}
+    for ch in channels.values():
+        groups.setdefault(ch.token_env_key, []).append(ch)
+    for group in groups.values():
+        group.sort(key=lambda c: c.key)
+    return groups
+
+
+def overlapping_chat_ids(group: list[Channel]) -> dict[int, list[str]]:
+    """chat_ids claimed by more than one row sharing a token — ambiguous
+    routing. Refused (not first-match) by the caller: a shared token's
+    group must have disjoint allowed_chat_ids, or there's no way to tell
+    which client a message belongs to. Empty dict = no overlap."""
+    seen: dict[int, list[str]] = {}
+    for ch in group:
+        for cid in (ch.allowed_chat_ids or []):
+            seen.setdefault(cid, []).append(ch.key)
+    return {cid: keys for cid, keys in seen.items() if len(keys) > 1}
+
+
+def empty_allowlist_rows(group: list[Channel]) -> list[str]:
+    """A row with no allowed_chat_ids/allowed_usernames can never match in a
+    SHARED-token group (gate_allows is always False for it) — not dangerous
+    (deny-by-default fails safe either way) but silent in a multi-row group
+    is how a client looks 'live' while actually never receiving anything.
+    A solo-token group (today's shape for every channel) is unaffected —
+    an unconfigured standalone channel is the normal pre-cutover state."""
+    if len(group) <= 1:
+        return []
+    return [ch.key for ch in group if not (ch.allowed_chat_ids or ch.allowed_usernames)]
+
+
+def match_channel_in_group(group: list[Channel], chat_id: int | None,
+                            username: str | None) -> Channel | None:
+    """Which row in this token's group handles an update, by chat_id/username
+    — reuses gate_allows so matching IS the gate (no divergent logic). Returns
+    None (unmatched) for an update from a chat no row in the group claims;
+    the caller still logs it (under the group's first row, for audit) and
+    gates it exactly like today's single-channel 'random stranger' case."""
+    if chat_id is None:
+        return None
+    for ch in group:
+        if gate_allows(ch, chat_id, username):
+            return ch
+    return None
+
+
 # ── Route: agent-session / log-and-route => nudge-only tmux line ─────────────
 
 def nudge_session(target: str, channel_key: str, n_unread: int) -> bool:
@@ -1272,37 +1325,71 @@ def unread_count(conn, ch: Channel) -> int:
         return cur.fetchone()[0]
 
 
-# ── Channel task: long-poll loop w/ DB-held offset ────────────────────────────
+# ── Token task: long-poll loop w/ DB-held offset, ONE per unique token ────────
+# (op#31298/31307 one-bot-many-clients: a solo-channel token group is this
+# exact loop, unchanged — grouping only matters once 2+ channel_keys share a
+# token_env_key.)
 
-async def channel_loop(key: str, channels: dict[str, Channel]):
-    last_db_alert = 0.0
-    while True:
-        ch = channels.get(key)
-        if ch is None:            # disabled on refresh → task retires
-            _log_line(f"{key}: disabled — loop exiting")
-            return
-        if not ch.token:
-            _log_line(f"{key}: token env '{ch.token_env_key}' empty — sleeping (graceful, no crash-loop)")
-            await asyncio.sleep(CONFIG_REFRESH)
-            continue
-        try:
-            params = {"timeout": POLL_TIMEOUT,
-                      "allowed_updates": '["message","edited_message","callback_query"]'}
-            if ch.poll_offset is not None:
-                params["offset"] = ch.poll_offset + 1
-            updates = await asyncio.to_thread(tg_call, ch.token, "getUpdates", params)
-            with psycopg.connect(_dsn()) as conn:
-                for upd in (updates or []):
-                    process_update(conn, ch, upd)
-                if updates:
-                    # Offset fail-safe: ack ONLY after the whole batch is durable.
-                    new_off = updates[-1]["update_id"]
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE bot_channels SET poll_offset=%s, updated_at=now() "
-                            "WHERE channel_key=%s", (new_off, ch.key))
-                    conn.commit()
-                    ch.poll_offset = new_off
+async def _run_token_cycle(token_env_key: str, channels: dict[str, Channel],
+                            last_db_alert: float) -> tuple[float, float | None]:
+    """One getUpdates cycle for a token's group. Returns (last_db_alert,
+    sleep_for) — sleep_for is None when the caller should proceed straight
+    into the next cycle (getUpdates' own long-poll already paced it), or a
+    number of seconds otherwise. Split out from channel_loop so a test can
+    drive exactly one cycle without an infinite loop (tg_call is the only
+    real-network call — monkeypatch it)."""
+    # Re-derived every cycle from the live (main()-refreshed) channels dict
+    # — a channel joining/leaving this token's group takes effect on the
+    # NEXT cycle with no restart and no task replacement needed.
+    group = [ch for ch in channels.values() if ch.token_env_key == token_env_key]
+    if not group:
+        _log_line(f"{token_env_key}: no channels left — loop exiting")
+        return last_db_alert, -1.0   # sentinel: caller returns, task retires
+    token = group[0].token
+    if not token:
+        _log_line(f"{token_env_key}: token env empty — sleeping (graceful, no crash-loop)")
+        return last_db_alert, CONFIG_REFRESH
+    overlap = overlapping_chat_ids(group)
+    if overlap:
+        _log_line(f"WATCHDOG: {token_env_key}: overlapping allowed_chat_ids across "
+                  f"{sorted(c.key for c in group)} ({overlap}) — refusing to poll until fixed")
+        return last_db_alert, ERROR_BACKOFF
+    for misconfigured_key in empty_allowlist_rows(group):
+        _log_line(f"WATCHDOG: {token_env_key}: '{misconfigured_key}' has an EMPTY "
+                  f"allowed_chat_ids/allowed_usernames in a {len(group)}-channel "
+                  "token group — it will never match any message")
+    try:
+        params = {"timeout": POLL_TIMEOUT,
+                  "allowed_updates": '["message","edited_message","callback_query"]'}
+        # Telegram's offset is per-BOT (one token), not per-chat — every row
+        # sharing this token advances in lockstep, so any one of them carries
+        # the shared cursor; max() tolerates a row that drifted (manual edit).
+        offsets = [c.poll_offset for c in group if c.poll_offset is not None]
+        if offsets:
+            params["offset"] = max(offsets) + 1
+        updates = await asyncio.to_thread(tg_call, token, "getUpdates", params)
+        with psycopg.connect(_dsn()) as conn:
+            for upd in (updates or []):
+                msg = upd.get("message") or upd.get("edited_message") or {}
+                chat_id = (msg.get("chat") or {}).get("id")
+                username = (msg.get("from") or {}).get("username")
+                matched = match_channel_in_group(group, chat_id, username)
+                # Unmatched (no row in the group claims this chat): still log it,
+                # under the group's first row — same as today's single-channel
+                # "random stranger messages the bot" case (logged, then gated,
+                # never routed). group[0] is deterministic (sorted by key).
+                process_update(conn, matched or group[0], upd)
+            if updates:
+                # Offset fail-safe: ack ONLY after the whole batch is durable.
+                new_off = updates[-1]["update_id"]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bot_channels SET poll_offset=%s, updated_at=now() "
+                        "WHERE token_env_key=%s", (new_off, token_env_key))
+                conn.commit()
+                for c in group:
+                    c.poll_offset = new_off
+            for ch in group:
                 # CAI-RESP-382 max-latency cap — runs every cycle (incl. empty
                 # polls) so a message deferred while the agent stays busy still
                 # nudges once it crosses MAX_DEFER_SEC. This is what was missing
@@ -1313,10 +1400,10 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
                 # stuck-idle (neither replying nor busy) — never left wondering.
                 reassure_if_unhandled(conn, ch)
                 # STEP-0 poll-health (channel-liveness watchdog; SRE 38560): record a
-                # SUCCESSFUL getUpdates cycle. Reuses this conn so it fires ONLY when the
-                # poll actually succeeded — last_ok_at is the liveness clock the rung-1
-                # reader keys on, consec_errors resets to 0. host distinguishes a dark hub
-                # instance from a dark Mini-pinned instance. updated_at bumps every cycle.
+                # SUCCESSFUL getUpdates cycle, per channel_key (health stays keyed
+                # per logical channel even though one getUpdates served the whole
+                # group) — last_ok_at is the liveness clock the rung-1 reader keys
+                # on, consec_errors resets to 0.
                 with conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO ingest_poll_health "
@@ -1325,25 +1412,28 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
                         "ON CONFLICT (channel_key, host) DO UPDATE SET "
                         "last_ok_at=now(), consec_errors=0, last_error=NULL, updated_at=now()",
                         (ch.key, socket.gethostname()))
-                conn.commit()
-        except psycopg.Error as e:
-            # DB unreachable: offset stays un-acked → Telegram will redeliver →
-            # A1 dedupe absorbs. Surface loudly for the watchdog (CAI-RESP-357).
-            now = time.monotonic()
-            if now - last_db_alert > DB_ALERT_EVERY:
-                _log_line(f"WATCHDOG: substrate DB unreachable from ingest ({type(e).__name__}: {e}) — channels paused, offsets held")
-                last_db_alert = now
-            await asyncio.sleep(ERROR_BACKOFF)
-        except Exception as e:
-            _log_line(f"{key}: loop error {type(e).__name__}: {e}")
-            # STEP-0 poll-health (SRE 38560): count this FAILED poll (the Errno-54 path).
-            # Short-lived conn — the success block's conn isn't open here — in its OWN
-            # try/except so a poll-health write failure can never crash or mask the loop's
-            # error handling. last_ok_at deliberately NOT touched: preserve the last REAL
-            # success time (the watchdog's liveness clock). Typed error string so a real
-            # Telegram 409 would ever surface verbatim (honest competitor-confirm signal).
-            try:
-                with psycopg.connect(_dsn()) as _hconn, _hconn.cursor() as _hcur:
+            conn.commit()
+        return last_db_alert, None
+    except psycopg.Error as e:
+        # DB unreachable: offset stays un-acked → Telegram will redeliver →
+        # A1 dedupe absorbs. Surface loudly for the watchdog (CAI-RESP-357).
+        now = time.monotonic()
+        if now - last_db_alert > DB_ALERT_EVERY:
+            _log_line(f"WATCHDOG: substrate DB unreachable from ingest ({type(e).__name__}: {e}) — channels paused, offsets held")
+            last_db_alert = now
+        return last_db_alert, ERROR_BACKOFF
+    except Exception as e:
+        _log_line(f"{token_env_key}: loop error {type(e).__name__}: {e}")
+        # STEP-0 poll-health (SRE 38560): count this FAILED poll (the Errno-54 /
+        # 409-conflict path) against EVERY channel_key in the group — the failure
+        # (e.g. a stray second poller on this token) affects all of them, not just
+        # one. Short-lived conn — the success block's conn isn't open here — in its
+        # OWN try/except so a poll-health write failure can never crash or mask the
+        # loop's error handling. last_ok_at deliberately NOT touched: preserve the
+        # last REAL success time (the watchdog's liveness clock).
+        try:
+            with psycopg.connect(_dsn()) as _hconn, _hconn.cursor() as _hcur:
+                for ch in group:
                     _hcur.execute(
                         "INSERT INTO ingest_poll_health "
                         "(channel_key, host, last_ok_at, consec_errors, last_error, updated_at) "
@@ -1352,10 +1442,23 @@ async def channel_loop(key: str, channels: dict[str, Channel]):
                         "consec_errors = ingest_poll_health.consec_errors + 1, "
                         "last_error = EXCLUDED.last_error, updated_at = now()",
                         (ch.key, socket.gethostname(), f"{type(e).__name__}: {e}"[:200]))
-                    _hconn.commit()
-            except Exception:
-                pass  # poll-health write is best-effort; never mask the real loop error
-            await asyncio.sleep(ERROR_BACKOFF)
+                _hconn.commit()
+        except Exception:
+            pass  # poll-health write is best-effort; never mask the real loop error
+        return last_db_alert, ERROR_BACKOFF
+
+
+async def channel_loop(token_env_key: str, channels: dict[str, Channel]):
+    """Thin driver: re-derives the token's group fresh every cycle from the
+    live `channels` dict, so a channel joining/leaving the group takes effect
+    on the next cycle with no restart (hot-reload for free)."""
+    last_db_alert = 0.0
+    while True:
+        last_db_alert, sleep_for = await _run_token_cycle(token_env_key, channels, last_db_alert)
+        if sleep_for == -1.0:
+            return
+        if sleep_for:
+            await asyncio.sleep(sleep_for)
 
 
 def _run_pinned_channel_drift_check() -> None:
@@ -1397,10 +1500,15 @@ async def main():
                 ch._last_forced_nudge_id = getattr(channels[k], "_last_forced_nudge_id", 0)
         channels.clear()
         channels.update(fresh)
-        for k in list(channels):
-            if k not in tasks or tasks[k].done():
-                tasks[k] = asyncio.create_task(channel_loop(k, channels))
-                _log_line(f"{k}: channel task up (mode={channels[k].mode})")
+        # One task per UNIQUE token_env_key, not per channel_key (op#31298
+        # one-bot-many-clients) — a brand-new token spawns a task here; an
+        # EXISTING token's group picking up a new/removed channel_key needs
+        # no respawn, since channel_loop re-derives its group from `channels`
+        # every cycle (true hot-reload, no restart required).
+        for token_env_key in list(group_by_token(channels)):
+            if token_env_key not in tasks or tasks[token_env_key].done():
+                tasks[token_env_key] = asyncio.create_task(channel_loop(token_env_key, channels))
+                _log_line(f"{token_env_key}: token task up")
         await asyncio.sleep(CONFIG_REFRESH)
 
 
