@@ -31,7 +31,12 @@ _INSERT_RE = re.compile(
     r"INSERT INTO public\.bot_channels\s*"
     r"\(\s*channel_key\s*,\s*token_env_key\s*,\s*mode\s*,\s*inject_target\s*,\s*"
     r"inject_prefix\s*,\s*responder_ref\s*,\s*allowed_chat_ids\s*,\s*allowed_usernames\s*,\s*"
-    r"group_routing\s*,\s*channel_tag\s*,\s*log_target\s*,\s*enabled\s*,\s*poll_offset\s*\)\s*"
+    r"group_routing\s*,\s*channel_tag\s*,\s*log_target\s*,\s*enabled\s*,\s*poll_offset\s*"
+    # `audience` became NOT NULL after migrations 069/070/072/109 shipped
+    # (bus #70415) -- a migration written against the newer schema adds it
+    # as a trailing column. Optional so the older 13-column shape still
+    # matches unchanged.
+    r"(?:,\s*audience\s*)?\)\s*"
     r"VALUES\s*\(\s*'([^']+)'",
     re.IGNORECASE,
 )
