@@ -89,26 +89,46 @@ def test_replay_one_failure_deletes_row_and_posts_bus_note(monkeypatch):
         raise RuntimeError("telegram still down")
     monkeypatch.setattr(tg_out, "_send_text", _boom)
 
+    sent = []
+
+    class _FakeBusSend:
+        @staticmethod
+        def send(**kwargs):
+            sent.append(kwargs)
+            return (1, "thread")
+
+    import scripts
+    monkeypatch.setattr(scripts, "bus_send", _FakeBusSend, raising=False)
+
     conn = FakeConn()
     ok = tg_out._replay_one(conn, 7, "c1", None, "undeliverable text", None)
 
     assert ok is False
-    sql_and_params = conn.executed
-    delete = [p for s, p in sql_and_params if "DELETE FROM tg_out" in s]
+    delete = [p for s, p in conn.executed if "DELETE FROM tg_out" in s]
     assert delete == [(7,)]
-    notes = [(s, p) for s, p in sql_and_params if "INSERT INTO agent_messages" in s]
-    assert len(notes) == 1
-    _, params = notes[0]
-    subject, body = params
-    assert "#7" in subject and "c1" in subject
-    assert "RuntimeError: telegram still down" in body
-    assert "undeliverable text" in body
+    assert not any("INSERT INTO agent_messages" in s for s, _ in conn.executed)
+    assert len(sent) == 1
+    call = sent[0]
+    assert call["from_agent"] == "tg-out-dead-replay"
+    assert call["to"] == "orch-console"
+    assert call["priority"] == "P2" and call["req"] is False
+    assert "#7" in call["subject"] and "c1" in call["subject"]
+    assert "RuntimeError: telegram still down" in call["body"]
+    assert "undeliverable text" in call["body"]
 
 
 def test_replay_one_no_chat_target_is_treated_as_failure(monkeypatch):
     monkeypatch.setattr(tg_out, "_resolve", lambda conn, ck: ("tok", None, "tag1"))
     monkeypatch.setattr(tg_out, "_send_text", lambda *a: (_ for _ in ()).throw(
         AssertionError("should never be called without a target")))
+
+    class _FakeBusSend:
+        @staticmethod
+        def send(**kwargs):
+            return (1, "thread")
+
+    import scripts
+    monkeypatch.setattr(scripts, "bus_send", _FakeBusSend, raising=False)
 
     conn = FakeConn()
     ok = tg_out._replay_one(conn, 9, "c1", None, "hi", None)

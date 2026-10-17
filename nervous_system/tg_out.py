@@ -425,12 +425,22 @@ def _purge_dead_row(conn, rid, channel_key, text, file_path, err) -> None:
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('app.current_agent_id','cc-orchestrator',true)")
         cur.execute("DELETE FROM tg_out WHERE id=%s", (rid,))
-        cur.execute(
-            "INSERT INTO agent_messages (from_agent,to_agent,message_type,subject,body,priority,requires_response) "
-            "VALUES ('cc-orchestrator','orch-console','update',%s,%s,'P2',false)",
-            (f"tg_out dead row #{rid} purged ('{channel_key}')", body),
-        )
     conn.commit()
+
+    # CLAUDE.md forbids a hand-written `INSERT INTO agent_messages` (bus #43651).
+    # This purge note goes through scripts/bus_send.py's send() instead, with
+    # from_agent='tg-out-dead-replay' — a dedicated identity (migration 107),
+    # not the hub's 'cc-orchestrator': this runs as a bare launchd daemon on the
+    # Mac Mini with no AGENT_ID/CC_BASE_AGENT_ID in its environment, so it can't
+    # resolve a live session identity, and 'cc-orchestrator' names the VPS hub
+    # process (ORCH-TOPOLOGY-001), not this daemon. Mirrors the existing
+    # 'sla-watchdog' / 'ddl-coverage-watchdog' / 'ingest-watchdog' precedent.
+    from scripts import bus_send
+    bus_send.send(
+        from_agent="tg-out-dead-replay", to="orch-console", mtype="update",
+        subject=f"tg_out dead row #{rid} purged ('{channel_key}')", body=body,
+        priority="P2", req=False, dsn=_dsn(),
+    )
 
 
 def main() -> int:
