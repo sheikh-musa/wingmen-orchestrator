@@ -472,7 +472,7 @@ def _purge_dead_row(conn, rid, channel_key, text, file_path, err, stale: bool = 
     bus_send.send(
         from_agent="tg-out-dead-replay", to="orch-console", mtype="update",
         subject=f"tg_out dead row #{rid} purged ('{channel_key}')", body=body,
-        priority="P2", req=False, dsn=_dsn(),
+        priority="P3", req=False, dsn=_dsn(),
     )
 
 
