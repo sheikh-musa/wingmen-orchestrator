@@ -379,6 +379,67 @@ def test_real_pinned_channel_list_today_is_all_solo_token_groups(cycle_dsn, monk
         assert ingest.empty_allowlist_rows(group) == []    # len<=1 -> never flagged
 
 
+# ── PR2 (design-GO bus #69978, migration 108): the REAL testbed repoint ──────
+# Musa's testbed for "one-bot-many-clients" repoints 'oeh' and 'angullia' onto
+# the same WINGMENDEVBOT_TOKEN that 'coffeemedia' already uses (migration 108)
+# -- a REAL 3-row group in the actual pinned channel list, not a synthetic
+# stand-in. allowed_chat_ids below are the real, already-disjoint values
+# (verified live before writing migration 108) -- this proves the group
+# refuses nothing and routes correctly for the exact shape that will exist in
+# prod once migration 108 is applied, not just a 2-row synthetic case.
+# `enabled` stays FALSE on all three per design-GO condition 5 -- this test
+# never flips it and never sends anything to a real chat.
+
+def test_wingmendevbot_testbed_repoint_three_real_rows_share_token_no_409(cycle_dsn, monkeypatch):
+    monkeypatch.setenv("WINGMENDEVBOT_TOKEN", "fake-token-value")
+    _seed_channel(cycle_dsn, "coffeemedia", "WINGMENDEVBOT_TOKEN",
+                  chat_ids=[286619815], audience="internal")
+    _seed_channel(cycle_dsn, "oeh", "WINGMENDEVBOT_TOKEN",
+                  chat_ids=[-5585966657, -1003694059692], audience="client")
+    _seed_channel(cycle_dsn, "angullia", "WINGMENDEVBOT_TOKEN",
+                  chat_ids=[-5449309564], audience="client")
+    channels = _load_group(cycle_dsn, "WINGMENDEVBOT_TOKEN")
+    assert sorted(channels.keys()) == ["angullia", "coffeemedia", "oeh"]
+
+    group = list(channels.values())
+    assert ingest.overlapping_chat_ids(group) == {}
+    assert ingest.empty_allowlist_rows(group) == []
+
+    calls = []
+
+    def _fake_tg_call(token, method, params, timeout=None):
+        calls.append((token, method, params))
+        return [
+            {"update_id": 1, "message": {"chat": {"id": 286619815}, "from": {}, "text": "musa to coffeemedia"}},
+            {"update_id": 2, "message": {"chat": {"id": -5585966657}, "from": {}, "text": "oeh group msg"}},
+            {"update_id": 3, "message": {"chat": {"id": -5449309564}, "from": {}, "text": "angullia group msg"}},
+        ]
+
+    monkeypatch.setattr(ingest, "tg_call", _fake_tg_call)
+    monkeypatch.setattr(ingest, "nudge_session", lambda *a: True)
+    monkeypatch.setattr(ingest, "pane_working", lambda *a: False)
+
+    import asyncio
+    last_alert, sleep_for = asyncio.run(
+        ingest._run_token_cycle("WINGMENDEVBOT_TOKEN", channels, 0.0))
+
+    assert len(calls) == 1          # ONE getUpdates call for all three rows -- no 409
+    assert sleep_for is None
+
+    with psycopg.connect(cycle_dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT tag, text FROM operator_messages ORDER BY id")
+        rows = cur.fetchall()
+    assert rows == [
+        ("coffeemedia", "musa to coffeemedia"),
+        ("oeh", "oeh group msg"),
+        ("angullia", "angullia group msg"),
+    ]
+
+    with psycopg.connect(cycle_dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT channel_key, enabled FROM bot_channels ORDER BY channel_key")
+        assert cur.fetchall() == [("angullia", False), ("coffeemedia", False), ("oeh", False)]
+
+
 def test_main_tasks_key_by_unique_token_not_channel_key():
     """main()'s task-spawn loop must iterate group_by_token(channels), i.e.
     ONE task per unique token_env_key -- the actual fix for the dual-poller
