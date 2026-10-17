@@ -19,7 +19,7 @@
 --
 -- Old tokens (OEH_BOT_TOKEN / ANGULLIA_BOT_TOKEN) are left untouched in .env --
 -- this migration only repoints which env var name the row's token_env_key
--- column references; it does not revoke or touch either bot's token.
+-- column references; the old bot tokens stay valid and are not disabled.
 
 UPDATE bot_channels
 SET token_env_key = 'WINGMENDEVBOT_TOKEN', updated_at = now()
