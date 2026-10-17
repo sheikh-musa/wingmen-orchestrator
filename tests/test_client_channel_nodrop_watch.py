@@ -150,6 +150,87 @@ def test_multichannel_coord_and_label_flow_through():
     assert actions[0]["to"] == "cc-angullia" and "angullia" in actions[0]["body"]
 
 
+# ---- load_channels() discovery (fable-audit-20261006 finding 12 / held_commitment #314) ----
+# The filter must key on audience='client' (the schema's actual client marker), not a `cc-*`
+# naming convention on the coord — that heuristic missed cosem-caai/cosem-exams (routed
+# straight to orch-console, no separate coord) and would wrongly include an internal channel
+# that happens to route to a cc-* agent (e.g. mamadah).
+class _FakeCursor:
+    def __init__(self, rows, captured):
+        self._rows = rows
+        self._captured = captured
+
+    def execute(self, sql, *a):
+        self._captured.append(sql)
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, rows, captured):
+        self._rows = rows
+        self._captured = captured
+
+    def cursor(self):
+        return _FakeCursor(self._rows, self._captured)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_load_channels_query_keys_on_audience_client(monkeypatch):
+    captured = []
+    rows = [("cosem-tdu", "cc-cosem-tdu-coord"), ("cosem-caai", "orch-console"),
+            ("cosem-exams", "orch-console")]
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda dsn: _FakeConn(rows, captured))
+
+    out = nd.load_channels("fake-dsn")
+
+    assert "audience='client'" in captured[0]
+    assert "LIKE 'cc-%'" not in captured[0]
+    tags = {c["tag"] for c in out}
+    assert tags == {"cosem-tdu", "cosem-caai", "cosem-exams"}
+
+
+def test_load_channels_console_routed_channel_keeps_console_as_coord(monkeypatch):
+    rows = [("cosem-caai", "orch-console")]
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda dsn: _FakeConn(rows, []))
+
+    out = nd.load_channels("fake-dsn")
+
+    assert out[0]["coord"] == "orch-console"
+    assert out[0]["send_script"] == "scripts/caai_send.sh"
+
+
+def test_load_channels_excludes_gazzabyte_dedicated_watch(monkeypatch):
+    rows = [("gazzabyte-irsyad", "cc-irsyad-coord"), ("oeh", "cc-oeh")]
+    monkeypatch.setattr(nd.psycopg2, "connect", lambda dsn: _FakeConn(rows, []))
+
+    out = nd.load_channels("fake-dsn")
+
+    assert {c["tag"] for c in out} == {"oeh"}
+
+
+def test_load_channels_db_error_falls_back_to_static_list(monkeypatch):
+    def _boom(dsn):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(nd.psycopg2, "connect", _boom)
+
+    out = nd.load_channels("fake-dsn")
+
+    assert out == list(nd.FALLBACK_CHANNELS)
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
