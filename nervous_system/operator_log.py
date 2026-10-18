@@ -176,7 +176,13 @@ _SHARED_FEED_TAGS = ("war-room", "hafiz-partner")
 # brandit-coffeemedia by chat_id, zero cross-wire) -- mode='log-and-route', no inject_target,
 # audience='internal', Musa's own throwaway 2-member chat with himself. Nothing for the console
 # to reconcile on anyone's behalf, same as coffeemedia.
-_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor", "mamadah", "coffeemedia", "brandit-coffeemedia")
+# `coffeemedia-hamhuskies-test` JOINED 2026-10-18 (op#31462, bus #70499/#70642, migration 112):
+# Musa's TG2.0 client-ONBOARDING e2e proof, /start from his alt account routed to the SAME
+# coffeemedia lane (inject_target='coffeemedia') via its own single-chat_id row. audience=
+# 'internal', owner_lane='coffeemedia' -- the lane answers and reconciles this tag itself,
+# same as coffeemedia/brandit-coffeemedia; nothing for the console to pick up here.
+_LANE_OWNED_TAGS = ("irsyad-drill", "gazzabyte-irsyad", "hk-editor", "mamadah", "coffeemedia",
+                     "brandit-coffeemedia", "coffeemedia-hamhuskies-test")
 
 # Client channels the Mini's nazim-ingest actually POLLS (scripts/boot_nazim_ingest.sh
 # INGEST_CHANNELS) that the CONSOLE body (not a dedicated lane, not the hub) reconciles.
