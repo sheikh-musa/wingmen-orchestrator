@@ -16,14 +16,24 @@ _GATE_TYPES, _SILO_ALIASES, and the whole-word silo-mention check are ported
 verbatim in logic from that file's _require_gate/_text_mentions_silo. Re-sync
 by re-reading that file's current state and updating this pin if it changes.
 
-KNOWN GAP (flagged to orch-console, bus #70870, unresolved as of writing): the
-frozen §2 wire request has no migration/pr field, so exec_prod._require_gate's
-"digit-boundary PR/migration match" sub-check cannot be re-performed here from
-the wire data alone. require_gate() accepts optional migration/pr kwargs and
-will apply that check if either is ever passed a non-None value by a caller —
-today's server.py always calls it with both left at their None default, so
-only the sub-check that needs them is skipped; every other sub-check below
-still runs.
+KNOWN GAP, RESOLVED FAIL-CLOSED (bus #70870 -> orch-console's CORRECTED
+ruling, bus #70929, after cc-fleet-health caught the hole in the original
+#70876 ruling): the frozen §2 wire request has no migration/pr field, so
+exec_prod._require_gate's "digit-boundary PR/migration match" sub-check
+cannot be re-performed here from the wire data alone. The FIRST fix attempt
+(skip that one sub-check, re-check everything else) was FAIL-OPEN in
+practice: server.py always calls require_gate() with migration=pr=None, so
+the skip was unconditional, and a gate that validly approved ONE migration to
+a silo would then authorize ANY DDL to that same silo — reopening the exact
+cross-authorization class exec_prod's own _require_gate was fixed to close
+(cc-quality #56681). The correct fix, per the corrected ruling: milestone (a)
+REFUSES ALL DDL-shaped SQL unconditionally (GATE_INVALID), regardless of
+gate_id, after every other sub-check already passes — "we cannot
+independently verify which migration/PR this gate authorizes" is a REFUSAL,
+never an allow-by-default. require_gate() still accepts optional migration/pr
+kwargs so that once the wire contract is amended at rollout step (c) to carry
+them, re-enabling DDL is a matter of making the final refusal conditional on
+their absence, not a redesign.
 """
 from __future__ import annotations
 
@@ -159,14 +169,31 @@ def require_gate(
             f"gate {gate_id} does not mention the target silo {project_ref!r}",
         )
 
-    # migration/pr: no wire field carries this today (see module docstring's
-    # KNOWN GAP) -- only applied if a future caller passes one explicitly.
     if migration or pr:
+        # Forward-compat path for rollout step (c), once the wire contract
+        # carries migration/pr: do the full independent match instead of the
+        # unconditional refusal below.
         if not _text_mentions_migration_or_pr(text, migration, pr):
             raise BrokerValidationError(
                 ErrorCode.GATE_INVALID,
                 f"gate {gate_id} does not mention migration {migration!r} or PR {pr!r}",
             )
+        return
+
+    # Milestone (a), FAIL CLOSED (bus #70929): migration/pr were not supplied
+    # (today, NEVER are -- see module docstring), so this gate's SPECIFICITY
+    # cannot be independently verified. Every other sub-check above already
+    # passed (shape/agent/type/is_past/silo-mention) -- refuse anyway, rather
+    # than let a gate approving one migration authorize any other DDL to the
+    # same silo. This is the never-trust-the-caller principle itself: do not
+    # remove this refusal without rollout step (c)'s contract amendment
+    # landing first.
+    raise BrokerValidationError(
+        ErrorCode.GATE_INVALID,
+        f"gate {gate_id} is shape-valid but DDL cannot be independently "
+        "migration/PR-matched in milestone (a) -- refused, not allowed by "
+        "default (bus #70929)",
+    )
 
 
 def _text_mentions_migration_or_pr(text: str, migration: str | None, pr: str | None) -> bool:

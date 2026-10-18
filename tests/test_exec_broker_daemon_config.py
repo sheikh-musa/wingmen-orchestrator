@@ -59,6 +59,48 @@ def test_main_fails_closed_on_missing_env_vars(monkeypatch):
     assert daemon.main([]) == 1
 
 
+def test_main_fails_closed_when_database_url_unresolvable(monkeypatch, tmp_path):
+    # op#24342: DATABASE_URL is no longer read from os.environ directly (that
+    # was the stale-DSN bug class) -- it's resolved via
+    # substrate_dsn.dsn_from_env_file, which fails loud when neither the file
+    # nor the environment has it.
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("EXEC_BROKER_ENV_FILE", str(tmp_path / "does-not-exist-env"))
+    monkeypatch.setenv("EXEC_BROKER_SOCKET", str(tmp_path / "s.sock"))
+    monkeypatch.setenv("EXEC_BROKER_ALLOWED_UIDS", "1000")
+    monkeypatch.setenv("EXEC_BROKER_TOKEN_FILE", str(token_file))
+    assert daemon.main([]) == 1
+
+
+def test_db_conn_factory_resolves_dsn_via_substrate_dsn_file_first(monkeypatch, tmp_path):
+    # Proves exec_broker_daemon.py actually WIRES into substrate_dsn (file
+    # wins over the environment), not just os.environ["DATABASE_URL"].
+    env_file = tmp_path / "broker.env"
+    env_file.write_text("DATABASE_URL=postgresql://from-file\n")
+    monkeypatch.setenv("EXEC_BROKER_ENV_FILE", str(env_file))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://stale-inherited-env-value")
+
+    captured = {}
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _fake_connect(dsn, **kwargs):
+        captured["dsn"] = dsn
+        return _FakeConn()
+
+    import psycopg
+    monkeypatch.setattr(psycopg, "connect", _fake_connect)
+    daemon._db_conn_factory()
+    assert captured["dsn"] == "postgresql://from-file"
+
+
 def test_main_fails_closed_on_bad_allowed_uids(monkeypatch, tmp_path):
     token_file = tmp_path / "token"
     token_file.write_text("secret")

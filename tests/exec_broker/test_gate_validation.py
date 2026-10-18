@@ -101,11 +101,44 @@ def test_require_gate_invalid_when_wrong_silo_mentioned():
     assert exc.value.code == ErrorCode.GATE_INVALID
 
 
-def test_require_gate_passes_with_valid_gate():
+def test_require_gate_refuses_even_a_fully_valid_shaped_gate(monkeypatch):
+    # FAIL-CLOSED (bus #70929, corrects the earlier #70876 ruling): a gate
+    # that is shape-valid on every axis (right agent/type/past/silo) must
+    # STILL be refused when migration/pr can't be independently verified --
+    # the broker must never allow DDL by default just because no mismatch
+    # was found. This is the exact regression the original (fail-open) fix
+    # introduced: a gate approving one migration would otherwise authorize
+    # ANY DDL to the same silo.
     row = {"from_agent": "orch-console", "message_type": "decision", "subject": "apply to goumlyne", "body": "", "is_past": True}
-    require_gate("drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row))  # no raise
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate("drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row))
+    assert exc.value.code == ErrorCode.GATE_INVALID
 
 
-def test_require_gate_passes_with_valid_gate_via_alias_qa():
+def test_require_gate_refuses_even_a_fully_valid_shaped_gate_via_alias_qa():
     row = {"from_agent": "cai", "message_type": "agreed", "subject": "go for qa", "body": "", "is_past": True}
-    require_gate("drop table t", "1", "oovskwogvefnznfowjky", cur=FakeCursor(row))  # no raise
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate("drop table t", "1", "oovskwogvefnznfowjky", cur=FakeCursor(row))
+    assert exc.value.code == ErrorCode.GATE_INVALID
+
+
+def test_require_gate_full_match_still_works_once_migration_pr_supplied():
+    # Forward-compat proof for rollout step (c): once the wire contract
+    # carries migration/pr and a caller passes them, the full independent
+    # match is used INSTEAD of the unconditional refusal, and a genuinely
+    # matching gate passes.
+    row = {"from_agent": "orch-console", "message_type": "decision",
+           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True}
+    require_gate(
+        "drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row), migration="435",
+    )  # no raise
+
+
+def test_require_gate_full_match_rejects_mismatched_migration_once_supplied():
+    row = {"from_agent": "orch-console", "message_type": "decision",
+           "subject": "apply migration 435 to goumlyne", "body": "", "is_past": True}
+    with pytest.raises(BrokerValidationError) as exc:
+        require_gate(
+            "drop table t", "56485", "goumlynecruxrlmzlntp", cur=FakeCursor(row), migration="999",
+        )
+    assert exc.value.code == ErrorCode.GATE_INVALID

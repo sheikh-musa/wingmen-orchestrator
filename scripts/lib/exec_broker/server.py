@@ -140,6 +140,27 @@ class BrokerServer:
                     db_conn.commit()
                     self._respond(conn, encode_error(e.code, e.message))
                     return
+                except Exception:  # noqa: BLE001 -- e.g. a transient DB error inside the gate lookup
+                    logger.exception("exec_broker: unexpected error during re-validation")
+                    try:
+                        log_finalized(cur, row_id, "error", ErrorCode.INTERNAL_ERROR.value)
+                        db_conn.commit()
+                    except Exception:  # noqa: BLE001 -- best-effort; still respond
+                        logger.exception("exec_broker: failed to finalize vault_access_log row")
+                    self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "internal error"))
+                    return
+
+                # Commit BEFORE the blocking mgmt-API call (up to 28s) -- require_gate's
+                # own SELECT (DDL path) would otherwise leave this connection
+                # idle-in-transaction for the whole network call. If a pooler
+                # killed that idle transaction AFTER a real DDL/DML already
+                # executed upstream but BEFORE this process finalized+committed,
+                # the caller would see INTERNAL_ERROR for a call that actually
+                # succeeded -- a retry on that error risks double-executing
+                # already-guarded SQL. Closing the transaction here removes
+                # that window; the next statement (log_finalized) opens a new,
+                # short one.
+                db_conn.commit()
 
                 try:
                     rows = self.mgmt_api_fn(req.guarded_sql, req.project_ref, self.token)

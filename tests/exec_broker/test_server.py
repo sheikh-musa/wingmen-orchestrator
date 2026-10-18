@@ -24,8 +24,9 @@ TEST_UID = os.getuid()
 
 
 class FakeCursor:
-    def __init__(self, gate_row=None):
+    def __init__(self, gate_row=None, raise_on_select=False):
         self.gate_row = gate_row
+        self.raise_on_select = raise_on_select
         self.calls = []
         self.vault_rows = {}
         self._next_id = 1
@@ -45,6 +46,8 @@ class FakeCursor:
             self.vault_rows[row_id]["error_code"] = error_code
             self._pending_fetch = None
         elif upper.startswith("SELECT FROM_AGENT"):
+            if self.raise_on_select:
+                raise RuntimeError("simulated transient DB error inside the gate lookup")
             self._pending_fetch = self.gate_row
         else:
             self._pending_fetch = None
@@ -78,8 +81,8 @@ class FakeDbConn:
 
 
 class FakeDb:
-    def __init__(self, gate_row=None):
-        self.cursor_obj = FakeCursor(gate_row=gate_row)
+    def __init__(self, gate_row=None, raise_on_select=False):
+        self.cursor_obj = FakeCursor(gate_row=gate_row, raise_on_select=raise_on_select)
         self.conn = FakeDbConn(self.cursor_obj)
 
     def __call__(self):
@@ -188,7 +191,11 @@ def test_gate_required_for_ddl_without_gate(tmp_path):
     assert list(db.vault_rows.values())[0]["status"] == "error"
 
 
-def test_ddl_with_valid_gate_succeeds(tmp_path):
+def test_ddl_with_fully_valid_shaped_gate_still_refused_end_to_end(tmp_path):
+    # FAIL-CLOSED (bus #70929): even a gate that is shape-valid on every axis
+    # (right agent/type/past/silo) must be refused end-to-end -- the broker
+    # cannot independently verify which migration/PR it authorizes, so DDL
+    # is refused rather than allowed by default in milestone (a).
     gate_row = {"from_agent": "orch-console", "message_type": "decision",
                 "subject": "go for qa", "body": "", "is_past": True}
     db = FakeDb(gate_row=gate_row)
@@ -197,8 +204,20 @@ def test_ddl_with_valid_gate_succeeds(tmp_path):
         "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "drop table t", "reason": "",
         "gate_id": "56485", "caller": "c", "exec_ledger_id": "e",
     })
-    assert resp == {"status": "ok", "rows": []}
-    assert list(db.vault_rows.values())[0]["status"] == "ok"
+    assert resp["error"]["code"] == "GATE_INVALID"
+    assert list(db.vault_rows.values())[0]["status"] == "error"
+
+
+def test_dml_still_succeeds_with_no_gate_even_though_ddl_is_refused(tmp_path):
+    # DML-only SQL never needs a gate and is unaffected by the DDL refusal
+    # above -- confirms the fail-closed fix didn't overreach into DML.
+    db = FakeDb()
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [{"n": 1}])
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select count(*) from t", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp == {"status": "ok", "rows": [{"n": 1}]}
 
 
 def test_real_non_qa_ref_rejected_end_to_end(tmp_path):
@@ -275,3 +294,35 @@ def test_respond_never_raises_on_an_already_closed_peer():
         BrokerServer._respond(a, b'{"status":"error"}\n')  # must not raise
     finally:
         a.close()
+
+
+def test_transient_db_error_during_revalidation_still_finalizes_the_row(tmp_path):
+    # A transient DB error inside require_gate's gate lookup (NOT a
+    # BrokerValidationError) must still finalize the vault_access_log row to
+    # error -- never leave it stuck at status=started (itself a P1 per the
+    # migration's own comment) just because the broker didn't crash.
+    gate_row = {"from_agent": "orch-console", "message_type": "decision", "subject": "go for qa", "body": "", "is_past": True}
+    db = FakeDb(gate_row=gate_row, raise_on_select=True)
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "drop table t", "reason": "",
+        "gate_id": "56485", "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp["error"]["code"] == "INTERNAL_ERROR"
+    assert list(db.vault_rows.values())[0]["status"] == "error"
+
+
+def test_success_path_commits_before_the_mgmt_api_call(tmp_path):
+    # The transaction opened by log_started (and, on a DDL path, by
+    # require_gate's gate lookup) must be committed BEFORE the blocking
+    # mgmt-API call, not held idle-in-transaction across it (pooler risk /
+    # retry-double-execution risk on a killed idle transaction). 3 commits
+    # for a success: started, pre-call, finalized.
+    db = FakeDb()
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
+    resp = _send(sock_path, {
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "select 1", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp == {"status": "ok", "rows": []}
+    assert db.conn.commits == 3
