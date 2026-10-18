@@ -1,0 +1,42 @@
+# /etc/systemd/system/irsyad-exec-broker.service
+# hc#95 exec-broker — gzb. DRAFT for orch-console's provisioning review
+# (handoff pack §5, reports/hc95-broker-handoff-pack-20261018.md) — NOT
+# installed/enabled by this PR. Provisioning (creating the irsyad-exec unix
+# user/group, installing this unit, minting exec_broker_role's DB password,
+# writing the 0400 token file) is orch-console's (holds gzb root), per the
+# kickoff brief's ownership split.
+#
+# TWO OPEN ITEMS orch-console must resolve before install (not this PR's to
+# answer — see handoff pack §5):
+#   1. "NEEDS CONFIRMING" row: which OS user/process on gzb is the actual
+#      socket CALLER (exec_prod.py's EXEC_TRANSPORT=broker side, cc-irsyad-2's
+#      PR) — that account must be added to the irsyad-exec group (or the mode
+#      loosened) so connect() succeeds at the OS level before the broker's
+#      own SO_PEERCRED allowlist re-checks it.
+#   2. ExecStart's path below is a PLACEHOLDER — fill in the real deployed
+#      path to this checkout's scripts/exec_broker_daemon.py on gzb.
+[Unit]
+Description=Wingmen hc#95 exec-broker — token-behind-vault mgmt-API broker (gzb)
+After=network-online.target wingmen-fetch-secrets.service
+Wants=network-online.target
+Requires=wingmen-fetch-secrets.service
+
+[Service]
+Type=simple
+User=irsyad-exec
+Group=irsyad-exec
+RuntimeDirectory=irsyad-exec-broker
+RuntimeDirectoryMode=0750
+Environment=EXEC_BROKER_SOCKET=/run/irsyad-exec-broker/broker.sock
+Environment=EXEC_BROKER_TOKEN_FILE=/etc/irsyad-exec-broker/token
+# DATABASE_URL and EXEC_BROKER_ALLOWED_UIDS: orch-console sets these via an
+# EnvironmentFile under /etc/irsyad-exec-broker/ (not inlined here — never
+# commit a DSN or a uid allowlist to this tracked unit file).
+EnvironmentFile=/etc/irsyad-exec-broker/env
+ExecStart=/usr/bin/env python3 /home/gazzai/wingmen-orchestrator/scripts/exec_broker_daemon.py
+Restart=always
+RestartSec=6
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
