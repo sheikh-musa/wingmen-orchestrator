@@ -34,13 +34,16 @@
 -- routing proof, per bus #70499's "tag routing to the brandit/coffeemedia
 -- (coffeemedia lane) handler".
 --
--- group_routing.agent_phase='direct': audience='internal' (this is Musa's
--- own alt account, zero client exposure -- design section 2's
--- supervised-default-for-client floor does not apply), AND single-chat_id
--- (so lane_reply.sh's line-164 `chat = str(chat_ids[0])` reply-target bug,
--- bus #70469, cannot bite even in direct phase -- multi-chat_id direct
--- stays blocked until that fix lands, per design section 2's explicit
--- dependency note).
+-- group_routing.agent_phase='supervised' (RESOLVED 2026-10-18, bus #70653 --
+-- supersedes #70499's earlier "direct is acceptable" call): orch-console's
+-- gate-pass #70650 named this "the SUPERVISED e2e TEST" and its condition 4
+-- requires outbound to 8494278755 to route through the reviewer
+-- (orch-console) before it reaches the alt account -- that is supervised
+-- behavior (lane_reply.sh files a draft to agent_reviewer, who forwards),
+-- not direct (lane sends immediately). Caught the direct-vs-supervised
+-- contradiction between #70499 and #70650/#70653 before merging, flagged it
+-- (bus #70652) instead of picking a side, and #70653 resolved it explicitly:
+-- supervised wins. agent_reviewer stays 'orch-console'.
 --
 -- group_routing.powers=['reply_text']: least-privilege metadata per design
 -- section 3. NOTE -- the PreToolUse-style enforcement guard for `powers` is
@@ -78,7 +81,7 @@ VALUES
   ('coffeemedia-hamhuskies-test', 'WINGMENDEVBOT_TOKEN', 'agent-session', 'coffeemedia',
    NULL, NULL,
    '{8494278755}', '{}',
-   '{"agent_phase": "direct", "agent_reviewer": "orch-console", "powers": ["reply_text"]}'::jsonb,
+   '{"agent_phase": "supervised", "agent_reviewer": "orch-console", "powers": ["reply_text"]}'::jsonb,
    'coffeemedia-hamhuskies-test', 'substrate', false, NULL,
    'internal', 'coffeemedia')
 ON CONFLICT (channel_key) DO NOTHING;
