@@ -1,0 +1,100 @@
+"""hc#95 exec-broker wire protocol (contract §1-3, ihsanos-irsyad main
+reports/hc95-exec-broker-contract.md, squash 5053826e)."""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
+
+from exec_broker.protocol import (  # noqa: E402
+    ErrorCode,
+    MalformedRequest,
+    encode_error,
+    encode_ok,
+    parse_request,
+)
+
+
+def test_parse_request_valid_dml_no_gate():
+    line = (
+        '{"project_ref":"oovskwogvefnznfowjky","guarded_sql":"select 1",'
+        '"reason":"r","gate_id":null,"caller":"cc-irsyad-2","exec_ledger_id":"abc-123"}'
+    )
+    req = parse_request(line)
+    assert req.gate_id is None
+    assert req.project_ref == "oovskwogvefnznfowjky"
+    assert req.guarded_sql == "select 1"
+    assert req.caller == "cc-irsyad-2"
+    assert req.exec_ledger_id == "abc-123"
+
+
+def test_parse_request_valid_ddl_with_gate():
+    line = (
+        '{"project_ref":"goumlynecruxrlmzlntp","guarded_sql":"alter table t add column x int",'
+        '"reason":"r","gate_id":"56485","caller":"cc-irsyad-2","exec_ledger_id":"abc-124"}'
+    )
+    assert parse_request(line).gate_id == "56485"
+
+
+def test_parse_request_missing_gate_id_key_raises():
+    # the key itself is absent -- distinct from gate_id: null (DML, no gate needed)
+    line = '{"project_ref":"x","guarded_sql":"select 1","reason":"r","caller":"c","exec_ledger_id":"e"}'
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
+def test_parse_request_missing_caller_raises():
+    line = '{"project_ref":"x","guarded_sql":"select 1","reason":"r","gate_id":null,"exec_ledger_id":"e"}'
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
+def test_parse_request_missing_project_ref_raises():
+    line = '{"guarded_sql":"select 1","reason":"r","gate_id":null,"caller":"c","exec_ledger_id":"e"}'
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
+def test_parse_request_empty_project_ref_raises():
+    line = '{"project_ref":"","guarded_sql":"select 1","reason":"r","gate_id":null,"caller":"c","exec_ledger_id":"e"}'
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
+def test_parse_request_empty_gate_id_string_raises():
+    # gate_id must be null or a non-empty string -- "" is neither
+    line = '{"project_ref":"x","guarded_sql":"select 1","reason":"r","gate_id":"","caller":"c","exec_ledger_id":"e"}'
+    with pytest.raises(MalformedRequest):
+        parse_request(line)
+
+
+def test_parse_request_bad_json_raises():
+    with pytest.raises(MalformedRequest):
+        parse_request("not json")
+
+
+def test_parse_request_non_object_json_raises():
+    with pytest.raises(MalformedRequest):
+        parse_request("[1, 2, 3]")
+
+
+def test_encode_ok_roundtrip():
+    payload = json.loads(encode_ok([{"a": 1}]).decode("utf-8"))
+    assert payload == {"status": "ok", "rows": [{"a": 1}]}
+
+
+def test_encode_ok_ends_with_newline():
+    assert encode_ok([]).endswith(b"\n")
+
+
+def test_encode_error_roundtrip():
+    payload = json.loads(encode_error(ErrorCode.BAD_PROJECT_REF, "nope").decode("utf-8"))
+    assert payload == {"status": "error", "error": {"code": "BAD_PROJECT_REF", "message": "nope"}}
+
+
+def test_encode_error_ends_with_newline():
+    assert encode_error(ErrorCode.INTERNAL_ERROR, "x").endswith(b"\n")
