@@ -29,6 +29,11 @@ from .vault_log import VaultLogEntry, log_finalized, log_started
 logger = logging.getLogger("exec_broker")
 
 _READ_TIMEOUT_SECONDS = 30.0
+# Generous for any real guarded_sql + metadata the contract describes, but
+# bounded -- an unbounded readline() lets one peer (even an ACL-allowed one,
+# or a bug on the caller's side) hold an open-ended amount of memory per
+# connection.
+_MAX_REQUEST_BYTES = 1_048_576  # 1 MiB
 
 
 class BrokerServer:
@@ -83,12 +88,15 @@ class BrokerServer:
         # gates everything the request's content could otherwise cause.
         conn.settimeout(_READ_TIMEOUT_SECONDS)
         try:
-            line = conn.makefile("rb").readline()
+            line = conn.makefile("rb").readline(_MAX_REQUEST_BYTES + 1)
         except (socket.timeout, OSError):
             self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "request timeout"))
             return
         if not line:
             self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "empty request"))
+            return
+        if len(line) > _MAX_REQUEST_BYTES:
+            self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "request too large"))
             return
 
         try:
@@ -156,4 +164,11 @@ class BrokerServer:
 
     @staticmethod
     def _respond(conn: socket.socket, payload: bytes) -> None:
-        conn.sendall(payload)
+        """Best-effort: if the peer already dropped the connection, there is
+        nothing more this call can do but it must not raise -- the "never
+        raises" contract on handle_connection would otherwise be violated by
+        exactly the path (an error response) that depends on it most."""
+        try:
+            conn.sendall(payload)
+        except OSError:
+            logger.warning("exec_broker: failed to send response (peer likely disconnected)")

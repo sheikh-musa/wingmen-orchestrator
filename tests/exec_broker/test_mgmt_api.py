@@ -84,3 +84,51 @@ def test_post_passes_max_time_to_curl(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run)
     post_to_mgmt_api("select 1", "ref", "tok")
     assert "--max-time" in captured["argv"]
+
+
+def test_post_never_puts_the_token_on_argv(monkeypatch):
+    # A local `ps` can read another process's argv but not its open files --
+    # the PAT must go in the -K config file, never a command-line argument.
+    captured = {}
+    fake_token = "secret-token-value"
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return FakeProc(0, "[]", "")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    post_to_mgmt_api("select 1", "ref", fake_token)
+    assert not any(fake_token in str(a) for a in captured["argv"])
+    assert "-K" in captured["argv"]
+
+
+def test_post_config_file_contains_the_header_and_is_cleaned_up(monkeypatch):
+    captured = {}
+    fake_token = "secret-token-value"
+
+    def _fake_run(argv, **kwargs):
+        config_path = argv[argv.index("-K") + 1]
+        captured["config_contents"] = open(config_path).read()
+        captured["config_path"] = config_path
+        return FakeProc(0, "[]", "")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    post_to_mgmt_api("select 1", "ref", fake_token)
+    assert "Authorization" in captured["config_contents"]
+    assert fake_token in captured["config_contents"]
+    import os
+    assert not os.path.exists(captured["config_path"])  # deleted after the call
+
+
+def test_post_config_file_cleaned_up_even_on_failure(monkeypatch):
+    captured = {}
+
+    def _fake_run(argv, **kwargs):
+        captured["config_path"] = argv[argv.index("-K") + 1]
+        return FakeProc(7, "", "boom")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    with pytest.raises(UpstreamError):
+        post_to_mgmt_api("select 1", "ref", "tok")
+    import os
+    assert not os.path.exists(captured["config_path"])

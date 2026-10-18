@@ -11,7 +11,9 @@ _fetch_gate_message.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 
 MGMT_QUERY_URL = "https://api.supabase.com/v1/projects/{ref}/database/query"
 
@@ -29,25 +31,43 @@ class UpstreamError(Exception):
 
 def post_to_mgmt_api(guarded_sql: str, project_ref: str, token: str, timeout: float = _SUBPROCESS_TIMEOUT) -> list:
     """POST guarded_sql to the mgmt API. Returns the 'rows' list on success.
-    Raises UpstreamError (fixed, token/stderr-free message) on any failure."""
+    Raises UpstreamError (fixed, token/stderr-free message) on any failure.
+
+    The PAT never appears on this process's argv (a local `ps`-able secret
+    defeats the entire token-behind-vault point) -- it goes in a curl -K
+    config file instead, a private 0600 tempfile this process creates, reads,
+    and deletes, never passed on the command line."""
     payload = json.dumps({"query": guarded_sql})
+    config_fd, config_path = tempfile.mkstemp(prefix="exec-broker-curl-", text=True)
     try:
-        proc = subprocess.run(
-            [
-                "curl", "-s", "-X", "POST",
-                MGMT_QUERY_URL.format(ref=project_ref),
-                "-H", f"Authorization: Bearer {token}",
-                "-H", "Content-Type: application/json",
-                "-H", "User-Agent: Mozilla/5.0",
-                "--max-time", _CURL_MAX_TIME,
-                "-d", "@-",
-            ],
-            input=payload, capture_output=True, text=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise UpstreamError("mgmt-API call timed out") from e
-    except OSError as e:
-        raise UpstreamError(f"mgmt-API call failed to run (errno {e.errno})") from e
+        with os.fdopen(config_fd, "w") as f:
+            # curl -K config syntax: one "key = value" pair per line, value
+            # double-quoted. header=/data=/etc. are config-file keys, same
+            # names as the long-form flags.
+            f.write(f'header = "Authorization: Bearer {token}"\n')
+
+        try:
+            proc = subprocess.run(
+                [
+                    "curl", "-s", "-X", "POST",
+                    MGMT_QUERY_URL.format(ref=project_ref),
+                    "-K", config_path,
+                    "-H", "Content-Type: application/json",
+                    "-H", "User-Agent: Mozilla/5.0",
+                    "--max-time", _CURL_MAX_TIME,
+                    "-d", "@-",
+                ],
+                input=payload, capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise UpstreamError("mgmt-API call timed out") from e
+        except OSError as e:
+            raise UpstreamError(f"mgmt-API call failed to run (errno {e.errno})") from e
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
 
     if proc.returncode != 0:
         raise UpstreamError(f"mgmt-API call failed (curl exit {proc.returncode})")

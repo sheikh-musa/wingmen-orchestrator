@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
 
 from exec_broker.mgmt_api import UpstreamError  # noqa: E402
-from exec_broker.server import BrokerServer  # noqa: E402
+from exec_broker.server import BrokerServer, _MAX_REQUEST_BYTES  # noqa: E402
 
 TEST_UID = os.getuid()
 
@@ -181,7 +181,7 @@ def test_gate_required_for_ddl_without_gate(tmp_path):
     db = FakeDb()
     _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
     resp = _send(sock_path, {
-        "project_ref": "goumlynecruxrlmzlntp", "guarded_sql": "drop table t", "reason": "",
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "drop table t", "reason": "",
         "gate_id": None, "caller": "c", "exec_ledger_id": "e",
     })
     assert resp["error"]["code"] == "GATE_REQUIRED"
@@ -190,15 +190,29 @@ def test_gate_required_for_ddl_without_gate(tmp_path):
 
 def test_ddl_with_valid_gate_succeeds(tmp_path):
     gate_row = {"from_agent": "orch-console", "message_type": "decision",
-                "subject": "apply to goumlyne", "body": "", "is_past": True}
+                "subject": "go for qa", "body": "", "is_past": True}
     db = FakeDb(gate_row=gate_row)
     _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db, mgmt_api_fn=lambda *a, **k: [])
     resp = _send(sock_path, {
-        "project_ref": "goumlynecruxrlmzlntp", "guarded_sql": "drop table t", "reason": "",
+        "project_ref": "oovskwogvefnznfowjky", "guarded_sql": "drop table t", "reason": "",
         "gate_id": "56485", "caller": "c", "exec_ledger_id": "e",
     })
     assert resp == {"status": "ok", "rows": []}
     assert list(db.vault_rows.values())[0]["status"] == "ok"
+
+
+def test_real_non_qa_ref_rejected_end_to_end(tmp_path):
+    # Milestone (a) scope, enforced in code (orch-console gate ruling, bus
+    # #70919): goumlyne is a REAL, CURRENT irsyad ref -- must still be
+    # rejected end-to-end, not just at the unit level, until step (c) lands.
+    db = FakeDb()
+    _, sock_path, db = _make_server(tmp_path, frozenset({TEST_UID}), db=db)
+    resp = _send(sock_path, {
+        "project_ref": "goumlynecruxrlmzlntp", "guarded_sql": "select 1", "reason": "",
+        "gate_id": None, "caller": "c", "exec_ledger_id": "e",
+    })
+    assert resp["error"]["code"] == "BAD_PROJECT_REF"
+    assert list(db.vault_rows.values())[0]["status"] == "error"
 
 
 def test_upstream_error_propagates(tmp_path):
@@ -245,3 +259,19 @@ def test_peer_uid_resolution_failure_maps_to_internal_error(tmp_path):
         "caller": "c", "exec_ledger_id": "e",
     })
     assert resp["error"]["code"] == "INTERNAL_ERROR"
+
+
+def test_oversized_request_rejected_without_hanging(tmp_path):
+    _, sock_path, _ = _make_server(tmp_path, frozenset({TEST_UID}))
+    oversized = b'{"project_ref":"' + b"x" * (_MAX_REQUEST_BYTES + 10) + b'"}\n'
+    resp = _send_raw(sock_path, oversized)
+    assert resp["error"]["code"] == "INTERNAL_ERROR"
+
+
+def test_respond_never_raises_on_an_already_closed_peer():
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    b.close()  # peer side gone before the server tries to respond
+    try:
+        BrokerServer._respond(a, b'{"status":"error"}\n')  # must not raise
+    finally:
+        a.close()

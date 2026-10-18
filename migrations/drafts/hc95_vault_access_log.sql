@@ -9,6 +9,20 @@
 -- itself a P1 (broker crashed mid-call) per bus #56697's daily reconcile + dead-man
 -- heartbeat -- that job is OUT of scope for this migration/milestone (a).
 --
+-- KNOWN LIMITATION (orch-console gate review, PR#434/bus #70919, required
+-- before real-ref use, not blocking milestone (a) on QA): the GRANT below is
+-- table-wide INSERT+UPDATE, so "the broker finalizes only its own
+-- just-inserted row" is enforced by vault_log.py's own code TODAY, not by the
+-- grant/schema -- exec_broker_role could technically UPDATE an arbitrary
+-- historical row (flip error->ok, rewrite sql_sha256) if the application code
+-- had a bug or were compromised. For an audit-integrity table, that must be
+-- enforced by the DB itself (e.g. a BEFORE UPDATE trigger that only allows a
+-- transition FROM status='started' on a row whose exec_ledger_id/ts_start the
+-- update isn't changing, or column-level grants + a narrower updatable view).
+-- Defer the actual trigger/grant hardening to rollout step (c) (same gate as
+-- option (2)'s full migration/PR re-check) -- tracked here, not silently
+-- dropped.
+--
 -- exec_broker_role needs its own LOGIN password, minted by orch-console at apply
 -- time (ALTER ROLE exec_broker_role LOGIN PASSWORD '...') -- never committed here.
 -- This is a SEPARATE credential from the general fleet-bus DATABASE_URL: the

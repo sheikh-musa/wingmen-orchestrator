@@ -3,7 +3,8 @@
 
 Re-checks, independently of exec_prod's own local screen, whenever the inner
 SQL is DDL-shaped:
-  1. project_ref is one of the 3 allowlisted irsyad refs (exact string).
+  1. project_ref is on the current milestone's allowlist (exact string) —
+     QA-ONLY for milestone (a), see ALLOWED_PROJECT_REFS below.
   2. gate_id is present, well-formed, and the fleet-bus row it names is a real
      console/cai GO (message_type decision/agreed), in the past, and mentions
      the target silo.
@@ -45,22 +46,37 @@ class BrokerValidationError(Exception):
 _GATE_AGENTS = {"orch-console", "cai"}
 _GATE_TYPES = {"decision", "agreed"}
 
-# alias -> project ref (vendored from exec_prod.py's _SILO_ALIASES).
+# alias -> project ref (vendored from exec_prod.py's _SILO_ALIASES) — the full
+# reference table of all 3 real irsyad refs, independently confirmed current by
+# cc-irsyad-coord-1 (bus #70875). Used for silo-MENTION matching in a gate's
+# text (_text_mentions_silo below); NOT the broker's own call-allowlist — see
+# ALLOWED_PROJECT_REFS.
 SILO_ALIASES = {
     "goumlyne": "goumlynecruxrlmzlntp",
     "ceayj": "ceayjeamtmcyzzvqflus",
     "qa": "oovskwogvefnznfowjky",
     "irsyad-qa": "oovskwogvefnznfowjky",
 }
-ALLOWED_PROJECT_REFS = set(SILO_ALIASES.values())
+
+# Milestone (a) scope, enforced IN CODE (orch-console gate ruling, bus #70919
+# answering PR#434's review): QA-ref ONLY, even though SILO_ALIASES names all
+# 3 real refs above. A non-QA ref must return BAD_PROJECT_REF until option (2)
+# — the full independent migration/PR gate re-check — plus a frozen-contract
+# amendment land at rollout step (c) (see require_gate's migration/pr kwargs
+# and the module docstring's KNOWN GAP). This is the never-trust-the-caller
+# control itself, not a stand-in for the daemon simply being un-provisioned
+# for goumlyne/ceayj — do not widen this set without that step-(c) work landing
+# first, and do not rely on provisioning alone to keep real refs out of reach.
+ALLOWED_PROJECT_REFS = {SILO_ALIASES["qa"]}
 
 
 def check_project_ref(project_ref: str) -> None:
-    """§4.1 — exact-string allowlist of the 3 irsyad refs."""
+    """§4.1 — exact-string allowlist. QA-only for milestone (a); see
+    ALLOWED_PROJECT_REFS's comment before widening this."""
     if project_ref not in ALLOWED_PROJECT_REFS:
         raise BrokerValidationError(
             ErrorCode.BAD_PROJECT_REF,
-            f"project_ref {project_ref!r} is not one of the allowlisted irsyad refs",
+            f"project_ref {project_ref!r} is not on the broker's current allowlist",
         )
 
 

@@ -30,9 +30,18 @@ class FakeCursor:
         return self.row
 
 
-def test_check_project_ref_allows_the_three_refs():
-    for ref in ("goumlynecruxrlmzlntp", "ceayjeamtmcyzzvqflus", "oovskwogvefnznfowjky"):
-        check_project_ref(ref)  # no raise
+def test_check_project_ref_allows_qa_ref_only():
+    check_project_ref("oovskwogvefnznfowjky")  # no raise
+
+
+def test_check_project_ref_rejects_the_two_real_refs():
+    # Milestone (a) scope, enforced in code (orch-console gate ruling, bus
+    # #70919): goumlyne/ceayj are REAL, CURRENT irsyad refs (not typos or
+    # unknown strings) and must still be rejected until step (c) lands.
+    for ref in ("goumlynecruxrlmzlntp", "ceayjeamtmcyzzvqflus"):
+        with pytest.raises(BrokerValidationError) as exc:
+            check_project_ref(ref)
+        assert exc.value.code == ErrorCode.BAD_PROJECT_REF
 
 
 def test_check_project_ref_rejects_unknown_ref():
