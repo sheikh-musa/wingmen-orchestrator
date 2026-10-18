@@ -24,6 +24,19 @@ def db(pg_dsn):
     assert_dsn_is_not_production(pg_dsn)
     with psycopg.connect(pg_dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
+            # pg_dsn is session-scoped and shared with every other test module.
+            # Some of them (e.g. test_ingest_pinned_channel_drift.py) rebuild
+            # 'public' via DROP SCHEMA public CASCADE; CREATE SCHEMA public --
+            # unlike the schema initdb bootstraps, a schema created that way
+            # has NO implicit USAGE grant to PUBLIC, so if one of those tests
+            # ran earlier in this session, a non-superuser role created below
+            # can't even resolve an unqualified table name (reported as
+            # "does not exist", not a permission error). Every real Postgres
+            # database -- including the actual deploy target -- already has
+            # that USAGE grant; restoring it here just re-establishes the
+            # normal baseline this test needs, and is independent of (does
+            # not weaken) the table-level REVOKE ALL this test proves below.
+            cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
             cur.execute(DRAFT.read_text())
             # Ephemeral-only: trust auth means no password is needed to connect
             # as these roles; the real apply mints exec_broker_role's actual
