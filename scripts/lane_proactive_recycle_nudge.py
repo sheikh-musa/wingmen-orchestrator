@@ -184,6 +184,30 @@ def _send_nudge(cur, conn, lane_base: str, subject: str, body: str) -> None:
     conn.commit()
 
 
+def _gauge_for_lane(conn, cur, base: str):
+    """(tokens, age_s) for `base`'s context gauge, or (None, None) if it cannot be reliably
+    attributed to a specific sibling.
+
+    WHY (2026-10-19, cc-cosem-platform-3's #71710/#71711, found right after the discover_lanes
+    lane/session fix landed): dm._gauge(cur, base) reads cc_session_costs WHERE cc_identity=base
+    -- but cc_identity is written as the BARE BASE for every sibling (confirmed: cc_session_costs
+    has exactly one distinct cc_identity value per base, 'cc-cosem-platform', regardless of how
+    many live instances -1/-2/-3/-4 are running). On a multi-sibling base the 'freshest row'
+    could belong to ANY sibling's session, not the one this iteration is about -- fixing the
+    lane/session NAME consistency (PR#439) did not fix this, because the gauge VALUE itself has
+    no per-instance identity to match against. -3 caught it immediately: the lane name was
+    correct this time, but the pct was still borrowed from elsewhere.
+
+    FIX: when >1 live session shares this base, the gauge is unattributable -- return (None,
+    None) so resolve_lane_pct's EXISTING fallback (gauge-stale/unreadable -> pane) takes over.
+    The pane check (dm._pane(session)) IS session-specific (a real tmux capture-pane on the
+    exact session string), so it stays trustworthy even when the gauge can't be. If the pane
+    also can't resolve, resolve_lane_pct correctly returns UNKNOWN rather than guessing."""
+    if len(slr.live_sessions_for_base(conn, base)) > 1:
+        return None, None
+    return dm._gauge(cur, base)
+
+
 def _lease_ok() -> "tuple[bool, str]":
     """fleet_health_lease.gate() wrapper (monkeypatchable). Fail-SAFE: any check error -> holder
     (never strand the monitor); returns (False, reason) only on positive evidence the hub holds a
@@ -214,7 +238,7 @@ def run(conn, dry: bool = False) -> int:
             # defence in depth — discover_lanes already excludes singletons; crash loudly if one slips.
             fhb.assert_sre_never_targets_singleton(base)
             session = lr.get("tmux_session")
-            tokens, age_s = dm._gauge(cur, base)
+            tokens, age_s = _gauge_for_lane(conn, cur, base)
             pane_pct, pane_hint_k = dm._pane(session) if session else (None, None)
             known, pct, _last_known, reason = dm.resolve_lane_pct(
                 tokens, age_s, pane_pct, pane_hint_k, max_gauge_age_s=NUDGE_GAUGE_STALE_S)
