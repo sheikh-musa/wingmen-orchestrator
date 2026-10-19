@@ -4,8 +4,19 @@ need porting into the cosem platform (operator directive op#7517, 2026-07-26).
 
 The operator actively tweaks ~/wingmen/projects/cosem-adcda (github sheikh-musa/
 cosem-adcda). This watcher fetches origin, and on new commits to WATCHED_BRANCHES
-beyond the last-seen SHA, posts an attributable bus row to cc-cosem-platform (the
-port lane) listing the new commits for port-assessment, and nudges orch-console.
+beyond the last-seen SHA, posts an attributable bus row to PORT_OWNER (the
+single assigned port-watch lane) listing the new commits for port-assessment.
+
+ROUTING (fixed 2026-10-19, orch-console #71671/cc-cosem-platform-3's #71670):
+this used to post to the BARE BASE 'cc-cosem-platform', which fans out to every
+platform instance (-1/-2/-3/-4). op#7517 port-watch was assigned to
+cc-cosem-platform-1 ALONE back on 2026-10-11 (#62694/#62695) -- this script
+predates that ruling (created 2026-07-26) and nobody updated its hardcoded
+target after, so -3 kept getting + correctly declining duplicate pings (3
+consecutive occurrences). This is a DIFFERENT bug class from the October
+bare-base-identity fix (resolve_agent_id/agent_identity.py) -- that fixed
+agents posting AS the bare base; this is a standing SCRIPT whose own to_agent
+was hardcoded wrong. Fix is just targeting the actual owner.
 
 DETECTION ONLY — the JUDGEMENT ("does this feature need porting, where does it fit")
 is the lane's, on the bus row (CAI-603: fact out, judgement in). Read-only on the
@@ -24,6 +35,9 @@ ORCH = pathlib.Path.home() / "wingmen" / "orchestrator"
 ADCDA = pathlib.Path.home() / "wingmen" / "projects" / "cosem-adcda"
 STATE = ORCH / "logs" / "adcda_port_watch.state"
 WATCHED_BRANCHES = ["main"]  # add feature branches here if the operator wants them watched too
+# op#7517 port-watch owner — cc-cosem-platform-1 ALONE (#62694/#62695, 2026-10-11). NEVER the
+# bare base 'cc-cosem-platform' (fans out to every instance; see module docstring).
+PORT_OWNER = "cc-cosem-platform-1"
 GIT = "/usr/bin/git" if os.path.exists("/usr/bin/git") else "git"
 
 
@@ -114,8 +128,8 @@ def main():
             "New commits detected since last check — assess each for PORT-WORTHINESS against your gap inventory, "
             "add the ones that belong in the platform to the port backlog, and report which to orch-console. "
             "This is DETECTION; the port-fit judgement is yours.\n\n" + "\n\n".join(new_lines))
-    rid = _post_bus(env, "cc-cosem-platform", "ADCDA app changed — assess new commits for porting", body)
-    print(f"[adcda_watch] {ts}: posted {len(new_lines)} branch-delta(s) to cc-cosem-platform as #{rid}")
+    rid = _post_bus(env, PORT_OWNER, "ADCDA app changed — assess new commits for porting", body)
+    print(f"[adcda_watch] {ts}: posted {len(new_lines)} branch-delta(s) to {PORT_OWNER} as #{rid}")
 
 
 if __name__ == "__main__":
