@@ -341,7 +341,21 @@ def discover_lanes(conn, lane: "str | None" = None) -> list:
     unregistered running lane appears but has NO worktree_path -> gate_git_clean fails closed
     (fail-SAFE, not blind). Singletons AND the SRE itself (fhb.SINGLETON_BODIES) are excluded —
     defence-in-depth with assert_sre_never_targets_singleton. `lane` restricts to one
-    fleet_lanes.lane. Shared by the CLI and the checkpoint-recycle driver's entrypoint."""
+    fleet_lanes.lane. Shared by the CLI and the checkpoint-recycle driver's entrypoint.
+
+    LANE/SESSION CONSISTENCY (fixed 2026-10-19, #71678/#71679/#71705): the inner subquery picks
+    ONE live sibling per base (freshest heartbeat) via `s.tmux_session`; the LATERAL join below
+    picks a fleet_lanes row for that base INDEPENDENTLY. On a multi-sibling base (e.g.
+    cc-cosem-platform has -1/-2/-3/-4) the old tiebreak (worktree_path-not-null, then lane name
+    alphabetically) could pick a DIFFERENT sibling's lane than the one `tmux_session` actually
+    names -- lane_proactive_recycle_nudge.py builds its message text from `lane` but resolves
+    `to_agent` from `tmux_session`, so the two can describe different instances and the nudge
+    lands on the wrong sibling with the wrong lane's content (confirmed: 'cosem-platform-adhoc'
+    text landed on cc-cosem-platform-3/author, 3x in under an hour). Fix: prefer the fleet_lanes
+    row whose `lane` exactly equals the chosen `tmux_session` -- the naming convention this fleet
+    already follows everywhere -- before falling back to the old tiebreak. Does not change the
+    one-row-per-base cardinality (by design, per the docstring above); only makes that one row
+    internally self-consistent."""
     singletons = sorted(fhb.SINGLETON_BODIES)
     ph = ",".join(["%s"] * len(singletons))
     q = ("SELECT COALESCE(l.lane, s.base_agent_id) AS lane, "
@@ -355,7 +369,8 @@ def discover_lanes(conn, lane: "str | None" = None) -> list:
          "      ORDER BY base_agent_id, last_heartbeat DESC) s "
          "LEFT JOIN LATERAL (SELECT lane, worktree_path, branch, notes, desired_state "
          "                   FROM fleet_lanes fl WHERE fl.base_agent_id = s.base_agent_id "
-         "                   ORDER BY (worktree_path IS NOT NULL) DESC, lane LIMIT 1) l ON true")
+         "                   ORDER BY (fl.lane = s.tmux_session) DESC, "
+         "                            (worktree_path IS NOT NULL) DESC, lane LIMIT 1) l ON true")
     params: list = list(singletons)
     if lane:
         q += " WHERE COALESCE(l.lane, s.base_agent_id) = %s"; params.append(lane)
