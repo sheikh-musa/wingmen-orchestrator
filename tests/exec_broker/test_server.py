@@ -35,12 +35,12 @@ class FakeCursor:
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
         upper = sql.strip().upper()
-        if upper.startswith("INSERT INTO VAULT_ACCESS_LOG"):
+        if upper.startswith("INSERT INTO EXEC_BROKER_ACCESS_LOG"):
             row_id = self._next_id
             self._next_id += 1
             self.vault_rows[row_id] = {"status": "started"}
             self._pending_fetch = {"id": row_id}
-        elif upper.startswith("UPDATE VAULT_ACCESS_LOG"):
+        elif upper.startswith("UPDATE EXEC_BROKER_ACCESS_LOG"):
             status, error_code, row_id = params
             self.vault_rows[row_id]["status"] = status
             self.vault_rows[row_id]["error_code"] = error_code
@@ -298,7 +298,7 @@ def test_respond_never_raises_on_an_already_closed_peer():
 
 def test_transient_db_error_during_revalidation_still_finalizes_the_row(tmp_path):
     # A transient DB error inside require_gate's gate lookup (NOT a
-    # BrokerValidationError) must still finalize the vault_access_log row to
+    # BrokerValidationError) must still finalize the exec_broker_access_log row to
     # error -- never leave it stuck at status=started (itself a P1 per the
     # migration's own comment) just because the broker didn't crash.
     gate_row = {"from_agent": "orch-console", "message_type": "decision", "subject": "go for qa", "body": "", "is_past": True}

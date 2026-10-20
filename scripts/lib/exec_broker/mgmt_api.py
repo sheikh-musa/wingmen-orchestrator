@@ -18,7 +18,7 @@ import tempfile
 MGMT_QUERY_URL = "https://api.supabase.com/v1/projects/{ref}/database/query"
 
 # Broker's own round-trip budget: leaves headroom under the contract's 30s
-# exec_prod-side timeout so the broker can still finalize the vault_access_log
+# exec_prod-side timeout so the broker can still finalize the exec_broker_access_log
 # row and respond within that window.
 _CURL_MAX_TIME = "25"
 _SUBPROCESS_TIMEOUT = 28.0

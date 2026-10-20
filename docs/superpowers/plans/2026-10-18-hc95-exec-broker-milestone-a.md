@@ -10,6 +10,8 @@
 
 **Spec:** `reports/hc95-broker-handoff-pack-20261018.md` (this repo) + bus #56692 (spec) / #56697 (accepted conditions) / #56789 (socket-contract agreement) + `ihsanos-irsyad` main `reports/hc95-exec-broker-contract.md` (squash commit `5053826e`, FROZEN schema).
 
+**POST-MERGE AMENDMENT (bus #72279, 2026-10-20):** this plan and the PR#434 code it produced named the audit table `vault_access_log` throughout. That name COLLIDES with the live fleet-wide secrets-access audit table (`migrations/065_secrets_vault.sql`) — caught by orch-console reading the live table before applying the (still propose-only) draft, no outage happened. Renamed to `exec_broker_access_log` everywhere (migration file, `vault_log.py`'s SQL, tests) in a follow-up fix. The task steps below still say `vault_access_log` as originally written — read them as `exec_broker_access_log` and never rename it back.
+
 ## Global Constraints
 
 - No live writes anywhere: no real prod, no client silos, no actual PAT in any test — synthetic/mocked only (kickoff brief, hard boundary).
