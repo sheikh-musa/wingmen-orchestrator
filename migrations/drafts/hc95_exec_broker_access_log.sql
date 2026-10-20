@@ -10,6 +10,15 @@
 -- before applying anything -- no outage happened, but never rename this back
 -- to vault_access_log.
 --
+-- SUPABASE DEFAULT-PRIVILEGES NOTE (bus #72301, same root cause as the
+-- collision above -- a table that looked locked down was actually wide
+-- open): on Supabase, authenticated/anon/service_role get their default
+-- grants DIRECTLY, not via PUBLIC -- `REVOKE ALL ... FROM PUBLIC` alone does
+-- NOT touch them, so a table believed deny-all can still be reachable
+-- through the API surface those roles serve. Every REVOKE below names all
+-- four explicitly; orch-console confirmed this is exactly what the LIVE
+-- apply needed and this draft now matches it.
+--
 -- Append-only from every vantage but the broker's own DB role: no DELETE grant to
 -- anyone, ever; UPDATE is only how the broker finalizes its OWN just-inserted row
 -- (started -> ok/error, see scripts/lib/exec_broker/vault_log.py), never a
@@ -59,7 +68,8 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
-REVOKE ALL ON exec_broker_access_log FROM PUBLIC;
+REVOKE ALL ON exec_broker_access_log FROM PUBLIC, authenticated, anon, service_role;
+REVOKE ALL ON SEQUENCE exec_broker_access_log_id_seq FROM PUBLIC, authenticated, anon, service_role;
 GRANT INSERT, UPDATE, SELECT ON exec_broker_access_log TO exec_broker_role;
 GRANT USAGE, SELECT ON SEQUENCE exec_broker_access_log_id_seq TO exec_broker_role;
 -- No DELETE grant to anyone, including exec_broker_role -- append-only by omission.
