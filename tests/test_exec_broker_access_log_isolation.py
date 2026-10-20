@@ -1,6 +1,12 @@
-"""Isolation proof-test for the hc#95 vault_access_log draft (migrations/drafts/
-hc95_vault_access_log.sql) — the gate is: PUBLIC has NOTHING on this table, and
-exec_broker_role can INSERT/UPDATE but never DELETE — proven, not asserted.
+"""Isolation proof-test for the hc#95 exec_broker_access_log draft (migrations/
+drafts/hc95_exec_broker_access_log.sql) — the gate is: PUBLIC has NOTHING on
+this table, and exec_broker_role can INSERT/UPDATE but never DELETE — proven,
+not asserted.
+
+NAME NOTE (bus #72279): this table was originally drafted as vault_access_log,
+which collides with the live fleet-wide secrets-access audit table
+(migrations/065_secrets_vault.sql) — renamed before anything was applied.
+Never rename this back to vault_access_log.
 
 Runs against the repo's OWN sanctioned ephemeral Postgres fixture (pg_dsn,
 tests/conftest.py) — never a manually-set DSN env var, never the real
@@ -16,7 +22,7 @@ import pytest
 
 from tests.conftest import assert_dsn_is_not_production
 
-DRAFT = pathlib.Path(__file__).resolve().parent.parent / "migrations" / "drafts" / "hc95_vault_access_log.sql"
+DRAFT = pathlib.Path(__file__).resolve().parent.parent / "migrations" / "drafts" / "hc95_exec_broker_access_log.sql"
 
 
 @pytest.fixture
@@ -43,7 +49,7 @@ def db(pg_dsn):
             # LOGIN/password out-of-band (orch-console, never committed).
             cur.execute("ALTER ROLE exec_broker_role LOGIN")
             cur.execute(
-                "DO $$ BEGIN CREATE ROLE vault_log_public_test LOGIN; "
+                "DO $$ BEGIN CREATE ROLE exec_broker_public_test LOGIN; "
                 "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
             )
         yield pg_dsn
@@ -55,18 +61,18 @@ def _as_role(dsn: str, role: str) -> str:
 
 
 def test_public_has_no_select(db):
-    dsn = _as_role(db, "vault_log_public_test")
+    dsn = _as_role(db, "exec_broker_public_test")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            cur.execute("SELECT * FROM vault_access_log")
+            cur.execute("SELECT * FROM exec_broker_access_log")
 
 
 def test_public_has_no_insert(db):
-    dsn = _as_role(db, "vault_log_public_test")
+    dsn = _as_role(db, "exec_broker_public_test")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             cur.execute(
-                "INSERT INTO vault_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, status) "
+                "INSERT INTO exec_broker_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, status) "
                 "VALUES ('e', 'c', 'p', 's', '', 'started')"
             )
 
@@ -75,12 +81,12 @@ def test_exec_broker_role_can_insert_and_update(db):
     dsn = _as_role(db, "exec_broker_role")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO vault_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, status) "
+            "INSERT INTO exec_broker_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, status) "
             "VALUES ('e1', 'c', 'p', 's', '', NULL, 'started') RETURNING id"
         )
         row_id = cur.fetchone()[0]
-        cur.execute("UPDATE vault_access_log SET status = 'ok', ts_end = now() WHERE id = %s", (row_id,))
-        cur.execute("SELECT status FROM vault_access_log WHERE id = %s", (row_id,))
+        cur.execute("UPDATE exec_broker_access_log SET status = 'ok', ts_end = now() WHERE id = %s", (row_id,))
+        cur.execute("SELECT status FROM exec_broker_access_log WHERE id = %s", (row_id,))
         assert cur.fetchone()[0] == "ok"
 
 
@@ -88,12 +94,12 @@ def test_exec_broker_role_cannot_delete(db):
     dsn = _as_role(db, "exec_broker_role")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO vault_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, status) "
+            "INSERT INTO exec_broker_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, status) "
             "VALUES ('e2', 'c', 'p', 's', '', NULL, 'started') RETURNING id"
         )
         row_id = cur.fetchone()[0]
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            cur.execute("DELETE FROM vault_access_log WHERE id = %s", (row_id,))
+            cur.execute("DELETE FROM exec_broker_access_log WHERE id = %s", (row_id,))
 
 
 def test_status_check_constraint_rejects_unknown_status(db):
@@ -101,6 +107,6 @@ def test_status_check_constraint_rejects_unknown_status(db):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         with pytest.raises(psycopg.errors.CheckViolation):
             cur.execute(
-                "INSERT INTO vault_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, status) "
+                "INSERT INTO exec_broker_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, status) "
                 "VALUES ('e3', 'c', 'p', 's', '', 'bogus-status')"
             )

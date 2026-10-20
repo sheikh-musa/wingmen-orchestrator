@@ -146,7 +146,7 @@ class BrokerServer:
                         log_finalized(cur, row_id, "error", ErrorCode.INTERNAL_ERROR.value)
                         db_conn.commit()
                     except Exception:  # noqa: BLE001 -- best-effort; still respond
-                        logger.exception("exec_broker: failed to finalize vault_access_log row")
+                        logger.exception("exec_broker: failed to finalize exec_broker_access_log row")
                     self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "internal error"))
                     return
 
@@ -175,7 +175,7 @@ class BrokerServer:
                         log_finalized(cur, row_id, "error", ErrorCode.INTERNAL_ERROR.value)
                         db_conn.commit()
                     except Exception:  # noqa: BLE001 -- best-effort; still respond
-                        logger.exception("exec_broker: failed to finalize vault_access_log row")
+                        logger.exception("exec_broker: failed to finalize exec_broker_access_log row")
                     self._respond(conn, encode_error(ErrorCode.INTERNAL_ERROR, "internal error"))
                     return
 

@@ -1,4 +1,4 @@
-"""hc#95 exec-broker vault_access_log writer (contract §6)."""
+"""hc#95 exec-broker exec_broker_access_log writer (contract §6)."""
 from __future__ import annotations
 
 import hashlib
@@ -32,7 +32,7 @@ def test_log_started_inserts_with_sha256_and_returns_id():
     assert row_id == 42
 
     sql, params = cur.calls[0]
-    assert sql.strip().upper().startswith("INSERT INTO VAULT_ACCESS_LOG")
+    assert sql.strip().upper().startswith("INSERT INTO EXEC_BROKER_ACCESS_LOG")
     assert "RETURNING id" in sql
     column_list = sql.split("(", 1)[1].split(")", 1)[0]
     assert "id" not in [c.strip() for c in column_list.split(",")]
