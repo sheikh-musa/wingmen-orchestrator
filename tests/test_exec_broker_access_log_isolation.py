@@ -119,6 +119,38 @@ def test_supabase_platform_role_has_no_insert(db, role):
             )
 
 
+@pytest.mark.parametrize("role", ["authenticated", "anon", "service_role"])
+def test_supabase_platform_role_has_no_sequence_usage(db, role):
+    # orch-console caught this gap live during PR#443 review: the table-level
+    # REVOKE alone left the SEQUENCE's own default grant untouched, so these
+    # roles could still nextval()/setval() it directly even without table
+    # access. Proven per-role against the real sequence, not inferred.
+    dsn = _as_role(db, role)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute("SELECT nextval('exec_broker_access_log_id_seq')")
+
+
+def test_public_has_no_sequence_usage(db):
+    dsn = _as_role(db, "exec_broker_public_test")
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute("SELECT nextval('exec_broker_access_log_id_seq')")
+
+
+def test_exec_broker_role_can_use_sequence(db):
+    # The broker's own role must still be able to insert (which implicitly
+    # calls nextval on the identity sequence) -- the lockdown above must not
+    # have taken out the one role that legitimately needs it.
+    dsn = _as_role(db, "exec_broker_role")
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO exec_broker_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, gate_id, status) "
+            "VALUES ('e-seq', 'c', 'p', 's', '', NULL, 'started') RETURNING id"
+        )
+        assert cur.fetchone()[0] is not None
+
+
 def test_exec_broker_role_can_insert_and_update(db):
     dsn = _as_role(db, "exec_broker_role")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
