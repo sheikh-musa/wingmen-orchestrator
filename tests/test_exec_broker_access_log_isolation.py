@@ -43,6 +43,26 @@ def db(pg_dsn):
             # normal baseline this test needs, and is independent of (does
             # not weaken) the table-level REVOKE ALL this test proves below.
             cur.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
+            # Ephemeral (non-Supabase) instances lack the platform roles the
+            # draft REVOKEs from (bus #72301) -- create them so the draft
+            # applies byte-identically, mirroring life_graph_p1.sql's test
+            # fixture pattern (tests/test_life_graph_isolation.py).
+            #
+            # pg_dsn is session-scoped: another test module
+            # (tests/migrations/test_104_provider_policy.py) may have
+            # already created one of these roles as NOLOGIN earlier in the
+            # SAME session. CREATE ROLE ... LOGIN then no-ops silently on
+            # the duplicate_object exception, leaving it NOLOGIN -- this
+            # test's own connection as that role would fail with "not
+            # permitted to log in", not the InsufficientPrivilege it's
+            # trying to prove. ALTER ROLE explicitly afterward so this
+            # test's LOGIN requirement holds regardless of pre-existing state.
+            for role in ("authenticated", "anon", "service_role"):
+                cur.execute(
+                    f"DO $$ BEGIN CREATE ROLE {role} LOGIN; "
+                    "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+                )
+                cur.execute(f"ALTER ROLE {role} LOGIN")
             cur.execute(DRAFT.read_text())
             # Ephemeral-only: trust auth means no password is needed to connect
             # as these roles; the real apply mints exec_broker_role's actual
@@ -69,6 +89,28 @@ def test_public_has_no_select(db):
 
 def test_public_has_no_insert(db):
     dsn = _as_role(db, "exec_broker_public_test")
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute(
+                "INSERT INTO exec_broker_access_log (exec_ledger_id, caller, project_ref, sql_sha256, reason, status) "
+                "VALUES ('e', 'c', 'p', 's', '', 'started')"
+            )
+
+
+@pytest.mark.parametrize("role", ["authenticated", "anon", "service_role"])
+def test_supabase_platform_role_has_no_select(db, role):
+    # bus #72301: these roles get their default grants DIRECTLY on Supabase,
+    # not via PUBLIC -- REVOKE FROM PUBLIC alone would NOT catch them. Proven
+    # against each role explicitly, not inferred from the PUBLIC result.
+    dsn = _as_role(db, role)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute("SELECT * FROM exec_broker_access_log")
+
+
+@pytest.mark.parametrize("role", ["authenticated", "anon", "service_role"])
+def test_supabase_platform_role_has_no_insert(db, role):
+    dsn = _as_role(db, role)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             cur.execute(
