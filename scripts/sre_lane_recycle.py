@@ -334,39 +334,51 @@ def _self_test() -> int:
     return 1 if fails else 0
 
 
-def discover_lanes(conn, lane: "str | None" = None) -> list:
-    """Enumerate ACTUALLY-RUNNING worker lanes (OPTION 2, CAI-RESP-705): the freshest live
-    instance per base from agent_status, cross-referenced to fleet_lanes ONLY for
+def discover_lanes(conn, lane: "str | None" = None, per_instance: bool = False) -> list:
+    """Enumerate ACTUALLY-RUNNING worker lanes (OPTION 2, CAI-RESP-705): by default, the freshest
+    live instance per base from agent_status, cross-referenced to fleet_lanes ONLY for
     worktree_path/branch/notes. Correct-by-construction: no stale-registry blind spot. An
     unregistered running lane appears but has NO worktree_path -> gate_git_clean fails closed
     (fail-SAFE, not blind). Singletons AND the SRE itself (fhb.SINGLETON_BODIES) are excluded —
     defence-in-depth with assert_sre_never_targets_singleton. `lane` restricts to one
     fleet_lanes.lane. Shared by the CLI and the checkpoint-recycle driver's entrypoint.
 
-    LANE/SESSION CONSISTENCY (fixed 2026-10-19, #71678/#71679/#71705): the inner subquery picks
-    ONE live sibling per base (freshest heartbeat) via `s.tmux_session`; the LATERAL join below
-    picks a fleet_lanes row for that base INDEPENDENTLY. On a multi-sibling base (e.g.
-    cc-cosem-platform has -1/-2/-3/-4) the old tiebreak (worktree_path-not-null, then lane name
-    alphabetically) could pick a DIFFERENT sibling's lane than the one `tmux_session` actually
-    names -- lane_proactive_recycle_nudge.py builds its message text from `lane` but resolves
-    `to_agent` from `tmux_session`, so the two can describe different instances and the nudge
-    lands on the wrong sibling with the wrong lane's content (confirmed: 'cosem-platform-adhoc'
-    text landed on cc-cosem-platform-3/author, 3x in under an hour). Fix: prefer the fleet_lanes
-    row whose `lane` exactly equals the chosen `tmux_session` -- the naming convention this fleet
-    already follows everywhere -- before falling back to the old tiebreak. Does not change the
-    one-row-per-base cardinality (by design, per the docstring above); only makes that one row
-    internally self-consistent."""
+    LANE/SESSION CONSISTENCY (fixed 2026-10-19, #71678/#71679/#71705): the inner subquery's
+    per-base row picks a fleet_lanes row INDEPENDENTLY via a LATERAL join that prefers the row
+    whose `lane` exactly equals the chosen `tmux_session` (the naming convention this fleet
+    already follows everywhere) before falling back to the old tiebreak (worktree_path-not-null,
+    then lane name alphabetically) -- so a returned row's `lane` and `tmux_session` always
+    describe the SAME instance (confirmed regression: 'cosem-platform-adhoc' text once landed on
+    cc-cosem-platform-3/author, 3x in under an hour, before this fix).
+
+    per_instance (bus #73007/#73009/#73011, cc-fleet-health): default False preserves the
+    original one-row-per-base cardinality (freshest heartbeat wins) EXACTLY, unchanged -- this is
+    what sre_lane_recycle.py's own CLI/checkpoint-recycle driver keeps using, because ITS gates
+    (gate_context_bloat/gate_fresh_handoff/last_material_action_epoch) are base-keyed, not yet
+    sibling-aware (facet 13, not fixed here) -- giving the driver N rows per base today would
+    silently misattribute a bloat/handoff reading across siblings on the live /clear path.
+    per_instance=True returns EVERY live sibling session for a multi-sibling base instead of
+    collapsing to one -- only lane_proactive_recycle_nudge.py and lane_recycle_deadman.py pass
+    this, now that their per-sibling state keying (state_key_for) makes evaluating each sibling
+    independently safe (those two tiers never recycle; they only message)."""
     singletons = sorted(fhb.SINGLETON_BODIES)
     ph = ",".join(["%s"] * len(singletons))
+    if per_instance:
+        s_subq = ("SELECT base_agent_id, tmux_session FROM agent_status "
+                  "WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
+                  f"  AND base_agent_id NOT IN ({ph}) "
+                  "  AND last_heartbeat > now() - interval '30 minutes'")
+    else:
+        s_subq = ("SELECT DISTINCT ON (base_agent_id) base_agent_id, tmux_session "
+                  "FROM agent_status "
+                  "WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
+                  f"  AND base_agent_id NOT IN ({ph}) "
+                  "  AND last_heartbeat > now() - interval '30 minutes' "
+                  "ORDER BY base_agent_id, last_heartbeat DESC")
     q = ("SELECT COALESCE(l.lane, s.base_agent_id) AS lane, "
          "       l.worktree_path, l.branch, s.base_agent_id, l.desired_state, l.notes, "
          "       s.tmux_session "
-         "FROM (SELECT DISTINCT ON (base_agent_id) base_agent_id, tmux_session "
-         "      FROM agent_status "
-         "      WHERE tmux_session IS NOT NULL AND base_agent_id IS NOT NULL "
-         f"        AND base_agent_id NOT IN ({ph}) "
-         "        AND last_heartbeat > now() - interval '30 minutes' "
-         "      ORDER BY base_agent_id, last_heartbeat DESC) s "
+         f"FROM ({s_subq}) s "
          "LEFT JOIN LATERAL (SELECT lane, worktree_path, branch, notes, desired_state "
          "                   FROM fleet_lanes fl WHERE fl.base_agent_id = s.base_agent_id "
          "                   ORDER BY (fl.lane = s.tmux_session) DESC, "
@@ -374,11 +386,23 @@ def discover_lanes(conn, lane: "str | None" = None) -> list:
     params: list = list(singletons)
     if lane:
         q += " WHERE COALESCE(l.lane, s.base_agent_id) = %s"; params.append(lane)
-    q += " ORDER BY s.base_agent_id"
+    q += " ORDER BY s.base_agent_id" + (", s.tmux_session" if per_instance else "")
     with conn.cursor() as cur:
         cur.execute(q, params)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def state_key_for(base_agent_id: str, session: "str | None") -> str:
+    """Per-sibling state-dict key for the nudge/dead-man tiers' persisted episode/sustain timers
+    (bus #73007/#73009/#73011). A multi-sibling base's live sessions must NEVER share one state
+    key: once discover_lanes(per_instance=True) returns N rows for a base, keying state on the
+    bare base lets whichever sibling is processed LAST in a sweep silently overwrite (or pop)
+    the timer an earlier sibling just started -- a genuinely-watching sibling's sustain clock can
+    be erased within the SAME pass by a healthy sibling read right after it. `session` (the live
+    tmux_session, already unique per instance) disambiguates; a missing session (no live
+    candidate to key on) falls back to the bare base -- a safe no-op when there is only one row."""
+    return f"{base_agent_id}::{session}" if session else base_agent_id
 
 
 def live_sessions_for_base(conn, base_agent_id) -> list:

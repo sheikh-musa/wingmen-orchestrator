@@ -103,3 +103,61 @@ def test_single_live_sibling_still_resolves_correctly(lanes_db, monkeypatch):
     assert len(lanes) == 1
     assert lanes[0]["lane"] == "finance"
     assert lanes[0]["tmux_session"] == "finance"
+
+
+# ── per_instance kwarg (bus #73007/#73009/#73011) ────────────────────────────────
+def test_per_instance_false_default_still_collapses_to_one_row_per_base(lanes_db, monkeypatch):
+    """Default (per_instance=False) must stay byte-identical to the pre-existing behavior relied
+    on by sre_lane_recycle.py's own CLI/checkpoint-recycle driver, whose gates are not yet
+    sibling-aware (facet 13, deferred) -- two live siblings of the same base still collapse to the
+    single freshest-heartbeat row."""
+    with psycopg.connect(lanes_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_status (agent_id, base_agent_id, tmux_session, last_heartbeat) "
+            "VALUES (%s, %s, %s, now() - interval '1 minute'), "
+            "       (%s, %s, %s, now() - interval '5 minutes')",
+            ["cc-x-1", "cc-x", "x-1", "cc-x-3", "cc-x", "x-3"])
+        cur.execute(
+            "INSERT INTO fleet_lanes (lane, base_agent_id, worktree_path, branch, notes, desired_state) "
+            "VALUES (%s, %s, %s, %s, %s, %s), (%s, %s, %s, %s, %s, %s)",
+            ["x-1", "cc-x", "/wt/x1", "b1", "", "up",
+             "x-3", "cc-x", "/wt/x3", "b2", "", "up"])
+        conn.commit()
+
+    monkeypatch.setattr(slr.fhb, "SINGLETON_BODIES", {"cc-nonexistent-singleton"})
+
+    with psycopg.connect(lanes_db) as conn:
+        lanes = slr.discover_lanes(conn)
+
+    assert len(lanes) == 1
+    assert lanes[0]["tmux_session"] == "x-1"  # freshest heartbeat
+
+
+def test_per_instance_true_returns_every_live_sibling(lanes_db, monkeypatch):
+    """per_instance=True (used only by the two message-only sweepers, lane_recycle_deadman.py and
+    lane_proactive_recycle_nudge.py) must return ALL live sessions for a multi-sibling base, not
+    collapse them -- this is what lets state_key_for() disambiguate siblings in the same sweep."""
+    with psycopg.connect(lanes_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_status (agent_id, base_agent_id, tmux_session, last_heartbeat) "
+            "VALUES (%s, %s, %s, now() - interval '1 minute'), "
+            "       (%s, %s, %s, now() - interval '5 minutes')",
+            ["cc-x-1", "cc-x", "x-1", "cc-x-3", "cc-x", "x-3"])
+        cur.execute(
+            "INSERT INTO fleet_lanes (lane, base_agent_id, worktree_path, branch, notes, desired_state) "
+            "VALUES (%s, %s, %s, %s, %s, %s), (%s, %s, %s, %s, %s, %s)",
+            ["x-1", "cc-x", "/wt/x1", "b1", "", "up",
+             "x-3", "cc-x", "/wt/x3", "b2", "", "up"])
+        conn.commit()
+
+    monkeypatch.setattr(slr.fhb, "SINGLETON_BODIES", {"cc-nonexistent-singleton"})
+
+    with psycopg.connect(lanes_db) as conn:
+        lanes = slr.discover_lanes(conn, per_instance=True)
+
+    assert len(lanes) == 2
+    sessions = {row["tmux_session"] for row in lanes}
+    assert sessions == {"x-1", "x-3"}
+    for row in lanes:
+        assert row["base_agent_id"] == "cc-x"
+        assert row["lane"] == row["tmux_session"]

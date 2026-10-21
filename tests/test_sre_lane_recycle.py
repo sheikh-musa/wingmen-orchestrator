@@ -338,3 +338,16 @@ def test_pick_instance_id_falls_back_to_base_when_no_match():
 
 def test_pick_instance_id_falls_back_when_no_session():
     assert slr.pick_instance_id(None, [("cc-x-1", "s")], "cc-x") == "cc-x"
+
+
+# ── state_key_for (bus #73009/#73011 -- per-sibling state-dict keying) ───────────
+def test_state_key_for_disambiguates_siblings_of_the_same_base():
+    k1 = slr.state_key_for("cc-x", "x-1")
+    k3 = slr.state_key_for("cc-x", "x-3")
+    assert k1 != k3
+
+def test_state_key_for_falls_back_to_bare_base_without_a_session():
+    assert slr.state_key_for("cc-x", None) == "cc-x"
+
+def test_state_key_for_falls_back_to_bare_base_on_empty_session():
+    assert slr.state_key_for("cc-x", "") == "cc-x"

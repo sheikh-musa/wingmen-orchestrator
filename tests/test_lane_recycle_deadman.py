@@ -239,7 +239,7 @@ def test_page_verdict_cofires_nudge_and_ok_does_not(monkeypatch):
         {"lane": "cc-hot", "base_agent_id": "cc-hot", "tmux_session": "hot"},
         {"lane": "cc-cool", "base_agent_id": "cc-cool", "tmux_session": "cool"},
     ]
-    monkeypatch.setattr(slr, "discover_lanes", lambda conn: lanes)
+    monkeypatch.setattr(slr, "discover_lanes", lambda conn, **kw: lanes)
     import psycopg
     monkeypatch.setattr(psycopg, "connect", lambda dsn: _FakeConn())
     monkeypatch.setattr(dm, "_gauge",
@@ -275,7 +275,7 @@ def test_page_fires_but_nudge_skips_on_stale_resampled_gauge(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postg://fake")
     monkeypatch.setattr(sys, "argv", ["lane_recycle_deadman.py", "--dry-run"])
     lanes = [{"lane": "cc-stale", "base_agent_id": "cc-stale", "tmux_session": "stale"}]
-    monkeypatch.setattr(slr, "discover_lanes", lambda conn: lanes)
+    monkeypatch.setattr(slr, "discover_lanes", lambda conn, **kw: lanes)
     import psycopg
     monkeypatch.setattr(psycopg, "connect", lambda dsn: _FakeConn())
     monkeypatch.setattr(dm, "_gauge", lambda cur, base: (900_000, 1500))   # stale-high
@@ -294,3 +294,37 @@ def test_page_fires_but_nudge_skips_on_stale_resampled_gauge(monkeypatch):
     assert dm.main() == 0
     assert paged == ["cc-stale"]   # backstop page still fires
     assert nudged == []            # nudge skipped (stale re-sample below bar)
+
+
+# ── multi-sibling state isolation (bus #73009/#73011) ─────────────────────────────────────────
+def test_multi_sibling_same_base_sustain_timer_is_not_erased_by_a_later_sibling(monkeypatch):
+    """Repro: once discover_lanes(per_instance=True) returns 2 rows for one base, a bare-base
+    state key let whichever sibling is processed LAST in the pass overwrite (or pop) the FIRST
+    sibling's just-started sustain timer, within the SAME sweep. sibling-1 crosses HARD and
+    starts watching; sibling-3 (processed right after it, same base) reads comfortably below the
+    bar. Before the state_key_for fix, sibling-3's 'ok' verdict popped state[base], erasing
+    sibling-1's brand-new timer before it was ever saved."""
+    import scripts.sre_lane_recycle as slr
+    monkeypatch.setenv("DATABASE_URL", "postg://fake")
+    monkeypatch.setattr(sys, "argv", ["lane_recycle_deadman.py"])
+    lanes = [
+        {"lane": "cc-x-1", "base_agent_id": "cc-x", "tmux_session": "x-1"},
+        {"lane": "cc-x-3", "base_agent_id": "cc-x", "tmux_session": "x-3"},
+    ]
+    monkeypatch.setattr(slr, "discover_lanes", lambda conn, **kw: lanes)
+    import psycopg
+    monkeypatch.setattr(psycopg, "connect", lambda dsn: _FakeConn())
+    monkeypatch.setattr(dm, "_gauge", lambda cur, base: (None, None))   # force the pane path
+    monkeypatch.setattr(dm, "_pane", lambda s: (90, None) if s == "x-1" else (10, None))
+    state: dict = {}
+    monkeypatch.setattr(dm, "_load_state", lambda: state)
+    saved: dict = {}
+    monkeypatch.setattr(dm, "_save_state", lambda st: saved.update(st))
+    monkeypatch.setattr(dm, "_page", lambda *a, **k: "would-page")
+    monkeypatch.setattr(dm, "_nudge", lambda *a, **k: "would-nudge")
+
+    assert dm.main() == 0
+
+    key1 = slr.state_key_for("cc-x", "x-1")
+    assert key1 in saved, (
+        "sibling-1's sustain timer must survive sibling-3 (same base) being processed after it")

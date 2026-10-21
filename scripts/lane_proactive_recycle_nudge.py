@@ -224,7 +224,7 @@ def run(conn, dry: bool = False) -> int:
     lease-held; otherwise scans + logs WOULD-NUDGE and mutates no state. Never recycles anything."""
     lease_ok, lease_reason = _lease_ok()
     send_live = ENABLED and not dry and lease_ok
-    lanes = slr.discover_lanes(conn)
+    lanes = slr.discover_lanes(conn, per_instance=True)
     state = _load_state()
     now = time.time()
     print(f"lane-proactive-recycle-nudge — {'LIVE' if send_live else 'SCAN+LOG'} — "
@@ -242,12 +242,13 @@ def run(conn, dry: bool = False) -> int:
             pane_pct, pane_hint_k = dm._pane(session) if session else (None, None)
             known, pct, _last_known, reason = dm.resolve_lane_pct(
                 tokens, age_s, pane_pct, pane_hint_k, max_gauge_age_s=NUDGE_GAUGE_STALE_S)
-            episode = state.get(base)
+            key = slr.state_key_for(base, session)
+            episode = state.get(key)
             verdict, new_ep = evaluate_proactive_nudge(known, pct, episode, now)
             if new_ep is None:
-                state.pop(base, None)
+                state.pop(key, None)
             else:
-                state[base] = new_ep
+                state[key] = new_ep
             pct_s = f"{pct}%" if pct is not None else "UNKNOWN"
             print(f"  {base:22s} {pct_s:>7s} -> {verdict}")
             if verdict in ("nudge", "renudge"):
