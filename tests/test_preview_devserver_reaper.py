@@ -273,6 +273,13 @@ def test_flag_registered_reap_calls_bus_send_with_correct_kwargs(monkeypatch):
     import sys
     monkeypatch.setitem(sys.modules, "scripts.bus_send", _FakeBusSend)
     monkeypatch.setitem(sys.modules, "bus_send", _FakeBusSend)
+    # `from scripts import bus_send` resolves via getattr on the ALREADY-IMPORTED `scripts`
+    # package object if one exists in this process (a full-suite run very likely has one,
+    # since some other test file legitimately imports the real scripts.bus_send first) —
+    # the sys.modules patches above alone do not override that cached attribute. Patch it
+    # directly too so this test is correct regardless of what else has already run.
+    if "scripts" in sys.modules:
+        monkeypatch.setattr(sys.modules["scripts"], "bus_send", _FakeBusSend, raising=False)
 
     pr._flag_registered_reap({"pid": 1, "port": 3200, "worktree": "/x/lane",
                               "lane": "cosem-exams", "command": "next dev"})

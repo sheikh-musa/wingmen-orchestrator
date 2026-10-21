@@ -234,6 +234,11 @@ def test_page_calls_bus_send_with_correct_kwargs(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "scripts.bus_send", _FakeBusSend)
     monkeypatch.setitem(sys.modules, "bus_send", _FakeBusSend)
+    # see the matching comment in test_preview_devserver_reaper.py: `from scripts import
+    # bus_send` resolves via getattr on an already-imported `scripts` package object if one
+    # exists (true in a full-suite run), which the sys.modules patches alone can't override.
+    if "scripts" in sys.modules:
+        monkeypatch.setattr(sys.modules["scripts"], "bus_send", _FakeBusSend, raising=False)
 
     nm._page({"errors": ["rm failed /x: boom"]})
     assert len(calls) == 1
