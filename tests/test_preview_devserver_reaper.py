@@ -251,3 +251,32 @@ def test_reap_proceeds_for_registered_lane_once_confirmed(tmp_path, monkeypatch)
     out = pr.reap(reports, confirmed=True)
     assert killed == [1]
     assert out[0]["action"] == "reaped"
+
+
+# ---- _flag_registered_reap actually calls bus_send.send() with its REAL signature -----
+def test_flag_registered_reap_calls_bus_send_with_correct_kwargs(monkeypatch):
+    # reproduces a production failure: send()'s real signature is (from_agent, to, mtype,
+    # subject, body, priority, req=..., ...) -- a caller passing type=/requires_response=
+    # raises TypeError, caught by the except-Exception fallback, which only LOGS (never
+    # truly pages) -- so the "dead-man's-switch" page silently never lands. Stub matches
+    # the real signature exactly so a wrong kwarg name fails this test the same way it
+    # failed in prod.
+    calls = []
+
+    def fake_send(from_agent, to, mtype, subject, body, priority, req=False, **_kw):
+        calls.append(dict(from_agent=from_agent, to=to, mtype=mtype, subject=subject,
+                          body=body, priority=priority, req=req))
+
+    class _FakeBusSend:
+        send = staticmethod(fake_send)
+
+    import sys
+    monkeypatch.setitem(sys.modules, "scripts.bus_send", _FakeBusSend)
+    monkeypatch.setitem(sys.modules, "bus_send", _FakeBusSend)
+
+    pr._flag_registered_reap({"pid": 1, "port": 3200, "worktree": "/x/lane",
+                              "lane": "cosem-exams", "command": "next dev"})
+    assert len(calls) == 1
+    assert calls[0]["to"] == "orch-console"
+    assert calls[0]["from_agent"] == "cc-fleet-health"
+    assert calls[0]["priority"] == "P2"

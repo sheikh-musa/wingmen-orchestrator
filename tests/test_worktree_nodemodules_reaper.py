@@ -216,3 +216,26 @@ def test_is_ignored_failsafe_on_error(monkeypatch, tmp_path):
 
     monkeypatch.setattr(nm.subprocess, "run", boom)
     assert nm._is_ignored(tmp_path, tmp_path / "node_modules") is False
+
+
+# ---- _page actually calls bus_send.send() with its REAL signature --------------
+def test_page_calls_bus_send_with_correct_kwargs(monkeypatch):
+    # bus_send.send()'s real signature is (from_agent, to, mtype, subject, body, priority,
+    # req=..., ...) -- a caller passing type=/requires_response= raises TypeError, caught
+    # by the except-Exception fallback, which only LOGS (never truly pages) -- the
+    # dead-man's-switch silently never lands. Stub matches the real signature exactly.
+    calls = []
+
+    def fake_send(from_agent, to, mtype, subject, body, priority, req=False, **_kw):
+        calls.append(dict(from_agent=from_agent, to=to, mtype=mtype, priority=priority, req=req))
+
+    class _FakeBusSend:
+        send = staticmethod(fake_send)
+
+    monkeypatch.setitem(sys.modules, "scripts.bus_send", _FakeBusSend)
+    monkeypatch.setitem(sys.modules, "bus_send", _FakeBusSend)
+
+    nm._page({"errors": ["rm failed /x: boom"]})
+    assert len(calls) == 1
+    assert calls[0]["to"] == "orch-console"
+    assert calls[0]["from_agent"] == "cc-fleet-health"

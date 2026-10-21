@@ -362,9 +362,9 @@ def _flag_registered_reap(r: dict) -> None:  # pragma: no cover - exercised via 
         f"path going forward (orphan path stays unaffected either way)."
     )
     try:
-        bus_send.send(to="orch-console", from_agent="cc-fleet-health", type="blocker",
+        bus_send.send(from_agent="cc-fleet-health", to="orch-console", mtype="blocker",
                       priority="P2", subject="preview-devserver reaper: first registered-lane reap (flagged, not killed)",
-                      body=body, requires_response=True)
+                      body=body, req=True)
     except Exception as e:
         log(f"FLAG-FALLBACK (bus_send.send failed: {e}): " + json.dumps(r))
 
