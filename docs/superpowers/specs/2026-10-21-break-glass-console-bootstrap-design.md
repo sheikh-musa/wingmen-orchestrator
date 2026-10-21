@@ -1,6 +1,6 @@
 # Break-glass console bootstrap — design (op#32771)
 
-**Status:** DESIGN, awaiting orch-console review before the build starts (bus #73265/#73267/#73270). Secrets-source step is deliberately parameterized — Musa hasn't picked GCP Secret Manager vs. an offline bundle yet (op#32773).
+**Status:** RULED on (orch-console, bus #73287) — the three judgment calls (§10, originally items 0/0b/0c) all resolve to building a CAS-lease (`console_lease`) for the console identity, on the `fleet_health_lease` pattern. Building against that spine now. Secrets-source step remains parameterized — Musa hasn't picked GCP Secret Manager vs. an offline bundle yet (op#32773); that pick, plus cai's security review of whichever store is chosen (orch-console, bus #73273), are the only things still blocking §8 specifically.
 
 ## 1. Intent and why
 
@@ -45,17 +45,31 @@ A fresh console is not "up" until **all three** pass; any failure is loud and th
 
 ## 7. Shape of the script (what's decided; implementation detail is left to the builder in §9)
 
+**RULED (orch-console, bus #73287):** all three of the builder-check's judgment calls (split-brain/handback, `--force` authorization, temporary-vs-permanent) resolve to one spine — a CAS-lease for the console identity, `console_lease`, built on the existing `fleet_health_lease` pattern (same TTL/CAS-take/renew/reclaim shape, see `scripts/lib/fleet_health_lease.py` and its migration for the reference implementation). Step 1 below replaces the plain liveness-check identity guard from the original draft.
+
 ```
 break_glass_bootstrap.sh [--force]
-  1. Identity guard:
-     query agent_status for agent_id='orch-console' — if status != 'offline' AND
-     last_heartbeat within the fleet's standard staleness window (30 min, matching
-     fleet_health.py's STALE_MIN), REFUSE unless --force. Requires reaching the
-     substrate DB first (see step 2) — if the DB itself is unreachable, that is
-     itself inconclusive (could mean "primary really is down" OR "this host just
-     has no route yet") and must be logged loudly and surfaced to the operator as
-     an explicit "could not verify, --force needed and acknowledged" state, never
-     silently treated as "safe to proceed."
+  1. Identity guard, lease-based (console_lease, fleet_health_lease-shaped):
+     - Default (no --force): WAIT for the current console_lease holder's TTL
+       to lapse (the automatic dead-man's-switch — mirrors fleet_health_lease's
+       reclaim-on-expiry), then CAS-take it, loud + logged.
+     - --force (RULED: bare flag, human-judged, NO operator-token in v1 —
+       break-glass is hands-on by definition, someone's at the spare machine
+       having personally judged the primary dead): CAS-take console_lease
+       NOW, before TTL, loud + logged. (Auto-DR — an unattended trigger that
+       needs its own authorization token instead of a human typing --force —
+       is explicitly OUT of scope for v1, RULED.)
+     - DB-unreachable case is still inconclusive either way (primary really
+       down vs. this host just has no route yet) — logged loudly, never
+       silently treated as safe to proceed.
+     - HANDBACK (RULED, in-scope for v1): once the break-glass console is up,
+       it must periodically re-check console_lease like any lease-holder
+       renews. If the original primary (or a planned move-back) re-takes
+       console_lease out from under it — on the NEXT renew check — the
+       break-glass console stands down: tears down its live session and
+       scrubs its RAM-backed secrets, same shutdown path as a failed proof
+       gate (§6/step 5 below), so a returning primary can't collide with an
+       orphaned authenticated body holding live secrets on a personal laptop.
   2. Secrets bundle fetch (PARAMETERIZED — see §8): obtain, into a RAM-backed
      location only (not /private/tmp on macOS, which is disk-backed — see
      ramdisk note in §9), the .env contents + OAuth token-pointer + anything
@@ -83,7 +97,12 @@ break_glass_bootstrap.sh [--force]
      live, nothing on disk" state as never having run at all.
   6. Only on all-green: write/update agent_status (orch-console, this host,
      working) and post one bus message to the operator-facing channel
-     summarizing what came up, where, and the proof-gate result.
+     summarizing what came up, where, and the proof-gate result. RULED
+     (orch-console, bus #73287): also fire scripts/nazim_send.sh with a
+     success confirmation — cheap, since the proof gate (§6 step 3) already
+     proved that channel reaches Musa's phone, so the "it's up" signal
+     doesn't only live in a bus message he can't currently read via a dead
+     console.
 ```
 
 ## 8. Secrets-fetch interface (parameterized, per Musa's op#32773 pick)
@@ -112,12 +131,14 @@ Either way, **this fetch must also deliver (or the bundle must separately includ
 
 **SETTLED (cc-fleet-health's call):** operator communication channel during an inconclusive/failure path (builder-check item) — assumed Musa is physically at the spare host's keyboard when this runs (it's a hands-on break-glass invocation), so loud stdout is sufficient; no separate alerting channel (SMS/push/call) built. Flagging the assumption here since it's cheap to overturn if wrong.
 
-**NEEDS ORCH-CONSOLE/MUSA (not mine to guess on, builder-check items, most important first):**
+**RULED (orch-console, bus #73287) — all three resolve to the `console_lease` spine in §7:**
 
-0. **Split-brain / handback.** The identity guard (§7 step 1) only checks liveness at the instant bootstrap starts — nothing fences off the "dead" primary actually being partitioned and reconnecting later with its own heartbeat still ticking, and two spare hosts bootstrapped concurrently could both pass the guard before either writes `agent_status` (a real check-then-act race). The fleet already has a CAS-lease pattern for exactly this shape (`fleet_health_lease`). Does break-glass need an equivalent lease for the console identity, or is "a human manually retires the old body" the accepted answer? Changes build scope substantially either way.
-0b. **`--force` authorization.** Is it only ever typed by a human who has personally judged the primary dead (bare flag, human-gated by construction), or could an automated DR trigger invoke this unattended? If the latter, `--force` needs its own authorization check, not just a flag — per this fleet's own doctrine that irreversible/real-judgment calls are never an agent's/script's to decide alone.
-0c. **Temporary bridge vs. permanent relocation.** Undecided whether this build also needs a handback procedure (stand the console back down cleanly when Mini/gzbai returns, parallel to `fleet_health_lease`'s reclaim/handback) or whether that's a deliberate follow-on. Building "stand up" without "stand back down" risks an orphaned authenticated body with live secrets on someone's personal laptop indefinitely.
+0. ~~Split-brain / handback~~ → `console_lease` (CAS, `fleet_health_lease`-shaped), in-scope. Worth the scope for a safety-critical bridge — two live consoles means the operator gets duplicate/conflicting messages, worst case mid-incident.
+0b. ~~`--force` authorization~~ → human-judged bare flag, no operator-token, no unattended invocation in v1. Break-glass is hands-on by construction. Auto-DR (an unattended trigger needing its own token) is explicitly out of scope for v1.
+0c. ~~Temporary bridge vs. permanent relocation~~ → handback is in-scope for v1. The lease makes it clean: primary re-takes `console_lease` → break-glass console loses it on its next renew check → stands down + scrubs RAM secrets (§7 step 1's handback sub-step).
 
-1. **Secrets-source pick** (Musa, op#32773) — blocks §8 only; everything else in §7 builds and can be dry-run-tested against a stub fetcher now.
+**STILL OPEN / blockers to flag (per op#32771's own ask):**
+
+1. **Secrets-source pick** (Musa, op#32773) — blocks §8 only; everything else in §7 builds and can be dry-run-tested against a stub fetcher now. Once picked, the chosen store also needs cai's security sanity-check before provisioning (orch-console, bus #73273) — a new root-of-trust holding `DATABASE_URL` is a governance call, not an ops one.
 2. **MacBook test-fire access** — "DONE" per op#32771 requires test-firing on a real spare machine (Musa's MacBook) with all three §6 proofs green, screenshotted/logged. This needs Musa's coordination (physical or remote access to that machine) before the proof-gate can be exercised for real; the rest of the build and a dry-run/mock of the proof gate can proceed without it.
-3. Confirmed via live query: the fleet vault's entire root of trust is the Mini's local Keychain today (sent as a separate finding to orch-console, bus #73270) — not a blocker for THIS design since it deliberately doesn't use the vault, but flagging again here since it's adjacent context for whoever reviews.
+3. Confirmed via live query: the fleet vault's entire root of trust is the Mini's local Keychain today (sent as a separate finding to orch-console, bus #73270) — not a blocker for THIS design since it deliberately doesn't use the vault, but flagging again here since it's adjacent context for whoever reviews. **Follow-up (PR#462, merge-clear per cc-quality review):** `VAULT_HOST_ID` env override now lets a second Mac get its own distinct KEK identity instead of colliding with `'mini'` — a prerequisite for the authorized MacBook `wrap_for_host()` onboarding (op#32771/#32773, bus #73273/#73279), separate from this design (that onboarding reduces the vault's SPOF risk; it doesn't make the vault the break-glass secrets-source — §8 above still stands). cc-quality flagged 3 non-blocking residuals worth carrying into whichever DR runbook eventually documents this: (a) the fix is opt-in — a second Mac that forgets to set `VAULT_HOST_ID` still silently collides with `'mini'`, no code guard catches an unconfigured second Mac; (b) `rotate()`/`put()` run from a break-glass host would rebind a Mini-owned secret's primary wrap to the break-glass host, requiring the Mini to then get its own `vault_secret_host_wraps` fallback row to keep reading it — note "re-wrap for mini after a break-glass rotate" in whatever runbook covers this.
