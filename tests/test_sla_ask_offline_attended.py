@@ -161,6 +161,18 @@ def test_live_recipient_not_affected_by_offline_check(sla_attended_db):
         assert s.attended_for(conn, mid, "unresponded", "cc-finance") is False
 
 
+# ── 7. human recipient (never an agent lane, no agent_status row by design) -> the
+#    offline check must NOT fire for it (cc-fleet-health review, bus #73227): it would
+#    otherwise mark every musa-addressed violation attended unconditionally, silencing
+#    the exact operator-page mechanism (renudge()'s agent=='musa' branch) this watchdog
+#    exists for.
+def test_human_recipient_not_suppressed_by_offline_check(sla_attended_db):
+    mid = _insert_message(sla_attended_db, to_agent="musa")
+
+    with psycopg.connect(sla_attended_db) as conn:
+        assert s.attended_for(conn, mid, "unresponded", "musa") is False
+
+
 # ── 8. multi-instance recipient, instance IS live -> NOT suppressed (bus #73084 repro).
 #    to_agent is the specific instance id; its agent_status row has that same string
 #    in agent_id, but a DIFFERENT string (the bare base) in base_agent_id -- matching
