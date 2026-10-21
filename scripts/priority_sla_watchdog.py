@@ -792,7 +792,21 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
         read_at set == attending -> suppress. A hub row NOT EVEN READ past the
         threshold still pages — that's the real 'hub not woken' alarm (#16246),
         deliberately preserved.
-    Fail-OPEN toward paging on error (a rare double-page beats missing a real P0)."""
+      * ASK-AWARE (Build B slice 4, bus #73068, incident #59453/ask#1146): a
+        violation whose thread is LINKED to an OPEN operator_asks row (via
+        --link-ask — see bus_send.py) that has since been re-committed to a
+        future date, or is flagged waiting_on_operator, is attended from the
+        operator's own side — re-paging about it is noise. A thread with no
+        linked ask, or a CLOSED one, is unaffected (falls through unchanged).
+      * OFFLINE RECIPIENT (Build B slice 4, bus #73068, same principle as slice
+        3's context-gauge veto): a violation addressed to a recipient with NO
+        live (non-offline, recently-heartbeating) agent_status row is structural
+        noise — the recipient doesn't exist to act on it. Independent of the HUB
+        read_at exception above: that one is about a SLOW but alive hub, this is
+        about a recipient that is not live at all.
+    Each new sub-check below fails toward False (not attended) on its own lookup
+    error — a DB hiccup must never silently swallow a real page — same posture as
+    the function's pre-existing Fail-OPEN-toward-paging-on-error contract."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -815,15 +829,42 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
                     (agent, thread_id, created_at),
                 )
                 same_thread_reply_after = cur.fetchone() is not None
+            ask_attended = False
+            if thread_id is not None:
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM operator_asks WHERE thread_id=%s AND closed_at IS NULL "
+                        "AND (waiting_on_operator IS TRUE OR committed_date > now()) LIMIT 1",
+                        (thread_id,),
+                    )
+                    ask_attended = cur.fetchone() is not None
+                except Exception as e:
+                    log(f"attended-recheck-ask-lookup-failed #{mid}: {e}")
+                    ask_attended = False
+            recipient_offline = False
+            if agent:
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM agent_status WHERE base_agent_id=%s "
+                        "AND status <> 'offline' AND last_heartbeat > now() - interval '30 minutes' "
+                        "LIMIT 1",
+                        (agent,),
+                    )
+                    recipient_offline = cur.fetchone() is None
+                except Exception as e:
+                    log(f"attended-recheck-liveness-lookup-failed #{mid}: {e}")
+                    recipient_offline = False
             return _attended_decision(is_read, is_resp, violation_type, agent,
-                                      same_thread_reply_after, HUB_SESSIONS)
+                                      same_thread_reply_after, HUB_SESSIONS,
+                                      ask_attended, recipient_offline)
     except Exception as e:
         log(f"attended-recheck-failed #{mid}: {e}")
         return False
 
 
 def _attended_decision(is_read, is_resp, violation_type, agent,
-                       same_thread_reply_after, hub_sessions) -> bool:
+                       same_thread_reply_after, hub_sessions,
+                       ask_attended=False, recipient_offline=False) -> bool:
     """PURE attended-recheck decision (see attended_for for the full rationale)."""
     if is_resp:
         return True
@@ -832,6 +873,10 @@ def _attended_decision(is_read, is_resp, violation_type, agent,
     if agent in hub_sessions and is_read:
         return True
     if same_thread_reply_after:
+        return True
+    if ask_attended:
+        return True
+    if recipient_offline:
         return True
     return False
 
