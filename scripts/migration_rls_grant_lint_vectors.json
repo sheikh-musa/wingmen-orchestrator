@@ -1,0 +1,57 @@
+[
+  {
+    "name": "cosem_pr429_bug_shape__update_policy_no_column_grant",
+    "sql": "CREATE POLICY theory_attempts_update_own ON theory_attempts FOR UPDATE TO authenticated USING (auth.uid() = user_id) WITH CHECK (status = 'in_progress');",
+    "expect_codes": ["RLS_UPDATE_NO_COLUMN_GRANT"]
+  },
+  {
+    "name": "cosem_pr429_fixed_shape__column_grant_present",
+    "sql": "REVOKE UPDATE ON theory_attempts FROM anon, authenticated; GRANT UPDATE (answers, saved_index) ON theory_attempts TO authenticated; CREATE POLICY theory_attempts_update_own ON theory_attempts FOR UPDATE TO authenticated USING (auth.uid() = user_id) WITH CHECK (status = 'in_progress');",
+    "expect_codes": []
+  },
+  {
+    "name": "for_select_policy_is_not_update_capable",
+    "sql": "CREATE POLICY read_own ON profiles FOR SELECT TO authenticated USING (auth.uid() = id);",
+    "expect_codes": []
+  },
+  {
+    "name": "no_for_clause_defaults_to_all__flagged",
+    "sql": "CREATE POLICY manage_own ON widgets TO authenticated USING (auth.uid() = owner);",
+    "expect_codes": ["RLS_UPDATE_NO_COLUMN_GRANT"]
+  },
+  {
+    "name": "whole_table_grant_update_is_not_a_column_grant__still_flagged",
+    "sql": "GRANT UPDATE ON gadgets TO authenticated; CREATE POLICY u ON gadgets FOR UPDATE TO authenticated USING (true);",
+    "expect_codes": ["RLS_UPDATE_NO_COLUMN_GRANT"]
+  },
+  {
+    "name": "policy_inside_a_comment_is_ignored",
+    "sql": "-- CREATE POLICY commented ON secrets FOR UPDATE TO authenticated USING (true);\nSELECT 1;",
+    "expect_codes": []
+  },
+  {
+    "name": "schema_qualified_and_quoted_table_correlates",
+    "sql": "GRANT UPDATE (score) ON public.\"Attempts\" TO authenticated; CREATE POLICY p ON public.\"Attempts\" FOR UPDATE TO authenticated USING (true);",
+    "expect_codes": []
+  },
+  {
+    "name": "enum_add_value_triggers_lifecycle_sweep",
+    "sql": "ALTER TYPE attempt_status ADD VALUE 'in_progress';",
+    "expect_codes": ["LIFECYCLE_VALUE_ADD"]
+  },
+  {
+    "name": "nonterminal_default_triggers_lifecycle_sweep",
+    "sql": "ALTER TABLE theory_attempts ADD COLUMN status text NOT NULL DEFAULT 'in_progress';",
+    "expect_codes": ["LIFECYCLE_NONTERMINAL_DEFAULT"]
+  },
+  {
+    "name": "clean_dml_only_migration",
+    "sql": "INSERT INTO config (k, v) VALUES ('x', '1'); UPDATE config SET v = '2' WHERE k = 'x';",
+    "expect_codes": []
+  },
+  {
+    "name": "alter_policy_update_capable_no_grant__flagged",
+    "sql": "ALTER POLICY existing_pol ON invoices FOR UPDATE TO authenticated USING (auth.uid() = payer);",
+    "expect_codes": ["RLS_UPDATE_NO_COLUMN_GRANT"]
+  }
+]
