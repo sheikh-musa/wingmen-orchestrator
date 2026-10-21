@@ -53,11 +53,6 @@ ORCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_PATH = os.path.join(ORCH, "state", "client_channel_nodrop_watch.json")
 
 CONSOLE_AGENT = "orch-console"
-# Operator Telegram id (migrations/020_operator_messages_sender_identity.sql) — an inbound
-# row FROM the operator is never a client waiting for a reply, even on a client channel
-# (orch-console #72925/#72951/#72953: Musa's own message, misfired into cosem-exams and
-# deleted, kept re-paging hourly because this watch had no sender check).
-MUSA_TELEGRAM_ID = os.environ.get("MUSA_TELEGRAM_ID")
 NUDGE_S = int(os.environ.get("CLIENT_NODROP_NUDGE_S", str(30 * 60)))         # coord nudge after 30m
 ESCALATE_S = int(os.environ.get("CLIENT_NODROP_ESCALATE_S", str(2 * 3600)))  # console/Nazim after 2h
 RE_NUDGE_S = int(os.environ.get("CLIENT_NODROP_RE_NUDGE_S", str(60 * 60)))   # re-nudge cadence
@@ -97,6 +92,29 @@ def _dsn() -> str:
     return m.group(1).strip()
 
 
+def _musa_telegram_id() -> "str | None":
+    """Operator Telegram id (migrations/020_operator_messages_sender_identity.sql) — an
+    inbound row FROM the operator is never a client waiting for a reply, even on a client
+    channel (orch-console #72925/#72951/#72953/#72963: Musa's own message, misfired into
+    cosem-exams and deleted, kept re-paging because this watch had no sender check).
+
+    SAME env-then-file fallback shape as _dsn() (orch-console #72969): the deployed
+    launchd plist for this watch never sources .env (unlike other client-nodrop plists),
+    so a bare os.environ.get() read None in the real cron's process environment and the
+    PR#452 sender-check silently never fired in production. Fail-safe: None if absent from
+    BOTH env and the .env file (never raises — is_operator_sender(musa_id=None) already
+    fails toward NOT skipping, which is the right default when this id is unknown)."""
+    env = os.environ.get("MUSA_TELEGRAM_ID")
+    if env:
+        return env
+    try:
+        text = open(os.path.join(ORCH, ".env")).read()
+    except OSError:
+        return None
+    m = re.search(r"^MUSA_TELEGRAM_ID=(.+)$", text, re.M)
+    return m.group(1).strip() if m else None
+
+
 def _load_state() -> dict:
     try:
         return json.load(open(STATE_PATH))
@@ -121,9 +139,9 @@ def is_receipt(text: "str | None") -> bool:
 def is_operator_sender(from_user_id, *, musa_id=None) -> bool:
     """True iff `from_user_id` is the operator's own Telegram id (orch-console
     #72925/#72951/#72953) — an inbound FROM the operator is never a client waiting for a
-    reply. musa_id=None (env var unset) never matches anything (fail toward NOT skipping,
+    reply. Caller resolves musa_id via _musa_telegram_id() (env-then-.env-file fallback,
+    orch-console #72969); musa_id=None never matches anything (fail toward NOT skipping,
     since silently losing every channel's drop-watch is worse than one false page)."""
-    musa_id = musa_id if musa_id is not None else MUSA_TELEGRAM_ID
     return bool(musa_id) and str(from_user_id) == str(musa_id)
 
 
@@ -295,6 +313,7 @@ def main(argv=None) -> int:
     mode = "ARMED" if armed else "DETECT-ONLY"
 
     dsn = _dsn()
+    musa_id = _musa_telegram_id()
     now = time.time()
     state = _load_state()
     new_state = dict(state)
@@ -310,7 +329,7 @@ def main(argv=None) -> int:
             had_error = True
             _fail_closed_page(dsn, tag, str(e), armed)
             continue
-        waiting = latest_unanswered_inbound(rows)
+        waiting = latest_unanswered_inbound(rows, musa_id=musa_id)
         actions, ns = evaluate(waiting, now, state.get(tag, {}), coord=ch["coord"],
                                label=ch["label"], tag=tag, send_script=ch["send_script"])
         new_state[tag] = ns

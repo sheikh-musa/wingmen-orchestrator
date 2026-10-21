@@ -93,6 +93,34 @@ def test_operator_id_default_none_still_counts_as_client_unanswered():
     assert nd.latest_unanswered_inbound([_row(1, "inbound", 60)])["id"] == 1
 
 
+# ---- _musa_telegram_id (env-then-file fallback, mirrors _dsn's shape) --------
+def test_musa_telegram_id_reads_env_var_first(monkeypatch):
+    monkeypatch.setenv("MUSA_TELEGRAM_ID", MUSA_ID)
+    assert nd._musa_telegram_id() == MUSA_ID
+
+
+def test_musa_telegram_id_falls_back_to_env_file(monkeypatch, tmp_path):
+    # orch-console #72969: the deployed launchd plist never sources .env (unlike other
+    # client-nodrop plists), so MUSA_TELEGRAM_ID is genuinely unset in the real cron's
+    # process environment -- the sender-check (PR#452) silently never fired in production.
+    # Same fallback shape _dsn() already has for DATABASE_URL.
+    monkeypatch.delenv("MUSA_TELEGRAM_ID", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"DATABASE_URL=postgres://x\nMUSA_TELEGRAM_ID={MUSA_ID}\n")
+    monkeypatch.setattr(nd, "ORCH", str(tmp_path))
+    assert nd._musa_telegram_id() == MUSA_ID
+
+
+def test_musa_telegram_id_returns_none_when_absent_everywhere(monkeypatch, tmp_path):
+    # fail-safe: absent entirely -> None (never skips every channel's drop-watch silently;
+    # is_operator_sender's own fail-safe already handles musa_id=None).
+    monkeypatch.delenv("MUSA_TELEGRAM_ID", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("DATABASE_URL=postgres://x\n")
+    monkeypatch.setattr(nd, "ORCH", str(tmp_path))
+    assert nd._musa_telegram_id() is None
+
+
 def test_older_answered_then_new_inbound_plus_receipt_is_unanswered():
     # a fully-handled older exchange, then a NEW client message with only a receipt after it
     rows = [
