@@ -41,10 +41,32 @@ def test_alerts_when_a_session_exceeds_alert_cap():
     assert any("runaway" in a for a in plan["alerts"])
 
 
-def test_alerts_when_disk_free_below_min():
+# ── bus #73314: two-tier disk-free signal — this Mini's normal baseline is 9-11GB free, so ──
+# ── a single old MIN_FREE=12GB alerted on EVERY run at a healthy level (alert fatigue, ~20 ──
+# ── pages a session marked read unread). `alerts` (bus-paged) now needs genuine near-crash ──
+# ── (< hard_free_bytes); `warnings` (local log only, never paged) covers the early signal. ──
+def test_hard_floor_breach_pages_via_alerts():
     plan = plan_prune([], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=10 * GB,
-                      disk_free_bytes=3 * GB, min_free_bytes=10 * GB)
+                      disk_free_bytes=3 * GB, warn_free_bytes=7 * GB, hard_free_bytes=6 * GB)
     assert any("disk free" in a.lower() for a in plan["alerts"])
+    assert plan["warnings"] == []
+
+
+def test_warn_floor_breach_is_local_only_not_paged():
+    # 8GB free: below the 9GB warn floor, but still above the 6GB hard floor -- must warn
+    # locally, and must NOT land in `alerts` (which is what triggers a bus page).
+    plan = plan_prune([], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=10 * GB,
+                      disk_free_bytes=8 * GB, warn_free_bytes=9 * GB, hard_free_bytes=6 * GB)
+    assert plan["alerts"] == []
+    assert any("disk free" in w.lower() for w in plan["warnings"])
+
+
+def test_healthy_disk_free_triggers_neither_tier():
+    # This Mini's normal baseline (9-11GB) must not fire anything -- the whole point of #73314.
+    plan = plan_prune([], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=10 * GB,
+                      disk_free_bytes=10 * GB, warn_free_bytes=7 * GB, hard_free_bytes=6 * GB)
+    assert plan["alerts"] == []
+    assert plan["warnings"] == []
 
 
 def test_keep_boundary_exact_versions_kept():
@@ -57,7 +79,7 @@ def test_keep_boundary_exact_versions_kept():
 # ── session actually crossed the bloat/alert cap (verify-not-assert, not an unconditional claim) ──
 def test_alert_body_does_not_blame_file_history_on_generic_low_disk():
     plan = plan_prune([], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=10 * GB,
-                      disk_free_bytes=3 * GB, min_free_bytes=10 * GB)
+                      disk_free_bytes=3 * GB, warn_free_bytes=7 * GB, hard_free_bytes=6 * GB)
     body = alert_body(plan["alerts"])
     assert "NOT the driver" in body
     assert "snapshotting a large growing file" not in body

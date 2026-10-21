@@ -32,7 +32,10 @@ FH_DIR = pathlib.Path(os.environ.get("CLAUDE_FILE_HISTORY_DIR",
 PRUNE_OVER = int(os.environ.get("FH_PRUNE_OVER_GB", "3")) * GB   # only prune a session this big+
 KEEP = int(os.environ.get("FH_KEEP_VERSIONS", "2"))             # newest N versions kept per file
 ALERT_OVER = int(os.environ.get("FH_ALERT_OVER_GB", "8")) * GB   # a session this big pages early
-MIN_FREE = int(os.environ.get("FH_MIN_FREE_GB", "12")) * GB      # disk-free floor that pages
+# Two-tier disk-free floor (orch-console, bus #73314 — the old single MIN_FREE=12GB fired
+# on this Mini's normal 9-11GB baseline, alert-fatigue noise that buried a real event):
+WARN_FREE = int(os.environ.get("FH_WARN_FREE_GB", "7")) * GB    # local-log-only early signal
+HARD_FREE = int(os.environ.get("FH_HARD_FREE_GB", "6")) * GB    # genuine near-crash, pages
 
 
 def _ver_num(path: str) -> int:
@@ -45,13 +48,23 @@ def _ver_num(path: str) -> int:
 
 
 def plan_prune(sessions, *, prune_over_bytes, keep, alert_over_bytes,
-               disk_free_bytes=None, min_free_bytes=None):
+               disk_free_bytes=None, warn_free_bytes=None, hard_free_bytes=None):
     """PURE decision. sessions: [{'session', 'total', 'versions':[{'path','hash','size','mtime'}]}].
-    Returns {'delete':[paths], 'freed':bytes, 'alerts':[str]}. Prunes ONLY sessions at/over
-    prune_over_bytes; within those, keeps the newest `keep` versions per file-hash (newest by
-    mtime, then @vN) and marks the rest to delete. Alerts on a session at/over alert_over_bytes
-    or disk free below min_free_bytes."""
-    delete, freed, alerts = [], 0, []
+    Returns {'delete':[paths], 'freed':bytes, 'alerts':[str], 'warnings':[str]}. Prunes ONLY
+    sessions at/over prune_over_bytes; within those, keeps the newest `keep` versions per
+    file-hash (newest by mtime, then @vN) and marks the rest to delete.
+
+    Two-tier disk-free signal (orch-console, bus #73314 — "crying wolf at healthy 9-11GB"):
+    this Mini's NORMAL baseline free space is 9-11GB, but the single old MIN_FREE threshold
+    was 12GB — so the disk-free alert fired on effectively every run at a perfectly healthy
+    level, and ~20 pages a session got marked read without being looked at: the exact noise
+    that would bury a REAL low-disk event. `alerts` (bus-paged, loud) now fires only below
+    hard_free_bytes (genuine near-crash risk, default 6GB); `warnings` (logged locally,
+    never bus-paged) fires below warn_free_bytes but at/above hard_free_bytes (default 7GB —
+    an early local signal for whoever's tailing the log, without manufacturing operator noise).
+    `alerts` also still carries a session at/over alert_over_bytes (a lane is genuinely
+    snapshotting a large growing file — see alert_body()'s verify-not-assert guard)."""
+    delete, freed, alerts, warnings = [], 0, [], []
     for s in sessions:
         total = s.get("total", 0)
         if total >= alert_over_bytes:
@@ -67,10 +80,14 @@ def plan_prune(sessions, *, prune_over_bytes, keep, alert_over_bytes,
             for v in vs_sorted[keep:]:
                 delete.append(v["path"])
                 freed += v["size"]
-    if disk_free_bytes is not None and min_free_bytes is not None and disk_free_bytes < min_free_bytes:
-        alerts.append(f"disk free {disk_free_bytes // GB}GB < min {min_free_bytes // GB}GB "
-                      f"— pruning file-history + escalate (disk-wedge risk)")
-    return {"delete": delete, "freed": freed, "alerts": alerts}
+    if disk_free_bytes is not None and hard_free_bytes is not None and disk_free_bytes < hard_free_bytes:
+        alerts.append(f"disk free {disk_free_bytes // GB}GB < hard floor {hard_free_bytes // GB}GB "
+                      f"— pruning file-history + escalate (disk-wedge risk, near-crash)")
+    elif (disk_free_bytes is not None and warn_free_bytes is not None
+          and disk_free_bytes < warn_free_bytes):
+        warnings.append(f"disk free {disk_free_bytes // GB}GB < warn floor {warn_free_bytes // GB}GB "
+                        f"— pruning file-history as a precaution (not yet near-crash, no page)")
+    return {"delete": delete, "freed": freed, "alerts": alerts, "warnings": warnings}
 
 
 def scan(fh_dir: pathlib.Path = FH_DIR):
@@ -190,13 +207,16 @@ def main(argv=None) -> int:
     sessions = scan()
     free = _disk_free()
     plan = plan_prune(sessions, prune_over_bytes=PRUNE_OVER, keep=KEEP,
-                      alert_over_bytes=ALERT_OVER, disk_free_bytes=free, min_free_bytes=MIN_FREE)
+                      alert_over_bytes=ALERT_OVER, disk_free_bytes=free,
+                      warn_free_bytes=WARN_FREE, hard_free_bytes=HARD_FREE)
     deleted, freed = apply_prune(plan["delete"], dry_run=not apply)
     total_fh = sum(s["total"] for s in sessions)
     mode = "APPLIED" if apply else "DRY-RUN"
     print(f"[file-history-prune {mode}] sessions={len(sessions)} total={total_fh // GB}GB "
           f"free={(free // GB) if free else '?'}GB pruned={deleted} freed={freed // GB}GB "
-          f"alerts={len(plan['alerts'])}", flush=True)
+          f"alerts={len(plan['alerts'])} warnings={len(plan['warnings'])}", flush=True)
+    for w in plan["warnings"]:
+        print(f"[file-history-prune WARN] {w}", flush=True)
     if plan["alerts"] and apply:
         _alert(plan["alerts"])
     return 0
