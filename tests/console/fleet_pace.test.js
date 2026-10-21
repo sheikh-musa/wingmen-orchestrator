@@ -159,10 +159,10 @@ ok("fmtReset: 'Xh Ym' under 48h, 'Xd Yh' at >= 48h, em-dash for null", function 
   assert.strictEqual(fmtReset(resetsInHours(3 * 24 + 5.5)), "3d 5h");
 });
 ok("card: weekly row carries bar + % + 'resets in'", function () {
-  const h = poolChip({ pool: "musa2", pct_7d: 42, pct_5h: 10, updated_age_s: 30,
+  const h = poolChip({ pool: "irsyad", pct_7d: 42, pct_5h: 10, updated_age_s: 30,
     resets_at: resetsInHours(17.4), resets_5h_at: resetsInHours(2.5) });
   assert(/poolcard/.test(h), "renders as a card");
-  assert(/musa2/.test(h), "key name present");
+  assert(/irsyad/.test(h), "key name present");
   assert(/poolwin good[^>]*>[\s\S]*?poolwl">wk<[\s\S]*?width:42%[\s\S]*?<b>42%<\/b>[\s\S]*?resets in 17h (23|24)m/.test(h), "weekly row: " + h);
   assert(/title="[^"]*weekly resets in 17h (23|24)m/.test(h), "tooltip carries the weekly countdown");
 });
@@ -207,7 +207,7 @@ ok("next5hBoundary: past rolls +5h to the next future boundary; null/garbage sta
   assert(ms != null && ms >= 292 && ms <= 295, "'YYYY-MM-DD HH:MM' space form parses + rolls, got " + ms);
 });
 ok("card: 5H row counts down to the next boundary when resets_5h_at just passed; WK row still '—'", function () {
-  const h = poolChip({ pool: "musa2", pct_7d: 42, pct_5h: 12, updated_age_s: 30,
+  const h = poolChip({ pool: "irsyad", pct_7d: 42, pct_5h: 12, updated_age_s: 30,
     resets_at: resetsInHours(-1), resets_5h_at: resetsInHours(-0.1) });
   assert(/window resets in 4h 5[34]m/.test(h), "5h row rolled to next boundary: " + h);
   assert(/title="[^"]*5h window resets in 4h 5[34]m/.test(h), "tooltip carries the rolled countdown");

@@ -5,7 +5,7 @@ THE CORRECTNESS CRUX (why this module exists):
 The account a lane ACTUALLY BOOTS ON (resolved in scripts/launch_dangerous_cc.sh)
 and the account the console shows as "expected" (nervous_system/console/panes.py
 `_expected_fp`) MUST use the IDENTICAL precedence — otherwise the console can show
-"expected musa2" while a lane actually booted on musa (a false-green / wrong-billing
+"expected irsyad" while a lane actually booted on musa (a false-green / wrong-billing
 display-vs-boot divergence). bash and python cannot share a function literally, so
 BOTH consult THIS one module: panes.py imports `resolve_lane_token_path`, and
 launch_dangerous_cc.sh calls the `__main__` CLI shim below (`python3 -m

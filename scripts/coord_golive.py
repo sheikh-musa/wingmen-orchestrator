@@ -16,7 +16,7 @@ Pre-checks (hard gate for --execute):
      (enabling gzb now would double-poll the token -> Telegram 409 conflict).
   2. coord NOT alive on the Mini: no cc-irsyad-coord* agent_status working@Sheikhs-Mini
      within the heartbeat window.
-  3. gzb readiness: IRSYAD_SUPPORT_BOT_TOKEN in shared tmpfs .env; session->musa2
+  3. gzb readiness: IRSYAD_SUPPORT_BOT_TOKEN in shared tmpfs .env; session->irsyad
      token resolves; coord worktree present; the systemd unit is installed.
 
 Execute:
@@ -60,13 +60,13 @@ def gzb_readiness():
         print(f"    (env read err: {e})")
     ok &= _p(tok, f"IRSYAD_SUPPORT_BOT_TOKEN present in {SHARED_ENV}")
     ok &= _p(os.path.isdir(COORD_WT), f"coord worktree present: {COORD_WT}")
-    # musa2 token resolves from the session name
+    # irsyad token resolves from the session name
     try:
         r = subprocess.run([f"{ORCH_DIR}/.venv/bin/python3", "-m",
                             "scripts.lib.lane_token_resolver", "--session", "irsyad-coord"],
                            cwd=ORCH_DIR, capture_output=True, text=True, timeout=20)
         ptr = r.stdout.strip()
-        ok &= _p("musa2" in ptr and os.path.isfile(ptr),
+        ok &= _p("irsyad" in ptr and os.path.isfile(ptr),
                  f"session irsyad-coord -> {ptr or '(empty)'}")
     except Exception as e:
         ok &= _p(False, f"token resolver err: {e}")

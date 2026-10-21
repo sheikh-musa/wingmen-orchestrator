@@ -2,7 +2,7 @@
 """PreToolUse guard: the console body (Nazim) stays OFF irsyad work — enforced, not remembered.
 
 Musa op#21944 (2026-09-22) + op#22229/22233 (2026-09-24, second relapse): irsyad investigation,
-design, code review and data access belong to cc-irsyad-coord + its musa2 lanes. The console's
+design, code review and data access belong to cc-irsyad-coord + its irsyad-key lanes. The console's
 only irsyad role is a yes/no floor ruling on coord's EVIDENCE PACK, which arrives over the bus
 (agent_messages) — so the console never needs the irsyad silos or the ihsanos code.
 

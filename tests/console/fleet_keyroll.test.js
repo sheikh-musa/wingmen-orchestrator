@@ -6,7 +6,7 @@
 //  - the per-lane chip renders from the backend `pool` NICKNAME alone (the hosted
 //    payload has no auth_fp), and from auth_fp when only that is present (local).
 //  - poolRollup counts EVERY lane with a known key per pool (ASSIGNMENT, not liveness —
-//    an offline/cross-host lane is still on its key; fc-v63 Musa fix) in Musa/musa2/Syed
+//    an offline/cross-host lane is still on its key; fc-v63 Musa fix) in Musa/irsyad/Syed
 //    order, unknown-key lanes as "unknown", and emits one .krchip per non-empty pool.
 //  - fc-v64 (Musa op#20715): poolRollup(lanes, coordinators, active) counts the SINGLETONS
 //    too — chip total = lanes + singletons; the split is visible (chip title + tapped hint).
@@ -77,15 +77,15 @@ assert(typeof poolOf === "function" && typeof tokChip === "function" && typeof p
   "fleet.js must export poolOf / tokChip / poolRollup");
 
 ok("hosted row (pool only, no auth_fp) resolves + renders the pool chip", function () {
-  assert.strictEqual(poolOf({ pool: "musa2" }), "musa2");
-  const h = tokChip(undefined, poolOf({ pool: "musa2" }));
-  assert(h.indexOf('class="tok musa2"') >= 0, h);
-  assert(h.indexOf(">musa2<") >= 0, h);
+  assert.strictEqual(poolOf({ pool: "irsyad" }), "irsyad");
+  const h = tokChip(undefined, poolOf({ pool: "irsyad" }));
+  assert(h.indexOf('class="tok irsyad"') >= 0, h);
+  assert(h.indexOf(">irsyad<") >= 0, h);
 });
 
 ok("local row (auth_fp only) derives the same nickname + colour class", function () {
   assert.strictEqual(poolOf({ auth_fp: "68142948c003" }), "Musa");
-  assert.strictEqual(poolOf({ auth_fp: "e1dfa48eec85" }), "musa2");
+  assert.strictEqual(poolOf({ auth_fp: "e1dfa48eec85" }), "irsyad");
   assert.strictEqual(poolOf({ auth_fp: "582043088eae" }), "Syed");
   const h = tokChip("582043088eae", poolOf({ auth_fp: "582043088eae" }));
   assert(h.indexOf('class="tok syed"') >= 0 && h.indexOf(">Syed<") >= 0, h);
@@ -100,12 +100,12 @@ ok("backend pool wins over a stale/absent fp; unknown = no chip on hosted", func
 });
 
 ok("op#25671/orch-console #51875: auth_mismatch renders the chip red + ⚠, never silently", function () {
-  const live = tokChip("e1dfa48eec85", "musa2", true);
-  assert(live.indexOf('class="tok musa2 mismatch"') >= 0, live);           // pool class kept, mismatch ADDED
+  const live = tokChip("e1dfa48eec85", "irsyad", true);
+  assert(live.indexOf('class="tok irsyad mismatch"') >= 0, live);           // pool class kept, mismatch ADDED
   assert(live.indexOf("⚠") >= 0, live);                              // visible warn marker
   assert(live.indexOf("disagrees with the stored snapshot") >= 0, live);  // title explains, never a silent swap
   // no mismatch -> no red class, no warn marker, same chip as before this feature existed
-  const clean = tokChip("e1dfa48eec85", "musa2", false);
+  const clean = tokChip("e1dfa48eec85", "irsyad", false);
   assert(clean.indexOf("mismatch") === -1 && clean.indexOf("⚠") === -1, clean);
   // the unknown-fp ("other") chip path must also carry the mismatch styling when flagged
   const otherMismatch = tokChip("deadbeef0000", "", true);
@@ -114,8 +114,8 @@ ok("op#25671/orch-console #51875: auth_mismatch renders the chip red + ⚠, neve
 
 ok("poolRollup counts ASSIGNED lanes per pool in canonical order, unknown last", function () {
   const lanes = [
-    { bucket: "working", pool: "musa2" },
-    { bucket: "idle", pool: "musa2" },
+    { bucket: "working", pool: "irsyad" },
+    { bucket: "idle", pool: "irsyad" },
     { bucket: "working", pool: "Musa" },
     { bucket: "offline", pool: "Syed" },          // offline but on a key: COUNTED
     { bucket: "working", auth_fp: "582043088eae" }, // local-shaped row
@@ -124,12 +124,12 @@ ok("poolRollup counts ASSIGNED lanes per pool in canonical order, unknown last",
   ];
   const r = poolRollup(lanes, [], "");
   // Object.assign: r.counts was born in the vm realm (different Object prototype).
-  assert.deepStrictEqual(Object.assign({}, r.counts), { musa2: 2, Musa: 1, Syed: 2, "?": 1 });
+  assert.deepStrictEqual(Object.assign({}, r.counts), { irsyad: 2, Musa: 1, Syed: 2, "?": 1 });
   assert.strictEqual(r.total, 6);
   const order = (r.html.match(/data-pool="([^"]+)"/g) || []).map(function (s) { return s.slice(11, -1); });
-  assert.deepStrictEqual(order, ["Musa", "musa2", "Syed", "?"]);
+  assert.deepStrictEqual(order, ["Musa", "irsyad", "Syed", "?"]);
   assert(r.html.indexOf('class="krchip tok musa"') >= 0, r.html);
-  assert(r.html.indexOf('class="krchip tok musa2"') >= 0, r.html);
+  assert(r.html.indexOf('class="krchip tok irsyad"') >= 0, r.html);
   assert(r.html.indexOf('class="krchip tok syed"') >= 0, r.html);
   assert(r.html.indexOf('class="krchip tok other"') >= 0 && r.html.indexOf(">unknown<b>1</b>") >= 0, r.html);
   assert(r.html.indexOf('<span class="krl">keys</span>') === 0, r.html);
@@ -152,22 +152,22 @@ ok("fc-v63 (Musa): an OFFLINE / cross-host lane on a key IS counted — assignme
   // musa2 vanished from "KEYS · Musa 3 · Syed 2" while a musa2 lane sat on the board.
   const lanes = [
     { bucket: "working", pool: "Musa" }, { bucket: "idle", pool: "Musa" }, { bucket: "working", pool: "Musa" },
-    { bucket: "offline", pool: "musa2" }, { bucket: "offline", pool: "musa2" },
+    { bucket: "offline", pool: "irsyad" }, { bucket: "offline", pool: "irsyad" },
     { bucket: "working", pool: "Syed" }, { bucket: "idle", pool: "Syed" },
   ];
   const r = poolRollup(lanes, [], "");
-  assert.deepStrictEqual(Object.assign({}, r.counts), { Musa: 3, musa2: 2, Syed: 2 });
+  assert.deepStrictEqual(Object.assign({}, r.counts), { Musa: 3, irsyad: 2, Syed: 2 });
   assert.strictEqual(r.total, 7);
   const order = (r.html.match(/data-pool="([^"]+)"/g) || []).map(function (s) { return s.slice(11, -1); });
-  assert.deepStrictEqual(order, ["Musa", "musa2", "Syed"], "all three pools appear when each has >=1 assigned lane");
-  assert(r.html.indexOf(">musa2<b>2</b>") >= 0, r.html);
-  assert(r.html.indexOf("musa2: 2 lanes + 0 singletons") >= 0, "chip title carries the lane|singleton split");
+  assert.deepStrictEqual(order, ["Musa", "irsyad", "Syed"], "all three pools appear when each has >=1 assigned lane");
+  assert(r.html.indexOf(">irsyad<b>2</b>") >= 0, r.html);
+  assert(r.html.indexOf("irsyad: 2 lanes + 0 singletons") >= 0, "chip title carries the lane|singleton split");
 });
 
 ok("fc-v64 (Musa op#20715): SINGLETONS are counted — total = lanes + singletons, split visible", function () {
   const lanes = [
     { bucket: "working", pool: "Musa" }, { bucket: "idle", pool: "Musa" }, { bucket: "working", pool: "Musa" },
-    { bucket: "offline", pool: "musa2" }, { bucket: "offline", pool: "musa2" },
+    { bucket: "offline", pool: "irsyad" }, { bucket: "offline", pool: "irsyad" },
     { bucket: "working", pool: "Syed" }, { bucket: "idle", pool: "Syed" },
   ];
   const coords = [
@@ -179,24 +179,24 @@ ok("fc-v64 (Musa op#20715): SINGLETONS are counted — total = lanes + singleton
     { agent_id: "cc-quality", short: "Quality" },                              // no key info -> skipped
   ];
   const r = poolRollup(lanes, coords, "");
-  assert.deepStrictEqual(Object.assign({}, r.counts), { Musa: 7, musa2: 2, Syed: 3 });
-  assert.deepStrictEqual(Object.assign({}, r.lanes), { Musa: 3, musa2: 2, Syed: 2 });
+  assert.deepStrictEqual(Object.assign({}, r.counts), { Musa: 7, irsyad: 2, Syed: 3 });
+  assert.deepStrictEqual(Object.assign({}, r.lanes), { Musa: 3, irsyad: 2, Syed: 2 });
   assert.deepStrictEqual(Object.assign({}, r.singletons), { Musa: 4, Syed: 1 });
   assert.strictEqual(r.total, 12);
   assert(r.html.indexOf(">Musa<b>7</b>") >= 0, r.html);
   assert(r.html.indexOf('title="Musa: 3 lanes + 4 singletons"') >= 0, r.html);
   assert(r.html.indexOf('title="Syed: 2 lanes + 1 singleton"') >= 0, r.html);
-  assert(r.html.indexOf('title="musa2: 2 lanes + 0 singletons"') >= 0, r.html);
+  assert(r.html.indexOf('title="irsyad: 2 lanes + 0 singletons"') >= 0, r.html);
   const order = (r.html.match(/data-pool="([^"]+)"/g) || []).map(function (s) { return s.slice(11, -1); });
-  assert.deepStrictEqual(order, ["Musa", "musa2", "Syed"], "POOL_FP order kept");
+  assert.deepStrictEqual(order, ["Musa", "irsyad", "Syed"], "POOL_FP order kept");
   assert(r.html.indexOf('<span class="krhint">lanes + singletons</span>') >= 0, "untapped hint line");
   assert(r.html.indexOf("68142948") < 0, "raw fp must never appear");
   const t = poolRollup(lanes, coords, "Musa");
   assert(t.html.indexOf("showing Musa · 3 lanes · 4 singletons · tap again for all") >= 0, t.html);
   assert(t.html.indexOf('class="krchip tok musa on"') >= 0, t.html);
   // a singletons-only pool still gets a chip (0 lanes + N singletons)
-  const s = poolRollup([], [{ pool: "musa2" }], "");
-  assert(s.html.indexOf('title="musa2: 0 lanes + 1 singleton"') >= 0 && s.total === 1, s.html);
+  const s = poolRollup([], [{ pool: "irsyad" }], "");
+  assert(s.html.indexOf('title="irsyad: 0 lanes + 1 singleton"') >= 0 && s.total === 1, s.html);
 });
 
 ok("fc-v64 (Musa op#20716): model chip — proc is plain, boot/registry get '~', unknown renders NOTHING", function () {
@@ -230,18 +230,18 @@ ok("fc-v64 (Musa op#20716): collapsed 'idle & fine' row carries key split + mode
     { agent_id: "a3", bucket: "idle", pool: "Musa", model: "claude-sonnet-5" },
     { agent_id: "a4", bucket: "idle", pool: "Syed", model: "claude-opus-4-8" },
     { agent_id: "a5", bucket: "idle", pool: "Syed", model: "claude-opus-4-8" },
-    { agent_id: "a6", bucket: "offline", pool: "musa2", model: "claude-opus-4-8" },
-    { agent_id: "a7", bucket: "idle", pool: "musa2", model: "claude-sonnet-5" },
+    { agent_id: "a6", bucket: "offline", pool: "irsyad", model: "claude-opus-4-8" },
+    { agent_id: "a7", bucket: "idle", pool: "irsyad", model: "claude-sonnet-5" },
     { agent_id: "a8", bucket: "idle" },                                        // no key, no model: in neither split
   ];
   const s = routineSummary(routine);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(s.keys)), [["Musa", 3], ["musa2", 2], ["Syed", 2]]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(s.keys)), [["Musa", 3], ["irsyad", 2], ["Syed", 2]]);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(s.models)), [["opus-4-8", 5], ["sonnet-5", 2]]);
   assert.strictEqual(s.names.length, 8);
   const h = collapsedHtml(routine);
   assert(h.indexOf('id="routineToggle"') >= 0 && h.indexOf("<b>8 lanes</b>") >= 0 && h.indexOf("idle &amp; fine") >= 0, h);
   const text = h.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
-  assert(/8 lanes idle &amp; fine · Musa 3 · musa2 2 · Syed 2 · opus-4-8 5 · sonnet-5 2/.test(text), text);
+  assert(/8 lanes idle &amp; fine · Musa 3 · irsyad 2 · Syed 2 · opus-4-8 5 · sonnet-5 2/.test(text), text);
   assert(h.indexOf('class="cnames">a1, a2, a3, a4, a5, a6…</div>') >= 0, "names on the second faint line, capped at 6");
   assert(h.indexOf("null") < 0);
   const one = collapsedHtml([{ agent_id: "solo", bucket: "idle" }]);

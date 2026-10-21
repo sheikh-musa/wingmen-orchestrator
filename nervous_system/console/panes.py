@@ -436,7 +436,7 @@ def lane_token_auth() -> dict:
 # operator already uses on the bus, never the raw token). CONSOLE_MAX_ACCT_OWNERS
 # (JSON {fp: label}) extends/overrides. Keyed at the length _fingerprint() emits.
 # SSOT = nervous_system/console/pools.py (op#20684 — this was a stale copy missing
-# musa2; keep fleet.js POOL_FP / irsyad.js acctForFp in lockstep with it).
+# irsyad; keep fleet.js POOL_FP / irsyad.js acctForFp in lockstep with it).
 _KNOWN_ACCOUNTS = dict(pools.KNOWN_POOLS)
 # FINAL fallback label only (op#10706 R1 replaced the flat policy): when a body's
 # expected account can't be resolved from its pointer file NOR the .env default,

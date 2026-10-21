@@ -43,7 +43,7 @@ current as the day's hot work shifts (a coordination call the script can't infer
 - **musa**  = `68142948c003` — fleet default lane pool (most cosem lanes).
 - **syed**  = `582043088eae` — console body's pool; also where fleet-health parks a
   lane it recovers off exhausted GLM (observed 2026-10-16: adcda-1 429'ing → re-tokened to Syed).
-- **musa2** = irsyad lanes' pool.
+- **irsyad** = irsyad lanes' pool.
 Both musa and syed are healthy Anthropic pools; a recovered lane on Syed is fine —
 only move it to Musa if the operator wants uniformity (no churn otherwise).
 

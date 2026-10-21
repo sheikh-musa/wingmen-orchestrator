@@ -3,7 +3,7 @@
 **Owner:** cc-orchestrator (hub, fleet-topology domain). **Status:** DESIGN — not built, not armed. **Gate:** orch-console (Nazim) reviews this at source before any build; ships INERT (detect+log only) → wet-prove → his gate → arm. **Origin:** Musa full-tilt GO + full autonomy (via Nazim 39331); demand-scaled pool course-correction (Musa op19217/19259 "supervised first").
 
 ## 1. Purpose & scope
-An elastic pool of **generic irsyad WORKER lanes** on **gzb**, each on the **musa2** OAuth pool, spun on demand and wound down on idle — so irsyad work scales without 12 static lanes, and no idle lane burns tokens.
+An elastic pool of **generic irsyad WORKER lanes** on **gzb**, each on the **irsyad** OAuth pool, spun on demand and wound down on idle — so irsyad work scales without 12 static lanes, and no idle lane burns tokens.
 
 **In scope:** ephemeral irsyad worker lanes (the `cc-irsyad-*` family doing tabung/student/bankimport/receipt-class work).
 **OUT of scope (never auto-killed / never autoscaler-owned):** `cc-irsyad-coord` (standing supervised coordinator, owns the gazzabyte-irsyad poller), any client-poller lane, any money-path lane mid-operation, and all singletons (hub/SRE/cai/console). These are PROTECTED (§5).
@@ -22,7 +22,7 @@ An elastic pool of **generic irsyad WORKER lanes** on **gzb**, each on the **mus
 
 ## 3. Placement
 - **Host:** gzb (spawn via `lanes.sh` / `launch_lane_as.sh` executed on gzb). Set **gzb as the irsyad spawn-host default** so even a manual spin lands correctly.
-- **Token:** musa2 — automatic via the proven session-name → `.group_default_token.irsyad` → `musa2-oauth-token` pointer (no per-lane token handling).
+- **Token:** irsyad — automatic via the proven session-name → `.group_default_token.irsyad` → `irsyad-oauth-token` pointer (no per-lane token handling).
 - **Identity:** DISTINCT per lane (avoid the `cc-irsyad-N`-collision drift the roadmap warns of) — allocate a distinct sub-tag via the existing bounded `pg_try_advisory_xact_lock` + smallest-free-N scan (auto_agent_id), base from `fleet_lanes.base_agent_id` via `CC_BASE_OVERRIDE` (the coord-proven pattern).
 - **Env hygiene:** each spawn inherits the CAI-1225 defense (no write DSN in the lane env; tmux-server-env stays scrubbed) — fold the boot-time server-env scrub in so a long-lived gzb tmux server can never re-leak write DSNs to a pool lane.
 
