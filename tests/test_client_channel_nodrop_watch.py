@@ -70,8 +70,10 @@ def test_no_inbound_or_empty_is_none():
 def test_operator_misfired_inbound_is_not_waiting_72953():
     # orch-console #72953 (2nd occurrence): Musa's OWN operator message, misfired into a
     # client channel, is NOT a client waiting for a reply -- it must never surface here.
+    # musa_id passed EXPLICITLY (not relying on an ambient MUSA_TELEGRAM_ID env var, which
+    # is present on a dev machine but NOT in CI -- this test must be hermetic).
     rows = [_row(32580, "inbound", 3600, "oops wrong channel", from_user_id=MUSA_ID)]
-    assert nd.latest_unanswered_inbound(rows) is None
+    assert nd.latest_unanswered_inbound(rows, musa_id=MUSA_ID) is None
 
 
 def test_operator_misfired_inbound_does_not_hide_a_real_older_unanswered_client_msg():
@@ -81,7 +83,7 @@ def test_operator_misfired_inbound_does_not_hide_a_real_older_unanswered_client_
         _row(32580, "inbound", 60, "oops wrong channel", from_user_id=MUSA_ID),
         _row(32500, "inbound", 3600, "any update on my request?"),
     ]
-    w = nd.latest_unanswered_inbound(rows)
+    w = nd.latest_unanswered_inbound(rows, musa_id=MUSA_ID)
     assert w is not None and w["id"] == 32500
 
 
