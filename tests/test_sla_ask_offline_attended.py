@@ -89,6 +89,19 @@ def _insert_live_agent(dsn, agent):
         conn.commit()
 
 
+def _insert_live_instance(dsn, agent_id, base_agent_id):
+    # Multi-instance lane row: agent_id is the SPECIFIC instance (e.g.
+    # 'cc-cosem-platform-2'), base_agent_id is the bare base (e.g.
+    # 'cc-cosem-platform') -- the two are DIFFERENT strings, unlike
+    # _insert_live_agent's single-instance shorthand above (bus #73084).
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_status (agent_id, base_agent_id, status, last_heartbeat) "
+            "VALUES (%s, %s, 'working', now())",
+            (agent_id, base_agent_id))
+        conn.commit()
+
+
 # ── 1. ask re-committed to a future date -> suppress (exact #59453/ask#1146 shape) ──
 def test_ask_recommitted_future_suppresses_repage(sla_attended_db):
     mid = _insert_message(sla_attended_db, thread_id="11111111-1111-1111-1111-111111111111")
@@ -146,6 +159,28 @@ def test_live_recipient_not_affected_by_offline_check(sla_attended_db):
 
     with psycopg.connect(sla_attended_db) as conn:
         assert s.attended_for(conn, mid, "unresponded", "cc-finance") is False
+
+
+# ── 8. multi-instance recipient, instance IS live -> NOT suppressed (bus #73084 repro).
+#    to_agent is the specific instance id; its agent_status row has that same string
+#    in agent_id, but a DIFFERENT string (the bare base) in base_agent_id -- matching
+#    base_agent_id alone would miss this live row entirely and wrongly suppress.
+def test_multi_instance_recipient_live_instance_not_suppressed(sla_attended_db):
+    mid = _insert_message(sla_attended_db, to_agent="cc-cosem-platform-2")
+    _insert_live_instance(sla_attended_db, "cc-cosem-platform-2", "cc-cosem-platform")
+
+    with psycopg.connect(sla_attended_db) as conn:
+        assert s.attended_for(conn, mid, "unresponded", "cc-cosem-platform-2") is False
+
+
+# ── 9. multi-instance recipient, that SPECIFIC instance is gone -> suppress, even
+#    though a different sibling instance of the same base is still live. ──────────
+def test_multi_instance_recipient_dead_instance_suppressed_despite_live_sibling(sla_attended_db):
+    mid = _insert_message(sla_attended_db, to_agent="cc-cosem-platform-2")
+    _insert_live_instance(sla_attended_db, "cc-cosem-platform-3", "cc-cosem-platform")
+
+    with psycopg.connect(sla_attended_db) as conn:
+        assert s.attended_for(conn, mid, "unresponded", "cc-cosem-platform-2") is True
 
 
 # ── 7. both new lookups failing -> fails OPEN (does NOT suppress) ───────────────

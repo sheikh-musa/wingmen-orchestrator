@@ -803,7 +803,13 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
         live (non-offline, recently-heartbeating) agent_status row is structural
         noise — the recipient doesn't exist to act on it. Independent of the HUB
         read_at exception above: that one is about a SLOW but alive hub, this is
-        about a recipient that is not live at all.
+        about a recipient that is not live at all. `agent` here is the violation's
+        raw to_agent, which for a multi-instance lane family is the SPECIFIC
+        INSTANCE id (e.g. 'cc-cosem-platform-2'), never the bare base — so the
+        liveness lookup must match EITHER agent_id OR base_agent_id (bus #73084:
+        matching base_agent_id alone made every live multi-instance recipient
+        look offline and mass-suppressed real pages, caught in cc-fleet-health's
+        review before merge).
     Each new sub-check below fails toward False (not attended) on its own lookup
     error — a DB hiccup must never silently swallow a real page — same posture as
     the function's pre-existing Fail-OPEN-toward-paging-on-error contract."""
@@ -845,10 +851,10 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
             if agent:
                 try:
                     cur.execute(
-                        "SELECT 1 FROM agent_status WHERE base_agent_id=%s "
+                        "SELECT 1 FROM agent_status WHERE (agent_id=%s OR base_agent_id=%s) "
                         "AND status <> 'offline' AND last_heartbeat > now() - interval '30 minutes' "
                         "LIMIT 1",
-                        (agent,),
+                        (agent, agent),
                     )
                     recipient_offline = cur.fetchone() is None
                 except Exception as e:
