@@ -158,10 +158,13 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 _NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def _row_ts(to_agent, id=1, age_s=0, priority="P2", is_test=False, rr=False, mt="update"):
-    """7-tuple incl created_at (age_s seconds before _NOW), for the age cap."""
+def _row_ts(to_agent, id=1, age_s=0, priority="P2", is_test=False, rr=False, mt="update",
+            from_agent="cc-someone-else"):
+    """8-tuple incl created_at (age_s seconds before _NOW) and from_agent, for the age cap
+    and the self-notice exclusion. from_agent defaults to a non-self value so existing
+    callers are unaffected."""
     ca = _NOW - timedelta(seconds=age_s)
-    return (id, to_agent, mt, rr, priority, is_test, ca)
+    return (id, to_agent, mt, rr, priority, is_test, ca, from_agent)
 
 
 def _collector():
@@ -761,6 +764,34 @@ def test_stuck_page_ignores_ineligible_recipients():
                        now_dt=_NOW, matching_hbs=lambda a: [], pane_state=lambda a: "idle",
                        mark=mark, escalate=page, escalated_seen=set())
     assert pages == [] and r["stuck_paged"] == []
+
+
+def test_stuck_page_excludes_own_selfnotice_rows_72904():
+    # orch-console #72904 (2nd occurrence): the sweep's OWN "[idle-unread]" nudge row
+    # (from_agent='cc-fleet-health') is itself a directed-unread row to the agent it nudged.
+    # idle_unread_sweep already excludes it from ITS OWN nudge/warn counting (the #60531
+    # self-feed-killer), but that exclusion is local to idle_unread_sweep — the STUCK-PAGE
+    # pass here has a completely separate fetch with no such filter, so it paged ABOUT a row
+    # that cc-fleet-health itself sent. A self-notice must never trigger a stuck-page.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-cosem-exams", 72875, age_s=5500, from_agent="cc-fleet-health")]
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(),
+                       this_host="Sheikhs-Mini", pane_state=lambda a: "idle", pane_active=lambda a: False,
+                       mark=mark, escalate=page, escalated_seen=set())
+    assert pages == [] and r["stuck_paged"] == []
+
+
+def test_stuck_page_still_pages_a_genuine_non_self_row_72904_regression():
+    # regression guard: the self-notice exclusion must not swallow a REAL stuck row from
+    # someone else — same shape as test_stuck_row_to_alive_agent_paged_once_with_pane_state_43063.
+    marked, pages, mark, page = _cas_collector()
+    stuck = [_row_ts("cc-quality", 201, age_s=2000, from_agent="orch-console")]
+    r = wbs.sweep_once(rows=[], stuck_rows=stuck, wake=lambda a, **k: {"woke": False},
+                       now_dt=_NOW, matching_hbs=lambda a: [_hb(60)], agent_host_rows=_local_rows(),
+                       this_host="Sheikhs-Mini", pane_state=lambda a: "idle", pane_active=lambda a: False,
+                       mark=mark, escalate=page, escalated_seen=set())
+    assert len(pages) == 1 and r["stuck_paged"] == ["cc-quality"]
 
 
 def test_stuck_page_upper_age_bound_row_older_than_max_never_paged_43073():
