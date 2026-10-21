@@ -10,49 +10,49 @@
 # Operator (op#15550) asked us to "keep track of the mini's resources" — this is
 # that mechanism, built in code, not a promise to remember.
 #
-# WHAT: checks the DATA volume every run.
-#   - WARN  (>= WARN_PCT, default 85): nudge cc-fleet-health on the bus to assess
-#           + prune regenerable space (npm/.next/caches) BEFORE it's critical.
-#   - CRIT  (>= CRIT_PCT, default 93): bus nudge + a direct ELI5 Telegram alert
-#           to the operator (nazim_send.sh) — at this point action is urgent.
-#   - Healthy (< WARN_PCT): clears the dedup flags.
-# Dedup: one alert per level per hour (flag files in /tmp). If /tmp itself is on
-# the full volume the flag write may fail — acceptable: worst case a duplicate
-# CRIT alert, which for a full disk is the right failure direction.
+# WHAT: checks the DATA volume every run, gated on FREE SPACE (GB), not percent —
+#   the volume is 233Gi total, so percent-of-capacity floats noisily (89-97%)
+#   across what is actually a healthy 8-20GB-free range; GB free is the number
+#   that actually predicts a crash (same lesson as the file-history-prune
+#   WARN_FREE/HARD_FREE retune, PR#463, bus #73314/#73375).
+#   - WARN  (< WARN_FREE_GB, default 9): LOCAL LOG ONLY. No bus row to anyone —
+#           cc-fleet-health already runs its own reclaim passes on a schedule;
+#           a bus nudge at this band was crying wolf at a healthy-ish 8-9GB free.
+#   - HARD  (< HARD_FREE_GB, default 6): bus P1 to orch-console + a direct ELI5
+#           Telegram alert to the operator (nazim_send.sh) — genuine near-crash,
+#           action is urgent.
+#   - Healthy (>= WARN_FREE_GB): clears the dedup flag.
+# Dedup: one HARD alert per hour (flag file in /tmp). If /tmp itself is on the
+# full volume the flag write may fail — acceptable: worst case a duplicate HARD
+# alert, which for a near-full disk is the right failure direction.
 #
-# ROUTING (bus #68342/#68390, 2026-10-15): WARN used to nudge orch-console,
-# which meant Nazim's own inbox got re-paged every time usage flapped across
-# the 89% line near its ~86% legitimate baseline — noise, once cc-fleet-health
-# actively owns resource health (CLAUDE.md §4.6). WARN now goes to
-# cc-fleet-health instead: assess + prune, same as any other routine health
-# signal, escalating to orch-console only if a prune can't clear it. CRIT
-# (the real operator-facing floor, ~94%) is UNCHANGED — that's still urgent
-# enough to reach Nazim directly via nazim_send.sh regardless of who else
-# gets paged first.
+# ROUTING history (bus #68342/#68390, 2026-10-15; retuned again 2026-10-22 per
+# bus #73375): WARN used to nudge orch-console, then cc-fleet-health, on every
+# %-based crossing — both were noise once the real signal is free-GB, not
+# percent. WARN is now silent-but-logged; only HARD (the real operator-facing
+# floor) reaches anyone.
 #
-# Scoped to the console body: it writes the bus row (routed per above) +
-# (crit only) the operator's nazim-console voice. It NEVER touches lanes or
-# the hub pen.
+# Scoped to the console body: on HARD it writes the bus row to orch-console +
+# the operator's nazim-console voice. It NEVER touches lanes or the hub pen.
 set -uo pipefail
 
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Baseline sits ~86% from legitimate worktree data, so WARN must clear it.
-# Lower these (env override) after a worktree dedup brings the baseline down.
-WARN_PCT="${DISK_WARN_PCT:-89}"
-CRIT_PCT="${DISK_CRIT_PCT:-94}"
+WARN_FREE_GB="${DISK_WARN_FREE_GB:-9}"   # local-log-only early signal
+HARD_FREE_GB="${DISK_HARD_FREE_GB:-6}"   # genuine near-crash floor, pages
 DATA_VOL="${DISK_DATA_VOL:-/System/Volumes/Data}"
-WARN_FLAG="/tmp/disk_monitor_warn_sent"
 CRIT_FLAG="/tmp/disk_monitor_crit_sent"
 LOG="$ORCH_DIR/logs/disk_space_monitor.log"
 
 # --- read the DATA volume usage (the one that actually fills) ---
 USED_PCT=$(df -k "$DATA_VOL" 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5}')
+AVAIL_KB=$(df -k "$DATA_VOL" 2>/dev/null | awk 'NR==2{print $4}')
 AVAIL_H=$(df -h "$DATA_VOL" 2>/dev/null | awk 'NR==2{print $4}')
 USED_H=$(df -h "$DATA_VOL" 2>/dev/null | awk 'NR==2{print $3}')
-if ! [[ "$USED_PCT" =~ ^[0-9]+$ ]]; then
+if ! [[ "$USED_PCT" =~ ^[0-9]+$ ]] || ! [[ "$AVAIL_KB" =~ ^[0-9]+$ ]]; then
   echo "$(date): ERROR could not read $DATA_VOL usage" >> "$LOG"
   exit 1
 fi
+AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
 
 stamp() { echo "$(date): $1" >> "$LOG"; }
 
@@ -82,24 +82,21 @@ conn.commit(); cur.close(); conn.close()
 PY
 }
 
-if [ "$USED_PCT" -ge "$CRIT_PCT" ]; then
+if [ "$AVAIL_GB" -lt "$HARD_FREE_GB" ]; then
   if should_fire "$CRIT_FLAG"; then
-    bus_nudge "P1" "DISK CRITICAL: ${DATA_VOL} at ${USED_PCT}% (only ${AVAIL_H} free)" \
-      "The Mac Mini DATA volume is ${USED_PCT}% full (${USED_H} used, ${AVAIL_H} free). At full it crashes watchdogs/DB writes with [Errno 28]. CLEAR NOW: npm cache clean --force; delete .next build caches (older than 60min) under ~/wingmen/projects; ~/.cache, brew cleanup -s. See the 2026-08-21 incident."
+    bus_nudge "P1" "DISK CRITICAL: ${DATA_VOL} at ${AVAIL_H} free (${USED_PCT}%)" \
+      "The Mac Mini DATA volume has only ${AVAIL_H} free (${USED_PCT}% full, ${USED_H} used) — below the ${HARD_FREE_GB}GB hard floor. At full it crashes watchdogs/DB writes with [Errno 28]. CLEAR NOW: npm cache clean --force; delete .next build caches (older than 60min) under ~/wingmen/projects; ~/.cache, brew cleanup -s. See the 2026-08-21 incident."
     "$ORCH_DIR/scripts/nazim_send.sh" \
-      "⚠️ Mac Mini disk is nearly full — ${USED_PCT}% used, only ${AVAIL_H} free. I'm clearing regenerable space (caches + build files) now; flagging you because at 100% things start crashing. Will confirm once it's back in the safe range." "@console disk-critical" >/dev/null 2>&1
-    touch "$CRIT_FLAG"; stamp "CRIT alert sent — ${USED_PCT}% (${AVAIL_H} free)"
+      "⚠️ Mac Mini disk is nearly full — only ${AVAIL_H} free (${USED_PCT}% used). I'm clearing regenerable space (caches + build files) now; flagging you because at 100% things start crashing. Will confirm once it's back in the safe range." "@console disk-critical" >/dev/null 2>&1
+    touch "$CRIT_FLAG"; stamp "HARD alert sent (paged) — ${AVAIL_H} free / ${USED_PCT}%"
   fi
-elif [ "$USED_PCT" -ge "$WARN_PCT" ]; then
-  if should_fire "$WARN_FLAG"; then
-    bus_nudge "P2" "DISK WARN: ${DATA_VOL} at ${USED_PCT}% (${AVAIL_H} free)" \
-      "Mac Mini DATA volume at ${USED_PCT}% (${AVAIL_H} free) — above the ${WARN_PCT}% warn line. Assess + prune regenerable space (worktree node_modules/.next, npm cache, build caches) before it gets critical. Operator not paged at this tier." \
-      "cc-fleet-health"
-    touch "$WARN_FLAG"; stamp "WARN nudge sent — ${USED_PCT}% (${AVAIL_H} free)"
-  fi
+elif [ "$AVAIL_GB" -lt "$WARN_FREE_GB" ]; then
+  # local-log-only: no bus row, no page. cc-fleet-health's own reclaim passes
+  # + scheduled health checks already watch this band; a bus nudge here was
+  # the noise this retune exists to remove (bus #73375).
+  stamp "WARN (log-only, no page) — ${AVAIL_H} free / ${USED_PCT}%"
 else
-  # healthy — clear dedup so a future breach re-alerts
-  [ -f "$WARN_FLAG" ] && { rm -f "$WARN_FLAG"; stamp "recovered below warn (${USED_PCT}%)"; }
-  [ -f "$CRIT_FLAG" ] && rm -f "$CRIT_FLAG"
-  stamp "healthy — ${USED_PCT}% (${AVAIL_H} free)"
+  # healthy — clear dedup so a future HARD breach re-alerts
+  [ -f "$CRIT_FLAG" ] && { rm -f "$CRIT_FLAG"; stamp "recovered above hard floor (${AVAIL_H} free)"; }
+  stamp "healthy — ${AVAIL_H} free (${USED_PCT}%)"
 fi
