@@ -7,7 +7,7 @@ ALERTS before a wedge. plan_prune is the PURE decision (imported, not re-typed).
 
 Run (from ~/wingmen/orchestrator): .venv/bin/python -m pytest tests/test_file_history_prune.py -q
 """
-from scripts.file_history_prune import plan_prune
+from scripts.file_history_prune import alert_body, plan_prune
 
 GB = 1 << 30
 
@@ -51,6 +51,24 @@ def test_keep_boundary_exact_versions_kept():
     vs = [_v("fb", i, 3 * GB, mtime=i) for i in range(1, 3)]  # exactly 2 versions
     plan = plan_prune([_sess("s3", vs)], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=100 * GB)
     assert plan["delete"] == []  # keep==count -> nothing deleted
+
+
+# ── bus #73188: the bus-page body must not claim file-history is the driver unless a ──
+# ── session actually crossed the bloat/alert cap (verify-not-assert, not an unconditional claim) ──
+def test_alert_body_does_not_blame_file_history_on_generic_low_disk():
+    plan = plan_prune([], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=10 * GB,
+                      disk_free_bytes=3 * GB, min_free_bytes=10 * GB)
+    body = alert_body(plan["alerts"])
+    assert "NOT the driver" in body
+    assert "snapshotting a large growing file" not in body
+
+
+def test_alert_body_blames_file_history_when_a_session_actually_is_bloated():
+    vs = [_v("fb", i, 4 * GB, mtime=i) for i in range(1, 4)]  # 12GB total
+    plan = plan_prune([_sess("runaway", vs)], prune_over_bytes=2 * GB, keep=1, alert_over_bytes=10 * GB)
+    body = alert_body(plan["alerts"])
+    assert "snapshotting a large growing file" in body
+    assert "NOT the driver" not in body
 
 
 def test_prune_is_per_hash_within_a_session():

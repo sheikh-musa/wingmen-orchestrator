@@ -137,6 +137,31 @@ def _disk_free(path="/System/Volumes/Data"):
         return None
 
 
+def alert_body(msgs) -> str:
+    """PURE: build the bus-page body from the alert messages plan_prune produced.
+
+    VERIFY-NOT-ASSERT (cc-fleet-health, 2026-10-21, bus #73188): this used to UNCONDITIONALLY
+    claim "a lane is snapshotting a large growing file" every time _alert() fired, even on the
+    generic low-disk-free alert — which has NO per-session evidence of file-history bloat
+    (across this monitor's entire run history the per-session bloat alert has never once fired;
+    total file-history size has never approached its own prune/alert thresholds). That unverified
+    claim, repeated on every low-disk page, is what got mistaken for a recurring file-history-
+    specific root cause (it was actually just general disk pressure from elsewhere). This now
+    only names file-history as the driver when a message here actually says so (a session really
+    did cross alert_over_bytes); otherwise it says file-history is NOT implicated and points at
+    general disk pressure instead."""
+    bloat_implicated = any("snapshotting a large growing file" in m for m in msgs)
+    if bloat_implicated:
+        tldr = ("TL;DR: ~/.claude/file-history is ballooning (a lane snapshotting a large "
+                "growing file) — disk-wedge risk. Pruned old snapshots; details:")
+    else:
+        tldr = ("TL;DR: disk is low for reasons UNRELATED to file-history (file-history itself "
+                "is small and under its prune threshold) — pruning it anyway as cheap "
+                "precaution, but it is NOT the driver; look elsewhere for the real consumer. "
+                "Details:")
+    return tldr + "\n  " + "\n  ".join(msgs)
+
+
 def _alert(msgs):
     """Fail-loud alert. Prints a LOUD banner to stderr (lands in the launchd log). The bus/
     operator page is best-effort (and this monitor runs BEFORE a wedge, so the bus is alive);
@@ -150,8 +175,7 @@ def _alert(msgs):
             c = psycopg2.connect(dsn)
             cur = c.cursor()
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
-            body = ("TL;DR: ~/.claude/file-history is ballooning (a lane snapshotting a large growing "
-                    "file) — disk-wedge risk. Pruned old snapshots; details:\n  " + "\n  ".join(msgs))
+            body = alert_body(msgs)
             cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
                            VALUES ('cc-fleet-health','orch-console','blocker','P1',
                            'file-history disk-wedge risk — pruned + flagging',%s)""", (body,))
