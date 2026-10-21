@@ -206,6 +206,14 @@ HUB_SESSIONS = {
     "cc-infra": os.environ.get("SLA_HUB_SESSION_INFRA", "infra"),
 }
 
+# Human identities that appear as `agent` on inbox_sla_violations rows but are NEVER
+# agent lanes and so NEVER have an agent_status row (cc-fleet-health review, PR #456 /
+# bus #73227): the OFFLINE RECIPIENT check below can't tell "dead agent lane" from
+# "never-was-an-agent-lane" and must not run for these at all, or every urgent page
+# addressed to a human (e.g. the weekly-limit operator page via renudge()'s
+# agent=='musa' branch) gets silently marked attended and never reaches send_page().
+HUMAN_RECIPIENTS = frozenset({"musa", "cto-desktop"})
+
 # op#11774 #5 INTERIM (ship-first, page-only): the read-parked-hub grace. A hub that
 # READS a P0/P1 rr row then PARKS (responded_at NULL) is silenced by attended_for()'s
 # read==attending rule; this net surfaces it after INTERIM_PARK_MIN. Chosen LONGER
@@ -792,7 +800,31 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
         read_at set == attending -> suppress. A hub row NOT EVEN READ past the
         threshold still pages — that's the real 'hub not woken' alarm (#16246),
         deliberately preserved.
-    Fail-OPEN toward paging on error (a rare double-page beats missing a real P0)."""
+      * ASK-AWARE (Build B slice 4, bus #73068, incident #59453/ask#1146): a
+        violation whose thread is LINKED to an OPEN operator_asks row (via
+        --link-ask — see bus_send.py) that has since been re-committed to a
+        future date, or is flagged waiting_on_operator, is attended from the
+        operator's own side — re-paging about it is noise. A thread with no
+        linked ask, or a CLOSED one, is unaffected (falls through unchanged).
+      * OFFLINE RECIPIENT (Build B slice 4, bus #73068, same principle as slice
+        3's context-gauge veto): a violation addressed to a recipient with NO
+        live (non-offline, recently-heartbeating) agent_status row is structural
+        noise — the recipient doesn't exist to act on it. Independent of the HUB
+        read_at exception above: that one is about a SLOW but alive hub, this is
+        about a recipient that is not live at all. `agent` here is the violation's
+        raw to_agent, which for a multi-instance lane family is the SPECIFIC
+        INSTANCE id (e.g. 'cc-cosem-platform-2'), never the bare base — so the
+        liveness lookup must match EITHER agent_id OR base_agent_id (bus #73084:
+        matching base_agent_id alone made every live multi-instance recipient
+        look offline and mass-suppressed real pages, caught in cc-fleet-health's
+        review before merge). NEVER runs for HUMAN_RECIPIENTS (bus #73227): a
+        human recipient has no agent_status row by design, not because it's
+        dead — running this check for `musa`/`cto-desktop` would mark every
+        human-addressed violation attended unconditionally, silencing exactly
+        the operator-page mechanism this watchdog exists for.
+    Each new sub-check below fails toward False (not attended) on its own lookup
+    error — a DB hiccup must never silently swallow a real page — same posture as
+    the function's pre-existing Fail-OPEN-toward-paging-on-error contract."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -815,15 +847,42 @@ def attended_for(conn, mid: int, violation_type: str, agent: str = "") -> bool:
                     (agent, thread_id, created_at),
                 )
                 same_thread_reply_after = cur.fetchone() is not None
+            ask_attended = False
+            if thread_id is not None:
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM operator_asks WHERE thread_id=%s AND closed_at IS NULL "
+                        "AND (waiting_on_operator IS TRUE OR committed_date > now()) LIMIT 1",
+                        (thread_id,),
+                    )
+                    ask_attended = cur.fetchone() is not None
+                except Exception as e:
+                    log(f"attended-recheck-ask-lookup-failed #{mid}: {e}")
+                    ask_attended = False
+            recipient_offline = False
+            if agent and agent not in HUMAN_RECIPIENTS:
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM agent_status WHERE (agent_id=%s OR base_agent_id=%s) "
+                        "AND status <> 'offline' AND last_heartbeat > now() - interval '30 minutes' "
+                        "LIMIT 1",
+                        (agent, agent),
+                    )
+                    recipient_offline = cur.fetchone() is None
+                except Exception as e:
+                    log(f"attended-recheck-liveness-lookup-failed #{mid}: {e}")
+                    recipient_offline = False
             return _attended_decision(is_read, is_resp, violation_type, agent,
-                                      same_thread_reply_after, HUB_SESSIONS)
+                                      same_thread_reply_after, HUB_SESSIONS,
+                                      ask_attended, recipient_offline)
     except Exception as e:
         log(f"attended-recheck-failed #{mid}: {e}")
         return False
 
 
 def _attended_decision(is_read, is_resp, violation_type, agent,
-                       same_thread_reply_after, hub_sessions) -> bool:
+                       same_thread_reply_after, hub_sessions,
+                       ask_attended=False, recipient_offline=False) -> bool:
     """PURE attended-recheck decision (see attended_for for the full rationale)."""
     if is_resp:
         return True
@@ -832,6 +891,10 @@ def _attended_decision(is_read, is_resp, violation_type, agent,
     if agent in hub_sessions and is_read:
         return True
     if same_thread_reply_after:
+        return True
+    if ask_attended:
+        return True
+    if recipient_offline:
         return True
     return False
 
