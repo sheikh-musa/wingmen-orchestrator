@@ -80,7 +80,11 @@ def test_local_host_id_is_mini_on_this_host():
 
 # ── op#32771/op#32773: VAULT_HOST_ID override lets a SECOND Mac (e.g. a break-glass
 # MacBook) get its own distinct logical identity instead of colliding with 'mini'. ──
-@_needs_mini
+# NOT @_needs_mini (cc-quality review, PR#462): the override short-circuits the
+# platform branch entirely, so it's equally valid evidence on ANY host -- gating it
+# to Darwin-only would skip it on the Linux CI runner AND skip it on an actual
+# break-glass host running with VAULT_HOST_ID set, which is exactly the host this
+# path exists for.
 def test_vault_host_id_env_override_wins_over_darwin_default(monkeypatch):
     monkeypatch.setenv("VAULT_HOST_ID", "macbook")
     assert _local_host_id() == "macbook"
