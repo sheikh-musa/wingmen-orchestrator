@@ -861,6 +861,67 @@ def test_fallback_base_not_a_known_lane_still_surfaces(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Build B / instance-awareness (cc-fleet-health build-b-watchdog-instance-
+# awareness.md): a base with >1 live sibling must have Signal A scoped to the
+# OWNING instance, never the bare base — else sibling-3's unread pileup bleeds
+# onto sibling-1 (which already answered its OWN mail) and fires a wedge/nudge
+# against the wrong, uninvolved sibling.
+# --------------------------------------------------------------------------- #
+
+def test_multi_sibling_base_scopes_signal_a_to_owning_instance(monkeypatch):
+    monkeypatch.setattr(w, "MONITOR_SINGLETONS", [])
+    monkeypatch.setattr(w, "list_lane_sessions", lambda: ["cosem-platform-1", "cosem-platform-3"])
+    monkeypatch.setattr(w, "agent_status_lane_map", lambda conn: (
+        {"cosem-platform-1": "cc-cosem-platform", "cosem-platform-3": "cc-cosem-platform"},
+        set(),
+    ))
+    monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({}, {}))
+    monkeypatch.setattr(w, "agent_status_instance_map", lambda conn: (
+        {"cosem-platform-1": "cc-cosem-platform-1", "cosem-platform-3": "cc-cosem-platform-3"}
+    ))
+    monkeypatch.setattr(w, "protected_agent_ids", lambda conn: set())
+    monkeypatch.setattr(w, "read_composer", lambda sess: w.ComposerSignal(w.COMP_EMPTY))
+
+    signals = {
+        "cc-cosem-platform-1": w.BusSignal(0, 0.0, 30.0),       # answered its own mail — healthy
+        "cc-cosem-platform-3": w.BusSignal(5, 9000.0, 9000.0),  # genuinely piling + quiet
+    }
+
+    def _fake_read_bus_signal(agent, conn, also_match=None):
+        return signals[agent]
+
+    monkeypatch.setattr(w, "read_bus_signal", _fake_read_bus_signal)
+    obs = w.gather_observations(None, state={}, alert=False)
+    by_sess = {o.session: o for o in obs if o.kind == "lane"}
+    assert by_sess["cosem-platform-1"].bus.unread == 0, (
+        "sibling-1 must see its OWN signal, not sibling-3's pileup bled across the shared base")
+    assert by_sess["cosem-platform-3"].bus.unread == 5, (
+        "sibling-3's own genuine pileup must still surface")
+
+
+def test_instance_map_lookup_failure_falls_back_to_base_only(monkeypatch):
+    # agent_status_instance_map raising (e.g. conn=None in prod callers that can't build
+    # the map) must degrade to the OLD base-only read_bus_signal call, never crash the scan.
+    monkeypatch.setattr(w, "MONITOR_SINGLETONS", [])
+    monkeypatch.setattr(w, "list_lane_sessions", lambda: ["exams"])
+    monkeypatch.setattr(w, "agent_status_lane_map", lambda conn: ({"exams": "cc-cosem-exams"}, set()))
+    monkeypatch.setattr(w, "lane_agent_map", lambda conn: ({}, {}))
+    monkeypatch.setattr(w, "agent_status_instance_map", lambda conn: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(w, "protected_agent_ids", lambda conn: set())
+    calls = []
+
+    def _fake_read_bus_signal(agent, conn, also_match=None):
+        calls.append((agent, also_match))
+        return w.BusSignal(0, 0.0, float("inf"))
+
+    monkeypatch.setattr(w, "read_bus_signal", _fake_read_bus_signal)
+    obs = w.gather_observations(None, state={}, alert=False)
+    assert "exams" in _obs_sessions(obs)
+    assert calls == [("cc-cosem-exams", None)], (
+        "a failed instance-map lookup must fall back to the plain base-only call, not crash")
+
+
+# --------------------------------------------------------------------------- #
 # ALL singletons 'uncovered' in a sweep -> possible broken DSN (bus #47588 follow-up)
 # --------------------------------------------------------------------------- #
 

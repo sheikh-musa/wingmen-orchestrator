@@ -290,11 +290,11 @@ def main() -> int:
         print("no DATABASE_URL", file=sys.stderr)
         return 2
 
-    from scripts.sre_lane_recycle import discover_lanes, instance_id_for_session
+    from scripts.sre_lane_recycle import discover_lanes, instance_id_for_session, state_key_for
 
     now = time.time()
     conn = psycopg.connect(dsn)
-    lanes = discover_lanes(conn)
+    lanes = discover_lanes(conn, per_instance=True)
     state = _load_state()
     print(f"lane-recycle dead-man — {'DRY-RUN' if args.dry_run else 'LIVE'} — "
           f"bar={HARD_PCT}% sustained>{SUSTAIN_S // 60}m — {len(lanes)} lane(s)")
@@ -308,13 +308,14 @@ def main() -> int:
             tokens, age_s = _gauge(cur, base)
             pane_pct, pane_hint_k = _pane(session) if session else (None, None)
             known, pct, last_known, reason = resolve_lane_pct(tokens, age_s, pane_pct, pane_hint_k)
-            first_over = state.get(base)
+            key = state_key_for(base, session)
+            first_over = state.get(key)
             verdict, new_first = evaluate_deadman(known, pct, first_over, now,
                                                   last_known_pct=last_known)
             if new_first is None:
-                state.pop(base, None)
+                state.pop(key, None)
             else:
-                state[base] = new_first
+                state[key] = new_first
             pct_s = f"{pct}%" if pct is not None else "UNKNOWN"
             print(f"  {base:22s} {pct_s:>7s} -> {verdict}")
             if verdict == "log_unknown":
