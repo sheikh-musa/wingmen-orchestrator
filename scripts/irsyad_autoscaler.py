@@ -494,7 +494,7 @@ def emit_spin_proposal(conn, d: Decision) -> Optional[int]:
         f"AUTOSCALER (SUPERVISED-propose, Nazim #40401 gate) — coord queue "
         f"'{d.coord_queue_source}' shows unclaimed demand={d.demand} (>= threshold "
         f"{SPIN_THRESHOLD}) and pool={d.pool_size} < MAX_LANES={MAX_LANES}.\n\n"
-        "PROPOSAL: spin +1 elastic irsyad worker (cc-irsyad-<N>, musa2 key, gzb).\n"
+        "PROPOSAL: spin +1 elastic irsyad worker (cc-irsyad-<N>, irsyad key, gzb).\n"
         f"Interlocks at propose time: {d.interlocks}\n\n"
         "Reply to CONFIRM (the hub spins on your confirm) or DECLINE. I do NOT auto-spin — this "
         "is the propose-then-confirm gate you set. Kill path stays idle-proof detect-only this phase."

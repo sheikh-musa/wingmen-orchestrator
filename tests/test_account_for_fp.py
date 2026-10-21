@@ -33,9 +33,9 @@ def _write_map(tmp_path, *rows):
 
 
 def test_known_fp_resolves_to_its_account(tmp_path):
-    m = _write_map(tmp_path, ("musa", "68142948c003"), ("musa2", "e1dfa48eec85"), ("syed", "582043088eae"))
+    m = _write_map(tmp_path, ("musa", "68142948c003"), ("irsyad", "e1dfa48eec85"), ("syed", "582043088eae"))
     assert _account_for_fp("68142948c003", m) == "musa"
-    assert _account_for_fp("e1dfa48eec85", m) == "musa2"
+    assert _account_for_fp("e1dfa48eec85", m) == "irsyad"
     assert _account_for_fp("582043088eae", m) == "syed"
 
 
@@ -60,11 +60,11 @@ def test_comment_lines_are_not_matched_as_a_fp(tmp_path):
     vacuous. The real map convention (its own header row) is NO space after '#'.
     This reproduces cc-quality's exact repro: a commented-out line carrying the
     SAME fp as a real entry, appearing FIRST -- without the guard, awk's
-    first-match-wins would return the comment's field 1 ("#musa2") instead of
+    first-match-wins would return the comment's field 1 ("#irsyad") instead of
     the real account below it."""
     p = tmp_path / "token_fps.map"
-    p.write_text("#musa2 e1dfa48eec85\nmusa2 e1dfa48eec85\n")
-    assert _account_for_fp("e1dfa48eec85", str(p)) == "musa2"
+    p.write_text("#irsyad e1dfa48eec85\nirsyad e1dfa48eec85\n")
+    assert _account_for_fp("e1dfa48eec85", str(p)) == "irsyad"
 
 
 def test_against_the_real_shipped_map():
@@ -72,4 +72,4 @@ def test_against_the_real_shipped_map():
     pins the exact incident scenario (#51865): a re-tokened lane's fp must resolve
     to its CURRENT account even if a stale $CLAUDE_ACCOUNT_LABEL still says otherwise."""
     real_map = os.path.join(_ROOT, "scripts", "lib", "token_fps.map")
-    assert _account_for_fp("e1dfa48eec85", real_map) == "musa2"
+    assert _account_for_fp("e1dfa48eec85", real_map) == "irsyad"

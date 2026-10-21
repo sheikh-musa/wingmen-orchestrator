@@ -24,7 +24,7 @@ from nervous_system.console import app as console_app
 from nervous_system.console import auth, db
 
 _MUSA_FP = "68142948c003"
-_MUSA2_FP = "e1dfa48eec85"
+_IRSYAD_FP = "e1dfa48eec85"
 _SYED_FP = "582043088eae"
 KEY = "armed-key-for-tests-0123456789"
 
@@ -56,7 +56,7 @@ def server(monkeypatch, tmp_path):
     # hermetic DB + tmux for /api/fleet
     monkeypatch.setattr(db, "fetch_lanes", lambda: [
         _lane("cc-hifz-1", "cc-hifz", "hifz", _MUSA_FP, "session-launch model=claude-sonnet-5 repo=hifz", "claude-opus-4-8"),
-        _lane("cc-irsyad-2", "cc-irsyad", "irsyad-coord", _MUSA2_FP, "session-launch model=claude-opus-4-8 repo=x", "claude-sonnet-5"),
+        _lane("cc-irsyad-2", "cc-irsyad", "irsyad-coord", _IRSYAD_FP, "session-launch model=claude-opus-4-8 repo=x", "claude-sonnet-5"),
         _lane("cc-cosem-1", "cc-cosem", "cosem-tdu", _SYED_FP, "build", "claude-fable-5-1"),
         _lane("cc-x-1", "cc-x", "xlane", None, None, None),
     ])
@@ -279,7 +279,7 @@ def test_fleet_lanes_and_coordinators_carry_pool_model_model_src(server):
     assert (lanes["cosem-tdu"]["model"], lanes["cosem-tdu"]["model_src"]) == ("claude-fable-5-1", "registry")
     # nothing known -> None, never invented / never "null"-ish
     assert (lanes["xlane"]["model"], lanes["xlane"]["model_src"]) == (None, None)
-    assert lanes["hifz"]["pool"] == "Musa" and lanes["irsyad-coord"]["pool"] == "musa2" \
+    assert lanes["hifz"]["pool"] == "Musa" and lanes["irsyad-coord"]["pool"] == "irsyad" \
         and lanes["cosem-tdu"]["pool"] == "Syed" and lanes["xlane"]["pool"] == ""
     # coordinators: pool from auth_fp; model = proc truth only, else None (never invented)
     assert coords["cai"]["pool"] == "Musa" and (coords["cai"]["model"], coords["cai"]["model_src"]) == ("claude-opus-4-8", "proc")

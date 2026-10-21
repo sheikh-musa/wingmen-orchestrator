@@ -64,8 +64,8 @@
   // fp-prefix -> pool nickname. auth_fp = sha256(OAuth token)[:12]. SSOT for the
   // set = nervous_system/console/pools.py (backend) — keep this + irsyad.js
   // acctForFp in lockstep (op#20684). Order = display order of the key roll-up.
-  var POOL_FP = [["68142948", "Musa"], ["e1dfa48", "musa2"], ["582043088", "Syed"]];
-  var POOL_CLS = { "Musa": "musa", "musa2": "musa2", "Syed": "syed" };
+  var POOL_FP = [["68142948", "Musa"], ["e1dfa48", "irsyad"], ["582043088", "Syed"]];
+  var POOL_CLS = { "Musa": "musa", "irsyad": "irsyad", "Syed": "syed" };
   function tokName(fp) {
     fp = fp || "";
     for (var i = 0; i < POOL_FP.length; i++) if (fp.indexOf(POOL_FP[i][0]) === 0) return POOL_FP[i][1];

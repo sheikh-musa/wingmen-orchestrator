@@ -3,7 +3,7 @@
 
 Owns the deadline Nazim handed cc-fleet-health (#28102 / cai CAI-RESP-1170 addendum):
 storefront is finishing its FULL money-path/live-tenant audits on SONNET-5 because a FRESH
-opus flip on musa2 currently 429s (cold-probe 4/4). This job re-probes musa2's OPUS window
+opus flip on irsyad currently 429s (cold-probe 4/4). This job re-probes irsyad's OPUS window
 and:
   * when opus is COMFORTABLY servable (2 consecutive HTTP-200 opus probes) -> bus-nudge
     cc-fleet-health to flip storefront to opus-4-8 + trigger coord's opus confirmation-pass.
@@ -22,7 +22,7 @@ from pathlib import Path
 
 ORCH = Path(__file__).resolve().parent.parent
 STATE = ORCH / "state" / "opus_reprobe_storefront.json"
-MUSA2_TOKEN = Path.home() / ".wingmen" / "keys" / "musa2-oauth-token"
+IRSYAD_TOKEN = Path.home() / ".wingmen" / "keys" / "irsyad-oauth-token"
 API = "https://api.anthropic.com/v1/messages"
 
 
@@ -39,8 +39,8 @@ def _dsn() -> str:
 
 
 def _probe_opus_once() -> int:
-    """One 1-token opus probe on musa2. Returns HTTP status (200 = servable, 429 = refused)."""
-    tok = MUSA2_TOKEN.read_text().strip()
+    """One 1-token opus probe on irsyad. Returns HTTP status (200 = servable, 429 = refused)."""
+    tok = IRSYAD_TOKEN.read_text().strip()
     body = json.dumps({"model": "claude-opus-4-8", "max_tokens": 1,
                        "messages": [{"role": "user", "content": "hi"}]}).encode()
     req = urllib.request.Request(API, data=body, method="POST", headers={
@@ -93,9 +93,9 @@ def main() -> int:
             # every 30min until I execute the flip and set status='done'.
             first = st.get("status") != "opus-clear-flip-pending"
             _post(cur, "cc-fleet-health",
-                  "OPUS CLEAR on musa2 (2/2 200s) — FLIP cc-storefront to opus-4-8 NOW (CAI-1170)"
+                  "OPUS CLEAR on irsyad (2/2 200s) — FLIP cc-storefront to opus-4-8 NOW (CAI-1170)"
                   + ("" if first else " [re-nudge — still pending]"),
-                  "musa2 OPUS is comfortably servable (2 consecutive 200s). ACT NOW:\n"
+                  "irsyad OPUS is comfortably servable (2 consecutive 200s). ACT NOW:\n"
                   "1. Flip cc-storefront live model to opus-4-8 via ROBUST verified-submit: "
                   "scripts/lane_nudge.sh storefront '/model claude-opus-4-8' — pane-verify 'Set model to Opus 4.8'. "
                   "NOT opus-5. NOT the backstop-sweep.\n"
@@ -112,8 +112,8 @@ def main() -> int:
         elif now >= deadline and not servable and not st.get("deadline_escalated"):
             for who in ("cc-fleet-health", "cai", "orch-console"):
                 _post(cur, who,
-                      "OPUS DEADLINE 12:00Z passed + opus STILL not servable on musa2 — escalating (per Nazim #28102)",
-                      "Durable re-probe: the 2026-08-19T12:00Z checkpoint passed and musa2 OPUS is "
+                      "OPUS DEADLINE 12:00Z passed + opus STILL not servable on irsyad — escalating (per Nazim #28102)",
+                      "Durable re-probe: the 2026-08-19T12:00Z checkpoint passed and irsyad OPUS is "
                       "still NOT comfortably servable (fresh opus probe still 429/other). Per Nazim "
                       "#28102 this ESCALATES to cai + orch-console (do not self-resolve). The FULL "
                       "money-path/live-tenant audit verdicts remain sonnet-only, awaiting an opus "

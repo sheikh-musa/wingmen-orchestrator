@@ -95,7 +95,7 @@ def test_real_map_is_the_one_place_and_well_formed():
     real = REPO / "scripts" / "lib" / "token_fps.map"
     lines = [l.split() for l in real.read_text().splitlines() if l.strip() and not l.startswith("#")]
     accts = {a for a, _ in lines}
-    assert {"musa", "musa2", "syed"} <= accts
+    assert {"musa", "irsyad", "syed"} <= accts
     assert all(len(f) == 12 and all(c in "0123456789abcdef" for c in f) for _, f in lines)
     assert "one place" in real.read_text().lower()
 

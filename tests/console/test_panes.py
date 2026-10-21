@@ -233,12 +233,12 @@ def _fp(tok):
 def test_expected_fp_honors_group_pointer(tmp_path, monkeypatch):
     make_key, ptr = _seed_orch(tmp_path)
     fleet = make_key("musa-oauth-token", "MUSA")
-    grp = make_key("musa2-oauth-token", "MUSA2")
+    grp = make_key("irsyad-oauth-token", "IRSYAD")
     ptr(".lane_default_token", fleet)
     ptr(".group_default_token.irsyad", grp)
     monkeypatch.setattr(panes, "_ORCH_DIR", str(tmp_path))
     # a lane in the pinned family shows the GROUP account
-    assert panes._expected_fp("irsyad-coord") == _fp("MUSA2")
+    assert panes._expected_fp("irsyad-coord") == _fp("IRSYAD")
     # a lane outside the family shows the fleet default (unaffected)
     assert panes._expected_fp("cosem-tdu") == _fp("MUSA")
 

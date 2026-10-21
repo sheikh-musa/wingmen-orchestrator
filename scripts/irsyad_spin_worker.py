@@ -23,7 +23,7 @@ FAIL-CLOSED: without a valid confirm row for the given proposal (--proposal-id p
 It also refuses to exceed MAX_LANES, refuses if the slot-allocation lock is already held by
 another invocation, and re-checks the autoscaler's own would_spin right before claiming (so a
 stale proposal/tick can't double-spin once demand is already covered). The worker BOOT is
-/home/gazzai/irsyad_worker_supervisor.sh (musa2 via the session name's irsyad family; identity
+/home/gazzai/irsyad_worker_supervisor.sh (irsyad key via the session name's irsyad family; identity
 cc-irsyad-<N> via CC_BASE_OVERRIDE=cc-irsyad).
 
 CONFIRM CONTRACT (what counts as Nazim's go for proposal <PID>): a bus row
@@ -155,7 +155,7 @@ def _register_pool_row(conn, n: int, wt: Path, dry: bool) -> None:
             "notes=EXCLUDED.notes, updated_at=now()",
             (lane, str(wt), f"lane/irsyad-worker{n}",
              "Elastic irsyad autoscaler pool worker (boot-on-demand via irsyad_worker_supervisor.sh, "
-             "winds down when queue empty). musa2 via session family; identity cc-irsyad-<N>."))
+             "winds down when queue empty). irsyad key via session family; identity cc-irsyad-<N>."))
     conn.commit()
     print(f"  registered fleet_lanes[{lane}] desired_state=up")
 
@@ -264,7 +264,7 @@ def main(argv=None) -> int:
         if not args.dry_run:
             ref = (f"for proposal #{args.proposal_id}" if args.proposal_id is not None
                    else ("AUTO-spin on demand" if args.auto else "wet-prove"))
-            _log_bus(conn, n, f"Booted irsyad-worker-{n} (identity cc-irsyad-<N>, musa2) off {wt} "
+            _log_bus(conn, n, f"Booted irsyad-worker-{n} (identity cc-irsyad-<N>, irsyad key) off {wt} "
                               f"{ref}; worker runs the claim-build-loop "
                               f"vs coord_dispatch_queue and winds down when empty.")
         print(f"[spin] done (slot {n}, rc {rc}).")

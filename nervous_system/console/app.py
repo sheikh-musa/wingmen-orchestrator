@@ -1853,13 +1853,13 @@ def _fleet_payload():
 # grouping use (prefix up to the first '-', after a tolerant `cc-` strip), so both
 # `irsyad`/`irsyad-coord`/`irsyad-prog1`/`irsyad-prog2` (base cc-irsyad) AND
 # `irsyad-import` (base cc-irsyad-b) resolve to family 'irsyad'. The irsyad family
-# runs on the musa2 pool, so the page also shows the musa2 pool_usage row (weekly).
+# runs on the irsyad pool, so the page also shows the irsyad pool_usage row (weekly).
 _IRSYAD_FAMILY = "irsyad"
 
 
 def _irsyad_payload():
     """The single read behind /api/irsyad (op#12501): the irsyad-family lanes +
-    the musa2 weekly pool. READ-ONLY, no actions. Mirrors the /api/fleet lane
+    the irsyad weekly pool. READ-ONLY, no actions. Mirrors the /api/fleet lane
     derivation exactly (live-pane bucket, context %, token badge) but scoped to
     ONE family so the operator gets a focused, always-current irsyad view.
 
@@ -1867,7 +1867,7 @@ def _irsyad_payload():
     from the LIVE pane, not the ghost/composer), flagged, token account +
     auth_fp + verified/off-account (from the process-verified token-truth scan,
     local-only — the whole family is on the Mini), model, and context % (of the
-    model window, same thresholds as the fleet view). `pool` is the musa2 row
+    model window, same thresholds as the fleet view). `pool` is the irsyad row
     (pct_7d/pct_5h/resets_at + the pace/projected_pct/runway_days advisory)."""
     live = set(panes.live_sessions())
     with ThreadPoolExecutor(max_workers=4) as ex:
@@ -1964,8 +1964,8 @@ def _irsyad_payload():
     out.sort(key=lambda r: (0 if r["flagged"] else 1,
                             order.get(r["bucket"], 3), r["session"] or ""))
 
-    # The irsyad family runs on musa2 — surface THAT pool's weekly usage.
-    pool = next((p for p in pool_rows if str(p.get("pool")) == "musa2"), None)
+    # The irsyad family runs on the irsyad pool — surface THAT pool's weekly usage.
+    pool = next((p for p in pool_rows if str(p.get("pool")) == "irsyad"), None)
 
     counts = {"working": 0, "idle": 0, "offline": 0, "flagged": 0}
     for r in out:
@@ -2145,7 +2145,7 @@ def _make_handler(feedloop: "_FeedLoop"):
                     return self._json(200, payload)
 
                 if path == "/api/irsyad":
-                    # op#12501: the irsyad-family lanes + musa2 weekly pool, for the
+                    # op#12501: the irsyad-family lanes + irsyad weekly pool, for the
                     # dedicated /irsyad page. Read-only aggregate (no actions).
                     payload = _irsyad_payload()
                     auth.audit(self._client(), path, "200")

@@ -50,7 +50,7 @@
 7. Verify each daemon healthy on gzb (ingest polling, tg_out delivering, watchdogs heart-beating, console rendering). **Rollback lever = re-point the lease back to Mini/Studio; Mini orch is still warm.**
 
 ### Phase 2 — Lanes
-8. Move the CC lanes to gzb honoring token pools: **irsyad lanes → musa2**, **cosem → Syed**, **singletons → Musa** (unchanged). Workers are headless; singletons per their boot scripts. **Every lane MUST pass the 🔴 HARD pre-cutover headless-claude authentication gate above (seed .claude.json, real tmux size, conditional --continue, one-real-turn smoke-test) before it is marked 'moved' — a heartbeat alone is not proof (2026-09-05 incident).**
+8. Move the CC lanes to gzb honoring token pools: **irsyad lanes → irsyad**, **cosem → Syed**, **singletons → Musa** (unchanged). Workers are headless; singletons per their boot scripts. **Every lane MUST pass the 🔴 HARD pre-cutover headless-claude authentication gate above (seed .claude.json, real tmux size, conditional --continue, one-real-turn smoke-test) before it is marked 'moved' — a heartbeat alone is not proof (2026-09-05 incident).**
 
 ### 🔴 HARD migration-completion gate — COMPLETE-OR-ROLLBACK, never park a split (added 2026-09-09; Musa op#19449)
 

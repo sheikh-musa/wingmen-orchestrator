@@ -5,7 +5,7 @@ LOCKS:
     bloat row and NEVER the raw auth_fp (cond-2 field list + the nickname).
   * the LOCAL /api/fleet lane row carries `pool` too (same key on both surfaces).
   * fp -> pool is ONE set: pools.py (backend SSOT) == panes._KNOWN_ACCOUNTS ==
-    fleet.js POOL_FP == irsyad.js acctForFp — musa2 included everywhere.
+    fleet.js POOL_FP == irsyad.js acctForFp — irsyad included everywhere.
 """
 import pathlib
 import re
@@ -13,14 +13,14 @@ import re
 from nervous_system.console import hosted_view, panes, pools
 
 _STATIC = pathlib.Path(__file__).resolve().parents[2] / "nervous_system" / "console" / "static"
-_MUSA, _MUSA2, _SYED = "68142948c003", "e1dfa48eec85", "582043088eae"
+_MUSA, _IRSYAD, _SYED = "68142948c003", "e1dfa48eec85", "582043088eae"
 
 
 def test_pool_for_fp_full_prefix_and_unknown():
     assert pools.pool_for_fp(_MUSA) == "Musa"
-    assert pools.pool_for_fp(_MUSA2) == "musa2"
+    assert pools.pool_for_fp(_IRSYAD) == "irsyad"
     assert pools.pool_for_fp(_SYED) == "Syed"
-    assert pools.pool_for_fp("e1dfa48") == "musa2"          # fleet.js-length prefix
+    assert pools.pool_for_fp("e1dfa48") == "irsyad"          # fleet.js-length prefix
     assert pools.pool_for_fp("deadbeef0000") == ""          # unknown -> "", NEVER the fp
     assert pools.pool_for_fp("e1d") == ""                    # too short to trust
     assert pools.pool_for_fp(None) == "" and pools.pool_for_fp("") == ""
@@ -28,7 +28,7 @@ def test_pool_for_fp_full_prefix_and_unknown():
 
 def test_backend_map_is_the_ssot_for_panes_fleet_js_and_irsyad_js():
     assert panes._KNOWN_ACCOUNTS == pools.KNOWN_POOLS
-    assert panes._KNOWN_ACCOUNTS[_MUSA2] == "musa2"        # the stale-copy bug
+    assert panes._KNOWN_ACCOUNTS[_IRSYAD] == "irsyad"        # the stale-copy bug
     fleet = (_STATIC / "fleet.js").read_text()
     m = re.search(r"var POOL_FP = \[(.*?)\];", fleet)
     assert m, "fleet.js must carry POOL_FP"
@@ -55,20 +55,20 @@ def _lane_row(fp, agent="cc-hifz", sess="hifz"):
 
 def test_hosted_lane_rows_carry_pool_nickname_never_raw_fp():
     rows = hosted_view._clone_lanes(_Cur([
-        _lane_row(_MUSA2, "cc-irsyad", "irsyad"),
+        _lane_row(_IRSYAD, "cc-irsyad", "irsyad"),
         _lane_row(_MUSA, "cc-hifz", "hifz"),
         _lane_row("deadbeef0000", "cc-x", "x"),
         _lane_row(None, "cc-y", "y"),
     ]))
     by = {r["tmux_session"]: r for r in rows}
-    assert by["irsyad"]["pool"] == "musa2" and by["hifz"]["pool"] == "Musa"
+    assert by["irsyad"]["pool"] == "irsyad" and by["hifz"]["pool"] == "Musa"
     assert by["x"]["pool"] == "" and by["y"]["pool"] == ""
     for r in rows:
         assert "auth_fp" not in r and "auth_account" not in r
         # op#20716: the hosted row carries the SAME model keys the Mini row does
         assert "model" in r and "model_src" in r
         # the raw id must not ride along under ANY key
-        assert _MUSA not in str(r) and _MUSA2 not in str(r) and "deadbeef" not in str(r)
+        assert _MUSA not in str(r) and _IRSYAD not in str(r) and "deadbeef" not in str(r)
 
 
 def test_hosted_lane_model_comes_from_boot_string_then_registry_never_invented():
@@ -76,7 +76,7 @@ def test_hosted_lane_model_comes_from_boot_string_then_registry_never_invented()
     -> ("<m>", "boot"); else fleet_lanes.model -> "registry"; else (None, None). The
     coarse current_task label is unaffected and no fp rides along."""
     boot = ("cc-irsyad-2", "cc-irsyad", "working", "session-launch model=claude-opus-4-8 repo=x",
-            "irsyad-coord", _MUSA2, "gzbai", 10, "up", "irsyad-coord", "ship it", 30, "claude-sonnet-5")
+            "irsyad-coord", _IRSYAD, "gzbai", 10, "up", "irsyad-coord", "ship it", 30, "claude-sonnet-5")
     reg = ("cc-hifz-1", "cc-hifz", "working", "building", "hifz", _MUSA, "mini", 10, "up", "hifz", "x", 30, "claude-sonnet-5")
     none = ("cc-x-1", "cc-x", "working", "building", "x", None, "mini", 10, "up", "x", "x", 30, None)
     by = {r["tmux_session"]: r for r in hosted_view._clone_lanes(_Cur([boot, reg, none]))}
@@ -84,7 +84,7 @@ def test_hosted_lane_model_comes_from_boot_string_then_registry_never_invented()
     assert by["irsyad-coord"]["current_task"] != "session-launch model=claude-opus-4-8 repo=x"
     assert (by["hifz"]["model"], by["hifz"]["model_src"]) == ("claude-sonnet-5", "registry")
     assert (by["x"]["model"], by["x"]["model_src"]) == (None, None)
-    assert "auth_fp" not in by["irsyad-coord"] and _MUSA2 not in str(by["irsyad-coord"])
+    assert "auth_fp" not in by["irsyad-coord"] and _IRSYAD not in str(by["irsyad-coord"])
     assert "l.model AS registry_model" in hosted_view._clone_lanes.__code__.co_consts.__repr__() or True
 
 
@@ -98,8 +98,8 @@ def test_hosted_coordinator_and_bloat_rows_carry_pool_not_fp(monkeypatch):
     # op#20716: no proc truth off-box -> model is None (never invented), keys present
     assert coords[0]["model"] is None and coords[0]["model_src"] is None
     # context bloat: cc_identity, sub_tag, ctx_tokens, age_s, auth_fp, host
-    bloat = hosted_view._clone_context_bloat(_Cur([("cc-hifz", None, 500000, 10, _MUSA2, "mini")]))
-    assert bloat and bloat[0]["pool"] == "musa2" and "auth_fp" not in bloat[0]
+    bloat = hosted_view._clone_context_bloat(_Cur([("cc-hifz", None, 500000, 10, _IRSYAD, "mini")]))
+    assert bloat and bloat[0]["pool"] == "irsyad" and "auth_fp" not in bloat[0]
 
 
 def test_hosted_cloned_payload_has_no_auth_fp_anywhere():
@@ -109,10 +109,10 @@ def test_hosted_cloned_payload_has_no_auth_fp_anywhere():
     class _AnyCur(_Cur):
         def __init__(self): super().__init__([])
         def fetchall(self):
-            return [_lane_row(_MUSA2)] if "FROM agent_status s" in (self.sql or "") else []
+            return [_lane_row(_IRSYAD)] if "FROM agent_status s" in (self.sql or "") else []
 
     payload = hosted_view.build_cloned_payload(_Conn())
-    assert payload["lanes"] and payload["lanes"][0]["pool"] == "musa2"
+    assert payload["lanes"] and payload["lanes"][0]["pool"] == "irsyad"
 
     def walk(n):
         if isinstance(n, dict):
@@ -121,7 +121,7 @@ def test_hosted_cloned_payload_has_no_auth_fp_anywhere():
         elif isinstance(n, list):
             for v in n: walk(v)
         elif isinstance(n, str):
-            assert _MUSA2 not in n and _MUSA not in n and _SYED not in n
+            assert _IRSYAD not in n and _MUSA not in n and _SYED not in n
     walk(payload)
 
 

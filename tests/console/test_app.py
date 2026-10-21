@@ -910,11 +910,11 @@ def test_set_pointer_guard_does_not_block_bulk_switch_all(server, repo_root, mon
     assert r.status_code == 200 and r.json()["ok"] is True
     assert _by_lane(r.json()["targets"])["irsyad-coord"]["action"] == "switch"
 # --- op#12501: dedicated /irsyad page + /api/irsyad endpoint -----------------
-# The endpoint is scoped to the irsyad lane-FAMILY (via _family_of) + the musa2
+# The endpoint is scoped to the irsyad lane-FAMILY (via _family_of) + the irsyad
 # weekly pool the family runs on. All seams are stubbed so the test is hermetic
 # (no live tmux/ps, no Supabase): fetch_lanes/context_bloat/pool_usage + the
 # panes live-pane + token ground-truth scan.
-_MUSA2_FP = "e1dfa48eec85"   # the musa2 pool's OAuth fingerprint
+_IRSYAD_FP = "e1dfa48eec85"   # the irsyad pool's OAuth fingerprint
 
 
 def _irsyad_lane(session, base="cc-irsyad", lane=None):
@@ -922,7 +922,7 @@ def _irsyad_lane(session, base="cc-irsyad", lane=None):
             "display_name": "irsyad " + session, "status": "working",
             "current_task": "build", "tmux_session": session,
             "lane": lane if lane is not None else session,
-            "auth_account": "musa", "auth_fp": _MUSA2_FP, "host": "Sheikhs-Mini",
+            "auth_account": "musa", "auth_fp": _IRSYAD_FP, "host": "Sheikhs-Mini",
             "heartbeat_age_s": 20, "desired_state": "up",
             "activity": "working on " + session, "activity_age_s": 40}
 
@@ -954,7 +954,7 @@ def irsyad_server(monkeypatch, tmp_path):
         {"pool": "Musa", "pct_7d": "47", "pct_5h": "37", "resets_at": None,
          "status_7d": "allowed", "pace": "2.0", "projected_pct": "200",
          "runway_days": None, "updated_age_s": 100},
-        {"pool": "musa2", "pct_7d": "9", "pct_5h": "31", "resets_at": None,
+        {"pool": "irsyad", "pct_7d": "9", "pct_5h": "31", "resets_at": None,
          "status_7d": "allowed", "pace": "0.31", "projected_pct": "31",
          "runway_days": None, "updated_age_s": 90},
     ])
@@ -969,9 +969,9 @@ def irsyad_server(monkeypatch, tmp_path):
     monkeypatch.setattr(console_app.panes, "capture", _cap)
     monkeypatch.setattr(console_app.panes, "token_ground_truth", lambda include_remote=False: {
         "rows": [
-            {"session": "irsyad-coord", "account": "musa2", "fp": _MUSA2_FP,
+            {"session": "irsyad-coord", "account": "irsyad", "fp": _IRSYAD_FP,
              "metered": False, "model": "claude-opus-4-8", "host": "Mini",
-             "verified": True, "expected": "musa2", "expected_fp": _MUSA2_FP,
+             "verified": True, "expected": "irsyad", "expected_fp": _IRSYAD_FP,
              "mismatch": False},
             {"session": "irsyad-import", "account": "Syed", "fp": _SYED_FP,
              "metered": False, "model": "claude-opus-4-8", "host": "Mini",
@@ -1009,7 +1009,7 @@ def test_api_irsyad_requires_auth(irsyad_server):
     assert r.status_code == 401
 
 
-def test_api_irsyad_scopes_to_family_and_musa2_pool(irsyad_server):
+def test_api_irsyad_scopes_to_family_and_irsyad_pool(irsyad_server):
     r = httpx.get(irsyad_server + "/api/irsyad", headers=H(), timeout=5)
     assert r.status_code == 200
     body = r.json()
@@ -1018,8 +1018,8 @@ def test_api_irsyad_scopes_to_family_and_musa2_pool(irsyad_server):
     # the 4 irsyad-family lanes are present; the cosem lane is filtered OUT.
     assert sessions == {"irsyad", "irsyad-coord", "irsyad-prog1", "irsyad-import"}
     assert "cosem-tdu" not in sessions
-    # the pool shown is musa2 (the pool this family runs on), never Musa.
-    assert body["pool"]["pool"] == "musa2"
+    # the pool shown is irsyad (the pool this family runs on), never Musa.
+    assert body["pool"]["pool"] == "irsyad"
     assert body["pool"]["pct_7d"] == "9"
     # counts: import lane working, the other three idle.
     assert body["counts"]["working"] == 1
@@ -1032,7 +1032,7 @@ def test_api_irsyad_folds_token_model_and_context(irsyad_server):
     # token-truth folded per session: verified account + model.
     coord = by["irsyad-coord"]
     assert coord["bucket"] == "idle"
-    assert coord["account"] == "musa2"
+    assert coord["account"] == "irsyad"
     assert coord["model"] == "claude-opus-4-8"
     assert coord["verified"] is True and coord["off_account"] is False
     # pane-truth ctx folded by sub_tag == tmux_session (pct=50 -> 500k / 1M = 50%).
