@@ -59,23 +59,39 @@ was previously always-terminal. Any migration that touches who-can-read/write-wh
 6. **PII filter = allowlist** — `IN(...)`, fail-closed; never `NOT IN(...)`.
    **[lint: grep `NOT IN (` in a visibility filter, WARN] + [manual]**
 
-### 4. ENFORCING HOOK
-- **Hook:** `scripts/lint/rls_column_grant_lint.py` — **TO-BUILD (this track's first
-  code PR, RED-priority #1).** A stdlib-only, no-DB **CI / migration-diff lint**
-  (same shape as `ddl_detect.py`): over the PR's `migrations/*.sql` diff, flags
-  `CREATE`/`ALTER POLICY … FOR UPDATE|ALL` whose same-diff carries no
-  `GRANT … (<cols>) ON <table>`, and flags a `status`/enum value-add with a "sweep
-  all readers of `<table>`" note, and a `NOT IN (` in a visibility filter — each as
-  a **LOUD WARN** (a CI annotation on the PR + the pre-push path, never a buried log).
-- **Why a CI-lint, not a fail-closed pre-tool hook:** a pre-tool hook sees one edit
-  in isolation and cannot see whether the *corresponding* column-GRANT lives in
-  another migration or already on live — hard-blocking would false-positive and
-  wedge the fleet. The lint matches the layer to what's decidable there. (cai's own
-  doctrine, orch-console gate #73186/#73191.)
-- **What it CANNOT enforce (residual, all [manual] above):** net-ACL vs live (step 3),
-  the negative-control proof (step 5), and whether each swept reader was actually
-  fixed (step 4) — these stay the reviewer's, with the live wet-proof. The lint
-  surfaces the *shape*; it does not prove adequacy on live.
+### 4. ENFORCING HOOK (two complementary nets — one EXISTING, one TO-BUILD)
+- **EXISTING 🟢 — `scripts/rls_grant_lint.py` (live-DB posture, CAI-RESP-511).**
+  Connects to the substrate and fails (exit 1) on the exploitable *anon-reachable*
+  surface: RLS-off base tables, anon/auth/PUBLIC **TRUNCATE**, permissive
+  `USING(true)/WITH CHECK(true)` write policies for anon/public, anon/PUBLIC
+  write grants off the allowlist, and postgres-owned default-privilege anon-write
+  regressions (tested, `tests/test_rls_grant_lint.py`). This is the live net —
+  **it already covers steps 3b-ish and the anon-write class; do NOT rebuild it.**
+  LIMITS: it reads the LIVE substrate posture (not a per-PR diff), runs against the
+  substrate DB (not per client-silo), and checks table/row-level write grants —
+  it does **NOT** check the *column-level* grant gap below.
+- **TO-BUILD 🟡 (this track's first code PR, RED-#1) — the DELTA the live lint
+  misses:** `scripts/migration_rls_grant_lint.py`, a stdlib-only, **no-DB static
+  migration-diff lint** (shape like `ddl_detect.py`). Over the PR's added
+  `migrations/*.sql` lines it flags, as a **LOUD WARN** (GitHub-Actions `::warning::`
+  annotation on the PR, never a buried log):
+  (i) a `CREATE`/`ALTER POLICY … FOR UPDATE|ALL` (or a policy with **no** `FOR`
+  clause — defaults to ALL) whose same-diff carries no column-level
+  `GRANT … (<cols>) ON <table>` → "an RLS UPDATE policy does not restrict columns;
+  confirm a column-GRANT or SECDEF write path";
+  (ii) a non-terminal lifecycle value-add (`ADD VALUE`, or a new `DEFAULT
+  'in_progress'|'draft'|'pending'`) → "sweep ALL readers of `<table>` (step 4)".
+  It is **complementary** to the live lint: authoring-time, diff-scoped, runs for
+  any silo's migrations, and catches the column-restriction gap the live net can't.
+- **Why a CI-lint (WARN), not a fail-closed pre-tool hook:** a pre-tool hook sees
+  one edit in isolation and cannot see whether the *corresponding* column-GRANT
+  lives in another migration or already on live — hard-blocking would false-positive
+  and wedge the fleet. Match the layer to what's decidable there (cai doctrine,
+  orch-console gate #73186/#73191).
+- **What NEITHER lint enforces (residual, all [manual] above):** net-ACL vs live
+  (step 3), the negative-control proof (step 5), and whether each swept reader was
+  actually fixed (step 4) — reviewer + live wet-proof. The lints surface the *shape*;
+  they do not prove adequacy on live.
 
 ### 5. DISCOVERY
 - Index `README.md` row; the lint's WARN annotation cites `PB-03`; CLAUDE.md

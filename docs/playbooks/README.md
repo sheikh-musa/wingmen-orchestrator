@@ -19,7 +19,7 @@ cc-substrate owns coherence-SSOT (#73169). Both gate through orch-console.
 |----|-------|------|-------------|--------|
 | [PB-01](01-playbook-migration-ddl.md) | Migration / DDL apply to prod | P0 | `secrets_transcript_guard`→`ddl_detect` **🟢 existing** (gate-required); +1 mechanical precheck candidate | **ready** |
 | [PB-02](02-playbook-client-data-path.md) | Client-data / residency path | P0 | `client_media_read_guard` **🟢**, `lane_db_residency_guard` (detect-only nudge); hard residency block **cai-declined** (CAI-RESP-1308) | **ready** |
-| [PB-03](03-playbook-rls-grants.md) | RLS / grants / lifecycle-column change | P0 | **CI-lint (WARN)** `rls_column_grant_lint.py` — **TO-BUILD, first PR** | ready; lint building |
+| [PB-03](03-playbook-rls-grants.md) | RLS / grants / lifecycle-column change | P0 | `rls_grant_lint.py` **🟢 existing** (live anon-write/TRUNCATE net) + `migration_rls_grant_lint.py` **CI-lint (WARN), TO-BUILD** (the column-grant delta) — **first PR** | ready; delta-lint building |
 | [PB-04](04-playbook-ship-to-live.md) | Ship-to-live completeness + test bar | P1 | **checklist / CI** (not a pre-tool hook); partial `deploy_safety_guard.sh` | ready |
 | [PB-05](05-playbook-secrets-transcript.md) | Secrets & transcript hygiene | P1 | `secrets_transcript_guard` + `secrets_output_scanner` **🟢 existing** | ready |
 | [PB-06](06-playbook-framework-footguns.md) | Framework footguns (use-server/SSR …) | P1 | **static lint** (the one clean hook-able RED row) — TO-BUILD | ready; lint planned |
