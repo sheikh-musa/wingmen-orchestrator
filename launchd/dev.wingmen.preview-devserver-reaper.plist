@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- preview-devserver-reaper (cc-fleet-health, greenlit orch-console #72892/#72894/#72900,
+       2026-10-21). Two disk CRITs the same day traced to the same root cause: an ad-hoc
+       `next dev`/`vite` preview server left running after nobody was watching it, silently
+       ballooning its own .next/dist build cache for hours. Detection gate: zero ESTABLISHED
+       connections on the server's listening port for an idle-grace window (default 20min);
+       for a REGISTERED fleet_lanes worktree with a LIVE tmux session, the lane's own pane
+       must ALSO be idle (hard requirement) before reaping — never yanks a dev server a lane
+       is driving programmatically. Orphans (no fleet_lanes row / no live session) reap on
+       zero-connections-past-grace alone.
+       STAGED ARMING (CLAUDE.md §2): DETECT-ONLY on first landing — this is fresh code, not
+       yet wet-proven as an unattended automated loop (its detection logic WAS manually
+       wet-proven live against real fleet data on 2026-10-21: both CRIT#1 op32368 and
+       CRIT#2 cosem-exams-lane kills were done by hand using this exact signature before the
+       tool existed). Arm with --apply only after a few ticks of sane detect-only output. -->
+  <key>Label</key>
+  <string>dev.wingmen.preview-devserver-reaper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/wingmen/orchestrator" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; unset ANTHROPIC_API_KEY &amp;&amp; exec .venv/bin/python3 -m scripts.preview_devserver_reaper --json</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/preview_devserver_reaper.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sheikhmusa/wingmen/orchestrator/logs/preview_devserver_reaper.log</string>
+</dict>
+</plist>
