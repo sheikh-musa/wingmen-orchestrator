@@ -255,10 +255,18 @@ $$;
 
 CREATE OR REPLACE FUNCTION work_item_mirror_ask_trg() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM work_item_mirror('ask', 'operator_asks', NEW.id,
-        work_item_derive_ask(NEW.id, NEW.ask, NEW.triage_state, NEW.closed_at,
-                              NEW.delegated_to, NEW.committed_date, NEW.triaged_by),
-        'trigger:operator_asks');
+    -- The mirror must NEVER be able to block the system of record (orch-console review,
+    -- bus #73195): an exception in here degrades to "work_item missing/stale for this one
+    -- row, surfaced loudly", never an aborted operator_asks write. The 2026-10-24
+    -- equivalence proof is the drift backstop that catches anything skipped this way.
+    BEGIN
+        PERFORM work_item_mirror('ask', 'operator_asks', NEW.id,
+            work_item_derive_ask(NEW.id, NEW.ask, NEW.triage_state, NEW.closed_at,
+                                  NEW.delegated_to, NEW.committed_date, NEW.triaged_by),
+            'trigger:operator_asks');
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'work_item mirror failed for operator_asks id=%: %', NEW.id, SQLERRM;
+    END;
     RETURN NEW;
 END;
 $$;
@@ -306,10 +314,16 @@ $$;
 
 CREATE OR REPLACE FUNCTION work_item_mirror_bus_trg() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM work_item_mirror('bus', 'agent_messages', NEW.id,
-        work_item_derive_bus(NEW.id, NEW.subject, NEW.responded_at, NEW.skipped_at,
-                              NEW.claimed_by, NEW.response_ref),
-        'trigger:agent_messages');
+    -- See work_item_mirror_ask_trg()'s comment: a mirror failure must never abort the
+    -- agent_messages write (orch-console review, bus #73195).
+    BEGIN
+        PERFORM work_item_mirror('bus', 'agent_messages', NEW.id,
+            work_item_derive_bus(NEW.id, NEW.subject, NEW.responded_at, NEW.skipped_at,
+                                  NEW.claimed_by, NEW.response_ref),
+            'trigger:agent_messages');
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'work_item mirror failed for agent_messages id=%: %', NEW.id, SQLERRM;
+    END;
     RETURN NEW;
 END;
 $$;
@@ -355,11 +369,17 @@ $$;
 
 CREATE OR REPLACE FUNCTION work_item_mirror_commitment_trg() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM work_item_mirror('commitment', 'held_commitments', NEW.id,
-        work_item_derive_commitment(NEW.id, NEW.title, NEW.status, NEW.owner_agent, NEW.due_at,
-                                     NEW.blocked_on, NEW.discharged_at, NEW.discharged_by,
-                                     NEW.cancelled_at, NEW.cancel_reason),
-        'trigger:held_commitments');
+    -- See work_item_mirror_ask_trg()'s comment: a mirror failure must never abort the
+    -- held_commitments write (orch-console review, bus #73195).
+    BEGIN
+        PERFORM work_item_mirror('commitment', 'held_commitments', NEW.id,
+            work_item_derive_commitment(NEW.id, NEW.title, NEW.status, NEW.owner_agent, NEW.due_at,
+                                         NEW.blocked_on, NEW.discharged_at, NEW.discharged_by,
+                                         NEW.cancelled_at, NEW.cancel_reason),
+            'trigger:held_commitments');
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'work_item mirror failed for held_commitments id=%: %', NEW.id, SQLERRM;
+    END;
     RETURN NEW;
 END;
 $$;

@@ -284,3 +284,40 @@ def test_backfill_rerun_is_idempotent_no_duplicate_rows_no_duplicate_audit(wi_db
 
     assert _q(wi_db, "SELECT count(*) FROM work_item WHERE source_table='operator_asks'") == [(1,)]
     assert _q(wi_db, "SELECT count(*) FROM work_item_audit WHERE work_item_id=%s", (item_id,)) == [(1,)]
+
+
+# ── Exception isolation (orch-console review, bus #73195) ──────────────────────────
+# A mirror-side failure must degrade to "work_item missing/stale for this one row,
+# surfaced loudly" and must NEVER abort the source table's write. Proven by forcing a
+# failure inside work_item_mirror() itself (a test-local BEFORE INSERT trigger on
+# work_item that raises on a sentinel title) and asserting the operator_asks insert
+# still commits, no work_item row is created, and a RAISE WARNING is surfaced (not
+# silently swallowed).
+def test_mirror_failure_does_not_abort_source_insert_and_surfaces_a_warning(wi_db):
+    _exec(wi_db, """
+        CREATE OR REPLACE FUNCTION _force_mirror_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.title = 'FORCE_MIRROR_FAIL' THEN
+                RAISE EXCEPTION 'forced mirror failure for test';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+    """)
+    _exec(wi_db, """
+        CREATE TRIGGER _force_mirror_fail_trg BEFORE INSERT ON work_item
+        FOR EACH ROW EXECUTE FUNCTION _force_mirror_fail()
+    """)
+
+    notices = []
+    with psycopg.connect(wi_db, autocommit=True) as conn:
+        conn.add_notice_handler(lambda diag: notices.append(diag.message_primary))
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO operator_asks (ask) VALUES ('FORCE_MIRROR_FAIL')")
+
+    # Source write survived.
+    assert _q(wi_db, "SELECT ask FROM operator_asks") == [("FORCE_MIRROR_FAIL",)]
+    # Mirror genuinely failed: no work_item row for it.
+    assert _q(wi_db, "SELECT count(*) FROM work_item WHERE source_table='operator_asks'") == [(0,)]
+    # Failure was surfaced loudly, not silently swallowed.
+    assert any("work_item mirror failed for operator_asks" in n for n in notices)
