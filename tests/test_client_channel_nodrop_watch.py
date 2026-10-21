@@ -25,9 +25,13 @@ SEND = "scripts/cosem_tdu_support_send.sh"
 RECEIPT = "📨 Got your message — it's logged and I'll pick it up. (Reply URGENT to bump it now.)"
 
 
-def _row(mid, direction, age_s, text="hi"):
+MUSA_ID = "286619815"  # MUSA_TELEGRAM_ID (migrations/020), matches tests/test_stage_client_file.py
+
+
+def _row(mid, direction, age_s, text="hi", from_user_id=None):
     return {"id": mid, "direction": direction, "created_epoch": NOW - age_s,
-            "from_name": "Fazli" if direction == "inbound" else "coord", "text": text}
+            "from_name": "Fazli" if direction == "inbound" else "coord", "text": text,
+            "from_user_id": from_user_id}
 
 
 # ---- is_receipt --------------------------------------------------------------
@@ -61,6 +65,32 @@ def test_inbound_only_is_unanswered():
 def test_no_inbound_or_empty_is_none():
     assert nd.latest_unanswered_inbound([]) is None
     assert nd.latest_unanswered_inbound([_row(1, "outbound", 60, "broadcast")]) is None
+
+
+def test_operator_misfired_inbound_is_not_waiting_72953():
+    # orch-console #72953 (2nd occurrence): Musa's OWN operator message, misfired into a
+    # client channel, is NOT a client waiting for a reply -- it must never surface here.
+    # musa_id passed EXPLICITLY (not relying on an ambient MUSA_TELEGRAM_ID env var, which
+    # is present on a dev machine but NOT in CI -- this test must be hermetic).
+    rows = [_row(32580, "inbound", 3600, "oops wrong channel", from_user_id=MUSA_ID)]
+    assert nd.latest_unanswered_inbound(rows, musa_id=MUSA_ID) is None
+
+
+def test_operator_misfired_inbound_does_not_hide_a_real_older_unanswered_client_msg():
+    # the operator-sent row is skipped entirely (not even treated as "answered") so a
+    # GENUINE older unanswered client inbound underneath it still surfaces.
+    rows = [
+        _row(32580, "inbound", 60, "oops wrong channel", from_user_id=MUSA_ID),
+        _row(32500, "inbound", 3600, "any update on my request?"),
+    ]
+    w = nd.latest_unanswered_inbound(rows, musa_id=MUSA_ID)
+    assert w is not None and w["id"] == 32500
+
+
+def test_operator_id_default_none_still_counts_as_client_unanswered():
+    # a row with no from_user_id (historical rows, pre-migration-020) is NOT treated as the
+    # operator -- must not silently stop paging for every pre-existing channel.
+    assert nd.latest_unanswered_inbound([_row(1, "inbound", 60)])["id"] == 1
 
 
 def test_older_answered_then_new_inbound_plus_receipt_is_unanswered():
