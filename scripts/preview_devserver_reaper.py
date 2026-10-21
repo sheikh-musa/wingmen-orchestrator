@@ -273,6 +273,16 @@ def _append_ledger(path: pathlib.Path, entry: dict) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+def gate_registered_reap(*, lane: "str | None", confirmed: bool) -> str:
+    """orch-console #72902 guardrail: the ORPHAN path (no registered lane) is fully
+    automatic. The FIRST time the reaper would kill a REGISTERED lane's dev server, it must
+    be LOGGED+FLAGGED for a human confirm instead of killed; once confirmed (persisted in
+    state), the registered-lane path also proceeds automatically."""
+    if lane is None:
+        return "proceed"
+    return "proceed" if confirmed else "flag-first-time"
+
+
 # ---- DB I/O ---------------------------------------------------------------
 def _dsn() -> str:
     from dotenv import load_dotenv
@@ -333,16 +343,50 @@ def scan(*, state: dict, lane_names: dict, now: float) -> "tuple[list[dict], dic
     return reports, new_state
 
 
-def reap(reports: "list[dict]") -> "list[dict]":
-    """Apply pass: for each report with verdict=='reap', kill the process and clear its
-    build-cache dirs. Returns reap-ledger entries (one per attempted reap, success or not)."""
+def _flag_registered_reap(r: dict) -> None:  # pragma: no cover - exercised via bus in prod
+    """LOG+FLAG (never kill) the first registered-lane reap, per orch-console #72902."""
+    try:
+        from scripts import bus_send  # type: ignore
+    except Exception:
+        try:
+            import bus_send  # type: ignore
+        except Exception:
+            log("FLAG-FALLBACK (bus_send import failed): " + json.dumps(r))
+            return
+    body = (
+        f"TL;DR: preview-devserver reaper would reap a REGISTERED lane's dev server for the "
+        f"FIRST time — flagging per your #72902 guardrail instead of killing.\n\n"
+        f"lane={r.get('lane')} worktree={r['worktree']} pid={r['pid']} port={r['port']} "
+        f"command={r.get('command')}\n"
+        f"Reply/confirm and I'll run --confirm-registered-reap to arm the registered-lane "
+        f"path going forward (orphan path stays unaffected either way)."
+    )
+    try:
+        bus_send.send(to="orch-console", from_agent="cc-fleet-health", type="blocker",
+                      priority="P2", subject="preview-devserver reaper: first registered-lane reap (flagged, not killed)",
+                      body=body, requires_response=True)
+    except Exception as e:
+        log(f"FLAG-FALLBACK (bus_send.send failed: {e}): " + json.dumps(r))
+
+
+def reap(reports: "list[dict]", *, confirmed: bool) -> "list[dict]":
+    """Apply pass: for each report with verdict=='reap', either reap it (kill + clear its
+    build-cache dirs) or, for the FIRST registered-lane reap while unconfirmed, flag it to
+    orch-console instead (orch-console #72902). Returns ledger entries (one per candidate)."""
     out = []
     for r in reports:
         if r["verdict"] != "reap":
             continue
+        gate = gate_registered_reap(lane=r.get("lane"), confirmed=confirmed)
         entry = {"ts": time.time(), "worktree": r["worktree"], "pid": r["pid"],
-                  "port": r["port"], "freed_bytes": 0, "errors": []}
+                  "port": r["port"], "lane": r.get("lane"), "freed_bytes": 0, "errors": []}
+        if gate == "flag-first-time":
+            _flag_registered_reap(r)
+            entry["action"] = "flagged-pending-confirm"
+            out.append(entry)
+            continue
         if not _kill_process(r["pid"]):
+            entry["action"] = "reaped"
             entry["errors"].append("kill-failed")
             out.append(entry)
             continue
@@ -354,16 +398,30 @@ def reap(reports: "list[dict]") -> "list[dict]":
                 entry["freed_bytes"] += sz
             except OSError as e:
                 entry["errors"].append(f"rm failed {d}: {e}")
+        entry["action"] = "reaped"
         out.append(entry)
     return out
+
+
+REGISTERED_REAP_CONFIRMED_KEY = "_registered_reap_confirmed"
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--apply", action="store_true", help="reap for real (default: detect-only)")
     ap.add_argument("--json", action="store_true", help="machine-readable report")
+    ap.add_argument("--confirm-registered-reap", action="store_true",
+                    help="one-time: arm the registered-lane reap path after a human confirm "
+                         "(orch-console #72902) — persists and exits, no scan this run")
     args = ap.parse_args(argv)
     mode = "APPLY" if args.apply else "DETECT-ONLY"
+
+    if args.confirm_registered_reap:
+        state = _load_state(STATE_PATH)
+        state[REGISTERED_REAP_CONFIRMED_KEY] = True
+        _save_state(STATE_PATH, state)
+        log("registered-lane reap path CONFIRMED and armed (orch-console #72902).")
+        return 0
 
     try:
         conn = _connect()
@@ -373,8 +431,10 @@ def main(argv=None) -> int:
         lane_names = {}
 
     state = _load_state(STATE_PATH)
+    confirmed = bool(state.get(REGISTERED_REAP_CONFIRMED_KEY, False))
     now = time.time()
     reports, new_state = scan(state=state, lane_names=lane_names, now=now)
+    new_state[REGISTERED_REAP_CONFIRMED_KEY] = confirmed  # never dropped by scan()
     _save_state(STATE_PATH, new_state)
 
     summary = {"mode": mode, "scanned": len(reports),
@@ -383,10 +443,11 @@ def main(argv=None) -> int:
 
     ledger_entries = []
     if args.apply:
-        ledger_entries = reap([r for r in reports if r["verdict"] == "reap"])
+        ledger_entries = reap([r for r in reports if r["verdict"] == "reap"], confirmed=confirmed)
         for e in ledger_entries:
             _append_ledger(LEDGER_PATH, e)
-        summary["reaped"] = len(ledger_entries)
+        summary["reaped"] = sum(1 for e in ledger_entries if e["action"] == "reaped")
+        summary["flagged"] = sum(1 for e in ledger_entries if e["action"] == "flagged-pending-confirm")
         summary["freed_bytes"] = sum(e["freed_bytes"] for e in ledger_entries)
         summary["errors"] = [err for e in ledger_entries for err in e["errors"]]
 
