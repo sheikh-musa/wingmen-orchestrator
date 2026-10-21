@@ -187,3 +187,67 @@ def test_find_reclaimable_dirs_finds_next_and_dist(tmp_path):
     (wt / "src").mkdir(parents=True)
     found = {p.name for p in pr.find_reclaimable_dirs(wt)}
     assert found == {".next", "dist"}
+
+
+# ---- gate_registered_reap (pure; orch-console #72902 guardrail) ---------------
+def test_gate_orphan_always_proceeds_unconfirmed():
+    # no registered lane at all -> nothing to confirm, orphan path is fully automatic
+    assert pr.gate_registered_reap(lane=None, confirmed=False) == "proceed"
+
+
+def test_gate_orphan_always_proceeds_confirmed():
+    assert pr.gate_registered_reap(lane=None, confirmed=True) == "proceed"
+
+
+def test_gate_registered_lane_unconfirmed_flags_first_time():
+    assert pr.gate_registered_reap(lane="cosem-exams", confirmed=False) == "flag-first-time"
+
+
+def test_gate_registered_lane_confirmed_proceeds():
+    assert pr.gate_registered_reap(lane="cosem-exams", confirmed=True) == "proceed"
+
+
+# ---- reap() orchestration: wires gate_registered_reap in, never kills on flag ----
+def test_reap_flags_registered_lane_first_time_without_killing(tmp_path, monkeypatch):
+    def boom(pid):
+        raise AssertionError("must NOT kill on flag-first-time")
+    flagged = []
+    monkeypatch.setattr(pr, "_kill_process", boom)
+    monkeypatch.setattr(pr, "_flag_registered_reap", lambda r: flagged.append(r))
+    wt = tmp_path / "lane"
+    (wt / ".next").mkdir(parents=True)
+    reports = [{"pid": 1, "port": 3200, "worktree": str(wt), "command": "next dev",
+                "lane": "cosem-exams", "established": 0, "verdict": "reap", "would_free": 0}]
+    out = pr.reap(reports, confirmed=False)
+    assert len(out) == 1
+    assert out[0]["action"] == "flagged-pending-confirm"
+    assert out[0]["freed_bytes"] == 0
+    assert (wt / ".next").exists()  # untouched
+    assert len(flagged) == 1
+
+
+def test_reap_proceeds_for_orphan_even_when_unconfirmed(tmp_path, monkeypatch):
+    killed = []
+    monkeypatch.setattr(pr, "_kill_process", lambda pid: killed.append(pid) or True)
+    wt = tmp_path / "lane"
+    (wt / ".next").mkdir(parents=True)
+    (wt / ".next" / "f").write_bytes(b"x" * 10)
+    reports = [{"pid": 1, "port": 3200, "worktree": str(wt), "command": "next dev",
+                "lane": None, "established": 0, "verdict": "reap", "would_free": 10}]
+    out = pr.reap(reports, confirmed=False)
+    assert killed == [1]
+    assert out[0]["action"] == "reaped"
+    assert out[0]["freed_bytes"] == 10
+    assert not (wt / ".next").exists()
+
+
+def test_reap_proceeds_for_registered_lane_once_confirmed(tmp_path, monkeypatch):
+    killed = []
+    monkeypatch.setattr(pr, "_kill_process", lambda pid: killed.append(pid) or True)
+    wt = tmp_path / "lane"
+    (wt / ".next").mkdir(parents=True)
+    reports = [{"pid": 1, "port": 3200, "worktree": str(wt), "command": "next dev",
+                "lane": "cosem-exams", "established": 0, "verdict": "reap", "would_free": 0}]
+    out = pr.reap(reports, confirmed=True)
+    assert killed == [1]
+    assert out[0]["action"] == "reaped"
