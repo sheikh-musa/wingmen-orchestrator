@@ -182,7 +182,8 @@ _SWEEP_SQL = """
 # this long after send. skipped_at is taken by the quiesce, so the once-guard for THIS page is a
 # separate process-level seen-set keyed by row id (below), not skipped_at.
 _STUCK_SQL = """
-    SELECT id, to_agent, message_type, requires_response, priority, is_test, created_at
+    SELECT id, to_agent, message_type, requires_response, priority, is_test, created_at,
+           from_agent
     FROM agent_messages
     WHERE read_at IS NULL
       AND skipped_at IS NOT NULL
@@ -206,6 +207,7 @@ def _rf(r, idx, key):
 def _row_id(r):     return _rf(r, 0, "id")
 def _to_agent(r):   return _rf(r, 1, "to_agent")
 def _created_at(r): return _rf(r, 6, "created_at")
+def _from_agent(r): return _rf(r, 7, "from_agent")
 
 
 def _deliveries_of(row_id) -> "int | None":
@@ -851,6 +853,14 @@ def sweep_once(*, grace_s: int = WAKE_SWEEP_GRACE_S, rows=None, wake=wake_agent,
                     continue
             except Exception:  # noqa: BLE001 — un-ageable → let the SQL fetch's bound govern
                 age_s = 0.0
+        # SELF-NOTICE EXCLUSION (orch-console #72904, 2nd occurrence of the class): the
+        # sweep's OWN "[idle-unread]" nudge rows (idle_unread_sweep._default_nudge) are
+        # directed-unread rows too, and idle_unread_sweep's own self-feed-killer (facet d,
+        # Nazim #60531) only excludes them from ITS OWN counting — this STUCK-PAGE pass has
+        # a separate fetch with no such filter, so it paged ABOUT a row cc-fleet-health
+        # itself sent (bus #72875/#72903). A self-notice is never a "stuck lane" signal.
+        if _from_agent(r) == _IDLE_NUDGE_FROM:
+            continue
         if should_backstop_wake(_to_agent(r), _rf(r, 2, "message_type"), _rf(r, 3, "requires_response"),
                                 _rf(r, 4, "priority"), _rf(r, 5, "is_test")):
             ag = _to_agent(r)
