@@ -29,6 +29,39 @@ def test_default_floor_matches_real_crash_margin_not_healthy_baseline():
     assert dar.REMEDIATE_UNDER == 20 * GB  # unchanged: cheap to attempt reclaim broadly
 
 
+# ---- pager-routing retune (2026-10-22, bus #73430) ------------------------------
+def test_default_emergency_floor_is_4gb():
+    assert dar.EMERGENCY_FLOOR == 4 * GB
+
+
+def test_page_severity_loud_on_reclaimer_error_regardless_of_band():
+    # An error is a NEW failure mode, never routine — always loud even well above floor.
+    assert dar.page_severity(50 * GB, [{"name": "x", "error": "boom"}],
+                             floor=6 * GB, emergency_floor=4 * GB) == "loud"
+
+
+def test_page_severity_loud_when_free_probe_unreadable():
+    # Can't confirm safety -> fail loud, not silent.
+    assert dar.page_severity(None, [], floor=6 * GB, emergency_floor=4 * GB) == "loud"
+
+
+def test_page_severity_loud_below_emergency_floor():
+    assert dar.page_severity(3 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "loud"
+    assert dar.page_severity(4 * GB - 1, [], floor=6 * GB, emergency_floor=4 * GB) == "loud"
+
+
+def test_page_severity_log_only_in_managed_band():
+    # Below floor but at/above the emergency line: real breach, no new action -- log-only.
+    assert dar.page_severity(4 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "log"
+    assert dar.page_severity(5 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "log"
+    assert dar.page_severity(6 * GB - 1, [], floor=6 * GB, emergency_floor=4 * GB) == "log"
+
+
+def test_page_severity_none_at_or_above_floor_with_no_errors():
+    assert dar.page_severity(6 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "none"
+    assert dar.page_severity(20 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "none"
+
+
 # ---- decide(): tier boundaries -------------------------------------------------
 def test_decide_ok_when_free_above_remediate_threshold():
     assert dar.decide(50 * GB, remediate_under=20 * GB, floor=8 * GB) == "ok"
@@ -141,6 +174,34 @@ def test_reclaim_dir_cmd_dry_run_never_runs_the_command(tmp_path):
     freed = apply(dry_run=True)
     assert not marker.exists(), "dry_run must NOT run the reclaim subprocess"
     assert freed >= 2048, "dry_run still reports would-free size"
+
+
+def test_reclaim_dir_cmd_measures_disk_free_delta_when_flagged(tmp_path, monkeypatch):
+    # Simulates brew cleanup -s (bus #73431): its real effect (pruning old Cellar versions)
+    # isn't reflected in the measured cache dir's size, but IS reflected in real disk free.
+    size_dir = tmp_path / "cache"
+    size_dir.mkdir()
+    (size_dir / "blob").write_bytes(b"x" * 1024)  # cache dir size unchanged by the "cleanup"
+    marker = tmp_path / "RAN"
+    disk_free_seq = [10 * GB, 11 * GB]  # +1GB freed elsewhere (e.g. Cellar), not in size_dir
+    monkeypatch.setattr(dar, "_disk_free", lambda *a, **k: disk_free_seq.pop(0))
+    apply = dar._reclaim_dir_cmd(str(size_dir), ["touch", str(marker)],
+                                 measure_via_disk_free=True)
+    freed = apply(dry_run=False)
+    assert marker.exists()
+    assert freed == 1 * GB, "must report the real disk-free delta, not the unchanged dir-size delta"
+
+
+def test_reclaim_dir_cmd_disk_free_flag_does_not_affect_dry_run(tmp_path, monkeypatch):
+    size_dir = tmp_path / "cache"
+    size_dir.mkdir()
+    (size_dir / "blob").write_bytes(b"x" * 2048)
+    marker = tmp_path / "RAN"
+    apply = dar._reclaim_dir_cmd(str(size_dir), ["touch", str(marker)],
+                                 measure_via_disk_free=True)
+    freed = apply(dry_run=True)
+    assert not marker.exists(), "dry_run must still never run the command"
+    assert freed >= 2048, "dry_run still estimates via dir size (no delta to measure)"
 
 
 def test_reclaim_next_cache_dry_run_deletes_nothing(tmp_path, monkeypatch):
