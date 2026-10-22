@@ -176,6 +176,34 @@ def test_reclaim_dir_cmd_dry_run_never_runs_the_command(tmp_path):
     assert freed >= 2048, "dry_run still reports would-free size"
 
 
+def test_reclaim_dir_cmd_measures_disk_free_delta_when_flagged(tmp_path, monkeypatch):
+    # Simulates brew cleanup -s (bus #73431): its real effect (pruning old Cellar versions)
+    # isn't reflected in the measured cache dir's size, but IS reflected in real disk free.
+    size_dir = tmp_path / "cache"
+    size_dir.mkdir()
+    (size_dir / "blob").write_bytes(b"x" * 1024)  # cache dir size unchanged by the "cleanup"
+    marker = tmp_path / "RAN"
+    disk_free_seq = [10 * GB, 11 * GB]  # +1GB freed elsewhere (e.g. Cellar), not in size_dir
+    monkeypatch.setattr(dar, "_disk_free", lambda *a, **k: disk_free_seq.pop(0))
+    apply = dar._reclaim_dir_cmd(str(size_dir), ["touch", str(marker)],
+                                 measure_via_disk_free=True)
+    freed = apply(dry_run=False)
+    assert marker.exists()
+    assert freed == 1 * GB, "must report the real disk-free delta, not the unchanged dir-size delta"
+
+
+def test_reclaim_dir_cmd_disk_free_flag_does_not_affect_dry_run(tmp_path, monkeypatch):
+    size_dir = tmp_path / "cache"
+    size_dir.mkdir()
+    (size_dir / "blob").write_bytes(b"x" * 2048)
+    marker = tmp_path / "RAN"
+    apply = dar._reclaim_dir_cmd(str(size_dir), ["touch", str(marker)],
+                                 measure_via_disk_free=True)
+    freed = apply(dry_run=True)
+    assert not marker.exists(), "dry_run must still never run the command"
+    assert freed >= 2048, "dry_run still estimates via dir size (no delta to measure)"
+
+
 def test_reclaim_next_cache_dry_run_deletes_nothing(tmp_path, monkeypatch):
     root = tmp_path / "projects"
     d = root / "ihsanos" / ".next" / "cache"

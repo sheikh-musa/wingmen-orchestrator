@@ -196,20 +196,32 @@ def _reclaim_file_history(dry_run):
     return freed
 
 
-def _reclaim_dir_cmd(size_dir, cmd):
+def _reclaim_dir_cmd(size_dir, cmd, *, measure_via_disk_free=False):
     """Generic cache reclaimer: dry-run reports the dir's current size (would-free);
-    apply runs `cmd` and returns the size delta (best-effort)."""
+    apply runs `cmd` and returns the size delta (best-effort). Set `measure_via_disk_free`
+    when the command's real effect isn't confined to `size_dir` — e.g. `brew cleanup -s`
+    also prunes OLD Cellar formula versions, not just the download cache, so measuring only
+    `size_dir` (the cache) silently reports ~0GB freed even when real disk was reclaimed
+    (bus #73431: a manual `brew cleanup -s` freed ~1GB that the automated reclaimer's own
+    per-tick log kept showing as 0GB — misleading attribution, not a missing/soft command;
+    the hard variant was already in use). Dry-run is unaffected (no side effect to measure a
+    delta around, so it still uses the cheap dir-size estimate)."""
     def _apply(dry_run):
-        before = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
+        before_dir = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
         if dry_run:
-            return before
+            return before_dir
+        before_disk = _disk_free() if measure_via_disk_free else None
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                            env=_augmented_env())
         except (subprocess.TimeoutExpired, OSError) as e:
             raise RuntimeError(f"{cmd[0]} failed: {e}") from e
-        after = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
-        return max(0, before - after)
+        if measure_via_disk_free and before_disk is not None:
+            after_disk = _disk_free()
+            if after_disk is not None:
+                return max(0, after_disk - before_disk)
+        after_dir = _dir_size(pathlib.Path(size_dir)) if size_dir else 0
+        return max(0, before_dir - after_dir)
     return _apply
 
 
@@ -351,7 +363,7 @@ def build_reclaimers():
         except (subprocess.TimeoutExpired, OSError):
             brew_cache = None
         reclaimers.append({"name": "brew-cleanup", "apply": _reclaim_dir_cmd(
-            brew_cache, [brew, "cleanup", "-s"])})
+            brew_cache, [brew, "cleanup", "-s"], measure_via_disk_free=True)})
     else:
         log("    brew not found on PATH or in known bin dirs — brew-cleanup reclaimer unavailable")
 
