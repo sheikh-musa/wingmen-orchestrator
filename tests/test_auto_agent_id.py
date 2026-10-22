@@ -821,6 +821,71 @@ class TestPickSubTagForSession:
         assert sub == auto_agent_id.pick_sub_tag(B, live)
         assert sticky is False
 
+    # ── cross-host sticky-collision guard (hub bug, bus #73472/#73476) ──────
+    # gz's cc-cosem-platform-3 was demonstrably alive, then clobbered by a
+    # Mini-side process that ALSO sticky-claimed -3 because both hosts name
+    # the role's tmux session identically ("cosem-platform-author"). Root
+    # cause: choose_sticky_sub_tag's invalidation only compares session NAME,
+    # blind to host, because live_rows carries no host field.
+    def test_sticky_refused_when_same_named_session_is_a_different_host(self):
+        live = [(f"{B}-3", "cosem-platform-author")]  # gz's row, globally live
+        claim = [(f"{B}-3", "cosem-platform-author", "gzb")]  # gz's own host
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B, live, session_rows=[f"{B}-3"], claim_rows=claim,
+            tmux_session="cosem-platform-author", host="Sheikhs-Mini",
+            alive_sessions=set(),
+        )
+        # must NOT reuse -3 (that would clobber gz's live row) -- falls to smallest-free.
+        assert sticky is False
+        assert sub != f"{B}-3"
+
+    def test_sticky_allowed_when_same_named_session_is_the_same_host(self):
+        # The legitimate case this guard must NOT break: our own prior row, same
+        # host, relaunching under the same session name.
+        live = [(f"{B}-3", "cosem-platform-author")]
+        claim = [(f"{B}-3", "cosem-platform-author", "Sheikhs-Mini")]
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B, live, session_rows=[f"{B}-3"], claim_rows=claim,
+            tmux_session="cosem-platform-author", host="Sheikhs-Mini",
+            alive_sessions=set(),
+        )
+        assert (sub, sticky) == (f"{B}-3", True)
+
+    def test_sticky_refused_when_claim_row_host_is_unknown(self):
+        # Our own host known, but the live claimant's host is NULL -- can't prove
+        # it's foreign, but also can't prove it's ours; conservative: refuse,
+        # same "unknown host on either side" rule as alive_session_claims.
+        live = [(f"{B}-3", "cosem-platform-author")]
+        claim = [(f"{B}-3", "cosem-platform-author", None)]
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B, live, session_rows=[f"{B}-3"], claim_rows=claim,
+            tmux_session="cosem-platform-author", host="Sheikhs-Mini",
+            alive_sessions=set(),
+        )
+        assert sticky is False
+        assert sub != f"{B}-3"
+
+    def test_sticky_refused_when_our_own_host_is_unknown(self):
+        live = [(f"{B}-3", "cosem-platform-author")]
+        claim = [(f"{B}-3", "cosem-platform-author", "Sheikhs-Mini")]
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B, live, session_rows=[f"{B}-3"], claim_rows=claim,
+            tmux_session="cosem-platform-author", host=None,
+            alive_sessions=set(),
+        )
+        assert sticky is False
+
+    def test_sticky_allowed_when_candidate_not_live_anywhere(self):
+        # candidate isn't in live_rows at all -- nothing to clobber, guard is a no-op
+        # (choose_sticky_sub_tag's own logic already allows this: not-live is fine).
+        claim = [(f"{B}-3", "cosem-platform-author", "gzb")]
+        sub, sticky = auto_agent_id.pick_sub_tag_for_session(
+            B, live_rows=[], session_rows=[f"{B}-3"], claim_rows=claim,
+            tmux_session="cosem-platform-author", host="Sheikhs-Mini",
+            alive_sessions=set(),
+        )
+        assert (sub, sticky) == (f"{B}-3", True)
+
 
 # ── allocate_sub_tag_and_register SQL wiring (fake psycopg, no DB) ────────────
 
