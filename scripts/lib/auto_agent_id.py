@@ -317,15 +317,55 @@ def pick_sub_tag_for_session(
     No tmux_session → byte-identical to pick_sub_tag over the live ids (today's
     behaviour). With a session: sticky reuse first; else smallest-free, ALSO
     skipping any N an alive other session still believes it owns.
-    """
+
+    CROSS-HOST GUARD (hub bug, bus #73472/#73476): `choose_sticky_sub_tag`'s
+    invalidation only compares SESSION NAME against `live_rows`, which carries no
+    host — so when two DIFFERENT HOSTS independently name a role's tmux session
+    identically (e.g. both call it "cosem-platform-author"), each host's sticky
+    lookup sees the OTHER host's live row as "same session, must be us" and
+    reuses the identical `{base}-N`. Because `agent_status.agent_id` is a single
+    shared key (not host-qualified), the two hosts' UPSERTs then clobber each
+    other's heartbeat row — exactly what the hub caught mid cross-host migration
+    (gz's cc-cosem-platform-3, demonstrably alive, stomped by a Mini-side
+    process). Fix: after a sticky candidate is chosen, check `claim_rows` (which
+    DOES carry host) for a LIVE entry with the same agent_id + session name;
+    if its host disagrees with ours, OR either host is unknown, treat the
+    candidate as unproven-ours and refuse the sticky reuse (falls through to
+    smallest-free, same conservative shape as `alive_session_claims`'s own
+    "unknown host on either side is treated as a claim" rule)."""
     live_ids = [aid for aid, _ in live_rows]
     if not tmux_session:
         return pick_sub_tag(base, live_ids), False
     sticky = choose_sticky_sub_tag(base, tmux_session, session_rows, live_rows)
+    if sticky is not None and _sticky_claimed_by_foreign_host(
+        sticky, tmux_session, host, claim_rows, live_ids
+    ):
+        sticky = None
     if sticky is not None:
         return sticky, True
     claimed = alive_session_claims(base, claim_rows, tmux_session, host, alive_sessions)
     return pick_sub_tag(base, live_ids + claimed), False
+
+
+def _sticky_claimed_by_foreign_host(
+    candidate: str,
+    tmux_session: str | None,
+    host: str | None,
+    claim_rows: list[tuple[str, str | None, str | None]],
+    live_ids: list[str],
+) -> bool:
+    """True iff `candidate` is LIVE under the SAME session name per `claim_rows`,
+    but that row's host cannot be proven to be ours (differs, or either side is
+    unknown). Pure. See pick_sub_tag_for_session's CROSS-HOST GUARD docstring."""
+    if candidate not in live_ids:
+        return False
+    for aid, sess, row_host in claim_rows:
+        if aid != candidate or sess != tmux_session:
+            continue
+        if host and row_host and row_host == host:
+            return False
+        return True
+    return False
 
 
 def list_alive_tmux_sessions() -> set[str]:
