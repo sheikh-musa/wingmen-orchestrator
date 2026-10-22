@@ -7,6 +7,7 @@ ALERTS before a wedge. plan_prune is the PURE decision (imported, not re-typed).
 
 Run (from ~/wingmen/orchestrator): .venv/bin/python -m pytest tests/test_file_history_prune.py -q
 """
+from scripts import file_history_prune as fhp
 from scripts.file_history_prune import alert_body, plan_prune
 
 GB = 1 << 30
@@ -138,3 +139,34 @@ def test_prune_is_per_hash_within_a_session():
     plan = plan_prune([_sess("s4", vs)], prune_over_bytes=2 * GB, keep=1, alert_over_bytes=100 * GB)
     # keep newest (v3) of each hash -> delete a@v1,a@v2,b@v1,b@v2
     assert set(plan["delete"]) == {"/fh/a@v1", "/fh/a@v2", "/fh/b@v1", "/fh/b@v2"}
+
+
+# ── bus #73447: managed band must be LOG-ONLY -- the console doorbell rings on any new ──
+# ── unread row regardless of priority, so even a P3 row was still indefinite churn. ──
+def test_alert_loud_false_never_attempts_db_write(monkeypatch, capsys):
+    import psycopg2
+    def _boom(*a, **k):
+        raise AssertionError("loud=False must never attempt a DB connection")
+    monkeypatch.setattr(psycopg2, "connect", _boom)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+    fhp._alert(["disk free 5GB < hard floor 6GB — pruning file-history (disk-wedge risk)"],
+              loud=False)
+    err = capsys.readouterr().err
+    assert "log-only, no bus row" in err
+
+
+def test_alert_loud_true_still_attempts_db_write(monkeypatch):
+    import psycopg2
+    calls = {"connect": 0}
+    class _FakeCursor:
+        def execute(self, *a, **k): pass
+    class _FakeConn:
+        def cursor(self): return _FakeCursor()
+        def commit(self): pass
+    def _fake_connect(*a, **k):
+        calls["connect"] += 1
+        return _FakeConn()
+    monkeypatch.setattr(psycopg2, "connect", _fake_connect)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+    fhp._alert(["disk free 3GB < hard floor 6GB — pruning file-history + escalate"], loud=True)
+    assert calls["connect"] == 1, "loud=True must still attempt the bus row"

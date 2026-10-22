@@ -57,6 +57,38 @@ def test_page_severity_log_only_in_managed_band():
     assert dar.page_severity(6 * GB - 1, [], floor=6 * GB, emergency_floor=4 * GB) == "log"
 
 
+def test_page_loud_false_never_attempts_db_write(monkeypatch, capsys):
+    # bus #73447: the managed band must be LOG-ONLY -- not even a lower-priority bus row,
+    # since the console's doorbell rings on any new unread row regardless of priority.
+    import psycopg2
+    def _boom(*a, **k):
+        raise AssertionError("loud=False must never attempt a DB connection")
+    monkeypatch.setattr(psycopg2, "connect", _boom)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+    summary = {"results": [{"name": "x", "freed": 0}], "errors": []}
+    dar._page(10 * GB, 5 * GB, summary, loud=False)
+    err = capsys.readouterr().err
+    assert "log-only, no bus row" in err
+
+
+def test_page_loud_true_still_attempts_db_write(monkeypatch, capsys):
+    import psycopg2
+    calls = {"connect": 0}
+    class _FakeCursor:
+        def execute(self, *a, **k): pass
+    class _FakeConn:
+        def cursor(self): return _FakeCursor()
+        def commit(self): pass
+    def _fake_connect(*a, **k):
+        calls["connect"] += 1
+        return _FakeConn()
+    monkeypatch.setattr(psycopg2, "connect", _fake_connect)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/db")
+    summary = {"results": [], "errors": []}
+    dar._page(10 * GB, 5 * GB, summary, loud=True)
+    assert calls["connect"] == 1, "loud=True must still attempt the bus row"
+
+
 def test_page_severity_none_at_or_above_floor_with_no_errors():
     assert dar.page_severity(6 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "none"
     assert dar.page_severity(20 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "none"
