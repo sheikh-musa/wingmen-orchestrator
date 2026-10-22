@@ -123,12 +123,36 @@ def _local_host_id() -> str:
     """The logical KEK-host identity for the machine this process is running
     on. Deliberately explicit/allowlisted rather than derived by guessing --
     an unrecognized host must fail loud, never silently fall back to some
-    default KEK path."""
+    default KEK path.
+
+    VAULT_HOST_ID env override (op#32771/op#32773 break-glass DR onboarding,
+    cc-fleet-health 2026-10-21): platform.system()=='Darwin' used to hardcode
+    'mini' unconditionally on the (correct, at the time) assumption that this
+    fleet has exactly one Mac. That stopped being true the moment a SECOND
+    Mac (e.g. Musa's MacBook, for break-glass DR) needed its own KEK: without
+    a way to distinguish them, wrap_for_host()/get() on that second Mac would
+    ALSO resolve to 'mini' -- colliding with the Mini's own primary kek_host
+    (so a "second host" wrap would really just overwrite/duplicate bookkeeping
+    for the Mini's own identity, not create an independent root of trust;
+    get()'s fast path, which compares kek_host==local_host, would then try to
+    unwrap vault_secrets' wrapped_dek -- which was wrapped under the REAL
+    Mini's physical Keychain key -- using the SECOND Mac's own, genuinely
+    different Keychain key, and fail). The override is checked FIRST, before
+    any platform-based default, and an explicit opt-in per host (never
+    inferred from hostname, which can change) -- the Mini's own behavior is
+    UNCHANGED when the var is unset (still 'mini'), so this is purely
+    additive. Caller sets e.g. VAULT_HOST_ID=macbook in that host's own .env;
+    every OTHER host's _local_host_id() is untouched."""
+    override = os.environ.get("VAULT_HOST_ID")
+    if override:
+        return override
     system = platform.system()
     if system == "Darwin":
-        # This fleet has exactly one Mac -- the Mini. hostname is not used as
-        # the KEK identity (it can change); 'mini' is the fixed logical name
-        # the design doc + bus #41841 both use.
+        # This fleet has exactly one Mac WITHOUT an explicit override -- the
+        # Mini. hostname is not used as the KEK identity (it can change);
+        # 'mini' is the fixed logical name the design doc + bus #41841 both
+        # use. A second/spare Mac MUST set VAULT_HOST_ID (above) rather than
+        # falling through here.
         return "mini"
     if system == "Linux":
         hostname = socket.gethostname()
