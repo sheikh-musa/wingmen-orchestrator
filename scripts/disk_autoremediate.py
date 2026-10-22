@@ -39,7 +39,13 @@ GB = 1 << 30
 # --- tunables (env-overridable) ---
 DATA_VOL = os.environ.get("DISK_DATA_VOL", "/System/Volumes/Data")
 REMEDIATE_UNDER = int(os.environ.get("DISK_REMEDIATE_UNDER_GB", "20")) * GB  # reclaim below this
-FLOOR = int(os.environ.get("DISK_FLOOR_GB", "8")) * GB                       # page if still below
+# 2026-10-22 retune (bus #73391): steady-state free sits at ~7-9GB once the fleet's live
+# lanes are up — this floor used to page P1 on EVERY tick once free dipped under it, even
+# though the real crash zone is ~0GB (2026-08-28 [Errno 28] incident) and reclaim was
+# already exhausted (0GB freed per tick). Same lesson + same number as the HARD_FREE_GB
+# floor in file_history_prune.py (PR#463) and disk_space_monitor.sh (PR#464): 6GB is the
+# genuine near-crash margin, not 8GB which is this Mini's normal healthy baseline.
+FLOOR = int(os.environ.get("DISK_FLOOR_GB", "6")) * GB                       # page if still below
 PROJECTS_ROOT = pathlib.Path(os.environ.get("WINGMEN_PROJECTS_ROOT",
                                             os.path.expanduser("~/wingmen/projects")))
 NEXT_CACHE_MIN_AGE_S = int(os.environ.get("DISK_NEXT_CACHE_MIN_AGE_S", "3600"))  # >60min
