@@ -19,6 +19,16 @@ from scripts import disk_autoremediate as dar  # noqa: E402
 GB = 1 << 30
 
 
+# ---- module-default retune (2026-10-22, bus #73391) ----------------------------
+def test_default_floor_matches_real_crash_margin_not_healthy_baseline():
+    # This Mini's steady-state free sits at ~7-9GB once live lanes are up (not a crash
+    # risk); the old FLOOR=8GB paged P1 on every tick at that baseline with 0GB
+    # reclaimable. 6GB matches the HARD_FREE_GB floor retuned in file_history_prune.py
+    # (PR#463) and disk_space_monitor.sh (PR#464) — the actual near-[Errno 28] margin.
+    assert dar.FLOOR == 6 * GB
+    assert dar.REMEDIATE_UNDER == 20 * GB  # unchanged: cheap to attempt reclaim broadly
+
+
 # ---- decide(): tier boundaries -------------------------------------------------
 def test_decide_ok_when_free_above_remediate_threshold():
     assert dar.decide(50 * GB, remediate_under=20 * GB, floor=8 * GB) == "ok"
