@@ -69,6 +69,44 @@ def test_healthy_disk_free_triggers_neither_tier():
     assert plan["warnings"] == []
 
 
+# ── bus #73441: same pager-routing retune as disk_autoremediate.py PR#466 -- a hard-floor ──
+# ── breach that's already diagnosed structural (no new action) must log, not wake, console. ──
+def test_hard_floor_breach_in_managed_band_does_not_page_when_emergency_given():
+    # 5GB: below hard floor (6GB) but at/above emergency floor (4GB) -- managed band.
+    plan = plan_prune([], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=10 * GB,
+                      disk_free_bytes=5 * GB, warn_free_bytes=7 * GB, hard_free_bytes=6 * GB,
+                      emergency_free_bytes=4 * GB)
+    assert plan["alerts"] == [], "managed-band breach must NOT land in alerts (bus-paged, loud)"
+    assert any("disk free" in m.lower() for m in plan["managed"])
+
+
+def test_below_emergency_floor_still_pages_loud():
+    plan = plan_prune([], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=10 * GB,
+                      disk_free_bytes=3 * GB, warn_free_bytes=7 * GB, hard_free_bytes=6 * GB,
+                      emergency_free_bytes=4 * GB)
+    assert any("disk free" in a.lower() for a in plan["alerts"])
+    assert plan["managed"] == []
+
+
+def test_omitting_emergency_floor_preserves_old_always_loud_behavior():
+    # No emergency_free_bytes passed -> existing callers (and the old test above) are
+    # unaffected: a hard-floor breach still pages loud, nothing goes to `managed`.
+    plan = plan_prune([], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=10 * GB,
+                      disk_free_bytes=5 * GB, warn_free_bytes=7 * GB, hard_free_bytes=6 * GB)
+    assert any("disk free" in a.lower() for a in plan["alerts"])
+    assert plan["managed"] == []
+
+
+def test_bloat_session_alert_is_never_downgraded_to_managed():
+    # A genuinely bloated session is a DISTINCT finding -- never downgraded by the disk-free
+    # band, even while free sits in the managed band.
+    vs = [_v("fb", i, 4 * GB, mtime=i) for i in range(1, 4)]  # 12GB total, over alert cap
+    plan = plan_prune([_sess("runaway", vs)], prune_over_bytes=2 * GB, keep=1,
+                      alert_over_bytes=10 * GB, disk_free_bytes=5 * GB, warn_free_bytes=7 * GB,
+                      hard_free_bytes=6 * GB, emergency_free_bytes=4 * GB)
+    assert any("runaway" in a for a in plan["alerts"])
+
+
 def test_keep_boundary_exact_versions_kept():
     vs = [_v("fb", i, 3 * GB, mtime=i) for i in range(1, 3)]  # exactly 2 versions
     plan = plan_prune([_sess("s3", vs)], prune_over_bytes=2 * GB, keep=2, alert_over_bytes=100 * GB)
