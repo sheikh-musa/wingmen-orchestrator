@@ -84,19 +84,27 @@ def decide(free, *, remediate_under, floor):
 
 
 def page_severity(free_after, errors, *, floor, emergency_floor):
-    """How loud to page after a reclaim attempt (bus #73430 pager-routing retune).
+    """How loud to page after a reclaim attempt (bus #73430 pager-routing retune;
+    RETUNED bus #73901 to decouple reclaimer errors from disk danger).
 
-    A reclaimer ERROR or an unreadable free-probe is always 'loud' — those are new/unknown
-    failure modes, never routine. Below `emergency_floor` is the genuine near-crash zone —
-    always 'loud'. Between `emergency_floor` and `floor` is the MANAGED band: a real floor
-    breach but already diagnosed as structural with no new action — 'log' only, no console
-    wake. At/above `floor` with no errors: 'none'.
+    An unreadable free-probe is always 'loud' — can't confirm safety. Below
+    `emergency_floor` is the genuine near-crash zone — always 'loud'. A reclaimer ERROR
+    combined with an actual floor breach is still the real emergency — 'loud'. But a
+    reclaimer error on an otherwise-HEALTHY disk (free_after >= floor) is a tooling bug,
+    not a disk emergency — 'log' only, same as the managed band, never a false P1.
+    Between `emergency_floor` and `floor` with no errors: the MANAGED band, already
+    diagnosed as structural with no new action — 'log' only, no console wake. At/above
+    `floor` with no errors: 'none'.
     """
-    if errors or free_after is None:
+    if free_after is None:
         return "loud"
     if free_after < emergency_floor:
         return "loud"
+    if errors and free_after < floor:
+        return "loud"
     if free_after < floor:
+        return "log"
+    if errors:
         return "log"
     return "none"
 
@@ -397,12 +405,13 @@ def library_caches_candidates(root):
 def _reclaim_library_caches(dry_run):
     """Clear ~/Library/Caches entries (Apple-blessed regenerable, per orch-console's own
     dig, bus #73708). Several subdirs are TCC/SIP-protected even for the owning user
-    (CloudKit, HomeKit, Safari, etc) -- a PermissionError on one entry is EXPECTED on this
-    Mini, not a new/unknown failure, so it's logged + skipped WITHOUT raising (unlike the
-    other reclaimers' raise-on-OSError): raising here would re-page every tick for an
-    already-diagnosed condition, exactly the perpetual-noise pattern bus #73430/#73447
-    already fixed for the floor-breach pagers. A genuinely unexpected OSError (not a
-    permission error) still raises, same as the other reclaimers."""
+    (CloudKit, HomeKit, Safari, etc) -- a PermissionError on one entry is EXPECTED. Others
+    are actively written to by their owning process between our listing and our rmtree
+    (bus #73901 live incident: com.apple.python raised OSError(ENOTEMPTY) from a TOCTOU
+    race, not a permission error) -- Library/Caches entries are known-flaky in BOTH ways,
+    so UNLIKE the other reclaimers' raise-on-OSError, ANY OSError here is logged + skipped
+    WITHOUT raising: one stubborn/racing cache dir must never abort the whole reclaim pass
+    or escalate into a false disk-emergency page (see page_severity's error/floor split)."""
     freed = 0
     for d in library_caches_candidates(LIBRARY_CACHES_ROOT):
         try:
@@ -421,11 +430,9 @@ def _reclaim_library_caches(dry_run):
             else:
                 d.unlink()
             freed += sz
-        except PermissionError as e:
-            log(f"    library-caches {d} skipped (protected, expected): {e}")
-            continue
         except OSError as e:
-            raise RuntimeError(f"remove {d} failed: {e}") from e
+            log(f"    library-caches {d} skipped ({type(e).__name__}, protected/racing): {e}")
+            continue
     return freed
 
 
@@ -465,23 +472,36 @@ def build_reclaimers():
 
 # ---- fail-loud page ------------------------------------------------------------
 def _page(free_before, free_after, summary, *, loud=True):
-    """loud=True: P1 blocker bus row, console wakes (genuine emergency or a new reclaimer
-    error). loud=False: LOG-FILE ONLY (bus #73447 — a follow-up to #73430/PR#466) — no bus
-    row at all. orch-console clarified that the console's reconcile-doorbell rings on ANY
-    new unread row regardless of priority, so even a P3 bus row in the managed band was
-    still indefinite console churn, just lower-stakes churn than P1. The managed band (a real
-    floor breach, already diagnosed structural with no new action) now stays ENTIRELY local:
-    the stderr banner (which lands in the launchd log) is the full record, never silent, just
-    never a bus row — zero doorbell rings for an already-handled condition. <4GB emergency
-    and any reclaimer error still always get the bus row, unconditionally."""
+    """loud=True: P1 blocker bus row, console wakes (genuine emergency, i.e. a floor breach,
+    optionally combined with a reclaimer error). loud=False: LOG-FILE ONLY (bus #73447 — a
+    follow-up to #73430/PR#466; further decoupled from reclaimer errors per bus #73901) — no
+    bus row at all. orch-console clarified that the console's reconcile-doorbell rings on ANY
+    new unread row regardless of priority, so even a P3 bus row in the managed band was still
+    indefinite console churn, just lower-stakes churn than P1. Two distinct loud=False cases
+    now share this path: (a) the managed band (a real floor breach, already diagnosed
+    structural with no new action), and (b) a HEALTHY disk where a reclaimer merely errored
+    (a tooling bug, not a disk emergency — see page_severity). Both stay ENTIRELY local: the
+    stderr banner (which lands in the launchd log) is the full record, never silent, just
+    never a bus row. <4GB emergency, or any error COMBINED with an actual floor breach, still
+    always gets the bus row via loud=True."""
     if not loud:
-        banner = ("⚪ disk auto-remediation: managed band, no new action (log-only, no bus row)\n  "
-                   f"free before={free_before // GB if free_before else '?'}GB "
-                   f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB, "
-                   f"emergency {EMERGENCY_FLOOR // GB}GB) — already diagnosed structural "
-                   f"(bus #73430/#73447), no new action.")
+        healthy = free_after is not None and free_after >= FLOOR
+        if healthy:
+            banner = ("⚪ disk auto-remediation: disk HEALTHY, reclaimer error logged not paged "
+                       "(log-only, no bus row)\n  "
+                       f"free before={free_before // GB if free_before else '?'}GB "
+                       f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB) "
+                       "— tooling bug, not a disk emergency (bus #73901).")
+        else:
+            banner = ("⚪ disk auto-remediation: managed band, no new action (log-only, no bus row)\n  "
+                       f"free before={free_before // GB if free_before else '?'}GB "
+                       f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB, "
+                       f"emergency {EMERGENCY_FLOOR // GB}GB) — already diagnosed structural "
+                       f"(bus #73430/#73447), no new action.")
         for r in summary["results"]:
             banner += f"\n    reclaimed {r['name']}: ~{r['freed'] // GB}GB"
+        for e in summary["errors"]:
+            banner += f"\n    🔴 {e['name']} FAILED: {e['error']}"
         print(banner, file=sys.stderr, flush=True)
         return
     header = "🔴 DISK AUTO-REMEDIATION INSUFFICIENT"

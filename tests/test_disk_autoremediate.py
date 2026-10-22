@@ -34,9 +34,20 @@ def test_default_emergency_floor_is_4gb():
     assert dar.EMERGENCY_FLOOR == 4 * GB
 
 
-def test_page_severity_loud_on_reclaimer_error_regardless_of_band():
-    # An error is a NEW failure mode, never routine — always loud even well above floor.
+def test_page_severity_log_not_loud_on_reclaimer_error_with_healthy_free():
+    # RETUNED 2026-10-22 (bus #73901 false P1): a reclaimer error used to ALWAYS page loud
+    # regardless of free space -- but a healthy disk (well above floor) with one failed
+    # reclaimer is not a disk emergency; it's a tooling bug, log/warn not P1. Decoupled from
+    # the actual danger signal (free_after vs floor), same shape as the managed-band split.
     assert dar.page_severity(50 * GB, [{"name": "x", "error": "boom"}],
+                             floor=6 * GB, emergency_floor=4 * GB) == "log"
+
+
+def test_page_severity_loud_on_reclaimer_error_when_also_below_floor():
+    # An error COMBINED with an actual floor breach is still the genuine emergency case.
+    assert dar.page_severity(5 * GB, [{"name": "x", "error": "boom"}],
+                             floor=6 * GB, emergency_floor=4 * GB) == "loud"
+    assert dar.page_severity(3 * GB, [{"name": "x", "error": "boom"}],
                              floor=6 * GB, emergency_floor=4 * GB) == "loud"
 
 
@@ -354,5 +365,33 @@ def test_reclaim_library_caches_skips_permission_denied_without_raising(tmp_path
     monkeypatch.setattr(dar.shutil, "rmtree", fake_rmtree)
     freed = dar._reclaim_library_caches(dry_run=False)  # must not raise
     assert protected.exists(), "permission-denied entry must be left in place"
+    assert not removable.exists(), "a removable entry must still be reclaimed"
+    assert freed >= 1024
+
+
+def test_reclaim_library_caches_skips_nonempty_dir_race_without_raising(tmp_path, monkeypatch):
+    # bus #73901 live incident: com.apple.python raised OSError(ENOTEMPTY) from rmtree
+    # (a TOCTOU race -- something wrote into the cache dir mid-sweep), which was NOT a
+    # PermissionError, so it fell through to the raise-RuntimeError branch and aborted the
+    # whole reclaimer, triggering a false P1 on a HEALTHY disk. Library/Caches entries are
+    # known-flaky (races, protected items) -- ANY OSError here must skip+continue, never raise.
+    root = tmp_path / "Caches"
+    racing = root / "com.apple.python"
+    removable = root / "Homebrew"
+    for d in (racing, removable):
+        d.mkdir(parents=True)
+        (d / "blob").write_bytes(b"x" * 1024)
+    monkeypatch.setattr(dar, "LIBRARY_CACHES_ROOT", root)
+
+    real_rmtree = dar.shutil.rmtree
+
+    def fake_rmtree(path, *a, **k):
+        if pathlib.Path(path) == racing:
+            raise OSError(66, "Directory not empty")
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(dar.shutil, "rmtree", fake_rmtree)
+    freed = dar._reclaim_library_caches(dry_run=False)  # must not raise
+    assert racing.exists(), "the racing/non-empty entry must be left in place, not half-removed"
     assert not removable.exists(), "a removable entry must still be reclaimed"
     assert freed >= 1024
