@@ -29,6 +29,39 @@ def test_default_floor_matches_real_crash_margin_not_healthy_baseline():
     assert dar.REMEDIATE_UNDER == 20 * GB  # unchanged: cheap to attempt reclaim broadly
 
 
+# ---- pager-routing retune (2026-10-22, bus #73430) ------------------------------
+def test_default_emergency_floor_is_4gb():
+    assert dar.EMERGENCY_FLOOR == 4 * GB
+
+
+def test_page_severity_loud_on_reclaimer_error_regardless_of_band():
+    # An error is a NEW failure mode, never routine — always loud even well above floor.
+    assert dar.page_severity(50 * GB, [{"name": "x", "error": "boom"}],
+                             floor=6 * GB, emergency_floor=4 * GB) == "loud"
+
+
+def test_page_severity_loud_when_free_probe_unreadable():
+    # Can't confirm safety -> fail loud, not silent.
+    assert dar.page_severity(None, [], floor=6 * GB, emergency_floor=4 * GB) == "loud"
+
+
+def test_page_severity_loud_below_emergency_floor():
+    assert dar.page_severity(3 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "loud"
+    assert dar.page_severity(4 * GB - 1, [], floor=6 * GB, emergency_floor=4 * GB) == "loud"
+
+
+def test_page_severity_log_only_in_managed_band():
+    # Below floor but at/above the emergency line: real breach, no new action -- log-only.
+    assert dar.page_severity(4 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "log"
+    assert dar.page_severity(5 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "log"
+    assert dar.page_severity(6 * GB - 1, [], floor=6 * GB, emergency_floor=4 * GB) == "log"
+
+
+def test_page_severity_none_at_or_above_floor_with_no_errors():
+    assert dar.page_severity(6 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "none"
+    assert dar.page_severity(20 * GB, [], floor=6 * GB, emergency_floor=4 * GB) == "none"
+
+
 # ---- decide(): tier boundaries -------------------------------------------------
 def test_decide_ok_when_free_above_remediate_threshold():
     assert dar.decide(50 * GB, remediate_under=20 * GB, floor=8 * GB) == "ok"

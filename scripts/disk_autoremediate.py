@@ -46,6 +46,16 @@ REMEDIATE_UNDER = int(os.environ.get("DISK_REMEDIATE_UNDER_GB", "20")) * GB  # r
 # floor in file_history_prune.py (PR#463) and disk_space_monitor.sh (PR#464): 6GB is the
 # genuine near-crash margin, not 8GB which is this Mini's normal healthy baseline.
 FLOOR = int(os.environ.get("DISK_FLOOR_GB", "6")) * GB                       # page if still below
+# 2026-10-22 pager-routing retune (bus #73430): steady-state has fallen further and can now
+# sit genuinely below FLOOR with 0GB reclaimable (structural capacity+load per orch-console's
+# own du/lsof dig, not a leak) — a REAL floor breach, but with NO new action, since the
+# external-drive fix is already escalated to Musa and both sides hold the emergency line below.
+# Paging P1 to console every ~5min for an already-handled condition is the exact
+# perpetual-noise pattern the FLOOR retune (PR#465) just killed, reappearing one tier down.
+# So: FLOOR..EMERGENCY_FLOOR is a "managed band" — log-only / P3, no console wake. Below
+# EMERGENCY_FLOOR (or any reclaimer error) is the genuine near-[Errno 28] emergency and still
+# pages loud (P1) exactly as before.
+EMERGENCY_FLOOR = int(os.environ.get("DISK_EMERGENCY_FREE_GB", "4")) * GB     # always page LOUD
 PROJECTS_ROOT = pathlib.Path(os.environ.get("WINGMEN_PROJECTS_ROOT",
                                             os.path.expanduser("~/wingmen/projects")))
 NEXT_CACHE_MIN_AGE_S = int(os.environ.get("DISK_NEXT_CACHE_MIN_AGE_S", "3600"))  # >60min
@@ -62,6 +72,24 @@ def log(msg: str) -> None:
 def decide(free, *, remediate_under, floor):
     """free AT or below `remediate_under` triggers reclaim (inclusive); strictly above is ok."""
     return "remediate" if free <= remediate_under else "ok"
+
+
+def page_severity(free_after, errors, *, floor, emergency_floor):
+    """How loud to page after a reclaim attempt (bus #73430 pager-routing retune).
+
+    A reclaimer ERROR or an unreadable free-probe is always 'loud' — those are new/unknown
+    failure modes, never routine. Below `emergency_floor` is the genuine near-crash zone —
+    always 'loud'. Between `emergency_floor` and `floor` is the MANAGED band: a real floor
+    breach but already diagnosed as structural with no new action — 'log' only, no console
+    wake. At/above `floor` with no errors: 'none'.
+    """
+    if errors or free_after is None:
+        return "loud"
+    if free_after < emergency_floor:
+        return "loud"
+    if free_after < floor:
+        return "log"
+    return "none"
 
 
 def _disk_free(path=DATA_VOL):
@@ -333,18 +361,38 @@ def build_reclaimers():
 
 
 # ---- fail-loud page ------------------------------------------------------------
-def _page(free_before, free_after, summary):
+def _page(free_before, free_after, summary, *, loud=True):
+    """loud=True: P1 blocker, console wakes (genuine emergency or a new reclaimer error).
+    loud=False: P3 update, log-only record — the managed band (bus #73430): a real floor
+    breach, already diagnosed structural with no new action, so it must NOT re-wake the
+    console every ~5min for an already-handled condition. Either way it is NEVER silent —
+    the stderr banner and the bus row (for the record) are written regardless of loudness;
+    only the message_type/priority (and thus whether it pages/wakes) differs."""
+    if loud:
+        header = "🔴 DISK AUTO-REMEDIATION INSUFFICIENT"
+        tldr = (f"TL;DR: disk auto-remediation ran but free is STILL below the "
+                f"{FLOOR // GB}GB floor (or a reclaimer errored) — needs a look before the "
+                f"fleet crashes on [Errno 28].")
+        mtype, priority = "blocker", "P1"
+        subject = "disk auto-remediation insufficient — free still below floor"
+    else:
+        header = "⚪ disk auto-remediation: managed band, no new action"
+        tldr = (f"TL;DR: free is below the {FLOOR // GB}GB floor but at/above the emergency "
+                f"{EMERGENCY_FLOOR // GB}GB line — already diagnosed structural (bus #73430), "
+                f"no new action. Logged for the record, not waking the console.")
+        mtype, priority = "update", "P3"
+        subject = "disk auto-remediation: managed band (floor breach, no new action — bus #73430)"
     lines = [
-        f"TL;DR: disk auto-remediation ran but free is STILL below the {FLOOR // GB}GB floor "
-        f"(or a reclaimer errored) — needs a look before the fleet crashes on [Errno 28].",
+        tldr,
         f"free before={free_before // GB if free_before else '?'}GB "
-        f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB).",
+        f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB, "
+        f"emergency {EMERGENCY_FLOOR // GB}GB).",
     ]
     for r in summary["results"]:
         lines.append(f"  reclaimed {r['name']}: ~{r['freed'] // GB}GB")
     for e in summary["errors"]:
         lines.append(f"  🔴 {e['name']} FAILED: {e['error']}")
-    banner = "🔴 DISK AUTO-REMEDIATION INSUFFICIENT\n  " + "\n  ".join(lines)
+    banner = header + "\n  " + "\n  ".join(lines)
     print(banner, file=sys.stderr, flush=True)
     try:
         import psycopg2
@@ -354,9 +402,8 @@ def _page(free_before, free_after, summary):
             cur = c.cursor()
             cur.execute("SELECT set_config('app.current_agent_id','cc-fleet-health',true)")
             cur.execute("""INSERT INTO agent_messages (from_agent,to_agent,message_type,priority,subject,body)
-                           VALUES ('cc-fleet-health','orch-console','blocker','P1',
-                           'disk auto-remediation insufficient — free still below floor',%s)""",
-                        ("\n".join(lines),))
+                           VALUES ('cc-fleet-health','orch-console',%s,%s,%s,%s)""",
+                        (mtype, priority, subject, "\n".join(lines)))
             c.commit()
     except Exception as e:  # noqa: BLE001 — page best-effort; stderr banner already stands
         print(f"[disk-autoremediate] WARN bus-page failed ({e}); banner stands", file=sys.stderr)
@@ -372,7 +419,8 @@ def main(argv=None) -> int:
         return 1
     tier = decide(free, remediate_under=REMEDIATE_UNDER, floor=FLOOR)
     log(f"[disk-autoremediate {mode}] free={free // GB}GB tier={tier} "
-        f"(remediate<{REMEDIATE_UNDER // GB}GB floor={FLOOR // GB}GB)")
+        f"(remediate<{REMEDIATE_UNDER // GB}GB floor={FLOOR // GB}GB "
+        f"emergency={EMERGENCY_FLOOR // GB}GB)")
     if tier == "ok":
         return 0
     summary = run_reclaimers(build_reclaimers(), free_probe=_disk_free,
@@ -382,9 +430,12 @@ def main(argv=None) -> int:
     log(f"[disk-autoremediate {mode}] {'would free' if not apply else 'freed'} "
         f"~{total_freed // GB}GB total; free after={free_after // GB if free_after else '?'}GB; "
         f"errors={len(summary['errors'])}")
-    # Fail-loud PAGE (apply mode only): still below floor after reclaim, or any reclaimer errored.
-    if apply and ((free_after is not None and free_after < FLOOR) or summary["errors"]):
-        _page(free, free_after, summary)
+    # Fail-loud PAGE (apply mode only) — severity-gated per bus #73430 (see page_severity doc).
+    if apply:
+        severity = page_severity(free_after, summary["errors"],
+                                 floor=FLOOR, emergency_floor=EMERGENCY_FLOOR)
+        if severity != "none":
+            _page(free, free_after, summary, loud=(severity == "loud"))
     return 0
 
 
