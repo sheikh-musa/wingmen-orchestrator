@@ -374,26 +374,31 @@ def build_reclaimers():
 
 # ---- fail-loud page ------------------------------------------------------------
 def _page(free_before, free_after, summary, *, loud=True):
-    """loud=True: P1 blocker, console wakes (genuine emergency or a new reclaimer error).
-    loud=False: P3 update, log-only record — the managed band (bus #73430): a real floor
-    breach, already diagnosed structural with no new action, so it must NOT re-wake the
-    console every ~5min for an already-handled condition. Either way it is NEVER silent —
-    the stderr banner and the bus row (for the record) are written regardless of loudness;
-    only the message_type/priority (and thus whether it pages/wakes) differs."""
-    if loud:
-        header = "🔴 DISK AUTO-REMEDIATION INSUFFICIENT"
-        tldr = (f"TL;DR: disk auto-remediation ran but free is STILL below the "
-                f"{FLOOR // GB}GB floor (or a reclaimer errored) — needs a look before the "
-                f"fleet crashes on [Errno 28].")
-        mtype, priority = "blocker", "P1"
-        subject = "disk auto-remediation insufficient — free still below floor"
-    else:
-        header = "⚪ disk auto-remediation: managed band, no new action"
-        tldr = (f"TL;DR: free is below the {FLOOR // GB}GB floor but at/above the emergency "
-                f"{EMERGENCY_FLOOR // GB}GB line — already diagnosed structural (bus #73430), "
-                f"no new action. Logged for the record, not waking the console.")
-        mtype, priority = "update", "P3"
-        subject = "disk auto-remediation: managed band (floor breach, no new action — bus #73430)"
+    """loud=True: P1 blocker bus row, console wakes (genuine emergency or a new reclaimer
+    error). loud=False: LOG-FILE ONLY (bus #73447 — a follow-up to #73430/PR#466) — no bus
+    row at all. orch-console clarified that the console's reconcile-doorbell rings on ANY
+    new unread row regardless of priority, so even a P3 bus row in the managed band was
+    still indefinite console churn, just lower-stakes churn than P1. The managed band (a real
+    floor breach, already diagnosed structural with no new action) now stays ENTIRELY local:
+    the stderr banner (which lands in the launchd log) is the full record, never silent, just
+    never a bus row — zero doorbell rings for an already-handled condition. <4GB emergency
+    and any reclaimer error still always get the bus row, unconditionally."""
+    if not loud:
+        banner = ("⚪ disk auto-remediation: managed band, no new action (log-only, no bus row)\n  "
+                   f"free before={free_before // GB if free_before else '?'}GB "
+                   f"after={free_after // GB if free_after else '?'}GB (floor {FLOOR // GB}GB, "
+                   f"emergency {EMERGENCY_FLOOR // GB}GB) — already diagnosed structural "
+                   f"(bus #73430/#73447), no new action.")
+        for r in summary["results"]:
+            banner += f"\n    reclaimed {r['name']}: ~{r['freed'] // GB}GB"
+        print(banner, file=sys.stderr, flush=True)
+        return
+    header = "🔴 DISK AUTO-REMEDIATION INSUFFICIENT"
+    tldr = (f"TL;DR: disk auto-remediation ran but free is STILL below the "
+            f"{FLOOR // GB}GB floor (or a reclaimer errored) — needs a look before the "
+            f"fleet crashes on [Errno 28].")
+    mtype, priority = "blocker", "P1"
+    subject = "disk auto-remediation insufficient — free still below floor"
     lines = [
         tldr,
         f"free before={free_before // GB if free_before else '?'}GB "

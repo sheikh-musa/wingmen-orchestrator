@@ -202,26 +202,24 @@ def alert_body(msgs) -> str:
 
 
 def _alert(msgs, *, loud=True):
-    """loud=True: P1 blocker, console wakes (genuine near-crash or a session actually bloated).
-    loud=False: P3 update, log-only record — the managed band (bus #73441): a real hard-floor
-    breach, already diagnosed structural with no new action, so it must NOT re-wake the
-    console every tick for an already-handled condition (same shape as disk_autoremediate.py
-    PR#466's page_severity). Either way NEVER silent — the stderr banner and the bus row (for
-    the record) are written regardless; only message_type/priority differ. The bus/operator
-    page is best-effort (this monitor runs BEFORE a wedge, so the bus is alive); a delivery
-    failure must not crash the prune."""
-    if loud:
-        header = "🔴 FILE-HISTORY DISK-WEDGE RISK"
-        mtype, priority = "blocker", "P1"
-        subject = "file-history disk-wedge risk — pruned + flagging"
-        body = alert_body(msgs)
-    else:
-        header = "⚪ file-history prune: managed band, no new action"
-        mtype, priority = "update", "P3"
-        subject = "file-history prune: managed band (hard-floor breach, no new action — bus #73441)"
-        body = ("TL;DR: disk free is below the hard floor but at/above the emergency line — "
-                "already diagnosed structural (bus #73430/#73441), no new action. Logged for "
-                "the record, not waking the console.\n  " + "\n  ".join(msgs))
+    """loud=True: P1 blocker bus row, console wakes (genuine near-crash or a session actually
+    bloated). loud=False: LOG-FILE ONLY (bus #73447 — a follow-up to #73441/PR#467) — no bus
+    row at all. orch-console clarified the console's reconcile-doorbell rings on ANY new
+    unread row regardless of priority, so even a P3 bus row in the managed band was still
+    indefinite console churn, just lower-stakes than P1. The managed band (a real hard-floor
+    breach, already diagnosed structural with no new action) now stays ENTIRELY local: the
+    stderr banner (which lands in the launchd log) is the full record, never silent, just
+    never a bus row. The bus/operator page for the loud path is best-effort (this monitor
+    runs BEFORE a wedge, so the bus is alive); a delivery failure must not crash the prune."""
+    if not loud:
+        banner = ("⚪ file-history prune: managed band, no new action (log-only, no bus row)\n  "
+                   + "\n  ".join(msgs))
+        print(banner, file=sys.stderr, flush=True)
+        return
+    header = "🔴 FILE-HISTORY DISK-WEDGE RISK"
+    mtype, priority = "blocker", "P1"
+    subject = "file-history disk-wedge risk — pruned + flagging"
+    body = alert_body(msgs)
     banner = header + "\n  " + "\n  ".join(msgs)
     print(banner, file=sys.stderr, flush=True)
     try:
