@@ -249,3 +249,110 @@ def test_reclaim_next_cache_dry_run_deletes_nothing(tmp_path, monkeypatch):
     freed = dar._reclaim_next_cache(dry_run=True)
     assert d.exists() and (d / "blob").exists(), "dry_run must NOT rmtree the cache dir"
     assert freed >= 4096, "dry_run still reports would-free size"
+
+
+# ---- daily_backup_candidates(): keep newest N, pure ----------------------------
+# bus #73708 (2026-10-22): orch-console hand-pruned ~/wingmen/backups (kept last 3 days)
+# as part of the disk-crash-averted fix and asked for it as a standing reclaimer tier.
+def test_daily_backup_candidates_keeps_newest_n(tmp_path):
+    root = tmp_path / "backups"
+    for name in ("2026-10-18", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22"):
+        (root / name).mkdir(parents=True)
+    cands = dar.daily_backup_candidates(root, keep_n=3)
+    names = {p.name for p in cands}
+    assert names == {"2026-10-18", "2026-10-19"}, "must prune only the oldest, keeping newest 3"
+
+
+def test_daily_backup_candidates_empty_when_at_or_under_keep_n(tmp_path):
+    root = tmp_path / "backups"
+    for name in ("2026-10-21", "2026-10-22"):
+        (root / name).mkdir(parents=True)
+    cands = dar.daily_backup_candidates(root, keep_n=3)
+    assert cands == [], "fewer dirs than keep_n -> nothing to prune"
+
+
+def test_daily_backup_candidates_missing_root_returns_empty(tmp_path):
+    cands = dar.daily_backup_candidates(tmp_path / "does-not-exist", keep_n=3)
+    assert cands == []
+
+
+def test_reclaim_daily_backups_dry_run_deletes_nothing(tmp_path, monkeypatch):
+    root = tmp_path / "backups"
+    for name in ("2026-10-18", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22"):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "snap.tar").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(dar, "BACKUPS_ROOT", root)
+    monkeypatch.setattr(dar, "BACKUP_KEEP_DAYS", 3)
+    freed = dar._reclaim_daily_backups(dry_run=True)
+    assert (root / "2026-10-18").exists(), "dry_run must NOT rmtree an old backup dir"
+    assert freed >= 4096 * 2, "dry_run still reports would-free size for the 2 oldest"
+
+
+def test_reclaim_daily_backups_apply_prunes_only_oldest(tmp_path, monkeypatch):
+    root = tmp_path / "backups"
+    for name in ("2026-10-18", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22"):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "snap.tar").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(dar, "BACKUPS_ROOT", root)
+    monkeypatch.setattr(dar, "BACKUP_KEEP_DAYS", 3)
+    freed = dar._reclaim_daily_backups(dry_run=False)
+    remaining = {p.name for p in root.iterdir()}
+    assert remaining == {"2026-10-20", "2026-10-21", "2026-10-22"}, "must keep exactly the newest 3"
+    assert freed >= 4096 * 2
+
+
+# ---- library_caches_candidates() + _reclaim_library_caches(): permission-aware ----
+# bus #73708: orch-console hand-cleared ~2.9GB from ~/Library/Caches (regenerable per
+# macOS convention) and asked for it as a standing reclaimer. Several subdirs are
+# TCC/SIP-protected even for the owning user (CloudKit, HomeKit, Safari, etc) -- a
+# permission error on one entry must be skipped+logged, never abort the sweep or
+# count as a reclaimer "error" (that's an EXPECTED, already-diagnosed condition on
+# this Mini, not a new/unknown failure -- raising here would re-introduce exactly
+# the perpetual-noise pager pattern bus #73430/#73447 already fixed elsewhere).
+def test_library_caches_candidates_lists_top_level_entries(tmp_path):
+    root = tmp_path / "Caches"
+    (root / "Homebrew").mkdir(parents=True)
+    (root / "com.apple.python").mkdir(parents=True)
+    cands = library_caches_names = {p.name for p in dar.library_caches_candidates(root)}
+    assert cands == {"Homebrew", "com.apple.python"}
+
+
+def test_library_caches_candidates_missing_root_returns_empty(tmp_path):
+    cands = dar.library_caches_candidates(tmp_path / "does-not-exist")
+    assert cands == []
+
+
+def test_reclaim_library_caches_dry_run_deletes_nothing(tmp_path, monkeypatch):
+    root = tmp_path / "Caches"
+    d = root / "Homebrew"
+    d.mkdir(parents=True)
+    (d / "blob").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(dar, "LIBRARY_CACHES_ROOT", root)
+    freed = dar._reclaim_library_caches(dry_run=True)
+    assert d.exists() and (d / "blob").exists(), "dry_run must NOT remove cache entries"
+    assert freed >= 4096
+
+
+def test_reclaim_library_caches_skips_permission_denied_without_raising(tmp_path, monkeypatch):
+    root = tmp_path / "Caches"
+    protected = root / "com.apple.protected"
+    removable = root / "Homebrew"
+    for d in (protected, removable):
+        d.mkdir(parents=True)
+        (d / "blob").write_bytes(b"x" * 1024)
+    monkeypatch.setattr(dar, "LIBRARY_CACHES_ROOT", root)
+
+    real_rmtree = dar.shutil.rmtree
+
+    def fake_rmtree(path, *a, **k):
+        if pathlib.Path(path) == protected:
+            raise PermissionError("Operation not permitted")
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(dar.shutil, "rmtree", fake_rmtree)
+    freed = dar._reclaim_library_caches(dry_run=False)  # must not raise
+    assert protected.exists(), "permission-denied entry must be left in place"
+    assert not removable.exists(), "a removable entry must still be reclaimed"
+    assert freed >= 1024

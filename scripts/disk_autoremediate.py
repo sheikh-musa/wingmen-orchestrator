@@ -59,6 +59,15 @@ EMERGENCY_FLOOR = int(os.environ.get("DISK_EMERGENCY_FREE_GB", "4")) * GB     # 
 PROJECTS_ROOT = pathlib.Path(os.environ.get("WINGMEN_PROJECTS_ROOT",
                                             os.path.expanduser("~/wingmen/projects")))
 NEXT_CACHE_MIN_AGE_S = int(os.environ.get("DISK_NEXT_CACHE_MIN_AGE_S", "3600"))  # >60min
+# 2026-10-22 (bus #73708): orch-console hand-reclaimed these during the disk-crash-averted
+# fix and asked for them as standing reclaimer tiers. BACKUPS_ROOT holds date-named daily
+# snapshot dirs (sortable lexicographically); LIBRARY_CACHES_ROOT is the per-user macOS
+# cache dir (Apple-blessed as regenerable, distinct from app support/profile data).
+BACKUPS_ROOT = pathlib.Path(os.environ.get("WINGMEN_BACKUPS_ROOT",
+                                           os.path.expanduser("~/wingmen/backups")))
+BACKUP_KEEP_DAYS = int(os.environ.get("DISK_BACKUP_KEEP_DAYS", "3"))
+LIBRARY_CACHES_ROOT = pathlib.Path(os.environ.get("DISK_LIBRARY_CACHES_ROOT",
+                                                  os.path.expanduser("~/Library/Caches")))
 # operator-held / never-auto-reaped project dirs (first path component under PROJECTS_ROOT)
 EXCLUDE_PROJECTS = set(filter(None, os.environ.get(
     "DISK_EXCLUDE_PROJECTS", "cosem-video-pipeline").split(",")))
@@ -340,6 +349,86 @@ def _reclaim_chrome_cache(dry_run):
     return freed
 
 
+def daily_backup_candidates(root, keep_n):
+    """Dirs under `root` sorted by name (date-named -> lexicographic == chronological);
+    return all but the newest `keep_n`. Pure -- listdir only, no deletion. Missing root
+    or fewer than `keep_n` dirs -> empty (nothing to prune)."""
+    root = pathlib.Path(root)
+    try:
+        entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+    except OSError:
+        return []
+    if keep_n <= 0 or len(entries) <= keep_n:
+        return [] if keep_n > 0 else entries
+    return entries[:-keep_n]
+
+
+def _reclaim_daily_backups(dry_run):
+    """Prune the oldest daily backup dirs beyond BACKUP_KEEP_DAYS. Mirrors next-cache's
+    lsof-guarded rmtree: an active backup write holds its dir open, so a lsof hit skips it
+    rather than corrupting an in-progress snapshot."""
+    freed = 0
+    for d in daily_backup_candidates(BACKUPS_ROOT, BACKUP_KEEP_DAYS):
+        sz = _dir_size(d)
+        if dry_run:
+            freed += sz
+            continue
+        if _lsof_in_use(d):
+            log(f"    daily-backup {d} in use (lsof) — skipped")
+            continue
+        try:
+            shutil.rmtree(d)
+            freed += sz
+        except OSError as e:
+            raise RuntimeError(f"rmtree {d} failed: {e}") from e
+    return freed
+
+
+def library_caches_candidates(root):
+    """Top-level entries under `root` (~/Library/Caches). Pure -- listdir only. Missing
+    root -> empty."""
+    root = pathlib.Path(root)
+    try:
+        return list(root.iterdir())
+    except OSError:
+        return []
+
+
+def _reclaim_library_caches(dry_run):
+    """Clear ~/Library/Caches entries (Apple-blessed regenerable, per orch-console's own
+    dig, bus #73708). Several subdirs are TCC/SIP-protected even for the owning user
+    (CloudKit, HomeKit, Safari, etc) -- a PermissionError on one entry is EXPECTED on this
+    Mini, not a new/unknown failure, so it's logged + skipped WITHOUT raising (unlike the
+    other reclaimers' raise-on-OSError): raising here would re-page every tick for an
+    already-diagnosed condition, exactly the perpetual-noise pattern bus #73430/#73447
+    already fixed for the floor-breach pagers. A genuinely unexpected OSError (not a
+    permission error) still raises, same as the other reclaimers."""
+    freed = 0
+    for d in library_caches_candidates(LIBRARY_CACHES_ROOT):
+        try:
+            sz = _dir_size(d) if d.is_dir() else d.stat().st_size
+        except OSError:
+            continue
+        if dry_run:
+            freed += sz
+            continue
+        if d.is_dir() and _lsof_in_use(d):
+            log(f"    library-caches {d} in use (lsof) — skipped")
+            continue
+        try:
+            if d.is_dir():
+                shutil.rmtree(d)
+            else:
+                d.unlink()
+            freed += sz
+        except PermissionError as e:
+            log(f"    library-caches {d} skipped (protected, expected): {e}")
+            continue
+        except OSError as e:
+            raise RuntimeError(f"remove {d} failed: {e}") from e
+    return freed
+
+
 def build_reclaimers():
     """Ordered safest/highest-known-yield first. npm/brew reclaimers are added only
     when the tool resolves to an absolute path — a missing tool is SKIPPED LOUDLY
@@ -369,6 +458,8 @@ def build_reclaimers():
 
     reclaimers.append({"name": "next-cache", "apply": _reclaim_next_cache})
     reclaimers.append({"name": "chrome-cache", "apply": _reclaim_chrome_cache})
+    reclaimers.append({"name": "library-caches", "apply": _reclaim_library_caches})
+    reclaimers.append({"name": "daily-backups", "apply": _reclaim_daily_backups})
     return reclaimers
 
 
