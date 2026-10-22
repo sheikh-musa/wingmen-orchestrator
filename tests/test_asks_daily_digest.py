@@ -39,11 +39,13 @@ def test_waiting_rows_appear_under_waiting_on_you_section():
     assert "#1" in digest and "approve the migration" in digest
 
 
-def test_non_waiting_rows_appear_under_open_in_progress():
+def test_non_waiting_rows_appear_under_open_in_progress_as_count_only():
+    """HARD GATE #66732: the non-waiting bucket is NEVER enumerated, even
+    for a single row — it's a judged count line only."""
     rows = [row(id=2, ask="ship the thing", waiting_on_operator=False)]
     digest = add.render_digest(rows)
-    assert "Open / in progress:" in digest
-    assert "#2" in digest and "ship the thing" in digest
+    assert "Open / in progress: 1" in digest
+    assert "#2" not in digest and "ship the thing" not in digest
 
 
 def test_waiting_section_omitted_when_none_waiting():
@@ -58,10 +60,52 @@ def test_others_section_omitted_when_all_waiting():
     assert "Open / in progress:" not in digest
 
 
-def test_unassigned_delegated_to_falls_back_to_label():
-    rows = [row(id=9, delegated_to=None, waiting_on_operator=False)]
+# ── op#30088 part 1 / HARD GATE #66732: cap, never enumerate beyond TOP_N ──
+def test_waiting_section_capped_at_top_n_with_remainder_line():
+    rows = [row(id=i, waiting_on_operator=True) for i in range(1, add.TOP_N + 4)]
     digest = add.render_digest(rows)
-    assert "unassigned" in digest
+    for i in range(1, add.TOP_N + 1):
+        assert f"#{i}" in digest
+    for i in range(add.TOP_N + 1, add.TOP_N + 4):
+        assert f"#{i}" not in digest
+    assert f"…and 3 more waiting on you" in digest
+    assert "cc-fleet-health" in digest
+
+
+def test_waiting_section_no_remainder_line_when_within_cap():
+    rows = [row(id=1, waiting_on_operator=True)]
+    digest = add.render_digest(rows)
+    assert "…and" not in digest
+
+
+def test_others_bucket_never_enumerates_even_with_many_rows():
+    """The old, ungated shape enumerated one line per row — with the real
+    ledger at 191 open asks that was a 191-line Telegram dump. This is the
+    exact regression HARD GATE #66732 exists to prevent."""
+    rows = [row(id=i, waiting_on_operator=False) for i in range(1, 192)]
+    digest = add.render_digest(rows)
+    assert "Open / in progress: 191" in digest
+    assert "#50" not in digest and "#190" not in digest
+    assert digest.count("\n") < 15  # a digest, not a dump
+
+
+def test_client_section_capped_at_top_n_with_remainder_line():
+    rows = [client_row(id=i) for i in range(1, add.TOP_N + 3)]
+    digest = add.render_digest([], None, rows, None)
+    for i in range(1, add.TOP_N + 1):
+        assert f"#{i}" in digest
+    for i in range(add.TOP_N + 1, add.TOP_N + 3):
+        assert f"#{i}" not in digest
+    assert "…and 2 more client ask(s)" in digest
+
+
+def test_unassigned_delegated_to_in_waiting_bucket_falls_back_to_placeholder():
+    """The non-waiting bucket no longer renders delegated_to at all (count-only,
+    HARD GATE #66732) — this now exercises the one remaining per-row path,
+    the WAITING ON YOU bucket."""
+    rows = [row(id=9, delegated_to=None, waiting_on_operator=True)]
+    digest = add.render_digest(rows)
+    assert "#9 (?)" in digest
 
 
 # ── migration 082: captured-bucket nudge line, never enumerated ──────────────
@@ -108,7 +152,7 @@ def test_digest_never_shows_raw_ask_text_only_triage_summary():
     """render_digest must render triage_summary, never a raw `ask` field —
     even if a caller's row dict happens to still carry one (defence in depth:
     fetch_open_asks() no longer SELECTs `ask` at all)."""
-    r = row(id=1, ask="clean summary")
+    r = row(id=1, ask="clean summary", waiting_on_operator=True)
     r["ask"] = "RAW UNTRIAGED TEXT SHOULD NEVER APPEAR"
     digest = add.render_digest([r])
     assert "RAW UNTRIAGED TEXT SHOULD NEVER APPEAR" not in digest
