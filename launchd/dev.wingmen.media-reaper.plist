@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.wingmen.media-reaper — bus #74111 (Musa directive via orch-console), part 2/3.
+  Retries a Telegram media download that failed after ingest.py's own 4 in-line retries,
+  for every operator_messages row with media_status IN ('pending','failed'), until bytes
+  land on disk and media_status flips to 'ok'. Same CAI-RESP-1029 shape as
+  dev.wingmen.commitment-sweeper: a sweeper over durable state, loaded here, RunAtLoad
+  true, so "built" and "exercised" happen in the same act.
+
+  AUTHORED by cc-substrate (bus #74111); OWNED/LOADED by orch-console per the normal
+  build + cc-quality review + merge-on-green gate — this plist ships in the PR but is not
+  self-loaded by the build lane (same posture as every other launchd/*.plist in this repo).
+
+  PATHS: verify against the HOST THIS IS LOADED ON before loading — see
+  dev.wingmen.commitment-sweeper.plist's own note on the residency_sweep precedent
+  (hardcoded /Users/Musa on a host where only /Users/sheikhmusa exists, six weeks dead).
+
+  WHY StartInterval AND NOT StartCalendarInterval: same reasoning as commitment-sweeper —
+  a media item's value is in landing SOON, not once a day. 600s (vs commitment-sweeper's
+  300s) because a media retry is a real network round-trip per row (up to ~14s of
+  in-line backoff via _download_media), not a single cheap query.
+
+  launchd inherits NOTHING: media_reaper.py calls load_dotenv(ROOT/'.env') at import for
+  exactly the reason commitment_sweeper.py's own comment explains (A3's original defect).
+  Do NOT put a credential in this plist to "fix" a future MISSING-DSN: this file is 0644,
+  .env is 0600.
+-->
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.wingmen.media-reaper</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/sheikhmusa/wingmen/orchestrator/.venv/bin/python3</string>
+    <string>-m</string>
+    <string>nervous_system.media_reaper</string>
+    <string>--fire</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/sheikhmusa/wingmen/orchestrator</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>600</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/sheikhmusa</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/media-reaper.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/sheikhmusa/wingmen/orchestrator/logs/media-reaper.out.log</string>
+</dict></plist>

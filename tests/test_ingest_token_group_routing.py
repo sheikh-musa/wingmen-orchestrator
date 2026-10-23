@@ -138,6 +138,7 @@ _SUPPORT_DDL = (
          direction TEXT NOT NULL, channel TEXT, chat_id TEXT, tag TEXT,
          text TEXT, delivered BOOLEAN NOT NULL DEFAULT true,
          from_user_id TEXT, from_username TEXT, from_name TEXT, cos_triage JSONB,
+         file_id TEXT, file_unique_id TEXT, media_kind TEXT, media_status TEXT,
          created_at TIMESTAMPTZ NOT NULL DEFAULT now(), handled_at TIMESTAMPTZ
        )""",
     """CREATE TABLE ingest_poll_health (

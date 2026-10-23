@@ -148,8 +148,10 @@ def test_a_personal_routed_inbound_is_sentinel_free_of_identity(monkeypatch):
     assert won is True
     params = _op_msg_insert_params(store)
     # params = (chat_id, tag, stored_content, stored_from_user_id,
-    #           stored_from_username, stored_from_name, cos_triage)
-    _, tag, text, from_user_id, from_username, from_name, cos_triage = params
+    #           stored_from_username, stored_from_name, cos_triage,
+    #           file_id, file_unique_id, media_kind, media_status)
+    (_, tag, text, from_user_id, from_username, from_name, cos_triage,
+     file_id, file_unique_id, media_kind, media_status) = params
     assert tag == "mamadah"
     assert text == personal_routing.SENTINEL_TEXT
     assert "hi mama dah" not in text
@@ -158,6 +160,8 @@ def test_a_personal_routed_inbound_is_sentinel_free_of_identity(monkeypatch):
     assert from_name is None
     assert cos_triage == personal_routing.SENTINEL_COS_TRIAGE
     assert "hi mama dah" not in cos_triage
+    # a text-only update carries no media identity regardless of routing.
+    assert (file_id, file_unique_id, media_kind, media_status) == (None, None, None, None)
 
     # wingmen-personal still gets the real content + real identity.
     assert len(calls) == 1
@@ -216,12 +220,14 @@ def test_c_non_personal_tag_path_is_unchanged(monkeypatch):
 
     assert won is True
     params = _op_msg_insert_params(store)
-    _, tag, text, from_user_id, from_username, from_name, cos_triage = params
+    (_, tag, text, from_user_id, from_username, from_name, cos_triage,
+     file_id, file_unique_id, media_kind, media_status) = params
     assert tag == "oeh"
     assert text == "real client text"
     assert from_user_id == "555"
     assert from_username == "clientco"
     assert from_name == "Client Contact"
+    assert (file_id, file_unique_id, media_kind, media_status) == (None, None, None, None)
     # non-personal path never touches wingmen-personal at all.
     assert calls == []
     assert conn.committed == 2  # envelope write + the gate's handled_at stamp
